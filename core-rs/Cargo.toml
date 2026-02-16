@@ -9,4 +9,5 @@ members = [
   "crates/mqk-artifacts",
   "crates/mqk-cli",
   "crates/mqk-testkit",
+  "crates/mqk-execution",
 ]
