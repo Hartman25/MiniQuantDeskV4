@@ -12,4 +12,5 @@ members = [
   "crates/mqk-execution",
   "crates/mqk-portfolio",
   "crates/mqk-risk",
+  "crates/mqk-integrity",
 ]

@@ -996,6 +996,10 @@ name = "mqk-execution"
 version = "0.1.0"
 
 [[package]]
+name = "mqk-integrity"
+version = "0.1.0"
+
+[[package]]
 name = "mqk-portfolio"
 version = "0.1.0"
 
