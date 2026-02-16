@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
+
 members = [
   "crates/mqk-schemas",
+  "crates/mqk-config",
+  "crates/mqk-db",
+  "crates/mqk-audit",
+  "crates/mqk-artifacts",
+  "crates/mqk-cli",
   "crates/mqk-testkit",
 ]

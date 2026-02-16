@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use chrono::Utc;
 use serde_json::Value;
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 use uuid::Uuid;
 
@@ -150,6 +151,20 @@ async fn main() -> Result<()> {
                 };
 
                 mqk_db::insert_run(&pool, &new_run).await?;
+
+                // Initialize run artifacts directory + manifest + placeholders.
+                // NOTE: CLI is run from core-rs/, so exports root is ../exports.
+                let exports_root = Path::new("../exports");
+                let _art = mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
+                    exports_root,
+                    schema_version: 1,
+                    run_id,
+                    engine_id: &engine,
+                    mode: &mode,
+                    git_hash: &git_hash,
+                    config_hash: &loaded.config_hash,
+                    host_fingerprint: &host_fp,
+                })?;
 
                 println!("run_id={}", run_id);
                 println!("engine_id={}", engine);
