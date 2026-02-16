@@ -2,3 +2,7 @@ exports/
 .env*
 secrets*
 **/__pycache__/
+.cargo/target/
+core-rs/target/
+.cargo/
+runtime/
