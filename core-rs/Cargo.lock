@@ -1000,6 +1000,10 @@ name = "mqk-portfolio"
 version = "0.1.0"
 
 [[package]]
+name = "mqk-risk"
+version = "0.1.0"
+
+[[package]]
 name = "mqk-schemas"
 version = "0.0.1"
 dependencies = [
