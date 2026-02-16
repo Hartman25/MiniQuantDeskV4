@@ -1021,6 +1021,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mqk-strategy"
+version = "0.1.0"
+dependencies = [
+ "mqk-execution",
+]
+
+[[package]]
 name = "mqk-testkit"
 version = "0.0.1"
 dependencies = [

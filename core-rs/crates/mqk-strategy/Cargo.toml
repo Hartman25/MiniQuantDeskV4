@@ -1,0 +1,7 @@
+[package]
+name = "mqk-strategy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mqk-execution = { path = "../mqk-execution" }
