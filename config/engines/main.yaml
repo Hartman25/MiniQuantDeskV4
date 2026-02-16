@@ -1,0 +1,26 @@
+engine:
+  engine_id: "MAIN"
+  description: "Consistency-first swing engine (Tier A Consistent)."
+  mode: "PAPER"
+  trading_enabled: false
+
+runtime:
+  post_pdt_stabilization_days: 60
+
+risk_profile: "tier_A_consistent"
+
+strategy:
+  allow_multiple_strategies: false
+  allow_multiple_timeframes: false
+  strategies:
+    - id: "swing_trend_v1"
+      enabled: true
+      shadow_mode: false
+      timeframe: "1H"
+      universe:
+        type: "watchlist"
+        symbols: ["SPY", "QQQ"]
+      params:
+        lookback: 50
+        atr_mult: 3.0
+        risk_per_trade: 0.005

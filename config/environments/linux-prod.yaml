@@ -1,0 +1,12 @@
+runtime:
+  reconcile_interval_seconds: 30
+  stale_data_threshold_seconds: 90
+
+broker:
+  environment: "live"
+  keys_env:
+    api_key: "ALPACA_API_KEY_LIVE"
+    api_secret: "ALPACA_API_SECRET_LIVE"
+
+artifacts:
+  export_dir: "/var/lib/mqk/exports"

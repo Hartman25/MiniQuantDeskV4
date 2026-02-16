@@ -1,0 +1,54 @@
+engine:
+  engine_id: "EXP"
+  description: "Experimental sandbox (capped, fail-fast)."
+  mode: "PAPER"
+  trading_enabled: false
+
+runtime:
+  deadman_file: "runtime/EXP_ARMED.flag"
+
+broker:
+  keys_env:
+    api_key: "ALPACA_API_KEY_PAPER_EXP"
+    api_secret: "ALPACA_API_SECRET_PAPER_EXP"
+
+risk_profile: "experimental_tier_B"
+
+execution:
+  base_spread_bps: 4
+  base_slippage_bps: 7
+  max_slippage_cap_bps: 35
+  partial_fills:
+    enabled: true
+    probability: 0.15
+
+risk:
+  max_position_per_symbol: 0.10
+  daily_loss_limit: 0.01
+  max_drawdown: 0.10
+  reject_storm:
+    max_rejects: 3
+
+strategy:
+  allow_multiple_strategies: true
+  allow_multiple_timeframes: true
+  strategies:
+    - id: "exp_meanrev_v1"
+      enabled: true
+      shadow_mode: true
+      timeframe: "5m"
+      universe:
+        type: "watchlist"
+        symbols: ["SPY"]
+      params:
+        lookback: 20
+        zscore_entry: 1.8
+        zscore_exit: 0.3
+
+promotion:
+  evaluation_profile: "experimental_v1"
+  required_metrics:
+    min_cagr: 0.05
+    max_drawdown: 0.20
+    min_profit_factor: 1.20
+    min_sharpe: 0.80

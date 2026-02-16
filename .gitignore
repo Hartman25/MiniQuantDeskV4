@@ -1,0 +1,4 @@
+exports/
+.env*
+secrets*
+**/__pycache__/

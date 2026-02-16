@@ -1,0 +1,12 @@
+risk:
+  allow_short: false
+  max_leverage: 1.0
+  max_gross_exposure: 1.0
+  max_position_per_symbol: 0.10
+  daily_loss_limit: 0.01
+  max_drawdown: 0.10
+  flatten_on_critical: true
+
+risk.pdt:
+  mode: "auto"
+  max_day_trades: 3

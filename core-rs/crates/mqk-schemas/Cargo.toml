@@ -1,0 +1,9 @@
+[package]
+name = "mqk-schemas"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+chrono = { version = "0.4", features = ["serde"] }

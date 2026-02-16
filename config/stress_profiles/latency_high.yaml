@@ -1,0 +1,4 @@
+execution:
+  latency_submit_events: 1
+  latency_cancel_events: 1
+  latency_replace_events: 1

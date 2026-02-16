@@ -1,0 +1,16 @@
+[package]
+name = "mqk-testkit"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+mqk-schemas = { path = "../mqk-schemas" }
+csv = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"

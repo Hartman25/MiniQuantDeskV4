@@ -1,0 +1,101 @@
+schema_version: 1
+
+engine:
+  engine_id: "MAIN"
+  description: ""
+  mode: "PAPER"
+  trading_enabled: false
+
+runtime:
+  reconcile_interval_seconds: 60
+  stale_data_threshold_seconds: 120
+  deadman_file: "runtime/ARMED.flag"
+
+broker:
+  name: "alpaca"
+  environment: "paper"
+  account_last4: "0000"
+  keys_env:
+    api_key: "ALPACA_API_KEY_PAPER"
+    api_secret: "ALPACA_API_SECRET_PAPER"
+
+data:
+  primary_source: "twelvedata"
+  price_series: "RAW"
+  enforce_no_lookahead: true
+  require_session_calendar: true
+  fail_on_gap: true
+  gap_tolerance_bars: 0
+  outlier_threshold_pct: 0.20
+  feed_disagreement_policy: "HALT_NEW"
+  stale_policy: "DISARM"
+
+execution:
+  model_name: "default_v1"
+  model_version: "1"
+  ambiguity_policy: "CONSERVATIVE_WORST_CASE"
+  base_spread_bps: 3
+  base_slippage_bps: 5
+  volatility_multiplier: 0.5
+  max_slippage_cap_bps: 25
+  latency_submit_events: 0
+  latency_cancel_events: 0
+  latency_replace_events: 0
+  partial_fills:
+    enabled: false
+    probability: 0.0
+
+risk_profile: "tier_A_consistent"
+
+risk:
+  pdt_mode: "auto"
+  pdt_max_day_trades: 3
+  allow_short: false
+  max_leverage: 1.0
+  max_gross_exposure: 1.0
+  max_position_per_symbol: 0.20
+  daily_loss_limit: 0.02
+  max_drawdown: 0.18
+  flatten_on_critical: true
+  reject_storm:
+    window_seconds: 300
+    max_rejects: 5
+
+arming:
+  require_manual_confirmation: true
+  require_clean_reconcile: true
+  confirmation_format: "ARM LIVE {account_last4} {daily_loss_limit}"
+
+strategy:
+  allow_multiple_strategies: false
+  allow_multiple_timeframes: false
+  enforce_target_position_model: true
+  strategies: []
+
+promotion:
+  evaluation_profile: "main_consistency_v1"
+  required_gates:
+    conservative_ambiguity: true
+    require_stress_profiles: ["slippage_x2"]
+    require_walk_forward: true
+    require_purged_cv: true
+  required_metrics:
+    min_cagr: 0.08
+    max_drawdown: 0.20
+    min_profit_factor: 1.40
+    min_sharpe: 1.30
+    min_profitable_months_pct: 0.60
+  tie_break:
+    prefer_lower_mdd: true
+    prefer_higher_stress_cagr: true
+
+artifacts:
+  export_on_completion: true
+  export_dir: "exports"
+  include:
+    - "manifest.json"
+    - "audit.jsonl"
+    - "orders.csv"
+    - "fills.csv"
+    - "equity_curve.csv"
+    - "metrics.json"

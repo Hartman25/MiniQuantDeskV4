@@ -1,0 +1,5 @@
+execution:
+  base_spread_bps: 6
+  base_slippage_bps: 10
+  volatility_multiplier: 1.0
+  max_slippage_cap_bps: 50

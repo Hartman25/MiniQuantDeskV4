@@ -1,0 +1,3 @@
+{"broker_fill_id": "F123", "broker_order_id": "B123", "client_order_id": "MAIN_00000000-0000-0000-0000-000000000001", "symbol": "SPY", "side": "BUY", "qty": "10", "price": "470.90", "fee": "0.10", "ts_utc": "2026-01-05T21:00:01Z"}
+{"broker_fill_id": "F123", "broker_order_id": "B123", "client_order_id": "MAIN_00000000-0000-0000-0000-000000000001", "symbol": "SPY", "side": "BUY", "qty": "10", "price": "470.90", "fee": "0.10", "ts_utc": "2026-01-05T21:00:01Z"}
+{"broker_fill_id": "F124", "broker_order_id": "B123", "client_order_id": "MAIN_00000000-0000-0000-0000-000000000001", "symbol": "SPY", "side": "BUY", "qty": "2", "price": "471.10", "fee": "0.02", "ts_utc": "2026-01-05T22:00:01Z"}

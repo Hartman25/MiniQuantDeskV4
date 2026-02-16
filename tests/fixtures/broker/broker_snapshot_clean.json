@@ -1,0 +1,42 @@
+{
+  "captured_at_utc": "2026-01-05T21:00:00Z",
+  "account": {
+    "equity": "10000.00",
+    "cash": "5000.00",
+    "currency": "USD"
+  },
+  "orders": [
+    {
+      "broker_order_id": "B123",
+      "client_order_id": "MAIN_00000000-0000-0000-0000-000000000001",
+      "symbol": "SPY",
+      "side": "BUY",
+      "type": "MARKET",
+      "status": "NEW",
+      "qty": "10",
+      "limit_price": null,
+      "stop_price": null,
+      "created_at_utc": "2026-01-05T21:00:00Z"
+    }
+  ],
+  "fills": [
+    {
+      "broker_fill_id": "F123",
+      "broker_order_id": "B123",
+      "client_order_id": "MAIN_00000000-0000-0000-0000-000000000001",
+      "symbol": "SPY",
+      "side": "BUY",
+      "qty": "10",
+      "price": "470.90",
+      "fee": "0.10",
+      "ts_utc": "2026-01-05T21:00:01Z"
+    }
+  ],
+  "positions": [
+    {
+      "symbol": "SPY",
+      "qty": "10",
+      "avg_price": "470.90"
+    }
+  ]
+}

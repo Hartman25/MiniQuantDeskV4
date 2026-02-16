@@ -1,0 +1,14 @@
+runtime:
+  deadman_file: "runtime/ARMED.flag"
+
+broker:
+  environment: "paper"
+  keys_env:
+    api_key: "ALPACA_API_KEY_PAPER"
+    api_secret: "ALPACA_API_SECRET_PAPER"
+
+data:
+  primary_source: "twelvedata"
+
+artifacts:
+  export_dir: "exports"
