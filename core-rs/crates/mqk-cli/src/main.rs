@@ -1,6 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use chrono::Utc;
+use serde_json::Value;
+use std::fs;
 use std::process::Command;
 use uuid::Uuid;
 
@@ -32,6 +34,12 @@ enum Commands {
         #[command(subcommand)]
         cmd: RunCmd,
     },
+
+    /// Audit trail utilities
+    Audit {
+        #[command(subcommand)]
+        cmd: AuditCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -55,6 +63,41 @@ enum RunCmd {
         /// Layered config paths in merge order
         #[arg(long = "config", required = true)]
         config_paths: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuditCmd {
+    /// Emit an audit event to JSONL (exports/<run_id>/audit.jsonl) AND to DB.
+    Emit {
+        /// Run id to attach this event to
+        #[arg(long)]
+        run_id: String,
+
+        /// Topic (e.g. runtime, data, broker, risk, exec)
+        #[arg(long)]
+        topic: String,
+
+        /// Event type (e.g. START, BAR, SIGNAL, ORDER_SUBMIT, FILL, KILL_SWITCH)
+        #[arg(long = "type")]
+        event_type: String,
+
+        /// Payload JSON string (avoid if possible; PowerShell quoting is annoying)
+        #[arg(long, conflicts_with = "payload_file")]
+        payload: Option<String>,
+
+        /// Path to a payload JSON file (recommended on Windows)
+        #[arg(long = "payload-file", conflicts_with = "payload")]
+        payload_file: Option<String>,
+
+        /// Enable hash chain (flag presence => true)
+        #[arg(long, default_value_t = true, action = clap::ArgAction::SetTrue)]
+        hash_chain: bool,
+
+        /// Disable hash chain explicitly
+        #[arg(long = "no-hash-chain", action = clap::ArgAction::SetFalse)]
+        #[arg(default_value_t = true)]
+        _hash_chain_off: bool,
     },
 }
 
@@ -116,9 +159,66 @@ async fn main() -> Result<()> {
                 println!("host_fingerprint={}", host_fp);
             }
         },
+
+        Commands::Audit { cmd } => match cmd {
+            AuditCmd::Emit { run_id, topic, event_type, payload, payload_file, hash_chain, .. } => {
+                let pool = mqk_db::connect_from_env().await?;
+
+                let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
+                let payload_json: Value = load_payload(payload, payload_file)?;
+
+                // JSONL path: exports/<run_id>/audit.jsonl (repo-root exports folder)
+                let path = format!("../exports/{}/audit.jsonl", run_id);
+                let mut writer = mqk_audit::AuditWriter::new(&path, hash_chain)?;
+
+                // Append to file (generates event_id + ts + optional hashes)
+                let ev = writer.append(run_uuid, &topic, &event_type, payload_json)?;
+
+                // Insert to DB
+                let db_ev = mqk_db::NewAuditEvent {
+                    event_id: ev.event_id,
+                    run_id: ev.run_id,
+                    ts_utc: ev.ts_utc,
+                    topic: ev.topic,
+                    event_type: ev.event_type,
+                    payload: ev.payload,
+                    hash_prev: ev.hash_prev,
+                    hash_self: ev.hash_self,
+                };
+                mqk_db::insert_audit_event(&pool, &db_ev).await?;
+
+                println!("audit_written=true path={}", path);
+                println!("event_id={}", db_ev.event_id);
+                if let Some(h) = db_ev.hash_self {
+                    println!("hash_self={}", h);
+                }
+            }
+        },
     }
 
     Ok(())
+}
+
+fn load_payload(payload: Option<String>, payload_file: Option<String>) -> Result<Value> {
+    if let Some(p) = payload_file {
+        // Read raw bytes to handle UTF-8 BOM cleanly on Windows.
+        let bytes = fs::read(&p).with_context(|| format!("read payload-file failed: {}", p))?;
+
+        // Strip UTF-8 BOM if present.
+        let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+
+        let raw = String::from_utf8(bytes.to_vec()).context("payload-file must be UTF-8 text")?;
+        let raw = raw.trim();
+
+        let v: Value = serde_json::from_str(raw).context("payload-file must contain valid JSON")?;
+        return Ok(v);
+    }
+
+    let raw = payload.context("must provide --payload or --payload-file")?;
+    let raw = raw.trim();
+
+    let v: Value = serde_json::from_str(raw).context("--payload must be valid JSON")?;
+    Ok(v)
 }
 
 /// Best-effort git hash (short).
