@@ -16,4 +16,6 @@ members = [
   "crates/mqk-reconcile",
   "crates/mqk-strategy",
   "crates/mqk-backtest",
+  "crates/mqk-promotion",
+
 ]
