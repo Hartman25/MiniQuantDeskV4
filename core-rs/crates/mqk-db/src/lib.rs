@@ -458,3 +458,210 @@ pub async fn enforce_deadman_or_halt(pool: &PgPool, run_id: Uuid, ttl_seconds: i
 
     Ok(false)
 }
+
+// -----------------------------
+// PATCH 19: OMS Outbox / Inbox
+// -----------------------------
+
+#[derive(Debug, Clone)]
+pub struct OutboxRow {
+    pub outbox_id: i64,
+    pub run_id: Uuid,
+    pub idempotency_key: String,
+    pub order_json: Value,
+    pub status: String, // PENDING | SENT | ACKED | FAILED
+    pub created_at_utc: DateTime<Utc>,
+    pub sent_at_utc: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InboxRow {
+    pub inbox_id: i64,
+    pub run_id: Uuid,
+    pub broker_message_id: String,
+    pub message_json: Value,
+    pub received_at_utc: DateTime<Utc>,
+}
+
+/// Enqueue an order intent into oms_outbox.
+///
+/// Idempotent behavior:
+/// - If idempotency_key already exists, returns Ok(false) and does NOT create a second row.
+/// - If inserted, returns Ok(true).
+///
+/// This matches the allocator-grade requirement: restarts cannot double-submit.
+pub async fn outbox_enqueue(
+    pool: &PgPool,
+    run_id: Uuid,
+    idempotency_key: &str,
+    order_json: Value,
+) -> Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"
+        insert into oms_outbox (run_id, idempotency_key, order_json, status)
+        values ($1, $2, $3, 'PENDING')
+        on conflict (idempotency_key) do nothing
+        returning outbox_id
+        "#,
+    )
+    .bind(run_id)
+    .bind(idempotency_key)
+    .bind(order_json)
+    .fetch_optional(pool)
+    .await
+    .context("outbox_enqueue failed")?;
+
+    Ok(row.is_some())
+}
+
+/// Fetch a single outbox row by idempotency_key.
+pub async fn outbox_fetch_by_idempotency_key(
+    pool: &PgPool,
+    idempotency_key: &str,
+) -> Result<Option<OutboxRow>> {
+    let row = sqlx::query(
+        r#"
+        select outbox_id, run_id, idempotency_key, order_json, status, created_at_utc, sent_at_utc
+        from oms_outbox
+        where idempotency_key = $1
+        "#,
+    )
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await
+    .context("outbox_fetch_by_idempotency_key failed")?;
+
+    let Some(row) = row else { return Ok(None); };
+
+    Ok(Some(OutboxRow {
+        outbox_id: row.try_get("outbox_id")?,
+        run_id: row.try_get("run_id")?,
+        idempotency_key: row.try_get("idempotency_key")?,
+        order_json: row.try_get("order_json")?,
+        status: row.try_get("status")?,
+        created_at_utc: row.try_get("created_at_utc")?,
+        sent_at_utc: row.try_get("sent_at_utc")?,
+    }))
+}
+
+/// Mark a PENDING outbox row as SENT (sets sent_at_utc).
+/// Returns true if a row transitioned, false if not found or not in PENDING state.
+pub async fn outbox_mark_sent(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"
+        update oms_outbox
+        set status = 'SENT',
+            sent_at_utc = coalesce(sent_at_utc, now())
+        where idempotency_key = $1
+          and status = 'PENDING'
+        returning outbox_id
+        "#,
+    )
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await
+    .context("outbox_mark_sent failed")?;
+
+    Ok(row.is_some())
+}
+
+/// Mark an outbox row as ACKED.
+/// Returns true if transitioned, false if not found.
+pub async fn outbox_mark_acked(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"
+        update oms_outbox
+        set status = 'ACKED'
+        where idempotency_key = $1
+        returning outbox_id
+        "#,
+    )
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await
+    .context("outbox_mark_acked failed")?;
+
+    Ok(row.is_some())
+}
+
+/// Mark an outbox row as FAILED.
+/// Returns true if transitioned, false if not found.
+pub async fn outbox_mark_failed(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"
+        update oms_outbox
+        set status = 'FAILED'
+        where idempotency_key = $1
+        returning outbox_id
+        "#,
+    )
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await
+    .context("outbox_mark_failed failed")?;
+
+    Ok(row.is_some())
+}
+
+/// Recovery query: list outbox rows that are not terminal (not ACKED).
+///
+/// NOTE: This does NOT talk to broker yet.
+/// It provides the minimal deterministic input required for a future reconcile step.
+pub async fn outbox_list_unacked_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<OutboxRow>> {
+    let rows = sqlx::query(
+        r#"
+        select outbox_id, run_id, idempotency_key, order_json, status, created_at_utc, sent_at_utc
+        from oms_outbox
+        where run_id = $1
+          and status in ('PENDING','SENT','FAILED')
+        order by outbox_id asc
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .context("outbox_list_unacked_for_run failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(OutboxRow {
+            outbox_id: row.try_get("outbox_id")?,
+            run_id: row.try_get("run_id")?,
+            idempotency_key: row.try_get("idempotency_key")?,
+            order_json: row.try_get("order_json")?,
+            status: row.try_get("status")?,
+            created_at_utc: row.try_get("created_at_utc")?,
+            sent_at_utc: row.try_get("sent_at_utc")?,
+        });
+    }
+    Ok(out)
+}
+
+/// Insert a broker message/fill into oms_inbox with dedupe on broker_message_id.
+///
+/// Idempotent behavior:
+/// - If broker_message_id already exists, returns Ok(false) and does NOT create a second row.
+/// - If inserted, returns Ok(true).
+pub async fn inbox_insert_deduped(
+    pool: &PgPool,
+    run_id: Uuid,
+    broker_message_id: &str,
+    message_json: Value,
+) -> Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"
+        insert into oms_inbox (run_id, broker_message_id, message_json)
+        values ($1, $2, $3)
+        on conflict (broker_message_id) do nothing
+        returning inbox_id
+        "#,
+    )
+    .bind(run_id)
+    .bind(broker_message_id)
+    .bind(message_json)
+    .fetch_optional(pool)
+    .await
+    .context("inbox_insert_deduped failed")?;
+
+    Ok(row.is_some())
+}
