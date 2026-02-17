@@ -1,4 +1,13 @@
-MiniQuantDeskV4
+
+<p align="center">
+  <img src="assets/logo/miniquantdesk_banner_wide.png"
+       alt="MiniQuantDesk"
+       width="480">
+</p>
+
+<h1 align="center">MiniQuantDeskV4</h1>
+
+</p>
 <p align="center"> <strong>Risk-First Quantitative Capital Allocation Framework</strong> </p> <p align="center"> <img src="https://img.shields.io/badge/Rust-Stable-orange?logo=rust" /> <img src="https://img.shields.io/badge/Workspace-Tests%20Green-brightgreen" /> <img src="https://img.shields.io/badge/Architecture-Risk%20First-blue" /> <img src="https://img.shields.io/badge/Mode-Deterministic-purple" /> <img src="https://img.shields.io/badge/Status-Reliability%20Hardening-lightgrey" /> </p>
 
 MiniQuantDeskV4 is an architecture-first quantitative trading system designed to operate as a disciplined capital allocator with enforced lifecycle controls, deterministic replay, and hard risk boundaries.
