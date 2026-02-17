@@ -1,0 +1,11 @@
+[package]
+name = "mqk-backtest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mqk-execution = { path = "../mqk-execution" }
+mqk-portfolio = { path = "../mqk-portfolio" }
+mqk-risk = { path = "../mqk-risk" }
+mqk-strategy = { path = "../mqk-strategy" }
+mqk-integrity = { path = "../mqk-integrity" }

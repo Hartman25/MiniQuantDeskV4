@@ -951,6 +951,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mqk-backtest"
+version = "0.1.0"
+dependencies = [
+ "mqk-execution",
+ "mqk-integrity",
+ "mqk-portfolio",
+ "mqk-risk",
+ "mqk-strategy",
+]
+
+[[package]]
 name = "mqk-cli"
 version = "0.0.1"
 dependencies = [
