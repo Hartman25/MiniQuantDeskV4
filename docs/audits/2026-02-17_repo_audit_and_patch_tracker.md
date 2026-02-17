@@ -1,0 +1,528 @@
+# MiniQuantDeskV4 â€” Patch Tracker (Updated)
+
+## Exact insert text requested (use this if you already have a tracker)
+
+### Add to docs list
+- docs/specs/strategy_evaluation_and_ranking.md
+- docs/specs/config_layering_and_hashing.md
+- docs/specs/testing_strategy.md
+- docs/specs/testing_fixtures_and_harness.md
+
+### Add to PATCH 01 deliverables
+- Config loader (merge layers) + config_hash + validation (minimal v0)
+
+---
+
+Rules:
+- One patch at a time.
+- Each patch has explicit acceptance tests.
+- No scope creep.
+- No external I/O integrations (Discord/HTTP/UI) until after PATCH 12. Only interface stubs are allowed.
+- Any EXPERIMENTAL engine live arming requires separate broker keys/account and remains capped by config.
+
+Docs that define invariants:
+- docs/specs/backtest_policy.md
+- docs/specs/execution_model.md
+- docs/specs/portfolio_and_accounting_model.md
+- docs/specs/data_pipeline_and_integrity.md
+- docs/specs/reconciliation.md
+- docs/specs/arming_model.md
+- docs/specs/event_taxonomy.md
+- docs/specs/strategy_framework_and_plugin_model.md
+- docs/specs/run_artifacts_and_reproducibility.md
+- docs/specs/kill_switches_and_limits.md
+- docs/specs/secrets_and_config_management.md
+- docs/specs/broker_adapter_contract.md
+- docs/specs/strategy_evaluation_and_ranking.md
+- docs/specs/config_layering_and_hashing.md
+- docs/specs/testing_strategy.md
+- docs/specs/testing_fixtures_and_harness.md
+
+---
+
+## PATCH 01â€“04 â€” Spine (DB, Config, Events, Outbox/Inbox)
+Status: DONE
+
+Implemented:
+- Postgres schema: runs, audit_events, oms_outbox, oms_inbox (`crates/mqk-db/migrations/0001_init.sql`)
+- Config loader with layered YAML merge, SHA-256 canonical hashing (`crates/mqk-config/src/lib.rs`)
+- Event envelope schema (`crates/mqk-schemas/src/lib.rs`)
+- Outbox idempotency via `uq_outbox_idempotency` unique index
+- Inbox dedupe via `uq_inbox_broker_message_id` unique index
+
+---
+
+## PATCH 05 â€” Execution: Target-to-Intent Conversion
+Status: DONE
+
+Implemented:
+- Deterministic targets_to_order_intents (`crates/mqk-execution/src/engine.rs`)
+- Signed quantities, BTreeMap deterministic ordering
+- Test: `scenario_target_to_intent.rs`
+
+---
+
+## PATCH 06 â€” Portfolio: FIFO Lots, PnL, Equity
+Status: DONE
+
+Implemented:
+- FIFO lot accounting with buy/sell (`crates/mqk-portfolio/src/accounting.rs`)
+- Equity = cash + unrealized (`crates/mqk-portfolio/src/metrics.rs`)
+- Exposure computation and enforcement
+- Tests: `scenario_pnl_partial_fills_fifo.rs`, `scenario_position_flatten_fifo.rs`, `scenario_exposure_enforcement_multi_symbol.rs`
+
+---
+
+## PATCH 07 â€” Risk Engine (Deterministic)
+Status: DONE
+
+Implemented:
+- Kill switches, daily loss, max drawdown, reject storm, PDT (`crates/mqk-risk/src/engine.rs`)
+- Sticky halt + disarm flags
+- Tests: `scenario_forced_halt_on_threshold_breach.rs`, `scenario_new_order_rejection_after_limit.rs`, `scenario_pdt_auto_mode_enforcement.rs`, `scenario_auto_flatten_on_critical_event.rs`
+
+---
+
+## PATCH 08 â€” Data Integrity Engine
+Status: DONE
+
+Implemented:
+- Stale feed, gap detection, feed disagreement, incomplete bar rejection (`crates/mqk-integrity/src/engine.rs`)
+- Tests: `scenario_stale_feed_disarm.rs`, `scenario_gap_fail.rs`, `scenario_feed_disagreement_halt.rs`, `scenario_incomplete_bar_rejection.rs`
+
+---
+
+## PATCH 09 â€” Reconciliation Engine
+Status: DONE
+
+Implemented:
+- Position mismatch, order drift, unknown broker order detection (`crates/mqk-reconcile/src/engine.rs`)
+- LIVE arming gate: `is_clean_reconcile()` (`crates/mqk-reconcile/src/engine.rs:138-141`)
+- Tests: `scenario_drift_detection.rs`, `scenario_reconcile_required_before_live.rs`, `scenario_unknown_order_detection.rs`
+
+---
+
+## PATCH 10 â€” Audit Trail + Artifacts
+Status: DONE
+
+Implemented:
+- Append-only JSONL with SHA-256 hash chain (`crates/mqk-audit/src/lib.rs`)
+- Run manifest + artifact initialization (`crates/mqk-artifacts/src/lib.rs`)
+- Tests: `scenario_run_artifacts_manifest_created.rs`, `scenario_entry_places_protective_stop.rs`
+
+---
+
+## PATCH 11 â€” Backtest + Stress Engine
+Status: DONE
+
+Implemented:
+- Deterministic replay engine (`crates/mqk-backtest/src/engine.rs`)
+- Conservative worst-case fill pricing (buy@high, sell@low + slippage)
+- Stress profile overlay
+- Tests: `scenario_replay_determinism.rs`, `scenario_stress_impact_measurable.rs`, `scenario_ambiguity_worst_case_enforced.rs`
+
+---
+
+## PATCH 12 â€” Promotion Gate Evaluator
+Status: DONE
+
+Implemented:
+- Sharpe, MDD, CAGR, profit factor, profitable months % (`crates/mqk-promotion/src/evaluator.rs`)
+- Tie-break deterministic ordering
+- Tests: `scenario_pass_above_threshold.rs`, `scenario_fail_below_threshold.rs`, `scenario_tie_break_correctness.rs`
+
+---
+
+## PATCH 13 â€” Engine Isolation (mqk-isolation)
+Status: DONE
+
+Implemented:
+- Engine-scoped broker key loading with token enforcement (`crates/mqk-isolation/src/lib.rs:70-82`)
+- Allocation cap enforcement (`enforce_allocation_cap_micros`, `crates/mqk-isolation/src/lib.rs:137-155`)
+- EngineStore keyed state to prevent cross-engine bleed (`crates/mqk-isolation/src/lib.rs:167-189`)
+- Integrated into backtest engine (`crates/mqk-backtest/src/engine.rs:194-228`)
+- Test: `scenario_allocation_cap_enforced.rs`
+
+---
+
+## PATCH 14 â€” Run Lifecycle + LIVE Exclusivity
+Status: DONE
+
+Implemented:
+- DB migration: status column, lifecycle timestamps, status CHECK constraint, unique partial index `uq_live_engine_active_run` on `(engine_id) WHERE mode='LIVE' AND status IN ('ARMED','RUNNING')` (`crates/mqk-db/migrations/0002_run_lifecycle.sql`)
+- Lifecycle transitions: arm_run, begin_run, stop_run, halt_run, heartbeat_run (`crates/mqk-db/src/lib.rs:272-410`)
+- Run binding assertion (`crates/mqk-db/src/lib.rs:238-269`)
+- CLI: `mqk run start`, `mqk db migrate`, `mqk db status`, `mqk audit emit` (`crates/mqk-cli/src/main.rs`)
+- Test: `scenario_run_lifecycle_enforced.rs` (lifecycle transitions + LIVE exclusivity via unique index)
+
+---
+
+## PATCH 15 â€” Integration Hardening + Remaining Scenario Tests
+Status: IN PROGRESS
+
+### Architectural Decision
+Close remaining test gaps identified during PATCH 08-14 implementation. Expand scenario coverage to prove integration invariants hold end-to-end.
+
+### Why This Matters
+Individual crate engines are tested in isolation, but cross-crate integration boundaries have untested seams. A real allocator needs confidence that the composition of these engines holds under realistic conditions.
+
+### Remaining Items (Explicit Scenario Tests)
+
+#### 15a. Config secrets exclusion test
+- **Crate:** `mqk-config`
+- **File:** `crates/mqk-config/tests/scenario_secrets_excluded.rs`
+- **Intent:** Prove that secret-like values in YAML config are detected and rejected. Prove that env var NAMES (not values) are what appears in config_json.
+- **Validates:** docs/specs/config_layering_and_hashing.md section 5 (secrets exclusion)
+- **GREEN when:** Loading a YAML with `api_key: "sk-live-abc123"` as a literal value fails; loading with `api_key_env: "ALPACA_API_KEY_MAIN"` succeeds and config_json contains the env var name, not the secret value.
+
+#### 15b. Config hash stability test
+- **Crate:** `mqk-config`
+- **File:** `crates/mqk-config/tests/scenario_config_hash_stable.rs`
+- **Intent:** Prove that the same set of YAML files always produces the same config_hash regardless of filesystem ordering or platform.
+- **Validates:** docs/specs/config_layering_and_hashing.md section 4 (hashing determinism)
+- **GREEN when:** `load_layered_yaml(&[base, env, engine])` called twice returns identical `config_hash`; reordering keys within YAML files doesn't change the hash.
+
+#### 15c. Audit hash chain integrity test
+- **Crate:** `mqk-audit`
+- **File:** `crates/mqk-audit/tests/scenario_hash_chain_tamper_detected.rs`
+- **Intent:** Prove that tampering with one line in audit.jsonl breaks hash chain verification.
+- **Validates:** docs/specs/run_artifacts_and_reproducibility.md (audit hash chain)
+- **GREEN when:** Writing 5 events with hash_chain=true, then mutating line 3 payload, then a verify pass detects the break at line 4.
+
+#### 15d. CLI run start + artifact creation integration test
+- **Crate:** `mqk-cli` (or `mqk-testkit`)
+- **File:** `crates/mqk-testkit/tests/scenario_cli_run_start_creates_artifacts.rs`
+- **Intent:** Prove that `mqk run start` creates DB row + artifact directory + manifest.json with matching hashes.
+- **Validates:** integration of mqk-db + mqk-artifacts + mqk-config
+- **GREEN when:** After run start, DB row exists with matching config_hash, and exports/<run_id>/manifest.json exists with matching config_hash and git_hash.
+
+#### 15e. Backtest â†’ promotion pipeline integration test
+- **Crate:** `mqk-testkit` or `mqk-promotion`
+- **File:** `crates/mqk-promotion/tests/scenario_backtest_to_promotion_pipeline.rs`
+- **Intent:** Prove that a BacktestReport can be fed into the promotion evaluator and produce correct pass/fail.
+- **Validates:** End-to-end: backtest engine -> report -> promotion evaluator
+- **GREEN when:** A profitable backtest report passes promotion; an unprofitable one fails with correct reason codes.
+
+#### 15f. Cross-engine isolation integration test
+- **Crate:** `mqk-isolation`
+- **File:** `crates/mqk-isolation/tests/scenario_cross_engine_state_bleed_prevented.rs`
+- **Intent:** Prove that EngineStore prevents reading/writing state across engine boundaries, and that broker key env var naming enforcement rejects shared keys.
+- **Validates:** PATCH 13 isolation guarantees end-to-end
+- **GREEN when:** `EngineStore<RiskState>` with MAIN and EXP entries returns None for wrong engine; `EngineIsolation::from_config_json` rejects config where broker key env var does not contain engine_id token.
+
+#### 15g. Reconcile + lifecycle gate integration test
+- **Crate:** `mqk-db` or `mqk-testkit`
+- **File:** `crates/mqk-db/tests/scenario_reconcile_gate_blocks_live_arm.rs`
+- **Intent:** Prove that the full arming sequence (reconcile -> arm -> begin) respects both reconcile cleanliness AND lifecycle state machine.
+- **Validates:** PATCH 09 + PATCH 14 integration
+- **GREEN when:** Attempting arm_run on a LIVE run while dirty reconcile is simulated fails; clean reconcile + valid lifecycle state succeeds. (Note: this may need a thin orchestration layer or test helper.)
+
+---
+
+## PATCH 16 â€” CLI Lifecycle Commands (arm, begin, stop, halt, heartbeat)
+Status: NOT STARTED
+
+### Architectural Decision
+The CLI (`crates/mqk-cli/src/main.rs`) currently only has `run start`. The lifecycle functions `arm_run`, `begin_run`, `stop_run`, `halt_run`, `heartbeat_run` exist in `mqk-db` but have NO CLI surface. An operator cannot arm, stop, or halt a run from the command line.
+
+### Why This Matters (P0)
+Without CLI commands for arm/stop/halt, there is NO operational path to:
+- Arm a LIVE run (the arming model spec requires explicit human confirmation: `ARM LIVE {account_last4} {daily_loss_limit}`)
+- Gracefully stop a running engine
+- Emergency-halt a running engine
+- Send heartbeats (deadman switch detection)
+
+This makes the system **inoperable for live capital allocation**. The entire lifecycle state machine exists in the DB layer but is unreachable by an operator.
+
+### Evidence
+- `crates/mqk-cli/src/main.rs:53-68` â€” RunCmd only has `Start` variant
+- `crates/mqk-db/src/lib.rs:272-410` â€” arm_run, begin_run, stop_run, halt_run, heartbeat_run all exist but no CLI caller
+- `docs/specs/arming_model.md:20-21` â€” requires "exact operator confirmation: `ARM LIVE <last4> <daily_loss_limit>`"
+- `config/defaults/base.yaml:65-67` â€” arming config exists (`require_manual_confirmation: true`, `confirmation_format`)
+
+### Required CLI Commands
+```
+mqk run arm    --run-id <UUID> [--confirm "ARM LIVE XXXX 0.02"]
+mqk run begin  --run-id <UUID>
+mqk run stop   --run-id <UUID>
+mqk run halt   --run-id <UUID> --reason <TEXT>
+mqk run heartbeat --run-id <UUID>
+mqk run status --run-id <UUID>
+```
+
+### Required Tests
+- `crates/mqk-cli/tests/scenario_cli_arm_requires_confirmation.rs` â€” arm without confirmation string fails; arm with correct format succeeds
+- `crates/mqk-cli/tests/scenario_cli_halt_stops_execution.rs` â€” halt transitions run to HALTED state in DB
+
+### Recommended Settings
+- Confirmation format: `config/defaults/base.yaml:67` â€” `"ARM LIVE {account_last4} {daily_loss_limit}"`
+- Manual confirmation required: `config/defaults/base.yaml:65` â€” `require_manual_confirmation: true`
+- Clean reconcile required: `config/defaults/base.yaml:66` â€” `require_clean_reconcile: true`
+
+---
+
+## PATCH 17 â€” Migration Checksum Safety + DB Operational Policy
+Status: NOT STARTED
+
+### Architectural Decision
+Enforce safe DB migration practices. The `sqlx::migrate!()` macro embeds migration checksums at compile time. If a migration file is modified after being applied to a DB, `migrate()` fails with a checksum mismatch. This was observed in real development.
+
+### Why This Matters (P0)
+- `mqk_db::migrate()` is called unconditionally in `crates/mqk-db/tests/scenario_run_lifecycle_enforced.rs:24` and via `mqk db migrate` CLI (`crates/mqk-cli/src/main.rs:118`).
+- There is NO documentation of the operational policy: "never reuse a prod DB for dev", "never edit applied migrations".
+- The test itself has a comment acknowledging the fragility (`crates/mqk-db/tests/scenario_run_lifecycle_enforced.rs:21-23`): "if your local DB has a sqlx migration checksum mismatch, mqk_db::migrate() will fail."
+- There is NO mechanism to detect or warn when `migrate()` is run against a production database.
+- There is NO separate test-DB provisioning strategy.
+
+### Evidence
+- `crates/mqk-db/src/lib.rs:25-31` â€” `migrate()` calls `sqlx::migrate!("./migrations")` with no env-gate or safety check
+- `crates/mqk-db/tests/scenario_run_lifecycle_enforced.rs:21-24` â€” comment acknowledges checksum mismatch risk
+- `crates/mqk-cli/src/main.rs:117-119` â€” `mqk db migrate` runs migrations with no confirmation prompt
+- No `docs/runbooks/` entry for DB migration safety
+- No `config/` entry for DB migration policy
+
+### Required Deliverables
+1. **Operational runbook**: `docs/runbooks/db_migration_safety.md` documenting:
+   - Never edit an applied migration
+   - Dev DBs: fresh DB per test cycle (or use `DROP DATABASE` + recreate)
+   - Prod DBs: migration checksums are immutable; new changes = new migration file only
+   - Pre-LIVE checklist: verify `_sqlx_migrations` table checksums match compiled checksums
+2. **CLI safety gate**: `mqk db migrate` should warn (or require `--yes`) before running against a DB that has `mode='LIVE'` runs
+3. **Test DB helper**: utility to create/destroy ephemeral test databases (prevents checksum conflicts between test runs)
+
+### Required Tests
+- `crates/mqk-db/tests/scenario_migrate_idempotent_on_clean_db.rs` â€” running `migrate()` twice on a fresh DB succeeds (idempotent)
+- `crates/mqk-db/tests/scenario_migrate_warns_on_live_db.rs` â€” if runs table has LIVE rows, migration warns or requires confirmation
+
+### Recommended Settings
+- NOT FOUND in config/docs. Needs decision: DB URL segmentation (dev vs prod) policy.
+
+---
+
+## PATCH 18 â€” Deadman Switch / Heartbeat Monitor
+Status: NOT STARTED
+
+### Architectural Decision
+Implement the deadman switch pattern described in `docs/specs/arming_model.md:32-33` ("runtime/ARMED.flag deletion triggers DISARM") and heartbeat-based liveness detection. Currently, `heartbeat_run` exists in DB but nothing monitors for missed heartbeats.
+
+### Why This Matters (P0)
+If the process crashes or hangs:
+- There is NO mechanism to detect the stall (heartbeat exists but nothing reads `last_heartbeat_utc` to trigger disarm)
+- There is NO deadman file creation/monitoring (`config/defaults/base.yaml:12` references `runtime/ARMED.flag` but no code creates/watches it)
+- There is NO auto-disarm on crash: the run stays in RUNNING state in DB forever
+- There is NO operational command to detect stale heartbeats
+
+### Evidence
+- `crates/mqk-db/src/lib.rs:385-410` â€” `heartbeat_run()` writes `last_heartbeat_utc` but nothing reads it for staleness
+- `config/defaults/base.yaml:12` â€” `deadman_file: "runtime/ARMED.flag"` configured but no code references it
+- `config/engines/experimental.yaml:8` â€” `deadman_file: "runtime/EXP_ARMED.flag"` configured but unused
+- `docs/specs/arming_model.md:32-33` â€” deadman spec exists but is unimplemented
+- No `rg "deadman|ARMED.flag"` hit in any Rust source file
+
+### Required Deliverables
+1. Deadman file creation on arm, deletion on disarm/halt
+2. Heartbeat staleness query: `SELECT run_id FROM runs WHERE status='RUNNING' AND last_heartbeat_utc < now() - interval '?? seconds'`
+3. CLI: `mqk run check-health` â€” reports stale heartbeat runs
+4. Runtime loop: periodic heartbeat writer (future; stub for now)
+
+### Required Tests
+- `crates/mqk-db/tests/scenario_stale_heartbeat_detected.rs` â€” run with old `last_heartbeat_utc` is flagged as stale
+- `crates/mqk-testkit/tests/scenario_deadman_file_lifecycle.rs` â€” ARMED.flag created on arm, removed on halt
+
+### Recommended Settings
+- Heartbeat interval: `config/defaults/base.yaml:10` â€” `reconcile_interval_seconds: 60` (no explicit heartbeat interval; TBD)
+- Stale threshold: `config/defaults/base.yaml:11` â€” `stale_data_threshold_seconds: 120` (data staleness, not heartbeat; TBD for heartbeat)
+- Deadman file path: `config/defaults/base.yaml:12` â€” `runtime/ARMED.flag`
+
+---
+
+## PATCH 19 â€” Order Idempotency + Crash Recovery at Execution Boundary
+Status: NOT STARTED
+
+### Architectural Decision
+Ensure that if the process crashes between submitting an order to the broker and recording the fill, recovery does not cause double-submission. The outbox/inbox tables exist (`0001_init.sql:31-54`) but no code writes to or reads from them.
+
+### Why This Matters (P0)
+- The `oms_outbox` and `oms_inbox` tables exist in the DB schema but are **completely unused** by any Rust code.
+- No outbox enqueue before broker submit. No inbox dedupe on fill receipt.
+- If the process crashes after `broker.submit()` but before recording the fill, a naive restart would re-submit the same order.
+- `docs/specs/broker_adapter_contract.md:8-9` states "Idempotency safe: duplicates tolerated; outbox/inbox enforce uniqueness" â€” but this contract is not implemented.
+
+### Evidence
+- `crates/mqk-db/migrations/0001_init.sql:31-54` â€” oms_outbox and oms_inbox tables defined
+- `rg "oms_outbox|oms_inbox" --type rust` â€” **ZERO hits** in any Rust source (only in SQL migration)
+- `docs/specs/broker_adapter_contract.md:8-9` â€” contract specifies outbox/inbox uniqueness
+- `crates/mqk-execution/src/engine.rs` â€” pure function, no outbox interaction
+- `crates/mqk-backtest/src/engine.rs` â€” backtest fills applied directly, no outbox
+
+### Required Deliverables
+1. Outbox writer: enqueue intent before broker submission (with idempotency_key = `{run_id}_{client_order_id}`)
+2. Inbox writer: record fill with `broker_message_id` dedupe before applying to portfolio
+3. Recovery query: on startup, check outbox for PENDING/SENT entries and reconcile with broker state
+4. Integration with CLI or future runtime loop
+
+### Required Tests
+- `crates/mqk-db/tests/scenario_outbox_idempotency_prevents_double_submit.rs` â€” inserting same idempotency_key twice fails (unique constraint)
+- `crates/mqk-db/tests/scenario_inbox_dedupe_prevents_double_fill.rs` â€” inserting same broker_message_id twice fails
+- `crates/mqk-testkit/tests/scenario_crash_recovery_no_double_order.rs` â€” simulate crash-after-submit, verify restart reconciles vs broker
+
+### Recommended Settings
+- NOT FOUND. Needs decision: outbox poll interval, retry policy, max retries.
+
+---
+
+## PATCH 20 â€” Arming Pre-Flight Checks Orchestration
+Status: NOT STARTED
+
+### Architectural Decision
+Implement the full arming pre-flight sequence from `docs/specs/arming_model.md`: clean reconcile + risk limits present + config hash pinned + kill switches enabled + operator confirmation. Currently these checks exist individually but are not composed into a single gate.
+
+### Why This Matters (P1)
+- `is_clean_reconcile()` exists (`crates/mqk-reconcile/src/engine.rs:138-141`) but is not called before `arm_run()`
+- `arm_run()` (`crates/mqk-db/src/lib.rs:272-308`) only checks lifecycle state, NOT reconcile cleanliness
+- Config hash binding check `assert_run_binding()` exists but is not called in the arming path
+- There is no check that risk limits are non-zero before arming LIVE
+- Kill switch enablement is not verified pre-arm
+
+### Evidence
+- `crates/mqk-db/src/lib.rs:272-308` â€” `arm_run()` checks `status IN ('CREATED','STOPPED')` only
+- `crates/mqk-reconcile/src/engine.rs:138-141` â€” `is_clean_reconcile()` exists but no caller in arming path
+- `crates/mqk-db/src/lib.rs:238-269` â€” `assert_run_binding()` exists but not called in arm flow
+- `docs/specs/arming_model.md:16-18` â€” pre-arm requires "clean reconcile, risk limits present, config hash pinned, kill switches enabled"
+- `config/defaults/base.yaml:65-67` â€” arming config with `require_clean_reconcile: true`
+
+### Required Deliverables
+1. `arm_preflight()` function that composes: reconcile check + risk limit validation + config hash assertion + kill switch verification
+2. Wire into CLI `mqk run arm` command (PATCH 16)
+3. Reject arm if any check fails, with specific error
+
+### Required Tests
+- `crates/mqk-reconcile/tests/scenario_arm_blocked_without_reconcile.rs` â€” arm fails when reconcile is dirty
+- `crates/mqk-risk/tests/scenario_arm_blocked_with_zero_risk_limits.rs` â€” arm fails when daily_loss_limit_micros=0 and mode=LIVE
+
+### Recommended Settings
+- `config/defaults/base.yaml:65-67` â€” `require_manual_confirmation: true`, `require_clean_reconcile: true`
+- Risk limits: `config/defaults/base.yaml:57-58` â€” `daily_loss_limit: 0.02`, `max_drawdown: 0.18`
+
+---
+
+## PATCH 21 â€” Config Validation + Secret Detection at Load Time
+Status: NOT STARTED
+
+### Architectural Decision
+The config loader (`crates/mqk-config/src/lib.rs`) performs deep merge and hashing but does NO validation of required fields and NO secret detection. The spec requires aborting on secret-like values in YAML.
+
+### Why This Matters (P1)
+- No required-field validation: a config missing `engine.engine_id` or `risk.daily_loss_limit` will load successfully and only fail later at runtime in an unpredictable location.
+- No secret detection: a user who accidentally puts `api_key: "sk-live-abc123"` in YAML will have the secret stored in `runs.config_json` (DB) and `manifest.json` (disk).
+- `docs/specs/config_layering_and_hashing.md:35-37` requires: "If secret-like value detected in YAML/effective config: abort, emit CONFIG_SECRET_DETECTED."
+
+### Evidence
+- `crates/mqk-config/src/lib.rs:8-33` â€” `load_layered_yaml()` merges and hashes but never validates or scans for secrets
+- `docs/specs/config_layering_and_hashing.md:33-37` â€” secrets must never appear; abort on detection
+- `crates/mqk-db/src/lib.rs:80` â€” `config_json` is stored directly in DB (would include secrets if present)
+- `crates/mqk-artifacts/src/lib.rs:80-81` â€” manifest.json written to disk with config data
+
+### Required Deliverables
+1. Required-field validator: check for `engine.engine_id`, `broker.keys_env.api_key`, `broker.keys_env.api_secret`, `risk.daily_loss_limit`, `risk.max_drawdown` at minimum
+2. Secret scanner: reject configs where values match patterns like `sk-`, `AKIA`, `-----BEGIN`, base64-encoded tokens, etc.
+3. Wire into `load_layered_yaml()` or as a separate `validate_config()` step
+
+### Required Tests
+- `crates/mqk-config/tests/scenario_missing_required_field_rejected.rs` â€” loading config without `engine.engine_id` returns error
+- `crates/mqk-config/tests/scenario_secret_in_yaml_aborts.rs` â€” loading config with literal API key value aborts with CONFIG_SECRET_DETECTED
+
+### Recommended Settings
+- Required fields: derived from `crates/mqk-isolation/src/lib.rs:54-67` (engine_id, broker keys_env) and `config/defaults/base.yaml` structure
+- Secret patterns: TBD (needs decision on pattern list)
+
+---
+
+## PATCH 22 â€” Stale Data â†’ Execution Path Kill (End-to-End)
+Status: NOT STARTED
+
+### Architectural Decision
+The integrity engine sets `st.disarmed = true` on stale feed (`crates/mqk-integrity/src/engine.rs:37-38`), but this flag is local to `IntegrityState` and is NOT propagated to the execution path. A stale feed disarm should guarantee that no new orders can be submitted.
+
+### Why This Matters (P1)
+- In the backtest engine, integrity checks run independently of the risk/execution path. The `IntegrityState.disarmed` flag is never read by the execution pipeline.
+- In a live runtime (future), if the integrity engine sets disarmed=true but the execution loop doesn't check it, orders will continue to be submitted on stale data.
+- `config/defaults/base.yaml:31` â€” `stale_policy: "DISARM"` is configured but the DISARM action has no downstream effect beyond setting a boolean.
+
+### Evidence
+- `crates/mqk-integrity/src/engine.rs:37-38` â€” sets `st.disarmed = true` on stale feed
+- `crates/mqk-integrity/src/types.rs:106-107` â€” `halted` and `disarmed` are fields on IntegrityState
+- `crates/mqk-backtest/src/engine.rs` â€” no reference to IntegrityState or disarmed flag
+- `crates/mqk-risk/src/types.rs:176` â€” RiskState also has `disarmed` but it's not connected to IntegrityState
+- No code path connects `IntegrityState.disarmed` â†’ execution halt
+
+### Required Deliverables
+1. Define the integration point: integrity disarm â†’ risk engine input (or direct execution gate)
+2. In backtest: feed bars through integrity engine before strategy evaluation; if disarmed, skip execution
+3. In runtime (future): integrity check must block order submission
+
+### Required Tests
+- `crates/mqk-backtest/tests/scenario_stale_data_stops_execution.rs` â€” backtest with stale bar gap causes execution to stop (no fills after gap)
+- `crates/mqk-integrity/tests/scenario_disarm_propagates_to_risk.rs` â€” integrity disarm sets risk state to reject all new orders
+
+### Recommended Settings
+- `config/defaults/base.yaml:30-31` â€” `stale_policy: "DISARM"`, `fail_on_gap: true`, `gap_tolerance_bars: 0`
+- `config/defaults/base.yaml:11` â€” `stale_data_threshold_seconds: 120`
+
+---
+
+# AUDIT SUMMARY
+
+## Part A â€” Evidence Summary
+
+### Test Results
+- **cargo test --workspace**: 30/30 tests pass, 0 failures, 0 ignored
+- **cargo test -p mqk-db --test scenario_run_lifecycle_enforced**: 1/1 pass
+- **cargo clippy --workspace --all-targets**: Only style warnings (for_kv_map, new_without_default, needless_question_mark, bool_assert_comparison). No correctness issues.
+
+### Config Sources Found
+- `config/defaults/base.yaml` â€” full base config with all sections (102 lines)
+- `config/engines/main.yaml` â€” MAIN engine config
+- `config/engines/experimental.yaml` â€” EXP engine config with separate broker keys
+- `config/risk_profiles/tier_A_consistent.yaml` â€” MAIN risk limits
+- `config/risk_profiles/experimental_tier_B.yaml` â€” EXP risk limits (tighter)
+- `config/environments/windows-dev.yaml` â€” dev environment overrides
+- `config/environments/linux-prod.yaml` â€” prod environment (live broker keys, tighter intervals)
+- `config/stress_profiles/slippage_x2.yaml` â€” 2x slippage stress
+- `config/stress_profiles/latency_high.yaml` â€” 1-event latency
+
+### DB Migrations
+- `0001_init.sql` â€” runs, audit_events, oms_outbox, oms_inbox
+- `0002_run_lifecycle.sql` â€” status column, lifecycle timestamps, CHECK constraint, unique partial index
+
+## Part B â€” Gap/Fragility Audit Table
+
+| Area | Finding | Why It Matters | Evidence | Severity | Recommended Default |
+|------|---------|---------------|----------|----------|-------------------|
+| CLI/Ops | No CLI commands for arm/begin/stop/halt/heartbeat | Operator cannot control run lifecycle; system is inoperable for live use | `mqk-cli/src/main.rs:53-68` (only Start variant) vs `mqk-db/src/lib.rs:272-410` (all lifecycle fns exist) | **P0** | `arming_model.md:20-21`: "ARM LIVE {last4} {daily_loss_limit}" |
+| DB | Migration checksum fragility on reused DB | `migrate()` fails silently on checksum mismatch; no operational docs exist | `mqk-db/src/lib.rs:25-31`, `scenario_run_lifecycle_enforced.rs:21-23` (comment acknowledges) | **P0** | NOT FOUND; needs DB segmentation policy |
+| Recovery | Deadman switch / heartbeat monitor unimplemented | Process crash leaves run in RUNNING state forever; no auto-disarm | `mqk-db/src/lib.rs:385-410` (heartbeat writes but nothing reads); `base.yaml:12` (deadman_file configured, unused) | **P0** | `base.yaml:12`: `runtime/ARMED.flag`; staleness TBD |
+| Execution | oms_outbox/oms_inbox tables unused â€” no crash recovery | Double-submission on crash-restart; violates broker_adapter_contract.md | `0001_init.sql:31-54` (tables exist); zero Rust references to oms_outbox/oms_inbox | **P0** | `broker_adapter_contract.md:8-9`: outbox/inbox enforce uniqueness |
+| Lifecycle | arm_run() does not check reconcile cleanliness | LIVE can be armed without clean reconcile, violating arming spec | `mqk-db/src/lib.rs:272-308` (only checks status); `arming_model.md:16-18` (requires clean reconcile) | **P0** | `base.yaml:66`: `require_clean_reconcile: true` |
+| Data | IntegrityState.disarmed not connected to execution path | Stale data disarm doesn't actually stop order submission | `integrity/engine.rs:37-38` (sets disarmed); backtest engine has no integrity check | **P1** | `base.yaml:31`: `stale_policy: "DISARM"` |
+| Config | No required-field validation at config load | Missing critical fields (engine_id, risk limits) silently accepted | `mqk-config/src/lib.rs:8-33` (no validation); `isolation/src/lib.rs:54-67` (crashes later) | **P1** | Required fields per `base.yaml` structure |
+| Config | No secret detection in config loader | Literal API keys in YAML stored in DB + manifest on disk | `mqk-config/src/lib.rs:8-33` (no scanning); `config_layering_and_hashing.md:35-37` (requires abort) | **P1** | `config_layering_and_hashing.md:35`: abort on secret detected |
+| Lifecycle | No config hash / risk limit validation pre-arm | arm_run() doesn't verify config_hash pinned or risk limits non-zero | `mqk-db/src/lib.rs:272-308`; `arming_model.md:16-18` | **P1** | `base.yaml:65-67`: arming config |
+| Isolation | Broker key env vars not validated as actually set pre-arm | `load_broker_keys_from_env()` exists but is never called in arming | `isolation/src/lib.rs:110-116` (loads from env); no caller in arm path | **P1** | `base.yaml:18-19`: keys_env configured |
+| Audit | No hash chain verification utility | Can write hash chain but cannot verify it (no read-back + check) | `mqk-audit/src/lib.rs` (write-only; no verify function) | **P1** | NOT FOUND |
+| Risk | `daily_loss_limit_micros: 0` and `max_drawdown_limit_micros: 0` disable limits entirely | Default test config has limits disabled; no guard preventing LIVE with zero limits | `mqk-risk/src/engine.rs:89,108` (skip when 0); `backtest/types.rs:60-61` (defaults to 0) | **P1** | `base.yaml:57-58`: `daily_loss_limit: 0.02`, `max_drawdown: 0.18` |
+| Reconcile | Missing local orders not flagged (by design comment) | Broker might have cancelled our order; we don't know | `reconcile/engine.rs:95-97` (intentional skip with comment) | P2 | NOT FOUND; future policy flag |
+| Clippy | sqlx-postgres v0.7.4 future-incompatibility warning | Will break on future Rust compiler update | clippy output: "code that will be rejected by a future version of Rust" | P2 | Upgrade sqlx to 0.8+ when stable |
+
+## P0/P1 Findings Summary (15 bullets max)
+
+1. **P0: No CLI arm/stop/halt commands** â€” lifecycle DB functions unreachable by operator (`mqk-cli/src/main.rs:53-68`)
+2. **P0: Migration checksum fragility** â€” no operational docs, no fresh-DB-per-test, no prod safety gate (`mqk-db/src/lib.rs:25-31`)
+3. **P0: Deadman switch unimplemented** â€” `runtime/ARMED.flag` configured but no code creates/watches it; stale heartbeats undetected
+4. **P0: oms_outbox/oms_inbox completely unused** â€” crash recovery impossible; double-submission risk on restart
+5. **P0: arm_run() skips reconcile check** â€” LIVE can be armed dirty, violating arming model spec
+6. **P1: Stale data disarm doesn't stop execution** â€” IntegrityState.disarmed is an island; no downstream effect
+7. **P1: No config validation or secret detection** â€” missing fields silently pass; secrets can leak to DB/disk
+8. **P1: No pre-arm risk limit validation** â€” zero-limit config allows LIVE with no drawdown protection
+9. **P1: No audit hash chain verifier** â€” write-only; tamper detection impossible
+10. **P1: Broker key env vars never validated pre-arm** â€” `load_broker_keys_from_env()` exists but uncalled in arming

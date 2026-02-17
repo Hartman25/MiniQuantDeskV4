@@ -6,3 +6,8 @@ secrets*
 core-rs/target/
 .cargo/
 runtime/
+# Claude worktrees
+.claude/
+.claude-worktrees/
+**/.claude/
+**/target/
