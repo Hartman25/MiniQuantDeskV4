@@ -24,7 +24,10 @@ async fn cli_arm_requires_confirmation_for_live() -> anyhow::Result<()> {
     mqk_db::migrate(&pool).await?;
 
     // Create a LIVE run with config_json containing arming requirements.
+    // IMPORTANT: use a unique engine_id to avoid colliding with other active LIVE runs in the same DB.
     let run_id = Uuid::new_v4();
+    let engine_id = format!("TEST_ENGINE_{}", Uuid::new_v4());
+
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -46,7 +49,7 @@ async fn cli_arm_requires_confirmation_for_live() -> anyhow::Result<()> {
         &pool,
         &mqk_db::NewRun {
             run_id,
-            engine_id: "MAIN".to_string(),
+            engine_id: engine_id.clone(),
             mode: "LIVE".to_string(),
             started_at_utc: Utc::now(),
             git_hash: "TEST".to_string(),
@@ -86,6 +89,6 @@ async fn cli_arm_requires_confirmation_for_live() -> anyhow::Result<()> {
     cmd2.assert().success();
 
     // Cleanup: do not leave an active LIVE run in the DB.
-    mqk_db::stop_run(&pool, run_id).await?;
+    mqk_db::halt_run(&pool, run_id).await?;
     Ok(())
 }
