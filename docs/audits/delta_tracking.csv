@@ -1,0 +1,11 @@
+Category,Score_0_10,Grade,Status,Compared_to_LEAN,Compared_to_Freqtrade,Compared_to_Hummingbot,Compared_to_V3
+Determinism,7,B,Fragile,Comparable,Comparable,Comparable,Ahead
+Data_Integrity,6,B-,Fragile,Comparable,Comparable,Comparable,Ahead
+Execution_Safety,5,C,Critical,Behind,Behind,Behind,Comparable
+Risk_Controls,6,B-,Fragile,Comparable,Comparable,Comparable,Ahead
+Lifecycle_Enforcement,6,B-,Fragile,Comparable,Comparable,Comparable,Ahead
+Broker_Reconciliation,5,C,Critical,Behind,Behind,Behind,Comparable
+Auditability,6,B-,Fragile,Comparable,Comparable,Comparable,Ahead
+Config_Discipline,4,D+,Critical,Behind,Behind,Behind,Comparable
+Testing_Realism,5,C,Fragile,Behind,Behind,Behind,Comparable
+Operational_Readiness,3,F,Critical,Behind,Behind,Behind,Behind
