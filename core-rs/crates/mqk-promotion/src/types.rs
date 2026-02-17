@@ -1,99 +1,108 @@
+use std::io;
+use std::path::{Path, PathBuf};
+
+use mqk_backtest::BacktestReport;
 use serde::{Deserialize, Serialize};
 
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+/// Thresholds for promotion gating.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PromotionThresholds {
-    /// Minimum annualized return (e.g., 0.10 = 10%)
-    pub cagr_min: f64,
-    /// Maximum drawdown fraction (e.g., 0.20 = 20%)
-    pub mdd_max: f64,
-    /// Minimum Sharpe ratio (unitless)
-    pub sharpe_min: f64,
-    /// Minimum profit factor (>= 1.0)
-    pub profit_factor_min: f64,
-    /// Minimum fraction of profitable "months" (0..=1)
-    pub profitable_months_min: f64,
+pub struct PromotionConfig {
+    /// Minimum annualized Sharpe ratio.
+    pub min_sharpe: f64,
+    /// Maximum drawdown as fraction (e.g. 0.20 = 20%).
+    pub max_mdd: f64,
+    /// Minimum CAGR as fraction (e.g. 0.10 = 10%).
+    pub min_cagr: f64,
+    /// Minimum profit factor (sum profits / abs sum losses).
+    pub min_profit_factor: f64,
+    /// Minimum fraction of profitable months (0..1).
+    pub min_profitable_months_pct: f64,
 }
 
-impl Default for PromotionThresholds {
-    fn default() -> Self {
-        Self {
-            cagr_min: 0.0,
-            mdd_max: 1.0,
-            sharpe_min: 0.0,
-            profit_factor_min: 1.0,
-            profitable_months_min: 0.0,
-        }
-    }
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+
+/// Input bundle for promotion evaluation.
+pub struct PromotionInput {
+    /// Initial equity in micros (required for CAGR denominator).
+    pub initial_equity_micros: i64,
+    /// The backtest report to evaluate.
+    pub report: BacktestReport,
 }
 
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+/// Computed promotion metrics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromotionMetrics {
-    pub cagr: f64,
-    pub max_drawdown: f64,
     pub sharpe: f64,
+    pub mdd: f64,
+    pub cagr: f64,
     pub profit_factor: f64,
-    pub profitable_months_frac: f64,
+    pub profitable_months_pct: f64,
+    // Intermediate reporting values
+    pub start_equity_micros: i64,
+    pub end_equity_micros: i64,
+    pub duration_days: f64,
+    pub num_months: usize,
+    pub num_trades: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Decision
+// ---------------------------------------------------------------------------
+
+/// Gate result for a single candidate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum PromotionDecision {
-    Pass,
-    Fail,
+pub struct PromotionDecision {
+    pub passed: bool,
+    /// Stable-ordered list of human-readable fail reasons (empty when passed).
+    pub fail_reasons: Vec<String>,
+    pub metrics: PromotionMetrics,
 }
 
+// ---------------------------------------------------------------------------
+// Report
+// ---------------------------------------------------------------------------
+
+/// Full promotion report artifact (serializable to JSON).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromotionReport {
+    pub config: PromotionConfig,
+    pub metrics: PromotionMetrics,
     pub decision: PromotionDecision,
-    pub thresholds: PromotionThresholds,
-    pub metrics: PromotionMetrics,
-    /// Human-readable fail reasons (empty when Pass).
-    pub reasons: Vec<String>,
+    /// Winner candidate id (set by select_best, None for single evaluation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub winner_id: Option<String>,
 }
 
-impl PromotionReport {
-    pub fn to_json_pretty(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
-    }
+/// Write the report as pretty-printed JSON to `out_dir/promotion_report.json`.
+/// Returns the path written.
+pub fn write_promotion_report_json(
+    out_dir: &Path,
+    report: &PromotionReport,
+) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(out_dir)?;
+    let path = out_dir.join("promotion_report.json");
+    let json = serde_json::to_string_pretty(report)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    std::fs::write(&path, json)?;
+    Ok(path)
 }
 
-/// A candidate for tie-break comparison.
-#[derive(Debug, Clone)]
-pub struct PromotionCandidate {
-    pub name: String,
-    pub metrics: PromotionMetrics,
-}
+// ---------------------------------------------------------------------------
+// Tie-break types
+// ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TieBreakOrder {
-    /// Lower max drawdown wins.
-    LowerMdd,
-    /// Higher CAGR wins.
-    HigherCagr,
-    /// Higher Sharpe wins.
-    HigherSharpe,
-    /// Higher profit factor wins.
-    HigherProfitFactor,
-    /// Higher profitable-month fraction wins.
-    HigherProfitableMonths,
-}
-
-#[derive(Debug, Clone)]
-pub struct TieBreakRules {
-    pub within_points: f64,
-    pub order: Vec<TieBreakOrder>,
-}
-
-impl Default for TieBreakRules {
-    fn default() -> Self {
-        Self {
-            within_points: 0.0,
-            order: vec![
-                TieBreakOrder::LowerMdd,
-                TieBreakOrder::HigherCagr,
-                TieBreakOrder::HigherSharpe,
-                TieBreakOrder::HigherProfitFactor,
-                TieBreakOrder::HigherProfitableMonths,
-            ],
-        }
-    }
+/// A candidate for comparative evaluation.
+pub struct Candidate {
+    pub id: String,
+    pub input: PromotionInput,
 }

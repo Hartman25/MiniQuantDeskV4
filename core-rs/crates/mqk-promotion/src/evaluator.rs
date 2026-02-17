@@ -1,186 +1,235 @@
-use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
-use mqk_backtest::BacktestReport;
+use mqk_portfolio::{Fill, Side};
 
 use crate::types::{
-    PromotionCandidate, PromotionDecision, PromotionMetrics, PromotionReport, PromotionThresholds,
-    TieBreakOrder, TieBreakRules,
+    Candidate, PromotionConfig, PromotionDecision, PromotionInput, PromotionMetrics,
+    PromotionReport,
 };
 
-/// Evaluate a backtest report against promotion thresholds.
-///
-/// Notes:
-/// - Gate = Pass/Fail + reasons.
-/// - Metrics derived from equity_curve only.
-/// - "Months" are approximated as fixed 30-day buckets (ts seconds / 2_592_000).
-pub fn evaluate_promotion(report: &BacktestReport, thr: PromotionThresholds) -> PromotionReport {
-    let metrics = compute_metrics(report);
+// ============================================================================
+// Public API
+// ============================================================================
 
-    let mut reasons = Vec::new();
+/// Evaluate a single candidate against promotion thresholds.
+pub fn evaluate_promotion(
+    config: &PromotionConfig,
+    input: &PromotionInput,
+) -> PromotionDecision {
+    let metrics = compute_metrics(input);
+    let mut fail_reasons = Vec::new();
 
-    if metrics.cagr < thr.cagr_min {
-        reasons.push(format!(
-            "CAGR below threshold: {:.6} < {:.6}",
-            metrics.cagr, thr.cagr_min
+    // Gate checks — stable ordering matches field order in PromotionConfig.
+    if metrics.sharpe < config.min_sharpe {
+        fail_reasons.push(format!(
+            "Sharpe {:.6} < min {:.6}",
+            metrics.sharpe, config.min_sharpe
         ));
     }
-    if metrics.max_drawdown > thr.mdd_max {
-        reasons.push(format!(
-            "Max drawdown above threshold: {:.6} > {:.6}",
-            metrics.max_drawdown, thr.mdd_max
+    if metrics.mdd > config.max_mdd {
+        fail_reasons.push(format!(
+            "MDD {:.6} > max {:.6}",
+            metrics.mdd, config.max_mdd
         ));
     }
-    if metrics.sharpe < thr.sharpe_min {
-        reasons.push(format!(
-            "Sharpe below threshold: {:.6} < {:.6}",
-            metrics.sharpe, thr.sharpe_min
+    if metrics.cagr < config.min_cagr {
+        fail_reasons.push(format!(
+            "CAGR {:.6} < min {:.6}",
+            metrics.cagr, config.min_cagr
         ));
     }
-    if metrics.profit_factor < thr.profit_factor_min {
-        reasons.push(format!(
-            "Profit factor below threshold: {:.6} < {:.6}",
-            metrics.profit_factor, thr.profit_factor_min
+    if metrics.profit_factor < config.min_profit_factor {
+        fail_reasons.push(format!(
+            "Profit factor {:.6} < min {:.6}",
+            metrics.profit_factor, config.min_profit_factor
         ));
     }
-    if metrics.profitable_months_frac < thr.profitable_months_min {
-        reasons.push(format!(
-            "Profitable months below threshold: {:.6} < {:.6}",
-            metrics.profitable_months_frac, thr.profitable_months_min
+    if metrics.profitable_months_pct < config.min_profitable_months_pct {
+        fail_reasons.push(format!(
+            "Profitable months {:.6} < min {:.6}",
+            metrics.profitable_months_pct, config.min_profitable_months_pct
         ));
     }
 
-    let decision = if reasons.is_empty() {
-        PromotionDecision::Pass
-    } else {
-        PromotionDecision::Fail
-    };
-
-    PromotionReport {
-        decision,
-        thresholds: thr,
+    let passed = fail_reasons.is_empty();
+    PromotionDecision {
+        passed,
+        fail_reasons,
         metrics,
-        reasons,
     }
 }
 
-/// Derive promotion metrics from the equity curve.
-pub fn compute_metrics(report: &BacktestReport) -> PromotionMetrics {
-    let eq = &report.equity_curve;
-    if eq.len() < 2 {
-        return PromotionMetrics {
-            cagr: 0.0,
-            max_drawdown: 0.0,
-            sharpe: 0.0,
-            profit_factor: 1.0,
-            profitable_months_frac: 0.0,
-        };
+/// Compare two passed candidates. Returns the winner id by tie-break rules:
+/// 1. Higher Sharpe
+/// 2. Lower MDD
+/// 3. Higher CAGR
+/// 4. Higher Profit Factor
+/// 5. Higher profitable_months_pct
+/// 6. Lexicographic candidate id
+pub fn pick_winner<'a>(
+    a_id: &'a str,
+    a_metrics: &PromotionMetrics,
+    b_id: &'a str,
+    b_metrics: &PromotionMetrics,
+) -> &'a str {
+    // 1. Higher Sharpe
+    match partial_cmp_f64(a_metrics.sharpe, b_metrics.sharpe) {
+        std::cmp::Ordering::Greater => return a_id,
+        std::cmp::Ordering::Less => return b_id,
+        std::cmp::Ordering::Equal => {}
+    }
+    // 2. Lower MDD
+    match partial_cmp_f64(a_metrics.mdd, b_metrics.mdd) {
+        std::cmp::Ordering::Less => return a_id,
+        std::cmp::Ordering::Greater => return b_id,
+        std::cmp::Ordering::Equal => {}
+    }
+    // 3. Higher CAGR
+    match partial_cmp_f64(a_metrics.cagr, b_metrics.cagr) {
+        std::cmp::Ordering::Greater => return a_id,
+        std::cmp::Ordering::Less => return b_id,
+        std::cmp::Ordering::Equal => {}
+    }
+    // 4. Higher Profit Factor
+    match partial_cmp_f64(a_metrics.profit_factor, b_metrics.profit_factor) {
+        std::cmp::Ordering::Greater => return a_id,
+        std::cmp::Ordering::Less => return b_id,
+        std::cmp::Ordering::Equal => {}
+    }
+    // 5. Higher profitable_months_pct
+    match partial_cmp_f64(
+        a_metrics.profitable_months_pct,
+        b_metrics.profitable_months_pct,
+    ) {
+        std::cmp::Ordering::Greater => return a_id,
+        std::cmp::Ordering::Less => return b_id,
+        std::cmp::Ordering::Equal => {}
+    }
+    // 6. Lexicographic
+    if a_id <= b_id {
+        a_id
+    } else {
+        b_id
+    }
+}
+
+/// Select the best candidate from a list. Only passed candidates compete.
+/// Returns (winner_id, winner_decision) or None if no candidate passes.
+pub fn select_best(
+    config: &PromotionConfig,
+    candidates: &[Candidate],
+) -> Option<(String, PromotionDecision)> {
+    let mut best: Option<(String, PromotionDecision)> = None;
+
+    for c in candidates {
+        let decision = evaluate_promotion(config, &c.input);
+        if !decision.passed {
+            continue;
+        }
+        best = Some(match best {
+            None => (c.id.clone(), decision),
+            Some((prev_id, prev_decision)) => {
+                let winner_id =
+                    pick_winner(&prev_id, &prev_decision.metrics, &c.id, &decision.metrics);
+                if winner_id == c.id {
+                    (c.id.clone(), decision)
+                } else {
+                    (prev_id, prev_decision)
+                }
+            }
+        });
     }
 
-    let start = eq.first().unwrap();
-    let end = eq.last().unwrap();
+    best
+}
 
-    let start_eq = start.1.max(1) as f64;
-    let end_eq = end.1.max(1) as f64;
+/// Build a full PromotionReport from a decision (convenience for single eval).
+pub fn build_report(
+    config: &PromotionConfig,
+    decision: &PromotionDecision,
+    winner_id: Option<String>,
+) -> PromotionReport {
+    PromotionReport {
+        config: *config,
+        metrics: decision.metrics.clone(),
+        decision: decision.clone(),
+        winner_id,
+    }
+}
 
-    let duration_secs = (end.0 - start.0).max(1) as f64;
-    let years = duration_secs / (365.25 * 24.0 * 3600.0);
-    let cagr = if years <= 0.0 {
-        0.0
+// ============================================================================
+// Metric computation
+// ============================================================================
+
+/// Compute all promotion metrics from a PromotionInput.
+pub fn compute_metrics(input: &PromotionInput) -> PromotionMetrics {
+    let eq = &input.report.equity_curve;
+    let fills = &input.report.fills;
+
+    let (start_eq, end_eq) = if eq.is_empty() {
+        (input.initial_equity_micros, input.initial_equity_micros)
     } else {
-        (end_eq / start_eq).powf(1.0 / years) - 1.0
+        (eq.first().unwrap().1, eq.last().unwrap().1)
     };
 
-    let max_drawdown = compute_max_drawdown(eq);
+    let duration_secs = if eq.len() >= 2 {
+        (eq.last().unwrap().0 - eq.first().unwrap().0) as f64
+    } else {
+        0.0
+    };
+    let duration_days = duration_secs / 86_400.0;
+    let years = duration_secs / (365.25 * 86_400.0);
 
-    let returns = compute_simple_returns(eq);
-    let (mean, std) = mean_std(&returns);
-    let sharpe = if std <= 0.0 {
+    // CAGR
+    let cagr = if years <= 0.0 || start_eq <= 0 {
         0.0
     } else {
-        (mean / std) * (returns.len() as f64).sqrt()
+        let ratio = end_eq as f64 / start_eq as f64;
+        if ratio <= 0.0 {
+            0.0
+        } else {
+            ratio.powf(1.0 / years) - 1.0
+        }
     };
 
-    let (gross_pos, gross_neg) = gross_pos_neg_deltas(eq);
-    let profit_factor = if gross_neg <= 0.0 { 99.0 } else { gross_pos / gross_neg };
+    // MDD
+    let mdd = compute_max_drawdown(eq);
 
-    let profitable_months_frac = compute_profitable_months_frac(eq);
+    // Sharpe (daily-bucketed)
+    let sharpe = compute_sharpe_daily(eq);
+
+    // Profit factor (FIFO lot matcher)
+    let (pf, num_trades) = compute_profit_factor(fills);
+
+    // Profitable months % (UTC month bucketing)
+    let (profitable_months_pct, num_months) = compute_profitable_months_pct(eq);
 
     PromotionMetrics {
-        cagr,
-        max_drawdown,
         sharpe,
-        profit_factor,
-        profitable_months_frac,
+        mdd,
+        cagr,
+        profit_factor: pf,
+        profitable_months_pct,
+        start_equity_micros: start_eq,
+        end_equity_micros: end_eq,
+        duration_days,
+        num_months,
+        num_trades,
     }
 }
 
-/// Compare candidates using a composite score, then tie-break rules when within tolerance.
-pub fn compare_candidates(
-    a: &PromotionCandidate,
-    b: &PromotionCandidate,
-    rules: &TieBreakRules,
-) -> Ordering {
-    let sa = score(&a.metrics);
-    let sb = score(&b.metrics);
-
-    let diff = (sa - sb).abs();
-    if diff > rules.within_points {
-        // Higher score wins.
-        return sb.partial_cmp(&sa).unwrap_or(Ordering::Equal);
-    }
-
-    for rule in &rules.order {
-        let ord = match rule {
-            TieBreakOrder::LowerMdd => a
-                .metrics
-                .max_drawdown
-                .partial_cmp(&b.metrics.max_drawdown)
-                .unwrap_or(Ordering::Equal),
-            TieBreakOrder::HigherCagr => b
-                .metrics
-                .cagr
-                .partial_cmp(&a.metrics.cagr)
-                .unwrap_or(Ordering::Equal),
-            TieBreakOrder::HigherSharpe => b
-                .metrics
-                .sharpe
-                .partial_cmp(&a.metrics.sharpe)
-                .unwrap_or(Ordering::Equal),
-            TieBreakOrder::HigherProfitFactor => b
-                .metrics
-                .profit_factor
-                .partial_cmp(&a.metrics.profit_factor)
-                .unwrap_or(Ordering::Equal),
-            TieBreakOrder::HigherProfitableMonths => b
-                .metrics
-                .profitable_months_frac
-                .partial_cmp(&a.metrics.profitable_months_frac)
-                .unwrap_or(Ordering::Equal),
-        };
-
-        if ord != Ordering::Equal {
-            return ord;
-        }
-    }
-
-    Ordering::Equal
-}
-
-fn score(m: &PromotionMetrics) -> f64 {
-    // Gate is thresholds; score is only for ranking/ties.
-    100.0 * m.cagr
-        + 10.0 * m.sharpe
-        + 5.0 * (m.profit_factor.min(10.0))
-        + 20.0 * m.profitable_months_frac
-        - 80.0 * m.max_drawdown
-}
+// ============================================================================
+// MDD
+// ============================================================================
 
 fn compute_max_drawdown(eq: &[(i64, i64)]) -> f64 {
+    if eq.len() < 2 {
+        return 0.0;
+    }
     let mut peak = eq[0].1 as f64;
-    let mut max_dd = 0.0;
-
-    for p in eq {
-        let e = p.1 as f64;
+    let mut max_dd = 0.0_f64;
+    for &(_, e) in eq {
+        let e = e as f64;
         if e > peak {
             peak = e;
         }
@@ -191,95 +240,222 @@ fn compute_max_drawdown(eq: &[(i64, i64)]) -> f64 {
             }
         }
     }
-
     max_dd
 }
 
-fn compute_simple_returns(eq: &[(i64, i64)]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(eq.len().saturating_sub(1));
+// ============================================================================
+// Sharpe — daily bucketed
+// ============================================================================
 
-    for w in eq.windows(2) {
-        let a = w[0].1.max(1) as f64;
-        let b = w[1].1.max(1) as f64;
-        out.push((b / a) - 1.0);
-    }
-
-    out
-}
-
-fn mean_std(xs: &[f64]) -> (f64, f64) {
-    if xs.is_empty() {
-        return (0.0, 0.0);
-    }
-
-    let mean = xs.iter().sum::<f64>() / (xs.len() as f64);
-    let var = xs
-        .iter()
-        .map(|x| {
-            let d = x - mean;
-            d * d
-        })
-        .sum::<f64>()
-        / (xs.len() as f64);
-
-    (mean, var.sqrt())
-}
-
-fn gross_pos_neg_deltas(eq: &[(i64, i64)]) -> (f64, f64) {
-    let mut pos = 0.0;
-    let mut neg = 0.0;
-
-    for w in eq.windows(2) {
-        let d = (w[1].1 - w[0].1) as f64;
-        if d >= 0.0 {
-            pos += d;
-        } else {
-            neg += -d;
-        }
-    }
-
-    (pos, neg)
-}
-
-fn compute_profitable_months_frac(eq: &[(i64, i64)]) -> f64 {
-    const MONTH_SECS: i64 = 30 * 24 * 60 * 60;
-
+/// Bucket equity curve to UTC days (last equity per day), compute daily returns,
+/// annualize with sqrt(252). If std == 0, Sharpe = 0.
+fn compute_sharpe_daily(eq: &[(i64, i64)]) -> f64 {
     if eq.len() < 2 {
         return 0.0;
     }
 
-    let mut buckets: Vec<(i64, i64)> = Vec::new(); // (month_id, end_equity)
-
-    for p in eq {
-        let month_id = p.0 / MONTH_SECS;
-        if let Some(last) = buckets.last_mut() {
-            if last.0 == month_id {
-                last.1 = p.1;
-            } else {
-                buckets.push((month_id, p.1));
-            }
-        } else {
-            buckets.push((month_id, p.1));
-        }
+    // Bucket by UTC day: day_id = ts / 86400
+    let mut day_equity: BTreeMap<i64, i64> = BTreeMap::new();
+    for &(ts, equity) in eq {
+        let day = ts / 86_400;
+        day_equity.insert(day, equity);
     }
 
-    if buckets.len() < 2 {
+    let day_values: Vec<i64> = day_equity.values().copied().collect();
+    if day_values.len() < 2 {
         return 0.0;
     }
 
-    let mut prof = 0u32;
-    let mut total = 0u32;
-
-    for w in buckets.windows(2) {
-        total += 1;
-        if w[1].1 > w[0].1 {
-            prof += 1;
+    // Daily returns
+    let mut returns = Vec::with_capacity(day_values.len() - 1);
+    for w in day_values.windows(2) {
+        let prev = w[0] as f64;
+        let curr = w[1] as f64;
+        if prev > 0.0 {
+            returns.push(curr / prev - 1.0);
         }
     }
 
-    if total == 0 {
+    if returns.is_empty() {
+        return 0.0;
+    }
+
+    let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+    let variance = returns.iter().map(|r| (r - mean) * (r - mean)).sum::<f64>()
+        / returns.len() as f64;
+    let std = variance.sqrt();
+
+    if std <= 0.0 {
         0.0
     } else {
-        (prof as f64) / (total as f64)
+        (mean / std) * 252.0_f64.sqrt()
     }
+}
+
+// ============================================================================
+// Profit factor — FIFO lot matcher
+// ============================================================================
+
+/// Minimal FIFO lot matcher operating on fills. Returns (profit_factor, num_trades).
+/// A "trade" = a round-trip: open + close.
+/// PF = sum(profits) / abs(sum(losses)). No losses & profits > 0 => +INF. No trades => 0.
+fn compute_profit_factor(fills: &[Fill]) -> (f64, usize) {
+    // Per-symbol FIFO lots: (qty_signed, entry_price_micros)
+    // Positive qty_signed = long lots, negative = short lots.
+    let mut positions: BTreeMap<String, Vec<(i64, i64)>> = BTreeMap::new();
+    let mut total_profit: i128 = 0;
+    let mut total_loss: i128 = 0;
+    let mut num_trades: usize = 0;
+
+    for fill in fills {
+        let lots = positions.entry(fill.symbol.clone()).or_default();
+        let fill_qty = fill.qty; // always positive
+        let fill_price = fill.price_micros;
+        let fee = fill.fee_micros as i128;
+
+        let fill_signed_qty: i64 = match fill.side {
+            Side::Buy => fill_qty,
+            Side::Sell => -fill_qty,
+        };
+
+        // Check if this fill closes existing lots (opposite direction)
+        let existing_direction = lots.first().map(|(q, _)| q.signum()).unwrap_or(0);
+
+        if existing_direction != 0 && existing_direction != fill_signed_qty.signum() {
+            // This fill closes (partially or fully) existing lots
+            let mut remaining = fill_qty; // unsigned qty to close
+
+            while remaining > 0 && !lots.is_empty() {
+                let lot = &mut lots[0];
+                let lot_abs = lot.0.unsigned_abs() as i64;
+                let close_qty = remaining.min(lot_abs);
+
+                // PnL for this partial close
+                let pnl: i128 = if lot.0 > 0 {
+                    // Was long, now selling
+                    (fill_price as i128 - lot.1 as i128) * close_qty as i128
+                } else {
+                    // Was short, now buying
+                    (lot.1 as i128 - fill_price as i128) * close_qty as i128
+                };
+
+                if pnl > 0 {
+                    total_profit += pnl;
+                } else if pnl < 0 {
+                    total_loss += -pnl; // store as positive
+                }
+                num_trades += 1;
+
+                remaining -= close_qty;
+                if close_qty == lot_abs {
+                    lots.remove(0);
+                } else {
+                    // Reduce lot size, keep direction
+                    let sign = lot.0.signum();
+                    lot.0 = sign * (lot_abs - close_qty);
+                }
+            }
+
+            // Subtract fee from profit side (or add to loss side)
+            // Simple: treat fee as loss
+            total_loss += fee;
+
+            // If remaining > 0, this fill also opens in the new direction
+            if remaining > 0 {
+                lots.push((fill_signed_qty.signum() * remaining, fill_price));
+            }
+        } else {
+            // Same direction or flat — opens new lot
+            lots.push((fill_signed_qty, fill_price));
+            // Fee on open reduces eventual profit (absorbed into cost basis
+            // in a proper system, but here we just charge it as loss)
+            total_loss += fee;
+        }
+    }
+
+    if num_trades == 0 {
+        return (0.0, 0);
+    }
+
+    let pf = if total_loss == 0 {
+        if total_profit > 0 {
+            f64::INFINITY
+        } else {
+            0.0
+        }
+    } else {
+        total_profit as f64 / total_loss as f64
+    };
+
+    (pf, num_trades)
+}
+
+// ============================================================================
+// Profitable months % — UTC month bucketing
+// ============================================================================
+
+/// Bucket equity curve by UTC month (year*12 + month). Last equity per month.
+/// Monthly return > 0 counts as profitable. If < 2 months, result is 0.
+fn compute_profitable_months_pct(eq: &[(i64, i64)]) -> (f64, usize) {
+    if eq.len() < 2 {
+        return (0.0, 0);
+    }
+
+    // Bucket by UTC month
+    let mut month_equity: BTreeMap<i32, i64> = BTreeMap::new();
+    for &(ts, equity) in eq {
+        let month_id = utc_month_id(ts);
+        month_equity.insert(month_id, equity);
+    }
+
+    let month_values: Vec<i64> = month_equity.values().copied().collect();
+    let num_months = month_values.len();
+
+    if num_months < 2 {
+        return (0.0, num_months);
+    }
+
+    let mut profitable = 0u32;
+    let mut total = 0u32;
+
+    for w in month_values.windows(2) {
+        total += 1;
+        if w[1] > w[0] {
+            profitable += 1;
+        }
+    }
+
+    let pct = if total == 0 {
+        0.0
+    } else {
+        profitable as f64 / total as f64
+    };
+
+    (pct, num_months)
+}
+
+/// Convert epoch seconds to a UTC month identifier (year*12 + month).
+/// Minimal civil calendar conversion (no leap-second precision needed).
+fn utc_month_id(epoch_secs: i64) -> i32 {
+    // Days since epoch
+    let days = epoch_secs.div_euclid(86_400);
+    // Civil date from days since 1970-01-01 (algorithm from Howard Hinnant)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y * 12 + m) as i32
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn partial_cmp_f64(a: f64, b: f64) -> std::cmp::Ordering {
+    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
 }

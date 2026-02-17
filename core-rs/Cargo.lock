@@ -1015,6 +1015,16 @@ name = "mqk-portfolio"
 version = "0.1.0"
 
 [[package]]
+name = "mqk-promotion"
+version = "0.1.0"
+dependencies = [
+ "mqk-backtest",
+ "mqk-portfolio",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mqk-reconcile"
 version = "0.1.0"
 

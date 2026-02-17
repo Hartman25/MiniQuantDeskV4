@@ -1,8 +1,10 @@
 mod evaluator;
 mod types;
 
-pub use evaluator::{compare_candidates, compute_metrics, evaluate_promotion};
+pub use evaluator::{
+    build_report, compute_metrics, evaluate_promotion, pick_winner, select_best,
+};
 pub use types::{
-    PromotionCandidate, PromotionDecision, PromotionMetrics, PromotionReport, PromotionThresholds,
-    TieBreakOrder, TieBreakRules,
+    Candidate, PromotionConfig, PromotionDecision, PromotionInput, PromotionMetrics,
+    PromotionReport, write_promotion_report_json,
 };
