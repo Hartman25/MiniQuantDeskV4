@@ -46,7 +46,13 @@ enum Commands {
 #[derive(Subcommand)]
 enum DbCmd {
     Status,
-    Migrate,
+
+    /// Apply SQL migrations. Guardrail: refuses when any LIVE run is ARMED/RUNNING unless --yes is provided.
+    Migrate {
+        /// Acknowledge you are migrating a DB that may be used for LIVE trading.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -115,6 +121,26 @@ enum RunCmd {
         #[arg(long)]
         run_id: String,
     },
+
+    /// Check if deadman is expired for a RUNNING run
+    DeadmanCheck {
+        #[arg(long)]
+        run_id: String,
+
+        /// Heartbeat TTL in seconds
+        #[arg(long)]
+        ttl_seconds: i64,
+    },
+
+    /// Enforce deadman: halt the run if expired
+    DeadmanEnforce {
+        #[arg(long)]
+        run_id: String,
+
+        /// Heartbeat TTL in seconds
+        #[arg(long)]
+        ttl_seconds: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -164,7 +190,17 @@ async fn main() -> Result<()> {
                     let s = mqk_db::status(&pool).await?;
                     println!("db_ok={} has_runs_table={}", s.ok, s.has_runs_table);
                 }
-                DbCmd::Migrate => {
+                DbCmd::Migrate { yes } => {
+                    // Guardrail: refuse migrations if there is any LIVE run in ARMED/RUNNING
+                    // unless the operator explicitly acknowledges with --yes.
+                    let n = mqk_db::count_active_live_runs(&pool).await?;
+                    if n > 0 && !yes {
+                        anyhow::bail!(
+                            "REFUSING MIGRATE: detected {} active LIVE run(s) in ARMED/RUNNING. Re-run with: `mqk db migrate --yes`",
+                            n
+                        );
+                    }
+
                     mqk_db::migrate(&pool).await?;
                     println!("migrations_applied=true");
                 }
@@ -258,7 +294,6 @@ async fn main() -> Result<()> {
                 let pool = mqk_db::connect_from_env().await?;
                 let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
                 mqk_db::halt_run(&pool, run_uuid).await?;
-                // Reason is not persisted in Phase 1 schema. Print it so operators have a record.
                 println!(
                     "halted=true run_id={} status=HALTED reason={}",
                     run_uuid, reason
@@ -290,7 +325,29 @@ async fn main() -> Result<()> {
                 println!("config_hash={}", r.config_hash);
                 println!("host_fingerprint={}", r.host_fingerprint);
             }
+
+            RunCmd::DeadmanCheck { run_id, ttl_seconds } => {
+                let pool = mqk_db::connect_from_env().await?;
+                let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
+                let expired = mqk_db::deadman_expired(&pool, run_uuid, ttl_seconds).await?;
+                println!(
+                    "deadman_expired={} run_id={} ttl_seconds={}",
+                    expired, run_uuid, ttl_seconds
+                );
+            }
+
+            RunCmd::DeadmanEnforce { run_id, ttl_seconds } => {
+                let pool = mqk_db::connect_from_env().await?;
+                let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
+                let halted =
+                    mqk_db::enforce_deadman_or_halt(&pool, run_uuid, ttl_seconds).await?;
+                println!(
+                    "deadman_halted={} run_id={} ttl_seconds={}",
+                    halted, run_uuid, ttl_seconds
+                );
+            }
         },
+
 
         Commands::Audit { cmd } => match cmd {
             AuditCmd::Emit {

@@ -2,8 +2,8 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use uuid::Uuid;
 use sqlx::Row;
+use uuid::Uuid;
 
 pub const ENV_DB_URL: &str = "MQK_DATABASE_URL";
 
@@ -60,6 +60,35 @@ pub struct DbStatus {
     pub has_runs_table: bool,
 }
 
+/// Count LIVE runs that are operationally "active": ARMED or RUNNING.
+/// This is used by CLI guardrails to prevent accidental migration of a live/armed DB.
+pub async fn count_active_live_runs(pool: &PgPool) -> Result<i64> {
+    // If schema doesn't exist yet, treat as 0 (safe) rather than failing.
+    let st = status(pool).await?;
+    if !st.has_runs_table {
+        return Ok(0);
+    }
+
+    let (n,): (i64,) = sqlx::query_as::<_, (i64,)>(
+        r#"
+        select count(*)::bigint
+        from runs
+        where mode = 'LIVE'
+          and status in ('ARMED','RUNNING')
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .context("count_active_live_runs failed")?;
+
+    Ok(n)
+}
+
+/// Convenience boolean.
+pub async fn has_active_live_runs(pool: &PgPool) -> Result<bool> {
+    Ok(count_active_live_runs(pool).await? > 0)
+}
+
 /// Insert a new run row. (Status defaults to CREATED in schema/migration)
 pub async fn insert_run(pool: &PgPool, run: &NewRun) -> Result<()> {
     sqlx::query(
@@ -103,7 +132,8 @@ pub async fn insert_audit_event(pool: &PgPool, ev: &NewAuditEvent) -> Result<()>
     sqlx::query(
         r#"
         insert into audit_events (
-          event_id, run_id, ts_utc, topic, event_type, payload, hash_prev, hash_self
+          event_id, run_id, ts_utc, topic, event_type, payload, hash_prev,
+          hash_self
         ) values (
           $1, $2, $3, $4, $5, $6, $7, $8
         )
@@ -120,7 +150,6 @@ pub async fn insert_audit_event(pool: &PgPool, ev: &NewAuditEvent) -> Result<()>
     .execute(pool)
     .await
     .context("insert_audit_event failed")?;
-
     Ok(())
 }
 
@@ -136,11 +165,7 @@ pub struct NewAuditEvent {
     pub hash_self: Option<String>,
 }
 
-// ----------------------
-// PATCH 14: Lifecycle API
-// ----------------------
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum RunStatus {
     Created,
     Armed,
@@ -235,7 +260,7 @@ pub async fn fetch_run(pool: &PgPool, run_id: Uuid) -> Result<RunRow> {
     })
 }
 
-/// Enforce run binding to {engine_id, mode, config_hash}.
+/// Verify that a run is bound to (engine_id, mode, config_hash).
 pub async fn assert_run_binding(
     pool: &PgPool,
     run_id: Uuid,
@@ -245,131 +270,118 @@ pub async fn assert_run_binding(
 ) -> Result<()> {
     let r = fetch_run(pool, run_id).await?;
     if r.engine_id != engine_id {
-        return Err(anyhow!(
-            "run binding mismatch: engine_id expected={} actual={}",
-            engine_id,
-            r.engine_id
-        ));
+        return Err(anyhow!("run binding mismatch: engine_id"));
     }
     if r.mode != mode {
-        return Err(anyhow!(
-            "run binding mismatch: mode expected={} actual={}",
-            mode,
-            r.mode
-        ));
+        return Err(anyhow!("run binding mismatch: mode"));
     }
     if r.config_hash != config_hash {
-        return Err(anyhow!(
-            "run binding mismatch: config_hash expected={} actual={}",
-            config_hash,
-            r.config_hash
-        ));
+        return Err(anyhow!("run binding mismatch: config_hash"));
     }
     Ok(())
 }
 
-/// Transition: CREATED/STOPPED -> ARMED
+/// Arm a run: CREATED/STOPPED -> ARMED.
 pub async fn arm_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
-    // IMPORTANT: preserve DB error details (e.g., unique index violations)
-    let res: std::result::Result<Option<(Uuid,)>, sqlx::Error> = sqlx::query_as(
+    let r = fetch_run(pool, run_id).await?;
+    match r.status {
+        RunStatus::Created | RunStatus::Stopped => {}
+        _ => return Err(anyhow!("arm_run invalid state: {}", r.status.as_str())),
+    }
+
+    let res = sqlx::query(
         r#"
         update runs
-        set
-          status = 'ARMED',
-          armed_at_utc = coalesce(armed_at_utc, now()),
-          stopped_at_utc = null
+        set status = 'ARMED',
+            armed_at_utc = now()
         where run_id = $1
-          and status in ('CREATED','STOPPED')
-        returning run_id
         "#,
     )
     .bind(run_id)
-    .fetch_optional(pool)
+    .execute(pool)
     .await;
 
-    let maybe = match res {
-        Ok(v) => v,
+    match res {
+        Ok(_) => Ok(()),
         Err(e) => {
-            // Include the sqlx error string so callers/tests can detect unique violations.
-            return Err(anyhow!("arm_run failed: {}", e));
-        }
-    };
-
-    match maybe {
-        Some(_) => Ok(()),
-        None => {
-            let r = fetch_run(pool, run_id).await?;
-            Err(anyhow!(
-                "arm_run refused: current_status={}",
-                r.status.as_str()
-            ))
+            // This repo expects a *specific* failure mode when the DB enforces
+            // “only one active LIVE run per engine” (uq_live_engine_active_run).
+            // Preserve that semantic so tests and operators get the true reason.
+            if is_unique_constraint_violation(&e, "uq_live_engine_active_run") {
+                return Err(anyhow!("unique active LIVE constraint"));
+            }
+            Err(anyhow::Error::new(e).context("arm_run update failed"))
         }
     }
 }
 
+/// Detect a Postgres unique constraint violation by name.
+fn is_unique_constraint_violation(err: &sqlx::Error, constraint: &str) -> bool {
+    match err {
+        sqlx::Error::Database(db_err) => {
+            db_err.constraint() == Some(constraint)
+                // Postgres unique_violation is 23505. Not always present, but helps.
+                || db_err.code().as_deref() == Some("23505") && db_err.constraint() == Some(constraint)
+        }
+        _ => false,
+    }
+}
 
-/// Transition: ARMED -> RUNNING
+/// Begin a run: ARMED -> RUNNING.
 pub async fn begin_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
-    let maybe: Option<(Uuid,)> = sqlx::query_as(
+    let r = fetch_run(pool, run_id).await?;
+    match r.status {
+        RunStatus::Armed => {}
+        _ => return Err(anyhow!("begin_run invalid state: {}", r.status.as_str())),
+    }
+
+    sqlx::query(
         r#"
         update runs
-        set
-          status = 'RUNNING',
-          running_at_utc = coalesce(running_at_utc, now())
+        set status = 'RUNNING',
+            running_at_utc = now()
         where run_id = $1
-          and status = 'ARMED'
-        returning run_id
         "#,
     )
     .bind(run_id)
-    .fetch_optional(pool)
+    .execute(pool)
     .await
     .context("begin_run update failed")?;
 
-    match maybe {
-        Some(_) => Ok(()),
-        None => {
-            let r = fetch_run(pool, run_id).await?;
-            Err(anyhow!("begin_run refused: current_status={}", r.status.as_str()))
-        }
-    }
+    Ok(())
 }
 
-/// Transition: ARMED/RUNNING -> STOPPED
+/// Stop a run: ARMED/RUNNING -> STOPPED.
 pub async fn stop_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
-    let maybe: Option<(Uuid,)> = sqlx::query_as(
+    let r = fetch_run(pool, run_id).await?;
+    match r.status {
+        RunStatus::Armed | RunStatus::Running => {}
+        _ => return Err(anyhow!("stop_run invalid state: {}", r.status.as_str())),
+    }
+
+    sqlx::query(
         r#"
         update runs
-        set
-          status = 'STOPPED',
-          stopped_at_utc = coalesce(stopped_at_utc, now())
+        set status = 'STOPPED',
+            stopped_at_utc = now()
         where run_id = $1
-          and status in ('ARMED','RUNNING')
-        returning run_id
         "#,
     )
     .bind(run_id)
-    .fetch_optional(pool)
+    .execute(pool)
     .await
     .context("stop_run update failed")?;
 
-    match maybe {
-        Some(_) => Ok(()),
-        None => {
-            let r = fetch_run(pool, run_id).await?;
-            Err(anyhow!("stop_run refused: current_status={}", r.status.as_str()))
-        }
-    }
+    Ok(())
 }
 
-/// Transition: ANY -> HALTED (terminal)
+/// Halt a run: ANY -> HALTED (sticky).
 pub async fn halt_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     sqlx::query(
         r#"
         update runs
-        set
-          status = 'HALTED',
-          halted_at_utc = coalesce(halted_at_utc, now())
+        set status = 'HALTED',
+            halted_at_utc = now()
         where run_id = $1
         "#,
     )
@@ -381,30 +393,68 @@ pub async fn halt_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     Ok(())
 }
 
-/// Heartbeat: RUNNING only.
+/// Heartbeat: RUNNING only updates last_heartbeat_utc.
 pub async fn heartbeat_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
-    let maybe: Option<(Uuid,)> = sqlx::query_as(
+    let r = fetch_run(pool, run_id).await?;
+    match r.status {
+        RunStatus::Running => {}
+        _ => return Err(anyhow!("heartbeat_run invalid state: {}", r.status.as_str())),
+    }
+
+    sqlx::query(
         r#"
         update runs
         set last_heartbeat_utc = now()
         where run_id = $1
-          and status = 'RUNNING'
-        returning run_id
         "#,
     )
     .bind(run_id)
-    .fetch_optional(pool)
+    .execute(pool)
     .await
     .context("heartbeat_run update failed")?;
 
-    match maybe {
-        Some(_) => Ok(()),
-        None => {
-            let r = fetch_run(pool, run_id).await?;
-            Err(anyhow!(
-                "heartbeat refused: current_status={}",
-                r.status.as_str()
-            ))
-        }
+    Ok(())
+}
+
+/// Deadman: compute whether a RUNNING run's heartbeat is stale.
+/// - If run is not RUNNING => false
+/// - If last_heartbeat_utc is NULL => true (RUNNING with no heartbeat is unsafe)
+pub async fn deadman_expired(pool: &PgPool, run_id: Uuid, ttl_seconds: i64) -> Result<bool> {
+    if ttl_seconds <= 0 {
+        return Err(anyhow!("deadman ttl_seconds must be > 0"));
     }
+
+    let r = fetch_run(pool, run_id).await?;
+    if r.status.as_str() != "RUNNING" {
+        return Ok(false);
+    }
+
+    let last = match r.last_heartbeat_utc {
+        Some(t) => t,
+        None => return Ok(true),
+    };
+
+    let age = Utc::now()
+        .signed_duration_since(last)
+        .num_seconds();
+
+    Ok(age > ttl_seconds)
+}
+
+/// Deadman enforcement: if RUNNING and expired, HALT the run (sticky) and return true.
+/// Otherwise return false.
+pub async fn enforce_deadman_or_halt(pool: &PgPool, run_id: Uuid, ttl_seconds: i64) -> Result<bool> {
+    let expired = deadman_expired(pool, run_id, ttl_seconds).await?;
+    if !expired {
+        return Ok(false);
+    }
+
+    // Only halt if still RUNNING at time of enforcement (avoid halting stopped/armed).
+    let r = fetch_run(pool, run_id).await?;
+    if r.status.as_str() == "RUNNING" {
+        halt_run(pool, run_id).await?;
+        return Ok(true);
+    }
+
+    Ok(false)
 }
