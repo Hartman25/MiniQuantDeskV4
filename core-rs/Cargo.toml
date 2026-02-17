@@ -2,6 +2,7 @@
 resolver = "2"
 
 members = [
+  "crates/mqk-isolation",
   "crates/mqk-schemas",
   "crates/mqk-config",
   "crates/mqk-db",

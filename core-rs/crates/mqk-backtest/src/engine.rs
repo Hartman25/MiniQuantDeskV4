@@ -2,16 +2,17 @@ use std::collections::BTreeMap;
 
 use mqk_execution::{targets_to_order_intents, PositionBook, Side as ExecSide};
 use mqk_portfolio::{
-    apply_fill, compute_equity_micros, Fill, MarkMap, PortfolioState, Side as PfSide,
+    apply_fill, compute_equity_micros, compute_exposure_micros, Fill, MarkMap, PortfolioState,
+    Side as PfSide,
 };
 use mqk_risk::{
-    evaluate as risk_evaluate, PdtContext, RequestKind, RiskAction, RiskConfig, RiskInput,
-    RiskState,
+    evaluate as risk_evaluate, PdtContext, RequestKind, RiskAction, RiskConfig, RiskInput, RiskState,
 };
 use mqk_strategy::{
-    BarStub, RecentBarsWindow, ShadowMode, Strategy, StrategyContext, StrategyHost,
-    StrategyHostError,
+    BarStub, RecentBarsWindow, ShadowMode, Strategy, StrategyContext, StrategyHost, StrategyHostError,
 };
+
+use mqk_isolation::enforce_allocation_cap_micros;
 
 use crate::types::{BacktestBar, BacktestConfig, BacktestReport};
 
@@ -111,7 +112,7 @@ impl BacktestEngine {
     /// 2. Update last prices / marks
     /// 3. Feed bar into strategy host
     /// 4. Convert strategy targets to order intents (mqk-execution)
-    /// 5. For each intent: risk check, apply slippage, create fill, apply to portfolio
+    /// 5. For each intent: allocation-cap check, risk check, apply slippage, create fill, apply to portfolio
     /// 6. Record equity curve point
     /// 7. Handle halt/flatten actions from risk engine
     pub fn run(&mut self, bars: &[BacktestBar]) -> Result<BacktestReport, BacktestError> {
@@ -157,13 +158,8 @@ impl BacktestEngine {
                 self.recent_bars = self.recent_bars.split_off(start);
             }
 
-            let recent =
-                RecentBarsWindow::new(self.config.bar_history_len, self.recent_bars.clone());
-            let ctx = StrategyContext::new(
-                self.config.timeframe_secs,
-                self.bar_count,
-                recent,
-            );
+            let recent = RecentBarsWindow::new(self.config.bar_history_len, self.recent_bars.clone());
+            let ctx = StrategyContext::new(self.config.timeframe_secs, self.bar_count, recent);
 
             let bar_result = self.host.on_bar(&ctx).map_err(BacktestError::StrategyHost)?;
 
@@ -181,10 +177,9 @@ impl BacktestEngine {
 
             // 5. Convert targets to order intents
             let position_book = self.build_position_book();
-            let decision =
-                targets_to_order_intents(&position_book, &bar_result.intents.output);
+            let decision = targets_to_order_intents(&position_book, &bar_result.intents.output);
 
-            // 6. Process each order intent through risk + fill
+            // 6. Process each order intent through allocation-cap + risk + fill
             for intent in &decision.intents {
                 if self.halted {
                     break;
@@ -196,7 +191,42 @@ impl BacktestEngine {
                     &self.last_prices,
                 );
 
+                // ---- PATCH 13: Allocation cap enforcement (engine isolation) ----
+                // Only block *risk-increasing* intents. Risk-reducing is always allowed.
                 let is_risk_reducing = self.is_intent_risk_reducing(intent);
+                if !is_risk_reducing {
+                    // Current gross exposure at marks (deterministic).
+                    let exposure = compute_exposure_micros(&self.portfolio.positions, &self.last_prices);
+
+                    // Worst-case fill price for *this intent* (ambiguity worst-case enforced).
+                    let fill_price = self.conservative_fill_price(bar, &intent.side);
+
+                    // Conservative bound: treat full order notional as additional gross exposure.
+                    // NOTE: this is intentionally pessimistic and deterministic.
+                    let proposed_notional_micros: i64 = {
+                        let n = (intent.qty as i128) * (fill_price as i128);
+                        if n > i64::MAX as i128 {
+                            i64::MAX
+                        } else if n < 0 {
+                            0
+                        } else {
+                            n as i64
+                        }
+                    };
+
+                    if enforce_allocation_cap_micros(
+                        equity,
+                        exposure.gross_exposure_micros,
+                        proposed_notional_micros,
+                        self.config.max_gross_exposure_mult_micros,
+                    )
+                    .is_err()
+                    {
+                        // Allocation cap breached => deterministic reject (no fill, no halt).
+                        continue;
+                    }
+                }
+                // ---------------------------------------------------------------
 
                 let risk_input = RiskInput {
                     day_id: bar.day_id,
@@ -219,13 +249,7 @@ impl BacktestEngine {
                             ExecSide::Buy => PfSide::Buy,
                             ExecSide::Sell => PfSide::Sell,
                         };
-                        let fill = Fill::new(
-                            intent.symbol.clone(),
-                            pf_side,
-                            intent.qty,
-                            fill_price,
-                            0, // no fees in backtest sim
-                        );
+                        let fill = Fill::new(intent.symbol.clone(), pf_side, intent.qty, fill_price, 0);
                         apply_fill(&mut self.portfolio, &fill);
                         self.fills.push(fill);
                     }
@@ -317,7 +341,7 @@ impl BacktestEngine {
 
         match intent.side {
             ExecSide::Buy => current_qty < 0,  // buying reduces a short
-            ExecSide::Sell => current_qty > 0,  // selling reduces a long
+            ExecSide::Sell => current_qty > 0, // selling reduces a long
         }
     }
 

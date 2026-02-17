@@ -956,6 +956,7 @@ version = "0.1.0"
 dependencies = [
  "mqk-execution",
  "mqk-integrity",
+ "mqk-isolation",
  "mqk-portfolio",
  "mqk-risk",
  "mqk-strategy",
@@ -1009,6 +1010,15 @@ version = "0.1.0"
 [[package]]
 name = "mqk-integrity"
 version = "0.1.0"
+
+[[package]]
+name = "mqk-isolation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mqk-portfolio",
+ "serde_json",
+]
 
 [[package]]
 name = "mqk-portfolio"

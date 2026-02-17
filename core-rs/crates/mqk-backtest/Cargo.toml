@@ -9,3 +9,4 @@ mqk-portfolio = { path = "../mqk-portfolio" }
 mqk-risk = { path = "../mqk-risk" }
 mqk-strategy = { path = "../mqk-strategy" }
 mqk-integrity = { path = "../mqk-integrity" }
+mqk-isolation = { path = "../mqk-isolation" }

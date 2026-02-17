@@ -41,6 +41,10 @@ pub struct BacktestConfig {
     /// Kill switch type for missing protective stop.
     pub kill_switch_flattens: bool,
 
+    /// Max gross exposure multiplier vs equity, in micros (1.0 => 1_000_000).
+    /// Used by PATCH 13 engine isolation allocation caps.
+    pub max_gross_exposure_mult_micros: i64,
+
     /// Stress profile for conservative fill pricing.
     pub stress: StressProfile,
 }
@@ -58,6 +62,7 @@ impl BacktestConfig {
             reject_storm_max_rejects: 100,
             pdt_enabled: false,
             kill_switch_flattens: true,
+            max_gross_exposure_mult_micros: 1_000_000, // 1.0x equity
             stress: StressProfile { slippage_bps: 0 },
         }
     }
