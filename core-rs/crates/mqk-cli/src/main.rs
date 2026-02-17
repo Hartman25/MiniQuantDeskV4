@@ -65,6 +65,56 @@ enum RunCmd {
         #[arg(long = "config", required = true)]
         config_paths: Vec<String>,
     },
+
+    /// Arm an existing run (CREATED/STOPPED -> ARMED)
+    Arm {
+        /// Run id
+        #[arg(long)]
+        run_id: String,
+
+        /// Manual confirmation string (required for LIVE when configured)
+        #[arg(long)]
+        confirm: Option<String>,
+    },
+
+    /// Begin an armed run (ARMED -> RUNNING)
+    Begin {
+        /// Run id
+        #[arg(long)]
+        run_id: String,
+    },
+
+    /// Stop an armed/running run (ARMED/RUNNING -> STOPPED)
+    Stop {
+        /// Run id
+        #[arg(long)]
+        run_id: String,
+    },
+
+    /// Halt a run (ANY -> HALTED)
+    Halt {
+        /// Run id
+        #[arg(long)]
+        run_id: String,
+
+        /// Human reason (printed; not stored in DB in Phase 1)
+        #[arg(long)]
+        reason: String,
+    },
+
+    /// Emit a heartbeat for a running run (RUNNING only)
+    Heartbeat {
+        /// Run id
+        #[arg(long)]
+        run_id: String,
+    },
+
+    /// Print run status row
+    Status {
+        /// Run id
+        #[arg(long)]
+        run_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -129,7 +179,11 @@ async fn main() -> Result<()> {
         }
 
         Commands::Run { cmd } => match cmd {
-            RunCmd::Start { engine, mode, config_paths } => {
+            RunCmd::Start {
+                engine,
+                mode,
+                config_paths,
+            } => {
                 let pool = mqk_db::connect_from_env().await?;
 
                 let path_refs: Vec<&str> = config_paths.iter().map(|s| s.as_str()).collect();
@@ -173,10 +227,81 @@ async fn main() -> Result<()> {
                 println!("config_hash={}", loaded.config_hash);
                 println!("host_fingerprint={}", host_fp);
             }
+
+            RunCmd::Arm { run_id, confirm } => {
+                let pool = mqk_db::connect_from_env().await?;
+                let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
+
+                // Fetch run so we can enforce LIVE confirmation rules using stored config_json.
+                let r = mqk_db::fetch_run(&pool, run_uuid).await?;
+                enforce_manual_confirmation_if_required(&r, confirm.as_deref())?;
+
+                mqk_db::arm_run(&pool, run_uuid).await?;
+                println!("armed=true run_id={} status=ARMED", run_uuid);
+            }
+
+            RunCmd::Begin { run_id } => {
+                let pool = mqk_db::connect_from_env().await?;
+                let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
+                mqk_db::begin_run(&pool, run_uuid).await?;
+                println!("begun=true run_id={} status=RUNNING", run_uuid);
+            }
+
+            RunCmd::Stop { run_id } => {
+                let pool = mqk_db::connect_from_env().await?;
+                let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
+                mqk_db::stop_run(&pool, run_uuid).await?;
+                println!("stopped=true run_id={} status=STOPPED", run_uuid);
+            }
+
+            RunCmd::Halt { run_id, reason } => {
+                let pool = mqk_db::connect_from_env().await?;
+                let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
+                mqk_db::halt_run(&pool, run_uuid).await?;
+                // Reason is not persisted in Phase 1 schema. Print it so operators have a record.
+                println!(
+                    "halted=true run_id={} status=HALTED reason={}",
+                    run_uuid, reason
+                );
+            }
+
+            RunCmd::Heartbeat { run_id } => {
+                let pool = mqk_db::connect_from_env().await?;
+                let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
+                mqk_db::heartbeat_run(&pool, run_uuid).await?;
+                println!("heartbeat=true run_id={}", run_uuid);
+            }
+
+            RunCmd::Status { run_id } => {
+                let pool = mqk_db::connect_from_env().await?;
+                let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
+                let r = mqk_db::fetch_run(&pool, run_uuid).await?;
+                println!("run_id={}", r.run_id);
+                println!("engine_id={}", r.engine_id);
+                println!("mode={}", r.mode);
+                println!("status={}", r.status.as_str());
+                println!("started_at_utc={}", r.started_at_utc.to_rfc3339());
+                println!("armed_at_utc={}", opt_dt(&r.armed_at_utc));
+                println!("running_at_utc={}", opt_dt(&r.running_at_utc));
+                println!("stopped_at_utc={}", opt_dt(&r.stopped_at_utc));
+                println!("halted_at_utc={}", opt_dt(&r.halted_at_utc));
+                println!("last_heartbeat_utc={}", opt_dt(&r.last_heartbeat_utc));
+                println!("git_hash={}", r.git_hash);
+                println!("config_hash={}", r.config_hash);
+                println!("host_fingerprint={}", r.host_fingerprint);
+            }
         },
 
         Commands::Audit { cmd } => match cmd {
-            AuditCmd::Emit { run_id, topic, event_type, payload, payload_file, hash_chain, .. } => {
+            AuditCmd::Emit {
+                run_id,
+                topic,
+                event_type,
+                payload,
+                payload_file,
+                hash_chain,
+                ..
+            } => {
                 let pool = mqk_db::connect_from_env().await?;
 
                 let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
@@ -258,4 +383,80 @@ fn host_fingerprint() -> String {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
     format!("{hostname}|{username}|{os}|{arch}")
+}
+
+fn opt_dt(dt: &Option<chrono::DateTime<Utc>>) -> String {
+    dt.as_ref()
+        .map(|d| d.to_rfc3339())
+        .unwrap_or_else(|| "".to_string())
+}
+
+/// Enforce manual confirmation for LIVE arming when configured.
+///
+/// NOTE: This is intentionally a CLI-layer gate. Phase-1 DB schema does not store
+/// operator confirmations, and `mqk_db::arm_run()` does not enforce it.
+fn enforce_manual_confirmation_if_required(
+    run: &mqk_db::RunRow,
+    confirm: Option<&str>,
+) -> Result<()> {
+    if run.mode.to_uppercase() != "LIVE" {
+        return Ok(());
+    }
+
+    // Default: require confirmation unless explicitly disabled in config.
+    let require = run
+        .config_json
+        .pointer("/arming/require_manual_confirmation")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    if !require {
+        return Ok(());
+    }
+
+    let fmt = run
+        .config_json
+        .pointer("/arming/confirmation_format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ARM LIVE {account_last4} {daily_loss_limit}");
+
+    let account_last4 = run
+        .config_json
+        .pointer("/broker/account_last4")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0000");
+
+    let daily_loss_limit = run
+        .config_json
+        .pointer("/risk/daily_loss_limit")
+        .map(|v| match v {
+            Value::Number(n) => n.to_string(),
+            Value::String(s) => s.clone(),
+            _ => "".to_string(),
+        })
+        .unwrap_or_else(|| "".to_string());
+
+    let expected = fmt
+        .replace("{account_last4}", account_last4)
+        .replace("{daily_loss_limit}", daily_loss_limit.trim());
+
+    let confirm = confirm
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "manual confirmation required for LIVE arming. expected: \"{}\" (use --confirm)",
+                expected
+            )
+        })?;
+
+    if confirm != expected {
+        return Err(anyhow::anyhow!(
+            "manual confirmation mismatch. expected: \"{}\" got: \"{}\"",
+            expected,
+            confirm
+        ));
+    }
+
+    Ok(())
 }
