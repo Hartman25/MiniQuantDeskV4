@@ -62,3 +62,7 @@ pub fn run_parity_scenario_stub(_bars: &[Bar]) -> Result<ScenarioRunResult> {
         audit_jsonl: String::new(),
     })
 }
+
+mod recovery;
+
+pub use recovery::{recover_outbox_against_broker, FakeBroker, RecoveryReport};

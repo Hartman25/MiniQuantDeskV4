@@ -36,14 +36,14 @@ async fn inbox_broker_message_id_dedupes_inserts() -> anyhow::Result<()> {
     )
     .await?;
 
-    let msg_id = "BROKER_MSG_ABC_123";
+    let msg_id = format!("BROKER_MSG_{}_{}", run_id, Uuid::new_v4());
 
     let inserted_1 =
-        mqk_db::inbox_insert_deduped(&pool, run_id, msg_id, json!({"fill":"one"})).await?;
+        mqk_db::inbox_insert_deduped(&pool, run_id, &msg_id, json!({"fill":"one"})).await?;
     assert!(inserted_1, "expected first inbox insert to create row");
 
     let inserted_2 =
-        mqk_db::inbox_insert_deduped(&pool, run_id, msg_id, json!({"fill":"one"})).await?;
+        mqk_db::inbox_insert_deduped(&pool, run_id, &msg_id, json!({"fill":"one"})).await?;
     assert!(
         !inserted_2,
         "expected second inbox insert to be deduped (no second row created)"

@@ -14,3 +14,8 @@ uuid = { version = "1", features = ["v4"] }
 
 mqk-schemas = { path = "../mqk-schemas" }
 mqk-artifacts = { path = "../mqk-artifacts" }
+mqk-db = { path = "../mqk-db" }
+sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "macros", "chrono", "uuid", "json"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

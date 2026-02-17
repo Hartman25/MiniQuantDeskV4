@@ -1119,10 +1119,13 @@ dependencies = [
  "chrono",
  "csv",
  "mqk-artifacts",
+ "mqk-db",
  "mqk-schemas",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
+ "tokio",
  "uuid",
 ]
 
