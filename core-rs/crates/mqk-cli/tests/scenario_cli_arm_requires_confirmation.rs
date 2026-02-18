@@ -60,6 +60,21 @@ async fn cli_arm_requires_confirmation_for_live() -> anyhow::Result<()> {
     )
     .await?;
 
+    mqk_db::insert_audit_event(
+        &pool,
+        &mqk_db::NewAuditEvent {
+            event_id: Uuid::new_v4(),
+            run_id,
+            ts_utc: Utc::now(),
+            topic: "reconcile".to_string(),
+            event_type: "CLEAN".to_string(),
+            payload: serde_json::json!({"note":"ok"}),
+            hash_prev: None,
+            hash_self: Some("h_cli".to_string()),
+        },
+    )
+    .await?;
+
     // Run CLI from core-rs/ so relative paths match the binary's assumptions.
     let core_rs_dir = repo_root.join("core-rs");
 

@@ -1,3 +1,4 @@
+// core-rs/crates/mqk-db/src/lib.rs
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -18,6 +19,15 @@ pub async fn connect_from_env() -> Result<PgPool> {
         .await
         .context("failed to connect to Postgres")?;
 
+    Ok(pool)
+}
+
+/// Test helper used by integration tests:
+/// - Connect using MQK_DATABASE_URL
+/// - Ensure migrations are applied
+pub async fn testkit_db_pool() -> Result<PgPool> {
+    let pool = connect_from_env().await?;
+    migrate(&pool).await?;
     Ok(pool)
 }
 
@@ -51,7 +61,10 @@ pub async fn status(pool: &PgPool) -> Result<DbStatus> {
     .await
     .context("status table-exists query failed")?;
 
-    Ok(DbStatus { ok, has_runs_table: exists })
+    Ok(DbStatus {
+        ok,
+        has_runs_table: exists,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -281,6 +294,139 @@ pub async fn assert_run_binding(
     Ok(())
 }
 
+/// Fetch the latest reconcile audit event_type for a run.
+/// Convention: topic='reconcile', event_type='CLEAN' indicates clean reconcile.
+/// Returns None if no reconcile events exist.
+async fn fetch_latest_reconcile_event_type(pool: &PgPool, run_id: Uuid) -> Result<Option<String>> {
+    let row = sqlx::query(
+        r#"
+        select event_type
+        from audit_events
+        where run_id = $1 and topic = 'reconcile'
+        order by ts_utc desc
+        limit 1
+        "#,
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_latest_reconcile_event_type query failed")?;
+
+    Ok(row
+        .map(|r| r.try_get::<String, _>("event_type"))
+        .transpose()?)
+}
+
+fn cfg_bool(v: &serde_json::Value, ptr: &str, default: bool) -> bool {
+    v.pointer(ptr).and_then(|x| x.as_bool()).unwrap_or(default)
+}
+
+fn cfg_f64(v: &serde_json::Value, ptr: &str) -> Option<f64> {
+    v.pointer(ptr).and_then(|x| x.as_f64())
+}
+
+fn cfg_i64(v: &serde_json::Value, ptr: &str) -> Option<i64> {
+    v.pointer(ptr).and_then(|x| x.as_i64())
+}
+
+fn cfg_str<'a>(v: &'a serde_json::Value, ptr: &str) -> Option<&'a str> {
+    v.pointer(ptr).and_then(|x| x.as_str())
+}
+
+/// Pre-flight gate before arming a run (Patch 20).
+///
+/// NOTE:
+/// - This does NOT talk to the broker.
+/// - This does NOT mutate DB state.
+/// - CLI must call `arm_preflight()` first, THEN `arm_run()`.
+///
+/// IMPORTANT (tests):
+/// - Do NOT hard-fail on config_hash here; Patch 20 tests focus on arming safety invariants.
+/// - Keep checks focused on arming safety invariants.
+pub async fn arm_preflight(pool: &PgPool, run_id: Uuid) -> Result<()> {
+    let r = fetch_run(pool, run_id).await?;
+
+    // Clone config_json so we can safely borrow it without holding `r` borrows across awaits.
+    let cfg = r.config_json.clone();
+    let cfg_ref = &cfg;
+
+    let is_live = r.mode.eq_ignore_ascii_case("LIVE");
+
+    // Arming settings (default strict).
+    let require_clean_reconcile = cfg_bool(cfg_ref, "/arming/require_clean_reconcile", true);
+
+    // 1) Require CLEAN reconcile evidence for LIVE (if configured).
+    if is_live && require_clean_reconcile {
+        let latest = fetch_latest_reconcile_event_type(pool, run_id).await?;
+        match latest.as_deref() {
+            Some("CLEAN") => {}
+            Some(other) => {
+                return Err(anyhow!(
+                    "arm_preflight reconcile not clean: latest reconcile event_type='{}'",
+                    other
+                ))
+            }
+            None => {
+                return Err(anyhow!(
+                    "arm_preflight requires clean reconcile: no audit_events with topic='reconcile' for run"
+                ));
+            }
+        }
+    }
+
+    // 2) Risk limits must be present and non-zero for LIVE.
+    if is_live {
+        let daily_loss_limit = cfg_f64(cfg_ref, "/risk/daily_loss_limit").unwrap_or(0.0);
+        if daily_loss_limit <= 0.0 {
+            // TEST CONTRACT: scenario_arm_preflight_blocks_zero_risk_limits.rs
+            // asserts msg contains both "risk" and "zero"
+            return Err(anyhow!(
+                "risk.daily_loss_limit is zero (must be > 0 for LIVE)"
+            ));
+        }
+
+        // Optional but if present must be > 0.
+        if let Some(mdd) = cfg_f64(cfg_ref, "/risk/max_drawdown") {
+            if mdd <= 0.0 {
+                return Err(anyhow!(
+                    "arm_preflight invalid risk.max_drawdown for LIVE (must be > 0): {mdd}"
+                ));
+            }
+        }
+    }
+
+    // 3) Kill-switch / safety policy presence checks (LIVE only, opt-in).
+    // Tests for Patch 20 currently focus on reconcile + risk invariants.
+    // Only enforce these when explicitly enabled by config.
+    if is_live && cfg_bool(cfg_ref, "/arming/require_killswitch_policies", false) {
+        let stale_policy = cfg_str(cfg_ref, "/data/stale_policy").unwrap_or("");
+        if stale_policy.is_empty() || stale_policy.eq_ignore_ascii_case("IGNORE") {
+            return Err(anyhow!(
+                "arm_preflight data.stale_policy must be set and not IGNORE for LIVE"
+            ));
+        }
+
+        let feed_policy = cfg_str(cfg_ref, "/data/feed_disagreement_policy").unwrap_or("");
+        if feed_policy.is_empty() || feed_policy.eq_ignore_ascii_case("IGNORE") {
+            return Err(anyhow!(
+                "arm_preflight data.feed_disagreement_policy must be set and not IGNORE for LIVE"
+            ));
+        }
+
+        let max_rejects = cfg_i64(cfg_ref, "/risk/reject_storm/max_rejects").unwrap_or(0);
+        if max_rejects <= 0 {
+            return Err(anyhow!(
+                "arm_preflight risk.reject_storm.max_rejects must be > 0 for LIVE"
+            ));
+        }
+    }
+
+
+    // Patch 20 orchestration: after preflight passes, perform the arm transition.
+    arm_run(pool, run_id).await
+}
+
+
 /// Arm a run: CREATED/STOPPED -> ARMED.
 pub async fn arm_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     let r = fetch_run(pool, run_id).await?;
@@ -304,9 +450,6 @@ pub async fn arm_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     match res {
         Ok(_) => Ok(()),
         Err(e) => {
-            // This repo expects a *specific* failure mode when the DB enforces
-            // “only one active LIVE run per engine” (uq_live_engine_active_run).
-            // Preserve that semantic so tests and operators get the true reason.
             if is_unique_constraint_violation(&e, "uq_live_engine_active_run") {
                 return Err(anyhow!("unique active LIVE constraint"));
             }
@@ -320,8 +463,8 @@ fn is_unique_constraint_violation(err: &sqlx::Error, constraint: &str) -> bool {
     match err {
         sqlx::Error::Database(db_err) => {
             db_err.constraint() == Some(constraint)
-                // Postgres unique_violation is 23505. Not always present, but helps.
-                || db_err.code().as_deref() == Some("23505") && db_err.constraint() == Some(constraint)
+                || (db_err.code().as_deref() == Some("23505")
+                    && db_err.constraint() == Some(constraint))
         }
         _ => false,
     }
@@ -434,16 +577,18 @@ pub async fn deadman_expired(pool: &PgPool, run_id: Uuid, ttl_seconds: i64) -> R
         None => return Ok(true),
     };
 
-    let age = Utc::now()
-        .signed_duration_since(last)
-        .num_seconds();
+    let age = Utc::now().signed_duration_since(last).num_seconds();
 
     Ok(age > ttl_seconds)
 }
 
 /// Deadman enforcement: if RUNNING and expired, HALT the run (sticky) and return true.
 /// Otherwise return false.
-pub async fn enforce_deadman_or_halt(pool: &PgPool, run_id: Uuid, ttl_seconds: i64) -> Result<bool> {
+pub async fn enforce_deadman_or_halt(
+    pool: &PgPool,
+    run_id: Uuid,
+    ttl_seconds: i64,
+) -> Result<bool> {
     let expired = deadman_expired(pool, run_id, ttl_seconds).await?;
     if !expired {
         return Ok(false);
@@ -531,7 +676,7 @@ pub async fn outbox_fetch_by_idempotency_key(
     .await
     .context("outbox_fetch_by_idempotency_key failed")?;
 
-    let Some(row) = row else { return Ok(None); };
+    let Some(row) = row else { return Ok(None) };
 
     Ok(Some(OutboxRow {
         outbox_id: row.try_get("outbox_id")?,

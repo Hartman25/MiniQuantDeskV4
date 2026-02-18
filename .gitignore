@@ -11,3 +11,7 @@ runtime/
 .claude-worktrees/
 **/.claude/
 **/target/
+# Office temp/lock files
+~$*.docx
+*.docx
+

@@ -337,37 +337,54 @@ If the process crashes or hangs:
 ---
 
 ## PATCH 19 — Order Idempotency + Crash Recovery at Execution Boundary
-Status: NOT STARTED
+Status: IN PROGRESS (19A COMPLETE)
 
 ### Architectural Decision
-Ensure that if the process crashes between submitting an order to the broker and recording the fill, recovery does not cause double-submission. The outbox/inbox tables exist (`0001_init.sql:31-54`) but no code writes to or reads from them.
+Ensure that if the process crashes between submitting an order to the broker and recording the fill, recovery does not cause double-submission. The outbox/inbox tables exist (`0001_init.sql:31-54`) and must be actively used by code.
 
 ### Why This Matters (P0)
-- The `oms_outbox` and `oms_inbox` tables exist in the DB schema but are **completely unused** by any Rust code.
-- No outbox enqueue before broker submit. No inbox dedupe on fill receipt.
-- If the process crashes after `broker.submit()` but before recording the fill, a naive restart would re-submit the same order.
-- `docs/specs/broker_adapter_contract.md:8-9` states "Idempotency safe: duplicates tolerated; outbox/inbox enforce uniqueness" — but this contract is not implemented.
+- If the process crashes after broker submit but before recording state, a naive restart can double-submit.
+- The broker adapter contract explicitly calls for idempotency via outbox/inbox uniqueness, but without wiring this is just a document.
 
 ### Evidence
-- `crates/mqk-db/migrations/0001_init.sql:31-54` — oms_outbox and oms_inbox tables defined
-- `rg "oms_outbox|oms_inbox" --type rust` — **ZERO hits** in any Rust source (only in SQL migration)
-- `docs/specs/broker_adapter_contract.md:8-9` — contract specifies outbox/inbox uniqueness
-- `crates/mqk-execution/src/engine.rs` — pure function, no outbox interaction
-- `crates/mqk-backtest/src/engine.rs` — backtest fills applied directly, no outbox
+- `crates/mqk-db/migrations/0001_init.sql:31-54` — `oms_outbox` and `oms_inbox` tables defined
+- `docs/specs/broker_adapter_contract.md:8-9` — contract specifies idempotency safety and outbox/inbox uniqueness
+- Patch 19A implementation:
+  - `crates/mqk-db/src/lib.rs` — added outbox/inbox DB APIs (enqueue, dedupe insert, mark sent/acked/failed, recovery query)
+  - `crates/mqk-db/tests/scenario_outbox_idempotency_prevents_double_submit.rs` — verifies idempotency_key dedupe
+  - `crates/mqk-db/tests/scenario_inbox_dedupe_prevents_double_fill.rs` — verifies broker_message_id dedupe
+  - `crates/mqk-db/tests/scenario_recovery_query_returns_pending_outbox.rs` — verifies recovery query returns unacked rows
 
 ### Required Deliverables
-1. Outbox writer: enqueue intent before broker submission (with idempotency_key = `{run_id}_{client_order_id}`)
-2. Inbox writer: record fill with `broker_message_id` dedupe before applying to portfolio
-3. Recovery query: on startup, check outbox for PENDING/SENT entries and reconcile with broker state
-4. Integration with CLI or future runtime loop
+
+#### 19A — DB boundary primitives (COMPLETE)
+1. Outbox writer API (idempotent enqueue) — COMPLETE
+2. Inbox writer API (broker_message_id dedupe) — COMPLETE
+3. Recovery query API for non-terminal outbox rows — COMPLETE
+4. Status transition helpers (mark sent/acked/failed) — COMPLETE
+
+#### 19B — Recovery orchestration proof (TESTKIT) (IN PROGRESS)
+1. Startup recovery primitive exists that inspects unacked outbox rows and reconciles vs a broker-like state — IN PROGRESS
+2. Minimal broker simulation exists to validate crash-after-submit => no double submit on restart — IN PROGRESS
+3. Outbox enqueue-before-submit / inbox-dedupe-before-apply are NOT yet wired into a production runtime boundary (no broker submit path exists in repo) — BLOCKED
 
 ### Required Tests
-- `crates/mqk-db/tests/scenario_outbox_idempotency_prevents_double_submit.rs` — inserting same idempotency_key twice fails (unique constraint)
-- `crates/mqk-db/tests/scenario_inbox_dedupe_prevents_double_fill.rs` — inserting same broker_message_id twice fails
-- `crates/mqk-testkit/tests/scenario_crash_recovery_no_double_order.rs` — simulate crash-after-submit, verify restart reconciles vs broker
+
+#### 19A Tests (COMPLETE)
+- `crates/mqk-db/tests/scenario_outbox_idempotency_prevents_double_submit.rs` — dedupes duplicate idempotency_key
+- `crates/mqk-db/tests/scenario_inbox_dedupe_prevents_double_fill.rs` — dedupes duplicate broker_message_id
+- `crates/mqk-db/tests/scenario_recovery_query_returns_pending_outbox.rs` — recovery query returns expected unacked rows
+
+#### 19B Tests (IN PROGRESS)
+- `crates/mqk-testkit/tests/scenario_crash_recovery_no_double_order.rs` — simulate crash-after-submit, verify restart reconciles vs broker — IN PROGRESS
+  - NOTE: requires tokio dev-dependency in mqk-testkit
 
 ### Recommended Settings
-- NOT FOUND. Needs decision: outbox poll interval, retry policy, max retries.
+- UNKNOWN — requires decision/spec update:
+  - outbox poll interval
+  - retry/backoff policy
+  - max retries and failure terminalization
+  - reconcile strategy (broker truth source)
 
 ---
 

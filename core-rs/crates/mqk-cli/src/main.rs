@@ -1,3 +1,4 @@
+// core-rs/crates/mqk-cli/src/main.rs
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use chrono::Utc;
@@ -272,7 +273,9 @@ async fn main() -> Result<()> {
                 let r = mqk_db::fetch_run(&pool, run_uuid).await?;
                 enforce_manual_confirmation_if_required(&r, confirm.as_deref())?;
 
-                mqk_db::arm_run(&pool, run_uuid).await?;
+                // PATCH 20: arm_preflight now performs the arming transition after checks.
+                mqk_db::arm_preflight(&pool, run_uuid).await?;
+
                 println!("armed=true run_id={} status=ARMED", run_uuid);
             }
 
@@ -339,15 +342,13 @@ async fn main() -> Result<()> {
             RunCmd::DeadmanEnforce { run_id, ttl_seconds } => {
                 let pool = mqk_db::connect_from_env().await?;
                 let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
-                let halted =
-                    mqk_db::enforce_deadman_or_halt(&pool, run_uuid, ttl_seconds).await?;
+                let halted = mqk_db::enforce_deadman_or_halt(&pool, run_uuid, ttl_seconds).await?;
                 println!(
                     "deadman_halted={} run_id={} ttl_seconds={}",
                     halted, run_uuid, ttl_seconds
                 );
             }
         },
-
 
         Commands::Audit { cmd } => match cmd {
             AuditCmd::Emit {
