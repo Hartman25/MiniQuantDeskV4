@@ -127,7 +127,7 @@ fn sort_keys(v: &Value) -> Value {
 }
 
 /// Hash chain is computed from canonical JSON of event WITHOUT hash_self (to avoid self-reference).
-fn compute_event_hash(ev: &AuditEvent) -> Result<String> {
+pub fn compute_event_hash(ev: &AuditEvent) -> Result<String> {
     let mut clone = ev.clone();
     clone.hash_self = None;
 
@@ -135,4 +135,67 @@ fn compute_event_hash(ev: &AuditEvent) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
     Ok(hex::encode(hasher.finalize()))
+}
+
+/// Verify the hash chain integrity of an audit log file.
+///
+/// Returns Ok(VerifyResult) describing whether the chain is intact or where it breaks.
+///
+/// PATCH 15c: required by docs/specs/run_artifacts_and_reproducibility.md.
+pub fn verify_hash_chain(path: impl AsRef<Path>) -> Result<VerifyResult> {
+    let content = fs::read_to_string(path.as_ref())
+        .with_context(|| format!("read audit log {:?}", path.as_ref()))?;
+
+    let mut prev_hash: Option<String> = None;
+    let mut line_count = 0usize;
+
+    for (i, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let ev: AuditEvent = serde_json::from_str(trimmed)
+            .with_context(|| format!("parse audit event at line {}", i + 1))?;
+
+        line_count += 1;
+
+        // 1. Verify hash_prev matches the previous event's hash_self
+        if ev.hash_prev != prev_hash {
+            return Ok(VerifyResult::Broken {
+                line: i + 1,
+                reason: format!(
+                    "hash_prev mismatch: expected {:?}, got {:?}",
+                    prev_hash, ev.hash_prev
+                ),
+            });
+        }
+
+        // 2. Verify hash_self is correct for this event's content
+        if let Some(ref claimed_hash) = ev.hash_self {
+            let recomputed = compute_event_hash(&ev)?;
+            if *claimed_hash != recomputed {
+                return Ok(VerifyResult::Broken {
+                    line: i + 1,
+                    reason: format!(
+                        "hash_self mismatch: claimed {}, recomputed {}",
+                        claimed_hash, recomputed
+                    ),
+                });
+            }
+        }
+
+        prev_hash = ev.hash_self.clone();
+    }
+
+    Ok(VerifyResult::Valid { lines: line_count })
+}
+
+/// Result of hash chain verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyResult {
+    /// The entire chain is valid.
+    Valid { lines: usize },
+    /// The chain is broken at the given line.
+    Broken { line: usize, reason: String },
 }

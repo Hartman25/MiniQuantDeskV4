@@ -1066,6 +1066,8 @@ dependencies = [
  "chrono",
  "csv",
  "mqk-artifacts",
+ "mqk-audit",
+ "mqk-config",
  "mqk-schemas",
  "serde",
  "serde_json",
