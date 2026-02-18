@@ -23,16 +23,20 @@ async fn run_lifecycle_enforced_and_live_exclusive() -> anyhow::Result<()> {
     // or resetting your local dev DB (do NOT "edit applied migrations" in real use).
     mqk_db::migrate(&pool).await?;
 
+    // IMPORTANT: Use a unique engine_id per test run so we never collide with
+    // leftover rows in a developer DB.
+    let engine = format!("MAIN_{}", Uuid::new_v4().simple());
+
     let run1 = Uuid::new_v4();
     let run2 = Uuid::new_v4();
     let run3 = Uuid::new_v4();
 
-    // Insert run1 LIVE MAIN (status defaults to CREATED)
+    // Insert run1 LIVE <engine> (status defaults to CREATED)
     mqk_db::insert_run(
         &pool,
         &mqk_db::NewRun {
             run_id: run1,
-            engine_id: "MAIN".to_string(),
+            engine_id: engine.clone(),
             mode: "LIVE".to_string(),
             started_at_utc: Utc::now(),
             git_hash: "TEST".to_string(),
@@ -48,12 +52,12 @@ async fn run_lifecycle_enforced_and_live_exclusive() -> anyhow::Result<()> {
     mqk_db::begin_run(&pool, run1).await?;
     mqk_db::heartbeat_run(&pool, run1).await?;
 
-    // Insert run2 LIVE MAIN (allowed; not active yet)
+    // Insert run2 LIVE <engine> (allowed; not active yet)
     mqk_db::insert_run(
         &pool,
         &mqk_db::NewRun {
             run_id: run2,
-            engine_id: "MAIN".to_string(),
+            engine_id: engine.clone(),
             mode: "LIVE".to_string(),
             started_at_utc: Utc::now(),
             git_hash: "TEST".to_string(),
