@@ -3,8 +3,7 @@ use std::collections::BTreeMap;
 use mqk_backtest::BacktestReport;
 use mqk_portfolio::{Fill, Side};
 use mqk_promotion::{
-    build_report, evaluate_promotion, write_promotion_report_json, PromotionConfig,
-    PromotionInput,
+    build_report, evaluate_promotion, write_promotion_report_json, PromotionConfig, PromotionInput,
 };
 
 /// Create an equity curve + fills that pass all thresholds.
@@ -43,13 +42,14 @@ fn passes_all_thresholds() {
         equity_curve,
         fills,
         last_prices: BTreeMap::new(),
+        execution_blocked: false,
     };
 
     // Set thresholds that the above data should comfortably clear
     let config = PromotionConfig {
         min_sharpe: 0.5,
-        max_mdd: 0.10,       // no drawdown in monotonic curve
-        min_cagr: 0.10,      // >10% annualized
+        max_mdd: 0.10,          // no drawdown in monotonic curve
+        min_cagr: 0.10,         // >10% annualized
         min_profit_factor: 1.5, // all trades profitable => PF = +inf
         min_profitable_months_pct: 0.50,
     };
@@ -92,10 +92,7 @@ fn passes_all_thresholds() {
 
     // Also test the report JSON artifact writer
     let report = build_report(&config, &decision, None);
-    let tmp_dir = std::env::temp_dir().join(format!(
-        "mqk_promo_test_pass_{}",
-        std::process::id()
-    ));
+    let tmp_dir = std::env::temp_dir().join(format!("mqk_promo_test_pass_{}", std::process::id()));
     let path = write_promotion_report_json(&tmp_dir, &report).unwrap();
     assert!(path.exists(), "report file should exist");
 

@@ -47,6 +47,21 @@ pub struct BacktestConfig {
 
     /// Stress profile for conservative fill pricing.
     pub stress: StressProfile,
+
+    // --- PATCH 22: Integrity gate ---
+    /// If true, enable integrity checks per bar (stale/gap/disagreement).
+    /// When integrity disarms or halts, execution is blocked.
+    pub integrity_enabled: bool,
+
+    /// Stale data threshold in ticks (bar count). 0 = disabled.
+    /// When now_tick - last_feed_tick > this, integrity DISARMS.
+    pub integrity_stale_threshold_ticks: u64,
+
+    /// Number of missing bars tolerated before integrity halts (0 = fail on any gap).
+    pub integrity_gap_tolerance_bars: u32,
+
+    /// If true, enforce feed disagreement detection in integrity engine.
+    pub integrity_enforce_feed_disagreement: bool,
 }
 
 impl BacktestConfig {
@@ -64,6 +79,11 @@ impl BacktestConfig {
             kill_switch_flattens: true,
             max_gross_exposure_mult_micros: 1_000_000, // 1.0x equity
             stress: StressProfile { slippage_bps: 0 },
+            // PATCH 22: integrity off by default (backwards compat)
+            integrity_enabled: false,
+            integrity_stale_threshold_ticks: 0,
+            integrity_gap_tolerance_bars: 0,
+            integrity_enforce_feed_disagreement: false,
         }
     }
 }
@@ -125,4 +145,6 @@ pub struct BacktestReport {
     pub fills: Vec<Fill>,
     /// Last known price per symbol.
     pub last_prices: BTreeMap<String, i64>,
+    /// PATCH 22: Whether integrity disarmed (stale feed / gap blocked execution).
+    pub execution_blocked: bool,
 }

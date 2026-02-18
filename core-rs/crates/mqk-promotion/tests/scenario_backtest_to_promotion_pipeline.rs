@@ -39,6 +39,7 @@ fn make_profitable_report() -> BacktestReport {
         equity_curve,
         fills,
         last_prices: BTreeMap::new(),
+        execution_blocked: false,
     }
 }
 
@@ -68,6 +69,7 @@ fn make_unprofitable_report() -> BacktestReport {
         equity_curve,
         fills,
         last_prices: BTreeMap::new(),
+        execution_blocked: false,
     }
 }
 
@@ -184,7 +186,9 @@ fn unprofitable_backtest_fails_promotion() {
     // Verify reason codes reference the right metrics
     // At minimum, CAGR and Sharpe should fail
     assert!(
-        reasons_str.contains("CAGR") || reasons_str.contains("Sharpe") || reasons_str.contains("Profit factor"),
+        reasons_str.contains("CAGR")
+            || reasons_str.contains("Sharpe")
+            || reasons_str.contains("Profit factor"),
         "fail reasons should mention specific metric failures, got: {reasons_str}"
     );
 }
@@ -212,6 +216,7 @@ fn halted_backtest_metrics_computed_from_partial_curve() {
         equity_curve,
         fills,
         last_prices: BTreeMap::new(),
+        execution_blocked: false,
     };
 
     let config = lenient_config();

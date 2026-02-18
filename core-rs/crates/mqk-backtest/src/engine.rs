@@ -1,15 +1,21 @@
 use std::collections::BTreeMap;
 
 use mqk_execution::{targets_to_order_intents, PositionBook, Side as ExecSide};
+use mqk_integrity::{
+    evaluate_bar as integrity_evaluate_bar, Bar as IntegrityBar, BarKey, FeedId, IntegrityAction,
+    IntegrityConfig, IntegrityState, Timeframe as IntegrityTimeframe,
+};
 use mqk_portfolio::{
     apply_fill, compute_equity_micros, compute_exposure_micros, Fill, MarkMap, PortfolioState,
     Side as PfSide,
 };
 use mqk_risk::{
-    evaluate as risk_evaluate, PdtContext, RequestKind, RiskAction, RiskConfig, RiskInput, RiskState,
+    evaluate as risk_evaluate, PdtContext, RequestKind, RiskAction, RiskConfig, RiskInput,
+    RiskState,
 };
 use mqk_strategy::{
-    BarStub, RecentBarsWindow, ShadowMode, Strategy, StrategyContext, StrategyHost, StrategyHostError,
+    BarStub, RecentBarsWindow, ShadowMode, Strategy, StrategyContext, StrategyHost,
+    StrategyHostError,
 };
 
 use mqk_isolation::enforce_allocation_cap_micros;
@@ -64,6 +70,16 @@ pub struct BacktestEngine {
     halt_reason: Option<String>,
     /// Bar counter (deterministic tick).
     bar_count: u64,
+    // --- PATCH 22: integrity gate ---
+    /// Integrity config (constructed from BacktestConfig).
+    integrity_config: IntegrityConfig,
+    /// Integrity state (tracks stale/gap/disagreement).
+    integrity_state: IntegrityState,
+    /// Whether integrity checks are enabled.
+    integrity_enabled: bool,
+    /// Whether execution is blocked due to integrity disarm/halt.
+    /// Once true, no new orders are submitted for the rest of the run.
+    execution_blocked: bool,
 }
 
 impl BacktestEngine {
@@ -84,6 +100,14 @@ impl BacktestEngine {
             missing_protective_stop_flattens: config.kill_switch_flattens,
         };
 
+        // PATCH 22: build integrity config from backtest config
+        let integrity_config = IntegrityConfig {
+            gap_tolerance_bars: config.integrity_gap_tolerance_bars,
+            stale_threshold_ticks: config.integrity_stale_threshold_ticks,
+            enforce_feed_disagreement: config.integrity_enforce_feed_disagreement,
+        };
+        let integrity_enabled = config.integrity_enabled;
+
         Self {
             config,
             host,
@@ -97,12 +121,44 @@ impl BacktestEngine {
             halted: false,
             halt_reason: None,
             bar_count: 0,
+            integrity_config,
+            integrity_state: IntegrityState::new(),
+            integrity_enabled,
+            execution_blocked: false,
         }
     }
 
     /// Register a strategy. Must be called before run().
     pub fn add_strategy(&mut self, s: Box<dyn Strategy>) -> Result<(), BacktestError> {
         self.host.register(s).map_err(BacktestError::StrategyHost)
+    }
+
+    /// PATCH 22: Returns true if integrity has blocked execution (disarm or halt).
+    pub fn is_execution_blocked(&self) -> bool {
+        self.execution_blocked
+    }
+
+    /// PATCH 22: Returns a reference to the integrity state for inspection.
+    pub fn integrity_state(&self) -> &IntegrityState {
+        &self.integrity_state
+    }
+
+    /// PATCH 22: Seed an additional integrity feed at a given tick.
+    ///
+    /// This is the integration point for multi-feed stale detection.
+    /// In runtime, the data adapter registers feeds via this method.
+    /// In backtest, tests can register a "heartbeat" feed at the start
+    /// tick, and if it's never updated, it will go stale as the primary
+    /// feed advances, triggering DISARM.
+    pub fn seed_integrity_feed(&mut self, feed_name: &str, tick: u64) {
+        use mqk_integrity::tick_feed;
+        let feed = FeedId::new(feed_name);
+        tick_feed(
+            &self.integrity_config,
+            &mut self.integrity_state,
+            &feed,
+            tick,
+        );
     }
 
     /// Run the backtest on a sequence of bars.
@@ -132,6 +188,46 @@ impl BacktestEngine {
                 return Err(BacktestError::NegativeTimestamp { end_ts: bar.end_ts });
             }
 
+            // PATCH 22: Integrity gate — evaluate bar through integrity engine.
+            // If integrity disarms (stale feed) or halts (gap), block execution.
+            //
+            // We use bar.end_ts (cast to u64) as the tick value. This allows
+            // stale detection to trigger when there is a large time gap between
+            // consecutive bars (e.g., market close → next day open) that exceeds
+            // the configured stale_threshold_ticks (interpreted as seconds here).
+            if self.integrity_enabled {
+                let feed = FeedId::new("backtest");
+                let now_tick = bar.end_ts as u64;
+                let int_bar = IntegrityBar::new(
+                    BarKey::new(
+                        bar.symbol.clone(),
+                        IntegrityTimeframe::secs(self.config.timeframe_secs),
+                        bar.end_ts,
+                    ),
+                    bar.is_complete,
+                    bar.close_micros,
+                    bar.volume,
+                );
+                let decision = integrity_evaluate_bar(
+                    &self.integrity_config,
+                    &mut self.integrity_state,
+                    &feed,
+                    now_tick,
+                    &int_bar,
+                );
+                match decision.action {
+                    IntegrityAction::Disarm | IntegrityAction::Halt => {
+                        self.execution_blocked = true;
+                    }
+                    IntegrityAction::Allow => {}
+                    IntegrityAction::Reject => {
+                        // Rejected bar (e.g. incomplete) — already caught above,
+                        // but if integrity rejects for other reasons, skip execution.
+                        self.execution_blocked = true;
+                    }
+                }
+            }
+
             // 2. Update last prices
             self.last_prices
                 .insert(bar.symbol.clone(), bar.close_micros);
@@ -158,14 +254,30 @@ impl BacktestEngine {
                 self.recent_bars = self.recent_bars.split_off(start);
             }
 
-            let recent = RecentBarsWindow::new(self.config.bar_history_len, self.recent_bars.clone());
+            let recent =
+                RecentBarsWindow::new(self.config.bar_history_len, self.recent_bars.clone());
             let ctx = StrategyContext::new(self.config.timeframe_secs, self.bar_count, recent);
 
-            let bar_result = self.host.on_bar(&ctx).map_err(BacktestError::StrategyHost)?;
+            let bar_result = self
+                .host
+                .on_bar(&ctx)
+                .map_err(BacktestError::StrategyHost)?;
 
             // 4. Check if intents should execute (shadow mode check)
             if !bar_result.intents.should_execute() {
                 // Shadow mode: record equity but don't execute
+                let equity = compute_equity_micros(
+                    self.portfolio.cash_micros,
+                    &self.portfolio.positions,
+                    &self.last_prices,
+                );
+                self.equity_curve.push((bar.end_ts, equity));
+                continue;
+            }
+
+            // PATCH 22: Integrity disarm gate — block all new order submissions.
+            // Strategy still runs (for logging/analytics), but no fills occur.
+            if self.execution_blocked {
                 let equity = compute_equity_micros(
                     self.portfolio.cash_micros,
                     &self.portfolio.positions,
@@ -196,7 +308,8 @@ impl BacktestEngine {
                 let is_risk_reducing = self.is_intent_risk_reducing(intent);
                 if !is_risk_reducing {
                     // Current gross exposure at marks (deterministic).
-                    let exposure = compute_exposure_micros(&self.portfolio.positions, &self.last_prices);
+                    let exposure =
+                        compute_exposure_micros(&self.portfolio.positions, &self.last_prices);
 
                     // Worst-case fill price for *this intent* (ambiguity worst-case enforced).
                     let fill_price = self.conservative_fill_price(bar, &intent.side);
@@ -249,7 +362,8 @@ impl BacktestEngine {
                             ExecSide::Buy => PfSide::Buy,
                             ExecSide::Sell => PfSide::Sell,
                         };
-                        let fill = Fill::new(intent.symbol.clone(), pf_side, intent.qty, fill_price, 0);
+                        let fill =
+                            Fill::new(intent.symbol.clone(), pf_side, intent.qty, fill_price, 0);
                         apply_fill(&mut self.portfolio, &fill);
                         self.fills.push(fill);
                     }
@@ -284,6 +398,7 @@ impl BacktestEngine {
             equity_curve: self.equity_curve.clone(),
             fills: self.fills.clone(),
             last_prices: self.last_prices.clone(),
+            execution_blocked: self.execution_blocked,
         })
     }
 
