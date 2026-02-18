@@ -120,6 +120,15 @@ impl IntegrityState {
     pub fn known_feeds(&self) -> BTreeSet<FeedId> {
         self.last_feed_tick.keys().cloned().collect()
     }
+
+    /// Single gate: returns true if execution must be blocked.
+    ///
+    /// This is the integration point for downstream consumers (backtest engine,
+    /// runtime order router, etc.) to check before submitting any new orders.
+    /// Blocked when integrity is disarmed OR halted.
+    pub fn is_execution_blocked(&self) -> bool {
+        self.disarmed || self.halted
+    }
 }
 
 /// Decision returned for each bar evaluation.

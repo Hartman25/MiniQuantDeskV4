@@ -3,8 +3,7 @@ use std::collections::BTreeMap;
 use mqk_backtest::BacktestReport;
 use mqk_portfolio::{Fill, Side};
 use mqk_promotion::{
-    pick_winner, select_best, Candidate, PromotionConfig, PromotionInput,
-    PromotionMetrics,
+    pick_winner, select_best, Candidate, PromotionConfig, PromotionInput, PromotionMetrics,
 };
 
 /// Helper: build a monotonically growing equity curve over N months.
@@ -67,8 +66,8 @@ fn tiebreak_equal_sharpe_lower_mdd_wins() {
     };
 
     let metrics_b = PromotionMetrics {
-        sharpe: 1.5,  // same Sharpe
-        mdd: 0.15,    // higher MDD => loses
+        sharpe: 1.5, // same Sharpe
+        mdd: 0.15,   // higher MDD => loses
         cagr: 0.20,
         profit_factor: 3.0,
         profitable_months_pct: 0.80,
@@ -119,6 +118,7 @@ fn select_best_picks_correct_winner() {
                     equity_curve: eq_1,
                     fills: make_profitable_fills(),
                     last_prices: BTreeMap::new(),
+                    execution_blocked: false,
                 },
             },
         },
@@ -132,6 +132,7 @@ fn select_best_picks_correct_winner() {
                     equity_curve: eq_2,
                     fills: vec![],
                     last_prices: BTreeMap::new(),
+                    execution_blocked: false,
                 },
             },
         },
@@ -145,6 +146,7 @@ fn select_best_picks_correct_winner() {
                     equity_curve: eq_3,
                     fills: make_profitable_fills(),
                     last_prices: BTreeMap::new(),
+                    execution_blocked: false,
                 },
             },
         },
