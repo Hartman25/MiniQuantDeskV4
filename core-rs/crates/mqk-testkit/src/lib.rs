@@ -66,3 +66,9 @@ pub fn run_parity_scenario_stub(_bars: &[Bar]) -> Result<ScenarioRunResult> {
 mod recovery;
 
 pub use recovery::{recover_outbox_against_broker, FakeBroker, RecoveryReport};
+
+pub mod orchestrator;
+pub mod paper_broker;
+
+pub use orchestrator::{Orchestrator, OrchestratorBar, OrchestratorConfig, OrchestratorReport};
+pub use paper_broker::PaperBroker as OrchestratorPaperBroker;

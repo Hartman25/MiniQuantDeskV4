@@ -17,6 +17,12 @@ mqk-artifacts = { path = "../mqk-artifacts" }
 mqk-config    = { path = "../mqk-config" }
 mqk-audit     = { path = "../mqk-audit" }
 mqk-db        = { path = "../mqk-db" }
+mqk-backtest  = { path = "../mqk-backtest" }
+mqk-integrity = { path = "../mqk-integrity" }
+mqk-strategy  = { path = "../mqk-strategy" }
+mqk-execution = { path = "../mqk-execution" }
+mqk-portfolio = { path = "../mqk-portfolio" }
+mqk-risk      = { path = "../mqk-risk" }
 
 sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "macros", "chrono", "uuid", "json"] }
 
