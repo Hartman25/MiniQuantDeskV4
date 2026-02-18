@@ -19,7 +19,12 @@ tempfile = "3"
 
 mqk-schemas = { path = "../mqk-schemas" }
 mqk-artifacts = { path = "../mqk-artifacts" }
+<<<<<<< HEAD
 mqk-db = { path = "../mqk-db" }
 
 [dev-dependencies]
 tokio.workspace = true
+=======
+mqk-config = { path = "../mqk-config" }
+mqk-audit = { path = "../mqk-audit" }
+>>>>>>> origin/claude/strange-burnell
