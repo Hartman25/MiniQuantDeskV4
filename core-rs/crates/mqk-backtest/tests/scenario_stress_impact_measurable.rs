@@ -34,10 +34,10 @@ fn make_bars() -> Vec<BacktestBar> {
             BacktestBar::new(
                 "SPY",
                 1_700_000_000 + (i + 1) * 60,
-                500_000_000,  // open
-                510_000_000,  // high
-                490_000_000,  // low
-                505_000_000,  // close
+                500_000_000, // open
+                510_000_000, // high
+                490_000_000, // low
+                505_000_000, // close
                 1000,
             )
         })
@@ -53,9 +53,7 @@ fn stress_slippage_worsens_equity() {
     base_cfg.stress = StressProfile { slippage_bps: 0 };
 
     let mut engine_base = BacktestEngine::new(base_cfg);
-    engine_base
-        .add_strategy(Box::new(FlipOnce::new()))
-        .unwrap();
+    engine_base.add_strategy(Box::new(FlipOnce::new())).unwrap();
     let base_report = engine_base.run(&bars).unwrap();
 
     // Stressed config: 200 bps slippage (2%)

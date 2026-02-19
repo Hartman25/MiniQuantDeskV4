@@ -131,7 +131,9 @@ pub enum ReconcileReason {
 /// Evidence of a mismatch (kept minimal but explicit).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReconcileDiff {
-    UnknownOrder { order_id: String },
+    UnknownOrder {
+        order_id: String,
+    },
 
     PositionQtyMismatch {
         symbol: String,

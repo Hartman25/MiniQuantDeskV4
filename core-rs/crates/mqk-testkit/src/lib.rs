@@ -23,7 +23,7 @@ pub fn load_bars_csv(path: &str) -> Result<Vec<Bar>> {
 
     // Minimal structural checks (expand later)
     for w in out.windows(2) {
-        if !(w[0].ts_close_utc < w[1].ts_close_utc) {
+        if w[0].ts_close_utc >= w[1].ts_close_utc {
             anyhow::bail!("bars not strictly increasing");
         }
     }

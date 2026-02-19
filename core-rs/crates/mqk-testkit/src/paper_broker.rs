@@ -39,6 +39,12 @@ pub struct PaperBroker {
     fills: Vec<BrokerFill>,
 }
 
+impl Default for PaperBroker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PaperBroker {
     pub fn new() -> Self {
         Self {

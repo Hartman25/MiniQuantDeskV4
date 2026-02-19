@@ -96,9 +96,15 @@ pub fn evaluate(cfg: &RiskConfig, st: &mut RiskState, inp: &RiskInput) -> RiskDe
                 kill_switch: Some(
                     KillSwitchEvent::new(KillSwitchType::Manual)
                         .with_evidence("type", "DAILY_LOSS_LIMIT")
-                        .with_evidence("day_start_equity_micros", st.day_start_equity_micros.to_string())
+                        .with_evidence(
+                            "day_start_equity_micros",
+                            st.day_start_equity_micros.to_string(),
+                        )
                         .with_evidence("equity_micros", inp.equity_micros.to_string())
-                        .with_evidence("daily_loss_limit_micros", cfg.daily_loss_limit_micros.to_string()),
+                        .with_evidence(
+                            "daily_loss_limit_micros",
+                            cfg.daily_loss_limit_micros.to_string(),
+                        ),
                 ),
             };
         }
@@ -118,7 +124,10 @@ pub fn evaluate(cfg: &RiskConfig, st: &mut RiskState, inp: &RiskInput) -> RiskDe
                         .with_evidence("type", "MAX_DRAWDOWN")
                         .with_evidence("peak_equity_micros", st.peak_equity_micros.to_string())
                         .with_evidence("equity_micros", inp.equity_micros.to_string())
-                        .with_evidence("max_drawdown_limit_micros", cfg.max_drawdown_limit_micros.to_string()),
+                        .with_evidence(
+                            "max_drawdown_limit_micros",
+                            cfg.max_drawdown_limit_micros.to_string(),
+                        ),
                 ),
             };
         }
@@ -133,7 +142,10 @@ pub fn evaluate(cfg: &RiskConfig, st: &mut RiskState, inp: &RiskInput) -> RiskDe
             kill_switch: Some(
                 KillSwitchEvent::new(KillSwitchType::RejectStorm)
                     .with_evidence("reject_window_id", st.reject_window_id.to_string())
-                    .with_evidence("reject_count_in_window", st.reject_count_in_window.to_string())
+                    .with_evidence(
+                        "reject_count_in_window",
+                        st.reject_count_in_window.to_string(),
+                    )
                     .with_evidence(
                         "reject_storm_max_rejects_in_window",
                         cfg.reject_storm_max_rejects_in_window.to_string(),

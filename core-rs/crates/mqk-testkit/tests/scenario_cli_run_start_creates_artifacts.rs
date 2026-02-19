@@ -9,8 +9,8 @@
 //! - config_hash in manifest matches what load_layered_yaml produces.
 
 use anyhow::Result;
-use mqk_artifacts::{InitRunArtifactsArgs, init_run_artifacts};
-use mqk_audit::{AuditWriter, verify_hash_chain, VerifyResult};
+use mqk_artifacts::{init_run_artifacts, InitRunArtifactsArgs};
+use mqk_audit::{verify_hash_chain, AuditWriter, VerifyResult};
 use mqk_config::load_layered_yaml_from_strings;
 use serde_json::json;
 use std::fs;
@@ -81,8 +81,14 @@ fn run_start_creates_artifacts_with_matching_config_hash() -> Result<()> {
 
     // 6. Verify all artifact placeholders exist
     let run_dir = &out.run_dir;
-    assert!(run_dir.join("audit.jsonl").exists(), "audit.jsonl placeholder");
-    assert!(run_dir.join("orders.csv").exists(), "orders.csv placeholder");
+    assert!(
+        run_dir.join("audit.jsonl").exists(),
+        "audit.jsonl placeholder"
+    );
+    assert!(
+        run_dir.join("orders.csv").exists(),
+        "orders.csv placeholder"
+    );
     assert!(run_dir.join("fills.csv").exists(), "fills.csv placeholder");
     assert!(
         run_dir.join("equity_curve.csv").exists(),

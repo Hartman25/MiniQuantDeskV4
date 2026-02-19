@@ -1,10 +1,10 @@
-use assert_cmd::prelude::*;
 use chrono::Utc;
 use uuid::Uuid;
 
 /// PATCH 16: `mqk run halt` must transition a run to HALTED in the DB.
 ///
 /// This test is DB-backed and is skipped if MQK_DATABASE_URL is not set.
+#[allow(deprecated)]
 #[tokio::test]
 async fn cli_halt_transitions_run_to_halted() -> anyhow::Result<()> {
     // Skip if no DB configured (local + CI friendly).

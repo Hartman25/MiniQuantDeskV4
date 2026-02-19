@@ -158,7 +158,10 @@ fn sell_fifo(pos: &mut PositionState, realized_pnl_micros: &mut i64, mut qty: i6
 ///
 /// Determinism invariant for PATCH 06:
 /// incremental apply_entry must match recompute_from_ledger on the same ledger stream.
-pub fn recompute_from_ledger(initial_cash_micros: i64, ledger: &[LedgerEntry]) -> (i64, i64, BTreeMap<String, PositionState>) {
+pub fn recompute_from_ledger(
+    initial_cash_micros: i64,
+    ledger: &[LedgerEntry],
+) -> (i64, i64, BTreeMap<String, PositionState>) {
     let mut cash = initial_cash_micros;
     let mut realized = 0i64;
     let mut positions: BTreeMap<String, PositionState> = BTreeMap::new();
@@ -177,7 +180,8 @@ pub fn recompute_from_ledger(initial_cash_micros: i64, ledger: &[LedgerEntry]) -
                         cash = cash.saturating_sub(f.fee_micros);
                     }
                     Side::Sell => {
-                        let proceeds = i128_to_i64_clamp(mul_qty_price_micros(f.qty, f.price_micros));
+                        let proceeds =
+                            i128_to_i64_clamp(mul_qty_price_micros(f.qty, f.price_micros));
                         cash = cash.saturating_add(proceeds);
                         cash = cash.saturating_sub(f.fee_micros);
                     }

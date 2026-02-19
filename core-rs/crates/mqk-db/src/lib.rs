@@ -2,16 +2,15 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{postgres::PgPoolOptions, PgPool};
 use sqlx::Row;
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
 
 pub const ENV_DB_URL: &str = "MQK_DATABASE_URL";
 
 /// Connect to Postgres using MQK_DATABASE_URL.
 pub async fn connect_from_env() -> Result<PgPool> {
-    let url = std::env::var(ENV_DB_URL)
-        .with_context(|| format!("missing env var {ENV_DB_URL}"))?;
+    let url = std::env::var(ENV_DB_URL).with_context(|| format!("missing env var {ENV_DB_URL}"))?;
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
@@ -421,11 +420,9 @@ pub async fn arm_preflight(pool: &PgPool, run_id: Uuid) -> Result<()> {
         }
     }
 
-
     // Patch 20 orchestration: after preflight passes, perform the arm transition.
     arm_run(pool, run_id).await
 }
-
 
 /// Arm a run: CREATED/STOPPED -> ARMED.
 pub async fn arm_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
@@ -541,7 +538,12 @@ pub async fn heartbeat_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     let r = fetch_run(pool, run_id).await?;
     match r.status {
         RunStatus::Running => {}
-        _ => return Err(anyhow!("heartbeat_run invalid state: {}", r.status.as_str())),
+        _ => {
+            return Err(anyhow!(
+                "heartbeat_run invalid state: {}",
+                r.status.as_str()
+            ))
+        }
     }
 
     sqlx::query(

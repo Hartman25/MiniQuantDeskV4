@@ -1,8 +1,8 @@
 use anyhow::Result;
 use serde_json::Value;
+use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
-use sqlx::PgPool;
 
 /// Minimal fake broker used ONLY for tests.
 /// Enforces idempotency by idempotency_key: repeated submit is treated as a no-op.

@@ -10,8 +10,8 @@
 //! - EngineStore mutations on one engine do not affect the other.
 
 use mqk_isolation::{
-    EngineId, EngineIsolation, EngineStore, enforce_allocation_cap_micros,
-    max_gross_exposure_allowed_micros, MICROS_SCALE,
+    enforce_allocation_cap_micros, max_gross_exposure_allowed_micros, EngineId, EngineIsolation,
+    EngineStore, MICROS_SCALE,
 };
 use serde_json::json;
 

@@ -13,7 +13,10 @@ use crate::PositionBook;
 ///   - delta < 0 => SELL -delta
 /// - Deterministic ordering by symbol (lexicographic)
 /// - No broker calls, no IO, no timestamps, no randomness
-pub fn targets_to_order_intents(current: &PositionBook, output: &StrategyOutput) -> ExecutionDecision {
+pub fn targets_to_order_intents(
+    current: &PositionBook,
+    output: &StrategyOutput,
+) -> ExecutionDecision {
     // Build a deterministic target map; last write wins if strategy emits duplicates.
     let mut targets: BTreeMap<String, i64> = BTreeMap::new();
     for t in &output.targets {

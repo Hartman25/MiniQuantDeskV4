@@ -1,5 +1,5 @@
 use mqk_portfolio::{
-    apply_entry, enforce_max_gross_exposure, Fill, LedgerEntry, PortfolioState, Side, marks,
+    apply_entry, enforce_max_gross_exposure, marks, Fill, LedgerEntry, PortfolioState, Side,
 };
 
 const M: i64 = 1_000_000;
@@ -9,8 +9,14 @@ fn scenario_multi_symbol_exposure_enforcement() {
     let mut pf = PortfolioState::new(100_000 * M);
 
     // Build positions via fills (ledger truth)
-    apply_entry(&mut pf, LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 10, 200 * M, 0)));
-    apply_entry(&mut pf, LedgerEntry::Fill(Fill::new("MSFT", Side::Buy, 10, 300 * M, 0)));
+    apply_entry(
+        &mut pf,
+        LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 10, 200 * M, 0)),
+    );
+    apply_entry(
+        &mut pf,
+        LedgerEntry::Fill(Fill::new("MSFT", Side::Buy, 10, 300 * M, 0)),
+    );
 
     // Marks: $200 and $300
     let marks = marks([("AAPL", 200 * M), ("MSFT", 300 * M)]);

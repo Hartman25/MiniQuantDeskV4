@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use crate::{
     BrokerSnapshot, LocalSnapshot, OrderSnapshot, ReconcileAction, ReconcileDiff, ReconcileReason,
     ReconcileReport,
@@ -11,7 +9,13 @@ fn push_reason_once(reasons: &mut Vec<ReconcileReason>, r: ReconcileReason) {
     }
 }
 
-fn compare_orders(order_id: &str, local: &OrderSnapshot, broker: &OrderSnapshot, diffs: &mut Vec<ReconcileDiff>, reasons: &mut Vec<ReconcileReason>) {
+fn compare_orders(
+    order_id: &str,
+    local: &OrderSnapshot,
+    broker: &OrderSnapshot,
+    diffs: &mut Vec<ReconcileDiff>,
+    reasons: &mut Vec<ReconcileReason>,
+) {
     // Symbol
     if local.symbol != broker.symbol {
         diffs.push(ReconcileDiff::OrderMismatch {
@@ -77,9 +81,8 @@ pub fn reconcile(local: &LocalSnapshot, broker: &BrokerSnapshot) -> ReconcileRep
     let mut diffs: Vec<ReconcileDiff> = Vec::new();
 
     // 1) Unknown broker orders
-    let local_ids: BTreeSet<&String> = local.orders.keys().collect();
     for order_id in broker.orders.keys() {
-        if !local_ids.contains(order_id) {
+        if !local.orders.contains_key(order_id) {
             diffs.push(ReconcileDiff::UnknownOrder {
                 order_id: order_id.clone(),
             });
@@ -94,12 +97,12 @@ pub fn reconcile(local: &LocalSnapshot, broker: &BrokerSnapshot) -> ReconcileRep
         }
         // NOTE: broker missing local order is not specified as HALT in your patch text.
         // We intentionally do NOT enforce it here to avoid false halts on broker retention windows.
-        // If you want it later, we add a policy flag in a separate patch.
+        // If you want it later, add a policy flag in a separate patch.
     }
 
     // 3) Position mismatches
     // Compare union of symbols deterministically.
-    let mut symbols: BTreeSet<String> = BTreeSet::new();
+    let mut symbols: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for s in local.positions.keys() {
         symbols.insert(s.clone());
     }

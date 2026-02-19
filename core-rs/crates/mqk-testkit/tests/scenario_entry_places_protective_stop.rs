@@ -250,10 +250,7 @@ fn entry_buy_appears_before_protective_stop_sell() -> Result<()> {
             && ev["payload"]["side"].as_str() == Some("SELL")
     });
 
-    assert!(
-        buy_fill_idx.is_some(),
-        "must have a BUY fill in audit log"
-    );
+    assert!(buy_fill_idx.is_some(), "must have a BUY fill in audit log");
     assert!(
         sell_fill_idx.is_some(),
         "must have a SELL fill in audit log"

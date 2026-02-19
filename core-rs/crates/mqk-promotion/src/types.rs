@@ -91,8 +91,7 @@ pub fn write_promotion_report_json(
 ) -> io::Result<PathBuf> {
     std::fs::create_dir_all(out_dir)?;
     let path = out_dir.join("promotion_report.json");
-    let json = serde_json::to_string_pretty(report)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(report).map_err(io::Error::other)?;
     std::fs::write(&path, json)?;
     Ok(path)
 }

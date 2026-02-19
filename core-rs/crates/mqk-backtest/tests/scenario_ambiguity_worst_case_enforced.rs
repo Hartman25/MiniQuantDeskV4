@@ -36,10 +36,10 @@ fn buy_fills_at_high_not_close() {
     let bars = vec![BacktestBar::new(
         "SPY",
         1_700_000_060,
-        500_000_000,   // open
-        high_micros,   // high
-        490_000_000,   // low
-        close_micros,  // close
+        500_000_000,  // open
+        high_micros,  // high
+        490_000_000,  // low
+        close_micros, // close
         1000,
     )];
 
@@ -94,8 +94,24 @@ fn sell_fills_at_low_not_close() {
     let close_micros = 505_000_000;
 
     let bars = vec![
-        BacktestBar::new("SPY", 1_700_000_060, 500_000_000, 510_000_000, low_micros, close_micros, 1000),
-        BacktestBar::new("SPY", 1_700_000_120, 505_000_000, 515_000_000, low_micros, 510_000_000, 1000),
+        BacktestBar::new(
+            "SPY",
+            1_700_000_060,
+            500_000_000,
+            510_000_000,
+            low_micros,
+            close_micros,
+            1000,
+        ),
+        BacktestBar::new(
+            "SPY",
+            1_700_000_120,
+            505_000_000,
+            515_000_000,
+            low_micros,
+            510_000_000,
+            1000,
+        ),
     ];
 
     let cfg = BacktestConfig::test_defaults();

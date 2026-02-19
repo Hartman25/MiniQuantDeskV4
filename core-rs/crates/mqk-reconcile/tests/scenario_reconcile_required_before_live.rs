@@ -9,9 +9,9 @@ fn scenario_reconcile_required_before_live() {
     let mut broker = BrokerSnapshot::empty();
     broker.positions.insert("SPY".to_string(), 9);
 
-    assert_eq!(is_clean_reconcile(&local, &broker), false);
+    assert!(!is_clean_reconcile(&local, &broker));
 
     // Clean reconcile => can arm
     broker.positions.insert("SPY".to_string(), 10);
-    assert_eq!(is_clean_reconcile(&local, &broker), true);
+    assert!(is_clean_reconcile(&local, &broker));
 }

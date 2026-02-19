@@ -168,6 +168,12 @@ pub struct EngineStore<T> {
     inner: BTreeMap<EngineId, T>,
 }
 
+impl<T> Default for EngineStore<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> EngineStore<T> {
     pub fn new() -> Self {
         Self {

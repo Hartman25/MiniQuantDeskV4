@@ -126,7 +126,7 @@ fn orchestrator_writes_audit_log_with_events() -> Result<()> {
 
     let content = fs::read_to_string(&audit_path)?;
     let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert!(lines.len() > 0, "audit log should have >0 records");
+    assert!(!lines.is_empty(), "audit log should have >0 records");
     assert!(report.audit_events > 0, "report should track audit events");
 
     // Each line should parse as valid JSON.

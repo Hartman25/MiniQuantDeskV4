@@ -106,6 +106,12 @@ pub struct IntegrityState {
     pub halted: bool,
 }
 
+impl Default for IntegrityState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IntegrityState {
     pub fn new() -> Self {
         Self {

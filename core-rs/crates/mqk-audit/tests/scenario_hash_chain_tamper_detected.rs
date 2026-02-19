@@ -7,7 +7,7 @@
 //! - Mutating line 3's payload in the file, then verifying, detects the break.
 //! - An untampered log verifies cleanly with correct line count.
 
-use mqk_audit::{AuditWriter, VerifyResult, verify_hash_chain};
+use mqk_audit::{verify_hash_chain, AuditWriter, VerifyResult};
 use serde_json::json;
 use uuid::Uuid;
 

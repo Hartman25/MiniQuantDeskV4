@@ -3,7 +3,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn crash_recovery_does_not_double_submit_when_broker_already_has_order() -> anyhow::Result<()> {
+async fn crash_recovery_does_not_double_submit_when_broker_already_has_order() -> anyhow::Result<()>
+{
     // Skip if no DB configured.
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
@@ -41,7 +42,8 @@ async fn crash_recovery_does_not_double_submit_when_broker_already_has_order() -
     let idempotency_key = format!("{run_id}_client_order_001");
     let order_json = json!({"symbol":"SPY","side":"BUY","qty":1});
 
-    let created = mqk_db::outbox_enqueue(&pool, run_id, &idempotency_key, order_json.clone()).await?;
+    let created =
+        mqk_db::outbox_enqueue(&pool, run_id, &idempotency_key, order_json.clone()).await?;
     assert!(created);
 
     // Simulate the "submit to broker" step happening…
@@ -57,8 +59,14 @@ async fn crash_recovery_does_not_double_submit_when_broker_already_has_order() -
     // "Restart" recovery: should see outbox row as SENT/unacked,
     // compare with broker state, and NOT resubmit.
     let report = mqk_testkit::recover_outbox_against_broker(&pool, run_id, &mut broker).await?;
-    assert_eq!(report.resubmitted, 0, "should not resubmit if broker already has order");
-    assert_eq!(report.acked, 1, "should mark ACKED when broker already has order");
+    assert_eq!(
+        report.resubmitted, 0,
+        "should not resubmit if broker already has order"
+    );
+    assert_eq!(
+        report.acked, 1,
+        "should mark ACKED when broker already has order"
+    );
     assert_eq!(broker.submit_count(), 1, "submit must remain exactly once");
 
     // DB should now show ACKED

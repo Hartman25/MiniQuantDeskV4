@@ -15,18 +15,11 @@ mod types;
 pub use accounting::{apply_entry, apply_fill, recompute_from_ledger};
 
 pub use metrics::{
-    compute_equity_micros,
-    compute_exposure_micros,
-    compute_unrealized_pnl_micros,
-    enforce_max_gross_exposure,
-    EquityMetrics,
-    ExposureBreach,
-    ExposureMetrics,
+    compute_equity_micros, compute_exposure_micros, compute_unrealized_pnl_micros,
+    enforce_max_gross_exposure, EquityMetrics, ExposureBreach, ExposureMetrics,
 };
 
-pub use types::{
-    CashEntry, Fill, LedgerEntry, Lot, PortfolioState, PositionState, Side,
-};
+pub use types::{CashEntry, Fill, LedgerEntry, Lot, PortfolioState, PositionState, Side};
 
 use std::collections::BTreeMap;
 

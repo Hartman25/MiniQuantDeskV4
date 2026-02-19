@@ -1,4 +1,3 @@
-use assert_cmd::prelude::*;
 use chrono::Utc;
 use predicates::prelude::*;
 use uuid::Uuid;
@@ -6,6 +5,7 @@ use uuid::Uuid;
 /// PATCH 16: `mqk run arm` must enforce manual confirmation for LIVE runs when configured.
 ///
 /// This test is DB-backed and is skipped if MQK_DATABASE_URL is not set.
+#[allow(deprecated)]
 #[tokio::test]
 async fn cli_arm_requires_confirmation_for_live() -> anyhow::Result<()> {
     // Skip if no DB configured (local + CI friendly).

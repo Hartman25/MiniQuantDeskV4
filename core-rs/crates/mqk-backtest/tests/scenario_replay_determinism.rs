@@ -34,10 +34,10 @@ fn make_bars() -> Vec<BacktestBar> {
             BacktestBar::new(
                 "SPY",
                 1_700_000_000 + (i + 1) * 60,
-                500_000_000,  // open
-                510_000_000,  // high
-                490_000_000,  // low
-                505_000_000,  // close
+                500_000_000, // open
+                510_000_000, // high
+                490_000_000, // low
+                505_000_000, // close
                 1000,
             )
         })
@@ -51,16 +51,12 @@ fn replay_determinism_identical_results() {
 
     // Run 1
     let mut engine1 = BacktestEngine::new(cfg.clone());
-    engine1
-        .add_strategy(Box::new(BuyHoldSell::new()))
-        .unwrap();
+    engine1.add_strategy(Box::new(BuyHoldSell::new())).unwrap();
     let report1 = engine1.run(&bars).unwrap();
 
     // Run 2
     let mut engine2 = BacktestEngine::new(cfg);
-    engine2
-        .add_strategy(Box::new(BuyHoldSell::new()))
-        .unwrap();
+    engine2.add_strategy(Box::new(BuyHoldSell::new())).unwrap();
     let report2 = engine2.run(&bars).unwrap();
 
     // Determinism: identical results

@@ -97,7 +97,8 @@ fn append_line(path: &Path, line: &str) -> Result<()> {
         .append(true)
         .open(path)
         .with_context(|| format!("open audit log {:?}", path))?;
-    f.write_all(line.as_bytes()).context("write audit line failed")?;
+    f.write_all(line.as_bytes())
+        .context("write audit line failed")?;
     f.write_all(b"\n").context("write newline failed")?;
     Ok(())
 }
@@ -107,7 +108,7 @@ fn append_line(path: &Path, line: &str) -> Result<()> {
 fn canonical_json_line<T: Serialize>(v: &T) -> Result<String> {
     let raw = serde_json::to_value(v).context("serialize audit event failed")?;
     let sorted = sort_keys(&raw);
-    Ok(serde_json::to_string(&sorted).context("json stringify failed")?)
+    serde_json::to_string(&sorted).context("json stringify failed")
 }
 
 fn sort_keys(v: &Value) -> Value {

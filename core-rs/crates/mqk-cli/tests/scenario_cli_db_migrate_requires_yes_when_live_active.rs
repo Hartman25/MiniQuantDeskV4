@@ -1,4 +1,3 @@
-use assert_cmd::prelude::*;
 use chrono::Utc;
 use predicates::prelude::*;
 use uuid::Uuid;
@@ -6,6 +5,7 @@ use uuid::Uuid;
 /// PATCH 17: `mqk db migrate` must refuse when there is a LIVE run in ARMED/RUNNING unless --yes.
 ///
 /// DB-backed test, skipped if MQK_DATABASE_URL is not set.
+#[allow(deprecated)]
 #[tokio::test]
 async fn cli_db_migrate_requires_yes_when_live_active() -> anyhow::Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {

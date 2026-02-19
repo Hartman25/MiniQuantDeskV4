@@ -9,9 +9,7 @@ mod engine;
 mod types;
 
 pub use engine::targets_to_order_intents;
-pub use types::{
-    ExecutionDecision, OrderIntent, Side, StrategyOutput, TargetPosition,
-};
+pub use types::{ExecutionDecision, OrderIntent, Side, StrategyOutput, TargetPosition};
 
 use std::collections::BTreeMap;
 

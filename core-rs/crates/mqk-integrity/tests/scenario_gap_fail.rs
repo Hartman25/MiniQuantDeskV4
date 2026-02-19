@@ -2,7 +2,11 @@ use mqk_integrity::*;
 
 #[test]
 fn scenario_gap_fail_when_tolerance_zero() {
-    let cfg = IntegrityConfig { gap_tolerance_bars: 0, stale_threshold_ticks: 0, enforce_feed_disagreement: false };
+    let cfg = IntegrityConfig {
+        gap_tolerance_bars: 0,
+        stale_threshold_ticks: 0,
+        enforce_feed_disagreement: false,
+    };
     let mut st = IntegrityState::new();
     let feed = FeedId::new("feedA");
     let tf = Timeframe::secs(60);

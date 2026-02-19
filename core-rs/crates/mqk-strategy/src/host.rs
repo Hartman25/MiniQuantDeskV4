@@ -42,11 +42,16 @@ impl StrategyHost {
     }
 
     pub fn spec(&self) -> Result<StrategySpec, StrategyHostError> {
-        self.spec.clone().ok_or(StrategyHostError::NoStrategyRegistered)
+        self.spec
+            .clone()
+            .ok_or(StrategyHostError::NoStrategyRegistered)
     }
 
     /// Run one bar evaluation. Validates timeframe and returns LIVE/SHADOW intents.
-    pub fn on_bar(&mut self, ctx: &StrategyContext) -> Result<StrategyBarResult, StrategyHostError> {
+    pub fn on_bar(
+        &mut self,
+        ctx: &StrategyContext,
+    ) -> Result<StrategyBarResult, StrategyHostError> {
         let spec = self.spec()?;
 
         if ctx.timeframe_secs != spec.timeframe_secs {

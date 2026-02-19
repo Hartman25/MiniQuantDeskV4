@@ -104,16 +104,15 @@ fn parse_audit_events(run_dir: &std::path::Path) -> Vec<serde_json::Value> {
 /// payload fields excluding order_id/fill_id which contain sequential IDs
 /// that are deterministic within a run but differ between runs due to
 /// separate Orchestrator instances).
-fn extract_broker_event_signatures(events: &[serde_json::Value]) -> Vec<(String, String, String, i64)> {
+fn extract_broker_event_signatures(
+    events: &[serde_json::Value],
+) -> Vec<(String, String, String, i64)> {
     events
         .iter()
         .filter(|ev| ev["topic"].as_str() == Some("broker"))
         .map(|ev| {
             let event_type = ev["event_type"].as_str().unwrap_or("").to_string();
-            let symbol = ev["payload"]["symbol"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
+            let symbol = ev["payload"]["symbol"].as_str().unwrap_or("").to_string();
             let side = ev["payload"]["side"].as_str().unwrap_or("").to_string();
             let qty = ev["payload"]["qty"].as_i64().unwrap_or(0);
             (event_type, symbol, side, qty)
@@ -277,14 +276,8 @@ fn determinism_fills_and_equity_curve_match_across_runs() -> Result<()> {
         .zip(report2.equity_curve.iter())
         .enumerate()
     {
-        assert_eq!(
-            ec1.0, ec2.0,
-            "equity curve timestamp mismatch at index {i}"
-        );
-        assert_eq!(
-            ec1.1, ec2.1,
-            "equity curve value mismatch at index {i}"
-        );
+        assert_eq!(ec1.0, ec2.0, "equity curve timestamp mismatch at index {i}");
+        assert_eq!(ec1.1, ec2.1, "equity curve value mismatch at index {i}");
     }
 
     // Bars processed must match.

@@ -35,7 +35,7 @@ fn scenario_shadow_mode_does_not_execute() {
     let r = host.on_bar(&ctx).unwrap();
 
     assert_eq!(r.intents.mode, IntentMode::Shadow);
-    assert_eq!(r.intents.should_execute(), false);
+    assert!(!r.intents.should_execute());
 
     // Strategy still produced outputs (for parity checks/logging).
     assert_eq!(r.intents.output.targets.len(), 1);

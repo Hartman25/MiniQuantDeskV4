@@ -40,13 +40,13 @@ async fn outbox_idempotency_key_dedupes_inserts() -> anyhow::Result<()> {
     let idem = format!("{run_id}_client_order_001");
 
     // First insert should create the row.
-    let created_1 = mqk_db::outbox_enqueue(&pool, run_id, &idem, json!({"symbol":"SPY","qty":1}))
-        .await?;
+    let created_1 =
+        mqk_db::outbox_enqueue(&pool, run_id, &idem, json!({"symbol":"SPY","qty":1})).await?;
     assert!(created_1, "expected first enqueue to create outbox row");
 
     // Second insert with same key should be deduped (no second row).
-    let created_2 = mqk_db::outbox_enqueue(&pool, run_id, &idem, json!({"symbol":"SPY","qty":1}))
-        .await?;
+    let created_2 =
+        mqk_db::outbox_enqueue(&pool, run_id, &idem, json!({"symbol":"SPY","qty":1})).await?;
     assert!(
         !created_2,
         "expected second enqueue to be deduped (no second row created)"

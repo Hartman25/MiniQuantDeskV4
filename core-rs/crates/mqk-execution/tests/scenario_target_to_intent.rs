@@ -6,9 +6,9 @@ use mqk_execution::{
 fn scenario_strategy_targets_convert_to_order_intents_deterministically() {
     // GIVEN current portfolio state (signed quantities)
     let current = position_book([
-        ("AAPL", 50),   // long 50
-        ("MSFT", 0),    // flat
-        ("TSLA", -10),  // short 10
+        ("AAPL", 50),  // long 50
+        ("MSFT", 0),   // flat
+        ("TSLA", -10), // short 10
     ]);
 
     // AND strategy outputs target positions (no direct orders)

@@ -137,7 +137,9 @@ fn unknown_broker_order_blocks_arming() {
     let report = reconcile(&local, &broker);
     assert_eq!(report.action, ReconcileAction::Halt);
     assert!(
-        report.reasons.contains(&ReconcileReason::UnknownBrokerOrder),
+        report
+            .reasons
+            .contains(&ReconcileReason::UnknownBrokerOrder),
         "should report UnknownBrokerOrder reason"
     );
 }
@@ -219,7 +221,9 @@ fn multiple_mismatches_all_reported() {
         "should contain PositionMismatch"
     );
     assert!(
-        report.reasons.contains(&ReconcileReason::UnknownBrokerOrder),
+        report
+            .reasons
+            .contains(&ReconcileReason::UnknownBrokerOrder),
         "should contain UnknownBrokerOrder"
     );
     assert!(

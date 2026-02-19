@@ -12,10 +12,7 @@ use crate::types::{
 // ============================================================================
 
 /// Evaluate a single candidate against promotion thresholds.
-pub fn evaluate_promotion(
-    config: &PromotionConfig,
-    input: &PromotionInput,
-) -> PromotionDecision {
+pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> PromotionDecision {
     let metrics = compute_metrics(input);
     let mut fail_reasons = Vec::new();
 
@@ -281,8 +278,8 @@ fn compute_sharpe_daily(eq: &[(i64, i64)]) -> f64 {
     }
 
     let mean = returns.iter().sum::<f64>() / returns.len() as f64;
-    let variance = returns.iter().map(|r| (r - mean) * (r - mean)).sum::<f64>()
-        / returns.len() as f64;
+    let variance =
+        returns.iter().map(|r| (r - mean) * (r - mean)).sum::<f64>() / returns.len() as f64;
     let std = variance.sqrt();
 
     if std <= 0.0 {

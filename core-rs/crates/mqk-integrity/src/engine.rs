@@ -32,7 +32,7 @@ pub fn tick_feed(
 
     // If stale threshold is set, enforce that *all known feeds* are fresh relative to now_tick.
     if cfg.stale_threshold_ticks > 0 {
-        for (_fid, last) in &st.last_feed_tick {
+        for last in st.last_feed_tick.values() {
             if now_tick.saturating_sub(*last) > cfg.stale_threshold_ticks {
                 st.disarmed = true;
                 return IntegrityDecision {
@@ -78,7 +78,7 @@ pub fn evaluate_bar(
     // Update feed freshness and enforce stale feed policy.
     st.last_feed_tick.insert(feed.clone(), now_tick);
     if cfg.stale_threshold_ticks > 0 {
-        for (_fid, last) in &st.last_feed_tick {
+        for last in st.last_feed_tick.values() {
             if now_tick.saturating_sub(*last) > cfg.stale_threshold_ticks {
                 st.disarmed = true;
                 return IntegrityDecision {
@@ -120,10 +120,7 @@ pub fn evaluate_bar(
 
     // 3) Feed disagreement detection (same BarKey, different fingerprint).
     if cfg.enforce_feed_disagreement {
-        let entry = st
-            .fingerprints
-            .entry(bar.key.clone())
-            .or_insert_with(Default::default);
+        let entry = st.fingerprints.entry(bar.key.clone()).or_default();
 
         entry.insert(feed.clone(), (bar.close_micros, bar.volume));
 

@@ -47,12 +47,19 @@ pub struct InitRunArtifactsResult {
 pub fn init_run_artifacts(args: InitRunArtifactsArgs<'_>) -> Result<InitRunArtifactsResult> {
     // exports/<run_id>/
     let run_dir = args.exports_root.join(args.run_id.to_string());
-    fs::create_dir_all(&run_dir).with_context(|| format!("create exports dir failed: {}", run_dir.display()))?;
+    fs::create_dir_all(&run_dir)
+        .with_context(|| format!("create exports dir failed: {}", run_dir.display()))?;
 
     // Create placeholder files if missing (do not overwrite existing).
     ensure_file_exists_with(&run_dir.join("audit.jsonl"), "")?;
-    ensure_file_exists_with(&run_dir.join("orders.csv"), "ts_utc,order_id,symbol,side,qty,order_type,limit_price,stop_price,status\n")?;
-    ensure_file_exists_with(&run_dir.join("fills.csv"), "ts_utc,fill_id,order_id,symbol,side,qty,price,fee\n")?;
+    ensure_file_exists_with(
+        &run_dir.join("orders.csv"),
+        "ts_utc,order_id,symbol,side,qty,order_type,limit_price,stop_price,status\n",
+    )?;
+    ensure_file_exists_with(
+        &run_dir.join("fills.csv"),
+        "ts_utc,fill_id,order_id,symbol,side,qty,price,fee\n",
+    )?;
     ensure_file_exists_with(&run_dir.join("equity_curve.csv"), "ts_utc,equity\n")?;
     ensure_file_exists_with(&run_dir.join("metrics.json"), "{}\n")?;
 
@@ -78,15 +85,20 @@ pub fn init_run_artifacts(args: InitRunArtifactsArgs<'_>) -> Result<InitRunArtif
 
     let manifest_path = run_dir.join("manifest.json");
     let json = serde_json::to_string_pretty(&manifest).context("serialize manifest failed")?;
-    fs::write(&manifest_path, format!("{json}\n")).with_context(|| format!("write manifest failed: {}", manifest_path.display()))?;
+    fs::write(&manifest_path, format!("{json}\n"))
+        .with_context(|| format!("write manifest failed: {}", manifest_path.display()))?;
 
-    Ok(InitRunArtifactsResult { run_dir, manifest_path })
+    Ok(InitRunArtifactsResult {
+        run_dir,
+        manifest_path,
+    })
 }
 
 fn ensure_file_exists_with(path: &Path, contents_if_create: &str) -> Result<()> {
     if path.exists() {
         return Ok(());
     }
-    fs::write(path, contents_if_create).with_context(|| format!("create placeholder failed: {}", path.display()))?;
+    fs::write(path, contents_if_create)
+        .with_context(|| format!("create placeholder failed: {}", path.display()))?;
     Ok(())
 }

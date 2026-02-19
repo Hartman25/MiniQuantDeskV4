@@ -1013,6 +1013,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mqk-broker-paper"
+version = "0.0.1"
+dependencies = [
+ "mqk-reconcile",
+]
+
+[[package]]
 name = "mqk-cli"
 version = "0.0.1"
 dependencies = [
@@ -1120,9 +1127,17 @@ dependencies = [
  "csv",
  "mqk-artifacts",
  "mqk-audit",
+ "mqk-backtest",
+ "mqk-broker-paper",
  "mqk-config",
  "mqk-db",
+ "mqk-execution",
+ "mqk-integrity",
+ "mqk-portfolio",
+ "mqk-reconcile",
+ "mqk-risk",
  "mqk-schemas",
+ "mqk-strategy",
  "serde",
  "serde_json",
  "sqlx",

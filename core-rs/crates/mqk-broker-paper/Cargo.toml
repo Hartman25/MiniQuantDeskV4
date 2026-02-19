@@ -1,0 +1,8 @@
+[package]
+name = "mqk-broker-paper"
+version = "0.0.1"
+edition = "2021"
+license = "Proprietary"
+
+[dependencies]
+mqk-reconcile = { path = "../mqk-reconcile" }

@@ -1,7 +1,7 @@
 // core-rs/crates/mqk-cli/src/main.rs
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
 use chrono::Utc;
+use clap::{Parser, Subcommand};
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
@@ -246,16 +246,17 @@ async fn main() -> Result<()> {
                 // Initialize run artifacts directory + manifest + placeholders.
                 // NOTE: CLI is run from core-rs/, so exports root is ../exports.
                 let exports_root = Path::new("../exports");
-                let _art = mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
-                    exports_root,
-                    schema_version: 1,
-                    run_id,
-                    engine_id: &engine,
-                    mode: &mode,
-                    git_hash: &git_hash,
-                    config_hash: &loaded.config_hash,
-                    host_fingerprint: &host_fp,
-                })?;
+                let _art =
+                    mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
+                        exports_root,
+                        schema_version: 1,
+                        run_id,
+                        engine_id: &engine,
+                        mode: &mode,
+                        git_hash: &git_hash,
+                        config_hash: &loaded.config_hash,
+                        host_fingerprint: &host_fp,
+                    })?;
 
                 println!("run_id={}", run_id);
                 println!("engine_id={}", engine);
@@ -329,7 +330,10 @@ async fn main() -> Result<()> {
                 println!("host_fingerprint={}", r.host_fingerprint);
             }
 
-            RunCmd::DeadmanCheck { run_id, ttl_seconds } => {
+            RunCmd::DeadmanCheck {
+                run_id,
+                ttl_seconds,
+            } => {
                 let pool = mqk_db::connect_from_env().await?;
                 let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
                 let expired = mqk_db::deadman_expired(&pool, run_uuid, ttl_seconds).await?;
@@ -339,7 +343,10 @@ async fn main() -> Result<()> {
                 );
             }
 
-            RunCmd::DeadmanEnforce { run_id, ttl_seconds } => {
+            RunCmd::DeadmanEnforce {
+                run_id,
+                ttl_seconds,
+            } => {
                 let pool = mqk_db::connect_from_env().await?;
                 let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
                 let halted = mqk_db::enforce_deadman_or_halt(&pool, run_uuid, ttl_seconds).await?;
@@ -444,9 +451,7 @@ fn host_fingerprint() -> String {
 }
 
 fn opt_dt(dt: &Option<chrono::DateTime<Utc>>) -> String {
-    dt.as_ref()
-        .map(|d| d.to_rfc3339())
-        .unwrap_or_else(|| "".to_string())
+    dt.as_ref().map(|d| d.to_rfc3339()).unwrap_or_default()
 }
 
 /// Enforce manual confirmation for LIVE arming when configured.
@@ -492,7 +497,7 @@ fn enforce_manual_confirmation_if_required(
             Value::String(s) => s.clone(),
             _ => "".to_string(),
         })
-        .unwrap_or_else(|| "".to_string());
+        .unwrap_or_default();
 
     let expected = fmt
         .replace("{account_last4}", account_last4)

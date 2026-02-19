@@ -2,7 +2,11 @@ use mqk_integrity::*;
 
 #[test]
 fn scenario_stale_feed_disarm() {
-    let cfg = IntegrityConfig { gap_tolerance_bars: 0, stale_threshold_ticks: 5, enforce_feed_disagreement: false };
+    let cfg = IntegrityConfig {
+        gap_tolerance_bars: 0,
+        stale_threshold_ticks: 5,
+        enforce_feed_disagreement: false,
+    };
     let mut st = IntegrityState::new();
 
     let feed_a = FeedId::new("feedA");
