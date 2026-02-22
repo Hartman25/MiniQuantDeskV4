@@ -1,121 +1,114 @@
-MiniQuantDeskV4
+# MiniQuantDeskV4 — Technical README
 
-MiniQuantDeskV4 is an architecture-first quantitative trading system designed to operate as a disciplined capital allocator with enforced integrity, deterministic replay, and strict risk boundaries.
+MiniQuantDeskV4 is a reliability-focused trading system built around:
+- deterministic backtesting + replay,
+- strict integrity/risk boundaries,
+- reconciliation gates for LIVE,
+- DB-enforced run lifecycle rules,
+- and scenario-driven validation.
 
-This version represents a ground-up reliability-focused rebuild with enforced lifecycle management, engine isolation, reconciliation guarantees, and scenario-driven validation.
+This file covers setup, DB, tests, and operational commands.
 
-Current System Status (as of PATCH 14)
+---
 
-All workspace tests are GREEN.
+## Current System Status (Current Repo State)
 
-Implemented and validated:
+Workspace tests are GREEN.
 
-Integrity Layer (PATCH 08)
+Implemented and validated (high level):
 
-No lookahead enforcement
+### Integrity (scenario-tested)
+- no-lookahead enforcement
+- incomplete bar rejection
+- gap detection (zero-tolerance supported)
+- stale feed disarm
+- feed disagreement halt
+- deadman-style halt scenarios
 
-Incomplete bar rejection
+### Reconciliation (scenario-tested)
+- LIVE can require reconcile before arming
+- drift detection halts
+- unknown broker orders halt
+- dirty reconcile blocks LIVE start
+- snapshot normalization adapter exists (`mqk-reconcile/src/snapshot_adapter.rs`)
 
-Gap fail (tolerance = 0)
+### Strategy Framework
+- plugin trait + host shape
+- guardrails for single-strategy/single-timeframe assumptions (where configured)
+- shadow mode support exists in the architecture
 
-Stale feed disarm
+### Execution Boundary
+- intent → order routing boundary exists
+- order_router is exported and test-covered
 
-Feed disagreement halt
+### Risk
+- allocation/exposure constraints tested
+- PDT helper module exists (`mqk-risk/src/pdt.rs`) with unit tests
 
-Broker Reconciliation (PATCH 09)
+### Deterministic Backtesting
+- event-sourced engine + deterministic replay
+- worst-case ambiguity fill logic
+- stress impact measurable
+- scenario-driven validation
 
-LIVE mode requires reconciliation before arming
+### Market Data Ingest
+- CSV ingest → canonical `md_bars` in Postgres
+- provider ingest → canonical `md_bars` in Postgres
+- Data Quality Gate reports produced for ingests
+- idempotency behaviors tested at ingest level
 
-Drift detection halts
+### Run Lifecycle Enforcement
+- explicit lifecycle: ARMED → RUNNING → STOPPED
+- DB uniqueness: one active LIVE run per engine
+- STOPPED exits active set
+- scenario tests validate exclusivity and lifecycle rules
 
-Unknown broker orders halt
+### Control Plane
+- daemon API provides status + lifecycle endpoints and SSE status stream
+- GUI can act as a control console over daemon endpoints
 
-Dirty reconcile prevents LIVE start
+---
 
-Strategy Framework (PATCH 10)
+## Repository Structure (core-rs)
 
-Strategy plugin trait + host
 
-Single strategy + single timeframe guards
-
-Shadow mode generates intents without execution
-
-Deterministic Backtesting (PATCH 11)
-
-Event-sourced backtest engine
-
-Deterministic replay
-
-Ambiguity worst-case enforced
-
-Stress impact measurable
-
-Scenario-based correctness validation
-
-Engine Isolation (PATCH 13)
-
-Allocation caps enforced per engine
-
-No cross-engine position bleed
-
-Isolation enforced at config + runtime + execution boundary
-
-Dedicated tests for cap enforcement
-
-Run Lifecycle Enforcement (PATCH 14)
-
-Explicit lifecycle: ARMED → RUNNING → STOPPED
-
-DB-level uniqueness: one active LIVE run per engine
-
-STOPPED exits active set at database constraint level
-
-Scenario test validates exclusivity
-
-System Guarantees
-
-The system enforces:
-
-One active LIVE run per engine (DB constraint)
-
-No execution without arming
-
-No LIVE without reconciliation
-
-Allocation caps at execution boundary
-
-Deterministic backtest replay
-
-Scenario-based correctness tests
-
-Risk guardrails on stale data, drift, feed disagreement, reject storms, PDT, and forced halts
-
-This is a risk-first architecture. Safety boundaries are enforced at multiple layers.
-
-Project Structure (core-rs)
+core-rs/
 crates/
-  mqk-integrity      → Market data integrity + guardrails
-  mqk-reconcile      → Broker reconciliation + drift detection
-  mqk-strategy       → Strategy plugin framework
-  mqk-execution      → Intent → order execution engine
-  mqk-risk           → Risk controls + kill switch logic
-  mqk-backtest       → Deterministic event-sourced backtesting
-  mqk-isolation      → Engine allocation isolation layer
-  mqk-db             → Run lifecycle + migrations
-  mqk-cli            → CLI entry point
+mqk-artifacts → run artifacts + reports
+mqk-audit → audit log/hash-chain primitives
+mqk-backtest → deterministic event-sourced backtesting
+mqk-cli → CLI entry point + operational commands
+mqk-config → layered config + deterministic hashing + unused-key guards
+mqk-daemon → HTTP/SSE control plane
+mqk-db → schema/migrations + run lifecycle + ingest persistence
+mqk-execution → intent → order boundary + order_router
+mqk-integrity → market data integrity + guardrails
+mqk-isolation → engine allocation isolation layer
+mqk-md → market data ingest/provider/normalization/quality
+mqk-portfolio → portfolio accounting + metrics (in progress in roadmap)
+mqk-promotion → promotion gate evaluator (thresholds + tie-breaks)
+mqk-reconcile → reconcile + drift detection + snapshot_adapter
+mqk-risk → risk controls + PDT helpers
+mqk-strategy → strategy plugin framework
+mqk-gui/ → GUI control console (React/Tauri)
 
-Prerequisites
 
-Rust (stable)
+---
 
-Docker
+## Prerequisites
 
-PostgreSQL 16 (via Docker recommended)
+- Rust (stable)
+- Docker
+- PostgreSQL 16 (Docker recommended)
+- Node.js (for GUI)
 
-Database Setup
+---
 
-Start PostgreSQL (example using Docker):
+## Database Setup
 
+Start PostgreSQL (example Docker):
+
+```powershell
 docker run --name mqk-postgres `
   -e POSTGRES_USER=mqk `
   -e POSTGRES_PASSWORD=mqk `
@@ -123,98 +116,131 @@ docker run --name mqk-postgres `
   -p 5432:5432 `
   -d postgres:16
 
-
 Create a dedicated test database (recommended):
 
 docker exec -it mqk-postgres psql -U mqk -d postgres -c "CREATE DATABASE mqk_v4_test;"
 
-
 Set environment variable (PowerShell):
 
 $env:MQK_DATABASE_URL = "postgres://mqk:mqk@localhost:5432/mqk_v4_test"
-
 Migrations
 
 Run database migrations via CLI:
 
+cd core-rs
 cargo run -p mqk-cli -- db migrate
 
+Migrations live under:
 
-This applies all migrations under:
-
-crates/mqk-db/migrations/
-
+core-rs/crates/mqk-db/migrations/
 Running Tests
 
 Full workspace:
 
-cargo test
+cd core-rs
+cargo test --workspace
 
+Targeted crates:
 
-DB-specific lifecycle test:
-
-cargo test -p mqk-db --test scenario_run_lifecycle_enforced
-
-
-Backtest scenarios:
-
+cargo test -p mqk-db
 cargo test -p mqk-backtest
+cargo test -p mqk-integrity
+cargo test -p mqk-reconcile
+cargo test -p mqk-risk
+cargo test -p mqk-execution
+cargo test -p mqk-md
 
-Backtesting
+Clippy (warnings as errors):
 
-Backtesting uses the event-sourced engine:
+cargo clippy --workspace --all-targets -- -D warnings
 
-Deterministic replay
+Format:
 
-Worst-case ambiguity fill logic
+cargo fmt
+Running the Daemon (Control Plane)
 
-Stress slippage measurable
+From core-rs/:
 
-To run backtest scenarios:
+cargo run -p mqk-daemon
 
-cargo test -p mqk-backtest
+Expected capabilities:
 
-CLI Usage
+status endpoint (includes integrity armed flag)
 
-Migrate database:
+lifecycle endpoints (start/stop/halt)
 
-cargo run -p mqk-cli -- db migrate
+integrity endpoints (arm/disarm)
 
+SSE status stream
 
-Additional CLI commands depend on configured modes and engines.
+(Exact host/port are set by daemon config; GUI assumes the daemon is reachable and streaming status.)
 
-Operational Safety Notes
+Running the GUI (Control Console)
 
-Always use a fresh test database for migrations.
+From core-rs/mqk-gui/:
 
-Never reuse a production DB after altering migration files.
+npm install
+npx tsc --noEmit
+npm run build
 
-LIVE requires reconciliation before arming.
+Dev mode (requires daemon reachable):
 
-STOPPED runs exit the LIVE-active uniqueness constraint.
+npm run tauri dev
 
-Allocation caps are enforced at execution boundary, not only at strategy layer.
+GUI behavior (current):
+
+connects to daemon SSE stream for live status
+
+polls status as fallback
+
+provides control buttons for start/stop/halt and arm/disarm
+
+shows an event log buffer
+
+Operational Safety Notes (Reality Check)
+
+This repo is in reliability hardening.
+
+Before any real-capital deployment, you must complete the live-safety roadmap:
+
+single authoritative run loop and choke-point submission path
+
+outbox-first idempotent broker submit discipline
+
+minimal OMS lifecycle state machine
+
+inbox apply idempotency proven (“insert → apply” atomic invariant)
+
+sticky disarm/deadman across restarts
+
+reconcile-before-arm plus periodic reconcile tick that hard-halts
+
+The ordered plan and definition-of-done lives in:
+
+MiniQuantDeskV4_Patch_By_Patch_Implementation_Plan.md
 
 Development Workflow
 
-Make change.
+Make one scoped change (one patch item).
 
-Add scenario test.
+Add/extend scenario test proving the invariant.
 
 Ensure:
 
-cargo test
+cargo fmt
 
+cargo test --workspace
 
-is GREEN.
+cargo clippy --workspace --all-targets -- -D warnings
 
-Commit with PATCH numbering.
-
-Push.
+Commit with patch label and short rationale.
 
 Status
 
 System is currently in reliability hardening phase.
-Patch tracker defines remaining work.
+Patch tracker / implementation plan defines remaining work.
 
-See: patch_tracker_updated.md
+
+---
+
+If you want, paste your **current repo root tree** (or just `ls` of `core-r

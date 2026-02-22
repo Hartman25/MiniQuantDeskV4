@@ -16,9 +16,12 @@
 mod engine;
 mod types;
 
+// OMS state machine — Patch L4.
+pub mod oms;
+
 // Crate-private: prevents external bypass.
-mod order_router;
 mod gateway;
+mod order_router;
 
 pub use engine::targets_to_order_intents;
 
