@@ -5,17 +5,27 @@ use mqk_config::{load_layered_yaml_from_strings, report_unused_keys, ConfigMode,
 /// Validates:
 /// 1) Unused keys are detected in WARN mode but do not error.
 /// 2) Unused keys cause failure in FAIL mode.
-/// 3) Keys under consumed prefixes are not flagged.
-/// 4) Deterministic ordering of unused pointers.
+/// 3) Keys that are known to be consumed in a mode are not flagged.
+/// 4) Exact-leaf consumption does NOT accidentally consume sibling keys.
+/// 5) Deterministic ordering of unused pointers.
+///
+/// IMPORTANT:
+/// The consumed-pointer registry must reflect what code ACTUALLY reads today.
+/// As of now, PAPER/BACKTEST consume only the minimal engine isolation keys.
 
 #[test]
 fn warn_mode_reports_unused_keys_without_error() {
     let yaml = r#"
-runtime:
-  mode: backtest
+engine:
+  engine_id: "MAIN"
 
-data:
-  timeframe: "1m"
+broker:
+  keys_env:
+    api_key: "ALPACA_API_KEY_MAIN"
+    api_secret: "ALPACA_API_SECRET_MAIN"
+
+risk:
+  max_gross_exposure: 1.0
 
 unused_section:
   foo: 123
@@ -25,7 +35,7 @@ unused_section:
     let loaded = load_layered_yaml_from_strings(&[yaml]).expect("config load must succeed");
 
     let report = report_unused_keys(
-        ConfigMode::Backtest,
+        ConfigMode::Paper,
         &loaded.config_json,
         UnusedKeyPolicy::Warn,
     )
@@ -33,7 +43,6 @@ unused_section:
 
     assert!(!report.is_clean(), "report should detect unused keys");
 
-    // Expect at least these leaf pointers.
     assert!(
         report
             .unused_leaf_pointers
@@ -52,8 +61,16 @@ unused_section:
 #[test]
 fn fail_mode_errors_on_unused_keys() {
     let yaml = r#"
-runtime:
-  mode: live
+engine:
+  engine_id: "MAIN"
+
+broker:
+  keys_env:
+    api_key: "ALPACA_API_KEY_MAIN"
+    api_secret: "ALPACA_API_SECRET_MAIN"
+
+risk:
+  max_gross_exposure: 1.0
 
 unused_section:
   foo: 1
@@ -76,19 +93,26 @@ unused_section:
 }
 
 #[test]
-fn consumed_prefix_covers_nested_keys() {
+fn only_consumed_keys_are_clean_in_paper_mode() {
+    // A config containing ONLY keys that are currently consumed in PAPER mode.
+    // This should produce a clean report.
     let yaml = r#"
+engine:
+  engine_id: "MAIN"
+
+broker:
+  keys_env:
+    api_key: "ALPACA_API_KEY_MAIN"
+    api_secret: "ALPACA_API_SECRET_MAIN"
+
 risk:
-  limits:
-    max_notional: 100000
-    max_positions: 5
+  max_gross_exposure: 1.0
 "#;
 
     let loaded = load_layered_yaml_from_strings(&[yaml]).expect("config load must succeed");
 
-    // In Backtest mode, "/risk" is consumed.
     let report = report_unused_keys(
-        ConfigMode::Backtest,
+        ConfigMode::Paper,
         &loaded.config_json,
         UnusedKeyPolicy::Warn,
     )
@@ -96,13 +120,59 @@ risk:
 
     assert!(
         report.is_clean(),
-        "risk subtree should be considered consumed in Backtest mode"
+        "config should be clean when it only uses consumed keys"
+    );
+}
+
+#[test]
+fn exact_leaf_consumption_does_not_consume_sibling_keys() {
+    // PAPER consumes /risk/max_gross_exposure.
+    // It must NOT treat /risk/max_gross_exposure_extra as consumed.
+    let yaml = r#"
+engine:
+  engine_id: "MAIN"
+
+broker:
+  keys_env:
+    api_key: "ALPACA_API_KEY_MAIN"
+    api_secret: "ALPACA_API_SECRET_MAIN"
+
+risk:
+  max_gross_exposure: 1.0
+  max_gross_exposure_extra: 999
+"#;
+
+    let loaded = load_layered_yaml_from_strings(&[yaml]).expect("config load must succeed");
+
+    let report = report_unused_keys(
+        ConfigMode::Paper,
+        &loaded.config_json,
+        UnusedKeyPolicy::Warn,
+    )
+    .expect("warn mode must not error");
+
+    assert!(
+        report
+            .unused_leaf_pointers
+            .contains(&"/risk/max_gross_exposure_extra".to_string()),
+        "sibling key must remain unused"
     );
 }
 
 #[test]
 fn deterministic_unused_pointer_ordering() {
     let yaml = r#"
+engine:
+  engine_id: "MAIN"
+
+broker:
+  keys_env:
+    api_key: "ALPACA_API_KEY_MAIN"
+    api_secret: "ALPACA_API_SECRET_MAIN"
+
+risk:
+  max_gross_exposure: 1.0
+
 unused:
   b: 2
   a: 1
@@ -111,7 +181,7 @@ unused:
     let loaded = load_layered_yaml_from_strings(&[yaml]).expect("config load must succeed");
 
     let report = report_unused_keys(
-        ConfigMode::Backtest,
+        ConfigMode::Paper,
         &loaded.config_json,
         UnusedKeyPolicy::Warn,
     )

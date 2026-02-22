@@ -68,7 +68,7 @@ mod recovery;
 pub use recovery::{recover_outbox_against_broker, FakeBroker, RecoveryReport};
 
 pub mod orchestrator;
-pub mod paper_broker;
 
-pub use orchestrator::{Orchestrator, OrchestratorBar, OrchestratorConfig, OrchestratorReport};
-pub use paper_broker::PaperBroker as OrchestratorPaperBroker;
+pub use orchestrator::{
+    Orchestrator, OrchestratorBar, OrchestratorConfig, OrchestratorReport, OrchestratorRunMeta,
+};
