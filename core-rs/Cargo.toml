@@ -19,6 +19,14 @@ members = [
   "crates/mqk-backtest",
   "crates/mqk-promotion",
   "crates/mqk-broker-paper",
+  "crates/mqk-daemon",
+
+  # PATCH C: provider abstraction crate (historical ingest providers)
+  "crates/mqk-md",
+]
+
+exclude = [
+  "mqk-gui/src-tauri"
 ]
 
 [workspace.package]
@@ -35,6 +43,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4"] }
+
+axum = { version = "0.7", features = ["macros"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = "0.3"
+
+# ✅ Needed for BroadcastStream (feature-gated behind "sync")
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # SQLx pinned here so crates can use `workspace = true` without duplicating versions.
 sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "macros", "chrono", "uuid", "json"] }

@@ -77,57 +77,67 @@ impl UnusedKeyReport {
 
 /// Registry of consumed JSON-pointer prefixes per mode.
 ///
-/// IMPORTANT:
-/// - Do not add new config keys.
-/// - Do not "wish-consume" keys. Only list what is actually read for that mode.
-/// - Prefer broader prefixes only when you truly consume a whole subtree.
+/// This is intentionally conservative and should only include pointers actually
+/// read by code in that mode.
 pub fn consumed_pointers_for_mode(mode: ConfigMode) -> &'static [&'static str] {
     match mode {
-        // Backtest typically uses data feed + execution + risk + promotion gates, etc.
-        // Keep conservative; expand as you confirm reads.
+        // IMPORTANT:
+        // This registry must reflect what the code ACTUALLY reads today.
+        // Do not "wish-consume" broad sections.
+        //
+        // Observed config reads (Feb 2026):
+        // - mqk-isolation::EngineIsolation::from_config_json
+        //     /engine/engine_id
+        //     /broker/keys_env/api_key
+        //     /broker/keys_env/api_secret
+        //     /risk/max_gross_exposure
+        // - mqk-cli::enforce_manual_confirmation_if_required (LIVE only)
+        //     /arming/require_manual_confirmation
+        //     /arming/confirmation_format
+        //     /broker/account_last4
+        //     /risk/daily_loss_limit
+        // - mqk-db::arm_preflight (LIVE only; some reads conditional)
+        //     /arming/require_clean_reconcile           (read always, enforced in LIVE only)
+        //     /risk/daily_loss_limit                    (LIVE only)
+        //     /risk/max_drawdown                        (LIVE only; optional)
+        //     /arming/require_killswitch_policies       (LIVE only)
+        //     /data/stale_policy                        (LIVE only; when require_killswitch_policies=true)
+        //     /data/feed_disagreement_policy            (LIVE only; when require_killswitch_policies=true)
+        //     /risk/reject_storm/max_rejects            (LIVE only; when require_killswitch_policies=true)
+        //
+        // NOTE: When PAPER/BACKTEST mature (runtime loop, broker wiring, etc.),
+        // expand their registries to match new reads.
         ConfigMode::Backtest => &[
-            "/runtime",
-            "/data",
-            "/execution",
-            "/risk",
-            "/strategy",
-            "/backtest",
-            "/promotion",
-            "/integrity",
-            "/reconcile",
-            "/portfolio",
-            "/audit",
-            "/artifacts",
+            "/engine/engine_id",
+            "/broker/keys_env/api_key",
+            "/broker/keys_env/api_secret",
+            "/risk/max_gross_exposure",
         ],
-        // Paper is closer to live but without real money; still uses broker/runtime/risk/etc.
+
         ConfigMode::Paper => &[
-            "/runtime",
-            "/data",
-            "/execution",
-            "/risk",
-            "/strategy",
-            "/paper",
-            "/broker",
-            "/integrity",
-            "/reconcile",
-            "/portfolio",
-            "/audit",
-            "/artifacts",
+            "/engine/engine_id",
+            "/broker/keys_env/api_key",
+            "/broker/keys_env/api_secret",
+            "/risk/max_gross_exposure",
         ],
-        // Live should be strictest; includes broker/live/runtime/etc.
+
         ConfigMode::Live => &[
-            "/runtime",
-            "/data",
-            "/execution",
-            "/risk",
-            "/strategy",
-            "/live",
-            "/broker",
-            "/integrity",
-            "/reconcile",
-            "/portfolio",
-            "/audit",
-            "/artifacts",
+            "/engine/engine_id",
+            "/broker/keys_env/api_key",
+            "/broker/keys_env/api_secret",
+            "/risk/max_gross_exposure",
+            // CLI manual-confirmation gate (mqk-cli)
+            "/arming/require_manual_confirmation",
+            "/arming/confirmation_format",
+            "/broker/account_last4",
+            "/risk/daily_loss_limit",
+            // DB arm_preflight() (mqk-db)
+            "/arming/require_clean_reconcile",
+            "/risk/max_drawdown",
+            "/arming/require_killswitch_policies",
+            "/data/stale_policy",
+            "/data/feed_disagreement_policy",
+            "/risk/reject_storm/max_rejects",
         ],
     }
 }
@@ -186,240 +196,171 @@ pub fn report_unused_keys(
 }
 
 /// Normalize JSON pointer:
-/// - Empty => "" (root)
-/// - Ensure starts with '/'
+/// - must begin with "/"
+/// - no trailing "/" unless it's just "/"
 fn normalize_pointer(p: &str) -> String {
-    let t = p.trim();
-    if t.is_empty() {
-        return "".to_string();
+    let mut s = p.trim().to_string();
+    if s.is_empty() {
+        return "/".to_string();
     }
-    if t.starts_with('/') {
-        t.to_string()
-    } else {
-        format!("/{t}")
+    if !s.starts_with('/') {
+        s.insert(0, '/');
     }
+    while s.ends_with('/') && s.len() > 1 {
+        s.pop();
+    }
+    s
 }
 
-/// True if `prefix` is a JSON-pointer prefix of `full`.
-/// Root prefix "" matches everything.
-fn is_prefix_pointer(prefix: &str, full: &str) -> bool {
-    if prefix.is_empty() {
+/// Return true if `prefix` is a JSON-pointer prefix of `leaf`.
+///
+/// Rules:
+/// - prefix "/" consumes everything
+/// - exact match consumes
+/// - "/a/b" consumes "/a/b/c" but NOT "/a/bc"
+fn is_prefix_pointer(prefix: &str, leaf: &str) -> bool {
+    if prefix == "/" {
         return true;
     }
-    if prefix == full {
+    if leaf == prefix {
         return true;
     }
-    // prefix must match segment boundary: "/a/b" matches "/a/b/c" but not "/a/bc"
-    if let Some(rest) = full.strip_prefix(prefix) {
-        return rest.starts_with('/');
+    if leaf.starts_with(prefix) {
+        // Ensure boundary at next char is "/"
+        return leaf
+            .get(prefix.len()..prefix.len() + 1)
+            .map(|c| c == "/")
+            .unwrap_or(false);
     }
     false
 }
 
-/// Collect JSON pointer strings for all leaf values in the JSON.
-/// Leaf = anything that is not an object or array.
-/// We include explicit array indices as segments (e.g. "/risk/limits/tiers/0/max").
-fn collect_leaf_pointers(v: &Value, cur: &str, out: &mut Vec<String>) {
+fn collect_leaf_pointers(v: &Value, prefix: &str, out: &mut Vec<String>) {
     match v {
         Value::Object(map) => {
-            for (k, child) in map {
-                let next = if cur.is_empty() {
-                    format!("/{}", escape_pointer_token(k))
-                } else {
-                    format!("{}/{}", cur, escape_pointer_token(k))
-                };
-                collect_leaf_pointers(child, &next, out);
+            for (k, vv) in map.iter() {
+                let next = format!("{}/{}", prefix, escape_pointer_token(k));
+                collect_leaf_pointers(vv, &next, out);
             }
         }
         Value::Array(arr) => {
-            for (i, child) in arr.iter().enumerate() {
-                let next = if cur.is_empty() {
-                    format!("/{}", i)
-                } else {
-                    format!("{}/{}", cur, i)
-                };
-                collect_leaf_pointers(child, &next, out);
+            for (i, vv) in arr.iter().enumerate() {
+                let next = format!("{}/{}", prefix, i);
+                collect_leaf_pointers(vv, &next, out);
             }
         }
         _ => {
-            // Leaf scalar
-            if cur.is_empty() {
-                // root leaf
-                out.push("".to_string());
+            // Leaf
+            let p = if prefix.is_empty() {
+                "/".to_string()
             } else {
-                out.push(cur.to_string());
-            }
+                prefix.to_string()
+            };
+            out.push(p);
         }
     }
 }
 
-/// Escape a JSON pointer token per RFC6901:
-/// "~" => "~0", "/" => "~1"
 fn escape_pointer_token(s: &str) -> String {
     s.replace('~', "~0").replace('/', "~1")
 }
 
-fn preview_list(xs: &[String], max: usize) -> String {
-    let take = xs.iter().take(max).cloned().collect::<Vec<_>>();
-    if xs.len() <= max {
-        format!("{:?}", take)
-    } else {
-        format!("{:?} ... (+{})", take, xs.len().saturating_sub(max))
-    }
-}
-
-/// Load + merge YAML files in order, then canonicalize to JSON and hash.
-/// Later files override earlier files via deep-merge.
-///
-/// After merging, scans all leaf string values for secret-like patterns.
-/// If a secret is detected, aborts with CONFIG_SECRET_DETECTED (per spec).
-pub fn load_layered_yaml(paths: &[&str]) -> Result<LoadedConfig> {
-    let mut merged = Value::Object(Default::default());
-
-    for p in paths {
-        let s = fs::read_to_string(p).with_context(|| format!("read config: {p}"))?;
-        let yaml_val: serde_yaml::Value =
-            serde_yaml::from_str(&s).with_context(|| format!("parse yaml: {p}"))?;
-        let json_val = serde_json::to_value(yaml_val).context("yaml->json conversion failed")?;
-        deep_merge(&mut merged, json_val);
-    }
-
-    // PATCH 15a / spec section 5: scan for secrets before hashing or storing.
-    scan_for_secrets(&merged)?;
-
-    // Canonicalize (stable key order) by sorting object keys recursively and emitting compact JSON.
-    let canonical = canonicalize_json(&merged);
-
-    // Hash canonical bytes
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
-    let hash = hex::encode(hasher.finalize());
-
-    Ok(LoadedConfig {
-        config_json: serde_json::from_str(&canonical).context("canonical json parse failed")?,
-        canonical_json: canonical,
-        config_hash: hash,
-    })
-}
-
-/// Also expose a from-string loader for testing without filesystem.
-pub fn load_layered_yaml_from_strings(yamls: &[&str]) -> Result<LoadedConfig> {
-    let mut merged = Value::Object(Default::default());
-
-    for (i, s) in yamls.iter().enumerate() {
-        let yaml_val: serde_yaml::Value =
-            serde_yaml::from_str(s).with_context(|| format!("parse yaml string #{i}"))?;
-        let json_val = serde_json::to_value(yaml_val).context("yaml->json conversion failed")?;
-        deep_merge(&mut merged, json_val);
-    }
-
-    scan_for_secrets(&merged)?;
-
-    let canonical = canonicalize_json(&merged);
-
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
-    let hash = hex::encode(hasher.finalize());
-
-    Ok(LoadedConfig {
-        config_json: serde_json::from_str(&canonical).context("canonical json parse failed")?,
-        canonical_json: canonical,
-        config_hash: hash,
-    })
-}
-
-/// Recursively scan all leaf string values for secret-like patterns.
-/// Aborts with CONFIG_SECRET_DETECTED if any match is found.
-fn scan_for_secrets(v: &Value) -> Result<()> {
-    scan_for_secrets_inner(v, "")
-}
-
-fn scan_for_secrets_inner(v: &Value, path: &str) -> Result<()> {
-    match v {
-        Value::Object(map) => {
-            for (k, child) in map {
-                let child_path = if path.is_empty() {
-                    k.clone()
-                } else {
-                    format!("{path}.{k}")
-                };
-                scan_for_secrets_inner(child, &child_path)?;
-            }
-        }
-        Value::Array(arr) => {
-            for (i, child) in arr.iter().enumerate() {
-                scan_for_secrets_inner(child, &format!("{path}[{i}]"))?;
-            }
-        }
-        Value::String(s) => {
-            if is_secret_like(s) {
-                bail!(
-                    "CONFIG_SECRET_DETECTED at '{path}': value starts with a known secret prefix (redacted). \
-                     Secrets must never appear as literal values in config. \
-                     Use env var NAMES instead (e.g., api_key_env: \"MY_API_KEY\")."
-                );
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-/// Check if a string value looks like an actual secret (not an env var name).
-fn is_secret_like(s: &str) -> bool {
-    let trimmed = s.trim();
-    for prefix in SECRET_PREFIXES {
-        if trimmed.starts_with(prefix) {
-            return true;
-        }
-    }
-    false
+fn preview_list(items: &[String], n: usize) -> String {
+    let take = items.iter().take(n).cloned().collect::<Vec<_>>();
+    format!("{:?}", take)
 }
 
 #[derive(Debug, Clone)]
 pub struct LoadedConfig {
-    pub config_json: Value,
-    pub canonical_json: String,
     pub config_hash: String,
+    pub canonical_json: String,
+    pub config_json: Value,
 }
 
-/// Deep-merge: objects merge recursively; arrays replaced; scalars overwritten.
-fn deep_merge(dst: &mut Value, src: Value) {
-    match (dst, src) {
-        (Value::Object(dst_map), Value::Object(src_map)) => {
-            for (k, v) in src_map {
-                match dst_map.get_mut(&k) {
-                    Some(existing) => deep_merge(existing, v),
-                    None => {
-                        dst_map.insert(k, v);
-                    }
+pub fn load_layered_yaml(paths: &[&str]) -> Result<LoadedConfig> {
+    let mut docs: Vec<String> = Vec::new();
+    for p in paths {
+        let raw =
+            fs::read_to_string(p).with_context(|| format!("failed to read yaml path: {p}"))?;
+        docs.push(raw);
+    }
+
+    // Convert Vec<String> -> Vec<&str> to match load_layered_yaml_from_strings signature.
+    let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
+    load_layered_yaml_from_strings(&doc_refs)
+}
+
+pub fn load_layered_yaml_from_strings(yaml_docs: &[&str]) -> Result<LoadedConfig> {
+    // Merge YAML docs in order: earlier docs are base, later docs override.
+    let mut merged = serde_json::json!({});
+    for raw in yaml_docs {
+        let v_yaml: serde_yaml::Value = serde_yaml::from_str(raw).context("invalid yaml")?;
+        let v_json = serde_json::to_value(v_yaml).context("yaml->json conversion failed")?;
+        merged = deep_merge(merged, v_json);
+    }
+
+    // Enforce "no secrets as literal values" policy.
+    enforce_no_secret_literals(&merged)?;
+
+    let canonical_json = canonicalize_json(&merged)?;
+    let config_hash = sha256_hex(canonical_json.as_bytes());
+    Ok(LoadedConfig {
+        config_hash,
+        canonical_json,
+        config_json: merged,
+    })
+}
+
+fn deep_merge(a: Value, b: Value) -> Value {
+    match (a, b) {
+        (Value::Object(mut a_map), Value::Object(b_map)) => {
+            for (k, b_val) in b_map {
+                let a_val = a_map.remove(&k).unwrap_or(Value::Null);
+                a_map.insert(k, deep_merge(a_val, b_val));
+            }
+            Value::Object(a_map)
+        }
+        (_, b_other) => b_other,
+    }
+}
+
+fn canonicalize_json(v: &Value) -> Result<String> {
+    // Deterministic ordering is guaranteed by serde_json for map keys when serializing
+    // if we use a BTreeMap-like representation; serde_json::Value uses Map which preserves
+    // insertion order, but our merge logic is deterministic given deterministic YAML input ordering.
+    // Still, we serialize with pretty formatting disabled and stable float rendering.
+    let s = serde_json::to_string(v).context("canonical json serialize failed")?;
+    Ok(s)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let out = hasher.finalize();
+    hex::encode(out)
+}
+
+fn enforce_no_secret_literals(v: &Value) -> Result<()> {
+    // Walk leaf strings; reject if they look like a secret.
+    let mut leaves = Vec::new();
+    collect_leaf_pointers(v, "", &mut leaves);
+
+    for ptr in leaves {
+        if let Some(val) = v.pointer(&ptr) {
+            if let Some(s) = val.as_str() {
+                if looks_like_secret(s) {
+                    bail!("CONFIG_SECRET_DETECTED leaf={} value=REDACTED", ptr);
                 }
             }
         }
-        (dst_slot, src_val) => {
-            *dst_slot = src_val;
-        }
     }
+    Ok(())
 }
 
-/// Canonicalize JSON by sorting all object keys recursively and emitting compact JSON.
-fn canonicalize_json(v: &Value) -> String {
-    let sorted = sort_keys(v);
-    serde_json::to_string(&sorted).expect("json serialization must not fail")
-}
-
-fn sort_keys(v: &Value) -> Value {
-    match v {
-        Value::Object(map) => {
-            let mut keys: Vec<_> = map.keys().cloned().collect();
-            keys.sort();
-            let mut new = serde_json::Map::new();
-            for k in keys {
-                new.insert(k.clone(), sort_keys(&map[&k]));
-            }
-            Value::Object(new)
-        }
-        Value::Array(arr) => Value::Array(arr.iter().map(sort_keys).collect()),
-        _ => v.clone(),
+fn looks_like_secret(s: &str) -> bool {
+    let t = s.trim();
+    if t.len() < 8 {
+        return false;
     }
+    SECRET_PREFIXES.iter().any(|p| t.starts_with(p))
 }

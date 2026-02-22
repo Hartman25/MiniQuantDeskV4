@@ -8,6 +8,19 @@ use uuid::Uuid;
 
 pub const ENV_DB_URL: &str = "MQK_DATABASE_URL";
 
+// -----------------------------
+// Backtest Market Data (Patch A/B/C)
+// -----------------------------
+// PATCH B/C: expose md module + re-export ingest/report types at crate root
+pub mod md;
+
+pub use md::{
+    CoverageTotals, GroupStats, IngestCsvArgs, IngestProviderBarsArgs, IngestResult,
+    MdQualityReport, ProviderBar,
+};
+
+pub use md::{ingest_csv_to_md_bars, ingest_provider_bars_to_md_bars};
+
 /// Connect to Postgres using MQK_DATABASE_URL.
 pub async fn connect_from_env() -> Result<PgPool> {
     let url = std::env::var(ENV_DB_URL).with_context(|| format!("missing env var {ENV_DB_URL}"))?;
