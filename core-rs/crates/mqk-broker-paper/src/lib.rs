@@ -119,6 +119,7 @@ impl PaperBroker {
         let snap = BrokerSnapshot {
             orders: self.orders.clone(),
             positions: self.positions.clone(),
+            fetched_at_ms: 0,
         };
         (msg, snap)
     }

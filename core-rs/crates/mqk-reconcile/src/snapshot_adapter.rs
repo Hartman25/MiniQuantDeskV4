@@ -130,12 +130,23 @@ pub struct RawBrokerPosition {
 ///
 /// Callers construct this from `serde_json::from_str` / `serde_json::from_value`
 /// after fetching the broker endpoint.
+///
+/// `fetched_at_ms` should be set by the caller to the epoch-millisecond
+/// timestamp at which the broker response was received.  It is forwarded
+/// verbatim to [`BrokerSnapshot::fetched_at_ms`] and consumed by the
+/// [`crate::SnapshotWatermark`] for monotonicity enforcement (Patch L8).
+/// Existing JSON payloads that lack this field will deserialize with `0`
+/// (the `#[serde(default)]` ensures backward compatibility).
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawBrokerSnapshot {
     /// All open/working (and optionally recent) orders visible at the broker.
     pub orders: Vec<RawBrokerOrder>,
     /// Current positions visible at the broker.
     pub positions: Vec<RawBrokerPosition>,
+    /// Epoch-milliseconds when the broker HTTP response was received.
+    /// Defaults to `0` (no timestamp) when missing in JSON.
+    #[serde(default)]
+    pub fetched_at_ms: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +239,8 @@ fn normalize_order(raw: RawBrokerOrder) -> Result<OrderSnapshot, SnapshotAdapter
 /// For a lenient variant that skips invalid orders instead of failing, see
 /// [`normalize_lenient`].
 pub fn normalize(raw: RawBrokerSnapshot) -> Result<BrokerSnapshot, SnapshotAdapterError> {
+    let fetched_at_ms = raw.fetched_at_ms;
+
     let mut orders: BTreeMap<String, OrderSnapshot> = BTreeMap::new();
     for raw_order in raw.orders {
         let snap = normalize_order(raw_order)?;
@@ -242,7 +255,11 @@ pub fn normalize(raw: RawBrokerSnapshot) -> Result<BrokerSnapshot, SnapshotAdapt
         }
     }
 
-    Ok(BrokerSnapshot { orders, positions })
+    Ok(BrokerSnapshot {
+        orders,
+        positions,
+        fetched_at_ms,
+    })
 }
 
 /// Lenient variant: skip malformed orders rather than failing.
@@ -251,6 +268,8 @@ pub fn normalize(raw: RawBrokerSnapshot) -> Result<BrokerSnapshot, SnapshotAdapt
 /// warnings rather than hard errors.  The caller receives both the partial
 /// snapshot and a list of errors for any skipped orders.
 pub fn normalize_lenient(raw: RawBrokerSnapshot) -> (BrokerSnapshot, Vec<SnapshotAdapterError>) {
+    let fetched_at_ms = raw.fetched_at_ms;
+
     let mut orders: BTreeMap<String, OrderSnapshot> = BTreeMap::new();
     let mut errors: Vec<SnapshotAdapterError> = Vec::new();
 
@@ -271,7 +290,14 @@ pub fn normalize_lenient(raw: RawBrokerSnapshot) -> (BrokerSnapshot, Vec<Snapsho
         }
     }
 
-    (BrokerSnapshot { orders, positions }, errors)
+    (
+        BrokerSnapshot {
+            orders,
+            positions,
+            fetched_at_ms,
+        },
+        errors,
+    )
 }
 
 /// Deserialize a JSON string directly into a [`BrokerSnapshot`].
@@ -437,6 +463,7 @@ mod tests {
         let raw = RawBrokerSnapshot {
             orders: vec![],
             positions: vec![],
+            fetched_at_ms: 0,
         };
         let snap = normalize(raw).unwrap();
         assert!(snap.orders.is_empty());
@@ -457,6 +484,7 @@ mod tests {
                     qty_signed: -50,
                 },
             ],
+            fetched_at_ms: 0,
         };
         let snap = normalize(raw).unwrap();
         assert_eq!(snap.positions["AAPL"], 100);
@@ -471,6 +499,7 @@ mod tests {
                 make_raw_order("", "TSLA", "sell", 50, 0, "new"), // bad: empty order_id
             ],
             positions: vec![],
+            fetched_at_ms: 0,
         };
         assert_eq!(normalize(raw), Err(SnapshotAdapterError::MissingOrderId));
     }
@@ -483,6 +512,7 @@ mod tests {
                 make_raw_order("", "TSLA", "sell", 50, 0, "new"), // bad
             ],
             positions: vec![],
+            fetched_at_ms: 0,
         };
         let (snap, errors) = normalize_lenient(raw);
         assert_eq!(snap.orders.len(), 1);
@@ -528,6 +558,7 @@ mod tests {
                 make_raw_order("o2", "TSLA", "sell", 50, 50, "filled"),
             ],
             positions: vec![],
+            fetched_at_ms: 0,
         };
         let snap = normalize(raw).unwrap();
         assert!(snap.orders.contains_key("o1"));
@@ -543,6 +574,7 @@ mod tests {
                 symbol: "  AAPL  ".to_string(),
                 qty_signed: 10,
             }],
+            fetched_at_ms: 0,
         };
         let snap = normalize(raw).unwrap();
         assert!(snap.orders.contains_key("o1"));

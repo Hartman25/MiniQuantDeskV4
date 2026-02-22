@@ -43,6 +43,7 @@ fn matching_broker_snapshot(local: &LocalSnapshot) -> BrokerSnapshot {
     BrokerSnapshot {
         orders: local.orders.clone(),
         positions: local.positions.clone(),
+        fetched_at_ms: 0,
     }
 }
 

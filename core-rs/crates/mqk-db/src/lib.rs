@@ -899,6 +899,55 @@ pub async fn outbox_list_unacked_for_run(pool: &PgPool, run_id: Uuid) -> Result<
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// Arm state persistence — Patch L7
+// ---------------------------------------------------------------------------
+
+/// Persist the current arm state to `sys_arm_state` (upsert singleton row).
+///
+/// `state` must be `"ARMED"` or `"DISARMED"`.
+/// `reason` is the `DisarmReason` variant name when `state == "DISARMED"`;
+/// pass `None` (or `Some("BootDefault")`) when arming.
+pub async fn persist_arm_state(pool: &PgPool, state: &str, reason: Option<&str>) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into sys_arm_state (sentinel_id, state, reason, updated_at_utc)
+        values (1, $1, $2, now())
+        on conflict (sentinel_id) do update
+            set state          = excluded.state,
+                reason         = excluded.reason,
+                updated_at_utc = excluded.updated_at_utc
+        "#,
+    )
+    .bind(state)
+    .bind(reason)
+    .execute(pool)
+    .await
+    .context("persist_arm_state failed")?;
+    Ok(())
+}
+
+/// Load the last persisted arm state.
+///
+/// Returns `None` if no state has ever been persisted (fresh system — caller
+/// should treat this as `DISARMED / BootDefault`).
+///
+/// Returns `Some((state, reason))` where `state` is `"ARMED"` or `"DISARMED"`
+/// and `reason` is the `DisarmReason` variant name (or `None` when armed).
+pub async fn load_arm_state(pool: &PgPool) -> Result<Option<(String, Option<String>)>> {
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        r#"
+        select state, reason
+        from sys_arm_state
+        where sentinel_id = 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await
+    .context("load_arm_state failed")?;
+    Ok(row)
+}
+
 /// Insert a broker message/fill into oms_inbox with dedupe on broker_message_id.
 ///
 /// Idempotent behavior:

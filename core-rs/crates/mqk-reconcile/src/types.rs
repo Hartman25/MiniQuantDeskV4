@@ -95,6 +95,11 @@ impl LocalSnapshot {
 }
 
 /// Broker snapshot as observed from broker API (outside this crate).
+///
+/// `fetched_at_ms` is epoch-milliseconds set by the caller when the snapshot
+/// was retrieved.  A value of `0` means "no timestamp" and is treated as stale
+/// by [`crate::SnapshotWatermark`].  The watermark enforces that accepted
+/// snapshots are non-decreasing in time (Patch L8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrokerSnapshot {
     /// Orders currently visible at broker (open/working and/or recent).
@@ -102,13 +107,32 @@ pub struct BrokerSnapshot {
 
     /// Positions visible at broker (symbol -> qty_signed).
     pub positions: BTreeMap<String, i64>,
+
+    /// Epoch-milliseconds when this snapshot was fetched from the broker.
+    /// `0` = no timestamp — treated as stale by `SnapshotWatermark`.
+    pub fetched_at_ms: i64,
 }
 
 impl BrokerSnapshot {
+    /// Construct an empty snapshot with no timestamp.
+    ///
+    /// Tests that only care about order/position content (not freshness) can use
+    /// this without setting `fetched_at_ms`.  Freshness-aware code must set the
+    /// field explicitly.
     pub fn empty() -> Self {
         Self {
             orders: BTreeMap::new(),
             positions: BTreeMap::new(),
+            fetched_at_ms: 0,
+        }
+    }
+
+    /// Construct an empty snapshot with the given fetch timestamp.
+    pub fn empty_at(fetched_at_ms: i64) -> Self {
+        Self {
+            orders: BTreeMap::new(),
+            positions: BTreeMap::new(),
+            fetched_at_ms,
         }
     }
 }
