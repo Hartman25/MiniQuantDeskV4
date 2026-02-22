@@ -14,5 +14,11 @@
 mod engine;
 mod types;
 
+pub mod snapshot_adapter;
+
 pub use engine::{is_clean_reconcile, reconcile};
+pub use snapshot_adapter::{
+    normalize, normalize_json, normalize_lenient, RawBrokerOrder, RawBrokerPosition,
+    RawBrokerSnapshot, SnapshotAdapterError,
+};
 pub use types::*;

@@ -77,3 +77,26 @@ impl ExecutionDecision {
         Self { intents: vec![] }
     }
 }
+
+/// Broker-bound execution intent produced by the order router layer.
+///
+/// This is the translation of an internal `OrderIntent` into the richer
+/// broker-agnostic struct required by `OrderRouter` / `BrokerAdapter`.
+/// Fields use `i32` quantity (broker APIs rarely exceed i32 range) and
+/// carry the broker-protocol fields (`order_type`, `time_in_force`) that
+/// the pure execution engine intentionally omits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecutionIntent {
+    /// Internal order identifier (UUID string).
+    pub order_id: String,
+    /// Instrument symbol (e.g. "AAPL").
+    pub symbol: String,
+    /// Signed quantity: positive = buy, negative = sell.
+    pub quantity: i32,
+    /// Order type string passed to broker (e.g. "market", "limit").
+    pub order_type: String,
+    /// Limit price, if applicable.
+    pub limit_price: Option<f64>,
+    /// Time-in-force string (e.g. "day", "gtc").
+    pub time_in_force: String,
+}

@@ -4,12 +4,23 @@
 //! - Strategies output target positions (not orders)
 //! - Engine converts (current_positions, targets) -> order intents
 //! - Pure deterministic logic, no broker wiring
+//!
+//! The `order_router` module provides the thin boundary between the internal
+//! execution engine and external broker adapters.
 
 mod engine;
 mod types;
 
+pub mod order_router;
+
 pub use engine::targets_to_order_intents;
-pub use types::{ExecutionDecision, OrderIntent, Side, StrategyOutput, TargetPosition};
+pub use order_router::{
+    BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
+    BrokerSubmitRequest, BrokerSubmitResponse, OrderRouter,
+};
+pub use types::{
+    ExecutionDecision, ExecutionIntent, OrderIntent, Side, StrategyOutput, TargetPosition,
+};
 
 use std::collections::BTreeMap;
 
