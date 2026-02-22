@@ -20,7 +20,11 @@ Environment / Secrets
 
 .env
 .env.*
-secrets*
+# Only ignore secret files at root or explicit patterns
+secrets.env
+secrets.local
+*.pem
+*.key
 *.pem
 *.key
 
