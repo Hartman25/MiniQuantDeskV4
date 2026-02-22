@@ -1,17 +1,111 @@
-exports/
-.env*
-secrets*
-**/__pycache__/
+===============================
+MiniQuantDesk V4 – .gitignore
+===============================
+-------------------------------
+Build Artifacts (Rust)
+-------------------------------
+
+target/
+**/target/
 .cargo/target/
 core-rs/target/
+
+Cargo local metadata
+
 .cargo/
+
+-------------------------------
+Environment / Secrets
+-------------------------------
+
+.env
+.env.*
+secrets*
+*.pem
+*.key
+
+-------------------------------
+Runtime / Generated Data
+-------------------------------
+
+exports/
 runtime/
-# Claude worktrees
+logs/
+*.log
+
+-------------------------------
+Python (if used anywhere)
+-------------------------------
+
+**/pycache/
+*.pyc
+*.pyo
+
+-------------------------------
+Node / GUI (Tauri / React)
+-------------------------------
+
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+-------------------------------
+Claude / AI Worktrees
+-------------------------------
+
 .claude/
 .claude-worktrees/
 **/.claude/
-**/target/
-# Office temp/lock files
-~$*.docx
-*.docx
 
+-------------------------------
+Local Scratch / Rescue
+-------------------------------
+
+.worktree_rescue/
+.continue/
+continue/
+
+-------------------------------
+Local Archives / Dumps
+-------------------------------
+
+*.zip
+*.7z
+*.tar
+*.tar.gz
+
+repo_tree.txt
+core_rs_dirs.txt
+cargo_tomls.txt
+
+Prevent committing local full-repo snapshots
+
+MiniQuantDeskV4__SOURCE.zip
+MiniQuantDeskV4_repo.zip
+MiniQuantDeskV4_core-rs.zip
+
+-------------------------------
+OS / Editor Junk
+-------------------------------
+
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+
+-------------------------------
+Office temp/lock files only
+(DO NOT ignore real specs)
+-------------------------------
+
+~$*.docx
+
+-------------------------------
+Coverage / Test Artifacts
+-------------------------------
+
+coverage/
+*.profraw
+*.profdata
