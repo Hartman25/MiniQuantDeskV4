@@ -14,5 +14,12 @@
 mod engine;
 mod types;
 
+pub mod pdt;
+
 pub use engine::{evaluate, tick};
+pub use pdt::{
+    clear_pdt_flag, evaluate_pdt, record_day_trade, tick_pdt, to_pdt_context, PdtDecision,
+    PdtInput, PdtPolicy, PdtReason, PdtState, PDT_DAY_TRADE_THRESHOLD, PDT_DEFAULT_WINDOW_DAYS,
+    PDT_MIN_EQUITY_MICROS,
+};
 pub use types::*;
