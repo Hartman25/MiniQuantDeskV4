@@ -7,19 +7,37 @@
 //!
 //! The `order_router` module provides the thin boundary between the internal
 //! execution engine and external broker adapters.
+//!
+//! PATCH L1: Single Submission Choke-Point
+//! - `order_router` is crate-private (never re-exported)
+//! - `BrokerGateway` is the only public path to broker operations
+//! - Gate checks enforced before every broker operation
 
 mod engine;
 mod types;
 
-pub mod order_router;
+// Crate-private: prevents external bypass.
+mod order_router;
+mod gateway;
 
 pub use engine::targets_to_order_intents;
-pub use order_router::{
-    BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
-    BrokerSubmitRequest, BrokerSubmitResponse, OrderRouter,
-};
+
 pub use types::{
     ExecutionDecision, ExecutionIntent, OrderIntent, Side, StrategyOutput, TargetPosition,
+};
+
+// --- Patch L1: choke-point exports ---
+
+/// The single public gateway for all broker operations.
+/// `OrderRouter` is intentionally NOT exported.
+pub use gateway::{intent_id_to_client_order_id, BrokerGateway, GateRefusal, GateVerdicts};
+
+/// Broker adapter trait + request/response types.
+/// External crates may implement `BrokerAdapter` and build request structs,
+/// but can only route them through `BrokerGateway`.
+pub use order_router::{
+    BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
+    BrokerSubmitRequest, BrokerSubmitResponse,
 };
 
 use std::collections::BTreeMap;

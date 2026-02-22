@@ -46,6 +46,11 @@ async fn crash_recovery_does_not_double_submit_when_broker_already_has_order() -
         mqk_db::outbox_enqueue(&pool, run_id, &idempotency_key, order_json.clone()).await?;
     assert!(created);
 
+    // Dispatcher claims the row (PENDING → CLAIMED) before broker submit.
+    // This is the L3 two-step dispatch protocol.
+    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "test-dispatcher").await?;
+    assert_eq!(claimed.len(), 1, "dispatcher must claim the pending row");
+
     // Simulate the "submit to broker" step happening…
     // …and then a crash BEFORE we ever mark ACKED (only SENT).
     let mut broker = mqk_testkit::FakeBroker::new();

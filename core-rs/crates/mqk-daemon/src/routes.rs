@@ -23,7 +23,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    api_types::{HealthResponse, IntegrityResponse},
+    api_types::{GateRefusedResponse, HealthResponse, IntegrityResponse},
     state::{uptime_secs, AppState, BusMsg},
 };
 
@@ -85,7 +85,29 @@ pub(crate) async fn status_handler(State(st): State<Arc<AppState>>) -> impl Into
 // POST /v1/run/start
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn run_start(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+/// Start a live run.
+///
+/// # Gate (Patch L1)
+/// Returns `403 Forbidden` if the integrity engine is disarmed or halted.
+/// Execution cannot be started when system integrity is not armed.
+/// This mirrors the `BrokerGateway` gate check at the control-plane level.
+pub(crate) async fn run_start(State(st): State<Arc<AppState>>) -> Response {
+    // Gate: integrity must be armed before any run can start.
+    {
+        let ig = st.integrity.read().await;
+        if ig.is_execution_blocked() {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(GateRefusedResponse {
+                    error: "GATE_REFUSED: integrity disarmed or halted; arm integrity first"
+                        .to_string(),
+                    gate: "integrity_armed".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    }
+
     let mut s = st.status.write().await;
 
     if s.state != "running" {
@@ -106,7 +128,7 @@ pub(crate) async fn run_start(State(st): State<Arc<AppState>>) -> impl IntoRespo
 
     info!(run_id = ?snap.active_run_id, "run/start");
     let _ = st.bus.send(BusMsg::Status(snap.clone()));
-    (StatusCode::OK, Json(snap))
+    (StatusCode::OK, Json(snap)).into_response()
 }
 
 // ---------------------------------------------------------------------------

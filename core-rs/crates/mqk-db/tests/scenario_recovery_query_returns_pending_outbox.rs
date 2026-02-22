@@ -42,7 +42,10 @@ async fn recovery_query_returns_pending_outbox_for_run() -> anyhow::Result<()> {
     mqk_db::outbox_enqueue(&pool, run_id, &k1, json!({"sym":"SPY"})).await?;
     mqk_db::outbox_enqueue(&pool, run_id, &k2, json!({"sym":"QQQ"})).await?;
 
-    // Mark one SENT so we prove the query returns both PENDING + SENT (not ACKED).
+    // Claim k1 first (PENDING → CLAIMED), then mark SENT (CLAIMED → SENT).
+    // Uses the L3 two-step dispatch protocol.
+    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "test-dispatcher").await?;
+    assert_eq!(claimed.len(), 1, "must claim exactly one row");
     mqk_db::outbox_mark_sent(&pool, &k1).await?;
 
     let pending = mqk_db::outbox_list_unacked_for_run(&pool, run_id).await?;

@@ -18,6 +18,18 @@ pub struct HealthResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Gate refusal (403) — Patch L1
+// ---------------------------------------------------------------------------
+
+/// Response body when a daemon route is refused due to a gate check failure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateRefusedResponse {
+    pub error: String,
+    /// Which gate failed: "integrity_armed" | "risk_allowed" | "reconcile_clean"
+    pub gate: String,
+}
+
+// ---------------------------------------------------------------------------
 // /v1/integrity/arm  /v1/integrity/disarm
 // ---------------------------------------------------------------------------
 

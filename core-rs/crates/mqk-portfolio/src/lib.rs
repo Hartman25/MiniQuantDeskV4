@@ -12,7 +12,20 @@ mod accounting;
 mod metrics;
 mod types;
 
+pub mod allocator;
+pub mod constraints;
+pub mod ledger;
+
 pub use accounting::{apply_entry, apply_fill, recompute_from_ledger};
+pub use allocator::{
+    AllocationConstraints, AllocationDecision, AllocationError, Allocator, Candidate,
+    RejectedCandidate, RejectionReason,
+};
+pub use constraints::{
+    check_all, check_sector_limits, check_turnover, check_weight_bounds, compute_turnover,
+    ConstraintViolation, SectorConstraint, TurnoverConstraint, WeightBoundsConstraint,
+};
+pub use ledger::{Ledger, LedgerError, LedgerSnapshot};
 
 pub use metrics::{
     compute_equity_micros, compute_exposure_micros, compute_unrealized_pnl_micros,

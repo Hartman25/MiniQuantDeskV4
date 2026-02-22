@@ -12,5 +12,8 @@
 mod host;
 mod types;
 
+pub mod plugin_registry;
+
 pub use host::*;
+pub use plugin_registry::{PluginRegistry, RegistryError, StrategyFactory, StrategyMeta};
 pub use types::*;

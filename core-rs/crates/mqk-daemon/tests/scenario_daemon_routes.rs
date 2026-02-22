@@ -306,6 +306,87 @@ async fn status_reflects_integrity_armed_flag() {
 }
 
 // ---------------------------------------------------------------------------
+// Patch L1: run_start refused (403) when integrity is disarmed
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn run_start_refused_403_when_integrity_disarmed() {
+    let st = Arc::new(state::AppState::new());
+
+    // Disarm first.
+    let disarm_req = Request::builder()
+        .method("POST")
+        .uri("/v1/integrity/disarm")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let _ = call(routes::build_router(Arc::clone(&st)), disarm_req).await;
+
+    // Now try to start — must be refused.
+    let start_req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), start_req).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "run/start must be 403 when integrity is disarmed"
+    );
+
+    let json = parse_json(body);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("GATE_REFUSED"),
+        "body should contain GATE_REFUSED: {json}"
+    );
+    assert_eq!(json["gate"], "integrity_armed");
+}
+
+#[tokio::test]
+async fn run_start_succeeds_after_rearm() {
+    let st = Arc::new(state::AppState::new());
+
+    // Disarm.
+    let disarm_req = Request::builder()
+        .method("POST")
+        .uri("/v1/integrity/disarm")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let _ = call(routes::build_router(Arc::clone(&st)), disarm_req).await;
+
+    // Confirm 403 while disarmed.
+    let start_req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, _) = call(routes::build_router(Arc::clone(&st)), start_req).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Re-arm.
+    let arm_req = Request::builder()
+        .method("POST")
+        .uri("/v1/integrity/arm")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let _ = call(routes::build_router(Arc::clone(&st)), arm_req).await;
+
+    // Now start must succeed.
+    let start_req2 = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status2, body2) = call(routes::build_router(Arc::clone(&st)), start_req2).await;
+    assert_eq!(status2, StatusCode::OK);
+    let json = parse_json(body2);
+    assert_eq!(json["state"], "running");
+}
+
+// ---------------------------------------------------------------------------
 // Unknown routes return 404
 // ---------------------------------------------------------------------------
 

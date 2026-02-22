@@ -629,9 +629,11 @@ pub struct OutboxRow {
     pub run_id: Uuid,
     pub idempotency_key: String,
     pub order_json: Value,
-    pub status: String, // PENDING | SENT | ACKED | FAILED
+    pub status: String, // PENDING | CLAIMED | SENT | ACKED | FAILED
     pub created_at_utc: DateTime<Utc>,
     pub sent_at_utc: Option<DateTime<Utc>>,
+    pub claimed_at_utc: Option<DateTime<Utc>>,
+    pub claimed_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -674,6 +676,87 @@ pub async fn outbox_enqueue(
     Ok(row.is_some())
 }
 
+/// Atomically claim up to `batch_size` PENDING outbox rows for exclusive dispatch.
+///
+/// Uses `FOR UPDATE SKIP LOCKED` so concurrent dispatchers never claim the same row.
+/// Returns the claimed rows (now in status CLAIMED). Returns an empty Vec if no
+/// PENDING rows are available.
+///
+/// The caller MUST either:
+/// - call `outbox_mark_sent` after a successful broker submit, OR
+/// - call `outbox_release_claim` on failure to revert to PENDING.
+pub async fn outbox_claim_batch(
+    pool: &PgPool,
+    batch_size: i64,
+    dispatcher_id: &str,
+) -> Result<Vec<OutboxRow>> {
+    let rows = sqlx::query(
+        r#"
+        with to_claim as (
+            select outbox_id
+            from oms_outbox
+            where status = 'PENDING'
+            order by outbox_id asc
+            limit $1
+            for update skip locked
+        )
+        update oms_outbox
+           set status         = 'CLAIMED',
+               claimed_at_utc = now(),
+               claimed_by     = $2
+         where outbox_id in (select outbox_id from to_claim)
+        returning outbox_id, run_id, idempotency_key, order_json, status,
+                  created_at_utc, sent_at_utc, claimed_at_utc, claimed_by
+        "#,
+    )
+    .bind(batch_size)
+    .bind(dispatcher_id)
+    .fetch_all(pool)
+    .await
+    .context("outbox_claim_batch failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(OutboxRow {
+            outbox_id: row.try_get("outbox_id")?,
+            run_id: row.try_get("run_id")?,
+            idempotency_key: row.try_get("idempotency_key")?,
+            order_json: row.try_get("order_json")?,
+            status: row.try_get("status")?,
+            created_at_utc: row.try_get("created_at_utc")?,
+            sent_at_utc: row.try_get("sent_at_utc")?,
+            claimed_at_utc: row.try_get("claimed_at_utc")?,
+            claimed_by: row.try_get("claimed_by")?,
+        });
+    }
+    Ok(out)
+}
+
+/// Release a CLAIMED row back to PENDING.
+///
+/// Called when a dispatcher fails before broker submit and wants to relinquish
+/// its claim so another dispatcher (or a future retry) can pick it up.
+/// Returns true if the row was CLAIMED and is now PENDING; false otherwise.
+pub async fn outbox_release_claim(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"
+        update oms_outbox
+           set status         = 'PENDING',
+               claimed_at_utc = null,
+               claimed_by     = null
+         where idempotency_key = $1
+           and status = 'CLAIMED'
+        returning outbox_id
+        "#,
+    )
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await
+    .context("outbox_release_claim failed")?;
+
+    Ok(row.is_some())
+}
+
 /// Fetch a single outbox row by idempotency_key.
 pub async fn outbox_fetch_by_idempotency_key(
     pool: &PgPool,
@@ -681,7 +764,8 @@ pub async fn outbox_fetch_by_idempotency_key(
 ) -> Result<Option<OutboxRow>> {
     let row = sqlx::query(
         r#"
-        select outbox_id, run_id, idempotency_key, order_json, status, created_at_utc, sent_at_utc
+        select outbox_id, run_id, idempotency_key, order_json, status,
+               created_at_utc, sent_at_utc, claimed_at_utc, claimed_by
         from oms_outbox
         where idempotency_key = $1
         "#,
@@ -701,19 +785,28 @@ pub async fn outbox_fetch_by_idempotency_key(
         status: row.try_get("status")?,
         created_at_utc: row.try_get("created_at_utc")?,
         sent_at_utc: row.try_get("sent_at_utc")?,
+        claimed_at_utc: row.try_get("claimed_at_utc")?,
+        claimed_by: row.try_get("claimed_by")?,
     }))
 }
 
-/// Mark a PENDING outbox row as SENT (sets sent_at_utc).
-/// Returns true if a row transitioned, false if not found or not in PENDING state.
+/// Mark a CLAIMED outbox row as SENT (sets sent_at_utc).
+///
+/// Returns true if a row transitioned CLAIMED → SENT; false if not found or
+/// not in CLAIMED state.
+///
+/// **Patch L3 enforcement:** only rows that have been claimed via
+/// `outbox_claim_batch` can be marked SENT. Attempting to mark a PENDING row
+/// SENT without first claiming it returns `false`, preventing a rogue
+/// dispatcher from bypassing the claim/lock protocol.
 pub async fn outbox_mark_sent(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
         update oms_outbox
-        set status = 'SENT',
-            sent_at_utc = coalesce(sent_at_utc, now())
-        where idempotency_key = $1
-          and status = 'PENDING'
+           set status      = 'SENT',
+               sent_at_utc = coalesce(sent_at_utc, now())
+         where idempotency_key = $1
+           and status = 'CLAIMED'
         returning outbox_id
         "#,
     )
@@ -744,14 +837,17 @@ pub async fn outbox_mark_acked(pool: &PgPool, idempotency_key: &str) -> Result<b
     Ok(row.is_some())
 }
 
-/// Mark an outbox row as FAILED.
-/// Returns true if transitioned, false if not found.
+/// Mark a CLAIMED outbox row as FAILED.
+///
+/// Returns true if a row transitioned CLAIMED → FAILED; false otherwise.
+/// Only CLAIMED rows can be failed — use `outbox_claim_batch` first.
 pub async fn outbox_mark_failed(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
         update oms_outbox
-        set status = 'FAILED'
-        where idempotency_key = $1
+           set status = 'FAILED'
+         where idempotency_key = $1
+           and status = 'CLAIMED'
         returning outbox_id
         "#,
     )
@@ -765,15 +861,19 @@ pub async fn outbox_mark_failed(pool: &PgPool, idempotency_key: &str) -> Result<
 
 /// Recovery query: list outbox rows that are not terminal (not ACKED).
 ///
+/// Includes PENDING, CLAIMED, SENT, and FAILED rows — all statuses that
+/// indicate the order has not yet been confirmed by the broker.
+///
 /// NOTE: This does NOT talk to broker yet.
 /// It provides the minimal deterministic input required for a future reconcile step.
 pub async fn outbox_list_unacked_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<OutboxRow>> {
     let rows = sqlx::query(
         r#"
-        select outbox_id, run_id, idempotency_key, order_json, status, created_at_utc, sent_at_utc
+        select outbox_id, run_id, idempotency_key, order_json, status,
+               created_at_utc, sent_at_utc, claimed_at_utc, claimed_by
         from oms_outbox
         where run_id = $1
-          and status in ('PENDING','SENT','FAILED')
+          and status in ('PENDING','CLAIMED','SENT','FAILED')
         order by outbox_id asc
         "#,
     )
@@ -792,6 +892,8 @@ pub async fn outbox_list_unacked_for_run(pool: &PgPool, run_id: Uuid) -> Result<
             status: row.try_get("status")?,
             created_at_utc: row.try_get("created_at_utc")?,
             sent_at_utc: row.try_get("sent_at_utc")?,
+            claimed_at_utc: row.try_get("claimed_at_utc")?,
+            claimed_by: row.try_get("claimed_by")?,
         });
     }
     Ok(out)
