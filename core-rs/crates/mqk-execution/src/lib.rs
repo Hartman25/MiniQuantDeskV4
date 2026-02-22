@@ -23,6 +23,10 @@ pub mod oms;
 mod gateway;
 mod order_router;
 
+// Patch L9 — integer micros + broker ID mapping.
+mod id_map;
+mod prices;
+
 pub use engine::targets_to_order_intents;
 
 pub use types::{
@@ -42,6 +46,15 @@ pub use order_router::{
     BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
     BrokerSubmitRequest, BrokerSubmitResponse,
 };
+
+// --- Patch L9: integer micros price surface + broker ID mapping ---
+
+/// In-memory map of internal order IDs → broker-assigned order IDs.
+/// Required for cancel/replace to target the correct broker order.
+pub use id_map::BrokerOrderMap;
+
+/// Price conversion helpers: `i64` micros ↔ `f64` (wire boundary only).
+pub use prices::{micros_to_price, price_to_micros, MICROS_PER_UNIT};
 
 use std::collections::BTreeMap;
 

@@ -15,13 +15,17 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 // ---------------------------------------------------------------------------
 
 /// Broker-agnostic order submission request.
+///
+/// `limit_price` is in **integer micros** (Patch L9). Use `crate::micros_to_price`
+/// only when serialising to a broker REST payload.
 #[derive(Debug, Clone)]
 pub struct BrokerSubmitRequest {
     pub order_id: String,
     pub symbol: String,
     pub quantity: i32,
     pub order_type: String,
-    pub limit_price: Option<f64>,
+    /// Limit price in integer micros (1 unit = 1_000_000). `None` for market orders.
+    pub limit_price: Option<i64>,
     pub time_in_force: String,
 }
 
@@ -42,11 +46,14 @@ pub struct BrokerCancelResponse {
 }
 
 /// Broker-agnostic order replacement request.
+///
+/// `limit_price` is in **integer micros** (Patch L9).
 #[derive(Debug, Clone)]
 pub struct BrokerReplaceRequest {
     pub broker_order_id: String,
     pub quantity: i32,
-    pub limit_price: Option<f64>,
+    /// Limit price in integer micros (1 unit = 1_000_000). `None` for market orders.
+    pub limit_price: Option<i64>,
     pub time_in_force: String,
 }
 
@@ -154,7 +161,7 @@ mod tests {
             symbol: "AAPL".to_string(),
             quantity: 100,
             order_type: "limit".to_string(),
-            limit_price: Some(150.0),
+            limit_price: Some(150_000_000), // $150.00 in micros
             time_in_force: "day".to_string(),
         };
         let resp = router.route_submit(req).unwrap();
@@ -175,7 +182,7 @@ mod tests {
         let req = BrokerReplaceRequest {
             broker_order_id: "broker-ord-1".to_string(),
             quantity: 200,
-            limit_price: Some(151.0),
+            limit_price: Some(151_000_000), // $151.00 in micros
             time_in_force: "gtc".to_string(),
         };
         let resp = router.route_replace(req).unwrap();

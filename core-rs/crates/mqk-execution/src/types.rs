@@ -85,7 +85,14 @@ impl ExecutionDecision {
 /// Fields use `i32` quantity (broker APIs rarely exceed i32 range) and
 /// carry the broker-protocol fields (`order_type`, `time_in_force`) that
 /// the pure execution engine intentionally omits.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// # Patch L9 — integer micros
+///
+/// `limit_price` is expressed in **integer micros** (1 unit = 1_000_000 micros).
+/// Use [`crate::micros_to_price`] only at the broker wire boundary when the
+/// value must be serialised to `f64` for a REST API.  No `f64` appears on the
+/// execution decision surface itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionIntent {
     /// Internal order identifier (UUID string).
     pub order_id: String,
@@ -95,8 +102,9 @@ pub struct ExecutionIntent {
     pub quantity: i32,
     /// Order type string passed to broker (e.g. "market", "limit").
     pub order_type: String,
-    /// Limit price, if applicable.
-    pub limit_price: Option<f64>,
+    /// Limit price in integer micros (1 unit = 1_000_000).
+    /// `None` for market orders.
+    pub limit_price: Option<i64>,
     /// Time-in-force string (e.g. "day", "gtc").
     pub time_in_force: String,
 }
