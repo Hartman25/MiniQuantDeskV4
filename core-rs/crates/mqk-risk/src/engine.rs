@@ -3,6 +3,50 @@ use crate::{
     RiskInput, RiskState,
 };
 
+// ---------------------------------------------------------------------------
+// Patch L10 — Exposure Sanity Clamps
+// ---------------------------------------------------------------------------
+
+/// Guard: `equity_micros` must be ≥ 0.
+///
+/// Negative equity is an unrepresentable value in this system (equity is always
+/// non-negative).  If a bad upstream source produces a negative number, this
+/// guard catches it *before* it can corrupt running state or cause arithmetic
+/// overflow in the floor calculations below.
+///
+/// Returns `Some(Halt)` if the value is invalid; `None` if it passes.
+pub fn validate_equity_input(equity_micros: i64) -> Option<RiskDecision> {
+    if equity_micros < 0 {
+        return Some(RiskDecision {
+            action: RiskAction::Halt,
+            reason: ReasonCode::BadInput,
+            kill_switch: None,
+        });
+    }
+    None
+}
+
+/// Guard: `order_qty` must be strictly positive (> 0).
+///
+/// A zero or negative order quantity has no meaningful interpretation as a new
+/// order intent and is treated as bad input that halts deterministically.
+///
+/// Returns `Some(Halt)` if the value is invalid; `None` if it passes.
+pub fn validate_order_qty(qty: i64) -> Option<RiskDecision> {
+    if qty <= 0 {
+        return Some(RiskDecision {
+            action: RiskAction::Halt,
+            reason: ReasonCode::BadInput,
+            kill_switch: None,
+        });
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Core engine
+// ---------------------------------------------------------------------------
+
 /// Deterministic tick maintenance:
 /// - resets day_start_equity on day rollover
 /// - updates peak equity
@@ -30,6 +74,17 @@ pub fn tick(_cfg: &RiskConfig, st: &mut RiskState, inp: &RiskInput) {
 
 /// Main evaluator (pure deterministic logic + sticky flags in state).
 pub fn evaluate(cfg: &RiskConfig, st: &mut RiskState, inp: &RiskInput) -> RiskDecision {
+    // 0) Sanity clamp — runs BEFORE tick so bad equity cannot corrupt running state.
+    //    Negative equity is geometrically impossible in this system; treat as bad input.
+    if let Some(_bad) = validate_equity_input(inp.equity_micros) {
+        st.halted = true;
+        return RiskDecision {
+            action: RiskAction::Halt,
+            reason: ReasonCode::BadInput,
+            kill_switch: None,
+        };
+    }
+
     tick(cfg, st, inp);
 
     // 1) Kill switch overrides everything (critical).
@@ -86,50 +141,89 @@ pub fn evaluate(cfg: &RiskConfig, st: &mut RiskState, inp: &RiskInput) -> RiskDe
     }
 
     // 4) Daily loss limit: halt trading when breached.
+    //    Use checked_sub to guard against corrupted state where day_start_equity_micros
+    //    is extreme-negative — overflow would produce a wrong floor that masks the breach.
     if cfg.daily_loss_limit_micros > 0 {
-        let floor = st.day_start_equity_micros - cfg.daily_loss_limit_micros;
-        if inp.equity_micros <= floor {
-            st.halted = true;
-            return RiskDecision {
-                action: RiskAction::Halt,
-                reason: ReasonCode::DailyLossLimitBreached,
-                kill_switch: Some(
-                    KillSwitchEvent::new(KillSwitchType::Manual)
-                        .with_evidence("type", "DAILY_LOSS_LIMIT")
-                        .with_evidence(
-                            "day_start_equity_micros",
-                            st.day_start_equity_micros.to_string(),
-                        )
-                        .with_evidence("equity_micros", inp.equity_micros.to_string())
-                        .with_evidence(
-                            "daily_loss_limit_micros",
-                            cfg.daily_loss_limit_micros.to_string(),
+        match st
+            .day_start_equity_micros
+            .checked_sub(cfg.daily_loss_limit_micros)
+        {
+            None => {
+                // Arithmetic underflow: day_start_equity is corrupted or limit is absurd.
+                // Fail-closed: halt rather than risk silently skipping the check.
+                st.halted = true;
+                return RiskDecision {
+                    action: RiskAction::Halt,
+                    reason: ReasonCode::BadInput,
+                    kill_switch: None,
+                };
+            }
+            Some(floor) => {
+                if inp.equity_micros <= floor {
+                    st.halted = true;
+                    return RiskDecision {
+                        action: RiskAction::Halt,
+                        reason: ReasonCode::DailyLossLimitBreached,
+                        kill_switch: Some(
+                            KillSwitchEvent::new(KillSwitchType::Manual)
+                                .with_evidence("type", "DAILY_LOSS_LIMIT")
+                                .with_evidence(
+                                    "day_start_equity_micros",
+                                    st.day_start_equity_micros.to_string(),
+                                )
+                                .with_evidence("equity_micros", inp.equity_micros.to_string())
+                                .with_evidence(
+                                    "daily_loss_limit_micros",
+                                    cfg.daily_loss_limit_micros.to_string(),
+                                ),
                         ),
-                ),
-            };
+                    };
+                }
+            }
         }
     }
 
     // 5) Max drawdown: flatten + halt when breached.
+    //    checked_sub is belt-and-suspenders here: in steady state peak_equity_micros is
+    //    always ≥ 0 (equity guard above prevents negative equity from reaching tick), so
+    //    underflow cannot occur in practice.  We use checked_sub anyway for defence-in-depth.
     if cfg.max_drawdown_limit_micros > 0 {
-        let floor = st.peak_equity_micros - cfg.max_drawdown_limit_micros;
-        if inp.equity_micros <= floor {
-            st.halted = true;
-            st.disarmed = true;
-            return RiskDecision {
-                action: RiskAction::FlattenAndHalt,
-                reason: ReasonCode::MaxDrawdownBreached,
-                kill_switch: Some(
-                    KillSwitchEvent::new(KillSwitchType::Manual)
-                        .with_evidence("type", "MAX_DRAWDOWN")
-                        .with_evidence("peak_equity_micros", st.peak_equity_micros.to_string())
-                        .with_evidence("equity_micros", inp.equity_micros.to_string())
-                        .with_evidence(
-                            "max_drawdown_limit_micros",
-                            cfg.max_drawdown_limit_micros.to_string(),
+        match st
+            .peak_equity_micros
+            .checked_sub(cfg.max_drawdown_limit_micros)
+        {
+            None => {
+                st.halted = true;
+                st.disarmed = true;
+                return RiskDecision {
+                    action: RiskAction::Halt,
+                    reason: ReasonCode::BadInput,
+                    kill_switch: None,
+                };
+            }
+            Some(floor) => {
+                if inp.equity_micros <= floor {
+                    st.halted = true;
+                    st.disarmed = true;
+                    return RiskDecision {
+                        action: RiskAction::FlattenAndHalt,
+                        reason: ReasonCode::MaxDrawdownBreached,
+                        kill_switch: Some(
+                            KillSwitchEvent::new(KillSwitchType::Manual)
+                                .with_evidence("type", "MAX_DRAWDOWN")
+                                .with_evidence(
+                                    "peak_equity_micros",
+                                    st.peak_equity_micros.to_string(),
+                                )
+                                .with_evidence("equity_micros", inp.equity_micros.to_string())
+                                .with_evidence(
+                                    "max_drawdown_limit_micros",
+                                    cfg.max_drawdown_limit_micros.to_string(),
+                                ),
                         ),
-                ),
-            };
+                    };
+                }
+            }
         }
     }
 

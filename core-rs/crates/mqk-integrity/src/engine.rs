@@ -97,16 +97,19 @@ pub fn evaluate_bar(
         };
     }
 
-    // 2) Gap detection on complete bars.
+    // 2) Gap detection on complete bars (Patch B3: session-aware via calendar).
     let sym_tf = (bar.key.symbol.clone(), bar.key.tf);
     if let Some(prev_end) = st.last_complete_end_ts.get(&sym_tf).copied() {
         let expected = expected_next_end_ts(prev_end, bar.key.tf);
         if bar.key.end_ts > expected {
-            // Missing bars count = (delta / interval) - 1 (integer, deterministic)
-            let delta = bar.key.end_ts - prev_end;
-            let interval = bar.key.tf.interval_secs;
-            let steps = delta / interval;
-            let missing = if steps > 0 { (steps - 1) as u32 } else { 0 };
+            // Session-aware missing bar count: slots in (prev_end, new_end) that
+            // are within the trading calendar. Non-session slots (weekends,
+            // holidays) are excluded and do NOT count as missing bars.
+            let missing = cfg.calendar.missing_bars_between(
+                prev_end,
+                bar.key.end_ts,
+                bar.key.tf.interval_secs,
+            );
 
             if missing > cfg.gap_tolerance_bars {
                 st.halted = true;

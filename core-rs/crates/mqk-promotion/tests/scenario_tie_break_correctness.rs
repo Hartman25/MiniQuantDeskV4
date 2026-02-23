@@ -4,6 +4,7 @@ use mqk_backtest::BacktestReport;
 use mqk_portfolio::{Fill, Side};
 use mqk_promotion::{
     pick_winner, select_best, Candidate, PromotionConfig, PromotionInput, PromotionMetrics,
+    StressSuiteResult,
 };
 
 /// Helper: build a monotonically growing equity curve over N months.
@@ -120,6 +121,7 @@ fn select_best_picks_correct_winner() {
                     last_prices: BTreeMap::new(),
                     execution_blocked: false,
                 },
+                stress_suite: Some(StressSuiteResult::pass(1)),
             },
         },
         Candidate {
@@ -134,6 +136,7 @@ fn select_best_picks_correct_winner() {
                     last_prices: BTreeMap::new(),
                     execution_blocked: false,
                 },
+                stress_suite: Some(StressSuiteResult::pass(1)),
             },
         },
         Candidate {
@@ -148,6 +151,7 @@ fn select_best_picks_correct_winner() {
                     last_prices: BTreeMap::new(),
                     execution_blocked: false,
                 },
+                stress_suite: Some(StressSuiteResult::pass(1)),
             },
         },
     ];

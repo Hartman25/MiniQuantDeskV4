@@ -6,6 +6,7 @@ fn scenario_gap_fail_when_tolerance_zero() {
         gap_tolerance_bars: 0,
         stale_threshold_ticks: 0,
         enforce_feed_disagreement: false,
+        calendar: CalendarSpec::AlwaysOn,
     };
     let mut st = IntegrityState::new();
     let feed = FeedId::new("feedA");

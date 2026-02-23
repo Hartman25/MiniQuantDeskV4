@@ -135,6 +135,7 @@ fn gap_detection_via_evaluate_bar_produces_deadman_halt_arm_state() {
         gap_tolerance_bars: 0,
         stale_threshold_ticks: 0,
         enforce_feed_disagreement: false,
+        calendar: mqk_integrity::CalendarSpec::AlwaysOn,
     };
     let mut st = IntegrityState::new();
     let feed = feed_a();

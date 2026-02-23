@@ -16,6 +16,30 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
     let metrics = compute_metrics(input);
     let mut fail_reasons = Vec::new();
 
+    // Patch B2 — Stress suite gate: must be run and must have passed.
+    match &input.stress_suite {
+        None => {
+            fail_reasons.push(
+                "Stress suite not run (partial-fill + cancel/replace suite is required for promotion)".to_string(),
+            );
+        }
+        Some(ss) if ss.scenarios_run == 0 => {
+            fail_reasons.push(
+                "Stress suite ran 0 scenarios — not valid (at least 1 scenario required)"
+                    .to_string(),
+            );
+        }
+        Some(ss) if !ss.passed => {
+            fail_reasons.push(format!(
+                "Stress suite failed: {}/{} scenarios passed; failures: [{}]",
+                ss.scenarios_passed,
+                ss.scenarios_run,
+                ss.failed_scenarios.join(", ")
+            ));
+        }
+        Some(_) => {} // passed with ≥ 1 scenarios — OK
+    }
+
     // Gate checks — stable ordering matches field order in PromotionConfig.
     if metrics.sharpe < config.min_sharpe {
         fail_reasons.push(format!(

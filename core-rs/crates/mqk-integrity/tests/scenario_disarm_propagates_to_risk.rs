@@ -18,6 +18,7 @@ fn stale_disarm_blocks_execution_gate() {
         gap_tolerance_bars: 0,
         stale_threshold_ticks: 5,
         enforce_feed_disagreement: false,
+        calendar: CalendarSpec::AlwaysOn,
     };
     let mut st = IntegrityState::new();
     let feed_a = FeedId::new("feedA");
@@ -57,6 +58,7 @@ fn gap_halt_blocks_execution_gate() {
         gap_tolerance_bars: 0,
         stale_threshold_ticks: 0, // disabled
         enforce_feed_disagreement: false,
+        calendar: CalendarSpec::AlwaysOn,
     };
     let mut st = IntegrityState::new();
     let feed = FeedId::new("main");
@@ -90,6 +92,7 @@ fn disarm_is_sticky_execution_stays_blocked() {
         gap_tolerance_bars: 100,
         stale_threshold_ticks: 5,
         enforce_feed_disagreement: false,
+        calendar: CalendarSpec::AlwaysOn,
     };
     let mut st = IntegrityState::new();
     let feed_a = FeedId::new("feedA");
@@ -124,6 +127,7 @@ fn halt_is_sticky_execution_stays_blocked() {
         gap_tolerance_bars: 0,
         stale_threshold_ticks: 0,
         enforce_feed_disagreement: false,
+        calendar: CalendarSpec::AlwaysOn,
     };
     let mut st = IntegrityState::new();
     let feed = FeedId::new("main");
@@ -183,6 +187,7 @@ fn gate_function_is_single_integration_point() {
         gap_tolerance_bars: 100,
         stale_threshold_ticks: 3,
         enforce_feed_disagreement: false,
+        calendar: CalendarSpec::AlwaysOn,
     };
     let mut st = IntegrityState::new();
     let main_feed = FeedId::new("main");

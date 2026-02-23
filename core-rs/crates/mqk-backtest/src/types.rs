@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use mqk_integrity::CalendarSpec;
 use mqk_portfolio::Fill;
 
 /// Stress profile for conservative fill pricing.
@@ -62,6 +63,10 @@ pub struct BacktestConfig {
 
     /// If true, enforce feed disagreement detection in integrity engine.
     pub integrity_enforce_feed_disagreement: bool,
+
+    /// Patch B3 — trading session calendar for session-aware gap detection.
+    /// Defaults to `AlwaysOn` (preserves pre-B3 behavior).
+    pub integrity_calendar: CalendarSpec,
 }
 
 impl BacktestConfig {
@@ -84,6 +89,8 @@ impl BacktestConfig {
             integrity_stale_threshold_ticks: 0,
             integrity_gap_tolerance_bars: 0,
             integrity_enforce_feed_disagreement: false,
+            // Patch B3: AlwaysOn preserves pre-B3 behavior
+            integrity_calendar: CalendarSpec::AlwaysOn,
         }
     }
 }

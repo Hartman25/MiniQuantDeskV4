@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use mqk_backtest::BacktestReport;
 use mqk_portfolio::{Fill, Side};
-use mqk_promotion::{evaluate_promotion, PromotionConfig, PromotionInput};
+use mqk_promotion::{evaluate_promotion, PromotionConfig, PromotionInput, StressSuiteResult};
 
 /// Build a profitable BacktestReport: steady equity growth, profitable fills.
 fn make_profitable_report() -> BacktestReport {
@@ -103,6 +103,7 @@ fn profitable_backtest_passes_promotion() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000,
         report,
+        stress_suite: Some(StressSuiteResult::pass(1)),
     };
 
     let decision = evaluate_promotion(&config, &input);
@@ -148,6 +149,7 @@ fn unprofitable_backtest_fails_promotion() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000,
         report,
+        stress_suite: None,
     };
 
     let decision = evaluate_promotion(&config, &input);
@@ -223,6 +225,7 @@ fn halted_backtest_metrics_computed_from_partial_curve() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000,
         report,
+        stress_suite: Some(StressSuiteResult::pass(1)),
     };
 
     let decision = evaluate_promotion(&config, &input);

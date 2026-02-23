@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::calendar::CalendarSpec;
+
 /// Identifies a feed source (deterministic ordering for tests/logs).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FeedId(pub String);
@@ -76,6 +78,13 @@ pub struct IntegrityConfig {
 
     /// If true, require feeds to agree on fingerprint for same BarKey (when both seen).
     pub enforce_feed_disagreement: bool,
+
+    /// Patch B3 — trading session calendar used for session-aware gap detection.
+    ///
+    /// When `NyseWeekdays`, gaps that span only non-trading time (weekends,
+    /// holidays, pre/after-market) are **not** counted as missing bars.
+    /// Defaults to `AlwaysOn` to preserve pre-B3 behavior.
+    pub calendar: CalendarSpec,
 }
 
 impl IntegrityConfig {
@@ -84,6 +93,7 @@ impl IntegrityConfig {
             gap_tolerance_bars: 0,
             stale_threshold_ticks: 0,
             enforce_feed_disagreement: true,
+            calendar: CalendarSpec::AlwaysOn,
         }
     }
 }

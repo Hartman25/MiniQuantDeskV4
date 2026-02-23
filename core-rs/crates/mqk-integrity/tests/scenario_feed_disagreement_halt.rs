@@ -6,6 +6,7 @@ fn scenario_feed_disagreement_halt() {
         gap_tolerance_bars: 0,
         stale_threshold_ticks: 0,
         enforce_feed_disagreement: true,
+        calendar: CalendarSpec::AlwaysOn,
     };
     let mut st = IntegrityState::new();
 

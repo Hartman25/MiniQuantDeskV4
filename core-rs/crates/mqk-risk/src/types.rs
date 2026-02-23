@@ -163,6 +163,10 @@ pub enum ReasonCode {
 
     // Kill switch
     KillSwitchTriggered,
+
+    // Patch L10 — sanity clamps
+    /// Input value failed basic sanity check (negative equity, zero/negative qty, overflow).
+    BadInput,
 }
 
 /// Risk engine state (persisted by runtime later).

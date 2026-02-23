@@ -4,6 +4,7 @@ use mqk_backtest::BacktestReport;
 use mqk_portfolio::{Fill, Side};
 use mqk_promotion::{
     build_report, evaluate_promotion, write_promotion_report_json, PromotionConfig, PromotionInput,
+    StressSuiteResult,
 };
 
 /// Create an equity curve + fills that pass all thresholds.
@@ -57,6 +58,7 @@ fn passes_all_thresholds() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000,
         report,
+        stress_suite: Some(StressSuiteResult::pass(1)),
     };
 
     let decision = evaluate_promotion(&config, &input);

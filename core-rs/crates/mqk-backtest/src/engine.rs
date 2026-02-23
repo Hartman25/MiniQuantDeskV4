@@ -100,11 +100,12 @@ impl BacktestEngine {
             missing_protective_stop_flattens: config.kill_switch_flattens,
         };
 
-        // PATCH 22: build integrity config from backtest config
+        // PATCH 22 / B3: build integrity config from backtest config
         let integrity_config = IntegrityConfig {
             gap_tolerance_bars: config.integrity_gap_tolerance_bars,
             stale_threshold_ticks: config.integrity_stale_threshold_ticks,
             enforce_feed_disagreement: config.integrity_enforce_feed_disagreement,
+            calendar: config.integrity_calendar, // Patch B3
         };
         let integrity_enabled = config.integrity_enabled;
 

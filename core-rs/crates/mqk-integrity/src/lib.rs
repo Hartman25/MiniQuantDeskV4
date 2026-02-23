@@ -11,9 +11,11 @@
 //! Pure deterministic logic. No IO, no wall-clock. Runtime provides now_tick and bar_end_ts.
 
 mod arm_state; // Patch L7 — sticky disarm + fail-closed boot
+pub mod calendar; // Patch B3 — trading session calendar
 mod engine;
 mod types;
 
 pub use arm_state::{ArmState, DisarmReason}; // Patch L7
+pub use calendar::CalendarSpec; // Patch B3
 pub use engine::{evaluate_bar, tick_feed};
 pub use types::*;

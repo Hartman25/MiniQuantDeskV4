@@ -33,6 +33,7 @@ fn fails_when_below_multiple_thresholds() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000,
         report,
+        stress_suite: None,
     };
 
     let decision = evaluate_promotion(&config, &input);
@@ -89,6 +90,7 @@ fn fails_with_large_drawdown() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000,
         report,
+        stress_suite: None,
     };
 
     let decision = evaluate_promotion(&config, &input);

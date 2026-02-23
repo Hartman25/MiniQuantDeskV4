@@ -97,6 +97,7 @@ fn config_with_integrity(stale_threshold_ticks: u64) -> BacktestConfig {
         integrity_stale_threshold_ticks: stale_threshold_ticks,
         integrity_gap_tolerance_bars: 100, // large so gap detection doesn't trigger halt
         integrity_enforce_feed_disagreement: false,
+        integrity_calendar: mqk_integrity::CalendarSpec::AlwaysOn, // Patch B3
     }
 }
 

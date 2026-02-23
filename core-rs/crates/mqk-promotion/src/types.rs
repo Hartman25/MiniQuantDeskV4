@@ -24,6 +24,52 @@ pub struct PromotionConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Patch B2 — Stress suite result
+// ---------------------------------------------------------------------------
+
+/// Results of the adversarial partial-fill + cancel/replace stress suite.
+///
+/// Promotion is **blocked** when:
+/// - `PromotionInput.stress_suite` is `None` (suite not run).
+/// - The suite ran but `passed == false`.
+/// - The suite ran with zero scenarios (`scenarios_run == 0`), which is invalid.
+///
+/// Build with [`StressSuiteResult::pass`] or [`StressSuiteResult::fail`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StressSuiteResult {
+    /// True if all scenarios passed.
+    pub passed: bool,
+    /// Number of stress scenarios that ran. Must be ≥ 1 for the suite to be valid.
+    pub scenarios_run: u32,
+    /// Number of scenarios that passed.
+    pub scenarios_passed: u32,
+    /// Human-readable descriptions of failed scenarios (empty when passed).
+    pub failed_scenarios: Vec<String>,
+}
+
+impl StressSuiteResult {
+    /// All `scenarios_run` scenarios passed.
+    pub fn pass(scenarios_run: u32) -> Self {
+        Self {
+            passed: true,
+            scenarios_run,
+            scenarios_passed: scenarios_run,
+            failed_scenarios: Vec::new(),
+        }
+    }
+
+    /// Some scenarios failed.
+    pub fn fail(scenarios_run: u32, scenarios_passed: u32, failed_scenarios: Vec<String>) -> Self {
+        Self {
+            passed: false,
+            scenarios_run,
+            scenarios_passed,
+            failed_scenarios,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
 
@@ -33,6 +79,12 @@ pub struct PromotionInput {
     pub initial_equity_micros: i64,
     /// The backtest report to evaluate.
     pub report: BacktestReport,
+    /// Results of the partial-fill + cancel/replace stress suite.
+    ///
+    /// **Promotion is blocked if `None`** (suite not run) or if the suite
+    /// ran but failed. Set to `Some(StressSuiteResult::pass(n))` after the
+    /// stress suite completes successfully.
+    pub stress_suite: Option<StressSuiteResult>, // Patch B2
 }
 
 // ---------------------------------------------------------------------------

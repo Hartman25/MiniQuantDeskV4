@@ -6,6 +6,7 @@ fn scenario_incomplete_bar_rejection() {
         gap_tolerance_bars: 0,
         stale_threshold_ticks: 0,
         enforce_feed_disagreement: true,
+        calendar: CalendarSpec::AlwaysOn,
     };
     let mut st = IntegrityState::new();
     let feed = FeedId::new("feedA");
