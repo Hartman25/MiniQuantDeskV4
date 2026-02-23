@@ -66,6 +66,31 @@ pub struct BrokerReplaceResponse {
 }
 
 // ---------------------------------------------------------------------------
+// PATCH A1 — Capability token: compile-time broker bypass prevention
+// ---------------------------------------------------------------------------
+
+/// Unforgeable capability token required by every [`BrokerAdapter`] method.
+///
+/// # Contract
+/// - The type is `pub` so external crates can **name** it in trait
+///   implementations (`fn submit_order(&self, req: …, _token: &BrokerInvokeToken)`).
+/// - The inner field is `pub(crate)`, so external crates **cannot construct**
+///   a `BrokerInvokeToken`. The only valid constructor is inside
+///   `mqk-execution` itself.
+/// - [`crate::BrokerGateway`] is the only internal site that manufactures the
+///   token, making it the **single compile-time choke-point** for all broker
+///   operations.
+///
+/// # What external crates can and cannot do
+/// ```text
+/// ✅  use mqk_execution::BrokerInvokeToken;               // naming: allowed
+/// ✅  fn submit_order(…, _token: &BrokerInvokeToken) {…}  // impl trait: allowed
+/// ❌  BrokerInvokeToken(())                               // construction: compile error
+/// ❌  broker.submit_order(req, &BrokerInvokeToken(()))    // direct call: compile error
+/// ```
+pub struct BrokerInvokeToken(pub(crate) ());
+
+// ---------------------------------------------------------------------------
 // BrokerAdapter trait (public — external crates implement this)
 // ---------------------------------------------------------------------------
 
@@ -73,10 +98,29 @@ pub struct BrokerReplaceResponse {
 ///
 /// Declared `pub` so external crates can provide implementations (paper,
 /// live, mock), but routing always flows through `BrokerGateway`.
+///
+/// # PATCH A1 — compile-time bypass prevention
+/// Every method requires `_token: &BrokerInvokeToken`. External crates can
+/// implement the trait (they can name the type) but cannot call the methods
+/// (they cannot construct the token). Only `BrokerGateway` creates the token.
 pub trait BrokerAdapter {
-    fn submit_order(&self, req: BrokerSubmitRequest) -> Result<BrokerSubmitResponse>;
-    fn cancel_order(&self, order_id: &str) -> Result<BrokerCancelResponse>;
-    fn replace_order(&self, req: BrokerReplaceRequest) -> Result<BrokerReplaceResponse>;
+    fn submit_order(
+        &self,
+        req: BrokerSubmitRequest,
+        _token: &BrokerInvokeToken,
+    ) -> Result<BrokerSubmitResponse>;
+
+    fn cancel_order(
+        &self,
+        order_id: &str,
+        _token: &BrokerInvokeToken,
+    ) -> Result<BrokerCancelResponse>;
+
+    fn replace_order(
+        &self,
+        req: BrokerReplaceRequest,
+        _token: &BrokerInvokeToken,
+    ) -> Result<BrokerReplaceResponse>;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,15 +141,15 @@ impl<B: BrokerAdapter> OrderRouter<B> {
     }
 
     pub(crate) fn route_submit(&self, req: BrokerSubmitRequest) -> Result<BrokerSubmitResponse> {
-        self.broker.submit_order(req)
+        self.broker.submit_order(req, &BrokerInvokeToken(()))
     }
 
     pub(crate) fn route_cancel(&self, order_id: &str) -> Result<BrokerCancelResponse> {
-        self.broker.cancel_order(order_id)
+        self.broker.cancel_order(order_id, &BrokerInvokeToken(()))
     }
 
     pub(crate) fn route_replace(&self, req: BrokerReplaceRequest) -> Result<BrokerReplaceResponse> {
-        self.broker.replace_order(req)
+        self.broker.replace_order(req, &BrokerInvokeToken(()))
     }
 }
 
@@ -125,7 +169,11 @@ mod tests {
     }
 
     impl BrokerAdapter for MockBroker {
-        fn submit_order(&self, req: BrokerSubmitRequest) -> Result<BrokerSubmitResponse> {
+        fn submit_order(
+            &self,
+            req: BrokerSubmitRequest,
+            _token: &BrokerInvokeToken,
+        ) -> Result<BrokerSubmitResponse> {
             self.submitted
                 .borrow_mut()
                 .insert(req.order_id.clone(), req.symbol.clone());
@@ -136,7 +184,11 @@ mod tests {
             })
         }
 
-        fn cancel_order(&self, order_id: &str) -> Result<BrokerCancelResponse> {
+        fn cancel_order(
+            &self,
+            order_id: &str,
+            _token: &BrokerInvokeToken,
+        ) -> Result<BrokerCancelResponse> {
             Ok(BrokerCancelResponse {
                 broker_order_id: format!("broker-{order_id}"),
                 cancelled_at: 1_000_000,
@@ -144,7 +196,11 @@ mod tests {
             })
         }
 
-        fn replace_order(&self, req: BrokerReplaceRequest) -> Result<BrokerReplaceResponse> {
+        fn replace_order(
+            &self,
+            req: BrokerReplaceRequest,
+            _token: &BrokerInvokeToken,
+        ) -> Result<BrokerReplaceResponse> {
             Ok(BrokerReplaceResponse {
                 broker_order_id: req.broker_order_id,
                 replaced_at: 1_000_000,

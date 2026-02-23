@@ -18,6 +18,9 @@ broker:
   keys_env:
     api_key: "ALPACA_API_KEY_PAPER"
     api_secret: "ALPACA_API_SECRET_PAPER"
+  endpoints_env:
+    paper_base_url: "ALPACA_PAPER_BASE_URL"
+    live_base_url: "ALPACA_LIVE_BASE_URL"
 
 data:
   primary_source: "twelvedata"
@@ -34,6 +37,7 @@ data:
   providers:
     twelvedata:
       api_key_env: "TWELVEDATA_API_KEY"
+      base_url_env: "TWELVEDATA_BASE_URL"
 
 execution:
   model_name: "default_v1"

@@ -1,20 +1,31 @@
 //! Broker Gateway — the SINGLE choke-point for all broker operations.
 //!
-//! # Invariant (enforced at both compile-time and runtime)
+//! # Invariants (enforced at both compile-time and runtime)
 //!
-//! **Compile-time:** `OrderRouter` is `pub(crate)` and is never re-exported
-//! from `lib.rs`. External crates have no way to construct one. The only
-//! public API that reaches a broker adapter is `BrokerGateway`.
+//! **Compile-time (PATCH A1):** `OrderRouter` is `pub(crate)` and is never
+//! re-exported from `lib.rs`. `BrokerAdapter` methods require a
+//! `&BrokerInvokeToken` that only `BrokerGateway` can construct.
 //!
-//! **Runtime:** Every call to `submit / cancel / replace` evaluates three
-//! gate verdicts in order and refuses with `GateRefusal` if any fails:
+//! **Compile-time (PATCH A2):** Gate checks are evaluated by the stored gate
+//! evaluator objects (`IG`, `RG`, `RecG`). There is no caller-supplied verdict
+//! struct with forgeable booleans. `submit / cancel / replace` accept no gate
+//! argument — the gateway evaluates each gate internally. Callers cannot inject
+//! a "clean" verdict; they must wire in real engine state via the gate traits.
 //!
-//! 1. `integrity_armed`  — system integrity is not disarmed or halted
-//! 2. `risk_allowed`     — risk engine returned Allow for this request
-//! 3. `reconcile_clean`  — most recent reconcile report is Clean
+//! **Compile-time (PATCH A3):** `BrokerGateway::submit` requires an
+//! `&OutboxClaimToken`. The token's `_priv` field is `pub(crate)`, preventing
+//! struct-literal construction outside this crate. Callers must use
+//! `OutboxClaimToken::from_claimed_row`, explicitly declaring outbox provenance.
 //!
-//! Callers evaluate each verdict from the respective engine and pass the
-//! result here. The gateway is the final policy enforcer.
+//! **Runtime:** Every call to `submit / cancel / replace` invokes three gate
+//! evaluators in order and refuses with `GateRefusal` if any returns `false`:
+//!
+//! 1. `IntegrityGate::is_armed()`  — system integrity is not disarmed or halted
+//! 2. `RiskGate::is_allowed()`     — risk engine returned Allow for this request
+//! 3. `ReconcileGate::is_clean()`  — most recent reconcile report is Clean
+//!
+//! Real engine implementations wire their subsystem state behind these traits.
+//! Test doubles use simple boolean stubs.
 
 use crate::order_router::{
     BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
@@ -22,32 +33,33 @@ use crate::order_router::{
 };
 
 // ---------------------------------------------------------------------------
-// GateVerdicts
+// Gate evaluator traits (PATCH A2)
 // ---------------------------------------------------------------------------
 
-/// Pre-evaluated gate verdicts the caller must supply before every broker op.
+/// Evaluates whether system integrity is currently armed (execution-allowed).
 ///
-/// | Field             | Source                                      |
-/// |-------------------|---------------------------------------------|
-/// | `integrity_armed` | `!IntegrityState::is_execution_blocked()`   |
-/// | `risk_allowed`    | `RiskDecision::action == RiskAction::Allow` |
-/// | `reconcile_clean` | `ReconcileReport::is_clean()`               |
-#[derive(Debug, Clone)]
-pub struct GateVerdicts {
-    pub integrity_armed: bool,
-    pub risk_allowed: bool,
-    pub reconcile_clean: bool,
+/// Implement with real `IntegrityState` or `mqk-integrity` state in production.
+/// Use a bool stub in tests.
+///
+/// # Contract
+/// Returns `true` only when execution is permitted: integrity is armed, no
+/// active kill-switch, and no halt signal is in effect.
+pub trait IntegrityGate {
+    fn is_armed(&self) -> bool;
 }
 
-impl GateVerdicts {
-    /// All gates clear — convenience helper for paper/test mode.
-    pub fn all_clear() -> Self {
-        Self {
-            integrity_armed: true,
-            risk_allowed: true,
-            reconcile_clean: true,
-        }
-    }
+/// Evaluates whether the risk engine currently allows order submission.
+///
+/// Implement with real `RiskDecision` output in production.
+pub trait RiskGate {
+    fn is_allowed(&self) -> bool;
+}
+
+/// Evaluates whether the most recent reconcile report is clean.
+///
+/// Implement with real `ReconcileReport` in production.
+pub trait ReconcileGate {
+    fn is_clean(&self) -> bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +96,61 @@ impl std::fmt::Display for GateRefusal {
 impl std::error::Error for GateRefusal {}
 
 // ---------------------------------------------------------------------------
+// OutboxClaimToken (PATCH A3)
+// ---------------------------------------------------------------------------
+
+/// Proof that a broker submit originates from a claimed outbox row.
+///
+/// # Contract
+/// Callers must obtain this token **after** successfully claiming an outbox row
+/// via `mqk_db::outbox_claim_batch`, then pass the claimed row's `outbox_id`
+/// and `idempotency_key` to [`OutboxClaimToken::from_claimed_row`].
+///
+/// The `_priv` field is `pub(crate)`, so external code **cannot** construct
+/// this type via struct literal:
+///
+/// ```text
+/// ✅  OutboxClaimToken::from_claimed_row(id, key)   // allowed: public constructor
+/// ❌  OutboxClaimToken { _priv: (), outbox_id: 1, … } // ERROR: private field
+/// ```
+///
+/// Passing fabricated values to `from_claimed_row` bypasses the protocol and
+/// is a contract violation; the DB-level `FOR UPDATE SKIP LOCKED` claim is the
+/// authoritative guard. The token makes outbox provenance an **explicit,
+/// named API requirement** rather than an invisible convention.
+///
+/// # Why `#[non_exhaustive]` is not used here
+/// `#[non_exhaustive]` carries the semantic "this struct may gain new fields."
+/// Our intent is a **capability-token pattern** (controlled constructor), not
+/// an extensibility hint. The `pub(crate) _priv` field is the correct tool;
+/// the lint is suppressed intentionally.
+#[allow(clippy::manual_non_exhaustive)]
+#[derive(Debug, Clone)]
+pub struct OutboxClaimToken {
+    /// The DB row ID of the claimed outbox entry.
+    pub outbox_id: i64,
+    /// The idempotency key (= `client_order_id`) of the claimed outbox entry.
+    pub idempotency_key: String,
+    /// Prevents struct-literal construction outside this crate (PATCH A3).
+    pub(crate) _priv: (),
+}
+
+impl OutboxClaimToken {
+    /// Construct a claim token from a successfully claimed outbox row.
+    ///
+    /// `outbox_id` and `idempotency_key` must come from a row returned by
+    /// `mqk_db::outbox_claim_batch`. Supplying fabricated values violates the
+    /// outbox-first contract.
+    pub fn from_claimed_row(outbox_id: i64, idempotency_key: impl Into<String>) -> Self {
+        Self {
+            outbox_id,
+            idempotency_key: idempotency_key.into(),
+            _priv: (),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BrokerGateway
 // ---------------------------------------------------------------------------
 
@@ -91,46 +158,72 @@ impl std::error::Error for GateRefusal {}
 ///
 /// # Architecture
 ///
-/// `BrokerGateway` owns a **private** `OrderRouter<B>`. Because `OrderRouter`
-/// is `pub(crate)`, it cannot be constructed or accessed from any crate
-/// outside `mqk-execution`. The only way external code can reach a broker
-/// adapter is through the public methods defined here — all of which evaluate
-/// the three gate checks before delegating.
+/// `BrokerGateway` owns:
+/// - A **private** `OrderRouter<B>` (the `pub(crate)` broker delegation layer).
+/// - Three gate evaluators: `IG` (`IntegrityGate`), `RG` (`RiskGate`),
+///   `RecG` (`ReconcileGate`).
+///
+/// Because gate state is evaluated by owned evaluator objects, no caller can
+/// supply a hand-crafted "all-clear" verdict at call time (PATCH A2).
+/// In production, wire real engine state behind these traits. In tests, use
+/// boolean stubs.
 ///
 /// ```text
 /// External code
 ///     │
-///     └──► BrokerGateway::submit / cancel / replace
+///     └──► BrokerGateway::submit(claim: &OutboxClaimToken, req)  (PATCH A3)
 ///                │
-///                ├── enforce_gates (integrity + risk + reconcile)
-///                │        └── GateRefusal  ◄── refused here if any fails
+///                ├── claim: outbox row was claimed before dispatch
+///                ├── IG::is_armed()    → GateRefusal::IntegrityDisarmed
+///                ├── RG::is_allowed()  → GateRefusal::RiskBlocked
+///                ├── RecG::is_clean()  → GateRefusal::ReconcileNotClean
 ///                │
-///                └── OrderRouter::route_*  ◄── only reached if all clear
-///                         └── BrokerAdapter::*
+///                └── OrderRouter::route_*  ◄── only reached if all gates pass
+///                         └── BrokerAdapter::*(…, &BrokerInvokeToken(()))
 /// ```
-pub struct BrokerGateway<B: BrokerAdapter> {
+pub struct BrokerGateway<B, IG, RG, RecG>
+where
+    B: BrokerAdapter,
+    IG: IntegrityGate,
+    RG: RiskGate,
+    RecG: ReconcileGate,
+{
     /// Private: unreachable from outside `mqk-execution`.
     router: OrderRouter<B>,
+    integrity: IG,
+    risk: RG,
+    reconcile: RecG,
 }
 
-impl<B: BrokerAdapter> BrokerGateway<B> {
-    /// Create a gateway wrapping the given broker adapter.
-    pub fn new(broker: B) -> Self {
+impl<B, IG, RG, RecG> BrokerGateway<B, IG, RG, RecG>
+where
+    B: BrokerAdapter,
+    IG: IntegrityGate,
+    RG: RiskGate,
+    RecG: ReconcileGate,
+{
+    /// Create a gateway wrapping the given broker adapter and gate evaluators.
+    ///
+    /// Pass real engine objects in production; pass boolean stubs in tests.
+    pub fn new(broker: B, integrity: IG, risk: RG, reconcile: RecG) -> Self {
         Self {
             router: OrderRouter::new(broker),
+            integrity,
+            risk,
+            reconcile,
         }
     }
 
-    /// Evaluate all three gate verdicts in order.
+    /// Evaluate all three gates in order.
     /// Returns the first refusal encountered, or `Ok(())` if all pass.
-    fn enforce_gates(verdicts: &GateVerdicts) -> Result<(), GateRefusal> {
-        if !verdicts.integrity_armed {
+    fn enforce_gates(&self) -> Result<(), GateRefusal> {
+        if !self.integrity.is_armed() {
             return Err(GateRefusal::IntegrityDisarmed);
         }
-        if !verdicts.risk_allowed {
+        if !self.risk.is_allowed() {
             return Err(GateRefusal::RiskBlocked);
         }
-        if !verdicts.reconcile_clean {
+        if !self.reconcile.is_clean() {
             return Err(GateRefusal::ReconcileNotClean);
         }
         Ok(())
@@ -138,37 +231,38 @@ impl<B: BrokerAdapter> BrokerGateway<B> {
 
     /// Submit a new broker order.
     ///
-    /// All three gates must be clear. Returns `GateRefusal` if any gate fails.
+    /// Requires an [`OutboxClaimToken`] proving the order originated from a
+    /// claimed outbox row (PATCH A3). All three gates must also pass.
+    /// Gate state is evaluated from the stored evaluators — no verdict can be
+    /// injected by the caller.
     pub fn submit(
         &self,
+        _claim: &OutboxClaimToken,
         req: BrokerSubmitRequest,
-        verdicts: &GateVerdicts,
     ) -> Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
-        Self::enforce_gates(verdicts)?;
+        self.enforce_gates()?;
         self.router.route_submit(req)
     }
 
     /// Cancel a broker order.
     ///
-    /// All three gates must be clear. Returns `GateRefusal` if any gate fails.
+    /// All three gates must pass. Returns `GateRefusal` if any gate fails.
     pub fn cancel(
         &self,
         order_id: &str,
-        verdicts: &GateVerdicts,
     ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
-        Self::enforce_gates(verdicts)?;
+        self.enforce_gates()?;
         self.router.route_cancel(order_id)
     }
 
     /// Replace a broker order.
     ///
-    /// All three gates must be clear. Returns `GateRefusal` if any gate fails.
+    /// All three gates must pass. Returns `GateRefusal` if any gate fails.
     pub fn replace(
         &self,
         req: BrokerReplaceRequest,
-        verdicts: &GateVerdicts,
     ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
-        Self::enforce_gates(verdicts)?;
+        self.enforce_gates()?;
         self.router.route_replace(req)
     }
 }
@@ -198,9 +292,11 @@ pub fn intent_id_to_client_order_id(intent_id: &str) -> String {
 mod tests {
     use super::*;
     use crate::order_router::{
-        BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
-        BrokerSubmitRequest, BrokerSubmitResponse,
+        BrokerAdapter, BrokerCancelResponse, BrokerInvokeToken, BrokerReplaceRequest,
+        BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
     };
+
+    // -- Broker stub ---------------------------------------------------------
 
     struct AlwaysOkBroker;
 
@@ -208,6 +304,7 @@ mod tests {
         fn submit_order(
             &self,
             req: BrokerSubmitRequest,
+            _token: &BrokerInvokeToken,
         ) -> Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
             Ok(BrokerSubmitResponse {
                 broker_order_id: format!("b-{}", req.order_id),
@@ -219,6 +316,7 @@ mod tests {
         fn cancel_order(
             &self,
             order_id: &str,
+            _token: &BrokerInvokeToken,
         ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
             Ok(BrokerCancelResponse {
                 broker_order_id: order_id.to_string(),
@@ -230,6 +328,7 @@ mod tests {
         fn replace_order(
             &self,
             req: BrokerReplaceRequest,
+            _token: &BrokerInvokeToken,
         ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
             Ok(BrokerReplaceResponse {
                 broker_order_id: req.broker_order_id,
@@ -237,6 +336,40 @@ mod tests {
                 status: "ok".to_string(),
             })
         }
+    }
+
+    // -- Gate stubs ----------------------------------------------------------
+
+    /// Boolean gate stub for tests. Implements all three gate traits.
+    struct BoolGate(bool);
+
+    impl IntegrityGate for BoolGate {
+        fn is_armed(&self) -> bool {
+            self.0
+        }
+    }
+    impl RiskGate for BoolGate {
+        fn is_allowed(&self) -> bool {
+            self.0
+        }
+    }
+    impl ReconcileGate for BoolGate {
+        fn is_clean(&self) -> bool {
+            self.0
+        }
+    }
+
+    // -- Helpers -------------------------------------------------------------
+
+    type TestGateway = BrokerGateway<AlwaysOkBroker, BoolGate, BoolGate, BoolGate>;
+
+    fn make_gateway(integrity: bool, risk: bool, reconcile: bool) -> TestGateway {
+        BrokerGateway::new(
+            AlwaysOkBroker,
+            BoolGate(integrity),
+            BoolGate(risk),
+            BoolGate(reconcile),
+        )
     }
 
     fn make_submit_req() -> BrokerSubmitRequest {
@@ -250,91 +383,73 @@ mod tests {
         }
     }
 
+    /// Stub claim token for unit tests (PATCH A3).
+    fn make_claim() -> OutboxClaimToken {
+        OutboxClaimToken::from_claimed_row(1, "ord-1")
+    }
+
+    // -- Gate pass/fail tests -----------------------------------------------
+
     #[test]
     fn all_clear_submit_succeeds() {
-        let gw = BrokerGateway::new(AlwaysOkBroker);
-        let res = gw.submit(make_submit_req(), &GateVerdicts::all_clear());
+        let res = make_gateway(true, true, true).submit(&make_claim(), make_submit_req());
         assert!(res.is_ok());
     }
 
     #[test]
     fn integrity_disarmed_blocks_submit() {
-        let gw = BrokerGateway::new(AlwaysOkBroker);
-        let verdicts = GateVerdicts {
-            integrity_armed: false,
-            risk_allowed: true,
-            reconcile_clean: true,
-        };
-        let err = gw.submit(make_submit_req(), &verdicts).unwrap_err();
+        let err = make_gateway(false, true, true)
+            .submit(&make_claim(), make_submit_req())
+            .unwrap_err();
         assert!(err.to_string().contains("integrity disarmed"));
     }
 
     #[test]
     fn risk_blocked_blocks_submit() {
-        let gw = BrokerGateway::new(AlwaysOkBroker);
-        let verdicts = GateVerdicts {
-            integrity_armed: true,
-            risk_allowed: false,
-            reconcile_clean: true,
-        };
-        let err = gw.submit(make_submit_req(), &verdicts).unwrap_err();
+        let err = make_gateway(true, false, true)
+            .submit(&make_claim(), make_submit_req())
+            .unwrap_err();
         assert!(err.to_string().contains("risk engine"));
     }
 
     #[test]
     fn reconcile_not_clean_blocks_submit() {
-        let gw = BrokerGateway::new(AlwaysOkBroker);
-        let verdicts = GateVerdicts {
-            integrity_armed: true,
-            risk_allowed: true,
-            reconcile_clean: false,
-        };
-        let err = gw.submit(make_submit_req(), &verdicts).unwrap_err();
+        let err = make_gateway(true, true, false)
+            .submit(&make_claim(), make_submit_req())
+            .unwrap_err();
         assert!(err.to_string().contains("reconcile"));
     }
 
     #[test]
     fn integrity_checked_before_risk() {
-        let gw = BrokerGateway::new(AlwaysOkBroker);
-        let verdicts = GateVerdicts {
-            integrity_armed: false,
-            risk_allowed: false,
-            reconcile_clean: false,
-        };
-        let err = gw.submit(make_submit_req(), &verdicts).unwrap_err();
-        // Integrity is checked first.
+        // All three gates false: integrity must be reported first.
+        let err = make_gateway(false, false, false)
+            .submit(&make_claim(), make_submit_req())
+            .unwrap_err();
         assert!(err.to_string().contains("integrity disarmed"));
     }
 
     #[test]
     fn all_clear_cancel_succeeds() {
-        let gw = BrokerGateway::new(AlwaysOkBroker);
-        let res = gw.cancel("ord-1", &GateVerdicts::all_clear());
+        let res = make_gateway(true, true, true).cancel("ord-1");
         assert!(res.is_ok());
     }
 
     #[test]
     fn integrity_disarmed_blocks_cancel() {
-        let gw = BrokerGateway::new(AlwaysOkBroker);
-        let verdicts = GateVerdicts {
-            integrity_armed: false,
-            risk_allowed: true,
-            reconcile_clean: true,
-        };
-        let err = gw.cancel("ord-1", &verdicts).unwrap_err();
+        let err = make_gateway(false, true, true).cancel("ord-1").unwrap_err();
         assert!(err.to_string().contains("integrity disarmed"));
     }
 
     #[test]
     fn all_clear_replace_succeeds() {
-        let gw = BrokerGateway::new(AlwaysOkBroker);
         let req = BrokerReplaceRequest {
             broker_order_id: "b-ord-1".to_string(),
             quantity: 20,
             limit_price: None,
             time_in_force: "day".to_string(),
         };
-        let res = gw.replace(req, &GateVerdicts::all_clear());
+        let res = make_gateway(true, true, true).replace(req);
         assert!(res.is_ok());
     }
 }

@@ -37,14 +37,29 @@ pub use types::{
 
 /// The single public gateway for all broker operations.
 /// `OrderRouter` is intentionally NOT exported.
-pub use gateway::{intent_id_to_client_order_id, BrokerGateway, GateRefusal, GateVerdicts};
+///
+/// Gate evaluator traits (`IntegrityGate`, `RiskGate`, `ReconcileGate`) are
+/// exported so callers can wire real engine state. `GateVerdicts` is removed
+/// (PATCH A2) — gates are no longer caller-supplied booleans.
+///
+/// `OutboxClaimToken` is exported so callers can construct the token after a
+/// successful DB claim (PATCH A3). Its `_priv` field is `pub(crate)`, so it
+/// cannot be constructed via struct literal outside `mqk-execution`.
+pub use gateway::{
+    intent_id_to_client_order_id, BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken,
+    ReconcileGate, RiskGate,
+};
 
 /// Broker adapter trait + request/response types.
 /// External crates may implement `BrokerAdapter` and build request structs,
 /// but can only route them through `BrokerGateway`.
+///
+/// `BrokerInvokeToken` is exported so external crates can **name** it in
+/// trait implementations, but its inner field is `pub(crate)` — external
+/// crates cannot construct one. See PATCH A1.
 pub use order_router::{
-    BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
-    BrokerSubmitRequest, BrokerSubmitResponse,
+    BrokerAdapter, BrokerCancelResponse, BrokerInvokeToken, BrokerReplaceRequest,
+    BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
 };
 
 // --- Patch L9: integer micros price surface + broker ID mapping ---
@@ -54,7 +69,9 @@ pub use order_router::{
 pub use id_map::BrokerOrderMap;
 
 /// Price conversion helpers: `i64` micros ↔ `f64` (wire boundary only).
-pub use prices::{micros_to_price, price_to_micros, MICROS_PER_UNIT};
+/// `PricingError` is the error type returned by [`price_to_micros`] when the
+/// input is non-finite or would overflow `i64` (PATCH A5).
+pub use prices::{micros_to_price, price_to_micros, PricingError, MICROS_PER_UNIT};
 
 use std::collections::BTreeMap;
 
