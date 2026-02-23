@@ -146,7 +146,15 @@ pub fn compute_event_hash(ev: &AuditEvent) -> Result<String> {
 pub fn verify_hash_chain(path: impl AsRef<Path>) -> Result<VerifyResult> {
     let content = fs::read_to_string(path.as_ref())
         .with_context(|| format!("read audit log {:?}", path.as_ref()))?;
+    verify_hash_chain_str(&content)
+}
 
+/// Verify the hash chain integrity of an audit log string (JSONL content).
+///
+/// Same logic as [`verify_hash_chain`] but operates on an in-memory `&str`.
+/// Useful for testing and for the Patch B6 artifact gate, which validates
+/// audit logs without requiring a file path.
+pub fn verify_hash_chain_str(content: &str) -> Result<VerifyResult> {
     let mut prev_hash: Option<String> = None;
     let mut line_count = 0usize;
 

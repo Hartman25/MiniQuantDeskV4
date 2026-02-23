@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use mqk_backtest::BacktestReport;
 use mqk_portfolio::{Fill, Side};
 use mqk_promotion::{
-    pick_winner, select_best, Candidate, PromotionConfig, PromotionInput, PromotionMetrics,
-    StressSuiteResult,
+    pick_winner, select_best, ArtifactLock, Candidate, PromotionConfig, PromotionInput,
+    PromotionMetrics, StressSuiteResult,
 };
 
 /// Helper: build a monotonically growing equity curve over N months.
@@ -122,6 +122,7 @@ fn select_best_picks_correct_winner() {
                     execution_blocked: false,
                 },
                 stress_suite: Some(StressSuiteResult::pass(1)),
+                artifact_lock: Some(ArtifactLock::new_for_testing("cfg", "git")), // B6
             },
         },
         Candidate {
@@ -137,6 +138,7 @@ fn select_best_picks_correct_winner() {
                     execution_blocked: false,
                 },
                 stress_suite: Some(StressSuiteResult::pass(1)),
+                artifact_lock: None, // B6: C2 fails on MDD; lock not needed
             },
         },
         Candidate {
@@ -152,6 +154,7 @@ fn select_best_picks_correct_winner() {
                     execution_blocked: false,
                 },
                 stress_suite: Some(StressSuiteResult::pass(1)),
+                artifact_lock: Some(ArtifactLock::new_for_testing("cfg", "git")), // B6
             },
         },
     ];

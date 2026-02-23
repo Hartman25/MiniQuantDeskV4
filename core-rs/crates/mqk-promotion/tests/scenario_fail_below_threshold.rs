@@ -34,6 +34,7 @@ fn fails_when_below_multiple_thresholds() {
         initial_equity_micros: 1_000_000,
         report,
         stress_suite: None,
+        artifact_lock: None, // B6: not locked; test expects failure
     };
 
     let decision = evaluate_promotion(&config, &input);
@@ -91,6 +92,7 @@ fn fails_with_large_drawdown() {
         initial_equity_micros: 1_000_000,
         report,
         stress_suite: None,
+        artifact_lock: None, // B6: not locked; test expects failure
     };
 
     let decision = evaluate_promotion(&config, &input);

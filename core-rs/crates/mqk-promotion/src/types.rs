@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use mqk_backtest::BacktestReport;
 use serde::{Deserialize, Serialize};
 
+use crate::artifact_gate::ArtifactLock;
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -85,6 +87,12 @@ pub struct PromotionInput {
     /// ran but failed. Set to `Some(StressSuiteResult::pass(n))` after the
     /// stress suite completes successfully.
     pub stress_suite: Option<StressSuiteResult>, // Patch B2
+    /// Patch B6 — proof that the artifact has been hash-locked.
+    ///
+    /// **Promotion is blocked if `None`** (artifact not validated).
+    /// Set to `Some(lock)` after calling [`crate::lock_artifact_from_str`]
+    /// successfully on the run's manifest + audit log.
+    pub artifact_lock: Option<ArtifactLock>, // Patch B6
 }
 
 // ---------------------------------------------------------------------------

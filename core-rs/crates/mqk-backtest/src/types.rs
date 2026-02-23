@@ -3,12 +3,35 @@ use std::collections::BTreeMap;
 use mqk_integrity::CalendarSpec;
 use mqk_portfolio::Fill;
 
+use crate::corporate_actions::CorporateActionPolicy;
+
 /// Stress profile for conservative fill pricing.
+///
+/// # Slippage model (Patch B5 — Slippage Realism v1)
+///
+/// Effective slippage per fill:
+/// ```text
+/// bar_spread_bps         = (high - low) * 10_000 / close   (volatility proxy)
+/// vol_component          = bar_spread_bps * volatility_mult_bps / 10_000
+/// effective_slippage_bps = slippage_bps + vol_component
+/// ```
+/// - `slippage_bps` is a deterministic minimum floor (calibrated or stress-tested).
+/// - `volatility_mult_bps` scales slippage with actual bar volatility so that
+///   wide-spread (volatile) bars incur more slippage than narrow ones.
+///   A value of `0` disables the volatility component (pre-B5 behavior).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StressProfile {
-    /// Slippage in basis points (1 bps = 0.01%).
+    /// Flat slippage floor in basis points (1 bps = 0.01%).
     /// Applied to fill prices: BUY fills at higher price, SELL fills at lower price.
+    /// Default 0 = no flat slippage.
     pub slippage_bps: i64,
+
+    /// Patch B5 — fraction of the bar's price spread added as extra slippage, in bps.
+    ///
+    /// `10_000` = 100% of the spread; `5_000` = 50%; `0` = disabled.
+    /// Wide-spread bars automatically incur more slippage, making the model
+    /// conservative for volatile market conditions.
+    pub volatility_mult_bps: i64,
 }
 
 /// Backtest configuration.
@@ -67,6 +90,13 @@ pub struct BacktestConfig {
     /// Patch B3 — trading session calendar for session-aware gap detection.
     /// Defaults to `AlwaysOn` (preserves pre-B3 behavior).
     pub integrity_calendar: CalendarSpec,
+
+    /// Patch B4 — corporate action policy.
+    ///
+    /// Enforces an explicit choice: either the caller guarantees adjusted data
+    /// (`Allow`) or declares which (symbol, period) pairs are forbidden
+    /// (`ForbidPeriods`). Defaults to `Allow` for backward compatibility.
+    pub corporate_action_policy: CorporateActionPolicy,
 }
 
 impl BacktestConfig {
@@ -83,7 +113,10 @@ impl BacktestConfig {
             pdt_enabled: false,
             kill_switch_flattens: true,
             max_gross_exposure_mult_micros: 1_000_000, // 1.0x equity
-            stress: StressProfile { slippage_bps: 0 },
+            stress: StressProfile {
+                slippage_bps: 0,
+                volatility_mult_bps: 0,
+            },
             // PATCH 22: integrity off by default (backwards compat)
             integrity_enabled: false,
             integrity_stale_threshold_ticks: 0,
@@ -91,6 +124,8 @@ impl BacktestConfig {
             integrity_enforce_feed_disagreement: false,
             // Patch B3: AlwaysOn preserves pre-B3 behavior
             integrity_calendar: CalendarSpec::AlwaysOn,
+            // Patch B4: Allow preserves pre-B4 behavior
+            corporate_action_policy: CorporateActionPolicy::Allow,
         }
     }
 }

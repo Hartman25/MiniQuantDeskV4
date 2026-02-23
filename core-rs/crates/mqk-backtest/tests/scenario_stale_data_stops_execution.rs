@@ -91,13 +91,17 @@ fn config_with_integrity(stale_threshold_ticks: u64) -> BacktestConfig {
         pdt_enabled: false,
         kill_switch_flattens: true,
         max_gross_exposure_mult_micros: 10_000_000, // 10x (generous)
-        stress: StressProfile { slippage_bps: 0 },
+        stress: StressProfile {
+            slippage_bps: 0,
+            volatility_mult_bps: 0,
+        },
         // PATCH 22: integrity ON
         integrity_enabled: true,
         integrity_stale_threshold_ticks: stale_threshold_ticks,
         integrity_gap_tolerance_bars: 100, // large so gap detection doesn't trigger halt
         integrity_enforce_feed_disagreement: false,
         integrity_calendar: mqk_integrity::CalendarSpec::AlwaysOn, // Patch B3
+        corporate_action_policy: mqk_backtest::CorporateActionPolicy::Allow, // Patch B4
     }
 }
 

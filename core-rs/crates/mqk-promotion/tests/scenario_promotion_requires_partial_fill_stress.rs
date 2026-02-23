@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 
 use mqk_backtest::BacktestReport;
 use mqk_portfolio::{Fill, Side};
-use mqk_promotion::{evaluate_promotion, PromotionConfig, PromotionInput, StressSuiteResult};
+use mqk_promotion::{
+    evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, StressSuiteResult,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -70,7 +72,8 @@ fn stress_suite_not_run_blocks_promotion() {
     let input = PromotionInput {
         initial_equity_micros: 1_000_000_000,
         report: good_report(),
-        stress_suite: None, // not run
+        stress_suite: None,  // not run
+        artifact_lock: None, // B6: not locked; test expects failure
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -98,6 +101,7 @@ fn zero_scenarios_run_is_invalid_stress_suite() {
         initial_equity_micros: 1_000_000_000,
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(0)), // 0 scenarios — invalid
+        artifact_lock: None,                            // B6: not locked; test expects failure
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -133,6 +137,7 @@ fn stress_suite_failed_scenarios_block_promotion() {
         initial_equity_micros: 1_000_000_000,
         report: good_report(),
         stress_suite: Some(suite),
+        artifact_lock: None, // B6: not locked; test expects failure
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -169,6 +174,7 @@ fn stress_suite_passed_with_good_metrics_allows_promotion() {
         initial_equity_micros: 1_000_000_000,
         report: good_report(),
         stress_suite: Some(StressSuiteResult::pass(3)),
+        artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")), // B6
     };
 
     let decision = evaluate_promotion(&lenient_config(), &input);
@@ -229,6 +235,7 @@ fn partial_fills_profit_factor_computed_correctly() {
         initial_equity_micros: 1_000_000_000,
         report,
         stress_suite: Some(StressSuiteResult::pass(1)),
+        artifact_lock: None, // B6: only checking metrics; decision.passed not tested
     };
 
     let decision = evaluate_promotion(&config, &input);
@@ -289,6 +296,7 @@ fn cancel_after_partial_fill_no_phantom_pnl() {
         initial_equity_micros: 1_000_000_000,
         report,
         stress_suite: Some(StressSuiteResult::pass(1)),
+        artifact_lock: None, // B6: only checking metrics; decision.passed not tested
     };
 
     let decision = evaluate_promotion(&config, &input);

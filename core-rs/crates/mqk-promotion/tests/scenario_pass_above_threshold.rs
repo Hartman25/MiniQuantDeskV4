@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use mqk_backtest::BacktestReport;
 use mqk_portfolio::{Fill, Side};
 use mqk_promotion::{
-    build_report, evaluate_promotion, write_promotion_report_json, PromotionConfig, PromotionInput,
-    StressSuiteResult,
+    build_report, evaluate_promotion, write_promotion_report_json, ArtifactLock, PromotionConfig,
+    PromotionInput, StressSuiteResult,
 };
 
 /// Create an equity curve + fills that pass all thresholds.
@@ -59,6 +59,7 @@ fn passes_all_thresholds() {
         initial_equity_micros: 1_000_000,
         report,
         stress_suite: Some(StressSuiteResult::pass(1)),
+        artifact_lock: Some(ArtifactLock::new_for_testing("cfg_hash", "git_hash")), // B6
     };
 
     let decision = evaluate_promotion(&config, &input);

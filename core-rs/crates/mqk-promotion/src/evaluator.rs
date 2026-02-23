@@ -16,6 +16,15 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
     let metrics = compute_metrics(input);
     let mut fail_reasons = Vec::new();
 
+    // Patch B6 — Artifact hash-lock gate: manifest + audit chain must be verified.
+    if input.artifact_lock.is_none() {
+        fail_reasons.push(
+            "Artifact not hash-locked: call lock_artifact_from_str() on the run manifest \
+             and audit log, then set artifact_lock (Patch B6 gate)"
+                .to_string(),
+        );
+    }
+
     // Patch B2 — Stress suite gate: must be run and must have passed.
     match &input.stress_suite {
         None => {

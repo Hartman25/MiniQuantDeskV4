@@ -50,7 +50,10 @@ fn stress_slippage_worsens_equity() {
 
     // Base config: no slippage
     let mut base_cfg = BacktestConfig::test_defaults();
-    base_cfg.stress = StressProfile { slippage_bps: 0 };
+    base_cfg.stress = StressProfile {
+        slippage_bps: 0,
+        volatility_mult_bps: 0,
+    };
 
     let mut engine_base = BacktestEngine::new(base_cfg);
     engine_base.add_strategy(Box::new(FlipOnce::new())).unwrap();
@@ -58,7 +61,10 @@ fn stress_slippage_worsens_equity() {
 
     // Stressed config: 200 bps slippage (2%)
     let mut stressed_cfg = BacktestConfig::test_defaults();
-    stressed_cfg.stress = StressProfile { slippage_bps: 200 };
+    stressed_cfg.stress = StressProfile {
+        slippage_bps: 200,
+        volatility_mult_bps: 0,
+    };
 
     let mut engine_stressed = BacktestEngine::new(stressed_cfg);
     engine_stressed

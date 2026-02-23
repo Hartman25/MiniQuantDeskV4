@@ -189,6 +189,23 @@ impl BacktestEngine {
                 return Err(BacktestError::NegativeTimestamp { end_ts: bar.end_ts });
             }
 
+            // Patch B4 — Corporate action policy gate.
+            // Checked before strategy execution: if the symbol is in a declared
+            // forbidden period, halt immediately rather than run strategy logic
+            // on contaminated (unadjusted) price data.
+            if self
+                .config
+                .corporate_action_policy
+                .is_excluded(&bar.symbol, bar.end_ts)
+            {
+                self.halted = true;
+                self.halt_reason = Some(format!(
+                    "Corporate action exclusion: symbol '{}' at ts={} is in a forbidden period",
+                    bar.symbol, bar.end_ts
+                ));
+                break;
+            }
+
             // PATCH 22: Integrity gate — evaluate bar through integrity engine.
             // If integrity disarms (stale feed) or halts (gap), block execution.
             //
@@ -418,22 +435,41 @@ impl BacktestEngine {
     /// Conservative fill price: apply slippage for worst-case pricing.
     ///
     /// Ambiguity worst-case enforcement:
-    /// - BUY fills at the HIGH price (worst case for buyer), then slippage on top
-    /// - SELL fills at the LOW price (worst case for seller), then slippage on top
+    /// - BUY fills at the HIGH price (worst case for buyer), then slippage on top.
+    /// - SELL fills at the LOW price (worst case for seller), then slippage on top.
+    ///
+    /// # Patch B5 — Slippage Realism v1
+    ///
+    /// Effective slippage is the sum of a flat floor and a volatility proxy:
+    /// ```text
+    /// bar_spread_bps         = (high - low) * 10_000 / close
+    /// vol_component          = bar_spread_bps * volatility_mult_bps / 10_000
+    /// effective_slippage_bps = slippage_bps + vol_component
+    /// ```
+    /// When `volatility_mult_bps == 0` (default), behavior is identical to pre-B5.
     fn conservative_fill_price(&self, bar: &BacktestBar, side: &ExecSide) -> i64 {
         let base = match side {
             ExecSide::Buy => bar.high_micros,
             ExecSide::Sell => bar.low_micros,
         };
 
-        let slippage_bps = self.config.stress.slippage_bps;
-        if slippage_bps == 0 {
+        // Patch B5: volatility proxy = bar spread as bps of close price.
+        // Deterministic: depends only on the bar's OHLC — no randomness, no clock.
+        let bar_spread_bps = if bar.close_micros > 0 {
+            (bar.high_micros - bar.low_micros).saturating_mul(10_000) / bar.close_micros
+        } else {
+            0
+        };
+        let vol_component = bar_spread_bps * self.config.stress.volatility_mult_bps / 10_000;
+
+        let effective_slippage_bps = self.config.stress.slippage_bps + vol_component;
+        if effective_slippage_bps == 0 {
             return base;
         }
 
         // slippage: BUY => price goes UP (worse for buyer)
         //           SELL => price goes DOWN (worse for seller)
-        let adjustment = (base as i128 * slippage_bps as i128) / 10_000i128;
+        let adjustment = (base as i128 * effective_slippage_bps as i128) / 10_000i128;
         match side {
             ExecSide::Buy => {
                 let result = base as i128 + adjustment;
