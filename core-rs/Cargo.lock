@@ -1865,10 +1865,13 @@ version = "0.1.0"
 name = "mqk-promotion"
 version = "0.1.0"
 dependencies = [
+ "mqk-artifacts",
+ "mqk-audit",
  "mqk-backtest",
  "mqk-portfolio",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
