@@ -266,6 +266,10 @@ enum AuditCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // PATCH S1: Load .env.local if present (dev convenience).
+    // Silent if the file does not exist — production injects env vars directly.
+    let _ = dotenvy::from_filename(".env.local");
+
     let cli = Cli::parse();
 
     match cli.cmd {

@@ -29,6 +29,11 @@ data:
   outlier_threshold_pct: 0.20
   feed_disagreement_policy: "HALT_NEW"
   stale_policy: "DISARM"
+  # PATCH S1: provider API key env var names (values never stored here).
+  # Extension point: add fmp: { api_key_env: "FMP_API_KEY" } when FMP is wired.
+  providers:
+    twelvedata:
+      api_key_env: "TWELVEDATA_API_KEY"
 
 execution:
   model_name: "default_v1"
@@ -88,6 +93,19 @@ promotion:
   tie_break:
     prefer_lower_mdd: true
     prefer_higher_stress_cagr: true
+
+# PATCH S1: Discord webhook channel env var names (values never stored here).
+# All channels are optional in every mode.
+# Extension point: add new channels under `channels:` without touching consumers
+# that don't need them.
+discord:
+  channels:
+    paper: "DISCORD_WEBHOOK_PAPER"
+    live: "DISCORD_WEBHOOK_LIVE"
+    backtest: "DISCORD_WEBHOOK_BACKTEST"
+    alerts: "DISCORD_WEBHOOK_ALERTS"
+    heartbeat: "DISCORD_WEBHOOK_HEARTBEAT"
+    c2: "DISCORD_WEBHOOK_C2"
 
 artifacts:
   export_on_completion: true

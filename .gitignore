@@ -20,6 +20,8 @@ Environment / Secrets
 
 .env
 .env.*
+# PATCH S1: keep the example file tracked (no real secrets inside)
+!.env.local.example
 # Only ignore secret files at root or explicit patterns
 secrets.env
 secrets.local

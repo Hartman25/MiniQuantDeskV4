@@ -1,3 +1,6 @@
+// PATCH S1: centralised secret resolution (env var names from config → resolved values)
+pub mod secrets;
+
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -112,6 +115,14 @@ pub fn consumed_pointers_for_mode(mode: ConfigMode) -> &'static [&'static str] {
             "/broker/keys_env/api_key",
             "/broker/keys_env/api_secret",
             "/risk/max_gross_exposure",
+            // PATCH S1: secrets resolver reads these in all modes
+            "/data/providers/twelvedata/api_key_env",
+            "/discord/channels/paper",
+            "/discord/channels/live",
+            "/discord/channels/backtest",
+            "/discord/channels/alerts",
+            "/discord/channels/heartbeat",
+            "/discord/channels/c2",
         ],
 
         ConfigMode::Paper => &[
@@ -119,6 +130,14 @@ pub fn consumed_pointers_for_mode(mode: ConfigMode) -> &'static [&'static str] {
             "/broker/keys_env/api_key",
             "/broker/keys_env/api_secret",
             "/risk/max_gross_exposure",
+            // PATCH S1: secrets resolver reads these in all modes
+            "/data/providers/twelvedata/api_key_env",
+            "/discord/channels/paper",
+            "/discord/channels/live",
+            "/discord/channels/backtest",
+            "/discord/channels/alerts",
+            "/discord/channels/heartbeat",
+            "/discord/channels/c2",
         ],
 
         ConfigMode::Live => &[
@@ -138,6 +157,14 @@ pub fn consumed_pointers_for_mode(mode: ConfigMode) -> &'static [&'static str] {
             "/data/stale_policy",
             "/data/feed_disagreement_policy",
             "/risk/reject_storm/max_rejects",
+            // PATCH S1: secrets resolver reads these in all modes
+            "/data/providers/twelvedata/api_key_env",
+            "/discord/channels/paper",
+            "/discord/channels/live",
+            "/discord/channels/backtest",
+            "/discord/channels/alerts",
+            "/discord/channels/heartbeat",
+            "/discord/channels/c2",
         ],
     }
 }

@@ -17,6 +17,10 @@ use tracing::{info, Level};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // PATCH S1: Load .env.local if present (dev convenience).
+    // Silent if the file does not exist — production injects env vars directly.
+    let _ = dotenvy::from_filename(".env.local");
+
     init_tracing();
 
     let shared = Arc::new(state::AppState::new());
