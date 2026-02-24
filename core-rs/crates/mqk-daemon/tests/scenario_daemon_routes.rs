@@ -77,12 +77,12 @@ async fn status_returns_200_with_integrity_armed_field() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
-    // Fresh state: idle, no active run, armed.
+    // Fresh state: idle, no active run, disarmed (Patch C1 — fail-closed at boot).
     assert_eq!(json["state"], "idle");
     assert!(json["active_run_id"].is_null());
     assert_eq!(
-        json["integrity_armed"], true,
-        "default state should be armed"
+        json["integrity_armed"], false,
+        "default state should be disarmed (Patch C1)"
     );
 }
 
@@ -92,14 +92,23 @@ async fn status_returns_200_with_integrity_armed_field() {
 
 #[tokio::test]
 async fn run_start_sets_state_running_and_returns_run_id() {
-    let router = make_router();
+    let st = Arc::new(state::AppState::new());
+
+    // Patch C1: arm before starting (boot is fail-closed/disarmed).
+    let arm_req = Request::builder()
+        .method("POST")
+        .uri("/v1/integrity/arm")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let _ = call(routes::build_router(Arc::clone(&st)), arm_req).await;
+
     let req = Request::builder()
         .method("POST")
         .uri("/v1/run/start")
         .body(axum::body::Body::empty())
         .unwrap();
 
-    let (status, body) = call(router, req).await;
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
@@ -117,6 +126,14 @@ async fn run_start_sets_state_running_and_returns_run_id() {
 #[tokio::test]
 async fn run_start_is_idempotent_keeps_run_id() {
     let st = Arc::new(state::AppState::new());
+
+    // Patch C1: arm before starting (boot is fail-closed/disarmed).
+    let arm_req = Request::builder()
+        .method("POST")
+        .uri("/v1/integrity/arm")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let _ = call(routes::build_router(Arc::clone(&st)), arm_req).await;
 
     let req1 = Request::builder()
         .method("POST")
@@ -148,6 +165,14 @@ async fn run_start_is_idempotent_keeps_run_id() {
 async fn run_stop_sets_state_idle_and_clears_run_id() {
     let st = Arc::new(state::AppState::new());
 
+    // Patch C1: arm before starting (boot is fail-closed/disarmed).
+    let arm_req = Request::builder()
+        .method("POST")
+        .uri("/v1/integrity/arm")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let _ = call(routes::build_router(Arc::clone(&st)), arm_req).await;
+
     // Start first.
     let start_req = Request::builder()
         .method("POST")
@@ -177,6 +202,14 @@ async fn run_stop_sets_state_idle_and_clears_run_id() {
 #[tokio::test]
 async fn run_halt_sets_state_halted_and_preserves_run_id() {
     let st = Arc::new(state::AppState::new());
+
+    // Patch C1: arm before starting (boot is fail-closed/disarmed).
+    let arm_req = Request::builder()
+        .method("POST")
+        .uri("/v1/integrity/arm")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let _ = call(routes::build_router(Arc::clone(&st)), arm_req).await;
 
     // Start first so there is a run_id.
     let start_req = Request::builder()
@@ -261,16 +294,16 @@ async fn integrity_disarm_sets_armed_false() {
 async fn status_reflects_integrity_armed_flag() {
     let st = Arc::new(state::AppState::new());
 
-    // Default: armed.
+    // Default: disarmed (Patch C1 — fail-closed at boot).
     let req = Request::builder()
         .method("GET")
         .uri("/v1/status")
         .body(axum::body::Body::empty())
         .unwrap();
     let (_, body) = call(routes::build_router(Arc::clone(&st)), req).await;
-    assert_eq!(parse_json(body)["integrity_armed"], true);
+    assert_eq!(parse_json(body)["integrity_armed"], false);
 
-    // Disarm.
+    // Disarm (idempotent — already disarmed at boot).
     let req = Request::builder()
         .method("POST")
         .uri("/v1/integrity/disarm")
@@ -278,7 +311,7 @@ async fn status_reflects_integrity_armed_flag() {
         .unwrap();
     let _ = call(routes::build_router(Arc::clone(&st)), req).await;
 
-    // Status now shows false.
+    // Status still shows false.
     let req = Request::builder()
         .method("GET")
         .uri("/v1/status")

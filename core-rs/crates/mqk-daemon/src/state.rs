@@ -84,8 +84,12 @@ impl AppState {
             active_run_id: None,
             state: "idle".to_string(),
             notes: Some("placeholder status; wire run loop next".to_string()),
-            integrity_armed: true, // armed = not disarmed
+            integrity_armed: false, // Patch C1: fail-closed at boot
         };
+
+        // Patch C1: start disarmed so an operator arm is required before any run.
+        let mut boot_integrity = IntegrityState::new();
+        boot_integrity.disarmed = true;
 
         Self {
             bus,
@@ -94,7 +98,7 @@ impl AppState {
                 version: env!("CARGO_PKG_VERSION"),
             },
             status: Arc::new(RwLock::new(initial_status)),
-            integrity: Arc::new(RwLock::new(IntegrityState::new())),
+            integrity: Arc::new(RwLock::new(boot_integrity)),
         }
     }
 }

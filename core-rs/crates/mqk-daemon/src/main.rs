@@ -23,6 +23,10 @@ async fn main() -> anyhow::Result<()> {
 
     init_tracing();
 
+    // Patch C1: AppState boots fail-closed (integrity disarmed). An explicit
+    // POST /v1/integrity/arm from the operator is required before any run can
+    // start. Full DB-backed sticky-DISARM wiring is deferred until the DB pool
+    // is available at daemon startup.
     let shared = Arc::new(state::AppState::new());
 
     state::spawn_heartbeat(shared.bus.clone(), Duration::from_secs(1));

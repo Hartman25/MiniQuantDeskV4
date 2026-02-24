@@ -71,10 +71,11 @@ pub(crate) async fn status_handler(State(st): State<Arc<AppState>>) -> impl Into
     let mut snap = st.status.read().await.clone();
     snap.daemon_uptime_secs = uptime_secs();
 
-    // Sync the integrity_armed field from the authoritative integrity state.
+    // Patch C2: sync integrity_armed from the authoritative gate — reflects
+    // both `disarmed` and `halted` flags via `is_execution_blocked()`.
     {
         let ig = st.integrity.read().await;
-        snap.integrity_armed = !ig.disarmed;
+        snap.integrity_armed = !ig.is_execution_blocked();
     }
 
     let _ = st.bus.send(BusMsg::Status(snap.clone()));
@@ -117,10 +118,10 @@ pub(crate) async fn run_start(State(st): State<Arc<AppState>>) -> Response {
     s.notes = Some("run started (in-memory); wire orchestrator next".to_string());
     s.daemon_uptime_secs = uptime_secs();
 
-    // Keep integrity_armed in sync.
+    // Patch C2: sync integrity_armed from the authoritative gate.
     {
         let ig = st.integrity.read().await;
-        s.integrity_armed = !ig.disarmed;
+        s.integrity_armed = !ig.is_execution_blocked();
     }
 
     let snap = s.clone();
@@ -143,9 +144,10 @@ pub(crate) async fn run_stop(State(st): State<Arc<AppState>>) -> impl IntoRespon
     s.notes = Some("run stopped (in-memory)".to_string());
     s.daemon_uptime_secs = uptime_secs();
 
+    // Patch C2: sync integrity_armed from the authoritative gate.
     {
         let ig = st.integrity.read().await;
-        s.integrity_armed = !ig.disarmed;
+        s.integrity_armed = !ig.is_execution_blocked();
     }
 
     let snap = s.clone();
@@ -161,6 +163,14 @@ pub(crate) async fn run_stop(State(st): State<Arc<AppState>>) -> impl IntoRespon
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn run_halt(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    // Patch C2: set integrity halted — makes halt sticky across the session.
+    // Execution gate (`is_execution_blocked`) will return true until the
+    // operator explicitly calls `POST /v1/integrity/arm`.
+    {
+        let mut ig = st.integrity.write().await;
+        ig.halted = true;
+    }
+
     let mut s = st.status.write().await;
 
     // Keep run_id so the GUI can show what was halted.
@@ -168,9 +178,10 @@ pub(crate) async fn run_halt(State(st): State<Arc<AppState>>) -> impl IntoRespon
     s.notes = Some("HALT asserted (in-memory); execution should gate on this later".to_string());
     s.daemon_uptime_secs = uptime_secs();
 
+    // Patch C2: sync integrity_armed from the authoritative gate.
     {
         let ig = st.integrity.read().await;
-        s.integrity_armed = !ig.disarmed;
+        s.integrity_armed = !ig.is_execution_blocked();
     }
 
     let snap = s.clone();
@@ -186,13 +197,15 @@ pub(crate) async fn run_halt(State(st): State<Arc<AppState>>) -> impl IntoRespon
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn integrity_arm(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    // arm = clear the disarmed flag
+    // Patch C2: arm clears BOTH disarmed and halted — it is the sole escape
+    // from any blocked integrity state (mirrors ArmState::arm() semantics).
     {
         let mut ig = st.integrity.write().await;
         ig.disarmed = false;
+        ig.halted = false;
     }
 
-    // Sync the status snapshot.
+    // Sync the status snapshot. Both flags are now false so is_armed = true.
     let (armed, active_run_id, state) = {
         let mut s = st.status.write().await;
         s.integrity_armed = true;

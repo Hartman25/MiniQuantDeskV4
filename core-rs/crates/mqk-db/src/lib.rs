@@ -632,6 +632,10 @@ pub struct InboxRow {
     pub broker_message_id: String,
     pub message_json: Value,
     pub received_at_utc: DateTime<Utc>,
+    /// NULL until inbox_mark_applied() is called after a successful portfolio
+    /// apply.  Rows with applied_at_utc IS NULL are returned by
+    /// inbox_load_unapplied_for_run() for crash-recovery replay (Patch D2).
+    pub applied_at_utc: Option<DateTime<Utc>>,
 }
 
 /// Enqueue an order intent into oms_outbox.
@@ -942,6 +946,17 @@ pub async fn load_arm_state(pool: &PgPool) -> Result<Option<(String, Option<Stri
 /// Idempotent behavior:
 /// - If broker_message_id already exists, returns Ok(false) and does NOT create a second row.
 /// - If inserted, returns Ok(true).
+///
+/// Patch D2 caller contract:
+/// ```text
+/// let inserted = inbox_insert_deduped(pool, run_id, msg_id, json).await?;
+/// if inserted {
+///     apply_fill_to_portfolio(json);          // idempotent apply
+///     inbox_mark_applied(pool, msg_id).await?; // journal completion
+/// }
+/// ```
+/// On crash between insert and mark_applied: the row surfaces in
+/// `inbox_load_unapplied_for_run` for recovery replay.
 pub async fn inbox_insert_deduped(
     pool: &PgPool,
     run_id: Uuid,
@@ -964,6 +979,71 @@ pub async fn inbox_insert_deduped(
     .context("inbox_insert_deduped failed")?;
 
     Ok(row.is_some())
+}
+
+/// Stamp `applied_at_utc = now()` on an inbox row after its fill has been
+/// successfully applied to in-process portfolio state.
+///
+/// Part of the Patch D2 crash-recovery contract:
+/// - Call this immediately after the portfolio apply completes.
+/// - Rows where `applied_at_utc IS NULL` appear in
+///   `inbox_load_unapplied_for_run` and must be replayed at startup.
+///
+/// Idempotent: silently succeeds if `broker_message_id` is not present or
+/// has already been stamped.
+pub async fn inbox_mark_applied(pool: &PgPool, broker_message_id: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        update oms_inbox
+           set applied_at_utc = now()
+         where broker_message_id = $1
+           and applied_at_utc is null
+        "#,
+    )
+    .bind(broker_message_id)
+    .execute(pool)
+    .await
+    .context("inbox_mark_applied failed")?;
+    Ok(())
+}
+
+/// Load inbox rows for a run that were received but not yet applied
+/// (`applied_at_utc IS NULL`).
+///
+/// Call this at startup/recovery to identify fills whose apply step did not
+/// complete before a crash.  Replay these fills in `inbox_id` ascending order;
+/// each apply must be idempotent so re-applying a partially-applied fill is
+/// safe.  After successfully applying each row, call `inbox_mark_applied`.
+///
+/// Uses the partial index `idx_inbox_run_unapplied` for efficiency.
+pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<InboxRow>> {
+    let rows = sqlx::query(
+        r#"
+        select inbox_id, run_id, broker_message_id, message_json,
+               received_at_utc, applied_at_utc
+          from oms_inbox
+         where run_id = $1
+           and applied_at_utc is null
+         order by inbox_id asc
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .context("inbox_load_unapplied_for_run failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(InboxRow {
+            inbox_id: row.try_get("inbox_id")?,
+            run_id: row.try_get("run_id")?,
+            broker_message_id: row.try_get("broker_message_id")?,
+            message_json: row.try_get("message_json")?,
+            received_at_utc: row.try_get("received_at_utc")?,
+            applied_at_utc: row.try_get("applied_at_utc")?,
+        });
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
