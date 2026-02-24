@@ -31,6 +31,17 @@ pub enum BacktestError {
     NegativeTimestamp { end_ts: i64 },
     /// Strategy host error (forwarded).
     StrategyHost(StrategyHostError),
+    /// PATCH F1 -- Negative slippage would make fills artificially favorable.
+    ///
+    /// Both `slippage_bps` and `volatility_mult_bps` must be >= 0. A negative value
+    /// inverts the fill-price adjustment (BUY fills cheaper, SELL fills higher),
+    /// which is a look-ahead / overfitting artifact and is unconditionally rejected.
+    NegativeSlippage {
+        /// The field name that carried the negative value.
+        field: &'static str,
+        /// The offending value in basis points.
+        value_bps: i64,
+    },
 }
 
 impl core::fmt::Display for BacktestError {
@@ -43,6 +54,12 @@ impl core::fmt::Display for BacktestError {
                 write!(f, "negative timestamp: {}", end_ts)
             }
             BacktestError::StrategyHost(e) => write!(f, "strategy host: {:?}", e),
+            BacktestError::NegativeSlippage { field, value_bps } => write!(
+                f,
+                "negative slippage rejected: {} = {} bps (must be >= 0; negative values produce favorable fills and are forbidden)",
+                field,
+                value_bps
+            ),
         }
     }
 }
@@ -162,6 +179,29 @@ impl BacktestEngine {
         );
     }
 
+    /// PATCH F1 -- Validate slippage knobs before executing any bars.
+    ///
+    /// Both `slippage_bps` and `volatility_mult_bps` must be >= 0. A negative
+    /// value would flip the fill-price adjustment direction, giving BUY orders
+    /// cheaper fills and SELL orders higher fills -- i.e. systematically
+    /// favorable pricing. That is a look-ahead / overfitting artifact and is
+    /// unconditionally rejected.
+    fn validate_stress_profile(&self) -> Result<(), BacktestError> {
+        if self.config.stress.slippage_bps < 0 {
+            return Err(BacktestError::NegativeSlippage {
+                field: "slippage_bps",
+                value_bps: self.config.stress.slippage_bps,
+            });
+        }
+        if self.config.stress.volatility_mult_bps < 0 {
+            return Err(BacktestError::NegativeSlippage {
+                field: "volatility_mult_bps",
+                value_bps: self.config.stress.volatility_mult_bps,
+            });
+        }
+        Ok(())
+    }
+
     /// Run the backtest on a sequence of bars.
     ///
     /// Event-sourced pipeline per bar:
@@ -173,6 +213,12 @@ impl BacktestEngine {
     /// 6. Record equity curve point
     /// 7. Handle halt/flatten actions from risk engine
     pub fn run(&mut self, bars: &[BacktestBar]) -> Result<BacktestReport, BacktestError> {
+        // PATCH F1: Reject negative slippage before processing any bars.
+        // Negative values invert the fill-price adjustment, producing fills that
+        // are systematically favorable (cheaper BUYs, higher-priced SELLs).
+        // Stress knobs are conservative-only.
+        self.validate_stress_profile()?;
+
         for bar in bars {
             if self.halted {
                 break;

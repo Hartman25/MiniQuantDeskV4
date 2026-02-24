@@ -15,12 +15,12 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
 
 /// A second mapping to the same broker_id must be rejected with SQLSTATE 23505.
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn broker_order_map_rejects_duplicate_broker_id() {
     let db_url = match std::env::var("MQK_DATABASE_URL") {
         Ok(u) => u,
         Err(_) => {
-            eprintln!("MQK_DATABASE_URL not set — skipping");
-            return;
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 
@@ -66,12 +66,12 @@ async fn broker_order_map_rejects_duplicate_broker_id() {
 
 /// Two mappings with distinct broker_ids must both succeed.
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn broker_order_map_allows_distinct_broker_ids() {
     let db_url = match std::env::var("MQK_DATABASE_URL") {
         Ok(u) => u,
         Err(_) => {
-            eprintln!("MQK_DATABASE_URL not set — skipping");
-            return;
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 

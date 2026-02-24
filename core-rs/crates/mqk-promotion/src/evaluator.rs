@@ -49,7 +49,28 @@ pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> P
         Some(_) => {} // passed with ≥ 1 scenarios — OK
     }
 
+    // PATCH F3 — Fail closed on NaN key metrics.
+    //
+    // Float comparisons involving NaN always return `false` in Rust, so a NaN
+    // sharpe would silently pass `if metrics.sharpe < config.min_sharpe` and
+    // appear to satisfy every threshold — the opposite of fail-closed.
+    //
+    // We check for NaN BEFORE the threshold comparisons and short-circuit on
+    // any NaN metric, skipping unreliable comparisons entirely.
+    // Note: ±Inf is handled correctly by Rust float comparisons (e.g.
+    // `f64::INFINITY < 1.0` is `false`) and is not special-cased here.
+    let nan_fails = check_metrics_finite(&metrics);
+    if !nan_fails.is_empty() {
+        fail_reasons.extend(nan_fails);
+        return PromotionDecision {
+            passed: false,
+            fail_reasons,
+            metrics,
+        };
+    }
+
     // Gate checks — stable ordering matches field order in PromotionConfig.
+    // Only reached when all five key metrics are finite (guarded above).
     if metrics.sharpe < config.min_sharpe {
         fail_reasons.push(format!(
             "Sharpe {:.6} < min {:.6}",
@@ -486,6 +507,58 @@ fn utc_month_id(epoch_secs: i64) -> i32 {
 // Helpers
 // ============================================================================
 
+/// Compare two f64 values for ordering.
+///
+/// PATCH F3 — NaN is treated as strictly less than any non-NaN value (it
+/// loses every comparison).  The old `unwrap_or(Equal)` silently collapsed
+/// NaN comparisons to Equal, making a NaN metric indistinguishable from a
+/// perfectly-tied finite metric and corrupting tie-break ranking.
+///
+/// Inf values compare normally via `partial_cmp` (Inf > any finite, etc.),
+/// which is fine here because `evaluate_promotion` already rejects ±Inf
+/// through the `check_metrics_finite` gate before any candidate reaches
+/// `pick_winner`.
 fn partial_cmp_f64(a: f64, b: f64) -> std::cmp::Ordering {
-    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal, // both NaN → deterministic tie
+        (true, false) => std::cmp::Ordering::Less, // NaN a loses to finite/Inf b
+        (false, true) => std::cmp::Ordering::Greater, // finite/Inf a beats NaN b
+        (false, false) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+    }
+}
+
+/// PATCH F3 — Validate that no key promotion metric is NaN.
+///
+/// Returns a list of fail reasons — one per NaN metric.
+/// An empty return means all five key metrics are non-NaN and threshold
+/// comparisons are reliable.
+///
+/// Why NaN specifically (not Inf):
+/// - Rust float ordering operators (`<`, `>`, `<=`, `>=`) **always return
+///   `false`** when either operand is NaN, regardless of the other operand.
+///   A NaN sharpe therefore silently passes `if metrics.sharpe < config.min_sharpe`
+///   and appears to satisfy every threshold — the opposite of fail-closed.
+/// - `±Inf` comparisons work correctly in Rust (e.g. `f64::INFINITY > 1.0`
+///   is `true`), so Inf values are handled properly by the existing threshold
+///   checks and do not need special-casing here.
+pub fn check_metrics_finite(metrics: &PromotionMetrics) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let fields: &[(&str, f64)] = &[
+        ("sharpe", metrics.sharpe),
+        ("mdd", metrics.mdd),
+        ("cagr", metrics.cagr),
+        ("profit_factor", metrics.profit_factor),
+        ("profitable_months_pct", metrics.profitable_months_pct),
+    ];
+    for &(name, val) in fields {
+        if val.is_nan() {
+            reasons.push(format!(
+                "NaN metric rejected: {} = NaN \
+                 (float comparisons with NaN always return false, silently satisfying \
+                 every threshold; promotion unconditionally fails)",
+                name
+            ));
+        }
+    }
+    reasons
 }

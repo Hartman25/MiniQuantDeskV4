@@ -33,12 +33,12 @@ fn apply_if_inserted(inserted: bool, apply_count: &mut u32) {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn first_insert_gates_apply_duplicate_is_noop() -> anyhow::Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 
@@ -113,12 +113,12 @@ async fn first_insert_gates_apply_duplicate_is_noop() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn distinct_fill_ids_each_apply_exactly_once() -> anyhow::Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 
@@ -178,12 +178,12 @@ async fn distinct_fill_ids_each_apply_exactly_once() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn broker_fill_id_uniqueness_is_global_not_run_scoped() -> anyhow::Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 

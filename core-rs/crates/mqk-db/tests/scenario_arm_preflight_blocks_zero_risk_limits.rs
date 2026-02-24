@@ -4,11 +4,11 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn arm_preflight_blocks_live_when_risk_limits_zero() -> Result<()> {
     // Skip if no DB configured (local + CI friendly).
     if std::env::var(mqk_db::ENV_DB_URL).is_err() {
-        eprintln!("SKIP: MQK_DATABASE_URL not set");
-        return Ok(());
+        panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
     }
 
     let pool = mqk_db::testkit_db_pool().await?;

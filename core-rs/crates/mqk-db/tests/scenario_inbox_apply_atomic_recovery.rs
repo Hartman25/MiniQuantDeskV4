@@ -51,12 +51,12 @@ async fn make_run(pool: &sqlx::PgPool) -> Uuid {
 /// crash) must appear in inbox_load_unapplied_for_run so the recovery path can
 /// replay it.
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn unapplied_fill_surfaces_in_recovery_list() {
     let db_url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
-            eprintln!("MQK_DATABASE_URL not set — skipping");
-            return;
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 
@@ -94,12 +94,12 @@ async fn unapplied_fill_surfaces_in_recovery_list() {
 /// A fill that completes the full happy path (insert → apply → mark_applied)
 /// must NOT appear in the recovery list — no spurious replays.
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn marked_applied_fill_absent_from_recovery_list() {
     let db_url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
-            eprintln!("MQK_DATABASE_URL not set — skipping");
-            return;
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 
@@ -138,12 +138,12 @@ async fn marked_applied_fill_absent_from_recovery_list() {
 /// delivered twice, the apply gate opens exactly once.  Under crash/restart the
 /// recovery list correctly shows zero unapplied rows for a fully applied fill.
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn duplicate_fill_cannot_double_apply() {
     let db_url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(u) => u,
         Err(_) => {
-            eprintln!("MQK_DATABASE_URL not set — skipping");
-            return;
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 

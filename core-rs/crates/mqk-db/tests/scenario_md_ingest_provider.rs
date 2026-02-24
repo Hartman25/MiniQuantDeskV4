@@ -43,12 +43,12 @@ fn bar(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_persists_bars_and_quality_report() -> Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 
@@ -145,12 +145,12 @@ async fn md_ingest_provider_persists_bars_and_quality_report() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_detects_duplicates_in_batch() -> Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 
@@ -198,12 +198,12 @@ async fn md_ingest_provider_detects_duplicates_in_batch() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_detects_out_of_order() -> Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 
@@ -261,12 +261,12 @@ async fn md_ingest_provider_detects_out_of_order() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_rejects_ohlc_violations() -> Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 
@@ -319,12 +319,12 @@ async fn md_ingest_provider_rejects_ohlc_violations() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_idempotent_same_ingest_id() -> Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 
@@ -382,12 +382,12 @@ async fn md_ingest_provider_idempotent_same_ingest_id() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_deterministic_regardless_of_input_order() -> Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 
@@ -493,12 +493,12 @@ async fn md_ingest_provider_deterministic_regardless_of_input_order() -> Result<
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_detects_1d_weekday_gaps() -> Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 
@@ -571,12 +571,12 @@ async fn md_ingest_provider_detects_1d_weekday_gaps() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_rejects_wrong_timeframe() -> Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
         }
     };
 

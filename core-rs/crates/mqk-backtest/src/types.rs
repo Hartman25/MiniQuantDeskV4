@@ -100,7 +100,16 @@ pub struct BacktestConfig {
 }
 
 impl BacktestConfig {
-    /// Reasonable defaults for testing.
+    /// Reasonable defaults **for unit tests only**.
+    ///
+    /// # ⚠ Not for real evaluation
+    ///
+    /// This constructor deliberately disables safety features — integrity checks,
+    /// risk limits, and slippage — to keep unit-test scenarios predictable and
+    /// isolated from system state. It must **never** be used as the default config
+    /// for CLI backtests, promotion runs, or any "run in anger" evaluation.
+    ///
+    /// Use [`BacktestConfig::conservative_defaults`] for real evaluation.
     pub fn test_defaults() -> Self {
         Self {
             timeframe_secs: 60,
@@ -126,6 +135,72 @@ impl BacktestConfig {
             integrity_calendar: CalendarSpec::AlwaysOn,
             // Patch B4: Allow preserves pre-B4 behavior
             corporate_action_policy: CorporateActionPolicy::Allow,
+        }
+    }
+
+    /// Conservative defaults for real evaluation ("run in anger" mode).
+    ///
+    /// # PATCH F2 — conservative-first posture
+    ///
+    /// These defaults are calibrated against `config/defaults/base.yaml` and apply
+    /// fail-closed settings for every safety knob. They are suitable as the
+    /// starting point for CLI backtests and promotion evaluation when no explicit
+    /// override is provided.
+    ///
+    /// Key differences from [`BacktestConfig::test_defaults`]:
+    ///
+    /// | Setting                           | `test_defaults` | `conservative_defaults` |
+    /// |-----------------------------------|-----------------|-------------------------|
+    /// | `integrity_enabled`               | `false`         | `true`                  |
+    /// | `integrity_stale_threshold_ticks` | `0` (disabled)  | `120` s                 |
+    /// | `integrity_gap_tolerance_bars`    | `0` (any gap halts) | `0` (any gap halts) |
+    /// | `integrity_enforce_feed_disagreement` | `false`     | `true`                  |
+    /// | `pdt_enabled`                     | `false`         | `true`                  |
+    /// | `daily_loss_limit_micros`         | `0` (disabled)  | 2 % of equity           |
+    /// | `max_drawdown_limit_micros`       | `0` (disabled)  | 18 % of equity          |
+    /// | `reject_storm_max_rejects`        | `100`           | `5`                     |
+    /// | `stress.slippage_bps`             | `0`             | `5`                     |
+    /// | `stress.volatility_mult_bps`      | `0`             | `5_000` (50 % spread)   |
+    /// | `corporate_action_policy`         | `Allow`         | `ForbidPeriods([])`     |
+    ///
+    /// Stale threshold (120 s) mirrors `runtime.stale_data_threshold_seconds: 120`
+    /// in `base.yaml`. Slippage values mirror `execution.base_slippage_bps: 5` and
+    /// `execution.volatility_multiplier: 0.5`. Risk limits mirror
+    /// `risk.daily_loss_limit: 0.02` and `risk.max_drawdown: 0.18` applied to the
+    /// default 100 k initial equity.
+    pub fn conservative_defaults() -> Self {
+        Self {
+            timeframe_secs: 60,
+            bar_history_len: 50,
+            initial_cash_micros: 100_000_000_000, // 100k USD
+            shadow_mode: false,
+            // 2 % of 100 k = $2 000 (base.yaml risk.daily_loss_limit: 0.02)
+            daily_loss_limit_micros: 2_000_000_000,
+            // 18 % of 100 k = $18 000 (base.yaml risk.max_drawdown: 0.18)
+            max_drawdown_limit_micros: 18_000_000_000,
+            // base.yaml risk.reject_storm.max_rejects: 5
+            reject_storm_max_rejects: 5,
+            pdt_enabled: true,
+            kill_switch_flattens: true,
+            // base.yaml risk.max_leverage: 1.0
+            max_gross_exposure_mult_micros: 1_000_000,
+            // base.yaml execution.base_slippage_bps: 5
+            // base.yaml execution.volatility_multiplier: 0.5 → 5_000 bps (50 % of spread)
+            stress: StressProfile {
+                slippage_bps: 5,
+                volatility_mult_bps: 5_000,
+            },
+            // Integrity ON — mirrors runtime.stale_data_threshold_seconds: 120
+            integrity_enabled: true,
+            integrity_stale_threshold_ticks: 120,
+            // base.yaml data.fail_on_gap: true, data.gap_tolerance_bars: 0
+            integrity_gap_tolerance_bars: 0,
+            // base.yaml data.feed_disagreement_policy: "HALT_NEW"
+            integrity_enforce_feed_disagreement: true,
+            integrity_calendar: CalendarSpec::AlwaysOn,
+            // ForbidPeriods(empty): no active exclusions yet, but the policy is set
+            // for the caller to extend with known corporate-action windows.
+            corporate_action_policy: CorporateActionPolicy::ForbidPeriods(vec![]),
         }
     }
 }
