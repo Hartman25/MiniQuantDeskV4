@@ -18,7 +18,10 @@ mod watermark; // Patch L8 — snapshot freshness + monotonicity watermark
 
 pub mod snapshot_adapter;
 
-pub use engine::{is_clean_reconcile, reconcile};
+// Patch B2 — reconcile_monotonic is the required production path; it enforces
+// snapshot monotonicity via SnapshotWatermark before running content comparison.
+// StaleBrokerSnapshot is returned when a snapshot fails the watermark check.
+pub use engine::{is_clean_reconcile, reconcile, reconcile_monotonic, StaleBrokerSnapshot};
 
 // Patch L6 — mandatory gate API for arm/start and periodic drift monitoring.
 pub use gate::{check_arm_gate, check_start_gate, reconcile_tick, ArmStartGate, DriftAction};

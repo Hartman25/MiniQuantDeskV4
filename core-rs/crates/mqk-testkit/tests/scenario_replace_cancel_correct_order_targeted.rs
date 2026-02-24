@@ -242,7 +242,7 @@ fn micros_to_price_converts_correctly() {
 
 #[test]
 fn price_to_micros_converts_correctly() {
-    let micros = price_to_micros(150.0);
+    let micros = price_to_micros(150.0).expect("150.0 is a valid price");
     assert_eq!(
         micros,
         150 * MICROS_PER_UNIT,
@@ -266,7 +266,7 @@ fn price_round_trip_is_exact_for_common_equity_prices() {
     ];
 
     for &original in prices_micros {
-        let via_f64 = price_to_micros(micros_to_price(original));
+        let via_f64 = price_to_micros(micros_to_price(original)).unwrap();
         assert_eq!(
             via_f64,
             original,

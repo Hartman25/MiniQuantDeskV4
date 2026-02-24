@@ -1,3 +1,4 @@
+use crate::watermark::{SnapshotFreshness, SnapshotWatermark};
 use crate::{
     BrokerSnapshot, LocalSnapshot, OrderSnapshot, ReconcileAction, ReconcileDiff, ReconcileReason,
     ReconcileReport,
@@ -141,4 +142,80 @@ pub fn reconcile(local: &LocalSnapshot, broker: &BrokerSnapshot) -> ReconcileRep
 /// Gate for LIVE arming: must be clean reconcile.
 pub fn is_clean_reconcile(local: &LocalSnapshot, broker: &BrokerSnapshot) -> bool {
     reconcile(local, broker).is_clean()
+}
+
+// ---------------------------------------------------------------------------
+// Monotonicity-enforced entry point — Patch B2
+// ---------------------------------------------------------------------------
+
+/// Error returned by [`reconcile_monotonic`] when the broker snapshot fails
+/// the monotonicity watermark check (Patch B2).
+///
+/// The `freshness` field carries the full rejection evidence:
+/// - [`SnapshotFreshness::Stale`] — snapshot timestamp is strictly older than
+///   the last accepted watermark.
+/// - [`SnapshotFreshness::NoTimestamp`] — snapshot has `fetched_at_ms == 0`
+///   (fail-closed: an untimed snapshot cannot be proven fresh).
+///
+/// [`SnapshotFreshness::Fresh`] is never stored here; it is produced by
+/// acceptance, not rejection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleBrokerSnapshot {
+    /// Rejection reason and evidence from the watermark check.
+    pub freshness: SnapshotFreshness,
+}
+
+impl std::fmt::Display for StaleBrokerSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.freshness {
+            SnapshotFreshness::Stale {
+                watermark_ms,
+                got_ms,
+            } => write!(
+                f,
+                "stale broker snapshot rejected: watermark={watermark_ms}ms \
+                 got={got_ms}ms (Patch B2 monotonicity enforcement)"
+            ),
+            SnapshotFreshness::NoTimestamp => write!(
+                f,
+                "broker snapshot has no timestamp (fetched_at_ms=0): rejected \
+                 under fail-closed semantics (Patch B2)"
+            ),
+            SnapshotFreshness::Fresh => {
+                write!(
+                    f,
+                    "StaleBrokerSnapshot: constructed with Fresh (logic error)"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for StaleBrokerSnapshot {}
+
+/// Monotonicity-enforced reconcile entry point — Patch B2.
+///
+/// This is the **required production path**.  Before comparing positions and
+/// orders the broker snapshot is checked against the [`SnapshotWatermark`]:
+///
+/// - **Fresh** (timestamp ≥ watermark): watermark is advanced and [`reconcile`]
+///   is called normally.
+/// - **Stale or no-timestamp**: returns `Err(StaleBrokerSnapshot)` immediately;
+///   no content comparison is performed.
+///
+/// A stale snapshot can mask real position drift by presenting outdated broker
+/// state — accepting it would give the engine a false sense of cleanliness.
+///
+/// Use [`reconcile`] directly only in unit tests not concerned with freshness
+/// (pure content comparison).
+pub fn reconcile_monotonic(
+    wm: &mut SnapshotWatermark,
+    local: &LocalSnapshot,
+    broker: &BrokerSnapshot,
+) -> Result<ReconcileReport, StaleBrokerSnapshot> {
+    let freshness = wm.accept(broker);
+    if freshness.is_rejected() {
+        return Err(StaleBrokerSnapshot { freshness });
+    }
+    Ok(reconcile(local, broker))
 }

@@ -306,29 +306,6 @@ pub async fn assert_run_binding(
     Ok(())
 }
 
-/// Fetch the latest reconcile audit event_type for a run.
-/// Convention: topic='reconcile', event_type='CLEAN' indicates clean reconcile.
-/// Returns None if no reconcile events exist.
-async fn fetch_latest_reconcile_event_type(pool: &PgPool, run_id: Uuid) -> Result<Option<String>> {
-    let row = sqlx::query(
-        r#"
-        select event_type
-        from audit_events
-        where run_id = $1 and topic = 'reconcile'
-        order by ts_utc desc
-        limit 1
-        "#,
-    )
-    .bind(run_id)
-    .fetch_optional(pool)
-    .await
-    .context("fetch_latest_reconcile_event_type query failed")?;
-
-    Ok(row
-        .map(|r| r.try_get::<String, _>("event_type"))
-        .transpose()?)
-}
-
 fn cfg_bool(v: &serde_json::Value, ptr: &str, default: bool) -> bool {
     v.pointer(ptr).and_then(|x| x.as_bool()).unwrap_or(default)
 }
@@ -355,6 +332,11 @@ fn cfg_str<'a>(v: &'a serde_json::Value, ptr: &str) -> Option<&'a str> {
 /// IMPORTANT (tests):
 /// - Do NOT hard-fail on config_hash here; Patch 20 tests focus on arming safety invariants.
 /// - Keep checks focused on arming safety invariants.
+///
+/// PATCH B1: Reconcile cleanliness is now verified via `sys_reconcile_checkpoint`,
+/// NOT by reading `audit_events`. A forged `insert_audit_event` row with
+/// `topic='reconcile', event_type='CLEAN'` no longer satisfies this gate.
+/// Callers must use `reconcile_checkpoint_write` after a genuine reconcile pass.
 pub async fn arm_preflight(pool: &PgPool, run_id: Uuid) -> Result<()> {
     let r = fetch_run(pool, run_id).await?;
 
@@ -367,20 +349,27 @@ pub async fn arm_preflight(pool: &PgPool, run_id: Uuid) -> Result<()> {
     // Arming settings (default strict).
     let require_clean_reconcile = cfg_bool(cfg_ref, "/arming/require_clean_reconcile", true);
 
-    // 1) Require CLEAN reconcile evidence for LIVE (if configured).
+    // 1) Require a CLEAN reconcile checkpoint for LIVE (PATCH B1).
+    //
+    //    Previously this checked audit_events.event_type='CLEAN', which was forgeable
+    //    by calling insert_audit_event() with any payload.  Now we check the dedicated
+    //    sys_reconcile_checkpoint table, written only by reconcile_checkpoint_write().
+    //    A forged audit event is insufficient — only a genuine reconcile checkpoint passes.
     if is_live && require_clean_reconcile {
-        let latest = fetch_latest_reconcile_event_type(pool, run_id).await?;
-        match latest.as_deref() {
+        let checkpoint = reconcile_checkpoint_load_latest(pool, run_id).await?;
+        match checkpoint.as_ref().map(|c| c.verdict.as_str()) {
             Some("CLEAN") => {}
             Some(other) => {
                 return Err(anyhow!(
-                    "arm_preflight reconcile not clean: latest reconcile event_type='{}'",
+                    "arm_preflight reconcile not clean: latest checkpoint verdict='{}'",
                     other
-                ))
+                ));
             }
             None => {
                 return Err(anyhow!(
-                    "arm_preflight requires clean reconcile: no audit_events with topic='reconcile' for run"
+                    "arm_preflight requires clean reconcile checkpoint: \
+                     no sys_reconcile_checkpoint row found for run — \
+                     insert_audit_event alone is insufficient (PATCH B1)"
                 ));
             }
         }
@@ -975,4 +964,172 @@ pub async fn inbox_insert_deduped(
     .context("inbox_insert_deduped failed")?;
 
     Ok(row.is_some())
+}
+
+// ---------------------------------------------------------------------------
+// Broker order ID map persistence — Patch A4
+// ---------------------------------------------------------------------------
+
+/// Persist (or update) an `internal_id → broker_id` mapping after a successful
+/// broker submit.
+///
+/// Uses `ON CONFLICT … DO UPDATE` so idempotent retries (e.g. after a crash
+/// between submit and `outbox_mark_sent`) safely overwrite rather than fail.
+///
+/// Call this immediately after a confirmed broker submit, before returning from
+/// the dispatch loop.
+pub async fn broker_map_upsert(pool: &PgPool, internal_id: &str, broker_id: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into broker_order_map (internal_id, broker_id)
+        values ($1, $2)
+        on conflict (internal_id) do update
+            set broker_id = excluded.broker_id
+        "#,
+    )
+    .bind(internal_id)
+    .bind(broker_id)
+    .execute(pool)
+    .await
+    .context("broker_map_upsert failed")?;
+    Ok(())
+}
+
+/// Remove an `internal_id → broker_id` mapping when an order reaches a terminal
+/// state (filled, cancel-ack, rejected).
+///
+/// Silently succeeds if `internal_id` is not present (idempotent cleanup).
+pub async fn broker_map_remove(pool: &PgPool, internal_id: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        delete from broker_order_map
+        where internal_id = $1
+        "#,
+    )
+    .bind(internal_id)
+    .execute(pool)
+    .await
+    .context("broker_map_remove failed")?;
+    Ok(())
+}
+
+/// Load all live `internal_id → broker_id` pairs from DB.
+///
+/// Called at daemon startup to repopulate the in-memory `BrokerOrderMap`
+/// (see `mqk-execution/id_map.rs`) so cancel/replace operations can target the
+/// correct broker order ID after a crash or planned restart.
+///
+/// Returns pairs ordered by `registered_at_utc` ascending (insertion order).
+pub async fn broker_map_load(pool: &PgPool) -> Result<Vec<(String, String)>> {
+    let rows = sqlx::query(
+        r#"
+        select internal_id, broker_id
+        from broker_order_map
+        order by registered_at_utc asc
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("broker_map_load failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push((
+            row.try_get::<String, _>("internal_id")?,
+            row.try_get::<String, _>("broker_id")?,
+        ));
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Reconcile checkpoint — Patch B1
+// ---------------------------------------------------------------------------
+
+/// A persisted reconcile checkpoint written by the reconcile engine.
+///
+/// `arm_preflight` checks this table (not `audit_events`) for reconcile
+/// cleanliness.  A CLEAN verdict here requires the reconcile engine to have
+/// called `reconcile_checkpoint_write` — inserting a fake audit event is
+/// insufficient.
+#[derive(Debug, Clone)]
+pub struct ReconcileCheckpoint {
+    pub checkpoint_id: i64,
+    pub run_id: Uuid,
+    /// `"CLEAN"` or `"DIRTY"`.
+    pub verdict: String,
+    /// `SnapshotWatermark::last_accepted_ms()` at reconcile time.
+    pub snapshot_watermark_ms: i64,
+    /// Caller-computed hash of the reconcile payload (auditability hook).
+    pub result_hash: String,
+    pub created_at_utc: DateTime<Utc>,
+}
+
+/// Write a reconcile checkpoint after a genuine reconcile pass.
+///
+/// This is the **only** function that satisfies the `arm_preflight` reconcile
+/// gate (PATCH B1).  `insert_audit_event` with `event_type='CLEAN'` no longer
+/// fulfils arming.
+///
+/// `verdict` must be `"CLEAN"` or `"DIRTY"`.
+/// `snapshot_watermark_ms` should be `SnapshotWatermark::last_accepted_ms()`.
+/// `result_hash` is a caller-computed hash (e.g. SHA-256 of the reconcile
+/// report JSON) for auditability; it is stored but not cryptographically
+/// verified by arming.
+pub async fn reconcile_checkpoint_write(
+    pool: &PgPool,
+    run_id: Uuid,
+    verdict: &str,
+    snapshot_watermark_ms: i64,
+    result_hash: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into sys_reconcile_checkpoint
+            (run_id, verdict, snapshot_watermark_ms, result_hash)
+        values ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(run_id)
+    .bind(verdict)
+    .bind(snapshot_watermark_ms)
+    .bind(result_hash)
+    .execute(pool)
+    .await
+    .context("reconcile_checkpoint_write failed")?;
+    Ok(())
+}
+
+/// Load the most recent reconcile checkpoint for a run.
+///
+/// Returns `None` if the reconcile engine has not yet written any checkpoint
+/// for this run (arming should fail in that case).
+pub async fn reconcile_checkpoint_load_latest(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<Option<ReconcileCheckpoint>> {
+    let row = sqlx::query(
+        r#"
+        select checkpoint_id, run_id, verdict, snapshot_watermark_ms, result_hash, created_at_utc
+        from sys_reconcile_checkpoint
+        where run_id = $1
+        order by created_at_utc desc
+        limit 1
+        "#,
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    .context("reconcile_checkpoint_load_latest failed")?;
+
+    let Some(row) = row else { return Ok(None) };
+
+    Ok(Some(ReconcileCheckpoint {
+        checkpoint_id: row.try_get("checkpoint_id")?,
+        run_id: row.try_get("run_id")?,
+        verdict: row.try_get("verdict")?,
+        snapshot_watermark_ms: row.try_get("snapshot_watermark_ms")?,
+        result_hash: row.try_get("result_hash")?,
+        created_at_utc: row.try_get("created_at_utc")?,
+    }))
 }

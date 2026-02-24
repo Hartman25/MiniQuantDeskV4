@@ -22,6 +22,7 @@ pub mod oms;
 // Crate-private: prevents external bypass.
 mod gateway;
 mod order_router;
+mod reconcile_guard; // Patch B3 — production ReconcileGate implementation.
 
 // Patch L9 — integer micros + broker ID mapping.
 mod id_map;
@@ -49,6 +50,10 @@ pub use gateway::{
     intent_id_to_client_order_id, BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken,
     ReconcileGate, RiskGate,
 };
+
+// Patch B3 — production ReconcileGate: fail-closed freshness guard with
+// injectable clock for deterministic testing.
+pub use reconcile_guard::ReconcileFreshnessGuard;
 
 /// Broker adapter trait + request/response types.
 /// External crates may implement `BrokerAdapter` and build request structs,
