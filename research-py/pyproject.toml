@@ -1,0 +1,21 @@
+[project]
+name = "mqk-research"
+version = "0.1.0"
+description = "MiniQuantDesk V4 deterministic research layer (Part A / Phase 1)"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0",
+  "numpy>=1.24",
+  "PyYAML>=6.0",
+  "SQLAlchemy>=2.0",
+  "psycopg[binary]>=3.1",
+]
+
+[project.scripts]
+mqk-research = "mqk_research.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

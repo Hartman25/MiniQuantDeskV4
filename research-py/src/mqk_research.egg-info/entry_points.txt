@@ -1,0 +1,2 @@
+[console_scripts]
+mqk-research = mqk_research.cli:main

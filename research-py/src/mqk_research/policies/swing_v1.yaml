@@ -1,0 +1,23 @@
+name: swing_v1
+asset_class: EQUITY
+
+requires:
+  bars: true
+  corporate_events: optional  # earnings exclusion stub allowed in Phase 1
+
+bars:
+  timeframe: "1D"
+  lookback_days: 140
+
+filters:
+  min_price: 5.0
+  min_adv_usd_20: 2000000.0
+
+rank:
+  top_k: 200
+  score: "ret_60d + trend_proxy"
+
+portfolio:
+  max_positions: 20
+  top_n: 10
+  long_only: true
