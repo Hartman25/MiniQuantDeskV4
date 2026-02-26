@@ -6,6 +6,7 @@ mod commands;
 
 use commands::{
     backtest::{md_ingest_csv, md_ingest_provider},
+    bkt::{run_backtest_csv, run_backtest_db},
     load_payload,
     run::{
         run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_halt, run_heartbeat,
@@ -56,6 +57,85 @@ enum Commands {
     Md {
         #[command(subcommand)]
         cmd: MdCmd,
+    },
+
+    /// Deterministic backtest tools.
+    Backtest {
+        #[command(subcommand)]
+        cmd: BacktestCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum BacktestCmd {
+    /// Run an end-to-end deterministic backtest from a CSV bars file.
+    Csv {
+        /// Path to bars CSV file (see mqk-backtest loader docs).
+        #[arg(long)]
+        bars: String,
+
+        /// Timeframe seconds (must match strategy spec).
+        #[arg(long, default_value_t = 60)]
+        timeframe_secs: i64,
+
+        /// Initial cash in micros.
+        #[arg(long, default_value_t = 100_000_000_000)]
+        initial_cash_micros: i64,
+
+        /// Shadow mode: run strategy but do not execute trades.
+        #[arg(long, default_value_t = false)]
+        shadow: bool,
+
+        /// Enable integrity checks.
+        #[arg(long, default_value_t = true)]
+        integrity_enabled: bool,
+
+        /// Integrity stale threshold (ticks).
+        #[arg(long, default_value_t = 120)]
+        integrity_stale_threshold_ticks: u64,
+
+        /// Integrity gap tolerance (missing bars).
+        #[arg(long, default_value_t = 0)]
+        integrity_gap_tolerance_bars: u32,
+
+        /// Optional output directory for deterministic artifacts (fills/equity/metrics).
+        #[arg(long)]
+        out_dir: Option<String>,
+    },
+
+    /// Load canonical bars from Postgres md_bars and run a deterministic backtest.
+    Db {
+        /// Timeframe string as stored in md_bars (e.g. 1m, 1h, 1D).
+        #[arg(long)]
+        timeframe: String,
+
+        /// Inclusive start end_ts (epoch seconds).
+        #[arg(long)]
+        start_end_ts: i64,
+
+        /// Inclusive end end_ts (epoch seconds).
+        #[arg(long)]
+        end_end_ts: i64,
+
+        /// Optional comma-separated symbol list. If omitted, loads all symbols.
+        #[arg(long)]
+        symbols: Option<String>,
+
+        /// Strategy timeframe in seconds.
+        #[arg(long, default_value_t = 60)]
+        timeframe_secs: i64,
+
+        /// Initial cash in micros.
+        #[arg(long, default_value_t = 100_000_000_000)]
+        initial_cash_micros: i64,
+
+        /// Shadow mode: run strategy but do not execute trades.
+        #[arg(long, default_value_t = false)]
+        shadow: bool,
+
+        /// Enable integrity checks.
+        #[arg(long, default_value_t = true)]
+        integrity_enabled: bool,
     },
 }
 
@@ -266,8 +346,6 @@ enum AuditCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // PATCH S1: Load .env.local if present (dev convenience).
-    // Silent if the file does not exist — production injects env vars directly.
     let _ = dotenvy::from_filename(".env.local");
 
     let cli = Cli::parse();
@@ -284,7 +362,7 @@ async fn main() -> Result<()> {
                     let n = mqk_db::count_active_live_runs(&pool).await?;
                     if n > 0 && !yes {
                         anyhow::bail!(
-                            "REFUSING MIGRATE: detected {} active LIVE run(s) in ARMED/RUNNING. Re-run with: `mqk db migrate --yes`",
+                            "REFUSING MIGRATE: detected {} active LIVE run(s) in ARMED/RUNNING. Re-run with: mqk db migrate --yes",
                             n
                         );
                     }
@@ -317,6 +395,53 @@ async fn main() -> Result<()> {
                 end,
             } => {
                 md_ingest_provider(source, symbols, timeframe, start, end).await?;
+            }
+        },
+
+        Commands::Backtest { cmd } => match cmd {
+            BacktestCmd::Csv {
+                bars,
+                timeframe_secs,
+                initial_cash_micros,
+                shadow,
+                integrity_enabled,
+                integrity_stale_threshold_ticks,
+                integrity_gap_tolerance_bars,
+                out_dir,
+            } => {
+                run_backtest_csv(
+                    bars,
+                    timeframe_secs,
+                    initial_cash_micros,
+                    shadow,
+                    integrity_enabled,
+                    integrity_stale_threshold_ticks,
+                    integrity_gap_tolerance_bars,
+                    out_dir,
+                )
+                .await?;
+            }
+            BacktestCmd::Db {
+                timeframe,
+                start_end_ts,
+                end_end_ts,
+                symbols,
+                timeframe_secs,
+                initial_cash_micros,
+                shadow,
+                integrity_enabled,
+            } => {
+                run_backtest_db(
+                    timeframe,
+                    start_end_ts,
+                    end_end_ts,
+                    symbols,
+                    timeframe_secs,
+                    initial_cash_micros,
+                    shadow,
+                    integrity_enabled,
+                )
+                .await?;
             }
         },
 

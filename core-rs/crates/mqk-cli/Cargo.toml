@@ -25,6 +25,9 @@ mqk-audit = { path = "../mqk-audit" }
 mqk-artifacts = { path = "../mqk-artifacts" }
 mqk-config = { path = "../mqk-config" }
 mqk-db = { path = "../mqk-db" }
+mqk-backtest = { path = "../mqk-backtest" }
+mqk-execution = { path = "../mqk-execution" }
+mqk-strategy = { path = "../mqk-strategy" }
 mqk-md = { path = "../mqk-md" }
 mqk-testkit = { path = "../mqk-testkit" }
 

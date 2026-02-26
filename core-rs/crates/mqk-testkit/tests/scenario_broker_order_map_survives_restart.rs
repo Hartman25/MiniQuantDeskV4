@@ -15,30 +15,53 @@
 //! 5. `broker_map_upsert` is idempotent — re-registering the same `internal_id`
 //!    does not produce duplicate rows and overwrites with the latest `broker_id`.
 //!
-//! Requires `MQK_DATABASE_URL`. Skips with a diagnostic message if absent.
+//! Requires `MQK_DATABASE_URL`. Skips with a diagnostic message if absent or
+//! misconfigured.
 
+use anyhow::Result;
 use mqk_execution::BrokerOrderMap;
+use sqlx::{postgres::PgPoolOptions, PgPool};
 
 // ---------------------------------------------------------------------------
 // 1 + 2 + 3 + 4: full crash-restart roundtrip
 // ---------------------------------------------------------------------------
 
+fn db_url_or_skip() -> Option<String> {
+    match std::env::var(mqk_db::ENV_DB_URL) {
+        Ok(v) if !v.trim().is_empty() => Some(v),
+        _ => {
+            println!("SKIP: requires MQK_DATABASE_URL");
+            None
+        }
+    }
+}
+
+async fn try_pool_or_skip(url: &str) -> Result<Option<PgPool>> {
+    match PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(2))
+        .connect(url)
+        .await
+    {
+        Ok(pool) => Ok(Some(pool)),
+        Err(e) => {
+            println!("SKIP: cannot connect to DB: {e}");
+            Ok(None)
+        }
+    }
+}
+
 #[tokio::test]
 async fn broker_order_map_survives_simulated_restart() -> anyhow::Result<()> {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
-        }
+    let Some(url) = db_url_or_skip() else {
+        return Ok(());
     };
 
     // --- Pre-crash session ---------------------------------------------------
 
-    let pool_before = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&url)
-        .await?;
+    let Some(pool_before) = try_pool_or_skip(&url).await? else {
+        return Ok(());
+    };
     mqk_db::migrate(&pool_before).await?;
 
     // Isolate test rows so parallel runs do not interfere.
@@ -55,10 +78,9 @@ async fn broker_order_map_survives_simulated_restart() -> anyhow::Result<()> {
 
     // --- Post-restart session ------------------------------------------------
 
-    let pool_after = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&url)
-        .await?;
+    let Some(pool_after) = try_pool_or_skip(&url).await? else {
+        return Ok(());
+    };
     mqk_db::migrate(&pool_after).await?;
 
     // Recovery: load all persisted mappings (daemon startup path).
@@ -115,18 +137,13 @@ async fn broker_order_map_survives_simulated_restart() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn broker_map_upsert_is_idempotent() -> anyhow::Result<()> {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
-        }
+    let Some(url) = db_url_or_skip() else {
+        return Ok(());
     };
 
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&url)
-        .await?;
+    let Some(pool) = try_pool_or_skip(&url).await? else {
+        return Ok(());
+    };
     mqk_db::migrate(&pool).await?;
 
     sqlx::query("delete from broker_order_map where internal_id = 'a4-idem-ord'")

@@ -102,3 +102,95 @@ fn ensure_file_exists_with(path: &Path, contents_if_create: &str) -> Result<()> 
         .with_context(|| format!("create placeholder failed: {}", path.display()))?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Backtest report writer (deterministic outputs)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+struct BacktestMetrics<'a> {
+    schema_version: i32,
+    halted: bool,
+    halt_reason: Option<&'a str>,
+    execution_blocked: bool,
+    bars: usize,
+    fills: usize,
+    final_equity_micros: i64,
+    symbols: Vec<&'a str>,
+    last_prices_micros: std::collections::BTreeMap<&'a str, i64>,
+}
+
+/// Write deterministic backtest artifacts into an existing run directory.
+///
+/// This function performs explicit IO. It is intended to be called by CLI/daemons.
+/// No wall-clock time is used; timestamps are derived from `report.equity_curve` / bar end_ts.
+///
+/// Files written (overwritten):
+/// - `fills.csv`
+/// - `equity_curve.csv`
+/// - `metrics.json`
+pub fn write_backtest_report(run_dir: &Path, report: &mqk_backtest::BacktestReport) -> Result<()> {
+    fs::create_dir_all(run_dir).with_context(|| {
+        format!(
+            "create backtest artifacts dir failed: {}",
+            run_dir.display()
+        )
+    })?;
+
+    // fills.csv (match placeholder header used by init_run_artifacts)
+    // NOTE: Fill currently has no IDs or timestamps in core structs, so we emit blank IDs.
+    // `ts_utc` is emitted as the first equity_curve timestamp when available; otherwise 0.
+    let default_ts = report.equity_curve.first().map(|(ts, _)| *ts).unwrap_or(0);
+    let mut fills_csv = String::from("ts_utc,fill_id,order_id,symbol,side,qty,price,fee\n");
+    for f in &report.fills {
+        let side = format!("{:?}", f.side).to_uppercase(); // BUY / SELL deterministically
+        fills_csv.push_str(&format!(
+            "{},{},{},{},{},{},{},{}\n",
+            default_ts, "", "", f.symbol, side, f.qty, f.price_micros, f.fee_micros
+        ));
+    }
+    let fills_path = run_dir.join("fills.csv");
+    fs::write(&fills_path, fills_csv)
+        .with_context(|| format!("write fills.csv failed: {}", fills_path.display()))?;
+
+    // equity_curve.csv (match placeholder header)
+    let mut eq_csv = String::from("ts_utc,equity\n");
+    for (ts, eq) in &report.equity_curve {
+        eq_csv.push_str(&format!("{},{}\n", ts, eq));
+    }
+    let eq_path = run_dir.join("equity_curve.csv");
+    fs::write(&eq_path, eq_csv)
+        .with_context(|| format!("write equity_curve.csv failed: {}", eq_path.display()))?;
+
+    // metrics.json
+    let final_equity = report.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(0);
+
+    // deterministic symbol listing
+    let mut symbols: Vec<&str> = report.last_prices.keys().map(|s| s.as_str()).collect();
+    symbols.sort();
+
+    let last_prices_micros = report
+        .last_prices
+        .iter()
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let metrics = BacktestMetrics {
+        schema_version: 1,
+        halted: report.halted,
+        halt_reason: report.halt_reason.as_deref(),
+        execution_blocked: report.execution_blocked,
+        bars: report.equity_curve.len(),
+        fills: report.fills.len(),
+        final_equity_micros: final_equity,
+        symbols,
+        last_prices_micros,
+    };
+
+    let metrics_path = run_dir.join("metrics.json");
+    let json = serde_json::to_string_pretty(&metrics).context("serialize metrics failed")?;
+    fs::write(&metrics_path, format!("{json}\n"))
+        .with_context(|| format!("write metrics.json failed: {}", metrics_path.display()))?;
+
+    Ok(())
+}

@@ -1,6 +1,6 @@
 //! mqk-backtest
 //!
-//! PATCH 11 – Backtest Engine (Event-Sourced Replay)
+//! PATCH 11 â€“ Backtest Engine (Event-Sourced Replay)
 //!
 //! Pipeline: BAR -> STRATEGY -> EXECUTION -> PORTFOLIO -> RISK
 //!
@@ -14,8 +14,10 @@
 
 pub mod corporate_actions; // Patch B4
 mod engine;
+pub mod loader;
 pub mod types;
 
 pub use corporate_actions::{CorporateActionPolicy, ForbidEntry}; // Patch B4
 pub use engine::{BacktestEngine, BacktestError};
+pub use loader::{load_csv_file, parse_csv_bars, LoadError};
 pub use types::{BacktestBar, BacktestConfig, BacktestReport, StressProfile};

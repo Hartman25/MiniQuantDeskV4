@@ -15,8 +15,8 @@ pub const ENV_DB_URL: &str = "MQK_DATABASE_URL";
 pub mod md;
 
 pub use md::{
-    CoverageTotals, GroupStats, IngestCsvArgs, IngestProviderBarsArgs, IngestResult,
-    MdQualityReport, ProviderBar,
+    fetch_md_bars, CoverageTotals, FetchMdBarsArgs, IngestCsvArgs, IngestProviderBarsArgs,
+    IngestResult, MdBarRow, MdQualityReport, ProviderBar,
 };
 
 pub use md::{ingest_csv_to_md_bars, ingest_provider_bars_to_md_bars};

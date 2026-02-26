@@ -568,3 +568,5 @@ impl BacktestEngine {
         }
     }
 }
+
+impl std::error::Error for BacktestError {}

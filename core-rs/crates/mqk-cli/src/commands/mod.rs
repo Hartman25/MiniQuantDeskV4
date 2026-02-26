@@ -4,6 +4,7 @@
 //! Command-specific logic lives in the submodules.
 
 pub mod backtest;
+pub mod bkt;
 pub mod run;
 
 use anyhow::{Context, Result};
