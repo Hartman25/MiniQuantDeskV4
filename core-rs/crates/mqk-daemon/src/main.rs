@@ -4,11 +4,11 @@
 //! state, wires middleware, and starts the HTTP server.  All route handlers
 //! live in `routes.rs`; all shared state types live in `state.rs`.
 
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
 use axum::http::{HeaderValue, Method};
-use mqk_daemon::{routes, state};
+use mqk_daemon::{bind, routes, state};
 use tower_http::{
     cors::CorsLayer,
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
@@ -39,7 +39,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .layer(cors_localhost_only());
 
-    let addr = bind_addr_from_env().unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 8899)));
+    // S7-2: Loopback-only default bind.  Non-loopback addresses require
+    // MQK_DAEMON_ALLOW_NETWORK_BIND=1 to be set explicitly.
+    let addr = bind::resolve_bind_addr_from_env()?;
     info!("mqk-daemon listening on http://{}", addr);
 
     axum::serve(tokio::net::TcpListener::bind(addr).await?, app)
@@ -55,10 +57,6 @@ fn init_tracing() {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-}
-
-fn bind_addr_from_env() -> Option<SocketAddr> {
-    std::env::var("MQK_DAEMON_ADDR").ok()?.parse().ok()
 }
 
 /// CORS: allow only localhost origins.

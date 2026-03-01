@@ -4,5 +4,6 @@
 //! The binary `main.rs` depends on this library target.
 
 pub mod api_types;
+pub mod bind;
 pub mod routes;
 pub mod state;
