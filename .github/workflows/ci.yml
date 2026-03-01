@@ -1,0 +1,109 @@
+# =============================================================================
+# MiniQuantDesk V4 — CI Pipeline
+# P0-1: Patch Discipline + CI Gate
+# =============================================================================
+#
+# Two jobs run on every push and pull request:
+#
+#   guards   — Deterministic pattern guard (check_unsafe_patterns.sh).
+#              Fails if Uuid::new_v4() appears in production src/, or if
+#              Utc::now() appears in mqk-db/src/ (enforcement scope).
+#              Expected to FAIL until D1-1, D1-2, D1-3 are applied.
+#
+#   rust     — Format check, Clippy (deny warnings), and cargo test.
+#              DB-backed tests self-skip when MQK_DATABASE_URL is absent.
+#              This job does NOT depend on `guards` — both run in parallel
+#              so all failures are visible at once.
+#
+# Rust workspace root: ./core-rs
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job: guards
+  # Deterministic static analysis. No build, no network beyond checkout.
+  # ---------------------------------------------------------------------------
+  guards:
+    name: "Safety Guards (P0-1)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run unsafe-pattern guard
+        # The guard script exits 1 if any forbidden pattern is detected.
+        # It prints exact file:line for each violation with remediation hints.
+        # Expected violations until D1-x patches:
+        #   [U] Uuid::new_v4() — mqk-audit, mqk-cli, mqk-daemon, mqk-db (md.rs)
+        #   [T] Utc::now()     — mqk-db/src/lib.rs (deadman enforcement)
+        run: bash scripts/guards/check_unsafe_patterns.sh
+
+  # ---------------------------------------------------------------------------
+  # Job: rust
+  # Format, lint, and test the Rust workspace (core-rs/).
+  # ---------------------------------------------------------------------------
+  rust:
+    name: "Rust (fmt + clippy + test)"
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./core-rs
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core-rs/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('core-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # -----------------------------------------------------------------------
+      # Format check — fails if any file is not gofmt-clean.
+      # Run `cargo fmt` locally to fix before pushing.
+      # -----------------------------------------------------------------------
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      # -----------------------------------------------------------------------
+      # Clippy — deny all warnings.
+      # Covers all targets (lib, bin, tests, examples, benches).
+      # Run `cargo clippy --workspace --all-targets -- -D warnings` locally.
+      # -----------------------------------------------------------------------
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # -----------------------------------------------------------------------
+      # Tests — DB-backed tests self-skip when MQK_DATABASE_URL is not set.
+      # To run DB tests in CI, add a `postgres` service block and set
+      # MQK_DATABASE_URL in the job env. Deferred until test suite is stable.
+      # -----------------------------------------------------------------------
+      - name: cargo test --workspace
+        run: cargo test --workspace
