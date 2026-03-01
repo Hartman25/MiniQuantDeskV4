@@ -17,6 +17,11 @@
 //! struct-literal construction outside this crate. Callers must use
 //! `OutboxClaimToken::from_claimed_row`, explicitly declaring outbox provenance.
 //!
+//! **Compile-time + runtime (EB-2):** `cancel` and `replace` require an
+//! internal order ID and a `&BrokerOrderMap`. The gateway resolves the broker
+//! ID internally and returns [`UnknownOrder`] if the mapping is absent —
+//! preventing cancel/replace of orders not submitted by this system.
+//!
 //! **Runtime:** Every call to `submit / cancel / replace` invokes three gate
 //! evaluators in order and refuses with `GateRefusal` if any returns `false`:
 //!
@@ -27,6 +32,7 @@
 //! Real engine implementations wire their subsystem state behind these traits.
 //! Test doubles use simple boolean stubs.
 
+use crate::id_map::BrokerOrderMap;
 use crate::order_router::{
     BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
     BrokerSubmitRequest, BrokerSubmitResponse, OrderRouter,
@@ -94,6 +100,31 @@ impl std::fmt::Display for GateRefusal {
 }
 
 impl std::error::Error for GateRefusal {}
+
+// ---------------------------------------------------------------------------
+// UnknownOrder (EB-2)
+// ---------------------------------------------------------------------------
+
+/// Returned when `cancel` or `replace` targets an internal order ID that has
+/// no entry in the [`BrokerOrderMap`] — i.e., the order was never submitted
+/// by this system, or has already been deregistered (EB-2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownOrder {
+    /// The internal order ID that had no broker mapping.
+    pub internal_id: String,
+}
+
+impl std::fmt::Display for UnknownOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CANCEL_REPLACE_REFUSED: no broker mapping for internal order '{}'",
+            self.internal_id
+        )
+    }
+}
+
+impl std::error::Error for UnknownOrder {}
 
 // ---------------------------------------------------------------------------
 // OutboxClaimToken (PATCH A3)
@@ -246,24 +277,50 @@ where
 
     /// Cancel a broker order.
     ///
-    /// All three gates must pass. Returns `GateRefusal` if any gate fails.
+    /// `internal_id` is the system-assigned order ID registered in `order_map`
+    /// after a successful submit. The gateway resolves it to the broker-assigned
+    /// ID internally. Returns [`UnknownOrder`] if the mapping is absent (EB-2).
+    /// All three gates must also pass.
     pub fn cancel(
         &self,
-        order_id: &str,
+        internal_id: &str,
+        order_map: &BrokerOrderMap,
     ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
         self.enforce_gates()?;
-        self.router.route_cancel(order_id)
+        let broker_id = order_map.broker_id(internal_id).ok_or_else(|| {
+            Box::new(UnknownOrder {
+                internal_id: internal_id.to_string(),
+            }) as Box<dyn std::error::Error>
+        })?;
+        self.router.route_cancel(broker_id)
     }
 
     /// Replace a broker order.
     ///
-    /// All three gates must pass. Returns `GateRefusal` if any gate fails.
+    /// `internal_id` is the system-assigned order ID registered in `order_map`
+    /// after a successful submit. The gateway resolves it to the broker-assigned
+    /// ID internally. Returns [`UnknownOrder`] if the mapping is absent (EB-2).
+    /// All three gates must also pass.
     pub fn replace(
         &self,
-        req: BrokerReplaceRequest,
+        internal_id: &str,
+        order_map: &BrokerOrderMap,
+        quantity: i32,
+        limit_price: Option<i64>,
+        time_in_force: String,
     ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
         self.enforce_gates()?;
-        self.router.route_replace(req)
+        let broker_id = order_map.broker_id(internal_id).ok_or_else(|| {
+            Box::new(UnknownOrder {
+                internal_id: internal_id.to_string(),
+            }) as Box<dyn std::error::Error>
+        })?;
+        self.router.route_replace(BrokerReplaceRequest {
+            broker_order_id: broker_id.to_string(),
+            quantity,
+            limit_price,
+            time_in_force,
+        })
     }
 }
 
@@ -431,25 +488,33 @@ mod tests {
 
     #[test]
     fn all_clear_cancel_succeeds() {
-        let res = make_gateway(true, true, true).cancel("ord-1");
+        let mut map = crate::id_map::BrokerOrderMap::new();
+        map.register("ord-1", "b-ord-1");
+        let res = make_gateway(true, true, true).cancel("ord-1", &map);
         assert!(res.is_ok());
     }
 
     #[test]
     fn integrity_disarmed_blocks_cancel() {
-        let err = make_gateway(false, true, true).cancel("ord-1").unwrap_err();
+        // Gate is evaluated before map lookup; empty map is acceptable.
+        let map = crate::id_map::BrokerOrderMap::new();
+        let err = make_gateway(false, true, true)
+            .cancel("ord-1", &map)
+            .unwrap_err();
         assert!(err.to_string().contains("integrity disarmed"));
     }
 
     #[test]
     fn all_clear_replace_succeeds() {
-        let req = BrokerReplaceRequest {
-            broker_order_id: "b-ord-1".to_string(),
-            quantity: 20,
-            limit_price: None,
-            time_in_force: "day".to_string(),
-        };
-        let res = make_gateway(true, true, true).replace(req);
+        let mut map = crate::id_map::BrokerOrderMap::new();
+        map.register("ord-1", "b-ord-1");
+        let res = make_gateway(true, true, true).replace(
+            "ord-1",
+            &map,
+            20,
+            None,
+            "day".to_string(),
+        );
         assert!(res.is_ok());
     }
 }

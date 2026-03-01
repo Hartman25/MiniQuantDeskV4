@@ -48,7 +48,7 @@ pub use types::{
 /// cannot be constructed via struct literal outside `mqk-execution`.
 pub use gateway::{
     intent_id_to_client_order_id, BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken,
-    ReconcileGate, RiskGate,
+    ReconcileGate, RiskGate, UnknownOrder,
 };
 
 // Patch B3 — production ReconcileGate: fail-closed freshness guard with
