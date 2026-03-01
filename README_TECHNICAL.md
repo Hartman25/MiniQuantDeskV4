@@ -1,112 +1,46 @@
 # MiniQuantDeskV4 — Technical README
 
-MiniQuantDeskV4 is a reliability-focused trading system built around:
-- deterministic backtesting + replay,
-- strict integrity/risk boundaries,
-- reconciliation gates for LIVE,
-- DB-enforced run lifecycle rules,
-- and scenario-driven validation.
+This is the **hands-on** setup and ops guide for MiniQuantDeskV4.
 
-This file covers setup, DB, tests, and operational commands.
-
----
-
-## Current System Status (Current Repo State)
-
-Workspace tests are GREEN.
-
-Implemented and validated (high level):
-
-### Integrity (scenario-tested)
-- no-lookahead enforcement
-- incomplete bar rejection
-- gap detection (zero-tolerance supported)
-- stale feed disarm
-- feed disagreement halt
-- deadman-style halt scenarios
-
-### Reconciliation (scenario-tested)
-- LIVE can require reconcile before arming
-- drift detection halts
-- unknown broker orders halt
-- dirty reconcile blocks LIVE start
-- snapshot normalization adapter exists (`mqk-reconcile/src/snapshot_adapter.rs`)
-
-### Strategy Framework
-- plugin trait + host shape
-- guardrails for single-strategy/single-timeframe assumptions (where configured)
-- shadow mode support exists in the architecture
-
-### Execution Boundary
-- intent → order routing boundary exists
-- order_router is exported and test-covered
-
-### Risk
-- allocation/exposure constraints tested
-- PDT helper module exists (`mqk-risk/src/pdt.rs`) with unit tests
-
-### Deterministic Backtesting
-- event-sourced engine + deterministic replay
-- worst-case ambiguity fill logic
-- stress impact measurable
-- scenario-driven validation
-
-### Market Data Ingest
-- CSV ingest → canonical `md_bars` in Postgres
-- provider ingest → canonical `md_bars` in Postgres
-- Data Quality Gate reports produced for ingests
-- idempotency behaviors tested at ingest level
-
-### Run Lifecycle Enforcement
-- explicit lifecycle: ARMED → RUNNING → STOPPED
-- DB uniqueness: one active LIVE run per engine
-- STOPPED exits active set
-- scenario tests validate exclusivity and lifecycle rules
-
-### Control Plane
-- daemon API provides status + lifecycle endpoints and SSE status stream
-- GUI can act as a control console over daemon endpoints
+**Core ideas:**
+- deterministic inputs/outputs
+- explicit run lifecycle
+- integrity/risk gates before any execution boundary
+- scenario-driven validation (treat brokers/data as adversarial)
 
 ---
 
-## Repository Structure (core-rs)
+## Repository Structure
 
-
-core-rs/
-crates/
-mqk-artifacts → run artifacts + reports
-mqk-audit → audit log/hash-chain primitives
-mqk-backtest → deterministic event-sourced backtesting
-mqk-cli → CLI entry point + operational commands
-mqk-config → layered config + deterministic hashing + unused-key guards
-mqk-daemon → HTTP/SSE control plane
-mqk-db → schema/migrations + run lifecycle + ingest persistence
-mqk-execution → intent → order boundary + order_router
-mqk-integrity → market data integrity + guardrails
-mqk-isolation → engine allocation isolation layer
-mqk-md → market data ingest/provider/normalization/quality
-mqk-portfolio → portfolio accounting + metrics (in progress in roadmap)
-mqk-promotion → promotion gate evaluator (thresholds + tie-breaks)
-mqk-reconcile → reconcile + drift detection + snapshot_adapter
-mqk-risk → risk controls + PDT helpers
-mqk-strategy → strategy plugin framework
-mqk-gui/ → GUI control console (React/Tauri)
-
+- `core-rs/` — Rust workspace
+  - `crates/` — subsystem crates
+  - `mqk-gui/` — GUI control console (Tauri/React)
+- `research-py/` — optional Python research CLI that emits deterministic run artifacts
+- `config/` — layered config: defaults, environments, engines, risk profiles, stress profiles
+- `runtime/` — runtime scaffolding/config (if present for your environment)
+- `tests/fixtures/` — fixtures used by scenario tests
 
 ---
 
-## Prerequisites
+## Prereqs
 
-- Rust (stable)
-- Docker
-- PostgreSQL 16 (Docker recommended)
-- Node.js (for GUI)
+### Core (Rust workspace)
+- Rust (stable toolchain)
+- Docker (recommended for Postgres)
+
+### GUI (optional)
+- Node.js + npm
+- Tauri prerequisites (platform-dependent)
+
+### Research (optional)
+- Python 3.11+ recommended
+- `pip` (or `uv` if you choose)
 
 ---
 
-## Database Setup
+## Database (Postgres 16)
 
-Start PostgreSQL (example Docker):
+### Start Postgres via Docker (example)
 
 ```powershell
 docker run --name mqk-postgres `
@@ -115,132 +49,213 @@ docker run --name mqk-postgres `
   -e POSTGRES_DB=mqk_v4 `
   -p 5432:5432 `
   -d postgres:16
+```
 
-Create a dedicated test database (recommended):
+(Optional but recommended) create a dedicated test DB:
 
+```powershell
 docker exec -it mqk-postgres psql -U mqk -d postgres -c "CREATE DATABASE mqk_v4_test;"
+```
 
-Set environment variable (PowerShell):
+Set the connection string (PowerShell):
 
+```powershell
 $env:MQK_DATABASE_URL = "postgres://mqk:mqk@localhost:5432/mqk_v4_test"
-Migrations
-
-Run database migrations via CLI:
-
-cd core-rs
-cargo run -p mqk-cli -- db migrate
-
-Migrations live under:
-
-core-rs/crates/mqk-db/migrations/
-Running Tests
-
-Full workspace:
-
-cd core-rs
-cargo test --workspace
-
-Targeted crates:
-
-cargo test -p mqk-db
-cargo test -p mqk-backtest
-cargo test -p mqk-integrity
-cargo test -p mqk-reconcile
-cargo test -p mqk-risk
-cargo test -p mqk-execution
-cargo test -p mqk-md
-
-Clippy (warnings as errors):
-
-cargo clippy --workspace --all-targets -- -D warnings
-
-Format:
-
-cargo fmt
-Running the Daemon (Control Plane)
-
-From core-rs/:
-
-cargo run -p mqk-daemon
-
-Expected capabilities:
-
-status endpoint (includes integrity armed flag)
-
-lifecycle endpoints (start/stop/halt)
-
-integrity endpoints (arm/disarm)
-
-SSE status stream
-
-(Exact host/port are set by daemon config; GUI assumes the daemon is reachable and streaming status.)
-
-Running the GUI (Control Console)
-
-From core-rs/mqk-gui/:
-
-npm install
-npx tsc --noEmit
-npm run build
-
-Dev mode (requires daemon reachable):
-
-npm run tauri dev
-
-GUI behavior (current):
-
-connects to daemon SSE stream for live status
-
-polls status as fallback
-
-provides control buttons for start/stop/halt and arm/disarm
-
-shows an event log buffer
-
-Operational Safety Notes (Reality Check)
-
-This repo is in reliability hardening.
-
-Before any real-capital deployment, you must complete the live-safety roadmap:
-
-single authoritative run loop and choke-point submission path
-
-outbox-first idempotent broker submit discipline
-
-minimal OMS lifecycle state machine
-
-inbox apply idempotency proven (“insert → apply” atomic invariant)
-
-sticky disarm/deadman across restarts
-
-reconcile-before-arm plus periodic reconcile tick that hard-halts
-
-The ordered plan and definition-of-done lives in:
-
-MiniQuantDeskV4_Patch_By_Patch_Implementation_Plan.md
-
-Development Workflow
-
-Make one scoped change (one patch item).
-
-Add/extend scenario test proving the invariant.
-
-Ensure:
-
-cargo fmt
-
-cargo test --workspace
-
-cargo clippy --workspace --all-targets -- -D warnings
-
-Commit with patch label and short rationale.
-
-Status
-
-System is currently in reliability hardening phase.
-Patch tracker / implementation plan defines remaining work.
-
+```
 
 ---
 
-If you want, paste your **current repo root tree** (or just `ls` of `core-r
+## Rust Workspace Commands
+
+All commands below assume you are in `core-rs/`.
+
+### Format / Lint / Test
+
+```powershell
+cargo fmt
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+### CLI Entry Point
+
+The CLI binary is `mqk` (crate: `mqk-cli`).
+
+Run it via cargo:
+
+```powershell
+cargo run -p mqk-cli -- --help
+```
+
+---
+
+## CLI: Common Operations
+
+### DB status + migrations
+
+```powershell
+# Status
+cargo run -p mqk-cli -- db status
+
+# Apply migrations
+cargo run -p mqk-cli -- db migrate
+# Guardrail: refuses when LIVE is ARMED/RUNNING unless you acknowledge:
+cargo run -p mqk-cli -- db migrate --yes
+```
+
+Migrations live under:
+
+- `core-rs/crates/mqk-db/migrations/`
+
+---
+
+## Market Data: Canonical `md_bars`
+
+### Ingest from CSV → `md_bars`
+
+```powershell
+cargo run -p mqk-cli -- md ingest-csv --path "<PATH_TO_CSV>" --timeframe "1D" --source "csv"
+```
+
+### Ingest from provider → `md_bars` (provider path scaffolding)
+
+```powershell
+cargo run -p mqk-cli -- md ingest-provider `
+  --source "twelvedata" `
+  --symbols "SPY,QQQ" `
+  --timeframe "1D" `
+  --start "2000-01-01" `
+  --end "2026-01-01"
+```
+
+---
+
+## Deterministic Backtests
+
+### Backtest from a bars CSV
+
+```powershell
+cargo run -p mqk-cli -- backtest csv `
+  --bars "<PATH_TO_BARS_CSV>" `
+  --timeframe-secs 60 `
+  --initial-cash-micros 100000000000 `
+  --integrity-enabled true `
+  --integrity-stale-threshold-ticks 120 `
+  --integrity-gap-tolerance-bars 0
+```
+
+Optional deterministic artifact output:
+
+```powershell
+cargo run -p mqk-cli -- backtest csv --bars "<PATH>" --out-dir "runs/backtests"
+```
+
+### Backtest from Postgres `md_bars`
+
+```powershell
+cargo run -p mqk-cli -- backtest db `
+  --timeframe "1D" `
+  --start-end-ts 946684800 `
+  --end-end-ts 1704067200 `
+  --symbols "SPY,QQQ"
+```
+
+> Note: `start_end_ts` / `end_end_ts` are epoch seconds for the **bar end_ts** range.
+
+---
+
+## Run Lifecycle (paper/live scaffolding)
+
+The Rust core enforces an explicit lifecycle and is designed to refuse unsafe transitions.
+
+Typical flow:
+
+```powershell
+# Create run
+cargo run -p mqk-cli -- run start --engine "MAIN" --mode "PAPER" --config "config/defaults/base.yaml" --config "config/environments/windows-dev.yaml" --config "config/engines/main.yaml"
+
+# Arm run
+cargo run -p mqk-cli -- run arm --run-id "<RUN_ID>"
+
+# Begin
+cargo run -p mqk-cli -- run begin --run-id "<RUN_ID>"
+
+# Stop
+cargo run -p mqk-cli -- run stop --run-id "<RUN_ID>"
+```
+
+Other run commands exist (status / halt / loop / heartbeat / deadman enforcement) — see:
+
+```powershell
+cargo run -p mqk-cli -- run --help
+```
+
+---
+
+## Daemon (Control Plane)
+
+Run the daemon:
+
+```powershell
+cargo run -p mqk-daemon
+```
+
+The daemon exposes:
+- status endpoints
+- lifecycle endpoints
+- SSE status stream
+
+Exact host/port are config-driven.
+
+---
+
+## GUI (Control Console)
+
+From `core-rs/mqk-gui/`:
+
+```powershell
+npm install
+npx tsc --noEmit
+npm run build
+```
+
+Dev mode (requires daemon reachable):
+
+```powershell
+npm run tauri dev
+```
+
+---
+
+## Python Research (Optional)
+
+From `research-py/`:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -U pip
+.\.venv\Scripts\python.exe -m pip install -e .
+```
+
+Run the research CLI:
+
+```powershell
+.\.venv\Scripts\python.exe -m mqk_research.cli --help
+```
+
+This layer is intended to produce deterministic artifacts (manifests + CSV outputs) that the Rust backtest/execution layers can consume.
+
+---
+
+## Dev Discipline
+
+This repo is designed to be patched **one scoped change at a time**:
+
+1) implement one invariant (small + surgical)
+2) add/extend a scenario test that proves it
+3) run: `cargo fmt`, `cargo test --workspace`, `cargo clippy ... -D warnings`
+4) commit with a patch label + rationale
+
+Roadmap / hardening plan:
+- `MiniQuantDesk_V4_Master_Patch_Plan_v2.md`
+- `patch_tracker_updated.md`
