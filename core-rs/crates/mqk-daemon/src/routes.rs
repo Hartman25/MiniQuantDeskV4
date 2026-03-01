@@ -451,12 +451,8 @@ pub(crate) async fn trading_snapshot_set(
     State(st): State<Arc<AppState>>,
     Json(body): Json<mqk_schemas::BrokerSnapshot>,
 ) -> Response {
-    let allow = std::env::var("MQK_DEV_ALLOW_SNAPSHOT_INJECT")
-        .ok()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    if !allow {
+    // S7-3: compile-time disabled in release builds; runtime-gated in debug.
+    if !crate::dev_gate::snapshot_inject_allowed() {
         return (
             StatusCode::FORBIDDEN,
             Json(GateRefusedResponse {
@@ -483,12 +479,8 @@ pub(crate) async fn trading_snapshot_set(
 }
 
 pub(crate) async fn trading_snapshot_clear(State(st): State<Arc<AppState>>) -> Response {
-    let allow = std::env::var("MQK_DEV_ALLOW_SNAPSHOT_INJECT")
-        .ok()
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    if !allow {
+    // S7-3: compile-time disabled in release builds; runtime-gated in debug.
+    if !crate::dev_gate::snapshot_inject_allowed() {
         return (
             StatusCode::FORBIDDEN,
             Json(GateRefusedResponse {
