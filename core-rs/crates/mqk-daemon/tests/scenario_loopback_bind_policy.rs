@@ -36,8 +36,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 /// binds to a network interface without an explicit configuration.
 #[test]
 fn default_bind_addr_is_loopback_127_0_0_1_port_8899() {
-    let addr = resolve_bind_addr(None, false)
-        .expect("default resolve must succeed");
+    let addr = resolve_bind_addr(None, false).expect("default resolve must succeed");
 
     assert_eq!(
         addr.ip(),

@@ -76,11 +76,9 @@ fn anchor_equals_last_event_hash_self() {
     // Anchor must equal the hash_self of the last event — these are the same
     // SHA-256 value reached by two independent paths.
     assert_eq!(
-        anchor,
-        last_event.hash_self,
+        anchor, last_event.hash_self,
         "last_hash() ({:?}) must equal last event hash_self ({:?})",
-        anchor,
-        last_event.hash_self,
+        anchor, last_event.hash_self,
     );
 
     // Sanity: anchor must be non-None when hash_chain is enabled.

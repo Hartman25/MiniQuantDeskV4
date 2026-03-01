@@ -23,12 +23,14 @@
 //!    through `apply_fill` directly yields identical portfolio state.
 
 use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine, StressProfile};
-use mqk_execution::{position_book, targets_to_order_intents, Side, StrategyOutput, TargetPosition};
+use mqk_execution::{
+    position_book, targets_to_order_intents, Side, StrategyOutput, TargetPosition,
+};
 use mqk_integrity::CalendarSpec;
 use mqk_portfolio::{apply_fill, compute_equity_micros, PortfolioState, MICROS_SCALE};
 use mqk_risk::{
-    evaluate as risk_evaluate, PdtContext, RiskAction, RiskConfig, RiskInput, RiskState,
-    RequestKind,
+    evaluate as risk_evaluate, PdtContext, RequestKind, RiskAction, RiskConfig, RiskInput,
+    RiskState,
 };
 use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
 
@@ -40,7 +42,15 @@ const M: i64 = MICROS_SCALE;
 
 /// Flat bar: OHLC all equal (no spread), so fill price = price exactly.
 fn flat_bar(symbol: &str, ts: i64, price_micros: i64) -> BacktestBar {
-    BacktestBar::new(symbol, ts, price_micros, price_micros, price_micros, price_micros, 1_000)
+    BacktestBar::new(
+        symbol,
+        ts,
+        price_micros,
+        price_micros,
+        price_micros,
+        price_micros,
+        1_000,
+    )
 }
 
 /// Non-flat bar with an explicit spread (HIGH > CLOSE > LOW).
@@ -69,7 +79,10 @@ fn alignment_config(initial_cash_micros: i64, daily_loss_limit_micros: i64) -> B
         pdt_enabled: false,
         kill_switch_flattens: false,
         max_gross_exposure_mult_micros: 3_000_000, // 3x — permissive for test isolation
-        stress: StressProfile { slippage_bps: 0, volatility_mult_bps: 0 },
+        stress: StressProfile {
+            slippage_bps: 0,
+            volatility_mult_bps: 0,
+        },
         integrity_enabled: false,
         integrity_stale_threshold_ticks: 0,
         integrity_gap_tolerance_bars: 0,
@@ -208,13 +221,17 @@ fn buy_fill_price_is_at_least_close_conservative_bound() {
     let fill_price = report.fills[0].price_micros;
 
     // Fill must be at HIGH (no slippage in alignment_config).
-    assert_eq!(fill_price, high, "BUY fill should be at HIGH with 0 slippage");
+    assert_eq!(
+        fill_price, high,
+        "BUY fill should be at HIGH with 0 slippage"
+    );
 
     // Key alignment property: fill >= close (never favorable vs close).
     assert!(
         fill_price >= close,
         "BUY fill {} must be >= close {} (conservative bound)",
-        fill_price, close
+        fill_price,
+        close
     );
 }
 
@@ -248,13 +265,17 @@ fn sell_fill_price_is_at_most_close_conservative_bound() {
     let sell_price = report.fills[1].price_micros;
 
     // Fill must be at LOW (no slippage).
-    assert_eq!(sell_price, low, "SELL fill should be at LOW with 0 slippage");
+    assert_eq!(
+        sell_price, low,
+        "SELL fill should be at LOW with 0 slippage"
+    );
 
     // Key alignment property: fill <= close (never favorable vs close).
     assert!(
         sell_price <= close,
         "SELL fill {} must be <= close {} (conservative bound)",
-        sell_price, close
+        sell_price,
+        close
     );
 }
 
@@ -271,7 +292,7 @@ fn sell_fill_price_is_at_most_close_conservative_bound() {
 fn risk_daily_loss_limit_governs_backtest_and_direct_evaluate_identically() {
     const INITIAL: i64 = 10_000 * M;
     const LIMIT: i64 = 500 * M; // $500 loss limit
-    // floor = INITIAL - LIMIT = $9,500.  Any equity <= $9,500 → Halt.
+                                // floor = INITIAL - LIMIT = $9,500.  Any equity <= $9,500 → Halt.
 
     // --- Part A: direct risk_evaluate ---
     let risk_cfg = RiskConfig {
@@ -292,7 +313,11 @@ fn risk_daily_loss_limit_governs_backtest_and_direct_evaluate_identically() {
         kill_switch: None,
     };
     let dec = risk_evaluate(&risk_cfg, &mut risk_state, &input_above);
-    assert_eq!(dec.action, RiskAction::Allow, "loss $400 < $500 limit should be allowed");
+    assert_eq!(
+        dec.action,
+        RiskAction::Allow,
+        "loss $400 < $500 limit should be allowed"
+    );
 
     let mut risk_state2 = RiskState::new(20250101, INITIAL, 0);
     let input_below = RiskInput {

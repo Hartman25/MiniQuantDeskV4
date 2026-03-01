@@ -47,10 +47,7 @@ fn make_router() -> axum::Router {
     routes::build_router(st)
 }
 
-async fn call(
-    router: axum::Router,
-    req: Request<axum::body::Body>,
-) -> (StatusCode, bytes::Bytes) {
+async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, bytes::Bytes) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
     let status = resp.status();
     let body = resp

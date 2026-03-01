@@ -21,12 +21,7 @@ const M: i64 = MICROS_SCALE;
 ///   equity(mark) == initial + realized_pnl + unrealized_pnl(mark) - total_fees
 ///
 /// Panics on violation with a diagnostic showing all constituent values.
-fn assert_conservation(
-    ledger: &Ledger,
-    mark_map: &MarkMap,
-    initial: i64,
-    total_fees: i64,
-) {
+fn assert_conservation(ledger: &Ledger, mark_map: &MarkMap, initial: i64, total_fees: i64) {
     let equity = ledger.equity_micros(mark_map);
     let realized = ledger.realized_pnl_micros();
     let unrealized = ledger.unrealized_pnl_micros(mark_map);
@@ -49,7 +44,9 @@ fn mark_at_cost_recovers_initial_capital() {
     let initial = 100_000 * M;
     let mut ledger = Ledger::new(initial);
 
-    ledger.append_fill(Fill::new("SPY", Side::Buy, 10, 100 * M, 0)).unwrap();
+    ledger
+        .append_fill(Fill::new("SPY", Side::Buy, 10, 100 * M, 0))
+        .unwrap();
 
     let mk = marks([("SPY", 100 * M)]);
     assert_conservation(&ledger, &mk, initial, 0);
@@ -63,8 +60,12 @@ fn round_trip_no_fee_cash_equals_initial_plus_realized() {
     let initial = 100_000 * M;
     let mut ledger = Ledger::new(initial);
 
-    ledger.append_fill(Fill::new("SPY", Side::Buy, 10, 100 * M, 0)).unwrap();
-    ledger.append_fill(Fill::new("SPY", Side::Sell, 10, 120 * M, 0)).unwrap();
+    ledger
+        .append_fill(Fill::new("SPY", Side::Buy, 10, 100 * M, 0))
+        .unwrap();
+    ledger
+        .append_fill(Fill::new("SPY", Side::Sell, 10, 120 * M, 0))
+        .unwrap();
 
     assert!(ledger.is_flat());
     let realized = ledger.realized_pnl_micros();
@@ -79,8 +80,12 @@ fn loss_trade_cash_reduced_by_loss() {
     let initial = 100_000 * M;
     let mut ledger = Ledger::new(initial);
 
-    ledger.append_fill(Fill::new("SPY", Side::Buy, 10, 100 * M, 0)).unwrap();
-    ledger.append_fill(Fill::new("SPY", Side::Sell, 10, 90 * M, 0)).unwrap();
+    ledger
+        .append_fill(Fill::new("SPY", Side::Buy, 10, 100 * M, 0))
+        .unwrap();
+    ledger
+        .append_fill(Fill::new("SPY", Side::Sell, 10, 90 * M, 0))
+        .unwrap();
 
     assert!(ledger.is_flat());
     let realized = ledger.realized_pnl_micros();
@@ -98,10 +103,14 @@ fn fees_reduce_equity_by_exact_total() {
     let mut ledger = Ledger::new(initial);
     let mut total_fees: i64 = 0;
 
-    ledger.append_fill(Fill::new("AAPL", Side::Buy, 10, 100 * M, fee)).unwrap();
+    ledger
+        .append_fill(Fill::new("AAPL", Side::Buy, 10, 100 * M, fee))
+        .unwrap();
     total_fees += fee;
 
-    ledger.append_fill(Fill::new("AAPL", Side::Sell, 10, 110 * M, fee)).unwrap();
+    ledger
+        .append_fill(Fill::new("AAPL", Side::Sell, 10, 110 * M, fee))
+        .unwrap();
     total_fees += fee;
 
     assert!(ledger.is_flat());
@@ -125,7 +134,9 @@ fn conservation_holds_at_every_checkpoint() {
     let sym = "SPY";
 
     // --- step 1: buy 5 @ $100, fee = $0.50 ---
-    ledger.append_fill(Fill::new(sym, Side::Buy, 5, 100 * M, fee)).unwrap();
+    ledger
+        .append_fill(Fill::new(sym, Side::Buy, 5, 100 * M, fee))
+        .unwrap();
     total_fees += fee;
     assert_conservation(&ledger, &marks([(sym, 100 * M)]), initial, total_fees);
 
@@ -133,18 +144,24 @@ fn conservation_holds_at_every_checkpoint() {
     assert_conservation(&ledger, &marks([(sym, 105 * M)]), initial, total_fees);
 
     // --- step 3: buy 5 more @ $105, fee = $0.50 ---
-    ledger.append_fill(Fill::new(sym, Side::Buy, 5, 105 * M, fee)).unwrap();
+    ledger
+        .append_fill(Fill::new(sym, Side::Buy, 5, 105 * M, fee))
+        .unwrap();
     total_fees += fee;
     assert_conservation(&ledger, &marks([(sym, 105 * M)]), initial, total_fees);
 
     // --- step 4: sell 5 @ $110, fee = $0.50; FIFO closes first lot (cost $100) ---
-    ledger.append_fill(Fill::new(sym, Side::Sell, 5, 110 * M, fee)).unwrap();
+    ledger
+        .append_fill(Fill::new(sym, Side::Sell, 5, 110 * M, fee))
+        .unwrap();
     total_fees += fee;
     assert_eq!(ledger.realized_pnl_micros(), 50 * M); // 5*(110-100)
     assert_conservation(&ledger, &marks([(sym, 110 * M)]), initial, total_fees);
 
     // --- step 5: sell remaining 5 @ $110, fee = $0.50; closes second lot (cost $105) ---
-    ledger.append_fill(Fill::new(sym, Side::Sell, 5, 110 * M, fee)).unwrap();
+    ledger
+        .append_fill(Fill::new(sym, Side::Sell, 5, 110 * M, fee))
+        .unwrap();
     total_fees += fee;
     assert_eq!(ledger.realized_pnl_micros(), 75 * M); // 50 + 5*(110-105)
     assert!(ledger.is_flat());
@@ -160,8 +177,12 @@ fn two_symbol_combined_equity_identity() {
     let initial = 200_000 * M;
     let mut ledger = Ledger::new(initial);
 
-    ledger.append_fill(Fill::new("AAPL", Side::Buy, 10, 150 * M, 0)).unwrap();
-    ledger.append_fill(Fill::new("MSFT", Side::Buy, 20, 100 * M, 0)).unwrap();
+    ledger
+        .append_fill(Fill::new("AAPL", Side::Buy, 10, 150 * M, 0))
+        .unwrap();
+    ledger
+        .append_fill(Fill::new("MSFT", Side::Buy, 20, 100 * M, 0))
+        .unwrap();
 
     // AAPL: mark $160 (+$10/share), MSFT: mark $95 (-$5/share)
     // net unrealized = 10*(160-150) + 20*(95-100) = 100 - 100 = 0
@@ -179,12 +200,16 @@ fn partial_close_conservation_holds() {
     let mut ledger = Ledger::new(initial);
 
     // Buy 20 @ $200
-    ledger.append_fill(Fill::new("GOOG", Side::Buy, 20, 200 * M, 0)).unwrap();
+    ledger
+        .append_fill(Fill::new("GOOG", Side::Buy, 20, 200 * M, 0))
+        .unwrap();
     let mk_before = marks([("GOOG", 200 * M)]);
     assert_conservation(&ledger, &mk_before, initial, 0);
 
     // Sell 8 @ $220 — FIFO closes first 8 lots; 12 remain at cost $200
-    ledger.append_fill(Fill::new("GOOG", Side::Sell, 8, 220 * M, 0)).unwrap();
+    ledger
+        .append_fill(Fill::new("GOOG", Side::Sell, 8, 220 * M, 0))
+        .unwrap();
     assert_eq!(ledger.realized_pnl_micros(), 160 * M); // 8*(220-200)
     assert_eq!(ledger.qty_signed("GOOG"), 12);
 

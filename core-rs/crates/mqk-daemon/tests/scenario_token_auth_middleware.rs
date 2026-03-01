@@ -41,17 +41,12 @@ use tower::ServiceExt; // oneshot
 
 /// Build a router with a specific operator token (or `None` for dev mode).
 fn make_router(token: Option<&str>) -> axum::Router {
-    let st = Arc::new(state::AppState::new_with_token(
-        token.map(str::to_owned),
-    ));
+    let st = Arc::new(state::AppState::new_with_token(token.map(str::to_owned)));
     routes::build_router(st)
 }
 
 /// Drive the router with a single request and return `(status, body_bytes)`.
-async fn call(
-    router: axum::Router,
-    req: Request<axum::body::Body>,
-) -> (StatusCode, bytes::Bytes) {
+async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, bytes::Bytes) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
     let status = resp.status();
     let body = resp

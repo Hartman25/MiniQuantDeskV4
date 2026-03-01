@@ -181,16 +181,28 @@ fn gate_buy_fill_price_is_worse_under_conservative_config() {
 
     // Run with test_defaults (0 slippage).
     let mut engine_test = BacktestEngine::new(BacktestConfig::test_defaults());
-    engine_test.add_strategy(Box::new(HoldQty::new(10))).unwrap();
+    engine_test
+        .add_strategy(Box::new(HoldQty::new(10)))
+        .unwrap();
     let report_test = engine_test.run(&[bar.clone()]).unwrap();
 
     // Run with conservative_defaults (205 effective bps on this bar).
     let mut engine_cons = BacktestEngine::new(BacktestConfig::conservative_defaults());
-    engine_cons.add_strategy(Box::new(HoldQty::new(10))).unwrap();
+    engine_cons
+        .add_strategy(Box::new(HoldQty::new(10)))
+        .unwrap();
     let report_cons = engine_cons.run(&[bar.clone()]).unwrap();
 
-    assert_eq!(report_test.fills.len(), 1, "test_defaults: expected 1 BUY fill");
-    assert_eq!(report_cons.fills.len(), 1, "conservative_defaults: expected 1 BUY fill");
+    assert_eq!(
+        report_test.fills.len(),
+        1,
+        "test_defaults: expected 1 BUY fill"
+    );
+    assert_eq!(
+        report_cons.fills.len(),
+        1,
+        "conservative_defaults: expected 1 BUY fill"
+    );
 
     let test_price = report_test.fills[0].price_micros;
     let cons_price = report_cons.fills[0].price_micros;
@@ -224,18 +236,32 @@ fn gate_sell_fill_price_is_worse_under_conservative_config() {
 
     // Run with test_defaults (0 slippage).
     let mut engine_test = BacktestEngine::new(BacktestConfig::test_defaults());
-    engine_test.add_strategy(Box::new(RoundTrip::new(10))).unwrap();
-    let report_test = engine_test.run(&[buy_bar.clone(), sell_bar.clone()]).unwrap();
+    engine_test
+        .add_strategy(Box::new(RoundTrip::new(10)))
+        .unwrap();
+    let report_test = engine_test
+        .run(&[buy_bar.clone(), sell_bar.clone()])
+        .unwrap();
 
     // Run with conservative_defaults (205 effective bps on these bars).
     let mut engine_cons = BacktestEngine::new(BacktestConfig::conservative_defaults());
     engine_cons
         .add_strategy(Box::new(RoundTrip::new(10)))
         .unwrap();
-    let report_cons = engine_cons.run(&[buy_bar.clone(), sell_bar.clone()]).unwrap();
+    let report_cons = engine_cons
+        .run(&[buy_bar.clone(), sell_bar.clone()])
+        .unwrap();
 
-    assert_eq!(report_test.fills.len(), 2, "test_defaults: expected 2 fills (buy + sell)");
-    assert_eq!(report_cons.fills.len(), 2, "conservative_defaults: expected 2 fills (buy + sell)");
+    assert_eq!(
+        report_test.fills.len(),
+        2,
+        "test_defaults: expected 2 fills (buy + sell)"
+    );
+    assert_eq!(
+        report_cons.fills.len(),
+        2,
+        "conservative_defaults: expected 2 fills (buy + sell)"
+    );
 
     let test_sell_price = report_test.fills[1].price_micros;
     let cons_sell_price = report_cons.fills[1].price_micros;
@@ -275,7 +301,9 @@ fn gate_conservative_config_produces_lower_final_equity() {
 
     // Run with test_defaults (0 slippage, no risk limits, no integrity).
     let mut engine_test = BacktestEngine::new(BacktestConfig::test_defaults());
-    engine_test.add_strategy(Box::new(RoundTrip::new(10))).unwrap();
+    engine_test
+        .add_strategy(Box::new(RoundTrip::new(10)))
+        .unwrap();
     let report_test = engine_test
         .run(&[buy_bar.clone(), sell_bar.clone()])
         .unwrap();
