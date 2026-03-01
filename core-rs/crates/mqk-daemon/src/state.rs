@@ -133,3 +133,50 @@ pub fn spawn_heartbeat(bus: broadcast::Sender<BusMsg>, interval: Duration) {
         }
     });
 }
+
+/// Spawn a background task that periodically runs a reconcile tick (R3-1).
+///
+/// On each interval:
+/// - Calls `local_fn()` and `broker_fn()` to obtain fresh snapshots.
+/// - If `broker_fn` returns `None`, the tick is skipped (no snapshot yet).
+/// - Calls [`mqk_reconcile::reconcile_tick`] on the snapshot pair.
+/// - If [`mqk_reconcile::DriftAction::HaltAndDisarm`] is returned the task:
+///   1. Sets `integrity.disarmed = true` (blocks all broker submissions).
+///   2. Sets `status.state = "halted"` and `status.integrity_armed = false`.
+///   3. Broadcasts `BusMsg::LogLine { level: "ERROR" }` on the SSE bus.
+pub fn spawn_reconcile_tick<L, B>(
+    state: Arc<AppState>,
+    local_fn: L,
+    broker_fn: B,
+    interval: Duration,
+) where
+    L: Fn() -> mqk_reconcile::LocalSnapshot + Send + 'static,
+    B: Fn() -> Option<mqk_reconcile::BrokerSnapshot> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            let local = local_fn();
+            let Some(broker) = broker_fn() else {
+                continue;
+            };
+            let action = mqk_reconcile::reconcile_tick(&local, &broker);
+            if action.requires_halt_and_disarm() {
+                {
+                    let mut ig = state.integrity.write().await;
+                    ig.disarmed = true;
+                }
+                {
+                    let mut st = state.status.write().await;
+                    st.state = "halted".to_string();
+                    st.integrity_armed = false;
+                }
+                let _ = state.bus.send(BusMsg::LogLine {
+                    level: "ERROR".to_string(),
+                    msg: "reconcile drift detected — system disarmed (R3-1)".to_string(),
+                });
+            }
+        }
+    });
+}
