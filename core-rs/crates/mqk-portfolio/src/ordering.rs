@@ -58,7 +58,7 @@ pub struct TaggedFill {
 ///
 /// This function is pure, stateless, and deterministic: identical inputs
 /// always produce identical outputs.
-pub fn sort_fills_canonical(fills: &mut Vec<TaggedFill>) {
+pub fn sort_fills_canonical(fills: &mut [TaggedFill]) {
     fills.sort_by(|a, b| {
         let seq = a.seq_no.cmp(&b.seq_no);
         if seq != std::cmp::Ordering::Equal {
