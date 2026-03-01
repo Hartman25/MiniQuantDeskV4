@@ -23,7 +23,11 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    api_types::{GateRefusedResponse, HealthResponse, IntegrityResponse},
+    api_types::{
+        GateRefusedResponse, HealthResponse, IntegrityResponse, TradingAccountResponse,
+        TradingFillsResponse, TradingOrdersResponse, TradingPositionsResponse,
+        TradingSnapshotResponse,
+    },
     state::{uptime_secs, AppState, BusMsg},
 };
 
@@ -45,6 +49,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/run/halt", post(run_halt))
         .route("/v1/integrity/arm", post(integrity_arm))
         .route("/v1/integrity/disarm", post(integrity_disarm))
+        // DAEMON-1: trading read APIs (placeholder until broker wiring exists)
+        .route("/v1/trading/account", get(trading_account))
+        .route("/v1/trading/positions", get(trading_positions))
+        .route("/v1/trading/orders", get(trading_orders))
+        .route("/v1/trading/fills", get(trading_fills))
+        // DAEMON-2: dev-only snapshot inject/clear + readback
+        .route("/v1/trading/snapshot", get(trading_snapshot))
+        .route("/v1/trading/snapshot", post(trading_snapshot_set))
+        .route(
+            "/v1/trading/snapshot",
+            axum::routing::delete(trading_snapshot_clear),
+        )
         .with_state(state)
 }
 
@@ -112,7 +128,7 @@ pub(crate) async fn run_start(State(st): State<Arc<AppState>>) -> Response {
     let mut s = st.status.write().await;
 
     if s.state != "running" {
-        s.active_run_id = Some(Uuid::new_v4());
+        s.active_run_id = Some(derive_daemon_run_id(st.build.service, st.build.version));
     }
     s.state = "running".to_string();
     s.notes = Some("run started (in-memory); wire orchestrator next".to_string());
@@ -260,6 +276,186 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
             state,
         }),
     )
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/trading/*  — DAEMON-1 (read-only placeholders)
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn trading_account(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.broker_snapshot.read().await.clone();
+
+    let (has_snapshot, account) = match snap {
+        Some(s) => (true, s.account),
+        None => (
+            false,
+            mqk_schemas::BrokerAccount {
+                equity: "0".to_string(),
+                cash: "0".to_string(),
+                currency: "USD".to_string(),
+            },
+        ),
+    };
+
+    (
+        StatusCode::OK,
+        Json(TradingAccountResponse {
+            has_snapshot,
+            account,
+        }),
+    )
+}
+
+pub(crate) async fn trading_positions(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.broker_snapshot.read().await.clone();
+    let (has_snapshot, positions) = match snap {
+        Some(s) => (true, s.positions),
+        None => (false, Vec::new()),
+    };
+
+    (
+        StatusCode::OK,
+        Json(TradingPositionsResponse {
+            has_snapshot,
+            positions,
+        }),
+    )
+}
+
+pub(crate) async fn trading_orders(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.broker_snapshot.read().await.clone();
+    let (has_snapshot, orders) = match snap {
+        Some(s) => (true, s.orders),
+        None => (false, Vec::new()),
+    };
+
+    (
+        StatusCode::OK,
+        Json(TradingOrdersResponse {
+            has_snapshot,
+            orders,
+        }),
+    )
+}
+
+pub(crate) async fn trading_fills(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.broker_snapshot.read().await.clone();
+    let (has_snapshot, fills) = match snap {
+        Some(s) => (true, s.fills),
+        None => (false, Vec::new()),
+    };
+
+    (
+        StatusCode::OK,
+        Json(TradingFillsResponse {
+            has_snapshot,
+            fills,
+        }),
+    )
+}
+
+pub(crate) async fn trading_snapshot(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.broker_snapshot.read().await.clone();
+    (
+        StatusCode::OK,
+        Json(TradingSnapshotResponse { snapshot: snap }),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// DAEMON-2: Dev-only snapshot inject/clear
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct OkResponse {
+    ok: bool,
+}
+
+pub(crate) async fn trading_snapshot_set(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<mqk_schemas::BrokerSnapshot>,
+) -> Response {
+    let allow = std::env::var("MQK_DEV_ALLOW_SNAPSHOT_INJECT")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if !allow {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(GateRefusedResponse {
+                error:
+                    "GATE_REFUSED: snapshot injection disabled; set MQK_DEV_ALLOW_SNAPSHOT_INJECT=1"
+                        .to_string(),
+                gate: "dev_snapshot_inject".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    {
+        let mut lock = st.broker_snapshot.write().await;
+        *lock = Some(body);
+    }
+
+    let _ = st.bus.send(BusMsg::LogLine {
+        level: "INFO".to_string(),
+        msg: "broker snapshot injected (dev)".to_string(),
+    });
+
+    (StatusCode::OK, Json(OkResponse { ok: true })).into_response()
+}
+
+pub(crate) async fn trading_snapshot_clear(State(st): State<Arc<AppState>>) -> Response {
+    let allow = std::env::var("MQK_DEV_ALLOW_SNAPSHOT_INJECT")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if !allow {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(GateRefusedResponse {
+                error: "GATE_REFUSED: snapshot clear disabled; set MQK_DEV_ALLOW_SNAPSHOT_INJECT=1"
+                    .to_string(),
+                gate: "dev_snapshot_inject".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    {
+        let mut lock = st.broker_snapshot.write().await;
+        *lock = None;
+    }
+
+    let _ = st.bus.send(BusMsg::LogLine {
+        level: "INFO".to_string(),
+        msg: "broker snapshot cleared (dev)".to_string(),
+    });
+
+    (StatusCode::OK, Json(OkResponse { ok: true })).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Run-ID derivation (D1-1)
+// ---------------------------------------------------------------------------
+
+/// Derive a deterministic in-memory run ID from daemon build metadata.
+///
+/// **No RNG.** Uses `Uuid::new_v5` (SHA-1 over the DNS namespace).
+///
+/// Inputs: `service` (crate name, static str) and `version` (semver, static
+/// str). Both are compile-time constants — no wall-clock, no random state.
+///
+/// The resulting UUID is stable for a given binary version, making it
+/// suitable as an in-memory session label. The authoritative run ID for DB
+/// persistence and cross-system audit correlation is created by `mqk-cli`
+/// (see `derive_cli_run_id` in `mqk-cli/src/commands/run.rs`). A later
+/// patch will wire the CLI run ID into the daemon so both IDs unify.
+fn derive_daemon_run_id(service: &'static str, version: &'static str) -> Uuid {
+    let data = format!("mqk-daemon.run.v1|{}|{}", service, version);
+    Uuid::new_v5(&Uuid::NAMESPACE_DNS, data.as_bytes())
 }
 
 // ---------------------------------------------------------------------------

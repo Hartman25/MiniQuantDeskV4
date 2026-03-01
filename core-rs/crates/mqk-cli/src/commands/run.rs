@@ -46,8 +46,8 @@ pub async fn run_start(engine: String, mode: String, config_paths: Vec<String>) 
 
     let pool = mqk_db::connect_from_env().await?;
 
-    let run_id = Uuid::new_v4();
     let git_hash = get_git_hash().unwrap_or_else(|| "UNKNOWN".to_string());
+    let run_id = derive_cli_run_id(&engine, &mode, &loaded.config_hash, &git_hash);
     let host_fp = host_fingerprint();
 
     let new_run = mqk_db::NewRun {
@@ -262,6 +262,37 @@ pub fn run_loop(
     println!("last_close_micros={:?}", report.last_close_micros);
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Run-ID derivation (D1-1)
+// ---------------------------------------------------------------------------
+
+/// Derive a deterministic run ID from the combination of engine identity and
+/// loaded configuration. All inputs are caller-provided with no wall-clock
+/// or RNG dependency.
+///
+/// **No RNG.** Uses `Uuid::new_v5` (SHA-1 over the DNS namespace).
+///
+/// Inputs:
+///   `engine_id`   — engine identifier string (e.g. `"swing_v1"`)
+///   `mode`        — `"live"` | `"paper"` | `"backtest"`
+///   `config_hash` — SHA-256 hex of the loaded config JSON (from `mqk_config`)
+///   `git_hash`    — short git commit hash of the running binary
+///
+/// Omitted from this version (reserved for future patches):
+///   `asof_utc`      — wall-clock at run start; requires a `TimeSource`
+///                     abstraction (D1-3) before it can be made deterministic.
+///   `universe_hash` — symbol-set hash; not yet defined in schema.
+///
+/// The derivation prefix `"mqk-cli.run.v1"` scopes the hash within the DNS
+/// namespace, preventing collisions with any other UUIDv5 uses in the system.
+fn derive_cli_run_id(engine_id: &str, mode: &str, config_hash: &str, git_hash: &str) -> Uuid {
+    let data = format!(
+        "mqk-cli.run.v1|{}|{}|{}|{}",
+        engine_id, mode, config_hash, git_hash
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_DNS, data.as_bytes())
 }
 
 // ---------------------------------------------------------------------------
