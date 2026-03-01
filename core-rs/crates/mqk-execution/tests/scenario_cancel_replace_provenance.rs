@@ -126,7 +126,8 @@ fn cancel_deregistered_order_refused() {
     map.register("ord-1", "b-ord-1");
     map.deregister("ord-1");
     let err = all_clear().cancel("ord-1", &map).unwrap_err();
-    err.downcast::<UnknownOrder>().expect("UnknownOrder — deregistered order must be refused");
+    err.downcast::<UnknownOrder>()
+        .expect("UnknownOrder — deregistered order must be refused");
 }
 
 // ---------------------------------------------------------------------------
@@ -137,11 +138,9 @@ fn cancel_deregistered_order_refused() {
 fn replace_registered_order_succeeds() {
     let mut map = BrokerOrderMap::new();
     map.register("ord-1", "b-ord-1");
-    assert!(
-        all_clear()
-            .replace("ord-1", &map, 20, None, "day".to_string())
-            .is_ok()
-    );
+    assert!(all_clear()
+        .replace("ord-1", &map, 20, None, "day".to_string())
+        .is_ok());
 }
 
 #[test]

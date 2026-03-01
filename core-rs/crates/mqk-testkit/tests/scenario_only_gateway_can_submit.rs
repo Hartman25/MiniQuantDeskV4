@@ -36,9 +36,9 @@
 //! A single failing gate produces `GateRefusal`; all must pass.
 
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerGateway, BrokerInvokeToken, BrokerReplaceRequest,
-    BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse, GateRefusal, IntegrityGate,
-    OutboxClaimToken, ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerGateway, BrokerInvokeToken, BrokerOrderMap,
+    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
+    GateRefusal, IntegrityGate, OutboxClaimToken, ReconcileGate, RiskGate,
 };
 
 // ---------------------------------------------------------------------------
@@ -138,13 +138,10 @@ fn submit_req() -> BrokerSubmitRequest {
     }
 }
 
-fn replace_req() -> BrokerReplaceRequest {
-    BrokerReplaceRequest {
-        broker_order_id: "b-ord-test".to_string(),
-        quantity: 20,
-        limit_price: None,
-        time_in_force: "day".to_string(),
-    }
+fn registered_map() -> BrokerOrderMap {
+    let mut m = BrokerOrderMap::new();
+    m.register("ord-test", "b-ord-test");
+    m
 }
 
 /// Stub claim token for tests (PATCH A3).
@@ -168,14 +165,15 @@ fn all_gates_clear_submit_succeeds() {
 
 #[test]
 fn all_gates_clear_cancel_succeeds() {
-    let result = make_gateway(true, true, true).cancel("ord-test");
+    let result = make_gateway(true, true, true).cancel("ord-test", &registered_map());
     assert!(result.is_ok());
     assert_eq!(result.unwrap().status, "cancelled");
 }
 
 #[test]
 fn all_gates_clear_replace_succeeds() {
-    let result = make_gateway(true, true, true).replace(replace_req());
+    let result = make_gateway(true, true, true)
+        .replace("ord-test", &registered_map(), 20, None, "day".to_string());
     assert!(result.is_ok());
     assert_eq!(result.unwrap().status, "replaced");
 }
@@ -197,8 +195,9 @@ fn integrity_disarmed_blocks_submit() {
 
 #[test]
 fn integrity_disarmed_blocks_cancel() {
+    // Gate fires before map lookup (EB-2); empty map is correct here.
     let err = make_gateway(false, true, true)
-        .cancel("ord-test")
+        .cancel("ord-test", &BrokerOrderMap::new())
         .unwrap_err();
     let refusal = err
         .downcast_ref::<GateRefusal>()
@@ -208,8 +207,9 @@ fn integrity_disarmed_blocks_cancel() {
 
 #[test]
 fn integrity_disarmed_blocks_replace() {
+    // Gate fires before map lookup (EB-2); empty map is correct here.
     let err = make_gateway(false, true, true)
-        .replace(replace_req())
+        .replace("ord-test", &BrokerOrderMap::new(), 20, None, "day".to_string())
         .unwrap_err();
     let refusal = err
         .downcast_ref::<GateRefusal>()

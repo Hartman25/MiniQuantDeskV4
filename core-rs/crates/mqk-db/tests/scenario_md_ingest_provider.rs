@@ -86,7 +86,7 @@ async fn md_ingest_provider_persists_bars_and_quality_report() -> Result<()> {
         mqk_db::IngestProviderBarsArgs {
             source: "mock_provider".to_string(),
             timeframe: "1D".to_string(),
-            ingest_id: ingest_id,
+            ingest_id,
             bars,
         },
     )
@@ -340,7 +340,7 @@ async fn md_ingest_provider_idempotent_same_ingest_id() -> Result<()> {
     let make_args = || mqk_db::IngestProviderBarsArgs {
         source: "mock_provider".to_string(),
         timeframe: "1D".to_string(),
-        ingest_id: ingest_id,
+        ingest_id,
         bars: vec![bar(
             "IDP",
             "1D",

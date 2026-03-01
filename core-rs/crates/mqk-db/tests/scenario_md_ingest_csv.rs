@@ -45,7 +45,7 @@ BBB,1D,1708041600,20,22,19,21,-5,true
             path: csv_path.clone(),
             timeframe: "1D".to_string(),
             source: "csv".to_string(),
-            ingest_id: ingest_id,
+            ingest_id,
         },
     )
     .await?;

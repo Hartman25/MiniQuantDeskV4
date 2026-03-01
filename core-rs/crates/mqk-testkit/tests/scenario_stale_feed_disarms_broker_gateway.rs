@@ -26,9 +26,9 @@
 //! (e.g., mqk-daemon or the engine dispatch layer).
 
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerGateway, BrokerInvokeToken, BrokerReplaceRequest,
-    BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse, GateRefusal, IntegrityGate,
-    OutboxClaimToken, ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerGateway, BrokerInvokeToken, BrokerOrderMap,
+    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
+    GateRefusal, IntegrityGate, OutboxClaimToken, ReconcileGate, RiskGate,
 };
 use mqk_integrity::{
     evaluate_bar, tick_feed, Bar, BarKey, CalendarSpec, FeedId, IntegrityAction, IntegrityConfig,
@@ -225,7 +225,8 @@ fn stale_feed_disarms_gateway_blocks_cancel() {
     assert!(st.disarmed);
 
     let gw = BrokerGateway::new(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
-    let err = gw.cancel("b-ord-e2").unwrap_err();
+    // Gate fires before map lookup (EB-2); empty map is correct here.
+    let err = gw.cancel("b-ord-e2", &BrokerOrderMap::new()).unwrap_err();
     let refusal = err
         .downcast_ref::<GateRefusal>()
         .expect("error must downcast to GateRefusal");
@@ -244,15 +245,11 @@ fn stale_feed_disarms_gateway_blocks_replace() {
 
     assert!(st.disarmed);
 
-    let replace_req = BrokerReplaceRequest {
-        broker_order_id: "b-ord-e2".to_string(),
-        quantity: 20,
-        limit_price: None,
-        time_in_force: "day".to_string(),
-    };
-
     let gw = BrokerGateway::new(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
-    let err = gw.replace(replace_req).unwrap_err();
+    // Gate fires before map lookup (EB-2); empty map is correct here.
+    let err = gw
+        .replace("b-ord-e2", &BrokerOrderMap::new(), 20, None, "day".to_string())
+        .unwrap_err();
     let refusal = err
         .downcast_ref::<GateRefusal>()
         .expect("error must downcast to GateRefusal");

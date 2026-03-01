@@ -516,13 +516,8 @@ mod tests {
     fn all_clear_replace_succeeds() {
         let mut map = crate::id_map::BrokerOrderMap::new();
         map.register("ord-1", "b-ord-1");
-        let res = make_gateway(true, true, true).replace(
-            "ord-1",
-            &map,
-            20,
-            None,
-            "day".to_string(),
-        );
+        let res =
+            make_gateway(true, true, true).replace("ord-1", &map, 20, None, "day".to_string());
         assert!(res.is_ok());
     }
 }
