@@ -111,6 +111,35 @@ pub struct AuditEvent {
     pub hash_self: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Event-ID derivation (D1-2)
+// ---------------------------------------------------------------------------
+
+/// Derive a deterministic audit event ID from chain state, payload, and sequence.
+///
+/// **No RNG.** Uses `Uuid::new_v5` (SHA-1 over the DNS namespace).
+///
+/// Inputs (D1-2 contract: `prev_hash + payload_hash + seq`):
+///   `prev_hash` — `hash_self` of the previous event, or `None` for the first event.
+///   `payload`   — the event payload (canonicalized for key-order stability).
+///   `seq`       — monotonically increasing counter from `AuditWriter` (prevents
+///                 collisions when `prev_hash` and `payload` are identical).
+///
+/// `ts_utc` is intentionally excluded: it is wall-clock ops metadata and its
+/// non-determinism is addressed separately. Including it would re-introduce
+/// non-determinism into `event_id` even after the TimeSource abstraction (D1-3)
+/// is in place.
+fn derive_event_id(prev_hash: Option<&str>, payload: &Value, seq: u64) -> Result<Uuid> {
+    let payload_canonical = canonical_json_line(payload)?;
+    let prev = prev_hash.unwrap_or("");
+    let data = format!("mqk-audit.event.v1|{}|{}|{}", prev, payload_canonical, seq);
+    Ok(Uuid::new_v5(&Uuid::NAMESPACE_DNS, data.as_bytes()))
+}
+
+// ---------------------------------------------------------------------------
+// File I/O
+// ---------------------------------------------------------------------------
+
 /// Write a single line to file (with trailing newline).
 fn append_line(path: &Path, line: &str) -> Result<()> {
     let mut f = OpenOptions::new()
