@@ -8,6 +8,84 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+// ---------------------------------------------------------------------------
+// A6-2: Durability policy
+// ---------------------------------------------------------------------------
+
+/// Explicit flush and rotation policy for the audit log.
+///
+/// # A6-2 — Log Durability Policy
+///
+/// Two orthogonal knobs:
+///
+/// | Knob                   | `strict()` | `permissive()` |
+/// |------------------------|------------|----------------|
+/// | `sync_on_append`       | `true`     | `false`        |
+/// | `rotation_max_events`  | `0` (off)  | `0` (off)      |
+///
+/// ## `sync_on_append`
+///
+/// When `true`, `sync_all()` (equivalent to `fsync(2)`) is called after every
+/// event write.  This guarantees the event reaches persistent storage before
+/// `append()` returns — the event cannot be lost by an OS crash or power
+/// failure after the call completes.
+///
+/// When `false`, durability is delegated to the OS write-back cache.  Suitable
+/// for unit tests and non-critical audit streams where throughput matters more
+/// than strict durability.
+///
+/// ## `rotation_max_events`
+///
+/// When non-zero, the writer starts a new log segment after this many events.
+/// Segment 0 is written to the base `path`; segment N (N ≥ 1) is written to
+/// `{base_path}.{N}`.  Each segment begins a fresh hash chain (independent
+/// verification).  The global `seq` counter continues across segments so
+/// event IDs remain unique.
+///
+/// `0` disables rotation (single file, no limit).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DurabilityPolicy {
+    /// Call `sync_all()` (fsync) after every append.
+    pub sync_on_append: bool,
+    /// Rotate to a new segment file after this many events (0 = disabled).
+    pub rotation_max_events: u64,
+}
+
+impl DurabilityPolicy {
+    /// Production default: fsync per event, no rotation.
+    ///
+    /// Fail-closed posture: every event is durably persisted before the caller
+    /// proceeds.  Use this for all live and promotion runs.
+    pub fn strict() -> Self {
+        Self {
+            sync_on_append: true,
+            rotation_max_events: 0,
+        }
+    }
+
+    /// Permissive (test) default: no fsync, no rotation.
+    ///
+    /// Trades durability for speed.  Suitable for unit tests where the process
+    /// does not crash and OS-buffered writes are sufficient.
+    pub fn permissive() -> Self {
+        Self {
+            sync_on_append: false,
+            rotation_max_events: 0,
+        }
+    }
+}
+
+impl Default for DurabilityPolicy {
+    /// The default durability policy is `strict()` — fail-closed.
+    fn default() -> Self {
+        Self::strict()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AuditWriter
+// ---------------------------------------------------------------------------
+
 /// Append-only audit writer. Writes JSON Lines (one event per line).
 /// Optional hash chain: each event can include hash_prev + hash_self.
 pub struct AuditWriter {
@@ -19,11 +97,34 @@ pub struct AuditWriter {
     /// When resuming an existing log (e.g. after daemon restart), restore with
     /// `set_seq(events_already_written)` alongside `set_last_hash`.
     seq: u64,
+    /// A6-2: active durability policy.
+    durability: DurabilityPolicy,
+    /// A6-2: current rotation segment (0 = base path, N = `{path}.{N}`).
+    segment: u64,
 }
 
 impl AuditWriter {
-    /// Creates the audit writer and ensures parent dirs exist.
+    /// Creates the audit writer with the default (`strict`) durability policy.
+    ///
+    /// Equivalent to `with_durability(path, hash_chain, DurabilityPolicy::strict())`.
+    /// Use [`with_durability`] to supply an explicit policy.
     pub fn new(path: impl AsRef<Path>, hash_chain: bool) -> Result<Self> {
+        Self::with_durability(path, hash_chain, DurabilityPolicy::strict())
+    }
+
+    /// Creates the audit writer with an explicit durability policy.
+    ///
+    /// # A6-2
+    ///
+    /// The caller declares the flush and rotation policy up-front.  There is
+    /// no implicit default: passing `DurabilityPolicy::strict()` opts into
+    /// fsync-per-event; passing `DurabilityPolicy::permissive()` explicitly
+    /// opts out.
+    pub fn with_durability(
+        path: impl AsRef<Path>,
+        hash_chain: bool,
+        durability: DurabilityPolicy,
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create_dir_all {:?}", parent))?;
@@ -34,6 +135,8 @@ impl AuditWriter {
             hash_chain,
             last_hash: None,
             seq: 0,
+            durability,
+            segment: 0,
         })
     }
 
@@ -58,6 +161,36 @@ impl AuditWriter {
         self.seq
     }
 
+    /// A6-2: Set the rotation segment counter (for restart with rotation enabled).
+    pub fn set_segment(&mut self, segment: u64) {
+        self.segment = segment;
+    }
+
+    /// A6-2: Current rotation segment index (0 = base path).
+    pub fn segment(&self) -> u64 {
+        self.segment
+    }
+
+    /// A6-2: Absolute path of the current segment file being written.
+    ///
+    /// Segment 0 → `{path}` (the base path).
+    /// Segment N → `{path}.{N}` for N ≥ 1.
+    pub fn current_segment_path(&self) -> PathBuf {
+        if self.segment == 0 {
+            self.path.clone()
+        } else {
+            let fname = self
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let mut p = self.path.clone();
+            p.set_file_name(format!("{}.{}", fname, self.segment));
+            p
+        }
+    }
+
     /// Append one event.
     pub fn append(
         &mut self,
@@ -66,6 +199,19 @@ impl AuditWriter {
         event_type: &str,
         payload: Value,
     ) -> Result<AuditEvent> {
+        // A6-2: rotation check — before writing, advance segment if threshold reached.
+        if self.durability.rotation_max_events > 0
+            && self.seq > 0
+            && self.seq % self.durability.rotation_max_events == 0
+        {
+            self.segment += 1;
+            // Each segment starts a fresh hash chain so it is independently verifiable.
+            // The global seq continues, keeping event_ids unique across segments.
+            if self.hash_chain {
+                self.last_hash = None;
+            }
+        }
+
         let ts_utc = Utc::now();
         // D1-2: event_id derived deterministically from chain state + payload + seq.
         // No RNG. See `derive_event_id` for derivation contract.
@@ -93,7 +239,9 @@ impl AuditWriter {
         }
 
         let line = canonical_json_line(&ev)?;
-        append_line(&self.path, &line)?;
+        // A6-2: write to the current segment path; flush according to policy.
+        let seg_path = self.current_segment_path();
+        append_line(&seg_path, &line, self.durability.sync_on_append)?;
 
         Ok(ev)
     }
@@ -141,7 +289,15 @@ fn derive_event_id(prev_hash: Option<&str>, payload: &Value, seq: u64) -> Result
 // ---------------------------------------------------------------------------
 
 /// Write a single line to file (with trailing newline).
-fn append_line(path: &Path, line: &str) -> Result<()> {
+///
+/// # A6-2 — flush policy
+///
+/// When `sync` is `true`, `sync_all()` (fsync) is called after the write.
+/// This guarantees the kernel has flushed the data to persistent storage
+/// before the function returns.
+///
+/// When `sync` is `false`, durability is delegated to the OS write-back cache.
+fn append_line(path: &Path, line: &str, sync: bool) -> Result<()> {
     let mut f = OpenOptions::new()
         .create(true)
         .append(true)
@@ -150,6 +306,9 @@ fn append_line(path: &Path, line: &str) -> Result<()> {
     f.write_all(line.as_bytes())
         .context("write audit line failed")?;
     f.write_all(b"\n").context("write newline failed")?;
+    if sync {
+        f.sync_all().context("sync_all (fsync) failed")?;
+    }
     Ok(())
 }
 
