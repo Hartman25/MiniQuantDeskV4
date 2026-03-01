@@ -40,6 +40,7 @@ mqk-db = { path = "../mqk-db" }
 mqk-testkit = { path = "../mqk-testkit" }
 mqk-integrity = { path = "../mqk-integrity" }
 mqk-audit = { path = "../mqk-audit" }
+mqk-schemas = { path = "../mqk-schemas" }
 
 [dev-dependencies]
 # Required for in-process Axum router testing via tower::ServiceExt::oneshot()

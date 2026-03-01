@@ -14,6 +14,11 @@ pub struct AuditWriter {
     path: PathBuf,
     hash_chain: bool,
     last_hash: Option<String>,
+    /// Monotonically increasing sequence counter for `event_id` derivation (D1-2).
+    /// Starts at 0 and increments on every `append` call.
+    /// When resuming an existing log (e.g. after daemon restart), restore with
+    /// `set_seq(events_already_written)` alongside `set_last_hash`.
+    seq: u64,
 }
 
 impl AuditWriter {
@@ -28,6 +33,7 @@ impl AuditWriter {
             path,
             hash_chain,
             last_hash: None,
+            seq: 0,
         })
     }
 
@@ -40,6 +46,18 @@ impl AuditWriter {
         self.last_hash.clone()
     }
 
+    /// Set the sequence counter when resuming an existing log after restart.
+    /// Pass the number of events already written (the next event's seq = this value).
+    /// Must be called in conjunction with `set_last_hash` for correct restart semantics.
+    pub fn set_seq(&mut self, seq: u64) {
+        self.seq = seq;
+    }
+
+    /// Current sequence counter (equals the number of events appended so far).
+    pub fn seq(&self) -> u64 {
+        self.seq
+    }
+
     /// Append one event.
     pub fn append(
         &mut self,
@@ -49,7 +67,10 @@ impl AuditWriter {
         payload: Value,
     ) -> Result<AuditEvent> {
         let ts_utc = Utc::now();
-        let event_id = Uuid::new_v4();
+        // D1-2: event_id derived deterministically from chain state + payload + seq.
+        // No RNG. See `derive_event_id` for derivation contract.
+        let event_id = derive_event_id(self.last_hash.as_deref(), &payload, self.seq)?;
+        self.seq += 1;
 
         let mut ev = AuditEvent {
             event_id,

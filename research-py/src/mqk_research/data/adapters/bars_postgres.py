@@ -19,6 +19,12 @@ class BarsQuery:
 MICROS_SCALE = 1_000_000.0
 EpochUnit = Literal["s", "ms"]
 
+# Deterministic boundary:
+# - epoch seconds today ~ 1.7e9 (10 digits)
+# - epoch millis today ~ 1.7e12 (13 digits)
+# We treat >= 2e10 as millis (safe through year ~2604 for seconds).
+EPOCH_MS_THRESHOLD = 20_000_000_000
+
 
 def _require_tz(ts: pd.Timestamp, name: str) -> None:
     if ts.tz is None:
@@ -131,24 +137,56 @@ def _to_price_float(series: pd.Series, source_col: str) -> pd.Series:
     return series.astype(float)
 
 
-def _infer_epoch_unit(engine: Engine, ts_col: str) -> EpochUnit:
+def infer_epoch_unit_strict(engine: Engine, ts_col: str) -> EpochUnit:
     """
-    Deterministic inference: sample one non-null value and infer seconds vs ms.
-    - > 1e12 => ms (since current epoch seconds ~ 1.7e9)
+    Deterministic, fail-closed inference for integer epoch timestamps.
+    - If values span both sides of EPOCH_MS_THRESHOLD => mixed units => error.
+    - Otherwise choose:
+        v >= threshold => ms
+        v <  threshold => s
     """
-    q = text(f"select {ts_col} as v from md_bars where {ts_col} is not null limit 1")
+    mm_q = text(f"select min({ts_col}) as min_v, max({ts_col}) as max_v from md_bars where {ts_col} is not null")
+    cnt_q = text(
+        f"""
+        select
+          sum(case when {ts_col} >= :thresh then 1 else 0 end) as n_ms,
+          sum(case when {ts_col} <  :thresh then 1 else 0 end) as n_s,
+          count(*) as n_total
+        from md_bars
+        where {ts_col} is not null
+        """
+    )
     with engine.connect() as cxn:
-        row = cxn.execute(q).fetchone()
-    if row is None or row[0] is None:
-        # If there is no data, the later query will fail anyway; default to seconds.
+        mm = cxn.execute(mm_q).fetchone()
+        cnt = cxn.execute(cnt_q, {"thresh": int(EPOCH_MS_THRESHOLD)}).fetchone()
+
+    if mm is None or mm[0] is None or mm[1] is None:
+        # No data: downstream history will fail anyway, but keep deterministic default.
         return "s"
-    v = int(row[0])
-    return "ms" if v > 1_000_000_000_000 else "s"
+
+    min_v = int(mm[0])
+    max_v = int(mm[1])
+
+    n_ms = int(cnt[0] or 0)
+    n_s = int(cnt[1] or 0)
+    n_total = int(cnt[2] or 0)
+
+    # Mixed => unsafe
+    if n_ms > 0 and n_s > 0:
+        raise RuntimeError(
+            "md_bars timestamp unit is MIXED/AMBIGUOUS (unsafe).\n"
+            f"  ts_col={ts_col}\n"
+            f"  threshold(EPOCH_MS_THRESHOLD)={EPOCH_MS_THRESHOLD}\n"
+            f"  counts: n_ms={n_ms} n_s={n_s} n_total={n_total}\n"
+            f"  raw min={min_v} raw max={max_v}\n"
+            "Fix your ingestor/storage so md_bars uses a single unit (epoch seconds OR epoch millis) consistently."
+        )
+
+    return "ms" if n_ms > 0 else "s"
 
 
 def _to_epoch_bound(ts_utc: pd.Timestamp, unit: EpochUnit) -> int:
     # pandas Timestamp -> epoch integer
-    # .timestamp() returns float seconds; convert deterministically.
     sec = int(ts_utc.timestamp())
     if unit == "s":
         return sec
@@ -158,6 +196,7 @@ def _to_epoch_bound(ts_utc: pd.Timestamp, unit: EpochUnit) -> int:
 def _epoch_series_to_utc(series: pd.Series, unit: EpochUnit) -> pd.Series:
     # integer epoch -> datetime64[ns, UTC]
     return pd.to_datetime(series.astype("int64"), unit=unit, utc=True)
+
 
 def _diagnose_empty(engine: Engine, symbols: List[str], timeframe: str, ts_col: str, has_is_complete: bool) -> str:
     # Deterministic diagnostics. No sampling randomness, all ORDER BY fixed.
@@ -175,7 +214,6 @@ def _diagnose_empty(engine: Engine, symbols: List[str], timeframe: str, ts_col: 
 
     tf_summary = ", ".join([f"{r[0]}={r[1]}" for r in tf_rows]) if tf_rows else "<none>"
 
-    # min/max end_ts (raw) for the chosen ts column for these symbols and timeframe
     mm_q = text(
         f"""
         select min({ts_col}) as min_ts, max({ts_col}) as max_ts, count(*) as n
@@ -205,19 +243,31 @@ def _diagnose_empty(engine: Engine, symbols: List[str], timeframe: str, ts_col: 
             c_rows = cxn.execute(c_q, {"symbols": symbols, "timeframe": timeframe}).fetchall()
         complete_str = ", ".join([f"{r[0]}={r[1]}" for r in c_rows]) if c_rows else "<none>"
 
+    unit_note = ""
+    try:
+        ts_type = _column_db_type(engine, ts_col)
+        if ts_type in {"bigint", "integer", "smallint"}:
+            unit = infer_epoch_unit_strict(engine, ts_col)
+            unit_note = f"  inferred_epoch_unit={unit} (threshold={EPOCH_MS_THRESHOLD})\n"
+    except Exception as e:
+        unit_note = f"  inferred_epoch_unit=<error: {e}>\n"
+
     return (
         "md_bars returned zero rows.\n"
         f"  symbols={symbols}\n"
         f"  requested_timeframe={timeframe}\n"
         f"  available_timeframes_for_symbols={tf_summary}\n"
         f"  ts_col={ts_col} (raw min/max for requested timeframe: {mm_str})\n"
+        f"{unit_note}"
         f"  is_complete_counts_for_timeframe={complete_str}\n"
         "Next actions:\n"
         "  - If available_timeframes_for_symbols is empty, your symbols are not present.\n"
         "  - If requested_timeframe not present, update policy bars.timeframe to a value shown.\n"
         "  - If max_ts is far earlier than your ASOF, pick an ASOF within your data range.\n"
         "  - If is_complete true count is 0, your ingestor never marked bars complete.\n"
+        "  - If inferred_epoch_unit errors or reports mixed units, fix md_bars end_ts storage first.\n"
     )
+
 
 def history(engine: Engine, q: BarsQuery) -> pd.DataFrame:
     if not q.symbols:
@@ -252,7 +302,7 @@ def history(engine: Engine, q: BarsQuery) -> pd.DataFrame:
     is_integer_ts = ts_type in {"bigint", "integer", "smallint"}
 
     if is_integer_ts:
-        epoch_unit = _infer_epoch_unit(engine, ts_col)
+        epoch_unit = infer_epoch_unit_strict(engine, ts_col)
         start_bound = _to_epoch_bound(start_utc, epoch_unit)
         end_bound = _to_epoch_bound(end_utc, epoch_unit)
 

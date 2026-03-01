@@ -1,0 +1,13 @@
+schema_version: "1"
+policy_name: "options_stub_v0"
+asset_class: "OPTIONS"
+notes:
+  - "Phase 2 stub policy: establishes config shape only."
+  - "No live calls. Data must come from Postgres once schema exists."
+
+# Placeholder section for future chain + greeks + IV settings
+options:
+  enabled: true
+  chain_source: "postgres"
+  pricing_model: "stub"
+  greeks: "stub"

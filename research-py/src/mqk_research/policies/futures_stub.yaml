@@ -1,0 +1,12 @@
+schema_version: "1"
+policy_name: "futures_stub_v0"
+asset_class: "FUTURES"
+notes:
+  - "Phase 2 stub policy: establishes config shape only."
+  - "No live calls. Data must come from Postgres once schema exists."
+
+futures:
+  enabled: false
+  history_source: "postgres"
+  roll_rule: "front_month"
+  continuous_series: "stub"

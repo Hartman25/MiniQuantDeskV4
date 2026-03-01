@@ -67,6 +67,11 @@ pub struct AppState {
     pub status: Arc<RwLock<StatusSnapshot>>,
     /// Integrity engine state (arm / disarm).
     pub integrity: Arc<RwLock<IntegrityState>>,
+    /// Latest broker snapshot known to the daemon (in-memory for now).
+    ///
+    /// DAEMON-1: read-only trading APIs surface this snapshot. A later patch
+    /// wires ingestion from broker/reconcile pipelines.
+    pub broker_snapshot: Arc<RwLock<Option<mqk_schemas::BrokerSnapshot>>>,
 }
 
 impl Default for AppState {
@@ -99,6 +104,7 @@ impl AppState {
             },
             status: Arc::new(RwLock::new(initial_status)),
             integrity: Arc::new(RwLock::new(boot_integrity)),
+            broker_snapshot: Arc::new(RwLock::new(None)),
         }
     }
 }

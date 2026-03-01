@@ -21,6 +21,24 @@ fn make_router() -> axum::Router {
     routes::build_router(st)
 }
 
+fn sample_snapshot() -> mqk_schemas::BrokerSnapshot {
+    use mqk_schemas::{BrokerAccount, BrokerSnapshot};
+
+    BrokerSnapshot {
+        captured_at_utc: chrono::DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        account: BrokerAccount {
+            equity: "100".to_string(),
+            cash: "50".to_string(),
+            currency: "USD".to_string(),
+        },
+        positions: Vec::new(),
+        orders: Vec::new(),
+        fills: Vec::new(),
+    }
+}
+
 /// Drive the router with a single request and return (status, body_bytes).
 async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, bytes::Bytes) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
@@ -434,4 +452,116 @@ async fn unknown_route_returns_404() {
 
     let (status, _) = call(router, req).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// DAEMON-1: Trading read APIs return 200 with placeholder bodies
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn trading_account_returns_200_and_has_snapshot_false_by_default() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/trading/account")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["has_snapshot"], false);
+    assert_eq!(json["account"]["currency"], "USD");
+}
+
+#[tokio::test]
+async fn trading_positions_returns_empty_vec_by_default() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/trading/positions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["has_snapshot"], false);
+    assert!(json["positions"].is_array());
+    assert_eq!(json["positions"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn trading_orders_returns_empty_vec_by_default() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/trading/orders")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["has_snapshot"], false);
+    assert!(json["orders"].is_array());
+    assert_eq!(json["orders"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn trading_fills_returns_empty_vec_by_default() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/trading/fills")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["has_snapshot"], false);
+    assert!(json["fills"].is_array());
+    assert_eq!(json["fills"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn trading_snapshot_returns_null_by_default() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/trading/snapshot")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert!(json["snapshot"].is_null());
+}
+
+#[tokio::test]
+async fn dev_snapshot_inject_refused_when_env_not_set() {
+    std::env::remove_var("MQK_DEV_ALLOW_SNAPSHOT_INJECT");
+
+    let router = make_router();
+    let snap = sample_snapshot();
+    let body = serde_json::to_string(&snap).expect("serialize snapshot");
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/trading/snapshot")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body))
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let json = parse_json(body);
+    assert_eq!(json["gate"], "dev_snapshot_inject");
 }
