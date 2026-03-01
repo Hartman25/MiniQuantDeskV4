@@ -9,6 +9,7 @@
 //! - Pure deterministic logic (no IO, no time, no broker wiring)
 
 mod accounting;
+mod fixedpoint;
 mod metrics;
 mod ordering;
 mod types;
@@ -32,6 +33,9 @@ pub use metrics::{
     compute_equity_micros, compute_exposure_micros, compute_unrealized_pnl_micros,
     enforce_max_gross_exposure, EquityMetrics, ExposureBreach, ExposureMetrics,
 };
+
+// M4-1: fixed-point money type
+pub use fixedpoint::Micros;
 
 // R3-2: canonical fill ordering policy
 pub use ordering::{apply_fills_canonical, sort_fills_canonical, TaggedFill};
