@@ -15,16 +15,26 @@
 //! 5. `broker_map_upsert` is idempotent — re-registering the same `internal_id`
 //!    does not produce duplicate rows and overwrites with the latest `broker_id`.
 //!
+//! # EB-4 FK prerequisite
+//!
+//! Migration 0013 adds a FK: broker_order_map.internal_id →
+//! oms_outbox(idempotency_key) ON DELETE RESTRICT.  Tests must now create a
+//! run + outbox entry for each idempotency key before calling
+//! broker_map_upsert.  Cleanup order: broker_map_remove → delete run
+//! (cascades to oms_outbox via on delete cascade on oms_outbox.run_id).
+//!
 //! Requires `MQK_DATABASE_URL`. Skips with a diagnostic message if absent or
 //! misconfigured.
 
 use anyhow::Result;
+use chrono::Utc;
 use mqk_execution::BrokerOrderMap;
 use sqlx::{postgres::PgPoolOptions, PgPool};
+use uuid::Uuid;
 
-// ---------------------------------------------------------------------------
-// 1 + 2 + 3 + 4: full crash-restart roundtrip
-// ---------------------------------------------------------------------------
+// Fixed UUIDs for the test runs — deterministic, never collide with real runs.
+const RESTART_RUN_ID: &str = "a4a40001-0000-0000-0000-000000000000";
+const IDEM_RUN_ID: &str = "a4a40002-0000-0000-0000-000000000000";
 
 fn db_url_or_skip() -> Option<String> {
     match std::env::var(mqk_db::ENV_DB_URL) {
@@ -51,6 +61,10 @@ async fn try_pool_or_skip(url: &str) -> Result<Option<PgPool>> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 1 + 2 + 3 + 4: full crash-restart roundtrip
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
 async fn broker_order_map_survives_simulated_restart() -> anyhow::Result<()> {
     let Some(url) = db_url_or_skip() else {
@@ -64,10 +78,47 @@ async fn broker_order_map_survives_simulated_restart() -> anyhow::Result<()> {
     };
     mqk_db::migrate(&pool_before).await?;
 
+    let run_id: Uuid = RESTART_RUN_ID.parse().unwrap();
+
     // Isolate test rows so parallel runs do not interfere.
+    // Order: broker_order_map first (FK RESTRICT), then run (cascades to outbox).
     sqlx::query("delete from broker_order_map where internal_id like 'a4-restart-%'")
         .execute(&pool_before)
         .await?;
+    sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(&pool_before)
+        .await?;
+
+    // EB-4: create run + outbox entries so broker_map_upsert satisfies the FK.
+    mqk_db::insert_run(
+        &pool_before,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "eb4-test".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: Utc::now(),
+            git_hash: "eb4-test".to_string(),
+            config_hash: "eb4-test".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "eb4-test".to_string(),
+        },
+    )
+    .await?;
+    mqk_db::outbox_enqueue(
+        &pool_before,
+        run_id,
+        "a4-restart-ord-1",
+        serde_json::json!({}),
+    )
+    .await?;
+    mqk_db::outbox_enqueue(
+        &pool_before,
+        run_id,
+        "a4-restart-ord-2",
+        serde_json::json!({}),
+    )
+    .await?;
 
     // Simulate two orders confirmed by the broker (post-submit registration).
     mqk_db::broker_map_upsert(&pool_before, "a4-restart-ord-1", "broker-XYZ-001").await?;
@@ -128,6 +179,12 @@ async fn broker_order_map_survives_simulated_restart() -> anyhow::Result<()> {
         "removed entries must not appear in broker_map_load after terminal state"
     );
 
+    // EB-4 cleanup: broker_map rows are gone; now delete run (cascades to outbox).
+    sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(&pool_after)
+        .await?;
+
     Ok(())
 }
 
@@ -146,9 +203,33 @@ async fn broker_map_upsert_is_idempotent() -> anyhow::Result<()> {
     };
     mqk_db::migrate(&pool).await?;
 
+    let run_id: Uuid = IDEM_RUN_ID.parse().unwrap();
+
+    // Pre-test cleanup: broker_map first (FK RESTRICT), then run (cascades to outbox).
     sqlx::query("delete from broker_order_map where internal_id = 'a4-idem-ord'")
         .execute(&pool)
         .await?;
+    sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await?;
+
+    // EB-4: create run + outbox entry so broker_map_upsert satisfies the FK.
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "eb4-test".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: Utc::now(),
+            git_hash: "eb4-test".to_string(),
+            config_hash: "eb4-test".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "eb4-test".to_string(),
+        },
+    )
+    .await?;
+    mqk_db::outbox_enqueue(&pool, run_id, "a4-idem-ord", serde_json::json!({})).await?;
 
     // First registration after submit.
     mqk_db::broker_map_upsert(&pool, "a4-idem-ord", "broker-first").await?;
@@ -173,8 +254,14 @@ async fn broker_map_upsert_is_idempotent() -> anyhow::Result<()> {
         "upsert must overwrite with the latest broker_id"
     );
 
-    // Cleanup.
+    // Terminal-state cleanup.
     mqk_db::broker_map_remove(&pool, "a4-idem-ord").await?;
+
+    // EB-4 cleanup: broker_map row gone; delete run (cascades to outbox).
+    sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await?;
 
     Ok(())
 }
