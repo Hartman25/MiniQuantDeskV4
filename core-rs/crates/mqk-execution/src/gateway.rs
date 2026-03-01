@@ -263,16 +263,24 @@ where
     /// Submit a new broker order.
     ///
     /// Requires an [`OutboxClaimToken`] proving the order originated from a
-    /// claimed outbox row (PATCH A3). All three gates must also pass.
-    /// Gate state is evaluated from the stored evaluators — no verdict can be
-    /// injected by the caller.
+    /// claimed outbox row (PATCH A3). The claim's `idempotency_key` is used
+    /// as the broker-side `order_id`, overriding any value in `req.order_id`
+    /// (EB-3). Callers cannot inject a free-form broker order ID — it must
+    /// come from the outbox. All three gates must also pass.
     pub fn submit(
         &self,
-        _claim: &OutboxClaimToken,
+        claim: &OutboxClaimToken,
         req: BrokerSubmitRequest,
     ) -> Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
         self.enforce_gates()?;
-        self.router.route_submit(req)
+        // EB-3: idempotency_key from the claimed outbox row is the authoritative
+        // broker-side order_id. This prevents callers from submitting free-form
+        // order IDs that were not recorded in the outbox.
+        let submit_req = BrokerSubmitRequest {
+            order_id: claim.idempotency_key.clone(),
+            ..req
+        };
+        self.router.route_submit(submit_req)
     }
 
     /// Cancel a broker order.
