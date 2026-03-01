@@ -1,5 +1,5 @@
 # =============================================================================
-# P0-1: MiniQuantDesk V4 — Deterministic Unsafe-Pattern Guard (PowerShell)
+# P0-1: MiniQuantDesk V4 -- Deterministic Unsafe-Pattern Guard (PowerShell)
 # =============================================================================
 # Windows companion to check_unsafe_patterns.sh.
 # Identical logic, identical exit codes, identical patterns.
@@ -9,7 +9,7 @@
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\check_unsafe_patterns.ps1
 #   # or from PowerShell directly:
-#   & scripts\guards\check_unsafe_patterns.ps1
+#   & .\scripts\guards\check_unsafe_patterns.ps1
 #
 # Exit codes: 0 = clean, 1 = violations found.
 # =============================================================================
@@ -17,14 +17,14 @@
 $ErrorActionPreference = "Stop"
 
 # Resolve repo root (two levels up from this script's directory).
-$ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$RepoRoot   = (Resolve-Path (Join-Path $ScriptDir "../../")).Path.TrimEnd('\')
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "../../")).Path.TrimEnd('\')
 
 $Violations = 0
 
-function Write-Red   { param([string]$Msg) Write-Host $Msg -ForegroundColor Red    }
-function Write-Green { param([string]$Msg) Write-Host $Msg -ForegroundColor Green  }
-function Write-Info  { param([string]$Msg) Write-Host $Msg -ForegroundColor Cyan   }
+function Show-Red   { param([string]$Msg) Write-Host $Msg -ForegroundColor Red    }
+function Show-Green { param([string]$Msg) Write-Host $Msg -ForegroundColor Green  }
+function Show-Info  { param([string]$Msg) Write-Host $Msg -ForegroundColor Cyan   }
 
 Write-Host "============================================================"
 Write-Host " MQK P0-1 Safety Guard (PowerShell)"
@@ -33,13 +33,16 @@ Write-Host "============================================================"
 
 # =============================================================================
 # [U] Uuid::new_v4 in production src/ files
-# Pattern catches both: Uuid::new_v4() and unwrap_or_else(Uuid::new_v4)
+# Pattern catches both: Uuid::new_v4() direct call and
+#                       unwrap_or_else(Uuid::new_v4) function-pointer form.
 # =============================================================================
 
-Write-Host ""
-Write-Info "--- [U] Uuid::new_v4 in production src/ ---"
+$UuidPattern = 'Uuid::new_v4'
 
-$UuidFileCount = 0
+Write-Host ""
+Show-Info "--- [U] $UuidPattern in production src/ ---"
+
+$UuidFileCount  = 0
 $UuidMatchLines = @()
 
 # Find all .rs files under crates/*/src/ (not tests/, not target/).
@@ -51,32 +54,38 @@ $SrcFiles = Get-ChildItem -Path "$RepoRoot\core-rs\crates" -Recurse -Filter "*.r
     }
 
 foreach ($File in $SrcFiles) {
-    $Matches = Select-String -Path $File.FullName -Pattern "Uuid::new_v4" -SimpleMatch
-    if ($Matches) {
+    $Found = Select-String -Path $File.FullName -Pattern $UuidPattern -SimpleMatch
+    if ($Found) {
         $UuidFileCount++
         $RelPath = $File.FullName.Substring($RepoRoot.Length + 1)
-        foreach ($Match in $Matches) {
-            $UuidMatchLines += "  ${RelPath}:$($Match.LineNumber):$($Match.Line.Trim())"
+        foreach ($Hit in $Found) {
+            $UuidMatchLines += "  ${RelPath}:$($Hit.LineNumber):$($Hit.Line.Trim())"
         }
     }
 }
 
 if ($UuidFileCount -eq 0) {
-    Write-Green "  OK — no Uuid::new_v4 in production src/"
+    Show-Green "  OK -- no $UuidPattern in production src/"
 } else {
     $Violations += $UuidFileCount
-    Write-Red "  FAIL — Uuid::new_v4 found in $UuidFileCount production file(s):"
+    Show-Red "  FAIL -- $UuidPattern found in $UuidFileCount production file(s):"
     $UuidMatchLines | ForEach-Object { Write-Host $_ }
-    Write-Red "  Remediation: D1-1 (run IDs: daemon routes + cli), D1-2 (audit event IDs)."
-    Write-Red "  Note: mqk-db/src/md.rs ingest_id fallback also flagged — address in D1-1 or separately."
+    Show-Red "  Remediation: D1-1 (run IDs: daemon routes + cli), D1-2 (audit event IDs)."
+    Show-Red "  Note: mqk-db/src/md.rs ingest_id fallback also flagged -- address in D1-1 or separately."
 }
 
 # =============================================================================
 # [T] Utc::now() in mqk-db/src/ (enforcement scope)
+#
+# Assign pattern to variable -- avoids PowerShell parser ambiguity with
+# parentheses in double-quoted string arguments.
 # =============================================================================
 
+# Single-quoted assignment: literal string, no interpolation, no parser issues.
+$UtcPattern = 'Utc::now()'
+
 Write-Host ""
-Write-Info "--- [T] Utc::now() in mqk-db/src/ (enforcement scope) ---"
+Show-Info "--- [T] $UtcPattern in mqk-db/src/ (enforcement scope) ---"
 
 $UtcFileCount  = 0
 $UtcMatchLines = @()
@@ -88,28 +97,29 @@ if (Test-Path $MqkDbSrc) {
         Where-Object { $_.FullName -notmatch '\\target\\' }
 
     foreach ($File in $DbSrcFiles) {
-        $Matches = Select-String -Path $File.FullName -Pattern "Utc::now()" -SimpleMatch
-        if ($Matches) {
+        $Found = Select-String -Path $File.FullName -Pattern $UtcPattern -SimpleMatch
+        if ($Found) {
             $UtcFileCount++
             $RelPath = $File.FullName.Substring($RepoRoot.Length + 1)
-            foreach ($Match in $Matches) {
-                $UtcMatchLines += "  ${RelPath}:$($Match.LineNumber):$($Match.Line.Trim())"
+            foreach ($Hit in $Found) {
+                $UtcMatchLines += "  ${RelPath}:$($Hit.LineNumber):$($Hit.Line.Trim())"
             }
         }
     }
 }
 
 if ($UtcFileCount -eq 0) {
-    Write-Green "  OK — no Utc::now() in mqk-db/src/"
+    Show-Green "  OK -- no $UtcPattern in mqk-db/src/"
 } else {
     $Violations += $UtcFileCount
-    Write-Red "  FAIL — Utc::now() found in $UtcFileCount file(s) in mqk-db/src/:"
+    Show-Red "  FAIL -- $UtcPattern found in $UtcFileCount file(s) in mqk-db/src/:"
     $UtcMatchLines | ForEach-Object { Write-Host $_ }
-    Write-Red "  Remediation: D1-3 (inject TimeSource abstraction into deadman)."
+    Show-Red "  Remediation: D1-3 (inject TimeSource abstraction into deadman)."
 }
 
 # =============================================================================
-# TODO(D1-4): DEFAULT now() in SQL migrations — disabled (see .sh for rationale)
+# TODO(D1-4): DEFAULT now() in SQL migrations -- disabled.
+# Enable after D1-4 cleans existing migration files. See .sh for full rationale.
 # =============================================================================
 
 Write-Host ""
@@ -118,15 +128,15 @@ Write-Host " Summary"
 Write-Host "============================================================"
 
 if ($Violations -eq 0) {
-    Write-Green " ALL GUARDS PASSED — no forbidden patterns detected."
+    Show-Green " ALL GUARDS PASSED -- no forbidden patterns detected."
     exit 0
 } else {
-    Write-Red " GUARD FAILED — $Violations violation(s) found."
+    Show-Red " GUARD FAILED -- $Violations violation(s) found."
     Write-Host ""
-    Write-Red " These are known tracked violations. Remediation patches:"
-    Write-Red "   D1-1: Uuid::new_v4 in daemon routes + cli run command"
-    Write-Red "   D1-2: Uuid::new_v4 in audit event IDs"
-    Write-Red "   D1-3: Utc::now() in mqk-db deadman enforcement path"
-    Write-Red "   D1-4: DEFAULT now() in SQL migrations (guard disabled until then)"
+    Show-Red " These are known tracked violations. Remediation patches:"
+    Show-Red "   D1-1: $UuidPattern in daemon routes + cli run command"
+    Show-Red "   D1-2: $UuidPattern in audit event IDs"
+    Show-Red "   D1-3: $UtcPattern in mqk-db deadman enforcement path"
+    Show-Red "   D1-4: DEFAULT now() in SQL migrations (guard disabled until then)"
     exit 1
 }
