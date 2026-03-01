@@ -58,25 +58,13 @@ fn canonical_apply_is_permutation_invariant() {
     let fill_b = tf(2, "AAPL", Side::Buy, 10, 110);
     let fill_c = tf(3, "AAPL", Side::Sell, 5, 120);
 
-    let snap_canonical = canonical_snapshot(vec![
-        fill_a.clone(),
-        fill_b.clone(),
-        fill_c.clone(),
-    ]);
+    let snap_canonical = canonical_snapshot(vec![fill_a.clone(), fill_b.clone(), fill_c.clone()]);
 
     // Reversed arrival order.
-    let snap_reversed = canonical_snapshot(vec![
-        fill_c.clone(),
-        fill_b.clone(),
-        fill_a.clone(),
-    ]);
+    let snap_reversed = canonical_snapshot(vec![fill_c.clone(), fill_b.clone(), fill_a.clone()]);
 
     // Another permutation.
-    let snap_middle = canonical_snapshot(vec![
-        fill_b.clone(),
-        fill_c.clone(),
-        fill_a.clone(),
-    ]);
+    let snap_middle = canonical_snapshot(vec![fill_b.clone(), fill_c.clone(), fill_a.clone()]);
 
     assert_eq!(
         snap_canonical.realized_pnl_micros,
@@ -84,13 +72,11 @@ fn canonical_apply_is_permutation_invariant() {
         "canonical order: realized PnL must be $100"
     );
     assert_eq!(
-        snap_reversed.realized_pnl_micros,
-        snap_canonical.realized_pnl_micros,
+        snap_reversed.realized_pnl_micros, snap_canonical.realized_pnl_micros,
         "reversed arrival must match canonical after sort"
     );
     assert_eq!(
-        snap_middle.realized_pnl_micros,
-        snap_canonical.realized_pnl_micros,
+        snap_middle.realized_pnl_micros, snap_canonical.realized_pnl_micros,
         "middle permutation must match canonical after sort"
     );
     assert_eq!(snap_reversed.cash_micros, snap_canonical.cash_micros);
@@ -142,13 +128,11 @@ fn non_canonical_order_produces_different_pnl() {
         "canonical: buy@100 then sell@90 → realized = −$100"
     );
     assert_eq!(
-        snap_wrong.realized_pnl_micros,
-        0,
+        snap_wrong.realized_pnl_micros, 0,
         "non-canonical: buy@80 first → sell@90 closes mixed lots → realized = $0"
     );
     assert_ne!(
-        snap_wrong.realized_pnl_micros,
-        snap_canonical.realized_pnl_micros,
+        snap_wrong.realized_pnl_micros, snap_canonical.realized_pnl_micros,
         "non-canonical application must produce different PnL — proves FIFO is order-sensitive"
     );
 }
@@ -160,8 +144,8 @@ fn non_canonical_order_produces_different_pnl() {
 #[test]
 fn sort_key_buy_before_sell_on_tied_seq_no() {
     let mut fills = vec![
-        tf(1, "AAPL", Side::Sell, 5, 120),  // should sort to index 1
-        tf(1, "AAPL", Side::Buy, 10, 100),  // should sort to index 0
+        tf(1, "AAPL", Side::Sell, 5, 120), // should sort to index 1
+        tf(1, "AAPL", Side::Buy, 10, 100), // should sort to index 0
     ];
     sort_fills_canonical(&mut fills);
     assert_eq!(

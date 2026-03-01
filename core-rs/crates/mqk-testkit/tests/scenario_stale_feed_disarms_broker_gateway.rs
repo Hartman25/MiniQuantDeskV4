@@ -248,7 +248,13 @@ fn stale_feed_disarms_gateway_blocks_replace() {
     let gw = BrokerGateway::new(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
     // Gate fires before map lookup (EB-2); empty map is correct here.
     let err = gw
-        .replace("b-ord-e2", &BrokerOrderMap::new(), 20, None, "day".to_string())
+        .replace(
+            "b-ord-e2",
+            &BrokerOrderMap::new(),
+            20,
+            None,
+            "day".to_string(),
+        )
         .unwrap_err();
     let refusal = err
         .downcast_ref::<GateRefusal>()

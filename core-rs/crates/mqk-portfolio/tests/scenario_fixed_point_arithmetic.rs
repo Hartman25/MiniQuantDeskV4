@@ -39,9 +39,9 @@ const TEN_DOLLARS: Micros = Micros::new(10_000_000);
 #[test]
 fn buy_sell_cash_conservation() {
     let initial_cash = Micros::new(100_000 * 1_000_000); // $100,000
-    let price = Micros::new(150 * 1_000_000);            // $150/share
+    let price = Micros::new(150 * 1_000_000); // $150/share
     let qty = 10_i64;
-    let fee = Micros::new(500_000);                       // $0.50 each way
+    let fee = Micros::new(500_000); // $0.50 each way
 
     let cost = price.checked_mul_qty(qty).unwrap() + fee;
     let proceeds = price.checked_mul_qty(qty).unwrap() - fee;
@@ -51,7 +51,10 @@ fn buy_sell_cash_conservation() {
 
     // Net: initial - 2*fee (one on each side)
     let expected = initial_cash - fee - fee;
-    assert_eq!(after_sell, expected, "cash conservation: only fees are lost");
+    assert_eq!(
+        after_sell, expected,
+        "cash conservation: only fees are lost"
+    );
 }
 
 // ---------------------------------------------------------------------------

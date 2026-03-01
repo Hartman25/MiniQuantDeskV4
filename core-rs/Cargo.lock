@@ -1804,6 +1804,7 @@ dependencies = [
  "mqk-audit",
  "mqk-db",
  "mqk-integrity",
+ "mqk-reconcile",
  "mqk-schemas",
  "mqk-testkit",
  "serde",

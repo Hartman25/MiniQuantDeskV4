@@ -58,7 +58,12 @@ async fn reconcile_tick_disarms_on_position_drift() {
         Some(snap)
     };
 
-    state::spawn_reconcile_tick(Arc::clone(&st), local_fn, broker_fn, Duration::from_millis(10));
+    state::spawn_reconcile_tick(
+        Arc::clone(&st),
+        local_fn,
+        broker_fn,
+        Duration::from_millis(10),
+    );
 
     // Allow multiple tick intervals for the background task to fire.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -101,7 +106,12 @@ async fn reconcile_tick_does_not_disarm_on_clean() {
         Some(snap)
     };
 
-    state::spawn_reconcile_tick(Arc::clone(&st), local_fn, broker_fn, Duration::from_millis(10));
+    state::spawn_reconcile_tick(
+        Arc::clone(&st),
+        local_fn,
+        broker_fn,
+        Duration::from_millis(10),
+    );
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -139,7 +149,12 @@ async fn reconcile_tick_skips_when_no_broker_snapshot() {
     };
     let broker_fn = || -> Option<BrokerSnapshot> { None };
 
-    state::spawn_reconcile_tick(Arc::clone(&st), local_fn, broker_fn, Duration::from_millis(10));
+    state::spawn_reconcile_tick(
+        Arc::clone(&st),
+        local_fn,
+        broker_fn,
+        Duration::from_millis(10),
+    );
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 

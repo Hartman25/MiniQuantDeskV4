@@ -107,7 +107,9 @@ Office temp/lock files only
 -------------------------------
 
 ~$*.docx
-
+# Research run artifacts (deterministic outputs, not source)
+research-py/runs/
+research-py/runs_*/
 -------------------------------
 Coverage / Test Artifacts
 -------------------------------

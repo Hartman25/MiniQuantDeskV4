@@ -172,8 +172,13 @@ fn all_gates_clear_cancel_succeeds() {
 
 #[test]
 fn all_gates_clear_replace_succeeds() {
-    let result = make_gateway(true, true, true)
-        .replace("ord-test", &registered_map(), 20, None, "day".to_string());
+    let result = make_gateway(true, true, true).replace(
+        "ord-test",
+        &registered_map(),
+        20,
+        None,
+        "day".to_string(),
+    );
     assert!(result.is_ok());
     assert_eq!(result.unwrap().status, "replaced");
 }
@@ -209,7 +214,13 @@ fn integrity_disarmed_blocks_cancel() {
 fn integrity_disarmed_blocks_replace() {
     // Gate fires before map lookup (EB-2); empty map is correct here.
     let err = make_gateway(false, true, true)
-        .replace("ord-test", &BrokerOrderMap::new(), 20, None, "day".to_string())
+        .replace(
+            "ord-test",
+            &BrokerOrderMap::new(),
+            20,
+            None,
+            "day".to_string(),
+        )
         .unwrap_err();
     let refusal = err
         .downcast_ref::<GateRefusal>()
