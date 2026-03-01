@@ -93,7 +93,8 @@ async fn forged_audit_event_cannot_satisfy_arming() -> Result<()> {
     );
 
     // Only after a genuine reconcile checkpoint does arming succeed.
-    mqk_db::reconcile_checkpoint_write(&pool, run_id, "CLEAN", 0, "sha256:real").await?;
+    mqk_db::reconcile_checkpoint_write(&pool, run_id, "CLEAN", 0, "sha256:real", Utc::now())
+        .await?;
     mqk_db::arm_preflight(&pool, run_id).await?;
     let r = mqk_db::fetch_run(&pool, run_id).await?;
     assert_eq!(

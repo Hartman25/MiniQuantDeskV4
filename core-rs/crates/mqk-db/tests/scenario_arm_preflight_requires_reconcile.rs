@@ -92,6 +92,7 @@ async fn arm_preflight_requires_clean_reconcile_when_configured() -> Result<()> 
         "CLEAN",
         1_700_000_000_000_i64, // snapshot_watermark_ms from SnapshotWatermark
         "sha256:abc123",       // result_hash (caller-computed from reconcile payload)
+        Utc::now(),
     )
     .await?;
 

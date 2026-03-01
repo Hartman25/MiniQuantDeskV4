@@ -141,32 +141,41 @@ else
 fi
 
 # =============================================================================
-# TODO(D1-4): DEFAULT now() in SQL migrations.
+# [N] DEFAULT now() in SQL migrations (D1-4: enabled, post-0012 only).
 #
-# Enable this block ONLY after D1-4 cleans existing migration files.
-# Until then, this guard is intentionally disabled to avoid blocking CI
-# before a repair path exists.
+# Legacy migrations 0001-0011 use DEFAULT now() for bookkeeping columns
+# (oms_outbox.created_at_utc, md_bars.ingested_at, etc.) that are NOT in any
+# enforcement or capital-decision path.  These are the D1-4 baseline whitelist
+# and must not be modified (SQLx checksum immutability).
 #
-# echo ""
-# info "--- [N] DEFAULT now() in SQL migrations ---"
-# SQL_VIOLATIONS=0
-# while IFS= read -r -d '' sql_file; do
-#     matches=$(grep -in "default now()\|DEFAULT CURRENT_TIMESTAMP" "$sql_file" 2>/dev/null || true)
-#     if [ -n "$matches" ]; then
-#         SQL_VIOLATIONS=$((SQL_VIOLATIONS + 1))
-#         VIOLATIONS=$((VIOLATIONS + 1))
-#         rel="${sql_file#"${REPO_ROOT}/"}"
-#         red "  FAIL: ${rel}"
-#         printf '%s\n' "$matches"
-#     fi
-# done < <(find "${REPO_ROOT}/core-rs/crates/mqk-db/migrations" \
-#     -type f -name "*.sql" -print0)
-# if [ "$SQL_VIOLATIONS" -eq 0 ]; then
-#     green "  OK — no DEFAULT now() in migrations"
-# else
-#     red "  Remediation: D1-4 (remove DEFAULT now() from semantics-bearing columns)."
-# fi
+# All migrations from 0012 onward must NOT use DEFAULT now() — semantics-bearing
+# timestamps must be injected by the caller (now: DateTime<Utc> pattern, D1-3).
 # =============================================================================
+
+echo ""
+info "--- [N] DEFAULT now() in new migration files (>= 0012) ---"
+
+SQL_VIOLATIONS=0
+
+while IFS= read -r -d '' sql_file; do
+    basename=$(basename "$sql_file")
+    [[ "$basename" < "0012_" ]] && continue
+    matches=$(grep -in "default now()\|DEFAULT CURRENT_TIMESTAMP" "$sql_file" 2>/dev/null || true)
+    if [ -n "$matches" ]; then
+        SQL_VIOLATIONS=$((SQL_VIOLATIONS + 1))
+        VIOLATIONS=$((VIOLATIONS + 1))
+        rel="${sql_file#"${REPO_ROOT}/"}"
+        red "  FAIL: ${rel}"
+        printf '%s\n' "$matches"
+    fi
+done < <(find "${REPO_ROOT}/core-rs/crates/mqk-db/migrations" \
+    -type f -name "*.sql" -print0)
+
+if [ "$SQL_VIOLATIONS" -eq 0 ]; then
+    green "  OK — no DEFAULT now() in post-D1-4 migrations"
+else
+    red "  Remediation: Remove DEFAULT now() from new migration; inject timestamp via now: DateTime<Utc> parameter."
+fi
 
 echo ""
 echo "============================================================"
@@ -183,6 +192,6 @@ else
     red "   D1-1: Uuid::new_v4() in daemon routes + cli run command"
     red "   D1-2: Uuid::new_v4() in audit event IDs"
     red "   D1-3: Utc::now() in mqk-db deadman enforcement path"
-    red "   D1-4: DEFAULT now() in SQL migrations (guard disabled until then)"
+    red "   D1-4: DEFAULT now() in SQL migrations (guard active for >= 0012)"
     exit 1
 fi

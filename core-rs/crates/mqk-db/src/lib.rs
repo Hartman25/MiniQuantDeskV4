@@ -1166,24 +1166,28 @@ pub struct ReconcileCheckpoint {
 /// `result_hash` is a caller-computed hash (e.g. SHA-256 of the reconcile
 /// report JSON) for auditability; it is stored but not cryptographically
 /// verified by arming.
+/// `now` is injected by the caller (D1-4: schema DEFAULT now() removed from
+/// created_at_utc; caller binds the timestamp explicitly).
 pub async fn reconcile_checkpoint_write(
     pool: &PgPool,
     run_id: Uuid,
     verdict: &str,
     snapshot_watermark_ms: i64,
     result_hash: &str,
+    now: DateTime<Utc>,
 ) -> Result<()> {
     sqlx::query(
         r#"
         insert into sys_reconcile_checkpoint
-            (run_id, verdict, snapshot_watermark_ms, result_hash)
-        values ($1, $2, $3, $4)
+            (run_id, verdict, snapshot_watermark_ms, result_hash, created_at_utc)
+        values ($1, $2, $3, $4, $5)
         "#,
     )
     .bind(run_id)
     .bind(verdict)
     .bind(snapshot_watermark_ms)
     .bind(result_hash)
+    .bind(now)
     .execute(pool)
     .await
     .context("reconcile_checkpoint_write failed")?;

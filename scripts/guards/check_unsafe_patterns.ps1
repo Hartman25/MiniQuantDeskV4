@@ -118,9 +118,40 @@ if ($UtcFileCount -eq 0) {
 }
 
 # =============================================================================
-# TODO(D1-4): DEFAULT now() in SQL migrations -- disabled.
-# Enable after D1-4 cleans existing migration files. See .sh for full rationale.
+# [N] DEFAULT now() in SQL migrations (D1-4: enabled, post-0012 only).
+#
+# Legacy migrations 0001-0011 are the D1-4 baseline whitelist (bookkeeping
+# DEFAULT now() is acceptable ops metadata for non-enforcement columns).
+# All migrations from 0012 onward must NOT use DEFAULT now().
 # =============================================================================
+
+Write-Host ""
+Show-Info "--- [N] DEFAULT now() in new migration files (>= 0012) ---"
+
+$SqlFileCount = 0
+$MigDir = "$RepoRoot\core-rs\crates\mqk-db\migrations"
+
+if (Test-Path $MigDir) {
+    $SqlFiles = Get-ChildItem -Path $MigDir -Filter "*.sql" |
+        Where-Object { $_.Name -ge "0012_" }
+
+    foreach ($File in $SqlFiles) {
+        $Found = Select-String -Path $File.FullName -Pattern 'default now()' -SimpleMatch -AllMatches
+        if ($Found) {
+            $SqlFileCount++
+            $Violations++
+            $RelPath = $File.FullName.Substring($RepoRoot.Length + 1)
+            Show-Red "  FAIL: $RelPath"
+            $Found | ForEach-Object { Write-Host "  $($_.Line.Trim())" }
+        }
+    }
+}
+
+if ($SqlFileCount -eq 0) {
+    Show-Green "  OK -- no DEFAULT now() in post-D1-4 migrations"
+} else {
+    Show-Red "  Remediation: Remove DEFAULT now() from new migration; inject timestamp via now: DateTime<Utc> parameter."
+}
 
 Write-Host ""
 Write-Host "============================================================"
@@ -137,6 +168,6 @@ if ($Violations -eq 0) {
     Show-Red "   D1-1: $UuidPattern in daemon routes + cli run command"
     Show-Red "   D1-2: $UuidPattern in audit event IDs"
     Show-Red "   D1-3: $UtcPattern in mqk-db deadman enforcement path"
-    Show-Red "   D1-4: DEFAULT now() in SQL migrations (guard disabled until then)"
+    Show-Red "   D1-4: DEFAULT now() in SQL migrations (guard active for >= 0012)"
     exit 1
 }
