@@ -10,6 +10,7 @@
 
 mod accounting;
 mod metrics;
+mod ordering;
 mod types;
 
 pub mod allocator;
@@ -31,6 +32,9 @@ pub use metrics::{
     compute_equity_micros, compute_exposure_micros, compute_unrealized_pnl_micros,
     enforce_max_gross_exposure, EquityMetrics, ExposureBreach, ExposureMetrics,
 };
+
+// R3-2: canonical fill ordering policy
+pub use ordering::{apply_fills_canonical, sort_fills_canonical, TaggedFill};
 
 pub use types::{CashEntry, Fill, LedgerEntry, Lot, PortfolioState, PositionState, Side};
 
