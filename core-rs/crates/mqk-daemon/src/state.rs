@@ -72,6 +72,14 @@ pub struct AppState {
     /// DAEMON-1: read-only trading APIs surface this snapshot. A later patch
     /// wires ingestion from broker/reconcile pipelines.
     pub broker_snapshot: Arc<RwLock<Option<mqk_schemas::BrokerSnapshot>>>,
+    /// S7-1: Bearer token required on all operator (POST/DELETE) routes.
+    ///
+    /// `None`  — no token configured; operator routes are unauthenticated
+    ///            (dev / loopback-only mode).  Set `MQK_OPERATOR_TOKEN` in the
+    ///            environment to enable authentication.
+    /// `Some(t)` — every operator request must supply `Authorization: Bearer t`
+    ///             or the request is rejected with `401 Unauthorized`.
+    pub operator_token: Option<String>,
 }
 
 impl Default for AppState {
@@ -81,7 +89,25 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Create application state, reading `MQK_OPERATOR_TOKEN` from the environment.
+    ///
+    /// An empty string is treated the same as absent (no authentication).
     pub fn new() -> Self {
+        let token = std::env::var("MQK_OPERATOR_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        Self::new_inner(token)
+    }
+
+    /// Create application state with an explicit operator token.
+    ///
+    /// Pass `None` to disable token authentication (dev / test mode).
+    /// Pass `Some(token)` to require that token on all operator routes.
+    pub fn new_with_token(token: Option<String>) -> Self {
+        Self::new_inner(token)
+    }
+
+    fn new_inner(operator_token: Option<String>) -> Self {
         let (bus, _rx) = broadcast::channel::<BusMsg>(1024);
 
         let initial_status = StatusSnapshot {
@@ -105,6 +131,7 @@ impl AppState {
             status: Arc::new(RwLock::new(initial_status)),
             integrity: Arc::new(RwLock::new(boot_integrity)),
             broker_snapshot: Arc::new(RwLock::new(None)),
+            operator_token,
         }
     }
 }

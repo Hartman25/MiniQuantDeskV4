@@ -8,7 +8,8 @@ use std::{convert::Infallible, sync::Arc};
 
 use axum::{
     extract::State,
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+    middleware::Next,
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -32,35 +33,110 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
+// S7-1: Token auth middleware
+// ---------------------------------------------------------------------------
+
+/// Axum middleware that enforces Bearer-token authentication on operator routes.
+///
+/// # S7-1 — No Unauthenticated Operator Actions
+///
+/// When `AppState::operator_token` is `Some(token)`, every request that
+/// reaches this middleware layer must carry:
+///
+/// ```text
+/// Authorization: Bearer <token>
+/// ```
+///
+/// A missing or incorrect header causes an immediate `401 Unauthorized`
+/// response with a `GateRefusedResponse` body.  The downstream handler is
+/// never reached.
+///
+/// When `AppState::operator_token` is `None` (env var `MQK_OPERATOR_TOKEN`
+/// not set), the middleware is a no-op — all requests pass through.  This
+/// fail-open posture is intentional for loopback-only development
+/// environments and is hardened in production by S7-2 (loopback bind).
+async fn token_auth_middleware(
+    State(st): State<Arc<AppState>>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if let Some(ref expected_token) = st.operator_token {
+        let provided = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "));
+
+        if provided != Some(expected_token.as_str()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(GateRefusedResponse {
+                    error: "GATE_REFUSED: valid Bearer token required on operator routes"
+                        .to_string(),
+                    gate: "operator_token".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
 /// Build the complete application router wired to the given shared state.
 ///
+/// # Route classification (S7-1)
+///
+/// | Category      | Methods                              | Auth required |
+/// |---------------|--------------------------------------|---------------|
+/// | Telemetry     | GET /v1/health, /v1/status, /v1/stream | No          |
+/// | Trading read  | GET /v1/trading/*                    | No            |
+/// | Operator      | POST/DELETE /v1/run/*, /v1/integrity/*, /v1/trading/snapshot | Yes (Bearer) |
+///
+/// Operator routes are wrapped in [`token_auth_middleware`].  Telemetry and
+/// read routes are on the public sub-router — no middleware is applied.
+///
 /// Middleware layers (CORS, tracing) are **not** applied here; `main.rs`
 /// attaches them after this call so tests can use the bare router.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    // --- Public (unauthenticated) routes — read-only telemetry & data. ---
+    let public = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/status", get(status_handler))
         .route("/v1/stream", get(stream))
-        .route("/v1/run/start", post(run_start))
-        .route("/v1/run/stop", post(run_stop))
-        .route("/v1/run/halt", post(run_halt))
-        .route("/v1/integrity/arm", post(integrity_arm))
-        .route("/v1/integrity/disarm", post(integrity_disarm))
         // DAEMON-1: trading read APIs (placeholder until broker wiring exists)
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
         .route("/v1/trading/orders", get(trading_orders))
         .route("/v1/trading/fills", get(trading_fills))
-        // DAEMON-2: dev-only snapshot inject/clear + readback
-        .route("/v1/trading/snapshot", get(trading_snapshot))
+        // DAEMON-2: read-back of current snapshot (no auth — read-only)
+        .route("/v1/trading/snapshot", get(trading_snapshot));
+
+    // --- Operator (authenticated) routes — mutating state changes. ---
+    let operator = Router::new()
+        .route("/v1/run/start", post(run_start))
+        .route("/v1/run/stop", post(run_stop))
+        .route("/v1/run/halt", post(run_halt))
+        .route("/v1/integrity/arm", post(integrity_arm))
+        .route("/v1/integrity/disarm", post(integrity_disarm))
+        // DAEMON-2: dev-only snapshot inject/clear
         .route("/v1/trading/snapshot", post(trading_snapshot_set))
         .route(
             "/v1/trading/snapshot",
             axum::routing::delete(trading_snapshot_clear),
         )
+        // S7-1: apply token auth to every operator route.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            token_auth_middleware,
+        ));
+
+    Router::new()
+        .merge(public)
+        .merge(operator)
         .with_state(state)
 }
 
