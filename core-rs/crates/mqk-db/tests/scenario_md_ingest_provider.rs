@@ -86,7 +86,7 @@ async fn md_ingest_provider_persists_bars_and_quality_report() -> Result<()> {
         mqk_db::IngestProviderBarsArgs {
             source: "mock_provider".to_string(),
             timeframe: "1D".to_string(),
-            ingest_id: Some(ingest_id),
+            ingest_id: ingest_id,
             bars,
         },
     )
@@ -172,7 +172,7 @@ async fn md_ingest_provider_detects_duplicates_in_batch() -> Result<()> {
         mqk_db::IngestProviderBarsArgs {
             source: "mock_provider".to_string(),
             timeframe: "1D".to_string(),
-            ingest_id: None,
+            ingest_id: Uuid::new_v4(),
             bars,
         },
     )
@@ -235,7 +235,7 @@ async fn md_ingest_provider_detects_out_of_order() -> Result<()> {
         mqk_db::IngestProviderBarsArgs {
             source: "mock_provider".to_string(),
             timeframe: "1D".to_string(),
-            ingest_id: None,
+            ingest_id: Uuid::new_v4(),
             bars,
         },
     )
@@ -295,7 +295,7 @@ async fn md_ingest_provider_rejects_ohlc_violations() -> Result<()> {
         mqk_db::IngestProviderBarsArgs {
             source: "mock_provider".to_string(),
             timeframe: "1D".to_string(),
-            ingest_id: None,
+            ingest_id: Uuid::new_v4(),
             bars,
         },
     )
@@ -340,7 +340,7 @@ async fn md_ingest_provider_idempotent_same_ingest_id() -> Result<()> {
     let make_args = || mqk_db::IngestProviderBarsArgs {
         source: "mock_provider".to_string(),
         timeframe: "1D".to_string(),
-        ingest_id: Some(ingest_id),
+        ingest_id: ingest_id,
         bars: vec![bar(
             "IDP",
             "1D",
@@ -445,7 +445,7 @@ async fn md_ingest_provider_deterministic_regardless_of_input_order() -> Result<
         mqk_db::IngestProviderBarsArgs {
             source: "mock_provider".to_string(),
             timeframe: "1D".to_string(),
-            ingest_id: None,
+            ingest_id: Uuid::new_v4(),
             bars: bars_asc,
         },
     )
@@ -456,7 +456,7 @@ async fn md_ingest_provider_deterministic_regardless_of_input_order() -> Result<
         mqk_db::IngestProviderBarsArgs {
             source: "mock_provider".to_string(),
             timeframe: "1D".to_string(),
-            ingest_id: None,
+            ingest_id: Uuid::new_v4(),
             bars: bars_desc,
         },
     )
@@ -543,7 +543,7 @@ async fn md_ingest_provider_detects_1d_weekday_gaps() -> Result<()> {
         mqk_db::IngestProviderBarsArgs {
             source: "mock_provider".to_string(),
             timeframe: "1D".to_string(),
-            ingest_id: None,
+            ingest_id: Uuid::new_v4(),
             bars,
         },
     )
@@ -597,7 +597,7 @@ async fn md_ingest_provider_rejects_wrong_timeframe() -> Result<()> {
         mqk_db::IngestProviderBarsArgs {
             source: "mock_provider".to_string(),
             timeframe: "1D".to_string(), // only accept 1D
-            ingest_id: None,
+            ingest_id: Uuid::new_v4(),
             bars,
         },
     )

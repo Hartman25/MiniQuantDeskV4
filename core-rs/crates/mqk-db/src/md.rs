@@ -168,8 +168,9 @@ pub struct IngestCsvArgs {
     pub timeframe: String,
     /// Source label for report (e.g. "csv").
     pub source: String,
-    /// Optional caller-provided ingest_id for idempotent retries.
-    pub ingest_id: Option<Uuid>,
+    /// Caller-provided ingest_id for idempotent retries.
+    /// Derive deterministically (e.g. UUIDv5 from source + path + timeframe).
+    pub ingest_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,7 +235,9 @@ pub struct MdBarIngestRow {
 pub struct ProviderIngestArgs {
     pub timeframe: String,
     pub source: String,
-    pub ingest_id: Option<Uuid>,
+    /// Caller-provided ingest_id for idempotent retries.
+    /// Derive deterministically (e.g. UUIDv5 from source + timeframe).
+    pub ingest_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,8 +259,9 @@ pub struct IngestProviderBarsArgs {
     pub source: String,
     /// Expected timeframe (e.g. "1D"). Rows with a different timeframe are rejected.
     pub timeframe: String,
-    /// Optional caller-provided ingest_id for idempotent retries.
-    pub ingest_id: Option<Uuid>,
+    /// Caller-provided ingest_id for idempotent retries.
+    /// Derive deterministically (e.g. UUIDv5 from source + timeframe + symbols + date range).
+    pub ingest_id: Uuid,
     pub bars: Vec<ProviderBar>,
 }
 
@@ -346,7 +350,7 @@ pub async fn ingest_provider_bars_to_md_bars(
     pool: &PgPool,
     args: IngestProviderBarsArgs,
 ) -> Result<IngestResult> {
-    let ingest_id = args.ingest_id.unwrap_or_else(Uuid::new_v4);
+    let ingest_id = args.ingest_id;
 
     let mut coverage = CoverageTotals {
         rows_read: 0,
@@ -526,7 +530,7 @@ pub async fn ingest_md_bars_csv(
     pool: &PgPool,
     args: IngestCsvArgs,
 ) -> Result<CoverageQualityReport> {
-    let ingest_id = args.ingest_id.unwrap_or_else(Uuid::new_v4);
+    let ingest_id = args.ingest_id;
 
     let mut report = CoverageQualityReport {
         ingest_id,
@@ -765,7 +769,7 @@ pub async fn ingest_md_bars_provider(
     args: ProviderIngestArgs,
     rows: Vec<MdBarIngestRow>,
 ) -> Result<CoverageQualityReport> {
-    let ingest_id = args.ingest_id.unwrap_or_else(Uuid::new_v4);
+    let ingest_id = args.ingest_id;
 
     let mut report = CoverageQualityReport {
         ingest_id,

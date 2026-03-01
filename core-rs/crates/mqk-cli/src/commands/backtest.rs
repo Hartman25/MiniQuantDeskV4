@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use std::fs;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 /// Env-var name for the TwelveData API key (PATCH C).
 const ENV_TWELVEDATA_API_KEY: &str = "TWELVEDATA_API_KEY";
@@ -25,7 +26,11 @@ pub async fn md_ingest_csv(path: String, timeframe: String, source: String) -> R
             path: PathBuf::from(&path),
             timeframe: timeframe.clone(),
             source: source.clone(),
-            ingest_id: None,
+            // D1-5: deterministic UUIDv5 from (source, path, timeframe); no random UUID in src/.
+            ingest_id: Uuid::new_v5(
+                &Uuid::NAMESPACE_DNS,
+                format!("mqk-md-ingest.csv.v1|{}|{}|{}", source, path, timeframe).as_bytes(),
+            ),
         },
     )
     .await
@@ -134,7 +139,19 @@ pub async fn md_ingest_provider(
         mqk_db::md::IngestProviderBarsArgs {
             source: source_lc.clone(),
             timeframe: tf.as_str().to_string(),
-            ingest_id: None,
+            // D1-5: deterministic UUIDv5 from (source, timeframe, symbols, date range); no random UUID in src/.
+            ingest_id: Uuid::new_v5(
+                &Uuid::NAMESPACE_DNS,
+                format!(
+                    "mqk-md-ingest.provider.v1|{}|{}|{}|{}|{}",
+                    source_lc,
+                    tf.as_str(),
+                    syms.join(","),
+                    start,
+                    end
+                )
+                .as_bytes(),
+            ),
             bars,
         },
     )
