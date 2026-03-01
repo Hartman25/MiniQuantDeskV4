@@ -566,7 +566,14 @@ pub async fn heartbeat_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
 /// Deadman: compute whether a RUNNING run's heartbeat is stale.
 /// - If run is not RUNNING => false
 /// - If last_heartbeat_utc is NULL => true (RUNNING with no heartbeat is unsafe)
-pub async fn deadman_expired(pool: &PgPool, run_id: Uuid, ttl_seconds: i64) -> Result<bool> {
+///
+/// `now` is injected by the caller (D1-3: no Utc::now() in enforcement path).
+pub async fn deadman_expired(
+    pool: &PgPool,
+    run_id: Uuid,
+    ttl_seconds: i64,
+    now: DateTime<Utc>,
+) -> Result<bool> {
     if ttl_seconds <= 0 {
         return Err(anyhow!("deadman ttl_seconds must be > 0"));
     }
@@ -581,19 +588,22 @@ pub async fn deadman_expired(pool: &PgPool, run_id: Uuid, ttl_seconds: i64) -> R
         None => return Ok(true),
     };
 
-    let age = Utc::now().signed_duration_since(last).num_seconds();
+    let age = now.signed_duration_since(last).num_seconds();
 
     Ok(age > ttl_seconds)
 }
 
 /// Deadman enforcement: if RUNNING and expired, HALT the run (sticky) and return true.
 /// Otherwise return false.
+///
+/// `now` is injected by the caller (D1-3: no Utc::now() in enforcement path).
 pub async fn enforce_deadman_or_halt(
     pool: &PgPool,
     run_id: Uuid,
     ttl_seconds: i64,
+    now: DateTime<Utc>,
 ) -> Result<bool> {
-    let expired = deadman_expired(pool, run_id, ttl_seconds).await?;
+    let expired = deadman_expired(pool, run_id, ttl_seconds, now).await?;
     if !expired {
         return Ok(false);
     }

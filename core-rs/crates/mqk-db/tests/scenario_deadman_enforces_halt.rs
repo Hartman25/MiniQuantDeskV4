@@ -51,7 +51,7 @@ async fn deadman_enforce_halts_running_when_heartbeat_stale() -> anyhow::Result<
         .await?;
 
     // TTL 10 seconds => should expire.
-    let halted = mqk_db::enforce_deadman_or_halt(&pool, run_id, 10).await?;
+    let halted = mqk_db::enforce_deadman_or_halt(&pool, run_id, 10, Utc::now()).await?;
     assert!(halted, "expected deadman to halt the run");
 
     let r = mqk_db::fetch_run(&pool, run_id).await?;

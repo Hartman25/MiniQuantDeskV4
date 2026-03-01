@@ -184,7 +184,7 @@ pub async fn run_status(run_id: String) -> Result<()> {
 pub async fn run_deadman_check(run_id: String, ttl_seconds: i64) -> Result<()> {
     let pool = mqk_db::connect_from_env().await?;
     let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
-    let expired = mqk_db::deadman_expired(&pool, run_uuid, ttl_seconds).await?;
+    let expired = mqk_db::deadman_expired(&pool, run_uuid, ttl_seconds, Utc::now()).await?;
     println!(
         "deadman_expired={} run_id={} ttl_seconds={}",
         expired, run_uuid, ttl_seconds
@@ -199,7 +199,7 @@ pub async fn run_deadman_check(run_id: String, ttl_seconds: i64) -> Result<()> {
 pub async fn run_deadman_enforce(run_id: String, ttl_seconds: i64) -> Result<()> {
     let pool = mqk_db::connect_from_env().await?;
     let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
-    let halted = mqk_db::enforce_deadman_or_halt(&pool, run_uuid, ttl_seconds).await?;
+    let halted = mqk_db::enforce_deadman_or_halt(&pool, run_uuid, ttl_seconds, Utc::now()).await?;
     println!(
         "deadman_halted={} run_id={} ttl_seconds={}",
         halted, run_uuid, ttl_seconds
