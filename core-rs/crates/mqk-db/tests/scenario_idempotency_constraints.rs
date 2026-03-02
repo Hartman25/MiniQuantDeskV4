@@ -2,8 +2,18 @@
 //!
 //! Requires a live PostgreSQL instance reachable via MQK_DATABASE_URL.
 //! All tests skip automatically when that variable is absent (CI without a DB).
+//!
+//! EB-4 note: Migration 0013 adds FK broker_order_map.internal_id →
+//! oms_outbox(idempotency_key) ON DELETE RESTRICT.  Each test now creates the
+//! required run + outbox rows within the same transaction so the FK is
+//! satisfied.  Everything rolls back together — no persistent state left in the
+//! shared DB.
 
 use sqlx::PgPool;
+
+// Fixed UUIDs — deterministic, never collide with real runs.
+const D3_UNIQ_RUN_ID: &str = "d3000001-0000-0000-0000-000000000000";
+const D3_DIST_RUN_ID: &str = "d3000002-0000-0000-0000-000000000000";
 
 fn is_unique_violation(err: &sqlx::Error) -> bool {
     if let sqlx::Error::Database(db_err) = err {
@@ -32,6 +42,32 @@ async fn broker_order_map_rejects_duplicate_broker_id() {
 
     // Wrap in a transaction so test rows are never committed to the shared DB.
     let mut tx = pool.begin().await.expect("begin tx");
+
+    // EB-4: create a run so outbox rows satisfy the oms_outbox.run_id FK.
+    sqlx::query(
+        "INSERT INTO runs \
+         (run_id, engine_id, mode, git_hash, config_hash, config_json, host_fingerprint) \
+         VALUES ($1, 'd3-test', 'PAPER', 'd3', 'd3', '{}', 'd3') \
+         ON CONFLICT (run_id) DO NOTHING",
+    )
+    .bind(D3_UNIQ_RUN_ID)
+    .execute(&mut *tx)
+    .await
+    .expect("run insert should succeed");
+
+    // EB-4: create outbox rows for both internal_ids so broker_order_map FK is satisfied.
+    for key in ["d3-internal-001", "d3-internal-002"] {
+        sqlx::query(
+            "INSERT INTO oms_outbox (run_id, idempotency_key, order_json, status) \
+             VALUES ($1, $2, '{}', 'PENDING') \
+             ON CONFLICT (idempotency_key) DO NOTHING",
+        )
+        .bind(D3_UNIQ_RUN_ID)
+        .bind(key)
+        .execute(&mut *tx)
+        .await
+        .expect("outbox row insert should succeed");
+    }
 
     // First internal_id mapped to broker-001 — must succeed.
     sqlx::query(
@@ -82,6 +118,31 @@ async fn broker_order_map_allows_distinct_broker_ids() {
         .expect("migrate");
 
     let mut tx = pool.begin().await.expect("begin tx");
+
+    // EB-4: create a run and outbox rows for both internal_ids.
+    sqlx::query(
+        "INSERT INTO runs \
+         (run_id, engine_id, mode, git_hash, config_hash, config_json, host_fingerprint) \
+         VALUES ($1, 'd3-test', 'PAPER', 'd3', 'd3', '{}', 'd3') \
+         ON CONFLICT (run_id) DO NOTHING",
+    )
+    .bind(D3_DIST_RUN_ID)
+    .execute(&mut *tx)
+    .await
+    .expect("run insert should succeed");
+
+    for key in ["d3-pos-internal-001", "d3-pos-internal-002"] {
+        sqlx::query(
+            "INSERT INTO oms_outbox (run_id, idempotency_key, order_json, status) \
+             VALUES ($1, $2, '{}', 'PENDING') \
+             ON CONFLICT (idempotency_key) DO NOTHING",
+        )
+        .bind(D3_DIST_RUN_ID)
+        .bind(key)
+        .execute(&mut *tx)
+        .await
+        .expect("outbox row insert should succeed");
+    }
 
     // First row — distinct broker_id, must succeed.
     sqlx::query(
