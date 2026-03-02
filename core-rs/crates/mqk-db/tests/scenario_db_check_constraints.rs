@@ -1,4 +1,4 @@
-//! Scenario: DB CHECK constraints reject invalid enum values — Patch D1
+//! Scenario: DB CHECK constraints reject invalid enum values — Patch D1 + FC-4
 //!
 //! # Invariant under test
 //!
@@ -6,12 +6,15 @@
 //! rejects out-of-range values at the DB level (PostgreSQL SQLSTATE 23514 —
 //! `check_violation`), independent of any application-layer validation.
 //!
-//! Columns verified:
+//! Columns / consistency rules verified:
 //!   - `oms_outbox.status`               (PENDING|CLAIMED|SENT|ACKED|FAILED)
 //!   - `runs.mode`                       (PAPER|LIVE|BACKTEST)
 //!   - `sys_arm_state.state`             (ARMED|DISARMED)
 //!   - `sys_arm_state.reason`            (nullable DisarmReason variants)
 //!   - `sys_reconcile_checkpoint.verdict` (CLEAN|DIRTY)
+//!   - `oms_outbox` claim metadata consistency (FC-4 / migration 0014):
+//!       * CLAIMED rows must have claimed_at_utc + claimed_by (not NULL)
+//!       * PENDING rows must NOT have claimed_at_utc / claimed_by (must be NULL)
 //!
 //! DB-backed test. Skips if `MQK_DATABASE_URL` is not set.
 
@@ -164,6 +167,51 @@ async fn check_constraints_reject_invalid_enum_values() -> anyhow::Result<()> {
     assert!(
         is_check_violation(&err),
         "sys_reconcile_checkpoint.verdict: 'MAYBE' must fail with CHECK violation (23514); got: {err}"
+    );
+
+    // -----------------------------------------------------------------------
+    // 6. oms_outbox claimed_metadata_present CHECK (FC-4)
+    //    CLAIMED row without claimed_at_utc / claimed_by must be rejected.
+    // -----------------------------------------------------------------------
+
+    let err = sqlx::query(
+        r#"
+        insert into oms_outbox (run_id, idempotency_key, order_json, status)
+        values ($1, $2, '{}', 'CLAIMED')
+        "#,
+    )
+    .bind(run_id)
+    .bind(format!("ik-fc4-claimed-{}", Uuid::new_v4()))
+    .execute(&pool)
+    .await
+    .unwrap_err();
+
+    assert!(
+        is_check_violation(&err),
+        "oms_outbox: CLAIMED without claimed_at_utc/claimed_by must fail CHECK (23514); got: {err}"
+    );
+
+    // -----------------------------------------------------------------------
+    // 7. oms_outbox pending_metadata_absent CHECK (FC-4)
+    //    PENDING row with claimed_at_utc set must be rejected.
+    // -----------------------------------------------------------------------
+
+    let err = sqlx::query(
+        r#"
+        insert into oms_outbox
+            (run_id, idempotency_key, order_json, status, claimed_at_utc, claimed_by)
+        values ($1, $2, '{}', 'PENDING', now(), 'dispatcher-1')
+        "#,
+    )
+    .bind(run_id)
+    .bind(format!("ik-fc4-pending-{}", Uuid::new_v4()))
+    .execute(&pool)
+    .await
+    .unwrap_err();
+
+    assert!(
+        is_check_violation(&err),
+        "oms_outbox: PENDING with claimed_at_utc set must fail CHECK (23514); got: {err}"
     );
 
     Ok(())
