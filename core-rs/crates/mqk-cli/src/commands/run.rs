@@ -484,7 +484,7 @@ pub async fn run_execute(run_id: String, ticks: u32) -> Result<()> {
         PortfolioState::new(0),
         run_uuid,
         "mqk-cli",
-        mqk_db::WallClock,
+        mqk_runtime::orchestrator::WallClock,
     );
 
     for _ in 0..ticks {

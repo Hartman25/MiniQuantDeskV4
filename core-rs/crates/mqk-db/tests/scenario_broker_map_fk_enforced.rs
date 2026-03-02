@@ -78,14 +78,12 @@ async fn broker_map_orphan_insert_rejected_by_fk() -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
 
     // Attempt an orphan INSERT — no matching oms_outbox row exists for this key.
-    let err = sqlx::query(
-        "INSERT INTO broker_order_map (internal_id, broker_id) VALUES ($1, $2)",
-    )
-    .bind(EB4_ORPHAN_KEY)
-    .bind("eb4-broker-orphan")
-    .execute(&mut *tx)
-    .await
-    .expect_err("orphan insert must be rejected by FK");
+    let err = sqlx::query("INSERT INTO broker_order_map (internal_id, broker_id) VALUES ($1, $2)")
+        .bind(EB4_ORPHAN_KEY)
+        .bind("eb4-broker-orphan")
+        .execute(&mut *tx)
+        .await
+        .expect_err("orphan insert must be rejected by FK");
 
     assert!(
         is_fk_violation(&err),
@@ -147,14 +145,12 @@ async fn broker_map_insert_with_parent_outbox_succeeds() -> anyhow::Result<()> {
     .await?;
 
     // Insert into broker_order_map with matching internal_id — must succeed.
-    sqlx::query(
-        "INSERT INTO broker_order_map (internal_id, broker_id) VALUES ($1, $2)",
-    )
-    .bind(EB4_VALID_KEY)
-    .bind("eb4-broker-valid")
-    .execute(&pool)
-    .await
-    .expect("insert with parent outbox row must succeed");
+    sqlx::query("INSERT INTO broker_order_map (internal_id, broker_id) VALUES ($1, $2)")
+        .bind(EB4_VALID_KEY)
+        .bind("eb4-broker-valid")
+        .execute(&pool)
+        .await
+        .expect("insert with parent outbox row must succeed");
 
     // Cleanup: broker_map first (RESTRICT), then run (cascades to outbox).
     sqlx::query("DELETE FROM broker_order_map WHERE internal_id = $1")

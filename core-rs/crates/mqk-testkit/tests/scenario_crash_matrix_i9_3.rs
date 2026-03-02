@@ -145,21 +145,23 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
     // --- Simulate pre-crash dispatch ---
 
     // Dispatcher claims the row (PENDING → CLAIMED).
-    let claimed =
-        mqk_db::outbox_claim_batch(&pool, 1, "i93-dispatcher", Utc::now()).await?;
+    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "i93-dispatcher", Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "W4: must claim the PENDING row");
 
     // Broker submit succeeds — broker now has the order.
     let mut broker = mqk_testkit::FakeBroker::new();
     broker.submit(key, json!({"symbol": "SPY", "qty": 1}));
-    assert_eq!(broker.submit_count(), 1, "W4: broker must record one submit");
+    assert_eq!(
+        broker.submit_count(),
+        1,
+        "W4: broker must record one submit"
+    );
 
     // --- CRASH: process exits here, outbox_mark_sent never called ---
     // DB state: outbox = CLAIMED, broker HAS the order, no broker_map entry.
 
     // --- Restart: run recovery ---
-    let report =
-        mqk_testkit::recover_outbox_against_broker(&pool, run_id, &mut broker).await?;
+    let report = mqk_testkit::recover_outbox_against_broker(&pool, run_id, &mut broker).await?;
 
     assert_eq!(
         report.inspected, 1,
@@ -233,14 +235,17 @@ async fn w5_crash_after_mark_sent_before_broker_map_upsert_no_double_submit() ->
     // --- Simulate pre-crash dispatch ---
 
     // Dispatcher claims the row (PENDING → CLAIMED).
-    let claimed =
-        mqk_db::outbox_claim_batch(&pool, 1, "i93-dispatcher", Utc::now()).await?;
+    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "i93-dispatcher", Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "W5: must claim the PENDING row");
 
     // Broker submit succeeds.
     let mut broker = mqk_testkit::FakeBroker::new();
     broker.submit(key, json!({"symbol": "SPY", "qty": 1}));
-    assert_eq!(broker.submit_count(), 1, "W5: broker must record one submit");
+    assert_eq!(
+        broker.submit_count(),
+        1,
+        "W5: broker must record one submit"
+    );
 
     // Mark outbox SENT (CLAIMED → SENT).
     let sent = mqk_db::outbox_mark_sent(&pool, key, Utc::now()).await?;
@@ -257,8 +262,7 @@ async fn w5_crash_after_mark_sent_before_broker_map_upsert_no_double_submit() ->
     );
 
     // --- Restart: run recovery ---
-    let report =
-        mqk_testkit::recover_outbox_against_broker(&pool, run_id, &mut broker).await?;
+    let report = mqk_testkit::recover_outbox_against_broker(&pool, run_id, &mut broker).await?;
 
     assert_eq!(
         report.inspected, 1,

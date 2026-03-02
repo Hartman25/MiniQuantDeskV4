@@ -12,25 +12,31 @@ pub const ENV_DB_URL: &str = "MQK_DATABASE_URL";
 // TimeSource — injectable clock abstraction (FC-5)
 // ---------------------------------------------------------------------------
 
-/// Abstraction over the UTC wall clock, injected wherever enforcement or
+/// Abstraction over a UTC clock, injected wherever enforcement or
 /// state-transition logic needs a timestamp.
 ///
-/// Production code uses [`WallClock`], which delegates to `Utc::now()`.
-/// Tests inject a deterministic implementation to remove wall-clock
-/// dependency from scenario replay.
+/// This crate must remain deterministic: it must not read the wall clock.
+/// Production code should provide a `TimeSource` implementation at the
+/// runtime/daemon layer and inject it into db calls.
 pub trait TimeSource: Send + Sync {
     fn now_utc(&self) -> DateTime<Utc>;
 }
 
-/// Production [`TimeSource`] — returns `Utc::now()`.
-///
-/// This is the only place in the enforcement / dispatch path that calls
-/// `Utc::now()` directly.  All callers receive time through `TimeSource`.
-pub struct WallClock;
+/// Deterministic `TimeSource` for tests and scenario replay.
+#[derive(Clone, Copy, Debug)]
+pub struct FixedClock {
+    now: DateTime<Utc>,
+}
 
-impl TimeSource for WallClock {
+impl FixedClock {
+    pub fn new(now: DateTime<Utc>) -> Self {
+        Self { now }
+    }
+}
+
+impl TimeSource for FixedClock {
     fn now_utc(&self) -> DateTime<Utc> {
-        Utc::now() // allow: wall-clock-canonical — sole permitted production clock read
+        self.now
     }
 }
 
@@ -599,7 +605,7 @@ pub async fn heartbeat_run(pool: &PgPool, run_id: Uuid, heartbeat_at: DateTime<U
 /// - If run is not RUNNING => false
 /// - If last_heartbeat_utc is NULL => true (RUNNING with no heartbeat is unsafe)
 ///
-/// `now` is injected by the caller (D1-3: no Utc::now() in enforcement path).
+/// `now` is injected by the caller (D1-3: no wall-clock reads in enforcement path).
 pub async fn deadman_expired(
     pool: &PgPool,
     run_id: Uuid,
@@ -628,7 +634,7 @@ pub async fn deadman_expired(
 /// Deadman enforcement: if RUNNING and expired, HALT the run (sticky) and return true.
 /// Otherwise return false.
 ///
-/// `now` is injected by the caller (D1-3: no Utc::now() in enforcement path).
+/// `now` is injected by the caller (D1-3: no wall-clock reads in enforcement path).
 pub async fn enforce_deadman_or_halt(
     pool: &PgPool,
     run_id: Uuid,

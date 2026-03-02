@@ -23,10 +23,22 @@
 use std::collections::BTreeMap;
 
 use anyhow::anyhow;
+use mqk_db::TimeSource;
+use sqlx::types::chrono;
 use sqlx::PgPool;
 use uuid::Uuid;
+/// Production wall-clock time source.
+///
+/// NOTE: wall-clock reads must not live in `mqk-db` (guards enforce that).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WallClock;
 
-use mqk_db::TimeSource;
+impl TimeSource for WallClock {
+    fn now_utc(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+    }
+}
+
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{
     BrokerAdapter, BrokerEvent, BrokerGateway, BrokerOrderMap, BrokerSubmitRequest,
@@ -89,7 +101,7 @@ where
     /// the first `tick` call.
     ///
     /// `time_source` provides the UTC clock for dispatch timestamps (FC-5).
-    /// Pass [`mqk_db::WallClock`] in production; inject a deterministic stub
+    /// Pass [`WallClock`] in production; inject a deterministic stub
     /// in tests.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
