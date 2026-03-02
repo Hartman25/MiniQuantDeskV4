@@ -202,7 +202,7 @@ impl AuditWriter {
         // A6-2: rotation check — before writing, advance segment if threshold reached.
         if self.durability.rotation_max_events > 0
             && self.seq > 0
-            && self.seq % self.durability.rotation_max_events == 0
+            && self.seq.is_multiple_of(self.durability.rotation_max_events)
         {
             self.segment += 1;
             // Each segment starts a fresh hash chain so it is independently verifiable.

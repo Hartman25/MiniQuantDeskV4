@@ -184,14 +184,14 @@ fn gate_buy_fill_price_is_worse_under_conservative_config() {
     engine_test
         .add_strategy(Box::new(HoldQty::new(10)))
         .unwrap();
-    let report_test = engine_test.run(&[bar.clone()]).unwrap();
+    let report_test = engine_test.run(std::slice::from_ref(&bar)).unwrap();
 
     // Run with conservative_defaults (205 effective bps on this bar).
     let mut engine_cons = BacktestEngine::new(BacktestConfig::conservative_defaults());
     engine_cons
         .add_strategy(Box::new(HoldQty::new(10)))
         .unwrap();
-    let report_cons = engine_cons.run(&[bar.clone()]).unwrap();
+    let report_cons = engine_cons.run(std::slice::from_ref(&bar)).unwrap();
 
     assert_eq!(
         report_test.fills.len(),

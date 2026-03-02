@@ -67,6 +67,10 @@ mod recovery;
 
 pub use recovery::{recover_outbox_against_broker, FakeBroker, RecoveryReport};
 
+// I9-1: capital conservation invariant helper.
+pub mod conservation;
+pub use conservation::assert_capital_conservation;
+
 pub mod orchestrator;
 
 pub use orchestrator::{
