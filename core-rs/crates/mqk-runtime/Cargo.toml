@@ -1,0 +1,17 @@
+[package]
+name = "mqk-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+sqlx.workspace = true
+
+mqk-db = { path = "../mqk-db" }
+mqk-execution = { path = "../mqk-execution" }
+mqk-portfolio = { path = "../mqk-portfolio" }

@@ -11,6 +11,125 @@
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 // ---------------------------------------------------------------------------
+// BrokerEvent — canonical inbound broker event type
+// ---------------------------------------------------------------------------
+
+/// A broker-sourced lifecycle event for an in-flight order.
+///
+/// Produced by [`BrokerAdapter::fetch_events`] and persisted to `oms_inbox`
+/// via JSON serialisation before being applied to the OMS state machine and
+/// portfolio.  The `broker_message_id` is the deduplication key for inbox
+/// insertion.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BrokerEvent {
+    Ack {
+        broker_message_id: String,
+        internal_order_id: String,
+    },
+    PartialFill {
+        broker_message_id: String,
+        internal_order_id: String,
+        symbol: String,
+        side: crate::types::Side,
+        delta_qty: i64,
+        price_micros: i64,
+        fee_micros: i64,
+    },
+    Fill {
+        broker_message_id: String,
+        internal_order_id: String,
+        symbol: String,
+        side: crate::types::Side,
+        delta_qty: i64,
+        price_micros: i64,
+        fee_micros: i64,
+    },
+    CancelAck {
+        broker_message_id: String,
+        internal_order_id: String,
+    },
+    CancelReject {
+        broker_message_id: String,
+        internal_order_id: String,
+    },
+    ReplaceAck {
+        broker_message_id: String,
+        internal_order_id: String,
+    },
+    ReplaceReject {
+        broker_message_id: String,
+        internal_order_id: String,
+    },
+    Reject {
+        broker_message_id: String,
+        internal_order_id: String,
+    },
+}
+
+impl BrokerEvent {
+    /// The deduplication key used for inbox insertion.
+    pub fn broker_message_id(&self) -> &str {
+        match self {
+            Self::Ack {
+                broker_message_id, ..
+            }
+            | Self::PartialFill {
+                broker_message_id, ..
+            }
+            | Self::Fill {
+                broker_message_id, ..
+            }
+            | Self::CancelAck {
+                broker_message_id, ..
+            }
+            | Self::CancelReject {
+                broker_message_id, ..
+            }
+            | Self::ReplaceAck {
+                broker_message_id, ..
+            }
+            | Self::ReplaceReject {
+                broker_message_id, ..
+            }
+            | Self::Reject {
+                broker_message_id, ..
+            } => broker_message_id.as_str(),
+        }
+    }
+
+    /// The system-assigned order ID this event pertains to.
+    pub fn internal_order_id(&self) -> &str {
+        match self {
+            Self::Ack {
+                internal_order_id, ..
+            }
+            | Self::PartialFill {
+                internal_order_id, ..
+            }
+            | Self::Fill {
+                internal_order_id, ..
+            }
+            | Self::CancelAck {
+                internal_order_id, ..
+            }
+            | Self::CancelReject {
+                internal_order_id, ..
+            }
+            | Self::ReplaceAck {
+                internal_order_id, ..
+            }
+            | Self::ReplaceReject {
+                internal_order_id, ..
+            }
+            | Self::Reject {
+                internal_order_id, ..
+            } => internal_order_id.as_str(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public request / response types (external crates need these to build reqs)
 // ---------------------------------------------------------------------------
 
@@ -121,6 +240,14 @@ pub trait BrokerAdapter {
         req: BrokerReplaceRequest,
         _token: &BrokerInvokeToken,
     ) -> Result<BrokerReplaceResponse>;
+
+    /// Poll the broker for new lifecycle events since the last call.
+    ///
+    /// The adapter is responsible for tracking which events have already been
+    /// returned (e.g. via a cursor or sequence number).  The orchestrator
+    /// persists every event to `oms_inbox` with dedup on `broker_message_id`,
+    /// so duplicate delivery is safe.
+    fn fetch_events(&self, _token: &BrokerInvokeToken) -> Result<Vec<BrokerEvent>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -150,6 +277,10 @@ impl<B: BrokerAdapter> OrderRouter<B> {
 
     pub(crate) fn route_replace(&self, req: BrokerReplaceRequest) -> Result<BrokerReplaceResponse> {
         self.broker.replace_order(req, &BrokerInvokeToken(()))
+    }
+
+    pub(crate) fn route_fetch_events(&self) -> Result<Vec<BrokerEvent>> {
+        self.broker.fetch_events(&BrokerInvokeToken(()))
     }
 }
 
@@ -206,6 +337,10 @@ mod tests {
                 replaced_at: 1_000_000,
                 status: "replaced".to_string(),
             })
+        }
+
+        fn fetch_events(&self, _token: &BrokerInvokeToken) -> Result<Vec<BrokerEvent>> {
+            Ok(vec![])
         }
     }
 

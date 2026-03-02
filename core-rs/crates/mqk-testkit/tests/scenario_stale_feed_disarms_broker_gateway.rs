@@ -93,6 +93,13 @@ impl BrokerAdapter for OkBroker {
             status: "replaced".to_string(),
         })
     }
+
+    fn fetch_events(
+        &self,
+        _token: &BrokerInvokeToken,
+    ) -> Result<Vec<mqk_execution::BrokerEvent>, Box<dyn std::error::Error>> {
+        Ok(vec![])
+    }
 }
 
 // ---------------------------------------------------------------------------

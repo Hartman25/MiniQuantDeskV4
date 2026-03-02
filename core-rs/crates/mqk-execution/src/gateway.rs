@@ -303,6 +303,19 @@ where
         self.router.route_cancel(broker_id)
     }
 
+    /// Fetch new broker events since the last poll.
+    ///
+    /// This is a read-only operation; gate checks are NOT applied.  The system
+    /// must be able to receive events even when disarmed (e.g. during crash
+    /// recovery).  The orchestrator persists each event to `oms_inbox` with
+    /// dedup on `broker_message_id` before applying it.
+    pub fn fetch_events(
+        &self,
+    ) -> std::result::Result<Vec<crate::order_router::BrokerEvent>, Box<dyn std::error::Error>>
+    {
+        self.router.route_fetch_events()
+    }
+
     /// Replace a broker order.
     ///
     /// `internal_id` is the system-assigned order ID registered in `order_map`
@@ -400,6 +413,13 @@ mod tests {
                 replaced_at: 1,
                 status: "ok".to_string(),
             })
+        }
+
+        fn fetch_events(
+            &self,
+            _token: &BrokerInvokeToken,
+        ) -> Result<Vec<crate::order_router::BrokerEvent>, Box<dyn std::error::Error>> {
+            Ok(vec![])
         }
     }
 

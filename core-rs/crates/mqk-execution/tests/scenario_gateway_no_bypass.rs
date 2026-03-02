@@ -85,6 +85,13 @@ impl BrokerAdapter for AlwaysOkBroker {
             status: "ok".to_string(),
         })
     }
+
+    fn fetch_events(
+        &self,
+        _token: &BrokerInvokeToken,
+    ) -> Result<Vec<mqk_execution::BrokerEvent>, Box<dyn std::error::Error>> {
+        Ok(vec![])
+    }
 }
 
 /// Boolean gate stub. Implements all three gate traits.

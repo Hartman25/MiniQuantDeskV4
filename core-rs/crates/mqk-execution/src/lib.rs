@@ -63,7 +63,7 @@ pub use reconcile_guard::ReconcileFreshnessGuard;
 /// trait implementations, but its inner field is `pub(crate)` — external
 /// crates cannot construct one. See PATCH A1.
 pub use order_router::{
-    BrokerAdapter, BrokerCancelResponse, BrokerInvokeToken, BrokerReplaceRequest,
+    BrokerAdapter, BrokerCancelResponse, BrokerEvent, BrokerInvokeToken, BrokerReplaceRequest,
     BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
 };
 

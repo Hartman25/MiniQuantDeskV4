@@ -1837,6 +1837,9 @@ dependencies = [
 [[package]]
 name = "mqk-execution"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "mqk-integrity"
@@ -1893,6 +1896,20 @@ dependencies = [
 [[package]]
 name = "mqk-risk"
 version = "0.1.0"
+
+[[package]]
+name = "mqk-runtime"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "mqk-db",
+ "mqk-execution",
+ "mqk-portfolio",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "uuid",
+]
 
 [[package]]
 name = "mqk-schemas"

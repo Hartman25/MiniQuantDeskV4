@@ -20,6 +20,7 @@ members = [
   "crates/mqk-promotion",
   "crates/mqk-broker-paper",
   "crates/mqk-daemon",
+  "crates/mqk-runtime",
 
   # PATCH C: provider abstraction crate (historical ingest providers)
   "crates/mqk-md",
