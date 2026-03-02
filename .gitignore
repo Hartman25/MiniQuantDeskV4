@@ -1,81 +1,95 @@
-===============================
-MiniQuantDesk V4 – .gitignore
-===============================
--------------------------------
-Build Artifacts (Rust)
--------------------------------
+###############################
+# MiniQuantDesk V4 – .gitignore
+###############################
 
+# -----------------------------
+# Rust build artifacts
+# -----------------------------
 target/
 **/target/
-.cargo/target/
-core-rs/target/
 
-Cargo local metadata
+# Keep repo-level Cargo config if you have it; ignore only cargo caches
+.cargo/registry/
+.cargo/git/
 
-.cargo/
-
--------------------------------
-Environment / Secrets
--------------------------------
-
+# -----------------------------
+# Environment / secrets
+# -----------------------------
 .env
 .env.*
-# PATCH S1: keep the example file tracked (no real secrets inside)
 !.env.local.example
-# Only ignore secret files at root or explicit patterns
 secrets.env
 secrets.local
 *.pem
 *.key
-*.pem
-*.key
 
--------------------------------
-Runtime / Generated Data
--------------------------------
-
+# -----------------------------
+# Runtime / generated data
+# -----------------------------
 exports/
 runtime/
 logs/
 *.log
 
--------------------------------
-Python (if used anywhere)
--------------------------------
+# Research run artifacts (deterministic outputs, not source)
+research-py/runs/
+research-py/runs_*/
 
-**/pycache/
-*.pyc
-*.pyo
+# Coverage / profiling outputs
+coverage/
+*.profraw
+*.profdata
 
--------------------------------
-Node / GUI (Tauri / React)
--------------------------------
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+**/__pycache__/
+*.py[cod]
 
+# Virtual environments
+.venv/
+venv/
+env/
+.venv*/
+venv*/
+env*/
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.eggs/
+*.egg-info/
+
+# Compiled extensions (common in scientific stacks)
+*.so
+*.pyd
+*.dll
+*.dylib
+
+# -----------------------------
+# Node / GUI
+# -----------------------------
 node_modules/
 dist/
 build/
 *.tsbuildinfo
 
--------------------------------
-Claude / AI Worktrees
--------------------------------
-
+# -----------------------------
+# AI / local tooling scratch
+# -----------------------------
 .claude/
 .claude-worktrees/
 **/.claude/
-
--------------------------------
-Local Scratch / Rescue
--------------------------------
-
 .worktree_rescue/
 .continue/
 continue/
 
--------------------------------
-Local Archives / Dumps
--------------------------------
-
+# -----------------------------
+# Local archives / dumps
+# -----------------------------
 *.zip
 *.7z
 *.tar
@@ -85,35 +99,22 @@ repo_tree.txt
 core_rs_dirs.txt
 cargo_tomls.txt
 
-Prevent committing local full-repo snapshots
-
 MiniQuantDeskV4__SOURCE.zip
 MiniQuantDeskV4_repo.zip
 MiniQuantDeskV4_core-rs.zip
 
--------------------------------
-OS / Editor Junk
--------------------------------
-
+# -----------------------------
+# OS / editor junk
+# -----------------------------
 .DS_Store
 Thumbs.db
 *.swp
 *.swo
 *.tmp
+.idea/
+.vscode/
 
--------------------------------
-Office temp/lock files only
-(DO NOT ignore real specs)
--------------------------------
-
+# -----------------------------
+# Office temp/lock files only
+# -----------------------------
 ~$*.docx
-# Research run artifacts (deterministic outputs, not source)
-research-py/runs/
-research-py/runs_*/
--------------------------------
-Coverage / Test Artifacts
--------------------------------
-
-coverage/
-*.profraw
-*.profdata
