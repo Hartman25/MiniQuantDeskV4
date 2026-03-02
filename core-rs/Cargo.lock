@@ -1950,6 +1950,7 @@ dependencies = [
  "mqk-portfolio",
  "mqk-reconcile",
  "mqk-risk",
+ "mqk-runtime",
  "mqk-schemas",
  "mqk-strategy",
  "serde",

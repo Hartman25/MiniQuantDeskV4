@@ -129,15 +129,37 @@ where
     /// Execute one orchestrator tick.
     ///
     /// Phases:
+    /// 0. Halt guard — refuse tick if run is HALTED in DB (I9-1).
     /// 1. Submit pending outbox rows via the gateway.
     /// 2. Fetch + ingest new broker events into oms_inbox.
     /// 3. Apply all unapplied inbox rows: OMS transition → portfolio apply →
-    ///    capital invariant check → mark applied.
+    ///    capital invariant check (with halt+disarm persistence) → mark applied.
     ///
     /// Returns `Err` on any DB failure, gate refusal, OMS illegal transition,
     /// or invariant violation.  The caller must treat any `Err` as a halt
     /// signal and stop the tick loop.
     pub async fn tick(&mut self) -> anyhow::Result<()> {
+        // ------------------------------------------------------------------
+        // Phase 0 — I9-1 HALT GUARD.
+        //
+        // Load run status from DB at the top of every tick.  If the run is
+        // already HALTED (written by a prior tick or by a concurrent process),
+        // refuse immediately — no outbox claim, no submit, no inbox apply.
+        //
+        // This ensures a persisted halt is honoured across crash+restart and
+        // multi-instance scenarios where a second process calls tick() after
+        // the first has already written HALTED.
+        // ------------------------------------------------------------------
+        {
+            let run = mqk_db::fetch_run(&self.pool, self.run_id).await?;
+            if matches!(run.status, mqk_db::RunStatus::Halted) {
+                return Err(anyhow!(
+                    "HALT_GUARD: run {} is HALTED — tick refused (I9-1)",
+                    self.run_id
+                ));
+            }
+        }
+
         // ------------------------------------------------------------------
         // Phase 1: Claim and submit outbox rows.
         // ------------------------------------------------------------------
@@ -236,8 +258,27 @@ where
                 apply_entry(&mut self.portfolio, LedgerEntry::Fill(fill));
             }
 
-            // Step 8: assert capital invariants before committing.
-            check_capital_invariants(&self.portfolio)?;
+            // Step 8: assert capital invariants — I9-1 persistence requirement.
+            //
+            // On violation: persist HALTED run status and DISARMED arm state
+            // before returning.  Best-effort DB writes: if either write fails,
+            // the invariant error is still surfaced to the caller.  The halt
+            // guard (Phase 0) prevents any further dispatch once HALTED is
+            // written to DB.
+            if let Err(inv_err) = check_capital_invariants(&self.portfolio) {
+                let now = self.time_source.now_utc();
+                let _ = mqk_db::halt_run(&self.pool, self.run_id, now).await;
+                let _ = mqk_db::persist_arm_state(
+                    &self.pool,
+                    "DISARMED",
+                    Some("IntegrityViolation"),
+                )
+                .await;
+                return Err(inv_err.context(format!(
+                    "INVARIANT_VIOLATED: run {} halted and disarmed (I9-1)",
+                    self.run_id
+                )));
+            }
 
             // Step 9: commit — mark the inbox row as applied.
             mqk_db::inbox_mark_applied(&self.pool, &msg_id, self.time_source.now_utc()).await?;
