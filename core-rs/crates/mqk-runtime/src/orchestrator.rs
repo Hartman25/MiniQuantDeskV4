@@ -29,8 +29,8 @@ use uuid::Uuid;
 use mqk_db::TimeSource;
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{
-    BrokerAdapter, BrokerEvent, BrokerGateway, BrokerOrderMap, BrokerSubmitRequest, IntegrityGate,
-    ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerEvent, BrokerGateway, BrokerOrderMap, BrokerSubmitRequest,
+    BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate,
 };
 use mqk_portfolio::{apply_entry, recompute_from_ledger, Fill, LedgerEntry, PortfolioState};
 
@@ -149,14 +149,20 @@ where
             let qty = order_json_qty(&claimed_row.row.order_json);
 
             // Step 3: submit via BrokerGateway — the ONLY submit path.
-            let resp = match self.gateway.submit(claim, req) {
+            //
+            // Box<dyn Error> is !Send. Convert to anyhow::Error (Send+Sync)
+            // in a typed binding BEFORE any match or await so the async
+            // generator state never holds a !Send type.
+            let submit_result: anyhow::Result<BrokerSubmitResponse> = self
+                .gateway
+                .submit(claim, req)
+                .map_err(|e| anyhow!("{}", e));
+            let resp = match submit_result {
                 Ok(r) => r,
                 Err(e) => {
-                    // Convert to String before the await: Box<dyn Error> is !Send
-                    // and must not be held across an await point.
-                    let err_msg = e.to_string();
+                    // e: anyhow::Error (Send+Sync) — safe to hold across await.
                     mqk_db::outbox_release_claim(&self.pool, &order_id).await?;
-                    return Err(anyhow!("broker submit failed: {}", err_msg));
+                    return Err(e.context("broker submit failed"));
                 }
             };
 
@@ -173,10 +179,13 @@ where
         // ------------------------------------------------------------------
         // Phase 2: Fetch broker events and ingest into oms_inbox.
         // ------------------------------------------------------------------
-        let events = self
+        // Same pattern: convert Box<dyn Error> → anyhow::Error in a typed
+        // binding before the ? so Box<dyn Error> is never in the generator state.
+        let events_result: anyhow::Result<Vec<BrokerEvent>> = self
             .gateway
             .fetch_events()
-            .map_err(|e| anyhow!("fetch_events failed: {}", e))?;
+            .map_err(|e| anyhow!("fetch_events failed: {}", e));
+        let events = events_result?;
 
         for event in &events {
             let msg_json = serde_json::to_value(event)?;
