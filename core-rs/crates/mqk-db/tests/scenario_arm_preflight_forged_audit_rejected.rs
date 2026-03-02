@@ -104,6 +104,6 @@ async fn forged_audit_event_cannot_satisfy_arming() -> Result<()> {
     );
 
     // cleanup
-    mqk_db::halt_run(&pool, run_id).await?;
+    mqk_db::halt_run(&pool, run_id, chrono::Utc::now()).await?;
     Ok(())
 }

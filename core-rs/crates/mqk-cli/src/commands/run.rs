@@ -133,7 +133,7 @@ pub async fn run_stop(run_id: String) -> Result<()> {
 pub async fn run_halt(run_id: String, reason: String) -> Result<()> {
     let pool = mqk_db::connect_from_env().await?;
     let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
-    mqk_db::halt_run(&pool, run_uuid).await?;
+    mqk_db::halt_run(&pool, run_uuid, chrono::Utc::now()).await?;
     println!(
         "halted=true run_id={} status=HALTED reason={}",
         run_uuid, reason
@@ -148,7 +148,7 @@ pub async fn run_halt(run_id: String, reason: String) -> Result<()> {
 pub async fn run_heartbeat(run_id: String) -> Result<()> {
     let pool = mqk_db::connect_from_env().await?;
     let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
-    mqk_db::heartbeat_run(&pool, run_uuid).await?;
+    mqk_db::heartbeat_run(&pool, run_uuid, chrono::Utc::now()).await?;
     println!("heartbeat=true run_id={}", run_uuid);
     Ok(())
 }
@@ -388,4 +388,109 @@ fn host_fingerprint() -> String {
 
 fn opt_dt(dt: &Option<chrono::DateTime<Utc>>) -> String {
     dt.as_ref().map(|d| d.to_rfc3339()).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// FD-2: stub adapters + sole authoritative execution path
+// ---------------------------------------------------------------------------
+
+/// No-op broker adapter for CLI integration tests and dry-run invocations.
+/// All submit/cancel/replace calls succeed immediately; no real orders sent.
+struct NullBroker;
+
+impl mqk_execution::BrokerAdapter for NullBroker {
+    fn submit_order(
+        &self,
+        req: mqk_execution::BrokerSubmitRequest,
+        _token: &mqk_execution::BrokerInvokeToken,
+    ) -> std::result::Result<mqk_execution::BrokerSubmitResponse, Box<dyn std::error::Error>> {
+        Ok(mqk_execution::BrokerSubmitResponse {
+            broker_order_id: format!("null-{}", req.order_id),
+            submitted_at: 0,
+            status: "null".to_string(),
+        })
+    }
+
+    fn cancel_order(
+        &self,
+        _order_id: &str,
+        _token: &mqk_execution::BrokerInvokeToken,
+    ) -> std::result::Result<mqk_execution::BrokerCancelResponse, Box<dyn std::error::Error>> {
+        Ok(mqk_execution::BrokerCancelResponse {
+            broker_order_id: "null".to_string(),
+            cancelled_at: 0,
+            status: "null".to_string(),
+        })
+    }
+
+    fn replace_order(
+        &self,
+        req: mqk_execution::BrokerReplaceRequest,
+        _token: &mqk_execution::BrokerInvokeToken,
+    ) -> std::result::Result<mqk_execution::BrokerReplaceResponse, Box<dyn std::error::Error>> {
+        Ok(mqk_execution::BrokerReplaceResponse {
+            broker_order_id: req.broker_order_id,
+            replaced_at: 0,
+            status: "null".to_string(),
+        })
+    }
+
+    fn fetch_events(
+        &self,
+        _token: &mqk_execution::BrokerInvokeToken,
+    ) -> std::result::Result<Vec<mqk_execution::BrokerEvent>, Box<dyn std::error::Error>> {
+        Ok(vec![])
+    }
+}
+
+/// Always-pass gate stub (armed, allowed, clean).
+struct PassGate;
+impl mqk_execution::IntegrityGate for PassGate {
+    fn is_armed(&self) -> bool {
+        true
+    }
+}
+impl mqk_execution::RiskGate for PassGate {
+    fn is_allowed(&self) -> bool {
+        true
+    }
+}
+impl mqk_execution::ReconcileGate for PassGate {
+    fn is_clean(&self) -> bool {
+        true
+    }
+}
+
+/// FD-2: wire `ExecutionOrchestrator::tick` as the sole broker-submit path.
+///
+/// Runs `ticks` iterations of the execution tick loop against a live DB.
+/// Uses `NullBroker` (no real orders) and `PassGate` (all gates open).
+/// Replace stubs with real implementations before LIVE deployment.
+pub async fn run_execute(run_id: String, ticks: u32) -> Result<()> {
+    use mqk_execution::{BrokerGateway, BrokerOrderMap};
+    use mqk_portfolio::PortfolioState;
+    use mqk_runtime::orchestrator::ExecutionOrchestrator;
+    use std::collections::BTreeMap;
+
+    let pool = mqk_db::connect_from_env().await?;
+    let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
+
+    let gateway = BrokerGateway::for_test(NullBroker, PassGate, PassGate, PassGate);
+    let mut orchestrator = ExecutionOrchestrator::new(
+        pool,
+        gateway,
+        BrokerOrderMap::new(),
+        BTreeMap::new(),
+        PortfolioState::new(0),
+        run_uuid,
+        "mqk-cli",
+        mqk_db::WallClock,
+    );
+
+    for _ in 0..ticks {
+        orchestrator.tick().await?;
+    }
+
+    println!("executed=true run_id={} ticks={}", run_uuid, ticks);
+    Ok(())
 }

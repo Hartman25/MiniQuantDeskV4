@@ -30,7 +30,7 @@ pub struct WallClock;
 
 impl TimeSource for WallClock {
     fn now_utc(&self) -> DateTime<Utc> {
-        Utc::now()
+        Utc::now() // allow: wall-clock-canonical — sole permitted production clock read
     }
 }
 
@@ -544,16 +544,19 @@ pub async fn stop_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
 }
 
 /// Halt a run: ANY -> HALTED (sticky).
-pub async fn halt_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
+///
+/// `halted_at` is injected by the caller (FC-9: no now() in enforcement path).
+pub async fn halt_run(pool: &PgPool, run_id: Uuid, halted_at: DateTime<Utc>) -> Result<()> {
     sqlx::query(
         r#"
         update runs
         set status = 'HALTED',
-            halted_at_utc = now()
+            halted_at_utc = $2
         where run_id = $1
         "#,
     )
     .bind(run_id)
+    .bind(halted_at)
     .execute(pool)
     .await
     .context("halt_run update failed")?;
@@ -562,7 +565,9 @@ pub async fn halt_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
 }
 
 /// Heartbeat: RUNNING only updates last_heartbeat_utc.
-pub async fn heartbeat_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
+///
+/// `heartbeat_at` is injected by the caller (FC-9: no now() in enforcement path).
+pub async fn heartbeat_run(pool: &PgPool, run_id: Uuid, heartbeat_at: DateTime<Utc>) -> Result<()> {
     let r = fetch_run(pool, run_id).await?;
     match r.status {
         RunStatus::Running => {}
@@ -577,11 +582,12 @@ pub async fn heartbeat_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     sqlx::query(
         r#"
         update runs
-        set last_heartbeat_utc = now()
+        set last_heartbeat_utc = $2
         where run_id = $1
         "#,
     )
     .bind(run_id)
+    .bind(heartbeat_at)
     .execute(pool)
     .await
     .context("heartbeat_run update failed")?;
@@ -637,7 +643,7 @@ pub async fn enforce_deadman_or_halt(
     // Only halt if still RUNNING at time of enforcement (avoid halting stopped/armed).
     let r = fetch_run(pool, run_id).await?;
     if r.status.as_str() == "RUNNING" {
-        halt_run(pool, run_id).await?;
+        halt_run(pool, run_id, now).await?;
         return Ok(true);
     }
 
@@ -712,10 +718,22 @@ impl OutboxClaimToken {
 
     /// Test-only escape hatch. Do NOT call from production code.
     ///
+    /// # Compile-time gate
+    ///
+    /// This function is compiled only when:
+    /// - `#[cfg(test)]` is active (i.e., the **owning crate** is being tested
+    ///   via `cargo test -p mqk-db`), OR
+    /// - the `testkit` Cargo feature is explicitly enabled.
+    ///
+    /// The `testkit` feature MUST NOT be listed in any production crate's
+    /// `[dependencies]` — only in `[dev-dependencies]` of test/testkit crates.
+    ///
     /// In production, tokens are returned exclusively by [`outbox_claim_batch`],
-    /// coupling each token to a real DB-level row lock. This function bypasses
-    /// that guarantee and exists solely for unit and integration test setup.
+    /// coupling each token to a real DB-level `FOR UPDATE SKIP LOCKED` row
+    /// lock. This function bypasses that guarantee and exists solely for unit
+    /// and integration test setup.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "testkit"))]
     pub fn for_test(outbox_id: i64, idempotency_key: impl Into<String>) -> Self {
         Self::new(outbox_id, idempotency_key)
     }
@@ -866,6 +884,42 @@ pub async fn outbox_release_claim(pool: &PgPool, idempotency_key: &str) -> Resul
     Ok(row.is_some())
 }
 
+/// Reset stale CLAIMED rows back to PENDING — the crash-recovery reaper (FC-6).
+///
+/// Called on orchestrator startup (and optionally on a periodic sweep) to
+/// recover rows left in CLAIMED state by a crashed or stuck dispatcher.
+///
+/// A row is considered stale when its `claimed_at_utc` is strictly earlier
+/// than `stale_threshold`.  The threshold is caller-supplied — no wall-clock
+/// inside this function (FC-5 policy).  In production, pass
+/// `time_source.now_utc() - stale_duration`; in tests, pass an explicit
+/// timestamp.
+///
+/// Returns the number of rows reset.  Only `CLAIMED` rows are affected.
+/// Terminal states (`SENT`, `ACKED`, `FAILED`) and `PENDING` rows are never
+/// modified.
+pub async fn outbox_reset_stale_claims(
+    pool: &PgPool,
+    stale_threshold: DateTime<Utc>,
+) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        update oms_outbox
+           set status         = 'PENDING',
+               claimed_at_utc = null,
+               claimed_by     = null
+         where status         = 'CLAIMED'
+           and claimed_at_utc < $1
+        "#,
+    )
+    .bind(stale_threshold)
+    .execute(pool)
+    .await
+    .context("outbox_reset_stale_claims failed")?;
+
+    Ok(result.rows_affected())
+}
+
 /// Fetch a single outbox row by idempotency_key.
 pub async fn outbox_fetch_by_idempotency_key(
     pool: &PgPool,
@@ -908,18 +962,27 @@ pub async fn outbox_fetch_by_idempotency_key(
 /// `outbox_claim_batch` can be marked SENT. Attempting to mark a PENDING row
 /// SENT without first claiming it returns `false`, preventing a rogue
 /// dispatcher from bypassing the claim/lock protocol.
-pub async fn outbox_mark_sent(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
+///
+/// `sent_at` is caller-supplied — no SQL `now()` in this function (FC-7
+/// policy: wall-clock excluded from the dispatch path).  In production,
+/// pass `time_source.now_utc()`; in tests, pass an explicit timestamp.
+pub async fn outbox_mark_sent(
+    pool: &PgPool,
+    idempotency_key: &str,
+    sent_at: DateTime<Utc>,
+) -> Result<bool> {
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
         update oms_outbox
            set status      = 'SENT',
-               sent_at_utc = coalesce(sent_at_utc, now())
+               sent_at_utc = coalesce(sent_at_utc, $2)
          where idempotency_key = $1
            and status = 'CLAIMED'
         returning outbox_id
         "#,
     )
     .bind(idempotency_key)
+    .bind(sent_at)
     .fetch_optional(pool)
     .await
     .context("outbox_mark_sent failed")?;
@@ -1097,7 +1160,7 @@ pub async fn inbox_insert_deduped(
     Ok(row.is_some())
 }
 
-/// Stamp `applied_at_utc = now()` on an inbox row after its fill has been
+/// Stamp `applied_at_utc` on an inbox row after its fill has been
 /// successfully applied to in-process portfolio state.
 ///
 /// Part of the Patch D2 crash-recovery contract:
@@ -1105,18 +1168,27 @@ pub async fn inbox_insert_deduped(
 /// - Rows where `applied_at_utc IS NULL` appear in
 ///   `inbox_load_unapplied_for_run` and must be replayed at startup.
 ///
+/// `applied_at` is caller-supplied — no SQL `now()` in this function (FC-8
+/// policy: wall-clock excluded from the fill-apply path).  In production,
+/// pass `time_source.now_utc()`; in tests, pass an explicit timestamp.
+///
 /// Idempotent: silently succeeds if `broker_message_id` is not present or
 /// has already been stamped.
-pub async fn inbox_mark_applied(pool: &PgPool, broker_message_id: &str) -> Result<()> {
+pub async fn inbox_mark_applied(
+    pool: &PgPool,
+    broker_message_id: &str,
+    applied_at: DateTime<Utc>,
+) -> Result<()> {
     sqlx::query(
         r#"
         update oms_inbox
-           set applied_at_utc = now()
+           set applied_at_utc = $2
          where broker_message_id = $1
            and applied_at_utc is null
         "#,
     )
     .bind(broker_message_id)
+    .bind(applied_at)
     .execute(pool)
     .await
     .context("inbox_mark_applied failed")?;

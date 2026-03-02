@@ -155,8 +155,34 @@ pub fn spawn_heartbeat(bus: broadcast::Sender<BusMsg>, interval: Duration) {
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            let ts = chrono::Utc::now().timestamp_millis();
+            let ts = chrono::Utc::now().timestamp_millis(); // allow: ops-metadata — SSE heartbeat timestamp, not enforcement
             let _ = bus.send(BusMsg::Heartbeat { ts_millis: ts });
+        }
+    });
+}
+
+/// FD-2: Spawn a background task that drives `ExecutionOrchestrator::tick` on
+/// the given interval.  This is the single authoritative execution path.
+///
+/// On any `tick` error the loop logs and halts — no silent swallowing.
+pub fn spawn_execution_loop<B, IG, RG, RecG, TS>(
+    mut orchestrator: mqk_runtime::orchestrator::ExecutionOrchestrator<B, IG, RG, RecG, TS>,
+    interval: Duration,
+) where
+    B: mqk_execution::BrokerAdapter + Send + 'static,
+    IG: mqk_execution::IntegrityGate + Send + 'static,
+    RG: mqk_execution::RiskGate + Send + 'static,
+    RecG: mqk_execution::ReconcileGate + Send + 'static,
+    TS: mqk_db::TimeSource + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            if let Err(e) = orchestrator.tick().await {
+                tracing::error!("execution_loop_halt error={}", e);
+                return;
+            }
         }
     });
 }

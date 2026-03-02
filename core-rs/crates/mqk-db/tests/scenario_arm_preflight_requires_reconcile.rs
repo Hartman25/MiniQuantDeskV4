@@ -102,6 +102,6 @@ async fn arm_preflight_requires_clean_reconcile_when_configured() -> Result<()> 
     assert_eq!(r.status.as_str(), "ARMED");
 
     // cleanup
-    mqk_db::halt_run(&pool, run_id).await?;
+    mqk_db::halt_run(&pool, run_id, chrono::Utc::now()).await?;
     Ok(())
 }

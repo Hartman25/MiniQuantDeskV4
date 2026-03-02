@@ -113,6 +113,6 @@ async fn cli_arm_requires_confirmation_for_live() -> anyhow::Result<()> {
     cmd2.assert().success();
 
     // Cleanup: do not leave an active LIVE run in the DB.
-    mqk_db::halt_run(&pool, run_id).await?;
+    mqk_db::halt_run(&pool, run_id, chrono::Utc::now()).await?;
     Ok(())
 }

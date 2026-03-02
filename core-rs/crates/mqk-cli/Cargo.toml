@@ -30,6 +30,8 @@ mqk-execution = { path = "../mqk-execution" }
 mqk-strategy = { path = "../mqk-strategy" }
 mqk-md = { path = "../mqk-md" }
 mqk-testkit = { path = "../mqk-testkit" }
+mqk-runtime = { path = "../mqk-runtime" }
+mqk-portfolio = { path = "../mqk-portfolio" }
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -50,7 +50,7 @@ async fn run_lifecycle_enforced_and_live_exclusive() -> anyhow::Result<()> {
     // CREATED -> ARMED -> RUNNING
     mqk_db::arm_run(&pool, run1).await?;
     mqk_db::begin_run(&pool, run1).await?;
-    mqk_db::heartbeat_run(&pool, run1).await?;
+    mqk_db::heartbeat_run(&pool, run1, chrono::Utc::now()).await?;
 
     // Insert run2 LIVE <engine> (allowed; not active yet)
     mqk_db::insert_run(

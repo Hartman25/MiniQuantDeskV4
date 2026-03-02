@@ -75,7 +75,7 @@ async fn cli_db_migrate_requires_yes_when_live_active() -> anyhow::Result<()> {
     cmd2.assert().success();
 
     // Cleanup: halt the run so we don't leave an active LIVE run behind.
-    mqk_db::halt_run(&pool, run_id).await?;
+    mqk_db::halt_run(&pool, run_id, chrono::Utc::now()).await?;
 
     Ok(())
 }

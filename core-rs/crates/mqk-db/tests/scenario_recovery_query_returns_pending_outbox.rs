@@ -44,9 +44,10 @@ async fn recovery_query_returns_pending_outbox_for_run() -> anyhow::Result<()> {
 
     // Claim k1 first (PENDING → CLAIMED), then mark SENT (CLAIMED → SENT).
     // Uses the L3 two-step dispatch protocol.
-    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "test-dispatcher").await?;
+    let claimed =
+        mqk_db::outbox_claim_batch(&pool, 1, "test-dispatcher", chrono::Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "must claim exactly one row");
-    mqk_db::outbox_mark_sent(&pool, &k1).await?;
+    mqk_db::outbox_mark_sent(&pool, &k1, chrono::Utc::now()).await?;
 
     let pending = mqk_db::outbox_list_unacked_for_run(&pool, run_id).await?;
     assert_eq!(pending.len(), 2, "expected 2 unacked outbox rows");

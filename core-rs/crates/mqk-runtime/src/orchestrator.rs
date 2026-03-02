@@ -91,6 +91,7 @@ where
     /// `time_source` provides the UTC clock for dispatch timestamps (FC-5).
     /// Pass [`mqk_db::WallClock`] in production; inject a deterministic stub
     /// in tests.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
         gateway: BrokerGateway<B, IG, RG, RecG>,
@@ -151,13 +152,16 @@ where
             let resp = match self.gateway.submit(claim, req) {
                 Ok(r) => r,
                 Err(e) => {
+                    // Convert to String before the await: Box<dyn Error> is !Send
+                    // and must not be held across an await point.
+                    let err_msg = e.to_string();
                     mqk_db::outbox_release_claim(&self.pool, &order_id).await?;
-                    return Err(anyhow!("broker submit failed: {}", e));
+                    return Err(anyhow!("broker submit failed: {}", err_msg));
                 }
             };
 
             // Step 4: persist SENT status and broker order ID mapping.
-            mqk_db::outbox_mark_sent(&self.pool, &order_id).await?;
+            mqk_db::outbox_mark_sent(&self.pool, &order_id, self.time_source.now_utc()).await?;
             mqk_db::broker_map_upsert(&self.pool, &order_id, &resp.broker_order_id).await?;
 
             // Register in in-memory maps.
@@ -215,7 +219,7 @@ where
             check_capital_invariants(&self.portfolio)?;
 
             // Step 9: commit — mark the inbox row as applied.
-            mqk_db::inbox_mark_applied(&self.pool, &msg_id).await?;
+            mqk_db::inbox_mark_applied(&self.pool, &msg_id, self.time_source.now_utc()).await?;
         }
 
         Ok(())

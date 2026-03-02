@@ -9,8 +9,8 @@ use commands::{
     bkt::{run_backtest_csv, run_backtest_db},
     load_payload,
     run::{
-        run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_halt, run_heartbeat,
-        run_loop, run_start, run_status, run_stop,
+        run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_execute, run_halt,
+        run_heartbeat, run_loop, run_start, run_status, run_stop,
     },
 };
 
@@ -279,6 +279,17 @@ enum RunCmd {
         ttl_seconds: i64,
     },
 
+    /// FD-2: Run the authoritative ExecutionOrchestrator tick loop against a live DB.
+    Execute {
+        /// Run id (must be RUNNING)
+        #[arg(long)]
+        run_id: String,
+
+        /// Number of tick iterations to execute
+        #[arg(long, default_value_t = 1)]
+        ticks: u32,
+    },
+
     /// Execute a deterministic orchestrator loop (testkit) with synthetic bars.
     Loop {
         #[arg(long)]
@@ -482,6 +493,9 @@ async fn main() -> Result<()> {
                 ttl_seconds,
             } => {
                 run_deadman_enforce(run_id, ttl_seconds).await?;
+            }
+            RunCmd::Execute { run_id, ticks } => {
+                run_execute(run_id, ticks).await?;
             }
             RunCmd::Loop {
                 run_id,

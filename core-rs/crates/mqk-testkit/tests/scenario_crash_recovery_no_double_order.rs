@@ -48,7 +48,8 @@ async fn crash_recovery_does_not_double_submit_when_broker_already_has_order() -
 
     // Dispatcher claims the row (PENDING → CLAIMED) before broker submit.
     // This is the L3 two-step dispatch protocol.
-    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "test-dispatcher").await?;
+    let claimed =
+        mqk_db::outbox_claim_batch(&pool, 1, "test-dispatcher", chrono::Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "dispatcher must claim the pending row");
 
     // Simulate the "submit to broker" step happening…
@@ -58,7 +59,7 @@ async fn crash_recovery_does_not_double_submit_when_broker_already_has_order() -
     assert_eq!(broker.submit_count(), 1);
 
     // Record that we attempted to send (but did NOT ack).
-    let sent = mqk_db::outbox_mark_sent(&pool, &idempotency_key).await?;
+    let sent = mqk_db::outbox_mark_sent(&pool, &idempotency_key, chrono::Utc::now()).await?;
     assert!(sent);
 
     // "Restart" recovery: should see outbox row as SENT/unacked,

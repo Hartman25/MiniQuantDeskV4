@@ -29,6 +29,11 @@ sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "macros", "ch
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
+# Activates OutboxClaimToken::for_test for all scenario tests under tests/.
+# MUST NOT be moved to [dependencies] — that would propagate testkit into
+# mqk-daemon and mqk-cli production builds via transitive dependency.
+mqk-db = { path = "../mqk-db", features = ["testkit"] }
+
 # Needed by the scenario test:
 mqk-broker-paper = { path = "../mqk-broker-paper" }
 mqk-reconcile    = { path = "../mqk-reconcile" }

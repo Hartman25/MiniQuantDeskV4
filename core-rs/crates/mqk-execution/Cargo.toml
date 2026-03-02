@@ -6,3 +6,8 @@ edition = "2021"
 [dependencies]
 serde = { workspace = true }
 mqk-db = { path = "../mqk-db" }
+
+[dev-dependencies]
+# Activates OutboxClaimToken::for_test for integration tests and internal
+# #[cfg(test)] modules. MUST NOT be moved to [dependencies].
+mqk-db = { path = "../mqk-db", features = ["testkit"] }

@@ -7,32 +7,24 @@
 #          This script contains NO randomness, NO network calls, NO wall-clock
 #          time. It is a pure grep-based static check.
 #
-# Patterns ENFORCED:
+# Patterns ENFORCED (all under core-rs/crates/*/src/):
 #
-#   [U] Uuid::new_v4() in production src/ files
-#       Rationale: Run IDs and event IDs used in enforcement/audit paths must
-#       be deterministic (derived from inputs), not random. Random IDs break
-#       replay guarantees and audit correlation.
-#       Remediation: Patches D1-1 (run IDs) and D1-2 (audit event IDs).
+#   [U] Uuid::new_v4()       — RNG run/event identity (breaks determinism)
+#   [T] Utc::now()           — wall-clock in mqk-db/src/ (enforcement scope)
+#   [S] SystemTime::now      — system clock anywhere in production src/
+#   [M] timestamp_millis()   — usually paired with Utc::now; flags temporal coupling
+#   [R] rand::               — any rand crate usage in production src/
+#   [N] DEFAULT now()        — semantics-bearing DB columns in migrations >= 0012
 #
-#   [T] Utc::now() in mqk-db/src/ (enforcement scope only)
-#       Rationale: mqk-db/src/lib.rs contains deadman_expired() and
-#       enforce_deadman_or_halt(), which directly gate capital execution.
-#       Wall-clock time in this path makes halt decisions non-deterministic
-#       and non-replayable. Other Utc::now() calls (audit timestamps,
-#       artifact ingestion, heartbeat ticks, CLI metadata) are ops-metadata
-#       and do NOT affect execution gating — widening that enforcement is
-#       the scope of D1-3, not P0-1.
-#       Remediation: Patch D1-3 (inject TimeSource into deadman).
+# Exemption mechanism:
+#   Lines containing "// allow:" are excluded from all [U/T/S/M/R] checks.
+#   SQL comment lines (starting with --) are excluded from [N] checks.
+#   Pure Rust comment lines (leading //) are excluded from [U/T/S/M/R] checks.
+#   This lets maintainers explicitly acknowledge a use is intentional.
 #
-# Pattern NOT enforced (rationale documented):
-#
-#   [N] DEFAULT now() in SQL migrations
-#       Rationale: Every existing migration already uses DEFAULT now().
-#       Enforcing a blanket ban here would immediately break CI with no
-#       repair path until D1-4 runs. The correct sequencing is: D1-4
-#       removes semantics-bearing instances first, then this guard can be
-#       re-enabled to prevent regression. See TODO(D1-4) block below.
+#   Current allow-listed items:
+#     mqk-db/src/lib.rs WallClock::now_utc()      — "// allow: wall-clock-canonical"
+#     mqk-daemon/src/state.rs spawn_heartbeat ts  — "// allow: ops-metadata"
 #
 # Exit codes: 0 = clean, 1 = violations found.
 #
@@ -57,99 +49,210 @@ echo " Repo root: ${REPO_ROOT}"
 echo "============================================================"
 
 # =============================================================================
-# [U] Uuid::new_v4 in production src/ files
-# =============================================================================
-# We scan files under crates/*/src/ only — not crates/*/tests/.
-# Pattern catches BOTH call forms:
-#   Uuid::new_v4()              — direct call
-#   unwrap_or_else(Uuid::new_v4) — function pointer (also calls the RNG)
+# Helper: grep for PATTERN in FILE, filtering out:
+#   1. Pure comment lines  — content (after stripping line-num prefix) starts
+#                            with optional whitespace then "//"
+#   2. Allow-listed lines  — content contains "// allow:"
 #
-# Note on #[cfg(test)] blocks inside src/ files: grep cannot distinguish
-# lines inside cfg(test) modules from production code. This is intentional:
-# we are conservative. If a Uuid::new_v4 call must live in a src/ file
-# under a cfg(test) block, the correct fix is to move it to a tests/ file.
+# grep -n produces "LINENUM:CONTENT". We strip the "LINENUM:" prefix when
+# testing whether the content itself is a comment.
+#
+# Usage: check_rs_pattern PATTERN FILE
+# Returns: matching lines (may be empty); exits 0 regardless.
+# =============================================================================
+check_rs_pattern() {
+    local pattern="$1" file="$2"
+    grep -n "$pattern" "$file" 2>/dev/null \
+        | grep -v "^[0-9][0-9]*:[[:space:]]*//" \
+        | grep -v "// allow:" \
+        || true
+}
+
+# =============================================================================
+# [U] Uuid::new_v4 in production src/ (all crates)
 # =============================================================================
 
 echo ""
 info "--- [U] Uuid::new_v4 in production src/ ---"
 
-UUID_FILE_COUNT=0
+UUID_VIOLATIONS=0
 UUID_MATCH_LINES=""
 
 while IFS= read -r -d '' rs_file; do
-    matches=$(grep -n "Uuid::new_v4" "$rs_file" 2>/dev/null || true)
+    matches=$(check_rs_pattern "Uuid::new_v4" "$rs_file")
     if [ -n "$matches" ]; then
-        UUID_FILE_COUNT=$((UUID_FILE_COUNT + 1))
+        UUID_VIOLATIONS=$((UUID_VIOLATIONS + 1))
         rel="${rs_file#"${REPO_ROOT}/"}"
         while IFS= read -r line; do
             UUID_MATCH_LINES="${UUID_MATCH_LINES}  ${rel}:${line}"$'\n'
         done <<< "$matches"
     fi
 done < <(find "${REPO_ROOT}/core-rs/crates" \
-    -type f \
-    -name "*.rs" \
-    -path "*/src/*" \
-    ! -path "*/target/*" \
-    -print0)
+    -type f -name "*.rs" -path "*/src/*" ! -path "*/target/*" -print0)
 
-if [ "$UUID_FILE_COUNT" -eq 0 ]; then
+if [ "$UUID_VIOLATIONS" -eq 0 ]; then
     green "  OK — no Uuid::new_v4() in production src/"
 else
-    VIOLATIONS=$((VIOLATIONS + UUID_FILE_COUNT))
-    red "  FAIL — Uuid::new_v4 found in ${UUID_FILE_COUNT} production file(s):"
+    VIOLATIONS=$((VIOLATIONS + UUID_VIOLATIONS))
+    red "  FAIL — Uuid::new_v4() found in ${UUID_VIOLATIONS} file(s):"
     printf '%s' "$UUID_MATCH_LINES"
-    red "  Remediation: D1-1 (run IDs: daemon routes + cli), D1-2 (audit event IDs)."
-    red "  Note: mqk-db/src/md.rs ingest_id fallback also flagged — address in D1-1 or separately."
+    red "  Remediation: D1-1 (run IDs), D1-2 (audit event IDs)."
 fi
 
 # =============================================================================
 # [T] Utc::now() in mqk-db/src/ (enforcement scope)
+#
+# mqk-db/src/ contains deadman_expired() and enforce_deadman_or_halt() which
+# gate capital execution. Wall-clock time here breaks determinism.
+# The sole permitted call is WallClock::now_utc() marked "// allow: wall-clock-canonical".
 # =============================================================================
 
 echo ""
 info "--- [T] Utc::now() in mqk-db/src/ (enforcement scope) ---"
 
-UTC_FILE_COUNT=0
+UTC_VIOLATIONS=0
 UTC_MATCH_LINES=""
-
 MQK_DB_SRC="${REPO_ROOT}/core-rs/crates/mqk-db/src"
 
 if [ -d "$MQK_DB_SRC" ]; then
     while IFS= read -r -d '' rs_file; do
-        matches=$(grep -n "Utc::now()" "$rs_file" 2>/dev/null || true)
+        matches=$(check_rs_pattern "Utc::now()" "$rs_file")
         if [ -n "$matches" ]; then
-            UTC_FILE_COUNT=$((UTC_FILE_COUNT + 1))
+            UTC_VIOLATIONS=$((UTC_VIOLATIONS + 1))
             rel="${rs_file#"${REPO_ROOT}/"}"
             while IFS= read -r line; do
                 UTC_MATCH_LINES="${UTC_MATCH_LINES}  ${rel}:${line}"$'\n'
             done <<< "$matches"
         fi
     done < <(find "$MQK_DB_SRC" \
-        -type f \
-        -name "*.rs" \
-        ! -path "*/target/*" \
-        -print0)
+        -type f -name "*.rs" ! -path "*/target/*" -print0)
 fi
 
-if [ "$UTC_FILE_COUNT" -eq 0 ]; then
-    green "  OK — no Utc::now() in mqk-db/src/"
+if [ "$UTC_VIOLATIONS" -eq 0 ]; then
+    green "  OK — no ungated Utc::now() in mqk-db/src/"
 else
-    VIOLATIONS=$((VIOLATIONS + UTC_FILE_COUNT))
-    red "  FAIL — Utc::now() found in ${UTC_FILE_COUNT} file(s) in mqk-db/src/:"
+    VIOLATIONS=$((VIOLATIONS + UTC_VIOLATIONS))
+    red "  FAIL — Utc::now() found in ${UTC_VIOLATIONS} file(s) in mqk-db/src/:"
     printf '%s' "$UTC_MATCH_LINES"
-    red "  Remediation: D1-3 (inject TimeSource abstraction into deadman)."
+    red "  Remediation: D1-3 (inject TimeSource into enforcement path)."
 fi
 
 # =============================================================================
-# [N] DEFAULT now() in SQL migrations (D1-4: enabled, post-0012 only).
+# [S] SystemTime::now in production src/ (all crates)
 #
-# Legacy migrations 0001-0011 use DEFAULT now() for bookkeeping columns
-# (oms_outbox.created_at_utc, md_bars.ingested_at, etc.) that are NOT in any
-# enforcement or capital-decision path.  These are the D1-4 baseline whitelist
-# and must not be modified (SQLx checksum immutability).
+# std::time::SystemTime::now() is a wall-clock read with platform-specific
+# behavior (monotonicity not guaranteed, affected by NTP). Use injected
+# TimeSource instead for any path that affects gating or determinism.
+# =============================================================================
+
+echo ""
+info "--- [S] SystemTime::now in production src/ ---"
+
+SYS_VIOLATIONS=0
+SYS_MATCH_LINES=""
+
+while IFS= read -r -d '' rs_file; do
+    matches=$(check_rs_pattern "SystemTime::now" "$rs_file")
+    if [ -n "$matches" ]; then
+        SYS_VIOLATIONS=$((SYS_VIOLATIONS + 1))
+        rel="${rs_file#"${REPO_ROOT}/"}"
+        while IFS= read -r line; do
+            SYS_MATCH_LINES="${SYS_MATCH_LINES}  ${rel}:${line}"$'\n'
+        done <<< "$matches"
+    fi
+done < <(find "${REPO_ROOT}/core-rs/crates" \
+    -type f -name "*.rs" -path "*/src/*" ! -path "*/target/*" -print0)
+
+if [ "$SYS_VIOLATIONS" -eq 0 ]; then
+    green "  OK — no SystemTime::now in production src/"
+else
+    VIOLATIONS=$((VIOLATIONS + SYS_VIOLATIONS))
+    red "  FAIL — SystemTime::now found in ${SYS_VIOLATIONS} file(s):"
+    printf '%s' "$SYS_MATCH_LINES"
+    red "  Remediation: replace with injected TimeSource."
+fi
+
+# =============================================================================
+# [M] timestamp_millis() in production src/ (all crates)
 #
-# All migrations from 0012 onward must NOT use DEFAULT now() — semantics-bearing
-# timestamps must be injected by the caller (now: DateTime<Utc> pattern, D1-3).
+# .timestamp_millis() is typically called on Utc::now() or similar, creating
+# a wall-clock dependency. Legitimate ops-metadata uses should be annotated
+# "// allow: ops-metadata" to make the intent explicit and suppress this check.
+# =============================================================================
+
+echo ""
+info "--- [M] timestamp_millis() in production src/ ---"
+
+MS_VIOLATIONS=0
+MS_MATCH_LINES=""
+
+while IFS= read -r -d '' rs_file; do
+    matches=$(check_rs_pattern "timestamp_millis" "$rs_file")
+    if [ -n "$matches" ]; then
+        MS_VIOLATIONS=$((MS_VIOLATIONS + 1))
+        rel="${rs_file#"${REPO_ROOT}/"}"
+        while IFS= read -r line; do
+            MS_MATCH_LINES="${MS_MATCH_LINES}  ${rel}:${line}"$'\n'
+        done <<< "$matches"
+    fi
+done < <(find "${REPO_ROOT}/core-rs/crates" \
+    -type f -name "*.rs" -path "*/src/*" ! -path "*/target/*" -print0)
+
+if [ "$MS_VIOLATIONS" -eq 0 ]; then
+    green "  OK — no ungated timestamp_millis() in production src/"
+else
+    VIOLATIONS=$((VIOLATIONS + MS_VIOLATIONS))
+    red "  FAIL — timestamp_millis() found in ${MS_VIOLATIONS} file(s):"
+    printf '%s' "$MS_MATCH_LINES"
+    red "  Remediation: remove wall-clock coupling or annotate '// allow: ops-metadata'."
+fi
+
+# =============================================================================
+# [R] rand:: in production src/ (all crates)
+#
+# The rand crate must not be used in production execution paths. All IDs and
+# ordering must be deterministic and derived from inputs.
+# =============================================================================
+
+echo ""
+info "--- [R] rand:: in production src/ ---"
+
+RAND_VIOLATIONS=0
+RAND_MATCH_LINES=""
+
+while IFS= read -r -d '' rs_file; do
+    matches=$(check_rs_pattern "rand::" "$rs_file")
+    if [ -n "$matches" ]; then
+        RAND_VIOLATIONS=$((RAND_VIOLATIONS + 1))
+        rel="${rs_file#"${REPO_ROOT}/"}"
+        while IFS= read -r line; do
+            RAND_MATCH_LINES="${RAND_MATCH_LINES}  ${rel}:${line}"$'\n'
+        done <<< "$matches"
+    fi
+done < <(find "${REPO_ROOT}/core-rs/crates" \
+    -type f -name "*.rs" -path "*/src/*" ! -path "*/target/*" -print0)
+
+if [ "$RAND_VIOLATIONS" -eq 0 ]; then
+    green "  OK — no rand:: in production src/"
+else
+    VIOLATIONS=$((VIOLATIONS + RAND_VIOLATIONS))
+    red "  FAIL — rand:: found in ${RAND_VIOLATIONS} file(s):"
+    printf '%s' "$RAND_MATCH_LINES"
+    red "  Remediation: replace with deterministic derivation."
+fi
+
+# =============================================================================
+# [N] DEFAULT now() in SQL migrations >= 0012
+#
+# Migrations 0001–0011 use DEFAULT now() for bookkeeping columns (created_at,
+# received_at, etc.) that are NOT in any enforcement or capital-decision path.
+# These are the D1-4 legacy whitelist — SQLx checksum immutability forbids
+# retroactive changes.
+#
+# All migrations numbered >= 0012 must NOT use DEFAULT now() on any column.
+# Semantics-bearing timestamps must be injected by the caller.
+#
+# Note: SQL comment lines (starting with --) are excluded from this check.
 # =============================================================================
 
 echo ""
@@ -159,8 +262,12 @@ SQL_VIOLATIONS=0
 
 while IFS= read -r -d '' sql_file; do
     basename=$(basename "$sql_file")
+    # Only check files numbered >= 0012_
     [[ "$basename" < "0012_" ]] && continue
-    matches=$(grep -in "default now()\|DEFAULT CURRENT_TIMESTAMP" "$sql_file" 2>/dev/null || true)
+    # Exclude SQL comment lines (starting with optional whitespace + --)
+    matches=$(grep -in "default now()\|DEFAULT CURRENT_TIMESTAMP" "$sql_file" 2>/dev/null \
+        | grep -v "^[0-9][0-9]*:[[:space:]]*--" \
+        || true)
     if [ -n "$matches" ]; then
         SQL_VIOLATIONS=$((SQL_VIOLATIONS + 1))
         VIOLATIONS=$((VIOLATIONS + 1))
@@ -172,10 +279,14 @@ done < <(find "${REPO_ROOT}/core-rs/crates/mqk-db/migrations" \
     -type f -name "*.sql" -print0)
 
 if [ "$SQL_VIOLATIONS" -eq 0 ]; then
-    green "  OK — no DEFAULT now() in post-D1-4 migrations"
+    green "  OK — no DEFAULT now() in post-D1-4 migrations (>= 0012)"
 else
-    red "  Remediation: Remove DEFAULT now() from new migration; inject timestamp via now: DateTime<Utc> parameter."
+    red "  Remediation: remove DEFAULT now(); inject timestamp via now: DateTime<Utc> caller parameter."
 fi
+
+# =============================================================================
+# Summary
+# =============================================================================
 
 echo ""
 echo "============================================================"
@@ -188,10 +299,9 @@ if [ "$VIOLATIONS" -eq 0 ]; then
 else
     red " GUARD FAILED — ${VIOLATIONS} violation(s) found."
     echo ""
-    red " These are known tracked violations. Remediation patches:"
-    red "   D1-1: Uuid::new_v4() in daemon routes + cli run command"
-    red "   D1-2: Uuid::new_v4() in audit event IDs"
-    red "   D1-3: Utc::now() in mqk-db deadman enforcement path"
-    red "   D1-4: DEFAULT now() in SQL migrations (guard active for >= 0012)"
+    red " Fix each flagged location or annotate with '// allow: <reason>'."
+    red " Allowed exemptions:"
+    red "   '// allow: wall-clock-canonical'  — WallClock::now_utc() in mqk-db"
+    red "   '// allow: ops-metadata'          — non-enforcement UI/heartbeat paths"
     exit 1
 fi

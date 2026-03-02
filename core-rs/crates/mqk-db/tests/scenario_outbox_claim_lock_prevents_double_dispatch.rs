@@ -76,7 +76,8 @@ async fn only_one_dispatcher_claims_row_second_gets_empty() -> anyhow::Result<()
     .await?;
 
     // --- Dispatcher A claims the row ---
-    let claimed_a = mqk_db::outbox_claim_batch(&pool, 10, "dispatcher-A").await?;
+    let claimed_a =
+        mqk_db::outbox_claim_batch(&pool, 10, "dispatcher-A", chrono::Utc::now()).await?;
     assert_eq!(claimed_a.len(), 1, "dispatcher A must claim exactly 1 row");
     assert_eq!(claimed_a[0].row.status, "CLAIMED");
     assert_eq!(
@@ -87,7 +88,8 @@ async fn only_one_dispatcher_claims_row_second_gets_empty() -> anyhow::Result<()
 
     // --- Dispatcher B tries to claim the same row — must get nothing ---
     // Because SKIP LOCKED skips rows held by A's implicit row lock.
-    let claimed_b = mqk_db::outbox_claim_batch(&pool, 10, "dispatcher-B").await?;
+    let claimed_b =
+        mqk_db::outbox_claim_batch(&pool, 10, "dispatcher-B", chrono::Utc::now()).await?;
     assert_eq!(
         claimed_b.len(),
         0,
@@ -95,7 +97,7 @@ async fn only_one_dispatcher_claims_row_second_gets_empty() -> anyhow::Result<()
     );
 
     // --- Only dispatcher A can advance the row to SENT ---
-    let sent = mqk_db::outbox_mark_sent(&pool, &intent_id).await?;
+    let sent = mqk_db::outbox_mark_sent(&pool, &intent_id, chrono::Utc::now()).await?;
     assert!(sent, "dispatcher A must be able to mark SENT");
 
     let row = mqk_db::outbox_fetch_by_idempotency_key(&pool, &intent_id)
@@ -133,7 +135,7 @@ async fn release_claim_returns_row_to_pending_for_next_dispatcher() -> anyhow::R
     .await?;
 
     // Dispatcher A claims the row.
-    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "dispatcher-A").await?;
+    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "dispatcher-A", chrono::Utc::now()).await?;
     assert_eq!(claimed.len(), 1);
 
     // Dispatcher A fails and releases its claim.
@@ -155,7 +157,8 @@ async fn release_claim_returns_row_to_pending_for_next_dispatcher() -> anyhow::R
     );
 
     // Dispatcher B can now claim the released row.
-    let claimed_b = mqk_db::outbox_claim_batch(&pool, 1, "dispatcher-B").await?;
+    let claimed_b =
+        mqk_db::outbox_claim_batch(&pool, 1, "dispatcher-B", chrono::Utc::now()).await?;
     assert_eq!(
         claimed_b.len(),
         1,
@@ -193,7 +196,7 @@ async fn unclaimed_row_cannot_be_marked_sent() -> anyhow::Result<()> {
     .await?;
 
     // Attempt to mark SENT directly — no claim step.
-    let sent = mqk_db::outbox_mark_sent(&pool, &intent_id).await?;
+    let sent = mqk_db::outbox_mark_sent(&pool, &intent_id, chrono::Utc::now()).await?;
     assert!(
         !sent,
         "mark_sent must return false if the row was never claimed"

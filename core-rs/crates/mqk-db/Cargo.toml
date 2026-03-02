@@ -13,5 +13,18 @@ sqlx = { version = "0.7", features = ["postgres", "runtime-tokio", "tls-native-t
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 
+[features]
+# Enables `OutboxClaimToken::for_test`. MUST NOT be activated in production
+# Cargo invocations. Only test crates should list this in [dev-dependencies].
+testkit = []
+
+# The prover integration test requires the testkit feature to be active so
+# that `OutboxClaimToken::for_test` compiles (integration tests are external
+# to the crate and do not benefit from the crate-level `#[cfg(test)]` gate).
+# Run with: cargo test -p mqk-db --features testkit --test prover_claim_token_unforgeable
+[[test]]
+name = "prover_claim_token_unforgeable"
+required-features = ["testkit"]
+
 [dev-dependencies]
 tempfile = "3"
