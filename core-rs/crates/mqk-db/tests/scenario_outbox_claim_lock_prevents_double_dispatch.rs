@@ -78,9 +78,9 @@ async fn only_one_dispatcher_claims_row_second_gets_empty() -> anyhow::Result<()
     // --- Dispatcher A claims the row ---
     let claimed_a = mqk_db::outbox_claim_batch(&pool, 10, "dispatcher-A").await?;
     assert_eq!(claimed_a.len(), 1, "dispatcher A must claim exactly 1 row");
-    assert_eq!(claimed_a[0].status, "CLAIMED");
+    assert_eq!(claimed_a[0].row.status, "CLAIMED");
     assert_eq!(
-        claimed_a[0].claimed_by.as_deref(),
+        claimed_a[0].row.claimed_by.as_deref(),
         Some("dispatcher-A"),
         "claimed_by must record dispatcher identity"
     );
@@ -161,7 +161,7 @@ async fn release_claim_returns_row_to_pending_for_next_dispatcher() -> anyhow::R
         1,
         "dispatcher B must claim the released row"
     );
-    assert_eq!(claimed_b[0].claimed_by.as_deref(), Some("dispatcher-B"));
+    assert_eq!(claimed_b[0].row.claimed_by.as_deref(), Some("dispatcher-B"));
 
     Ok(())
 }

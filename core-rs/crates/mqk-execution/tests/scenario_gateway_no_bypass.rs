@@ -120,7 +120,7 @@ impl ReconcileGate for BoolGate {
 type TestGateway = BrokerGateway<AlwaysOkBroker, BoolGate, BoolGate, BoolGate>;
 
 fn make_gateway(integrity: bool, risk: bool, reconcile: bool) -> TestGateway {
-    BrokerGateway::new(
+    BrokerGateway::for_test(
         AlwaysOkBroker,
         BoolGate(integrity),
         BoolGate(risk),
@@ -155,7 +155,7 @@ fn claim() -> OutboxClaimToken {
     // External code MUST use from_claimed_row. Struct literal fails to compile:
     //   OutboxClaimToken { _priv: (), outbox_id: 1, idempotency_key: "ord-1".into() }
     //   ^ error[E0451]: field `_priv` of struct `OutboxClaimToken` is private
-    OutboxClaimToken::from_claimed_row(1, "ord-1")
+    OutboxClaimToken::for_test(1, "ord-1")
 }
 
 // ---------------------------------------------------------------------------

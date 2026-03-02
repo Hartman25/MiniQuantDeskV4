@@ -12,10 +12,10 @@
 //! argument — the gateway evaluates each gate internally. Callers cannot inject
 //! a "clean" verdict; they must wire in real engine state via the gate traits.
 //!
-//! **Compile-time (PATCH A3):** `BrokerGateway::submit` requires an
-//! `&OutboxClaimToken`. The token's `_priv` field is `pub(crate)`, preventing
-//! struct-literal construction outside this crate. Callers must use
-//! `OutboxClaimToken::from_claimed_row`, explicitly declaring outbox provenance.
+//! **Compile-time (PATCH A3 / FC-2):** `BrokerGateway::submit` requires an
+//! `&OutboxClaimToken`. The token is defined in `mqk-db` with a `pub(crate)`
+//! constructor; the only production path to obtain one is through
+//! `mqk_db::outbox_claim_batch`, which couples each token to a real DB row lock.
 //!
 //! **Compile-time + runtime (EB-2):** `cancel` and `replace` require an
 //! internal order ID and a `&BrokerOrderMap`. The gateway resolves the broker
@@ -37,6 +37,11 @@ use crate::order_router::{
     BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
     BrokerSubmitRequest, BrokerSubmitResponse, OrderRouter,
 };
+
+// FC-2: OutboxClaimToken now lives in mqk-db (the only crate whose
+// `outbox_claim_batch` function constructs it).  Re-exported below so
+// existing `use mqk_execution::OutboxClaimToken` imports continue to work.
+pub use mqk_db::OutboxClaimToken;
 
 // ---------------------------------------------------------------------------
 // Gate evaluator traits (PATCH A2)
@@ -127,61 +132,6 @@ impl std::fmt::Display for UnknownOrder {
 impl std::error::Error for UnknownOrder {}
 
 // ---------------------------------------------------------------------------
-// OutboxClaimToken (PATCH A3)
-// ---------------------------------------------------------------------------
-
-/// Proof that a broker submit originates from a claimed outbox row.
-///
-/// # Contract
-/// Callers must obtain this token **after** successfully claiming an outbox row
-/// via `mqk_db::outbox_claim_batch`, then pass the claimed row's `outbox_id`
-/// and `idempotency_key` to [`OutboxClaimToken::from_claimed_row`].
-///
-/// The `_priv` field is `pub(crate)`, so external code **cannot** construct
-/// this type via struct literal:
-///
-/// ```text
-/// ✅  OutboxClaimToken::from_claimed_row(id, key)   // allowed: public constructor
-/// ❌  OutboxClaimToken { _priv: (), outbox_id: 1, … } // ERROR: private field
-/// ```
-///
-/// Passing fabricated values to `from_claimed_row` bypasses the protocol and
-/// is a contract violation; the DB-level `FOR UPDATE SKIP LOCKED` claim is the
-/// authoritative guard. The token makes outbox provenance an **explicit,
-/// named API requirement** rather than an invisible convention.
-///
-/// # Why `#[non_exhaustive]` is not used here
-/// `#[non_exhaustive]` carries the semantic "this struct may gain new fields."
-/// Our intent is a **capability-token pattern** (controlled constructor), not
-/// an extensibility hint. The `pub(crate) _priv` field is the correct tool;
-/// the lint is suppressed intentionally.
-#[allow(clippy::manual_non_exhaustive)]
-#[derive(Debug, Clone)]
-pub struct OutboxClaimToken {
-    /// The DB row ID of the claimed outbox entry.
-    pub outbox_id: i64,
-    /// The idempotency key (= `client_order_id`) of the claimed outbox entry.
-    pub idempotency_key: String,
-    /// Prevents struct-literal construction outside this crate (PATCH A3).
-    pub(crate) _priv: (),
-}
-
-impl OutboxClaimToken {
-    /// Construct a claim token from a successfully claimed outbox row.
-    ///
-    /// `outbox_id` and `idempotency_key` must come from a row returned by
-    /// `mqk_db::outbox_claim_batch`. Supplying fabricated values violates the
-    /// outbox-first contract.
-    pub fn from_claimed_row(outbox_id: i64, idempotency_key: impl Into<String>) -> Self {
-        Self {
-            outbox_id,
-            idempotency_key: idempotency_key.into(),
-            _priv: (),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // BrokerGateway
 // ---------------------------------------------------------------------------
 
@@ -235,14 +185,31 @@ where
 {
     /// Create a gateway wrapping the given broker adapter and gate evaluators.
     ///
-    /// Pass real engine objects in production; pass boolean stubs in tests.
-    pub fn new(broker: B, integrity: IG, risk: RG, reconcile: RecG) -> Self {
+    /// `pub(crate)` — FC-3: external callers must use the production wiring path
+    /// or the test escape hatch `BrokerGateway::for_test`.
+    pub(crate) fn new(broker: B, integrity: IG, risk: RG, reconcile: RecG) -> Self {
         Self {
             router: OrderRouter::new(broker),
             integrity,
             risk,
             reconcile,
         }
+    }
+
+    /// Test-only constructor.
+    ///
+    /// The name is intentionally explicit: callers outside `mqk-execution` that
+    /// use this function are declaring that they are constructing a gateway with
+    /// stub gate evaluators for test purposes, not production wiring.
+    ///
+    /// In production, a gateway is constructed by the runtime orchestration layer
+    /// using real engine objects wired behind the gate traits.
+    ///
+    /// FC-3: mirrors `OutboxClaimToken::for_test` — explicit naming makes the
+    /// test/production distinction structural rather than invisible.
+    #[doc(hidden)]
+    pub fn for_test(broker: B, integrity: IG, risk: RG, reconcile: RecG) -> Self {
+        Self::new(broker, integrity, risk, reconcile)
     }
 
     /// Evaluate all three gates in order.
@@ -263,7 +230,9 @@ where
     /// Submit a new broker order.
     ///
     /// Requires an [`OutboxClaimToken`] proving the order originated from a
-    /// claimed outbox row (PATCH A3). The claim's `idempotency_key` is used
+    /// claimed outbox row (PATCH A3 / FC-2). Tokens are returned by
+    /// `mqk_db::outbox_claim_batch`; the only test escape hatch is
+    /// `OutboxClaimToken::for_test`. The claim's `idempotency_key` is used
     /// as the broker-side `order_id`, overriding any value in `req.order_id`
     /// (EB-3). Callers cannot inject a free-form broker order ID — it must
     /// come from the outbox. All three gates must also pass.
@@ -468,9 +437,9 @@ mod tests {
         }
     }
 
-    /// Stub claim token for unit tests (PATCH A3).
+    /// Stub claim token for unit tests. Uses the test escape hatch (FC-2).
     fn make_claim() -> OutboxClaimToken {
-        OutboxClaimToken::from_claimed_row(1, "ord-1")
+        OutboxClaimToken::for_test(1, "ord-1")
     }
 
     // -- Gate pass/fail tests -----------------------------------------------

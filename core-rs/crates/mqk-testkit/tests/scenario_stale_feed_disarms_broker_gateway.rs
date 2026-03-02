@@ -125,7 +125,7 @@ impl ReconcileGate for AlwaysPass {
 // ---------------------------------------------------------------------------
 
 fn make_claim() -> OutboxClaimToken {
-    OutboxClaimToken::from_claimed_row(1, "ord-e2")
+    OutboxClaimToken::for_test(1, "ord-e2")
 }
 
 fn submit_req() -> BrokerSubmitRequest {
@@ -173,7 +173,7 @@ fn healthy_integrity_allows_submit() {
         "gate must be open before disarm"
     );
 
-    let gw = BrokerGateway::new(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
+    let gw = BrokerGateway::for_test(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
     let result = gw.submit(&make_claim(), submit_req());
     assert!(result.is_ok(), "healthy integrity must allow submit");
 }
@@ -207,7 +207,7 @@ fn stale_feed_disarms_gateway_blocks_submit() {
     assert!(st.disarmed, "disarmed flag must be set");
     assert!(st.is_execution_blocked(), "execution must be blocked");
 
-    let gw = BrokerGateway::new(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
+    let gw = BrokerGateway::for_test(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
     let refusal = err
         .downcast_ref::<GateRefusal>()
@@ -231,7 +231,7 @@ fn stale_feed_disarms_gateway_blocks_cancel() {
 
     assert!(st.disarmed);
 
-    let gw = BrokerGateway::new(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
+    let gw = BrokerGateway::for_test(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
     // Gate fires before map lookup (EB-2); empty map is correct here.
     let err = gw.cancel("b-ord-e2", &BrokerOrderMap::new()).unwrap_err();
     let refusal = err
@@ -252,7 +252,7 @@ fn stale_feed_disarms_gateway_blocks_replace() {
 
     assert!(st.disarmed);
 
-    let gw = BrokerGateway::new(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
+    let gw = BrokerGateway::for_test(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
     // Gate fires before map lookup (EB-2); empty map is correct here.
     let err = gw
         .replace(
@@ -296,7 +296,7 @@ fn gap_halt_disarms_gateway() {
     assert!(st.halted, "halted flag must be set after gap");
     assert!(st.is_execution_blocked());
 
-    let gw = BrokerGateway::new(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
+    let gw = BrokerGateway::for_test(OkBroker, IntegrityAdapter(st), AlwaysPass, AlwaysPass);
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
     let refusal = err
         .downcast_ref::<GateRefusal>()

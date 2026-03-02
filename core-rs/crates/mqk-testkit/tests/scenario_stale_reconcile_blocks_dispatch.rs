@@ -107,7 +107,7 @@ fn submit_req() -> BrokerSubmitRequest {
 }
 
 fn make_claim() -> OutboxClaimToken {
-    OutboxClaimToken::from_claimed_row(1, "ord-test")
+    OutboxClaimToken::for_test(1, "ord-test")
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@ fn dispatch_blocked_when_reconcile_never_ran() {
     let now_ms = Cell::new(1_000_000_i64);
     // record_reconcile_result is never called — guard starts with None.
     let guard = ReconcileFreshnessGuard::new(BOUND_MS, || now_ms.get());
-    let gw = BrokerGateway::new(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
+    let gw = BrokerGateway::for_test(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
 
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
     let refusal = err
@@ -140,7 +140,7 @@ fn dispatch_allowed_after_clean_reconcile_within_bound() {
 
     // Advance 1 second — well within the 5-second freshness bound.
     now_ms.set(1_001_000);
-    let gw = BrokerGateway::new(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
+    let gw = BrokerGateway::for_test(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
 
     let result = gw.submit(&make_claim(), submit_req());
     assert!(
@@ -161,7 +161,7 @@ fn dispatch_blocked_when_clean_reconcile_is_stale() {
 
     // Advance 6 seconds — past the 5-second freshness bound.
     now_ms.set(1_006_000);
-    let gw = BrokerGateway::new(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
+    let gw = BrokerGateway::for_test(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
 
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
     let refusal = err
@@ -185,7 +185,7 @@ fn dispatch_unblocked_after_fresh_reconcile_refreshes_guard() {
 
     // Re-record clean at T=1_006_000 — guard is fresh again (elapsed=0).
     guard.record_reconcile_result(true);
-    let gw = BrokerGateway::new(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
+    let gw = BrokerGateway::for_test(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
 
     let result = gw.submit(&make_claim(), submit_req());
     assert!(
@@ -206,7 +206,7 @@ fn dispatch_blocked_immediately_after_dirty_reconcile() {
 
     // Dirty result — clears the clean timestamp regardless of elapsed time.
     guard.record_reconcile_result(false);
-    let gw = BrokerGateway::new(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
+    let gw = BrokerGateway::for_test(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
 
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
     let refusal = err
@@ -227,7 +227,7 @@ fn dispatch_allowed_at_exact_freshness_bound() {
 
     // Advance exactly BOUND_MS: elapsed == bound, still fresh (<=).
     now_ms.set(1_000_000 + BOUND_MS);
-    let gw = BrokerGateway::new(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
+    let gw = BrokerGateway::for_test(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
 
     let result = gw.submit(&make_claim(), submit_req());
     assert!(
@@ -248,7 +248,7 @@ fn dispatch_blocked_one_ms_past_freshness_bound() {
 
     // Advance BOUND_MS + 1: elapsed strictly exceeds bound, stale.
     now_ms.set(1_000_000 + BOUND_MS + 1);
-    let gw = BrokerGateway::new(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
+    let gw = BrokerGateway::for_test(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
 
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
     let refusal = err

@@ -10,7 +10,8 @@
 //! # tick sequence
 //!
 //! 1.  Claim PENDING outbox rows (DB, `FOR UPDATE SKIP LOCKED`).
-//! 2.  Construct `OutboxClaimToken` (unforgeable; from claimed row IDs).
+//! 2.  Receive `OutboxClaimToken` from `outbox_claim_batch` (FC-2: only the DB
+//!     claim path constructs the token).
 //! 3.  Submit via `BrokerGateway` (gates enforced inside gateway).
 //! 4.  Persist SENT + broker order ID mapping; register in-memory OMS order.
 //! 5.  Fetch broker events via `BrokerGateway::fetch_events`.
@@ -25,10 +26,11 @@ use anyhow::anyhow;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use mqk_db::TimeSource;
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{
     BrokerAdapter, BrokerEvent, BrokerGateway, BrokerOrderMap, BrokerSubmitRequest, IntegrityGate,
-    OutboxClaimToken, ReconcileGate, RiskGate,
+    ReconcileGate, RiskGate,
 };
 use mqk_portfolio::{apply_entry, recompute_from_ledger, Fill, LedgerEntry, PortfolioState};
 
@@ -54,12 +56,13 @@ use mqk_portfolio::{apply_entry, recompute_from_ledger, Fill, LedgerEntry, Portf
 ///     // sleep for polling interval
 /// }
 /// ```
-pub struct ExecutionOrchestrator<B, IG, RG, RecG>
+pub struct ExecutionOrchestrator<B, IG, RG, RecG, TS>
 where
     B: BrokerAdapter,
     IG: IntegrityGate,
     RG: RiskGate,
     RecG: ReconcileGate,
+    TS: TimeSource,
 {
     pool: PgPool,
     gateway: BrokerGateway<B, IG, RG, RecG>,
@@ -68,19 +71,26 @@ where
     portfolio: PortfolioState,
     run_id: Uuid,
     dispatcher_id: String,
+    /// FC-5: injected clock — no direct `Utc::now()` in the dispatch path.
+    time_source: TS,
 }
 
-impl<B, IG, RG, RecG> ExecutionOrchestrator<B, IG, RG, RecG>
+impl<B, IG, RG, RecG, TS> ExecutionOrchestrator<B, IG, RG, RecG, TS>
 where
     B: BrokerAdapter,
     IG: IntegrityGate,
     RG: RiskGate,
     RecG: ReconcileGate,
+    TS: TimeSource,
 {
     /// Construct the orchestrator.
     ///
     /// All in-memory state must be pre-populated by the caller before
     /// the first `tick` call.
+    ///
+    /// `time_source` provides the UTC clock for dispatch timestamps (FC-5).
+    /// Pass [`mqk_db::WallClock`] in production; inject a deterministic stub
+    /// in tests.
     pub fn new(
         pool: PgPool,
         gateway: BrokerGateway<B, IG, RG, RecG>,
@@ -89,6 +99,7 @@ where
         portfolio: PortfolioState,
         run_id: Uuid,
         dispatcher_id: impl Into<String>,
+        time_source: TS,
     ) -> Self {
         Self {
             pool,
@@ -98,6 +109,7 @@ where
             portfolio,
             run_id,
             dispatcher_id: dispatcher_id.into(),
+            time_source,
         }
     }
 
@@ -116,21 +128,27 @@ where
         // ------------------------------------------------------------------
         // Phase 1: Claim and submit outbox rows.
         // ------------------------------------------------------------------
-        let claimed = mqk_db::outbox_claim_batch(&self.pool, 1, &self.dispatcher_id).await?;
+        let claimed = mqk_db::outbox_claim_batch(
+            &self.pool,
+            1,
+            &self.dispatcher_id,
+            self.time_source.now_utc(),
+        )
+        .await?;
 
-        for outbox_row in claimed {
-            let order_id = outbox_row.idempotency_key.clone();
+        for claimed_row in claimed {
+            let order_id = claimed_row.row.idempotency_key.clone();
 
-            // Step 2: construct unforgeable claim token from the claimed row.
-            let claim = OutboxClaimToken::from_claimed_row(outbox_row.outbox_id, &order_id);
+            // Step 2: unforgeable claim token — returned by outbox_claim_batch (FC-2).
+            let claim = &claimed_row.token;
 
             // Build a submit request from the outbox order_json.
-            let req = build_submit_request(&outbox_row)?;
-            let symbol = order_json_symbol(&outbox_row.order_json);
-            let qty = order_json_qty(&outbox_row.order_json);
+            let req = build_submit_request(&claimed_row.row)?;
+            let symbol = order_json_symbol(&claimed_row.row.order_json);
+            let qty = order_json_qty(&claimed_row.row.order_json);
 
             // Step 3: submit via BrokerGateway — the ONLY submit path.
-            let resp = match self.gateway.submit(&claim, req) {
+            let resp = match self.gateway.submit(claim, req) {
                 Ok(r) => r,
                 Err(e) => {
                     mqk_db::outbox_release_claim(&self.pool, &order_id).await?;

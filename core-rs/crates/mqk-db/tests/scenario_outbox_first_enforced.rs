@@ -82,7 +82,7 @@ async fn outbox_row_is_pending_before_broker_submit() -> anyhow::Result<()> {
     // to the broker. This is the L3 two-step protocol.
     let claimed = mqk_db::outbox_claim_batch(&pool, 1, "test-dispatcher").await?;
     assert_eq!(claimed.len(), 1, "dispatcher must claim exactly one row");
-    assert_eq!(claimed[0].status, "CLAIMED");
+    assert_eq!(claimed[0].row.status, "CLAIMED");
 
     // --- Step 4: Simulate broker submit (advance status to SENT) ---
     // In production the dispatcher calls the broker adapter *after* claiming,

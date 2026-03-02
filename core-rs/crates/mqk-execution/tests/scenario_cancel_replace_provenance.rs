@@ -88,7 +88,7 @@ impl ReconcileGate for BoolGate {
 type TestGateway = BrokerGateway<AlwaysOkBroker, BoolGate, BoolGate, BoolGate>;
 
 fn all_clear() -> TestGateway {
-    BrokerGateway::new(
+    BrokerGateway::for_test(
         AlwaysOkBroker,
         BoolGate(true),
         BoolGate(true),
@@ -97,7 +97,7 @@ fn all_clear() -> TestGateway {
 }
 
 fn integrity_down() -> TestGateway {
-    BrokerGateway::new(
+    BrokerGateway::for_test(
         AlwaysOkBroker,
         BoolGate(false),
         BoolGate(true),

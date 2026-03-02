@@ -8,6 +8,32 @@ use uuid::Uuid;
 
 pub const ENV_DB_URL: &str = "MQK_DATABASE_URL";
 
+// ---------------------------------------------------------------------------
+// TimeSource — injectable clock abstraction (FC-5)
+// ---------------------------------------------------------------------------
+
+/// Abstraction over the UTC wall clock, injected wherever enforcement or
+/// state-transition logic needs a timestamp.
+///
+/// Production code uses [`WallClock`], which delegates to `Utc::now()`.
+/// Tests inject a deterministic implementation to remove wall-clock
+/// dependency from scenario replay.
+pub trait TimeSource: Send + Sync {
+    fn now_utc(&self) -> DateTime<Utc>;
+}
+
+/// Production [`TimeSource`] — returns `Utc::now()`.
+///
+/// This is the only place in the enforcement / dispatch path that calls
+/// `Utc::now()` directly.  All callers receive time through `TimeSource`.
+pub struct WallClock;
+
+impl TimeSource for WallClock {
+    fn now_utc(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
 // -----------------------------
 // Backtest Market Data (Patch A/B/C)
 // -----------------------------
@@ -635,6 +661,78 @@ pub struct OutboxRow {
     pub claimed_by: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// OutboxClaimToken (FC-2)
+// ---------------------------------------------------------------------------
+
+/// Unforgeable proof that an outbox row has been claimed via
+/// [`outbox_claim_batch`].
+///
+/// # Forgeability
+///
+/// The `_priv` field is `pub(crate)`, preventing struct-literal construction
+/// outside this crate. The only `pub(crate)` constructor (`OutboxClaimToken::new`)
+/// is called exclusively inside `outbox_claim_batch`, which atomically performs
+/// `FOR UPDATE SKIP LOCKED` — the DB lock IS the proof.
+///
+/// External code may name this type (needed to implement `BrokerAdapter` and
+/// call `BrokerGateway::submit`) but cannot construct it. In production, the
+/// only way to obtain a token is through `outbox_claim_batch`. In tests,
+/// [`OutboxClaimToken::for_test`] is available as an explicit escape hatch.
+///
+/// ```text
+/// ✅  let claimed = outbox_claim_batch(&pool, …).await?;   // production path
+///     let token = &claimed[0].token;
+/// ✅  OutboxClaimToken::for_test(id, key)                  // tests only
+/// ❌  OutboxClaimToken { _priv: (), … }                    // ERROR: private field
+/// ```
+#[allow(clippy::manual_non_exhaustive)]
+#[derive(Debug, Clone)]
+pub struct OutboxClaimToken {
+    /// The DB row ID of the claimed outbox entry.
+    pub outbox_id: i64,
+    /// The idempotency key (`client_order_id`) of the claimed outbox entry.
+    pub idempotency_key: String,
+    /// Prevents struct-literal construction outside this crate (FC-2).
+    pub(crate) _priv: (),
+}
+
+impl OutboxClaimToken {
+    /// Construct a claim token from a successfully claimed outbox row.
+    ///
+    /// `pub(crate)` — only callable inside `mqk-db`. Callers outside this
+    /// crate must obtain tokens via [`outbox_claim_batch`].
+    pub(crate) fn new(outbox_id: i64, idempotency_key: impl Into<String>) -> Self {
+        Self {
+            outbox_id,
+            idempotency_key: idempotency_key.into(),
+            _priv: (),
+        }
+    }
+
+    /// Test-only escape hatch. Do NOT call from production code.
+    ///
+    /// In production, tokens are returned exclusively by [`outbox_claim_batch`],
+    /// coupling each token to a real DB-level row lock. This function bypasses
+    /// that guarantee and exists solely for unit and integration test setup.
+    #[doc(hidden)]
+    pub fn for_test(outbox_id: i64, idempotency_key: impl Into<String>) -> Self {
+        Self::new(outbox_id, idempotency_key)
+    }
+}
+
+/// Return type of [`outbox_claim_batch`].
+///
+/// Bundles the claimed [`OutboxRow`] with its [`OutboxClaimToken`], ensuring
+/// the token is always paired with the row that generated it.
+#[derive(Debug, Clone)]
+pub struct ClaimedOutboxRow {
+    /// The claimed outbox row (status = `CLAIMED`).
+    pub row: OutboxRow,
+    /// Unforgeable proof of the DB claim. Pass to `BrokerGateway::submit`.
+    pub token: OutboxClaimToken,
+}
+
 #[derive(Debug, Clone)]
 pub struct InboxRow {
     pub inbox_id: i64,
@@ -682,8 +780,9 @@ pub async fn outbox_enqueue(
 /// Atomically claim up to `batch_size` PENDING outbox rows for exclusive dispatch.
 ///
 /// Uses `FOR UPDATE SKIP LOCKED` so concurrent dispatchers never claim the same row.
-/// Returns the claimed rows (now in status CLAIMED). Returns an empty Vec if no
-/// PENDING rows are available.
+/// Returns [`ClaimedOutboxRow`]s, each containing the claimed [`OutboxRow`] **and**
+/// an [`OutboxClaimToken`] constructed from the DB row — coupling the token to the
+/// actual lock (FC-2). Returns an empty `Vec` if no `PENDING` rows are available.
 ///
 /// The caller MUST either:
 /// - call `outbox_mark_sent` after a successful broker submit, OR
@@ -692,7 +791,8 @@ pub async fn outbox_claim_batch(
     pool: &PgPool,
     batch_size: i64,
     dispatcher_id: &str,
-) -> Result<Vec<OutboxRow>> {
+    claimed_at: DateTime<Utc>,
+) -> Result<Vec<ClaimedOutboxRow>> {
     let rows = sqlx::query(
         r#"
         with to_claim as (
@@ -705,7 +805,7 @@ pub async fn outbox_claim_batch(
         )
         update oms_outbox
            set status         = 'CLAIMED',
-               claimed_at_utc = now(),
+               claimed_at_utc = $3,
                claimed_by     = $2
          where outbox_id in (select outbox_id from to_claim)
         returning outbox_id, run_id, idempotency_key, order_json, status,
@@ -714,13 +814,14 @@ pub async fn outbox_claim_batch(
     )
     .bind(batch_size)
     .bind(dispatcher_id)
+    .bind(claimed_at)
     .fetch_all(pool)
     .await
     .context("outbox_claim_batch failed")?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        out.push(OutboxRow {
+        let outbox_row = OutboxRow {
             outbox_id: row.try_get("outbox_id")?,
             run_id: row.try_get("run_id")?,
             idempotency_key: row.try_get("idempotency_key")?,
@@ -730,6 +831,11 @@ pub async fn outbox_claim_batch(
             sent_at_utc: row.try_get("sent_at_utc")?,
             claimed_at_utc: row.try_get("claimed_at_utc")?,
             claimed_by: row.try_get("claimed_by")?,
+        };
+        let token = OutboxClaimToken::new(outbox_row.outbox_id, &outbox_row.idempotency_key);
+        out.push(ClaimedOutboxRow {
+            row: outbox_row,
+            token,
         });
     }
     Ok(out)

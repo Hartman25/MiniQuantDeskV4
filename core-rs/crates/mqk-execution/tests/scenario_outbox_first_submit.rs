@@ -88,7 +88,7 @@ impl ReconcileGate for Open {
 }
 
 fn all_clear() -> BrokerGateway<EchoBroker, Open, Open, Open> {
-    BrokerGateway::new(EchoBroker, Open, Open, Open)
+    BrokerGateway::for_test(EchoBroker, Open, Open, Open)
 }
 
 fn registered_map(internal_id: &str, broker_id: &str) -> BrokerOrderMap {
@@ -106,7 +106,7 @@ fn submit_uses_claim_idempotency_key_not_req_order_id() {
     // The claim carries "outbox-key" (from the outbox row's idempotency_key).
     // The request carries a DIFFERENT order_id ("caller-key").
     // The broker must see "outbox-key" — not "caller-key".
-    let claim = OutboxClaimToken::from_claimed_row(42, "outbox-key");
+    let claim = OutboxClaimToken::for_test(42, "outbox-key");
     let req = BrokerSubmitRequest {
         order_id: "caller-key".to_string(), // must be overridden
         symbol: "AAPL".to_string(),
@@ -129,7 +129,7 @@ fn submit_uses_claim_idempotency_key_not_req_order_id() {
 #[test]
 fn submit_when_req_order_id_matches_claim_key_succeeds_unchanged() {
     // When the caller happens to provide the correct key, the override is a no-op.
-    let claim = OutboxClaimToken::from_claimed_row(7, "order-abc");
+    let claim = OutboxClaimToken::for_test(7, "order-abc");
     let req = BrokerSubmitRequest {
         order_id: "order-abc".to_string(),
         symbol: "MSFT".to_string(),
@@ -146,7 +146,7 @@ fn submit_when_req_order_id_matches_claim_key_succeeds_unchanged() {
 #[test]
 fn submit_other_fields_from_req_are_preserved() {
     // Overriding order_id must not corrupt other request fields.
-    let claim = OutboxClaimToken::from_claimed_row(1, "key-1");
+    let claim = OutboxClaimToken::for_test(1, "key-1");
     let req = BrokerSubmitRequest {
         order_id: "wrong".to_string(),
         symbol: "TSLA".to_string(),

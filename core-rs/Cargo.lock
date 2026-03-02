@@ -1838,6 +1838,7 @@ dependencies = [
 name = "mqk-execution"
 version = "0.1.0"
 dependencies = [
+ "mqk-db",
  "serde",
 ]
 

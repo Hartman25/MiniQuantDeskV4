@@ -28,7 +28,7 @@
 //! `submit` requires `claim: &OutboxClaimToken` as its first argument.
 //! The token's `_priv` field is `pub(crate)` — struct-literal construction is
 //! a compile error from external crates. Callers must use
-//! `OutboxClaimToken::from_claimed_row(outbox_id, idempotency_key)`, explicitly
+//! `OutboxClaimToken::for_test(outbox_id, idempotency_key)`, explicitly
 //! declaring that they have a row claimed via `mqk_db::outbox_claim_batch`.
 //!
 //! ## Runtime enforcement (tested here)
@@ -122,7 +122,7 @@ impl ReconcileGate for BoolGate {
 type TestGateway = BrokerGateway<OkBroker, BoolGate, BoolGate, BoolGate>;
 
 fn make_gateway(integrity: bool, risk: bool, reconcile: bool) -> TestGateway {
-    BrokerGateway::new(
+    BrokerGateway::for_test(
         OkBroker,
         BoolGate(integrity),
         BoolGate(risk),
@@ -156,7 +156,7 @@ fn registered_map() -> BrokerOrderMap {
 /// In production, `outbox_id` and `idempotency_key` come from a row returned
 /// by `mqk_db::outbox_claim_batch`. Here we use fixed values for unit testing.
 fn make_claim() -> OutboxClaimToken {
-    OutboxClaimToken::from_claimed_row(1, "ord-test")
+    OutboxClaimToken::for_test(1, "ord-test")
 }
 
 // ---------------------------------------------------------------------------
@@ -336,7 +336,7 @@ fn gate_verdict_cannot_be_forged_externally_documented() {
     //
     // This test passes trivially; the non-forgeability is structural.
     let gw = make_gateway(true, true, true);
-    let claim = OutboxClaimToken::from_claimed_row(1, "ord-test");
+    let claim = OutboxClaimToken::for_test(1, "ord-test");
     let result = gw.submit(&claim, submit_req()); // claim + req, no verdict — compiles
     assert!(result.is_ok());
 }
@@ -360,13 +360,13 @@ fn submit_requires_outbox_claim_token_documented() {
     //
     //   OutboxClaimToken { _priv: (), outbox_id: 1, … } // ERROR: private field
     //
-    // Callers must use OutboxClaimToken::from_claimed_row(outbox_id, idempotency_key),
+    // Callers must use OutboxClaimToken::for_test(outbox_id, idempotency_key),
     // explicitly declaring that they have a claimed outbox row from
     // mqk_db::outbox_claim_batch. This makes outbox-first dispatch a named,
     // structural API requirement rather than an invisible convention.
     //
     // This test passes trivially; the requirement is enforced at every call site.
-    let claim = OutboxClaimToken::from_claimed_row(42, "ord-test");
+    let claim = OutboxClaimToken::for_test(42, "ord-test");
     assert_eq!(claim.outbox_id, 42);
     assert_eq!(claim.idempotency_key, "ord-test");
     let result = make_gateway(true, true, true).submit(&claim, submit_req());

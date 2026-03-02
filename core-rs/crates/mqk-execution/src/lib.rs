@@ -43,9 +43,9 @@ pub use types::{
 /// exported so callers can wire real engine state. `GateVerdicts` is removed
 /// (PATCH A2) — gates are no longer caller-supplied booleans.
 ///
-/// `OutboxClaimToken` is exported so callers can construct the token after a
-/// successful DB claim (PATCH A3). Its `_priv` field is `pub(crate)`, so it
-/// cannot be constructed via struct literal outside `mqk-execution`.
+/// `OutboxClaimToken` is re-exported from `mqk-db` (FC-2). The constructor
+/// is `pub(crate)` in `mqk-db`; the sole production path is
+/// `mqk_db::outbox_claim_batch`. Tests use `OutboxClaimToken::for_test`.
 pub use gateway::{
     intent_id_to_client_order_id, BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken,
     ReconcileGate, RiskGate, UnknownOrder,
