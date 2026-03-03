@@ -73,6 +73,7 @@ pub async fn run_start(engine: String, mode: String, config_paths: Vec<String>) 
         git_hash: &git_hash,
         config_hash: &loaded.config_hash,
         host_fingerprint: &host_fp,
+        now_utc: Utc::now(), // allow: ops-metadata
     })?;
 
     println!("run_id={}", run_id);

@@ -37,6 +37,12 @@ pub struct InitRunArtifactsArgs<'a> {
     pub git_hash: &'a str,
     pub config_hash: &'a str,
     pub host_fingerprint: &'a str,
+    /// I9-4: injected creation time for deterministic manifest.
+    ///
+    /// Pass `time_source.now_utc()` in production or a fixed timestamp in
+    /// tests.  Eliminates `Utc::now()` from the artifacts path so that two
+    /// independent runs with identical inputs produce byte-identical manifests.
+    pub now_utc: DateTime<Utc>,
 }
 
 pub struct InitRunArtifactsResult {
@@ -72,7 +78,7 @@ pub fn init_run_artifacts(args: InitRunArtifactsArgs<'_>) -> Result<InitRunArtif
         git_hash: args.git_hash.to_string(),
         config_hash: args.config_hash.to_string(),
         host_fingerprint: args.host_fingerprint.to_string(),
-        created_at_utc: Utc::now(),
+        created_at_utc: args.now_utc, // I9-4: injected, not Utc::now()
         artifacts: ArtifactList {
             audit_jsonl: "audit.jsonl".to_string(),
             manifest_json: "manifest.json".to_string(),

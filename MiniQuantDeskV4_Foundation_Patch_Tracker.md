@@ -54,7 +54,7 @@
 
 ### Patch P0-1 — Determinism & Safety Guardrails in CI (denylist)
 - **ID:** P0-1
-- **Status:** MISSING
+- **Status:** DONE
 - **Severity:** HIGH
 - **Goal:** Add repo guard script + CI step that fails if forbidden patterns appear in non-test enforcement code.
 - **Non-goals:** Any functional changes.
@@ -75,7 +75,7 @@
 
 ### Patch FD-1 — Make OutboxClaimToken Unforgeable in Production (capability hardening)
 - **ID:** FD-1
-- **Status:** PRESENT-BUT-BYPASSABLE
+- **Status:** DONE
 - **Severity:** CRITICAL
 - **Goal:** Claim tokens can only be created by DB claim code paths; no public constructors in prod.
 - **Non-goals:** No changes to outbox semantics beyond token construction + visibility.
@@ -98,7 +98,7 @@
 
 ### Patch EB-4 — Schema: Enforce Outbox-First Provenance via FK/Constraints
 - **ID:** EB-4 (Master Plan)
-- **Status:** MISSING
+- **Status:** DONE
 - **Severity:** HIGH
 - **Goal:** DB prevents broker map rows without matching outbox idempotency key.
 - **Non-goals:** No schema redesign.
@@ -115,7 +115,7 @@
 
 ### Patch D1-4 — Remove DB `default now()` from semantics-bearing columns
 - **ID:** D1-4 (Master Plan)
-- **Status:** PARTIAL
+- **Status:** DONE
 - **Severity:** HIGH
 - **Goal:** Every semantics-bearing timestamp must be explicitly supplied.
 - **Non-goals:** No removal of timestamps.
@@ -136,7 +136,7 @@
 
 ### Patch D1-3 — Remove wall-clock usage from enforcement decisions
 - **ID:** D1-3 (Master Plan)
-- **Status:** PARTIAL
+- **Status:** DONE
 - **Severity:** HIGH
 - **Goal:** No `Utc::now()` (or equivalent) in enforcement/decisions. Use injected time source.
 - **Non-goals:** You may keep timestamps as **data**, but never for logic decisions unless injected.
@@ -156,7 +156,7 @@
 
 ### Patch FD-2 — Wire the SINGLE Authoritative Runtime Boundary into daemon/CLI
 - **ID:** FD-2
-- **Status:** MISSING
+- **Status:** DONE
 - **Severity:** CRITICAL
 - **Goal:** `mqk-runtime::ExecutionOrchestrator::tick` is the only execution closure path used by daemon/CLI.
 - **Non-goals:** No GUI; no HTTP “nice” routes except control-plane essentials.
@@ -178,7 +178,7 @@
 
 ### Patch EB-1 — Prove Non-bypassable Submit Gate (lifecycle + reconcile + risk)
 - **ID:** EB-1 (Master Plan)
-- **Status:** PARTIAL
+- **Status:** DONE
 - **Severity:** CRITICAL
 - **Goal:** Submits are mechanically impossible unless: (1) claimed outbox token, (2) lifecycle ARMED/RUNNING, (3) reconcile-clean, (4) risk gate pass.
 - **Non-goals:** No strategy changes.
@@ -200,7 +200,7 @@
 
 ### Patch I9-1 — Invariant Authority after every apply + persistent halt/disarm
 - **ID:** I9-1 (Master Plan)
-- **Status:** MISSING
+- **Status:** DONE
 - **Severity:** CRITICAL
 - **Goal:** After every OMS+portfolio apply in runtime tick, invariants are checked; violations persist HALT + DISARM and stop future submits.
 - **Non-goals:** No fancy reporting.
@@ -217,7 +217,7 @@
 
 ### Patch I9-2 — Duplicate/out-of-order broker events proven through the real runtime boundary
 - **ID:** I9-2 (Master Plan)
-- **Status:** MISSING
+- **Status:** DONE
 - **Severity:** HIGH
 - **Goal:** Duplicates/reordering do not change final state (OMS + portfolio).
 - **Non-goals:** No new broker adapters.
@@ -236,7 +236,7 @@
 
 ### Patch I9-3 — Crash Matrix Bound to Runtime Orchestrator
 - **ID:** I9-3 (Master Plan)
-- **Status:** PARTIAL
+- **Status:** DONE
 - **Severity:** HIGH
 - **Goal:** Prove: no double-submit, no double-apply, no divergence after restart across crash windows.
 - **Non-goals:** No performance work.
@@ -257,7 +257,7 @@
 
 ### Patch I9-4 — Deterministic Replay Proof (byte-identical state + audit chain)
 - **ID:** I9-4 (Master Plan)
-- **Status:** MISSING
+- **Status:** DONE
 - **Severity:** HIGH
 - **Goal:** Same inputs + broker event log → byte-identical portfolio state and audit chain.
 - **Non-goals:** No new serialization formats.
@@ -277,7 +277,7 @@
 
 ### Patch R3-2 — Stable ordering for fills / deterministic apply order
 - **ID:** R3-2 (Master Plan)
-- **Status:** PARTIAL
+- **Status:** DONE
 - **Severity:** MEDIUM → HIGH if it gates decisions
 - **Goal:** Enforce stable ordering for any list iteration that affects state transitions / sums.
 - **Non-goals:** No broad refactors.
@@ -294,7 +294,7 @@
 
 ### Patch M4-1 — Fixed-point / explicit rounding for money/exposure/risk gating
 - **ID:** M4-1 (Master Plan)
-- **Status:** MISSING/PARTIAL
+- **Status:** DONE
 - **Severity:** HIGH if any f64 gates execution
 - **Goal:** Remove raw f64 from money/exposure/risk gates OR enforce explicit rounding rules.
 - **Non-goals:** Don’t rewrite the entire portfolio engine; target gates first.

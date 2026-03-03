@@ -19,6 +19,7 @@ fn scenario_run_artifacts_manifest_created() -> Result<()> {
         git_hash: "deadbeef",
         config_hash: "cafebabe",
         host_fingerprint: "HOST|USER|os|arch",
+        now_utc: chrono::Utc::now(),
     })?;
 
     // manifest exists

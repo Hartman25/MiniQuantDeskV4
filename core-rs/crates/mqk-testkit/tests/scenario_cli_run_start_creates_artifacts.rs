@@ -52,6 +52,7 @@ fn run_start_creates_artifacts_with_matching_config_hash() -> Result<()> {
         git_hash: "deadbeef01234567",
         config_hash,
         host_fingerprint: "test_host|test_user|linux|x86_64",
+        now_utc: chrono::Utc::now(),
     })?;
 
     // 3. Verify manifest.json exists and parses
@@ -156,6 +157,7 @@ fn config_hash_is_deterministic_across_artifact_init() -> Result<()> {
         git_hash: "abc123",
         config_hash: &loaded_a.config_hash,
         host_fingerprint: "host",
+        now_utc: chrono::Utc::now(),
     })?;
 
     let out_b = init_run_artifacts(InitRunArtifactsArgs {
@@ -167,6 +169,7 @@ fn config_hash_is_deterministic_across_artifact_init() -> Result<()> {
         git_hash: "abc123",
         config_hash: &loaded_b.config_hash,
         host_fingerprint: "host",
+        now_utc: chrono::Utc::now(),
     })?;
 
     // Both manifests should have the same config_hash

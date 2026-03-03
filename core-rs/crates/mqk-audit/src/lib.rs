@@ -191,13 +191,22 @@ impl AuditWriter {
         }
     }
 
-    /// Append one event.
-    pub fn append(
+    /// Append one event with an injected timestamp.
+    ///
+    /// # I9-4 — Deterministic replay
+    ///
+    /// Use this in any path that requires byte-identical audit chain outputs
+    /// across independent replay runs (execution orchestrator, test harnesses).
+    /// The injected `now_utc` is stored verbatim as `ts_utc` and is included
+    /// in `hash_self`; two calls with identical arguments produce identical
+    /// `AuditEvent` records and an identical chain hash.
+    pub fn append_at(
         &mut self,
         run_id: Uuid,
         topic: &str,
         event_type: &str,
         payload: Value,
+        now_utc: DateTime<Utc>,
     ) -> Result<AuditEvent> {
         // A6-2: rotation check — before writing, advance segment if threshold reached.
         if self.durability.rotation_max_events > 0
@@ -212,7 +221,6 @@ impl AuditWriter {
             }
         }
 
-        let ts_utc = Utc::now();
         // D1-2: event_id derived deterministically from chain state + payload + seq.
         // No RNG. See `derive_event_id` for derivation contract.
         let event_id = derive_event_id(self.last_hash.as_deref(), &payload, self.seq)?;
@@ -221,7 +229,7 @@ impl AuditWriter {
         let mut ev = AuditEvent {
             event_id,
             run_id,
-            ts_utc,
+            ts_utc: now_utc, // I9-4: injected, not wall-clock
             topic: topic.to_string(),
             event_type: event_type.to_string(),
             payload,
@@ -244,6 +252,19 @@ impl AuditWriter {
         append_line(&seg_path, &line, self.durability.sync_on_append)?;
 
         Ok(ev)
+    }
+
+    /// Append one event using wall-clock time (ops-metadata paths only).
+    ///
+    /// For replay-safe audit chains use [`append_at`] with an injected clock.
+    pub fn append(
+        &mut self,
+        run_id: Uuid,
+        topic: &str,
+        event_type: &str,
+        payload: Value,
+    ) -> Result<AuditEvent> {
+        self.append_at(run_id, topic, event_type, payload, Utc::now()) // allow: ops-metadata
     }
 }
 
