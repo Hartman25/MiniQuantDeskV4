@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+#[cfg(feature = "testkit")]
 use std::path::PathBuf;
 
 mod commands;
@@ -9,10 +10,14 @@ use commands::{
     bkt::{run_backtest_csv, run_backtest_db},
     load_payload,
     run::{
-        run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_execute, run_halt,
-        run_heartbeat, run_loop, run_start, run_status, run_stop,
+        run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_halt, run_heartbeat,
+        run_start, run_status, run_stop,
     },
 };
+// RT-2: run_execute uses BrokerGateway::for_test (stub wiring); gated in production.
+// RT-8: run_loop uses mqk_testkit::Orchestrator; gated in production.
+#[cfg(feature = "testkit")]
+use commands::run::{run_execute, run_loop};
 
 // ---------------------------------------------------------------------------
 // Clap CLI structure
@@ -280,6 +285,8 @@ enum RunCmd {
     },
 
     /// FD-2: Run the authoritative ExecutionOrchestrator tick loop against a live DB.
+    /// RT-2: only available when built with --features testkit.
+    #[cfg(feature = "testkit")]
     Execute {
         /// Run id (must be RUNNING)
         #[arg(long)]
@@ -291,6 +298,8 @@ enum RunCmd {
     },
 
     /// Execute a deterministic orchestrator loop (testkit) with synthetic bars.
+    /// RT-8: only available when built with --features testkit.
+    #[cfg(feature = "testkit")]
     Loop {
         #[arg(long)]
         run_id: String,
@@ -494,9 +503,11 @@ async fn main() -> Result<()> {
             } => {
                 run_deadman_enforce(run_id, ttl_seconds).await?;
             }
+            #[cfg(feature = "testkit")]
             RunCmd::Execute { run_id, ticks } => {
                 run_execute(run_id, ticks).await?;
             }
+            #[cfg(feature = "testkit")]
             RunCmd::Loop {
                 run_id,
                 symbol,

@@ -139,7 +139,9 @@ fn replay_audit(log: &[Value], dir: &Path) -> String {
             .expect("append_at failed");
     }
 
-    writer.last_hash().expect("audit log must have at least one event")
+    writer
+        .last_hash()
+        .expect("audit log must have at least one event")
 }
 
 // ---------------------------------------------------------------------------
@@ -200,10 +202,10 @@ fn audit_chain_is_deterministic_with_injected_time() {
     );
 
     // Both chains must be independently valid.
-    let result_a = verify_hash_chain(tmp_a.path().join("audit.jsonl"))
-        .expect("verify_hash_chain a failed");
-    let result_b = verify_hash_chain(tmp_b.path().join("audit.jsonl"))
-        .expect("verify_hash_chain b failed");
+    let result_a =
+        verify_hash_chain(tmp_a.path().join("audit.jsonl")).expect("verify_hash_chain a failed");
+    let result_b =
+        verify_hash_chain(tmp_b.path().join("audit.jsonl")).expect("verify_hash_chain b failed");
 
     assert!(
         matches!(result_a, VerifyResult::Valid { .. }),

@@ -115,7 +115,7 @@ async fn marked_applied_fill_absent_from_recovery_list() {
     assert!(inserted, "first inbox insert must return true");
 
     // Normal path: apply completed, stamp the row.
-    mqk_db::inbox_mark_applied(&pool, &msg_id, chrono::Utc::now())
+    mqk_db::inbox_mark_applied(&pool, run_id, &msg_id, chrono::Utc::now())
         .await
         .expect("inbox_mark_applied");
 
@@ -160,7 +160,7 @@ async fn duplicate_fill_cannot_double_apply() {
         .expect("first inbox_insert_deduped");
     if inserted {
         apply_count += 1;
-        mqk_db::inbox_mark_applied(&pool, &msg_id, chrono::Utc::now())
+        mqk_db::inbox_mark_applied(&pool, run_id, &msg_id, chrono::Utc::now())
             .await
             .expect("inbox_mark_applied");
     }

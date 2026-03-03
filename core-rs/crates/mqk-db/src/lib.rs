@@ -470,7 +470,7 @@ pub async fn arm_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
         r#"
         update runs
         set status = 'ARMED',
-            armed_at_utc = now()
+            armed_at_utc = now() -- allow: ops-metadata
         where run_id = $1
         "#,
     )
@@ -513,7 +513,7 @@ pub async fn begin_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
         r#"
         update runs
         set status = 'RUNNING',
-            running_at_utc = now()
+            running_at_utc = now() -- allow: ops-metadata
         where run_id = $1
         "#,
     )
@@ -537,7 +537,7 @@ pub async fn stop_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
         r#"
         update runs
         set status = 'STOPPED',
-            stopped_at_utc = now()
+            stopped_at_utc = now() -- allow: ops-metadata
         where run_id = $1
         "#,
     )
@@ -666,11 +666,15 @@ pub struct OutboxRow {
     pub run_id: Uuid,
     pub idempotency_key: String,
     pub order_json: Value,
-    pub status: String, // PENDING | CLAIMED | SENT | ACKED | FAILED
+    pub status: String, // PENDING | CLAIMED | DISPATCHING | SENT | ACKED | FAILED
     pub created_at_utc: DateTime<Utc>,
     pub sent_at_utc: Option<DateTime<Utc>>,
     pub claimed_at_utc: Option<DateTime<Utc>>,
     pub claimed_by: Option<String>,
+    /// RT-5: timestamp written before gateway.submit(); null until DISPATCHING.
+    pub dispatching_at_utc: Option<DateTime<Utc>>,
+    /// RT-5: dispatcher identity written before gateway.submit(); null until DISPATCHING.
+    pub dispatch_attempt_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -749,6 +753,15 @@ impl OutboxClaimToken {
 ///
 /// Bundles the claimed [`OutboxRow`] with its [`OutboxClaimToken`], ensuring
 /// the token is always paired with the row that generated it.
+///
+/// # Availability
+///
+/// Gated behind `feature = "runtime-claim"` (production) or `feature = "testkit"`
+/// (tests). See RT-1.
+// RT-1: single-dispatcher boundary. Only mqk-runtime (runtime-claim feature) and
+// test infrastructure (testkit feature) may use this type. Daemon and CLI must
+// not depend on mqk-db with either feature active.
+#[cfg(any(feature = "runtime-claim", feature = "testkit"))]
 #[derive(Debug, Clone)]
 pub struct ClaimedOutboxRow {
     /// The claimed outbox row (status = `CLAIMED`).
@@ -808,9 +821,22 @@ pub async fn outbox_enqueue(
 /// an [`OutboxClaimToken`] constructed from the DB row — coupling the token to the
 /// actual lock (FC-2). Returns an empty `Vec` if no `PENDING` rows are available.
 ///
-/// The caller MUST either:
-/// - call `outbox_mark_sent` after a successful broker submit, OR
-/// - call `outbox_release_claim` on failure to revert to PENDING.
+/// The caller MUST:
+/// - call `outbox_mark_dispatching` immediately before `gateway.submit()`, THEN
+/// - call `outbox_mark_sent` after a successful submit (DISPATCHING → SENT), OR
+/// - call `outbox_mark_failed` on submit failure (row quarantined as FAILED).
+///
+/// `outbox_release_claim` (CLAIMED → PENDING) is only valid while the row is
+/// still CLAIMED — i.e. before `outbox_mark_dispatching` is called.
+///
+/// # Availability — RT-1 single-dispatcher gate
+///
+/// This function is only compiled when `feature = "runtime-claim"` (enabled
+/// exclusively by `mqk-runtime`) or `feature = "testkit"` (test infrastructure)
+/// is active. Daemon and CLI crates must NOT enable either feature; any attempt
+/// to call this function from those crates produces `error[E0425]` at compile time.
+// RT-1: gate enforced here. Do not remove without updating the prover.
+#[cfg(any(feature = "runtime-claim", feature = "testkit"))]
 pub async fn outbox_claim_batch(
     pool: &PgPool,
     batch_size: i64,
@@ -833,7 +859,8 @@ pub async fn outbox_claim_batch(
                claimed_by     = $2
          where outbox_id in (select outbox_id from to_claim)
         returning outbox_id, run_id, idempotency_key, order_json, status,
-                  created_at_utc, sent_at_utc, claimed_at_utc, claimed_by
+                  created_at_utc, sent_at_utc, claimed_at_utc, claimed_by,
+                  dispatching_at_utc, dispatch_attempt_id
         "#,
     )
     .bind(batch_size)
@@ -855,6 +882,8 @@ pub async fn outbox_claim_batch(
             sent_at_utc: row.try_get("sent_at_utc")?,
             claimed_at_utc: row.try_get("claimed_at_utc")?,
             claimed_by: row.try_get("claimed_by")?,
+            dispatching_at_utc: row.try_get("dispatching_at_utc")?,
+            dispatch_attempt_id: row.try_get("dispatch_attempt_id")?,
         };
         let token = OutboxClaimToken::new(outbox_row.outbox_id, &outbox_row.idempotency_key);
         out.push(ClaimedOutboxRow {
@@ -886,6 +915,47 @@ pub async fn outbox_release_claim(pool: &PgPool, idempotency_key: &str) -> Resul
     .fetch_optional(pool)
     .await
     .context("outbox_release_claim failed")?;
+
+    Ok(row.is_some())
+}
+
+/// RT-5: Advance a CLAIMED outbox row to DISPATCHING immediately before calling
+/// `gateway.submit()`.
+///
+/// Writing DISPATCHING before the broker call closes the W4 crash window:
+/// `outbox_reset_stale_claims` only resets `CLAIMED` rows — a crash between
+/// `outbox_mark_dispatching` and `outbox_mark_sent` leaves the row in
+/// `DISPATCHING`, preventing silent requeue and double-submit on restart.
+///
+/// `dispatching_at` is caller-supplied (no SQL `now()` — FC-7 policy).
+/// `dispatch_attempt_id` identifies which dispatcher instance was in-flight;
+/// used for crash-recovery audit.
+///
+/// Returns `true` if the row transitioned `CLAIMED → DISPATCHING`; `false` if
+/// not found or not in `CLAIMED` state.
+pub async fn outbox_mark_dispatching(
+    pool: &PgPool,
+    idempotency_key: &str,
+    dispatch_attempt_id: &str,
+    dispatching_at: DateTime<Utc>,
+) -> Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"
+        update oms_outbox
+           set status              = 'DISPATCHING',
+               dispatching_at_utc  = $3,
+               dispatch_attempt_id = $2
+         where idempotency_key = $1
+           and status = 'CLAIMED'
+        returning outbox_id
+        "#,
+    )
+    .bind(idempotency_key)
+    .bind(dispatch_attempt_id)
+    .bind(dispatching_at)
+    .fetch_optional(pool)
+    .await
+    .context("outbox_mark_dispatching failed")?;
 
     Ok(row.is_some())
 }
@@ -934,7 +1004,8 @@ pub async fn outbox_fetch_by_idempotency_key(
     let row = sqlx::query(
         r#"
         select outbox_id, run_id, idempotency_key, order_json, status,
-               created_at_utc, sent_at_utc, claimed_at_utc, claimed_by
+               created_at_utc, sent_at_utc, claimed_at_utc, claimed_by,
+               dispatching_at_utc, dispatch_attempt_id
         from oms_outbox
         where idempotency_key = $1
         "#,
@@ -956,13 +1027,20 @@ pub async fn outbox_fetch_by_idempotency_key(
         sent_at_utc: row.try_get("sent_at_utc")?,
         claimed_at_utc: row.try_get("claimed_at_utc")?,
         claimed_by: row.try_get("claimed_by")?,
+        dispatching_at_utc: row.try_get("dispatching_at_utc")?,
+        dispatch_attempt_id: row.try_get("dispatch_attempt_id")?,
     }))
 }
 
-/// Mark a CLAIMED outbox row as SENT (sets sent_at_utc).
+/// Mark a CLAIMED or DISPATCHING outbox row as SENT (sets sent_at_utc).
 ///
-/// Returns true if a row transitioned CLAIMED → SENT; false if not found or
-/// not in CLAIMED state.
+/// Returns true if a row transitioned to SENT; false if not found or not in
+/// an acceptable pre-SENT state.
+///
+/// Accepts both `CLAIMED` and `DISPATCHING` for backward compatibility:
+/// - Production path (RT-5): `DISPATCHING → SENT` (row was marked DISPATCHING
+///   before `gateway.submit()`).
+/// - Legacy test path: `CLAIMED → SENT` (tests that skip `outbox_mark_dispatching`).
 ///
 /// **Patch L3 enforcement:** only rows that have been claimed via
 /// `outbox_claim_batch` can be marked SENT. Attempting to mark a PENDING row
@@ -983,7 +1061,7 @@ pub async fn outbox_mark_sent(
            set status      = 'SENT',
                sent_at_utc = coalesce(sent_at_utc, $2)
          where idempotency_key = $1
-           and status = 'CLAIMED'
+           and status in ('CLAIMED', 'DISPATCHING')
         returning outbox_id
         "#,
     )
@@ -1015,17 +1093,18 @@ pub async fn outbox_mark_acked(pool: &PgPool, idempotency_key: &str) -> Result<b
     Ok(row.is_some())
 }
 
-/// Mark a CLAIMED outbox row as FAILED.
+/// Mark a CLAIMED or DISPATCHING outbox row as FAILED.
 ///
-/// Returns true if a row transitioned CLAIMED → FAILED; false otherwise.
-/// Only CLAIMED rows can be failed — use `outbox_claim_batch` first.
+/// Returns true if a row transitioned to FAILED; false otherwise.
+/// Accepts both `CLAIMED` and `DISPATCHING` — use `outbox_claim_batch` first.
+/// After RT-5, the production submit-failure path calls this with a DISPATCHING row.
 pub async fn outbox_mark_failed(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
         update oms_outbox
            set status = 'FAILED'
          where idempotency_key = $1
-           and status = 'CLAIMED'
+           and status in ('CLAIMED', 'DISPATCHING')
         returning outbox_id
         "#,
     )
@@ -1039,8 +1118,8 @@ pub async fn outbox_mark_failed(pool: &PgPool, idempotency_key: &str) -> Result<
 
 /// Recovery query: list outbox rows that are not terminal (not ACKED).
 ///
-/// Includes PENDING, CLAIMED, SENT, and FAILED rows — all statuses that
-/// indicate the order has not yet been confirmed by the broker.
+/// Includes PENDING, CLAIMED, DISPATCHING, SENT, and FAILED rows — all statuses
+/// that indicate the order has not yet been confirmed by the broker.
 ///
 /// NOTE: This does NOT talk to broker yet.
 /// It provides the minimal deterministic input required for a future reconcile step.
@@ -1048,10 +1127,11 @@ pub async fn outbox_list_unacked_for_run(pool: &PgPool, run_id: Uuid) -> Result<
     let rows = sqlx::query(
         r#"
         select outbox_id, run_id, idempotency_key, order_json, status,
-               created_at_utc, sent_at_utc, claimed_at_utc, claimed_by
+               created_at_utc, sent_at_utc, claimed_at_utc, claimed_by,
+               dispatching_at_utc, dispatch_attempt_id
         from oms_outbox
         where run_id = $1
-          and status in ('PENDING','CLAIMED','SENT','FAILED')
+          and status in ('PENDING','CLAIMED','DISPATCHING','SENT','FAILED')
         order by outbox_id asc
         "#,
     )
@@ -1072,6 +1152,8 @@ pub async fn outbox_list_unacked_for_run(pool: &PgPool, run_id: Uuid) -> Result<
             sent_at_utc: row.try_get("sent_at_utc")?,
             claimed_at_utc: row.try_get("claimed_at_utc")?,
             claimed_by: row.try_get("claimed_by")?,
+            dispatching_at_utc: row.try_get("dispatching_at_utc")?,
+            dispatch_attempt_id: row.try_get("dispatch_attempt_id")?,
         });
     }
     Ok(out)
@@ -1090,7 +1172,7 @@ pub async fn persist_arm_state(pool: &PgPool, state: &str, reason: Option<&str>)
     sqlx::query(
         r#"
         insert into sys_arm_state (sentinel_id, state, reason, updated_at_utc)
-        values (1, $1, $2, now())
+        values (1, $1, $2, now()) -- allow: ops-metadata
         on conflict (sentinel_id) do update
             set state          = excluded.state,
                 reason         = excluded.reason,
@@ -1126,18 +1208,22 @@ pub async fn load_arm_state(pool: &PgPool) -> Result<Option<(String, Option<Stri
     Ok(row)
 }
 
-/// Insert a broker message/fill into oms_inbox with dedupe on broker_message_id.
+/// Insert a broker message/fill into oms_inbox with dedupe on (run_id, broker_message_id).
 ///
 /// Idempotent behavior:
-/// - If broker_message_id already exists, returns Ok(false) and does NOT create a second row.
+/// - If (run_id, broker_message_id) already exists, returns Ok(false) and does NOT create a
+///   second row.
 /// - If inserted, returns Ok(true).
+///
+/// RT-3: dedupe is scoped to the run — the same broker_message_id can appear in different
+/// runs without collision (broker IDs are only unique within a session).
 ///
 /// Patch D2 caller contract:
 /// ```text
 /// let inserted = inbox_insert_deduped(pool, run_id, msg_id, json).await?;
 /// if inserted {
-///     apply_fill_to_portfolio(json);          // idempotent apply
-///     inbox_mark_applied(pool, msg_id).await?; // journal completion
+///     apply_fill_to_portfolio(json);                   // idempotent apply
+///     inbox_mark_applied(pool, run_id, msg_id).await?; // journal completion
 /// }
 /// ```
 /// On crash between insert and mark_applied: the row surfaces in
@@ -1152,7 +1238,7 @@ pub async fn inbox_insert_deduped(
         r#"
         insert into oms_inbox (run_id, broker_message_id, message_json)
         values ($1, $2, $3)
-        on conflict (broker_message_id) do nothing
+        on conflict (run_id, broker_message_id) do nothing
         returning inbox_id
         "#,
     )
@@ -1174,25 +1260,30 @@ pub async fn inbox_insert_deduped(
 /// - Rows where `applied_at_utc IS NULL` appear in
 ///   `inbox_load_unapplied_for_run` and must be replayed at startup.
 ///
+/// RT-3: `run_id` is now required — dedupe is scoped to (run_id, broker_message_id).
+///
 /// `applied_at` is caller-supplied — no SQL `now()` in this function (FC-8
 /// policy: wall-clock excluded from the fill-apply path).  In production,
 /// pass `time_source.now_utc()`; in tests, pass an explicit timestamp.
 ///
-/// Idempotent: silently succeeds if `broker_message_id` is not present or
-/// has already been stamped.
+/// Idempotent: silently succeeds if (run_id, broker_message_id) is not present
+/// or has already been stamped.
 pub async fn inbox_mark_applied(
     pool: &PgPool,
+    run_id: Uuid,
     broker_message_id: &str,
     applied_at: DateTime<Utc>,
 ) -> Result<()> {
     sqlx::query(
         r#"
         update oms_inbox
-           set applied_at_utc = $2
-         where broker_message_id = $1
+           set applied_at_utc = $3
+         where run_id = $1
+           and broker_message_id = $2
            and applied_at_utc is null
         "#,
     )
+    .bind(run_id)
     .bind(broker_message_id)
     .bind(applied_at)
     .execute(pool)
@@ -1205,8 +1296,8 @@ pub async fn inbox_mark_applied(
 /// (`applied_at_utc IS NULL`).
 ///
 /// Call this at startup/recovery to identify fills whose apply step did not
-/// complete before a crash.  Replay these fills in `inbox_id` ascending order;
-/// each apply must be idempotent so re-applying a partially-applied fill is
+/// complete before a crash.  Replay these events in canonical (`broker_message_id`)
+/// order; each apply must be idempotent so re-applying a partially-applied fill is
 /// safe.  After successfully applying each row, call `inbox_mark_applied`.
 ///
 /// Uses the partial index `idx_inbox_run_unapplied` for efficiency.
@@ -1218,7 +1309,7 @@ pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result
           from oms_inbox
          where run_id = $1
            and applied_at_utc is null
-         order by inbox_id asc
+         order by broker_message_id asc
         "#,
     )
     .bind(run_id)

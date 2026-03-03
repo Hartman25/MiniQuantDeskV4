@@ -12,6 +12,8 @@ serde_json.workspace = true
 uuid.workspace = true
 sqlx.workspace = true
 
-mqk-db = { path = "../mqk-db" }
+# RT-1: runtime-claim is the ONLY production activation of outbox_claim_batch.
+# No other crate's [dependencies] may enable this feature.
+mqk-db = { path = "../mqk-db", features = ["runtime-claim"] }
 mqk-execution = { path = "../mqk-execution" }
 mqk-portfolio = { path = "../mqk-portfolio" }

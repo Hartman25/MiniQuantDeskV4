@@ -256,8 +256,7 @@ async fn i91_invariant_violation_halts_run_and_disarms() -> anyhow::Result<()> {
         "broker_message_id": "i91-s1-msg-001",
         "internal_order_id": "i91-s1-ord-001"
     });
-    let inserted =
-        mqk_db::inbox_insert_deduped(&pool, run_id, "i91-s1-msg-001", msg_json).await?;
+    let inserted = mqk_db::inbox_insert_deduped(&pool, run_id, "i91-s1-msg-001", msg_json).await?;
     assert!(inserted, "S1: inbox Ack row must be inserted");
 
     // ── tick() must fail with INVARIANT_VIOLATED ──────────────────────────

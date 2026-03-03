@@ -207,6 +207,9 @@ where
     ///
     /// FC-3: mirrors `OutboxClaimToken::for_test` — explicit naming makes the
     /// test/production distinction structural rather than invisible.
+    ///
+    /// RT-2: gated — not available in production builds without `testkit` feature.
+    #[cfg(any(test, feature = "testkit"))]
     #[doc(hidden)]
     pub fn for_test(broker: B, integrity: IG, risk: RG, reconcile: RecG) -> Self {
         Self::new(broker, integrity, risk, reconcile)

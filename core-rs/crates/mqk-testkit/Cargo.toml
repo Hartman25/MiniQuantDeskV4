@@ -34,6 +34,10 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # mqk-daemon and mqk-cli production builds via transitive dependency.
 mqk-db = { path = "../mqk-db", features = ["testkit"] }
 
+# RT-2: activates BrokerGateway::for_test for scenario tests under tests/.
+# MUST NOT be moved to [dependencies] — same transitive propagation concern.
+mqk-execution = { path = "../mqk-execution", features = ["testkit"] }
+
 # Needed by the scenario tests:
 mqk-broker-paper = { path = "../mqk-broker-paper" }
 mqk-reconcile    = { path = "../mqk-reconcile" }

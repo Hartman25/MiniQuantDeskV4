@@ -18,12 +18,50 @@ uuid = { version = "1", features = ["serde", "v4"] }
 # Cargo invocations. Only test crates should list this in [dev-dependencies].
 testkit = []
 
-# The prover integration test requires the testkit feature to be active so
-# that `OutboxClaimToken::for_test` compiles (integration tests are external
-# to the crate and do not benefit from the crate-level `#[cfg(test)]` gate).
-# Run with: cargo test -p mqk-db --features testkit --test prover_claim_token_unforgeable
+# RT-1: Enables `outbox_claim_batch` + `ClaimedOutboxRow`.
+# MUST be listed ONLY in `mqk-runtime`'s [dependencies]. Every other crate
+# (daemon, cli, strategy, …) must leave this feature absent so that the
+# single-dispatcher invariant is enforced at compile time.
+# Daemon/CLI depend on mqk-db WITHOUT this feature; any attempt to call
+# outbox_claim_batch from those crates produces:
+#   error[E0425]: cannot find function `outbox_claim_batch` in module `mqk_db`
+runtime-claim = []
+
+# Positive prover: OutboxClaimToken forge-resistance (FD-1).
+# Run: cargo test -p mqk-db --features testkit --test prover_claim_token_unforgeable
 [[test]]
 name = "prover_claim_token_unforgeable"
+required-features = ["testkit"]
+
+# RT-1 positive prover: outbox_claim_batch accessible under runtime-claim.
+# Run: cargo test -p mqk-db --features runtime-claim --test prover_outbox_claim_rt1
+[[test]]
+name = "prover_outbox_claim_rt1"
+path = "tests/prover_outbox_claim_rt1.rs"
+required-features = ["runtime-claim"]
+
+# RT-1: these four tests call outbox_claim_batch directly and therefore require
+# the testkit feature (which mqk-testkit activates via its dev-dependencies).
+# Without required-features, cargo test --workspace would try to compile them
+# without any feature active and fail because outbox_claim_batch is gated.
+[[test]]
+name = "scenario_outbox_claim_lock_prevents_double_dispatch"
+path = "tests/scenario_outbox_claim_lock_prevents_double_dispatch.rs"
+required-features = ["testkit"]
+
+[[test]]
+name = "scenario_stale_claim_recovery"
+path = "tests/scenario_stale_claim_recovery.rs"
+required-features = ["testkit"]
+
+[[test]]
+name = "scenario_recovery_query_returns_pending_outbox"
+path = "tests/scenario_recovery_query_returns_pending_outbox.rs"
+required-features = ["testkit"]
+
+[[test]]
+name = "scenario_outbox_first_enforced"
+path = "tests/scenario_outbox_first_enforced.rs"
 required-features = ["testkit"]
 
 [dev-dependencies]

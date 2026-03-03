@@ -22,9 +22,16 @@
 #   Pure Rust comment lines (leading //) are excluded from [U/T/S/M/R] checks.
 #   This lets maintainers explicitly acknowledge a use is intentional.
 #
-#   Current allow-listed items:
-#     mqk-db/src/lib.rs WallClock::now_utc()      — "// allow: wall-clock-canonical"
+#   Current allow-listed items (Rust // allow:):
 #     mqk-daemon/src/state.rs spawn_heartbeat ts  — "// allow: ops-metadata"
+#     (WallClock::now_utc() was moved to mqk-runtime/src/orchestrator.rs in D1-3;
+#      it is outside the [T] guard scope of mqk-db/src/)
+#
+#   Current allow-listed items (SQL -- allow:, used in [Q] guard):
+#     mqk-db/src/lib.rs arm_run armed_at_utc      — "-- allow: ops-metadata"
+#     mqk-db/src/lib.rs begin_run running_at_utc  — "-- allow: ops-metadata"
+#     mqk-db/src/lib.rs stop_run stopped_at_utc   — "-- allow: ops-metadata"
+#     mqk-db/src/lib.rs persist_arm_state upd_at  — "-- allow: ops-metadata"
 #
 # Exit codes: 0 = clean, 1 = violations found.
 #
@@ -282,6 +289,55 @@ if [ "$SQL_VIOLATIONS" -eq 0 ]; then
     green "  OK — no DEFAULT now() in post-D1-4 migrations (>= 0012)"
 else
     red "  Remediation: remove DEFAULT now(); inject timestamp via now: DateTime<Utc> caller parameter."
+fi
+
+# =============================================================================
+# [Q] SQL now() in inline SQL strings within mqk-db/src/
+#
+# sqlx::query strings containing now() are equivalent to DEFAULT now() in a
+# migration: the DB server supplies a non-deterministic wall-clock timestamp.
+# Any column written by the enforcement or capital-decision path must receive
+# an injected caller timestamp, not a DB-side now().
+#
+# Exemption:
+#   Annotate the SQL line with a trailing SQL comment "-- allow: ops-metadata"
+#   for columns that are pure bookkeeping (lifecycle timestamps, UI metadata)
+#   and are NOT read by any enforcement or capital-decision path.
+#   A trailing "// allow:" Rust annotation also suppresses the check.
+# =============================================================================
+
+echo ""
+info "--- [Q] SQL now() in inline SQL strings within mqk-db/src/ ---"
+
+SQL_NOW_VIOLATIONS=0
+SQL_NOW_MATCH_LINES=""
+
+if [ -d "$MQK_DB_SRC" ]; then
+    while IFS= read -r -d '' rs_file; do
+        matches=$(grep -n "now()" "$rs_file" 2>/dev/null \
+            | grep -v "^[0-9][0-9]*:[[:space:]]*//" \
+            | grep -v "// allow:" \
+            | grep -v -e "-- allow:" \
+            || true)
+        if [ -n "$matches" ]; then
+            SQL_NOW_VIOLATIONS=$((SQL_NOW_VIOLATIONS + 1))
+            rel="${rs_file#"${REPO_ROOT}/"}"
+            while IFS= read -r line; do
+                SQL_NOW_MATCH_LINES="${SQL_NOW_MATCH_LINES}  ${rel}:${line}"$'\n'
+            done <<< "$matches"
+        fi
+    done < <(find "$MQK_DB_SRC" \
+        -type f -name "*.rs" ! -path "*/target/*" -print0)
+fi
+
+if [ "$SQL_NOW_VIOLATIONS" -eq 0 ]; then
+    green "  OK — no unannotated SQL now() in mqk-db/src/"
+else
+    VIOLATIONS=$((VIOLATIONS + SQL_NOW_VIOLATIONS))
+    red "  FAIL — SQL now() found in ${SQL_NOW_VIOLATIONS} file(s) in mqk-db/src/:"
+    printf '%s' "$SQL_NOW_MATCH_LINES"
+    red "  Remediation: inject timestamp as caller parameter, or annotate with"
+    red "  '-- allow: ops-metadata' if the column is pure bookkeeping metadata."
 fi
 
 # =============================================================================

@@ -18,7 +18,7 @@
 //!
 //! DB-backed test. Skips if `MQK_DATABASE_URL` is not set.
 
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use uuid::Uuid;
 
 /// Returns true if `err` is a PostgreSQL CHECK constraint violation (SQLSTATE 23514).
@@ -28,6 +28,11 @@ fn is_check_violation(err: &sqlx::Error) -> bool {
     } else {
         false
     }
+}
+
+/// Deterministic timestamp for DB tests (avoid `now()` / wall-clock time).
+fn fixed_ts_utc() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap()
 }
 
 #[tokio::test]
@@ -55,7 +60,7 @@ async fn check_constraints_reject_invalid_enum_values() -> anyhow::Result<()> {
             run_id,
             engine_id: format!("TEST_D1_{}", Uuid::new_v4()),
             mode: "PAPER".to_string(),
-            started_at_utc: Utc::now(),
+            started_at_utc: fixed_ts_utc(),
             git_hash: "TEST".to_string(),
             config_hash: "CFG_D1".to_string(),
             config_json: serde_json::json!({}),
@@ -152,14 +157,19 @@ async fn check_constraints_reject_invalid_enum_values() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // 5. sys_reconcile_checkpoint.verdict CHECK — invalid verdict must be rejected
     // -----------------------------------------------------------------------
+    //
+    // Important: sys_reconcile_checkpoint has NOT NULL columns beyond the ones
+    // we’re trying to violate. We must satisfy those so the error is a CHECK
+    // violation (23514), not a NOT NULL violation.
 
     let err = sqlx::query(
         r#"
-        insert into sys_reconcile_checkpoint (run_id, verdict, snapshot_watermark_ms, result_hash)
-        values ($1, 'MAYBE', 0, 'h')
+        insert into sys_reconcile_checkpoint (run_id, verdict, snapshot_watermark_ms, result_hash, created_at_utc)
+        values ($1, 'MAYBE', 0, 'h', $2)
         "#,
     )
     .bind(run_id)
+    .bind(fixed_ts_utc())
     .execute(&pool)
     .await
     .unwrap_err();
@@ -195,16 +205,19 @@ async fn check_constraints_reject_invalid_enum_values() -> anyhow::Result<()> {
     // 7. oms_outbox pending_metadata_absent CHECK (FC-4)
     //    PENDING row with claimed_at_utc set must be rejected.
     // -----------------------------------------------------------------------
+    //
+    // Avoid `now()` here (nondeterministic). A fixed timestamptz literal is fine.
 
     let err = sqlx::query(
         r#"
         insert into oms_outbox
             (run_id, idempotency_key, order_json, status, claimed_at_utc, claimed_by)
-        values ($1, $2, '{}', 'PENDING', now(), 'dispatcher-1')
+        values ($1, $2, '{}', 'PENDING', $3, 'dispatcher-1')
         "#,
     )
     .bind(run_id)
     .bind(format!("ik-fc4-pending-{}", Uuid::new_v4()))
+    .bind(fixed_ts_utc())
     .execute(&pool)
     .await
     .unwrap_err();

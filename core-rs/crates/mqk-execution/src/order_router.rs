@@ -26,10 +26,18 @@ pub enum BrokerEvent {
     Ack {
         broker_message_id: String,
         internal_order_id: String,
+        /// RT-9: the broker/exchange-assigned order ID carried in the Ack.
+        /// `None` for adapters that do not distinguish broker ID from internal ID
+        /// (e.g. paper). `Some` for live adapters where the exchange assigns its
+        /// own ID asynchronously. When `Some`, Phase 3b updates `BrokerOrderMap`
+        /// with the authoritative ID.
+        broker_order_id: Option<String>,
     },
     PartialFill {
         broker_message_id: String,
         internal_order_id: String,
+        /// RT-9: broker-assigned order ID associated with this fill event.
+        broker_order_id: Option<String>,
         symbol: String,
         side: crate::types::Side,
         delta_qty: i64,
@@ -39,6 +47,8 @@ pub enum BrokerEvent {
     Fill {
         broker_message_id: String,
         internal_order_id: String,
+        /// RT-9: broker-assigned order ID associated with this fill event.
+        broker_order_id: Option<String>,
         symbol: String,
         side: crate::types::Side,
         delta_qty: i64,
@@ -48,22 +58,32 @@ pub enum BrokerEvent {
     CancelAck {
         broker_message_id: String,
         internal_order_id: String,
+        /// RT-9: broker-assigned order ID for the cancelled order.
+        broker_order_id: Option<String>,
     },
     CancelReject {
         broker_message_id: String,
         internal_order_id: String,
+        /// RT-9: broker-assigned order ID for the rejected cancel.
+        broker_order_id: Option<String>,
     },
     ReplaceAck {
         broker_message_id: String,
         internal_order_id: String,
+        /// RT-9: broker-assigned order ID for the replaced order.
+        broker_order_id: Option<String>,
     },
     ReplaceReject {
         broker_message_id: String,
         internal_order_id: String,
+        /// RT-9: broker-assigned order ID for the rejected replace.
+        broker_order_id: Option<String>,
     },
     Reject {
         broker_message_id: String,
         internal_order_id: String,
+        /// RT-9: broker-assigned order ID for the rejected order.
+        broker_order_id: Option<String>,
     },
 }
 
@@ -95,6 +115,40 @@ impl BrokerEvent {
             | Self::Reject {
                 broker_message_id, ..
             } => broker_message_id.as_str(),
+        }
+    }
+
+    /// The broker/exchange-assigned order ID carried in this event, if any.
+    ///
+    /// `None` for adapters that do not distinguish broker ID from internal ID
+    /// (e.g. paper).  `Some` for live adapters.  Phase 3b uses this value to
+    /// update `BrokerOrderMap` when a real Ack arrives.
+    pub fn broker_order_id(&self) -> Option<&str> {
+        match self {
+            Self::Ack {
+                broker_order_id, ..
+            }
+            | Self::PartialFill {
+                broker_order_id, ..
+            }
+            | Self::Fill {
+                broker_order_id, ..
+            }
+            | Self::CancelAck {
+                broker_order_id, ..
+            }
+            | Self::CancelReject {
+                broker_order_id, ..
+            }
+            | Self::ReplaceAck {
+                broker_order_id, ..
+            }
+            | Self::ReplaceReject {
+                broker_order_id, ..
+            }
+            | Self::Reject {
+                broker_order_id, ..
+            } => broker_order_id.as_deref(),
         }
     }
 

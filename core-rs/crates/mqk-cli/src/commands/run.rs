@@ -6,9 +6,13 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use mqk_config::{report_unused_keys, UnusedKeyPolicy};
+// RT-8: testkit orchestrator only available in non-production builds.
+#[cfg(feature = "testkit")]
 use mqk_testkit::{Orchestrator, OrchestratorBar, OrchestratorConfig, OrchestratorRunMeta};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "testkit")]
+use std::path::PathBuf;
 use std::process::Command;
 use uuid::Uuid;
 
@@ -209,9 +213,12 @@ pub async fn run_deadman_enforce(run_id: String, ttl_seconds: i64) -> Result<()>
 }
 
 // ---------------------------------------------------------------------------
-// run loop
+// run loop (testkit only — RT-8)
 // ---------------------------------------------------------------------------
 
+/// Synthetic bar loop using the testkit orchestrator.
+/// Not available in production builds; gated behind the `testkit` feature.
+#[cfg(feature = "testkit")]
 pub fn run_loop(
     run_id: String,
     symbol: String,
@@ -393,12 +400,15 @@ fn opt_dt(dt: &Option<chrono::DateTime<Utc>>) -> String {
 
 // ---------------------------------------------------------------------------
 // FD-2: stub adapters + sole authoritative execution path
+// RT-2: entire section gated — not available in production builds.
 // ---------------------------------------------------------------------------
 
 /// No-op broker adapter for CLI integration tests and dry-run invocations.
 /// All submit/cancel/replace calls succeed immediately; no real orders sent.
+#[cfg(feature = "testkit")]
 struct NullBroker;
 
+#[cfg(feature = "testkit")]
 impl mqk_execution::BrokerAdapter for NullBroker {
     fn submit_order(
         &self,
@@ -445,17 +455,21 @@ impl mqk_execution::BrokerAdapter for NullBroker {
 }
 
 /// Always-pass gate stub (armed, allowed, clean).
+#[cfg(feature = "testkit")]
 struct PassGate;
+#[cfg(feature = "testkit")]
 impl mqk_execution::IntegrityGate for PassGate {
     fn is_armed(&self) -> bool {
         true
     }
 }
+#[cfg(feature = "testkit")]
 impl mqk_execution::RiskGate for PassGate {
     fn is_allowed(&self) -> bool {
         true
     }
 }
+#[cfg(feature = "testkit")]
 impl mqk_execution::ReconcileGate for PassGate {
     fn is_clean(&self) -> bool {
         true
@@ -467,6 +481,9 @@ impl mqk_execution::ReconcileGate for PassGate {
 /// Runs `ticks` iterations of the execution tick loop against a live DB.
 /// Uses `NullBroker` (no real orders) and `PassGate` (all gates open).
 /// Replace stubs with real implementations before LIVE deployment.
+///
+/// RT-2: gated — not available in production builds without `testkit` feature.
+#[cfg(feature = "testkit")]
 pub async fn run_execute(run_id: String, ticks: u32) -> Result<()> {
     use mqk_execution::{BrokerGateway, BrokerOrderMap};
     use mqk_portfolio::PortfolioState;

@@ -182,7 +182,21 @@ where
             let symbol = order_json_symbol(&claimed_row.row.order_json);
             let qty = order_json_qty(&claimed_row.row.order_json);
 
-            // Step 3: submit via BrokerGateway — the ONLY submit path.
+            // Step 3a: RT-5 — write DISPATCHING before calling gateway.submit().
+            //
+            // Closes crash window W4: if the process crashes between here and
+            // outbox_mark_sent, the row stays DISPATCHING on restart.
+            // outbox_reset_stale_claims only resets CLAIMED rows, so the order
+            // is NOT silently requeued — preventing double-submit.
+            mqk_db::outbox_mark_dispatching(
+                &self.pool,
+                &order_id,
+                &self.dispatcher_id,
+                self.time_source.now_utc(),
+            )
+            .await?;
+
+            // Step 3b: submit via BrokerGateway — the ONLY submit path.
             //
             // Box<dyn Error> is !Send. Convert to anyhow::Error (Send+Sync)
             // in a typed binding BEFORE any match or await so the async
@@ -194,8 +208,10 @@ where
             let resp = match submit_result {
                 Ok(r) => r,
                 Err(e) => {
-                    // e: anyhow::Error (Send+Sync) — safe to hold across await.
-                    mqk_db::outbox_release_claim(&self.pool, &order_id).await?;
+                    // RT-5: Row is DISPATCHING — submit was attempted and may
+                    // have reached the broker.  Mark FAILED rather than
+                    // releasing to PENDING; requires operator review.
+                    let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
                     return Err(e.context("broker submit failed"));
                 }
             };
@@ -240,9 +256,26 @@ where
         // ------------------------------------------------------------------
         let unapplied = mqk_db::inbox_load_unapplied_for_run(&self.pool, self.run_id).await?;
 
+        // Phase 3a: RT-4 — deserialize all rows, then sort into canonical apply order.
+        //
+        // Sort key: (broker_message_id ASC, internal_order_id ASC, event_kind_rank ASC).
+        // The DB already orders by broker_message_id ASC; the in-process sort makes
+        // the final order deterministic regardless of DB row ordering or future index changes.
+        let mut apply_queue: Vec<(String, BrokerEvent)> = Vec::with_capacity(unapplied.len());
         for row in unapplied {
-            let msg_id = row.broker_message_id.clone();
+            let msg_id = row.broker_message_id;
             let event: BrokerEvent = serde_json::from_value(row.message_json)?;
+            apply_queue.push((msg_id, event));
+        }
+        apply_queue.sort_by(|(a_msg, a_ev), (b_msg, b_ev)| {
+            a_msg
+                .cmp(b_msg)
+                .then_with(|| a_ev.internal_order_id().cmp(b_ev.internal_order_id()))
+                .then_with(|| event_kind_rank(a_ev).cmp(&event_kind_rank(b_ev)))
+        });
+
+        // Phase 3b: apply in canonical order.
+        for (msg_id, event) in apply_queue {
             let internal_id = event.internal_order_id().to_string();
 
             // Step 6: apply OMS transition.
@@ -251,6 +284,19 @@ where
                 order
                     .apply(&oms_event, Some(&msg_id))
                     .map_err(|e| anyhow!("OMS transition error: {}", e))?;
+            }
+
+            // RT-9: Phase 3b — when a live broker Ack carries the exchange-assigned
+            // order ID, register it in the in-memory order map.  For paper brokers
+            // `broker_order_id` is `None` (the ID was already registered in Phase 1
+            // from `BrokerSubmitResponse.broker_order_id`).  Re-registering with the
+            // same value is idempotent.
+            if let BrokerEvent::Ack {
+                broker_order_id: Some(bid),
+                ..
+            } = &event
+            {
+                self.order_map.register(&internal_id, bid);
             }
 
             // Step 7: apply portfolio change (fills only).
@@ -268,12 +314,9 @@ where
             if let Err(inv_err) = check_capital_invariants(&self.portfolio) {
                 let now = self.time_source.now_utc();
                 let _ = mqk_db::halt_run(&self.pool, self.run_id, now).await;
-                let _ = mqk_db::persist_arm_state(
-                    &self.pool,
-                    "DISARMED",
-                    Some("IntegrityViolation"),
-                )
-                .await;
+                let _ =
+                    mqk_db::persist_arm_state(&self.pool, "DISARMED", Some("IntegrityViolation"))
+                        .await;
                 return Err(inv_err.context(format!(
                     "INVARIANT_VIOLATED: run {} halted and disarmed (I9-1)",
                     self.run_id
@@ -281,7 +324,13 @@ where
             }
 
             // Step 9: commit — mark the inbox row as applied.
-            mqk_db::inbox_mark_applied(&self.pool, &msg_id, self.time_source.now_utc()).await?;
+            mqk_db::inbox_mark_applied(
+                &self.pool,
+                self.run_id,
+                &msg_id,
+                self.time_source.now_utc(),
+            )
+            .await?;
         }
 
         Ok(())
@@ -389,6 +438,25 @@ fn broker_event_to_fill(event: &BrokerEvent) -> Option<Fill> {
     }
 }
 
+/// RT-4: Canonical rank for `BrokerEvent` variants in the deterministic apply queue.
+///
+/// Ordering intent: Ack before fills before cancel/replace; within a kind the
+/// SQL `broker_message_id ASC` order dominates.  This rank is used only as a
+/// tie-breaker when two events share the same `broker_message_id` AND the same
+/// `internal_order_id`.
+fn event_kind_rank(event: &BrokerEvent) -> u8 {
+    match event {
+        BrokerEvent::Ack { .. } => 0,
+        BrokerEvent::PartialFill { .. } => 1,
+        BrokerEvent::Fill { .. } => 2,
+        BrokerEvent::CancelAck { .. } => 3,
+        BrokerEvent::CancelReject { .. } => 4,
+        BrokerEvent::ReplaceAck { .. } => 5,
+        BrokerEvent::ReplaceReject { .. } => 6,
+        BrokerEvent::Reject { .. } => 7,
+    }
+}
+
 /// Assert that the incremental portfolio state is consistent with a full
 /// recompute from the ledger.
 ///
@@ -463,6 +531,7 @@ mod tests {
         let ev = BrokerEvent::Fill {
             broker_message_id: "msg-1".to_string(),
             internal_order_id: "ord-1".to_string(),
+            broker_order_id: None,
             symbol: "AAPL".to_string(),
             side: Side::Buy,
             delta_qty: 10,
@@ -567,5 +636,94 @@ mod tests {
         for ev in cases {
             let _ = broker_event_to_oms_event(ev);
         }
+    }
+
+    #[test]
+    fn event_kind_rank_is_strictly_ordered() {
+        use mqk_execution::Side;
+        // Verify no two distinct variant kinds map to the same rank.
+        let events: Vec<BrokerEvent> = vec![
+            BrokerEvent::Ack {
+                broker_message_id: "m".into(),
+                internal_order_id: "o".into(),
+            },
+            BrokerEvent::PartialFill {
+                broker_message_id: "m".into(),
+                internal_order_id: "o".into(),
+                symbol: "X".into(),
+                side: Side::Buy,
+                delta_qty: 1,
+                price_micros: 1,
+                fee_micros: 0,
+            },
+            BrokerEvent::Fill {
+                broker_message_id: "m".into(),
+                internal_order_id: "o".into(),
+                symbol: "X".into(),
+                side: Side::Buy,
+                delta_qty: 1,
+                price_micros: 1,
+                fee_micros: 0,
+            },
+            BrokerEvent::CancelAck {
+                broker_message_id: "m".into(),
+                internal_order_id: "o".into(),
+            },
+            BrokerEvent::CancelReject {
+                broker_message_id: "m".into(),
+                internal_order_id: "o".into(),
+            },
+            BrokerEvent::ReplaceAck {
+                broker_message_id: "m".into(),
+                internal_order_id: "o".into(),
+            },
+            BrokerEvent::ReplaceReject {
+                broker_message_id: "m".into(),
+                internal_order_id: "o".into(),
+            },
+            BrokerEvent::Reject {
+                broker_message_id: "m".into(),
+                internal_order_id: "o".into(),
+            },
+        ];
+        let mut ranks: Vec<u8> = events.iter().map(event_kind_rank).collect();
+        ranks.sort_unstable();
+        ranks.dedup();
+        assert_eq!(
+            ranks.len(),
+            events.len(),
+            "each variant must have a unique rank"
+        );
+    }
+
+    #[test]
+    fn apply_queue_sort_is_canonical() {
+        use mqk_execution::Side;
+        // Two events for the same message/order: Ack must sort before Fill by rank.
+        let fill = BrokerEvent::Fill {
+            broker_message_id: "msg-a".into(),
+            internal_order_id: "ord-1".into(),
+            symbol: "X".into(),
+            side: Side::Buy,
+            delta_qty: 5,
+            price_micros: 100,
+            fee_micros: 0,
+        };
+        let ack = BrokerEvent::Ack {
+            broker_message_id: "msg-a".into(),
+            internal_order_id: "ord-1".into(),
+        };
+        let mut queue: Vec<(String, BrokerEvent)> =
+            vec![("msg-a".into(), fill), ("msg-a".into(), ack)];
+        queue.sort_by(|(a_msg, a_ev), (b_msg, b_ev)| {
+            a_msg
+                .cmp(b_msg)
+                .then_with(|| a_ev.internal_order_id().cmp(b_ev.internal_order_id()))
+                .then_with(|| event_kind_rank(a_ev).cmp(&event_kind_rank(b_ev)))
+        });
+        assert!(
+            matches!(queue[0].1, BrokerEvent::Ack { .. }),
+            "Ack (rank 0) must sort before Fill (rank 2) on same message/order"
+        );
     }
 }

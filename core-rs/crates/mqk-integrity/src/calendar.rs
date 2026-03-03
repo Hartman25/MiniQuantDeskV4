@@ -13,8 +13,11 @@
 //! - [`CalendarSpec::AlwaysOn`] — 24/7 trading (e.g., crypto). Every slot is
 //!   a valid trading slot. Preserves exact pre-B3 gap-detection behavior.
 //! - [`CalendarSpec::NyseWeekdays`] — NYSE-style equities: weekdays 09:30–16:00
-//!   Eastern (UTC-5 fixed offset for v1 simplicity), excluding a hardcoded set
-//!   of US market holidays for 2023–2026.
+//!   Eastern (DST-aware via chrono-tz America/New_York), excluding a hardcoded
+//!   set of US market holidays for 2023–2026.
+
+use chrono::{DateTime, Datelike, LocalResult, TimeZone, Timelike, Utc, Weekday};
+use chrono_tz::America::New_York;
 
 // ---------------------------------------------------------------------------
 // CalendarSpec
@@ -32,7 +35,7 @@ pub enum CalendarSpec {
 
     /// NYSE-style equities:
     /// - Weekdays only (Monday–Friday).
-    /// - Regular session: 09:30–16:00 Eastern (UTC-5 fixed offset for v1).
+    /// - Regular session: 09:30–16:00 Eastern (DST-aware via chrono-tz America/New_York).
     /// - Hardcoded US market holidays 2023–2026.
     ///
     /// A bar whose `end_ts` falls outside these windows is treated as a
@@ -99,45 +102,51 @@ impl CalendarSpec {
 }
 
 // ---------------------------------------------------------------------------
-// NYSE session logic (deterministic, UTC-5 fixed offset)
+// NYSE session logic (DST-aware via chrono-tz America/New_York)
 // ---------------------------------------------------------------------------
 
 /// Returns `true` if `end_ts` (epoch seconds, UTC) falls within NYSE regular
 /// session hours on a valid trading day.
 ///
-/// Rules (minimal v1):
-/// - Day-of-week: Monday–Friday only (epoch day 0 = Thursday 1970-01-01).
-/// - Session: 09:30 < time ≤ 16:00 Eastern (UTC-5 fixed offset).
+/// Rules:
+/// - Day-of-week: Monday–Friday only.
+/// - Session: 09:30 < time ≤ 16:00 Eastern (DST-aware via chrono-tz America/New_York).
+///   Handles EDT (UTC-4, mid-Mar – early Nov) and EST (UTC-5, Nov – mid-Mar) correctly.
 ///   A bar `end_ts` represents the **close** of an interval, so a bar ending
 ///   exactly at open (09:30:00) is excluded; one ending at 09:35:00 is the
 ///   first 5-minute bar of the day.
 /// - Holidays: excluded via hardcoded table for 2023–2026.
 fn is_nyse_session_end(end_ts: i64) -> bool {
-    // Shift to Eastern Time (UTC-5, fixed for v1 — daylight saving ignored
-    // as a known approximation; sufficient for gap-detection purposes).
-    const ET_OFFSET_SECS: i64 = 5 * 3600;
-    let et_secs = end_ts - ET_OFFSET_SECS;
+    // Convert to Eastern Time (DST-aware). America/New_York switches between
+    // EST (UTC-5) and EDT (UTC-4) automatically.
+    let utc_dt: DateTime<Utc> = match Utc.timestamp_opt(end_ts, 0) {
+        LocalResult::Single(dt) => dt,
+        _ => return false, // Out-of-range or ambiguous — treat as non-trading.
+    };
+    let et_dt = utc_dt.with_timezone(&New_York);
 
-    // Day-of-week: epoch day 0 (1970-01-01) was a Thursday.
-    // Mapping: 0=Thu, 1=Fri, 2=Sat, 3=Sun, 4=Mon, 5=Tue, 6=Wed
-    let epoch_day = et_secs.div_euclid(86_400);
-    let dow = epoch_day.rem_euclid(7);
-    if dow == 2 || dow == 3 {
-        // Saturday or Sunday
+    // Day-of-week: Monday–Friday only.
+    if matches!(et_dt.weekday(), Weekday::Sat | Weekday::Sun) {
         return false;
     }
 
     // Civil date for holiday lookup.
-    let (year, month, day) = epoch_secs_to_ymd(et_secs);
+    let (year, month, day) = (
+        et_dt.year() as i64,
+        et_dt.month() as i64,
+        et_dt.day() as i64,
+    );
     if is_nyse_holiday(year, month, day) {
         return false;
     }
 
     // Time-of-day check: 09:30:00 < time ≤ 16:00:00 ET.
-    let et_time = et_secs.rem_euclid(86_400);
-    let open = 9 * 3600 + 30 * 60; //  9:30:00 = 34200 seconds
-    let close = 16 * 3600; //          16:00:00 = 57600 seconds
-    et_time > open && et_time <= close
+    let et_secs = et_dt.hour() as i64 * 3600
+        + et_dt.minute() as i64 * 60
+        + et_dt.second() as i64;
+    let open  = 9 * 3600 + 30 * 60; //  9:30:00 = 34200 seconds
+    let close = 16 * 3600;           // 16:00:00 = 57600 seconds
+    et_secs > open && et_secs <= close
 }
 
 // ---------------------------------------------------------------------------
@@ -274,5 +283,37 @@ mod tests {
     fn always_on_includes_weekend() {
         let saturday = 1_704_510_000_i64;
         assert!(CalendarSpec::AlwaysOn.is_session_bar_end(saturday));
+    }
+
+    // DST boundary tests (RT-7) —————————————————————————————————————————————
+    //
+    // 2024-04-15 is a Monday well into EDT (UTC-4). DST started 2024-03-10.
+    //
+    //   2024-04-15T13:35:00Z  = 09:35 EDT  → first 5-min bar of day
+    //   2024-04-15T20:00:00Z  = 16:00 EDT  → last  5-min bar of day (close)
+    //   2024-04-15T20:01:00Z  = 16:01 EDT  → after close
+    //
+    // With the old UTC-5 fixed offset these would be misread as 08:35/15:00/15:01
+    // EST, causing the first bar to be excluded and the post-close bar included.
+
+    /// EDT: 2024-04-15 Mon 09:35 EDT (13:35 UTC) → first bar → session bar.
+    #[test]
+    fn edt_first_bar_09h35_is_trading() {
+        let ts = 1_713_188_100_i64; // 2024-04-15T13:35:00Z = 09:35 EDT
+        assert!(CalendarSpec::NyseWeekdays.is_session_bar_end(ts));
+    }
+
+    /// EDT: 2024-04-15 Mon 16:00 EDT (20:00 UTC) → last bar (close) → session bar.
+    #[test]
+    fn edt_last_bar_16h00_is_trading() {
+        let ts = 1_713_211_200_i64; // 2024-04-15T20:00:00Z = 16:00 EDT
+        assert!(CalendarSpec::NyseWeekdays.is_session_bar_end(ts));
+    }
+
+    /// EDT: 2024-04-15 Mon 16:01 EDT (20:01 UTC) → after close → not session bar.
+    #[test]
+    fn edt_after_close_16h01_is_not_trading() {
+        let ts = 1_713_211_260_i64; // 2024-04-15T20:01:00Z = 16:01 EDT
+        assert!(!CalendarSpec::NyseWeekdays.is_session_bar_end(ts));
     }
 }

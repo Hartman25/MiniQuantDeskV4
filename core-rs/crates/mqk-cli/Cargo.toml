@@ -3,6 +3,13 @@ name = "mqk-cli"
 version = "0.0.1"
 edition = "2021"
 
+[features]
+# RT-2: enables run_execute (NullBroker/PassGate stubs) and BrokerGateway::for_test.
+# RT-8: also gates run_loop (mqk_testkit::Orchestrator) out of the production binary.
+# Propagates testkit to mqk-execution so for_test is callable.
+# MUST NOT be enabled in production deployments.
+testkit = ["dep:mqk-testkit", "mqk-execution/testkit"]
+
 [[bin]]
 name = "mqk-cli"
 path = "src/main.rs"
@@ -29,7 +36,7 @@ mqk-backtest = { path = "../mqk-backtest" }
 mqk-execution = { path = "../mqk-execution" }
 mqk-strategy = { path = "../mqk-strategy" }
 mqk-md = { path = "../mqk-md" }
-mqk-testkit = { path = "../mqk-testkit" }
+mqk-testkit = { path = "../mqk-testkit", optional = true }
 mqk-runtime = { path = "../mqk-runtime" }
 mqk-portfolio = { path = "../mqk-portfolio" }
 

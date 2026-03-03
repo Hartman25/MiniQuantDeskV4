@@ -364,7 +364,7 @@ async fn w6_crash_after_inbox_insert_before_apply_replays_exactly_once() -> anyh
     );
 
     // Simulate portfolio apply and mark applied.
-    mqk_db::inbox_mark_applied(&pool, fill_msg_id, Utc::now()).await?;
+    mqk_db::inbox_mark_applied(&pool, run_id, fill_msg_id, Utc::now()).await?;
 
     // --- Second restart: no unapplied rows remain ---
     let after_apply = mqk_db::inbox_load_unapplied_for_run(&pool, run_id).await?;
@@ -375,7 +375,7 @@ async fn w6_crash_after_inbox_insert_before_apply_replays_exactly_once() -> anyh
     );
 
     // inbox_mark_applied is idempotent: calling it again must not error.
-    mqk_db::inbox_mark_applied(&pool, fill_msg_id, Utc::now()).await?;
+    mqk_db::inbox_mark_applied(&pool, run_id, fill_msg_id, Utc::now()).await?;
     let idempotent_check = mqk_db::inbox_load_unapplied_for_run(&pool, run_id).await?;
     assert_eq!(
         idempotent_check.len(),

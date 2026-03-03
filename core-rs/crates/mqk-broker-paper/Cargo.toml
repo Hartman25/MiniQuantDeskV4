@@ -6,3 +6,5 @@ license = "Proprietary"
 
 [dependencies]
 mqk-reconcile = { path = "../mqk-reconcile" }
+# RT-8: implement BrokerAdapter for LockedPaperBroker.
+mqk-execution = { path = "../mqk-execution" }
