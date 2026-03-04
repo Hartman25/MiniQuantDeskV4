@@ -1,38 +1,59 @@
+#![forbid(unsafe_code)]
+
+use std::collections::BTreeMap;
+
 use mqk_execution::{
-    position_book, targets_to_order_intents, Side, StrategyOutput, TargetPosition,
+    targets_to_order_intents, ExecutionDecision, Side, StrategyOutput, TargetPosition,
 };
 
 #[test]
-fn scenario_strategy_targets_convert_to_order_intents_deterministically() {
-    // GIVEN current portfolio state (signed quantities)
-    let current = position_book([
-        ("AAPL", 50),  // long 50
-        ("MSFT", 0),   // flat
-        ("TSLA", -10), // short 10
-    ]);
+fn scenario_target_to_intent() {
+    // Current broker positions (signed qty):
+    // TSLA: -10 (short 10) -> target 0 => BUY 10
+    // AAPL: +50 (long 50)  -> target 0 => SELL 50
+    // MSFT: 0              -> target 20 => BUY 20
+    let mut current_qty: BTreeMap<String, i64> = BTreeMap::new();
+    current_qty.insert("TSLA".to_string(), -10);
+    current_qty.insert("AAPL".to_string(), 50);
+    current_qty.insert("MSFT".to_string(), 0);
 
-    // AND strategy outputs target positions (no direct orders)
-    let output = StrategyOutput::new(vec![
-        TargetPosition::new("TSLA", 0),  // cover short -> BUY 10
-        TargetPosition::new("AAPL", 0),  // flatten -> SELL 50
-        TargetPosition::new("MSFT", 20), // open long -> BUY 20
-    ]);
+    let output = StrategyOutput {
+        targets: vec![
+            TargetPosition {
+                symbol: "TSLA".to_string(),
+                qty: 0,
+            },
+            TargetPosition {
+                symbol: "AAPL".to_string(),
+                qty: 0,
+            },
+            TargetPosition {
+                symbol: "MSFT".to_string(),
+                qty: 20,
+            },
+        ],
+    };
 
-    // WHEN engine converts targets -> intents
-    let decision = targets_to_order_intents(&current, &output);
+    let decision = targets_to_order_intents(&output.targets, &current_qty);
 
-    // THEN intents are correct and ordered deterministically by symbol
-    assert_eq!(decision.intents.len(), 3);
+    let intents = match decision {
+        ExecutionDecision::PlaceOrders(intents) => intents,
+        ExecutionDecision::Noop => panic!("expected PlaceOrders, got Noop"),
+        ExecutionDecision::HaltAndDisarm { reason } => panic!("unexpected HaltAndDisarm: {reason}"),
+    };
 
-    assert_eq!(decision.intents[0].symbol, "AAPL");
-    assert_eq!(decision.intents[0].side, Side::Sell);
-    assert_eq!(decision.intents[0].qty, 50);
+    assert_eq!(intents.len(), 3);
 
-    assert_eq!(decision.intents[1].symbol, "MSFT");
-    assert_eq!(decision.intents[1].side, Side::Buy);
-    assert_eq!(decision.intents[1].qty, 20);
+    // Deterministic order is symbol-sorted by the engine's BTreeMap union: AAPL, MSFT, TSLA.
+    assert_eq!(intents[0].symbol, "AAPL");
+    assert_eq!(intents[0].side, Side::Sell);
+    assert_eq!(intents[0].qty, 50);
 
-    assert_eq!(decision.intents[2].symbol, "TSLA");
-    assert_eq!(decision.intents[2].side, Side::Buy);
-    assert_eq!(decision.intents[2].qty, 10);
+    assert_eq!(intents[1].symbol, "MSFT");
+    assert_eq!(intents[1].side, Side::Buy);
+    assert_eq!(intents[1].qty, 20);
+
+    assert_eq!(intents[2].symbol, "TSLA");
+    assert_eq!(intents[2].side, Side::Buy);
+    assert_eq!(intents[2].qty, 10);
 }

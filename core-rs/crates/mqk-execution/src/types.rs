@@ -1,110 +1,148 @@
-use std::fmt;
+use serde::{Deserialize, Serialize};
 
-/// A target position for a single symbol.
-/// Signed quantity: +long, -short, 0 = flat.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TargetPosition {
-    pub symbol: String,
-    pub target_qty: i64,
-}
-
-impl TargetPosition {
-    pub fn new<S: Into<String>>(symbol: S, target_qty: i64) -> Self {
-        Self {
-            symbol: symbol.into(),
-            target_qty,
-        }
-    }
-}
-
-/// Strategy output contract for PATCH 05.
-/// Target-position model: strategy does NOT submit orders.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Strategy output is a set of target positions.
+///
+/// The engine decides on a target portfolio state; execution is computed as
+/// deltas against broker positions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StrategyOutput {
     pub targets: Vec<TargetPosition>,
 }
 
-impl StrategyOutput {
-    pub fn new(targets: Vec<TargetPosition>) -> Self {
-        Self { targets }
-    }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetPosition {
+    pub symbol: String,
+    /// Signed quantity. +long, -short.
+    pub qty: i64,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
     Buy,
     Sell,
 }
 
-impl fmt::Display for Side {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Side::Buy => write!(f, "BUY"),
-            Side::Sell => write!(f, "SELL"),
-        }
+/// An order intent is the minimal representation of “place an order”
+/// that strategy code can generate without knowing broker specifics.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderIntent {
+    pub client_order_id: String,
+    pub symbol: String,
+    pub side: Side,
+    /// Positive quantity.
+    pub qty: i64,
+    /// Optional limit price in integer micros.
+    pub limit_price_micros: Option<i64>,
+    /// Optional stop price in integer micros.
+    pub stop_price_micros: Option<i64>,
+    /// Time-in-force string (e.g. "day", "gtc").
+    pub time_in_force: String,
+}
+
+/// Execution intent is derived from order intents and risk rules.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionIntent {
+    pub client_order_id: String,
+    pub symbol: String,
+    pub side: Side,
+    /// Positive quantity.
+    pub qty: i64,
+    /// Optional limit price in integer micros.
+    pub limit_price_micros: Option<i64>,
+    /// Optional stop price in integer micros.
+    pub stop_price_micros: Option<i64>,
+    /// Time-in-force string (e.g. "day", "gtc").
+    pub time_in_force: String,
+}
+
+/// Execution decision describes what the engine will do for this tick.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecutionDecision {
+    Noop,
+    PlaceOrders(Vec<ExecutionIntent>),
+    HaltAndDisarm { reason: String },
+}
+
+// ---------------------------------------------------------------------------
+// Forward-compatible multi-asset types (V2)
+// ---------------------------------------------------------------------------
+
+use mqk_schemas::{
+    AssetClass, ContractSpec, Instrument, OrderSide as CanonSide, OrderSpec,
+    OrderType as CanonType, QtyMicros,
+};
+
+/// Create a canonical equity instrument (USD, no venue).
+///
+/// This is a bridge helper so existing symbol-based flows can produce a stable
+/// `Instrument` without changing the current execution engine contract.
+pub fn equity_instrument<S: Into<String>>(symbol: S) -> Instrument {
+    Instrument {
+        symbol: symbol.into(),
+        asset_class: AssetClass::Equity,
+        venue: None,
+        currency: "USD".to_string(),
+        contract: ContractSpec::Equity,
     }
 }
 
-/// Minimal order intent (no broker fields).
-/// Quantity is always positive.
+/// V2 order intent keyed by `Instrument` and fractional quantity support.
+///
+/// Note: `qty` is always positive; `side` encodes direction.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OrderIntent {
-    pub symbol: String,
-    pub side: Side,
-    pub qty: i64,
+pub struct OrderIntentV2 {
+    pub instrument: Instrument,
+    pub side: CanonSide,
+    pub qty: QtyMicros,
 }
 
-impl OrderIntent {
-    pub fn new<S: Into<String>>(symbol: S, side: Side, qty: i64) -> Self {
-        debug_assert!(qty > 0, "OrderIntent.qty must be > 0");
+impl OrderIntentV2 {
+    pub fn new(instrument: Instrument, side: CanonSide, qty: QtyMicros) -> Self {
+        debug_assert!(qty.raw() > 0, "OrderIntentV2.qty must be > 0");
         Self {
-            symbol: symbol.into(),
+            instrument,
             side,
             qty,
         }
     }
-}
 
-/// Engine decision for a single evaluation tick.
-/// No side effects; caller is responsible for persistence/broker wiring later.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExecutionDecision {
-    pub intents: Vec<OrderIntent>,
-}
-
-impl ExecutionDecision {
-    pub fn empty() -> Self {
-        Self { intents: vec![] }
+    /// Strict equity guard: requires whole-unit quantity.
+    pub fn assert_equity_whole_units(&self) {
+        if self.instrument.asset_class == AssetClass::Equity {
+            debug_assert!(
+                self.qty.is_whole(),
+                "equity qty must be whole units (multiple of 1_000_000 micros)"
+            );
+        }
     }
 }
 
-/// Broker-bound execution intent produced by the order router layer.
+/// V2 execution intent aligns with `mqk-schemas::OrderSpec` for broker adapters.
 ///
-/// This is the translation of an internal `OrderIntent` into the richer
-/// broker-agnostic struct required by `OrderRouter` / `BrokerAdapter`.
-/// Fields use `i32` quantity (broker APIs rarely exceed i32 range) and
-/// carry the broker-protocol fields (`order_type`, `time_in_force`) that
-/// the pure execution engine intentionally omits.
-///
-/// # Patch L9 — integer micros
-///
-/// `limit_price` is expressed in **integer micros** (1 unit = 1_000_000 micros).
-/// Use [`crate::micros_to_price`] only at the broker wire boundary when the
-/// value must be serialised to `f64` for a REST API.  No `f64` appears on the
-/// execution decision surface itself.
+/// This does NOT change the current execution pipeline yet; it simply provides
+/// the shared contract needed to expand asset classes later without rewrites.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExecutionIntent {
-    /// Internal order identifier (UUID string).
-    pub order_id: String,
-    /// Instrument symbol (e.g. "AAPL").
-    pub symbol: String,
-    /// Signed quantity: positive = buy, negative = sell.
-    pub quantity: i32,
-    /// Order type string passed to broker (e.g. "market", "limit").
-    pub order_type: String,
-    /// Limit price in integer micros (1 unit = 1_000_000).
-    /// `None` for market orders.
-    pub limit_price: Option<i64>,
-    /// Time-in-force string (e.g. "day", "gtc").
-    pub time_in_force: String,
+pub struct ExecutionIntentV2 {
+    pub spec: OrderSpec,
+}
+
+impl ExecutionIntentV2 {
+    pub fn market(
+        client_order_id: String,
+        instrument: Instrument,
+        side: CanonSide,
+        qty: QtyMicros,
+    ) -> Self {
+        let spec = OrderSpec {
+            client_order_id,
+            instrument,
+            side,
+            order_type: CanonType::Market,
+            qty,
+            limit_price_micros: None,
+            stop_price_micros: None,
+            time_in_force: "DAY".to_string(),
+        };
+        Self { spec }
+    }
 }

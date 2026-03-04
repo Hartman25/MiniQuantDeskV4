@@ -1,0 +1,11 @@
+# Example config for labeling shadow intents (scaffold)
+
+shadow_label_policy:
+  enabled: true
+  inputs:
+    shadow_intents_csv: shadow_intents.csv
+    bars_csv: bars.csv
+  label:
+    horizon_bars_default: 5
+    ret_threshold: 0.005
+    require_exact_bar_match: true

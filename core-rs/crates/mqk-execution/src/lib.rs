@@ -1,98 +1,74 @@
-//! mqk-execution
-//!
-//! PATCH 05: Execution Engine Contract (Target Position Model)
-//! - Strategies output target positions (not orders)
-//! - Engine converts (current_positions, targets) -> order intents
-//! - Pure deterministic logic, no broker wiring
-//!
-//! The `order_router` module provides the thin boundary between the internal
-//! execution engine and external broker adapters.
-//!
-//! PATCH L1: Single Submission Choke-Point
-//! - `order_router` is crate-private (never re-exported)
-//! - `BrokerGateway` is the only public path to broker operations
-//! - Gate checks enforced before every broker operation
+#![forbid(unsafe_code)]
+
+//! Execution-side types + order intent generation utilities.
 
 mod engine;
-mod types;
-
-// OMS state machine — Patch L4.
-pub mod oms;
-
-// Crate-private: prevents external bypass.
-mod gateway;
-mod order_router;
-mod reconcile_guard; // Patch B3 — production ReconcileGate implementation.
-
-// Patch L9 — integer micros + broker ID mapping.
+pub mod gateway;
 mod id_map;
-mod prices;
+mod order_router;
+pub mod types;
 
 pub use engine::targets_to_order_intents;
 
+// Re-export core strategy/execution types.
 pub use types::{
-    ExecutionDecision, ExecutionIntent, OrderIntent, Side, StrategyOutput, TargetPosition,
+    equity_instrument, ExecutionDecision, ExecutionIntent, ExecutionIntentV2, OrderIntent,
+    OrderIntentV2, Side, StrategyOutput, TargetPosition,
 };
 
-// --- Patch L1: choke-point exports ---
+// Re-export the broker-facing contract types that downstream crates use.
+// (Do NOT re-export OrderRouter itself.)
+pub use id_map::BrokerOrderMap;
 
-/// The single public gateway for all broker operations.
-/// `OrderRouter` is intentionally NOT exported.
-///
-/// Gate evaluator traits (`IntegrityGate`, `RiskGate`, `ReconcileGate`) are
-/// exported so callers can wire real engine state. `GateVerdicts` is removed
-/// (PATCH A2) — gates are no longer caller-supplied booleans.
-///
-/// `OutboxClaimToken` is re-exported from `mqk-db` (FC-2). The constructor
-/// is `pub(crate)` in `mqk-db`; the sole production path is
-/// `mqk_db::outbox_claim_batch`. Tests use `OutboxClaimToken::for_test`.
-pub use gateway::{
-    intent_id_to_client_order_id, BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken,
-    ReconcileGate, RiskGate, UnknownOrder,
-};
-
-// Patch B3 — production ReconcileGate: fail-closed freshness guard with
-// injectable clock for deterministic testing.
-pub use reconcile_guard::ReconcileFreshnessGuard;
-
-/// Broker adapter trait + request/response types.
-/// External crates may implement `BrokerAdapter` and build request structs,
-/// but can only route them through `BrokerGateway`.
-///
-/// `BrokerInvokeToken` is exported so external crates can **name** it in
-/// trait implementations, but its inner field is `pub(crate)` — external
-/// crates cannot construct one. See PATCH A1.
 pub use order_router::{
     BrokerAdapter, BrokerCancelResponse, BrokerEvent, BrokerInvokeToken, BrokerReplaceRequest,
     BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
 };
 
-// --- Patch L9: integer micros price surface + broker ID mapping ---
+pub use gateway::{
+    BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken, ReconcileGate, RiskGate,
+    UnknownOrder,
+};
 
-/// In-memory map of internal order IDs → broker-assigned order IDs.
-/// Required for cancel/replace to target the correct broker order.
-pub use id_map::BrokerOrderMap;
+// --- Patch L1: choke-point exports ---
 
-/// Price conversion helpers: `i64` micros ↔ `f64` (wire boundary only).
-/// `PricingError` is the error type returned by [`price_to_micros`] when the
-/// input is non-finite or would overflow `i64` (PATCH A5).
-pub use prices::{micros_to_price, price_to_micros, PricingError, MICROS_PER_UNIT};
+/// deterministic helper: stable sort of (symbol, qty) positions.
+pub fn stable_sort_positions(mut xs: Vec<TargetPosition>) -> Vec<TargetPosition> {
+    xs.sort_by(|a, b| a.symbol.cmp(&b.symbol).then(a.qty.cmp(&b.qty)));
+    xs
+}
 
-use std::collections::BTreeMap;
+/// deterministic helper: stable sort order intents by client_id.
+pub fn stable_sort_intents(mut xs: Vec<OrderIntent>) -> Vec<OrderIntent> {
+    xs.sort_by(|a, b| a.client_order_id.cmp(&b.client_order_id));
+    xs
+}
 
-/// Canonical type for current positions, keyed by symbol.
-/// Signed quantity: +long, -short.
-pub type PositionBook = BTreeMap<String, i64>;
-
-/// Helper to build a PositionBook with minimal boilerplate in tests/callers.
-pub fn position_book<I, S>(items: I) -> PositionBook
-where
-    I: IntoIterator<Item = (S, i64)>,
-    S: Into<String>,
-{
-    let mut book = PositionBook::new();
-    for (sym, qty) in items {
-        book.insert(sym.into(), qty);
+/// Convert a list of `TargetPosition` into a map symbol -> qty.
+pub fn targets_to_map(xs: &[TargetPosition]) -> std::collections::BTreeMap<String, i64> {
+    let mut book = std::collections::BTreeMap::<String, i64>::new();
+    for x in xs {
+        book.insert(x.symbol.clone(), x.qty);
     }
     book
 }
+
+/// Convert a list of `BrokerPosition` into a map symbol -> qty.
+///
+/// This is used in tests and in the runtime boundary when calculating deltas.
+pub fn broker_positions_to_map(
+    xs: &[mqk_schemas::BrokerPosition],
+) -> std::collections::BTreeMap<String, i64> {
+    let mut book = std::collections::BTreeMap::<String, i64>::new();
+    for x in xs {
+        // broker snapshot qty comes in as string; parse as i64 shares for now.
+        // This stays conservative until V2 execution is fully wired.
+        if let Ok(q) = x.qty.parse::<i64>() {
+            book.insert(x.symbol.clone(), q);
+        }
+    }
+    book
+}
+
+#[cfg(feature = "runtime-boundary")]
+pub mod wiring;

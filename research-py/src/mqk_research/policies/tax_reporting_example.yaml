@@ -1,0 +1,16 @@
+# Tax reporting + tax drag simulation (scaffold config)
+# Not wired to your policy loader yet.
+
+tax_reporting_policy:
+  enabled: true
+  fifo_lots:
+    long_term_days: 365
+    assume_fees_in_cost_basis: true
+
+tax_drag_policy:
+  enabled: true
+  mode: annual_settlement     # or immediate_withholding
+  rates:
+    short_rate: 0.30
+    long_rate: 0.15
+  allow_loss_offset: true

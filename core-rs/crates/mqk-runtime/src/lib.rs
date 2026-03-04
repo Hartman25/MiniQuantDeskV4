@@ -7,3 +7,5 @@
 //! the broker.
 
 pub mod orchestrator;
+
+pub mod wiring_paper;

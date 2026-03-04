@@ -141,11 +141,9 @@ fn is_nyse_session_end(end_ts: i64) -> bool {
     }
 
     // Time-of-day check: 09:30:00 < time ≤ 16:00:00 ET.
-    let et_secs = et_dt.hour() as i64 * 3600
-        + et_dt.minute() as i64 * 60
-        + et_dt.second() as i64;
-    let open  = 9 * 3600 + 30 * 60; //  9:30:00 = 34200 seconds
-    let close = 16 * 3600;           // 16:00:00 = 57600 seconds
+    let et_secs = et_dt.hour() as i64 * 3600 + et_dt.minute() as i64 * 60 + et_dt.second() as i64;
+    let open = 9 * 3600 + 30 * 60; //  9:30:00 = 34200 seconds
+    let close = 16 * 3600; // 16:00:00 = 57600 seconds
     et_secs > open && et_secs <= close
 }
 

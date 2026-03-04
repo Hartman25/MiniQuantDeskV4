@@ -19,6 +19,7 @@ members = [
   "crates/mqk-backtest",
   "crates/mqk-promotion",
   "crates/mqk-broker-paper",
+  "crates/mqk-broker-alpaca",
   "crates/mqk-daemon",
   "crates/mqk-runtime",
 

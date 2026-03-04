@@ -1,0 +1,21 @@
+# Example feature policy for Feature Set v1 (scaffold)
+#
+# This is NOT wired into your policy loader yet.
+# Use it as a standard config target for later integration.
+
+feature_policy:
+  feature_set: v1
+  inputs:
+    bars_table: md_bars
+    required_columns: [symbol, end_ts, open, high, low, close, volume]
+  params:
+    ret_windows: [1,2,5,10,20]
+    vol_windows: [10,20,60]
+    extrema_windows: [20,60]
+    ema_fast: 10
+    ema_slow: 30
+    trend_window: 20
+    atr_window: 14
+    cross_section_windows: [5,20]
+    add_calendar: true
+    min_rows_per_symbol: 80

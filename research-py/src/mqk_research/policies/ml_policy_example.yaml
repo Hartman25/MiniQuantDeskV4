@@ -1,0 +1,42 @@
+# Example ML policy for MiniQuantDesk research runs (scaffold)
+#
+# This is NOT wired into runtime/backtest yet.
+# It exists to standardize config + manifest recording for future promotion workflow.
+
+ml_policy:
+  enabled: true
+
+  model:
+    type: logreg_v1
+    label_column: target
+
+  training:
+    steps: 500
+    learning_rate: 0.05
+    l2: 0.001
+    min_rows: 200
+    standardize: true
+    clip_z: 8.0
+
+  scoring:
+    output_column: ml_score
+
+  signal_pack:
+    signal_column: signal
+    confidence_column: confidence
+
+  evaluation:
+    walk_forward:
+      enabled: false
+      # Example split spec (deterministic):
+      # train_years: 3
+      # test_months: 3
+      # step_months: 3
+
+  notes:
+    - ML is advisory only until promoted signal_packs are consumed by Rust
+
+  promotion_gates:
+    require_walk_forward_eval: false
+    min_folds_used: 2
+    min_auc_mean: 0.52

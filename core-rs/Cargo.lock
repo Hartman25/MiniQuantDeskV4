@@ -1754,6 +1754,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mqk-broker-alpaca"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "mqk-execution",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mqk-broker-paper"
 version = "0.0.1"
 dependencies = [
@@ -1854,6 +1866,7 @@ name = "mqk-execution"
 version = "0.1.0"
 dependencies = [
  "mqk-db",
+ "mqk-schemas",
  "serde",
 ]
 
@@ -1922,6 +1935,7 @@ name = "mqk-runtime"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "mqk-broker-paper",
  "mqk-db",
  "mqk-execution",
  "mqk-portfolio",

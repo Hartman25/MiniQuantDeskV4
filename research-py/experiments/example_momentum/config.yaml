@@ -1,0 +1,11 @@
+name: example_momentum
+policy: src/mqk_research/policies/swing_v1.yaml
+
+inputs:
+  symbols: ["SPY","QQQ"]
+  asof_utc: "2026-01-01T00:00:00Z"
+  timeframe: "1day"
+
+outputs:
+  signal_pack: true
+  report: true

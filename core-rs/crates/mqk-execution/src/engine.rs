@@ -1,45 +1,73 @@
-use std::collections::{BTreeMap, BTreeSet};
+#![forbid(unsafe_code)]
 
-use crate::types::{ExecutionDecision, OrderIntent, Side, StrategyOutput};
+//! Order/execution intent generation from target positions.
+//!
+//! Deterministic: converts desired target positions into a set of `ExecutionIntent`s
+//! to move current positions toward target. No broker calls, no randomness.
 
-use crate::PositionBook;
+use std::collections::BTreeMap;
 
-/// Convert target positions into order intents given current positions.
+use crate::types::{ExecutionDecision, ExecutionIntent, Side, TargetPosition};
+
+/// Convert target positions into execution intents.
 ///
-/// Rules (PATCH 05):
-/// - Signed quantities: +long, -short
-/// - delta = target - current
-///   - delta > 0 => BUY delta
-///   - delta < 0 => SELL -delta
-/// - Deterministic ordering by symbol (lexicographic)
-/// - No broker calls, no IO, no timestamps, no randomness
+/// `current_qty` is signed quantity per symbol.
+/// Targets are signed quantity (+long, -short).
 pub fn targets_to_order_intents(
-    current: &PositionBook,
-    output: &StrategyOutput,
+    targets_in: &[TargetPosition],
+    current_qty: &BTreeMap<String, i64>,
 ) -> ExecutionDecision {
-    // Build a deterministic target map; last write wins if strategy emits duplicates.
+    // Build target map (symbol -> target qty).
     let mut targets: BTreeMap<String, i64> = BTreeMap::new();
-    for t in &output.targets {
-        targets.insert(t.symbol.clone(), t.target_qty);
+    for t in targets_in {
+        targets.insert(t.symbol.clone(), t.qty);
     }
 
-    let mut symbols: BTreeSet<String> = BTreeSet::new();
-    symbols.extend(current.keys().cloned());
-    symbols.extend(targets.keys().cloned());
+    // Union of symbols in current + target.
+    let mut all: BTreeMap<String, ()> = BTreeMap::new();
+    for sym in targets.keys() {
+        all.insert(sym.clone(), ());
+    }
+    for sym in current_qty.keys() {
+        all.insert(sym.clone(), ());
+    }
 
-    let mut intents: Vec<OrderIntent> = Vec::new();
+    let mut intents: Vec<ExecutionIntent> = Vec::new();
 
-    for sym in symbols {
-        let cur = *current.get(&sym).unwrap_or(&0);
+    for (sym, _) in all {
+        let cur = *current_qty.get(&sym).unwrap_or(&0);
         let tgt = *targets.get(&sym).unwrap_or(&0);
         let delta = tgt - cur;
 
-        if delta > 0 {
-            intents.push(OrderIntent::new(sym, Side::Buy, delta));
-        } else if delta < 0 {
-            intents.push(OrderIntent::new(sym, Side::Sell, -delta));
+        if delta == 0 {
+            continue;
         }
+
+        let (side, qty): (Side, i64) = if delta > 0 {
+            (Side::Buy, delta)
+        } else {
+            (Side::Sell, -delta)
+        };
+
+        // Deterministic client order id.
+        // Must be stable across re-runs for the same inputs.
+        // (Symbol has no ":" today in your system; if it ever does, this is still fine.)
+        let client_order_id = format!("tgt:{}:{:?}:{}", sym, side, qty);
+
+        intents.push(ExecutionIntent {
+            client_order_id,
+            symbol: sym,
+            side,
+            qty,
+            limit_price_micros: None,
+            stop_price_micros: None,
+            time_in_force: "day".to_string(),
+        });
     }
 
-    ExecutionDecision { intents }
+    if intents.is_empty() {
+        ExecutionDecision::Noop
+    } else {
+        ExecutionDecision::PlaceOrders(intents)
+    }
 }

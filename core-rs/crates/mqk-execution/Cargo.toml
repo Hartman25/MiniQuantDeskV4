@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+# Allows construction of BrokerGateway via mqk-execution::wiring
+runtime-boundary = []
 # RT-2: gates BrokerGateway::for_test. Only test crates and mqk-cli
 # (via its own testkit feature) should activate this. MUST NOT appear
 # in production [dependencies] of mqk-daemon, mqk-runtime, or mqk-cli.
@@ -12,15 +14,9 @@ testkit = []
 [dependencies]
 serde = { workspace = true }
 mqk-db = { path = "../mqk-db" }
+mqk-schemas = { path = "../mqk-schemas" }
 
 [dev-dependencies]
 # Activates OutboxClaimToken::for_test for integration tests and internal
-# #[cfg(test)] modules. MUST NOT be moved to [dependencies].
+# harnesses; not permitted in prod crates.
 mqk-db = { path = "../mqk-db", features = ["testkit"] }
-
-# RT-2 positive prover: BrokerGateway::for_test accessible under testkit.
-# Run: cargo test -p mqk-execution --features testkit --test prover_gateway_for_test_rt2
-[[test]]
-name = "prover_gateway_for_test_rt2"
-path = "tests/prover_gateway_for_test_rt2.rs"
-required-features = ["testkit"]

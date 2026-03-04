@@ -11,7 +11,7 @@ impl Strategy for Dummy {
         StrategyOutput {
             targets: vec![TargetPosition {
                 symbol: "SPY".to_string(),
-                target_qty: 1,
+                qty: 1,
             }],
         }
     }
