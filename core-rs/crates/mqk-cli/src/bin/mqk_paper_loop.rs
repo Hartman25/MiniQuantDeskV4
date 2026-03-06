@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     let pool = mqk_db::connect_from_env().await?;
 
     // Paper gateway via runtime wiring (NOT for_test).
-    let gateway = mqk_runtime::wiring_paper::paper_gateway_for_validation();
+    let gateway = mqk_runtime::wiring_paper::paper_gateway_for_testkit_validation();
 
     let mut orchestrator = mqk_runtime::orchestrator::ExecutionOrchestrator::new(
         pool,

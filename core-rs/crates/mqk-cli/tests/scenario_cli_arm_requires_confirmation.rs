@@ -69,6 +69,8 @@ async fn cli_arm_requires_confirmation_for_live() -> anyhow::Result<()> {
     )
     .await?;
 
+    // A forged audit event alone is no longer sufficient for LIVE arming.
+    // PATCH B1 requires a real reconcile checkpoint row.
     mqk_db::insert_audit_event(
         &pool,
         &mqk_db::NewAuditEvent {
@@ -77,12 +79,15 @@ async fn cli_arm_requires_confirmation_for_live() -> anyhow::Result<()> {
             ts_utc: Utc::now(),
             topic: "reconcile".to_string(),
             event_type: "CLEAN".to_string(),
-            payload: serde_json::json!({"note":"ok"}),
+            payload: serde_json::json!({ "note": "ok" }),
             hash_prev: None,
             hash_self: Some("h_cli".to_string()),
         },
     )
     .await?;
+
+    mqk_db::reconcile_checkpoint_write(&pool, run_id, "CLEAN", 0, "sha256:test-clean", Utc::now())
+        .await?;
 
     // Run CLI from core-rs/ so relative paths match the binary's assumptions.
     let core_rs_dir = repo_root.join("core-rs");

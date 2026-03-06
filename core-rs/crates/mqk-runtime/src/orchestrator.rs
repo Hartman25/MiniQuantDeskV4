@@ -548,6 +548,7 @@ mod tests {
         let ev = BrokerEvent::Fill {
             broker_message_id: "msg-2".to_string(),
             internal_order_id: "ord-2".to_string(),
+            broker_order_id: None,
             symbol: "MSFT".to_string(),
             side: Side::Sell,
             delta_qty: 5,
@@ -566,6 +567,7 @@ mod tests {
         let ev = BrokerEvent::Ack {
             broker_message_id: "msg-3".to_string(),
             internal_order_id: "ord-3".to_string(),
+            broker_order_id: None,
         };
         assert!(broker_event_to_fill(&ev).is_none());
     }
@@ -576,6 +578,7 @@ mod tests {
         let ev = BrokerEvent::Fill {
             broker_message_id: "msg-4".to_string(),
             internal_order_id: "ord-4".to_string(),
+            broker_order_id: None,
             symbol: "X".to_string(),
             side: Side::Buy,
             delta_qty: 0,
@@ -592,10 +595,12 @@ mod tests {
             BrokerEvent::Ack {
                 broker_message_id: "m".to_string(),
                 internal_order_id: "o".to_string(),
+                broker_order_id: None,
             },
             BrokerEvent::Fill {
                 broker_message_id: "m".to_string(),
                 internal_order_id: "o".to_string(),
+                broker_order_id: None,
                 symbol: "X".to_string(),
                 side: Side::Buy,
                 delta_qty: 1,
@@ -605,6 +610,7 @@ mod tests {
             BrokerEvent::PartialFill {
                 broker_message_id: "m".to_string(),
                 internal_order_id: "o".to_string(),
+                broker_order_id: None,
                 symbol: "X".to_string(),
                 side: Side::Buy,
                 delta_qty: 1,
@@ -614,22 +620,27 @@ mod tests {
             BrokerEvent::CancelAck {
                 broker_message_id: "m".to_string(),
                 internal_order_id: "o".to_string(),
+                broker_order_id: None,
             },
             BrokerEvent::CancelReject {
                 broker_message_id: "m".to_string(),
                 internal_order_id: "o".to_string(),
+                broker_order_id: None,
             },
             BrokerEvent::ReplaceAck {
                 broker_message_id: "m".to_string(),
                 internal_order_id: "o".to_string(),
+                broker_order_id: None,
             },
             BrokerEvent::ReplaceReject {
                 broker_message_id: "m".to_string(),
                 internal_order_id: "o".to_string(),
+                broker_order_id: None,
             },
             BrokerEvent::Reject {
                 broker_message_id: "m".to_string(),
                 internal_order_id: "o".to_string(),
+                broker_order_id: None,
             },
         ];
         // Verify mapping does not panic for any variant.
@@ -646,10 +657,12 @@ mod tests {
             BrokerEvent::Ack {
                 broker_message_id: "m".into(),
                 internal_order_id: "o".into(),
+                broker_order_id: None,
             },
             BrokerEvent::PartialFill {
                 broker_message_id: "m".into(),
                 internal_order_id: "o".into(),
+                broker_order_id: None,
                 symbol: "X".into(),
                 side: Side::Buy,
                 delta_qty: 1,
@@ -659,6 +672,7 @@ mod tests {
             BrokerEvent::Fill {
                 broker_message_id: "m".into(),
                 internal_order_id: "o".into(),
+                broker_order_id: None,
                 symbol: "X".into(),
                 side: Side::Buy,
                 delta_qty: 1,
@@ -668,22 +682,27 @@ mod tests {
             BrokerEvent::CancelAck {
                 broker_message_id: "m".into(),
                 internal_order_id: "o".into(),
+                broker_order_id: None,
             },
             BrokerEvent::CancelReject {
                 broker_message_id: "m".into(),
                 internal_order_id: "o".into(),
+                broker_order_id: None,
             },
             BrokerEvent::ReplaceAck {
                 broker_message_id: "m".into(),
                 internal_order_id: "o".into(),
+                broker_order_id: None,
             },
             BrokerEvent::ReplaceReject {
                 broker_message_id: "m".into(),
                 internal_order_id: "o".into(),
+                broker_order_id: None,
             },
             BrokerEvent::Reject {
                 broker_message_id: "m".into(),
                 internal_order_id: "o".into(),
+                broker_order_id: None,
             },
         ];
         let mut ranks: Vec<u8> = events.iter().map(event_kind_rank).collect();
@@ -703,6 +722,7 @@ mod tests {
         let fill = BrokerEvent::Fill {
             broker_message_id: "msg-a".into(),
             internal_order_id: "ord-1".into(),
+            broker_order_id: None,
             symbol: "X".into(),
             side: Side::Buy,
             delta_qty: 5,
@@ -712,6 +732,7 @@ mod tests {
         let ack = BrokerEvent::Ack {
             broker_message_id: "msg-a".into(),
             internal_order_id: "ord-1".into(),
+            broker_order_id: None,
         };
         let mut queue: Vec<(String, BrokerEvent)> =
             vec![("msg-a".into(), fill), ("msg-a".into(), ack)];

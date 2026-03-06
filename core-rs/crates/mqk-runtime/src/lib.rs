@@ -8,4 +8,7 @@
 
 pub mod orchestrator;
 
+// Patch 1: PassGate wiring must never exist in production builds.
+// Only available to tests / explicit testkit builds.
+#[cfg(any(test, feature = "testkit"))]
 pub mod wiring_paper;

@@ -206,7 +206,7 @@ impl Strategy for BuyThenExitStrategy {
     }
 
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
-        let target_qty = if ctx.now_tick == 0 {
+        let qty = if ctx.now_tick == 0 {
             self.qty
         } else if ctx.now_tick >= self.exit_tick {
             0
@@ -215,7 +215,7 @@ impl Strategy for BuyThenExitStrategy {
         };
         StrategyOutput::new(vec![TargetPosition {
             symbol: "TEST".to_string(),
-            target_qty,
+            qty,
         }])
     }
 }

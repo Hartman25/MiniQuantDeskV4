@@ -20,3 +20,8 @@ mqk-execution = { path = "../mqk-execution", features = ["runtime-boundary"] }
 mqk-portfolio = { path = "../mqk-portfolio" }
 
 mqk-broker-paper = { path = "../mqk-broker-paper" }
+
+[features]
+# Patch 1: test-only wiring helpers (e.g., PassGate paper gateway).
+# MUST NOT be enabled in production deployments.
+testkit = ["mqk-execution/testkit"]
