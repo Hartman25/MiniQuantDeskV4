@@ -161,6 +161,41 @@ where
         }
 
         // ------------------------------------------------------------------
+        // Phase 0b — Patch 2: restart quarantine for ambiguous outbox rows.
+        //
+        // Policy:
+        // - DISPATCHING => submit may have been attempted, never silently requeue.
+        // - SENT        => ambiguous only when broker-map evidence is missing.
+        //
+        // Without a broker-driven repair/reconcile path, the only safe behavior
+        // is quarantine + halt/disarm before any new dispatch occurs.
+        // ------------------------------------------------------------------
+        {
+            let ambiguous =
+                mqk_db::outbox_load_restart_ambiguous_for_run(&self.pool, self.run_id).await?;
+
+            if !ambiguous.is_empty() {
+                let now = self.time_source.now_utc();
+
+                // Best-effort persistence; still surface the recovery-quarantine error
+                // even if one of these writes fails.
+                let _ = mqk_db::halt_run(&self.pool, self.run_id, now).await;
+                let _ =
+                    mqk_db::persist_arm_state(&self.pool, "DISARMED", Some("RecoveryQuarantine"))
+                        .await;
+
+                let details = summarize_ambiguous_outbox(&ambiguous);
+                return Err(anyhow!(
+                    "RECOVERY_QUARANTINE: run {} has {} ambiguous outbox row(s); \
+                     dispatch refused until operator action. rows=[{}]",
+                    self.run_id,
+                    ambiguous.len(),
+                    details
+                ));
+            }
+        }
+
+        // ------------------------------------------------------------------
         // Phase 1: Claim and submit outbox rows.
         // ------------------------------------------------------------------
         let claimed = mqk_db::outbox_claim_batch(
@@ -491,6 +526,16 @@ fn check_capital_invariants(portfolio: &PortfolioState) -> anyhow::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn summarize_ambiguous_outbox(rows: &[mqk_db::AmbiguousOutboxRow]) -> String {
+    rows.iter()
+        .map(|r| match &r.broker_order_id {
+            Some(bid) => format!("{}:{}:broker={}", r.idempotency_key, r.status, bid),
+            None => format!("{}:{}", r.idempotency_key, r.status),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // ---------------------------------------------------------------------------

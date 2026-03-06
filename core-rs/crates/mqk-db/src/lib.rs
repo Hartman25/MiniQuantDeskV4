@@ -677,6 +677,65 @@ pub struct OutboxRow {
     pub dispatch_attempt_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmbiguousOutboxRow {
+    pub idempotency_key: String,
+    pub status: String, // DISPATCHING | SENT
+    pub broker_order_id: Option<String>,
+}
+
+/// Load restart-ambiguous outbox rows for a run.
+///
+/// Patch 2 policy:
+/// - `DISPATCHING` is always ambiguous on restart: broker submit may have
+///   been attempted, but the process died before closure.
+/// - `SENT` is ambiguous only when the broker-order map is still missing.
+///   A normal healthy `SENT` row with a broker map entry must NOT be
+///   quarantined every tick, otherwise the system would halt during
+///   ordinary pre-ACK operation.
+///
+/// This helper therefore returns only rows that are unsafe to continue past
+/// restart without operator intervention.
+pub async fn outbox_load_restart_ambiguous_for_run(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<Vec<AmbiguousOutboxRow>> {
+    let rows = sqlx::query(
+        r#"
+        select
+            o.idempotency_key,
+            o.status,
+            m.broker_id as broker_order_id
+        from oms_outbox o
+        left join broker_order_map m
+          on m.internal_id = o.idempotency_key
+        where o.run_id = $1
+          and (
+                o.status = 'DISPATCHING'
+                or (
+                    o.status = 'SENT'
+                    and m.broker_id is null
+                )
+          )
+        order by o.outbox_id asc
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .context("outbox_load_restart_ambiguous_for_run failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(AmbiguousOutboxRow {
+            idempotency_key: row.try_get("idempotency_key")?,
+            status: row.try_get("status")?,
+            broker_order_id: row.try_get("broker_order_id")?,
+        });
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // OutboxClaimToken (FC-2)
 // ---------------------------------------------------------------------------
