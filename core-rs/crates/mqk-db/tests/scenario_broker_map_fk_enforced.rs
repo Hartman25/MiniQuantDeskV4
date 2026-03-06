@@ -1,8 +1,8 @@
-//! EB-4: Broker Map FK → oms_outbox — DB-level rejection test.
+//! EB-4: Broker Map FK -> oms_outbox — DB-level rejection test.
 //!
 //! # Invariants under test
 //!
-//! Migration 0013 adds FK: broker_order_map.internal_id →
+//! Migration 0013 adds FK: broker_order_map.internal_id ->
 //! oms_outbox(idempotency_key) ON DELETE RESTRICT.
 //!
 //! 1. An INSERT into broker_order_map with an internal_id that has no parent
@@ -11,11 +11,12 @@
 //!    not originate from an outbox dispatch.
 //!
 //! 2. An INSERT with a matching outbox row (created via the standard
-//!    run → outbox_enqueue path) must succeed.
+//!    run -> outbox_enqueue path) must succeed.
 //!
-//! Tests skip gracefully when MQK_DATABASE_URL is not set (CI without DB).
+//! Tests skip only when MQK_DATABASE_URL is not set.
+//! If MQK_DATABASE_URL is set but the DB cannot be reached, that is a HARD FAIL.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 
 // Fixed UUIDs — deterministic, never collide with real runs.
@@ -33,19 +34,13 @@ fn db_url_or_skip() -> Option<String> {
     }
 }
 
-async fn try_pool_or_skip(url: &str) -> Result<Option<PgPool>> {
-    match PgPoolOptions::new()
-        .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(2))
+async fn db_pool(url: &str) -> Result<PgPool> {
+    PgPoolOptions::new()
+        .max_connections(4)
+        .acquire_timeout(std::time::Duration::from_secs(10))
         .connect(url)
         .await
-    {
-        Ok(pool) => Ok(Some(pool)),
-        Err(e) => {
-            println!("SKIP: cannot connect to DB: {e}");
-            Ok(None)
-        }
-    }
+        .with_context(|| format!("failed to connect to DB at {url}"))
 }
 
 fn is_fk_violation(err: &sqlx::Error) -> bool {
@@ -69,9 +64,8 @@ async fn broker_map_orphan_insert_rejected_by_fk() -> anyhow::Result<()> {
     let Some(url) = db_url_or_skip() else {
         return Ok(());
     };
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
+
+    let pool = db_pool(&url).await?;
     mqk_db::migrate(&pool).await?;
 
     // Use a transaction so nothing is committed regardless of outcome.
@@ -91,7 +85,7 @@ async fn broker_map_orphan_insert_rejected_by_fk() -> anyhow::Result<()> {
     );
 
     // Rollback — nothing was committed.
-    let _ = tx.rollback().await;
+    tx.rollback().await?;
     Ok(())
 }
 
@@ -101,19 +95,18 @@ async fn broker_map_orphan_insert_rejected_by_fk() -> anyhow::Result<()> {
 
 /// INSERT into broker_order_map with a matching outbox row must succeed.
 ///
-/// Verifies the happy path: run → outbox_enqueue → broker_map_upsert chain
+/// Verifies the happy path: run -> outbox_enqueue -> broker_map_upsert chain
 /// satisfies the FK constraint end-to-end.
 #[tokio::test]
 async fn broker_map_insert_with_parent_outbox_succeeds() -> anyhow::Result<()> {
     let Some(url) = db_url_or_skip() else {
         return Ok(());
     };
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
+
+    let pool = db_pool(&url).await?;
     mqk_db::migrate(&pool).await?;
 
-    let run_id: uuid::Uuid = EB4_RUN_ID.parse().unwrap();
+    let run_id: uuid::Uuid = EB4_RUN_ID.parse().expect("EB4_RUN_ID must be a valid UUID");
 
     // Pre-cleanup: broker_map first (FK RESTRICT), then run (cascades to outbox).
     sqlx::query("DELETE FROM broker_order_map WHERE internal_id = $1")

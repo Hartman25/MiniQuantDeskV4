@@ -44,23 +44,41 @@ async fn crash_recovery_does_not_double_submit_when_broker_already_has_order() -
 
     let created =
         mqk_db::outbox_enqueue(&pool, run_id, &idempotency_key, order_json.clone()).await?;
-    assert!(created);
+    assert!(created, "outbox row must be created");
 
-    // Dispatcher claims the row (PENDING → CLAIMED) before broker submit.
-    // This is the L3 two-step dispatch protocol.
-    let claimed =
-        mqk_db::outbox_claim_batch(&pool, 1, "test-dispatcher", chrono::Utc::now()).await?;
-    assert_eq!(claimed.len(), 1, "dispatcher must claim the pending row");
+    let row = mqk_db::outbox_fetch_by_idempotency_key(&pool, &idempotency_key).await?;
+    let row = row.expect("freshly enqueued outbox row missing");
+    assert_eq!(row.status, "PENDING", "fresh enqueue must start as PENDING");
+
+    // Dispatcher claims rows before broker submit.
+    //
+    // Use a batch > 1 and then locate our exact row. This makes the test robust
+    // against a shared local DB that may contain unrelated pending rows from other
+    // runs/tests.
+    let dispatcher_id = format!("test-dispatcher-{run_id}");
+    let claimed = mqk_db::outbox_claim_batch(&pool, 64, &dispatcher_id, chrono::Utc::now()).await?;
+
+    let claimed_row = claimed
+        .into_iter()
+        .find(|row| row.row.idempotency_key == idempotency_key)
+        .expect("dispatcher must claim the target outbox row");
+
+    assert_eq!(
+        claimed_row.row.idempotency_key, idempotency_key,
+        "claimed row must match the target idempotency key"
+    );
 
     // Simulate the "submit to broker" step happening…
     // …and then a crash BEFORE we ever mark ACKED (only SENT).
     let mut broker = mqk_testkit::FakeBroker::new();
-    broker.submit(&idempotency_key, order_json.clone());
+    broker.submit(&claimed_row.row.idempotency_key, order_json.clone());
     assert_eq!(broker.submit_count(), 1);
 
     // Record that we attempted to send (but did NOT ack).
-    let sent = mqk_db::outbox_mark_sent(&pool, &idempotency_key, chrono::Utc::now()).await?;
-    assert!(sent);
+    let sent =
+        mqk_db::outbox_mark_sent(&pool, &claimed_row.row.idempotency_key, chrono::Utc::now())
+            .await?;
+    assert!(sent, "outbox_mark_sent must transition claimed row to SENT");
 
     // "Restart" recovery: should see outbox row as SENT/unacked,
     // compare with broker state, and NOT resubmit.
@@ -76,7 +94,8 @@ async fn crash_recovery_does_not_double_submit_when_broker_already_has_order() -
     assert_eq!(broker.submit_count(), 1, "submit must remain exactly once");
 
     // DB should now show ACKED
-    let row = mqk_db::outbox_fetch_by_idempotency_key(&pool, &idempotency_key).await?;
+    let row =
+        mqk_db::outbox_fetch_by_idempotency_key(&pool, &claimed_row.row.idempotency_key).await?;
     let row = row.expect("outbox row missing");
     assert_eq!(row.status, "ACKED");
 

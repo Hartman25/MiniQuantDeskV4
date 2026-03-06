@@ -1,49 +1,17 @@
-use mqk_broker_paper::{buy, PaperBroker};
-use mqk_reconcile::{is_clean_reconcile, reconcile, LocalSnapshot};
+use mqk_reconcile::{check_arm_gate, BrokerSnapshot, LocalSnapshot};
 
-/// Scenario: LIVE arming must be gated by a clean reconcile.
-/// This uses the paper broker snapshot + reconcile engine.
-///
-/// Notes:
-/// - This test assumes `mqk-testkit` has dev-deps on:
-///     - mqk-broker-paper
-///     - mqk-reconcile
-///       If it doesn't yet, add them to `crates/mqk-testkit/Cargo.toml` as dev-dependencies.
 #[test]
-fn scenario_clean_reconcile_required_before_live_arm() {
-    // 1) Start with a clean broker snapshot.
-    let mut broker = PaperBroker::new();
-    broker.set_position("AAPL", 0);
+fn clean_reconcile_required_before_live_arm() {
+    // DIRTY: local thinks we hold something, broker says we hold nothing -> blocked.
+    let mut local = LocalSnapshot::empty();
+    local.positions.insert("SPY".to_string(), 1);
 
-    // Submit a deterministic order so we exercise orders as well.
-    let _ = broker.submit(buy("AAPL", 10, "cid-001"));
+    let broker = BrokerSnapshot::empty_at(1);
 
-    let (_msg_id, broker_snap) = broker.snapshot();
+    assert!(check_arm_gate(&local, &broker).is_blocked());
 
-    // Local snapshot matches the broker exactly => must be clean.
-    let local: LocalSnapshot = broker.as_local_snapshot();
-    let report = reconcile(&local, &broker_snap);
-    assert!(
-        report.is_clean(),
-        "expected clean reconcile, got: {:?}",
-        report
-    );
-    assert!(
-        is_clean_reconcile(&local, &broker_snap),
-        "expected clean reconcile gate to pass"
-    );
+    // CLEAN: make local match broker -> permitted.
+    local.positions.clear();
 
-    // 2) Now create a drift: local thinks it has a different position.
-    let mut local_drift = local.clone();
-    local_drift.positions.insert("AAPL".to_string(), 5);
-
-    let report2 = reconcile(&local_drift, &broker_snap);
-    assert!(
-        !report2.is_clean(),
-        "expected non-clean reconcile due to position mismatch"
-    );
-    assert!(
-        !is_clean_reconcile(&local_drift, &broker_snap),
-        "expected clean reconcile gate to fail"
-    );
+    assert!(check_arm_gate(&local, &broker).is_permitted());
 }
