@@ -1,4 +1,4 @@
-//! Scenario: Replace/Cancel Targets Correct Broker Order — Patch L9
+//! Scenario: Replace/Cancel Targets Correct Broker Order — Patch L9 / 3C-2
 //!
 //! # Invariants under test
 //!
@@ -10,13 +10,16 @@
 //! 5. Deregistering removes the mapping — `broker_id()` returns `None`.
 //! 6. Unknown (never-registered) internal ID → `None`.
 //! 7. Map is empty initially; `len()` and `is_empty()` reflect live mappings.
+//! 8. Patch 3C-2: after a simulated restart, a freshly rebuilt in-memory map
+//!    still resolves cancel/replace targeting to the broker-assigned ID rather
+//!    than silently falling back to the internal ID.
 //!
 //! **Integer micros price surface (no f64 on decision boundary)**
-//! 8. `limit_price` in `BrokerSubmitRequest` is `Option<i64>` (micros).
-//! 9. `limit_price` in `BrokerReplaceRequest` is `Option<i64>` (micros).
-//! 10. `micros_to_price` converts 150_000_000 → 150.0 (exact).
-//! 11. `price_to_micros` converts 150.0 → 150_000_000 (exact).
-//! 12. Round-trip: price_to_micros(micros_to_price(m)) == m for common prices.
+//! 9. `limit_price` in `BrokerSubmitRequest` is `Option<i64>` (micros).
+//! 10. `limit_price` in `BrokerReplaceRequest` is `Option<i64>` (micros).
+//! 11. `micros_to_price` converts 150_000_000 → 150.0 (exact).
+//! 12. `price_to_micros` converts 150.0 → 150_000_000 (exact).
+//! 13. Round-trip: price_to_micros(micros_to_price(m)) == m for common prices.
 //!
 //! All tests are pure in-process; no DB or network required.
 
@@ -173,7 +176,59 @@ fn len_and_is_empty_reflect_live_mappings() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. BrokerSubmitRequest.limit_price is Option<i64>
+// 8. Simulated restart preserves non-identity targeting
+// ---------------------------------------------------------------------------
+
+#[test]
+fn restart_rehydrated_map_preserves_cancel_replace_targeting() {
+    let internal_id = "restart-intent-001";
+    let broker_id = "broker-live-ABC999";
+
+    // Pre-restart process had previously learned the mapping.
+    let persisted_pairs = vec![(internal_id.to_string(), broker_id.to_string())];
+
+    // Simulated restart: fresh process, fresh in-memory map.
+    let mut restarted_map = BrokerOrderMap::new();
+    for (internal, broker) in &persisted_pairs {
+        restarted_map.register(internal, broker);
+    }
+
+    // Cancel path after restart must still resolve to broker ID.
+    let cancel_target = restarted_map
+        .broker_id(internal_id)
+        .expect("rehydrated map must resolve cancel target after restart");
+    assert_eq!(
+        cancel_target, broker_id,
+        "cancel after restart must target broker-assigned ID"
+    );
+    assert_ne!(
+        cancel_target, internal_id,
+        "cancel after restart must not fall back to internal ID"
+    );
+
+    // Replace path after restart must also still resolve to broker ID.
+    let replace_target = restarted_map
+        .broker_id(internal_id)
+        .expect("rehydrated map must resolve replace target after restart");
+    let req = BrokerReplaceRequest {
+        broker_order_id: replace_target.to_string(),
+        quantity: 125,
+        limit_price: Some(152_250_000), // $152.25
+        time_in_force: "day".to_string(),
+    };
+
+    assert_eq!(
+        req.broker_order_id, broker_id,
+        "replace after restart must target broker-assigned ID"
+    );
+    assert_ne!(
+        req.broker_order_id, internal_id,
+        "replace after restart must not target the internal ID"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 9. BrokerSubmitRequest.limit_price is Option<i64>
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -206,7 +261,7 @@ fn broker_submit_request_market_order_has_no_limit_price() {
 }
 
 // ---------------------------------------------------------------------------
-// 9. BrokerReplaceRequest.limit_price is Option<i64>
+// 10. BrokerReplaceRequest.limit_price is Option<i64>
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -223,7 +278,7 @@ fn broker_replace_request_limit_price_is_integer_micros() {
 }
 
 // ---------------------------------------------------------------------------
-// 10. micros_to_price: 150_000_000 → 150.0
+// 11. micros_to_price: 150_000_000 → 150.0
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -237,7 +292,7 @@ fn micros_to_price_converts_correctly() {
 }
 
 // ---------------------------------------------------------------------------
-// 11. price_to_micros: 150.0 → 150_000_000
+// 12. price_to_micros: 150.0 → 150_000_000
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -251,7 +306,7 @@ fn price_to_micros_converts_correctly() {
 }
 
 // ---------------------------------------------------------------------------
-// 12. Round-trip: price_to_micros(micros_to_price(m)) == m
+// 13. Round-trip: price_to_micros(micros_to_price(m)) == m
 // ---------------------------------------------------------------------------
 
 #[test]

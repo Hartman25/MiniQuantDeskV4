@@ -19,10 +19,16 @@ async fn main() -> anyhow::Result<()> {
     // Paper gateway via runtime wiring (NOT for_test).
     let gateway = mqk_runtime::wiring_paper::paper_gateway_for_testkit_validation();
 
+    let order_map = BrokerOrderMap::new();
+    let existing = mqk_db::broker_map_load(&pool).await?;
+    for (internal_id, broker_id) in existing {
+        order_map.register(&internal_id, &broker_id);
+    }
+
     let mut orchestrator = mqk_runtime::orchestrator::ExecutionOrchestrator::new(
         pool,
         gateway,
-        BrokerOrderMap::new(),
+        order_map,
         std::collections::BTreeMap::new(),
         PortfolioState::new(args.initial_cash_usd * 1_000_000),
         args.run_id,

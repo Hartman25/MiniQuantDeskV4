@@ -494,10 +494,17 @@ pub async fn run_execute(run_id: String, ticks: u32) -> Result<()> {
     let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
 
     let gateway = BrokerGateway::for_test(NullBroker, PassGate, PassGate, PassGate);
+
+    let order_map = BrokerOrderMap::new();
+    let existing = mqk_db::broker_map_load(&pool).await?;
+    for (internal_id, broker_id) in existing {
+        order_map.register(&internal_id, &broker_id);
+    }
+
     let mut orchestrator = ExecutionOrchestrator::new(
         pool,
         gateway,
-        BrokerOrderMap::new(),
+        order_map,
         BTreeMap::new(),
         PortfolioState::new(0),
         run_uuid,

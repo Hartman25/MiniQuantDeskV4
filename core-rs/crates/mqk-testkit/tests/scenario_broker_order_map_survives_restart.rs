@@ -1,4 +1,4 @@
-//! Scenario: Broker order-ID mapping survives simulated crash — Patch A4
+//! Scenario: Broker order-ID mapping survives simulated crash — Patch A4 / 3C-1
 //!
 //! # Invariants under test
 //!
@@ -14,14 +14,22 @@
 //!    `broker_map_load` does not return the deleted entry.
 //! 5. `broker_map_upsert` is idempotent — re-registering the same `internal_id`
 //!    does not produce duplicate rows and overwrites with the latest `broker_id`.
+//! 6. Patch 3C-1: restart recovery must preserve a NON-IDENTITY mapping.
+//!    The recovered broker ID must remain distinct from the internal ID, proving
+//!    post-restart cancel/replace lookup would target the broker order ID rather
+//!    than silently falling back to the internal/client order ID.
 //!
 //! # EB-4 FK prerequisite
 //!
 //! Migration 0013 adds a FK: broker_order_map.internal_id →
-//! oms_outbox(idempotency_key) ON DELETE RESTRICT.  Tests must now create a
+//! oms_outbox(idempotency_key) ON DELETE RESTRICT. Tests must now create a
 //! run + outbox entry for each idempotency key before calling
-//! broker_map_upsert.  Cleanup order: broker_map_remove → delete run
-//! (cascades to oms_outbox via on delete cascade on oms_outbox.run_id).
+//! broker_map_upsert.
+//!
+//! Cleanup order:
+//!   broker_map_remove → delete run
+//!
+//! `runs.run_id` deletion cascades to `oms_outbox` via `ON DELETE CASCADE`.
 //!
 //! Requires `MQK_DATABASE_URL`. Skips with a diagnostic message if absent or
 //! misconfigured.
@@ -62,7 +70,7 @@ async fn try_pool_or_skip(url: &str) -> Result<Option<PgPool>> {
 }
 
 // ---------------------------------------------------------------------------
-// 1 + 2 + 3 + 4: full crash-restart roundtrip
+// 1 + 2 + 3 + 4 + 6: full crash-restart roundtrip with NON-IDENTITY proof
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -121,6 +129,10 @@ async fn broker_order_map_survives_simulated_restart() -> anyhow::Result<()> {
     .await?;
 
     // Simulate two orders confirmed by the broker (post-submit registration).
+    //
+    // IMPORTANT (Patch 3C-1):
+    // broker IDs MUST be distinct from internal IDs. If they are equal, restart
+    // tests can pass while still hiding a real live-trading bug.
     mqk_db::broker_map_upsert(&pool_before, "a4-restart-ord-1", "broker-XYZ-001").await?;
     mqk_db::broker_map_upsert(&pool_before, "a4-restart-ord-2", "broker-XYZ-002").await?;
 
@@ -163,6 +175,33 @@ async fn broker_order_map_survives_simulated_restart() -> anyhow::Result<()> {
         order_map.broker_id("a4-restart-ord-2"),
         Some("broker-XYZ-002"),
         "cancel/replace must locate ord-2 broker ID after restart"
+    );
+
+    // Patch 3C-1: prove the mapping stays NON-IDENTITY after restart.
+    //
+    // This closes the weak proof where a paper/identity broker could make tests
+    // pass even if live cancel/replace would accidentally target the internal ID.
+    assert_ne!(
+        "a4-restart-ord-1", "broker-XYZ-001",
+        "test fixture must use non-identity broker IDs"
+    );
+    assert_ne!(
+        "a4-restart-ord-2", "broker-XYZ-002",
+        "test fixture must use non-identity broker IDs"
+    );
+
+    let recovered_1 = order_map.broker_id("a4-restart-ord-1");
+    let recovered_2 = order_map.broker_id("a4-restart-ord-2");
+
+    assert_ne!(
+        recovered_1,
+        Some("a4-restart-ord-1"),
+        "restart recovery must not fall back to internal_id for ord-1"
+    );
+    assert_ne!(
+        recovered_2,
+        Some("a4-restart-ord-2"),
+        "restart recovery must not fall back to internal_id for ord-2"
     );
 
     // Terminal-state cleanup: orders filled → remove from map.

@@ -208,9 +208,7 @@ where
 
         for claimed_row in claimed {
             let order_id = claimed_row.row.idempotency_key.clone();
-
-            // Step 2: unforgeable claim token — returned by outbox_claim_batch (FC-2).
-            let claim = &claimed_row.token;
+            let claim = claimed_row.token;
 
             // Build a submit request from the outbox order_json.
             let req = build_submit_request(&claimed_row.row)?;
@@ -238,24 +236,43 @@ where
             // generator state never holds a !Send type.
             let submit_result: anyhow::Result<BrokerSubmitResponse> = self
                 .gateway
-                .submit(claim, req)
+                .submit(&claim, req)
                 .map_err(|e| anyhow!("{}", e));
+
             let resp = match submit_result {
                 Ok(r) => r,
                 Err(e) => {
                     // RT-5: Row is DISPATCHING — submit was attempted and may
-                    // have reached the broker.  Mark FAILED rather than
+                    // have reached the broker. Mark FAILED rather than
                     // releasing to PENDING; requires operator review.
                     let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
                     return Err(e.context("broker submit failed"));
                 }
             };
 
-            // Step 4: persist SENT status and broker order ID mapping.
-            mqk_db::outbox_mark_sent(&self.pool, &order_id, self.time_source.now_utc()).await?;
-            mqk_db::broker_map_upsert(&self.pool, &order_id, &resp.broker_order_id).await?;
+            // Step 4: atomically persist broker order ID mapping + SENT status.
+            //
+            // Patch 3A:
+            // After broker submit succeeds, the DB must not be able to observe
+            // a durable SENT row without the corresponding durable
+            // internal_id -> broker_id mapping needed for restart recovery,
+            // reconcile, and cancel/replace targeting.
+            let sent = mqk_db::outbox_mark_sent_with_broker_map(
+                &self.pool,
+                &order_id,
+                &resp.broker_order_id,
+                self.time_source.now_utc(),
+            )
+            .await?;
 
-            // Register in in-memory maps.
+            if !sent {
+                return Err(anyhow!(
+                    "broker submit succeeded but outbox row {} could not transition to SENT with broker map persistence",
+                    order_id
+                ));
+            }
+
+            // Register in-memory state only after DB durability succeeds.
             self.order_map.register(&order_id, &resp.broker_order_id);
             self.oms_orders
                 .insert(order_id.clone(), OmsOrder::new(&order_id, &symbol, qty));

@@ -1133,6 +1133,78 @@ pub async fn outbox_mark_sent(
     Ok(row.is_some())
 }
 
+/// Atomically persist `internal_id → broker_id` and transition the outbox row
+/// to `SENT`.
+///
+/// This closes the Patch 3A durability gap:
+/// the system must not durably acknowledge dispatch (`SENT`) without also
+/// durably persisting the broker order ID mapping needed for restart recovery.
+///
+/// Transaction semantics:
+/// - upsert `(internal_id, broker_id)` into `broker_order_map`
+/// - transition `oms_outbox` row to `SENT`
+/// - commit only if both steps succeed
+///
+/// Returns `true` if the outbox row transitioned to `SENT`; `false` if not
+/// found or not in an acceptable pre-SENT state. If the outbox transition does
+/// not occur, the transaction is not committed, so the broker map upsert is
+/// rolled back as well.
+///
+/// Accepts both `CLAIMED` and `DISPATCHING` for parity with `outbox_mark_sent`:
+/// - Production path (RT-5): `DISPATCHING → SENT`
+/// - Legacy test path: `CLAIMED → SENT`
+pub async fn outbox_mark_sent_with_broker_map(
+    pool: &PgPool,
+    internal_id: &str,
+    broker_id: &str,
+    sent_at: DateTime<Utc>,
+) -> Result<bool> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("outbox_mark_sent_with_broker_map begin failed")?;
+
+    sqlx::query(
+        r#"
+        insert into broker_order_map (internal_id, broker_id)
+        values ($1, $2)
+        on conflict (internal_id) do update
+            set broker_id = excluded.broker_id
+        "#,
+    )
+    .bind(internal_id)
+    .bind(broker_id)
+    .execute(&mut *tx)
+    .await
+    .context("outbox_mark_sent_with_broker_map broker_map_upsert failed")?;
+
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"
+        update oms_outbox
+           set status      = 'SENT',
+               sent_at_utc = coalesce(sent_at_utc, $2)
+         where idempotency_key = $1
+           and status in ('CLAIMED', 'DISPATCHING')
+        returning outbox_id
+        "#,
+    )
+    .bind(internal_id)
+    .bind(sent_at)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("outbox_mark_sent_with_broker_map outbox_mark_sent failed")?;
+
+    let Some((_outbox_id,)) = row else {
+        return Ok(false);
+    };
+
+    tx.commit()
+        .await
+        .context("outbox_mark_sent_with_broker_map commit failed")?;
+
+    Ok(true)
+}
+
 /// Mark an outbox row as ACKED.
 /// Returns true if transitioned, false if not found.
 pub async fn outbox_mark_acked(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
