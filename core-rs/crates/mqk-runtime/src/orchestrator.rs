@@ -24,9 +24,11 @@ use std::collections::BTreeMap;
 
 use anyhow::anyhow;
 use mqk_db::TimeSource;
+use mqk_reconcile::{reconcile_tick, BrokerSnapshot, DriftAction, LocalSnapshot};
 use sqlx::types::chrono;
 use sqlx::PgPool;
 use uuid::Uuid;
+
 /// Production wall-clock time source.
 ///
 /// NOTE: wall-clock reads must not live in `mqk-db` (guards enforce that).
@@ -85,6 +87,16 @@ where
     dispatcher_id: String,
     /// FC-5: injected clock — no direct `Utc::now()` in the dispatch path.
     time_source: TS,
+    /// Patch 4A: authoritative local reconcile snapshot source.
+    ///
+    /// This is injected by the caller so runtime can enforce reconcile drift
+    /// before any new dispatch occurs.
+    local_snapshot_provider: Box<dyn Fn() -> LocalSnapshot + Send + Sync>,
+    /// Patch 4A: authoritative broker reconcile snapshot source.
+    ///
+    /// This is injected by the caller so runtime can enforce reconcile drift
+    /// before any new dispatch occurs.
+    broker_snapshot_provider: Box<dyn Fn() -> BrokerSnapshot + Send + Sync>,
 }
 
 impl<B, IG, RG, RecG, TS> ExecutionOrchestrator<B, IG, RG, RecG, TS>
@@ -103,6 +115,10 @@ where
     /// `time_source` provides the UTC clock for dispatch timestamps (FC-5).
     /// Pass [`WallClock`] in production; inject a deterministic stub
     /// in tests.
+    ///
+    /// Patch 4A:
+    /// The caller must also inject local + broker snapshot providers used for
+    /// reconcile drift enforcement before dispatch.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
@@ -113,6 +129,8 @@ where
         run_id: Uuid,
         dispatcher_id: impl Into<String>,
         time_source: TS,
+        local_snapshot_provider: Box<dyn Fn() -> LocalSnapshot + Send + Sync>,
+        broker_snapshot_provider: Box<dyn Fn() -> BrokerSnapshot + Send + Sync>,
     ) -> Self {
         Self {
             pool,
@@ -123,6 +141,8 @@ where
             run_id,
             dispatcher_id: dispatcher_id.into(),
             time_source,
+            local_snapshot_provider,
+            broker_snapshot_provider,
         }
     }
 
@@ -130,14 +150,18 @@ where
     ///
     /// Phases:
     /// 0. Halt guard — refuse tick if run is HALTED in DB (I9-1).
+    /// 0b. Restart quarantine — refuse tick if ambiguous DISPATCHING / SENT
+    ///     outbox rows exist (Patch 2).
+    /// 0c. Reconcile drift enforcement — refuse tick and persist HALT/DISARM
+    ///     if local vs broker snapshots are dirty (Patch 4A).
     /// 1. Submit pending outbox rows via the gateway.
     /// 2. Fetch + ingest new broker events into oms_inbox.
     /// 3. Apply all unapplied inbox rows: OMS transition → portfolio apply →
     ///    capital invariant check (with halt+disarm persistence) → mark applied.
     ///
     /// Returns `Err` on any DB failure, gate refusal, OMS illegal transition,
-    /// or invariant violation.  The caller must treat any `Err` as a halt
-    /// signal and stop the tick loop.
+    /// reconcile drift, or invariant violation.  The caller must treat any
+    /// `Err` as a halt signal and stop the tick loop.
     pub async fn tick(&mut self) -> anyhow::Result<()> {
         // ------------------------------------------------------------------
         // Phase 0 — I9-1 HALT GUARD.
@@ -191,6 +215,39 @@ where
                     self.run_id,
                     ambiguous.len(),
                     details
+                ));
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Phase 0c — Patch 4A: reconcile drift enforcement.
+        //
+        // Runtime must not dispatch new outbox rows if local and broker state
+        // have drifted.  Reconcile is now an authoritative pre-dispatch gate.
+        //
+        // Policy:
+        // - CLEAN  => continue
+        // - DIRTY  => HALT run + DISARM arm state + refuse dispatch
+        //
+        // This is intentionally fail-closed.
+        // ------------------------------------------------------------------
+        {
+            let local = (self.local_snapshot_provider)();
+            let broker = (self.broker_snapshot_provider)();
+
+            let action = reconcile_tick(&local, &broker);
+
+            if let DriftAction::HaltAndDisarm { .. } = action {
+                let now = self.time_source.now_utc();
+
+                // Best-effort persistence; surface reconcile drift either way.
+                let _ = mqk_db::halt_run(&self.pool, self.run_id, now).await;
+                let _ =
+                    mqk_db::persist_arm_state(&self.pool, "DISARMED", Some("ReconcileDrift")).await;
+
+                return Err(anyhow!(
+                    "RECONCILE_DRIFT: run {} halted and disarmed; dispatch refused",
+                    self.run_id
                 ));
             }
         }

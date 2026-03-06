@@ -510,6 +510,8 @@ pub async fn run_execute(run_id: String, ticks: u32) -> Result<()> {
         run_uuid,
         "mqk-cli",
         mqk_runtime::orchestrator::WallClock,
+        Box::new(mqk_reconcile::LocalSnapshot::empty),
+        Box::new(mqk_reconcile::BrokerSnapshot::empty),
     );
 
     for _ in 0..ticks {

@@ -162,10 +162,12 @@ fn make_orchestrator(
         gateway,
         BrokerOrderMap::new(),
         BTreeMap::new(),
-        PortfolioState::new(1_000_000_000),
+        PortfolioState::new(0),
         run_id,
-        "patch2-dispatcher",
+        "restart-dispatcher",
         FixedClock::new(Utc::now()),
+        Box::new(mqk_reconcile::LocalSnapshot::empty),
+        Box::new(mqk_reconcile::BrokerSnapshot::empty),
     )
 }
 
