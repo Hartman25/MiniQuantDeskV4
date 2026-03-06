@@ -2,31 +2,30 @@
 
 //! Deterministic in-memory "paper" broker adapter with explicit bar-driven fills.
 //!
-//! Notes:
-//! - This crate is intentionally deterministic: no wall-clock reads, no RNG.
-//! - `BrokerSnapshot.fetched_at_ms` is set to 0 (callers may override via reconcile tick metadata).
+//! Design constraints:
+//! - No wall-clock reads, no RNG.
+//! - All timestamps are set to 0; callers may attach timing metadata elsewhere.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerEvent, BrokerInvokeToken, BrokerReplaceRequest,
-    BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
+    types::Side as ExecSide, BrokerAdapter, BrokerCancelResponse, BrokerEvent, BrokerInvokeToken,
+    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
 };
-use mqk_reconcile::{BrokerSnapshot, OrderSnapshot, OrderStatus, Side as ReconSide};
+use mqk_reconcile::{BrokerSnapshot, OrderSnapshot, OrderStatus};
 
 mod fill_engine;
 pub mod types;
 
-use fill_engine::{Bar, DeterministicFillEngine, FillMode, FillSpec, PaperOrderState};
-use mqk_execution::types::Side as ExecSide;
+use fill_engine::{Bar, DeterministicFillEngine, PaperOrderState};
 
 #[derive(Debug, Default)]
 pub struct LockedPaperBroker {
     inner: Mutex<PaperInner>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct PaperInner {
     /// Open orders keyed by broker_order_id.
     open: BTreeMap<String, PaperOrderState>,
@@ -34,8 +33,19 @@ struct PaperInner {
     closed: BTreeSet<String>,
     /// Deterministic fill engine.
     engine: DeterministicFillEngine,
-    /// FIFO-ish event queue (deterministic append order).
+    /// FIFO event queue (deterministic append order).
     events: Vec<BrokerEvent>,
+}
+
+impl Default for PaperInner {
+    fn default() -> Self {
+        Self {
+            open: BTreeMap::new(),
+            closed: BTreeSet::new(),
+            engine: DeterministicFillEngine::new(),
+            events: Vec::new(),
+        }
+    }
 }
 
 impl LockedPaperBroker {
@@ -44,7 +54,7 @@ impl LockedPaperBroker {
     }
 
     /// Drive fills by providing a bar. The deterministic fill engine will emit events
-    /// based on the configured fill mode/spec for each open order.
+    /// based on the configured fill spec for each open order.
     pub fn on_bar(&self, bar: Bar) {
         let mut inner = self.inner.lock().expect("poisoned mutex");
 
@@ -58,41 +68,17 @@ impl LockedPaperBroker {
             };
 
             let evs = inner.engine.apply_bar_to_order(&bar, &mut ord);
-
-            // Apply terminal transitions / reinsert.
-            let mut terminal = false;
-            for ev in evs {
-                if matches!(ev, BrokerEvent::Fill { .. } | BrokerEvent::Canceled { .. }) {
-                    // Fill can be partial; terminal is decided by remaining_qty below.
-                }
-                inner.events.push(ev);
-            }
+            inner.events.extend(evs);
 
             if ord.remaining_qty == 0 {
-                terminal = true;
-            }
-
-            if terminal {
-                inner.closed.insert(k.clone());
+                inner.closed.insert(k);
             } else {
                 inner.open.insert(k, ord);
             }
         }
     }
 
-    /// Configure fill behavior for future orders.
-    pub fn set_fill_mode(&self, mode: FillMode) {
-        let mut inner = self.inner.lock().expect("poisoned mutex");
-        inner.engine.set_fill_mode(mode);
-    }
-
-    /// Configure a per-symbol fill spec override.
-    pub fn set_fill_spec(&self, symbol: &str, spec: FillSpec) {
-        let mut inner = self.inner.lock().expect("poisoned mutex");
-        inner.engine.set_fill_spec(symbol, spec);
-    }
-
-    fn exec_side_from_qty(qty: i64) -> ExecSide {
+    fn exec_side_from_signed_qty(qty: i32) -> ExecSide {
         if qty >= 0 {
             ExecSide::Buy
         } else {
@@ -100,25 +86,25 @@ impl LockedPaperBroker {
         }
     }
 
-    fn recon_side_from_exec(side: ExecSide) -> ReconSide {
-        match side {
-            ExecSide::Buy => ReconSide::Buy,
-            ExecSide::Sell => ReconSide::Sell,
-        }
-    }
-
-    fn order_snapshot_from_state(order_id: &str, s: &PaperOrderState) -> OrderSnapshot {
+    fn order_snapshot_from_state(oid: &str, s: &PaperOrderState) -> OrderSnapshot {
+        let filled = s.original_qty.saturating_sub(s.remaining_qty);
         let status = if s.remaining_qty == 0 {
             OrderStatus::Filled
+        } else if filled > 0 {
+            OrderStatus::PartiallyFilled
         } else {
-            OrderStatus::Open
+            OrderStatus::New
         };
 
         OrderSnapshot {
-            order_id: order_id.to_string(),
+            order_id: oid.to_string(),
             symbol: s.symbol.clone(),
-            side: Self::recon_side_from_exec(s.side),
-            quantity: s.original_qty,
+            side: match s.side {
+                ExecSide::Buy => mqk_reconcile::Side::Buy,
+                ExecSide::Sell => mqk_reconcile::Side::Sell,
+            },
+            qty: s.original_qty,
+            filled_qty: filled,
             status,
         }
     }
@@ -135,10 +121,9 @@ impl LockedPaperBroker {
     pub fn snapshot(&self) -> BrokerSnapshot {
         let inner = self.inner.lock().expect("poisoned mutex");
         BrokerSnapshot {
-            account_id: "paper".to_string(),
             fetched_at_ms: 0,
             orders: Self::list_orders_map(&inner),
-            fills: Vec::new(),
+            positions: BTreeMap::new(),
         }
     }
 }
@@ -159,30 +144,28 @@ impl BrokerAdapter for LockedPaperBroker {
     ) -> std::result::Result<BrokerSubmitResponse, Box<dyn std::error::Error + 'static>> {
         let mut inner = self.inner.lock().expect("poisoned mutex");
 
-        // Use order_id as broker_order_id for deterministic identity mapping.
+        // Deterministic identity mapping: broker_order_id == internal order_id.
         let broker_order_id = req.order_id.clone();
 
-        // Side is inferred from sign; store absolute quantities in order state.
-        let side = Self::exec_side_from_qty(req.quantity);
-        let abs_qty: i64 = req.quantity.abs();
+        // Side is inferred from sign; fill engine uses absolute quantity.
+        let side = Self::exec_side_from_signed_qty(req.quantity);
+        let abs_qty: i64 = (req.quantity as i64).abs();
 
-        let state = PaperOrderState {
-            symbol: req.symbol.clone(),
-            side,
-            original_qty: abs_qty,
-            remaining_qty: abs_qty,
-            limit_price_micros: req.limit_price_micros,
-        };
+        let state = PaperOrderState::new(req.order_id.clone(), req.symbol.clone(), side, abs_qty);
 
-        // Emit ack deterministically.
         inner.events.push(BrokerEvent::Ack {
-            internal_order_id: req.order_id.clone(),
+            broker_message_id: format!("ack:{}", broker_order_id),
+            internal_order_id: req.order_id,
             broker_order_id: Some(broker_order_id.clone()),
         });
 
         inner.open.insert(broker_order_id.clone(), state);
 
-        Ok(BrokerSubmitResponse { broker_order_id })
+        Ok(BrokerSubmitResponse {
+            broker_order_id,
+            status: "accepted".to_string(),
+            submitted_at: 0,
+        })
     }
 
     fn cancel_order(
@@ -192,25 +175,30 @@ impl BrokerAdapter for LockedPaperBroker {
     ) -> std::result::Result<BrokerCancelResponse, Box<dyn std::error::Error + 'static>> {
         let mut inner = self.inner.lock().expect("poisoned mutex");
 
+        let oid = broker_order_id.to_string();
+
         // Idempotent cancel.
-        if inner.closed.contains(broker_order_id) {
+        if inner.closed.contains(&oid) {
             return Ok(BrokerCancelResponse {
-                canceled: true,
-                broker_order_id: broker_order_id.to_string(),
+                broker_order_id: oid,
+                status: "cancelled".to_string(),
+                cancelled_at: 0,
             });
         }
 
-        if inner.open.remove(broker_order_id).is_some() {
-            inner.closed.insert(broker_order_id.to_string());
-            inner.events.push(BrokerEvent::Canceled {
-                internal_order_id: broker_order_id.to_string(),
-                broker_order_id: Some(broker_order_id.to_string()),
+        if inner.open.remove(&oid).is_some() {
+            inner.closed.insert(oid.clone());
+            inner.events.push(BrokerEvent::CancelAck {
+                broker_message_id: format!("cancel:{}", oid),
+                internal_order_id: oid.clone(),
+                broker_order_id: Some(oid.clone()),
             });
         }
 
         Ok(BrokerCancelResponse {
-            canceled: true,
-            broker_order_id: broker_order_id.to_string(),
+            broker_order_id: oid,
+            status: "cancelled".to_string(),
+            cancelled_at: 0,
         })
     }
 
@@ -221,37 +209,40 @@ impl BrokerAdapter for LockedPaperBroker {
     ) -> std::result::Result<BrokerReplaceResponse, Box<dyn std::error::Error + 'static>> {
         let mut inner = self.inner.lock().expect("poisoned mutex");
 
-        let broker_order_id = req.broker_order_id.clone();
+        let oid = req.broker_order_id.clone();
 
-        // Idempotent replace against terminal orders is a no-op but "ok".
-        if inner.closed.contains(&broker_order_id) {
+        // Idempotent replace against terminal orders is a no-op but still "ok".
+        if inner.closed.contains(&oid) {
             inner.events.push(BrokerEvent::ReplaceAck {
-                internal_order_id: broker_order_id.clone(),
-                broker_order_id: Some(broker_order_id.clone()),
+                broker_message_id: format!("replace:{}", oid),
+                internal_order_id: oid.clone(),
+                broker_order_id: Some(oid.clone()),
             });
             return Ok(BrokerReplaceResponse {
-                replaced: true,
-                broker_order_id,
+                broker_order_id: oid,
+                status: "replaced".to_string(),
+                replaced_at: 0,
             });
         }
 
-        if let Some(o) = inner.open.get_mut(&broker_order_id) {
-            // Replace semantics: update remaining_qty and limit if provided.
-            // Quantity is absolute; side doesn't change on replace.
-            let new_abs = req.quantity.abs();
-            o.remaining_qty = new_abs;
+        if let Some(o) = inner.open.get_mut(&oid) {
+            let side = Self::exec_side_from_signed_qty(req.quantity);
+            let new_abs: i64 = (req.quantity as i64).abs();
+            o.side = side;
             o.original_qty = new_abs;
-            o.limit_price_micros = req.limit_price_micros;
+            o.remaining_qty = new_abs;
         }
 
         inner.events.push(BrokerEvent::ReplaceAck {
-            internal_order_id: broker_order_id.clone(),
-            broker_order_id: Some(broker_order_id.clone()),
+            broker_message_id: format!("replace:{}", oid),
+            internal_order_id: oid.clone(),
+            broker_order_id: Some(oid.clone()),
         });
 
         Ok(BrokerReplaceResponse {
-            replaced: true,
-            broker_order_id,
+            broker_order_id: oid,
+            status: "replaced".to_string(),
+            replaced_at: 0,
         })
     }
 }

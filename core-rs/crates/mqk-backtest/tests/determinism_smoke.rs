@@ -32,7 +32,7 @@ impl Strategy for BuyHoldExit {
 
         StrategyOutput::new(vec![TargetPosition {
             symbol: "TEST".to_string(),
-            target_qty,
+            qty: target_qty,
         }])
     }
 }

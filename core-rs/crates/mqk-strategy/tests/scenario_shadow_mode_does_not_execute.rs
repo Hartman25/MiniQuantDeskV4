@@ -11,7 +11,7 @@ impl Strategy for Dummy {
         StrategyOutput {
             targets: vec![TargetPosition {
                 symbol: "SPY".to_string(),
-                target_qty: 1,
+                qty: 1,
             }],
         }
     }
@@ -40,5 +40,5 @@ fn scenario_shadow_mode_does_not_execute() {
     // Strategy still produced outputs (for parity checks/logging).
     assert_eq!(r.intents.output.targets.len(), 1);
     assert_eq!(r.intents.output.targets[0].symbol, "SPY");
-    assert_eq!(r.intents.output.targets[0].target_qty, 1);
+    assert_eq!(r.intents.output.targets[0].qty, 1);
 }

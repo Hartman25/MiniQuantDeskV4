@@ -6,7 +6,12 @@ mod engine;
 pub mod gateway;
 mod id_map;
 mod order_router;
+mod prices;
+mod reconcile_guard;
 pub mod types;
+
+// Optional submodules used by runtime boundary wiring / OMS integration.
+pub mod oms;
 
 pub use engine::targets_to_order_intents;
 
@@ -16,8 +21,13 @@ pub use types::{
     OrderIntentV2, Side, StrategyOutput, TargetPosition,
 };
 
+// Price fixed-point helpers expected by testkit.
+pub use prices::{micros_to_price, price_to_micros, MICROS_PER_UNIT};
+
+// Reconcile freshness guard expected by testkit.
+pub use reconcile_guard::ReconcileFreshnessGuard;
+
 // Re-export the broker-facing contract types that downstream crates use.
-// (Do NOT re-export OrderRouter itself.)
 pub use id_map::BrokerOrderMap;
 
 pub use order_router::{
@@ -26,8 +36,8 @@ pub use order_router::{
 };
 
 pub use gateway::{
-    BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken, ReconcileGate, RiskGate,
-    UnknownOrder,
+    intent_id_to_client_order_id, BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken,
+    ReconcileGate, RiskGate, UnknownOrder,
 };
 
 // --- Patch L1: choke-point exports ---
@@ -54,15 +64,11 @@ pub fn targets_to_map(xs: &[TargetPosition]) -> std::collections::BTreeMap<Strin
 }
 
 /// Convert a list of `BrokerPosition` into a map symbol -> qty.
-///
-/// This is used in tests and in the runtime boundary when calculating deltas.
 pub fn broker_positions_to_map(
     xs: &[mqk_schemas::BrokerPosition],
 ) -> std::collections::BTreeMap<String, i64> {
     let mut book = std::collections::BTreeMap::<String, i64>::new();
     for x in xs {
-        // broker snapshot qty comes in as string; parse as i64 shares for now.
-        // This stays conservative until V2 execution is fully wired.
         if let Ok(q) = x.qty.parse::<i64>() {
             book.insert(x.symbol.clone(), q);
         }
@@ -72,3 +78,18 @@ pub fn broker_positions_to_map(
 
 #[cfg(feature = "runtime-boundary")]
 pub mod wiring;
+
+use std::collections::BTreeMap;
+
+/// Helper for tests/examples: build a symbol->qty map from an iterator.
+#[must_use]
+pub fn position_book<I, S>(items: I) -> BTreeMap<String, i64>
+where
+    I: IntoIterator<Item = (S, i64)>,
+    S: Into<String>,
+{
+    items
+        .into_iter()
+        .map(|(sym, qty)| (sym.into(), qty))
+        .collect()
+}

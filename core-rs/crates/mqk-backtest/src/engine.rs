@@ -1,10 +1,24 @@
+#![forbid(unsafe_code)]
+
+//! Deterministic backtest engine (event-sourced, replayable).
+//!
+//! Pipeline per bar: BAR -> STRATEGY -> EXECUTION -> PORTFOLIO -> RISK
+//!
+//! Design constraints:
+//! - No wall-clock reads, no RNG.
+//! - Deterministic iteration order where possible.
+
 use std::collections::BTreeMap;
 
-use mqk_execution::{targets_to_order_intents, PositionBook, Side as ExecSide};
+use mqk_execution::{targets_to_order_intents, Side as ExecSide};
+
+type PositionBook = BTreeMap<String, i64>;
+
 use mqk_integrity::{
     evaluate_bar as integrity_evaluate_bar, Bar as IntegrityBar, BarKey, FeedId, IntegrityAction,
     IntegrityConfig, IntegrityState, Timeframe as IntegrityTimeframe,
 };
+use mqk_isolation::enforce_allocation_cap_micros;
 use mqk_portfolio::{
     apply_fill, compute_equity_micros, compute_exposure_micros, Fill, MarkMap, PortfolioState,
     Side as PfSide,
@@ -17,8 +31,6 @@ use mqk_strategy::{
     BarStub, RecentBarsWindow, ShadowMode, Strategy, StrategyContext, StrategyHost,
     StrategyHostError,
 };
-
-use mqk_isolation::enforce_allocation_cap_micros;
 
 use crate::types::{BacktestBar, BacktestConfig, BacktestReport};
 
@@ -122,7 +134,7 @@ impl BacktestEngine {
             gap_tolerance_bars: config.integrity_gap_tolerance_bars,
             stale_threshold_ticks: config.integrity_stale_threshold_ticks,
             enforce_feed_disagreement: config.integrity_enforce_feed_disagreement,
-            calendar: config.integrity_calendar, // Patch B3
+            calendar: config.integrity_calendar,
         };
         let integrity_enabled = config.integrity_enabled;
 
@@ -162,12 +174,6 @@ impl BacktestEngine {
     }
 
     /// PATCH 22: Seed an additional integrity feed at a given tick.
-    ///
-    /// This is the integration point for multi-feed stale detection.
-    /// In runtime, the data adapter registers feeds via this method.
-    /// In backtest, tests can register a "heartbeat" feed at the start
-    /// tick, and if it's never updated, it will go stale as the primary
-    /// feed advances, triggering DISARM.
     pub fn seed_integrity_feed(&mut self, feed_name: &str, tick: u64) {
         use mqk_integrity::tick_feed;
         let feed = FeedId::new(feed_name);
@@ -180,12 +186,6 @@ impl BacktestEngine {
     }
 
     /// PATCH F1 -- Validate slippage knobs before executing any bars.
-    ///
-    /// Both `slippage_bps` and `volatility_mult_bps` must be >= 0. A negative
-    /// value would flip the fill-price adjustment direction, giving BUY orders
-    /// cheaper fills and SELL orders higher fills -- i.e. systematically
-    /// favorable pricing. That is a look-ahead / overfitting artifact and is
-    /// unconditionally rejected.
     fn validate_stress_profile(&self) -> Result<(), BacktestError> {
         if self.config.stress.slippage_bps < 0 {
             return Err(BacktestError::NegativeSlippage {
@@ -203,20 +203,7 @@ impl BacktestEngine {
     }
 
     /// Run the backtest on a sequence of bars.
-    ///
-    /// Event-sourced pipeline per bar:
-    /// 1. Validate bar (incomplete => error, negative ts => error)
-    /// 2. Update last prices / marks
-    /// 3. Feed bar into strategy host
-    /// 4. Convert strategy targets to order intents (mqk-execution)
-    /// 5. For each intent: allocation-cap check, risk check, apply slippage, create fill, apply to portfolio
-    /// 6. Record equity curve point
-    /// 7. Handle halt/flatten actions from risk engine
     pub fn run(&mut self, bars: &[BacktestBar]) -> Result<BacktestReport, BacktestError> {
-        // PATCH F1: Reject negative slippage before processing any bars.
-        // Negative values invert the fill-price adjustment, producing fills that
-        // are systematically favorable (cheaper BUYs, higher-priced SELLs).
-        // Stress knobs are conservative-only.
         self.validate_stress_profile()?;
 
         for bar in bars {
@@ -235,10 +222,7 @@ impl BacktestEngine {
                 return Err(BacktestError::NegativeTimestamp { end_ts: bar.end_ts });
             }
 
-            // Patch B4 — Corporate action policy gate.
-            // Checked before strategy execution: if the symbol is in a declared
-            // forbidden period, halt immediately rather than run strategy logic
-            // on contaminated (unadjusted) price data.
+            // Corporate action exclusion gate.
             if self
                 .config
                 .corporate_action_policy
@@ -252,13 +236,7 @@ impl BacktestEngine {
                 break;
             }
 
-            // PATCH 22: Integrity gate — evaluate bar through integrity engine.
-            // If integrity disarms (stale feed) or halts (gap), block execution.
-            //
-            // We use bar.end_ts (cast to u64) as the tick value. This allows
-            // stale detection to trigger when there is a large time gap between
-            // consecutive bars (e.g., market close → next day open) that exceeds
-            // the configured stale_threshold_ticks (interpreted as seconds here).
+            // PATCH 22: Integrity gate.
             if self.integrity_enabled {
                 let feed = FeedId::new("backtest");
                 let now_tick = bar.end_ts as u64;
@@ -285,8 +263,6 @@ impl BacktestEngine {
                     }
                     IntegrityAction::Allow => {}
                     IntegrityAction::Reject => {
-                        // Rejected bar (e.g. incomplete) — already caught above,
-                        // but if integrity rejects for other reasons, skip execution.
                         self.execution_blocked = true;
                     }
                 }
@@ -311,7 +287,6 @@ impl BacktestEngine {
 
             let stub = BarStub::new(bar.end_ts, bar.is_complete, bar.close_micros, bar.volume);
             self.recent_bars.push(stub);
-            // Trim to max window length
             let max_len = self.config.bar_history_len;
             if self.recent_bars.len() > max_len {
                 let start = self.recent_bars.len() - max_len;
@@ -327,9 +302,8 @@ impl BacktestEngine {
                 .on_bar(&ctx)
                 .map_err(BacktestError::StrategyHost)?;
 
-            // 4. Check if intents should execute (shadow mode check)
+            // 4. Shadow mode check
             if !bar_result.intents.should_execute() {
-                // Shadow mode: record equity but don't execute
                 let equity = compute_equity_micros(
                     self.portfolio.cash_micros,
                     &self.portfolio.positions,
@@ -339,8 +313,7 @@ impl BacktestEngine {
                 continue;
             }
 
-            // PATCH 22: Integrity disarm gate — block all new order submissions.
-            // Strategy still runs (for logging/analytics), but no fills occur.
+            // PATCH 22: Integrity disarm gate.
             if self.execution_blocked {
                 let equity = compute_equity_micros(
                     self.portfolio.cash_micros,
@@ -353,10 +326,22 @@ impl BacktestEngine {
 
             // 5. Convert targets to order intents
             let position_book = self.build_position_book();
-            let decision = targets_to_order_intents(&position_book, &bar_result.intents.output);
+            let decision =
+                targets_to_order_intents(&bar_result.intents.output.targets, &position_book);
 
-            // 6. Process each order intent through allocation-cap + risk + fill
-            for intent in &decision.intents {
+            // PATCH C: handle HaltAndDisarm
+            let intents = match decision {
+                mqk_execution::ExecutionDecision::Noop => Vec::new(),
+                mqk_execution::ExecutionDecision::PlaceOrders(intents) => intents,
+                mqk_execution::ExecutionDecision::HaltAndDisarm { reason } => {
+                    self.halted = true;
+                    self.halt_reason = Some(reason);
+                    Vec::new()
+                }
+            };
+
+            // 6. Process each intent through allocation-cap + risk + fill
+            for intent in &intents {
                 if self.halted {
                     break;
                 }
@@ -367,19 +352,14 @@ impl BacktestEngine {
                     &self.last_prices,
                 );
 
-                // ---- PATCH 13: Allocation cap enforcement (engine isolation) ----
-                // Only block *risk-increasing* intents. Risk-reducing is always allowed.
+                // PATCH 13: allocation cap enforcement — only for risk-increasing intents
                 let is_risk_reducing = self.is_intent_risk_reducing(intent);
                 if !is_risk_reducing {
-                    // Current gross exposure at marks (deterministic).
                     let exposure =
                         compute_exposure_micros(&self.portfolio.positions, &self.last_prices);
 
-                    // Worst-case fill price for *this intent* (ambiguity worst-case enforced).
                     let fill_price = self.conservative_fill_price(bar, &intent.side);
 
-                    // Conservative bound: treat full order notional as additional gross exposure.
-                    // NOTE: this is intentionally pessimistic and deterministic.
                     let proposed_notional_micros: i64 = {
                         let n = (intent.qty as i128) * (fill_price as i128);
                         if n > i64::MAX as i128 {
@@ -399,11 +379,9 @@ impl BacktestEngine {
                     )
                     .is_err()
                     {
-                        // Allocation cap breached => deterministic reject (no fill, no halt).
                         continue;
                     }
                 }
-                // ---------------------------------------------------------------
 
                 let risk_input = RiskInput {
                     day_id: bar.day_id,
@@ -415,12 +393,11 @@ impl BacktestEngine {
                     kill_switch: None,
                 };
 
-                let risk_state = self.risk_state.as_mut().unwrap();
+                let risk_state = self.risk_state.as_mut().expect("risk_state must exist");
                 let risk_decision = risk_evaluate(&self.risk_config, risk_state, &risk_input);
 
                 match risk_decision.action {
                     RiskAction::Allow => {
-                        // Apply conservative fill price (worst-case slippage)
                         let fill_price = self.conservative_fill_price(bar, &intent.side);
                         let pf_side = match intent.side {
                             ExecSide::Buy => PfSide::Buy,
@@ -431,15 +408,12 @@ impl BacktestEngine {
                         apply_fill(&mut self.portfolio, &fill);
                         self.fills.push(fill);
                     }
-                    RiskAction::Reject => {
-                        // Skip this intent (rejected by risk)
-                    }
+                    RiskAction::Reject => {}
                     RiskAction::Halt => {
                         self.halted = true;
                         self.halt_reason = Some(format!("{:?}", risk_decision.reason));
                     }
                     RiskAction::FlattenAndHalt => {
-                        // Flatten all positions, then halt
                         self.flatten_all(bar);
                         self.halted = true;
                         self.halt_reason = Some(format!("{:?}", risk_decision.reason));
@@ -447,7 +421,7 @@ impl BacktestEngine {
                 }
             }
 
-            // 7. Record equity curve point (post-execution)
+            // 7. Record equity curve
             let equity = compute_equity_micros(
                 self.portfolio.cash_micros,
                 &self.portfolio.positions,
@@ -484,23 +458,18 @@ impl BacktestEngine {
     /// - BUY fills at the HIGH price (worst case for buyer), then slippage on top.
     /// - SELL fills at the LOW price (worst case for seller), then slippage on top.
     ///
-    /// # Patch B5 — Slippage Realism v1
+    /// Patch B5 — Slippage Realism v1
     ///
     /// Effective slippage is the sum of a flat floor and a volatility proxy:
-    /// ```text
-    /// bar_spread_bps         = (high - low) * 10_000 / close
-    /// vol_component          = bar_spread_bps * volatility_mult_bps / 10_000
-    /// effective_slippage_bps = slippage_bps + vol_component
-    /// ```
-    /// When `volatility_mult_bps == 0` (default), behavior is identical to pre-B5.
+    /// - bar_spread_bps = (high - low) * 10_000 / close
+    /// - vol_component = bar_spread_bps * volatility_mult_bps / 10_000
+    /// - effective_slippage_bps = slippage_bps + vol_component
     fn conservative_fill_price(&self, bar: &BacktestBar, side: &ExecSide) -> i64 {
         let base = match side {
             ExecSide::Buy => bar.high_micros,
             ExecSide::Sell => bar.low_micros,
         };
 
-        // Patch B5: volatility proxy = bar spread as bps of close price.
-        // Deterministic: depends only on the bar's OHLC — no randomness, no clock.
         let bar_spread_bps = if bar.close_micros > 0 {
             (bar.high_micros - bar.low_micros).saturating_mul(10_000) / bar.close_micros
         } else {
@@ -513,8 +482,6 @@ impl BacktestEngine {
             return base;
         }
 
-        // slippage: BUY => price goes UP (worse for buyer)
-        //           SELL => price goes DOWN (worse for seller)
         let adjustment = (base as i128 * effective_slippage_bps as i128) / 10_000i128;
         match side {
             ExecSide::Buy => {
@@ -528,8 +495,8 @@ impl BacktestEngine {
         }
     }
 
-    /// Check if an order intent reduces risk (closing / reducing existing position).
-    fn is_intent_risk_reducing(&self, intent: &mqk_execution::OrderIntent) -> bool {
+    /// Check if an execution intent reduces risk (closing / reducing existing position).
+    fn is_intent_risk_reducing(&self, intent: &mqk_execution::ExecutionIntent) -> bool {
         let current_qty = self
             .portfolio
             .positions

@@ -16,6 +16,35 @@ pub struct TargetPosition {
     pub qty: i64,
 }
 
+impl StrategyOutput {
+    #[inline]
+    pub fn new(targets: Vec<TargetPosition>) -> Self {
+        Self { targets }
+    }
+}
+
+impl TargetPosition {
+    #[inline]
+    pub fn new<S: Into<String>>(symbol: S, qty: i64) -> Self {
+        Self {
+            symbol: symbol.into(),
+            qty,
+        }
+    }
+}
+
+impl ExecutionDecision {
+    /// Convenience accessor for tests/callers that want the order list.
+    /// Returns an empty slice for Noop/HaltAndDisarm.
+    #[inline]
+    pub fn intents(&self) -> &[ExecutionIntent] {
+        match self {
+            ExecutionDecision::PlaceOrders(intents) => intents.as_slice(),
+            ExecutionDecision::Noop | ExecutionDecision::HaltAndDisarm { .. } => &[],
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
     Buy,

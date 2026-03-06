@@ -23,9 +23,7 @@
 //!    through `apply_fill` directly yields identical portfolio state.
 
 use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine, StressProfile};
-use mqk_execution::{
-    position_book, targets_to_order_intents, Side, StrategyOutput, TargetPosition,
-};
+use mqk_execution::{targets_to_order_intents, Side, StrategyOutput, TargetPosition};
 use mqk_integrity::CalendarSpec;
 use mqk_portfolio::{apply_fill, compute_equity_micros, PortfolioState, MICROS_SCALE};
 use mqk_risk::{
@@ -33,12 +31,23 @@ use mqk_risk::{
     RiskState,
 };
 use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
+use std::collections::BTreeMap;
 
 const M: i64 = MICROS_SCALE;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+fn position_book<I>(pairs: I) -> BTreeMap<String, i64>
+where
+    I: IntoIterator<Item = (&'static str, i64)>,
+{
+    pairs
+        .into_iter()
+        .map(|(sym, qty)| (sym.to_string(), qty))
+        .collect()
+}
 
 /// Flat bar: OHLC all equal (no spread), so fill price = price exactly.
 fn flat_bar(symbol: &str, ts: i64, price_micros: i64) -> BacktestBar {
@@ -135,34 +144,34 @@ impl Strategy for StaticTarget {
 #[test]
 fn intent_conversion_delta_rule_is_deterministic() {
     // flat → 10: BUY 10
-    let book = position_book(std::iter::empty::<(&str, i64)>());
+    let book = position_book(std::iter::empty());
     let out = StrategyOutput::new(vec![TargetPosition::new("SPY", 10)]);
-    let dec = targets_to_order_intents(&book, &out);
-    assert_eq!(dec.intents.len(), 1);
-    assert_eq!(dec.intents[0].side, Side::Buy);
-    assert_eq!(dec.intents[0].qty, 10);
+    let dec = targets_to_order_intents(&out.targets, &book);
+    assert_eq!(dec.intents().len(), 1);
+    assert_eq!(dec.intents()[0].side, Side::Buy);
+    assert_eq!(dec.intents()[0].qty, 10);
 
     // 10 → 5: SELL 5
     let book = position_book([("SPY", 10_i64)]);
     let out = StrategyOutput::new(vec![TargetPosition::new("SPY", 5)]);
-    let dec = targets_to_order_intents(&book, &out);
-    assert_eq!(dec.intents.len(), 1);
-    assert_eq!(dec.intents[0].side, Side::Sell);
-    assert_eq!(dec.intents[0].qty, 5);
+    let dec = targets_to_order_intents(&out.targets, &book);
+    assert_eq!(dec.intents().len(), 1);
+    assert_eq!(dec.intents()[0].side, Side::Sell);
+    assert_eq!(dec.intents()[0].qty, 5);
 
     // 10 → 0: SELL 10 (full close)
     let book = position_book([("SPY", 10_i64)]);
     let out = StrategyOutput::new(vec![TargetPosition::new("SPY", 0)]);
-    let dec = targets_to_order_intents(&book, &out);
-    assert_eq!(dec.intents.len(), 1);
-    assert_eq!(dec.intents[0].side, Side::Sell);
-    assert_eq!(dec.intents[0].qty, 10);
+    let dec = targets_to_order_intents(&out.targets, &book);
+    assert_eq!(dec.intents().len(), 1);
+    assert_eq!(dec.intents()[0].side, Side::Sell);
+    assert_eq!(dec.intents()[0].qty, 10);
 
     // 10 → 10: no intent (already at target)
     let book = position_book([("SPY", 10_i64)]);
     let out = StrategyOutput::new(vec![TargetPosition::new("SPY", 10)]);
-    let dec = targets_to_order_intents(&book, &out);
-    assert_eq!(dec.intents.len(), 0);
+    let dec = targets_to_order_intents(&out.targets, &book);
+    assert_eq!(dec.intents().len(), 0);
 }
 
 /// Backtest engine applies the same delta rule: starting flat, targeting 10
