@@ -34,6 +34,8 @@ async fn main() -> anyhow::Result<()> {
         args.run_id,
         "mqk-paper-loop",
         mqk_runtime::orchestrator::WallClock,
+        Box::new(mqk_reconcile::LocalSnapshot::empty),
+        Box::new(mqk_reconcile::BrokerSnapshot::empty),
     );
 
     for _ in 0..args.ticks {

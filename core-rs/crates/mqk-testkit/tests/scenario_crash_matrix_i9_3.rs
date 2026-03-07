@@ -3,20 +3,20 @@
 //! # Invariants under test
 //!
 //! Three crash windows in the outbox dispatch / inbox apply path not covered
-//! by EB-5.  Each window leaves the DB in a state that could, naïvely,
+//! by EB-5. Each window leaves the DB in a state that could, naïvely,
 //! produce a double-submit or double-apply on restart.
 //!
 //! ## Crash Window W4 — after broker submit, before outbox_mark_sent
 //!
-//! Normal path:  claim → submit_to_broker → mark_sent → broker_map_upsert
+//! Normal path:  claim → mark_dispatching → submit_to_broker → mark_sent → broker_map_upsert
 //! Crash at:     ^— broker.submit() succeeded, process exits before mark_sent
-//! DB state:     outbox = CLAIMED, broker HAS the order, no broker_map entry
+//! DB state:     outbox = DISPATCHING, broker HAS the order, no broker_map entry
 //! Recovery:     broker.has_order() = true → mark_acked; do NOT resubmit
 //! Invariant:    broker.submit_count() == 1 (no double-submit)
 //!
 //! ## Crash Window W5 — after outbox_mark_sent, before broker_map_upsert
 //!
-//! Normal path:  … → mark_sent → broker_map_upsert → order_map.register
+//! Normal path:  … → mark_dispatching → submit_to_broker → mark_sent → broker_map_upsert → order_map.register
 //! Crash at:     ^— mark_sent done, process exits before broker_map_upsert
 //! DB state:     outbox = SENT, no broker_order_map entry
 //! Recovery:     broker.has_order() = true → mark_acked; broker_map gap persists
@@ -103,7 +103,7 @@ async fn seed_run_and_outbox(pool: &PgPool, run_id: Uuid, idem_key: &str) -> Res
 /// Remove test data for the given run.
 ///
 /// oms_outbox and oms_inbox both have ON DELETE CASCADE from runs, so a
-/// single delete from runs cleans everything.  The caller must have already
+/// single delete from runs cleans everything. The caller must have already
 /// removed any broker_order_map rows (FK RESTRICT) before calling this.
 async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     sqlx::query("delete from runs where run_id = $1")
@@ -119,10 +119,10 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
 
 /// Crash after broker.submit() but before outbox_mark_sent().
 ///
-/// DB state entering recovery: outbox = CLAIMED, broker HAS the order.
-/// The dispatcher never called mark_sent, so the outbox row never reached
-/// SENT.  recover_outbox_against_broker must NOT resubmit — broker already
-/// has it — and must ACK the row to advance past this crash window.
+/// DB state entering recovery: outbox = DISPATCHING, broker HAS the order.
+/// The dispatcher already crossed the pre-submit safety barrier and wrote
+/// DISPATCHING, but never reached mark_sent. recover_outbox_against_broker
+/// must NOT resubmit — broker already has it — and must ACK the row.
 #[tokio::test]
 async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Result<()> {
     let Some(url) = db_url_or_skip() else {
@@ -148,6 +148,14 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
     let claimed = mqk_db::outbox_claim_batch(&pool, 1, "i93-dispatcher", Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "W4: must claim the PENDING row");
 
+    // Dispatcher marks DISPATCHING before broker submit (CLAIMED → DISPATCHING).
+    let marked_dispatching =
+        mqk_db::outbox_mark_dispatching(&pool, key, "i93-dispatcher", Utc::now()).await?;
+    assert!(
+        marked_dispatching,
+        "W4: outbox_mark_dispatching must transition CLAIMED → DISPATCHING"
+    );
+
     // Broker submit succeeds — broker now has the order.
     let mut broker = mqk_testkit::FakeBroker::new();
     broker.submit(key, json!({"symbol": "SPY", "qty": 1}));
@@ -158,14 +166,14 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
     );
 
     // --- CRASH: process exits here, outbox_mark_sent never called ---
-    // DB state: outbox = CLAIMED, broker HAS the order, no broker_map entry.
+    // DB state: outbox = DISPATCHING, broker HAS the order, no broker_map entry.
 
     // --- Restart: run recovery ---
     let report = mqk_testkit::recover_outbox_against_broker(&pool, run_id, &mut broker).await?;
 
     assert_eq!(
         report.inspected, 1,
-        "W4: recovery must inspect the CLAIMED row"
+        "W4: recovery must inspect the DISPATCHING row"
     );
     assert_eq!(
         report.resubmitted, 0,
@@ -209,7 +217,7 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
 /// Crash after outbox_mark_sent() but before broker_map_upsert().
 ///
 /// DB state entering recovery: outbox = SENT, broker HAS the order, no
-/// broker_order_map entry for this key.  Recovery must ACK without resubmit.
+/// broker_order_map entry for this key. Recovery must ACK without resubmit.
 /// The broker_map gap persists after recovery — cancel/replace cannot locate
 /// this order, but no double-submit occurs and no phantom entry is created.
 #[tokio::test]
@@ -237,6 +245,18 @@ async fn w5_crash_after_mark_sent_before_broker_map_upsert_no_double_submit() ->
     // Dispatcher claims the row (PENDING → CLAIMED).
     let claimed = mqk_db::outbox_claim_batch(&pool, 1, "i93-dispatcher", Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "W5: must claim the PENDING row");
+    assert_eq!(
+        claimed[0].row.idempotency_key, key,
+        "W5: claimed row must be the seeded key"
+    );
+
+    // Production path now requires CLAIMED → DISPATCHING before submit.
+    let marked_dispatching =
+        mqk_db::outbox_mark_dispatching(&pool, key, "i93-dispatcher", Utc::now()).await?;
+    assert!(
+        marked_dispatching,
+        "W5: outbox_mark_dispatching must transition CLAIMED → DISPATCHING"
+    );
 
     // Broker submit succeeds.
     let mut broker = mqk_testkit::FakeBroker::new();
@@ -247,9 +267,12 @@ async fn w5_crash_after_mark_sent_before_broker_map_upsert_no_double_submit() ->
         "W5: broker must record one submit"
     );
 
-    // Mark outbox SENT (CLAIMED → SENT).
+    // Mark outbox SENT (DISPATCHING → SENT).
     let sent = mqk_db::outbox_mark_sent(&pool, key, Utc::now()).await?;
-    assert!(sent, "W5: outbox_mark_sent must transition CLAIMED → SENT");
+    assert!(
+        sent,
+        "W5: outbox_mark_sent must transition DISPATCHING → SENT"
+    );
 
     // --- CRASH: process exits here, broker_map_upsert never called ---
     // DB state: outbox = SENT, broker HAS the order, broker_map has no entry.

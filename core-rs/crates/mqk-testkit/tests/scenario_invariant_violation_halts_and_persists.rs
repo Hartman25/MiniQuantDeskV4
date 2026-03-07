@@ -210,11 +210,13 @@ fn make_corrupted_orchestrator(
         pool,
         gateway,
         BrokerOrderMap::new(),
-        BTreeMap::new(), // empty oms_orders — Ack skips OMS transition
+        BTreeMap::new(),
         portfolio,
         run_id,
         "i91-dispatcher",
         FixedClock::new(Utc::now()),
+        Box::new(mqk_reconcile::LocalSnapshot::empty),
+        Box::new(mqk_reconcile::BrokerSnapshot::empty),
     )
 }
 

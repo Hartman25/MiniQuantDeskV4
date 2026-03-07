@@ -1,4 +1,16 @@
+use anyhow::Result;
 use mqk_db::md::load_md_bars_for_backtest;
+use sqlx::PgPool;
+
+async fn maybe_pool() -> Option<PgPool> {
+    match mqk_db::connect_from_env().await {
+        Ok(pool) => Some(pool),
+        Err(e) => {
+            eprintln!("SKIP: requires working MQK_DATABASE_URL ({e})");
+            None
+        }
+    }
+}
 
 /// DB-backed loader test.
 ///
@@ -9,10 +21,13 @@ use mqk_db::md::load_md_bars_for_backtest;
 ///   MQK_DATABASE_URL=... cargo test -p mqk-db --test md_load_backtest -- --ignored
 #[tokio::test]
 #[ignore]
-async fn load_md_bars_for_backtest_is_deterministically_ordered() {
-    let pool = mqk_db::testkit_db_pool().await.expect("db pool");
+async fn load_md_bars_for_backtest_is_deterministically_ordered() -> Result<()> {
+    let Some(pool) = maybe_pool().await else {
+        return Ok(());
+    };
 
-    // Clean slate.
+    mqk_db::migrate(&pool).await?;
+
     sqlx::query("delete from md_bars")
         .execute(&pool)
         .await
@@ -84,14 +99,10 @@ async fn load_md_bars_for_backtest_is_deterministically_ordered() {
     .expect("insert A@120");
 
     let mut symbols = vec!["B".to_string(), "A".to_string()];
-    // Intentionally unsorted input must not matter.
     symbols.reverse();
 
-    let rows = load_md_bars_for_backtest(&pool, "1m", 0, 999_999, &symbols)
-        .await
-        .expect("load");
+    let rows = load_md_bars_for_backtest(&pool, "1m", 0, 999_999, &symbols).await?;
 
-    // Deterministic order: (end_ts ASC, symbol ASC)
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].end_ts, 60);
     assert_eq!(rows[0].symbol, "A");
@@ -99,4 +110,6 @@ async fn load_md_bars_for_backtest_is_deterministically_ordered() {
     assert_eq!(rows[1].symbol, "A");
     assert_eq!(rows[2].end_ts, 120);
     assert_eq!(rows[2].symbol, "B");
+
+    Ok(())
 }

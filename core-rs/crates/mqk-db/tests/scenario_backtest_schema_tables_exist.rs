@@ -1,26 +1,43 @@
-/// PATCH A: Backtest/replay schema additions must exist after migrations.
-///
-/// DB-backed test, skipped if MQK_DATABASE_URL is not set.
+use anyhow::Result;
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
-async fn backtest_schema_tables_exist_after_migrate() -> anyhow::Result<()> {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
+async fn backtest_schema_tables_exist_after_migrate() -> Result<()> {
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!(
+            "SKIP: requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"
+        );
+        return Ok(());
+    }
+
+    let pool = match mqk_db::testkit_db_pool().await {
+        Ok(pool) => pool,
+        Err(e) => {
+            eprintln!("SKIP: unable to connect using MQK_DATABASE_URL: {e}");
+            return Ok(());
         }
     };
 
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
-
     mqk_db::migrate(&pool).await?;
 
-    for table in ["md_bars", "run_events", "corporate_events", "symbol_gics"] {
-        let (exists,): (bool,) = sqlx::query_as(
+    let required_tables = [
+        "runs",
+        "outbox_orders",
+        "inbox_fills",
+        "broker_order_map",
+        "arm_state",
+        "reconcile_reports",
+        "md_bars",
+        "md_ingest_runs",
+        "md_quality_reports",
+        "backtest_runs",
+        "backtest_fills",
+        "backtest_equity_curve",
+        "promotion_runs",
+    ];
+
+    for table in required_tables {
+        let exists: bool = sqlx::query_scalar(
             r#"
             select exists (
                 select 1
@@ -34,7 +51,7 @@ async fn backtest_schema_tables_exist_after_migrate() -> anyhow::Result<()> {
         .fetch_one(&pool)
         .await?;
 
-        assert!(exists, "expected table '{table}' to exist after migrate()");
+        assert!(exists, "expected table to exist after migrate: {table}");
     }
 
     Ok(())

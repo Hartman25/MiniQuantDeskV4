@@ -5,10 +5,10 @@
 //!
 //! `outbox_claim_batch` uses `FOR UPDATE SKIP LOCKED`, which means:
 //! - The first caller atomically transitions matching PENDING rows to CLAIMED.
-//! - Any concurrent caller finds no unlocked PENDING rows and gets an empty result.
+//! - Any concurrent caller cannot claim the SAME row.
 //!
 //! These tests simulate the two-dispatcher scenario synchronously:
-//! Dispatcher A claims first, Dispatcher B finds nothing (skipped).
+//! Dispatcher A claims first, Dispatcher B must not claim that same row.
 //! Only the claiming dispatcher can advance the row to SENT.
 //!
 //! All tests skip gracefully when `MQK_DATABASE_URL` is not set.
@@ -18,7 +18,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// Helper
+// Helpers
 // ---------------------------------------------------------------------------
 
 async fn make_pool(url: &str) -> anyhow::Result<sqlx::PgPool> {
@@ -49,8 +49,16 @@ async fn make_run(pool: &sqlx::PgPool) -> anyhow::Result<uuid::Uuid> {
     Ok(run_id)
 }
 
+async fn cleanup_outbox_tables(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    sqlx::query("delete from broker_order_map")
+        .execute(pool)
+        .await?;
+    sqlx::query("delete from oms_outbox").execute(pool).await?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
-// Test 1: only one dispatcher claims the row; the second gets nothing
+// Test 1: only one dispatcher claims the same row; the second cannot claim it
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -64,6 +72,7 @@ async fn only_one_dispatcher_claims_row_second_gets_empty() -> anyhow::Result<()
     };
 
     let pool = make_pool(&url).await?;
+    cleanup_outbox_tables(&pool).await?;
     let run_id = make_run(&pool).await?;
 
     let intent_id = format!("{run_id}_intent_double_dispatch");
@@ -77,8 +86,9 @@ async fn only_one_dispatcher_claims_row_second_gets_empty() -> anyhow::Result<()
 
     // --- Dispatcher A claims the row ---
     let claimed_a =
-        mqk_db::outbox_claim_batch(&pool, 10, "dispatcher-A", chrono::Utc::now()).await?;
+        mqk_db::outbox_claim_batch(&pool, 1, "dispatcher-A", chrono::Utc::now()).await?;
     assert_eq!(claimed_a.len(), 1, "dispatcher A must claim exactly 1 row");
+    assert_eq!(claimed_a[0].row.idempotency_key, intent_id);
     assert_eq!(claimed_a[0].row.status, "CLAIMED");
     assert_eq!(
         claimed_a[0].row.claimed_by.as_deref(),
@@ -86,14 +96,21 @@ async fn only_one_dispatcher_claims_row_second_gets_empty() -> anyhow::Result<()
         "claimed_by must record dispatcher identity"
     );
 
-    // --- Dispatcher B tries to claim the same row — must get nothing ---
-    // Because SKIP LOCKED skips rows held by A's implicit row lock.
+    // --- Dispatcher B tries to claim while A already holds the target row ---
     let claimed_b =
-        mqk_db::outbox_claim_batch(&pool, 10, "dispatcher-B", chrono::Utc::now()).await?;
+        mqk_db::outbox_claim_batch(&pool, 1, "dispatcher-B", chrono::Utc::now()).await?;
+
+    assert!(
+        claimed_b.iter().all(|r| r.row.idempotency_key != intent_id),
+        "dispatcher B must not be able to claim the same outbox row already claimed by dispatcher A"
+    );
+
+    // Since this test inserted exactly one outbox row into an otherwise cleaned table,
+    // B should get nothing.
     assert_eq!(
         claimed_b.len(),
         0,
-        "dispatcher B must find no claimable rows while A holds the claim"
+        "dispatcher B must find no second claimable row in this isolated test"
     );
 
     // --- Only dispatcher A can advance the row to SENT ---
@@ -123,6 +140,7 @@ async fn release_claim_returns_row_to_pending_for_next_dispatcher() -> anyhow::R
     };
 
     let pool = make_pool(&url).await?;
+    cleanup_outbox_tables(&pool).await?;
     let run_id = make_run(&pool).await?;
 
     let intent_id = format!("{run_id}_intent_release_test");
@@ -137,6 +155,7 @@ async fn release_claim_returns_row_to_pending_for_next_dispatcher() -> anyhow::R
     // Dispatcher A claims the row.
     let claimed = mqk_db::outbox_claim_batch(&pool, 1, "dispatcher-A", chrono::Utc::now()).await?;
     assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].row.idempotency_key, intent_id);
 
     // Dispatcher A fails and releases its claim.
     let released = mqk_db::outbox_release_claim(&pool, &intent_id).await?;
@@ -164,6 +183,7 @@ async fn release_claim_returns_row_to_pending_for_next_dispatcher() -> anyhow::R
         1,
         "dispatcher B must claim the released row"
     );
+    assert_eq!(claimed_b[0].row.idempotency_key, intent_id);
     assert_eq!(claimed_b[0].row.claimed_by.as_deref(), Some("dispatcher-B"));
 
     Ok(())
@@ -184,6 +204,7 @@ async fn unclaimed_row_cannot_be_marked_sent() -> anyhow::Result<()> {
     };
 
     let pool = make_pool(&url).await?;
+    cleanup_outbox_tables(&pool).await?;
     let run_id = make_run(&pool).await?;
 
     let intent_id = format!("{run_id}_intent_noclaim_test");
@@ -202,13 +223,13 @@ async fn unclaimed_row_cannot_be_marked_sent() -> anyhow::Result<()> {
         "mark_sent must return false if the row was never claimed"
     );
 
-    // Row must remain PENDING.
+    // Current behavior: failed direct mark_sent leaves the row PENDING.
     let row = mqk_db::outbox_fetch_by_idempotency_key(&pool, &intent_id)
         .await?
         .expect("outbox row must exist");
     assert_eq!(
         row.status, "PENDING",
-        "row must remain PENDING after a failed mark_sent attempt"
+        "row must remain PENDING after a failed direct mark_sent attempt"
     );
 
     Ok(())
