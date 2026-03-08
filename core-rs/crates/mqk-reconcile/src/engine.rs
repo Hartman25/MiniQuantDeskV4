@@ -1,13 +1,27 @@
 use crate::watermark::{SnapshotFreshness, SnapshotWatermark};
 use crate::{
-    BrokerSnapshot, LocalSnapshot, OrderSnapshot, ReconcileAction, ReconcileDiff, ReconcileReason,
-    ReconcileReport,
+    BrokerSnapshot, LocalSnapshot, OrderSnapshot, OrderStatus, ReconcileAction, ReconcileDiff,
+    ReconcileReason, ReconcileReport,
 };
 
 fn push_reason_once(reasons: &mut Vec<ReconcileReason>, r: ReconcileReason) {
     if !reasons.contains(&r) {
         reasons.push(r);
     }
+}
+
+/// Section E: returns true for order statuses that represent an active
+/// (non-terminal) order.  Terminal orders (Filled/Canceled/Rejected) are
+/// excluded from LocalOrderMissingAtBroker detection because the broker may
+/// purge them from its retention window after completion.
+fn is_active_status(status: &OrderStatus) -> bool {
+    matches!(
+        status,
+        OrderStatus::New
+            | OrderStatus::Accepted
+            | OrderStatus::PartiallyFilled
+            | OrderStatus::Unknown
+    )
 }
 
 fn compare_orders(
@@ -81,24 +95,45 @@ pub fn reconcile(local: &LocalSnapshot, broker: &BrokerSnapshot) -> ReconcileRep
     let mut reasons: Vec<ReconcileReason> = Vec::new();
     let mut diffs: Vec<ReconcileDiff> = Vec::new();
 
-    // 1) Unknown broker orders
-    for order_id in broker.orders.keys() {
+    // 1) Unknown broker orders (Section E: distinguish fill-touched from open-only)
+    for (order_id, broker_ord) in &broker.orders {
         if !local.orders.contains_key(order_id) {
-            diffs.push(ReconcileDiff::UnknownOrder {
-                order_id: order_id.clone(),
-            });
-            push_reason_once(&mut reasons, ReconcileReason::UnknownBrokerOrder);
+            // Economic exposure has changed if the unknown order has been filled
+            // (partially or fully).  Classify more specifically so callers can
+            // distinguish timing artifacts (open, unfilled) from real exposure drift.
+            let fill_touched = broker_ord.filled_qty > 0
+                || matches!(
+                    broker_ord.status,
+                    OrderStatus::Filled | OrderStatus::PartiallyFilled
+                );
+            if fill_touched {
+                diffs.push(ReconcileDiff::UnknownBrokerFill {
+                    order_id: order_id.clone(),
+                    filled_qty: broker_ord.filled_qty,
+                });
+                push_reason_once(&mut reasons, ReconcileReason::UnknownBrokerFill);
+            } else {
+                diffs.push(ReconcileDiff::UnknownOrder {
+                    order_id: order_id.clone(),
+                });
+                push_reason_once(&mut reasons, ReconcileReason::UnknownBrokerOrder);
+            }
         }
     }
 
-    // 2) Order drift for common ids
+    // 2) Order drift for common ids + local active orders absent at broker (Section E)
     for (order_id, local_ord) in &local.orders {
         if let Some(broker_ord) = broker.orders.get(order_id) {
             compare_orders(order_id, local_ord, broker_ord, &mut diffs, &mut reasons);
+        } else if is_active_status(&local_ord.status) {
+            // Section E: local active order has no broker counterpart — drift.
+            // Terminal orders (Filled/Canceled/Rejected) are excluded: the broker
+            // may have purged them from its retention window after completion.
+            diffs.push(ReconcileDiff::LocalOrderMissingAtBroker {
+                order_id: order_id.clone(),
+            });
+            push_reason_once(&mut reasons, ReconcileReason::LocalOrderMissingAtBroker);
         }
-        // NOTE: broker missing local order is not specified as HALT in your patch text.
-        // We intentionally do NOT enforce it here to avoid false halts on broker retention windows.
-        // If you want it later, add a policy flag in a separate patch.
     }
 
     // 3) Position mismatches
@@ -111,15 +146,24 @@ pub fn reconcile(local: &LocalSnapshot, broker: &BrokerSnapshot) -> ReconcileRep
         symbols.insert(s.clone());
     }
 
-    for sym in symbols {
-        let lq = *local.positions.get(&sym).unwrap_or(&0);
-        let bq = *broker.positions.get(&sym).unwrap_or(&0);
+    for sym in &symbols {
+        let local_has = local.positions.contains_key(sym);
+        let broker_has = broker.positions.contains_key(sym);
+        let lq = *local.positions.get(sym).unwrap_or(&0);
+        let bq = *broker.positions.get(sym).unwrap_or(&0);
         if lq != bq {
             diffs.push(ReconcileDiff::PositionQtyMismatch {
-                symbol: sym,
+                symbol: sym.clone(),
                 local_qty: lq,
                 broker_qty: bq,
             });
+            // Section E: emit UnknownBrokerPosition when the broker holds a
+            // position we have no portfolio record for.  Also emit PositionMismatch
+            // so callers relying on that reason for the broker-only case continue
+            // to work (backward-compat dual-emit).
+            if broker_has && !local_has {
+                push_reason_once(&mut reasons, ReconcileReason::UnknownBrokerPosition);
+            }
             push_reason_once(&mut reasons, ReconcileReason::PositionMismatch);
         }
     }
@@ -142,6 +186,160 @@ pub fn reconcile(local: &LocalSnapshot, broker: &BrokerSnapshot) -> ReconcileRep
 /// Gate for LIVE arming: must be clean reconcile.
 pub fn is_clean_reconcile(local: &LocalSnapshot, broker: &BrokerSnapshot) -> bool {
     reconcile(local, broker).is_clean()
+}
+
+// ---------------------------------------------------------------------------
+// Section E unit tests — one per drift class
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod section_e_tests {
+    use super::*;
+    use crate::{
+        BrokerSnapshot, LocalSnapshot, OrderSnapshot, OrderStatus, ReconcileAction, ReconcileDiff,
+        ReconcileReason, Side,
+    };
+
+    fn order(id: &str, status: OrderStatus, qty: i64, filled: i64) -> OrderSnapshot {
+        OrderSnapshot::new(id, "SPY", Side::Buy, qty, filled, status)
+    }
+
+    // E-T1: UnknownBrokerFill — broker reports a filled order we have no OMS record of.
+    #[test]
+    fn unknown_broker_fill_triggers_halt() {
+        let local = LocalSnapshot::empty();
+        let mut broker = BrokerSnapshot::empty();
+        broker.orders.insert(
+            "fill-ord-1".to_string(),
+            order("fill-ord-1", OrderStatus::Filled, 100, 100),
+        );
+
+        let r = reconcile(&local, &broker);
+
+        assert_eq!(r.action, ReconcileAction::Halt);
+        assert!(
+            r.reasons.contains(&ReconcileReason::UnknownBrokerFill),
+            "expected UnknownBrokerFill, got {:?}",
+            r.reasons
+        );
+        let has_fill_diff = r.diffs.iter().any(|d| {
+            if let ReconcileDiff::UnknownBrokerFill {
+                order_id,
+                filled_qty,
+            } = d
+            {
+                order_id == "fill-ord-1" && *filled_qty == 100
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_fill_diff,
+            "expected UnknownBrokerFill diff for fill-ord-1 with filled_qty=100"
+        );
+        // Must NOT emit UnknownBrokerOrder — it is the more specific class.
+        assert!(
+            !r.reasons.contains(&ReconcileReason::UnknownBrokerOrder),
+            "fill-touched unknown order must not be classified as UnknownBrokerOrder"
+        );
+    }
+
+    // E-T2: UnknownBrokerPosition — broker holds a position our portfolio has no record of.
+    #[test]
+    fn unknown_broker_position_triggers_halt() {
+        let local = LocalSnapshot::empty(); // no positions
+        let mut broker = BrokerSnapshot::empty();
+        broker.positions.insert("AAPL".to_string(), 200);
+
+        let r = reconcile(&local, &broker);
+
+        assert_eq!(r.action, ReconcileAction::Halt);
+        assert!(
+            r.reasons.contains(&ReconcileReason::UnknownBrokerPosition),
+            "expected UnknownBrokerPosition, got {:?}",
+            r.reasons
+        );
+    }
+
+    // E-T3: LocalOrderMissingAtBroker — OMS has an active order that broker does not report.
+    #[test]
+    fn local_active_order_missing_at_broker_triggers_halt() {
+        let mut local = LocalSnapshot::empty();
+        local.orders.insert(
+            "local-ord-1".to_string(),
+            order("local-ord-1", OrderStatus::Accepted, 50, 0),
+        );
+        let broker = BrokerSnapshot::empty(); // broker knows nothing
+
+        let r = reconcile(&local, &broker);
+
+        assert_eq!(r.action, ReconcileAction::Halt);
+        assert!(
+            r.reasons
+                .contains(&ReconcileReason::LocalOrderMissingAtBroker),
+            "expected LocalOrderMissingAtBroker, got {:?}",
+            r.reasons
+        );
+        let has_diff = r.diffs.iter().any(|d| {
+            if let ReconcileDiff::LocalOrderMissingAtBroker { order_id } = d {
+                order_id == "local-ord-1"
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_diff,
+            "expected LocalOrderMissingAtBroker diff for local-ord-1"
+        );
+    }
+
+    // E-T4: BrokerOrderMissingLocally — broker has an open order OMS has no record of.
+    #[test]
+    fn broker_order_missing_locally_triggers_halt() {
+        let local = LocalSnapshot::empty();
+        let mut broker = BrokerSnapshot::empty();
+        broker.orders.insert(
+            "ghost-ord-1".to_string(),
+            order("ghost-ord-1", OrderStatus::Accepted, 30, 0),
+        );
+
+        let r = reconcile(&local, &broker);
+
+        assert_eq!(r.action, ReconcileAction::Halt);
+        assert!(
+            r.reasons.contains(&ReconcileReason::UnknownBrokerOrder),
+            "expected UnknownBrokerOrder, got {:?}",
+            r.reasons
+        );
+        // Not fill-touched — must NOT be classified as UnknownBrokerFill.
+        assert!(
+            !r.reasons.contains(&ReconcileReason::UnknownBrokerFill),
+            "open unfilled broker order must not be classified as UnknownBrokerFill"
+        );
+    }
+
+    // E-T5: PositionQuantityMismatch — both sides know the symbol but quantities differ.
+    #[test]
+    fn position_qty_mismatch_both_sides_known_triggers_halt() {
+        let mut local = LocalSnapshot::empty();
+        local.positions.insert("TSLA".to_string(), 100);
+        let mut broker = BrokerSnapshot::empty();
+        broker.positions.insert("TSLA".to_string(), 80);
+
+        let r = reconcile(&local, &broker);
+
+        assert_eq!(r.action, ReconcileAction::Halt);
+        assert!(
+            r.reasons.contains(&ReconcileReason::PositionMismatch),
+            "expected PositionMismatch, got {:?}",
+            r.reasons
+        );
+        // Both sides have TSLA — must NOT emit UnknownBrokerPosition.
+        assert!(
+            !r.reasons.contains(&ReconcileReason::UnknownBrokerPosition),
+            "should not emit UnknownBrokerPosition when both sides hold the position"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

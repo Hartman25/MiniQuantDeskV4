@@ -64,12 +64,15 @@ async fn cleanup_outbox_tables(pool: &sqlx::PgPool) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn outbox_row_is_pending_before_broker_submit() -> anyhow::Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
+            panic!(
+                "PROOF: MQK_DATABASE_URL is not set. 
+             This is a load-bearing proof test and cannot be skipped. 
+             Set MQK_DATABASE_URL to a live Postgres instance and re-run."
+            );
         }
     };
 
@@ -149,12 +152,15 @@ async fn outbox_row_is_pending_before_broker_submit() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn retry_enqueue_does_not_create_second_outbox_row() -> anyhow::Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => {
-            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
+            panic!(
+                "PROOF: MQK_DATABASE_URL is not set. 
+             This is a load-bearing proof test and cannot be skipped. 
+             Set MQK_DATABASE_URL to a live Postgres instance and re-run."
+            );
         }
     };
 

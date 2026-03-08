@@ -32,8 +32,11 @@
 //! Recovery:     inbox_load_unapplied_for_run returns the row; apply exactly once
 //! Invariant:    fill applied exactly once; second restart sees zero unapplied rows
 //!
-//! Requires `MQK_DATABASE_URL`. Skips with a diagnostic message if absent or
-//! misconfigured.
+//! # PROOF LANE
+//!
+//! This is a load-bearing institutional proof test. It MUST fail hard if
+//! MQK_DATABASE_URL is absent or the DB is unreachable. Silent skip is not
+//! acceptable — a skipped proof test is an unproven invariant.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -50,32 +53,31 @@ const W5_RUN_ID: &str = "19300005-0000-0000-0000-000000000000";
 const W6_RUN_ID: &str = "19300006-0000-0000-0000-000000000000";
 
 // ---------------------------------------------------------------------------
-// Helpers
+// PROOF LANE harness helpers — fail hard on absent or unreachable DB.
 // ---------------------------------------------------------------------------
 
-fn db_url_or_skip() -> Option<String> {
+/// Panics with a clear message if MQK_DATABASE_URL is not set.
+/// This is intentional: a proof test that cannot reach its DB is a failed proof.
+fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) if !v.trim().is_empty() => Some(v),
-        _ => {
-            println!("SKIP: requires MQK_DATABASE_URL");
-            None
-        }
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => panic!(
+            "PROOF: MQK_DATABASE_URL is not set. \
+             This is a load-bearing proof test and cannot be skipped. \
+             Set MQK_DATABASE_URL to a live Postgres instance and re-run."
+        ),
     }
 }
 
-async fn try_pool_or_skip(url: &str) -> Result<Option<PgPool>> {
-    match PgPoolOptions::new()
+/// Panics if the DB is unreachable.
+/// An unreachable DB means the proof cannot be run — fail loud, not silent.
+async fn require_pool(url: &str) -> PgPool {
+    PgPoolOptions::new()
         .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(2))
+        .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(url)
         .await
-    {
-        Ok(pool) => Ok(Some(pool)),
-        Err(e) => {
-            println!("SKIP: cannot connect to DB: {e}");
-            Ok(None)
-        }
-    }
+        .unwrap_or_else(|e| panic!("PROOF: cannot connect to DB: {e}"))
 }
 
 /// Insert a minimal test run and a single outbox entry.
@@ -125,12 +127,8 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
 /// must NOT resubmit — broker already has it — and must ACK the row.
 #[tokio::test]
 async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Result<()> {
-    let Some(url) = db_url_or_skip() else {
-        return Ok(());
-    };
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
+    let url = require_db_url();
+    let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;
 
     let run_id: Uuid = W4_RUN_ID.parse().unwrap();
@@ -223,12 +221,8 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
 #[tokio::test]
 async fn w5_crash_after_mark_sent_before_broker_map_upsert_no_double_submit() -> anyhow::Result<()>
 {
-    let Some(url) = db_url_or_skip() else {
-        return Ok(());
-    };
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
+    let url = require_db_url();
+    let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;
 
     let run_id: Uuid = W5_RUN_ID.parse().unwrap();
@@ -337,12 +331,8 @@ async fn w5_crash_after_mark_sent_before_broker_map_upsert_no_double_submit() ->
 /// After the apply, a second call must return zero rows — no double-apply.
 #[tokio::test]
 async fn w6_crash_after_inbox_insert_before_apply_replays_exactly_once() -> anyhow::Result<()> {
-    let Some(url) = db_url_or_skip() else {
-        return Ok(());
-    };
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
+    let url = require_db_url();
+    let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;
 
     let run_id: Uuid = W6_RUN_ID.parse().unwrap();

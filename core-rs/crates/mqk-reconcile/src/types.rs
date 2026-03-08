@@ -150,6 +150,18 @@ pub enum ReconcileReason {
     UnknownBrokerOrder,
     PositionMismatch,
     OrderDrift,
+    // Section E — five drift classes
+    /// Broker reports a fill (filled_qty > 0 or Filled/PartiallyFilled status) for
+    /// an order we have no OMS record of.  Economic exposure changed without local
+    /// knowledge — fail closed.
+    UnknownBrokerFill,
+    /// Broker reports a position for a symbol our portfolio has no record of.
+    /// Dual-emitted alongside PositionMismatch to preserve backward-compat callers.
+    UnknownBrokerPosition,
+    /// OMS has an active order (New/Accepted/PartiallyFilled/Unknown) that the broker
+    /// does not report.  Terminal orders are excluded — broker may purge them after
+    /// completion.
+    LocalOrderMissingAtBroker,
 }
 
 /// Evidence of a mismatch (kept minimal but explicit).
@@ -170,6 +182,19 @@ pub enum ReconcileDiff {
         field: String,
         local: String,
         broker: String,
+    },
+
+    // Section E — additional drift evidence
+    /// Broker reports a fill for an order we have no OMS record of.
+    UnknownBrokerFill {
+        order_id: String,
+        /// `filled_qty` as reported by the broker snapshot.
+        filled_qty: i64,
+    },
+
+    /// Local active order has no counterpart in the broker snapshot.
+    LocalOrderMissingAtBroker {
+        order_id: String,
     },
 }
 

@@ -31,10 +31,12 @@
 //!
 //! `runs.run_id` deletion cascades to `oms_outbox` via `ON DELETE CASCADE`.
 //!
-//! Requires `MQK_DATABASE_URL`. Skips with a diagnostic message if absent or
-//! misconfigured.
+//! # PROOF LANE
+//!
+//! This is a load-bearing institutional proof test. It MUST fail hard if
+//! MQK_DATABASE_URL is absent or the DB is unreachable. Silent skip is not
+//! acceptable — a skipped proof test is an unproven invariant.
 
-use anyhow::Result;
 use chrono::Utc;
 use mqk_execution::BrokerOrderMap;
 use sqlx::{postgres::PgPoolOptions, PgPool};
@@ -44,29 +46,30 @@ use uuid::Uuid;
 const RESTART_RUN_ID: &str = "a4a40001-0000-0000-0000-000000000000";
 const IDEM_RUN_ID: &str = "a4a40002-0000-0000-0000-000000000000";
 
-fn db_url_or_skip() -> Option<String> {
+// ---------------------------------------------------------------------------
+// PROOF LANE harness helpers — fail hard on absent or unreachable DB.
+// ---------------------------------------------------------------------------
+
+/// Panics with a clear message if MQK_DATABASE_URL is not set.
+fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) if !v.trim().is_empty() => Some(v),
-        _ => {
-            println!("SKIP: requires MQK_DATABASE_URL");
-            None
-        }
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => panic!(
+            "PROOF: MQK_DATABASE_URL is not set. \
+             This is a load-bearing proof test and cannot be skipped. \
+             Set MQK_DATABASE_URL to a live Postgres instance and re-run."
+        ),
     }
 }
 
-async fn try_pool_or_skip(url: &str) -> Result<Option<PgPool>> {
-    match PgPoolOptions::new()
+/// Panics if the DB is unreachable.
+async fn require_pool(url: &str) -> PgPool {
+    PgPoolOptions::new()
         .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(2))
+        .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(url)
         .await
-    {
-        Ok(pool) => Ok(Some(pool)),
-        Err(e) => {
-            println!("SKIP: cannot connect to DB: {e}");
-            Ok(None)
-        }
-    }
+        .unwrap_or_else(|e| panic!("PROOF: cannot connect to DB: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -75,15 +78,11 @@ async fn try_pool_or_skip(url: &str) -> Result<Option<PgPool>> {
 
 #[tokio::test]
 async fn broker_order_map_survives_simulated_restart() -> anyhow::Result<()> {
-    let Some(url) = db_url_or_skip() else {
-        return Ok(());
-    };
+    let url = require_db_url();
 
     // --- Pre-crash session ---------------------------------------------------
 
-    let Some(pool_before) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
+    let pool_before = require_pool(&url).await;
     mqk_db::migrate(&pool_before).await?;
 
     let run_id: Uuid = RESTART_RUN_ID.parse().unwrap();
@@ -141,9 +140,7 @@ async fn broker_order_map_survives_simulated_restart() -> anyhow::Result<()> {
 
     // --- Post-restart session ------------------------------------------------
 
-    let Some(pool_after) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
+    let pool_after = require_pool(&url).await;
     mqk_db::migrate(&pool_after).await?;
 
     // Recovery: load all persisted mappings (daemon startup path).
@@ -233,13 +230,8 @@ async fn broker_order_map_survives_simulated_restart() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn broker_map_upsert_is_idempotent() -> anyhow::Result<()> {
-    let Some(url) = db_url_or_skip() else {
-        return Ok(());
-    };
-
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
+    let url = require_db_url();
+    let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;
 
     let run_id: Uuid = IDEM_RUN_ID.parse().unwrap();

@@ -12,8 +12,13 @@
 mod host;
 mod types;
 
+pub mod engines;
 pub mod plugin_registry;
 
 pub use host::*;
 pub use plugin_registry::{PluginRegistry, RegistryError, StrategyFactory, StrategyMeta};
 pub use types::*;
+
+// Re-export execution-facing output types so engine modules and downstream
+// callers can use mqk-strategy as the main strategy-layer boundary.
+pub use mqk_execution::{StrategyOutput, TargetPosition};

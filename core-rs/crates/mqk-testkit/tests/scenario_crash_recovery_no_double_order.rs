@@ -1,3 +1,16 @@
+//! Scenario: Crash Recovery No Double Order
+//!
+//! # Invariant under test
+//! When a process crashes after broker submit but before mark_acked, the
+//! recovery path must detect that the broker already has the order and NOT
+//! resubmit. broker.submit_count() must remain exactly 1.
+//!
+//! # PROOF LANE
+//!
+//! This is a load-bearing institutional proof test. It MUST fail hard if
+//! MQK_DATABASE_URL is absent or the DB is unreachable. Silent skip is not
+//! acceptable — a skipped proof test is an unproven invariant.
+
 use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
@@ -5,13 +18,14 @@ use uuid::Uuid;
 #[tokio::test]
 async fn crash_recovery_does_not_double_submit_when_broker_already_has_order() -> anyhow::Result<()>
 {
-    // Skip if no DB configured.
+    // PROOF LANE: fail hard if MQK_DATABASE_URL is not set.
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("SKIP: MQK_DATABASE_URL not set");
-            return Ok(());
-        }
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => panic!(
+            "PROOF: MQK_DATABASE_URL is not set. \
+             This is a load-bearing proof test and cannot be skipped. \
+             Set MQK_DATABASE_URL to a live Postgres instance and re-run."
+        ),
     };
 
     let pool = sqlx::postgres::PgPoolOptions::new()

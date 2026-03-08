@@ -31,8 +31,11 @@
 //! outbox_list_unacked_for_run must not return it.  A second restart
 //! therefore inspects zero rows and makes zero broker calls.
 //!
-//! Requires `MQK_DATABASE_URL`. Skips with a diagnostic message if absent
-//! or misconfigured.
+//! # PROOF LANE
+//!
+//! This is a load-bearing institutional proof test. It MUST fail hard if
+//! MQK_DATABASE_URL is absent or the DB is unreachable. Silent skip is not
+//! acceptable — a skipped proof test is an unproven invariant.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -49,32 +52,31 @@ const W2_RUN_ID: &str = "eb5b0002-0000-0000-0000-000000000000";
 const W3_RUN_ID: &str = "eb5b0003-0000-0000-0000-000000000000";
 
 // ---------------------------------------------------------------------------
-// Helpers
+// PROOF LANE harness helpers — fail hard on absent or unreachable DB.
 // ---------------------------------------------------------------------------
 
-fn db_url_or_skip() -> Option<String> {
+/// Panics with a clear message if MQK_DATABASE_URL is not set.
+/// This is intentional: a proof test that cannot reach its DB is a failed proof.
+fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) if !v.trim().is_empty() => Some(v),
-        _ => {
-            println!("SKIP: requires MQK_DATABASE_URL");
-            None
-        }
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => panic!(
+            "PROOF: MQK_DATABASE_URL is not set. \
+             This is a load-bearing proof test and cannot be skipped. \
+             Set MQK_DATABASE_URL to a live Postgres instance and re-run."
+        ),
     }
 }
 
-async fn try_pool_or_skip(url: &str) -> Result<Option<PgPool>> {
-    match PgPoolOptions::new()
+/// Panics if the DB is unreachable.
+/// An unreachable DB means the proof cannot be run — fail loud, not silent.
+async fn require_pool(url: &str) -> PgPool {
+    PgPoolOptions::new()
         .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_secs(2))
+        .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(url)
         .await
-    {
-        Ok(pool) => Ok(Some(pool)),
-        Err(e) => {
-            println!("SKIP: cannot connect to DB: {e}");
-            Ok(None)
-        }
-    }
+        .unwrap_or_else(|e| panic!("PROOF: cannot connect to DB: {e}"))
 }
 
 /// Insert a minimal test run and a single outbox entry.
@@ -116,12 +118,8 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
 
 #[tokio::test]
 async fn w1_crash_after_sent_before_ack_no_double_submit() -> anyhow::Result<()> {
-    let Some(url) = db_url_or_skip() else {
-        return Ok(());
-    };
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
+    let url = require_db_url();
+    let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;
 
     let run_id: Uuid = W1_RUN_ID.parse().unwrap();
@@ -196,12 +194,8 @@ async fn w1_crash_after_sent_before_ack_no_double_submit() -> anyhow::Result<()>
 
 #[tokio::test]
 async fn w2_crash_after_claimed_before_sent_resubmits_exactly_once() -> anyhow::Result<()> {
-    let Some(url) = db_url_or_skip() else {
-        return Ok(());
-    };
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
+    let url = require_db_url();
+    let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;
 
     let run_id: Uuid = W2_RUN_ID.parse().unwrap();
@@ -268,12 +262,8 @@ async fn w2_crash_after_claimed_before_sent_resubmits_exactly_once() -> anyhow::
 
 #[tokio::test]
 async fn w3_acked_row_not_reinspected_on_second_restart() -> anyhow::Result<()> {
-    let Some(url) = db_url_or_skip() else {
-        return Ok(());
-    };
-    let Some(pool) = try_pool_or_skip(&url).await? else {
-        return Ok(());
-    };
+    let url = require_db_url();
+    let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;
 
     let run_id: Uuid = W3_RUN_ID.parse().unwrap();

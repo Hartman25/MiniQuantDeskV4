@@ -777,6 +777,17 @@ impl OutboxClaimToken {
     ///
     /// `pub(crate)` — only callable inside `mqk-db`. Callers outside this
     /// crate must obtain tokens via [`outbox_claim_batch`].
+    ///
+    /// # Compile-time gate
+    ///
+    /// Compiled only when at least one of the following is active:
+    /// - `test` — for the `for_test` escape hatch used in unit tests
+    /// - `feature = "runtime-claim"` — for `outbox_claim_batch` (production path)
+    /// - `feature = "testkit"` — for integration test infrastructure
+    ///
+    /// In a plain `cargo build` / `cargo clippy` without any of these, this
+    /// function is not present and cannot be called — enforcing the RT-1 gate.
+    #[cfg(any(test, feature = "runtime-claim", feature = "testkit"))]
     pub(crate) fn new(outbox_id: i64, idempotency_key: impl Into<String>) -> Self {
         Self {
             outbox_id,

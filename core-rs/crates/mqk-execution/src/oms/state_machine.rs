@@ -148,7 +148,10 @@ pub struct OmsOrder {
     /// Current lifecycle state.
     pub state: OrderState,
     /// Applied event IDs — used for idempotent replay.
-    applied: HashSet<String>,
+    /// Indexed by the caller-supplied event identity string.
+    /// Only successful transitions are recorded; rejected events are never
+    /// inserted, so the same event_id can be retried with a corrected payload.
+    applied_event_ids: HashSet<String>,
 }
 
 impl OmsOrder {
@@ -164,7 +167,7 @@ impl OmsOrder {
             total_qty,
             filled_qty: 0,
             state: OrderState::Open,
-            applied: HashSet::new(),
+            applied_event_ids: HashSet::new(),
         }
     }
 
@@ -181,17 +184,24 @@ impl OmsOrder {
         event: &OmsEvent,
         event_id: Option<&str>,
     ) -> Result<(), TransitionError> {
-        // Idempotency: skip events we have already processed.
+        // Section B — Fill Identity & Deduplication
+        // Early check: if this event_id has already been applied, return a
+        // silent no-op before any state mutation. This must fire before
+        // do_transition so that even an overflow-carrying duplicate cannot
+        // reach the quantity guards.
         if let Some(id) = event_id {
-            if self.applied.contains(id) {
+            if self.applied_event_ids.contains(id) {
                 return Ok(());
             }
         }
 
         self.do_transition(event)?;
 
+        // Record identity only after a successful transition. Rejected events
+        // (TransitionError propagated via `?` above) never reach this line,
+        // so their event_id remains available for a corrected retry.
         if let Some(id) = event_id {
-            self.applied.insert(id.to_string());
+            self.applied_event_ids.insert(id.to_string());
         }
 
         Ok(())
@@ -211,20 +221,75 @@ impl OmsOrder {
             // ------------------------------------------------------------------
             // Partial fills: accepted from any live state (fills may arrive
             // while a cancel or replace is in flight).
+            //
+            // Invariants enforced before any mutation:
+            //   1. delta_qty must be positive.
+            //   2. filled_qty + delta_qty must not exceed total_qty.
+            // A violation returns TransitionError; state and filled_qty are
+            // unchanged and the event_id is NOT recorded.
             // ------------------------------------------------------------------
             (
                 Open | PartiallyFilled | CancelPending | ReplacePending,
                 PartialFill { delta_qty },
             ) => {
-                self.filled_qty += delta_qty;
+                if *delta_qty <= 0 {
+                    return Err(TransitionError {
+                        from: self.state.clone(),
+                        event: format!(
+                            "PartialFill(delta_qty={}) — delta_qty must be positive",
+                            delta_qty
+                        ),
+                    });
+                }
+                let proposed = self.filled_qty + delta_qty;
+                if proposed > self.total_qty {
+                    return Err(TransitionError {
+                        from: self.state.clone(),
+                        event: format!(
+                            "PartialFill(delta_qty={}) — would overflow: \
+                             filled={} + delta={} = {} > total={}",
+                            delta_qty, self.filled_qty, delta_qty, proposed, self.total_qty
+                        ),
+                    });
+                }
+                self.filled_qty = proposed;
                 self.state = PartiallyFilled;
             }
 
             // ------------------------------------------------------------------
             // Final fill: accepted from any live state for the same reason.
+            //
+            // Invariants enforced before any mutation:
+            //   1. delta_qty must be positive.
+            //   2. filled_qty + delta_qty must equal total_qty exactly.
+            //      Under-completion (< total_qty) and overflow (> total_qty)
+            //      are both rejected — the caller used Fill instead of
+            //      PartialFill for an incomplete fill, which is a logic error.
+            // A violation returns TransitionError; state and filled_qty are
+            // unchanged and the event_id is NOT recorded.
             // ------------------------------------------------------------------
             (Open | PartiallyFilled | CancelPending | ReplacePending, Fill { delta_qty }) => {
-                self.filled_qty += delta_qty;
+                if *delta_qty <= 0 {
+                    return Err(TransitionError {
+                        from: self.state.clone(),
+                        event: format!(
+                            "Fill(delta_qty={}) — delta_qty must be positive",
+                            delta_qty
+                        ),
+                    });
+                }
+                let proposed = self.filled_qty + delta_qty;
+                if proposed != self.total_qty {
+                    return Err(TransitionError {
+                        from: self.state.clone(),
+                        event: format!(
+                            "Fill(delta_qty={}) — proposed_filled={} must equal \
+                             total_qty={} (filled={}); use PartialFill for incomplete fills",
+                            delta_qty, proposed, self.total_qty, self.filled_qty
+                        ),
+                    });
+                }
+                self.filled_qty = proposed;
                 self.state = Filled;
             }
 
@@ -397,5 +462,284 @@ mod tests {
         o.apply(&OmsEvent::Fill { delta_qty: 100 }, Some("f1"))
             .unwrap();
         assert_eq!(o.state, OrderState::Filled);
+    }
+
+    // -----------------------------------------------------------------------
+    // Section A — OMS Fill Truth: invariant enforcement
+    // -----------------------------------------------------------------------
+
+    /// A PartialFill whose cumulative sum would exceed total_qty is rejected.
+    /// State and filled_qty must be unchanged.
+    #[test]
+    fn partial_fill_overflow_is_rejected() {
+        let mut o = open_order(); // total_qty = 100
+        o.apply(&OmsEvent::PartialFill { delta_qty: 60 }, Some("f1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 60);
+
+        // 60 + 60 = 120 > 100 — must be rejected.
+        let err = o
+            .apply(&OmsEvent::PartialFill { delta_qty: 60 }, Some("f2"))
+            .unwrap_err();
+        assert_eq!(
+            err.from,
+            OrderState::PartiallyFilled,
+            "TransitionError.from must reflect the state at rejection"
+        );
+        // State and accounting must be unchanged after rejection.
+        assert_eq!(
+            o.state,
+            OrderState::PartiallyFilled,
+            "state must not change on rejected PartialFill"
+        );
+        assert_eq!(
+            o.filled_qty, 60,
+            "filled_qty must not be mutated on rejected PartialFill"
+        );
+    }
+
+    /// A Fill whose delta pushes cumulative filled above total_qty is rejected.
+    #[test]
+    fn fill_overflow_is_rejected() {
+        let mut o = open_order(); // total_qty = 100
+                                  // 0 + 101 = 101 != 100 — overflow.
+        let err = o
+            .apply(&OmsEvent::Fill { delta_qty: 101 }, Some("f1"))
+            .unwrap_err();
+        assert_eq!(
+            err.from,
+            OrderState::Open,
+            "TransitionError.from must reflect the state at rejection"
+        );
+        assert_eq!(
+            o.state,
+            OrderState::Open,
+            "state must not change on rejected Fill"
+        );
+        assert_eq!(
+            o.filled_qty, 0,
+            "filled_qty must not be mutated on rejected Fill"
+        );
+    }
+
+    /// A Fill that would leave the order under-complete (proposed < total_qty)
+    /// is rejected. The caller must use PartialFill for incomplete fills.
+    #[test]
+    fn undercomplete_fill_is_rejected() {
+        let mut o = open_order(); // total_qty = 100
+        o.apply(&OmsEvent::PartialFill { delta_qty: 60 }, Some("f1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 60);
+
+        // 60 + 30 = 90 != 100 — under-complete.
+        let err = o
+            .apply(&OmsEvent::Fill { delta_qty: 30 }, Some("f2"))
+            .unwrap_err();
+        assert_eq!(err.from, OrderState::PartiallyFilled);
+        assert_eq!(
+            o.state,
+            OrderState::PartiallyFilled,
+            "state must not change on under-complete Fill"
+        );
+        assert_eq!(
+            o.filled_qty, 60,
+            "filled_qty must not be mutated on under-complete Fill"
+        );
+    }
+
+    /// Valid path: PartialFill(60) + Fill(40) on total=100 still works.
+    #[test]
+    fn valid_partial_then_exact_fill_completes() {
+        let mut o = open_order(); // total_qty = 100
+        o.apply(&OmsEvent::PartialFill { delta_qty: 60 }, Some("f1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 60);
+        assert_eq!(o.state, OrderState::PartiallyFilled);
+
+        o.apply(&OmsEvent::Fill { delta_qty: 40 }, Some("f2"))
+            .unwrap();
+        assert_eq!(o.state, OrderState::Filled);
+        assert_eq!(o.filled_qty, 100);
+        assert!(o.state.is_terminal());
+    }
+
+    /// A rejected fill must NOT record the event_id as applied.
+    /// Proof: apply the same event_id again with a valid fill — it must
+    /// succeed (not be silently skipped as a duplicate).
+    #[test]
+    fn rejected_fill_event_id_is_not_recorded() {
+        let mut o = open_order(); // total_qty = 100
+                                  // Overflow — rejected.
+        let _err = o
+            .apply(&OmsEvent::Fill { delta_qty: 999 }, Some("f-probe"))
+            .unwrap_err();
+        assert_eq!(o.state, OrderState::Open);
+        assert_eq!(o.filled_qty, 0);
+
+        // Re-use "f-probe" with a valid fill. If the event_id was recorded on
+        // rejection, this call would be silently skipped and the order would
+        // stay Open. It must NOT be skipped.
+        o.apply(&OmsEvent::Fill { delta_qty: 100 }, Some("f-probe"))
+            .unwrap();
+        assert_eq!(
+            o.state,
+            OrderState::Filled,
+            "rejected event_id must not be recorded; re-use with valid fill must apply"
+        );
+        assert_eq!(o.filled_qty, 100);
+    }
+
+    /// A late fill arriving on an already-Filled order is a no-op by state,
+    /// regardless of delta_qty. The state-based guard (Filled → noop) fires
+    /// before quantity validation, so even an "oversized" late fill is safe.
+    #[test]
+    fn late_fill_on_filled_order_is_noop_regardless_of_qty() {
+        let mut o = open_order(); // total_qty = 100
+        o.apply(&OmsEvent::Fill { delta_qty: 100 }, Some("f1"))
+            .unwrap();
+        assert_eq!(o.state, OrderState::Filled);
+        assert_eq!(o.filled_qty, 100);
+
+        // Late fill with a new event_id — state guard makes it a no-op.
+        o.apply(&OmsEvent::Fill { delta_qty: 999 }, Some("f-late"))
+            .unwrap();
+        assert_eq!(
+            o.filled_qty, 100,
+            "late fill on Filled order must be a no-op regardless of qty"
+        );
+        assert_eq!(o.state, OrderState::Filled);
+    }
+
+    // -----------------------------------------------------------------------
+    // Section B — Fill Identity & Deduplication
+    // -----------------------------------------------------------------------
+
+    /// Duplicate PartialFill carrying the same event_id must be a silent no-op.
+    /// filled_qty must not accumulate past the first application.
+    /// State must not change.
+    #[test]
+    fn duplicate_partial_fill_is_noop() {
+        let mut o = open_order(); // total_qty = 100
+        o.apply(&OmsEvent::PartialFill { delta_qty: 60 }, Some("E1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 60);
+        assert_eq!(o.state, OrderState::PartiallyFilled);
+
+        // Duplicate — same event_id "E1", same delta.
+        o.apply(&OmsEvent::PartialFill { delta_qty: 60 }, Some("E1"))
+            .unwrap();
+        assert_eq!(
+            o.filled_qty, 60,
+            "duplicate PartialFill must not increase filled_qty"
+        );
+        assert_eq!(
+            o.state,
+            OrderState::PartiallyFilled,
+            "state must not change on duplicate PartialFill"
+        );
+    }
+
+    /// Duplicate final Fill event after order completion must be a silent no-op.
+    /// Event-id deduplication must fire before the Filled→noop state guard,
+    /// so that the applied_event_ids set remains the single source of truth
+    /// for identity dedup on non-terminal-state paths.
+    #[test]
+    fn duplicate_final_fill_is_noop() {
+        let mut o = open_order(); // total_qty = 100
+        o.apply(&OmsEvent::PartialFill { delta_qty: 60 }, Some("E1"))
+            .unwrap();
+        o.apply(&OmsEvent::Fill { delta_qty: 40 }, Some("E2"))
+            .unwrap();
+        assert_eq!(o.state, OrderState::Filled);
+        assert_eq!(o.filled_qty, 100);
+
+        // Duplicate Fill(E2) on now-Filled order — must be a no-op.
+        o.apply(&OmsEvent::Fill { delta_qty: 40 }, Some("E2"))
+            .unwrap();
+        assert_eq!(
+            o.filled_qty, 100,
+            "duplicate Fill must not increase filled_qty"
+        );
+        assert_eq!(
+            o.state,
+            OrderState::Filled,
+            "duplicate Fill must not alter terminal state"
+        );
+    }
+
+    /// 50 repeated deliveries of the same PartialFill event (broker storm)
+    /// must produce exactly one fill's worth of quantity accumulation.
+    #[test]
+    fn duplicate_storm_fifty_repeats_accumulates_once() {
+        let mut o = open_order(); // total_qty = 100
+        for _ in 0..50 {
+            o.apply(&OmsEvent::PartialFill { delta_qty: 50 }, Some("E1"))
+                .unwrap();
+        }
+        assert_eq!(
+            o.filled_qty, 50,
+            "50 duplicate storm events must accumulate exactly once"
+        );
+        assert_eq!(o.state, OrderState::PartiallyFilled);
+    }
+
+    /// After order reaches a terminal state, repeated delivery of the fill
+    /// event that triggered the terminal transition must be a pure no-op.
+    /// Neither state nor filled_qty may change across any of the repeats.
+    #[test]
+    fn duplicate_after_terminal_state_is_noop() {
+        let mut o = open_order(); // total_qty = 100
+        o.apply(&OmsEvent::PartialFill { delta_qty: 60 }, Some("E1"))
+            .unwrap();
+        o.apply(&OmsEvent::Fill { delta_qty: 40 }, Some("E2"))
+            .unwrap();
+        assert_eq!(o.state, OrderState::Filled);
+        assert_eq!(o.filled_qty, 100);
+
+        for _ in 0..10 {
+            o.apply(&OmsEvent::Fill { delta_qty: 40 }, Some("E2"))
+                .unwrap();
+        }
+        assert_eq!(
+            o.state,
+            OrderState::Filled,
+            "terminal state must not change on repeated duplicate fills"
+        );
+        assert_eq!(
+            o.filled_qty, 100,
+            "filled_qty must not change on repeated duplicate fills after terminal"
+        );
+    }
+
+    /// A rejected fill must not poison its event_id.
+    /// Scenario: order at filled_qty=90, Fill(E1, delta=20) rejected because
+    /// 90+20=110 overflows total_qty=100. The same event_id E1 must then be
+    /// accepted when submitted with a corrected delta of 10 (90+10=100).
+    #[test]
+    fn rejected_fill_does_not_poison_event_identity() {
+        let mut o = open_order(); // total_qty = 100
+
+        // Bring order to filled_qty = 90.
+        o.apply(&OmsEvent::PartialFill { delta_qty: 90 }, Some("E0"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 90);
+
+        // Fill(E1, 20): 90 + 20 = 110 > 100 — overflow, rejected.
+        let err = o
+            .apply(&OmsEvent::Fill { delta_qty: 20 }, Some("E1"))
+            .unwrap_err();
+        assert_eq!(err.from, OrderState::PartiallyFilled);
+        assert_eq!(o.filled_qty, 90, "rejected fill must not mutate filled_qty");
+
+        // Fill(E1, 10): same event_id, corrected delta. 90 + 10 = 100 == total_qty.
+        // If E1 had been poisoned on rejection this call would silently skip.
+        o.apply(&OmsEvent::Fill { delta_qty: 10 }, Some("E1"))
+            .unwrap();
+        assert_eq!(
+            o.state,
+            OrderState::Filled,
+            "valid fill with previously-rejected event_id must be accepted"
+        );
+        assert_eq!(o.filled_qty, 100);
     }
 }

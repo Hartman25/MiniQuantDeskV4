@@ -20,3 +20,18 @@ mqk-schemas = { path = "../mqk-schemas" }
 # Activates OutboxClaimToken::for_test for integration tests and internal
 # harnesses; not permitted in prod crates.
 mqk-db = { path = "../mqk-db", features = ["testkit"] }
+
+# RT-2: integration tests that call BrokerGateway::for_test or
+# OutboxClaimToken::for_test must activate the testkit feature.
+# Without it the lib is compiled without cfg(test) so for_test is absent.
+[[test]]
+name = "scenario_gateway_no_bypass"
+required-features = ["testkit"]
+
+[[test]]
+name = "scenario_cancel_replace_provenance"
+required-features = ["testkit"]
+
+[[test]]
+name = "scenario_outbox_first_submit"
+required-features = ["testkit"]

@@ -3,6 +3,14 @@
 //! # Invariant under test
 //! A broker event replayed after restart with the same broker_message_id
 //! must not be applied twice.
+//!
+//! # PROOF LANE
+//!
+//! This is a load-bearing institutional proof test. It MUST fail hard if
+//! MQK_DATABASE_URL is absent or the DB is unreachable. Silent skip is not
+//! acceptable — a skipped proof test is an unproven invariant.
+//!
+//! Run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-testkit
 
 use chrono::Utc;
 use mqk_execution::{BrokerEvent, Side};
@@ -50,9 +58,9 @@ fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => panic!(
-            "DB tests require MQK_DATABASE_URL; run: \
-             MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
-             cargo test -p mqk-testkit -- --include-ignored"
+            "PROOF: MQK_DATABASE_URL is not set. \
+             This is a load-bearing proof test and cannot be skipped. \
+             Set MQK_DATABASE_URL to a live Postgres instance and re-run."
         ),
     }
 }
@@ -62,7 +70,6 @@ fn require_db_url() -> String {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn replayed_broker_event_is_deduped_after_restart() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
     cleanup_inbox(&pool).await?;

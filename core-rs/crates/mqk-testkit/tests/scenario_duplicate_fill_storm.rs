@@ -1,4 +1,4 @@
-//! Scenario: Duplicate Fill Storm
+﻿//! Scenario: Duplicate Fill Storm
 //!
 //! # Invariant under test
 //! Many duplicate copies of the same fill event must collapse to one durable inbox row.
@@ -49,9 +49,9 @@ fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => panic!(
-            "DB tests require MQK_DATABASE_URL; run: \
-             MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
-             cargo test -p mqk-testkit -- --include-ignored"
+            "PROOF: MQK_DATABASE_URL is not set. \
+             This is a load-bearing proof test and cannot be skipped. \
+             Set MQK_DATABASE_URL to a live Postgres instance and re-run."
         ),
     }
 }
@@ -61,7 +61,6 @@ fn require_db_url() -> String {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn duplicate_fill_storm_collapses_to_one_inbox_row() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
     cleanup_inbox(&pool).await?;

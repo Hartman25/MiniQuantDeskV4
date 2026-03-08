@@ -1,4 +1,4 @@
-//! Scenario: Partial Fill Ordering Chaos
+﻿//! Scenario: Partial Fill Ordering Chaos
 //!
 //! # Invariant under test
 //! Out-of-order partial fill delivery must still produce a deterministic,
@@ -50,9 +50,9 @@ fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
         Err(_) => panic!(
-            "DB tests require MQK_DATABASE_URL; run: \
-             MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
-             cargo test -p mqk-testkit -- --include-ignored"
+            "PROOF: MQK_DATABASE_URL is not set. \
+             This is a load-bearing proof test and cannot be skipped. \
+             Set MQK_DATABASE_URL to a live Postgres instance and re-run."
         ),
     }
 }
@@ -62,7 +62,6 @@ fn require_db_url() -> String {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn out_of_order_partial_fills_remain_distinct_and_deterministic() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
     cleanup_inbox(&pool).await?;
