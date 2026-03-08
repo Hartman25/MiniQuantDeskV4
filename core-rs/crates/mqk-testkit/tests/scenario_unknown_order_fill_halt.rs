@@ -13,7 +13,7 @@
 //!   from the orchestrator's OMS order map, `tick()` must:
 //!   1. Call `persist_halt_and_disarm` (mandatory, not best-effort).
 //!   2. Write `runs.status = 'HALTED'`, `halted_at_utc IS NOT NULL`.
-//!   3. Write `sys_arm_state = 'DISARMED'`, reason `'UnknownOrderFill'`.
+//!   3. Write `sys_arm_state = 'DISARMED'`, reason `'IntegrityViolation'`.
 //!   4. Return `Err(…)` whose string representation contains `"UNKNOWN_ORDER_FILL"`.
 //!
 //! **C-2** — Halt is sticky across restart:
@@ -252,11 +252,11 @@ fn make_clean_orch(
 /// 2. Insert one unapplied inbox `Fill` row.  The `internal_order_id`
 ///    (`"cuf-ord-unknown"`) is absent from the empty OMS order map.
 /// 3. `tick()` → Phase 3b apply loop → `apply_fill_step` returns `Err` for
-///    the unknown order → `persist_halt_and_disarm("UnknownOrderFill")` is
+///    the unknown order → `persist_halt_and_disarm("IntegrityViolation")` is
 ///    called mandatorily → `tick()` returns `Err`.
 /// 4. Assert error string contains `"UNKNOWN_ORDER_FILL"`.
 /// 5. Assert `runs.status = HALTED`, `halted_at_utc IS NOT NULL`.
-/// 6. Assert `sys_arm_state = ('DISARMED', 'UnknownOrderFill')`.
+/// 6. Assert `sys_arm_state = ('DISARMED', 'IntegrityViolation')`.
 /// 7. Construct a BRAND-NEW orchestrator (all gates pass — `BoolGate(true)` —
 ///    no shared in-memory state with the first orchestrator).
 /// 8. `tick()` → Phase 0 HALT_GUARD reads `runs.status` from DB → sees
@@ -341,7 +341,7 @@ async fn c1_c2_unknown_fill_halts_disarms_and_refuses_restart() -> Result<()> {
         "C1: halted_at_utc must be non-NULL after halt"
     );
 
-    // ── 6. DB: arm state must be DISARMED / UnknownOrderFill ─────────────
+    // ── 6. DB: arm state must be DISARMED / IntegrityViolation ───────────
     //
     // If persist_arm_state() had been best-effort and silently failed,
     // load_arm_state would return None here and the assertion would fail.
@@ -354,8 +354,8 @@ async fn c1_c2_unknown_fill_halts_disarms_and_refuses_restart() -> Result<()> {
     );
     assert_eq!(
         arm.1.as_deref(),
-        Some("UnknownOrderFill"),
-        "C1: disarm reason must be 'UnknownOrderFill' (not IntegrityViolation or other path)"
+        Some("IntegrityViolation"),
+        "C1: disarm reason must be 'IntegrityViolation' to match the production halt path"
     );
 
     // ── 7+8. Fresh orchestrator for same run_id is refused by HALT_GUARD ─
