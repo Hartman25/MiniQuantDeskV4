@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context as _};
 use mqk_db::TimeSource;
 use mqk_reconcile::{reconcile_tick, BrokerSnapshot, DriftAction, LocalSnapshot};
 use sqlx::types::chrono;
@@ -201,12 +201,18 @@ where
             if !ambiguous.is_empty() {
                 let now = self.time_source.now_utc();
 
-                // Best-effort persistence; still surface the recovery-quarantine error
-                // even if one of these writes fails.
-                let _ = mqk_db::halt_run(&self.pool, self.run_id, now).await;
-                let _ =
-                    mqk_db::persist_arm_state(&self.pool, "DISARMED", Some("RecoveryQuarantine"))
-                        .await;
+                // Mandatory halt + disarm — both writes must succeed before returning.
+                // If either write fails the error propagates immediately so the caller
+                // learns the persistence failure rather than silently losing the halt.
+                // On success the Phase-0 HALT_GUARD will block any future tick() on
+                // any orchestrator instance for this run_id.
+                persist_halt_and_disarm(
+                    &self.pool,
+                    self.run_id,
+                    now,
+                    "IntegrityViolation",
+                )
+                .await?;
 
                 let details = summarize_ambiguous_outbox(&ambiguous);
                 return Err(anyhow!(
@@ -240,10 +246,8 @@ where
             if let DriftAction::HaltAndDisarm { .. } = action {
                 let now = self.time_source.now_utc();
 
-                // Best-effort persistence; surface reconcile drift either way.
-                let _ = mqk_db::halt_run(&self.pool, self.run_id, now).await;
-                let _ =
-                    mqk_db::persist_arm_state(&self.pool, "DISARMED", Some("ReconcileDrift")).await;
+                // Mandatory halt + disarm — same fail-closed contract as Phase 0b.
+                persist_halt_and_disarm(&self.pool, self.run_id, now, "ReconcileDrift").await?;
 
                 return Err(anyhow!(
                     "RECONCILE_DRIFT: run {} halted and disarmed; dispatch refused",
@@ -421,13 +425,16 @@ where
                     Ok(f) => f,
                     Err(e) => {
                         let now = self.time_source.now_utc();
-                        let _ = mqk_db::halt_run(&self.pool, self.run_id, now).await;
-                        let _ = mqk_db::persist_arm_state(
+                        // Mandatory halt + disarm before surfacing the OMS error.
+                        // If the DB writes fail their error takes precedence — failing
+                        // to persist HALTED is more dangerous than the OMS fault itself.
+                        persist_halt_and_disarm(
                             &self.pool,
-                            "DISARMED",
-                            Some("UnknownOrderFill"),
+                            self.run_id,
+                            now,
+                            "IntegrityViolation",
                         )
-                        .await;
+                        .await?;
                         return Err(e.context(format!(
                             "UNKNOWN_ORDER_FILL: run {} halted and disarmed (Section C)",
                             self.run_id
@@ -459,16 +466,20 @@ where
             // Step 8: assert capital invariants — I9-1 persistence requirement.
             //
             // On violation: persist HALTED run status and DISARMED arm state
-            // before returning.  Best-effort DB writes: if either write fails,
-            // the invariant error is still surfaced to the caller.  The halt
-            // guard (Phase 0) prevents any further dispatch once HALTED is
-            // written to DB.
+            // before returning.  Both writes are now mandatory (not best-effort):
+            // if either write fails, persist_halt_and_disarm propagates the DB
+            // error immediately so the caller learns the failure explicitly.
+            // The halt guard (Phase 0) blocks any further dispatch once HALTED
+            // is durably written to DB.
             if let Err(inv_err) = check_capital_invariants(&self.portfolio) {
                 let now = self.time_source.now_utc();
-                let _ = mqk_db::halt_run(&self.pool, self.run_id, now).await;
-                let _ =
-                    mqk_db::persist_arm_state(&self.pool, "DISARMED", Some("IntegrityViolation"))
-                        .await;
+                persist_halt_and_disarm(
+                    &self.pool,
+                    self.run_id,
+                    now,
+                    "IntegrityViolation",
+                )
+                .await?;
                 return Err(inv_err.context(format!(
                     "INVARIANT_VIOLATED: run {} halted and disarmed (I9-1)",
                     self.run_id
@@ -653,6 +664,55 @@ fn summarize_ambiguous_outbox(rows: &[mqk_db::AmbiguousOutboxRow]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+// ---------------------------------------------------------------------------
+// Internal helper — mandatory halt + disarm persistence
+// ---------------------------------------------------------------------------
+
+/// Write `runs.status = 'HALTED'` and `sys_arm_state = 'DISARMED'` to the DB
+/// as mandatory (not best-effort) operations.
+///
+/// # Fail-closed contract
+///
+/// Both writes use `?` propagation.  If either write fails the caller receives
+/// an explicit `Err` describing the DB failure rather than silently continuing.
+/// This is intentionally stricter than the previous best-effort `let _ = …`
+/// pattern: it is safer for a tick to surface `HALT_PERSISTENCE_FAILURE` than
+/// to return the original halt error while leaving `runs.status` as RUNNING,
+/// which would allow the Phase-0 HALT_GUARD to be bypassed on the next call.
+///
+/// # Order of writes
+///
+/// `halt_run` is always attempted first.  If it succeeds but `persist_arm_state`
+/// fails, the arm-state error is returned; `runs.status` is already HALTED so
+/// the Phase-0 guard will still block future ticks on any orchestrator instance
+/// for this `run_id`.
+async fn persist_halt_and_disarm(
+    pool: &PgPool,
+    run_id: Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+    reason: &'static str,
+) -> anyhow::Result<()> {
+    mqk_db::halt_run(pool, run_id, now)
+        .await
+        .with_context(|| {
+            format!(
+                "HALT_PERSISTENCE_FAILURE: run {run_id} — runs.status=HALTED could not be \
+                 written (reason={reason}); Phase-0 halt guard on restart is NOT guaranteed"
+            )
+        })?;
+
+    mqk_db::persist_arm_state(pool, "DISARMED", Some(reason))
+        .await
+        .with_context(|| {
+            format!(
+                "ARM_STATE_PERSISTENCE_FAILURE: run {run_id} — sys_arm_state=DISARMED could \
+                 not be written (reason={reason}); runs.status=HALTED was persisted"
+            )
+        })?;
+
+    Ok(())
 }
 
 /// Section C — Restart / Unknown-Order Fill Safety.
