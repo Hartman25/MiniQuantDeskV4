@@ -1,9 +1,18 @@
 #![forbid(unsafe_code)]
 
-//! Alpaca broker adapter (stub / placeholder).
+//! Alpaca broker adapter.
 //!
-//! This crate compiles and satisfies the `mqk_execution::BrokerAdapter` trait.
-//! The real API wiring can come later; for now these are deterministic stubs.
+//! # Modules
+//! - `types`    — raw Alpaca v2 trade-update event shapes (serde wire types).
+//! - `normalize` — converts raw Alpaca events into canonical `BrokerEvent`.
+//!
+//! The `AlpacaBrokerAdapter` struct satisfies `mqk_execution::BrokerAdapter`.
+//! Network wiring (`reqwest` feature) is not yet implemented; the stub adapter
+//! returns `BrokerError::Transient` for outbound operations while
+//! `normalize_trade_update` is fully implemented and contract-tested.
+
+pub mod normalize;
+pub mod types;
 
 use mqk_execution::{
     BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent, BrokerInvokeToken,
