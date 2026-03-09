@@ -2,6 +2,7 @@
 
 //! Execution-side types + order intent generation utilities.
 
+pub mod broker_error;
 mod engine;
 pub mod gateway;
 mod id_map;
@@ -37,8 +38,10 @@ pub use order_router::{
 
 pub use gateway::{
     intent_id_to_client_order_id, BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken,
-    ReconcileGate, RiskGate, UnknownOrder,
+    ReconcileGate, RiskGate, SubmitError, UnknownOrder,
 };
+
+pub use broker_error::BrokerError;
 
 // --- Patch L1: choke-point exports ---
 

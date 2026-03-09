@@ -10,9 +10,9 @@
 //! recorded in the outbox (which would break idempotency and audit tracing).
 
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerGateway, BrokerInvokeToken, BrokerOrderMap,
-    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
-    IntegrityGate, OutboxClaimToken, ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
+    BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
+    BrokerSubmitResponse, IntegrityGate, OutboxClaimToken, ReconcileGate, RiskGate,
 };
 
 // ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ impl BrokerAdapter for EchoBroker {
         &self,
         req: BrokerSubmitRequest,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerSubmitResponse, BrokerError> {
         Ok(BrokerSubmitResponse {
             // Echo back the order_id so tests can verify which key reached the broker.
             broker_order_id: format!("b-{}", req.order_id),
@@ -42,7 +42,7 @@ impl BrokerAdapter for EchoBroker {
         &self,
         order_id: &str,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerCancelResponse, BrokerError> {
         Ok(BrokerCancelResponse {
             broker_order_id: order_id.to_string(),
             cancelled_at: 1,
@@ -54,7 +54,7 @@ impl BrokerAdapter for EchoBroker {
         &self,
         req: BrokerReplaceRequest,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerReplaceResponse, BrokerError> {
         Ok(BrokerReplaceResponse {
             broker_order_id: req.broker_order_id,
             replaced_at: 1,
@@ -64,9 +64,10 @@ impl BrokerAdapter for EchoBroker {
 
     fn fetch_events(
         &self,
+        _cursor: Option<&str>,
         _token: &BrokerInvokeToken,
-    ) -> Result<Vec<mqk_execution::BrokerEvent>, Box<dyn std::error::Error>> {
-        Ok(vec![])
+    ) -> Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError> {
+        Ok((vec![], None))
     }
 }
 

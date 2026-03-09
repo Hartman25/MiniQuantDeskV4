@@ -7,8 +7,10 @@
 //! `OrderRouter` and its methods are `pub(crate)` — they cannot be
 //! constructed or called from outside `mqk-execution`.
 
+use crate::broker_error::BrokerError;
+
 /// Convenience alias used throughout this module.
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+type Result<T> = std::result::Result<T, BrokerError>;
 
 // ---------------------------------------------------------------------------
 // BrokerEvent — canonical inbound broker event type
@@ -313,13 +315,23 @@ pub trait BrokerAdapter {
         _token: &BrokerInvokeToken,
     ) -> Result<BrokerReplaceResponse>;
 
-    /// Poll the broker for new lifecycle events since the last call.
+    /// Poll the broker for new lifecycle events since `cursor`.
     ///
-    /// The adapter is responsible for tracking which events have already been
-    /// returned (e.g. via a cursor or sequence number).  The orchestrator
-    /// persists every event to `oms_inbox` with dedup on `broker_message_id`,
-    /// so duplicate delivery is safe.
-    fn fetch_events(&self, _token: &BrokerInvokeToken) -> Result<Vec<BrokerEvent>>;
+    /// `cursor` is the last-consumed cursor value returned by a prior call, or
+    /// `None` to start from the beginning.  The adapter returns all events that
+    /// follow the cursor position together with the new cursor value to pass on
+    /// the next call.  Returning `None` as the new cursor means no events were
+    /// produced and no cursor advancement is needed.
+    ///
+    /// The orchestrator persists every event to `oms_inbox` with dedup on
+    /// `broker_message_id` BEFORE advancing the cursor in DB, so a crash
+    /// between the two steps is safe: on restart the orchestrator re-fetches
+    /// from the old cursor and the inbox dedup prevents double-apply.
+    fn fetch_events(
+        &self,
+        cursor: Option<&str>,
+        _token: &BrokerInvokeToken,
+    ) -> Result<(Vec<BrokerEvent>, Option<String>)>;
 }
 
 // ---------------------------------------------------------------------------
@@ -351,8 +363,11 @@ impl<B: BrokerAdapter> OrderRouter<B> {
         self.broker.replace_order(req, &BrokerInvokeToken(()))
     }
 
-    pub(crate) fn route_fetch_events(&self) -> Result<Vec<BrokerEvent>> {
-        self.broker.fetch_events(&BrokerInvokeToken(()))
+    pub(crate) fn route_fetch_events(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<(Vec<BrokerEvent>, Option<String>)> {
+        self.broker.fetch_events(cursor, &BrokerInvokeToken(()))
     }
 }
 
@@ -411,8 +426,12 @@ mod tests {
             })
         }
 
-        fn fetch_events(&self, _token: &BrokerInvokeToken) -> Result<Vec<BrokerEvent>> {
-            Ok(vec![])
+        fn fetch_events(
+            &self,
+            _cursor: Option<&str>,
+            _token: &BrokerInvokeToken,
+        ) -> Result<(Vec<BrokerEvent>, Option<String>)> {
+            Ok((vec![], None))
         }
     }
 

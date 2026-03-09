@@ -36,9 +36,10 @@
 //! fails. Gate state is stored in the gateway; callers cannot inject a verdict.
 
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerGateway, BrokerInvokeToken, BrokerOrderMap,
-    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
-    GateRefusal, IntegrityGate, OutboxClaimToken, ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
+    BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
+    BrokerSubmitResponse, GateRefusal, IntegrityGate, OutboxClaimToken, ReconcileGate, RiskGate,
+    SubmitError,
 };
 
 // ---------------------------------------------------------------------------
@@ -54,7 +55,7 @@ impl BrokerAdapter for AlwaysOkBroker {
         _token: &BrokerInvokeToken,
         // Note: `_token` is received here but CANNOT be constructed by this
         // external code. The token only arrives because BrokerGateway created it.
-    ) -> Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerSubmitResponse, BrokerError> {
         Ok(BrokerSubmitResponse {
             broker_order_id: format!("b-{}", req.order_id),
             submitted_at: 1,
@@ -66,7 +67,7 @@ impl BrokerAdapter for AlwaysOkBroker {
         &self,
         order_id: &str,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerCancelResponse, BrokerError> {
         Ok(BrokerCancelResponse {
             broker_order_id: order_id.to_string(),
             cancelled_at: 1,
@@ -78,7 +79,7 @@ impl BrokerAdapter for AlwaysOkBroker {
         &self,
         req: BrokerReplaceRequest,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerReplaceResponse, BrokerError> {
         Ok(BrokerReplaceResponse {
             broker_order_id: req.broker_order_id,
             replaced_at: 1,
@@ -88,9 +89,10 @@ impl BrokerAdapter for AlwaysOkBroker {
 
     fn fetch_events(
         &self,
+        _cursor: Option<&str>,
         _token: &BrokerInvokeToken,
-    ) -> Result<Vec<mqk_execution::BrokerEvent>, Box<dyn std::error::Error>> {
-        Ok(vec![])
+    ) -> Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError> {
+        Ok((vec![], None))
     }
 }
 
@@ -174,8 +176,10 @@ fn integrity_gate_blocks_submit() {
     let err = make_gateway(false, true, true)
         .submit(&claim(), submit_req())
         .unwrap_err();
-    let refusal = err.downcast::<GateRefusal>().expect("GateRefusal");
-    assert_eq!(*refusal, GateRefusal::IntegrityDisarmed);
+    let SubmitError::Gate(refusal) = err else {
+        panic!("expected SubmitError::Gate, got {err:?}")
+    };
+    assert_eq!(refusal, GateRefusal::IntegrityDisarmed);
 }
 
 #[test]
@@ -183,8 +187,10 @@ fn risk_gate_blocks_submit() {
     let err = make_gateway(true, false, true)
         .submit(&claim(), submit_req())
         .unwrap_err();
-    let refusal = err.downcast::<GateRefusal>().expect("GateRefusal");
-    assert_eq!(*refusal, GateRefusal::RiskBlocked);
+    let SubmitError::Gate(refusal) = err else {
+        panic!("expected SubmitError::Gate, got {err:?}")
+    };
+    assert_eq!(refusal, GateRefusal::RiskBlocked);
 }
 
 #[test]
@@ -192,8 +198,10 @@ fn reconcile_gate_blocks_submit() {
     let err = make_gateway(true, true, false)
         .submit(&claim(), submit_req())
         .unwrap_err();
-    let refusal = err.downcast::<GateRefusal>().expect("GateRefusal");
-    assert_eq!(*refusal, GateRefusal::ReconcileNotClean);
+    let SubmitError::Gate(refusal) = err else {
+        panic!("expected SubmitError::Gate, got {err:?}")
+    };
+    assert_eq!(refusal, GateRefusal::ReconcileNotClean);
 }
 
 #[test]
@@ -202,9 +210,11 @@ fn integrity_evaluated_before_risk_and_reconcile_on_submit() {
     let err = make_gateway(false, false, false)
         .submit(&claim(), submit_req())
         .unwrap_err();
-    let refusal = err.downcast::<GateRefusal>().expect("GateRefusal");
+    let SubmitError::Gate(refusal) = err else {
+        panic!("expected SubmitError::Gate, got {err:?}")
+    };
     assert_eq!(
-        *refusal,
+        refusal,
         GateRefusal::IntegrityDisarmed,
         "integrity must be the first gate evaluated"
     );

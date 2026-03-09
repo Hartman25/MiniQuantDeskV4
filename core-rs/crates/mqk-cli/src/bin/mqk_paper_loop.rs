@@ -25,6 +25,10 @@ async fn main() -> anyhow::Result<()> {
         order_map.register(&internal_id, &broker_id);
     }
 
+    // A2: resume from last-persisted cursor so events are not re-fetched from
+    // the beginning after a restart.  Fails closed: None = start from beginning.
+    let broker_cursor = mqk_db::load_broker_cursor(&pool, "paper").await?;
+
     let mut orchestrator = mqk_runtime::orchestrator::ExecutionOrchestrator::new(
         pool,
         gateway,
@@ -33,6 +37,8 @@ async fn main() -> anyhow::Result<()> {
         PortfolioState::new(args.initial_cash_usd * 1_000_000),
         args.run_id,
         "mqk-paper-loop",
+        "paper",
+        broker_cursor,
         mqk_runtime::orchestrator::WallClock,
         Box::new(mqk_reconcile::LocalSnapshot::empty),
         Box::new(mqk_reconcile::BrokerSnapshot::empty),

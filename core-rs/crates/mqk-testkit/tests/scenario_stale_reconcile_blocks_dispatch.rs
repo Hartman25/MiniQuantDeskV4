@@ -20,9 +20,9 @@
 use std::cell::Cell;
 
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerGateway, BrokerInvokeToken, BrokerReplaceRequest,
-    BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse, GateRefusal, IntegrityGate,
-    OutboxClaimToken, ReconcileFreshnessGuard, RiskGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
+    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
+    GateRefusal, IntegrityGate, OutboxClaimToken, ReconcileFreshnessGuard, RiskGate, SubmitError,
 };
 
 // ---------------------------------------------------------------------------
@@ -36,7 +36,7 @@ impl BrokerAdapter for OkBroker {
         &self,
         req: BrokerSubmitRequest,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerSubmitResponse, BrokerError> {
         Ok(BrokerSubmitResponse {
             broker_order_id: format!("b-{}", req.order_id),
             submitted_at: 1,
@@ -48,7 +48,7 @@ impl BrokerAdapter for OkBroker {
         &self,
         order_id: &str,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerCancelResponse, BrokerError> {
         Ok(BrokerCancelResponse {
             broker_order_id: order_id.to_string(),
             cancelled_at: 1,
@@ -60,7 +60,7 @@ impl BrokerAdapter for OkBroker {
         &self,
         req: BrokerReplaceRequest,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerReplaceResponse, BrokerError> {
         Ok(BrokerReplaceResponse {
             broker_order_id: req.broker_order_id,
             replaced_at: 1,
@@ -70,9 +70,10 @@ impl BrokerAdapter for OkBroker {
 
     fn fetch_events(
         &self,
+        _cursor: Option<&str>,
         _token: &BrokerInvokeToken,
-    ) -> Result<Vec<mqk_execution::BrokerEvent>, Box<dyn std::error::Error>> {
-        Ok(vec![])
+    ) -> Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError> {
+        Ok((vec![], None))
     }
 }
 
@@ -123,10 +124,10 @@ fn dispatch_blocked_when_reconcile_never_ran() {
     let gw = BrokerGateway::for_test(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
 
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
-    let refusal = err
-        .downcast_ref::<GateRefusal>()
-        .expect("expected GateRefusal");
-    assert_eq!(*refusal, GateRefusal::ReconcileNotClean);
+    let SubmitError::Gate(refusal) = err else {
+        panic!("expected SubmitError::Gate, got {err:?}")
+    };
+    assert_eq!(refusal, GateRefusal::ReconcileNotClean);
 }
 
 // ---------------------------------------------------------------------------
@@ -165,10 +166,10 @@ fn dispatch_blocked_when_clean_reconcile_is_stale() {
     let gw = BrokerGateway::for_test(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
 
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
-    let refusal = err
-        .downcast_ref::<GateRefusal>()
-        .expect("expected GateRefusal");
-    assert_eq!(*refusal, GateRefusal::ReconcileNotClean);
+    let SubmitError::Gate(refusal) = err else {
+        panic!("expected SubmitError::Gate, got {err:?}")
+    };
+    assert_eq!(refusal, GateRefusal::ReconcileNotClean);
 }
 
 // ---------------------------------------------------------------------------
@@ -210,10 +211,10 @@ fn dispatch_blocked_immediately_after_dirty_reconcile() {
     let gw = BrokerGateway::for_test(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
 
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
-    let refusal = err
-        .downcast_ref::<GateRefusal>()
-        .expect("expected GateRefusal");
-    assert_eq!(*refusal, GateRefusal::ReconcileNotClean);
+    let SubmitError::Gate(refusal) = err else {
+        panic!("expected SubmitError::Gate, got {err:?}")
+    };
+    assert_eq!(refusal, GateRefusal::ReconcileNotClean);
 }
 
 // ---------------------------------------------------------------------------
@@ -252,8 +253,8 @@ fn dispatch_blocked_one_ms_past_freshness_bound() {
     let gw = BrokerGateway::for_test(OkBroker, AlwaysArmed, AlwaysAllowed, guard);
 
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
-    let refusal = err
-        .downcast_ref::<GateRefusal>()
-        .expect("expected GateRefusal");
-    assert_eq!(*refusal, GateRefusal::ReconcileNotClean);
+    let SubmitError::Gate(refusal) = err else {
+        panic!("expected SubmitError::Gate, got {err:?}")
+    };
+    assert_eq!(refusal, GateRefusal::ReconcileNotClean);
 }

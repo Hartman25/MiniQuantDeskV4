@@ -64,9 +64,10 @@ use anyhow::Result;
 use chrono::Utc;
 use mqk_db::FixedClock;
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerGateway, BrokerInvokeToken, BrokerOrderMap,
-    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
-    GateRefusal, IntegrityGate, OutboxClaimToken, ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
+    BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
+    BrokerSubmitResponse, GateRefusal, IntegrityGate, OutboxClaimToken, ReconcileGate, RiskGate,
+    SubmitError,
 };
 use mqk_portfolio::PortfolioState;
 use mqk_runtime::orchestrator::ExecutionOrchestrator;
@@ -88,7 +89,7 @@ impl BrokerAdapter for OkBroker {
         &self,
         req: BrokerSubmitRequest,
         _token: &BrokerInvokeToken,
-    ) -> std::result::Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
+    ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
         Ok(BrokerSubmitResponse {
             broker_order_id: format!("b-{}", req.order_id),
             submitted_at: 1,
@@ -100,7 +101,7 @@ impl BrokerAdapter for OkBroker {
         &self,
         id: &str,
         _token: &BrokerInvokeToken,
-    ) -> std::result::Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
+    ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
         Ok(BrokerCancelResponse {
             broker_order_id: id.to_string(),
             cancelled_at: 1,
@@ -112,7 +113,7 @@ impl BrokerAdapter for OkBroker {
         &self,
         req: BrokerReplaceRequest,
         _token: &BrokerInvokeToken,
-    ) -> std::result::Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
+    ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
         Ok(BrokerReplaceResponse {
             broker_order_id: req.broker_order_id,
             replaced_at: 1,
@@ -122,9 +123,10 @@ impl BrokerAdapter for OkBroker {
 
     fn fetch_events(
         &self,
+        _cursor: Option<&str>,
         _token: &BrokerInvokeToken,
-    ) -> std::result::Result<Vec<mqk_execution::BrokerEvent>, Box<dyn std::error::Error>> {
-        Ok(vec![])
+    ) -> std::result::Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError> {
+        Ok((vec![], None))
     }
 }
 
@@ -212,13 +214,12 @@ fn i1_i2_disarmed_gateway_blocks_all_trading_operations() {
     let map = empty_map();
 
     // I1 — submit is blocked.
-    let submit_err = gw
-        .submit(&claim_token(), submit_req())
-        .unwrap_err()
-        .downcast::<GateRefusal>()
-        .expect("I1: submit error must be GateRefusal");
+    let submit_err = gw.submit(&claim_token(), submit_req()).unwrap_err();
+    let SubmitError::Gate(submit_refusal) = submit_err else {
+        panic!("I1: submit error must be SubmitError::Gate, got {submit_err:?}")
+    };
     assert_eq!(
-        *submit_err,
+        submit_refusal,
         GateRefusal::IntegrityDisarmed,
         "I1: submit must return IntegrityDisarmed when disarmed"
     );
@@ -382,6 +383,8 @@ fn make_fresh_orchestrator(
         PortfolioState::new(1_000_000_000_i64),
         run_id,
         "i4-dispatcher",
+        "test",
+        None,
         FixedClock::new(Utc::now()),
         Box::new(mqk_reconcile::LocalSnapshot::empty),
         Box::new(mqk_reconcile::BrokerSnapshot::empty),
@@ -510,6 +513,8 @@ fn make_corrupted_orch_for_i(
         portfolio,
         run_id,
         "imhp-dispatcher",
+        "test",
+        None,
         FixedClock::new(Utc::now()),
         Box::new(mqk_reconcile::LocalSnapshot::empty),
         Box::new(mqk_reconcile::BrokerSnapshot::empty),

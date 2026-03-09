@@ -43,8 +43,8 @@ impl TimeSource for WallClock {
 
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{
-    BrokerAdapter, BrokerEvent, BrokerGateway, BrokerOrderMap, BrokerSubmitRequest,
-    BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerEvent, BrokerGateway, BrokerOrderMap, BrokerSubmitRequest, IntegrityGate,
+    ReconcileGate, RiskGate,
 };
 use mqk_portfolio::{apply_entry, recompute_from_ledger, Fill, LedgerEntry, PortfolioState};
 
@@ -85,6 +85,10 @@ where
     portfolio: PortfolioState,
     run_id: Uuid,
     dispatcher_id: String,
+    /// A2: opaque broker adapter identifier used to scope the cursor in DB.
+    adapter_id: String,
+    /// A2: last-consumed broker event cursor; `None` = start from beginning.
+    broker_cursor: Option<String>,
     /// FC-5: injected clock — no direct `Utc::now()` in the dispatch path.
     time_source: TS,
     /// Patch 4A: authoritative local reconcile snapshot source.
@@ -128,6 +132,8 @@ where
         portfolio: PortfolioState,
         run_id: Uuid,
         dispatcher_id: impl Into<String>,
+        adapter_id: impl Into<String>,
+        broker_cursor: Option<String>,
         time_source: TS,
         local_snapshot_provider: Box<dyn Fn() -> LocalSnapshot + Send + Sync>,
         broker_snapshot_provider: Box<dyn Fn() -> BrokerSnapshot + Send + Sync>,
@@ -140,6 +146,8 @@ where
             portfolio,
             run_id,
             dispatcher_id: dispatcher_id.into(),
+            adapter_id: adapter_id.into(),
+            broker_cursor,
             time_source,
             local_snapshot_provider,
             broker_snapshot_provider,
@@ -286,22 +294,64 @@ where
 
             // Step 3b: submit via BrokerGateway — the ONLY submit path.
             //
-            // Box<dyn Error> is !Send. Convert to anyhow::Error (Send+Sync)
-            // in a typed binding BEFORE any match or await so the async
-            // generator state never holds a !Send type.
-            let submit_result: anyhow::Result<BrokerSubmitResponse> = self
-                .gateway
-                .submit(&claim, req)
-                .map_err(|e| anyhow!("{}", e));
+            // A3: gateway.submit returns Result<_, SubmitError>.
+            // SubmitError is Send+Sync (all inner fields are String/u64),
+            // so no anyhow conversion is needed before the async dispatch.
+            let submit_result = self.gateway.submit(&claim, req);
 
             let resp = match submit_result {
                 Ok(r) => r,
                 Err(e) => {
-                    // RT-5: Row is DISPATCHING — submit was attempted and may
-                    // have reached the broker. Mark FAILED rather than
-                    // releasing to PENDING; requires operator review.
-                    let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
-                    return Err(e.context("broker submit failed"));
+                    // A3: per-class outbox row disposition.
+                    use mqk_execution::{BrokerError, SubmitError};
+                    match &e {
+                        SubmitError::Gate(_) => {
+                            // Gate refused before touching the broker.
+                            // Row is DISPATCHING but request never left.
+                            // Mark FAILED; requires operator review.
+                            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                        }
+                        SubmitError::Broker(be) if be.requires_halt() => {
+                            let now = self.time_source.now_utc();
+                            if matches!(be, BrokerError::AmbiguousSubmit { .. }) {
+                                // Outcome unknown — row stays DISPATCHING.
+                                // Halt+disarm so Phase-0b quarantine blocks restart.
+                                let _ = persist_halt_and_disarm(
+                                    &self.pool,
+                                    self.run_id,
+                                    now,
+                                    "AmbiguousSubmit",
+                                )
+                                .await;
+                            } else {
+                                // AuthSession: credentials revoked — mark FAILED + halt.
+                                let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                                let _ = persist_halt_and_disarm(
+                                    &self.pool,
+                                    self.run_id,
+                                    now,
+                                    "AuthSession",
+                                )
+                                .await;
+                            }
+                        }
+                        SubmitError::Broker(be) if be.is_retryable() => {
+                            // Transport / RateLimit: request never left the local host.
+                            // Reset row to PENDING for re-dispatch on the next tick.
+                            let _ =
+                                mqk_db::outbox_reset_dispatching_to_pending(&self.pool, &order_id)
+                                    .await;
+                            eprintln!("WARN broker_submit_retryable order_id={order_id} error={e}");
+                        }
+                        SubmitError::Broker(_) => {
+                            // Reject / Transient: mark FAILED, requires operator.
+                            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                            eprintln!(
+                                "WARN broker_submit_non_retryable order_id={order_id} error={e}"
+                            );
+                        }
+                    }
+                    return Err(anyhow!("{e}"));
                 }
             };
 
@@ -335,14 +385,21 @@ where
 
         // ------------------------------------------------------------------
         // Phase 2: Fetch broker events and ingest into oms_inbox.
+        //
+        // A2: pass the current cursor so the adapter resumes from its last
+        // acknowledged position.  Crash-safe ordering:
+        //   1. inbox_insert_deduped for every event  (dedup key = broker_message_id)
+        //   2. advance_broker_cursor                 (only after all inserts succeed)
+        // If the process crashes between (1) and (2), the next tick re-fetches
+        // from the old cursor; the inbox unique constraint silently discards
+        // duplicates, so no event is double-applied.
         // ------------------------------------------------------------------
-        // Same pattern: convert Box<dyn Error> → anyhow::Error in a typed
-        // binding before the ? so Box<dyn Error> is never in the generator state.
-        let events_result: anyhow::Result<Vec<BrokerEvent>> = self
+        // Same Box<dyn Error> → anyhow::Error lift pattern used throughout.
+        let fetch_result: anyhow::Result<(Vec<BrokerEvent>, Option<String>)> = self
             .gateway
-            .fetch_events()
+            .fetch_events(self.broker_cursor.as_deref())
             .map_err(|e| anyhow!("fetch_events failed: {}", e));
-        let events = events_result?;
+        let (events, new_cursor) = fetch_result?;
 
         for event in &events {
             let msg_json = serde_json::to_value(event)?;
@@ -353,6 +410,13 @@ where
                 msg_json,
             )
             .await?;
+        }
+
+        // Advance cursor only after all inbox persists succeed (crash-safe).
+        if let Some(ref cursor) = new_cursor {
+            let now = self.time_source.now_utc();
+            mqk_db::advance_broker_cursor(&self.pool, &self.adapter_id, cursor, now).await?;
+            self.broker_cursor = new_cursor;
         }
 
         // ------------------------------------------------------------------

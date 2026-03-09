@@ -7,9 +7,9 @@
 //! will get a compile error on any attempt to call BrokerGateway::for_test.
 
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerEvent, BrokerGateway, BrokerInvokeToken,
-    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
-    IntegrityGate, ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent, BrokerGateway,
+    BrokerInvokeToken, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
+    BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate,
 };
 
 // Minimal broker stub.
@@ -20,7 +20,7 @@ impl BrokerAdapter for NullBroker {
         &self,
         req: BrokerSubmitRequest,
         _t: &BrokerInvokeToken,
-    ) -> Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerSubmitResponse, BrokerError> {
         Ok(BrokerSubmitResponse {
             broker_order_id: req.order_id,
             submitted_at: 0,
@@ -32,7 +32,7 @@ impl BrokerAdapter for NullBroker {
         &self,
         id: &str,
         _t: &BrokerInvokeToken,
-    ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerCancelResponse, BrokerError> {
         Ok(BrokerCancelResponse {
             broker_order_id: id.to_string(),
             cancelled_at: 0,
@@ -44,7 +44,7 @@ impl BrokerAdapter for NullBroker {
         &self,
         req: BrokerReplaceRequest,
         _t: &BrokerInvokeToken,
-    ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerReplaceResponse, BrokerError> {
         Ok(BrokerReplaceResponse {
             broker_order_id: req.broker_order_id,
             replaced_at: 0,
@@ -54,9 +54,10 @@ impl BrokerAdapter for NullBroker {
 
     fn fetch_events(
         &self,
+        _cursor: Option<&str>,
         _t: &BrokerInvokeToken,
-    ) -> Result<Vec<BrokerEvent>, Box<dyn std::error::Error>> {
-        Ok(vec![])
+    ) -> Result<(Vec<BrokerEvent>, Option<String>), BrokerError> {
+        Ok((vec![], None))
     }
 }
 

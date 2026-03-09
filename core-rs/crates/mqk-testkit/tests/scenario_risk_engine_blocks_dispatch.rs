@@ -33,9 +33,10 @@
 //! All tests are pure in-process; no DB or network required.
 
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerGateway, BrokerInvokeToken, BrokerOrderMap,
-    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
-    GateRefusal, IntegrityGate, OutboxClaimToken, ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
+    BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
+    BrokerSubmitResponse, GateRefusal, IntegrityGate, OutboxClaimToken, ReconcileGate, RiskGate,
+    SubmitError,
 };
 use mqk_risk::{
     evaluate, KillSwitchEvent, KillSwitchType, PdtContext, RequestKind, RiskAction, RiskConfig,
@@ -72,7 +73,7 @@ impl BrokerAdapter for OkBroker {
         &self,
         req: BrokerSubmitRequest,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerSubmitResponse, BrokerError> {
         Ok(BrokerSubmitResponse {
             broker_order_id: format!("b-{}", req.order_id),
             submitted_at: 1,
@@ -84,7 +85,7 @@ impl BrokerAdapter for OkBroker {
         &self,
         order_id: &str,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerCancelResponse, BrokerError> {
         Ok(BrokerCancelResponse {
             broker_order_id: order_id.to_string(),
             cancelled_at: 1,
@@ -96,7 +97,7 @@ impl BrokerAdapter for OkBroker {
         &self,
         req: BrokerReplaceRequest,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerReplaceResponse, BrokerError> {
         Ok(BrokerReplaceResponse {
             broker_order_id: req.broker_order_id,
             replaced_at: 1,
@@ -106,9 +107,10 @@ impl BrokerAdapter for OkBroker {
 
     fn fetch_events(
         &self,
+        _cursor: Option<&str>,
         _token: &BrokerInvokeToken,
-    ) -> Result<Vec<mqk_execution::BrokerEvent>, Box<dyn std::error::Error>> {
-        Ok(vec![])
+    ) -> Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError> {
+        Ok((vec![], None))
     }
 }
 
@@ -263,11 +265,11 @@ fn daily_loss_limit_breach_blocks_submit() {
         AlwaysClean,
     );
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
-    let refusal = err
-        .downcast_ref::<GateRefusal>()
-        .expect("error must downcast to GateRefusal");
+    let SubmitError::Gate(refusal) = err else {
+        panic!("expected SubmitError::Gate, got {err:?}")
+    };
     assert_eq!(
-        *refusal,
+        refusal,
         GateRefusal::RiskBlocked,
         "daily loss limit breach must block gateway with RiskBlocked"
     );
@@ -309,11 +311,11 @@ fn kill_switch_blocks_submit() {
         AlwaysClean,
     );
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
-    let refusal = err
-        .downcast_ref::<GateRefusal>()
-        .expect("error must downcast to GateRefusal");
+    let SubmitError::Gate(refusal) = err else {
+        panic!("expected SubmitError::Gate, got {err:?}")
+    };
     assert_eq!(
-        *refusal,
+        refusal,
         GateRefusal::RiskBlocked,
         "kill switch must block gateway with RiskBlocked"
     );
@@ -359,11 +361,11 @@ fn gate_order_risk_is_evaluated_before_reconcile() {
     );
 
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
-    let refusal = err
-        .downcast_ref::<GateRefusal>()
-        .expect("error must downcast to GateRefusal");
+    let SubmitError::Gate(refusal) = err else {
+        panic!("expected SubmitError::Gate, got {err:?}")
+    };
     assert_eq!(
-        *refusal,
+        refusal,
         GateRefusal::RiskBlocked,
         "risk must be evaluated before reconcile: when both deny, first error must be RiskBlocked"
     );
@@ -495,11 +497,11 @@ fn sticky_halt_state_blocks_new_order_submit() {
         AlwaysClean,
     );
     let err = gw.submit(&make_claim(), submit_req()).unwrap_err();
-    let refusal = err
-        .downcast_ref::<GateRefusal>()
-        .expect("error must downcast to GateRefusal");
+    let SubmitError::Gate(refusal) = err else {
+        panic!("expected SubmitError::Gate, got {err:?}")
+    };
     assert_eq!(
-        *refusal,
+        refusal,
         GateRefusal::RiskBlocked,
         "sticky halted risk state must block gateway with RiskBlocked"
     );

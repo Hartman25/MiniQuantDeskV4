@@ -12,9 +12,9 @@
 //! distinguishable from a provenance failure by error type.
 
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerGateway, BrokerInvokeToken, BrokerOrderMap,
-    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
-    GateRefusal, IntegrityGate, ReconcileGate, RiskGate, UnknownOrder,
+    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
+    BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
+    BrokerSubmitResponse, GateRefusal, IntegrityGate, ReconcileGate, RiskGate, UnknownOrder,
 };
 
 // ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ impl BrokerAdapter for AlwaysOkBroker {
         &self,
         req: BrokerSubmitRequest,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerSubmitResponse, BrokerError> {
         Ok(BrokerSubmitResponse {
             broker_order_id: format!("b-{}", req.order_id),
             submitted_at: 1,
@@ -40,7 +40,7 @@ impl BrokerAdapter for AlwaysOkBroker {
         &self,
         order_id: &str,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerCancelResponse, BrokerError> {
         Ok(BrokerCancelResponse {
             broker_order_id: order_id.to_string(),
             cancelled_at: 1,
@@ -52,7 +52,7 @@ impl BrokerAdapter for AlwaysOkBroker {
         &self,
         req: BrokerReplaceRequest,
         _token: &BrokerInvokeToken,
-    ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerReplaceResponse, BrokerError> {
         Ok(BrokerReplaceResponse {
             broker_order_id: req.broker_order_id,
             replaced_at: 1,
@@ -62,9 +62,10 @@ impl BrokerAdapter for AlwaysOkBroker {
 
     fn fetch_events(
         &self,
+        _cursor: Option<&str>,
         _token: &BrokerInvokeToken,
-    ) -> Result<Vec<mqk_execution::BrokerEvent>, Box<dyn std::error::Error>> {
-        Ok(vec![])
+    ) -> Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError> {
+        Ok((vec![], None))
     }
 }
 

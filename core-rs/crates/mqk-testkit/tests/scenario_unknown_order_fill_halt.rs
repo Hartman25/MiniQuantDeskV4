@@ -45,9 +45,9 @@ use anyhow::Result;
 use chrono::Utc;
 use mqk_db::FixedClock;
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerGateway, BrokerInvokeToken, BrokerOrderMap,
-    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
-    IntegrityGate, ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
+    BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
+    BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate,
 };
 use mqk_portfolio::PortfolioState;
 use mqk_runtime::orchestrator::ExecutionOrchestrator;
@@ -78,7 +78,7 @@ impl BrokerAdapter for OkBroker {
         &self,
         req: BrokerSubmitRequest,
         _token: &BrokerInvokeToken,
-    ) -> std::result::Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
+    ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
         Ok(BrokerSubmitResponse {
             broker_order_id: format!("b-{}", req.order_id),
             submitted_at: 1,
@@ -90,7 +90,7 @@ impl BrokerAdapter for OkBroker {
         &self,
         id: &str,
         _token: &BrokerInvokeToken,
-    ) -> std::result::Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
+    ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
         Ok(BrokerCancelResponse {
             broker_order_id: id.to_string(),
             cancelled_at: 1,
@@ -102,7 +102,7 @@ impl BrokerAdapter for OkBroker {
         &self,
         req: BrokerReplaceRequest,
         _token: &BrokerInvokeToken,
-    ) -> std::result::Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
+    ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
         Ok(BrokerReplaceResponse {
             broker_order_id: req.broker_order_id,
             replaced_at: 1,
@@ -112,9 +112,10 @@ impl BrokerAdapter for OkBroker {
 
     fn fetch_events(
         &self,
+        _cursor: Option<&str>,
         _token: &BrokerInvokeToken,
-    ) -> std::result::Result<Vec<mqk_execution::BrokerEvent>, Box<dyn std::error::Error>> {
-        Ok(vec![])
+    ) -> std::result::Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError> {
+        Ok((vec![], None))
     }
 }
 
@@ -225,6 +226,8 @@ fn make_clean_orch(
         PortfolioState::new(1_000_000_000_i64),
         run_id,
         "c1-dispatcher",
+        "test",
+        None,
         FixedClock::new(Utc::now()),
         Box::new(mqk_reconcile::LocalSnapshot::empty),
         Box::new(mqk_reconcile::BrokerSnapshot::empty),

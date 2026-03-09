@@ -414,7 +414,7 @@ impl mqk_execution::BrokerAdapter for NullBroker {
         &self,
         req: mqk_execution::BrokerSubmitRequest,
         _token: &mqk_execution::BrokerInvokeToken,
-    ) -> std::result::Result<mqk_execution::BrokerSubmitResponse, Box<dyn std::error::Error>> {
+    ) -> std::result::Result<mqk_execution::BrokerSubmitResponse, mqk_execution::BrokerError> {
         Ok(mqk_execution::BrokerSubmitResponse {
             broker_order_id: format!("null-{}", req.order_id),
             submitted_at: 0,
@@ -426,7 +426,7 @@ impl mqk_execution::BrokerAdapter for NullBroker {
         &self,
         _order_id: &str,
         _token: &mqk_execution::BrokerInvokeToken,
-    ) -> std::result::Result<mqk_execution::BrokerCancelResponse, Box<dyn std::error::Error>> {
+    ) -> std::result::Result<mqk_execution::BrokerCancelResponse, mqk_execution::BrokerError> {
         Ok(mqk_execution::BrokerCancelResponse {
             broker_order_id: "null".to_string(),
             cancelled_at: 0,
@@ -438,7 +438,7 @@ impl mqk_execution::BrokerAdapter for NullBroker {
         &self,
         req: mqk_execution::BrokerReplaceRequest,
         _token: &mqk_execution::BrokerInvokeToken,
-    ) -> std::result::Result<mqk_execution::BrokerReplaceResponse, Box<dyn std::error::Error>> {
+    ) -> std::result::Result<mqk_execution::BrokerReplaceResponse, mqk_execution::BrokerError> {
         Ok(mqk_execution::BrokerReplaceResponse {
             broker_order_id: req.broker_order_id,
             replaced_at: 0,
@@ -448,9 +448,13 @@ impl mqk_execution::BrokerAdapter for NullBroker {
 
     fn fetch_events(
         &self,
+        _cursor: Option<&str>,
         _token: &mqk_execution::BrokerInvokeToken,
-    ) -> std::result::Result<Vec<mqk_execution::BrokerEvent>, Box<dyn std::error::Error>> {
-        Ok(vec![])
+    ) -> std::result::Result<
+        (Vec<mqk_execution::BrokerEvent>, Option<String>),
+        mqk_execution::BrokerError,
+    > {
+        Ok((vec![], None))
     }
 }
 
@@ -509,6 +513,8 @@ pub async fn run_execute(run_id: String, ticks: u32) -> Result<()> {
         PortfolioState::new(0),
         run_uuid,
         "mqk-cli",
+        "null",
+        None,
         mqk_runtime::orchestrator::WallClock,
         Box::new(mqk_reconcile::LocalSnapshot::empty),
         Box::new(mqk_reconcile::BrokerSnapshot::empty),

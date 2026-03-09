@@ -32,6 +32,7 @@
 //! Real engine implementations wire their subsystem state behind these traits.
 //! Test doubles use simple boolean stubs.
 
+use crate::broker_error::BrokerError;
 use crate::id_map::BrokerOrderMap;
 use crate::order_router::{
     BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
@@ -105,6 +106,41 @@ impl std::fmt::Display for GateRefusal {
 }
 
 impl std::error::Error for GateRefusal {}
+
+// ---------------------------------------------------------------------------
+// SubmitError (A3)
+// ---------------------------------------------------------------------------
+
+/// Error returned by [`BrokerGateway::submit`].
+///
+/// Distinguishes gate refusals (request never reached the broker) from
+/// classified broker errors, enabling the orchestrator to apply per-class
+/// outbox row disposition without downcasting.
+#[derive(Debug)]
+pub enum SubmitError {
+    /// A gate evaluator refused the submit before the request was sent.
+    Gate(GateRefusal),
+    /// The broker adapter returned a classified error.
+    Broker(BrokerError),
+}
+
+impl std::fmt::Display for SubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubmitError::Gate(r) => write!(f, "SUBMIT_GATE_REFUSED: {r}"),
+            SubmitError::Broker(e) => write!(f, "SUBMIT_BROKER_ERROR: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SubmitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            SubmitError::Gate(r) => Some(r),
+            SubmitError::Broker(e) => Some(e),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // UnknownOrder (EB-2)
@@ -243,8 +279,8 @@ where
         &self,
         claim: &OutboxClaimToken,
         req: BrokerSubmitRequest,
-    ) -> Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
-        self.enforce_gates()?;
+    ) -> Result<BrokerSubmitResponse, SubmitError> {
+        self.enforce_gates().map_err(SubmitError::Gate)?;
         // EB-3: idempotency_key from the claimed outbox row is the authoritative
         // broker-side order_id. This prevents callers from submitting free-form
         // order IDs that were not recorded in the outbox.
@@ -252,7 +288,9 @@ where
             order_id: claim.idempotency_key.clone(),
             ..req
         };
-        self.router.route_submit(submit_req)
+        self.router
+            .route_submit(submit_req)
+            .map_err(SubmitError::Broker)
     }
 
     /// Cancel a broker order.
@@ -272,20 +310,28 @@ where
                 internal_id: internal_id.to_string(),
             }) as Box<dyn std::error::Error>
         })?;
-        self.router.route_cancel(broker_id)
+        self.router
+            .route_cancel(broker_id)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 
-    /// Fetch new broker events since the last poll.
+    /// Fetch new broker events since `cursor`.
     ///
     /// This is a read-only operation; gate checks are NOT applied.  The system
     /// must be able to receive events even when disarmed (e.g. during crash
     /// recovery).  The orchestrator persists each event to `oms_inbox` with
-    /// dedup on `broker_message_id` before applying it.
+    /// dedup on `broker_message_id` BEFORE advancing the cursor, so a crash
+    /// between the two steps is safe.
     pub fn fetch_events(
         &self,
-    ) -> std::result::Result<Vec<crate::order_router::BrokerEvent>, Box<dyn std::error::Error>>
-    {
-        self.router.route_fetch_events()
+        cursor: Option<&str>,
+    ) -> std::result::Result<
+        (Vec<crate::order_router::BrokerEvent>, Option<String>),
+        Box<dyn std::error::Error>,
+    > {
+        self.router
+            .route_fetch_events(cursor)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 
     /// Replace a broker order.
@@ -308,12 +354,14 @@ where
                 internal_id: internal_id.to_string(),
             }) as Box<dyn std::error::Error>
         })?;
-        self.router.route_replace(BrokerReplaceRequest {
-            broker_order_id: broker_id.to_string(),
-            quantity,
-            limit_price,
-            time_in_force,
-        })
+        self.router
+            .route_replace(BrokerReplaceRequest {
+                broker_order_id: broker_id.to_string(),
+                quantity,
+                limit_price,
+                time_in_force,
+            })
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 }
 
@@ -355,7 +403,7 @@ mod tests {
             &self,
             req: BrokerSubmitRequest,
             _token: &BrokerInvokeToken,
-        ) -> Result<BrokerSubmitResponse, Box<dyn std::error::Error>> {
+        ) -> Result<BrokerSubmitResponse, crate::broker_error::BrokerError> {
             Ok(BrokerSubmitResponse {
                 broker_order_id: format!("b-{}", req.order_id),
                 submitted_at: 1,
@@ -367,7 +415,7 @@ mod tests {
             &self,
             order_id: &str,
             _token: &BrokerInvokeToken,
-        ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
+        ) -> Result<BrokerCancelResponse, crate::broker_error::BrokerError> {
             Ok(BrokerCancelResponse {
                 broker_order_id: order_id.to_string(),
                 cancelled_at: 1,
@@ -379,7 +427,7 @@ mod tests {
             &self,
             req: BrokerReplaceRequest,
             _token: &BrokerInvokeToken,
-        ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
+        ) -> Result<BrokerReplaceResponse, crate::broker_error::BrokerError> {
             Ok(BrokerReplaceResponse {
                 broker_order_id: req.broker_order_id,
                 replaced_at: 1,
@@ -389,9 +437,13 @@ mod tests {
 
         fn fetch_events(
             &self,
+            _cursor: Option<&str>,
             _token: &BrokerInvokeToken,
-        ) -> Result<Vec<crate::order_router::BrokerEvent>, Box<dyn std::error::Error>> {
-            Ok(vec![])
+        ) -> Result<
+            (Vec<crate::order_router::BrokerEvent>, Option<String>),
+            crate::broker_error::BrokerError,
+        > {
+            Ok((vec![], None))
         }
     }
 

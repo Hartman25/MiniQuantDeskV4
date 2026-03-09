@@ -1258,6 +1258,40 @@ pub async fn outbox_mark_failed(pool: &PgPool, idempotency_key: &str) -> Result<
     Ok(row.is_some())
 }
 
+/// Reset a `DISPATCHING` row back to `PENDING` for safe retry.
+///
+/// Used by the orchestrator when the broker adapter returns a retryable error
+/// (`Transport` or `RateLimit`) — i.e., the request provably never reached the
+/// broker.  Clears the claim fields so `outbox_claim_batch` can re-claim the
+/// row on the next tick.
+///
+/// Returns `true` if the row was reset; `false` if not found or not
+/// `DISPATCHING`.
+pub async fn outbox_reset_dispatching_to_pending(
+    pool: &PgPool,
+    idempotency_key: &str,
+) -> Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"
+        update oms_outbox
+           set status                 = 'PENDING',
+               claimed_by             = null,
+               claimed_at_utc         = null,
+               dispatching_at_utc     = null,
+               dispatch_attempt_id    = null
+         where idempotency_key = $1
+           and status = 'DISPATCHING'
+        returning outbox_id
+        "#,
+    )
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await
+    .context("outbox_reset_dispatching_to_pending failed")?;
+
+    Ok(row.is_some())
+}
+
 /// Recovery query: list outbox rows that are not terminal (not ACKED).
 ///
 /// Includes PENDING, CLAIMED, DISPATCHING, SENT, and FAILED rows — all statuses
@@ -1608,6 +1642,67 @@ pub async fn reconcile_checkpoint_write(
     .execute(pool)
     .await
     .context("reconcile_checkpoint_write failed")?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Broker event cursor — Patch A2
+// ---------------------------------------------------------------------------
+
+/// Load the persisted broker event cursor for the given adapter.
+///
+/// Returns `None` if no cursor has been persisted yet (fresh system or first
+/// run for this adapter).  The orchestrator treats `None` as "start from the
+/// beginning", which is always safe because `oms_inbox` deduplicates events by
+/// `(run_id, broker_message_id)`.
+pub async fn load_broker_cursor(pool: &PgPool, adapter_id: &str) -> Result<Option<String>> {
+    let row: Option<(String,)> = sqlx::query_as(
+        r#"
+        select cursor_value
+        from broker_event_cursor
+        where adapter_id = $1
+        "#,
+    )
+    .bind(adapter_id)
+    .fetch_optional(pool)
+    .await
+    .context("load_broker_cursor failed")?;
+    Ok(row.map(|(v,)| v))
+}
+
+/// Advance (upsert) the broker event cursor for the given adapter.
+///
+/// Called by the orchestrator ONLY after all events in the current batch have
+/// been persisted to `oms_inbox`.  Ordering contract:
+///   1. `inbox_insert_deduped` succeeds for every event in the batch.
+///   2. `advance_broker_cursor` persists the new cursor.
+///
+/// If the process crashes between steps 1 and 2 the cursor is NOT advanced.
+/// On restart the orchestrator re-fetches from the old cursor and `oms_inbox`
+/// dedup prevents double-apply.
+///
+/// `updated_at` is caller-supplied (no SQL `now()`; D1 policy).
+pub async fn advance_broker_cursor(
+    pool: &PgPool,
+    adapter_id: &str,
+    cursor_value: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into broker_event_cursor (adapter_id, cursor_value, updated_at)
+        values ($1, $2, $3)
+        on conflict (adapter_id) do update
+            set cursor_value = excluded.cursor_value,
+                updated_at   = excluded.updated_at
+        "#,
+    )
+    .bind(adapter_id)
+    .bind(cursor_value)
+    .bind(updated_at)
+    .execute(pool)
+    .await
+    .context("advance_broker_cursor failed")?;
     Ok(())
 }
 

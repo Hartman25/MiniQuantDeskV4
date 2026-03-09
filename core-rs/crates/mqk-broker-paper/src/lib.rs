@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use mqk_execution::{
-    types::Side as ExecSide, BrokerAdapter, BrokerCancelResponse, BrokerEvent, BrokerInvokeToken,
-    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
+    types::Side as ExecSide, BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent,
+    BrokerInvokeToken, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
+    BrokerSubmitResponse,
 };
 use mqk_reconcile::{BrokerSnapshot, OrderSnapshot, OrderStatus};
 
@@ -33,8 +34,15 @@ struct PaperInner {
     closed: BTreeSet<String>,
     /// Deterministic fill engine.
     engine: DeterministicFillEngine,
-    /// FIFO event queue (deterministic append order).
-    events: Vec<BrokerEvent>,
+    /// Durable event log: each entry is `(seq, event)`.
+    ///
+    /// Events are NEVER drained.  `fetch_events(cursor)` returns only events
+    /// whose seq > parsed cursor, simulating a durable broker event stream.
+    /// This allows replay from any past cursor, which is required for
+    /// restart-safety tests (Patch A2).
+    events: Vec<(u64, BrokerEvent)>,
+    /// Monotonically increasing counter; incremented before each push.
+    next_seq: u64,
 }
 
 impl Default for PaperInner {
@@ -44,6 +52,7 @@ impl Default for PaperInner {
             closed: BTreeSet::new(),
             engine: DeterministicFillEngine::new(),
             events: Vec::new(),
+            next_seq: 0,
         }
     }
 }
@@ -68,7 +77,11 @@ impl LockedPaperBroker {
             };
 
             let evs = inner.engine.apply_bar_to_order(&bar, &mut ord);
-            inner.events.extend(evs);
+            for ev in evs {
+                inner.next_seq += 1;
+                let seq = inner.next_seq;
+                inner.events.push((seq, ev));
+            }
 
             if ord.remaining_qty == 0 {
                 inner.closed.insert(k);
@@ -123,17 +136,27 @@ impl LockedPaperBroker {
 impl BrokerAdapter for LockedPaperBroker {
     fn fetch_events(
         &self,
+        cursor: Option<&str>,
         _token: &BrokerInvokeToken,
-    ) -> std::result::Result<Vec<BrokerEvent>, Box<dyn std::error::Error + 'static>> {
-        let mut inner = self.inner.lock().expect("poisoned mutex");
-        Ok(std::mem::take(&mut inner.events))
+    ) -> std::result::Result<(Vec<BrokerEvent>, Option<String>), BrokerError> {
+        let inner = self.inner.lock().expect("poisoned mutex");
+        let since_seq: u64 = cursor.and_then(|s| s.parse().ok()).unwrap_or(0);
+        let batch: Vec<(u64, BrokerEvent)> = inner
+            .events
+            .iter()
+            .filter(|(seq, _)| *seq > since_seq)
+            .map(|(seq, ev)| (*seq, ev.clone()))
+            .collect();
+        let new_cursor = batch.last().map(|(seq, _)| seq.to_string());
+        let events = batch.into_iter().map(|(_, ev)| ev).collect();
+        Ok((events, new_cursor))
     }
 
     fn submit_order(
         &self,
         req: BrokerSubmitRequest,
         _token: &BrokerInvokeToken,
-    ) -> std::result::Result<BrokerSubmitResponse, Box<dyn std::error::Error + 'static>> {
+    ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
         let mut inner = self.inner.lock().expect("poisoned mutex");
 
         // Deterministic identity mapping: broker_order_id == internal order_id.
@@ -146,11 +169,16 @@ impl BrokerAdapter for LockedPaperBroker {
 
         let state = PaperOrderState::new(req.order_id.clone(), req.symbol.clone(), side, abs_qty);
 
-        inner.events.push(BrokerEvent::Ack {
-            broker_message_id: format!("ack:{}", broker_order_id),
-            internal_order_id: req.order_id,
-            broker_order_id: Some(broker_order_id.clone()),
-        });
+        inner.next_seq += 1;
+        let seq = inner.next_seq;
+        inner.events.push((
+            seq,
+            BrokerEvent::Ack {
+                broker_message_id: format!("ack:{}", broker_order_id),
+                internal_order_id: req.order_id,
+                broker_order_id: Some(broker_order_id.clone()),
+            },
+        ));
 
         inner.open.insert(broker_order_id.clone(), state);
 
@@ -165,7 +193,7 @@ impl BrokerAdapter for LockedPaperBroker {
         &self,
         broker_order_id: &str,
         _token: &BrokerInvokeToken,
-    ) -> std::result::Result<BrokerCancelResponse, Box<dyn std::error::Error + 'static>> {
+    ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
         let mut inner = self.inner.lock().expect("poisoned mutex");
 
         let oid = broker_order_id.to_string();
@@ -181,11 +209,16 @@ impl BrokerAdapter for LockedPaperBroker {
 
         if inner.open.remove(&oid).is_some() {
             inner.closed.insert(oid.clone());
-            inner.events.push(BrokerEvent::CancelAck {
-                broker_message_id: format!("cancel:{}", oid),
-                internal_order_id: oid.clone(),
-                broker_order_id: Some(oid.clone()),
-            });
+            inner.next_seq += 1;
+            let seq = inner.next_seq;
+            inner.events.push((
+                seq,
+                BrokerEvent::CancelAck {
+                    broker_message_id: format!("cancel:{}", oid),
+                    internal_order_id: oid.clone(),
+                    broker_order_id: Some(oid.clone()),
+                },
+            ));
         }
 
         Ok(BrokerCancelResponse {
@@ -199,18 +232,23 @@ impl BrokerAdapter for LockedPaperBroker {
         &self,
         req: BrokerReplaceRequest,
         _token: &BrokerInvokeToken,
-    ) -> std::result::Result<BrokerReplaceResponse, Box<dyn std::error::Error + 'static>> {
+    ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
         let mut inner = self.inner.lock().expect("poisoned mutex");
 
         let oid = req.broker_order_id.clone();
 
         // P1-03: Reject replace on terminal (cancelled/filled/rejected) orders.
         if inner.closed.contains(&oid) {
-            inner.events.push(BrokerEvent::ReplaceReject {
-                broker_message_id: format!("replace:{}", oid),
-                internal_order_id: oid.clone(),
-                broker_order_id: Some(oid.clone()),
-            });
+            inner.next_seq += 1;
+            let seq = inner.next_seq;
+            inner.events.push((
+                seq,
+                BrokerEvent::ReplaceReject {
+                    broker_message_id: format!("replace:{}", oid),
+                    internal_order_id: oid.clone(),
+                    broker_order_id: Some(oid.clone()),
+                },
+            ));
             return Ok(BrokerReplaceResponse {
                 broker_order_id: oid,
                 status: "replace_rejected".to_string(),
@@ -223,11 +261,16 @@ impl BrokerAdapter for LockedPaperBroker {
 
             // P1-03: Reject replace with zero open leaves (invalid quantity).
             if new_abs == 0 {
-                inner.events.push(BrokerEvent::ReplaceReject {
-                    broker_message_id: format!("replace:{}", oid),
-                    internal_order_id: oid.clone(),
-                    broker_order_id: Some(oid.clone()),
-                });
+                inner.next_seq += 1;
+                let seq = inner.next_seq;
+                inner.events.push((
+                    seq,
+                    BrokerEvent::ReplaceReject {
+                        broker_message_id: format!("replace:{}", oid),
+                        internal_order_id: oid.clone(),
+                        broker_order_id: Some(oid.clone()),
+                    },
+                ));
                 return Ok(BrokerReplaceResponse {
                     broker_order_id: oid,
                     status: "replace_rejected".to_string(),
@@ -253,12 +296,17 @@ impl BrokerAdapter for LockedPaperBroker {
             o.original_qty = new_total_qty;
             o.remaining_qty = new_abs;
 
-            inner.events.push(BrokerEvent::ReplaceAck {
-                broker_message_id: format!("replace:{}", oid),
-                internal_order_id: oid.clone(),
-                broker_order_id: Some(oid.clone()),
-                new_total_qty,
-            });
+            inner.next_seq += 1;
+            let seq = inner.next_seq;
+            inner.events.push((
+                seq,
+                BrokerEvent::ReplaceAck {
+                    broker_message_id: format!("replace:{}", oid),
+                    internal_order_id: oid.clone(),
+                    broker_order_id: Some(oid.clone()),
+                    new_total_qty,
+                },
+            ));
 
             return Ok(BrokerReplaceResponse {
                 broker_order_id: oid,
@@ -268,11 +316,16 @@ impl BrokerAdapter for LockedPaperBroker {
         }
 
         // P1-03: Unknown order — reject.
-        inner.events.push(BrokerEvent::ReplaceReject {
-            broker_message_id: format!("replace:{}", oid),
-            internal_order_id: oid.clone(),
-            broker_order_id: Some(oid.clone()),
-        });
+        inner.next_seq += 1;
+        let seq = inner.next_seq;
+        inner.events.push((
+            seq,
+            BrokerEvent::ReplaceReject {
+                broker_message_id: format!("replace:{}", oid),
+                internal_order_id: oid.clone(),
+                broker_order_id: Some(oid.clone()),
+            },
+        ));
         Ok(BrokerReplaceResponse {
             broker_order_id: oid,
             status: "replace_rejected".to_string(),
@@ -442,8 +495,8 @@ mod tests {
             "replace after terminal cancel must not resurrect the order"
         );
 
-        let events = broker
-            .fetch_events(&token)
+        let (events, _cursor) = broker
+            .fetch_events(None, &token)
             .expect("fetch events must succeed");
         assert!(events.iter().any(
             |ev| matches!(ev, BrokerEvent::CancelAck { internal_order_id, .. } if internal_order_id == "ord-cxl")
