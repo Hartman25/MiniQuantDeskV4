@@ -1,0 +1,18 @@
+Phase 4 future GUI bundle.
+
+Adds/overrides:
+- features/metrics/MetricsScreen.tsx
+- features/transport/TransportScreen.tsx
+- features/topology/TopologyScreen.tsx
+- features/session/SessionScreen.tsx
+- features/config/ConfigScreen.tsx
+- features/marketData/MarketDataScreen.tsx
+
+Intent:
+- flesh out the secondary operator surfaces
+- bring non-primary screens into the same desk/panel pattern
+- reduce the remaining gap between shell maturity and screen maturity
+
+Status:
+- prepared, not compile-verified here
+- intended to merge after gui_future_bundle.zip, phase2, and phase3

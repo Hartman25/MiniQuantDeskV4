@@ -1,0 +1,18 @@
+Phase 5 future GUI bundle.
+
+Adds/overrides:
+- features/alerts/AlertsScreen.tsx
+- features/incidents/IncidentsScreen.tsx
+- features/operatorTimeline/OperatorTimelineScreen.tsx
+- features/artifacts/ArtifactsScreen.tsx
+- features/audit/AuditScreen.tsx
+- features/strategy/StrategyScreen.tsx
+
+Intent:
+- flesh out the tertiary operator surfaces
+- bring alert/incident/audit/strategy views into the same desk pattern
+- push the future bundle close to a full operator-console pass
+
+Status:
+- prepared, not compile-verified here
+- intended to merge after gui_future_bundle.zip and phases 2-4

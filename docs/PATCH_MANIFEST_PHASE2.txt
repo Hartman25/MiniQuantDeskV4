@@ -1,0 +1,18 @@
+Phase 2 future GUI bundle.
+
+Adds/overrides:
+- features/dashboard/DashboardScreen.tsx
+- features/execution/ExecutionScreen.tsx
+- features/risk/RiskScreen.tsx
+- features/reconcile/ReconcileScreen.tsx
+- features/portfolio/PortfolioScreen.tsx
+- features/ops/OpsScreen.tsx
+
+Intent:
+- panelize major operator screens
+- align screens to desk layout
+- make screens dataSource-aware where useful
+
+Status:
+- prepared, not compile-verified here
+- intended to merge with the earlier gui_future_bundle.zip

@@ -1,0 +1,23 @@
+GUI future bundle for later laptop merge.
+
+Included:
+- app/AppShell.tsx
+- components/status/GlobalStatusBar.tsx
+- features/runtime/RuntimeScreen.tsx (new)
+- features/system/types.ts
+- features/system/mockData.ts
+- features/system/api.ts
+- features/system/useOperatorModel.ts
+- features/system/useSystemModel.ts
+- styles.css
+
+Intent:
+- add runtime screen
+- add truth-aware data source model
+- add 2/3 monitor desk toggle
+- add desk-shell styling groundwork
+
+Status:
+- prepared against current repo snapshot
+- not compile-verified in this environment
+- apply later as a coherent group, then build and repair

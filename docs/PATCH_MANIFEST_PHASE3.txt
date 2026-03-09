@@ -1,0 +1,18 @@
+Phase 3 future GUI bundle.
+
+Adds/overrides:
+- features/screens/screenRegistry.tsx
+- App.tsx
+- components/layout/LeftCommandRail.tsx
+- components/layout/RightOpsRail.tsx
+- components/layout/BottomEventRail.tsx
+- components/layout/WorkspaceFrame.tsx
+
+Intent:
+- finish the shell/navigation/layout layer
+- wire runtime screen into registry
+- align app entry and shell support files with the future desk model
+
+Status:
+- prepared, not compile-verified here
+- intended to merge after gui_future_bundle.zip and gui_future_bundle_phase2.zip
