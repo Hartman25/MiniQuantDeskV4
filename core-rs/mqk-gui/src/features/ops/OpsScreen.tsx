@@ -28,7 +28,7 @@ export function OpsScreen({
   onChangeMode: (targetMode: EnvironmentMode) => void;
 }) {
   return (
-    <div className="screen-grid">
+    <div className="screen-grid desk-screen-grid">
       <Panel title="System mode transition" subtitle="Mode changes require a controlled daemon restart and configuration reload. This is not a casual runtime toggle.">
         <div className="mode-transition-panel">
           <div className="mode-transition-meta">
@@ -36,6 +36,7 @@ export function OpsScreen({
             <div><span>Runtime</span><strong>{model.status.runtime_status}</strong></div>
             <div><span>Live routing</span><strong>{model.status.live_routing_enabled ? "enabled" : "disabled"}</strong></div>
             <div><span>Generation</span><strong>{model.runtimeLeadership.generation_id}</strong></div>
+            <div><span>Source state</span><strong>{model.dataSource.state}</strong></div>
           </div>
           <div className="mode-toggle-row">
             {TARGET_MODES.map((mode) => (

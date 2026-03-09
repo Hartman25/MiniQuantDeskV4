@@ -24,7 +24,15 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
           title="Runtime"
           value={status.runtime_status}
           detail={`Heartbeat ${formatDateTime(status.last_heartbeat)}`}
-          tone={status.has_critical ? "bad" : status.has_warning ? "warn" : "good"}
+          tone={
+            model.dataSource?.state === "disconnected"
+              ? "bad"
+              : status.has_critical
+                ? "bad"
+                : status.has_warning
+                  ? "warn"
+                  : "good"
+          }
         />
         <StatCard
           title="Daemon"

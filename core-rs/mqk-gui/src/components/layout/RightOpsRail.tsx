@@ -1,78 +1,69 @@
-import type { OperatorAlert, SystemModel } from "../../features/system/types";
+import { Panel } from "../common/Panel";
+import { formatDateTime, formatMoney } from "../../lib/format";
+import type { SystemModel } from "../../features/system/types";
 
-interface RightOpsRailProps {
-  model: SystemModel;
-}
-
-function AlertCard({ alert }: { alert: OperatorAlert }) {
-  return (
-    <div className={`alert-card tone-${alert.severity}`}>
-      <div className="alert-header">
-        <span className="alert-domain">{alert.domain}</span>
-        <span className="alert-severity">{alert.severity}</span>
-      </div>
-      <div className="alert-title">{alert.title}</div>
-      <div className="alert-message">{alert.message}</div>
-    </div>
-  );
-}
-
-export function RightOpsRail({ model }: RightOpsRailProps) {
-  const { status, alerts } = model;
-
-  const posture = [
-    { label: "Strategy", value: status.strategy_armed ? "Armed" : "Disarmed", tone: status.strategy_armed ? "warning" : "info" },
-    { label: "Execution", value: status.execution_armed ? "Armed" : "Disarmed", tone: status.execution_armed ? "warning" : "info" },
-    {
-      label: "Live Routing",
-      value: status.live_routing_enabled ? "Enabled" : "Disabled",
-      tone: status.live_routing_enabled ? "critical" : "info",
-    },
-    { label: "Kill Switch", value: status.kill_switch_active ? "Active" : "Clear", tone: status.kill_switch_active ? "critical" : "info" },
-    { label: "Risk Halt", value: status.risk_halt_active ? "Active" : "Clear", tone: status.risk_halt_active ? "critical" : "info" },
-    {
-      label: "Integrity Halt",
-      value: status.integrity_halt_active ? "Active" : "Clear",
-      tone: status.integrity_halt_active ? "critical" : "info",
-    },
-  ] as const;
+export function RightOpsRail({ model }: { model: SystemModel }) {
+  const topAlerts = model.alerts.slice(0, 4);
+  const topIncidents = model.incidents.slice(0, 3);
 
   return (
-    <aside className="right-rail panel">
-      <section>
-        <div className="panel-header">
-          <div>
-            <div className="eyebrow">Active Posture</div>
-            <h2>Safety rails</h2>
-          </div>
+    <aside className="right-rail">
+      <Panel title="Operator context" compact>
+        <div className="metric-list compact-list">
+          <div><span>Environment</span><strong>{model.status.environment}</strong></div>
+          <div><span>Runtime</span><strong>{model.status.runtime_status}</strong></div>
+          <div><span>Source</span><strong>{model.dataSource?.state ?? "unknown"}</strong></div>
+          <div><span>Connected</span><strong>{model.connected ? "Yes" : "No"}</strong></div>
         </div>
-        <div className="badge-grid">
-          {posture.map((item) => (
-            <div key={item.label} className={`mini-badge tone-${item.tone}`}>
-              <span>{item.label}</span>
-              <strong>{item.value}</strong>
-            </div>
-          ))}
-        </div>
-      </section>
+      </Panel>
 
-      <div className="right-rail-scroll">
-        <section>
-          <div className="panel-header">
-            <div>
-              <div className="eyebrow">Alerts</div>
-              <h2>{alerts.length} open</h2>
-            </div>
+      <Panel title="Portfolio snapshot" compact>
+        <div className="metric-list compact-list">
+          <div><span>Equity</span><strong>{formatMoney(model.portfolioSummary.account_equity)}</strong></div>
+          <div><span>Cash</span><strong>{formatMoney(model.portfolioSummary.cash)}</strong></div>
+          <div><span>Buying power</span><strong>{formatMoney(model.portfolioSummary.buying_power)}</strong></div>
+          <div><span>Positions</span><strong>{model.positions.length}</strong></div>
+        </div>
+      </Panel>
+
+      <Panel title="Alerts" compact>
+        {topAlerts.length > 0 ? (
+          <div className="list-stack compact-list">
+            {topAlerts.map((alert) => (
+              <div key={alert.id} className="list-row">
+                <strong>{alert.title}</strong>
+                <span>{alert.severity}</span>
+              </div>
+            ))}
           </div>
-          <div className="alert-stack">
-            {alerts.length > 0 ? (
-              alerts.map((alert) => <AlertCard key={alert.id} alert={alert} />)
-            ) : (
-              <div className="empty-state">No active alerts.</div>
-            )}
+        ) : (
+          <div className="empty-state">No active alerts.</div>
+        )}
+      </Panel>
+
+      <Panel title="Incidents" compact>
+        {topIncidents.length > 0 ? (
+          <div className="list-stack compact-list">
+            {topIncidents.map((incident) => (
+              <div key={incident.incident_id} className="list-row">
+                <strong>{incident.title}</strong>
+                <span>{incident.status}</span>
+              </div>
+            ))}
           </div>
-        </section>
-      </div>
+        ) : (
+          <div className="empty-state">No active incidents.</div>
+        )}
+      </Panel>
+
+      <Panel title="Runtime markers" compact>
+        <div className="metric-list compact-list">
+          <div><span>Generation</span><strong>{model.runtimeLeadership.generation_id}</strong></div>
+          <div><span>Leader</span><strong>{model.runtimeLeadership.leader_node}</strong></div>
+          <div><span>Last restart</span><strong>{formatDateTime(model.runtimeLeadership.last_restart_at)}</strong></div>
+          <div><span>Recovery</span><strong>{model.runtimeLeadership.post_restart_recovery_state}</strong></div>
+        </div>
+      </Panel>
     </aside>
   );
 }

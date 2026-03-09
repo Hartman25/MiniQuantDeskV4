@@ -54,7 +54,6 @@ export function AppShell() {
       ].join("\n\n"),
       "",
     );
-
     if ((typed ?? "").trim().toUpperCase() !== targetMode.toUpperCase()) return;
 
     const reason =
@@ -62,7 +61,6 @@ export function AppShell() {
         `Reason required for mode transition to ${targetMode.toUpperCase()}:`,
         "Controlled environment change",
       ) ?? "";
-
     if (!reason.trim()) return;
 
     await requestModeChange(targetMode, reason.trim());
@@ -73,7 +71,6 @@ export function AppShell() {
     const reason = action.requiresReason
       ? window.prompt(`Reason required for ${action.label}:`, "Operator review") ?? ""
       : "";
-
     if (action.requiresReason && !reason.trim()) return;
 
     const accepted = window.confirm(
@@ -81,14 +78,12 @@ export function AppShell() {
         model.status.live_routing_enabled ? "enabled" : "disabled"
       }`,
     );
-
     if (!accepted) return;
 
     await runAction(action, {
       reason: reason.trim() || undefined,
       target_scope: activeScreen,
     });
-
     await refresh();
   };
 
@@ -97,7 +92,7 @@ export function AppShell() {
       <LeftCommandRail activeScreen={activeScreen} onSelect={setActiveScreen} />
 
       <div className="main-shell">
-        <GlobalStatusBar status={model.status} />
+        <GlobalStatusBar status={model.status} dataSource={model.dataSource} />
 
         <div className="workspace-layout">
           <main className="workspace-column">

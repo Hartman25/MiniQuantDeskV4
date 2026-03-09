@@ -1,22 +1,27 @@
 import type { ReactNode } from "react";
 
-interface WorkspaceFrameProps {
+export function WorkspaceFrame({
+  title,
+  description,
+  children,
+}: {
   title: string;
   description: string;
   children: ReactNode;
-}
-
-export function WorkspaceFrame({ title, description, children }: WorkspaceFrameProps) {
+}) {
   return (
-    <div className="workspace-frame">
-      <div className="workspace-header panel">
+    <section className="workspace-frame panel">
+      <div className="panel-head">
         <div>
-          <div className="eyebrow">Primary Workspace</div>
-          <h2>{title}</h2>
+          <div className="eyebrow">Workspace</div>
+          <h3>{title}</h3>
+          <p className="panel-subtitle">{description}</p>
         </div>
-        <p>{description}</p>
       </div>
-      <div className="workspace-body">{children}</div>
-    </div>
+
+      <div className="workspace-body">
+        {children}
+      </div>
+    </section>
   );
 }

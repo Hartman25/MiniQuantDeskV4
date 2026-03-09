@@ -1,48 +1,37 @@
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
-import { formatDateTime, formatLabel } from "../../lib/format";
+import { formatDateTime } from "../../lib/format";
 import type { SystemModel } from "../system/types";
 
 export function IncidentsScreen({ model }: { model: SystemModel }) {
-  const open = model.incidents.filter((i) => i.status !== "resolved").length;
   const critical = model.incidents.filter((i) => i.severity === "critical").length;
+  const investigating = model.incidents.filter((i) => i.status === "investigating").length;
+
   return (
-    <div className="screen-grid">
+    <div className="screen-grid desk-screen-grid">
       <div className="summary-grid summary-grid-four">
-        <StatCard title="Active Incidents" value={String(open)} tone={open ? "warn" : "good"} />
-        <StatCard title="Critical Incidents" value={String(critical)} tone={critical ? "bad" : "good"} />
-        <StatCard title="Linked Reconcile Cases" value={String(model.incidents.flatMap((i) => i.reconcile_case_ids).length)} tone="neutral" />
-        <StatCard title="Operator Actions Logged" value={String(model.incidents.flatMap((i) => i.operator_actions_taken).length)} tone="neutral" />
+        <StatCard title="Open Incidents" value={String(model.incidents.length)} detail="Active operator cases" tone={model.incidents.length > 0 ? "warn" : "good"} />
+        <StatCard title="Critical" value={String(critical)} detail="Highest severity cases" tone={critical > 0 ? "bad" : "good"} />
+        <StatCard title="Investigating" value={String(investigating)} detail="Cases under active review" tone={investigating > 0 ? "warn" : "good"} />
+        <StatCard title="Artifacts Ready" value={String(model.artifactRegistry.ready_count)} detail="Evidence bundles available" tone="good" />
       </div>
-      <Panel title="Incident workspace" subtitle="Case-centric grouping of alerts, orders, reconcile cases, actions, and final disposition.">
+
+      <Panel title="Incident workspace" subtitle="Group alerts, orders, reconcile cases, and actions by active incident.">
         <DataTable
           rows={model.incidents}
           rowKey={(row) => row.incident_id}
           columns={[
-            { key: "incident", title: "Incident", render: (row) => row.incident_id },
+            { key: "severity", title: "Severity", render: (row) => row.severity },
             { key: "title", title: "Title", render: (row) => row.title },
-            { key: "status", title: "Status", render: (row) => formatLabel(row.status) },
-            { key: "orders", title: "Orders", render: (row) => row.impacted_orders.join(", ") },
-            { key: "subsystems", title: "Subsystems", render: (row) => row.impacted_subsystems.join(", ") },
-            { key: "actions", title: "Actions Taken", render: (row) => row.operator_actions_taken.join(", ") || "—" },
+            { key: "status", title: "Status", render: (row) => row.status },
+            { key: "opened", title: "Opened", render: (row) => formatDateTime(row.opened_at) },
             { key: "updated", title: "Updated", render: (row) => formatDateTime(row.updated_at) },
+            { key: "subsystems", title: "Subsystems", render: (row) => row.impacted_subsystems.join(", ") },
+            { key: "actions", title: "Actions", render: (row) => row.operator_actions_taken.join(", ") || "—" },
           ]}
         />
       </Panel>
-      <div className="two-column-grid">
-        {model.incidents.map((incident) => (
-          <Panel key={incident.incident_id} title={incident.title} subtitle={`${incident.incident_id} · ${formatLabel(incident.status)}`}>
-            <div className="metric-list compact-list">
-              <div><span>Opened</span><strong>{formatDateTime(incident.opened_at)}</strong></div>
-              <div><span>Alerts</span><strong>{incident.alerts.join(", ") || "—"}</strong></div>
-              <div><span>Strategies</span><strong>{incident.impacted_strategies.join(", ") || "—"}</strong></div>
-              <div><span>Reconcile</span><strong>{incident.reconcile_case_ids.join(", ") || "—"}</strong></div>
-              <div><span>Disposition</span><strong>{incident.final_disposition}</strong></div>
-            </div>
-          </Panel>
-        ))}
-      </div>
     </div>
   );
 }

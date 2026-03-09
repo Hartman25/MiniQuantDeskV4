@@ -1,29 +1,53 @@
 import { Panel } from "../../components/common/Panel";
+import type { SystemModel } from "../system/types";
 import { MetricStripChart } from "../execution/components/MetricStripChart";
-import type { SystemModel, MetricsSection } from "../system/types";
-
-function Section({ section }: { section: MetricsSection }) {
-  return (
-    <Panel title={section.title} subtitle={section.description}>
-      <div className="metrics-grid">
-        {section.series.map((series) => (
-          <MetricStripChart key={series.key} series={series} />
-        ))}
-      </div>
-    </Panel>
-  );
-}
 
 export function MetricsScreen({ model }: { model: SystemModel }) {
-  const { runtime, execution, fillQuality, reconciliation, riskSafety } = model.metrics;
-
   return (
-    <div className="screen-grid">
-      <Section section={runtime} />
-      <Section section={execution} />
-      <Section section={fillQuality} />
-      <Section section={reconciliation} />
-      <Section section={riskSafety} />
+    <div className="screen-grid desk-screen-grid">
+      <div className="desk-panel-grid desk-panel-grid-primary">
+        <Panel title={model.metrics.runtime.title} subtitle={model.metrics.runtime.description}>
+          <div className="metrics-grid">
+            {model.metrics.runtime.series.map((series) => (
+              <MetricStripChart key={series.key} series={series} />
+            ))}
+          </div>
+        </Panel>
+
+        <Panel title={model.metrics.execution.title} subtitle={model.metrics.execution.description}>
+          <div className="metrics-grid">
+            {model.metrics.execution.series.map((series) => (
+              <MetricStripChart key={series.key} series={series} />
+            ))}
+          </div>
+        </Panel>
+      </div>
+
+      <div className="desk-panel-grid desk-panel-grid-primary">
+        <Panel title={model.metrics.fillQuality.title} subtitle={model.metrics.fillQuality.description}>
+          <div className="metrics-grid">
+            {model.metrics.fillQuality.series.map((series) => (
+              <MetricStripChart key={series.key} series={series} />
+            ))}
+          </div>
+        </Panel>
+
+        <Panel title={model.metrics.reconciliation.title} subtitle={model.metrics.reconciliation.description}>
+          <div className="metrics-grid">
+            {model.metrics.reconciliation.series.map((series) => (
+              <MetricStripChart key={series.key} series={series} />
+            ))}
+          </div>
+        </Panel>
+      </div>
+
+      <Panel title={model.metrics.riskSafety.title} subtitle={model.metrics.riskSafety.description}>
+        <div className="metrics-grid">
+          {model.metrics.riskSafety.series.map((series) => (
+            <MetricStripChart key={series.key} series={series} />
+          ))}
+        </div>
+      </Panel>
     </div>
   );
 }

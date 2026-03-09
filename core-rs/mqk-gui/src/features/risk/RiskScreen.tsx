@@ -6,7 +6,7 @@ import type { SystemModel } from "../system/types";
 
 export function RiskScreen({ model }: { model: SystemModel }) {
   const r = model.riskSummary;
-  const criticalSuppressions = model.strategySuppressions.filter((row) => row.state === "active");
+  const activeSuppressions = model.strategySuppressions.filter((row) => row.state === "active");
 
   return (
     <div className="screen-grid desk-screen-grid">
@@ -65,9 +65,9 @@ export function RiskScreen({ model }: { model: SystemModel }) {
         </Panel>
 
         <Panel title="Strategy suppressions" subtitle="Active trading blocks that matter right now.">
-          {criticalSuppressions.length > 0 ? (
+          {activeSuppressions.length > 0 ? (
             <DataTable
-              rows={criticalSuppressions}
+              rows={activeSuppressions}
               rowKey={(row) => row.suppression_id}
               columns={[
                 { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
@@ -79,6 +79,15 @@ export function RiskScreen({ model }: { model: SystemModel }) {
           ) : (
             <div className="empty-state">No active suppressions.</div>
           )}
+        </Panel>
+
+        <Panel title="Operator context" compact>
+          <div className="metric-list compact-list">
+            <div><span>Source state</span><strong>{model.dataSource.state}</strong></div>
+            <div><span>Mock sections</span><strong>{model.dataSource.mockSections.length}</strong></div>
+            <div><span>Warnings</span><strong>{model.preflight.warnings.length}</strong></div>
+            <div><span>Blockers</span><strong>{model.preflight.blockers.length}</strong></div>
+          </div>
         </Panel>
       </div>
     </div>

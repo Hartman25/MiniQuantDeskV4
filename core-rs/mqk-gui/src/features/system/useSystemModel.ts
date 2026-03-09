@@ -47,6 +47,14 @@ const FALLBACK_MODEL: SystemModel = {
   configDiffs: [],
   operatorTimeline: [],
   actionCatalog: [],
+  dataSource: {
+    state: "disconnected",
+    reachable: false,
+    realEndpoints: [],
+    missingEndpoints: [],
+    mockSections: [],
+    message: "No daemon connection established yet",
+  },
   connected: false,
   lastUpdatedAt: null,
 };

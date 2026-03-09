@@ -1,36 +1,29 @@
 import { formatDateTime } from "../../lib/format";
 import type { FeedEvent } from "../../features/system/types";
 
-interface BottomEventRailProps {
-  events: FeedEvent[];
-}
-
-export function BottomEventRail({ events }: BottomEventRailProps) {
+export function BottomEventRail({ events }: { events: FeedEvent[] }) {
   return (
     <section className="bottom-rail panel">
-      <div className="panel-header">
+      <div className="panel-head">
         <div>
-          <div className="eyebrow">Event Stream</div>
-          <h2>Operator-visible feed</h2>
+          <div className="eyebrow">Event Rail</div>
+          <h3>Recent system events</h3>
         </div>
       </div>
-      <div className="bottom-rail-scroll">
-        <div className="event-table">
-          <div className="event-table-head">
-            <span>Time</span>
-            <span>Severity</span>
-            <span>Source</span>
-            <span>Message</span>
-          </div>
-          {events.map((event) => (
-            <div key={event.id} className={`event-row tone-${event.severity}`}>
-              <span>{formatDateTime(event.at)}</span>
-              <span>{event.severity}</span>
-              <span>{event.source}</span>
-              <span>{event.text}</span>
+
+      <div className="event-table">
+        {events.length > 0 ? (
+          events.map((event) => (
+            <div key={event.id} className="table-row event-row">
+              <div>{formatDateTime(event.at)}</div>
+              <div>{event.severity}</div>
+              <div>{event.source}</div>
+              <div>{event.text}</div>
             </div>
-          ))}
-        </div>
+          ))
+        ) : (
+          <div className="empty-state">No events available.</div>
+        )}
       </div>
     </section>
   );

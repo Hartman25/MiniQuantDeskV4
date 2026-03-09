@@ -1,12 +1,24 @@
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
-import { formatDateTime, formatLabel, formatMoney, formatPercent } from "../../lib/format";
+import { StatCard } from "../../components/common/StatCard";
+import { formatDateTime, formatMoney, formatPercent } from "../../lib/format";
 import type { SystemModel } from "../system/types";
 
 export function StrategyScreen({ model }: { model: SystemModel }) {
+  const armed = model.strategies.filter((s) => s.armed).length;
+  const throttled = model.strategies.filter((s) => s.throttle_state !== "normal").length;
+  const unhealthy = model.strategies.filter((s) => s.health !== "ok").length;
+
   return (
-    <div className="screen-grid">
-      <Panel title="Strategy matrix" subtitle="Monitor strategy engines without manual trading controls.">
+    <div className="screen-grid desk-screen-grid">
+      <div className="summary-grid summary-grid-four">
+        <StatCard title="Strategies" value={String(model.strategies.length)} detail="Configured strategy engines" tone="good" />
+        <StatCard title="Armed" value={String(armed)} detail="Strategies currently armed" tone={armed > 0 ? "good" : "warn"} />
+        <StatCard title="Throttled" value={String(throttled)} detail="Throttle / suppression active" tone={throttled > 0 ? "warn" : "good"} />
+        <StatCard title="Warnings" value={String(unhealthy)} detail="Strategies not in ok health" tone={unhealthy > 0 ? "warn" : "good"} />
+      </div>
+
+      <Panel title="Strategy engines" subtitle="Monitor strategy runtime health without turning the GUI into manual trading software.">
         <DataTable
           rows={model.strategies}
           rowKey={(row) => row.strategy_id}
@@ -16,29 +28,28 @@ export function StrategyScreen({ model }: { model: SystemModel }) {
             { key: "armed", title: "Armed", render: (row) => (row.armed ? "Yes" : "No") },
             { key: "health", title: "Health", render: (row) => row.health },
             { key: "universe", title: "Universe", render: (row) => row.universe },
-            { key: "pending", title: "Pending Intents", render: (row) => row.pending_intents },
+            { key: "intents", title: "Pending Intents", render: (row) => row.pending_intents },
             { key: "positions", title: "Open Positions", render: (row) => row.open_positions },
             { key: "pnl", title: "Today PnL", render: (row) => formatMoney(row.today_pnl) },
-            { key: "dd", title: "Drawdown", render: (row) => formatPercent(row.drawdown_pct) },
+            { key: "drawdown", title: "Drawdown", render: (row) => formatPercent(row.drawdown_pct) },
             { key: "regime", title: "Regime", render: (row) => row.regime },
             { key: "throttle", title: "Throttle", render: (row) => row.throttle_state },
-            { key: "decision", title: "Last Decision", render: (row) => formatDateTime(row.last_decision_time) },
+            { key: "last", title: "Last Decision", render: (row) => formatDateTime(row.last_decision_time) },
           ]}
         />
       </Panel>
 
-      <Panel title="Suppression lineage" subtitle="Every blocked or throttled strategy needs a reason and a timeline.">
+      <Panel title="Strategy suppressions" subtitle="Active and historical suppressions affecting strategy output.">
         <DataTable
           rows={model.strategySuppressions}
           rowKey={(row) => row.suppression_id}
           columns={[
-            { key: "id", title: "Suppression", render: (row) => row.suppression_id },
             { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
-            { key: "state", title: "State", render: (row) => formatLabel(row.state) },
-            { key: "domain", title: "Trigger Domain", render: (row) => formatLabel(row.trigger_domain) },
-            { key: "reason", title: "Trigger Reason", render: (row) => row.trigger_reason },
+            { key: "state", title: "State", render: (row) => row.state },
+            { key: "domain", title: "Trigger Domain", render: (row) => row.trigger_domain },
+            { key: "reason", title: "Reason", render: (row) => row.trigger_reason },
             { key: "started", title: "Started", render: (row) => formatDateTime(row.started_at) },
-            { key: "cleared", title: "Cleared", render: (row) => formatDateTime(row.cleared_at) },
+            { key: "cleared", title: "Cleared", render: (row) => row.cleared_at ? formatDateTime(row.cleared_at) : "—" },
             { key: "note", title: "Note", render: (row) => row.note },
           ]}
         />

@@ -886,6 +886,14 @@ export const MOCK_MODEL: SystemModel = {
   configDiffs: MOCK_CONFIG_DIFFS,
   operatorTimeline: MOCK_OPERATOR_TIMELINE,
   actionCatalog: MOCK_ACTION_CATALOG,
+  dataSource: {
+    state: "mock",
+    reachable: true,
+    realEndpoints: [],
+    missingEndpoints: [],
+    mockSections: ["all"],
+    message: "Mock fallback model active",
+  },
   connected: true,
   lastUpdatedAt: new Date().toISOString(),
 };

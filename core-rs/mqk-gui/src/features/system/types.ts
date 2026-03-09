@@ -6,6 +6,17 @@ export type ActionLevel = 0 | 1 | 2 | 3;
 export type OmsState = "open" | "partially_filled" | "filled" | "cancelled" | "rejected";
 export type OperatorTimelineCategory = "alert" | "operator_action" | "mode_transition" | "runtime_restart" | "config_change" | "incident" | "reconcile";
 
+export type DataSourceState = "real" | "partial" | "mock" | "disconnected";
+
+export interface DataSourceDetail {
+  state: DataSourceState;
+  reachable: boolean;
+  realEndpoints: string[];
+  missingEndpoints: string[];
+  mockSections: string[];
+  message?: string;
+}
+
 export interface SystemStatus {
   environment: EnvironmentMode;
   runtime_status: RuntimeStatus;
@@ -903,6 +914,7 @@ export interface SystemModel {
   configDiffs: ConfigDiffRow[];
   operatorTimeline: OperatorTimelineEvent[];
   actionCatalog: OperatorActionDefinition[];
+  dataSource: DataSourceDetail;
   connected: boolean;
   lastUpdatedAt: string | null;
 }

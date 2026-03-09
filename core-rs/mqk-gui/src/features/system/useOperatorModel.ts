@@ -90,6 +90,14 @@ const FALLBACK_MODEL: SystemModel = {
   configDiffs: [],
   operatorTimeline: [],
   actionCatalog: [],
+  dataSource: {
+    state: "disconnected",
+    reachable: false,
+    realEndpoints: [],
+    missingEndpoints: [],
+    mockSections: [],
+    message: "No daemon connection established yet",
+  },
   connected: false,
   lastUpdatedAt: null,
 };
@@ -143,7 +151,7 @@ export function useOperatorModel(pollIntervalMs = 5000) {
 
   const requestModeChange = useCallback(
     async (targetMode: SystemModel["status"]["environment"], reason: string) => {
-      const receipt = await requestSystemModeTransition(targetMode, model, reason);
+      const receipt = await requestSystemModeTransition(targetMode, reason);
       setActionReceipt(receipt);
       return receipt;
     },
@@ -152,7 +160,7 @@ export function useOperatorModel(pollIntervalMs = 5000) {
 
   const runAction = useCallback(
     async (action: OperatorActionDefinition, args: { reason?: string; target_scope?: string; alert_id?: string }) => {
-      const receipt = await invokeOperatorAction(action, args, model);
+      const receipt = await invokeOperatorAction(action.action_key, args);
       setActionReceipt(receipt);
       return receipt;
     },
