@@ -193,11 +193,14 @@ where
         }
 
         // ------------------------------------------------------------------
-        // Phase 0b — Patch 2: restart quarantine for ambiguous outbox rows.
+        // Phase 0b — A4: restart quarantine for ambiguous outbox rows.
         //
-        // Policy:
-        // - DISPATCHING => submit may have been attempted, never silently requeue.
-        // - SENT        => ambiguous only when broker-map evidence is missing.
+        // Policy (A4):
+        // - AMBIGUOUS    => BrokerError::AmbiguousSubmit was returned; outcome
+        //                   definitively unknown. Never silently re-dispatch.
+        // - DISPATCHING  => submit may have been attempted before crash; never
+        //                   silently requeue.
+        // - SENT (no map) => ambiguous only when broker-map evidence is missing.
         //
         // Without a broker-driven repair/reconcile path, the only safe behavior
         // is quarantine + halt/disarm before any new dispatch occurs.
@@ -214,7 +217,8 @@ where
                 // learns the persistence failure rather than silently losing the halt.
                 // On success the Phase-0 HALT_GUARD will block any future tick() on
                 // any orchestrator instance for this run_id.
-                persist_halt_and_disarm(&self.pool, self.run_id, now, "IntegrityViolation").await?;
+                // A4: use "RecoveryQuarantine" (added in migration 0017 for this purpose).
+                persist_halt_and_disarm(&self.pool, self.run_id, now, "RecoveryQuarantine").await?;
 
                 let details = summarize_ambiguous_outbox(&ambiguous);
                 return Err(anyhow!(
@@ -314,8 +318,12 @@ where
                         SubmitError::Broker(be) if be.requires_halt() => {
                             let now = self.time_source.now_utc();
                             if matches!(be, BrokerError::AmbiguousSubmit { .. }) {
-                                // Outcome unknown — row stays DISPATCHING.
-                                // Halt+disarm so Phase-0b quarantine blocks restart.
+                                // A4: Transition DISPATCHING → AMBIGUOUS (explicit quarantine).
+                                // Row cannot re-enter dispatch without explicit operator/reconcile
+                                // release via outbox_reset_ambiguous_to_pending.
+                                let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
+                                // Halt+disarm — "AmbiguousSubmit" is now a valid DB reason
+                                // (migration 0020). Phase-0b quarantine blocks any restart.
                                 let _ = persist_halt_and_disarm(
                                     &self.pool,
                                     self.run_id,
@@ -325,6 +333,7 @@ where
                                 .await;
                             } else {
                                 // AuthSession: credentials revoked — mark FAILED + halt.
+                                // "AuthSession" is now a valid DB reason (migration 0020).
                                 let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
                                 let _ = persist_halt_and_disarm(
                                     &self.pool,

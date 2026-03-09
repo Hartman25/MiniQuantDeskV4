@@ -680,13 +680,17 @@ pub struct OutboxRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AmbiguousOutboxRow {
     pub idempotency_key: String,
-    pub status: String, // DISPATCHING | SENT
+    pub status: String, // AMBIGUOUS | DISPATCHING | SENT (without broker map)
     pub broker_order_id: Option<String>,
 }
 
 /// Load restart-ambiguous outbox rows for a run.
 ///
-/// Patch 2 policy:
+/// Policy (A4):
+/// - `AMBIGUOUS` is always quarantined: `BrokerError::AmbiguousSubmit` was
+///   returned, meaning the broker may or may not have accepted the order.
+///   These rows can only exit quarantine via `outbox_reset_ambiguous_to_pending`
+///   (explicit operator/reconcile-proof release).
 /// - `DISPATCHING` is always ambiguous on restart: broker submit may have
 ///   been attempted, but the process died before closure.
 /// - `SENT` is ambiguous only when the broker-order map is still missing.
@@ -711,7 +715,8 @@ pub async fn outbox_load_restart_ambiguous_for_run(
           on m.internal_id = o.idempotency_key
         where o.run_id = $1
           and (
-                o.status = 'DISPATCHING'
+                o.status = 'AMBIGUOUS'
+                or o.status = 'DISPATCHING'
                 or (
                     o.status = 'SENT'
                     and m.broker_id is null
@@ -1292,10 +1297,82 @@ pub async fn outbox_reset_dispatching_to_pending(
     Ok(row.is_some())
 }
 
+/// A4: Transition a DISPATCHING outbox row to AMBIGUOUS explicit quarantine.
+///
+/// Called when `BrokerError::AmbiguousSubmit` is returned by the broker
+/// adapter: the submit reached the broker transport layer but the outcome
+/// is definitively unknown (timeout after send, partial ACK, connection drop
+/// between send and receive).
+///
+/// Unlike `DISPATCHING` (which is also written for rows that crashed mid-
+/// dispatch), `AMBIGUOUS` explicitly encodes "broker confirmed: outcome
+/// unknown". It is structurally prevented from re-entering normal dispatch:
+/// - `outbox_claim_batch` only claims `PENDING` rows — `AMBIGUOUS` is skipped.
+/// - `outbox_load_restart_ambiguous_for_run` always returns `AMBIGUOUS` rows.
+/// - The only exit is `outbox_reset_ambiguous_to_pending`.
+///
+/// Returns `true` if the row transitioned `DISPATCHING → AMBIGUOUS`; `false`
+/// if not found or not in `DISPATCHING` state.
+pub async fn outbox_mark_ambiguous(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"
+        update oms_outbox
+           set status = 'AMBIGUOUS'
+         where idempotency_key = $1
+           and status = 'DISPATCHING'
+        returning outbox_id
+        "#,
+    )
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await
+    .context("outbox_mark_ambiguous failed")?;
+
+    Ok(row.is_some())
+}
+
+/// A4: Release an AMBIGUOUS outbox row back to PENDING.
+///
+/// This is the ONLY safe path to re-enable dispatch for an order that was
+/// quarantined by `outbox_mark_ambiguous`. It MUST only be called after:
+/// - reconcile proof confirms the order was NOT accepted by the broker, OR
+/// - an operator has verified the broker state and confirmed no live order
+///   for this `idempotency_key` exists at the broker.
+///
+/// Clears all claim/dispatch metadata so `outbox_claim_batch` can re-claim
+/// the row on the next tick after the run is re-armed.
+///
+/// Returns `true` if the row was released; `false` if not found or not in
+/// `AMBIGUOUS` state (safe: calling this on a non-AMBIGUOUS row is a no-op).
+pub async fn outbox_reset_ambiguous_to_pending(
+    pool: &PgPool,
+    idempotency_key: &str,
+) -> Result<bool> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        r#"
+        update oms_outbox
+           set status              = 'PENDING',
+               claimed_by          = null,
+               claimed_at_utc      = null,
+               dispatching_at_utc  = null,
+               dispatch_attempt_id = null
+         where idempotency_key = $1
+           and status = 'AMBIGUOUS'
+        returning outbox_id
+        "#,
+    )
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await
+    .context("outbox_reset_ambiguous_to_pending failed")?;
+
+    Ok(row.is_some())
+}
+
 /// Recovery query: list outbox rows that are not terminal (not ACKED).
 ///
-/// Includes PENDING, CLAIMED, DISPATCHING, SENT, and FAILED rows — all statuses
-/// that indicate the order has not yet been confirmed by the broker.
+/// Includes PENDING, CLAIMED, DISPATCHING, SENT, FAILED, and AMBIGUOUS rows —
+/// all statuses that indicate the order has not yet been confirmed by the broker.
 ///
 /// NOTE: This does NOT talk to broker yet.
 /// It provides the minimal deterministic input required for a future reconcile step.
@@ -1307,7 +1384,7 @@ pub async fn outbox_list_unacked_for_run(pool: &PgPool, run_id: Uuid) -> Result<
                dispatching_at_utc, dispatch_attempt_id
         from oms_outbox
         where run_id = $1
-          and status in ('PENDING','CLAIMED','DISPATCHING','SENT','FAILED')
+          and status in ('PENDING','CLAIMED','DISPATCHING','SENT','FAILED','AMBIGUOUS')
         order by outbox_id asc
         "#,
     )

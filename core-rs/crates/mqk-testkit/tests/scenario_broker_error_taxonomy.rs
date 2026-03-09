@@ -7,7 +7,7 @@
 //!
 //! | Variant         | is_retryable | requires_halt | Outbox action              |
 //! |-----------------|:------------:|:-------------:|----------------------------|
-//! | AmbiguousSubmit | false        | true          | row stays DISPATCHING+halt |
+//! | AmbiguousSubmit | false        | true          | row → AMBIGUOUS+halt (A4)  |
 //! | Reject          | false        | false         | mark FAILED                |
 //! | Transient       | false        | false         | mark FAILED (conservative) |
 //! | RateLimit       | true         | false         | reset to PENDING           |
@@ -24,8 +24,8 @@
 //! ## DB-backed (skipped unless `MQK_DATABASE_URL` is set)
 //! - B1: orchestrator tick with `Reject` broker → outbox row FAILED, run not halted.
 //! - B2: orchestrator tick with `Transport` broker → outbox row reset to PENDING.
-//! - B3: orchestrator tick with `AmbiguousSubmit` broker → row stays DISPATCHING,
-//!   run HALTED+DISARMED.
+//! - B3: orchestrator tick with `AmbiguousSubmit` broker → row moves to AMBIGUOUS
+//!   (A4 explicit quarantine), run HALTED+DISARMED with reason AmbiguousSubmit.
 //! - B4: orchestrator tick with `AuthSession` broker → row FAILED, run HALTED+DISARMED.
 
 // ---------------------------------------------------------------------------
@@ -517,11 +517,12 @@ mod db_tests {
     }
 
     // -----------------------------------------------------------------------
-    // B3: AmbiguousSubmit broker → row stays DISPATCHING, run HALTED+DISARMED.
+    // B3: AmbiguousSubmit broker → row moves to AMBIGUOUS, run HALTED+DISARMED.
+    //     A4: explicit quarantine state; arm reason = "AmbiguousSubmit".
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn b3_ambiguous_submit_row_dispatching_run_halted() -> Result<()> {
+    async fn b3_ambiguous_submit_row_ambiguous_run_halted() -> Result<()> {
         let url = match std::env::var(mqk_db::ENV_DB_URL) {
             Ok(v) if !v.trim().is_empty() => v,
             _ => {
@@ -566,12 +567,12 @@ mod db_tests {
             "error must mention ambiguous submit or halt, got: {msg}"
         );
 
-        // Row must stay DISPATCHING — outcome unknown.
+        // A4: Row must be AMBIGUOUS — explicit quarantine, outcome unknown.
         let status = outbox_status(&pool, idem).await?;
         assert_eq!(
             status.as_deref(),
-            Some("DISPATCHING"),
-            "expected DISPATCHING after AmbiguousSubmit, got {status:?}"
+            Some("AMBIGUOUS"),
+            "expected AMBIGUOUS after AmbiguousSubmit (A4 quarantine), got {status:?}"
         );
 
         // Run must be HALTED.
@@ -581,12 +582,17 @@ mod db_tests {
             "expected run HALTED after AmbiguousSubmit"
         );
 
-        // Arm state must be DISARMED.
+        // Arm state must be DISARMED with reason "AmbiguousSubmit" (A4/migration 0020).
         let arm = mqk_db::load_arm_state(&pool).await?;
         assert_eq!(
             arm.as_ref().map(|(s, _)| s.as_str()),
             Some("DISARMED"),
             "expected DISARMED after AmbiguousSubmit, got {arm:?}"
+        );
+        assert_eq!(
+            arm.as_ref().and_then(|(_, r)| r.as_deref()),
+            Some("AmbiguousSubmit"),
+            "expected disarm reason AmbiguousSubmit, got {arm:?}"
         );
 
         cleanup_run(&pool, run_id).await?;

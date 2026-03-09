@@ -9,7 +9,7 @@
 
 ## Phase A — Mandatory patches
 
-### A1 — P1-03 Cancel / Replace parity after partial fills
+### A1 — P1-03 Cancel / Replace parity after partial fills **DONE**
 **Priority:** Critical
 
 **Likely files**
@@ -37,7 +37,7 @@
   - new -> partial fill -> replace reject
   - new -> partial fill -> cancel reject
 
-### A2 — Durable broker cursor / resume state
+### A2 — Durable broker cursor / resume state **DONE**
 **Priority:** Critical
 
 **Likely files**
@@ -55,7 +55,7 @@
 - No restart creates an unknown broker event gap.
 - Replay after restart is deterministic and idempotent.
 
-### A3 — Broker error taxonomy + retry policy
+### A3 — Broker error taxonomy + retry policy **DONE**
 **Priority:** High
 
 **Likely files**
@@ -74,7 +74,7 @@
 - Hard rejects never retry.
 - Retryable errors are bounded and logged.
 
-### A4 — Ambiguous submit quarantine hardening
+### A4 — Ambiguous submit quarantine hardening **DONE**
 **Priority:** High
 
 **Likely files**
@@ -134,5 +134,5 @@
 - reconnect replay
 - split-brain runtime attempt
 
-## Immediate start
-Start with **A1 / P1-03**.
+## Next
+**A5** — Live broker adapter completion.

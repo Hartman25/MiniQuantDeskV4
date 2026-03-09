@@ -29,9 +29,11 @@ pub enum BrokerError {
     /// drop between sending and receiving the response.
     ///
     /// The order **MAY** have been accepted.  NEVER silently retry.  The
-    /// orchestrator leaves the outbox row in `DISPATCHING` and halts+disarms
-    /// so the Phase-0b restart quarantine gate blocks further dispatch until
-    /// an operator verifies whether the order is live at the broker.
+    /// orchestrator transitions the outbox row to `AMBIGUOUS` (A4 explicit
+    /// quarantine) and halts+disarms so the Phase-0b restart quarantine gate
+    /// blocks further dispatch until an operator verifies whether the order is
+    /// live at the broker and explicitly releases via
+    /// `outbox_reset_ambiguous_to_pending`.
     AmbiguousSubmit { detail: String },
 
     /// Broker returned a hard business reject.
