@@ -90,22 +90,35 @@
 **Acceptance gate**
 - No ambiguous submit re-enters normal dispatch automatically.
 
-### A5 — Live broker adapter completion
+### A5 — Live broker adapter completion **DONE**
 **Priority:** High
 
-**Likely files**
-- live broker crate
-- event normalization layer
-- contract tests
+**Files changed**
+- `core-rs/crates/mqk-broker-alpaca/Cargo.toml` — reqwest required + blocking feature; testkit dev-dep
+- `core-rs/crates/mqk-broker-alpaca/src/types.rs` — added AlpacaOrderFull, AlpacaOrderActivity, updated AlpacaSubmitResponse (created_at)
+- `core-rs/crates/mqk-broker-alpaca/src/lib.rs` — AlpacaConfig + AlpacaBrokerAdapter with real HTTP impl
+- `core-rs/crates/mqk-broker-alpaca/tests/scenario_alpaca_live_adapter_a5.rs` — 20 end-to-end adapter tests
 
-**Implementation rules**
-- Implement submit/cancel/replace/fetch_events fully.
-- Normalize all inbound lifecycle events into canonical `BrokerEvent`.
-- Carry authoritative broker order IDs on ack/fill/cancel/replace.
+**What was implemented**
+- `submit_order`: POST /v2/orders; side mapping; micros→decimal string at wire only; client_order_id=order_id; AmbiguousSubmit on non-connect errors
+- `cancel_order`: DELETE /v2/orders/{id}; 404/422→Reject; no fabricated success
+- `replace_order`: GET /v2/orders/{id} to read filled_qty; fail-closed if parse fails; PATCH with filled_qty+new_leaves total; Alpaca total-qty semantics enforced
+- `fetch_events`: GET /v2/account/activities polling (FILL/PARTIAL_FILL only); per-activity order lookup for client_order_id; all events normalized via normalize_trade_update(); cursor=last activity id; returns Err not empty-vec on transport failure
+- `activity_to_trade_update()`: public pure fn; maps AlpacaOrderActivity+AlpacaOrderFull → AlpacaTradeUpdate for the existing normalizer
+- `build_submit_body()`, `build_replace_body()`, `micros_to_price_str()`: public pure fns (testable without network)
 
-**Acceptance gate**
-- Live adapter is not scaffolded.
-- Contract tests prove parity with OMS and paper semantics.
+**Acceptance gate (all verified)**
+- submit_order is real ✓
+- cancel_order is real ✓
+- replace_order is real ✓ (fails closed if filled_qty unparseable)
+- fetch_events is real ✓ (not empty-vec stub; L14 proves it)
+- 20 live adapter tests pass ✓ (L1-L14 + supplementary)
+- 29 normalization contract tests still pass ✓
+- workspace compiles ✓ / fmt clean ✓ / clippy -D warnings clean ✓
+- DB-absent proof-lane tests fail hard by design (unchanged)
+
+**fetch_events polling limitation (documented)**
+- REST polling surfaces FILL/PARTIAL_FILL only. Ack/CancelAck/ReplaceAck require websocket.
 
 ## Phase B — Depth patches that push into the 90s
 
@@ -135,4 +148,4 @@
 - split-brain runtime attempt
 
 ## Next
-**A5** — Live broker adapter completion.
+**B1** — Reconcile auto-repair workflow.

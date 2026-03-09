@@ -1,8 +1,13 @@
-//! Alpaca v2 trade-update event types.
+//! Alpaca v2 wire types.
 //!
-//! These are the raw shapes deserialized from Alpaca's trade-update stream.
-//! Fields are strings because that is how Alpaca returns quantities and prices
-//! in JSON (decimal strings rather than numbers).
+//! # Modules covered
+//!
+//! - `AlpacaTradeUpdate` / `AlpacaOrder` — raw shapes from the websocket
+//!   trade-update stream, used by the normalization layer.
+//! - `AlpacaSubmitBody` / `AlpacaSubmitResponse` — POST /v2/orders wire types.
+//! - `AlpacaReplaceBody` / `AlpacaReplaceResponse` — PATCH /v2/orders/{id} wire types.
+//! - `AlpacaOrderFull` — GET /v2/orders/{id} response (used by replace to get filled_qty).
+//! - `AlpacaOrderActivity` — GET /v2/account/activities polling response.
 //!
 //! # Design rules
 //!
@@ -12,6 +17,10 @@
 //!   silently coerced.
 
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Websocket trade-update types (normalization layer input)
+// ---------------------------------------------------------------------------
 
 /// A single order lifecycle event from Alpaca's trade-update stream.
 ///
@@ -83,11 +92,15 @@ pub struct AlpacaOrder {
     pub filled_qty: String,
 }
 
+// ---------------------------------------------------------------------------
+// Submit types — POST /v2/orders
+// ---------------------------------------------------------------------------
+
 /// Raw Alpaca order submission request body for `POST /v2/orders`.
 #[derive(Debug, Clone, Serialize)]
 pub struct AlpacaSubmitBody {
     pub symbol: String,
-    /// Total order quantity (whole shares).
+    /// Total order quantity (whole shares as string).
     pub qty: String,
     pub side: String,
     /// `"market"` or `"limit"`.
@@ -108,7 +121,14 @@ pub struct AlpacaSubmitResponse {
     pub id: String,
     /// Echoed client_order_id.
     pub client_order_id: String,
+    /// Order creation timestamp (ISO 8601). Optional because some Alpaca
+    /// environments omit it in sandbox responses.
+    pub created_at: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Replace types — PATCH /v2/orders/{order_id}
+// ---------------------------------------------------------------------------
 
 /// Raw Alpaca replace request body for `PATCH /v2/orders/{order_id}`.
 #[derive(Debug, Clone, Serialize)]
@@ -132,4 +152,76 @@ pub struct AlpacaReplaceResponse {
     pub id: String,
     /// New total quantity as echoed by Alpaca.
     pub qty: String,
+}
+
+// ---------------------------------------------------------------------------
+// Full order — GET /v2/orders/{order_id}
+// ---------------------------------------------------------------------------
+
+/// Full Alpaca order object returned by `GET /v2/orders/{id}`.
+///
+/// Used by `replace_order` to look up the current `filled_qty` before
+/// computing the new total quantity for the replace request.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlpacaOrderFull {
+    /// Alpaca-assigned broker order UUID.
+    pub id: String,
+    /// Caller-assigned client order ID (maps to internal_order_id in OMS).
+    pub client_order_id: String,
+    pub symbol: String,
+    /// Order direction: `"buy"` or `"sell"`.
+    pub side: String,
+    /// Current total order quantity as a decimal string.
+    pub qty: String,
+    /// Cumulative filled quantity as a decimal string.
+    pub filled_qty: String,
+}
+
+// ---------------------------------------------------------------------------
+// Account activities — GET /v2/account/activities (REST polling)
+// ---------------------------------------------------------------------------
+
+/// A single account activity record from `GET /v2/account/activities`.
+///
+/// `fetch_events` uses this polling endpoint (in place of the websocket
+/// trade-update stream) to retrieve fill events.  Only `FILL` and
+/// `PARTIAL_FILL` activity types are converted to canonical `BrokerEvent`s.
+///
+/// Non-fill activities (dividends, rebates, adjustments) are silently
+/// skipped in `fetch_events`.  Ack / cancel / replace events are not
+/// available via REST polling; a websocket integration would be required
+/// to deliver those in real-time.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlpacaOrderActivity {
+    /// Unique activity ID.
+    ///
+    /// Used as the cursor for incremental polling.  Alpaca returns activities
+    /// ordered by `transaction_time`; the last `id` in a page is passed as
+    /// `after` on the next call.
+    ///
+    /// Format: `"YYYYMMDDHHMMSS{fraction}::{uuid}"`.
+    pub id: String,
+
+    /// Activity type from Alpaca, e.g. `"FILL"`, `"PARTIAL_FILL"`, `"DIV"`.
+    ///
+    /// Only `FILL` and `PARTIAL_FILL` are processed; all others are skipped.
+    pub activity_type: String,
+
+    /// Alpaca broker-assigned order UUID.
+    pub order_id: String,
+
+    /// ISO 8601 timestamp of the transaction.
+    pub transaction_time: String,
+
+    /// Fill price as a decimal string.  Present for `FILL`/`PARTIAL_FILL`.
+    pub price: Option<String>,
+
+    /// Fill quantity for this event (delta, not cumulative).
+    pub qty: Option<String>,
+
+    /// Order direction: `"buy"` or `"sell"`.
+    pub side: String,
+
+    /// Ticker symbol.
+    pub symbol: String,
 }
