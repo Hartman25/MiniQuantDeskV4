@@ -87,7 +87,12 @@ pub enum OmsEvent {
     /// Application requested a replace/amend (→ `ReplacePending`).
     ReplaceRequest,
     /// Broker acknowledged the replace (order reverts to its prior live state).
-    ReplaceAck,
+    ///
+    /// P1-03: `new_total_qty` is the authoritative post-replace total quantity,
+    /// equal to `filled_qty_at_replace + new_open_leaves`. The OMS updates
+    /// `self.total_qty` to this value so that subsequent fills validate against
+    /// the amended order size rather than the original.
+    ReplaceAck { new_total_qty: i64 },
     /// Broker rejected the replace request (order reverts to its prior live state).
     ReplaceReject,
     /// Broker rejected the order outright (→ `Rejected`).
@@ -318,7 +323,21 @@ impl OmsOrder {
             (Open | PartiallyFilled, ReplaceRequest) => self.state = ReplacePending,
 
             // Replace confirmed → order is live again.
-            (ReplacePending, ReplaceAck) => {
+            //
+            // P1-03: Update total_qty to the authoritative post-replace total.
+            // Reject if new_total_qty < filled_qty — that would create an
+            // immediately-overfilled order and violate the core invariant.
+            (ReplacePending, ReplaceAck { new_total_qty }) => {
+                if *new_total_qty < self.filled_qty {
+                    return Err(TransitionError {
+                        from: self.state.clone(),
+                        event: format!(
+                            "ReplaceAck(new_total_qty={}) — below already-filled qty={}",
+                            new_total_qty, self.filled_qty
+                        ),
+                    });
+                }
+                self.total_qty = *new_total_qty;
                 self.state = if self.filled_qty > 0 {
                     PartiallyFilled
                 } else {
@@ -410,11 +429,14 @@ mod tests {
 
     #[test]
     fn replace_request_then_ack() {
-        let mut o = open_order();
+        let mut o = open_order(); // total_qty = 100
         o.apply(&OmsEvent::ReplaceRequest, Some("r1")).unwrap();
         assert_eq!(o.state, OrderState::ReplacePending);
-        o.apply(&OmsEvent::ReplaceAck, Some("r2")).unwrap();
+        // P1-03: ReplaceAck carries new_total_qty. Order has no fills so new total = 100.
+        o.apply(&OmsEvent::ReplaceAck { new_total_qty: 100 }, Some("r2"))
+            .unwrap();
         assert_eq!(o.state, OrderState::Open);
+        assert_eq!(o.total_qty, 100);
     }
 
     #[test]
@@ -708,6 +730,230 @@ mod tests {
         assert_eq!(
             o.filled_qty, 100,
             "filled_qty must not change on repeated duplicate fills after terminal"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Section C — P1-03: Cancel / Replace parity after partial fills
+    // -----------------------------------------------------------------------
+
+    /// S1: new → partial_fill(40) → replace_request → replace_ack(new_total=65) → fill(25) → Filled.
+    ///
+    /// Acceptance gates:
+    /// - total_qty updated to new_total_qty on ReplaceAck.
+    /// - Replace does not erase prior fills (filled_qty remains 40 post-ack).
+    /// - Partial fill + replace + fill preserves exact cumulative quantity (65).
+    /// - No path permits filled_qty > total_qty.
+    #[test]
+    fn p1_03_partial_fill_then_replace_then_fill() {
+        let mut o = OmsOrder::new("ord-p103-1", "AAPL", 100);
+
+        // 40 of 100 filled.
+        o.apply(&OmsEvent::PartialFill { delta_qty: 40 }, Some("f1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 40);
+        assert_eq!(o.total_qty, 100);
+
+        // Replace: new open leaves = 25 → new total = 40 + 25 = 65.
+        o.apply(&OmsEvent::ReplaceRequest, Some("r1")).unwrap();
+        assert_eq!(o.state, OrderState::ReplacePending);
+
+        o.apply(&OmsEvent::ReplaceAck { new_total_qty: 65 }, Some("r2"))
+            .unwrap();
+        assert_eq!(o.state, OrderState::PartiallyFilled);
+        assert_eq!(
+            o.total_qty, 65,
+            "total_qty must be updated to new_total_qty"
+        );
+        assert_eq!(o.filled_qty, 40, "replace must not erase prior fills");
+
+        // Final fill for remaining 25 lots.
+        o.apply(&OmsEvent::Fill { delta_qty: 25 }, Some("f2"))
+            .unwrap();
+        assert_eq!(o.state, OrderState::Filled);
+        assert_eq!(o.filled_qty, 65);
+
+        // Acceptance gate: no path permits filled_qty > total_qty.
+        assert!(
+            o.filled_qty <= o.total_qty,
+            "filled_qty must never exceed total_qty"
+        );
+    }
+
+    /// S2a: new → partial_fill(40) → cancel_request → cancel_ack → Cancelled.
+    ///
+    /// Acceptance gate: cancel after partial fill must not erase prior fills.
+    #[test]
+    fn p1_03_cancel_after_partial_fill_preserves_filled_qty() {
+        let mut o = OmsOrder::new("ord-p103-2a", "MSFT", 100);
+
+        o.apply(&OmsEvent::PartialFill { delta_qty: 40 }, Some("f1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 40);
+
+        o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
+        assert_eq!(o.state, OrderState::CancelPending);
+
+        // CancelAck: order is cancelled; prior fills must be preserved.
+        o.apply(&OmsEvent::CancelAck, Some("c2")).unwrap();
+        assert_eq!(o.state, OrderState::Cancelled);
+        assert_eq!(o.filled_qty, 40, "cancel must not erase prior fills");
+    }
+
+    /// S2b: new → partial_fill(40) → cancel_request → late_partial_fill(30) during pending.
+    ///
+    /// Acceptance gate: late fills after cancel request must still apply correctly.
+    /// Note: a PartialFill accepted from CancelPending transitions state back to
+    /// PartiallyFilled (the broker filled before processing the cancel); the test
+    /// captures this correct OMS behavior.
+    #[test]
+    fn p1_03_late_fill_during_cancel_pending_applies_correctly() {
+        let mut o = OmsOrder::new("ord-p103-2b", "MSFT", 100);
+
+        o.apply(&OmsEvent::PartialFill { delta_qty: 40 }, Some("f1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 40);
+
+        o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
+        assert_eq!(o.state, OrderState::CancelPending);
+
+        // Late fill arrives before the broker processes the cancel — must apply.
+        o.apply(&OmsEvent::PartialFill { delta_qty: 30 }, Some("f2"))
+            .unwrap();
+        assert_eq!(
+            o.filled_qty, 70,
+            "late fill during CancelPending must accumulate filled_qty"
+        );
+        // PartialFill from CancelPending transitions to PartiallyFilled; the broker
+        // filled before the cancel was acknowledged.
+        assert_eq!(
+            o.state,
+            OrderState::PartiallyFilled,
+            "PartialFill during CancelPending returns order to PartiallyFilled"
+        );
+        assert!(
+            o.filled_qty <= o.total_qty,
+            "no path permits filled_qty > total_qty"
+        );
+    }
+
+    /// S3: new → partial_fill(40) → replace_request → replace_reject → PartiallyFilled, qty unchanged.
+    ///
+    /// Acceptance gate: replace reject restores prior state; total_qty and filled_qty unchanged.
+    #[test]
+    fn p1_03_partial_fill_then_replace_reject() {
+        let mut o = OmsOrder::new("ord-p103-3", "TSLA", 100);
+
+        o.apply(&OmsEvent::PartialFill { delta_qty: 40 }, Some("f1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 40);
+
+        o.apply(&OmsEvent::ReplaceRequest, Some("r1")).unwrap();
+        assert_eq!(o.state, OrderState::ReplacePending);
+
+        o.apply(&OmsEvent::ReplaceReject, Some("r2")).unwrap();
+        assert_eq!(
+            o.state,
+            OrderState::PartiallyFilled,
+            "replace reject must restore PartiallyFilled"
+        );
+        assert_eq!(
+            o.total_qty, 100,
+            "total_qty must be unchanged on replace reject"
+        );
+        assert_eq!(
+            o.filled_qty, 40,
+            "filled_qty must be unchanged on replace reject"
+        );
+    }
+
+    /// S4: new → partial_fill(40) → cancel_request → cancel_reject → PartiallyFilled.
+    ///
+    /// Acceptance gate: cancel reject restores prior state; filled_qty unchanged.
+    #[test]
+    fn p1_03_partial_fill_then_cancel_reject() {
+        let mut o = OmsOrder::new("ord-p103-4", "SPY", 100);
+
+        o.apply(&OmsEvent::PartialFill { delta_qty: 40 }, Some("f1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 40);
+
+        o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
+        assert_eq!(o.state, OrderState::CancelPending);
+
+        o.apply(&OmsEvent::CancelReject, Some("c2")).unwrap();
+        assert_eq!(
+            o.state,
+            OrderState::PartiallyFilled,
+            "cancel reject must restore PartiallyFilled"
+        );
+        assert_eq!(
+            o.filled_qty, 40,
+            "filled_qty must be unchanged on cancel reject"
+        );
+    }
+
+    /// Acceptance gate: ReplaceAck with new_total_qty < filled_qty is rejected.
+    /// No path permits filled_qty > total_qty.
+    #[test]
+    fn p1_03_replace_ack_below_filled_qty_is_rejected() {
+        let mut o = OmsOrder::new("ord-p103-5", "GLD", 100);
+
+        o.apply(&OmsEvent::PartialFill { delta_qty: 60 }, Some("f1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 60);
+
+        o.apply(&OmsEvent::ReplaceRequest, Some("r1")).unwrap();
+        assert_eq!(o.state, OrderState::ReplacePending);
+
+        // new_total_qty=40 < filled_qty=60 — must be rejected.
+        let err = o
+            .apply(&OmsEvent::ReplaceAck { new_total_qty: 40 }, Some("r2"))
+            .unwrap_err();
+        assert_eq!(
+            err.from,
+            OrderState::ReplacePending,
+            "TransitionError.from must be ReplacePending"
+        );
+        // State, total_qty, filled_qty must all be unchanged.
+        assert_eq!(
+            o.state,
+            OrderState::ReplacePending,
+            "state must not change on rejected ReplaceAck"
+        );
+        assert_eq!(
+            o.total_qty, 100,
+            "total_qty must not change on rejected ReplaceAck"
+        );
+        assert_eq!(
+            o.filled_qty, 60,
+            "filled_qty must not change on rejected ReplaceAck"
+        );
+    }
+
+    /// Acceptance gate: replace_ack preserves filled_qty exactly.
+    /// Replace cannot erase prior fills.
+    #[test]
+    fn p1_03_replace_ack_preserves_filled_qty() {
+        let mut o = OmsOrder::new("ord-p103-6", "NVDA", 100);
+
+        o.apply(&OmsEvent::PartialFill { delta_qty: 40 }, Some("f1"))
+            .unwrap();
+        o.apply(&OmsEvent::ReplaceRequest, Some("r1")).unwrap();
+        o.apply(&OmsEvent::ReplaceAck { new_total_qty: 65 }, Some("r2"))
+            .unwrap();
+
+        assert_eq!(o.filled_qty, 40, "replace_ack must not erase prior fills");
+        assert_eq!(
+            o.total_qty, 65,
+            "total_qty must be updated to new_total_qty"
+        );
+        // Ensure the event_id for ReplaceAck was recorded (idempotent replay).
+        o.apply(&OmsEvent::ReplaceAck { new_total_qty: 99 }, Some("r2"))
+            .unwrap();
+        assert_eq!(
+            o.total_qty, 65,
+            "duplicate ReplaceAck event_id must not re-apply"
         );
     }
 

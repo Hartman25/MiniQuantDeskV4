@@ -72,6 +72,11 @@ pub enum BrokerEvent {
         internal_order_id: String,
         /// RT-9: broker-assigned order ID for the replaced order.
         broker_order_id: Option<String>,
+        /// P1-03: authoritative post-replace total quantity.
+        /// Equals filled_qty_at_replace + new_open_leaves.
+        /// Used by the OMS to update `OmsOrder::total_qty` so subsequent fills
+        /// validate against the amended order size rather than the original.
+        new_total_qty: i64,
     },
     ReplaceReject {
         broker_message_id: String,
@@ -195,6 +200,8 @@ impl BrokerEvent {
 pub struct BrokerSubmitRequest {
     pub order_id: String,
     pub symbol: String,
+    /// Direction of the order. Quantity is always positive; side carries direction.
+    pub side: crate::types::Side,
     pub quantity: i32,
     pub order_type: String,
     /// Limit price in integer micros (1 unit = 1_000_000). `None` for market orders.
@@ -262,6 +269,17 @@ pub struct BrokerReplaceResponse {
 /// ❌  broker.submit_order(req, &BrokerInvokeToken(()))    // direct call: compile error
 /// ```
 pub struct BrokerInvokeToken(pub(crate) ());
+
+#[cfg(any(test, feature = "testkit"))]
+impl BrokerInvokeToken {
+    /// Escape hatch for adapter unit tests outside `mqk-execution`.
+    ///
+    /// Only available under `#[cfg(test)]` or `feature = "testkit"`.
+    /// Must not appear in production code paths.
+    pub fn for_test() -> Self {
+        Self(())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // BrokerAdapter trait (public — external crates implement this)
@@ -404,6 +422,7 @@ mod tests {
         let req = BrokerSubmitRequest {
             order_id: "ord-1".to_string(),
             symbol: "AAPL".to_string(),
+            side: crate::types::Side::Buy,
             quantity: 100,
             order_type: "limit".to_string(),
             limit_price: Some(150_000_000), // $150.00 in micros

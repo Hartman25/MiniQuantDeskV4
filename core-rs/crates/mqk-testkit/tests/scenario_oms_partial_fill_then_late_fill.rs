@@ -149,7 +149,10 @@ fn replace_request_puts_order_in_replace_pending_not_confirmed() {
     );
 
     // Broker acknowledges the replace — order is live again.
-    order.apply(&OmsEvent::ReplaceAck, Some("r2")).unwrap();
+    // P1-03: ReplaceAck carries new_total_qty. Order has no fills, total=10.
+    order
+        .apply(&OmsEvent::ReplaceAck { new_total_qty: 10 }, Some("r2"))
+        .unwrap();
     assert_eq!(
         order.state,
         OrderState::Open,

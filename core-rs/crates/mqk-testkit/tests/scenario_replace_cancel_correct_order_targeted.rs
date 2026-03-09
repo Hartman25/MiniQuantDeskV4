@@ -236,6 +236,7 @@ fn broker_submit_request_limit_price_is_integer_micros() {
     let req = BrokerSubmitRequest {
         order_id: "ord-limit".to_string(),
         symbol: "AAPL".to_string(),
+        side: mqk_execution::Side::Buy,
         quantity: 100,
         order_type: "limit".to_string(),
         limit_price: Some(150_000_000), // $150.00 in micros
@@ -252,6 +253,7 @@ fn broker_submit_request_market_order_has_no_limit_price() {
     let req = BrokerSubmitRequest {
         order_id: "ord-market".to_string(),
         symbol: "SPY".to_string(),
+        side: mqk_execution::Side::Buy,
         quantity: 10,
         order_type: "market".to_string(),
         limit_price: None,

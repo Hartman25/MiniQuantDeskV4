@@ -8,3 +8,7 @@ license = "Proprietary"
 mqk-reconcile = { path = "../mqk-reconcile" }
 # RT-8: implement BrokerAdapter for LockedPaperBroker.
 mqk-execution = { path = "../mqk-execution" }
+
+[dev-dependencies]
+# P1-03: activates BrokerInvokeToken::for_test for unit tests.
+mqk-execution = { path = "../mqk-execution", features = ["testkit"] }

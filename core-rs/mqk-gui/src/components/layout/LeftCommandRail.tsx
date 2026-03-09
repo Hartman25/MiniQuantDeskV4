@@ -37,19 +37,21 @@ export function LeftCommandRail({ activeScreen, onSelect }: LeftCommandRailProps
         <p>GUI is a cockpit above the daemon, not an execution bypass.</p>
       </div>
 
-      <nav className="nav-stack" aria-label="Primary navigation">
-        {ITEMS.map((item) => (
-          <button
-            key={item.key}
-            type="button"
-            className={`nav-card ${item.key === activeScreen ? "is-active" : ""}`}
-            onClick={() => onSelect(item.key)}
-          >
-            <span className="nav-label">{item.label}</span>
-            <span className="nav-subtitle">{item.subtitle}</span>
-          </button>
-        ))}
-      </nav>
+      <div className="left-rail-scroll">
+        <nav className="nav-stack" aria-label="Primary navigation">
+          {ITEMS.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              className={`nav-card ${item.key === activeScreen ? "is-active" : ""}`}
+              onClick={() => onSelect(item.key)}
+            >
+              <span className="nav-label">{item.label}</span>
+              <span className="nav-subtitle">{item.subtitle}</span>
+            </button>
+          ))}
+        </nav>
+      </div>
 
       <div className="rail-footnote">
         <div className="eyebrow">Desk Split</div>

@@ -132,6 +132,7 @@ fn submit_req() -> BrokerSubmitRequest {
     BrokerSubmitRequest {
         order_id: "ord-e2".to_string(),
         symbol: "SPY".to_string(),
+        side: mqk_execution::Side::Buy,
         quantity: 5,
         order_type: "market".to_string(),
         limit_price: None,

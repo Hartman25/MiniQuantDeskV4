@@ -110,6 +110,7 @@ fn submit_uses_claim_idempotency_key_not_req_order_id() {
     let req = BrokerSubmitRequest {
         order_id: "caller-key".to_string(), // must be overridden
         symbol: "AAPL".to_string(),
+        side: mqk_execution::Side::Buy,
         quantity: 10,
         order_type: "market".to_string(),
         limit_price: None,
@@ -133,6 +134,7 @@ fn submit_when_req_order_id_matches_claim_key_succeeds_unchanged() {
     let req = BrokerSubmitRequest {
         order_id: "order-abc".to_string(),
         symbol: "MSFT".to_string(),
+        side: mqk_execution::Side::Buy,
         quantity: 5,
         order_type: "limit".to_string(),
         limit_price: Some(300_000_000),
@@ -150,6 +152,7 @@ fn submit_other_fields_from_req_are_preserved() {
     let req = BrokerSubmitRequest {
         order_id: "wrong".to_string(),
         symbol: "TSLA".to_string(),
+        side: mqk_execution::Side::Buy,
         quantity: 25,
         order_type: "limit".to_string(),
         limit_price: Some(200_000_000), // $200 in micros

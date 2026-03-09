@@ -215,12 +215,7 @@ fn make_clean_orch(
     pool: PgPool,
     run_id: Uuid,
 ) -> ExecutionOrchestrator<OkBroker, BoolGate, BoolGate, BoolGate, FixedClock> {
-    let gateway = BrokerGateway::for_test(
-        OkBroker,
-        BoolGate(true),
-        BoolGate(true),
-        BoolGate(true),
-    );
+    let gateway = BrokerGateway::for_test(OkBroker, BoolGate(true), BoolGate(true), BoolGate(true));
 
     ExecutionOrchestrator::new(
         pool,
@@ -308,9 +303,11 @@ async fn c1_c2_unknown_fill_halts_disarms_and_refuses_restart() -> Result<()> {
         "price_micros":      100_000_000_i64,
         "fee_micros":        0_i64
     });
-    let inserted =
-        mqk_db::inbox_insert_deduped(&pool, run_id, "cuf-msg-001", msg_json).await?;
-    assert!(inserted, "C1: Fill inbox row must be inserted (dedup returned false)");
+    let inserted = mqk_db::inbox_insert_deduped(&pool, run_id, "cuf-msg-001", msg_json).await?;
+    assert!(
+        inserted,
+        "C1: Fill inbox row must be inserted (dedup returned false)"
+    );
 
     // ── 3. tick() must fail — unknown-order fill triggers mandatory halt ───
     let mut orch = make_clean_orch(pool.clone(), run_id);

@@ -78,14 +78,6 @@ impl LockedPaperBroker {
         }
     }
 
-    fn exec_side_from_signed_qty(qty: i32) -> ExecSide {
-        if qty >= 0 {
-            ExecSide::Buy
-        } else {
-            ExecSide::Sell
-        }
-    }
-
     fn order_snapshot_from_state(oid: &str, s: &PaperOrderState) -> OrderSnapshot {
         let filled = s.original_qty.saturating_sub(s.remaining_qty);
         let status = if s.remaining_qty == 0 {
@@ -147,9 +139,10 @@ impl BrokerAdapter for LockedPaperBroker {
         // Deterministic identity mapping: broker_order_id == internal order_id.
         let broker_order_id = req.order_id.clone();
 
-        // Side is inferred from sign; fill engine uses absolute quantity.
-        let side = Self::exec_side_from_signed_qty(req.quantity);
-        let abs_qty: i64 = (req.quantity as i64).abs();
+        // P1-02:
+        // Submit-side direction is explicit on the request; quantity is always positive.
+        let side = req.side;
+        let abs_qty: i64 = (req.quantity as i64).saturating_abs();
 
         let state = PaperOrderState::new(req.order_id.clone(), req.symbol.clone(), side, abs_qty);
 
@@ -211,13 +204,62 @@ impl BrokerAdapter for LockedPaperBroker {
 
         let oid = req.broker_order_id.clone();
 
-        // Idempotent replace against terminal orders is a no-op but still "ok".
+        // P1-03: Reject replace on terminal (cancelled/filled/rejected) orders.
         if inner.closed.contains(&oid) {
-            inner.events.push(BrokerEvent::ReplaceAck {
+            inner.events.push(BrokerEvent::ReplaceReject {
                 broker_message_id: format!("replace:{}", oid),
                 internal_order_id: oid.clone(),
                 broker_order_id: Some(oid.clone()),
             });
+            return Ok(BrokerReplaceResponse {
+                broker_order_id: oid,
+                status: "replace_rejected".to_string(),
+                replaced_at: 0,
+            });
+        }
+
+        if let Some(o) = inner.open.get_mut(&oid) {
+            let new_abs: i64 = (req.quantity as i64).saturating_abs();
+
+            // P1-03: Reject replace with zero open leaves (invalid quantity).
+            if new_abs == 0 {
+                inner.events.push(BrokerEvent::ReplaceReject {
+                    broker_message_id: format!("replace:{}", oid),
+                    internal_order_id: oid.clone(),
+                    broker_order_id: Some(oid.clone()),
+                });
+                return Ok(BrokerReplaceResponse {
+                    broker_order_id: oid,
+                    status: "replace_rejected".to_string(),
+                    replaced_at: 0,
+                });
+            }
+
+            // P1-03: Preserve already-filled quantity across replace.
+            // `req.quantity` is the new OPEN leaves after the amend, not a
+            // reset of cumulative fill history.
+            //
+            // Example:
+            //   original_qty  = 100, remaining_qty = 60 → filled = 40
+            //   replace qty   = 25  (new open leaves)
+            //
+            // Result:
+            //   original_qty  = 65  (40 filled + 25 new leaves)
+            //   remaining_qty = 25
+            //   filled_qty    = 40  (preserved)
+            //   new_total_qty = 65  (carried in ReplaceAck for OMS update)
+            let filled = o.original_qty.saturating_sub(o.remaining_qty);
+            let new_total_qty = filled.saturating_add(new_abs);
+            o.original_qty = new_total_qty;
+            o.remaining_qty = new_abs;
+
+            inner.events.push(BrokerEvent::ReplaceAck {
+                broker_message_id: format!("replace:{}", oid),
+                internal_order_id: oid.clone(),
+                broker_order_id: Some(oid.clone()),
+                new_total_qty,
+            });
+
             return Ok(BrokerReplaceResponse {
                 broker_order_id: oid,
                 status: "replaced".to_string(),
@@ -225,24 +267,216 @@ impl BrokerAdapter for LockedPaperBroker {
             });
         }
 
-        if let Some(o) = inner.open.get_mut(&oid) {
-            let side = Self::exec_side_from_signed_qty(req.quantity);
-            let new_abs: i64 = (req.quantity as i64).abs();
-            o.side = side;
-            o.original_qty = new_abs;
-            o.remaining_qty = new_abs;
-        }
-
-        inner.events.push(BrokerEvent::ReplaceAck {
+        // P1-03: Unknown order — reject.
+        inner.events.push(BrokerEvent::ReplaceReject {
             broker_message_id: format!("replace:{}", oid),
             internal_order_id: oid.clone(),
             broker_order_id: Some(oid.clone()),
         });
-
         Ok(BrokerReplaceResponse {
             broker_order_id: oid,
-            status: "replaced".to_string(),
+            status: "replace_rejected".to_string(),
             replaced_at: 0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submit_order_uses_explicit_side_and_positive_quantity() {
+        let broker = LockedPaperBroker::new();
+        let token = BrokerInvokeToken::for_test();
+        let resp = broker
+            .submit_order(
+                BrokerSubmitRequest {
+                    order_id: "ord-sell".to_string(),
+                    symbol: "SPY".to_string(),
+                    side: ExecSide::Sell,
+                    quantity: 100,
+                    order_type: "market".to_string(),
+                    limit_price: None,
+                    time_in_force: "day".to_string(),
+                },
+                &token,
+            )
+            .expect("submit must succeed");
+        assert_eq!(resp.broker_order_id, "ord-sell");
+
+        let snap = broker.snapshot();
+        let ord = snap.orders.get("ord-sell").expect("order must exist");
+        assert!(matches!(ord.side, mqk_reconcile::Side::Sell));
+        assert_eq!(ord.qty, 100);
+    }
+
+    #[test]
+    fn replace_order_preserves_existing_side_and_normalizes_quantity() {
+        let broker = LockedPaperBroker::new();
+        let token = BrokerInvokeToken::for_test();
+
+        broker
+            .submit_order(
+                BrokerSubmitRequest {
+                    order_id: "ord-1".to_string(),
+                    symbol: "SPY".to_string(),
+                    side: ExecSide::Sell,
+                    quantity: 100,
+                    order_type: "market".to_string(),
+                    limit_price: None,
+                    time_in_force: "day".to_string(),
+                },
+                &token,
+            )
+            .expect("submit must succeed");
+
+        broker
+            .replace_order(
+                BrokerReplaceRequest {
+                    broker_order_id: "ord-1".to_string(),
+                    quantity: 75,
+                    limit_price: None,
+                    time_in_force: "day".to_string(),
+                },
+                &token,
+            )
+            .expect("replace must succeed");
+
+        let snap = broker.snapshot();
+        let ord = snap.orders.get("ord-1").expect("order must exist");
+        assert!(matches!(ord.side, mqk_reconcile::Side::Sell));
+        assert_eq!(ord.qty, 75);
+    }
+
+    #[test]
+    fn replace_after_partial_fill_preserves_filled_qty_and_updates_remaining() {
+        let broker = LockedPaperBroker::new();
+        let token = BrokerInvokeToken::for_test();
+
+        {
+            let mut inner = broker.inner.lock().expect("poisoned mutex");
+            inner.open.insert(
+                "ord-pf".to_string(),
+                PaperOrderState {
+                    internal_order_id: "ord-pf".to_string(),
+                    symbol: "SPY".to_string(),
+                    side: ExecSide::Sell,
+                    original_qty: 100,
+                    remaining_qty: 60,
+                    fill_seq: 1,
+                },
+            );
+        }
+
+        broker
+            .replace_order(
+                BrokerReplaceRequest {
+                    broker_order_id: "ord-pf".to_string(),
+                    quantity: 25,
+                    limit_price: None,
+                    time_in_force: "day".to_string(),
+                },
+                &token,
+            )
+            .expect("replace must succeed");
+
+        let snap = broker.snapshot();
+        let ord = snap.orders.get("ord-pf").expect("order must exist");
+        assert!(matches!(ord.side, mqk_reconcile::Side::Sell));
+        assert_eq!(
+            ord.qty, 65,
+            "qty must equal preserved filled + new remaining"
+        );
+        assert_eq!(
+            ord.filled_qty, 40,
+            "replace must preserve already-filled quantity"
+        );
+        assert!(matches!(ord.status, OrderStatus::PartiallyFilled));
+
+        let inner = broker.inner.lock().expect("poisoned mutex");
+        let state = inner.open.get("ord-pf").expect("state must remain open");
+        assert_eq!(state.original_qty, 65);
+        assert_eq!(state.remaining_qty, 25);
+    }
+
+    #[test]
+    fn cancel_after_partial_fill_then_replace_does_not_resurrect_order() {
+        let broker = LockedPaperBroker::new();
+        let token = BrokerInvokeToken::for_test();
+
+        {
+            let mut inner = broker.inner.lock().expect("poisoned mutex");
+            inner.open.insert(
+                "ord-cxl".to_string(),
+                PaperOrderState {
+                    internal_order_id: "ord-cxl".to_string(),
+                    symbol: "AAPL".to_string(),
+                    side: ExecSide::Buy,
+                    original_qty: 100,
+                    remaining_qty: 40,
+                    fill_seq: 1,
+                },
+            );
+        }
+
+        broker
+            .cancel_order("ord-cxl", &token)
+            .expect("cancel must succeed");
+
+        broker
+            .replace_order(
+                BrokerReplaceRequest {
+                    broker_order_id: "ord-cxl".to_string(),
+                    quantity: 25,
+                    limit_price: None,
+                    time_in_force: "day".to_string(),
+                },
+                &token,
+            )
+            .expect("replace after cancel must return idempotent success");
+
+        let snap = broker.snapshot();
+        assert!(
+            !snap.orders.contains_key("ord-cxl"),
+            "replace after terminal cancel must not resurrect the order"
+        );
+
+        let events = broker
+            .fetch_events(&token)
+            .expect("fetch events must succeed");
+        assert!(events.iter().any(
+            |ev| matches!(ev, BrokerEvent::CancelAck { internal_order_id, .. } if internal_order_id == "ord-cxl")
+        ));
+        // P1-03: replace after cancel must emit ReplaceReject (terminal order).
+        assert!(events.iter().any(
+            |ev| matches!(ev, BrokerEvent::ReplaceReject { internal_order_id, .. } if internal_order_id == "ord-cxl")
+        ));
+    }
+
+    #[test]
+    fn replace_after_terminal_fill_does_not_resurrect_order() {
+        let broker = LockedPaperBroker::new();
+        let token = BrokerInvokeToken::for_test();
+
+        {
+            let mut inner = broker.inner.lock().expect("poisoned mutex");
+            inner.closed.insert("ord-filled".to_string());
+        }
+
+        broker
+            .replace_order(
+                BrokerReplaceRequest {
+                    broker_order_id: "ord-filled".to_string(),
+                    quantity: 10,
+                    limit_price: None,
+                    time_in_force: "day".to_string(),
+                },
+                &token,
+            )
+            .expect("replace against terminal order must be idempotent");
+
+        let snap = broker.snapshot();
+        assert!(!snap.orders.contains_key("ord-filled"));
     }
 }

@@ -172,6 +172,7 @@ fn submit_req() -> BrokerSubmitRequest {
     BrokerSubmitRequest {
         order_id: "ord-i-001".to_string(),
         symbol: "SPY".to_string(),
+        side: mqk_execution::Side::Buy,
         quantity: 10,
         order_type: "market".to_string(),
         limit_price: None,
@@ -493,12 +494,7 @@ fn make_corrupted_orch_for_i(
     pool: PgPool,
     run_id: Uuid,
 ) -> ExecutionOrchestrator<OkBroker, BoolGate, BoolGate, BoolGate, FixedClock> {
-    let gateway = BrokerGateway::for_test(
-        OkBroker,
-        BoolGate(true),
-        BoolGate(true),
-        BoolGate(true),
-    );
+    let gateway = BrokerGateway::for_test(OkBroker, BoolGate(true), BoolGate(true), BoolGate(true));
 
     let mut portfolio = PortfolioState::new(1_000_000_000_i64);
     // Corrupt the cash balance by −1 micro without a matching ledger entry.
@@ -550,7 +546,9 @@ async fn i_orchestrator_triggered_halt_proves_mandatory_writes() -> Result<()> {
     };
     mqk_db::migrate(&pool).await?;
 
-    let run_id: Uuid = IMHP_RUN_ID.parse().expect("IMHP_RUN_ID must be a valid UUID");
+    let run_id: Uuid = IMHP_RUN_ID
+        .parse()
+        .expect("IMHP_RUN_ID must be a valid UUID");
 
     // ── Pre-test cleanup ──────────────────────────────────────────────────
     cleanup_run(&pool, run_id).await?;
@@ -571,8 +569,7 @@ async fn i_orchestrator_triggered_halt_proves_mandatory_writes() -> Result<()> {
         "broker_message_id": "imhp-msg-001",
         "internal_order_id": "imhp-ord-001"
     });
-    let inserted =
-        mqk_db::inbox_insert_deduped(&pool, run_id, "imhp-msg-001", msg_json).await?;
+    let inserted = mqk_db::inbox_insert_deduped(&pool, run_id, "imhp-msg-001", msg_json).await?;
     assert!(inserted, "IMHP: inbox Ack row must be inserted");
 
     // ── 3. tick() must fail — invariant violation triggers mandatory halt ──

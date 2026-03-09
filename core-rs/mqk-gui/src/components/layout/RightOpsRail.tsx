@@ -38,8 +38,8 @@ export function RightOpsRail({ model }: RightOpsRailProps) {
   ] as const;
 
   return (
-    <aside className="right-rail">
-      <section className="panel">
+    <aside className="right-rail panel">
+      <section>
         <div className="panel-header">
           <div>
             <div className="eyebrow">Active Posture</div>
@@ -56,17 +56,23 @@ export function RightOpsRail({ model }: RightOpsRailProps) {
         </div>
       </section>
 
-      <section className="panel">
-        <div className="panel-header">
-          <div>
-            <div className="eyebrow">Alerts</div>
-            <h2>{alerts.length} open</h2>
+      <div className="right-rail-scroll">
+        <section>
+          <div className="panel-header">
+            <div>
+              <div className="eyebrow">Alerts</div>
+              <h2>{alerts.length} open</h2>
+            </div>
           </div>
-        </div>
-        <div className="alert-stack">
-          {alerts.length > 0 ? alerts.map((alert) => <AlertCard key={alert.id} alert={alert} />) : <div className="empty-state">No active alerts.</div>}
-        </div>
-      </section>
+          <div className="alert-stack">
+            {alerts.length > 0 ? (
+              alerts.map((alert) => <AlertCard key={alert.id} alert={alert} />)
+            ) : (
+              <div className="empty-state">No active alerts.</div>
+            )}
+          </div>
+        </section>
+      </div>
     </aside>
   );
 }

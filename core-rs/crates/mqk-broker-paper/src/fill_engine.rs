@@ -157,7 +157,10 @@ mod tests {
         let mut ord = PaperOrderState::new("o1".into(), "AAPL".into(), Side::Buy, 50);
         let evs = engine.apply_bar_to_order(&bar, &mut ord);
         assert_eq!(evs.len(), 1);
-        let BrokerEvent::Fill { delta_qty, side, .. } = &evs[0] else {
+        let BrokerEvent::Fill {
+            delta_qty, side, ..
+        } = &evs[0]
+        else {
             panic!("expected Fill");
         };
         assert_eq!(*delta_qty, 50, "buy fill delta_qty must equal abs fill qty");
@@ -175,11 +178,20 @@ mod tests {
         let mut ord = PaperOrderState::new("o2".into(), "AAPL".into(), Side::Sell, 50);
         let evs = engine.apply_bar_to_order(&bar, &mut ord);
         assert_eq!(evs.len(), 1);
-        let BrokerEvent::Fill { delta_qty, side, .. } = &evs[0] else {
+        let BrokerEvent::Fill {
+            delta_qty, side, ..
+        } = &evs[0]
+        else {
             panic!("expected Fill");
         };
-        assert_eq!(*delta_qty, 50, "sell fill delta_qty must equal abs fill qty");
-        assert!(*delta_qty > 0, "sell fill delta_qty must be positive, not signed");
+        assert_eq!(
+            *delta_qty, 50,
+            "sell fill delta_qty must equal abs fill qty"
+        );
+        assert!(
+            *delta_qty > 0,
+            "sell fill delta_qty must be positive, not signed"
+        );
         assert!(matches!(side, Side::Sell), "sell fill must carry side=Sell");
     }
 
@@ -200,7 +212,10 @@ mod tests {
         };
         let evs = engine.apply_bar_to_order(&bar, &mut ord);
         assert_eq!(evs.len(), 1);
-        let BrokerEvent::Fill { delta_qty, side, .. } = &evs[0] else {
+        let BrokerEvent::Fill {
+            delta_qty, side, ..
+        } = &evs[0]
+        else {
             panic!("expected Fill");
         };
         assert_eq!(*delta_qty, 70, "fill must equal remaining_qty");
@@ -219,12 +234,18 @@ mod tests {
         let mut ord = PaperOrderState::new("short-1".into(), "GME".into(), Side::Sell, 200);
         let evs = engine.apply_bar_to_order(&bar, &mut ord);
         assert_eq!(evs.len(), 1);
-        let BrokerEvent::Fill { delta_qty, side, .. } = &evs[0] else {
+        let BrokerEvent::Fill {
+            delta_qty, side, ..
+        } = &evs[0]
+        else {
             panic!("expected Fill");
         };
         assert_eq!(*delta_qty, 200);
         assert!(*delta_qty > 0, "short sell delta_qty must be positive");
-        assert!(matches!(side, Side::Sell), "short sell must carry side=Sell");
+        assert!(
+            matches!(side, Side::Sell),
+            "short sell must carry side=Sell"
+        );
     }
 
     // P1-01 proof 5: buy-to-cover fill has positive delta_qty and side=Buy.
@@ -237,7 +258,10 @@ mod tests {
         let mut ord = PaperOrderState::new("cover-1".into(), "GME".into(), Side::Buy, 200);
         let evs = engine.apply_bar_to_order(&bar, &mut ord);
         assert_eq!(evs.len(), 1);
-        let BrokerEvent::Fill { delta_qty, side, .. } = &evs[0] else {
+        let BrokerEvent::Fill {
+            delta_qty, side, ..
+        } = &evs[0]
+        else {
             panic!("expected Fill");
         };
         assert_eq!(*delta_qty, 200);
@@ -300,7 +324,10 @@ mod tests {
         let mut ord = PaperOrderState::new("o-pf".into(), "SPY".into(), Side::Sell, 10);
         let evs = engine.apply_bar_to_order(&bar, &mut ord);
         assert_eq!(evs.len(), 1);
-        if let BrokerEvent::Fill { side, delta_qty, .. } = &evs[0] {
+        if let BrokerEvent::Fill {
+            side, delta_qty, ..
+        } = &evs[0]
+        {
             assert!(
                 matches!(side, Side::Sell),
                 "fill side must be Sell so portfolio routes to sell_fifo"
@@ -322,7 +349,10 @@ mod tests {
         assert_eq!(evs.len(), 1);
         if let BrokerEvent::Fill { delta_qty, .. } = &evs[0] {
             assert_eq!(*delta_qty, 33);
-            assert_eq!(ord.remaining_qty, 0, "remaining_qty must be 0 after full fill");
+            assert_eq!(
+                ord.remaining_qty, 0,
+                "remaining_qty must be 0 after full fill"
+            );
         }
     }
 }

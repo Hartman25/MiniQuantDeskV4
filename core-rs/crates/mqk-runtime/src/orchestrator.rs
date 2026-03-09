@@ -206,13 +206,7 @@ where
                 // learns the persistence failure rather than silently losing the halt.
                 // On success the Phase-0 HALT_GUARD will block any future tick() on
                 // any orchestrator instance for this run_id.
-                persist_halt_and_disarm(
-                    &self.pool,
-                    self.run_id,
-                    now,
-                    "IntegrityViolation",
-                )
-                .await?;
+                persist_halt_and_disarm(&self.pool, self.run_id, now, "IntegrityViolation").await?;
 
                 let details = summarize_ambiguous_outbox(&ambiguous);
                 return Err(anyhow!(
@@ -428,13 +422,8 @@ where
                         // Mandatory halt + disarm before surfacing the OMS error.
                         // If the DB writes fail their error takes precedence — failing
                         // to persist HALTED is more dangerous than the OMS fault itself.
-                        persist_halt_and_disarm(
-                            &self.pool,
-                            self.run_id,
-                            now,
-                            "IntegrityViolation",
-                        )
-                        .await?;
+                        persist_halt_and_disarm(&self.pool, self.run_id, now, "IntegrityViolation")
+                            .await?;
                         return Err(e.context(format!(
                             "UNKNOWN_ORDER_FILL: run {} halted and disarmed (Section C)",
                             self.run_id
@@ -473,13 +462,7 @@ where
             // is durably written to DB.
             if let Err(inv_err) = check_capital_invariants(&self.portfolio) {
                 let now = self.time_source.now_utc();
-                persist_halt_and_disarm(
-                    &self.pool,
-                    self.run_id,
-                    now,
-                    "IntegrityViolation",
-                )
-                .await?;
+                persist_halt_and_disarm(&self.pool, self.run_id, now, "IntegrityViolation").await?;
                 return Err(inv_err.context(format!(
                     "INVARIANT_VIOLATED: run {} halted and disarmed (I9-1)",
                     self.run_id
@@ -517,15 +500,17 @@ where
 /// Build a `BrokerSubmitRequest` from a claimed outbox row.
 fn build_submit_request(row: &mqk_db::OutboxRow) -> anyhow::Result<BrokerSubmitRequest> {
     let json = &row.order_json;
+    let raw_qty = json["quantity"]
+        .as_i64()
+        .ok_or_else(|| anyhow!("order_json missing 'quantity'"))?;
     Ok(BrokerSubmitRequest {
         order_id: row.idempotency_key.clone(),
         symbol: json["symbol"]
             .as_str()
             .ok_or_else(|| anyhow!("order_json missing 'symbol'"))?
             .to_string(),
-        quantity: json["quantity"]
-            .as_i64()
-            .ok_or_else(|| anyhow!("order_json missing 'quantity'"))? as i32,
+        side: order_json_side(json),
+        quantity: raw_qty.saturating_abs() as i32,
         order_type: json["order_type"].as_str().unwrap_or("market").to_string(),
         limit_price: json["limit_price"].as_i64(),
         time_in_force: json["time_in_force"].as_str().unwrap_or("day").to_string(),
@@ -537,9 +522,35 @@ fn order_json_symbol(json: &serde_json::Value) -> String {
     json["symbol"].as_str().unwrap_or("UNKNOWN").to_string()
 }
 
-/// Extract quantity from outbox order_json, defaulting to 0.
+/// Extract ABSOLUTE quantity from outbox order_json, defaulting to 0.
+///
+/// P1-02:
+/// OMS registration must never inherit signed sell quantity from order_json.
+/// Direction is conveyed by side; in-memory OMS quantity must always be positive.
 fn order_json_qty(json: &serde_json::Value) -> i64 {
-    json["quantity"].as_i64().unwrap_or(0)
+    json["quantity"].as_i64().unwrap_or(0).saturating_abs()
+}
+
+/// Extract side from outbox order_json.
+///
+/// Preferred contract:
+/// - `side` is explicit ("buy" / "sell")
+/// - `quantity` is always positive
+///
+/// Backward compatibility:
+/// if `side` is absent, infer it from the legacy signed quantity encoding.
+fn order_json_side(json: &serde_json::Value) -> mqk_execution::Side {
+    match json["side"].as_str() {
+        Some("buy") | Some("BUY") | Some("Buy") => mqk_execution::Side::Buy,
+        Some("sell") | Some("SELL") | Some("Sell") => mqk_execution::Side::Sell,
+        _ => {
+            if json["quantity"].as_i64().unwrap_or(0) >= 0 {
+                mqk_execution::Side::Buy
+            } else {
+                mqk_execution::Side::Sell
+            }
+        }
+    }
 }
 
 /// Map a `BrokerEvent` to the corresponding `OmsEvent`.
@@ -554,7 +565,9 @@ fn broker_event_to_oms_event(event: &BrokerEvent) -> OmsEvent {
         },
         BrokerEvent::CancelAck { .. } => OmsEvent::CancelAck,
         BrokerEvent::CancelReject { .. } => OmsEvent::CancelReject,
-        BrokerEvent::ReplaceAck { .. } => OmsEvent::ReplaceAck,
+        BrokerEvent::ReplaceAck { new_total_qty, .. } => OmsEvent::ReplaceAck {
+            new_total_qty: *new_total_qty,
+        },
         BrokerEvent::ReplaceReject { .. } => OmsEvent::ReplaceReject,
         BrokerEvent::Reject { .. } => OmsEvent::Reject,
     }
@@ -694,14 +707,12 @@ async fn persist_halt_and_disarm(
     now: chrono::DateTime<chrono::Utc>,
     reason: &'static str,
 ) -> anyhow::Result<()> {
-    mqk_db::halt_run(pool, run_id, now)
-        .await
-        .with_context(|| {
-            format!(
-                "HALT_PERSISTENCE_FAILURE: run {run_id} — runs.status=HALTED could not be \
+    mqk_db::halt_run(pool, run_id, now).await.with_context(|| {
+        format!(
+            "HALT_PERSISTENCE_FAILURE: run {run_id} — runs.status=HALTED could not be \
                  written (reason={reason}); Phase-0 halt guard on restart is NOT guaranteed"
-            )
-        })?;
+        )
+    })?;
 
     mqk_db::persist_arm_state(pool, "DISARMED", Some(reason))
         .await
@@ -862,6 +873,62 @@ mod tests {
     }
 
     #[test]
+    fn order_json_qty_preserves_positive_buy_quantity() {
+        let json = serde_json::json!({
+            "symbol": "SPY",
+            "side": "buy",
+            "quantity": 100
+        });
+        assert_eq!(order_json_qty(&json), 100);
+        assert!(matches!(order_json_side(&json), mqk_execution::Side::Buy));
+    }
+
+    #[test]
+    fn order_json_qty_normalizes_negative_sell_quantity_for_oms_registration() {
+        let json = serde_json::json!({
+            "symbol": "SPY",
+            "quantity": -100
+        });
+
+        let qty = order_json_qty(&json);
+        assert_eq!(qty, 100, "OMS registration quantity must be absolute");
+        assert!(matches!(order_json_side(&json), mqk_execution::Side::Sell));
+
+        let order = OmsOrder::new("ord-sell", "SPY", qty);
+        assert_eq!(
+            order.total_qty, 100,
+            "negative signed sell quantity must not leak into OmsOrder::new"
+        );
+    }
+
+    #[test]
+    fn explicit_side_overrides_legacy_sign_in_submit_request_building() {
+        let row = mqk_db::OutboxRow {
+            outbox_id: 1,
+            run_id: uuid::Uuid::nil(),
+            idempotency_key: "ord-1".to_string(),
+            order_json: serde_json::json!({
+                "symbol": "SPY",
+                "side": "sell",
+                "quantity": 100,
+                "order_type": "market",
+                "time_in_force": "day"
+            }),
+            status: "PENDING".to_string(),
+            created_at_utc: chrono::Utc::now(),
+            sent_at_utc: None,
+            claimed_at_utc: None,
+            claimed_by: None,
+            dispatching_at_utc: None,
+            dispatch_attempt_id: None,
+        };
+
+        let req = build_submit_request(&row).expect("submit request must build");
+        assert!(matches!(req.side, mqk_execution::Side::Sell));
+        assert_eq!(req.quantity, 100);
+    }
+
+    #[test]
     fn broker_event_to_fill_rejects_zero_qty() {
         use mqk_execution::Side;
         let ev = BrokerEvent::Fill {
@@ -920,6 +987,7 @@ mod tests {
                 broker_message_id: "m".to_string(),
                 internal_order_id: "o".to_string(),
                 broker_order_id: None,
+                new_total_qty: 100, // P1-03
             },
             BrokerEvent::ReplaceReject {
                 broker_message_id: "m".to_string(),
@@ -982,6 +1050,7 @@ mod tests {
                 broker_message_id: "m".into(),
                 internal_order_id: "o".into(),
                 broker_order_id: None,
+                new_total_qty: 100, // P1-03
             },
             BrokerEvent::ReplaceReject {
                 broker_message_id: "m".into(),

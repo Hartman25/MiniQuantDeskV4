@@ -24,19 +24,23 @@ export function GlobalStatusBar({ status }: GlobalStatusBarProps) {
         <StatusPill label="Integrity" value={status.integrity_status} tone={healthTone(status.integrity_status)} />
         <StatusPill label="Audit" value={status.audit_writer_status} tone={healthTone(status.audit_writer_status)} />
       </div>
+
       <div className="global-status-secondary">
         <div className="status-metric">
           <span className="metric-label">Heartbeat</span>
           <span className="metric-value">{formatDateTime(status.last_heartbeat)}</span>
         </div>
+
         <div className="status-metric">
           <span className="metric-label">Loop Latency</span>
           <span className="metric-value">{formatLatency(status.loop_latency_ms)}</span>
         </div>
+
         <div className="status-metric">
           <span className="metric-label">Account</span>
           <span className="metric-value">{status.active_account_id ?? "—"}</span>
         </div>
+
         <div className="status-metric">
           <span className="metric-label">Config</span>
           <span className="metric-value">{status.config_profile ?? "—"}</span>

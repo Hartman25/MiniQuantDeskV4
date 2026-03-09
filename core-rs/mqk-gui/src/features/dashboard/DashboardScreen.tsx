@@ -5,24 +5,54 @@ import { formatDateTime, formatLatency } from "../../lib/format";
 import { MetricStripChart } from "../execution/components/MetricStripChart";
 
 export function DashboardScreen({ model }: { model: SystemModel }) {
-  const { status, alerts, preflight, executionSummary, riskSummary, reconcileSummary, positions, openOrders, fills } = model;
+  const {
+    status,
+    alerts,
+    preflight,
+    executionSummary,
+    riskSummary,
+    reconcileSummary,
+    positions,
+    openOrders,
+    fills,
+  } = model;
 
   return (
-    <div className="screen-grid">
+    <div className="screen-grid desk-screen-grid">
       <div className="summary-grid summary-grid-four">
-        <StatCard title="Runtime" value={status.runtime_status} detail={`Heartbeat ${formatDateTime(status.last_heartbeat)}`} tone={status.has_critical ? "bad" : status.has_warning ? "warn" : "good"} />
-        <StatCard title="Daemon" value={model.connected ? "Connected" : "Disconnected"} detail={`Loop latency ${formatLatency(status.loop_latency_ms)}`} tone={model.connected ? "good" : "bad"} />
-        <StatCard title="Open Alerts" value={String(alerts.length)} detail={`${alerts.filter((a) => a.severity === "critical").length} critical`} tone={alerts.some((a) => a.severity === "critical") ? "bad" : alerts.length > 0 ? "warn" : "good"} />
-        <StatCard title="Preflight" value={preflight.blockers.length > 0 ? "Blocked" : "Clear"} detail={`${preflight.warnings.length} warnings`} tone={preflight.blockers.length > 0 ? "bad" : preflight.warnings.length > 0 ? "warn" : "good"} />
+        <StatCard
+          title="Runtime"
+          value={status.runtime_status}
+          detail={`Heartbeat ${formatDateTime(status.last_heartbeat)}`}
+          tone={status.has_critical ? "bad" : status.has_warning ? "warn" : "good"}
+        />
+        <StatCard
+          title="Daemon"
+          value={model.connected ? "Connected" : "Disconnected"}
+          detail={`Loop latency ${formatLatency(status.loop_latency_ms)}`}
+          tone={model.connected ? "good" : "bad"}
+        />
+        <StatCard
+          title="Open Alerts"
+          value={String(alerts.length)}
+          detail={`${alerts.filter((a) => a.severity === "critical").length} critical`}
+          tone={alerts.some((a) => a.severity === "critical") ? "bad" : alerts.length > 0 ? "warn" : "good"}
+        />
+        <StatCard
+          title="Preflight"
+          value={preflight.blockers.length > 0 ? "Blocked" : "Clear"}
+          detail={`${preflight.warnings.length} warnings`}
+          tone={preflight.blockers.length > 0 ? "bad" : preflight.warnings.length > 0 ? "warn" : "good"}
+        />
       </div>
 
-      <div className="three-column-grid">
+      <div className="metrics-grid desk-panel-row">
         {model.metrics.runtime.series.map((series) => (
           <MetricStripChart key={series.key} series={series} />
         ))}
       </div>
 
-      <div className="two-column-grid">
+      <div className="desk-panel-grid desk-panel-grid-primary">
         <Panel title="Session posture" compact>
           <div className="metric-list compact-list">
             <div><span>Market session</span><strong>{model.sessionState.market_session}</strong></div>
@@ -30,6 +60,7 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
             <div><span>Next change</span><strong>{formatDateTime(model.sessionState.next_session_change_at)}</strong></div>
           </div>
         </Panel>
+
         <Panel title="Config fingerprint" compact>
           <div className="metric-list compact-list">
             <div><span>Config hash</span><strong>{model.configFingerprint.config_hash}</strong></div>
@@ -37,7 +68,8 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
             <div><span>Risk policy</span><strong>{model.configFingerprint.risk_policy_version}</strong></div>
           </div>
         </Panel>
-        <Panel title="Execution pipeline summary" subtitle="System status and order flow posture.">
+
+        <Panel title="Execution pipeline summary" subtitle="System status and order-flow posture.">
           <div className="metric-list">
             <div><span>Strategy state</span><strong>{status.strategy_armed ? "Armed" : "Disarmed"}</strong></div>
             <div><span>Execution state</span><strong>{status.execution_armed ? "Armed" : "Disarmed"}</strong></div>
@@ -60,15 +92,28 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
         </Panel>
       </div>
 
-      <Panel title="Three-monitor desk layout" subtitle="Recommended institutional operator split.">
-        <div className="three-column-grid">
-          <div className="panel panel-compact monitor-card"><strong>Monitor 1</strong><p>System control, startup gate, runtime health, event log, operator actions.</p></div>
-          <div className="panel panel-compact monitor-card"><strong>Monitor 2</strong><p>Execution timeline, OMS visualizer, live orders, trace viewer, broker messages.</p></div>
-          <div className="panel panel-compact monitor-card"><strong>Monitor 3</strong><p>Risk, portfolio, reconcile, replay, incident forensics, audit evidence.</p></div>
+      <Panel
+        title="Desk split recommendation"
+        subtitle="Two-monitor mode favors control + execution. Three-monitor mode gives risk / reconcile / audit their own dedicated view."
+        compact
+      >
+        <div className="desk-monitor-strip">
+          <div className="desk-monitor-card">
+            <strong>Monitor 1</strong>
+            <p>Runtime, global health, operator actions, alerts, and event supervision.</p>
+          </div>
+          <div className="desk-monitor-card">
+            <strong>Monitor 2</strong>
+            <p>Execution timelines, OMS state, traces, replay, open orders, and broker messages.</p>
+          </div>
+          <div className="desk-monitor-card optional-monitor">
+            <strong>Monitor 3</strong>
+            <p>Risk, portfolio, reconcile, incidents, audit evidence, and deeper forensics.</p>
+          </div>
         </div>
       </Panel>
 
-      <div className="three-column-grid">
+      <div className="desk-panel-grid desk-panel-grid-secondary">
         <Panel title="Positions snapshot">
           <div className="list-stack compact-list">
             {positions.slice(0, 5).map((position) => (
@@ -80,6 +125,7 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
             ))}
           </div>
         </Panel>
+
         <Panel title="Open orders snapshot">
           <div className="list-stack compact-list">
             {openOrders.slice(0, 5).map((order) => (
@@ -91,6 +137,7 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
             ))}
           </div>
         </Panel>
+
         <Panel title="Recent fills snapshot">
           <div className="list-stack compact-list">
             {fills.slice(0, 5).map((fill) => (
