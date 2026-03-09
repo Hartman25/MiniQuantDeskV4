@@ -1173,3 +1173,72 @@ ul {
     grid-template-columns: 1fr;
   }
 }
+
+.app-shell.desk-role-execution,
+.app-shell.desk-role-oversight {
+  grid-template-columns: 1fr;
+}
+
+.app-shell.desk-role-execution .left-rail,
+.app-shell.desk-role-oversight .left-rail {
+  display: none;
+}
+
+.app-shell.desk-role-execution .main-shell,
+.app-shell.desk-role-oversight .main-shell {
+  min-width: 0;
+}
+
+.app-shell.desk-role-execution .workspace-layout,
+.app-shell.desk-role-oversight .workspace-layout {
+  grid-template-columns: minmax(0, 1fr) 320px;
+}
+
+.app-shell.desk-role-execution .workspace-column,
+.app-shell.desk-role-oversight .workspace-column {
+  min-width: 0;
+}
+
+.app-shell.desk-role-execution .workspace-body,
+.app-shell.desk-role-oversight .workspace-body {
+  min-width: 0;
+}
+
+.app-shell.desk-role-execution .screen-grid,
+.app-shell.desk-role-oversight .screen-grid {
+  min-width: 0;
+}
+
+.app-shell.desk-role-execution .bottom-rail {
+  display: block;
+}
+
+.app-shell.desk-role-oversight .bottom-rail {
+  display: none;
+}
+
+.app-shell.desk-role-execution .workspace-toolbar,
+.app-shell.desk-role-oversight .workspace-toolbar,
+.app-shell.desk-role-execution .workspace-frame,
+.app-shell.desk-role-oversight .workspace-frame,
+.app-shell.desk-role-execution .right-rail,
+.app-shell.desk-role-oversight .right-rail {
+  width: 100%;
+}
+
+.app-shell.desk-role-execution .summary-grid-four,
+.app-shell.desk-role-oversight .summary-grid-four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+@media (max-width: 1400px) {
+  .app-shell.desk-role-execution .workspace-layout,
+  .app-shell.desk-role-oversight .workspace-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .app-shell.desk-role-execution .right-rail,
+  .app-shell.desk-role-oversight .right-rail {
+    grid-template-columns: 1fr;
+  }
+}
