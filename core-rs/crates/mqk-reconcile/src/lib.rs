@@ -13,6 +13,7 @@
 
 mod engine;
 mod gate; // Patch L6 — arm/start gate + drift tick
+pub mod repair; // B1 — auto-repair classification
 mod types;
 mod watermark; // Patch L8 — snapshot freshness + monotonicity watermark
 
@@ -32,3 +33,8 @@ pub use snapshot_adapter::{
 pub use types::*;
 // Patch L8 — snapshot freshness + monotonicity enforcement.
 pub use watermark::{SnapshotFreshness, SnapshotWatermark};
+// B1 — reconcile auto-repair classification.
+pub use repair::{
+    build_repair_plan, classify_diff, DriftClassification, DriftSeverity, ReconcileRepairPlan,
+    RepairAction,
+};
