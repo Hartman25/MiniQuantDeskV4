@@ -6,6 +6,7 @@
 //! → OMS state machine → portfolio state.  No other code path may submit to
 //! the broker.
 
+pub mod observability;
 pub mod orchestrator;
 
 // Patch 1: PassGate wiring must never exist in production builds.

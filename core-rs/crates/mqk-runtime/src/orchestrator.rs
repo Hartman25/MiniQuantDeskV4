@@ -564,6 +564,38 @@ where
     pub fn oms_orders(&self) -> &BTreeMap<String, OmsOrder> {
         &self.oms_orders
     }
+
+    /// B4: Collect a read-only execution pipeline snapshot.
+    ///
+    /// Fetches outbox / inbox / run / arm state from the DB, then overlays the
+    /// in-memory OMS order map and portfolio.  Entirely read-only — does not
+    /// modify any execution state or affect `tick()` semantics.
+    ///
+    /// Takes `&mut self` so that the spawned future is `Send` without
+    /// requiring the gate/adapter type parameters to implement `Sync`.
+    /// All in-memory data is extracted synchronously before the first `.await`.
+    ///
+    /// The timestamp is sourced from `self.time_source` — no direct
+    /// `Utc::now()` call ([T]-guard compliant).
+    pub async fn snapshot(
+        &mut self,
+    ) -> anyhow::Result<crate::observability::ExecutionSnapshot> {
+        // Extract everything needed from `self` synchronously, before any `.await`,
+        // so `&mut self` is not live across a suspension point.
+        let now = self.time_source.now_utc();
+        let run_id = self.run_id;
+        let pool = self.pool.clone(); // PgPool is Clone (Arc internally)
+        let active_orders =
+            crate::observability::build_order_snapshots(&self.oms_orders, &self.order_map);
+        let portfolio = crate::observability::build_portfolio_snapshot(&self.portfolio);
+
+        // `self` is no longer borrowed here — safe to `.await` without Sync.
+        let mut snap =
+            crate::observability::collect_db_snapshot(&pool, run_id, now).await?;
+        snap.active_orders = active_orders;
+        snap.portfolio = portfolio;
+        Ok(snap)
+    }
 }
 
 // ---------------------------------------------------------------------------

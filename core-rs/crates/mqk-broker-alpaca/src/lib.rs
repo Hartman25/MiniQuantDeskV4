@@ -18,13 +18,26 @@
 //! | `replace_order` | `GET+PATCH /v2/orders/{id}`            | Fetches filled_qty before PATCH    |
 //! | `fetch_events`  | `GET /v2/account/activities`           | Polling; FILL/PARTIAL_FILL only    |
 //!
-//! # fetch_events polling limitation
+//! # A5 inbound lifecycle status
 //!
-//! The websocket trade-update stream is the canonical source for all Alpaca order
-//! lifecycle events (Ack, CancelAck, ReplaceAck, etc.).  The REST polling path
-//! implemented here surfaces only `FILL` and `PARTIAL_FILL` activities.
-//! Ack / cancel / replace events are NOT available via REST polling.
-//! A websocket integration is required to deliver those in real-time.
+//! **Normalization boundary (fully proven):** `normalize_trade_update` handles
+//! all 8 canonical lifecycle variants — Ack, PartialFill, Fill, CancelAck,
+//! CancelReject, ReplaceAck, ReplaceReject, Reject — as proven by contract
+//! tests (C1–C10) and inbound lifecycle tests (IL-1–IL-11).
+//!
+//! **`fetch_events` production path (partial):** REST polling via
+//! `GET /v2/account/activities` only surfaces `FILL` and `PARTIAL_FILL`
+//! activities.  The following 6 lifecycle variants are **not delivered** by the
+//! current `fetch_events` implementation:
+//!   - `Ack` (Alpaca events: `new`, `pending_new`, `accepted`)
+//!   - `CancelAck` (Alpaca events: `canceled`, `expired`)
+//!   - `CancelReject` (Alpaca event: `cancel_rejected`)
+//!   - `ReplaceAck` (Alpaca event: `replaced`)
+//!   - `ReplaceReject` (Alpaca event: `replace_rejected`)
+//!   - `Reject` (Alpaca event: `rejected`)
+//!
+//! A future patch must add the Alpaca websocket trade-update stream to deliver
+//! the full lifecycle through `fetch_events`.
 //!
 //! # No randomness, no wall-clock reads
 //!
@@ -319,11 +332,14 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
     /// beginning.  The returned cursor is the `id` of the last activity in this
     /// page, or `None` if no activities were returned.
     ///
-    /// # Limitation
+    /// # Limitation — fills only
     ///
-    /// Ack, CancelAck, and ReplaceAck events are not available via REST polling.
-    /// A websocket integration against Alpaca's trade-update stream is required
-    /// to deliver those lifecycle events.
+    /// REST polling via `GET /v2/account/activities` only surfaces `FILL` and
+    /// `PARTIAL_FILL` activities.  The following lifecycle variants are **not**
+    /// delivered by this path: `Ack`, `CancelAck`, `CancelReject`, `ReplaceAck`,
+    /// `ReplaceReject`, `Reject`.  Websocket integration is required for those.
+    /// See the crate-level A5 status documentation for the exact next-patch
+    /// boundary.
     fn fetch_events(
         &self,
         cursor: Option<&str>,
@@ -495,7 +511,7 @@ fn parse_broker_qty(raw: &str) -> Result<i64, &str> {
 fn parse_iso_to_epoch_ms(ts: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(ts)
         .ok()
-        .map(|dt| dt.timestamp_millis() as u64)
+        .map(|dt| dt.timestamp_millis() as u64) // allow: ops-metadata — converts broker-supplied ISO timestamp to cursor ms; not a wall-clock read
 }
 
 /// Read the HTTP response: return parsed JSON on success, or classify the

@@ -25,9 +25,9 @@ use uuid::Uuid;
 
 use crate::{
     api_types::{
-        GateRefusedResponse, HealthResponse, IntegrityResponse, TradingAccountResponse,
-        TradingFillsResponse, TradingOrdersResponse, TradingPositionsResponse,
-        TradingSnapshotResponse,
+        DiagnosticsSnapshotResponse, GateRefusedResponse, HealthResponse, IntegrityResponse,
+        TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
+        TradingPositionsResponse, TradingSnapshotResponse,
     },
     state::{uptime_secs, AppState, BusMsg},
 };
@@ -113,7 +113,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/trading/orders", get(trading_orders))
         .route("/v1/trading/fills", get(trading_fills))
         // DAEMON-2: read-back of current snapshot (no auth — read-only)
-        .route("/v1/trading/snapshot", get(trading_snapshot));
+        .route("/v1/trading/snapshot", get(trading_snapshot))
+        // B4: execution pipeline diagnostics (no auth — read-only)
+        .route("/v1/diagnostics/snapshot", get(diagnostics_snapshot));
 
     // --- Operator (authenticated) routes — mutating state changes. ---
     let operator = Router::new()
@@ -503,6 +505,23 @@ pub(crate) async fn trading_snapshot_clear(State(st): State<Arc<AppState>>) -> R
     });
 
     (StatusCode::OK, Json(OkResponse { ok: true })).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/diagnostics/snapshot  (B4)
+// ---------------------------------------------------------------------------
+
+/// Return the latest execution pipeline snapshot.
+///
+/// This is a read-only public endpoint — no auth required.  Returns the
+/// most-recent snapshot written by the execution loop, or `{ "snapshot": null }`
+/// if no loop is running or no tick has completed yet.
+pub(crate) async fn diagnostics_snapshot(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snapshot = st.execution_snapshot.read().await.clone();
+    (
+        StatusCode::OK,
+        Json(DiagnosticsSnapshotResponse { snapshot }),
+    )
 }
 
 // ---------------------------------------------------------------------------

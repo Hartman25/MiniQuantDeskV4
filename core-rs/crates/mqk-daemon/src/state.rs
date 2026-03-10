@@ -72,6 +72,12 @@ pub struct AppState {
     /// DAEMON-1: read-only trading APIs surface this snapshot. A later patch
     /// wires ingestion from broker/reconcile pipelines.
     pub broker_snapshot: Arc<RwLock<Option<mqk_schemas::BrokerSnapshot>>>,
+    /// B4: Latest execution pipeline snapshot.
+    ///
+    /// Updated after every successful orchestrator tick by `spawn_execution_loop`.
+    /// `None` until the first tick completes (or if no execution loop is running).
+    /// Read-only from HTTP handlers — never written outside the execution loop.
+    pub execution_snapshot: Arc<RwLock<Option<mqk_runtime::observability::ExecutionSnapshot>>>,
     /// S7-1: Bearer token required on all operator (POST/DELETE) routes.
     ///
     /// `None`  — no token configured; operator routes are unauthenticated
@@ -131,6 +137,7 @@ impl AppState {
             status: Arc::new(RwLock::new(initial_status)),
             integrity: Arc::new(RwLock::new(boot_integrity)),
             broker_snapshot: Arc::new(RwLock::new(None)),
+            execution_snapshot: Arc::new(RwLock::new(None)),
             operator_token,
         }
     }
@@ -165,9 +172,15 @@ pub fn spawn_heartbeat(bus: broadcast::Sender<BusMsg>, interval: Duration) {
 /// the given interval.  This is the single authoritative execution path.
 ///
 /// On any `tick` error the loop logs and halts — no silent swallowing.
+///
+/// B4: If `snapshot_cache` is `Some`, the cache is refreshed after every
+/// successful tick so the diagnostics route always serves a recent snapshot.
+/// Pass `None` to disable snapshot collection (e.g. in tests that only need
+/// tick behavior).
 pub fn spawn_execution_loop<B, IG, RG, RecG, TS>(
     mut orchestrator: mqk_runtime::orchestrator::ExecutionOrchestrator<B, IG, RG, RecG, TS>,
     interval: Duration,
+    snapshot_cache: Option<Arc<RwLock<Option<mqk_runtime::observability::ExecutionSnapshot>>>>,
 ) where
     B: mqk_execution::BrokerAdapter + Send + 'static,
     IG: mqk_execution::IntegrityGate + Send + 'static,
@@ -182,6 +195,17 @@ pub fn spawn_execution_loop<B, IG, RG, RecG, TS>(
             if let Err(e) = orchestrator.tick().await {
                 tracing::error!("execution_loop_halt error={}", e);
                 return;
+            }
+            // B4: refresh snapshot cache after each successful tick.
+            if let Some(ref cache) = snapshot_cache {
+                match orchestrator.snapshot().await {
+                    Ok(snap) => {
+                        *cache.write().await = Some(snap);
+                    }
+                    Err(e) => {
+                        tracing::warn!("b4_snapshot_collection_failed error={}", e);
+                    }
+                }
             }
         }
     });

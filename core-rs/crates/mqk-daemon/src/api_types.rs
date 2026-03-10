@@ -81,3 +81,16 @@ pub struct TradingFillsResponse {
 pub struct TradingSnapshotResponse {
     pub snapshot: Option<BrokerSnapshot>,
 }
+
+// ---------------------------------------------------------------------------
+// /v1/diagnostics/snapshot  (B4)
+// ---------------------------------------------------------------------------
+
+/// B4: Full execution pipeline snapshot for operator diagnostics.
+///
+/// `snapshot` is `None` until the first orchestrator tick completes (or when
+/// no execution loop is running).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticsSnapshotResponse {
+    pub snapshot: Option<mqk_runtime::observability::ExecutionSnapshot>,
+}
