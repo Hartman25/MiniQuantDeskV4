@@ -26,7 +26,7 @@
 //! evaluators in order and refuses with `GateRefusal` if any returns `false`:
 //!
 //! 1. `IntegrityGate::is_armed()`  — system integrity is not disarmed or halted
-//! 2. `RiskGate::is_allowed()`     — risk engine returned Allow for this request
+//! 2. `RiskGate::evaluate_gate()`  — risk engine returned Allow for this request
 //! 3. `ReconcileGate::is_clean()`  — most recent reconcile report is Clean
 //!
 //! Real engine implementations wire their subsystem state behind these traits.
@@ -38,6 +38,7 @@ use crate::order_router::{
     BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
     BrokerSubmitRequest, BrokerSubmitResponse, OrderRouter,
 };
+use crate::risk_decision::{RiskDecision, RiskDenial};
 
 // FC-2: OutboxClaimToken now lives in mqk-db (the only crate whose
 // `outbox_claim_batch` function constructs it).  Re-exported below so
@@ -62,9 +63,17 @@ pub trait IntegrityGate {
 
 /// Evaluates whether the risk engine currently allows order submission.
 ///
-/// Implement with real `RiskDecision` output in production.
+/// Implementations must be deterministic, side-effect free, and fail-closed:
+/// any state where the engine cannot be consulted must return
+/// `RiskDecision::Deny` with `RiskReason::RiskEngineUnavailable`.
+///
+/// # Fail-closed contract
+///
+/// Implementors MUST NOT silently downgrade a denial to `Allow`.
+/// The gateway treats `Deny` as a hard refusal regardless of which
+/// `RiskReason` variant is present.
 pub trait RiskGate {
-    fn is_allowed(&self) -> bool;
+    fn evaluate_gate(&self) -> RiskDecision;
 }
 
 /// Evaluates whether the most recent reconcile report is clean.
@@ -82,10 +91,16 @@ pub trait ReconcileGate {
 ///
 /// Implements `std::error::Error` so it can be boxed and propagated through
 /// `Box<dyn Error>` chains without extra wrapping.
+///
+/// `RiskBlocked` carries a [`RiskDenial`] with the structured reason and
+/// supporting evidence, enabling the orchestrator and diagnostics layer to
+/// surface the exact denial reason to operators without re-evaluating the gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateRefusal {
     IntegrityDisarmed,
-    RiskBlocked,
+    /// The risk gate denied the request. The [`RiskDenial`] contains the
+    /// structured reason code and supporting evidence.
+    RiskBlocked(RiskDenial),
     ReconcileNotClean,
 }
 
@@ -95,8 +110,13 @@ impl std::fmt::Display for GateRefusal {
             GateRefusal::IntegrityDisarmed => {
                 write!(f, "GATE_REFUSED: integrity disarmed or halted")
             }
-            GateRefusal::RiskBlocked => {
-                write!(f, "GATE_REFUSED: risk engine did not allow")
+            GateRefusal::RiskBlocked(denial) => {
+                write!(
+                    f,
+                    "GATE_REFUSED: risk engine did not allow [{}] {}",
+                    denial.reason_code(),
+                    denial.reason_summary()
+                )
             }
             GateRefusal::ReconcileNotClean => {
                 write!(f, "GATE_REFUSED: reconcile is not clean")
@@ -192,7 +212,7 @@ impl std::error::Error for UnknownOrder {}
 ///                │
 ///                ├── claim: outbox row was claimed before dispatch
 ///                ├── IG::is_armed()    → GateRefusal::IntegrityDisarmed
-///                ├── RG::is_allowed()  → GateRefusal::RiskBlocked
+///                ├── RG::evaluate_gate() → GateRefusal::RiskBlocked(denial)
 ///                ├── RecG::is_clean()  → GateRefusal::ReconcileNotClean
 ///                │
 ///                └── OrderRouter::route_*  ◄── only reached if all gates pass
@@ -253,12 +273,20 @@ where
 
     /// Evaluate all three gates in order.
     /// Returns the first refusal encountered, or `Ok(())` if all pass.
+    ///
+    /// Gate evaluation order:
+    /// 1. `IntegrityGate::is_armed()`   — system integrity / halt state
+    /// 2. `RiskGate::evaluate_gate()`   — structured risk decision (B2)
+    /// 3. `ReconcileGate::is_clean()`   — reconcile drift
     fn enforce_gates(&self) -> Result<(), GateRefusal> {
         if !self.integrity.is_armed() {
             return Err(GateRefusal::IntegrityDisarmed);
         }
-        if !self.risk.is_allowed() {
-            return Err(GateRefusal::RiskBlocked);
+        match self.risk.evaluate_gate() {
+            RiskDecision::Allow => {}
+            RiskDecision::Deny(denial) => {
+                return Err(GateRefusal::RiskBlocked(denial));
+            }
         }
         if !self.reconcile.is_clean() {
             return Err(GateRefusal::ReconcileNotClean);
@@ -458,8 +486,15 @@ mod tests {
         }
     }
     impl RiskGate for BoolGate {
-        fn is_allowed(&self) -> bool {
-            self.0
+        fn evaluate_gate(&self) -> crate::risk_decision::RiskDecision {
+            if self.0 {
+                crate::risk_decision::RiskDecision::Allow
+            } else {
+                crate::risk_decision::RiskDecision::Deny(crate::risk_decision::RiskDenial {
+                    reason: crate::risk_decision::RiskReason::RiskEngineUnavailable,
+                    evidence: crate::risk_decision::RiskEvidence::default(),
+                })
+            }
         }
     }
     impl ReconcileGate for BoolGate {

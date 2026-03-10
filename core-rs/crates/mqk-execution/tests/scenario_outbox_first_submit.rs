@@ -78,8 +78,8 @@ impl IntegrityGate for Open {
     }
 }
 impl RiskGate for Open {
-    fn is_allowed(&self) -> bool {
-        true
+    fn evaluate_gate(&self) -> mqk_execution::RiskDecision {
+        mqk_execution::RiskDecision::Allow
     }
 }
 impl ReconcileGate for Open {

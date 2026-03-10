@@ -47,18 +47,26 @@ use mqk_risk::{
 // RiskDecisionAdapter: bridges RiskDecision → RiskGate (Section G)
 // ---------------------------------------------------------------------------
 
-/// Newtype that implements `RiskGate` for a pre-evaluated `RiskDecision`.
+/// Newtype that implements `RiskGate` for a pre-evaluated `mqk_risk::RiskDecision`.
 ///
-/// `is_allowed()` returns `true` ONLY when `decision.action == RiskAction::Allow`.
-/// Any other action (`Reject`, `Halt`, `FlattenAndHalt`) is treated as denied.
+/// `evaluate_gate()` returns `Allow` ONLY when `decision.action == RiskAction::Allow`.
+/// Any other action (`Reject`, `Halt`, `FlattenAndHalt`) is treated as denied with
+/// `RiskReason::RiskEngineUnavailable` (fail-closed sentinel for the gateway contract).
 ///
 /// This is fail-closed: an unknown or future `RiskAction` variant that is not
-/// `Allow` produces `false` automatically via the `==` comparison.
+/// `Allow` produces `Deny` automatically via the `==` comparison.
 struct RiskDecisionAdapter(RiskDecision);
 
 impl RiskGate for RiskDecisionAdapter {
-    fn is_allowed(&self) -> bool {
-        self.0.action == RiskAction::Allow
+    fn evaluate_gate(&self) -> mqk_execution::RiskDecision {
+        if self.0.action == RiskAction::Allow {
+            mqk_execution::RiskDecision::Allow
+        } else {
+            mqk_execution::RiskDecision::Deny(mqk_execution::RiskDenial {
+                reason: mqk_execution::RiskReason::RiskEngineUnavailable,
+                evidence: mqk_execution::RiskEvidence::default(),
+            })
+        }
     }
 }
 
@@ -268,9 +276,8 @@ fn daily_loss_limit_breach_blocks_submit() {
     let SubmitError::Gate(refusal) = err else {
         panic!("expected SubmitError::Gate, got {err:?}")
     };
-    assert_eq!(
-        refusal,
-        GateRefusal::RiskBlocked,
+    assert!(
+        matches!(refusal, GateRefusal::RiskBlocked(_)),
         "daily loss limit breach must block gateway with RiskBlocked"
     );
 }
@@ -314,9 +321,8 @@ fn kill_switch_blocks_submit() {
     let SubmitError::Gate(refusal) = err else {
         panic!("expected SubmitError::Gate, got {err:?}")
     };
-    assert_eq!(
-        refusal,
-        GateRefusal::RiskBlocked,
+    assert!(
+        matches!(refusal, GateRefusal::RiskBlocked(_)),
         "kill switch must block gateway with RiskBlocked"
     );
 }
@@ -364,9 +370,8 @@ fn gate_order_risk_is_evaluated_before_reconcile() {
     let SubmitError::Gate(refusal) = err else {
         panic!("expected SubmitError::Gate, got {err:?}")
     };
-    assert_eq!(
-        refusal,
-        GateRefusal::RiskBlocked,
+    assert!(
+        matches!(refusal, GateRefusal::RiskBlocked(_)),
         "risk must be evaluated before reconcile: when both deny, first error must be RiskBlocked"
     );
 }
@@ -408,9 +413,8 @@ fn risk_denial_blocks_cancel() {
     let refusal = err
         .downcast_ref::<GateRefusal>()
         .expect("error must downcast to GateRefusal");
-    assert_eq!(
-        *refusal,
-        GateRefusal::RiskBlocked,
+    assert!(
+        matches!(*refusal, GateRefusal::RiskBlocked(_)),
         "risk denial must block cancel with RiskBlocked"
     );
 }
@@ -458,9 +462,8 @@ fn risk_denial_blocks_replace() {
     let refusal = err
         .downcast_ref::<GateRefusal>()
         .expect("error must downcast to GateRefusal");
-    assert_eq!(
-        *refusal,
-        GateRefusal::RiskBlocked,
+    assert!(
+        matches!(*refusal, GateRefusal::RiskBlocked(_)),
         "risk denial must block replace with RiskBlocked"
     );
 }
@@ -500,9 +503,8 @@ fn sticky_halt_state_blocks_new_order_submit() {
     let SubmitError::Gate(refusal) = err else {
         panic!("expected SubmitError::Gate, got {err:?}")
     };
-    assert_eq!(
-        refusal,
-        GateRefusal::RiskBlocked,
+    assert!(
+        matches!(refusal, GateRefusal::RiskBlocked(_)),
         "sticky halted risk state must block gateway with RiskBlocked"
     );
 }

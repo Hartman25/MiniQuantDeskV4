@@ -9,6 +9,7 @@ mod id_map;
 mod order_router;
 mod prices;
 mod reconcile_guard;
+pub mod risk_decision;
 pub mod types;
 
 // Optional submodules used by runtime boundary wiring / OMS integration.
@@ -40,6 +41,8 @@ pub use gateway::{
     intent_id_to_client_order_id, BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken,
     ReconcileGate, RiskGate, SubmitError, UnknownOrder,
 };
+
+pub use risk_decision::{RiskDecision, RiskDenial, RiskEvidence, RiskReason};
 
 pub use broker_error::BrokerError;
 

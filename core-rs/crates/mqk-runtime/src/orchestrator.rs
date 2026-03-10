@@ -101,6 +101,12 @@ where
     /// This is injected by the caller so runtime can enforce reconcile drift
     /// before any new dispatch occurs.
     broker_snapshot_provider: Box<dyn Fn() -> BrokerSnapshot + Send + Sync>,
+    /// B2: last structured risk gate denial seen during a tick.
+    ///
+    /// `None` until the first `RiskGate::evaluate_gate()` denial is captured.
+    /// Surfaced through the B4 observability snapshot as `SystemBlockState`
+    /// with `reason_code = denial.reason_code()`.
+    last_risk_denial: Option<mqk_execution::RiskDenial>,
 }
 
 impl<B, IG, RG, RecG, TS> ExecutionOrchestrator<B, IG, RG, RecG, TS>
@@ -151,6 +157,7 @@ where
             time_source,
             local_snapshot_provider,
             broker_snapshot_provider,
+            last_risk_denial: None,
         }
     }
 
@@ -307,10 +314,21 @@ where
                 Ok(r) => r,
                 Err(e) => {
                     // A3: per-class outbox row disposition.
-                    use mqk_execution::{BrokerError, SubmitError};
+                    use mqk_execution::{BrokerError, GateRefusal, SubmitError};
                     match &e {
-                        SubmitError::Gate(_) => {
+                        SubmitError::Gate(GateRefusal::RiskBlocked(denial)) => {
+                            // B2: capture the structured risk denial for the B4
+                            // diagnostics snapshot. The denial is stored in-memory
+                            // and overlaid by snapshot() onto SystemBlockState.
+                            self.last_risk_denial = Some(denial.clone());
                             // Gate refused before touching the broker.
+                            // Row is DISPATCHING but request never left.
+                            // Mark FAILED; requires operator review.
+                            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                        }
+                        SubmitError::Gate(_) => {
+                            // Other gate refusals (IntegrityDisarmed, ReconcileNotClean)
+                            // — gate refused before touching the broker.
                             // Row is DISPATCHING but request never left.
                             // Mark FAILED; requires operator review.
                             let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
@@ -577,9 +595,7 @@ where
     ///
     /// The timestamp is sourced from `self.time_source` — no direct
     /// `Utc::now()` call ([T]-guard compliant).
-    pub async fn snapshot(
-        &mut self,
-    ) -> anyhow::Result<crate::observability::ExecutionSnapshot> {
+    pub async fn snapshot(&mut self) -> anyhow::Result<crate::observability::ExecutionSnapshot> {
         // Extract everything needed from `self` synchronously, before any `.await`,
         // so `&mut self` is not live across a suspension point.
         let now = self.time_source.now_utc();
@@ -588,12 +604,30 @@ where
         let active_orders =
             crate::observability::build_order_snapshots(&self.oms_orders, &self.order_map);
         let portfolio = crate::observability::build_portfolio_snapshot(&self.portfolio);
+        // B2: extract before await so no borrow of self crosses the suspension point.
+        let last_risk_denial = self.last_risk_denial.clone();
 
         // `self` is no longer borrowed here — safe to `.await` without Sync.
-        let mut snap =
-            crate::observability::collect_db_snapshot(&pool, run_id, now).await?;
+        let mut snap = crate::observability::collect_db_snapshot(&pool, run_id, now).await?;
         snap.active_orders = active_orders;
         snap.portfolio = portfolio;
+
+        // B2: overlay risk denial if no higher-priority block state already exists.
+        //
+        // Priority (matches gateway evaluation order):
+        //   HALTED_IN_DB      — built by collect_db_snapshot (highest)
+        //   INTEGRITY_DISARMED — built by collect_db_snapshot
+        //   RISK_BLOCKED       — overlaid here (lowest)
+        if snap.system_block_state.is_none() {
+            if let Some(denial) = last_risk_denial {
+                snap.system_block_state = Some(crate::observability::SystemBlockState {
+                    reason_code: denial.reason_code().to_string(),
+                    reason_summary: denial.reason_summary().to_string(),
+                    evidence: denial.evidence.to_kv_pairs(),
+                });
+            }
+        }
+
         Ok(snap)
     }
 }

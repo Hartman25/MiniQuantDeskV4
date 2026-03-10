@@ -3,6 +3,7 @@
 //! These types are `Serialize + Deserialize` so they can be JSON-encoded
 //! by Axum and decoded by tests.  No business logic lives here.
 
+use mqk_runtime::observability::ExecutionSnapshot;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -83,14 +84,97 @@ pub struct TradingSnapshotResponse {
 }
 
 // ---------------------------------------------------------------------------
-// /v1/diagnostics/snapshot  (B4)
+// /api/v1 summary spine — GUI alignment patch
 // ---------------------------------------------------------------------------
 
-/// B4: Full execution pipeline snapshot for operator diagnostics.
-///
-/// `snapshot` is `None` until the first orchestrator tick completes (or when
-/// no execution loop is running).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemStatusResponse {
+    pub environment: String,
+    pub runtime_status: String,
+    pub broker_status: String,
+    pub db_status: String,
+    pub market_data_health: String,
+    pub reconcile_status: String,
+    pub integrity_status: String,
+    pub audit_writer_status: String,
+    pub last_heartbeat: Option<String>,
+    pub loop_latency_ms: Option<u64>,
+    pub active_account_id: Option<String>,
+    pub config_profile: Option<String>,
+    pub has_warning: bool,
+    pub has_critical: bool,
+    pub strategy_armed: bool,
+    pub execution_armed: bool,
+    pub live_routing_enabled: bool,
+    pub kill_switch_active: bool,
+    pub risk_halt_active: bool,
+    pub integrity_halt_active: bool,
+    pub daemon_reachable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreflightStatusResponse {
+    pub daemon_reachable: bool,
+    pub db_reachable: bool,
+    pub broker_config_present: bool,
+    pub market_data_config_present: bool,
+    pub audit_writer_ready: bool,
+    pub runtime_idle: bool,
+    pub strategy_disarmed: bool,
+    pub execution_disarmed: bool,
+    pub live_routing_disabled: bool,
+    pub warnings: Vec<String>,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionSummaryResponse {
+    pub active_orders: usize,
+    pub pending_orders: usize,
+    pub dispatching_orders: usize,
+    pub reject_count_today: usize,
+    pub cancel_replace_count_today: usize,
+    pub avg_ack_latency_ms: Option<u64>,
+    pub stuck_orders: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioSummaryResponse {
+    pub account_equity: f64,
+    pub cash: f64,
+    pub long_market_value: f64,
+    pub short_market_value: f64,
+    pub daily_pnl: f64,
+    pub buying_power: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskSummaryResponse {
+    pub gross_exposure: f64,
+    pub net_exposure: f64,
+    pub concentration_pct: f64,
+    pub daily_pnl: f64,
+    pub drawdown_pct: f64,
+    pub loss_limit_utilization_pct: f64,
+    pub kill_switch_active: bool,
+    pub active_breaches: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconcileSummaryResponse {
+    pub status: String,
+    pub last_run_at: Option<String>,
+    pub mismatched_positions: usize,
+    pub mismatched_orders: usize,
+    pub mismatched_fills: usize,
+    pub unmatched_broker_events: usize,
+}
+
+// ---------------------------------------------------------------------------
+// /api/v1/diagnostics/snapshot (B4)
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticsSnapshotResponse {
-    pub snapshot: Option<mqk_runtime::observability::ExecutionSnapshot>,
+    pub snapshot: Option<ExecutionSnapshot>,
 }

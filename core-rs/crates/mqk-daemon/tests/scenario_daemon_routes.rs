@@ -565,3 +565,210 @@ async fn dev_snapshot_inject_refused_when_env_not_set() {
     let json = parse_json(body);
     assert_eq!(json["gate"], "dev_snapshot_inject");
 }
+
+// ---------------------------------------------------------------------------
+// /api/v1 summary spine — GUI alignment patch
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn api_system_status_returns_gui_contract() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["environment"], "paper");
+    assert_eq!(json["runtime_status"], "idle");
+    assert_eq!(json["integrity_status"], "warning");
+    assert_eq!(json["daemon_reachable"], true);
+}
+
+#[tokio::test]
+async fn api_system_preflight_is_fail_closed_for_unproven_dependencies() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/preflight")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["daemon_reachable"], true);
+    assert_eq!(json["db_reachable"], false);
+    assert_eq!(json["execution_disarmed"], true);
+    assert!(json["blockers"].as_array().unwrap().len() >= 4);
+}
+
+#[tokio::test]
+async fn api_execution_summary_derives_counts_from_broker_snapshot() {
+    use chrono::{Duration, Utc};
+    use mqk_schemas::{BrokerAccount, BrokerOrder, BrokerSnapshot};
+
+    let st = Arc::new(state::AppState::new());
+    {
+        let mut lock = st.broker_snapshot.write().await;
+        *lock = Some(BrokerSnapshot {
+            captured_at_utc: Utc::now(),
+            account: BrokerAccount {
+                equity: "1000".to_string(),
+                cash: "400".to_string(),
+                currency: "USD".to_string(),
+            },
+            positions: Vec::new(),
+            fills: Vec::new(),
+            orders: vec![
+                BrokerOrder {
+                    broker_order_id: "bo-1".to_string(),
+                    client_order_id: "io-1".to_string(),
+                    symbol: "AAPL".to_string(),
+                    side: "buy".to_string(),
+                    r#type: "limit".to_string(),
+                    status: "new".to_string(),
+                    qty: "10".to_string(),
+                    limit_price: Some("100".to_string()),
+                    stop_price: None,
+                    created_at_utc: Utc::now() - Duration::minutes(6),
+                },
+                BrokerOrder {
+                    broker_order_id: "bo-2".to_string(),
+                    client_order_id: "io-2".to_string(),
+                    symbol: "MSFT".to_string(),
+                    side: "sell".to_string(),
+                    r#type: "market".to_string(),
+                    status: "submitted".to_string(),
+                    qty: "5".to_string(),
+                    limit_price: None,
+                    stop_price: None,
+                    created_at_utc: Utc::now(),
+                },
+                BrokerOrder {
+                    broker_order_id: "bo-3".to_string(),
+                    client_order_id: "io-3".to_string(),
+                    symbol: "NVDA".to_string(),
+                    side: "buy".to_string(),
+                    r#type: "market".to_string(),
+                    status: "rejected".to_string(),
+                    qty: "1".to_string(),
+                    limit_price: None,
+                    stop_price: None,
+                    created_at_utc: Utc::now(),
+                },
+            ],
+        });
+    }
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/execution/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["active_orders"], 2);
+    assert_eq!(json["pending_orders"], 1);
+    assert_eq!(json["dispatching_orders"], 1);
+    assert_eq!(json["reject_count_today"], 1);
+    assert_eq!(json["stuck_orders"], 1);
+    assert!(json["avg_ack_latency_ms"].is_null());
+}
+
+#[tokio::test]
+async fn api_portfolio_and_risk_summary_derive_from_snapshot() {
+    use chrono::Utc;
+    use mqk_schemas::{BrokerAccount, BrokerPosition, BrokerSnapshot};
+
+    let st = Arc::new(state::AppState::new());
+    {
+        let mut lock = st.broker_snapshot.write().await;
+        *lock = Some(BrokerSnapshot {
+            captured_at_utc: Utc::now(),
+            account: BrokerAccount {
+                equity: "1500.5".to_string(),
+                cash: "500.25".to_string(),
+                currency: "USD".to_string(),
+            },
+            positions: vec![
+                BrokerPosition {
+                    symbol: "AAPL".to_string(),
+                    qty: "10".to_string(),
+                    avg_price: "100".to_string(),
+                },
+                BrokerPosition {
+                    symbol: "TSLA".to_string(),
+                    qty: "-2".to_string(),
+                    avg_price: "50".to_string(),
+                },
+            ],
+            orders: Vec::new(),
+            fills: Vec::new(),
+        });
+    }
+
+    let portfolio_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/portfolio/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (portfolio_status, portfolio_body) =
+        call(routes::build_router(Arc::clone(&st)), portfolio_req).await;
+    assert_eq!(portfolio_status, StatusCode::OK);
+    let portfolio_json = parse_json(portfolio_body);
+    assert_eq!(portfolio_json["account_equity"].as_f64().unwrap(), 1500.5);
+    assert_eq!(portfolio_json["cash"].as_f64().unwrap(), 500.25);
+    assert_eq!(
+        portfolio_json["long_market_value"].as_f64().unwrap(),
+        1000.0
+    );
+    assert_eq!(
+        portfolio_json["short_market_value"].as_f64().unwrap(),
+        100.0
+    );
+    assert_eq!(portfolio_json["buying_power"].as_f64().unwrap(), 500.25);
+
+    let risk_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (risk_status, risk_body) = call(routes::build_router(Arc::clone(&st)), risk_req).await;
+    assert_eq!(risk_status, StatusCode::OK);
+    let risk_json = parse_json(risk_body);
+    assert_eq!(risk_json["gross_exposure"].as_f64().unwrap(), 1100.0);
+    assert_eq!(risk_json["net_exposure"].as_f64().unwrap(), 900.0);
+    assert!((risk_json["concentration_pct"].as_f64().unwrap() - 90.9090909090909).abs() < 1e-9);
+    assert_eq!(risk_json["kill_switch_active"], false);
+    assert_eq!(risk_json["active_breaches"], 0);
+}
+
+#[tokio::test]
+async fn api_reconcile_status_exists_and_is_explicitly_unknown() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/reconcile/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["status"], "unknown");
+    assert!(json["last_run_at"].is_null());
+    assert_eq!(json["mismatched_positions"], 0);
+    assert_eq!(json["mismatched_orders"], 0);
+    assert_eq!(json["mismatched_fills"], 0);
+    assert_eq!(json["unmatched_broker_events"], 0);
+}

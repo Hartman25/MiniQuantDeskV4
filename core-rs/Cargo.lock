@@ -1929,6 +1929,9 @@ dependencies = [
 [[package]]
 name = "mqk-risk"
 version = "0.1.0"
+dependencies = [
+ "mqk-execution",
+]
 
 [[package]]
 name = "mqk-runtime"

@@ -132,8 +132,15 @@ impl IntegrityGate for BoolGate {
     }
 }
 impl RiskGate for BoolGate {
-    fn is_allowed(&self) -> bool {
-        self.0
+    fn evaluate_gate(&self) -> mqk_execution::RiskDecision {
+        if self.0 {
+            mqk_execution::RiskDecision::Allow
+        } else {
+            mqk_execution::RiskDecision::Deny(mqk_execution::RiskDenial {
+                reason: mqk_execution::RiskReason::RiskEngineUnavailable,
+                evidence: mqk_execution::RiskEvidence::default(),
+            })
+        }
     }
 }
 impl ReconcileGate for BoolGate {

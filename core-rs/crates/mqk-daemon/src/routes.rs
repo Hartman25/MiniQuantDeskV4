@@ -18,6 +18,7 @@ use axum::{
     Json, Router,
 };
 use futures_util::{Stream, StreamExt};
+use mqk_schemas::BrokerPosition;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
@@ -25,7 +26,9 @@ use uuid::Uuid;
 
 use crate::{
     api_types::{
-        DiagnosticsSnapshotResponse, GateRefusedResponse, HealthResponse, IntegrityResponse,
+        DiagnosticsSnapshotResponse, ExecutionSummaryResponse, GateRefusedResponse, HealthResponse,
+        IntegrityResponse, PortfolioSummaryResponse, PreflightStatusResponse,
+        ReconcileSummaryResponse, RiskSummaryResponse, SystemStatusResponse,
         TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
@@ -107,6 +110,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/health", get(health))
         .route("/v1/status", get(status_handler))
         .route("/v1/stream", get(stream))
+        .route("/api/v1/system/status", get(system_status))
+        .route("/api/v1/system/preflight", get(system_preflight))
+        .route("/api/v1/execution/summary", get(execution_summary))
+        .route("/api/v1/portfolio/summary", get(portfolio_summary))
+        .route("/api/v1/risk/summary", get(risk_summary))
+        .route("/api/v1/reconcile/status", get(reconcile_status))
         // DAEMON-1: trading read APIs (placeholder until broker wiring exists)
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
@@ -114,7 +123,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/trading/fills", get(trading_fills))
         // DAEMON-2: read-back of current snapshot (no auth — read-only)
         .route("/v1/trading/snapshot", get(trading_snapshot))
-        // B4: execution pipeline diagnostics (no auth — read-only)
+        // B4: execution diagnostics snapshot (no auth — read-only)
         .route("/v1/diagnostics/snapshot", get(diagnostics_snapshot));
 
     // --- Operator (authenticated) routes — mutating state changes. ---
@@ -357,6 +366,305 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1 summary spine — GUI alignment patch
+// ---------------------------------------------------------------------------
+
+fn parse_decimal(value: &str) -> f64 {
+    value.parse::<f64>().unwrap_or(0.0)
+}
+
+fn runtime_status_from_state(state: &str) -> &'static str {
+    match state {
+        "idle" => "idle",
+        "running" => "running",
+        "halted" => "halted",
+        _ => "degraded",
+    }
+}
+
+fn is_terminal_order_status(status: &str) -> bool {
+    matches!(
+        status,
+        "filled" | "cancelled" | "canceled" | "rejected" | "expired" | "done_for_day"
+    )
+}
+
+fn is_pending_order_status(status: &str) -> bool {
+    matches!(status, "new" | "pending" | "accepted")
+}
+
+fn is_dispatching_order_status(status: &str) -> bool {
+    status.contains("submit")
+}
+
+fn position_market_value(position: &BrokerPosition) -> f64 {
+    parse_decimal(&position.qty) * parse_decimal(&position.avg_price)
+}
+
+fn exposure_breakdown(positions: &[BrokerPosition]) -> (f64, f64, f64, f64) {
+    let mut long_market_value: f64 = 0.0;
+    let mut short_market_value: f64 = 0.0;
+    let mut max_abs_position: f64 = 0.0;
+
+    for position in positions {
+        let market_value = position_market_value(position);
+        let abs_market_value = market_value.abs();
+        max_abs_position = max_abs_position.max(abs_market_value);
+
+        if market_value >= 0.0 {
+            long_market_value += market_value;
+        } else {
+            short_market_value += abs_market_value;
+        }
+    }
+
+    let gross_exposure = long_market_value + short_market_value;
+    (
+        long_market_value,
+        short_market_value,
+        gross_exposure,
+        max_abs_position,
+    )
+}
+
+pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = st.status.read().await.clone();
+    let snapshot_present = st.broker_snapshot.read().await.is_some();
+    let integrity_armed = {
+        let ig = st.integrity.read().await;
+        !ig.is_execution_blocked()
+    };
+
+    let runtime_status = runtime_status_from_state(&status.state).to_string();
+    let broker_status = if snapshot_present { "ok" } else { "warning" }.to_string();
+    let integrity_status = if integrity_armed { "ok" } else { "warning" }.to_string();
+    let reconcile_status = "unknown".to_string();
+    let has_warning = broker_status != "ok"
+        || integrity_status != "ok"
+        || reconcile_status != "ok"
+        || status.notes.is_some();
+
+    (
+        StatusCode::OK,
+        Json(SystemStatusResponse {
+            environment: "paper".to_string(),
+            runtime_status,
+            broker_status,
+            db_status: "unknown".to_string(),
+            market_data_health: "unknown".to_string(),
+            reconcile_status,
+            integrity_status,
+            audit_writer_status: "unknown".to_string(),
+            last_heartbeat: None,
+            loop_latency_ms: None,
+            active_account_id: None,
+            config_profile: None,
+            has_warning,
+            has_critical: false,
+            strategy_armed: integrity_armed,
+            execution_armed: integrity_armed,
+            live_routing_enabled: false,
+            kill_switch_active: status.state == "halted",
+            risk_halt_active: false,
+            integrity_halt_active: !integrity_armed,
+            daemon_reachable: true,
+        }),
+    )
+}
+
+pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = st.status.read().await.clone();
+    let integrity_armed = {
+        let ig = st.integrity.read().await;
+        !ig.is_execution_blocked()
+    };
+
+    let strategy_disarmed = !integrity_armed;
+    let execution_disarmed = !integrity_armed;
+
+    let mut warnings = vec![
+        "Preflight is partially derived from in-memory daemon state; DB, broker config, market data config, and audit writer readiness are not wired yet.".to_string(),
+    ];
+    if status.notes.is_some() {
+        warnings.push(
+            "Daemon status contains placeholder notes; runtime wiring is incomplete.".to_string(),
+        );
+    }
+
+    let mut blockers = vec![
+        "DB reachability is unproven by daemon state.".to_string(),
+        "Broker config presence is unproven by daemon state.".to_string(),
+        "Market data config presence is unproven by daemon state.".to_string(),
+        "Audit writer readiness is unproven by daemon state.".to_string(),
+    ];
+    if execution_disarmed {
+        blockers.push("Execution is disarmed at the integrity gate.".to_string());
+    }
+
+    (
+        StatusCode::OK,
+        Json(PreflightStatusResponse {
+            daemon_reachable: true,
+            db_reachable: false,
+            broker_config_present: false,
+            market_data_config_present: false,
+            audit_writer_ready: false,
+            runtime_idle: status.state != "running",
+            strategy_disarmed,
+            execution_disarmed,
+            live_routing_disabled: true,
+            warnings,
+            blockers,
+        }),
+    )
+}
+
+pub(crate) async fn execution_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.broker_snapshot.read().await.clone();
+    let now = chrono::Utc::now();
+
+    let summary = if let Some(snapshot) = snap {
+        let active_orders = snapshot
+            .orders
+            .iter()
+            .filter(|order| !is_terminal_order_status(order.status.as_str()))
+            .count();
+        let pending_orders = snapshot
+            .orders
+            .iter()
+            .filter(|order| is_pending_order_status(order.status.as_str()))
+            .count();
+        let dispatching_orders = snapshot
+            .orders
+            .iter()
+            .filter(|order| is_dispatching_order_status(order.status.as_str()))
+            .count();
+        let reject_count_today = snapshot
+            .orders
+            .iter()
+            .filter(|order| order.status.eq_ignore_ascii_case("rejected"))
+            .count();
+        let stuck_orders = snapshot
+            .orders
+            .iter()
+            .filter(|order| {
+                !is_terminal_order_status(order.status.as_str())
+                    && (now - order.created_at_utc).num_minutes() >= 5
+            })
+            .count();
+
+        ExecutionSummaryResponse {
+            active_orders,
+            pending_orders,
+            dispatching_orders,
+            reject_count_today,
+            cancel_replace_count_today: 0,
+            avg_ack_latency_ms: None,
+            stuck_orders,
+        }
+    } else {
+        ExecutionSummaryResponse {
+            active_orders: 0,
+            pending_orders: 0,
+            dispatching_orders: 0,
+            reject_count_today: 0,
+            cancel_replace_count_today: 0,
+            avg_ack_latency_ms: None,
+            stuck_orders: 0,
+        }
+    };
+
+    (StatusCode::OK, Json(summary))
+}
+
+pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.broker_snapshot.read().await.clone();
+
+    let summary = if let Some(snapshot) = snap {
+        let account_equity = parse_decimal(&snapshot.account.equity);
+        let cash = parse_decimal(&snapshot.account.cash);
+        let (long_market_value, short_market_value, _, _) = exposure_breakdown(&snapshot.positions);
+
+        PortfolioSummaryResponse {
+            account_equity,
+            cash,
+            long_market_value,
+            short_market_value,
+            daily_pnl: 0.0,
+            buying_power: cash,
+        }
+    } else {
+        PortfolioSummaryResponse {
+            account_equity: 0.0,
+            cash: 0.0,
+            long_market_value: 0.0,
+            short_market_value: 0.0,
+            daily_pnl: 0.0,
+            buying_power: 0.0,
+        }
+    };
+
+    (StatusCode::OK, Json(summary))
+}
+
+pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.broker_snapshot.read().await.clone();
+    let status = st.status.read().await.clone();
+
+    let summary = if let Some(snapshot) = snap {
+        let (_, _, gross_exposure, max_abs_position) = exposure_breakdown(&snapshot.positions);
+        let net_exposure = snapshot
+            .positions
+            .iter()
+            .map(position_market_value)
+            .sum::<f64>();
+        let concentration_pct = if gross_exposure > 0.0 {
+            (max_abs_position / gross_exposure) * 100.0
+        } else {
+            0.0
+        };
+
+        RiskSummaryResponse {
+            gross_exposure,
+            net_exposure,
+            concentration_pct,
+            daily_pnl: 0.0,
+            drawdown_pct: 0.0,
+            loss_limit_utilization_pct: 0.0,
+            kill_switch_active: status.state == "halted",
+            active_breaches: usize::from(status.state == "halted"),
+        }
+    } else {
+        RiskSummaryResponse {
+            gross_exposure: 0.0,
+            net_exposure: 0.0,
+            concentration_pct: 0.0,
+            daily_pnl: 0.0,
+            drawdown_pct: 0.0,
+            loss_limit_utilization_pct: 0.0,
+            kill_switch_active: status.state == "halted",
+            active_breaches: usize::from(status.state == "halted"),
+        }
+    };
+
+    (StatusCode::OK, Json(summary))
+}
+
+pub(crate) async fn reconcile_status(State(_st): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(ReconcileSummaryResponse {
+            status: "unknown".to_string(),
+            last_run_at: None,
+            mismatched_positions: 0,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // GET /v1/trading/*  — DAEMON-1 (read-only placeholders)
 // ---------------------------------------------------------------------------
 
@@ -433,11 +741,9 @@ pub(crate) async fn trading_fills(State(st): State<Arc<AppState>>) -> impl IntoR
 }
 
 pub(crate) async fn trading_snapshot(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    let snap = st.broker_snapshot.read().await.clone();
-    (
-        StatusCode::OK,
-        Json(TradingSnapshotResponse { snapshot: snap }),
-    )
+    let snapshot = st.broker_snapshot.read().await.clone();
+
+    (StatusCode::OK, Json(TradingSnapshotResponse { snapshot }))
 }
 
 // ---------------------------------------------------------------------------

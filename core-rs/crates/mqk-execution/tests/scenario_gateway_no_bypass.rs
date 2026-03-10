@@ -105,8 +105,15 @@ impl IntegrityGate for BoolGate {
     }
 }
 impl RiskGate for BoolGate {
-    fn is_allowed(&self) -> bool {
-        self.0
+    fn evaluate_gate(&self) -> mqk_execution::RiskDecision {
+        if self.0 {
+            mqk_execution::RiskDecision::Allow
+        } else {
+            mqk_execution::RiskDecision::Deny(mqk_execution::RiskDenial {
+                reason: mqk_execution::RiskReason::RiskEngineUnavailable,
+                evidence: mqk_execution::RiskEvidence::default(),
+            })
+        }
     }
 }
 impl ReconcileGate for BoolGate {
@@ -190,7 +197,7 @@ fn risk_gate_blocks_submit() {
     let SubmitError::Gate(refusal) = err else {
         panic!("expected SubmitError::Gate, got {err:?}")
     };
-    assert_eq!(refusal, GateRefusal::RiskBlocked);
+    assert!(matches!(refusal, GateRefusal::RiskBlocked(_)));
 }
 
 #[test]
@@ -246,7 +253,7 @@ fn risk_gate_blocks_cancel() {
         .cancel("ord-1", &empty_map())
         .unwrap_err();
     let refusal = err.downcast::<GateRefusal>().expect("GateRefusal");
-    assert_eq!(*refusal, GateRefusal::RiskBlocked);
+    assert!(matches!(*refusal, GateRefusal::RiskBlocked(_)));
 }
 
 #[test]
@@ -289,7 +296,7 @@ fn risk_gate_blocks_replace() {
         .replace("ord-1", &empty_map(), 20, None, "day".to_string())
         .unwrap_err();
     let refusal = err.downcast::<GateRefusal>().expect("GateRefusal");
-    assert_eq!(*refusal, GateRefusal::RiskBlocked);
+    assert!(matches!(*refusal, GateRefusal::RiskBlocked(_)));
 }
 
 #[test]

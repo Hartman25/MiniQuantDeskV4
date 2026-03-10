@@ -88,8 +88,8 @@ impl IntegrityGate for AlwaysArmed {
 
 struct AlwaysAllowed;
 impl RiskGate for AlwaysAllowed {
-    fn is_allowed(&self) -> bool {
-        true
+    fn evaluate_gate(&self) -> mqk_execution::RiskDecision {
+        mqk_execution::RiskDecision::Allow
     }
 }
 
