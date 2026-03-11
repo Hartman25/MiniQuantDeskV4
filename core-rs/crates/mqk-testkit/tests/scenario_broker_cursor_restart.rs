@@ -29,7 +29,8 @@
 //! | `a3_orchestrator_resumes_from_cursor`    | A3 | Yes |
 //! | `a4_orchestrator_persists_fetch_error_cursor` | A4 | Yes |
 //!
-//! DB tests skip gracefully when `MQK_DATABASE_URL` is absent or unreachable.
+//! DB tests skip gracefully when `MQK_DATABASE_URL` is absent.
+//! If `MQK_DATABASE_URL` is set but unreachable, the proof lane must fail.
 use anyhow::Result;
 use chrono::Utc;
 use mqk_db::FixedClock;
@@ -152,10 +153,7 @@ async fn try_pool_or_skip(url: &str) -> Result<Option<PgPool>> {
         .await
     {
         Ok(pool) => Ok(Some(pool)),
-        Err(e) => {
-            println!("SKIP: cannot connect to DB: {e}");
-            Ok(None)
-        }
+        Err(e) => Err(anyhow::anyhow!("PROOF: cannot connect to DB: {e}")),
     }
 }
 async fn seed_running_run(pool: &PgPool, run_id: Uuid) -> Result<()> {

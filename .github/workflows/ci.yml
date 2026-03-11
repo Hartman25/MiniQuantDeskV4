@@ -1,19 +1,22 @@
 # =============================================================================
-# MiniQuantDesk V4 — CI Pipeline
+# MiniQuantDesk V4 - CI Pipeline
 # P0-1: Patch Discipline + CI Gate
 # =============================================================================
 #
-# Two jobs run on every push and pull request:
+# Three jobs run on every push and pull request:
 #
-#   guards   — Deterministic pattern guard (check_unsafe_patterns.sh).
-#              Fails if Uuid::new_v4() appears in production src/, or if
-#              Utc::now() appears in mqk-db/src/ (enforcement scope).
-#              Expected to FAIL until D1-1, D1-2, D1-3 are applied.
+#   guards    - Deterministic pattern guard (check_unsafe_patterns.sh).
+#               Fails if Uuid::new_v4() appears in production src/, or if
+#               Utc::now() appears in mqk-db/src/ (enforcement scope).
+#               Expected to FAIL until D1-1, D1-2, D1-3 are applied.
 #
-#   rust     — Format check, Clippy (deny warnings), and cargo test.
-#              DB-backed tests self-skip when MQK_DATABASE_URL is absent.
-#              This job does NOT depend on `guards` — both run in parallel
-#              so all failures are visible at once.
+#   rust      - Format check, Clippy (deny warnings), and cargo test.
+#               Uses an ephemeral Postgres service so the broad workspace test
+#               job does not fail spuriously on load-bearing DB proofs.
+#
+#   db-proof  - Foundational Postgres-backed proof lane. Provisions a fresh
+#               Postgres service, runs migrations from scratch, and executes a
+#               narrow set of DB-backed safety proofs on every merge.
 #
 # Rust workspace root: ./core-rs
 # =============================================================================
@@ -34,10 +37,6 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Job: guards
-  # Deterministic static analysis. No build, no network beyond checkout.
-  # ---------------------------------------------------------------------------
   guards:
     name: "Safety Guards (P0-1)"
     runs-on: ubuntu-latest
@@ -46,20 +45,29 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run unsafe-pattern guard
-        # The guard script exits 1 if any forbidden pattern is detected.
-        # It prints exact file:line for each violation with remediation hints.
-        # Expected violations until D1-x patches:
-        #   [U] Uuid::new_v4() — mqk-audit, mqk-cli, mqk-daemon, mqk-db (md.rs)
-        #   [T] Utc::now()     — mqk-db/src/lib.rs (deadman enforcement)
         run: bash scripts/guards/check_unsafe_patterns.sh
 
-  # ---------------------------------------------------------------------------
-  # Job: rust
-  # Format, lint, and test the Rust workspace (core-rs/).
-  # ---------------------------------------------------------------------------
   rust:
     name: "Rust (fmt + clippy + test)"
     runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mqk
+          POSTGRES_PASSWORD: mqk
+          POSTGRES_DB: mqk_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mqk -d mqk_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      MQK_DATABASE_URL: postgres://mqk:mqk@127.0.0.1:5432/mqk_test
 
     defaults:
       run:
@@ -85,25 +93,87 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # -----------------------------------------------------------------------
-      # Format check — fails if any file is not gofmt-clean.
-      # Run `cargo fmt` locally to fix before pushing.
-      # -----------------------------------------------------------------------
       - name: cargo fmt --check
         run: cargo fmt --check
 
-      # -----------------------------------------------------------------------
-      # Clippy — deny all warnings.
-      # Covers all targets (lib, bin, tests, examples, benches).
-      # Run `cargo clippy --workspace --all-targets -- -D warnings` locally.
-      # -----------------------------------------------------------------------
       - name: cargo clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # -----------------------------------------------------------------------
-      # Tests — DB-backed tests self-skip when MQK_DATABASE_URL is not set.
-      # To run DB tests in CI, add a `postgres` service block and set
-      # MQK_DATABASE_URL in the job env. Deferred until test suite is stable.
-      # -----------------------------------------------------------------------
       - name: cargo test --workspace
         run: cargo test --workspace
+
+  db-proof:
+    name: "DB Proof Lane (Postgres)"
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mqk
+          POSTGRES_PASSWORD: mqk
+          POSTGRES_DB: mqk_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mqk -d mqk_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      MQK_DATABASE_URL: postgres://mqk:mqk@127.0.0.1:5432/mqk_test
+
+    defaults:
+      run:
+        working-directory: ./core-rs
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core-rs/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('core-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install postgres client tools
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+
+      - name: Wait for Postgres readiness
+        run: |
+          for i in {1..30}; do
+            if pg_isready -h 127.0.0.1 -p 5432 -U mqk -d mqk_test; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Postgres did not become ready in time"
+          exit 1
+
+      - name: Migration bootstrap / idempotence proof
+        run: cargo test -p mqk-db --test scenario_migrate_idempotent_on_clean_db -- --ignored --test-threads=1
+
+      - name: Inbox dedupe and apply atomicity proofs
+        run: |
+          cargo test -p mqk-db --test scenario_inbox_insert_then_apply_is_atomic -- --test-threads=1
+          cargo test -p mqk-db --test scenario_inbox_apply_atomic_recovery -- --test-threads=1
+
+      - name: Outbox claim and dispatch proofs
+        run: |
+          cargo test -p mqk-db --test scenario_outbox_first_enforced -- --test-threads=1
+          cargo test -p mqk-db --test scenario_outbox_claim_lock_prevents_double_dispatch -- --test-threads=1
+
+      - name: Broker cursor and restart quarantine proofs
+        run: |
+          cargo test -p mqk-testkit --test scenario_broker_cursor_restart -- --test-threads=1
+          cargo test -p mqk-testkit --test scenario_restart_quarantines_dispatching_outbox -- --test-threads=1

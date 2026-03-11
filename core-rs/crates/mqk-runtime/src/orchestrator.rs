@@ -309,8 +309,8 @@ where
             let claim = claimed_row.token;
             // Build a submit request from the outbox order_json.
             let req = build_submit_request(&claimed_row.row)?;
-            let symbol = order_json_symbol(&claimed_row.row.order_json);
-            let qty = order_json_qty(&claimed_row.row.order_json);
+            let symbol = req.symbol.clone();
+            let qty = i64::from(req.quantity);
             // Step 3a: RT-5 - write DISPATCHING before calling gateway.submit().
             //
             // Closes crash window W4: if the process crashes between here and
@@ -706,44 +706,187 @@ where
 // Internal helpers
 // ---------------------------------------------------------------------------
 /// Build a `BrokerSubmitRequest` from a claimed outbox row.
-fn build_submit_request(row: &mqk_db::OutboxRow) -> anyhow::Result<BrokerSubmitRequest> {
-    let json = &row.order_json;
-    let raw_qty = json["quantity"]
-        .as_i64()
-        .ok_or_else(|| anyhow!("order_json missing 'quantity'"))?;
+fn build_validated_submit_request(
+    order_id: &str,
+    order_json: &serde_json::Value,
+) -> anyhow::Result<BrokerSubmitRequest> {
+    let symbol = validated_order_symbol(order_json)?;
+    let side = validated_order_side(order_json)?;
+    let quantity = validated_order_quantity(order_json)?;
+    let order_type = validated_order_type(order_json)?;
+    let time_in_force = validated_order_time_in_force(order_json)?;
+    let limit_price = validated_limit_price_for_order_type(order_json, &order_type)?;
+
     Ok(BrokerSubmitRequest {
-        order_id: row.idempotency_key.clone(),
-        symbol: json["symbol"]
-            .as_str()
-            .ok_or_else(|| anyhow!("order_json missing 'symbol'"))?
-            .to_string(),
-        side: order_json_side(json),
-        quantity: raw_qty.saturating_abs() as i32,
-        order_type: json["order_type"].as_str().unwrap_or("market").to_string(),
-        limit_price: json["limit_price"].as_i64(),
-        time_in_force: json["time_in_force"].as_str().unwrap_or("day").to_string(),
+        order_id: order_id.to_string(),
+        symbol,
+        side,
+        quantity,
+        order_type,
+        limit_price,
+        time_in_force,
     })
 }
-/// Extract symbol from outbox order_json, defaulting to "UNKNOWN".
-fn order_json_symbol(json: &serde_json::Value) -> String {
-    json["symbol"].as_str().unwrap_or("UNKNOWN").to_string()
+
+fn build_submit_request(row: &mqk_db::OutboxRow) -> anyhow::Result<BrokerSubmitRequest> {
+    build_validated_submit_request(&row.idempotency_key, &row.order_json)
 }
-/// Extract ABSOLUTE quantity from outbox order_json, defaulting to 0.
-///
-/// P1-02:
-/// OMS registration must never inherit signed sell quantity from order_json.
-/// Direction is conveyed by side; in-memory OMS quantity must always be positive.
+fn validated_order_symbol(order_json: &serde_json::Value) -> anyhow::Result<String> {
+    let symbol = order_json
+        .get("symbol")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .ok_or_else(|| anyhow!("invalid submit payload: symbol missing or not a string"))?;
+
+    if symbol.is_empty() {
+        return Err(anyhow!("invalid submit payload: symbol blank"));
+    }
+
+    Ok(symbol.to_string())
+}
+
+fn validated_order_side(order_json: &serde_json::Value) -> anyhow::Result<mqk_execution::Side> {
+    let side = order_json
+        .get("side")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .ok_or_else(|| anyhow!("invalid submit payload: side missing or not a string"))?
+        .to_ascii_lowercase();
+
+    match side.as_str() {
+        "buy" => Ok(mqk_execution::Side::Buy),
+        "sell" => Ok(mqk_execution::Side::Sell),
+        _ => Err(anyhow!(
+            "invalid submit payload: unsupported side '{}'",
+            side
+        )),
+    }
+}
+
+fn validated_order_quantity(order_json: &serde_json::Value) -> anyhow::Result<i32> {
+    let qty = match (order_json.get("qty"), order_json.get("quantity")) {
+        (Some(qty), Some(quantity)) => {
+            let qty = parse_positive_i64_field("qty", qty)?;
+            let quantity = parse_positive_i64_field("quantity", quantity)?;
+            if qty != quantity {
+                return Err(anyhow!(
+                    "invalid submit payload: qty and quantity disagree (qty={}, quantity={})",
+                    qty,
+                    quantity
+                ));
+            }
+            qty
+        }
+        (Some(qty), None) => parse_positive_i64_field("qty", qty)?,
+        (None, Some(quantity)) => parse_positive_i64_field("quantity", quantity)?,
+        (None, None) => return Err(anyhow!("invalid submit payload: quantity missing")),
+    };
+
+    i32::try_from(qty).context("invalid submit payload: quantity out of range for broker request")
+}
+
+fn validated_order_type(order_json: &serde_json::Value) -> anyhow::Result<String> {
+    let order_type = order_json
+        .get("order_type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .ok_or_else(|| anyhow!("invalid submit payload: order_type missing or not a string"))?
+        .to_ascii_lowercase();
+
+    match order_type.as_str() {
+        "market" | "limit" => Ok(order_type),
+        _ => Err(anyhow!(
+            "invalid submit payload: unsupported order_type '{}'",
+            order_type
+        )),
+    }
+}
+
+fn validated_order_time_in_force(order_json: &serde_json::Value) -> anyhow::Result<String> {
+    let time_in_force = order_json
+        .get("time_in_force")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .ok_or_else(|| anyhow!("invalid submit payload: time_in_force missing or not a string"))?
+        .to_ascii_lowercase();
+
+    match time_in_force.as_str() {
+        "day" | "gtc" | "ioc" | "fok" | "opg" | "cls" => Ok(time_in_force),
+        _ => Err(anyhow!(
+            "invalid submit payload: unsupported time_in_force '{}'",
+            time_in_force
+        )),
+    }
+}
+
+fn validated_limit_price_for_order_type(
+    order_json: &serde_json::Value,
+    order_type: &str,
+) -> anyhow::Result<Option<i64>> {
+    let limit_price = order_json.get("limit_price");
+
+    match order_type {
+        "limit" => {
+            let limit_price = limit_price.ok_or_else(|| {
+                anyhow!("invalid submit payload: limit order missing limit_price")
+            })?;
+            if limit_price.is_null() {
+                return Err(anyhow!(
+                    "invalid submit payload: limit order missing limit_price"
+                ));
+            }
+            Ok(Some(parse_positive_i64_field("limit_price", limit_price)?))
+        }
+        "market" => {
+            if limit_price.is_some_and(|value| !value.is_null()) {
+                return Err(anyhow!(
+                    "invalid submit payload: market order must not carry limit_price"
+                ));
+            }
+            Ok(None)
+        }
+        _ => Err(anyhow!(
+            "invalid submit payload: unsupported order_type '{}'",
+            order_type
+        )),
+    }
+}
+
+fn parse_positive_i64_field(name: &str, value: &serde_json::Value) -> anyhow::Result<i64> {
+    let parsed = match value {
+        serde_json::Value::Number(number) => number.as_i64().ok_or_else(|| {
+            anyhow!(
+                "invalid submit payload: {} must be an integer without lossy conversion",
+                name
+            )
+        })?,
+        serde_json::Value::String(raw) => raw.trim().parse::<i64>().map_err(|_| {
+            anyhow!(
+                "invalid submit payload: {} must be an integer without lossy conversion",
+                name
+            )
+        })?,
+        _ => {
+            return Err(anyhow!(
+                "invalid submit payload: {} missing or not an integer-compatible value",
+                name
+            ))
+        }
+    };
+
+    if parsed <= 0 {
+        return Err(anyhow!("invalid submit payload: {} must be positive", name));
+    }
+
+    Ok(parsed)
+}
+
+#[cfg(test)]
 fn order_json_qty(json: &serde_json::Value) -> i64 {
     json["quantity"].as_i64().unwrap_or(0).saturating_abs()
 }
-/// Extract side from outbox order_json.
-///
-/// Preferred contract:
-/// - `side` is explicit ("buy" / "sell")
-/// - `quantity` is always positive
-///
-/// Backward compatibility:
-/// if `side` is absent, infer it from the legacy signed quantity encoding.
+
+#[cfg(test)]
 fn order_json_side(json: &serde_json::Value) -> mqk_execution::Side {
     match json["side"].as_str() {
         Some("buy") | Some("BUY") | Some("Buy") => mqk_execution::Side::Buy,
@@ -1431,6 +1574,172 @@ mod tests {
         assert!(
             result.unwrap().is_none(),
             "non-fill event for unknown order must return Ok(None), not Err"
+        );
+    }
+
+    fn valid_submit_order_json() -> serde_json::Value {
+        serde_json::json!({
+            "symbol": "SPY",
+            "side": "buy",
+            "qty": 10,
+            "order_type": "market",
+            "limit_price": null,
+            "time_in_force": "day"
+        })
+    }
+
+    struct SubmitCountingBroker {
+        submits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl mqk_execution::BrokerAdapter for SubmitCountingBroker {
+        fn submit_order(
+            &self,
+            req: mqk_execution::BrokerSubmitRequest,
+            _token: &mqk_execution::BrokerInvokeToken,
+        ) -> Result<mqk_execution::BrokerSubmitResponse, mqk_execution::BrokerError> {
+            self.submits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(mqk_execution::BrokerSubmitResponse {
+                broker_order_id: format!("broker-{}", req.order_id),
+                submitted_at: 1,
+                status: "ok".to_string(),
+            })
+        }
+
+        fn cancel_order(
+            &self,
+            order_id: &str,
+            _token: &mqk_execution::BrokerInvokeToken,
+        ) -> Result<mqk_execution::BrokerCancelResponse, mqk_execution::BrokerError> {
+            Ok(mqk_execution::BrokerCancelResponse {
+                broker_order_id: order_id.to_string(),
+                cancelled_at: 1,
+                status: "ok".to_string(),
+            })
+        }
+
+        fn replace_order(
+            &self,
+            req: mqk_execution::BrokerReplaceRequest,
+            _token: &mqk_execution::BrokerInvokeToken,
+        ) -> Result<mqk_execution::BrokerReplaceResponse, mqk_execution::BrokerError> {
+            Ok(mqk_execution::BrokerReplaceResponse {
+                broker_order_id: req.broker_order_id,
+                replaced_at: 1,
+                status: "ok".to_string(),
+            })
+        }
+
+        fn fetch_events(
+            &self,
+            _cursor: Option<&str>,
+            _token: &mqk_execution::BrokerInvokeToken,
+        ) -> Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), mqk_execution::BrokerError>
+        {
+            Ok((Vec::new(), None))
+        }
+    }
+
+    #[test]
+    fn submit_request_rejects_zero_or_negative_quantity() {
+        let mut zero_qty = valid_submit_order_json();
+        zero_qty["qty"] = serde_json::json!(0);
+        let err = build_validated_submit_request("ord-zero", &zero_qty)
+            .expect_err("zero quantity must be rejected before broker submission");
+        assert!(err.to_string().contains("quantity") || err.to_string().contains("qty"));
+
+        let mut negative_qty = valid_submit_order_json();
+        negative_qty["qty"] = serde_json::json!(-5);
+        let err = build_validated_submit_request("ord-negative", &negative_qty)
+            .expect_err("negative quantity must be rejected before broker submission");
+        assert!(err.to_string().contains("quantity") || err.to_string().contains("qty"));
+    }
+
+    #[test]
+    fn submit_request_rejects_out_of_range_quantity() {
+        let mut out_of_range = valid_submit_order_json();
+        out_of_range["qty"] = serde_json::json!(2147483648_i64);
+        let err = build_validated_submit_request("ord-range", &out_of_range)
+            .expect_err("out-of-range quantity must be rejected before broker submission");
+        assert!(err.to_string().contains("out of range"));
+
+        let mut lossy = valid_submit_order_json();
+        lossy["qty"] = serde_json::json!(1.5);
+        let err = build_validated_submit_request("ord-lossy", &lossy)
+            .expect_err("lossy quantity must be rejected before broker submission");
+        assert!(
+            err.to_string().contains("lossy conversion") || err.to_string().contains("integer")
+        );
+    }
+
+    #[test]
+    fn submit_request_rejects_missing_or_blank_symbol() {
+        let mut missing_symbol = valid_submit_order_json();
+        let missing_obj = missing_symbol.as_object_mut().expect("object");
+        missing_obj.remove("symbol");
+        let err = build_validated_submit_request("ord-missing-symbol", &missing_symbol)
+            .expect_err("missing symbol must be rejected before broker submission");
+        assert!(err.to_string().contains("symbol"));
+
+        let mut blank_symbol = valid_submit_order_json();
+        blank_symbol["symbol"] = serde_json::json!("   ");
+        let err = build_validated_submit_request("ord-blank-symbol", &blank_symbol)
+            .expect_err("blank symbol must be rejected before broker submission");
+        assert!(err.to_string().contains("symbol"));
+    }
+
+    #[test]
+    fn submit_request_rejects_invalid_order_type_or_price_semantics() {
+        let mut unsupported_type = valid_submit_order_json();
+        unsupported_type["order_type"] = serde_json::json!("stop");
+        let err = build_validated_submit_request("ord-stop", &unsupported_type)
+            .expect_err("unsupported order_type must be rejected before broker submission");
+        assert!(err.to_string().contains("order_type"));
+
+        let mut limit_missing_price = valid_submit_order_json();
+        limit_missing_price["order_type"] = serde_json::json!("limit");
+        let err = build_validated_submit_request("ord-limit-missing", &limit_missing_price)
+            .expect_err("limit order missing limit_price must be rejected");
+        assert!(err.to_string().contains("limit_price"));
+
+        let mut market_with_limit = valid_submit_order_json();
+        market_with_limit["limit_price"] = serde_json::json!(1000000);
+        let err = build_validated_submit_request("ord-market-limit", &market_with_limit)
+            .expect_err("market order carrying limit_price must be rejected");
+        assert!(err.to_string().contains("limit_price"));
+    }
+
+    #[test]
+    fn malformed_persisted_order_payload_does_not_reach_broker_submit() {
+        let submits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gateway = mqk_execution::BrokerGateway::for_test(
+            SubmitCountingBroker {
+                submits: std::sync::Arc::clone(&submits),
+            },
+            AllowGate,
+            AllowGate,
+            AllowGate,
+        );
+        let mut malformed = valid_submit_order_json();
+        malformed["qty"] = serde_json::json!(0);
+
+        let result = match build_validated_submit_request("ord-malformed", &malformed) {
+            Ok(req) => gateway
+                .submit(
+                    &mqk_execution::OutboxClaimToken::for_test(1, "ord-malformed"),
+                    req,
+                )
+                .map(|_| ())
+                .map_err(|err| anyhow!(err.to_string())),
+            Err(err) => Err(err),
+        };
+
+        assert!(result.is_err(), "malformed payload must fail before submit");
+        assert_eq!(
+            submits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "invalid persisted payload must not reach broker submit"
         );
     }
     // -----------------------------------------------------------------------
