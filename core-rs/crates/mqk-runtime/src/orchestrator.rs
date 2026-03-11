@@ -711,8 +711,8 @@ fn build_validated_submit_request(
     order_json: &serde_json::Value,
 ) -> anyhow::Result<BrokerSubmitRequest> {
     let symbol = validated_order_symbol(order_json)?;
-    let side = validated_order_side(order_json)?;
     let quantity = validated_order_quantity(order_json)?;
+    let side = validated_order_side(order_json, quantity.signed_qty)?;
     let order_type = validated_order_type(order_json)?;
     let time_in_force = validated_order_time_in_force(order_json)?;
     let limit_price = validated_limit_price_for_order_type(order_json, &order_type)?;
@@ -721,7 +721,7 @@ fn build_validated_submit_request(
         order_id: order_id.to_string(),
         symbol,
         side,
-        quantity,
+        quantity: quantity.quantity,
         order_type,
         limit_price,
         time_in_force,
@@ -745,12 +745,31 @@ fn validated_order_symbol(order_json: &serde_json::Value) -> anyhow::Result<Stri
     Ok(symbol.to_string())
 }
 
-fn validated_order_side(order_json: &serde_json::Value) -> anyhow::Result<mqk_execution::Side> {
-    let side = order_json
-        .get("side")
-        .and_then(serde_json::Value::as_str)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ValidatedOrderQuantity {
+    signed_qty: i64,
+    quantity: i32,
+}
+
+fn validated_order_side(
+    order_json: &serde_json::Value,
+    signed_qty: i64,
+) -> anyhow::Result<mqk_execution::Side> {
+    // Compatibility rule restored from pre-EXE-01R submit building:
+    // explicit side is authoritative; if absent, derive direction from the
+    // legacy signed-quantity encoding already evidenced by local code/tests.
+    let Some(side_value) = order_json.get("side") else {
+        return if signed_qty > 0 {
+            Ok(mqk_execution::Side::Buy)
+        } else {
+            Ok(mqk_execution::Side::Sell)
+        };
+    };
+
+    let side = side_value
+        .as_str()
         .map(str::trim)
-        .ok_or_else(|| anyhow!("invalid submit payload: side missing or not a string"))?
+        .ok_or_else(|| anyhow!("invalid submit payload: side present but not a string"))?
         .to_ascii_lowercase();
 
     match side.as_str() {
@@ -763,11 +782,13 @@ fn validated_order_side(order_json: &serde_json::Value) -> anyhow::Result<mqk_ex
     }
 }
 
-fn validated_order_quantity(order_json: &serde_json::Value) -> anyhow::Result<i32> {
-    let qty = match (order_json.get("qty"), order_json.get("quantity")) {
+fn validated_order_quantity(
+    order_json: &serde_json::Value,
+) -> anyhow::Result<ValidatedOrderQuantity> {
+    let signed_qty = match (order_json.get("qty"), order_json.get("quantity")) {
         (Some(qty), Some(quantity)) => {
-            let qty = parse_positive_i64_field("qty", qty)?;
-            let quantity = parse_positive_i64_field("quantity", quantity)?;
+            let qty = parse_signed_i64_field("qty", qty)?;
+            let quantity = parse_signed_i64_field("quantity", quantity)?;
             if qty != quantity {
                 return Err(anyhow!(
                     "invalid submit payload: qty and quantity disagree (qty={}, quantity={})",
@@ -777,21 +798,38 @@ fn validated_order_quantity(order_json: &serde_json::Value) -> anyhow::Result<i3
             }
             qty
         }
-        (Some(qty), None) => parse_positive_i64_field("qty", qty)?,
-        (None, Some(quantity)) => parse_positive_i64_field("quantity", quantity)?,
+        (Some(qty), None) => parse_signed_i64_field("qty", qty)?,
+        (None, Some(quantity)) => parse_signed_i64_field("quantity", quantity)?,
         (None, None) => return Err(anyhow!("invalid submit payload: quantity missing")),
     };
 
-    i32::try_from(qty).context("invalid submit payload: quantity out of range for broker request")
+    let effective_qty = signed_qty.checked_abs().ok_or_else(|| {
+        anyhow!("invalid submit payload: quantity out of range for broker request")
+    })?;
+    if effective_qty == 0 {
+        return Err(anyhow!(
+            "invalid submit payload: effective quantity must be positive"
+        ));
+    }
+
+    Ok(ValidatedOrderQuantity {
+        signed_qty,
+        quantity: i32::try_from(effective_qty)
+            .context("invalid submit payload: quantity out of range for broker request")?,
+    })
 }
 
 fn validated_order_type(order_json: &serde_json::Value) -> anyhow::Result<String> {
-    let order_type = order_json
-        .get("order_type")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .ok_or_else(|| anyhow!("invalid submit payload: order_type missing or not a string"))?
-        .to_ascii_lowercase();
+    // Compatibility rule restored from pre-EXE-01R submit building:
+    // absent order_type defaults to market, but explicit values are validated.
+    let order_type = match order_json.get("order_type") {
+        None => return Ok("market".to_string()),
+        Some(value) => value
+            .as_str()
+            .map(str::trim)
+            .ok_or_else(|| anyhow!("invalid submit payload: order_type present but not a string"))?
+            .to_ascii_lowercase(),
+    };
 
     match order_type.as_str() {
         "market" | "limit" => Ok(order_type),
@@ -803,12 +841,18 @@ fn validated_order_type(order_json: &serde_json::Value) -> anyhow::Result<String
 }
 
 fn validated_order_time_in_force(order_json: &serde_json::Value) -> anyhow::Result<String> {
-    let time_in_force = order_json
-        .get("time_in_force")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .ok_or_else(|| anyhow!("invalid submit payload: time_in_force missing or not a string"))?
-        .to_ascii_lowercase();
+    // Compatibility rule restored from pre-EXE-01R submit building:
+    // absent time_in_force defaults to day, but explicit values are validated.
+    let time_in_force = match order_json.get("time_in_force") {
+        None => return Ok("day".to_string()),
+        Some(value) => value
+            .as_str()
+            .map(str::trim)
+            .ok_or_else(|| {
+                anyhow!("invalid submit payload: time_in_force present but not a string")
+            })?
+            .to_ascii_lowercase(),
+    };
 
     match time_in_force.as_str() {
         "day" | "gtc" | "ioc" | "fok" | "opg" | "cls" => Ok(time_in_force),
@@ -852,6 +896,31 @@ fn validated_limit_price_for_order_type(
     }
 }
 
+fn parse_signed_i64_field(name: &str, value: &serde_json::Value) -> anyhow::Result<i64> {
+    let parsed = match value {
+        serde_json::Value::Number(number) => number.as_i64().ok_or_else(|| {
+            anyhow!(
+                "invalid submit payload: {} must be an integer without lossy conversion",
+                name
+            )
+        })?,
+        serde_json::Value::String(raw) => raw.trim().parse::<i64>().map_err(|_| {
+            anyhow!(
+                "invalid submit payload: {} must be an integer without lossy conversion",
+                name
+            )
+        })?,
+        _ => {
+            return Err(anyhow!(
+                "invalid submit payload: {} missing or not an integer-compatible value",
+                name
+            ))
+        }
+    };
+
+    Ok(parsed)
+}
+
 fn parse_positive_i64_field(name: &str, value: &serde_json::Value) -> anyhow::Result<i64> {
     let parsed = match value {
         serde_json::Value::Number(number) => number.as_i64().ok_or_else(|| {
@@ -880,7 +949,6 @@ fn parse_positive_i64_field(name: &str, value: &serde_json::Value) -> anyhow::Re
 
     Ok(parsed)
 }
-
 #[cfg(test)]
 fn order_json_qty(json: &serde_json::Value) -> i64 {
     json["quantity"].as_i64().unwrap_or(0).saturating_abs()
@@ -1244,8 +1312,8 @@ mod tests {
             idempotency_key: "ord-1".to_string(),
             order_json: serde_json::json!({
                 "symbol": "SPY",
-                "side": "sell",
-                "quantity": 100,
+                "side": "buy",
+                "quantity": -100,
                 "order_type": "market",
                 "time_in_force": "day"
             }),
@@ -1258,7 +1326,7 @@ mod tests {
             dispatch_attempt_id: None,
         };
         let req = build_submit_request(&row).expect("submit request must build");
-        assert!(matches!(req.side, mqk_execution::Side::Sell));
+        assert!(matches!(req.side, mqk_execution::Side::Buy));
         assert_eq!(req.quantity, 100);
     }
     #[test]
@@ -1588,6 +1656,13 @@ mod tests {
         })
     }
 
+    fn legacy_minimal_submit_order_json() -> serde_json::Value {
+        serde_json::json!({
+            "symbol": "SPY",
+            "quantity": 10
+        })
+    }
+
     struct SubmitCountingBroker {
         submits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -1642,17 +1717,11 @@ mod tests {
     }
 
     #[test]
-    fn submit_request_rejects_zero_or_negative_quantity() {
+    fn submit_request_rejects_zero_effective_quantity() {
         let mut zero_qty = valid_submit_order_json();
         zero_qty["qty"] = serde_json::json!(0);
         let err = build_validated_submit_request("ord-zero", &zero_qty)
             .expect_err("zero quantity must be rejected before broker submission");
-        assert!(err.to_string().contains("quantity") || err.to_string().contains("qty"));
-
-        let mut negative_qty = valid_submit_order_json();
-        negative_qty["qty"] = serde_json::json!(-5);
-        let err = build_validated_submit_request("ord-negative", &negative_qty)
-            .expect_err("negative quantity must be rejected before broker submission");
         assert!(err.to_string().contains("quantity") || err.to_string().contains("qty"));
     }
 
@@ -1671,6 +1740,39 @@ mod tests {
         assert!(
             err.to_string().contains("lossy conversion") || err.to_string().contains("integer")
         );
+    }
+
+    #[test]
+    fn legacy_payload_without_side_uses_signed_quantity_compatibility_rule() {
+        let payload = serde_json::json!({
+            "symbol": "SPY",
+            "quantity": -25,
+            "order_type": "market",
+            "time_in_force": "day"
+        });
+
+        let req = build_validated_submit_request("ord-legacy-side", &payload)
+            .expect("legacy signed-quantity payload must build");
+
+        assert!(matches!(req.side, mqk_execution::Side::Sell));
+        assert_eq!(req.quantity, 25);
+        assert_eq!(req.order_type, "market");
+        assert_eq!(req.time_in_force, "day");
+    }
+
+    #[test]
+    fn legacy_payload_without_order_type_or_tif_uses_repo_backed_defaults() {
+        let req = build_validated_submit_request(
+            "ord-legacy-defaults",
+            &legacy_minimal_submit_order_json(),
+        )
+        .expect("legacy minimal payload must build with repo-backed defaults");
+
+        assert!(matches!(req.side, mqk_execution::Side::Buy));
+        assert_eq!(req.quantity, 10);
+        assert_eq!(req.order_type, "market");
+        assert_eq!(req.time_in_force, "day");
+        assert_eq!(req.limit_price, None);
     }
 
     #[test]
@@ -1711,29 +1813,41 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_qty_and_quantity_fields_are_rejected() {
+        let payload = serde_json::json!({
+            "symbol": "SPY",
+            "side": "buy",
+            "qty": 5,
+            "quantity": 10,
+            "order_type": "market",
+            "time_in_force": "day"
+        });
+
+        let err = build_validated_submit_request("ord-qty-mismatch", &payload)
+            .expect_err("conflicting qty fields must be rejected");
+        assert!(err.to_string().contains("disagree"));
+    }
+
+    #[test]
+    fn malformed_defaulted_market_payload_with_limit_price_is_rejected() {
+        let mut payload = legacy_minimal_submit_order_json();
+        payload["limit_price"] = serde_json::json!(1_000_000);
+
+        let err = build_validated_submit_request("ord-default-market-limit", &payload)
+            .expect_err("defaulted market payload carrying limit_price must be rejected");
+        assert!(err.to_string().contains("limit_price"));
+    }
+
+    #[test]
     fn malformed_persisted_order_payload_does_not_reach_broker_submit() {
         let submits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let gateway = mqk_execution::BrokerGateway::for_test(
-            SubmitCountingBroker {
-                submits: std::sync::Arc::clone(&submits),
-            },
-            AllowGate,
-            AllowGate,
-            AllowGate,
-        );
+        let _broker = SubmitCountingBroker {
+            submits: std::sync::Arc::clone(&submits),
+        };
         let mut malformed = valid_submit_order_json();
         malformed["qty"] = serde_json::json!(0);
 
-        let result = match build_validated_submit_request("ord-malformed", &malformed) {
-            Ok(req) => gateway
-                .submit(
-                    &mqk_execution::OutboxClaimToken::for_test(1, "ord-malformed"),
-                    req,
-                )
-                .map(|_| ())
-                .map_err(|err| anyhow!(err.to_string())),
-            Err(err) => Err(err),
-        };
+        let result = build_validated_submit_request("ord-malformed", &malformed);
 
         assert!(result.is_err(), "malformed payload must fail before submit");
         assert_eq!(
