@@ -1,4 +1,4 @@
-//! Scenario: Broker Cursor Restart — Patch A2
+//! Scenario: Broker Cursor Restart - Patch A2
 //!
 //! # Mission
 //!
@@ -6,17 +6,17 @@
 //!
 //! # Invariants under test
 //!
-//! **A1** — Paper broker cursor filters correctly (pure in-memory):
+//! **A1** - Paper broker cursor filters correctly (pure in-memory):
 //!   `fetch_events(cursor)` returns only events whose seq > cursor value.
 //!   Events are never drained.  `fetch_events(new_cursor)` after consuming all
 //!   events returns an empty batch and `None` cursor.
 //!
-//! **A2** — Orchestrator advances DB cursor after inbox persist:
+//! **A2** - Orchestrator advances DB cursor after inbox persist:
 //!   After `tick()` completes, `broker_event_cursor` in DB holds the cursor
 //!   value returned by the adapter.  The adapter is called with `None` when
 //!   no prior cursor exists.
 //!
-//! **A3** — Orchestrator resumes from DB cursor on restart:
+//! **A3** - Orchestrator resumes from DB cursor on restart:
 //!   A fresh orchestrator constructed with a cursor loaded from DB passes that
 //!   cursor (not `None`) to the adapter on its first `fetch_events` call.
 //!
@@ -27,12 +27,9 @@
 //! | `a1_paper_broker_cursor_filters_events` | A1 | No  |
 //! | `a2_orchestrator_advances_db_cursor`     | A2 | Yes |
 //! | `a3_orchestrator_resumes_from_cursor`    | A3 | Yes |
+//! | `a4_orchestrator_persists_fetch_error_cursor` | A4 | Yes |
 //!
 //! DB tests skip gracefully when `MQK_DATABASE_URL` is absent or unreachable.
-
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-
 use anyhow::Result;
 use chrono::Utc;
 use mqk_db::FixedClock;
@@ -45,12 +42,12 @@ use mqk_portfolio::PortfolioState;
 use mqk_runtime::orchestrator::ExecutionOrchestrator;
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
-
 // ---------------------------------------------------------------------------
 // Cursor-tracking broker stub
 // ---------------------------------------------------------------------------
-
 /// State shared between the broker and test assertions.
 #[derive(Default)]
 struct CursorState {
@@ -59,12 +56,10 @@ struct CursorState {
     /// Pre-configured return values popped FIFO; exhausted → `([], None)`.
     events_to_return: Vec<(Vec<mqk_execution::BrokerEvent>, Option<String>)>,
 }
-
 /// Broker that records every cursor it receives and returns preconfigured batches.
 struct CursorTrackingBroker {
     state: Arc<Mutex<CursorState>>,
 }
-
 impl BrokerAdapter for CursorTrackingBroker {
     fn submit_order(
         &self,
@@ -77,7 +72,6 @@ impl BrokerAdapter for CursorTrackingBroker {
             status: "ok".to_string(),
         })
     }
-
     fn cancel_order(
         &self,
         id: &str,
@@ -89,7 +83,6 @@ impl BrokerAdapter for CursorTrackingBroker {
             status: "ok".to_string(),
         })
     }
-
     fn replace_order(
         &self,
         req: BrokerReplaceRequest,
@@ -101,7 +94,6 @@ impl BrokerAdapter for CursorTrackingBroker {
             status: "ok".to_string(),
         })
     }
-
     fn fetch_events(
         &self,
         cursor: Option<&str>,
@@ -116,7 +108,6 @@ impl BrokerAdapter for CursorTrackingBroker {
         }
     }
 }
-
 /// Boolean gate: implements all three gate traits with a single `bool` value.
 struct BoolGate(bool);
 impl IntegrityGate for BoolGate {
@@ -141,11 +132,9 @@ impl ReconcileGate for BoolGate {
         self.0
     }
 }
-
 // ---------------------------------------------------------------------------
 // DB helpers
 // ---------------------------------------------------------------------------
-
 fn db_url_or_skip() -> Option<String> {
     match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) if !v.trim().is_empty() => Some(v),
@@ -155,7 +144,6 @@ fn db_url_or_skip() -> Option<String> {
         }
     }
 }
-
 async fn try_pool_or_skip(url: &str) -> Result<Option<PgPool>> {
     match PgPoolOptions::new()
         .max_connections(1)
@@ -170,7 +158,6 @@ async fn try_pool_or_skip(url: &str) -> Result<Option<PgPool>> {
         }
     }
 }
-
 async fn seed_running_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     mqk_db::insert_run(
         pool,
@@ -190,7 +177,6 @@ async fn seed_running_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     mqk_db::begin_run(pool, run_id).await?;
     Ok(())
 }
-
 async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     sqlx::query("delete from runs where run_id = $1")
         .bind(run_id)
@@ -198,7 +184,6 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
         .await?;
     Ok(())
 }
-
 async fn cleanup_cursor(pool: &PgPool, adapter_id: &str) -> Result<()> {
     sqlx::query("delete from broker_event_cursor where adapter_id = $1")
         .bind(adapter_id)
@@ -206,7 +191,6 @@ async fn cleanup_cursor(pool: &PgPool, adapter_id: &str) -> Result<()> {
         .await?;
     Ok(())
 }
-
 fn make_tracking_orch(
     pool: PgPool,
     run_id: Uuid,
@@ -227,24 +211,20 @@ fn make_tracking_orch(
         broker_cursor,
         FixedClock::new(Utc::now()),
         Box::new(mqk_reconcile::LocalSnapshot::empty),
-        Box::new(mqk_reconcile::BrokerSnapshot::empty),
+        Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
     )
 }
-
 // ---------------------------------------------------------------------------
-// A1 — paper broker cursor filters correctly (pure in-memory, no DB)
+// A1 - paper broker cursor filters correctly (pure in-memory, no DB)
 // ---------------------------------------------------------------------------
-
 /// A1: `fetch_events(cursor)` on the paper broker returns only events whose
-/// sequence number exceeds the cursor value.  Events are never drained —
+/// sequence number exceeds the cursor value.  Events are never drained -
 /// re-fetching from an older cursor replays the same events.
 #[test]
 fn a1_paper_broker_cursor_filters_events() {
     use mqk_broker_paper::LockedPaperBroker;
-
     let broker = LockedPaperBroker::new();
     let token = BrokerInvokeToken::for_test();
-
     // ── Submit two orders; each generates an Ack (seq = 1, then 2) ───────
     let submit = |id: &str, price: i64| BrokerSubmitRequest {
         order_id: id.to_string(),
@@ -255,14 +235,12 @@ fn a1_paper_broker_cursor_filters_events() {
         limit_price: Some(price),
         time_in_force: "day".to_string(),
     };
-
     broker
         .submit_order(submit("ord-1", 150_000_000), &token)
         .unwrap();
     broker
         .submit_order(submit("ord-2", 149_000_000), &token)
         .unwrap();
-
     // ── Fetch from start: both Ack events returned ────────────────────────
     let (events, cursor1) = broker.fetch_events(None, &token).unwrap();
     assert_eq!(events.len(), 2, "A1: start fetch must return 2 events");
@@ -271,7 +249,6 @@ fn a1_paper_broker_cursor_filters_events() {
         "A1: cursor must be Some after first fetch"
     );
     let cursor1 = cursor1.unwrap();
-
     // ── Fetch again from cursor1: nothing new ─────────────────────────────
     let (events2, cursor2) = broker.fetch_events(Some(&cursor1), &token).unwrap();
     assert_eq!(events2.len(), 0, "A1: no new events after consuming all");
@@ -279,7 +256,6 @@ fn a1_paper_broker_cursor_filters_events() {
         cursor2.is_none(),
         "A1: cursor must be None when no new events"
     );
-
     // ── Fetch from "1" (after first Ack): only second Ack returned ────────
     let (events3, cursor3) = broker.fetch_events(Some("1"), &token).unwrap();
     assert_eq!(
@@ -292,24 +268,20 @@ fn a1_paper_broker_cursor_filters_events() {
         c3, "2",
         "A1: returned cursor must equal the highest seq in the batch"
     );
-
     // ── Events are NOT drained: fetch from None still returns both ─────────
     let (events4, _) = broker.fetch_events(None, &token).unwrap();
     assert_eq!(
         events4.len(),
         2,
-        "A1: events must not be drained — re-fetch from None still returns 2"
+        "A1: events must not be drained - re-fetch from None still returns 2"
     );
 }
-
 // ---------------------------------------------------------------------------
-// A2 — orchestrator advances DB cursor after inbox persist
+// A2 - orchestrator advances DB cursor after inbox persist
 // ---------------------------------------------------------------------------
-
 /// Fixed run UUID for the A2 cursor-advancement test.
 const A2_RUN_ID: &str = "a2000002-0000-0000-0000-000000000000";
 const A2_ADAPTER_ID: &str = "a2-cursor-adv-test";
-
 /// A2: After `tick()` where the adapter returns `new_cursor = Some("seq-99")`,
 /// the orchestrator writes "seq-99" to `broker_event_cursor` in DB.
 /// The adapter is called with `None` cursor because no prior cursor existed.
@@ -324,16 +296,12 @@ async fn a2_orchestrator_advances_db_cursor_after_tick() -> Result<()> {
         return Ok(());
     };
     mqk_db::migrate(&pool).await?;
-
     let run_id: Uuid = A2_RUN_ID.parse().expect("A2_RUN_ID must be a valid UUID");
-
     // ── Pre-test cleanup ───────────────────────────────────────────────────
     cleanup_run(&pool, run_id).await?;
     cleanup_cursor(&pool, A2_ADAPTER_ID).await?;
-
     // ── Seed a RUNNING run ─────────────────────────────────────────────────
     seed_running_run(&pool, run_id).await?;
-
     // ── Broker: returns empty batch with cursor "seq-99" ───────────────────
     //
     // Using an empty event batch so Phase 3 has nothing to apply; tick() will
@@ -346,10 +314,8 @@ async fn a2_orchestrator_advances_db_cursor_after_tick() -> Result<()> {
     let broker = CursorTrackingBroker {
         state: Arc::clone(&state),
     };
-
     let mut orch = make_tracking_orch(pool.clone(), run_id, broker, A2_ADAPTER_ID, None);
     orch.tick().await?;
-
     // ── Assert: DB cursor must be "seq-99" ────────────────────────────────
     let stored = mqk_db::load_broker_cursor(&pool, A2_ADAPTER_ID).await?;
     assert_eq!(
@@ -357,7 +323,6 @@ async fn a2_orchestrator_advances_db_cursor_after_tick() -> Result<()> {
         Some("seq-99"),
         "A2: broker_event_cursor must be 'seq-99' after tick with new_cursor=Some"
     );
-
     // ── Assert: adapter was called once with None (no prior cursor) ────────
     {
         let s = state.lock().unwrap();
@@ -371,23 +336,19 @@ async fn a2_orchestrator_advances_db_cursor_after_tick() -> Result<()> {
             "A2: adapter must receive None cursor on first tick with no prior DB cursor"
         );
     }
-
     // ── Post-test cleanup ──────────────────────────────────────────────────
     cleanup_run(&pool, run_id).await?;
     cleanup_cursor(&pool, A2_ADAPTER_ID).await?;
     Ok(())
 }
-
 // ---------------------------------------------------------------------------
-// A3 — orchestrator resumes from DB cursor on restart
+// A3 - orchestrator resumes from DB cursor on restart
 // ---------------------------------------------------------------------------
-
 /// Fixed run UUID for the A3 cursor-resume test.
 const A3_RUN_ID: &str = "a3000003-0000-0000-0000-000000000000";
 const A3_ADAPTER_ID: &str = "a3-cursor-resume-test";
-
 /// A3: A fresh orchestrator constructed with a cursor loaded from DB passes
-/// that cursor — not `None` — to the adapter on its first `fetch_events` call.
+/// that cursor - not `None` - to the adapter on its first `fetch_events` call.
 ///
 /// This simulates the correct restart sequence:
 ///   1. Prior process consumed events up to cursor "resume-from-42" and wrote it to DB.
@@ -406,19 +367,14 @@ async fn a3_orchestrator_resumes_from_db_cursor() -> Result<()> {
         return Ok(());
     };
     mqk_db::migrate(&pool).await?;
-
     let run_id: Uuid = A3_RUN_ID.parse().expect("A3_RUN_ID must be a valid UUID");
-
     // ── Pre-test cleanup ───────────────────────────────────────────────────
     cleanup_run(&pool, run_id).await?;
     cleanup_cursor(&pool, A3_ADAPTER_ID).await?;
-
     // ── Seed a RUNNING run ─────────────────────────────────────────────────
     seed_running_run(&pool, run_id).await?;
-
     // ── Simulate a prior process having written cursor "resume-from-42" ───
     mqk_db::advance_broker_cursor(&pool, A3_ADAPTER_ID, "resume-from-42", Utc::now()).await?;
-
     // ── Verify load works ─────────────────────────────────────────────────
     let loaded_cursor = mqk_db::load_broker_cursor(&pool, A3_ADAPTER_ID).await?;
     assert_eq!(
@@ -426,7 +382,6 @@ async fn a3_orchestrator_resumes_from_db_cursor() -> Result<()> {
         Some("resume-from-42"),
         "A3: load_broker_cursor must return the seeded value"
     );
-
     // ── Construct fresh orchestrator with loaded cursor (restart simulation)
     let state = Arc::new(Mutex::new(CursorState {
         calls: vec![],
@@ -436,9 +391,7 @@ async fn a3_orchestrator_resumes_from_db_cursor() -> Result<()> {
         state: Arc::clone(&state),
     };
     let mut orch = make_tracking_orch(pool.clone(), run_id, broker, A3_ADAPTER_ID, loaded_cursor);
-
     orch.tick().await?;
-
     // ── Assert: adapter received the loaded cursor, not None ──────────────
     {
         let s = state.lock().unwrap();
@@ -453,9 +406,113 @@ async fn a3_orchestrator_resumes_from_db_cursor() -> Result<()> {
             "A3: adapter must receive the DB-loaded cursor on restart, not None"
         );
     }
-
     // ── Post-test cleanup ──────────────────────────────────────────────────
     cleanup_run(&pool, run_id).await?;
     cleanup_cursor(&pool, A3_ADAPTER_ID).await?;
+    Ok(())
+}
+/// Fixed run UUID for the A4 fetch-error cursor-persist test.
+const A4_RUN_ID: &str = "a4000004-0000-0000-0000-000000000000";
+const A4_ADAPTER_ID: &str = "a4-fetch-error-cursor-test";
+struct FetchErrorCursorBroker {
+    calls: Arc<Mutex<Vec<Option<String>>>>,
+    error: BrokerError,
+}
+impl BrokerAdapter for FetchErrorCursorBroker {
+    fn submit_order(
+        &self,
+        req: BrokerSubmitRequest,
+        _token: &BrokerInvokeToken,
+    ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
+        Ok(BrokerSubmitResponse {
+            broker_order_id: format!("b-{}", req.order_id),
+            submitted_at: 0,
+            status: "ok".to_string(),
+        })
+    }
+    fn cancel_order(
+        &self,
+        id: &str,
+        _token: &BrokerInvokeToken,
+    ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
+        Ok(BrokerCancelResponse {
+            broker_order_id: id.to_string(),
+            cancelled_at: 0,
+            status: "ok".to_string(),
+        })
+    }
+    fn replace_order(
+        &self,
+        req: BrokerReplaceRequest,
+        _token: &BrokerInvokeToken,
+    ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
+        Ok(BrokerReplaceResponse {
+            broker_order_id: req.broker_order_id,
+            replaced_at: 0,
+            status: "ok".to_string(),
+        })
+    }
+    fn fetch_events(
+        &self,
+        cursor: Option<&str>,
+        _token: &BrokerInvokeToken,
+    ) -> std::result::Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError> {
+        self.calls
+            .lock()
+            .expect("poisoned")
+            .push(cursor.map(|s| s.to_string()));
+        Err(self.error.clone())
+    }
+}
+#[tokio::test]
+async fn a4_orchestrator_persists_fetch_error_cursor_state() -> Result<()> {
+    let Some(url) = db_url_or_skip() else {
+        return Ok(());
+    };
+    let Some(pool) = try_pool_or_skip(&url).await? else {
+        return Ok(());
+    };
+    mqk_db::migrate(&pool).await?;
+    let run_id: Uuid = A4_RUN_ID.parse().expect("A4_RUN_ID must be a valid UUID");
+    cleanup_run(&pool, run_id).await?;
+    cleanup_cursor(&pool, A4_ADAPTER_ID).await?;
+    seed_running_run(&pool, run_id).await?;
+    let persisted_cursor =
+        r#"{"schema_version":1,"rest_activity_after":"20240615093001000::activity","trade_updates":{"status":"cold_start_unproven"}}"#
+            .to_string();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let broker = FetchErrorCursorBroker {
+        calls: Arc::clone(&calls),
+        error: BrokerError::InboundContinuityUnproven {
+            detail: "websocket continuity is unproven".to_string(),
+            persist_cursor: Some(persisted_cursor.clone()),
+        },
+    };
+    let gateway = BrokerGateway::for_test(broker, BoolGate(true), BoolGate(true), BoolGate(true));
+    let mut orch = ExecutionOrchestrator::new(
+        pool.clone(),
+        gateway,
+        BrokerOrderMap::new(),
+        BTreeMap::new(),
+        PortfolioState::new(1_000_000_000_i64),
+        run_id,
+        "a4-dispatcher",
+        A4_ADAPTER_ID,
+        None,
+        FixedClock::new(Utc::now()),
+        Box::new(mqk_reconcile::LocalSnapshot::empty),
+        Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
+    );
+    let err = orch.tick().await.expect_err("tick must fail closed");
+    assert!(err.to_string().contains("InboundContinuityUnproven"));
+    let stored = mqk_db::load_broker_cursor(&pool, A4_ADAPTER_ID).await?;
+    assert_eq!(stored.as_deref(), Some(persisted_cursor.as_str()));
+    {
+        let state = calls.lock().unwrap();
+        assert_eq!(state.len(), 1);
+        assert_eq!(state[0], None);
+    }
+    cleanup_run(&pool, run_id).await?;
+    cleanup_cursor(&pool, A4_ADAPTER_ID).await?;
     Ok(())
 }

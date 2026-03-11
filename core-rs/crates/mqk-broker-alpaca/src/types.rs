@@ -2,26 +2,23 @@
 //!
 //! # Modules covered
 //!
-//! - `AlpacaTradeUpdate` / `AlpacaOrder` — raw shapes from the websocket
+//! - `AlpacaTradeUpdate` / `AlpacaOrder` - raw shapes from the websocket
 //!   trade-update stream, used by the normalization layer.
-//! - `AlpacaSubmitBody` / `AlpacaSubmitResponse` — POST /v2/orders wire types.
-//! - `AlpacaReplaceBody` / `AlpacaReplaceResponse` — PATCH /v2/orders/{id} wire types.
-//! - `AlpacaOrderFull` — GET /v2/orders/{id} response (used by replace to get filled_qty).
-//! - `AlpacaOrderActivity` — GET /v2/account/activities polling response.
+//! - `AlpacaSubmitBody` / `AlpacaSubmitResponse` - POST /v2/orders wire types.
+//! - `AlpacaReplaceBody` / `AlpacaReplaceResponse` - PATCH /v2/orders/{id} wire types.
+//! - `AlpacaOrderFull` - GET /v2/orders/{id} response (used by replace to get filled_qty).
+//! - `AlpacaOrderActivity` - GET /v2/account/activities polling response.
 //!
 //! # Design rules
 //!
-//! - No `Uuid::new_v4()`, no wall-clock reads — timestamps come from the event.
+//! - No `Uuid::new_v4()`, no wall-clock reads - timestamps come from the event.
 //! - Quantities and prices remain as `String` until the normalization layer
 //!   parses them explicitly, so parsing errors are always captured rather than
 //!   silently coerced.
-
 use serde::{Deserialize, Serialize};
-
 // ---------------------------------------------------------------------------
 // Websocket trade-update types (normalization layer input)
 // ---------------------------------------------------------------------------
-
 /// A single order lifecycle event from Alpaca's trade-update stream.
 ///
 /// Known event types:
@@ -37,28 +34,86 @@ use serde::{Deserialize, Serialize};
 pub struct AlpacaTradeUpdate {
     /// Event type string as returned by Alpaca.
     pub event: String,
-
     /// ISO 8601 timestamp of the event from Alpaca.
     ///
     /// Used as part of the deterministic `broker_message_id` so that
     /// two fill events on the same order have distinct deduplication keys.
     pub timestamp: String,
-
     /// The order state at the time of the event.
     pub order: AlpacaOrder,
-
     /// Fill execution price as a decimal string (e.g. `"150.50"`).
     ///
     /// Present for `"partial_fill"` and `"fill"` events; absent for others.
     pub price: Option<String>,
-
     /// Fill quantity as a decimal string (e.g. `"40"`).
     ///
     /// For `"partial_fill"` / `"fill"`: the quantity executed in this event,
     /// not the cumulative total.
     pub qty: Option<String>,
 }
-
+/// Adapter-owned opaque inbound resume state persisted in `broker_event_cursor`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AlpacaFetchCursor {
+    pub schema_version: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rest_activity_after: Option<String>,
+    pub trade_updates: AlpacaTradeUpdatesResume,
+}
+impl AlpacaFetchCursor {
+    pub const SCHEMA_VERSION: u8 = 1;
+    pub fn cold_start_unproven(rest_activity_after: Option<String>) -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            rest_activity_after,
+            trade_updates: AlpacaTradeUpdatesResume::ColdStartUnproven,
+        }
+    }
+    pub fn live(
+        rest_activity_after: Option<String>,
+        last_message_id: impl Into<String>,
+        last_event_at: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            rest_activity_after,
+            trade_updates: AlpacaTradeUpdatesResume::Live {
+                last_message_id: last_message_id.into(),
+                last_event_at: last_event_at.into(),
+            },
+        }
+    }
+    pub fn gap_detected(
+        rest_activity_after: Option<String>,
+        last_message_id: Option<String>,
+        last_event_at: Option<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            rest_activity_after,
+            trade_updates: AlpacaTradeUpdatesResume::GapDetected {
+                last_message_id,
+                last_event_at,
+                detail: detail.into(),
+            },
+        }
+    }
+}
+/// Persisted websocket continuity state for Alpaca trade updates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AlpacaTradeUpdatesResume {
+    ColdStartUnproven,
+    Live {
+        last_message_id: String,
+        last_event_at: String,
+    },
+    GapDetected {
+        last_message_id: Option<String>,
+        last_event_at: Option<String>,
+        detail: String,
+    },
+}
 /// Alpaca order fields present in every trade-update message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlpacaOrder {
@@ -68,34 +123,27 @@ pub struct AlpacaOrder {
     /// `client_order_id` and is the value the OMS must use for cancel/replace
     /// targeting after an Ack is received.
     pub id: String,
-
     /// Caller-assigned client order ID.
     ///
     /// Set by us at submit time; maps back to `internal_order_id` in the OMS.
     /// Alpaca echoes it unchanged on every lifecycle event for this order.
     pub client_order_id: String,
-
     /// Ticker symbol, e.g. `"AAPL"`.
     pub symbol: String,
-
     /// Order direction: `"buy"` or `"sell"`.
     pub side: String,
-
     /// Current total order quantity as a decimal string.
     ///
     /// After a replace this reflects the new total (filled + new leaves).
     /// Used by the normalization layer to populate `new_total_qty` in
     /// `BrokerEvent::ReplaceAck`.
     pub qty: String,
-
     /// Cumulative filled quantity as a decimal string.
     pub filled_qty: String,
 }
-
 // ---------------------------------------------------------------------------
-// Submit types — POST /v2/orders
+// Submit types - POST /v2/orders
 // ---------------------------------------------------------------------------
-
 /// Raw Alpaca order submission request body for `POST /v2/orders`.
 #[derive(Debug, Clone, Serialize)]
 pub struct AlpacaSubmitBody {
@@ -110,10 +158,9 @@ pub struct AlpacaSubmitBody {
     /// Limit price as a decimal string. Present for limit orders only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit_price: Option<String>,
-    /// Our internal order ID — Alpaca echoes it back on every event.
+    /// Our internal order ID - Alpaca echoes it back on every event.
     pub client_order_id: String,
 }
-
 /// Raw Alpaca order submission response body from `POST /v2/orders`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AlpacaSubmitResponse {
@@ -125,17 +172,15 @@ pub struct AlpacaSubmitResponse {
     /// environments omit it in sandbox responses.
     pub created_at: Option<String>,
 }
-
 // ---------------------------------------------------------------------------
-// Replace types — PATCH /v2/orders/{order_id}
+// Replace types - PATCH /v2/orders/{order_id}
 // ---------------------------------------------------------------------------
-
 /// Raw Alpaca replace request body for `PATCH /v2/orders/{order_id}`.
 #[derive(Debug, Clone, Serialize)]
 pub struct AlpacaReplaceBody {
     /// New total quantity (filled_qty + new open leaves).
     ///
-    /// Alpaca interprets this as the new total — not open leaves.
+    /// Alpaca interprets this as the new total - not open leaves.
     /// The adapter must add filled_qty to the new-leaves value from
     /// `BrokerReplaceRequest.quantity` before sending this field.
     pub qty: String,
@@ -144,7 +189,6 @@ pub struct AlpacaReplaceBody {
     pub limit_price: Option<String>,
     pub time_in_force: String,
 }
-
 /// Raw Alpaca replace response body from `PATCH /v2/orders/{order_id}`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AlpacaReplaceResponse {
@@ -153,11 +197,9 @@ pub struct AlpacaReplaceResponse {
     /// New total quantity as echoed by Alpaca.
     pub qty: String,
 }
-
 // ---------------------------------------------------------------------------
-// Full order — GET /v2/orders/{order_id}
+// Full order - GET /v2/orders/{order_id}
 // ---------------------------------------------------------------------------
-
 /// Full Alpaca order object returned by `GET /v2/orders/{id}`.
 ///
 /// Used by `replace_order` to look up the current `filled_qty` before
@@ -176,11 +218,9 @@ pub struct AlpacaOrderFull {
     /// Cumulative filled quantity as a decimal string.
     pub filled_qty: String,
 }
-
 // ---------------------------------------------------------------------------
-// Account activities — GET /v2/account/activities (REST polling)
+// Account activities - GET /v2/account/activities (REST polling)
 // ---------------------------------------------------------------------------
-
 /// A single account activity record from `GET /v2/account/activities`.
 ///
 /// `fetch_events` uses this polling endpoint (in place of the websocket
@@ -201,27 +241,20 @@ pub struct AlpacaOrderActivity {
     ///
     /// Format: `"YYYYMMDDHHMMSS{fraction}::{uuid}"`.
     pub id: String,
-
     /// Activity type from Alpaca, e.g. `"FILL"`, `"PARTIAL_FILL"`, `"DIV"`.
     ///
     /// Only `FILL` and `PARTIAL_FILL` are processed; all others are skipped.
     pub activity_type: String,
-
     /// Alpaca broker-assigned order UUID.
     pub order_id: String,
-
     /// ISO 8601 timestamp of the transaction.
     pub transaction_time: String,
-
     /// Fill price as a decimal string.  Present for `FILL`/`PARTIAL_FILL`.
     pub price: Option<String>,
-
     /// Fill quantity for this event (delta, not cumulative).
     pub qty: Option<String>,
-
     /// Order direction: `"buy"` or `"sell"`.
     pub side: String,
-
     /// Ticker symbol.
     pub symbol: String,
 }

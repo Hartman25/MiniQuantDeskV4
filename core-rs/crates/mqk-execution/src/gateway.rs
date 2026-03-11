@@ -1,4 +1,4 @@
-//! Broker Gateway — the SINGLE choke-point for all broker operations.
+//! Broker Gateway - the SINGLE choke-point for all broker operations.
 //!
 //! # Invariants (enforced at both compile-time and runtime)
 //!
@@ -9,7 +9,7 @@
 //! **Compile-time (PATCH A2):** Gate checks are evaluated by the stored gate
 //! evaluator objects (`IG`, `RG`, `RecG`). There is no caller-supplied verdict
 //! struct with forgeable booleans. `submit / cancel / replace` accept no gate
-//! argument — the gateway evaluates each gate internally. Callers cannot inject
+//! argument - the gateway evaluates each gate internally. Callers cannot inject
 //! a "clean" verdict; they must wire in real engine state via the gate traits.
 //!
 //! **Compile-time (PATCH A3 / FC-2):** `BrokerGateway::submit` requires an
@@ -19,19 +19,18 @@
 //!
 //! **Compile-time + runtime (EB-2):** `cancel` and `replace` require an
 //! internal order ID and a `&BrokerOrderMap`. The gateway resolves the broker
-//! ID internally and returns [`UnknownOrder`] if the mapping is absent —
+//! ID internally and returns [`UnknownOrder`] if the mapping is absent -
 //! preventing cancel/replace of orders not submitted by this system.
 //!
 //! **Runtime:** Every call to `submit / cancel / replace` invokes three gate
 //! evaluators in order and refuses with `GateRefusal` if any returns `false`:
 //!
-//! 1. `IntegrityGate::is_armed()`  — system integrity is not disarmed or halted
-//! 2. `RiskGate::evaluate_gate()`  — risk engine returned Allow for this request
-//! 3. `ReconcileGate::is_clean()`  — most recent reconcile report is Clean
+//! 1. `IntegrityGate::is_armed()`  - system integrity is not disarmed or halted
+//! 2. `RiskGate::evaluate_gate()`  - risk engine returned Allow for this request
+//! 3. `ReconcileGate::is_clean()`  - most recent reconcile report is Clean
 //!
 //! Real engine implementations wire their subsystem state behind these traits.
 //! Test doubles use simple boolean stubs.
-
 use crate::broker_error::BrokerError;
 use crate::id_map::BrokerOrderMap;
 use crate::order_router::{
@@ -39,16 +38,13 @@ use crate::order_router::{
     BrokerSubmitRequest, BrokerSubmitResponse, OrderRouter,
 };
 use crate::risk_decision::{RiskDecision, RiskDenial};
-
 // FC-2: OutboxClaimToken now lives in mqk-db (the only crate whose
 // `outbox_claim_batch` function constructs it).  Re-exported below so
 // existing `use mqk_execution::OutboxClaimToken` imports continue to work.
 pub use mqk_db::OutboxClaimToken;
-
 // ---------------------------------------------------------------------------
 // Gate evaluator traits (PATCH A2)
 // ---------------------------------------------------------------------------
-
 /// Evaluates whether system integrity is currently armed (execution-allowed).
 ///
 /// Implement with real `IntegrityState` or `mqk-integrity` state in production.
@@ -60,7 +56,6 @@ pub use mqk_db::OutboxClaimToken;
 pub trait IntegrityGate {
     fn is_armed(&self) -> bool;
 }
-
 /// Evaluates whether the risk engine currently allows order submission.
 ///
 /// Implementations must be deterministic, side-effect free, and fail-closed:
@@ -75,18 +70,15 @@ pub trait IntegrityGate {
 pub trait RiskGate {
     fn evaluate_gate(&self) -> RiskDecision;
 }
-
 /// Evaluates whether the most recent reconcile report is clean.
 ///
 /// Implement with real `ReconcileReport` in production.
 pub trait ReconcileGate {
     fn is_clean(&self) -> bool;
 }
-
 // ---------------------------------------------------------------------------
 // GateRefusal
 // ---------------------------------------------------------------------------
-
 /// The reason a broker operation was refused at the gateway.
 ///
 /// Implements `std::error::Error` so it can be boxed and propagated through
@@ -103,7 +95,6 @@ pub enum GateRefusal {
     RiskBlocked(RiskDenial),
     ReconcileNotClean,
 }
-
 impl std::fmt::Display for GateRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -124,13 +115,10 @@ impl std::fmt::Display for GateRefusal {
         }
     }
 }
-
 impl std::error::Error for GateRefusal {}
-
 // ---------------------------------------------------------------------------
 // SubmitError (A3)
 // ---------------------------------------------------------------------------
-
 /// Error returned by [`BrokerGateway::submit`].
 ///
 /// Distinguishes gate refusals (request never reached the broker) from
@@ -143,7 +131,6 @@ pub enum SubmitError {
     /// The broker adapter returned a classified error.
     Broker(BrokerError),
 }
-
 impl std::fmt::Display for SubmitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -152,7 +139,6 @@ impl std::fmt::Display for SubmitError {
         }
     }
 }
-
 impl std::error::Error for SubmitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -161,20 +147,17 @@ impl std::error::Error for SubmitError {
         }
     }
 }
-
 // ---------------------------------------------------------------------------
 // UnknownOrder (EB-2)
 // ---------------------------------------------------------------------------
-
 /// Returned when `cancel` or `replace` targets an internal order ID that has
-/// no entry in the [`BrokerOrderMap`] — i.e., the order was never submitted
+/// no entry in the [`BrokerOrderMap`] - i.e., the order was never submitted
 /// by this system, or has already been deregistered (EB-2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownOrder {
     /// The internal order ID that had no broker mapping.
     pub internal_id: String,
 }
-
 impl std::fmt::Display for UnknownOrder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -184,13 +167,10 @@ impl std::fmt::Display for UnknownOrder {
         )
     }
 }
-
 impl std::error::Error for UnknownOrder {}
-
 // ---------------------------------------------------------------------------
 // BrokerGateway
 // ---------------------------------------------------------------------------
-
 /// The SINGLE choke-point through which ALL broker operations must flow.
 ///
 /// # Architecture
@@ -231,7 +211,6 @@ where
     risk: RG,
     reconcile: RecG,
 }
-
 impl<B, IG, RG, RecG> BrokerGateway<B, IG, RG, RecG>
 where
     B: BrokerAdapter,
@@ -241,7 +220,7 @@ where
 {
     /// Create a gateway wrapping the given broker adapter and gate evaluators.
     ///
-    /// `pub(crate)` — FC-3: external callers must use the production wiring path
+    /// `pub(crate)` - FC-3: external callers must use the production wiring path
     /// or the test escape hatch `BrokerGateway::for_test`.
     pub(crate) fn new(broker: B, integrity: IG, risk: RG, reconcile: RecG) -> Self {
         Self {
@@ -251,7 +230,6 @@ where
             reconcile,
         }
     }
-
     /// Test-only constructor.
     ///
     /// The name is intentionally explicit: callers outside `mqk-execution` that
@@ -261,23 +239,22 @@ where
     /// In production, a gateway is constructed by the runtime orchestration layer
     /// using real engine objects wired behind the gate traits.
     ///
-    /// FC-3: mirrors `OutboxClaimToken::for_test` — explicit naming makes the
+    /// FC-3: mirrors `OutboxClaimToken::for_test` - explicit naming makes the
     /// test/production distinction structural rather than invisible.
     ///
-    /// RT-2: gated — not available in production builds without `testkit` feature.
+    /// RT-2: gated - not available in production builds without `testkit` feature.
     #[cfg(any(test, feature = "testkit"))]
     #[doc(hidden)]
     pub fn for_test(broker: B, integrity: IG, risk: RG, reconcile: RecG) -> Self {
         Self::new(broker, integrity, risk, reconcile)
     }
-
     /// Evaluate all three gates in order.
     /// Returns the first refusal encountered, or `Ok(())` if all pass.
     ///
     /// Gate evaluation order:
-    /// 1. `IntegrityGate::is_armed()`   — system integrity / halt state
-    /// 2. `RiskGate::evaluate_gate()`   — structured risk decision (B2)
-    /// 3. `ReconcileGate::is_clean()`   — reconcile drift
+    /// 1. `IntegrityGate::is_armed()`   - system integrity / halt state
+    /// 2. `RiskGate::evaluate_gate()`   - structured risk decision (B2)
+    /// 3. `ReconcileGate::is_clean()`   - reconcile drift
     fn enforce_gates(&self) -> Result<(), GateRefusal> {
         if !self.integrity.is_armed() {
             return Err(GateRefusal::IntegrityDisarmed);
@@ -293,7 +270,6 @@ where
         }
         Ok(())
     }
-
     /// Submit a new broker order.
     ///
     /// Requires an [`OutboxClaimToken`] proving the order originated from a
@@ -301,7 +277,7 @@ where
     /// `mqk_db::outbox_claim_batch`; the only test escape hatch is
     /// `OutboxClaimToken::for_test`. The claim's `idempotency_key` is used
     /// as the broker-side `order_id`, overriding any value in `req.order_id`
-    /// (EB-3). Callers cannot inject a free-form broker order ID — it must
+    /// (EB-3). Callers cannot inject a free-form broker order ID - it must
     /// come from the outbox. All three gates must also pass.
     pub fn submit(
         &self,
@@ -320,7 +296,6 @@ where
             .route_submit(submit_req)
             .map_err(SubmitError::Broker)
     }
-
     /// Cancel a broker order.
     ///
     /// `internal_id` is the system-assigned order ID registered in `order_map`
@@ -342,7 +317,6 @@ where
             .route_cancel(broker_id)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
-
     /// Fetch new broker events since `cursor`.
     ///
     /// This is a read-only operation; gate checks are NOT applied.  The system
@@ -355,13 +329,10 @@ where
         cursor: Option<&str>,
     ) -> std::result::Result<
         (Vec<crate::order_router::BrokerEvent>, Option<String>),
-        Box<dyn std::error::Error>,
+        crate::broker_error::BrokerError,
     > {
-        self.router
-            .route_fetch_events(cursor)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+        self.router.route_fetch_events(cursor)
     }
-
     /// Replace a broker order.
     ///
     /// `internal_id` is the system-assigned order ID registered in `order_map`
@@ -392,15 +363,13 @@ where
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 }
-
 // ---------------------------------------------------------------------------
 // Idempotency derivation
 // ---------------------------------------------------------------------------
-
 /// Derive the stable `client_order_id` for a given intent ID.
 ///
-/// This is the **canonical** derivation point: every call-site — first submit
-/// or any subsequent retry — must use this function. Because the mapping is
+/// This is the **canonical** derivation point: every call-site - first submit
+/// or any subsequent retry - must use this function. Because the mapping is
 /// deterministic (same `intent_id` ⟹ same output), retries automatically
 /// reuse the same key, preventing broker-side duplicate submission.
 ///
@@ -409,11 +378,9 @@ where
 pub fn intent_id_to_client_order_id(intent_id: &str) -> String {
     intent_id.to_string()
 }
-
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,11 +388,8 @@ mod tests {
         BrokerAdapter, BrokerCancelResponse, BrokerInvokeToken, BrokerReplaceRequest,
         BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
     };
-
     // -- Broker stub ---------------------------------------------------------
-
     struct AlwaysOkBroker;
-
     impl BrokerAdapter for AlwaysOkBroker {
         fn submit_order(
             &self,
@@ -438,7 +402,6 @@ mod tests {
                 status: "ok".to_string(),
             })
         }
-
         fn cancel_order(
             &self,
             order_id: &str,
@@ -450,7 +413,6 @@ mod tests {
                 status: "ok".to_string(),
             })
         }
-
         fn replace_order(
             &self,
             req: BrokerReplaceRequest,
@@ -462,7 +424,6 @@ mod tests {
                 status: "ok".to_string(),
             })
         }
-
         fn fetch_events(
             &self,
             _cursor: Option<&str>,
@@ -474,12 +435,9 @@ mod tests {
             Ok((vec![], None))
         }
     }
-
     // -- Gate stubs ----------------------------------------------------------
-
     /// Boolean gate stub for tests. Implements all three gate traits.
     struct BoolGate(bool);
-
     impl IntegrityGate for BoolGate {
         fn is_armed(&self) -> bool {
             self.0
@@ -502,11 +460,8 @@ mod tests {
             self.0
         }
     }
-
     // -- Helpers -------------------------------------------------------------
-
     type TestGateway = BrokerGateway<AlwaysOkBroker, BoolGate, BoolGate, BoolGate>;
-
     fn make_gateway(integrity: bool, risk: bool, reconcile: bool) -> TestGateway {
         BrokerGateway::new(
             AlwaysOkBroker,
@@ -515,7 +470,6 @@ mod tests {
             BoolGate(reconcile),
         )
     }
-
     fn make_submit_req() -> BrokerSubmitRequest {
         BrokerSubmitRequest {
             order_id: "ord-1".to_string(),
@@ -527,20 +481,16 @@ mod tests {
             time_in_force: "day".to_string(),
         }
     }
-
     /// Stub claim token for unit tests. Uses the test escape hatch (FC-2).
     fn make_claim() -> OutboxClaimToken {
         OutboxClaimToken::for_test(1, "ord-1")
     }
-
     // -- Gate pass/fail tests -----------------------------------------------
-
     #[test]
     fn all_clear_submit_succeeds() {
         let res = make_gateway(true, true, true).submit(&make_claim(), make_submit_req());
         assert!(res.is_ok());
     }
-
     #[test]
     fn integrity_disarmed_blocks_submit() {
         let err = make_gateway(false, true, true)
@@ -548,7 +498,6 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("integrity disarmed"));
     }
-
     #[test]
     fn risk_blocked_blocks_submit() {
         let err = make_gateway(true, false, true)
@@ -556,7 +505,6 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("risk engine"));
     }
-
     #[test]
     fn reconcile_not_clean_blocks_submit() {
         let err = make_gateway(true, true, false)
@@ -564,7 +512,6 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("reconcile"));
     }
-
     #[test]
     fn integrity_checked_before_risk() {
         // All three gates false: integrity must be reported first.
@@ -573,7 +520,6 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("integrity disarmed"));
     }
-
     #[test]
     fn all_clear_cancel_succeeds() {
         let mut map = crate::id_map::BrokerOrderMap::new();
@@ -581,7 +527,6 @@ mod tests {
         let res = make_gateway(true, true, true).cancel("ord-1", &map);
         assert!(res.is_ok());
     }
-
     #[test]
     fn integrity_disarmed_blocks_cancel() {
         // Gate is evaluated before map lookup; empty map is acceptable.
@@ -591,7 +536,6 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("integrity disarmed"));
     }
-
     #[test]
     fn all_clear_replace_succeeds() {
         let mut map = crate::id_map::BrokerOrderMap::new();

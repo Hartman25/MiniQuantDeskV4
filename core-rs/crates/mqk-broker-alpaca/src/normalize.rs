@@ -11,15 +11,11 @@
 //! - internal_order_id is order.client_order_id (the ID we set at submit).
 //! - Price strings are parsed via mqk_execution::price_to_micros at the
 //!   wire boundary only; no f64 crosses the decision surface.
-
-use mqk_execution::{price_to_micros, BrokerEvent, Side};
-
 use crate::types::AlpacaTradeUpdate;
-
+use mqk_execution::{price_to_micros, BrokerEvent, Side};
 // ---------------------------------------------------------------------------
 // NormalizeError
 // ---------------------------------------------------------------------------
-
 /// Error returned when an Alpaca trade-update event cannot be normalized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NormalizeError {
@@ -34,7 +30,6 @@ pub enum NormalizeError {
     /// A required field was absent.
     MissingField(&'static str),
 }
-
 impl std::fmt::Display for NormalizeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -56,13 +51,10 @@ impl std::fmt::Display for NormalizeError {
         }
     }
 }
-
 impl std::error::Error for NormalizeError {}
-
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
 /// Parse a decimal quantity string to a non-negative i64.
 ///
 /// Accepts both integer ("100") and decimal ("100.0") forms because Alpaca
@@ -80,7 +72,6 @@ fn parse_qty(raw: &str, field: &'static str) -> Result<i64, NormalizeError> {
     }
     Ok(v.round() as i64)
 }
-
 /// Parse a decimal price string to integer micros.
 fn parse_price(raw: &str) -> Result<i64, NormalizeError> {
     let f: f64 = raw.parse().map_err(|_| NormalizeError::InvalidPrice {
@@ -90,7 +81,6 @@ fn parse_price(raw: &str) -> Result<i64, NormalizeError> {
         raw: raw.to_string(),
     })
 }
-
 /// Parse an Alpaca side string to Side.
 fn parse_side(s: &str) -> Result<Side, NormalizeError> {
     match s {
@@ -99,18 +89,19 @@ fn parse_side(s: &str) -> Result<Side, NormalizeError> {
         other => Err(NormalizeError::UnknownSide(other.to_string())),
     }
 }
-
 /// Build a deterministic broker_message_id from the event payload.
 ///
 /// Format: "alpaca:{order.id}:{event}:{timestamp}"
 fn make_broker_message_id(order_id: &str, event_type: &str, timestamp: &str) -> String {
     format!("alpaca:{order_id}:{event_type}:{timestamp}")
 }
-
+/// Build the deterministic deduplication key for an Alpaca trade update.
+pub fn trade_update_message_id(ev: &AlpacaTradeUpdate) -> String {
+    make_broker_message_id(&ev.order.id, &ev.event, &ev.timestamp)
+}
 // ---------------------------------------------------------------------------
 // normalize_trade_update
 // ---------------------------------------------------------------------------
-
 /// Normalize an AlpacaTradeUpdate into a canonical BrokerEvent.
 ///
 /// # Contract (A5)
@@ -129,8 +120,7 @@ fn make_broker_message_id(order_id: &str, event_type: &str, timestamp: &str) -> 
 pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, NormalizeError> {
     let broker_order_id = ev.order.id.clone();
     let internal_order_id = ev.order.client_order_id.clone();
-    let broker_message_id = make_broker_message_id(&broker_order_id, &ev.event, &ev.timestamp);
-
+    let broker_message_id = trade_update_message_id(ev);
     match ev.event.as_str() {
         // ------------------------------------------------------------------
         // Ack: order acknowledged by broker.
@@ -141,7 +131,6 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
             internal_order_id,
             broker_order_id: Some(broker_order_id),
         }),
-
         // ------------------------------------------------------------------
         // PartialFill: broker executed part of the order.
         // ev.qty is the quantity filled in THIS event (not cumulative).
@@ -155,7 +144,6 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
                 .price
                 .as_deref()
                 .ok_or(NormalizeError::MissingField("price"))?;
-
             Ok(BrokerEvent::PartialFill {
                 broker_message_id,
                 internal_order_id,
@@ -167,7 +155,6 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
                 fee_micros: 0,
             })
         }
-
         // ------------------------------------------------------------------
         // Fill: order completely filled. Same fields as PartialFill.
         // ------------------------------------------------------------------
@@ -180,7 +167,6 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
                 .price
                 .as_deref()
                 .ok_or(NormalizeError::MissingField("price"))?;
-
             Ok(BrokerEvent::Fill {
                 broker_message_id,
                 internal_order_id,
@@ -192,7 +178,6 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
                 fee_micros: 0,
             })
         }
-
         // ------------------------------------------------------------------
         // CancelAck: order canceled or expired.
         // ------------------------------------------------------------------
@@ -201,7 +186,6 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
             internal_order_id,
             broker_order_id: Some(broker_order_id),
         }),
-
         // ------------------------------------------------------------------
         // CancelReject: cancel request was rejected by the broker.
         // ------------------------------------------------------------------
@@ -210,7 +194,6 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
             internal_order_id,
             broker_order_id: Some(broker_order_id),
         }),
-
         // ------------------------------------------------------------------
         // ReplaceAck: replace was accepted.
         // order.qty in the "replaced" event is the new authoritative total.
@@ -224,7 +207,6 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
                 new_total_qty,
             })
         }
-
         // ------------------------------------------------------------------
         // ReplaceReject: replace request was rejected by the broker.
         // ------------------------------------------------------------------
@@ -233,7 +215,6 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
             internal_order_id,
             broker_order_id: Some(broker_order_id),
         }),
-
         // ------------------------------------------------------------------
         // Reject: order outright rejected by broker or exchange.
         // ------------------------------------------------------------------
@@ -242,23 +223,19 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
             internal_order_id,
             broker_order_id: Some(broker_order_id),
         }),
-
         // ------------------------------------------------------------------
         // Unknown: fail normalization; event is not persisted to OMS.
         // ------------------------------------------------------------------
         other => Err(NormalizeError::UnknownEventType(other.to_string())),
     }
 }
-
 // ---------------------------------------------------------------------------
 // Unit tests (no network, no DB, no clock)
 // ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::AlpacaOrder;
-
     fn order(id: &str, client_id: &str, symbol: &str, side: &str, qty: &str) -> AlpacaOrder {
         AlpacaOrder {
             id: id.to_string(),
@@ -269,7 +246,6 @@ mod tests {
             filled_qty: "0".to_string(),
         }
     }
-
     fn update(
         event: &str,
         ord: AlpacaOrder,
@@ -284,7 +260,6 @@ mod tests {
             qty: qty.map(str::to_string),
         }
     }
-
     #[test]
     fn new_event_produces_ack() {
         let u = update(
@@ -298,7 +273,6 @@ mod tests {
         assert_eq!(ev.broker_order_id(), Some("alpaca-uuid-001"));
         assert_eq!(ev.internal_order_id(), "internal-001");
     }
-
     #[test]
     fn unknown_event_returns_error() {
         let u = update(

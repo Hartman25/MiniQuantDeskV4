@@ -16,7 +16,6 @@
 //! | `Transport`       | → `PENDING` (reset)           | Yes (bounded)    |
 //! | `RateLimit`       | → `PENDING` (reset)           | Yes (bounded)    |
 //! | `AuthSession`     | → `FAILED` (halt + disarm)    | Never (operator) |
-
 /// Typed error class for all [`crate::BrokerAdapter`] method failures.
 ///
 /// Every adapter implementation **must** map its failure modes to one of
@@ -35,7 +34,6 @@ pub enum BrokerError {
     /// live at the broker and explicitly releases via
     /// `outbox_reset_ambiguous_to_pending`.
     AmbiguousSubmit { detail: String },
-
     /// Broker returned a hard business reject.
     ///
     /// Causes: invalid symbol, insufficient margin, quantity exceeds position
@@ -43,7 +41,6 @@ pub enum BrokerError {
     ///
     /// Do **not** retry.  The outbox row is marked `FAILED`.
     Reject { code: String, detail: String },
-
     /// Transient broker-side error.
     ///
     /// Causes: broker internal error (5xx), exchange connectivity issue,
@@ -51,10 +48,9 @@ pub enum BrokerError {
     /// at the exchange.  Treated conservatively: mark outbox row `FAILED`;
     /// requires operator review before re-dispatch.
     Transient { detail: String },
-
     /// Broker is throttling requests (HTTP 429 / equivalent).
     ///
-    /// The request was **not** queued — the broker rejected it before
+    /// The request was **not** queued - the broker rejected it before
     /// processing.  Safe to retry after a delay.  The orchestrator resets the
     /// outbox row to `PENDING` for re-dispatch on the next tick.
     ///
@@ -65,7 +61,6 @@ pub enum BrokerError {
         retry_after_ms: Option<u64>,
         detail: String,
     },
-
     /// Authentication or session credentials expired or revoked.
     ///
     /// Causes: API key invalid, OAuth token expired, session terminated.
@@ -73,7 +68,6 @@ pub enum BrokerError {
     /// Do **not** retry without operator intervention.  The outbox row is
     /// marked `FAILED` and the run is halted+disarmed.
     AuthSession { detail: String },
-
     /// TCP/TLS-level transport failure before the request reached the broker.
     ///
     /// Causes: connection refused, DNS failure, TLS handshake error.  The
@@ -83,8 +77,18 @@ pub enum BrokerError {
     /// Note: per-row bounded retry (max dispatch attempts) will be enforced
     /// once `oms_outbox.dispatch_attempt_count` is added in a future patch.
     Transport { detail: String },
+    /// Inbound lifecycle continuity could not be proven for broker events.
+    ///
+    /// Used by broker adapters whose websocket lifecycle coverage depends on a
+    /// durable adapter-owned resume state. If continuity is cold-start
+    /// unproven or a gap was detected, the adapter must fail closed and may
+    /// supply an updated opaque cursor that the runtime should persist before
+    /// returning the error.
+    InboundContinuityUnproven {
+        detail: String,
+        persist_cursor: Option<String>,
+    },
 }
-
 impl BrokerError {
     /// Whether this error class is safe to auto-retry without operator review.
     ///
@@ -99,7 +103,6 @@ impl BrokerError {
             BrokerError::Transport { .. } | BrokerError::RateLimit { .. }
         )
     }
-
     /// Whether this error requires an immediate halt+disarm of the run.
     ///
     /// `true` ⟹ the orchestrator calls `persist_halt_and_disarm` before
@@ -110,8 +113,17 @@ impl BrokerError {
             BrokerError::AmbiguousSubmit { .. } | BrokerError::AuthSession { .. }
         )
     }
+    /// Opaque cursor state that should be persisted even though the fetch
+    /// failed closed.
+    pub fn persist_cursor(&self) -> Option<&str> {
+        match self {
+            BrokerError::InboundContinuityUnproven { persist_cursor, .. } => {
+                persist_cursor.as_deref()
+            }
+            _ => None,
+        }
+    }
 }
-
 impl std::fmt::Display for BrokerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -137,8 +149,18 @@ impl std::fmt::Display for BrokerError {
             BrokerError::Transport { detail } => {
                 write!(f, "BROKER_ERROR[Transport]: {detail}")
             }
+            BrokerError::InboundContinuityUnproven {
+                detail,
+                persist_cursor,
+            } => match persist_cursor {
+                Some(cursor) => write!(
+                    f,
+                    "BROKER_ERROR[InboundContinuityUnproven] cursor={} detail={}",
+                    cursor, detail
+                ),
+                None => write!(f, "BROKER_ERROR[InboundContinuityUnproven]: {detail}"),
+            },
         }
     }
 }
-
 impl std::error::Error for BrokerError {}
