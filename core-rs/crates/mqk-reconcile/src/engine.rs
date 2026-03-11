@@ -417,3 +417,30 @@ pub fn reconcile_monotonic(
     }
     Ok(reconcile(local, broker))
 }
+
+#[cfg(test)]
+mod monotonic_tests {
+    use super::*;
+
+    #[test]
+    fn monotonic_reconcile_rejects_stale_snapshot() {
+        let local = LocalSnapshot::empty();
+        let mut watermark = SnapshotWatermark::new();
+
+        let fresh = BrokerSnapshot::empty_at(2_000);
+        reconcile_monotonic(&mut watermark, &local, &fresh)
+            .expect("fresh broker snapshot must be accepted");
+
+        let stale = BrokerSnapshot::empty_at(1_000);
+        let err = reconcile_monotonic(&mut watermark, &local, &stale)
+            .expect_err("stale broker snapshot must be rejected");
+
+        assert_eq!(
+            err.freshness,
+            SnapshotFreshness::Stale {
+                watermark_ms: 2_000,
+                got_ms: 1_000,
+            }
+        );
+    }
+}

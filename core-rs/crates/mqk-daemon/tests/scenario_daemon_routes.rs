@@ -109,10 +109,9 @@ async fn status_returns_200_with_integrity_armed_field() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn run_start_sets_state_running_and_returns_run_id() {
+async fn run_start_requires_db_backed_runtime_after_arm() {
     let st = Arc::new(state::AppState::new());
 
-    // Patch C1: arm before starting (boot is fail-closed/disarmed).
     let arm_req = Request::builder()
         .method("POST")
         .uri("/v1/integrity/arm")
@@ -127,52 +126,46 @@ async fn run_start_sets_state_running_and_returns_run_id() {
         .unwrap();
 
     let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 
     let json = parse_json(body);
-    assert_eq!(json["state"], "running");
     assert!(
-        !json["active_run_id"].is_null(),
-        "run_id should be set after start"
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("runtime DB is not configured"),
+        "body should explain DB-backed runtime requirement: {json}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/run/start is idempotent (same run_id on double-call)
+// Placeholder in-memory state must not claim a running runtime
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn run_start_is_idempotent_keeps_run_id() {
+async fn cannot_report_running_from_placeholder_state_alone() {
     let st = Arc::new(state::AppState::new());
+    {
+        let mut status = st.status.write().await;
+        status.state = "running".to_string();
+        status.active_run_id = Some(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon-placeholder-running",
+        ));
+        status.notes = Some("placeholder running".to_string());
+    }
 
-    // Patch C1: arm before starting (boot is fail-closed/disarmed).
-    let arm_req = Request::builder()
-        .method("POST")
-        .uri("/v1/integrity/arm")
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/status")
         .body(axum::body::Body::empty())
         .unwrap();
-    let _ = call(routes::build_router(Arc::clone(&st)), arm_req).await;
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
 
-    let req1 = Request::builder()
-        .method("POST")
-        .uri("/v1/run/start")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (_, body1) = call(routes::build_router(Arc::clone(&st)), req1).await;
-    let run_id_first = parse_json(body1)["active_run_id"].clone();
-
-    let req2 = Request::builder()
-        .method("POST")
-        .uri("/v1/run/start")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (_, body2) = call(routes::build_router(Arc::clone(&st)), req2).await;
-    let run_id_second = parse_json(body2)["active_run_id"].clone();
-
-    assert_eq!(
-        run_id_first, run_id_second,
-        "second start should preserve existing run_id"
-    );
+    let json = parse_json(body);
+    assert_eq!(json["state"], "idle");
+    assert!(json["active_run_id"].is_null());
 }
 
 // ---------------------------------------------------------------------------
@@ -180,26 +173,9 @@ async fn run_start_is_idempotent_keeps_run_id() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn run_stop_sets_state_idle_and_clears_run_id() {
+async fn run_stop_on_idle_remains_idle() {
     let st = Arc::new(state::AppState::new());
 
-    // Patch C1: arm before starting (boot is fail-closed/disarmed).
-    let arm_req = Request::builder()
-        .method("POST")
-        .uri("/v1/integrity/arm")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let _ = call(routes::build_router(Arc::clone(&st)), arm_req).await;
-
-    // Start first.
-    let start_req = Request::builder()
-        .method("POST")
-        .uri("/v1/run/start")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let _ = call(routes::build_router(Arc::clone(&st)), start_req).await;
-
-    // Then stop.
     let stop_req = Request::builder()
         .method("POST")
         .uri("/v1/run/stop")
@@ -210,7 +186,10 @@ async fn run_stop_sets_state_idle_and_clears_run_id() {
 
     let json = parse_json(body);
     assert_eq!(json["state"], "idle");
-    assert!(json["active_run_id"].is_null(), "run_id cleared after stop");
+    assert!(
+        json["active_run_id"].is_null(),
+        "idle stop must not invent a run_id"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -218,27 +197,9 @@ async fn run_stop_sets_state_idle_and_clears_run_id() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn run_halt_sets_state_halted_and_preserves_run_id() {
+async fn run_halt_sets_state_halted_without_active_run() {
     let st = Arc::new(state::AppState::new());
 
-    // Patch C1: arm before starting (boot is fail-closed/disarmed).
-    let arm_req = Request::builder()
-        .method("POST")
-        .uri("/v1/integrity/arm")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let _ = call(routes::build_router(Arc::clone(&st)), arm_req).await;
-
-    // Start first so there is a run_id.
-    let start_req = Request::builder()
-        .method("POST")
-        .uri("/v1/run/start")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (_, start_body) = call(routes::build_router(Arc::clone(&st)), start_req).await;
-    let run_id = parse_json(start_body)["active_run_id"].clone();
-
-    // Now halt.
     let halt_req = Request::builder()
         .method("POST")
         .uri("/v1/run/halt")
@@ -249,10 +210,8 @@ async fn run_halt_sets_state_halted_and_preserves_run_id() {
 
     let json = parse_json(body);
     assert_eq!(json["state"], "halted");
-    assert_eq!(
-        json["active_run_id"], run_id,
-        "halt should preserve run_id for GUI display"
-    );
+    assert!(json["active_run_id"].is_null());
+    assert_eq!(json["integrity_armed"], false);
 }
 
 // ---------------------------------------------------------------------------
@@ -397,10 +356,9 @@ async fn run_start_refused_403_when_integrity_disarmed() {
 }
 
 #[tokio::test]
-async fn run_start_succeeds_after_rearm() {
+async fn run_start_requires_db_after_rearm() {
     let st = Arc::new(state::AppState::new());
 
-    // Disarm.
     let disarm_req = Request::builder()
         .method("POST")
         .uri("/v1/integrity/disarm")
@@ -408,7 +366,6 @@ async fn run_start_succeeds_after_rearm() {
         .unwrap();
     let _ = call(routes::build_router(Arc::clone(&st)), disarm_req).await;
 
-    // Confirm 403 while disarmed.
     let start_req = Request::builder()
         .method("POST")
         .uri("/v1/run/start")
@@ -417,7 +374,6 @@ async fn run_start_succeeds_after_rearm() {
     let (status, _) = call(routes::build_router(Arc::clone(&st)), start_req).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // Re-arm.
     let arm_req = Request::builder()
         .method("POST")
         .uri("/v1/integrity/arm")
@@ -425,16 +381,21 @@ async fn run_start_succeeds_after_rearm() {
         .unwrap();
     let _ = call(routes::build_router(Arc::clone(&st)), arm_req).await;
 
-    // Now start must succeed.
     let start_req2 = Request::builder()
         .method("POST")
         .uri("/v1/run/start")
         .body(axum::body::Body::empty())
         .unwrap();
     let (status2, body2) = call(routes::build_router(Arc::clone(&st)), start_req2).await;
-    assert_eq!(status2, StatusCode::OK);
+    assert_eq!(status2, StatusCode::SERVICE_UNAVAILABLE);
     let json = parse_json(body2);
-    assert_eq!(json["state"], "running");
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("runtime DB is not configured"),
+        "body should explain DB-backed runtime requirement: {json}"
+    );
 }
 
 // ---------------------------------------------------------------------------

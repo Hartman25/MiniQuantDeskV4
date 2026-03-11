@@ -44,6 +44,7 @@ mqk-md = { path = "../mqk-md" }
 mqk-testkit = { path = "../mqk-testkit", optional = true }
 mqk-runtime = { path = "../mqk-runtime" }
 mqk-portfolio = { path = "../mqk-portfolio" }
+mqk-reconcile = { path = "../mqk-reconcile" }
 
 [dev-dependencies]
 assert_cmd = "2"

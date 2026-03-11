@@ -15,11 +15,16 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse()?;
 
     let pool = mqk_db::connect_from_env().await?;
+    let run = mqk_db::fetch_run(&pool, args.run_id).await?;
+    let initial_equity_micros = args.initial_cash_usd * 1_000_000;
 
     // Paper gateway via runtime wiring (NOT for_test).
-    let gateway = mqk_runtime::wiring_paper::paper_gateway_for_testkit_validation();
+    let gateway = mqk_runtime::wiring_paper::paper_gateway_for_testkit_validation(
+        &run.config_json,
+        initial_equity_micros,
+    );
 
-    let order_map = BrokerOrderMap::new();
+    let mut order_map = BrokerOrderMap::new();
     let existing = mqk_db::broker_map_load(&pool).await?;
     for (internal_id, broker_id) in existing {
         order_map.register(&internal_id, &broker_id);
@@ -34,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         gateway,
         order_map,
         std::collections::BTreeMap::new(),
-        PortfolioState::new(args.initial_cash_usd * 1_000_000),
+        PortfolioState::new(initial_equity_micros),
         args.run_id,
         "mqk-paper-loop",
         "paper",
@@ -48,6 +53,11 @@ async fn main() -> anyhow::Result<()> {
         orchestrator.tick().await.context("tick failed")?;
         tokio::time::sleep(Duration::from_millis(args.sleep_ms)).await;
     }
+
+    orchestrator
+        .release_runtime_leadership()
+        .await
+        .context("release runtime leadership failed")?;
 
     println!(
         "paper_loop_ok=true run_id={} ticks={}",

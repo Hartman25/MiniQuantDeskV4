@@ -20,7 +20,7 @@ chrono.workspace = true
 dotenvy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 uuid.workspace = true
 
 axum.workspace = true
@@ -44,6 +44,8 @@ mqk-schemas = { path = "../mqk-schemas" }
 mqk-reconcile = { path = "../mqk-reconcile" }
 mqk-runtime = { path = "../mqk-runtime" }
 mqk-execution = { path = "../mqk-execution" }
+mqk-broker-paper = { path = "../mqk-broker-paper" }
+mqk-portfolio = { path = "../mqk-portfolio" }
 
 [dev-dependencies]
 # Required for in-process Axum router testing via tower::ServiceExt::oneshot()

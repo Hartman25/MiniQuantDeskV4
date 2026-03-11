@@ -1,4 +1,4 @@
-//! ExecutionOrchestrator — the single authoritative execution path.
+//! ExecutionOrchestrator - the single authoritative execution path.
 //!
 //! # Invariant
 //!
@@ -19,39 +19,35 @@
 //! 7.  Load all unapplied inbox rows for the run.
 //! 8.  For each unapplied row: apply OMS transition, apply portfolio change,
 //!     assert capital invariants, mark applied.
-
-use std::collections::BTreeMap;
-
 use anyhow::{anyhow, Context as _};
 use mqk_db::TimeSource;
-use mqk_reconcile::{reconcile_tick, BrokerSnapshot, DriftAction, LocalSnapshot};
+use mqk_reconcile::{
+    reconcile_monotonic, BrokerSnapshot, LocalSnapshot, SnapshotWatermark, StaleBrokerSnapshot,
+};
 use sqlx::types::chrono;
 use sqlx::PgPool;
+use std::collections::BTreeMap;
 use uuid::Uuid;
-
 /// Production wall-clock time source.
 ///
 /// NOTE: wall-clock reads must not live in `mqk-db` (guards enforce that).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WallClock;
-
 impl TimeSource for WallClock {
     fn now_utc(&self) -> chrono::DateTime<chrono::Utc> {
         chrono::Utc::now()
     }
 }
-
+const RUNTIME_LEASE_TTL_SECS: i64 = 15;
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{
     BrokerAdapter, BrokerEvent, BrokerGateway, BrokerOrderMap, BrokerSubmitRequest, IntegrityGate,
     ReconcileGate, RiskGate,
 };
 use mqk_portfolio::{apply_entry, recompute_from_ledger, Fill, LedgerEntry, PortfolioState};
-
 // ---------------------------------------------------------------------------
 // ExecutionOrchestrator
 // ---------------------------------------------------------------------------
-
 /// The single authoritative execution runtime.
 ///
 /// # Construction
@@ -89,7 +85,7 @@ where
     adapter_id: String,
     /// A2: last-consumed broker event cursor; `None` = start from beginning.
     broker_cursor: Option<String>,
-    /// FC-5: injected clock — no direct `Utc::now()` in the dispatch path.
+    /// FC-5: injected clock - no direct `Utc::now()` in the dispatch path.
     time_source: TS,
     /// Patch 4A: authoritative local reconcile snapshot source.
     ///
@@ -101,6 +97,15 @@ where
     /// This is injected by the caller so runtime can enforce reconcile drift
     /// before any new dispatch occurs.
     broker_snapshot_provider: Box<dyn Fn() -> BrokerSnapshot + Send + Sync>,
+    /// DB-backed runtime leader lease holder identity.
+    runtime_holder_id: String,
+    /// Current DB lease epoch held by this runtime, if any.
+    runtime_epoch: Option<i64>,
+    /// Lease TTL in seconds for renewals.
+    runtime_lease_ttl_secs: i64,
+    /// Monotonic watermark that prevents stale broker snapshots from relaxing
+    /// reconcile state across ticks.
+    reconcile_watermark: SnapshotWatermark,
     /// B2: last structured risk gate denial seen during a tick.
     ///
     /// `None` until the first `RiskGate::evaluate_gate()` denial is captured.
@@ -108,7 +113,22 @@ where
     /// with `reason_code = denial.reason_code()`.
     last_risk_denial: Option<mqk_execution::RiskDenial>,
 }
-
+#[derive(Debug)]
+enum MonotonicReconcileError {
+    Dirty,
+    Stale(StaleBrokerSnapshot),
+}
+fn evaluate_monotonic_reconcile(
+    reconcile_watermark: &mut SnapshotWatermark,
+    local: &LocalSnapshot,
+    broker: &BrokerSnapshot,
+) -> Result<(), MonotonicReconcileError> {
+    match reconcile_monotonic(reconcile_watermark, local, broker) {
+        Ok(report) if report.is_clean() => Ok(()),
+        Ok(_report) => Err(MonotonicReconcileError::Dirty),
+        Err(stale) => Err(MonotonicReconcileError::Stale(stale)),
+    }
+}
 impl<B, IG, RG, RecG, TS> ExecutionOrchestrator<B, IG, RG, RecG, TS>
 where
     B: BrokerAdapter,
@@ -144,6 +164,7 @@ where
         local_snapshot_provider: Box<dyn Fn() -> LocalSnapshot + Send + Sync>,
         broker_snapshot_provider: Box<dyn Fn() -> BrokerSnapshot + Send + Sync>,
     ) -> Self {
+        let dispatcher_id = dispatcher_id.into();
         Self {
             pool,
             gateway,
@@ -151,23 +172,26 @@ where
             oms_orders,
             portfolio,
             run_id,
-            dispatcher_id: dispatcher_id.into(),
+            dispatcher_id: dispatcher_id.clone(),
             adapter_id: adapter_id.into(),
             broker_cursor,
             time_source,
             local_snapshot_provider,
             broker_snapshot_provider,
+            runtime_holder_id: derive_runtime_holder_id(&dispatcher_id, run_id),
+            runtime_epoch: None,
+            runtime_lease_ttl_secs: RUNTIME_LEASE_TTL_SECS,
+            reconcile_watermark: SnapshotWatermark::new(),
             last_risk_denial: None,
         }
     }
-
     /// Execute one orchestrator tick.
     ///
     /// Phases:
-    /// 0. Halt guard — refuse tick if run is HALTED in DB (I9-1).
-    /// 0b. Restart quarantine — refuse tick if ambiguous DISPATCHING / SENT
+    /// 0. Halt guard - refuse tick if run is HALTED in DB (I9-1).
+    /// 0b. Restart quarantine - refuse tick if ambiguous DISPATCHING / SENT
     ///     outbox rows exist (Patch 2).
-    /// 0c. Reconcile drift enforcement — refuse tick and persist HALT/DISARM
+    /// 0c. Reconcile drift enforcement - refuse tick and persist HALT/DISARM
     ///     if local vs broker snapshots are dirty (Patch 4A).
     /// 1. Submit pending outbox rows via the gateway.
     /// 2. Fetch + ingest new broker events into oms_inbox.
@@ -179,11 +203,11 @@ where
     /// `Err` as a halt signal and stop the tick loop.
     pub async fn tick(&mut self) -> anyhow::Result<()> {
         // ------------------------------------------------------------------
-        // Phase 0 — I9-1 HALT GUARD.
+        // Phase 0 - I9-1 HALT GUARD.
         //
         // Load run status from DB at the top of every tick.  If the run is
         // already HALTED (written by a prior tick or by a concurrent process),
-        // refuse immediately — no outbox claim, no submit, no inbox apply.
+        // refuse immediately - no outbox claim, no submit, no inbox apply.
         //
         // This ensures a persisted halt is honoured across crash+restart and
         // multi-instance scenarios where a second process calls tick() after
@@ -193,14 +217,14 @@ where
             let run = mqk_db::fetch_run(&self.pool, self.run_id).await?;
             if matches!(run.status, mqk_db::RunStatus::Halted) {
                 return Err(anyhow!(
-                    "HALT_GUARD: run {} is HALTED — tick refused (I9-1)",
+                    "HALT_GUARD: run {} is HALTED - tick refused (I9-1)",
                     self.run_id
                 ));
             }
         }
-
+        self.refresh_or_acquire_runtime_leadership().await?;
         // ------------------------------------------------------------------
-        // Phase 0b — A4: restart quarantine for ambiguous outbox rows.
+        // Phase 0b - A4: restart quarantine for ambiguous outbox rows.
         //
         // Policy (A4):
         // - AMBIGUOUS    => BrokerError::AmbiguousSubmit was returned; outcome
@@ -215,18 +239,15 @@ where
         {
             let ambiguous =
                 mqk_db::outbox_load_restart_ambiguous_for_run(&self.pool, self.run_id).await?;
-
             if !ambiguous.is_empty() {
                 let now = self.time_source.now_utc();
-
-                // Mandatory halt + disarm — both writes must succeed before returning.
+                // Mandatory halt + disarm - both writes must succeed before returning.
                 // If either write fails the error propagates immediately so the caller
                 // learns the persistence failure rather than silently losing the halt.
                 // On success the Phase-0 HALT_GUARD will block any future tick() on
                 // any orchestrator instance for this run_id.
                 // A4: use "RecoveryQuarantine" (added in migration 0017 for this purpose).
                 persist_halt_and_disarm(&self.pool, self.run_id, now, "RecoveryQuarantine").await?;
-
                 let details = summarize_ambiguous_outbox(&ambiguous);
                 return Err(anyhow!(
                     "RECOVERY_QUARANTINE: run {} has {} ambiguous outbox row(s); \
@@ -237,9 +258,8 @@ where
                 ));
             }
         }
-
         // ------------------------------------------------------------------
-        // Phase 0c — Patch 4A: reconcile drift enforcement.
+        // Phase 0c - Patch 4A: reconcile drift enforcement.
         //
         // Runtime must not dispatch new outbox rows if local and broker state
         // have drifted.  Reconcile is now an authoritative pre-dispatch gate.
@@ -253,25 +273,29 @@ where
         {
             let local = (self.local_snapshot_provider)();
             let broker = (self.broker_snapshot_provider)();
-
-            let action = reconcile_tick(&local, &broker);
-
-            if let DriftAction::HaltAndDisarm { .. } = action {
+            if let Err(err) =
+                evaluate_monotonic_reconcile(&mut self.reconcile_watermark, &local, &broker)
+            {
                 let now = self.time_source.now_utc();
-
-                // Mandatory halt + disarm — same fail-closed contract as Phase 0b.
+                // Mandatory halt + disarm - same fail-closed contract as Phase 0b.
                 persist_halt_and_disarm(&self.pool, self.run_id, now, "ReconcileDrift").await?;
-
-                return Err(anyhow!(
-                    "RECONCILE_DRIFT: run {} halted and disarmed; dispatch refused",
-                    self.run_id
-                ));
+                return match err {
+                    MonotonicReconcileError::Dirty => Err(anyhow!(
+                        "RECONCILE_DRIFT: run {} halted and disarmed; dispatch refused",
+                        self.run_id
+                    )),
+                    MonotonicReconcileError::Stale(stale) => Err(anyhow!(
+                        "RECONCILE_SNAPSHOT_STALE: run {} halted and disarmed; dispatch refused: {}",
+                        self.run_id,
+                        stale
+                    )),
+                };
             }
         }
-
         // ------------------------------------------------------------------
         // Phase 1: Claim and submit outbox rows.
         // ------------------------------------------------------------------
+        self.refresh_or_acquire_runtime_leadership().await?;
         let claimed = mqk_db::outbox_claim_batch(
             &self.pool,
             1,
@@ -279,22 +303,20 @@ where
             self.time_source.now_utc(),
         )
         .await?;
-
         for claimed_row in claimed {
+            self.refresh_or_acquire_runtime_leadership().await?;
             let order_id = claimed_row.row.idempotency_key.clone();
             let claim = claimed_row.token;
-
             // Build a submit request from the outbox order_json.
             let req = build_submit_request(&claimed_row.row)?;
             let symbol = order_json_symbol(&claimed_row.row.order_json);
             let qty = order_json_qty(&claimed_row.row.order_json);
-
-            // Step 3a: RT-5 — write DISPATCHING before calling gateway.submit().
+            // Step 3a: RT-5 - write DISPATCHING before calling gateway.submit().
             //
             // Closes crash window W4: if the process crashes between here and
             // outbox_mark_sent, the row stays DISPATCHING on restart.
             // outbox_reset_stale_claims only resets CLAIMED rows, so the order
-            // is NOT silently requeued — preventing double-submit.
+            // is NOT silently requeued - preventing double-submit.
             mqk_db::outbox_mark_dispatching(
                 &self.pool,
                 &order_id,
@@ -302,14 +324,12 @@ where
                 self.time_source.now_utc(),
             )
             .await?;
-
-            // Step 3b: submit via BrokerGateway — the ONLY submit path.
+            // Step 3b: submit via BrokerGateway - the ONLY submit path.
             //
             // A3: gateway.submit returns Result<_, SubmitError>.
             // SubmitError is Send+Sync (all inner fields are String/u64),
             // so no anyhow conversion is needed before the async dispatch.
             let submit_result = self.gateway.submit(&claim, req);
-
             let resp = match submit_result {
                 Ok(r) => r,
                 Err(e) => {
@@ -328,7 +348,7 @@ where
                         }
                         SubmitError::Gate(_) => {
                             // Other gate refusals (IntegrityDisarmed, ReconcileNotClean)
-                            // — gate refused before touching the broker.
+                            // - gate refused before touching the broker.
                             // Row is DISPATCHING but request never left.
                             // Mark FAILED; requires operator review.
                             let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
@@ -340,7 +360,7 @@ where
                                 // Row cannot re-enter dispatch without explicit operator/reconcile
                                 // release via outbox_reset_ambiguous_to_pending.
                                 let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
-                                // Halt+disarm — "AmbiguousSubmit" is now a valid DB reason
+                                // Halt+disarm - "AmbiguousSubmit" is now a valid DB reason
                                 // (migration 0020). Phase-0b quarantine blocks any restart.
                                 let _ = persist_halt_and_disarm(
                                     &self.pool,
@@ -350,7 +370,7 @@ where
                                 )
                                 .await;
                             } else {
-                                // AuthSession: credentials revoked — mark FAILED + halt.
+                                // AuthSession: credentials revoked - mark FAILED + halt.
                                 // "AuthSession" is now a valid DB reason (migration 0020).
                                 let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
                                 let _ = persist_halt_and_disarm(
@@ -381,7 +401,6 @@ where
                     return Err(anyhow!("{e}"));
                 }
             };
-
             // Step 4: atomically persist broker order ID mapping + SENT status.
             //
             // Patch 3A:
@@ -396,20 +415,17 @@ where
                 self.time_source.now_utc(),
             )
             .await?;
-
             if !sent {
                 return Err(anyhow!(
                     "broker submit succeeded but outbox row {} could not transition to SENT with broker map persistence",
                     order_id
                 ));
             }
-
             // Register in-memory state only after DB durability succeeds.
             self.order_map.register(&order_id, &resp.broker_order_id);
             self.oms_orders
                 .insert(order_id.clone(), OmsOrder::new(&order_id, &symbol, qty));
         }
-
         // ------------------------------------------------------------------
         // Phase 2: Fetch broker events and ingest into oms_inbox.
         //
@@ -421,13 +437,20 @@ where
         // from the old cursor; the inbox unique constraint silently discards
         // duplicates, so no event is double-applied.
         // ------------------------------------------------------------------
-        // Same Box<dyn Error> → anyhow::Error lift pattern used throughout.
-        let fetch_result: anyhow::Result<(Vec<BrokerEvent>, Option<String>)> = self
-            .gateway
-            .fetch_events(self.broker_cursor.as_deref())
-            .map_err(|e| anyhow!("fetch_events failed: {}", e));
-        let (events, new_cursor) = fetch_result?;
-
+        self.refresh_or_acquire_runtime_leadership().await?;
+        let (events, new_cursor) = match self.gateway.fetch_events(self.broker_cursor.as_deref()) {
+            Ok(batch) => batch,
+            Err(err) => {
+                if let Some(cursor) = err.persist_cursor() {
+                    let cursor = cursor.to_string();
+                    let now = self.time_source.now_utc();
+                    mqk_db::advance_broker_cursor(&self.pool, &self.adapter_id, &cursor, now)
+                        .await?;
+                    self.broker_cursor = Some(cursor);
+                }
+                return Err(anyhow!("fetch_events failed: {}", err));
+            }
+        };
         for event in &events {
             let msg_json = serde_json::to_value(event)?;
             mqk_db::inbox_insert_deduped(
@@ -438,18 +461,16 @@ where
             )
             .await?;
         }
-
         // Advance cursor only after all inbox persists succeed (crash-safe).
         if let Some(ref cursor) = new_cursor {
             let now = self.time_source.now_utc();
             mqk_db::advance_broker_cursor(&self.pool, &self.adapter_id, cursor, now).await?;
             self.broker_cursor = new_cursor;
         }
-
         // ------------------------------------------------------------------
         // Phase 3: Apply all unapplied inbox rows.
         //
-        // SECTION D — Durable restart replay gate.
+        // SECTION D - Durable restart replay gate.
         //
         // inbox_load_unapplied_for_run queries `applied_at_utc IS NULL`.
         // This is the authoritative restart-replay boundary, not the OMS
@@ -475,9 +496,9 @@ where
         // Restart replay safety therefore does NOT depend on OMS applied_event_ids
         // surviving a crash.  The durable applied_at_utc column is sufficient.
         // ------------------------------------------------------------------
+        self.refresh_or_acquire_runtime_leadership().await?;
         let unapplied = mqk_db::inbox_load_unapplied_for_run(&self.pool, self.run_id).await?;
-
-        // Phase 3a: RT-4 — deserialize all rows, then sort into canonical apply order.
+        // Phase 3a: RT-4 - deserialize all rows, then sort into canonical apply order.
         //
         // Sort key: (broker_message_id ASC, internal_order_id ASC, event_kind_rank ASC).
         // The DB already orders by broker_message_id ASC; the in-process sort makes
@@ -494,24 +515,23 @@ where
                 .then_with(|| a_ev.internal_order_id().cmp(b_ev.internal_order_id()))
                 .then_with(|| event_kind_rank(a_ev).cmp(&event_kind_rank(b_ev)))
         });
-
         // Phase 3b: apply in canonical order.
         for (msg_id, event) in apply_queue {
+            self.refresh_or_acquire_runtime_leadership().await?;
             let internal_id = event.internal_order_id().to_string();
-
             // Steps 6+7: OMS context guard → portfolio apply (Section C).
             //
             // apply_fill_step enforces that fill events cannot reach portfolio
             // without a proven OMS order context in memory.  On Err (unknown-
             // order fill OR illegal OMS transition), halt the run and disarm
-            // before propagating — same pattern as capital invariant violations.
+            // before propagating - same pattern as capital invariant violations.
             let fill_opt =
                 match apply_fill_step(&mut self.oms_orders, &internal_id, &event, &msg_id) {
                     Ok(f) => f,
                     Err(e) => {
                         let now = self.time_source.now_utc();
                         // Mandatory halt + disarm before surfacing the OMS error.
-                        // If the DB writes fail their error takes precedence — failing
+                        // If the DB writes fail their error takes precedence - failing
                         // to persist HALTED is more dangerous than the OMS fault itself.
                         persist_halt_and_disarm(&self.pool, self.run_id, now, "IntegrityViolation")
                             .await?;
@@ -521,8 +541,7 @@ where
                         )));
                     }
                 };
-
-            // RT-9: Phase 3b — when a live broker Ack carries the exchange-assigned
+            // RT-9: Phase 3b - when a live broker Ack carries the exchange-assigned
             // order ID, register it in the in-memory order map.  For paper brokers
             // `broker_order_id` is `None` (the ID was already registered in Phase 1
             // from `BrokerSubmitResponse.broker_order_id`).  Re-registering with the
@@ -534,16 +553,14 @@ where
             {
                 self.order_map.register(&internal_id, bid);
             }
-
-            // Apply portfolio fill — only if apply_fill_step returned Some(fill).
+            // Apply portfolio fill - only if apply_fill_step returned Some(fill).
             // None is returned for: non-fill events, non-fill events for unknown
             // orders, and no-op replays (duplicate event_id or late fill on a
             // terminal OMS order where filled_qty did not advance).
             if let Some(fill) = fill_opt {
                 apply_entry(&mut self.portfolio, LedgerEntry::Fill(fill));
             }
-
-            // Step 8: assert capital invariants — I9-1 persistence requirement.
+            // Step 8: assert capital invariants - I9-1 persistence requirement.
             //
             // On violation: persist HALTED run status and DISARMED arm state
             // before returning.  Both writes are now mandatory (not best-effort):
@@ -559,8 +576,7 @@ where
                     self.run_id
                 )));
             }
-
-            // Step 9: commit — mark the inbox row as applied.
+            // Step 9: commit - mark the inbox row as applied.
             mqk_db::inbox_mark_applied(
                 &self.pool,
                 self.run_id,
@@ -569,31 +585,27 @@ where
             )
             .await?;
         }
-
         Ok(())
     }
-
     /// Immutable view of the current portfolio state.
     pub fn portfolio(&self) -> &PortfolioState {
         &self.portfolio
     }
-
     /// Immutable view of the current OMS order map.
     pub fn oms_orders(&self) -> &BTreeMap<String, OmsOrder> {
         &self.oms_orders
     }
-
     /// B4: Collect a read-only execution pipeline snapshot.
     ///
     /// Fetches outbox / inbox / run / arm state from the DB, then overlays the
-    /// in-memory OMS order map and portfolio.  Entirely read-only — does not
+    /// in-memory OMS order map and portfolio.  Entirely read-only - does not
     /// modify any execution state or affect `tick()` semantics.
     ///
     /// Takes `&mut self` so that the spawned future is `Send` without
     /// requiring the gate/adapter type parameters to implement `Sync`.
     /// All in-memory data is extracted synchronously before the first `.await`.
     ///
-    /// The timestamp is sourced from `self.time_source` — no direct
+    /// The timestamp is sourced from `self.time_source` - no direct
     /// `Utc::now()` call ([T]-guard compliant).
     pub async fn snapshot(&mut self) -> anyhow::Result<crate::observability::ExecutionSnapshot> {
         // Extract everything needed from `self` synchronously, before any `.await`,
@@ -606,18 +618,16 @@ where
         let portfolio = crate::observability::build_portfolio_snapshot(&self.portfolio);
         // B2: extract before await so no borrow of self crosses the suspension point.
         let last_risk_denial = self.last_risk_denial.clone();
-
-        // `self` is no longer borrowed here — safe to `.await` without Sync.
+        // `self` is no longer borrowed here - safe to `.await` without Sync.
         let mut snap = crate::observability::collect_db_snapshot(&pool, run_id, now).await?;
         snap.active_orders = active_orders;
         snap.portfolio = portfolio;
-
         // B2: overlay risk denial if no higher-priority block state already exists.
         //
         // Priority (matches gateway evaluation order):
-        //   HALTED_IN_DB      — built by collect_db_snapshot (highest)
-        //   INTEGRITY_DISARMED — built by collect_db_snapshot
-        //   RISK_BLOCKED       — overlaid here (lowest)
+        //   HALTED_IN_DB      - built by collect_db_snapshot (highest)
+        //   INTEGRITY_DISARMED - built by collect_db_snapshot
+        //   RISK_BLOCKED       - overlaid here (lowest)
         if snap.system_block_state.is_none() {
             if let Some(denial) = last_risk_denial {
                 snap.system_block_state = Some(crate::observability::SystemBlockState {
@@ -627,15 +637,74 @@ where
                 });
             }
         }
-
         Ok(snap)
     }
+    pub async fn release_runtime_leadership(&mut self) -> anyhow::Result<()> {
+        let Some(epoch) = self.runtime_epoch.take() else {
+            return Ok(());
+        };
+        mqk_db::runtime_lease::release_lease(&self.pool, &self.runtime_holder_id, epoch).await
+    }
+    async fn refresh_or_acquire_runtime_leadership(&mut self) -> anyhow::Result<()> {
+        let now = self.time_source.now_utc();
+        if let Some(epoch) = self.runtime_epoch {
+            match mqk_db::runtime_lease::refresh_lease(
+                &self.pool,
+                &self.runtime_holder_id,
+                epoch,
+                now,
+                self.runtime_lease_ttl_secs,
+            )
+            .await
+            {
+                Ok(lease) => {
+                    self.runtime_epoch = Some(lease.epoch);
+                    return Ok(());
+                }
+                Err(err) => {
+                    self.runtime_epoch = None;
+                    persist_halt_and_disarm(&self.pool, self.run_id, now, "LeaderLeaseLost")
+                        .await?;
+                    return Err(anyhow!(
+                        "RUNTIME_LEASE_LOST: run {} holder={} epoch={} error={}",
+                        self.run_id,
+                        self.runtime_holder_id,
+                        epoch,
+                        err
+                    ));
+                }
+            }
+        }
+        match mqk_db::runtime_lease::acquire_lease(
+            &self.pool,
+            &self.runtime_holder_id,
+            now,
+            self.runtime_lease_ttl_secs,
+        )
+        .await?
+        {
+            mqk_db::runtime_lease::LeaseAcquireOutcome::Acquired(lease) => {
+                self.runtime_epoch = Some(lease.epoch);
+                Ok(())
+            }
+            mqk_db::runtime_lease::LeaseAcquireOutcome::HeldByOther(current) => {
+                persist_halt_and_disarm(&self.pool, self.run_id, now, "LeaderLeaseUnavailable")
+                    .await?;
+                Err(anyhow!(
+                    "RUNTIME_LEASE_UNAVAILABLE: run {} refused holder={} current_holder={} current_epoch={} expires_at={}",
+                    self.run_id,
+                    self.runtime_holder_id,
+                    current.holder_id,
+                    current.epoch,
+                    current.lease_expires_at.to_rfc3339(),
+                ))
+            }
+        }
+    }
 }
-
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
 /// Build a `BrokerSubmitRequest` from a claimed outbox row.
 fn build_submit_request(row: &mqk_db::OutboxRow) -> anyhow::Result<BrokerSubmitRequest> {
     let json = &row.order_json;
@@ -655,12 +724,10 @@ fn build_submit_request(row: &mqk_db::OutboxRow) -> anyhow::Result<BrokerSubmitR
         time_in_force: json["time_in_force"].as_str().unwrap_or("day").to_string(),
     })
 }
-
 /// Extract symbol from outbox order_json, defaulting to "UNKNOWN".
 fn order_json_symbol(json: &serde_json::Value) -> String {
     json["symbol"].as_str().unwrap_or("UNKNOWN").to_string()
 }
-
 /// Extract ABSOLUTE quantity from outbox order_json, defaulting to 0.
 ///
 /// P1-02:
@@ -669,7 +736,6 @@ fn order_json_symbol(json: &serde_json::Value) -> String {
 fn order_json_qty(json: &serde_json::Value) -> i64 {
     json["quantity"].as_i64().unwrap_or(0).saturating_abs()
 }
-
 /// Extract side from outbox order_json.
 ///
 /// Preferred contract:
@@ -691,7 +757,6 @@ fn order_json_side(json: &serde_json::Value) -> mqk_execution::Side {
         }
     }
 }
-
 /// Map a `BrokerEvent` to the corresponding `OmsEvent`.
 fn broker_event_to_oms_event(event: &BrokerEvent) -> OmsEvent {
     match event {
@@ -711,7 +776,6 @@ fn broker_event_to_oms_event(event: &BrokerEvent) -> OmsEvent {
         BrokerEvent::Reject { .. } => OmsEvent::Reject,
     }
 }
-
 /// Extract a portfolio `Fill` from a `BrokerEvent`, if the event carries fill data.
 ///
 /// Returns `None` for non-fill events (Ack, CancelAck, etc.).
@@ -752,7 +816,6 @@ fn broker_event_to_fill(event: &BrokerEvent) -> Option<Fill> {
         _ => None,
     }
 }
-
 /// RT-4: Canonical rank for `BrokerEvent` variants in the deterministic apply queue.
 ///
 /// Ordering intent: Ack before fills before cancel/replace; within a kind the
@@ -771,7 +834,6 @@ fn event_kind_rank(event: &BrokerEvent) -> u8 {
         BrokerEvent::Reject { .. } => 7,
     }
 }
-
 /// Assert that the incremental portfolio state is consistent with a full
 /// recompute from the ledger.
 ///
@@ -785,7 +847,6 @@ fn event_kind_rank(event: &BrokerEvent) -> u8 {
 fn check_capital_invariants(portfolio: &PortfolioState) -> anyhow::Result<()> {
     let (recomputed_cash, recomputed_pnl, recomputed_positions) =
         recompute_from_ledger(portfolio.initial_cash_micros, &portfolio.ledger);
-
     if recomputed_cash != portfolio.cash_micros {
         return Err(anyhow!(
             "INVARIANT_VIOLATED: cash_micros mismatch: recomputed={} state={}",
@@ -807,7 +868,6 @@ fn check_capital_invariants(portfolio: &PortfolioState) -> anyhow::Result<()> {
     }
     Ok(())
 }
-
 fn summarize_ambiguous_outbox(rows: &[mqk_db::AmbiguousOutboxRow]) -> String {
     rows.iter()
         .map(|r| match &r.broker_order_id {
@@ -817,11 +877,21 @@ fn summarize_ambiguous_outbox(rows: &[mqk_db::AmbiguousOutboxRow]) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
-
+fn derive_runtime_holder_id(dispatcher_id: &str, run_id: Uuid) -> String {
+    let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "UNKNOWN_HOST".to_string());
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "UNKNOWN_USER".to_string());
+    format!(
+        "{}|{}|{}|pid={}|run={}",
+        dispatcher_id,
+        host,
+        user,
+        std::process::id(),
+        run_id
+    )
+}
 // ---------------------------------------------------------------------------
-// Internal helper — mandatory halt + disarm persistence
+// Internal helper - mandatory halt + disarm persistence
 // ---------------------------------------------------------------------------
-
 /// Write `runs.status = 'HALTED'` and `sys_arm_state = 'DISARMED'` to the DB
 /// as mandatory (not best-effort) operations.
 ///
@@ -848,31 +918,28 @@ async fn persist_halt_and_disarm(
 ) -> anyhow::Result<()> {
     mqk_db::halt_run(pool, run_id, now).await.with_context(|| {
         format!(
-            "HALT_PERSISTENCE_FAILURE: run {run_id} — runs.status=HALTED could not be \
+            "HALT_PERSISTENCE_FAILURE: run {run_id} - runs.status=HALTED could not be \
                  written (reason={reason}); Phase-0 halt guard on restart is NOT guaranteed"
         )
     })?;
-
     mqk_db::persist_arm_state(pool, "DISARMED", Some(reason))
         .await
         .with_context(|| {
             format!(
-                "ARM_STATE_PERSISTENCE_FAILURE: run {run_id} — sys_arm_state=DISARMED could \
+                "ARM_STATE_PERSISTENCE_FAILURE: run {run_id} - sys_arm_state=DISARMED could \
                  not be written (reason={reason}); runs.status=HALTED was persisted"
             )
         })?;
-
     Ok(())
 }
-
-/// Section C — Restart / Unknown-Order Fill Safety.
+/// Section C - Restart / Unknown-Order Fill Safety.
 ///
 /// Apply OMS transition and return the portfolio fill to apply (if any).
 ///
 /// # Invariants enforced
 ///
 /// - Fill events (`PartialFill`, `Fill`) **must** have a corresponding OMS
-///   order in memory. If none is found, `Err` is returned immediately —
+///   order in memory. If none is found, `Err` is returned immediately -
 ///   the caller must halt and disarm before propagating.
 ///
 /// - Non-fill events (Ack, CancelAck, etc.) for unknown orders are silently
@@ -897,7 +964,6 @@ fn apply_fill_step(
         BrokerEvent::PartialFill { .. } | BrokerEvent::Fill { .. }
     );
     let oms_event = broker_event_to_oms_event(event);
-
     match oms_orders.get_mut(internal_id) {
         Some(order) => {
             let pre_qty = order.filled_qty;
@@ -917,35 +983,31 @@ fn apply_fill_step(
             // a proven OMS order context in memory.  Fail closed.
             return Err(anyhow!(
                 "UNKNOWN_ORDER_FILL: broker_message_id='{}' internal_order_id='{}' \
-                 — fill event has no OMS order context in memory; \
+                 - fill event has no OMS order context in memory; \
                  refusing portfolio mutation (Section C)",
                 msg_id,
                 internal_id
             ));
         }
         None => {
-            // Non-fill event for unknown order — silently skipped.
+            // Non-fill event for unknown order - silently skipped.
             // No OMS transition, no portfolio effect.
         }
     }
-
     Ok(broker_event_to_fill(event))
 }
-
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use ::chrono::TimeZone;
     #[test]
     fn invariant_check_passes_on_fresh_portfolio() {
         let pf = PortfolioState::new(1_000_000_000_i64);
         check_capital_invariants(&pf).unwrap();
     }
-
     #[test]
     fn invariant_check_detects_cash_corruption() {
         let mut pf = PortfolioState::new(1_000_000_000_i64);
@@ -953,7 +1015,6 @@ mod tests {
         pf.cash_micros = 999_999_999;
         assert!(check_capital_invariants(&pf).is_err());
     }
-
     #[test]
     fn invariant_check_passes_after_apply_entry() {
         use mqk_portfolio::{Fill, LedgerEntry, Side};
@@ -963,7 +1024,6 @@ mod tests {
         // After apply_entry (which appends to ledger), invariant must hold.
         check_capital_invariants(&pf).unwrap();
     }
-
     #[test]
     fn broker_event_accessors() {
         use mqk_execution::Side;
@@ -980,7 +1040,6 @@ mod tests {
         assert_eq!(ev.broker_message_id(), "msg-1");
         assert_eq!(ev.internal_order_id(), "ord-1");
     }
-
     #[test]
     fn broker_event_to_fill_converts_correctly() {
         use mqk_execution::Side;
@@ -1000,7 +1059,6 @@ mod tests {
         assert_eq!(fill.fee_micros, 1_000);
         assert_eq!(fill.side, mqk_portfolio::Side::Sell);
     }
-
     #[test]
     fn broker_event_to_fill_returns_none_for_ack() {
         let ev = BrokerEvent::Ack {
@@ -1010,7 +1068,6 @@ mod tests {
         };
         assert!(broker_event_to_fill(&ev).is_none());
     }
-
     #[test]
     fn order_json_qty_preserves_positive_buy_quantity() {
         let json = serde_json::json!({
@@ -1021,25 +1078,21 @@ mod tests {
         assert_eq!(order_json_qty(&json), 100);
         assert!(matches!(order_json_side(&json), mqk_execution::Side::Buy));
     }
-
     #[test]
     fn order_json_qty_normalizes_negative_sell_quantity_for_oms_registration() {
         let json = serde_json::json!({
             "symbol": "SPY",
             "quantity": -100
         });
-
         let qty = order_json_qty(&json);
         assert_eq!(qty, 100, "OMS registration quantity must be absolute");
         assert!(matches!(order_json_side(&json), mqk_execution::Side::Sell));
-
         let order = OmsOrder::new("ord-sell", "SPY", qty);
         assert_eq!(
             order.total_qty, 100,
             "negative signed sell quantity must not leak into OmsOrder::new"
         );
     }
-
     #[test]
     fn explicit_side_overrides_legacy_sign_in_submit_request_building() {
         let row = mqk_db::OutboxRow {
@@ -1061,12 +1114,10 @@ mod tests {
             dispatching_at_utc: None,
             dispatch_attempt_id: None,
         };
-
         let req = build_submit_request(&row).expect("submit request must build");
         assert!(matches!(req.side, mqk_execution::Side::Sell));
         assert_eq!(req.quantity, 100);
     }
-
     #[test]
     fn broker_event_to_fill_rejects_zero_qty() {
         use mqk_execution::Side;
@@ -1082,7 +1133,6 @@ mod tests {
         };
         assert!(broker_event_to_fill(&ev).is_none());
     }
-
     #[test]
     fn oms_event_mapping_covers_all_variants() {
         use mqk_execution::Side;
@@ -1144,7 +1194,6 @@ mod tests {
             let _ = broker_event_to_oms_event(ev);
         }
     }
-
     #[test]
     fn event_kind_rank_is_strictly_ordered() {
         use mqk_execution::Side;
@@ -1211,7 +1260,6 @@ mod tests {
             "each variant must have a unique rank"
         );
     }
-
     #[test]
     fn apply_queue_sort_is_canonical() {
         use mqk_execution::Side;
@@ -1244,11 +1292,9 @@ mod tests {
             "Ack (rank 0) must sort before Fill (rank 2) on same message/order"
         );
     }
-
     // -----------------------------------------------------------------------
-    // Section C — apply_fill_step unit tests
+    // Section C - apply_fill_step unit tests
     // -----------------------------------------------------------------------
-
     fn make_ack_event(internal_id: &str, msg_id: &str) -> BrokerEvent {
         BrokerEvent::Ack {
             broker_message_id: msg_id.to_string(),
@@ -1256,7 +1302,6 @@ mod tests {
             broker_order_id: None,
         }
     }
-
     fn make_partial_fill_event(internal_id: &str, msg_id: &str, qty: i64) -> BrokerEvent {
         BrokerEvent::PartialFill {
             broker_message_id: msg_id.to_string(),
@@ -1269,7 +1314,6 @@ mod tests {
             fee_micros: 0,
         }
     }
-
     fn make_fill_event(internal_id: &str, msg_id: &str, qty: i64) -> BrokerEvent {
         BrokerEvent::Fill {
             broker_message_id: msg_id.to_string(),
@@ -1282,8 +1326,7 @@ mod tests {
             fee_micros: 0,
         }
     }
-
-    /// Section C — T1.
+    /// Section C - T1.
     /// A Fill event for an order not present in oms_orders must return
     /// UNKNOWN_ORDER_FILL and never produce a portfolio fill.
     #[test]
@@ -1297,10 +1340,9 @@ mod tests {
             "expected UNKNOWN_ORDER_FILL, got: {err}"
         );
     }
-
-    /// Section C — T2.
+    /// Section C - T2.
     /// A PartialFill event for an order not present in oms_orders must also
-    /// return UNKNOWN_ORDER_FILL — the rule is not limited to final fills.
+    /// return UNKNOWN_ORDER_FILL - the rule is not limited to final fills.
     #[test]
     fn unknown_order_partial_fill_is_rejected() {
         let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
@@ -1312,8 +1354,7 @@ mod tests {
             "expected UNKNOWN_ORDER_FILL, got: {err}"
         );
     }
-
-    /// Section C — T3.
+    /// Section C - T3.
     /// A Fill event for a known order must succeed, return Some(fill) with
     /// correct qty, and advance the OMS filled_qty.
     #[test]
@@ -1329,8 +1370,7 @@ mod tests {
         // OMS state must have advanced.
         assert_eq!(oms["ord-1"].filled_qty, 100);
     }
-
-    /// Section C — T4.
+    /// Section C - T4.
     /// An OMS-level transition error (fill would overflow total_qty) must
     /// surface as Err containing "OMS transition error" and must NOT advance
     /// filled_qty, preventing any downstream portfolio mutation.
@@ -1343,7 +1383,6 @@ mod tests {
             .apply(&OmsEvent::PartialFill { delta_qty: 60 }, Some("pf-setup"))
             .unwrap();
         oms.insert("ord-2".to_string(), order);
-
         // Fill(60) when filled=60, total=100 → 60+60=120 ≠ 100 → TransitionError.
         let ev = make_fill_event("ord-2", "fill-overflow", 60);
         let result = apply_fill_step(&mut oms, "ord-2", &ev, "fill-overflow");
@@ -1355,8 +1394,7 @@ mod tests {
         // filled_qty must NOT have advanced on rejection.
         assert_eq!(oms["ord-2"].filled_qty, 60);
     }
-
-    /// Section C — T5.
+    /// Section C - T5.
     /// A duplicate fill replay (same msg_id applied twice to the same order)
     /// must return Ok(Some(fill)) on the first call and Ok(None) on the second.
     /// filled_qty must not advance on the duplicate.
@@ -1364,16 +1402,13 @@ mod tests {
     fn duplicate_fill_replay_does_not_double_apply_portfolio() {
         let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
         oms.insert("ord-3".to_string(), OmsOrder::new("ord-3", "SPY", 100));
-
         let ev = make_partial_fill_event("ord-3", "pf-msg-dup", 60);
-
         // First application: fill goes through.
         let first = apply_fill_step(&mut oms, "ord-3", &ev, "pf-msg-dup")
             .unwrap()
             .expect("first application must return Some(fill)");
         assert_eq!(first.qty, 60);
         assert_eq!(oms["ord-3"].filled_qty, 60);
-
         // Second application with the same msg_id: OMS dedup → no state change.
         let second = apply_fill_step(&mut oms, "ord-3", &ev, "pf-msg-dup").unwrap();
         assert!(
@@ -1383,10 +1418,9 @@ mod tests {
         // filled_qty must not have advanced.
         assert_eq!(oms["ord-3"].filled_qty, 60);
     }
-
-    /// Section C — T6.
+    /// Section C - T6.
     /// A non-fill event (Ack) for an order not present in oms_orders must
-    /// return Ok(None) — not Err.  Unknown-order Acks are silently skipped
+    /// return Ok(None) - not Err.  Unknown-order Acks are silently skipped
     /// because they carry no portfolio effect and can arrive legitimately after
     /// a crash during restart recovery.
     #[test]
@@ -1399,16 +1433,14 @@ mod tests {
             "non-fill event for unknown order must return Ok(None), not Err"
         );
     }
-
     // -----------------------------------------------------------------------
-    // Section D — Restart replay safety unit tests
+    // Section D - Restart replay safety unit tests
     //
     // These tests prove that restart replay safety is gated by the durable
     // inbox applied_at_utc column (modelled here as queue membership), NOT
     // by the OMS in-memory applied_event_ids set.
     // -----------------------------------------------------------------------
-
-    /// Section D — T1.  Primary restart replay safety proof.
+    /// Section D - T1.  Primary restart replay safety proof.
     ///
     /// A fill that was durably marked applied (applied_at_utc IS NOT NULL)
     /// before crash is excluded from inbox_load_unapplied_for_run.  Modelled
@@ -1420,8 +1452,7 @@ mod tests {
     #[test]
     fn applied_fill_absent_from_recovery_queue_leaves_portfolio_clean() {
         let initial_cash = 1_000_000_000_i64;
-
-        // Fresh restart: OmsOrder rebuilt from outbox — applied_event_ids is empty.
+        // Fresh restart: OmsOrder rebuilt from outbox - applied_event_ids is empty.
         // The fill that was applied before crash is NOT in the apply_queue
         // because inbox_load_unapplied_for_run excluded it (applied_at_utc IS NOT NULL).
         let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
@@ -1429,9 +1460,7 @@ mod tests {
             "ord-pre-crash".to_string(),
             OmsOrder::new("ord-pre-crash", "SPY", 100),
         );
-
         let apply_queue: Vec<(String, BrokerEvent)> = vec![]; // applied fill filtered by DB
-
         let mut portfolio = PortfolioState::new(initial_cash);
         for (msg_id, event) in &apply_queue {
             let internal_id = event.internal_order_id().to_string();
@@ -1440,7 +1469,6 @@ mod tests {
                 apply_entry(&mut portfolio, LedgerEntry::Fill(fill));
             }
         }
-
         assert_eq!(
             portfolio.cash_micros, initial_cash,
             "applied fill absent from recovery queue must not re-mutate portfolio cash after restart"
@@ -1450,15 +1478,14 @@ mod tests {
             "fresh OmsOrder must not advance filled_qty when recovery queue is empty"
         );
     }
-
-    /// Section D — T2.  Unapplied fill recovers exactly once with fresh OMS state.
+    /// Section D - T2.  Unapplied fill recovers exactly once with fresh OMS state.
     ///
     /// Simulates the W6 crash window: fill was inbox-inserted but mark_applied
     /// did not complete before crash.  After restart the OmsOrder is rebuilt
     /// fresh (applied_event_ids empty) and the fill IS in the recovery queue.
     ///
-    /// First apply: Ok(Some(fill)) — portfolio mutated (correct recovery).
-    /// Second delivery of the same msg_id within the session: Ok(None) —
+    /// First apply: Ok(Some(fill)) - portfolio mutated (correct recovery).
+    /// Second delivery of the same msg_id within the session: Ok(None) -
     /// blocked by the within-session OMS dedup (applied_event_ids updated
     /// by the first apply).
     #[test]
@@ -1466,22 +1493,18 @@ mod tests {
         let initial_cash = 1_000_000_000_000_i64;
         let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
         oms.insert("ord-w6".to_string(), OmsOrder::new("ord-w6", "SPY", 100));
-
         let ev = make_fill_event("ord-w6", "crash-window-fill", 100);
-
         // First recovery apply: fresh applied_event_ids, fill is in queue.
         let fill_opt = apply_fill_step(&mut oms, "ord-w6", &ev, "crash-window-fill").unwrap();
         let mut portfolio = PortfolioState::new(initial_cash);
         if let Some(fill) = fill_opt {
             apply_entry(&mut portfolio, LedgerEntry::Fill(fill));
         }
-
         assert_ne!(
             portfolio.cash_micros, initial_cash,
             "unapplied fill must apply once and mutate portfolio on crash-window recovery"
         );
         assert_eq!(oms["ord-w6"].filled_qty, 100);
-
         // Second delivery of same msg_id within recovery session:
         // OMS applied_event_ids now contains "crash-window-fill" → Ok(None).
         let cash_before_second = portfolio.cash_micros;
@@ -1494,18 +1517,17 @@ mod tests {
             "within-session duplicate fill delivery must not mutate portfolio a second time"
         );
     }
-
-    /// Section D — T3.  Durable applied gate is queue membership, not OMS memory.
+    /// Section D - T3.  Durable applied gate is queue membership, not OMS memory.
     ///
     /// Two fills for the same order:
-    ///   F1 (delta_qty=40) — applied before crash, NOT in apply_queue.
-    ///   F2 (delta_qty=60) — unapplied, IN apply_queue.
+    ///   F1 (delta_qty=40) - applied before crash, NOT in apply_queue.
+    ///   F2 (delta_qty=60) - unapplied, IN apply_queue.
     ///
     /// OmsOrder is fresh after restart (applied_event_ids empty, filled_qty=0).
     /// Only F2 must reach portfolio; F1's absence from the queue is the fence.
     ///
     /// Proves: which fills mutate portfolio after restart is determined by
-    /// inbox_load_unapplied_for_run output alone — not by OMS in-memory state.
+    /// inbox_load_unapplied_for_run output alone - not by OMS in-memory state.
     #[test]
     fn durable_applied_gate_is_queue_membership_not_oms_memory() {
         let initial_cash = 1_000_000_000_000_i64;
@@ -1515,13 +1537,11 @@ mod tests {
             "ord-split".to_string(),
             OmsOrder::new("ord-split", "SPY", 100),
         );
-
         // Only F2 is in the recovery queue; F1 was filtered by the DB.
         let apply_queue: Vec<(String, BrokerEvent)> = vec![(
             "f2".to_string(),
             make_partial_fill_event("ord-split", "f2", 60),
         )];
-
         let mut portfolio = PortfolioState::new(initial_cash);
         for (msg_id, event) in &apply_queue {
             let internal_id = event.internal_order_id().to_string();
@@ -1530,7 +1550,6 @@ mod tests {
                 apply_entry(&mut portfolio, LedgerEntry::Fill(fill));
             }
         }
-
         // OMS shows only F2's contribution (60), not F1+F2 (100).
         assert_eq!(
             oms["ord-split"].filled_qty,
@@ -1545,8 +1564,7 @@ mod tests {
         // If F1 had been double-applied, filled_qty would be 100 not 60.
         // The OMS assertion above is the definitive proof.
     }
-
-    /// Section D — T4.  Empty applied_event_ids does not bypass restart replay protection.
+    /// Section D - T4.  Empty applied_event_ids does not bypass restart replay protection.
     ///
     /// Multiple orders rebuilt fresh after restart (all applied_event_ids empty).
     /// All fills for those orders were durably applied before crash → none appear
@@ -1558,17 +1576,14 @@ mod tests {
     #[test]
     fn empty_oms_applied_event_ids_does_not_bypass_restart_replay_protection() {
         let initial_cash = 1_000_000_000_i64;
-
         // Multiple orders with fresh applied_event_ids (restart).
         let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
         oms.insert("ord-a".to_string(), OmsOrder::new("ord-a", "AAPL", 50));
         oms.insert("ord-b".to_string(), OmsOrder::new("ord-b", "MSFT", 80));
-
         // All fills were applied before crash → not in recovery queue.
         // The empty OmsOrder applied_event_ids cannot cause them to be re-applied
         // because they never reach apply_fill_step.
         let apply_queue: Vec<(String, BrokerEvent)> = vec![];
-
         let mut portfolio = PortfolioState::new(initial_cash);
         for (msg_id, event) in &apply_queue {
             let internal_id = event.internal_order_id().to_string();
@@ -1577,7 +1592,6 @@ mod tests {
                 apply_entry(&mut portfolio, LedgerEntry::Fill(fill));
             }
         }
-
         assert_eq!(
             portfolio.cash_micros, initial_cash,
             "empty applied_event_ids must not bypass restart replay protection \
@@ -1587,5 +1601,271 @@ mod tests {
             portfolio.positions.is_empty(),
             "no positions must be created when all fills were durably applied pre-crash"
         );
+    }
+    #[derive(Clone)]
+    struct MutableClock {
+        now: std::sync::Arc<std::sync::Mutex<chrono::DateTime<chrono::Utc>>>,
+    }
+    impl MutableClock {
+        fn new(now: chrono::DateTime<chrono::Utc>) -> Self {
+            Self {
+                now: std::sync::Arc::new(std::sync::Mutex::new(now)),
+            }
+        }
+        fn set(&self, now: chrono::DateTime<chrono::Utc>) {
+            *self.now.lock().expect("clock lock") = now;
+        }
+    }
+    impl mqk_db::TimeSource for MutableClock {
+        fn now_utc(&self) -> chrono::DateTime<chrono::Utc> {
+            *self.now.lock().expect("clock lock")
+        }
+    }
+    struct NoopBroker;
+    impl mqk_execution::BrokerAdapter for NoopBroker {
+        fn submit_order(
+            &self,
+            req: mqk_execution::BrokerSubmitRequest,
+            _token: &mqk_execution::BrokerInvokeToken,
+        ) -> Result<mqk_execution::BrokerSubmitResponse, mqk_execution::BrokerError> {
+            Ok(mqk_execution::BrokerSubmitResponse {
+                broker_order_id: format!("broker-{}", req.order_id),
+                submitted_at: 1,
+                status: "ok".to_string(),
+            })
+        }
+        fn cancel_order(
+            &self,
+            order_id: &str,
+            _token: &mqk_execution::BrokerInvokeToken,
+        ) -> Result<mqk_execution::BrokerCancelResponse, mqk_execution::BrokerError> {
+            Ok(mqk_execution::BrokerCancelResponse {
+                broker_order_id: order_id.to_string(),
+                cancelled_at: 1,
+                status: "ok".to_string(),
+            })
+        }
+        fn replace_order(
+            &self,
+            req: mqk_execution::BrokerReplaceRequest,
+            _token: &mqk_execution::BrokerInvokeToken,
+        ) -> Result<mqk_execution::BrokerReplaceResponse, mqk_execution::BrokerError> {
+            Ok(mqk_execution::BrokerReplaceResponse {
+                broker_order_id: req.broker_order_id,
+                replaced_at: 1,
+                status: "ok".to_string(),
+            })
+        }
+        fn fetch_events(
+            &self,
+            _cursor: Option<&str>,
+            _token: &mqk_execution::BrokerInvokeToken,
+        ) -> Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), mqk_execution::BrokerError>
+        {
+            Ok((Vec::new(), None))
+        }
+    }
+    #[derive(Clone, Copy)]
+    struct AllowGate;
+    impl mqk_execution::IntegrityGate for AllowGate {
+        fn is_armed(&self) -> bool {
+            true
+        }
+    }
+    impl mqk_execution::RiskGate for AllowGate {
+        fn evaluate_gate(&self) -> mqk_execution::RiskDecision {
+            mqk_execution::RiskDecision::Allow
+        }
+    }
+    impl mqk_execution::ReconcileGate for AllowGate {
+        fn is_clean(&self) -> bool {
+            true
+        }
+    }
+    type LeaseTestOrchestrator =
+        ExecutionOrchestrator<NoopBroker, AllowGate, AllowGate, AllowGate, MutableClock>;
+    async fn runtime_test_pool() -> PgPool {
+        let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
+            panic!(
+                "DB tests require MQK_DATABASE_URL; run: \
+                 MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
+                 cargo test -p mqk-runtime runtime_ -- --include-ignored"
+            )
+        });
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect");
+        mqk_db::migrate(&pool).await.expect("migrate");
+        sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("cleanup runtime_leader_lease");
+        sqlx::query("DELETE FROM sys_arm_state WHERE sentinel_id = 1")
+            .execute(&pool)
+            .await
+            .expect("cleanup sys_arm_state");
+        pool
+    }
+    fn runtime_ts(seconds: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc
+            .timestamp_opt(seconds, 0)
+            .single()
+            .expect("valid timestamp")
+    }
+    async fn make_running_run(pool: &PgPool, started_at: chrono::DateTime<chrono::Utc>) -> Uuid {
+        let run_id = Uuid::new_v4();
+        mqk_db::insert_run(
+            pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: format!("runtime-test-{}", run_id),
+                mode: "PAPER".to_string(),
+                started_at_utc: started_at,
+                git_hash: "TEST".to_string(),
+                config_hash: format!("cfg-{}", run_id),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "TESTHOST".to_string(),
+            },
+        )
+        .await
+        .expect("insert run");
+        mqk_db::arm_run(pool, run_id).await.expect("arm run");
+        mqk_db::begin_run(pool, run_id).await.expect("begin run");
+        run_id
+    }
+    fn make_lease_test_orchestrator(
+        pool: PgPool,
+        run_id: Uuid,
+        clock: MutableClock,
+    ) -> LeaseTestOrchestrator {
+        ExecutionOrchestrator::new(
+            pool,
+            mqk_execution::BrokerGateway::for_test(NoopBroker, AllowGate, AllowGate, AllowGate),
+            mqk_execution::BrokerOrderMap::new(),
+            BTreeMap::new(),
+            PortfolioState::new(0),
+            run_id,
+            "runtime-lease-test",
+            "paper",
+            None,
+            clock,
+            Box::new(mqk_reconcile::LocalSnapshot::empty),
+            Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
+        )
+    }
+    fn broker_snapshot_with_position(
+        fetched_at_ms: i64,
+        qty: i64,
+    ) -> mqk_reconcile::BrokerSnapshot {
+        let mut broker = mqk_reconcile::BrokerSnapshot::empty_at(fetched_at_ms);
+        broker.positions.insert("SPY".to_string(), qty);
+        broker
+    }
+    #[test]
+    fn runtime_reconcile_gate_remains_dirty_after_stale_snapshot() {
+        let mut watermark = SnapshotWatermark::new();
+        let mut local = mqk_reconcile::LocalSnapshot::empty();
+        local.positions.insert("SPY".to_string(), 100);
+        let dirty = broker_snapshot_with_position(2_000, 200);
+        let err = evaluate_monotonic_reconcile(&mut watermark, &local, &dirty)
+            .expect_err("fresh dirty snapshot must block dispatch");
+        assert!(matches!(err, MonotonicReconcileError::Dirty));
+        let stale_clean = broker_snapshot_with_position(1_000, 100);
+        let err = evaluate_monotonic_reconcile(&mut watermark, &local, &stale_clean)
+            .expect_err("stale snapshot must not clear dirty state");
+        assert!(matches!(
+            err,
+            MonotonicReconcileError::Stale(StaleBrokerSnapshot {
+                freshness: mqk_reconcile::SnapshotFreshness::Stale { .. }
+            })
+        ));
+    }
+    #[test]
+    fn placeholder_snapshot_path_fails_closed() {
+        let mut watermark = SnapshotWatermark::new();
+        let local = mqk_reconcile::LocalSnapshot::empty();
+        let broker = mqk_reconcile::BrokerSnapshot::empty();
+        let err = evaluate_monotonic_reconcile(&mut watermark, &local, &broker)
+            .expect_err("placeholder broker snapshot must fail closed");
+        assert!(matches!(
+            err,
+            MonotonicReconcileError::Stale(StaleBrokerSnapshot {
+                freshness: mqk_reconcile::SnapshotFreshness::NoTimestamp
+            })
+        ));
+    }
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn runtime_refuses_to_run_without_lease() {
+        let pool = runtime_test_pool().await;
+        let clock = MutableClock::new(runtime_ts(10_000));
+        let run_id = make_running_run(&pool, clock.now_utc()).await;
+        let locked =
+            mqk_db::runtime_lease::acquire_lease(&pool, "other-runtime", clock.now_utc(), 30)
+                .await
+                .expect("seed active lease");
+        assert!(matches!(
+            locked,
+            mqk_db::runtime_lease::LeaseAcquireOutcome::Acquired(_)
+        ));
+        let mut orchestrator = make_lease_test_orchestrator(pool.clone(), run_id, clock.clone());
+        let err = orchestrator
+            .tick()
+            .await
+            .expect_err("tick must refuse without lease");
+        assert!(
+            err.to_string().contains("RUNTIME_LEASE_UNAVAILABLE"),
+            "unexpected error: {err}"
+        );
+        let run = mqk_db::fetch_run(&pool, run_id).await.expect("fetch run");
+        assert!(matches!(run.status, mqk_db::RunStatus::Halted));
+        let arm_state = mqk_db::load_arm_state(&pool)
+            .await
+            .expect("load arm state")
+            .expect("arm state persisted");
+        assert_eq!(arm_state.0, "DISARMED");
+    }
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn runtime_halts_when_lease_is_lost() {
+        let pool = runtime_test_pool().await;
+        let clock = MutableClock::new(runtime_ts(20_000));
+        let run_id = make_running_run(&pool, clock.now_utc()).await;
+        let mut orchestrator = make_lease_test_orchestrator(pool.clone(), run_id, clock.clone());
+        orchestrator
+            .tick()
+            .await
+            .expect("first tick acquires lease");
+        clock.set(runtime_ts(20_016));
+        let stolen =
+            mqk_db::runtime_lease::acquire_lease(&pool, "other-runtime", clock.now_utc(), 30)
+                .await
+                .expect("steal expired lease");
+        assert!(matches!(
+            stolen,
+            mqk_db::runtime_lease::LeaseAcquireOutcome::Acquired(_)
+        ));
+        let err = orchestrator
+            .tick()
+            .await
+            .expect_err("tick must halt on lease loss");
+        assert!(
+            err.to_string().contains("RUNTIME_LEASE_LOST"),
+            "unexpected error: {err}"
+        );
+        let run = mqk_db::fetch_run(&pool, run_id).await.expect("fetch run");
+        assert!(matches!(run.status, mqk_db::RunStatus::Halted));
+        let arm_state = mqk_db::load_arm_state(&pool)
+            .await
+            .expect("load arm state")
+            .expect("arm state persisted");
+        assert_eq!(arm_state.0, "DISARMED");
+        let lease = mqk_db::runtime_lease::fetch_current_lease(&pool)
+            .await
+            .expect("fetch current lease")
+            .expect("active lease row");
+        assert_eq!(lease.holder_id, "other-runtime");
     }
 }

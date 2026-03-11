@@ -10,7 +10,7 @@
 //!
 //! 1. Fresh status snapshot exposes `integrity_armed: false`.
 //! 2. `POST /v1/run/start` returns 403 on a fresh (never-armed) daemon.
-//! 3. `POST /v1/run/start` succeeds after an explicit arm.
+//! 3. `POST /v1/run/start` still fails closed after arm when no DB-backed runtime is configured.
 //!
 //! All tests are pure in-process; no DB or network required.
 
@@ -96,11 +96,12 @@ async fn run_start_returns_403_before_arm() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. run/start succeeds after explicit arm
+// 3. run/start still fails closed after explicit arm when DB/runtime ownership
+//    cannot be proven
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn run_start_succeeds_after_explicit_arm() {
+async fn run_start_requires_db_after_explicit_arm() {
     let st = Arc::new(state::AppState::new());
 
     // Arm explicitly.
@@ -122,13 +123,15 @@ async fn run_start_succeeds_after_explicit_arm() {
 
     assert_eq!(
         status,
-        StatusCode::OK,
-        "run/start must succeed after explicit arm"
+        StatusCode::SERVICE_UNAVAILABLE,
+        "run/start must fail closed when no DB-backed runtime is configured"
     );
     let json = parse_json(body);
-    assert_eq!(json["state"], "running");
     assert!(
-        !json["active_run_id"].is_null(),
-        "run_id should be set after start"
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("runtime DB is not configured"),
+        "body should explain DB-backed runtime requirement: {json}"
     );
 }

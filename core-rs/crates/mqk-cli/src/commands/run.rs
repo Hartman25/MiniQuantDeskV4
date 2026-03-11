@@ -458,18 +458,12 @@ impl mqk_execution::BrokerAdapter for NullBroker {
     }
 }
 
-/// Always-pass gate stub (armed, allowed, clean).
+/// Always-pass gate stub (armed and clean).
 #[cfg(feature = "testkit")]
 struct PassGate;
 #[cfg(feature = "testkit")]
 impl mqk_execution::IntegrityGate for PassGate {
     fn is_armed(&self) -> bool {
-        true
-    }
-}
-#[cfg(feature = "testkit")]
-impl mqk_execution::RiskGate for PassGate {
-    fn is_allowed(&self) -> bool {
         true
     }
 }
@@ -483,7 +477,8 @@ impl mqk_execution::ReconcileGate for PassGate {
 /// FD-2: wire `ExecutionOrchestrator::tick` as the sole broker-submit path.
 ///
 /// Runs `ticks` iterations of the execution tick loop against a live DB.
-/// Uses `NullBroker` (no real orders) and `PassGate` (all gates open).
+/// Uses `NullBroker` (no real orders), permissive integrity/reconcile gates,
+/// and a real mqk-risk-backed runtime risk adapter.
 /// Replace stubs with real implementations before LIVE deployment.
 ///
 /// RT-2: gated — not available in production builds without `testkit` feature.
@@ -492,14 +487,22 @@ pub async fn run_execute(run_id: String, ticks: u32) -> Result<()> {
     use mqk_execution::{BrokerGateway, BrokerOrderMap};
     use mqk_portfolio::PortfolioState;
     use mqk_runtime::orchestrator::ExecutionOrchestrator;
+    use mqk_runtime::wiring_paper::RuntimeRiskGate;
     use std::collections::BTreeMap;
 
     let pool = mqk_db::connect_from_env().await?;
     let run_uuid = Uuid::parse_str(&run_id).context("invalid run_id uuid")?;
+    let run = mqk_db::fetch_run(&pool, run_uuid).await?;
 
-    let gateway = BrokerGateway::for_test(NullBroker, PassGate, PassGate, PassGate);
+    let portfolio = PortfolioState::new(0);
+    let gateway = BrokerGateway::for_test(
+        NullBroker,
+        PassGate,
+        RuntimeRiskGate::from_run_config(&run.config_json, portfolio.initial_cash_micros),
+        PassGate,
+    );
 
-    let order_map = BrokerOrderMap::new();
+    let mut order_map = BrokerOrderMap::new();
     let existing = mqk_db::broker_map_load(&pool).await?;
     for (internal_id, broker_id) in existing {
         order_map.register(&internal_id, &broker_id);
@@ -510,7 +513,7 @@ pub async fn run_execute(run_id: String, ticks: u32) -> Result<()> {
         gateway,
         order_map,
         BTreeMap::new(),
-        PortfolioState::new(0),
+        portfolio,
         run_uuid,
         "mqk-cli",
         "null",
@@ -523,6 +526,8 @@ pub async fn run_execute(run_id: String, ticks: u32) -> Result<()> {
     for _ in 0..ticks {
         orchestrator.tick().await?;
     }
+
+    orchestrator.release_runtime_leadership().await?;
 
     println!("executed=true run_id={} ticks={}", run_uuid, ticks);
     Ok(())

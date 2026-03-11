@@ -14,7 +14,7 @@
 //!
 //! 1. After halt, run/start returns 403 (deadman blocks dispatch).
 //! 2. After halt, GET /v1/status reports `integrity_armed: false`.
-//! 3. After halt then explicit arm, run/start succeeds.
+//! 3. After halt then explicit arm, run/start still fails closed without DB-backed runtime ownership.
 //!
 //! All tests are pure in-process; no DB or network required.
 
@@ -127,11 +127,12 @@ async fn status_shows_not_armed_after_halt() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. After halt then explicit arm, run/start succeeds
+// 3. After halt then explicit arm, run/start still requires DB-backed runtime
+//    ownership proof
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn run_start_succeeds_after_halt_then_arm() {
+async fn run_start_requires_db_after_halt_then_arm() {
     let st = Arc::new(state::AppState::new());
 
     arm(&st).await;
@@ -159,13 +160,15 @@ async fn run_start_succeeds_after_halt_then_arm() {
 
     assert_eq!(
         status,
-        StatusCode::OK,
-        "run/start must succeed after halt + explicit arm"
+        StatusCode::SERVICE_UNAVAILABLE,
+        "run/start must still fail closed without DB-backed runtime ownership"
     );
     let json = parse_json(body);
-    assert_eq!(json["state"], "running");
     assert!(
-        !json["active_run_id"].is_null(),
-        "run_id should be set after start"
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("runtime DB is not configured"),
+        "body should explain DB-backed runtime requirement: {json}"
     );
 }

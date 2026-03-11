@@ -1,8 +1,11 @@
 //! mqk-daemon entry point.
 //!
 //! This file is intentionally thin: it sets up tracing, builds the shared
-//! state, wires middleware, and starts the HTTP server.  All route handlers
+//! state, wires middleware, and starts the HTTP server. All route handlers
 //! live in `routes.rs`; all shared state types live in `state.rs`.
+
+#[path = "routes/control.rs"]
+mod control;
 
 use std::{sync::Arc, time::Duration};
 
@@ -17,21 +20,19 @@ use tracing::{info, Level};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // PATCH S1: Load .env.local if present (dev convenience).
-    // Silent if the file does not exist — production injects env vars directly.
     let _ = dotenvy::from_filename(".env.local");
 
     init_tracing();
 
-    // Patch C1: AppState boots fail-closed (integrity disarmed). An explicit
-    // POST /v1/integrity/arm from the operator is required before any run can
-    // start. Full DB-backed sticky-DISARM wiring is deferred until the DB pool
-    // is available at daemon startup.
-    let shared = Arc::new(state::AppState::new());
+    let db = mqk_db::connect_from_env()
+        .await
+        .context("mqk-daemon requires MQK_DATABASE_URL for real runtime lifecycle control")?;
 
+    let shared = Arc::new(state::AppState::new_with_db(db));
     state::spawn_heartbeat(shared.bus.clone(), Duration::from_secs(1));
 
     let app = routes::build_router(Arc::clone(&shared))
+        .merge(control::router(Arc::clone(&shared)))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
@@ -39,12 +40,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .layer(cors_localhost_only());
 
-    // S7-2: Loopback-only default bind.  Non-loopback addresses require
-    // MQK_DAEMON_ALLOW_NETWORK_BIND=1 to be set explicitly.
     let addr = bind::resolve_bind_addr_from_env()?;
     info!("mqk-daemon listening on http://{}", addr);
 
+    let shutdown_state = Arc::clone(&shared);
     axum::serve(tokio::net::TcpListener::bind(addr).await?, app)
+        .with_graceful_shutdown(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            shutdown_state.stop_for_shutdown().await;
+        })
         .await
         .context("server crashed")?;
 

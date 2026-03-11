@@ -22,7 +22,6 @@ use mqk_schemas::BrokerPosition;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
-use uuid::Uuid;
 
 use crate::{
     api_types::{
@@ -32,7 +31,7 @@ use crate::{
         TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
-    state::{uptime_secs, AppState, BusMsg},
+    state::{AppState, BusMsg, RuntimeLifecycleError},
 };
 
 // ---------------------------------------------------------------------------
@@ -170,19 +169,11 @@ pub(crate) async fn health(State(st): State<Arc<AppState>>) -> impl IntoResponse
 // GET /v1/status
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn status_handler(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut snap = st.status.read().await.clone();
-    snap.daemon_uptime_secs = uptime_secs();
-
-    // Patch C2: sync integrity_armed from the authoritative gate — reflects
-    // both `disarmed` and `halted` flags via `is_execution_blocked()`.
-    {
-        let ig = st.integrity.read().await;
-        snap.integrity_armed = !ig.is_execution_blocked();
+pub(crate) async fn status_handler(State(st): State<Arc<AppState>>) -> Response {
+    match st.current_status_snapshot().await {
+        Ok(snapshot) => (StatusCode::OK, Json(snapshot)).into_response(),
+        Err(err) => runtime_error_response(err),
     }
-
-    let _ = st.bus.send(BusMsg::Status(snap.clone()));
-    (StatusCode::OK, Json(snap))
 }
 
 // ---------------------------------------------------------------------------
@@ -196,103 +187,41 @@ pub(crate) async fn status_handler(State(st): State<Arc<AppState>>) -> impl Into
 /// Execution cannot be started when system integrity is not armed.
 /// This mirrors the `BrokerGateway` gate check at the control-plane level.
 pub(crate) async fn run_start(State(st): State<Arc<AppState>>) -> Response {
-    // Gate: integrity must be armed before any run can start.
-    {
-        let ig = st.integrity.read().await;
-        if ig.is_execution_blocked() {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(GateRefusedResponse {
-                    error: "GATE_REFUSED: integrity disarmed or halted; arm integrity first"
-                        .to_string(),
-                    gate: "integrity_armed".to_string(),
-                }),
-            )
-                .into_response();
+    match st.start_execution_runtime().await {
+        Ok(snapshot) => {
+            info!(run_id = ?snapshot.active_run_id, "run/start");
+            (StatusCode::OK, Json(snapshot)).into_response()
         }
+        Err(err) => runtime_error_response(err),
     }
-
-    let mut s = st.status.write().await;
-
-    if s.state != "running" {
-        s.active_run_id = Some(derive_daemon_run_id(st.build.service, st.build.version));
-    }
-    s.state = "running".to_string();
-    s.notes = Some("run started (in-memory); wire orchestrator next".to_string());
-    s.daemon_uptime_secs = uptime_secs();
-
-    // Patch C2: sync integrity_armed from the authoritative gate.
-    {
-        let ig = st.integrity.read().await;
-        s.integrity_armed = !ig.is_execution_blocked();
-    }
-
-    let snap = s.clone();
-    drop(s);
-
-    info!(run_id = ?snap.active_run_id, "run/start");
-    let _ = st.bus.send(BusMsg::Status(snap.clone()));
-    (StatusCode::OK, Json(snap)).into_response()
 }
 
 // ---------------------------------------------------------------------------
 // POST /v1/run/stop
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn run_stop(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut s = st.status.write().await;
-
-    s.active_run_id = None;
-    s.state = "idle".to_string();
-    s.notes = Some("run stopped (in-memory)".to_string());
-    s.daemon_uptime_secs = uptime_secs();
-
-    // Patch C2: sync integrity_armed from the authoritative gate.
-    {
-        let ig = st.integrity.read().await;
-        s.integrity_armed = !ig.is_execution_blocked();
+pub(crate) async fn run_stop(State(st): State<Arc<AppState>>) -> Response {
+    match st.stop_execution_runtime().await {
+        Ok(snapshot) => {
+            info!("run/stop");
+            (StatusCode::OK, Json(snapshot)).into_response()
+        }
+        Err(err) => runtime_error_response(err),
     }
-
-    let snap = s.clone();
-    drop(s);
-
-    info!("run/stop");
-    let _ = st.bus.send(BusMsg::Status(snap.clone()));
-    (StatusCode::OK, Json(snap))
 }
 
 // ---------------------------------------------------------------------------
 // POST /v1/run/halt
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn run_halt(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    // Patch C2: set integrity halted — makes halt sticky across the session.
-    // Execution gate (`is_execution_blocked`) will return true until the
-    // operator explicitly calls `POST /v1/integrity/arm`.
-    {
-        let mut ig = st.integrity.write().await;
-        ig.halted = true;
+pub(crate) async fn run_halt(State(st): State<Arc<AppState>>) -> Response {
+    match st.halt_execution_runtime().await {
+        Ok(snapshot) => {
+            info!("run/halt");
+            (StatusCode::OK, Json(snapshot)).into_response()
+        }
+        Err(err) => runtime_error_response(err),
     }
-
-    let mut s = st.status.write().await;
-
-    // Keep run_id so the GUI can show what was halted.
-    s.state = "halted".to_string();
-    s.notes = Some("HALT asserted (in-memory); execution should gate on this later".to_string());
-    s.daemon_uptime_secs = uptime_secs();
-
-    // Patch C2: sync integrity_armed from the authoritative gate.
-    {
-        let ig = st.integrity.read().await;
-        s.integrity_armed = !ig.is_execution_blocked();
-    }
-
-    let snap = s.clone();
-    drop(s);
-
-    info!("run/halt");
-    let _ = st.bus.send(BusMsg::Status(snap.clone()));
-    (StatusCode::OK, Json(snap))
 }
 
 // ---------------------------------------------------------------------------
@@ -300,19 +229,15 @@ pub(crate) async fn run_halt(State(st): State<Arc<AppState>>) -> impl IntoRespon
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn integrity_arm(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    // Patch C2: arm clears BOTH disarmed and halted — it is the sole escape
-    // from any blocked integrity state (mirrors ArmState::arm() semantics).
     {
         let mut ig = st.integrity.write().await;
         ig.disarmed = false;
         ig.halted = false;
     }
 
-    // Sync the status snapshot. Both flags are now false so is_armed = true.
-    let (armed, active_run_id, state) = {
-        let mut s = st.status.write().await;
-        s.integrity_armed = true;
-        (true, s.active_run_id, s.state.clone())
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
     };
 
     info!("integrity/arm");
@@ -324,11 +249,12 @@ pub(crate) async fn integrity_arm(State(st): State<Arc<AppState>>) -> impl IntoR
     (
         StatusCode::OK,
         Json(IntegrityResponse {
-            armed,
-            active_run_id,
-            state,
+            armed: true,
+            active_run_id: status.active_run_id,
+            state: status.state,
         }),
     )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -336,17 +262,14 @@ pub(crate) async fn integrity_arm(State(st): State<Arc<AppState>>) -> impl IntoR
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    // disarm = set the disarmed flag
     {
         let mut ig = st.integrity.write().await;
         ig.disarmed = true;
     }
 
-    // Sync the status snapshot.
-    let (armed, active_run_id, state) = {
-        let mut s = st.status.write().await;
-        s.integrity_armed = false;
-        (false, s.active_run_id, s.state.clone())
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
     };
 
     info!("integrity/disarm");
@@ -358,16 +281,45 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
     (
         StatusCode::OK,
         Json(IntegrityResponse {
-            armed,
-            active_run_id,
-            state,
+            armed: false,
+            active_run_id: status.active_run_id,
+            state: status.state,
         }),
     )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
 // /api/v1 summary spine — GUI alignment patch
 // ---------------------------------------------------------------------------
+
+fn runtime_error_response(err: RuntimeLifecycleError) -> Response {
+    match err {
+        RuntimeLifecycleError::Forbidden { gate, message } => (
+            StatusCode::FORBIDDEN,
+            Json(GateRefusedResponse {
+                error: message,
+                gate,
+            }),
+        )
+            .into_response(),
+        RuntimeLifecycleError::ServiceUnavailable(message) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": message })),
+        )
+            .into_response(),
+        RuntimeLifecycleError::Conflict(message) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": message })),
+        )
+            .into_response(),
+        RuntimeLifecycleError::Internal(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": message })),
+        )
+            .into_response(),
+    }
+}
 
 fn parse_decimal(value: &str) -> f64 {
     value.parse::<f64>().unwrap_or(0.0)
@@ -378,6 +330,7 @@ fn runtime_status_from_state(state: &str) -> &'static str {
         "idle" => "idle",
         "running" => "running",
         "halted" => "halted",
+        "unknown" => "unknown",
         _ => "degraded",
     }
 }
@@ -428,7 +381,11 @@ fn exposure_breakdown(positions: &[BrokerPosition]) -> (f64, f64, f64, f64) {
 }
 
 pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    let status = st.status.read().await.clone();
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+    let reconcile = st.current_reconcile_snapshot().await;
     let snapshot_present = st.broker_snapshot.read().await.is_some();
     let integrity_armed = {
         let ig = st.integrity.read().await;
@@ -438,11 +395,13 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
     let runtime_status = runtime_status_from_state(&status.state).to_string();
     let broker_status = if snapshot_present { "ok" } else { "warning" }.to_string();
     let integrity_status = if integrity_armed { "ok" } else { "warning" }.to_string();
-    let reconcile_status = "unknown".to_string();
+    let reconcile_status = reconcile.status.clone();
+    let has_critical = matches!(reconcile_status.as_str(), "dirty" | "stale");
     let has_warning = broker_status != "ok"
         || integrity_status != "ok"
         || reconcile_status != "ok"
-        || status.notes.is_some();
+        || status.notes.is_some()
+        || reconcile.note.is_some();
 
     (
         StatusCode::OK,
@@ -460,7 +419,7 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             active_account_id: None,
             config_profile: None,
             has_warning,
-            has_critical: false,
+            has_critical,
             strategy_armed: integrity_armed,
             execution_armed: integrity_armed,
             live_routing_enabled: false,
@@ -470,10 +429,14 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             daemon_reachable: true,
         }),
     )
+        .into_response()
 }
 
 pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    let status = st.status.read().await.clone();
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
     let integrity_armed = {
         let ig = st.integrity.read().await;
         !ig.is_execution_blocked()
@@ -517,6 +480,7 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
             blockers,
         }),
     )
+        .into_response()
 }
 
 pub(crate) async fn execution_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
@@ -574,7 +538,7 @@ pub(crate) async fn execution_summary(State(st): State<Arc<AppState>>) -> impl I
         }
     };
 
-    (StatusCode::OK, Json(summary))
+    (StatusCode::OK, Json(summary)).into_response()
 }
 
 pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
@@ -604,12 +568,15 @@ pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl I
         }
     };
 
-    (StatusCode::OK, Json(summary))
+    (StatusCode::OK, Json(summary)).into_response()
 }
 
 pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
-    let status = st.status.read().await.clone();
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
 
     let summary = if let Some(snapshot) = snap {
         let (_, _, gross_exposure, max_abs_position) = exposure_breakdown(&snapshot.positions);
@@ -647,19 +614,21 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
         }
     };
 
-    (StatusCode::OK, Json(summary))
+    (StatusCode::OK, Json(summary)).into_response()
 }
 
-pub(crate) async fn reconcile_status(State(_st): State<Arc<AppState>>) -> impl IntoResponse {
+pub(crate) async fn reconcile_status(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let reconcile = st.current_reconcile_snapshot().await;
+
     (
         StatusCode::OK,
         Json(ReconcileSummaryResponse {
-            status: "unknown".to_string(),
-            last_run_at: None,
-            mismatched_positions: 0,
-            mismatched_orders: 0,
-            mismatched_fills: 0,
-            unmatched_broker_events: 0,
+            status: reconcile.status,
+            last_run_at: reconcile.last_run_at,
+            mismatched_positions: reconcile.mismatched_positions,
+            mismatched_orders: reconcile.mismatched_orders,
+            mismatched_fills: reconcile.mismatched_fills,
+            unmatched_broker_events: reconcile.unmatched_broker_events,
         }),
     )
 }
@@ -828,27 +797,6 @@ pub(crate) async fn diagnostics_snapshot(State(st): State<Arc<AppState>>) -> imp
         StatusCode::OK,
         Json(DiagnosticsSnapshotResponse { snapshot }),
     )
-}
-
-// ---------------------------------------------------------------------------
-// Run-ID derivation (D1-1)
-// ---------------------------------------------------------------------------
-
-/// Derive a deterministic in-memory run ID from daemon build metadata.
-///
-/// **No RNG.** Uses `Uuid::new_v5` (SHA-1 over the DNS namespace).
-///
-/// Inputs: `service` (crate name, static str) and `version` (semver, static
-/// str). Both are compile-time constants — no wall-clock, no random state.
-///
-/// The resulting UUID is stable for a given binary version, making it
-/// suitable as an in-memory session label. The authoritative run ID for DB
-/// persistence and cross-system audit correlation is created by `mqk-cli`
-/// (see `derive_cli_run_id` in `mqk-cli/src/commands/run.rs`). A later
-/// patch will wire the CLI run ID into the daemon so both IDs unify.
-fn derive_daemon_run_id(service: &'static str, version: &'static str) -> Uuid {
-    let data = format!("mqk-daemon.run.v1|{}|{}", service, version);
-    Uuid::new_v5(&Uuid::NAMESPACE_DNS, data.as_bytes())
 }
 
 // ---------------------------------------------------------------------------

@@ -21,8 +21,11 @@ mqk-execution = { path = "../mqk-execution", features = ["runtime-boundary"] }
 mqk-portfolio = { path = "../mqk-portfolio" }
 mqk-reconcile = { path = "../mqk-reconcile" }
 mqk-broker-paper = { path = "../mqk-broker-paper" }
+mqk-risk = { path = "../mqk-risk" }
 
 [features]
 # Patch 1: test-only wiring helpers (e.g., PassGate paper gateway).
 # MUST NOT be enabled in production deployments.
 testkit = ["mqk-execution/testkit"]
+[dev-dependencies]
+tokio.workspace = true

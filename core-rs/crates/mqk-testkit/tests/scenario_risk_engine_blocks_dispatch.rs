@@ -2,7 +2,7 @@
 //!
 //! # Invariant under test
 //!
-//! `RiskDecisionAdapter` is the production bridge from `mqk-risk::evaluate()`
+//! `RiskDecisionAdapter` mirrors the runtime bridge semantics from `mqk-runtime` and wires `mqk-risk::evaluate()`
 //! output to `BrokerGateway`'s `RiskGate` trait.  It proves that the gateway's
 //! risk gate is satisfied by a real risk engine decision, not a boolean stub.
 //!

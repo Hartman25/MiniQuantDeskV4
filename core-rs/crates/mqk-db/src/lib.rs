@@ -3,10 +3,15 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::Row;
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{
+    postgres::{PgPoolOptions, PgRow},
+    PgPool,
+};
 use uuid::Uuid;
 
 pub const ENV_DB_URL: &str = "MQK_DATABASE_URL";
+
+pub mod runtime_lease;
 
 // ---------------------------------------------------------------------------
 // TimeSource — injectable clock abstraction (FC-5)
@@ -272,9 +277,28 @@ pub struct RunRow {
     pub last_heartbeat_utc: Option<DateTime<Utc>>,
 }
 
+fn run_row_from_row(row: PgRow) -> Result<RunRow> {
+    Ok(RunRow {
+        run_id: row.try_get("run_id")?,
+        engine_id: row.try_get("engine_id")?,
+        mode: row.try_get("mode")?,
+        started_at_utc: row.try_get("started_at_utc")?,
+        git_hash: row.try_get("git_hash")?,
+        config_hash: row.try_get("config_hash")?,
+        config_json: row.try_get("config_json")?,
+        host_fingerprint: row.try_get("host_fingerprint")?,
+        status: RunStatus::parse(&row.try_get::<String, _>("status")?)?,
+        armed_at_utc: row.try_get("armed_at_utc")?,
+        running_at_utc: row.try_get("running_at_utc")?,
+        stopped_at_utc: row.try_get("stopped_at_utc")?,
+        halted_at_utc: row.try_get("halted_at_utc")?,
+        last_heartbeat_utc: row.try_get("last_heartbeat_utc")?,
+    })
+}
+
 pub async fn fetch_run(pool: &PgPool, run_id: Uuid) -> Result<RunRow> {
     let row = sqlx::query(
-        r#"
+        r#"""
         select
           run_id,
           engine_id,
@@ -292,29 +316,91 @@ pub async fn fetch_run(pool: &PgPool, run_id: Uuid) -> Result<RunRow> {
           last_heartbeat_utc
         from runs
         where run_id = $1
-        "#,
+        """#,
     )
     .bind(run_id)
     .fetch_one(pool)
     .await
     .context("fetch_run failed")?;
 
-    Ok(RunRow {
-        run_id: row.try_get("run_id")?,
-        engine_id: row.try_get("engine_id")?,
-        mode: row.try_get("mode")?,
-        started_at_utc: row.try_get("started_at_utc")?,
-        git_hash: row.try_get("git_hash")?,
-        config_hash: row.try_get("config_hash")?,
-        config_json: row.try_get("config_json")?,
-        host_fingerprint: row.try_get("host_fingerprint")?,
-        status: RunStatus::parse(&row.try_get::<String, _>("status")?)?,
-        armed_at_utc: row.try_get("armed_at_utc")?,
-        running_at_utc: row.try_get("running_at_utc")?,
-        stopped_at_utc: row.try_get("stopped_at_utc")?,
-        halted_at_utc: row.try_get("halted_at_utc")?,
-        last_heartbeat_utc: row.try_get("last_heartbeat_utc")?,
-    })
+    run_row_from_row(row)
+}
+
+pub async fn fetch_latest_run_for_engine(
+    pool: &PgPool,
+    engine_id: &str,
+    mode: &str,
+) -> Result<Option<RunRow>> {
+    let row = sqlx::query(
+        r#"""
+        select
+          run_id,
+          engine_id,
+          mode,
+          started_at_utc,
+          git_hash,
+          config_hash,
+          config_json,
+          host_fingerprint,
+          status,
+          armed_at_utc,
+          running_at_utc,
+          stopped_at_utc,
+          halted_at_utc,
+          last_heartbeat_utc
+        from runs
+        where engine_id = $1
+          and mode = $2
+        order by started_at_utc desc, run_id desc
+        limit 1
+        """#,
+    )
+    .bind(engine_id)
+    .bind(mode)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_latest_run_for_engine failed")?;
+
+    row.map(run_row_from_row).transpose()
+}
+
+pub async fn fetch_active_run_for_engine(
+    pool: &PgPool,
+    engine_id: &str,
+    mode: &str,
+) -> Result<Option<RunRow>> {
+    let row = sqlx::query(
+        r#"""
+        select
+          run_id,
+          engine_id,
+          mode,
+          started_at_utc,
+          git_hash,
+          config_hash,
+          config_json,
+          host_fingerprint,
+          status,
+          armed_at_utc,
+          running_at_utc,
+          stopped_at_utc,
+          halted_at_utc,
+          last_heartbeat_utc
+        from runs
+        where engine_id = $1
+          and mode = $2
+          and status in ('ARMED', 'RUNNING')
+        order by started_at_utc desc, run_id desc
+        limit 1
+        """#,
+    )
+    .bind(engine_id)
+    .bind(mode)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_active_run_for_engine failed")?;
+
+    row.map(run_row_from_row).transpose()
 }
 
 /// Verify that a run is bound to (engine_id, mode, config_hash).
