@@ -50,12 +50,87 @@ interface EndpointFetchResult<T> {
   error?: string;
 }
 
+interface EndpointPostResult<T> {
+  ok: boolean;
+  endpoint: string;
+  status?: number;
+  data?: T;
+  error?: string;
+}
+
 interface LegacyDaemonStatusSnapshot {
   daemon_uptime_secs: number;
   active_run_id: string | null;
   state: string;
   notes?: string | null;
   integrity_armed: boolean;
+}
+
+interface LegacyHealthResponse {
+  ok: boolean;
+  service: string;
+  version: string;
+}
+
+interface LegacyTradingAccountResponse {
+  has_snapshot: boolean;
+  account: {
+    equity: string;
+    cash: string;
+    currency: string;
+  };
+}
+
+interface LegacyTradingPosition {
+  symbol: string;
+  qty: string;
+  avg_price: string;
+}
+
+interface LegacyTradingPositionsResponse {
+  has_snapshot: boolean;
+  positions: LegacyTradingPosition[];
+}
+
+interface LegacyTradingOrder {
+  broker_order_id: string;
+  client_order_id: string;
+  symbol: string;
+  side: string;
+  type: string;
+  status: string;
+  qty: string;
+  limit_price?: string | null;
+  stop_price?: string | null;
+  created_at_utc: string;
+}
+
+interface LegacyTradingOrdersResponse {
+  has_snapshot: boolean;
+  orders: LegacyTradingOrder[];
+}
+
+interface LegacyTradingFill {
+  broker_fill_id: string;
+  broker_order_id: string;
+  client_order_id: string;
+  symbol: string;
+  side: string;
+  qty: string;
+  price: string;
+  fee: string;
+  ts_utc: string;
+}
+
+interface LegacyTradingFillsResponse {
+  has_snapshot: boolean;
+  fills: LegacyTradingFill[];
+}
+
+interface LegacyIntegrityResponse {
+  armed: boolean;
+  active_run_id: string | null;
+  state: string;
 }
 
 async function fetchJsonCandidate<T>(path: string): Promise<EndpointFetchResult<T>> {
@@ -101,7 +176,13 @@ async function tryFetchJson<T>(paths: string[]): Promise<T | null> {
   return result.ok ? (result.data ?? null) : null;
 }
 
-async function postJson<T>(paths: string[], body: Record<string, unknown>): Promise<T | null> {
+async function postJson<T>(paths: string[], body: Record<string, unknown>): Promise<EndpointPostResult<T>> {
+  let lastFailure: EndpointPostResult<T> = {
+    ok: false,
+    endpoint: paths[0] ?? "unknown",
+    error: "all candidates failed",
+  };
+
   for (const path of paths) {
     try {
       const url = new URL(path, getDaemonUrl()).toString();
@@ -113,14 +194,92 @@ async function postJson<T>(paths: string[], body: Record<string, unknown>): Prom
         },
         body: JSON.stringify(body),
       });
-      if (!response.ok) continue;
-      return (await response.json()) as T;
-    } catch {
-      // try next candidate
+
+      if (!response.ok) {
+        lastFailure = {
+          ok: false,
+          endpoint: path,
+          status: response.status,
+          error: `HTTP ${response.status}`,
+        };
+        continue;
+      }
+
+      const contentType = response.headers.get("content-type") ?? "";
+      const data = contentType.includes("application/json") ? ((await response.json()) as T) : undefined;
+
+      return {
+        ok: true,
+        endpoint: path,
+        status: response.status,
+        data,
+      };
+    } catch (error) {
+      lastFailure = {
+        ok: false,
+        endpoint: path,
+        error: error instanceof Error ? error.message : "unknown error",
+      };
     }
   }
 
-  return null;
+  return lastFailure;
+}
+
+function parseNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function parseIsoTimestamp(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function ageMsFromTimestamp(value: unknown): number {
+  const iso = parseIsoTimestamp(value);
+  if (!iso) return 0;
+  const timestamp = Date.parse(iso);
+  if (Number.isNaN(timestamp)) return 0;
+  return Math.max(0, Date.now() - timestamp);
+}
+
+function normalizeSide(side: unknown): "buy" | "sell" {
+  return String(side ?? "").toLowerCase() === "sell" ? "sell" : "buy";
+}
+
+function normalizeOrderType(orderType: unknown): "market" | "limit" | "stop" | "stop_limit" {
+  const normalized = String(orderType ?? "").toLowerCase().replace(/\s+/g, "_");
+  if (normalized === "limit") return "limit";
+  if (normalized === "stop") return "stop";
+  if (normalized === "stop_limit" || normalized === "stoplimit") return "stop_limit";
+  return "market";
+}
+
+function normalizeOrderStatus(status: unknown): string {
+  const normalized = String(status ?? "unknown").trim().toLowerCase().replace(/\s+/g, "_");
+  return normalized || "unknown";
+}
+
+function isTerminalOrderStatus(status: string): boolean {
+  return ["filled", "cancelled", "canceled", "rejected", "expired", "done_for_day"].includes(status);
+}
+
+function deriveExecutionStage(status: string): string {
+  if (status.includes("partial")) return "Partial Fill";
+  if (status.includes("fill")) return "Filled";
+  if (status.includes("cancel")) return "Cancelled";
+  if (status.includes("reject")) return "Rejected";
+  if (status.includes("pending") || status.includes("new") || status.includes("accepted")) return "Pending";
+  if (status.includes("submit")) return "Dispatching";
+  return "Broker Snapshot";
 }
 
 function mapLegacyStatusToSystemStatus(legacy: LegacyDaemonStatusSnapshot): SystemStatus {
@@ -143,12 +302,15 @@ function mapLegacyStatusToSystemStatus(legacy: LegacyDaemonStatusSnapshot): Syst
     ...base,
     runtime_status: runtimeStatus,
     integrity_status: legacy.integrity_armed ? "ok" : "warning",
-    last_heartbeat: new Date().toISOString(),
-    active_account_id: legacy.active_run_id,
-    has_warning: base.has_warning || !legacy.integrity_armed,
+    last_heartbeat: null,
+    active_account_id: null,
+    config_profile: null,
+    has_warning: base.has_warning || !legacy.integrity_armed || Boolean(legacy.notes),
     strategy_armed: legacy.integrity_armed,
     execution_armed: legacy.integrity_armed,
+    live_routing_enabled: false,
     kill_switch_active: runtimeStatus === "halted",
+    risk_halt_active: false,
     integrity_halt_active: !legacy.integrity_armed,
     daemon_reachable: true,
   };
@@ -161,6 +323,8 @@ function deriveLegacyPreflight(status: LegacyDaemonStatusSnapshot): PreflightSta
     runtime_idle: !String(status.state ?? "").toLowerCase().includes("run"),
     strategy_disarmed: !status.integrity_armed,
     execution_disarmed: !status.integrity_armed,
+    live_routing_disabled: true,
+    warnings: ["Derived from legacy /v1/status; canonical preflight endpoint unavailable."],
     blockers: [],
   };
 }
@@ -184,12 +348,142 @@ function legacyActionPaths(actionKey: string): string[] {
   }
 }
 
-function arrayOrFallback<T>(value: unknown, fallback: T[]): T[] {
-  return Array.isArray(value) ? (value as T[]) : fallback;
-}
-
 function objectOrFallback<T>(value: unknown, fallback: T): T {
   return value && typeof value === "object" ? (value as T) : fallback;
+}
+
+function mapLegacyPositionsResponse(response: LegacyTradingPositionsResponse | null): PositionRow[] | null {
+  if (!response) return null;
+  return response.positions.map((position) => {
+    const qty = parseNumber(position.qty);
+    const avgPrice = parseNumber(position.avg_price);
+    return {
+      symbol: position.symbol,
+      strategy_id: "broker_snapshot",
+      qty,
+      avg_price: avgPrice,
+      mark_price: avgPrice,
+      unrealized_pnl: 0,
+      realized_pnl_today: 0,
+      broker_qty: qty,
+      drift: false,
+    };
+  });
+}
+
+function mapLegacyPortfolioSummary(
+  accountResponse: LegacyTradingAccountResponse | null,
+): PortfolioSummary | null {
+  if (!accountResponse) return null;
+
+  const equity = parseNumber(accountResponse.account?.equity);
+  const cash = parseNumber(accountResponse.account?.cash);
+
+  return {
+    account_equity: equity,
+    cash,
+    long_market_value: 0,
+    short_market_value: 0,
+    daily_pnl: 0,
+    buying_power: cash,
+  };
+}
+
+function mapLegacyTradingOrdersToExecutionOrders(response: LegacyTradingOrdersResponse | null): ExecutionOrderRow[] | null {
+  if (!response) return null;
+
+  return response.orders.map((order) => {
+    const status = normalizeOrderStatus(order.status);
+    const ageMs = ageMsFromTimestamp(order.created_at_utc);
+    const hasCritical = status.includes("reject");
+    const hasWarning = !hasCritical && !isTerminalOrderStatus(status) && ageMs >= 300_000;
+
+    return {
+      internal_order_id: order.client_order_id || order.broker_order_id,
+      broker_order_id: order.broker_order_id || null,
+      symbol: order.symbol,
+      strategy_id: "broker_snapshot",
+      side: normalizeSide(order.side),
+      order_type: normalizeOrderType(order.type),
+      requested_qty: parseNumber(order.qty),
+      filled_qty: 0,
+      current_status: status,
+      current_stage: deriveExecutionStage(status),
+      age_ms: ageMs,
+      has_warning: hasWarning,
+      has_critical: hasCritical,
+      updated_at: parseIsoTimestamp(order.created_at_utc) ?? nowIso(),
+    };
+  });
+}
+
+function mapLegacyTradingOrdersToOpenOrders(response: LegacyTradingOrdersResponse | null): OpenOrderRow[] | null {
+  const rows = mapLegacyTradingOrdersToExecutionOrders(response);
+  if (!rows) return null;
+
+  return rows
+    .filter((order) => !isTerminalOrderStatus(order.current_status))
+    .map((order) => ({
+      internal_order_id: order.internal_order_id,
+      symbol: order.symbol,
+      strategy_id: order.strategy_id,
+      side: order.side,
+      status: order.current_status,
+      broker_order_id: order.broker_order_id,
+      requested_qty: order.requested_qty,
+      filled_qty: order.filled_qty,
+      entered_at: order.updated_at,
+    }));
+}
+
+function mapLegacyTradingFillsToRows(response: LegacyTradingFillsResponse | null): FillRow[] | null {
+  if (!response) return null;
+
+  return response.fills.map((fill) => ({
+    fill_id: fill.broker_fill_id,
+    internal_order_id: fill.client_order_id || fill.broker_order_id,
+    symbol: fill.symbol,
+    strategy_id: "broker_snapshot",
+    side: normalizeSide(fill.side),
+    qty: parseNumber(fill.qty),
+    price: parseNumber(fill.price),
+    broker_exec_id: fill.broker_fill_id,
+    applied: true,
+    at: parseIsoTimestamp(fill.ts_utc) ?? nowIso(),
+  }));
+}
+
+function deriveExecutionSummaryFromOrders(orders: ExecutionOrderRow[] | null): ExecutionSummary | null {
+  if (!orders) return null;
+
+  const activeOrders = orders.filter((order) => !isTerminalOrderStatus(order.current_status));
+  const pendingOrders = orders.filter((order) => {
+    const status = order.current_status;
+    return status.includes("new") || status.includes("pending") || status.includes("accepted");
+  });
+  const dispatchingOrders = orders.filter((order) => order.current_status.includes("submit") || order.current_stage === "Dispatching");
+  const rejectedOrders = orders.filter((order) => order.current_status.includes("reject"));
+  const stuckOrders = activeOrders.filter((order) => order.age_ms >= 300_000);
+
+  return {
+    active_orders: activeOrders.length,
+    pending_orders: pendingOrders.length,
+    dispatching_orders: dispatchingOrders.length,
+    reject_count_today: rejectedOrders.length,
+    cancel_replace_count_today: 0,
+    avg_ack_latency_ms: null,
+    stuck_orders: stuckOrders.length,
+  };
+}
+
+function mapLegacyHealthToMetadata(health: LegacyHealthResponse | null): MetadataSummary | null {
+  if (!health) return null;
+  return {
+    build_version: health.version,
+    api_version: "v1",
+    broker_adapter: "unknown",
+    endpoint_status: health.ok ? "ok" : "warning",
+  };
 }
 
 function deriveDataSourceDetail(args: {
@@ -229,31 +523,32 @@ function deriveDataSourceDetail(args: {
 }
 
 export async function fetchOperatorModel(): Promise<SystemModel> {
-  const statusProbe = await fetchJsonCandidates<SystemStatus>(["/api/v1/system/status", "/v1/status"]);
+  const statusProbe = await fetchJsonCandidates<SystemStatus | LegacyDaemonStatusSnapshot>(["/api/v1/system/status", "/v1/status"]);
+  const healthProbe = await fetchJsonCandidates<MetadataSummary | LegacyHealthResponse>(["/api/v1/system/metadata", "/v1/health"]);
+
   const legacyStatus =
     statusProbe.ok && statusProbe.endpoint === "/v1/status"
-      ? (statusProbe.data as unknown as LegacyDaemonStatusSnapshot)
+      ? (statusProbe.data as LegacyDaemonStatusSnapshot)
       : await tryFetchJson<LegacyDaemonStatusSnapshot>(["/v1/status"]);
 
   const probes = await Promise.all([
     fetchJsonCandidates<PreflightStatus>(["/api/v1/system/preflight"]),
     fetchJsonCandidates<ExecutionSummary>(["/api/v1/execution/summary"]),
-    fetchJsonCandidates<ExecutionOrderRow[]>(["/api/v1/execution/orders", "/v1/trading/orders"]),
+    fetchJsonCandidates<ExecutionOrderRow[] | LegacyTradingOrdersResponse>(["/api/v1/execution/orders", "/v1/trading/orders"]),
     fetchJsonCandidates<OmsOverview>(["/api/v1/oms/overview"]),
     fetchJsonCandidates<SystemMetrics>(["/api/v1/metrics/dashboards"]),
-    fetchJsonCandidates<PortfolioSummary>(["/api/v1/portfolio/summary", "/v1/trading/account"]),
-    fetchJsonCandidates<PositionRow[]>(["/api/v1/portfolio/positions", "/v1/trading/positions"]),
-    fetchJsonCandidates<OpenOrderRow[]>(["/api/v1/portfolio/orders/open", "/v1/trading/orders"]),
-    fetchJsonCandidates<FillRow[]>(["/api/v1/portfolio/fills", "/v1/trading/fills"]),
+    fetchJsonCandidates<PortfolioSummary | LegacyTradingAccountResponse>(["/api/v1/portfolio/summary", "/v1/trading/account"]),
+    fetchJsonCandidates<PositionRow[] | LegacyTradingPositionsResponse>(["/api/v1/portfolio/positions", "/v1/trading/positions"]),
+    fetchJsonCandidates<OpenOrderRow[] | LegacyTradingOrdersResponse>(["/api/v1/portfolio/orders/open", "/v1/trading/orders"]),
+    fetchJsonCandidates<FillRow[] | LegacyTradingFillsResponse>(["/api/v1/portfolio/fills", "/v1/trading/fills"]),
     fetchJsonCandidates<RiskSummary>(["/api/v1/risk/summary"]),
     fetchJsonCandidates<RiskDenialRow[]>(["/api/v1/risk/denials"]),
     fetchJsonCandidates<ReconcileSummary>(["/api/v1/reconcile/status"]),
     fetchJsonCandidates<ReconcileMismatchRow[]>(["/api/v1/reconcile/mismatches"]),
     fetchJsonCandidates<StrategyRow[]>(["/api/v1/strategy/summary"]),
     fetchJsonCandidates<OperatorAlert[]>(["/api/v1/alerts/active"]),
-    fetchJsonCandidates<FeedEvent[]>(["/api/v1/events/feed", "/v1/stream"]),
+    fetchJsonCandidates<FeedEvent[]>(["/api/v1/events/feed"]),
     fetchJsonCandidates<AuditActionRow[]>(["/api/v1/audit/operator-actions"]),
-    fetchJsonCandidates<MetadataSummary>(["/api/v1/system/metadata"]),
     fetchJsonCandidates<ServiceTopology>(["/api/v1/system/topology"]),
     fetchJsonCandidates<TransportSummary>(["/api/v1/execution/transport"]),
     fetchJsonCandidates<IncidentCase[]>(["/api/v1/incidents"]),
@@ -287,7 +582,6 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     alertsR,
     feedR,
     auditActionsR,
-    metadataR,
     topologyR,
     transportR,
     incidentsR,
@@ -303,10 +597,35 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     operatorTimelineR,
   ] = probes;
 
-  const daemonReachable = statusProbe.ok || Boolean(legacyStatus) || probes.some((p) => p.ok);
+  const daemonReachable = statusProbe.ok || healthProbe.ok || Boolean(legacyStatus) || probes.some((p) => p.ok);
   const connected = daemonReachable;
 
-  const executionOrders = arrayOrFallback(executionOrdersR.data, MOCK_MODEL.executionOrders);
+  const legacyOrdersResponse = executionOrdersR.ok && executionOrdersR.endpoint === "/v1/trading/orders"
+    ? (executionOrdersR.data as LegacyTradingOrdersResponse)
+    : openOrdersR.ok && openOrdersR.endpoint === "/v1/trading/orders"
+      ? (openOrdersR.data as LegacyTradingOrdersResponse)
+      : null;
+
+  const legacyPositionsResponse = positionsR.ok && positionsR.endpoint === "/v1/trading/positions"
+    ? (positionsR.data as LegacyTradingPositionsResponse)
+    : null;
+
+  const legacyAccountResponse = portfolioSummaryR.ok && portfolioSummaryR.endpoint === "/v1/trading/account"
+    ? (portfolioSummaryR.data as LegacyTradingAccountResponse)
+    : null;
+
+  const legacyFillsResponse = fillsR.ok && fillsR.endpoint === "/v1/trading/fills"
+    ? (fillsR.data as LegacyTradingFillsResponse)
+    : null;
+
+  const legacyHealthResponse = healthProbe.ok && healthProbe.endpoint === "/v1/health"
+    ? (healthProbe.data as LegacyHealthResponse)
+    : null;
+
+  const executionOrders = Array.isArray(executionOrdersR.data)
+    ? executionOrdersR.data
+    : mapLegacyTradingOrdersToExecutionOrders(legacyOrdersResponse) ?? MOCK_MODEL.executionOrders;
+
   const firstOrderId = executionOrders[0]?.internal_order_id;
   const [selectedTimeline, executionTrace, executionReplay, executionChart, causalityTrace] = firstOrderId
     ? await Promise.all([
@@ -330,8 +649,50 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     return fallback;
   };
 
+  const executionSummary =
+    executionSummaryR.ok && executionSummaryR.data !== undefined
+      ? executionSummaryR.data
+      : deriveExecutionSummaryFromOrders(executionOrders);
+  if (!executionSummary) usedMockSections.push("executionSummary");
+
+  const portfolioSummary =
+    portfolioSummaryR.ok && portfolioSummaryR.endpoint === "/api/v1/portfolio/summary" && portfolioSummaryR.data !== undefined
+      ? (portfolioSummaryR.data as PortfolioSummary)
+      : mapLegacyPortfolioSummary(legacyAccountResponse);
+  if (!portfolioSummary) usedMockSections.push("portfolioSummary");
+
+  const positions =
+    positionsR.ok && Array.isArray(positionsR.data)
+      ? (positionsR.data as PositionRow[])
+      : mapLegacyPositionsResponse(legacyPositionsResponse);
+  if (!positions) usedMockSections.push("positions");
+
+  const openOrders =
+    openOrdersR.ok && Array.isArray(openOrdersR.data)
+      ? (openOrdersR.data as OpenOrderRow[])
+      : mapLegacyTradingOrdersToOpenOrders(legacyOrdersResponse);
+  if (!openOrders) usedMockSections.push("openOrders");
+
+  const fills =
+    fillsR.ok && Array.isArray(fillsR.data)
+      ? (fillsR.data as FillRow[])
+      : mapLegacyTradingFillsToRows(legacyFillsResponse);
+  if (!fills) usedMockSections.push("fills");
+
+  const metadata =
+    healthProbe.ok && healthProbe.endpoint === "/api/v1/system/metadata" && healthProbe.data !== undefined
+      ? (healthProbe.data as MetadataSummary)
+      : mapLegacyHealthToMetadata(legacyHealthResponse);
+  if (!metadata) usedMockSections.push("metadata");
+
+  if (!selectedTimeline) usedMockSections.push("selectedTimeline");
+  if (!executionTrace) usedMockSections.push("executionTrace");
+  if (!executionReplay) usedMockSections.push("executionReplay");
+  if (!executionChart) usedMockSections.push("executionChart");
+  if (!causalityTrace) usedMockSections.push("causalityTrace");
+
   const dataSource = deriveDataSourceDetail({
-    probeResults: [statusProbe, ...probes],
+    probeResults: [statusProbe, healthProbe, ...probes],
     usedMockSections,
     daemonReachable,
   });
@@ -349,7 +710,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       preflightR.ok ? preflightR.data : legacyStatus ? deriveLegacyPreflight(legacyStatus) : null,
       connected ? MOCK_MODEL.preflight : { ...MOCK_MODEL.preflight, daemon_reachable: false, blockers: ["Daemon unreachable"] },
     ),
-    executionSummary: useObject("executionSummary", executionSummaryR, MOCK_MODEL.executionSummary),
+    executionSummary: executionSummary ?? MOCK_MODEL.executionSummary,
     executionOrders,
     selectedTimeline: objectOrFallback(selectedTimeline, MOCK_MODEL.selectedTimeline),
     omsOverview: useObject("omsOverview", omsOverviewR, MOCK_MODEL.omsOverview),
@@ -358,10 +719,10 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     executionChart: objectOrFallback(executionChart, MOCK_MODEL.executionChart),
     causalityTrace: objectOrFallback(causalityTrace, MOCK_MODEL.causalityTrace),
     metrics: useObject("metrics", metricsR, MOCK_MODEL.metrics),
-    portfolioSummary: useObject("portfolioSummary", portfolioSummaryR, MOCK_MODEL.portfolioSummary),
-    positions: useArray("positions", positionsR, MOCK_MODEL.positions),
-    openOrders: useArray("openOrders", openOrdersR, MOCK_MODEL.openOrders),
-    fills: useArray("fills", fillsR, MOCK_MODEL.fills),
+    portfolioSummary: portfolioSummary ?? MOCK_MODEL.portfolioSummary,
+    positions: positions ?? MOCK_MODEL.positions,
+    openOrders: openOrders ?? MOCK_MODEL.openOrders,
+    fills: fills ?? MOCK_MODEL.fills,
     riskSummary: useObject("riskSummary", riskSummaryR, MOCK_MODEL.riskSummary),
     riskDenials: useArray("riskDenials", riskDenialsR, MOCK_MODEL.riskDenials),
     reconcileSummary: useObject("reconcileSummary", reconcileSummaryR, MOCK_MODEL.reconcileSummary),
@@ -370,7 +731,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     alerts: useArray("alerts", alertsR, MOCK_MODEL.alerts),
     feed: useArray("feed", feedR, MOCK_MODEL.feed),
     auditActions: useArray("auditActions", auditActionsR, MOCK_MODEL.auditActions),
-    metadata: useObject("metadata", metadataR, MOCK_MODEL.metadata),
+    metadata: metadata ?? MOCK_MODEL.metadata,
     topology: useObject("topology", topologyR, MOCK_MODEL.topology),
     transport: useObject("transport", transportR, MOCK_MODEL.transport),
     incidents: useArray("incidents", incidentsR, MOCK_MODEL.incidents),
@@ -387,7 +748,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     actionCatalog: connected ? MOCK_MODEL.actionCatalog : [],
     dataSource,
     connected,
-    lastUpdatedAt: new Date().toISOString(),
+    lastUpdatedAt: nowIso(),
   };
 }
 
@@ -411,38 +772,110 @@ export async function fetchCausalityTrace(internalOrderId: string): Promise<Caus
   return tryFetchJson<CausalityTrace>([`/api/v1/execution/causality/${internalOrderId}`]);
 }
 
+function mapLegacyOperatorActionResponse(
+  actionKey: string,
+  response: EndpointPostResult<unknown>,
+): OperatorActionReceipt | null {
+  if (!response.ok) return null;
+
+  const payload = response.data as Partial<OperatorActionReceipt & LegacyDaemonStatusSnapshot & LegacyIntegrityResponse> | undefined;
+  if (!payload || typeof payload !== "object") {
+    return {
+      ok: true,
+      action_key: actionKey,
+      environment: "paper",
+      live_routing_enabled: false,
+      result_state: "accepted",
+      warnings: ["Operator action completed but returned no JSON payload."],
+      audit_reference: `${actionKey}-${Date.now()}`,
+      blocking_failures: [],
+    };
+  }
+
+  if ("action_key" in payload || "result_state" in payload) {
+    return {
+      ok: payload.ok ?? true,
+      action_key: payload.action_key ?? actionKey,
+      environment: payload.environment ?? "paper",
+      live_routing_enabled: payload.live_routing_enabled ?? false,
+      result_state: payload.result_state ?? "accepted",
+      warnings: payload.warnings ?? [],
+      audit_reference: payload.audit_reference ?? `${actionKey}-${Date.now()}`,
+      blocking_failures: payload.blocking_failures ?? [],
+      simulated: payload.simulated,
+    };
+  }
+
+  if ("armed" in payload || "active_run_id" in payload || "state" in payload) {
+    return {
+      ok: true,
+      action_key: actionKey,
+      environment: "paper",
+      live_routing_enabled: false,
+      result_state: String(payload.state ?? "accepted"),
+      warnings: [],
+      audit_reference: `${actionKey}-${Date.now()}`,
+      blocking_failures: [],
+    };
+  }
+
+  return null;
+}
+
+function failedOperatorActionReceipt(
+  actionKey: string,
+  failure: EndpointPostResult<unknown>,
+  targetEnvironment: SystemStatus["environment"] = "paper",
+): OperatorActionReceipt {
+  const blockingFailures: string[] = [];
+  const warnings: string[] = [];
+  let resultState = "unavailable";
+  let simulated = true;
+
+  if (failure.status === 401) {
+    resultState = "unauthorized";
+    simulated = false;
+    blockingFailures.push("Daemon refused operator action: valid Bearer token required.");
+  } else if (failure.status === 403) {
+    resultState = "refused";
+    simulated = false;
+    blockingFailures.push("Daemon refused operator action at the gate.");
+  } else if (failure.status === 404) {
+    blockingFailures.push(`Operator action endpoint missing for ${actionKey}.`);
+  } else if (failure.error) {
+    blockingFailures.push(`Operator action failed: ${failure.error}`);
+  } else {
+    blockingFailures.push(`Operator action failed for ${actionKey}.`);
+  }
+
+  warnings.push(`Last attempted endpoint: ${failure.endpoint}`);
+
+  return {
+    ok: false,
+    action_key: actionKey,
+    environment: targetEnvironment,
+    live_routing_enabled: false,
+    result_state: resultState,
+    warnings,
+    audit_reference: `${actionKey}-${Date.now()}`,
+    blocking_failures: blockingFailures,
+    simulated,
+  };
+}
+
 export async function invokeOperatorAction(
   actionKey: string,
   params: Record<string, unknown>,
 ): Promise<OperatorActionReceipt> {
-  const response = await postJson<Partial<OperatorActionReceipt>>(
+  const response = await postJson<Partial<OperatorActionReceipt> | LegacyDaemonStatusSnapshot | LegacyIntegrityResponse>(
     ["/api/v1/ops/action", ...legacyActionPaths(actionKey)],
     { action_key: actionKey, ...params },
   );
 
-  if (response) {
-    return {
-      ok: response.ok ?? true,
-      action_key: response.action_key ?? actionKey,
-      environment: response.environment ?? "paper",
-      live_routing_enabled: response.live_routing_enabled ?? false,
-      result_state: response.result_state ?? "accepted",
-      warnings: response.warnings ?? [],
-      audit_reference: response.audit_reference ?? `audit-${actionKey}-${Date.now()}`,
-      blocking_failures: response.blocking_failures ?? [],
-    };
-  }
+  const mapped = mapLegacyOperatorActionResponse(actionKey, response);
+  if (mapped) return mapped;
 
-  return {
-    ok: true,
-    action_key: actionKey,
-    environment: "paper",
-    live_routing_enabled: false,
-    result_state: "accepted",
-    warnings: ["Simulated receipt: daemon action endpoint unavailable."],
-    audit_reference: `audit-${actionKey}-${Date.now()}`,
-    blocking_failures: [],
-  };
+  return failedOperatorActionReceipt(actionKey, response);
 }
 
 export async function requestSystemModeTransition(
@@ -454,27 +887,20 @@ export async function requestSystemModeTransition(
     { target_mode: targetMode, reason },
   );
 
-  if (response) {
+  if (response.ok && response.data) {
+    const payload = response.data;
     return {
-      ok: response.ok ?? true,
-      action_key: response.action_key ?? "change-system-mode",
-      environment: response.environment ?? targetMode,
-      live_routing_enabled: response.live_routing_enabled ?? false,
-      result_state: response.result_state ?? "accepted",
-      warnings: response.warnings ?? [],
-      audit_reference: response.audit_reference ?? `audit-change-system-mode-${Date.now()}`,
-      blocking_failures: response.blocking_failures ?? [],
+      ok: payload.ok ?? true,
+      action_key: payload.action_key ?? "change-system-mode",
+      environment: payload.environment ?? targetMode,
+      live_routing_enabled: payload.live_routing_enabled ?? false,
+      result_state: payload.result_state ?? "accepted",
+      warnings: payload.warnings ?? [],
+      audit_reference: payload.audit_reference ?? `audit-change-system-mode-${Date.now()}`,
+      blocking_failures: payload.blocking_failures ?? [],
+      simulated: payload.simulated,
     };
   }
 
-  return {
-    ok: true,
-    action_key: "change-system-mode",
-    environment: targetMode,
-    live_routing_enabled: false,
-    result_state: "accepted",
-    warnings: ["Simulated receipt: daemon mode transition endpoint unavailable."],
-    audit_reference: `audit-change-system-mode-${Date.now()}`,
-    blocking_failures: [],
-  };
+  return failedOperatorActionReceipt("change-system-mode", response, targetMode);
 }
