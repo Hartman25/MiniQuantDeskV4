@@ -33,8 +33,8 @@ pub use reconcile_guard::ReconcileFreshnessGuard;
 pub use id_map::BrokerOrderMap;
 
 pub use order_router::{
-    BrokerAdapter, BrokerCancelResponse, BrokerEvent, BrokerInvokeToken, BrokerReplaceRequest,
-    BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
+    BrokerAdapter, BrokerCancelResponse, BrokerEvent, BrokerEventIdentity, BrokerInvokeToken,
+    BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest, BrokerSubmitResponse,
 };
 
 pub use gateway::{

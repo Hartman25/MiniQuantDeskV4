@@ -70,6 +70,7 @@ async fn out_of_order_partial_fills_remain_distinct_and_deterministic() -> anyho
     let events = vec![
         BrokerEvent::PartialFill {
             broker_message_id: "pf-3".to_string(),
+            broker_fill_id: None,
             internal_order_id: "ord-chaos".to_string(),
             broker_order_id: Some("broker-chaos".to_string()),
             symbol: "IWM".to_string(),
@@ -80,6 +81,7 @@ async fn out_of_order_partial_fills_remain_distinct_and_deterministic() -> anyho
         },
         BrokerEvent::PartialFill {
             broker_message_id: "pf-1".to_string(),
+            broker_fill_id: None,
             internal_order_id: "ord-chaos".to_string(),
             broker_order_id: Some("broker-chaos".to_string()),
             symbol: "IWM".to_string(),
@@ -90,6 +92,7 @@ async fn out_of_order_partial_fills_remain_distinct_and_deterministic() -> anyho
         },
         BrokerEvent::PartialFill {
             broker_message_id: "pf-2".to_string(),
+            broker_fill_id: None,
             internal_order_id: "ord-chaos".to_string(),
             broker_order_id: Some("broker-chaos".to_string()),
             symbol: "IWM".to_string(),

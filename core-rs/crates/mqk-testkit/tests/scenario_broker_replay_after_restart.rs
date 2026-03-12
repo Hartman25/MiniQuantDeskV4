@@ -77,6 +77,7 @@ async fn replayed_broker_event_is_deduped_after_restart() -> anyhow::Result<()> 
 
     let ev = BrokerEvent::Fill {
         broker_message_id: "replay-msg-1".to_string(),
+        broker_fill_id: None,
         internal_order_id: "ord-1".to_string(),
         broker_order_id: Some("broker-1".to_string()),
         symbol: "SPY".to_string(),
