@@ -2,25 +2,28 @@
 //!
 //! # Invariants under test
 //!
-//! The outbox dispatch protocol (claim → submit → mark_sent → mark_acked)
+//! The outbox dispatch protocol (claim → mark_dispatching → submit →
+//! mark_sent_with_broker_map → mark_acked)
 //! has two windows where a process crash leaves the DB in a state that
 //! could, naïvely, produce a double-submit on restart.
 //!
 //! This file proves the recovery path eliminates double-submit across
 //! both crash boundaries.
 //!
-//! ## Crash Window W1 — after SENT, before ACK persisted
+//! ## Crash Window W1 — after atomic SENT+map commit, before ACK persisted
 //!
-//! Normal path:   claim → submit_to_broker → mark_sent → [receive ACK] → mark_acked
-//! Crash at:      ^— after mark_sent, process exits before mark_acked
-//! DB state:      outbox = SENT, broker has the order
+//! Normal path:   claim → mark_dispatching → submit_to_broker → mark_sent_with_broker_map
+//! Crash at:      ^— after atomic SENT+map commit, process exits before mark_acked
+//! DB state:      outbox = SENT, broker has order, broker_map has durable evidence
 //! Recovery:      broker has order → mark_acked locally, do NOT resubmit
 //! Invariant:     broker.submit_count() == 1 after recovery
 //!
-//! ## Crash Window W2 — after CLAIMED, before broker submit
+//! ## Crash Window W2 (LEGACY/CORRUPT DB-STATE) — row stranded in CLAIMED
 //!
-//! Normal path:   claim → [send to broker] → mark_sent → ...
-//! Crash at:      ^— after claim, process exits before broker submit
+//! This is retained as an explicit legacy/corrupt-state proof.
+//! Normal production dispatch should advance CLAIMED → DISPATCHING before any
+//! broker call; a long-lived CLAIMED row at restart indicates legacy/crashed
+//! pre-dispatch state.
 //! DB state:      outbox = CLAIMED, broker does NOT have the order
 //! Recovery:      broker missing → submit exactly once → mark_acked
 //! Invariant:     broker.submit_count() == 1 after recovery (no zero, no two)
@@ -105,6 +108,18 @@ async fn seed_run_and_outbox(pool: &PgPool, run_id: Uuid, idem_key: &str) -> Res
 /// Remove test data for the given run (cascades oms_outbox from runs delete).
 /// broker_order_map rows must already be gone before calling this.
 async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
+    sqlx::query(
+        r#"
+        delete from broker_order_map
+        where internal_id in (
+            select idempotency_key from oms_outbox where run_id = $1
+        )
+        "#,
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?;
+
     sqlx::query("delete from runs where run_id = $1")
         .bind(run_id)
         .execute(pool)
@@ -138,6 +153,13 @@ async fn w1_crash_after_sent_before_ack_no_double_submit() -> anyhow::Result<()>
         mqk_db::outbox_claim_batch(&pool, 1, "eb5-dispatcher", chrono::Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "must claim the PENDING row");
 
+    let dispatching =
+        mqk_db::outbox_mark_dispatching(&pool, key, "eb5-dispatcher", Utc::now()).await?;
+    assert!(
+        dispatching,
+        "must mark CLAIMED -> DISPATCHING before broker submit"
+    );
+
     // Broker stub: submit the order. Broker now has it.
     let mut broker = mqk_testkit::FakeBroker::new();
     broker.submit(key, json!({"symbol":"SPY","qty":1}));
@@ -147,9 +169,18 @@ async fn w1_crash_after_sent_before_ack_no_double_submit() -> anyhow::Result<()>
         "broker must record exactly one submit"
     );
 
-    // Mark outbox SENT to record the dispatch attempt.
-    let sent = mqk_db::outbox_mark_sent(&pool, key, chrono::Utc::now()).await?;
-    assert!(sent, "outbox_mark_sent must transition CLAIMED → SENT");
+    // Atomically persist SENT + broker map to record dispatch attempt.
+    let sent = mqk_db::outbox_mark_sent_with_broker_map(
+        &pool,
+        key,
+        &format!("broker-{key}"),
+        chrono::Utc::now(),
+    )
+    .await?;
+    assert!(
+        sent,
+        "outbox_mark_sent_with_broker_map must transition DISPATCHING → SENT"
+    );
 
     // --- CRASH: process exits here, mark_acked never called ---
     // DB state: outbox = SENT, broker has the order.
@@ -189,11 +220,11 @@ async fn w1_crash_after_sent_before_ack_no_double_submit() -> anyhow::Result<()>
 }
 
 // ---------------------------------------------------------------------------
-// W2: Crash after CLAIMED, before broker submit — resubmit exactly once
+// W2: Legacy/corrupt CLAIMED state recovery — resubmit exactly once
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn w2_crash_after_claimed_before_sent_resubmits_exactly_once() -> anyhow::Result<()> {
+async fn w2_legacy_claimed_row_on_restart_resubmits_exactly_once() -> anyhow::Result<()> {
     let url = require_db_url();
     let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;

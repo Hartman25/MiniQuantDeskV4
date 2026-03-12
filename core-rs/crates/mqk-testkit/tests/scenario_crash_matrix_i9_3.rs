@@ -3,25 +3,25 @@
 //! # Invariants under test
 //!
 //! Three crash windows in the outbox dispatch / inbox apply path not covered
-//! by EB-5. Each window leaves the DB in a state that could, naïvely,
-//! produce a double-submit or double-apply on restart.
+//! by EB-5. Scenarios are aligned to the current production contract:
+//! fail-closed restart quarantine for ambiguous dispatch states,
+//! atomic SENT+broker-map durability, and inbox replay safety.
 //!
-//! ## Crash Window W4 — after broker submit, before outbox_mark_sent
+//! ## Crash Window W4 — after DISPATCHING mark, before atomic SENT+map commit
 //!
-//! Normal path:  claim → mark_dispatching → submit_to_broker → mark_sent → broker_map_upsert
-//! Crash at:     ^— broker.submit() succeeded, process exits before mark_sent
-//! DB state:     outbox = DISPATCHING, broker HAS the order, no broker_map entry
+//! Normal path:  claim → mark_dispatching → submit_to_broker → mark_sent_with_broker_map
+//! Crash at:     ^— process exits after mark_dispatching, before atomic commit
+//! DB state:     outbox = DISPATCHING, no durable broker_map evidence
+//! Recovery:     restart quarantine must halt/disarm; dispatch is refused
+//! Invariant:    outbox_load_restart_ambiguous_for_run returns this row
+//!
+//! ## Crash Window W5 — after atomic SENT+broker_map commit, before ACK
+//!
+//! Normal path:  … → mark_dispatching → submit_to_broker → mark_sent_with_broker_map → order_map.register
+//! Crash at:     ^— atomic commit done, process exits before ACK persistence
+//! DB state:     outbox = SENT, broker_order_map entry exists
 //! Recovery:     broker.has_order() = true → mark_acked; do NOT resubmit
-//! Invariant:    broker.submit_count() == 1 (no double-submit)
-//!
-//! ## Crash Window W5 — after outbox_mark_sent, before broker_map_upsert
-//!
-//! Normal path:  … → mark_dispatching → submit_to_broker → mark_sent → broker_map_upsert → order_map.register
-//! Crash at:     ^— mark_sent done, process exits before broker_map_upsert
-//! DB state:     outbox = SENT, no broker_order_map entry
-//! Recovery:     broker.has_order() = true → mark_acked; broker_map gap persists
-//! Invariant:    broker.submit_count() == 1; broker_map has no orphaned entry —
-//!               the mapping gap is surfaced (not hidden) by broker_map_load
+//! Invariant:    broker.submit_count() == 1 and broker_map remains present
 //!
 //! ## Crash Window W6 — after inbox_insert_deduped, before inbox_mark_applied
 //!
@@ -104,10 +104,21 @@ async fn seed_run_and_outbox(pool: &PgPool, run_id: Uuid, idem_key: &str) -> Res
 
 /// Remove test data for the given run.
 ///
-/// oms_outbox and oms_inbox both have ON DELETE CASCADE from runs, so a
-/// single delete from runs cleans everything. The caller must have already
-/// removed any broker_order_map rows (FK RESTRICT) before calling this.
+/// broker_order_map has FK RESTRICT to oms_outbox, so mapping rows must be
+/// removed before deleting the run.
 async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
+    sqlx::query(
+        r#"
+        delete from broker_order_map
+        where internal_id in (
+            select idempotency_key from oms_outbox where run_id = $1
+        )
+        "#,
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?;
+
     sqlx::query("delete from runs where run_id = $1")
         .bind(run_id)
         .execute(pool)
@@ -116,17 +127,15 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// W4: Crash after broker submit, before outbox_mark_sent
+// W4: Crash after DISPATCHING, before atomic SENT+map commit
 // ---------------------------------------------------------------------------
 
-/// Crash after broker.submit() but before outbox_mark_sent().
+/// Crash after outbox_mark_dispatching() but before atomic SENT+map commit.
 ///
-/// DB state entering recovery: outbox = DISPATCHING, broker HAS the order.
-/// The dispatcher already crossed the pre-submit safety barrier and wrote
-/// DISPATCHING, but never reached mark_sent. recover_outbox_against_broker
-/// must NOT resubmit — broker already has it — and must ACK the row.
+/// DB state entering restart: outbox = DISPATCHING, no broker-map evidence.
+/// Current production policy quarantines this row; no automatic recovery.
 #[tokio::test]
-async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Result<()> {
+async fn w4_crash_before_atomic_sent_map_commit_is_restart_quarantined() -> anyhow::Result<()> {
     let url = require_db_url();
     let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;
@@ -154,45 +163,23 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
         "W4: outbox_mark_dispatching must transition CLAIMED → DISPATCHING"
     );
 
-    // Broker submit succeeds — broker now has the order.
-    let mut broker = mqk_testkit::FakeBroker::new();
-    broker.submit(key, json!({"symbol": "SPY", "qty": 1}));
+    // --- CRASH: process exits here, atomic SENT+map commit never ran ---
+    // DB state: outbox = DISPATCHING, no broker_map entry.
+
+    let ambiguous = mqk_db::outbox_load_restart_ambiguous_for_run(&pool, run_id).await?;
     assert_eq!(
-        broker.submit_count(),
+        ambiguous.len(),
         1,
-        "W4: broker must record one submit"
+        "W4: restart quarantine must surface DISPATCHING row as ambiguous"
     );
+    assert_eq!(ambiguous[0].status, "DISPATCHING");
 
-    // --- CRASH: process exits here, outbox_mark_sent never called ---
-    // DB state: outbox = DISPATCHING, broker HAS the order, no broker_map entry.
-
-    // --- Restart: run recovery ---
-    let report = mqk_testkit::recover_outbox_against_broker(&pool, run_id, &mut broker).await?;
-
-    assert_eq!(
-        report.inspected, 1,
-        "W4: recovery must inspect the DISPATCHING row"
-    );
-    assert_eq!(
-        report.resubmitted, 0,
-        "W4: must NOT resubmit — broker already has the order"
-    );
-    assert_eq!(
-        report.acked, 1,
-        "W4: must mark ACKED when broker already has the order"
-    );
-    assert_eq!(
-        broker.submit_count(),
-        1,
-        "W4: broker must have received exactly one submit total (no double-submit)"
-    );
-
-    // DB must now show ACKED.
+    // DB must remain DISPATCHING and must not be auto-ACKed.
     let row = mqk_db::outbox_fetch_by_idempotency_key(&pool, key).await?;
     assert_eq!(
         row.expect("W4: row must exist").status,
-        "ACKED",
-        "W4: outbox row must be ACKED after recovery"
+        "DISPATCHING",
+        "W4: row must remain DISPATCHING until operator/reconcile action"
     );
 
     // No broker_map entry was ever created (upsert was not reached before crash).
@@ -200,7 +187,7 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
     let w4_entry = all_mappings.iter().find(|(id, _)| id == key);
     assert!(
         w4_entry.is_none(),
-        "W4: broker_map must have no entry — upsert never reached before crash"
+        "W4: broker_map must have no entry — atomic commit never ran"
     );
 
     cleanup_run(&pool, run_id).await?;
@@ -209,18 +196,15 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
 }
 
 // ---------------------------------------------------------------------------
-// W5: Crash after outbox_mark_sent, before broker_map_upsert
+// W5: Crash after atomic SENT+map commit, before ACK
 // ---------------------------------------------------------------------------
 
-/// Crash after outbox_mark_sent() but before broker_map_upsert().
+/// Crash after outbox_mark_sent_with_broker_map() commits.
 ///
-/// DB state entering recovery: outbox = SENT, broker HAS the order, no
-/// broker_order_map entry for this key. Recovery must ACK without resubmit.
-/// The broker_map gap persists after recovery — cancel/replace cannot locate
-/// this order, but no double-submit occurs and no phantom entry is created.
+/// DB state entering recovery: outbox = SENT, broker HAS the order, and
+/// broker_order_map has durable evidence. Recovery must ACK without resubmit.
 #[tokio::test]
-async fn w5_crash_after_mark_sent_before_broker_map_upsert_no_double_submit() -> anyhow::Result<()>
-{
+async fn w5_crash_after_atomic_sent_map_commit_before_ack_no_double_submit() -> anyhow::Result<()> {
     let url = require_db_url();
     let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;
@@ -261,21 +245,31 @@ async fn w5_crash_after_mark_sent_before_broker_map_upsert_no_double_submit() ->
         "W5: broker must record one submit"
     );
 
-    // Mark outbox SENT (DISPATCHING → SENT).
-    let sent = mqk_db::outbox_mark_sent(&pool, key, Utc::now()).await?;
+    // Atomically persist broker-map + SENT.
+    let sent =
+        mqk_db::outbox_mark_sent_with_broker_map(&pool, key, &format!("broker-{key}"), Utc::now())
+            .await?;
     assert!(
         sent,
-        "W5: outbox_mark_sent must transition DISPATCHING → SENT"
+        "W5: outbox_mark_sent_with_broker_map must transition DISPATCHING → SENT"
     );
 
-    // --- CRASH: process exits here, broker_map_upsert never called ---
-    // DB state: outbox = SENT, broker HAS the order, broker_map has no entry.
+    // --- CRASH: process exits here, before ACK is persisted ---
+    // DB state: outbox = SENT, broker HAS the order, broker_map entry exists.
 
     // Verify the broker_map gap before recovery.
     let before = mqk_db::broker_map_load(&pool).await?;
     assert!(
-        before.iter().all(|(id, _)| id != key),
-        "W5: broker_map must have no entry for the crashed key before recovery"
+        before
+            .iter()
+            .any(|(id, broker)| id == key && broker == &format!("broker-{key}")),
+        "W5: broker_map must contain durable SENT mapping before recovery"
+    );
+
+    let ambiguous = mqk_db::outbox_load_restart_ambiguous_for_run(&pool, run_id).await?;
+    assert!(
+        ambiguous.iter().all(|row| row.idempotency_key != key),
+        "W5: SENT row with broker map evidence must NOT be restart-quarantined"
     );
 
     // --- Restart: run recovery ---
@@ -307,12 +301,13 @@ async fn w5_crash_after_mark_sent_before_broker_map_upsert_no_double_submit() ->
         "W5: outbox row must be ACKED after recovery"
     );
 
-    // The broker_map gap persists after recovery — this is expected and documented.
-    // Recovery does not back-fill the mapping; the gap is surfaced not hidden.
+    // Broker map evidence remains present across recovery.
     let after = mqk_db::broker_map_load(&pool).await?;
     assert!(
-        after.iter().all(|(id, _)| id != key),
-        "W5: broker_map must still have no entry after recovery — gap persists, not fabricated"
+        after
+            .iter()
+            .any(|(id, broker)| id == key && broker == &format!("broker-{key}")),
+        "W5: broker_map must remain present after recovery"
     );
 
     cleanup_run(&pool, run_id).await?;

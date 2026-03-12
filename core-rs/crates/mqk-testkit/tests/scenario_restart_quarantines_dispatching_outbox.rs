@@ -218,6 +218,14 @@ async fn restart_quarantines_dispatching_row_and_refuses_dispatch() -> Result<()
         mqk_db::outbox_mark_dispatching(&pool, idem, "patch2-dispatcher", Utc::now()).await?;
     assert!(marked, "row must transition CLAIMED -> DISPATCHING");
 
+    let ambiguous = mqk_db::outbox_load_restart_ambiguous_for_run(&pool, run_id).await?;
+    assert!(
+        ambiguous
+            .iter()
+            .any(|row| row.idempotency_key == idem && row.status == "DISPATCHING"),
+        "DISPATCHING row must be restart-ambiguous prior to orchestrator tick"
+    );
+
     let broker = CountingBroker::default();
     let broker_probe = broker.clone();
 

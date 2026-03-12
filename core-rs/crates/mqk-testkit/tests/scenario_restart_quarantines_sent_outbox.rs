@@ -1,5 +1,9 @@
 //! Patch 2 — restart quarantine for SENT rows that have no broker-map evidence.
 //!
+//! This is an explicit legacy/corrupt DB-state proof: current production
+//! dispatch writes SENT + broker_map atomically, so a durable SENT row with no
+//! mapping should only appear after legacy behavior or external DB corruption.
+//!
 //! # PROOF LANE
 //!
 //! This is a load-bearing institutional proof test. It MUST fail hard if
@@ -182,7 +186,8 @@ fn make_orchestrator(
 }
 
 #[tokio::test]
-async fn restart_quarantines_sent_row_without_broker_map_and_refuses_dispatch() -> Result<()> {
+async fn restart_quarantines_legacy_sent_row_without_broker_map_and_refuses_dispatch() -> Result<()>
+{
     let url = require_db_url();
     let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;
@@ -218,7 +223,15 @@ async fn restart_quarantines_sent_row_without_broker_map_and_refuses_dispatch() 
     assert!(sent, "row must transition CLAIMED -> SENT");
 
     // Intentionally DO NOT write broker_map_upsert().
-    // This is the crash window Patch 2 is supposed to quarantine.
+    // This emulates legacy/corrupt durable state (SENT without mapping).
+
+    let ambiguous = mqk_db::outbox_load_restart_ambiguous_for_run(&pool, run_id).await?;
+    assert!(
+        ambiguous
+            .iter()
+            .any(|row| row.idempotency_key == idem && row.status == "SENT"),
+        "legacy/corrupt SENT row without broker map must be restart-ambiguous"
+    );
 
     let broker = CountingBroker::default();
     let broker_probe = broker.clone();
