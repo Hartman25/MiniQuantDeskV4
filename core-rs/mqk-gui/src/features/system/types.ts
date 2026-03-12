@@ -7,6 +7,17 @@ export type OmsState = "open" | "partially_filled" | "filled" | "cancelled" | "r
 export type OperatorTimelineCategory = "alert" | "operator_action" | "mode_transition" | "runtime_restart" | "config_change" | "incident" | "reconcile";
 
 export type DataSourceState = "real" | "partial" | "mock" | "disconnected";
+export type SourceAuthority = "db_truth" | "runtime_memory" | "broker_snapshot" | "placeholder" | "mixed" | "unknown";
+export type CorePanelKey = "dashboard" | "system" | "execution" | "risk" | "reconcile" | "portfolio" | "ops";
+
+export interface SourceAuthorityDetail {
+  authority: SourceAuthority;
+  note: string;
+  sources: SourceAuthority[];
+  sections: string[];
+}
+
+export type PanelSourceMap = Record<CorePanelKey, SourceAuthorityDetail>;
 
 export interface DataSourceDetail {
   state: DataSourceState;
@@ -915,9 +926,20 @@ export interface SystemModel {
   operatorTimeline: OperatorTimelineEvent[];
   actionCatalog: OperatorActionDefinition[];
   dataSource: DataSourceDetail;
+  panelSources: PanelSourceMap;
   connected: boolean;
   lastUpdatedAt: string | null;
 }
+
+export const DEFAULT_PANEL_SOURCES: PanelSourceMap = {
+  dashboard: { authority: "unknown", note: "Source cannot be proven without daemon data.", sources: ["unknown"], sections: [] },
+  system: { authority: "unknown", note: "Source cannot be proven without daemon data.", sources: ["unknown"], sections: [] },
+  execution: { authority: "unknown", note: "Source cannot be proven without daemon data.", sources: ["unknown"], sections: [] },
+  risk: { authority: "unknown", note: "Source cannot be proven without daemon data.", sources: ["unknown"], sections: [] },
+  reconcile: { authority: "unknown", note: "Source cannot be proven without daemon data.", sources: ["unknown"], sections: [] },
+  portfolio: { authority: "unknown", note: "Source cannot be proven without daemon data.", sources: ["unknown"], sections: [] },
+  ops: { authority: "unknown", note: "Source cannot be proven without daemon data.", sources: ["unknown"], sections: [] },
+};
 
 export const DEFAULT_STATUS: SystemStatus = {
   environment: "paper",

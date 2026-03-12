@@ -1,5 +1,6 @@
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
+import { SourceAuthorityBadge } from "../../components/common/SourceAuthorityBadge";
 import { StatCard } from "../../components/common/StatCard";
 import { formatDateTime, formatMoney } from "../../lib/format";
 import type { SystemModel } from "../system/types";
@@ -9,6 +10,7 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
 
   return (
     <div className="screen-grid desk-screen-grid">
+      <SourceAuthorityBadge detail={model.panelSources.portfolio} />
       <div className="summary-grid summary-grid-four">
         <StatCard title="Equity" value={formatMoney(p.account_equity)} detail="Account equity" tone="good" />
         <StatCard title="Cash" value={formatMoney(p.cash)} detail="Available cash" tone="neutral" />

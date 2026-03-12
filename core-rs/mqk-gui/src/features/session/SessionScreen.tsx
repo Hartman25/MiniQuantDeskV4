@@ -1,4 +1,5 @@
 import { Panel } from "../../components/common/Panel";
+import { SourceAuthorityBadge } from "../../components/common/SourceAuthorityBadge";
 import { StatCard } from "../../components/common/StatCard";
 import { formatDateTime } from "../../lib/format";
 import type { SystemModel } from "../system/types";
@@ -8,6 +9,7 @@ export function SessionScreen({ model }: { model: SystemModel }) {
 
   return (
     <div className="screen-grid desk-screen-grid">
+      <SourceAuthorityBadge detail={model.panelSources.system} />
       <div className="summary-grid summary-grid-four">
         <StatCard title="Market Session" value={s.market_session} detail="Current exchange session" tone="good" />
         <StatCard title="Calendar State" value={s.exchange_calendar_state} detail="Exchange calendar view" tone="neutral" />

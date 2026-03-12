@@ -1,4 +1,5 @@
 import { Panel } from "../../components/common/Panel";
+import { SourceAuthorityBadge } from "../../components/common/SourceAuthorityBadge";
 import type { EnvironmentMode, OperatorActionDefinition, SystemModel } from "../system/types";
 
 function levelLabel(level: OperatorActionDefinition["level"]): string {
@@ -29,6 +30,7 @@ export function OpsScreen({
 }) {
   return (
     <div className="screen-grid desk-screen-grid">
+      <SourceAuthorityBadge detail={model.panelSources.ops} />
       <Panel title="System mode transition" subtitle="Mode changes require a controlled daemon restart and configuration reload. This is not a casual runtime toggle.">
         <div className="mode-transition-panel">
           <div className="mode-transition-meta">

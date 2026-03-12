@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
+import { SourceAuthorityBadge } from "../../components/common/SourceAuthorityBadge";
 import { StatCard } from "../../components/common/StatCard";
 import { TimelineStageStrip } from "../../components/common/TimelineStageStrip";
 import { formatDateTime, formatDurationMs } from "../../lib/format";
@@ -31,6 +32,7 @@ export function ExecutionScreen({
 
   return (
     <div className="screen-grid desk-screen-grid execution-workspace">
+      <SourceAuthorityBadge detail={model.panelSources.execution} />
       <div className="summary-grid summary-grid-four">
         <StatCard
           title="Active Orders"

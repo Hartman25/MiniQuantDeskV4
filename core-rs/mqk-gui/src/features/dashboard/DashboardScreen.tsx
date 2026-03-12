@@ -1,4 +1,5 @@
 import { Panel } from "../../components/common/Panel";
+import { SourceAuthorityBadge } from "../../components/common/SourceAuthorityBadge";
 import { StatCard } from "../../components/common/StatCard";
 import type { SystemModel } from "../system/types";
 import { formatDateTime, formatLatency } from "../../lib/format";
@@ -19,6 +20,7 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
 
   return (
     <div className="screen-grid desk-screen-grid">
+      <SourceAuthorityBadge detail={model.panelSources.dashboard} />
       <div className="summary-grid summary-grid-four">
         <StatCard
           title="Runtime"

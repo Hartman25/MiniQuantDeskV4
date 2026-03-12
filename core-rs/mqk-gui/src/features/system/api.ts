@@ -1,5 +1,6 @@
 import { getDaemonUrl } from "../../config";
 import { MOCK_MODEL } from "./mockData";
+import { classifyPanelSources } from "./sourceAuthority";
 import type {
   AlertTriageRow,
   ArtifactRegistrySummary,
@@ -696,6 +697,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     usedMockSections,
     daemonReachable,
   });
+  const panelSources = classifyPanelSources(dataSource);
 
   return {
     status: objectOrFallback(
@@ -747,6 +749,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     operatorTimeline: useArray("operatorTimeline", operatorTimelineR, MOCK_MODEL.operatorTimeline),
     actionCatalog: connected ? MOCK_MODEL.actionCatalog : [],
     dataSource,
+    panelSources,
     connected,
     lastUpdatedAt: nowIso(),
   };

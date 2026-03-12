@@ -1,5 +1,6 @@
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
+import { SourceAuthorityBadge } from "../../components/common/SourceAuthorityBadge";
 import { StatCard } from "../../components/common/StatCard";
 import { formatDateTime } from "../../lib/format";
 import type { SystemModel } from "../system/types";
@@ -11,6 +12,7 @@ export function ReconcileScreen({ model }: { model: SystemModel }) {
 
   return (
     <div className="screen-grid desk-screen-grid">
+      <SourceAuthorityBadge detail={model.panelSources.reconcile} />
       <div className="summary-grid summary-grid-four">
         <StatCard
           title="Reconcile Status"

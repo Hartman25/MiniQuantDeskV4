@@ -894,6 +894,15 @@ export const MOCK_MODEL: SystemModel = {
     mockSections: ["all"],
     message: "Mock fallback model active",
   },
+  panelSources: {
+    dashboard: { authority: "placeholder", note: "Mock fallback model active.", sources: ["placeholder"], sections: ["all"] },
+    system: { authority: "placeholder", note: "Mock fallback model active.", sources: ["placeholder"], sections: ["all"] },
+    execution: { authority: "placeholder", note: "Mock fallback model active.", sources: ["placeholder"], sections: ["all"] },
+    risk: { authority: "placeholder", note: "Mock fallback model active.", sources: ["placeholder"], sections: ["all"] },
+    reconcile: { authority: "placeholder", note: "Mock fallback model active.", sources: ["placeholder"], sections: ["all"] },
+    portfolio: { authority: "placeholder", note: "Mock fallback model active.", sources: ["placeholder"], sections: ["all"] },
+    ops: { authority: "placeholder", note: "Mock fallback model active.", sources: ["placeholder"], sections: ["all"] },
+  },
   connected: true,
   lastUpdatedAt: new Date().toISOString(),
 };

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { fetchOperatorModel } from "./api";
-import { DEFAULT_PREFLIGHT, DEFAULT_STATUS, type SystemModel } from "./types";
+import { DEFAULT_PANEL_SOURCES, DEFAULT_PREFLIGHT, DEFAULT_STATUS, type SystemModel } from "./types";
 
 const FALLBACK_MODEL: SystemModel = {
   status: DEFAULT_STATUS,
@@ -55,6 +55,7 @@ const FALLBACK_MODEL: SystemModel = {
     mockSections: [],
     message: "No daemon connection established yet",
   },
+  panelSources: DEFAULT_PANEL_SOURCES,
   connected: false,
   lastUpdatedAt: null,
 };
