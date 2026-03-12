@@ -47,7 +47,8 @@ async fn recovery_query_returns_pending_outbox_for_run() -> anyhow::Result<()> {
     let claimed =
         mqk_db::outbox_claim_batch(&pool, 1, "test-dispatcher", chrono::Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "must claim exactly one row");
-    mqk_db::outbox_mark_sent(&pool, &k1, chrono::Utc::now()).await?;
+    mqk_db::outbox_mark_sent_with_broker_map(&pool, &k1, "test-broker-id-k1", chrono::Utc::now())
+        .await?;
 
     let pending = mqk_db::outbox_list_unacked_for_run(&pool, run_id).await?;
     assert_eq!(pending.len(), 2, "expected 2 unacked outbox rows");

@@ -148,7 +148,9 @@ async fn w1_crash_after_sent_before_ack_no_double_submit() -> anyhow::Result<()>
     );
 
     // Mark outbox SENT to record the dispatch attempt.
-    let sent = mqk_db::outbox_mark_sent(&pool, key, chrono::Utc::now()).await?;
+    let sent =
+        mqk_db::outbox_mark_sent_with_broker_map(&pool, key, "test-broker-id", chrono::Utc::now())
+            .await?;
     assert!(sent, "outbox_mark_sent must transition CLAIMED → SENT");
 
     // --- CRASH: process exits here, mark_acked never called ---
@@ -279,7 +281,8 @@ async fn w3_acked_row_not_reinspected_on_second_restart() -> anyhow::Result<()> 
 
     let mut broker = mqk_testkit::FakeBroker::new();
     broker.submit(key, json!({"symbol":"SPY","qty":1}));
-    mqk_db::outbox_mark_sent(&pool, key, chrono::Utc::now()).await?;
+    mqk_db::outbox_mark_sent_with_broker_map(&pool, key, "test-broker-id", chrono::Utc::now())
+        .await?;
 
     // First recovery: marks the row ACKED.
     let first = mqk_testkit::recover_outbox_against_broker(&pool, run_id, &mut broker).await?;

@@ -173,7 +173,9 @@ async fn sent_rows_never_reset_by_stale_reaper() -> anyhow::Result<()> {
 
     mqk_db::outbox_claim_batch(&pool, 1, "dispatcher-ok", claimed_at).await?;
 
-    let sent = mqk_db::outbox_mark_sent(&pool, &intent_id, Utc::now()).await?;
+    let sent =
+        mqk_db::outbox_mark_sent_with_broker_map(&pool, &intent_id, "test-broker-id", Utc::now())
+            .await?;
 
     assert!(sent);
 

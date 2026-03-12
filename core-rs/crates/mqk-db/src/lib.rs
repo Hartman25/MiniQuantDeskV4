@@ -1193,48 +1193,6 @@ pub async fn outbox_fetch_by_idempotency_key(
     }))
 }
 
-/// Mark a CLAIMED or DISPATCHING outbox row as SENT (sets sent_at_utc).
-///
-/// Returns true if a row transitioned to SENT; false if not found or not in
-/// an acceptable pre-SENT state.
-///
-/// Accepts both `CLAIMED` and `DISPATCHING` for backward compatibility:
-/// - Production path (RT-5): `DISPATCHING → SENT` (row was marked DISPATCHING
-///   before `gateway.submit()`).
-/// - Legacy test path: `CLAIMED → SENT` (tests that skip `outbox_mark_dispatching`).
-///
-/// **Patch L3 enforcement:** only rows that have been claimed via
-/// `outbox_claim_batch` can be marked SENT. Attempting to mark a PENDING row
-/// SENT without first claiming it returns `false`, preventing a rogue
-/// dispatcher from bypassing the claim/lock protocol.
-///
-/// `sent_at` is caller-supplied — no SQL `now()` in this function (FC-7
-/// policy: wall-clock excluded from the dispatch path).  In production,
-/// pass `time_source.now_utc()`; in tests, pass an explicit timestamp.
-pub async fn outbox_mark_sent(
-    pool: &PgPool,
-    idempotency_key: &str,
-    sent_at: DateTime<Utc>,
-) -> Result<bool> {
-    let row: Option<(i64,)> = sqlx::query_as(
-        r#"
-        update oms_outbox
-           set status      = 'SENT',
-               sent_at_utc = coalesce(sent_at_utc, $2)
-         where idempotency_key = $1
-           and status in ('CLAIMED', 'DISPATCHING')
-        returning outbox_id
-        "#,
-    )
-    .bind(idempotency_key)
-    .bind(sent_at)
-    .fetch_optional(pool)
-    .await
-    .context("outbox_mark_sent failed")?;
-
-    Ok(row.is_some())
-}
-
 /// Atomically persist `internal_id → broker_id` and transition the outbox row
 /// to `SENT`.
 ///
@@ -1252,7 +1210,7 @@ pub async fn outbox_mark_sent(
 /// not occur, the transaction is not committed, so the broker map upsert is
 /// rolled back as well.
 ///
-/// Accepts both `CLAIMED` and `DISPATCHING` for parity with `outbox_mark_sent`:
+/// Accepts both `CLAIMED` and `DISPATCHING`:
 /// - Production path (RT-5): `DISPATCHING → SENT`
 /// - Legacy test path: `CLAIMED → SENT`
 pub async fn outbox_mark_sent_with_broker_map(

@@ -125,7 +125,13 @@ async fn outbox_row_is_pending_before_broker_submit() -> anyhow::Result<()> {
     //
     // In production the dispatcher calls the broker adapter *after* claiming,
     // then marks SENT. Here we skip the actual broker call.
-    let marked = mqk_db::outbox_mark_sent(&pool, &client_order_id, chrono::Utc::now()).await?;
+    let marked = mqk_db::outbox_mark_sent_with_broker_map(
+        &pool,
+        &client_order_id,
+        "test-broker-id",
+        chrono::Utc::now(),
+    )
+    .await?;
     assert!(
         marked,
         "outbox_mark_sent must succeed after the row has been CLAIMED"
