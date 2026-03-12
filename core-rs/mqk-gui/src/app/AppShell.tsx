@@ -272,7 +272,12 @@ export function AppShell() {
             <ActionReceiptBanner receipt={actionReceipt} />
             <PreflightGate preflight={model.preflight} />
 
-            <WorkspaceFrame title={screen.title} description={screen.description}>
+            <WorkspaceFrame
+              title={screen.title}
+              description={screen.description}
+              panelKey={activeScreen}
+              authority={model.panelSources[activeScreen]}
+            >
               {screen.render({
                 model,
                 selectTimeline: (internalOrderId) => void selectTimeline(internalOrderId),

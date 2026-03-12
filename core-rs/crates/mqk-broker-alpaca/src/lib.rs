@@ -519,6 +519,7 @@ fn classify_transport_err_for_submit(err: reqwest::Error) -> BrokerError {
     if err.is_connect() {
         // Connection refused before the request was sent - safe to retry.
         BrokerError::Transport {
+            non_delivery_proven: true,
             detail: err.to_string(),
         }
     } else {
@@ -532,6 +533,7 @@ fn classify_transport_err_for_submit(err: reqwest::Error) -> BrokerError {
 fn classify_transport_err(err: reqwest::Error) -> BrokerError {
     if err.is_connect() {
         BrokerError::Transport {
+            non_delivery_proven: true,
             detail: err.to_string(),
         }
     } else if err.is_timeout() {
@@ -560,6 +562,7 @@ fn classify_http_status(status: reqwest::StatusCode, body: &str) -> BrokerError 
         },
         429 => BrokerError::RateLimit {
             retry_after_ms: None,
+            non_delivery_proven: true,
             detail: body.to_string(),
         },
         c if c >= 500 => BrokerError::Transient {

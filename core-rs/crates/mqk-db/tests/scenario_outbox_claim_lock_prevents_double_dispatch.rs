@@ -117,7 +117,13 @@ async fn only_one_dispatcher_claims_row_second_gets_empty() -> anyhow::Result<()
     );
 
     // --- Only dispatcher A can advance the row to SENT ---
-    let sent = mqk_db::outbox_mark_sent(&pool, &intent_id, chrono::Utc::now()).await?;
+    let sent = mqk_db::outbox_mark_sent_with_broker_map(
+        &pool,
+        &intent_id,
+        "test-broker-id",
+        chrono::Utc::now(),
+    )
+    .await?;
     assert!(sent, "dispatcher A must be able to mark SENT");
 
     let row = mqk_db::outbox_fetch_by_idempotency_key(&pool, &intent_id)
@@ -226,7 +232,13 @@ async fn unclaimed_row_cannot_be_marked_sent() -> anyhow::Result<()> {
     .await?;
 
     // Attempt to mark SENT directly — no claim step.
-    let sent = mqk_db::outbox_mark_sent(&pool, &intent_id, chrono::Utc::now()).await?;
+    let sent = mqk_db::outbox_mark_sent_with_broker_map(
+        &pool,
+        &intent_id,
+        "test-broker-id",
+        chrono::Utc::now(),
+    )
+    .await?;
     assert!(
         !sent,
         "mark_sent must return false if the row was never claimed"

@@ -17,7 +17,11 @@ sqlx.workspace = true
 # No other crate's [dependencies] may enable this feature.
 mqk-db = { path = "../mqk-db", features = ["runtime-claim"] }
 
+# Production/runtime wiring only. Test-only helpers are activated below in
+# dev-dependencies so unit/integration tests can use explicit test escape hatches
+# without changing production compilation semantics.
 mqk-execution = { path = "../mqk-execution", features = ["runtime-boundary"] }
+
 mqk-portfolio = { path = "../mqk-portfolio" }
 mqk-reconcile = { path = "../mqk-reconcile" }
 mqk-broker-paper = { path = "../mqk-broker-paper" }
@@ -26,6 +30,14 @@ mqk-risk = { path = "../mqk-risk" }
 [features]
 # Patch 1: test-only wiring helpers (e.g., PassGate paper gateway).
 # MUST NOT be enabled in production deployments.
-testkit = ["mqk-execution/testkit"]
+testkit = ["mqk-execution/testkit", "mqk-db/testkit"]
+
 [dev-dependencies]
 tokio.workspace = true
+
+# Test-only feature activations for mqk-runtime unit/lib tests.
+# These do not affect production builds, but they allow lib tests to call
+# explicit test escape hatches such as BrokerGateway::for_test and
+# OutboxClaimToken::for_test.
+mqk-db = { path = "../mqk-db", features = ["testkit", "runtime-claim"] }
+mqk-execution = { path = "../mqk-execution", features = ["testkit", "runtime-boundary"] }

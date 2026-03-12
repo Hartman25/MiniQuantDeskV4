@@ -61,13 +61,14 @@ fn require_db_url() -> String {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn duplicate_fill_storm_collapses_to_one_inbox_row() -> anyhow::Result<()> {
+async fn duplicate_events_remain_dedupe_safe_under_new_ordering() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
     cleanup_inbox(&pool).await?;
     let run_id = make_run(&pool).await?;
 
     let ev = BrokerEvent::PartialFill {
         broker_message_id: "storm-fill-1".to_string(),
+        broker_fill_id: None,
         internal_order_id: "ord-storm".to_string(),
         broker_order_id: Some("broker-storm".to_string()),
         symbol: "QQQ".to_string(),

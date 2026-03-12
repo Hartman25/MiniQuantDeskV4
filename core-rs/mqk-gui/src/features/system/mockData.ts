@@ -39,6 +39,7 @@ import type {
   SystemModel,
   SystemStatus,
 } from "./types";
+import { classifyPanelSources } from "./sourceAuthority";
 
 const now = new Date();
 const iso = (minutesAgo = 0) => new Date(now.getTime() - minutesAgo * 60_000).toISOString();
@@ -894,6 +895,14 @@ export const MOCK_MODEL: SystemModel = {
     mockSections: ["all"],
     message: "Mock fallback model active",
   },
+  panelSources: classifyPanelSources({
+    state: "mock",
+    reachable: true,
+    realEndpoints: [],
+    missingEndpoints: [],
+    mockSections: ["all"],
+    message: "Mock fallback model active",
+  }, true),
   connected: true,
   lastUpdatedAt: new Date().toISOString(),
 };

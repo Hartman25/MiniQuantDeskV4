@@ -16,6 +16,17 @@ type Result<T> = std::result::Result<T, BrokerError>;
 // BrokerEvent — canonical inbound broker event type
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BrokerEventIdentity {
+    pub broker_message_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_fill_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_sequence_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_timestamp: Option<String>,
+}
+
 /// A broker-sourced lifecycle event for an in-flight order.
 ///
 /// Produced by [`BrokerAdapter::fetch_events`] and persisted to `oms_inbox`
@@ -37,6 +48,8 @@ pub enum BrokerEvent {
     },
     PartialFill {
         broker_message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        broker_fill_id: Option<String>,
         internal_order_id: String,
         /// RT-9: broker-assigned order ID associated with this fill event.
         broker_order_id: Option<String>,
@@ -48,6 +61,8 @@ pub enum BrokerEvent {
     },
     Fill {
         broker_message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        broker_fill_id: Option<String>,
         internal_order_id: String,
         /// RT-9: broker-assigned order ID associated with this fill event.
         broker_order_id: Option<String>,
@@ -122,6 +137,31 @@ impl BrokerEvent {
             | Self::Reject {
                 broker_message_id, ..
             } => broker_message_id.as_str(),
+        }
+    }
+
+    /// Optional economic fill identity carried by this event.
+    ///
+    /// This value is distinct from `broker_message_id`: a broker can emit
+    /// multiple transport messages that refer to the same underlying fill.
+    /// Adapters should populate this only when the broker supplies a truthful
+    /// fill identifier.
+    pub fn broker_fill_id(&self) -> Option<&str> {
+        match self {
+            Self::PartialFill { broker_fill_id, .. } | Self::Fill { broker_fill_id, .. } => {
+                broker_fill_id.as_deref()
+            }
+            _ => None,
+        }
+    }
+
+    /// Canonical identity tuple for this broker event.
+    pub fn identity(&self) -> BrokerEventIdentity {
+        BrokerEventIdentity {
+            broker_message_id: self.broker_message_id().to_string(),
+            broker_fill_id: self.broker_fill_id().map(ToString::to_string),
+            broker_sequence_id: None,
+            broker_timestamp: None,
         }
     }
 

@@ -182,7 +182,8 @@ fn make_orchestrator(
 }
 
 #[tokio::test]
-async fn restart_quarantines_sent_row_without_broker_map_and_refuses_dispatch() -> Result<()> {
+async fn restart_quarantines_legacy_sent_row_without_broker_map_and_refuses_dispatch() -> Result<()>
+{
     let url = require_db_url();
     let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;
@@ -214,11 +215,26 @@ async fn restart_quarantines_sent_row_without_broker_map_and_refuses_dispatch() 
     let claimed = mqk_db::outbox_claim_batch(&pool, 1, "patch2-dispatcher", Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "must claim the pending row");
 
-    let sent = mqk_db::outbox_mark_sent(&pool, idem, Utc::now()).await?;
-    assert!(sent, "row must transition CLAIMED -> SENT");
-
-    // Intentionally DO NOT write broker_map_upsert().
-    // This is the crash window Patch 2 is supposed to quarantine.
+    // Forge a legacy/corrupt SENT row without broker_map durability.
+    // Production runtime cannot create this state because it uses the atomic
+    // outbox_mark_sent_with_broker_map helper, but quarantine must remain fail-closed
+    // if it is observed in the database.
+    let forced = sqlx::query(
+        r#"update oms_outbox
+            set status = 'SENT',
+                sent_at_utc = $2
+          where idempotency_key = $1
+            and status = 'CLAIMED'"#,
+    )
+    .bind(idem)
+    .bind(Utc::now())
+    .execute(&pool)
+    .await?;
+    assert_eq!(
+        forced.rows_affected(),
+        1,
+        "must force CLAIMED -> SENT for quarantine proof"
+    );
 
     let broker = CountingBroker::default();
     let broker_probe = broker.clone();

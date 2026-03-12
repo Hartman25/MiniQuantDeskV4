@@ -248,6 +248,14 @@ pub(crate) async fn integrity_arm(State(st): State<Arc<AppState>>) -> impl IntoR
         ig.halted = false;
     }
 
+    if let Some(db) = st.db.as_ref() {
+        if let Err(err) = mqk_db::persist_arm_state(db, "ARMED", None).await {
+            return runtime_error_response(RuntimeLifecycleError::Internal(format!(
+                "integrity/arm persist_arm_state failed: {err}"
+            )));
+        }
+    }
+
     let status = match st.current_status_snapshot().await {
         Ok(snapshot) => snapshot,
         Err(err) => return runtime_error_response(err),
@@ -278,6 +286,14 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
     {
         let mut ig = st.integrity.write().await;
         ig.disarmed = true;
+    }
+
+    if let Some(db) = st.db.as_ref() {
+        if let Err(err) = mqk_db::persist_arm_state(db, "DISARMED", Some("OperatorDisarm")).await {
+            return runtime_error_response(RuntimeLifecycleError::Internal(format!(
+                "integrity/disarm persist_arm_state failed: {err}"
+            )));
+        }
     }
 
     let status = match st.current_status_snapshot().await {
@@ -400,9 +416,15 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
     };
     let reconcile = st.current_reconcile_snapshot().await;
     let snapshot_present = st.broker_snapshot.read().await.is_some();
-    let integrity_armed = {
-        let ig = st.integrity.read().await;
-        !ig.is_execution_blocked()
+    let integrity_armed = status.integrity_armed;
+    let risk_blocked = if let Some(db) = st.db.as_ref() {
+        mqk_db::load_risk_block_state(db)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|risk| risk.blocked)
+    } else {
+        false
     };
 
     let runtime_status = runtime_status_from_state(&status.state).to_string();
@@ -427,7 +449,8 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             reconcile_status,
             integrity_status,
             audit_writer_status: "unknown".to_string(),
-            last_heartbeat: None,
+            last_heartbeat: status.deadman_last_heartbeat_utc.clone(),
+            deadman_status: status.deadman_status.clone(),
             loop_latency_ms: None,
             active_account_id: None,
             config_profile: None,
@@ -437,7 +460,7 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             execution_armed: integrity_armed,
             live_routing_enabled: false,
             kill_switch_active: status.state == "halted",
-            risk_halt_active: false,
+            risk_halt_active: risk_blocked,
             integrity_halt_active: !integrity_armed,
             daemon_reachable: true,
         }),
@@ -586,10 +609,12 @@ pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl I
 
 pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
-    let status = match st.current_status_snapshot().await {
-        Ok(snapshot) => snapshot,
-        Err(err) => return runtime_error_response(err),
+    let durable_risk = if let Some(db) = st.db.as_ref() {
+        mqk_db::load_risk_block_state(db).await.ok().flatten()
+    } else {
+        None
     };
+    let risk_blocked = durable_risk.as_ref().is_some_and(|state| state.blocked);
 
     let summary = if let Some(snapshot) = snap {
         let (_, _, gross_exposure, max_abs_position) = exposure_breakdown(&snapshot.positions);
@@ -611,8 +636,8 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
             daily_pnl: 0.0,
             drawdown_pct: 0.0,
             loss_limit_utilization_pct: 0.0,
-            kill_switch_active: status.state == "halted",
-            active_breaches: usize::from(status.state == "halted"),
+            kill_switch_active: risk_blocked,
+            active_breaches: usize::from(risk_blocked),
         }
     } else {
         RiskSummaryResponse {
@@ -622,8 +647,8 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
             daily_pnl: 0.0,
             drawdown_pct: 0.0,
             loss_limit_utilization_pct: 0.0,
-            kill_switch_active: status.state == "halted",
-            active_breaches: usize::from(status.state == "halted"),
+            kill_switch_active: risk_blocked,
+            active_breaches: usize::from(risk_blocked),
         }
     };
 
@@ -638,6 +663,7 @@ pub(crate) async fn reconcile_status(State(st): State<Arc<AppState>>) -> impl In
         Json(ReconcileSummaryResponse {
             status: reconcile.status,
             last_run_at: reconcile.last_run_at,
+            snapshot_watermark_ms: reconcile.snapshot_watermark_ms,
             mismatched_positions: reconcile.mismatched_positions,
             mismatched_orders: reconcile.mismatched_orders,
             mismatched_fills: reconcile.mismatched_fills,

@@ -3,8 +3,9 @@
 //! # Invariants under test
 //!
 //! Three crash windows in the outbox dispatch / inbox apply path not covered
-//! by EB-5. Each window leaves the DB in a state that could, naïvely,
-//! produce a double-submit or double-apply on restart.
+//! by EB-5. Scenarios are aligned to the current production contract:
+//! fail-closed restart quarantine for ambiguous dispatch states,
+//! atomic SENT+broker-map durability, and inbox replay safety.
 //!
 //! ## Crash Window W4 — after broker submit, before outbox_mark_sent
 //!
@@ -14,14 +15,15 @@
 //! Recovery:     broker.has_order() = true → mark_acked; do NOT resubmit
 //! Invariant:    broker.submit_count() == 1 (no double-submit)
 //!
-//! ## Crash Window W5 — after outbox_mark_sent, before broker_map_upsert
+//! ## Crash Window W5 — after atomic SENT+broker_map commit, before in-memory register
 //!
-//! Normal path:  … → mark_dispatching → submit_to_broker → mark_sent → broker_map_upsert → order_map.register
-//! Crash at:     ^— mark_sent done, process exits before broker_map_upsert
-//! DB state:     outbox = SENT, no broker_order_map entry
-//! Recovery:     broker.has_order() = true → mark_acked; broker_map gap persists
-//! Invariant:    broker.submit_count() == 1; broker_map has no orphaned entry —
-//!               the mapping gap is surfaced (not hidden) by broker_map_load
+//! Normal path:  … → mark_dispatching → submit_to_broker
+//!            → outbox_mark_sent_with_broker_map (single DB transaction)
+//!            → order_map.register
+//! Crash at:     ^— DB commit succeeded, process exits before in-memory register
+//! DB state:     outbox = SENT, broker_order_map entry exists
+//! Recovery:     broker.has_order() = true → mark_acked; do NOT resubmit
+//! Invariant:    broker.submit_count() == 1; durable broker_map exists
 //!
 //! ## Crash Window W6 — after inbox_insert_deduped, before inbox_mark_applied
 //!
@@ -104,10 +106,21 @@ async fn seed_run_and_outbox(pool: &PgPool, run_id: Uuid, idem_key: &str) -> Res
 
 /// Remove test data for the given run.
 ///
-/// oms_outbox and oms_inbox both have ON DELETE CASCADE from runs, so a
-/// single delete from runs cleans everything. The caller must have already
-/// removed any broker_order_map rows (FK RESTRICT) before calling this.
+/// broker_order_map has FK RESTRICT to oms_outbox, so mapping rows must be
+/// removed before deleting the run.
 async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
+    sqlx::query(
+        r#"
+        delete from broker_order_map
+        where internal_id in (
+            select idempotency_key from oms_outbox where run_id = $1
+        )
+        "#,
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?;
+
     sqlx::query("delete from runs where run_id = $1")
         .bind(run_id)
         .execute(pool)
@@ -209,18 +222,16 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
 }
 
 // ---------------------------------------------------------------------------
-// W5: Crash after outbox_mark_sent, before broker_map_upsert
+// W5: Crash after atomic SENT+broker_map commit, before in-memory register
 // ---------------------------------------------------------------------------
 
-/// Crash after outbox_mark_sent() but before broker_map_upsert().
+/// Crash after outbox_mark_sent_with_broker_map() commits but before any
+/// in-memory order-map register step.
 ///
-/// DB state entering recovery: outbox = SENT, broker HAS the order, no
-/// broker_order_map entry for this key. Recovery must ACK without resubmit.
-/// The broker_map gap persists after recovery — cancel/replace cannot locate
-/// this order, but no double-submit occurs and no phantom entry is created.
+/// DB state entering recovery: outbox = SENT, broker HAS the order, durable
+/// broker_order_map entry exists. Recovery must ACK without resubmit.
 #[tokio::test]
-async fn w5_crash_after_mark_sent_before_broker_map_upsert_no_double_submit() -> anyhow::Result<()>
-{
+async fn w5_crash_after_atomic_sent_and_broker_map_commit_no_double_submit() -> anyhow::Result<()> {
     let url = require_db_url();
     let pool = require_pool(&url).await;
     mqk_db::migrate(&pool).await?;
@@ -261,21 +272,21 @@ async fn w5_crash_after_mark_sent_before_broker_map_upsert_no_double_submit() ->
         "W5: broker must record one submit"
     );
 
-    // Mark outbox SENT (DISPATCHING → SENT).
-    let sent = mqk_db::outbox_mark_sent(&pool, key, Utc::now()).await?;
-    assert!(
-        sent,
-        "W5: outbox_mark_sent must transition DISPATCHING → SENT"
-    );
+    // Atomically persist SENT + broker_map durability.
+    let sent =
+        mqk_db::outbox_mark_sent_with_broker_map(&pool, key, "test-broker-id", Utc::now()).await?;
+    assert!(sent, "W5: atomic helper must transition DISPATCHING → SENT");
 
-    // --- CRASH: process exits here, broker_map_upsert never called ---
-    // DB state: outbox = SENT, broker HAS the order, broker_map has no entry.
+    // --- CRASH: process exits here, before any in-memory order_map.register ---
+    // DB state: outbox = SENT, broker HAS the order, broker_map entry is durable.
 
-    // Verify the broker_map gap before recovery.
+    // Verify broker_map durability before recovery.
     let before = mqk_db::broker_map_load(&pool).await?;
     assert!(
-        before.iter().all(|(id, _)| id != key),
-        "W5: broker_map must have no entry for the crashed key before recovery"
+        before
+            .iter()
+            .any(|(id, broker_id)| id == key && broker_id == "test-broker-id"),
+        "W5: broker_map must contain durable entry before recovery"
     );
 
     // --- Restart: run recovery ---
@@ -307,12 +318,13 @@ async fn w5_crash_after_mark_sent_before_broker_map_upsert_no_double_submit() ->
         "W5: outbox row must be ACKED after recovery"
     );
 
-    // The broker_map gap persists after recovery — this is expected and documented.
-    // Recovery does not back-fill the mapping; the gap is surfaced not hidden.
+    // Mapping durability must remain intact after recovery.
     let after = mqk_db::broker_map_load(&pool).await?;
     assert!(
-        after.iter().all(|(id, _)| id != key),
-        "W5: broker_map must still have no entry after recovery — gap persists, not fabricated"
+        after
+            .iter()
+            .any(|(id, broker_id)| id == key && broker_id == "test-broker-id"),
+        "W5: broker_map durable entry must survive recovery"
     );
 
     cleanup_run(&pool, run_id).await?;

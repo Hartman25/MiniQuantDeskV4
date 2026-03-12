@@ -13,8 +13,8 @@
 //! | `AmbiguousSubmit` | stays `DISPATCHING` (halt)    | Never (operator) |
 //! | `Reject`          | → `FAILED`                    | Never            |
 //! | `Transient`       | → `FAILED`                    | Never (operator) |
-//! | `Transport`       | → `PENDING` (reset)           | Yes (bounded)    |
-//! | `RateLimit`       | → `PENDING` (reset)           | Yes (bounded)    |
+//! | `Transport`       | depends on `non_delivery_proven` | Conditional   |
+//! | `RateLimit`       | depends on `non_delivery_proven` | Conditional   |
 //! | `AuthSession`     | → `FAILED` (halt + disarm)    | Never (operator) |
 /// Typed error class for all [`crate::BrokerAdapter`] method failures.
 ///
@@ -59,6 +59,9 @@ pub enum BrokerError {
     RateLimit {
         /// Suggested delay before retrying, if the broker supplied one.
         retry_after_ms: Option<u64>,
+        /// `true` only when adapter can prove request was rejected before
+        /// broker-side acceptance; `false` means outcome is ambiguous.
+        non_delivery_proven: bool,
         detail: String,
     },
     /// Authentication or session credentials expired or revoked.
@@ -76,7 +79,11 @@ pub enum BrokerError {
     ///
     /// Note: per-row bounded retry (max dispatch attempts) will be enforced
     /// once `oms_outbox.dispatch_attempt_count` is added in a future patch.
-    Transport { detail: String },
+    Transport {
+        /// `true` only when adapter can prove broker contact never happened.
+        non_delivery_proven: bool,
+        detail: String,
+    },
     /// Inbound lifecycle continuity could not be proven for broker events.
     ///
     /// Used by broker adapters whose websocket lifecycle coverage depends on a
@@ -90,18 +97,35 @@ pub enum BrokerError {
     },
 }
 impl BrokerError {
-    /// Whether this error class is safe to auto-retry without operator review.
-    ///
-    /// `true` ⟹ the request is guaranteed **not** to have reached the
-    /// broker; the orchestrator resets the outbox row to `PENDING`.
-    ///
-    /// `false` ⟹ the row is marked `FAILED` (or left `DISPATCHING` for
-    /// `AmbiguousSubmit`) and requires operator action.
-    pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            BrokerError::Transport { .. } | BrokerError::RateLimit { .. }
-        )
+    /// Whether submit non-delivery is proven and automatic retry is safe.
+    pub fn is_safe_pre_send_retry(&self) -> bool {
+        match self {
+            BrokerError::Transport {
+                non_delivery_proven,
+                ..
+            } => *non_delivery_proven,
+            BrokerError::RateLimit {
+                non_delivery_proven,
+                ..
+            } => *non_delivery_proven,
+            _ => false,
+        }
+    }
+
+    /// Whether the submit outcome is ambiguous and must fail closed.
+    pub fn is_ambiguous_send_outcome(&self) -> bool {
+        match self {
+            BrokerError::AmbiguousSubmit { .. } => true,
+            BrokerError::RateLimit {
+                non_delivery_proven,
+                ..
+            } => !non_delivery_proven,
+            BrokerError::Transport {
+                non_delivery_proven,
+                ..
+            } => !non_delivery_proven,
+            _ => false,
+        }
     }
     /// Whether this error requires an immediate halt+disarm of the run.
     ///
@@ -138,16 +162,29 @@ impl std::fmt::Display for BrokerError {
             }
             BrokerError::RateLimit {
                 retry_after_ms,
+                non_delivery_proven,
                 detail,
             } => match retry_after_ms {
-                Some(ms) => write!(f, "BROKER_ERROR[RateLimit] retry_after={ms}ms: {detail}"),
-                None => write!(f, "BROKER_ERROR[RateLimit]: {detail}"),
+                Some(ms) => write!(
+                    f,
+                    "BROKER_ERROR[RateLimit] retry_after={ms}ms non_delivery_proven={non_delivery_proven}: {detail}"
+                ),
+                None => write!(
+                    f,
+                    "BROKER_ERROR[RateLimit] non_delivery_proven={non_delivery_proven}: {detail}"
+                ),
             },
             BrokerError::AuthSession { detail } => {
                 write!(f, "BROKER_ERROR[AuthSession]: {detail}")
             }
-            BrokerError::Transport { detail } => {
-                write!(f, "BROKER_ERROR[Transport]: {detail}")
+            BrokerError::Transport {
+                non_delivery_proven,
+                detail,
+            } => {
+                write!(
+                    f,
+                    "BROKER_ERROR[Transport] non_delivery_proven={non_delivery_proven}: {detail}"
+                )
             }
             BrokerError::InboundContinuityUnproven {
                 detail,

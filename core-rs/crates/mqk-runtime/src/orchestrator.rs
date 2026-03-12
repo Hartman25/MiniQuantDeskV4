@@ -41,8 +41,8 @@ impl TimeSource for WallClock {
 const RUNTIME_LEASE_TTL_SECS: i64 = 15;
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{
-    BrokerAdapter, BrokerEvent, BrokerGateway, BrokerOrderMap, BrokerSubmitRequest, IntegrityGate,
-    ReconcileGate, RiskGate,
+    BrokerAdapter, BrokerError, BrokerEvent, BrokerGateway, BrokerOrderMap, BrokerSubmitRequest,
+    IntegrityGate, ReconcileGate, RiskGate,
 };
 use mqk_portfolio::{apply_entry, recompute_from_ledger, Fill, LedgerEntry, PortfolioState};
 // ---------------------------------------------------------------------------
@@ -223,6 +223,8 @@ where
             }
         }
         self.refresh_or_acquire_runtime_leadership().await?;
+        mqk_db::persist_risk_block_state(&self.pool, false, None, self.time_source.now_utc())
+            .await?;
         // ------------------------------------------------------------------
         // Phase 0b - A4: restart quarantine for ambiguous outbox rows.
         //
@@ -334,13 +336,20 @@ where
                 Ok(r) => r,
                 Err(e) => {
                     // A3: per-class outbox row disposition.
-                    use mqk_execution::{BrokerError, GateRefusal, SubmitError};
+                    use mqk_execution::{GateRefusal, SubmitError};
                     match &e {
                         SubmitError::Gate(GateRefusal::RiskBlocked(denial)) => {
                             // B2: capture the structured risk denial for the B4
                             // diagnostics snapshot. The denial is stored in-memory
                             // and overlaid by snapshot() onto SystemBlockState.
                             self.last_risk_denial = Some(denial.clone());
+                            mqk_db::persist_risk_block_state(
+                                &self.pool,
+                                true,
+                                Some(denial.reason_code()),
+                                self.time_source.now_utc(),
+                            )
+                            .await?;
                             // Gate refused before touching the broker.
                             // Row is DISPATCHING but request never left.
                             // Mark FAILED; requires operator review.
@@ -382,13 +391,25 @@ where
                                 .await;
                             }
                         }
-                        SubmitError::Broker(be) if be.is_retryable() => {
-                            // Transport / RateLimit: request never left the local host.
+                        SubmitError::Broker(be) if be.is_safe_pre_send_retry() => {
+                            // Safe retry class: local non-delivery is proven.
                             // Reset row to PENDING for re-dispatch on the next tick.
                             let _ =
                                 mqk_db::outbox_reset_dispatching_to_pending(&self.pool, &order_id)
                                     .await;
                             eprintln!("WARN broker_submit_retryable order_id={order_id} error={e}");
+                        }
+                        SubmitError::Broker(be) if be.is_ambiguous_send_outcome() => {
+                            // Ambiguous transport/broker outcome - fail closed.
+                            let now = self.time_source.now_utc();
+                            let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
+                            let _ = persist_halt_and_disarm(
+                                &self.pool,
+                                self.run_id,
+                                now,
+                                "AmbiguousSubmit",
+                            )
+                            .await;
                         }
                         SubmitError::Broker(_) => {
                             // Reject / Transient: mark FAILED, requires operator.
@@ -453,10 +474,16 @@ where
         };
         for event in &events {
             let msg_json = serde_json::to_value(event)?;
-            mqk_db::inbox_insert_deduped(
+            let event_identity = event.identity();
+            mqk_db::inbox_insert_deduped_with_identity(
                 &self.pool,
                 self.run_id,
-                event.broker_message_id(),
+                &mqk_db::BrokerEventIdentity {
+                    broker_message_id: event_identity.broker_message_id,
+                    broker_fill_id: event_identity.broker_fill_id,
+                    broker_sequence_id: event_identity.broker_sequence_id,
+                    broker_timestamp: event_identity.broker_timestamp,
+                },
                 msg_json,
             )
             .await?;
@@ -498,25 +525,12 @@ where
         // ------------------------------------------------------------------
         self.refresh_or_acquire_runtime_leadership().await?;
         let unapplied = mqk_db::inbox_load_unapplied_for_run(&self.pool, self.run_id).await?;
-        // Phase 3a: RT-4 - deserialize all rows, then sort into canonical apply order.
-        //
-        // Sort key: (broker_message_id ASC, internal_order_id ASC, event_kind_rank ASC).
-        // The DB already orders by broker_message_id ASC; the in-process sort makes
-        // the final order deterministic regardless of DB row ordering or future index changes.
-        let mut apply_queue: Vec<(String, BrokerEvent)> = Vec::with_capacity(unapplied.len());
-        for row in unapplied {
-            let msg_id = row.broker_message_id;
-            let event: BrokerEvent = serde_json::from_value(row.message_json)?;
-            apply_queue.push((msg_id, event));
-        }
-        apply_queue.sort_by(|(a_msg, a_ev), (b_msg, b_ev)| {
-            a_msg
-                .cmp(b_msg)
-                .then_with(|| a_ev.internal_order_id().cmp(b_ev.internal_order_id()))
-                .then_with(|| event_kind_rank(a_ev).cmp(&event_kind_rank(b_ev)))
-        });
+        // Phase 3a: canonical key is durable inbox ingest order (`inbox_id ASC`),
+        // not `broker_message_id`. Message IDs remain dedupe identity only.
+        let apply_queue = build_canonical_apply_queue(unapplied)?;
+
         // Phase 3b: apply in canonical order.
-        for (msg_id, event) in apply_queue {
+        for (_inbox_id, msg_id, event) in apply_queue {
             self.refresh_or_acquire_runtime_leadership().await?;
             let internal_id = event.internal_order_id().to_string();
             // Steps 6+7: OMS context guard → portfolio apply (Section C).
@@ -1003,6 +1017,29 @@ fn broker_event_to_oms_event(event: &BrokerEvent) -> OmsEvent {
 ///
 /// Returns `None` for non-fill events (Ack, CancelAck, etc.).
 /// Degenerate fills with `delta_qty <= 0` are rejected.
+fn build_canonical_apply_queue(
+    unapplied: Vec<mqk_db::InboxRow>,
+) -> anyhow::Result<Vec<(i64, String, BrokerEvent)>> {
+    let mut apply_queue: Vec<(i64, String, BrokerEvent)> = Vec::with_capacity(unapplied.len());
+    for row in unapplied {
+        let inbox_id = row.inbox_id;
+        let msg_id = row.broker_message_id;
+        let event: BrokerEvent = serde_json::from_value(row.message_json)?;
+        apply_queue.push((inbox_id, msg_id, event));
+    }
+    apply_queue.sort_by_key(|(inbox_id, _, _)| *inbox_id);
+
+    for pair in apply_queue.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(anyhow!(
+                "AMBIGUOUS_CANONICAL_ORDER: duplicate inbox_id {} in apply queue",
+                pair[0].0
+            ));
+        }
+    }
+    Ok(apply_queue)
+}
+
 fn broker_event_to_fill(event: &BrokerEvent) -> Option<Fill> {
     match event {
         BrokerEvent::Fill {
@@ -1039,12 +1076,7 @@ fn broker_event_to_fill(event: &BrokerEvent) -> Option<Fill> {
         _ => None,
     }
 }
-/// RT-4: Canonical rank for `BrokerEvent` variants in the deterministic apply queue.
-///
-/// Ordering intent: Ack before fills before cancel/replace; within a kind the
-/// SQL `broker_message_id ASC` order dominates.  This rank is used only as a
-/// tie-breaker when two events share the same `broker_message_id` AND the same
-/// `internal_order_id`.
+#[cfg(test)]
 fn event_kind_rank(event: &BrokerEvent) -> u8 {
     match event {
         BrokerEvent::Ack { .. } => 0,
@@ -1219,8 +1251,9 @@ fn apply_fill_step(
     match oms_orders.get_mut(internal_id) {
         Some(order) => {
             let pre_qty = order.filled_qty;
+            let economic_event_id = event.broker_fill_id().unwrap_or(msg_id);
             order
-                .apply(&oms_event, Some(msg_id))
+                .apply(&oms_event, Some(economic_event_id))
                 .map_err(|e| anyhow!("OMS transition error for '{}': {}", internal_id, e))?;
             // No-op detection: if this is a fill event and filled_qty has not
             // advanced, OMS applied a silent no-op (duplicate event_id or fill
@@ -1281,6 +1314,7 @@ mod tests {
         use mqk_execution::Side;
         let ev = BrokerEvent::Fill {
             broker_message_id: "msg-1".to_string(),
+            broker_fill_id: None,
             internal_order_id: "ord-1".to_string(),
             broker_order_id: None,
             symbol: "AAPL".to_string(),
@@ -1297,6 +1331,7 @@ mod tests {
         use mqk_execution::Side;
         let ev = BrokerEvent::Fill {
             broker_message_id: "msg-2".to_string(),
+            broker_fill_id: None,
             internal_order_id: "ord-2".to_string(),
             broker_order_id: None,
             symbol: "MSFT".to_string(),
@@ -1375,6 +1410,7 @@ mod tests {
         use mqk_execution::Side;
         let ev = BrokerEvent::Fill {
             broker_message_id: "msg-4".to_string(),
+            broker_fill_id: None,
             internal_order_id: "ord-4".to_string(),
             broker_order_id: None,
             symbol: "X".to_string(),
@@ -1396,6 +1432,7 @@ mod tests {
             },
             BrokerEvent::Fill {
                 broker_message_id: "m".to_string(),
+                broker_fill_id: None,
                 internal_order_id: "o".to_string(),
                 broker_order_id: None,
                 symbol: "X".to_string(),
@@ -1406,6 +1443,7 @@ mod tests {
             },
             BrokerEvent::PartialFill {
                 broker_message_id: "m".to_string(),
+                broker_fill_id: None,
                 internal_order_id: "o".to_string(),
                 broker_order_id: None,
                 symbol: "X".to_string(),
@@ -1458,6 +1496,7 @@ mod tests {
             },
             BrokerEvent::PartialFill {
                 broker_message_id: "m".into(),
+                broker_fill_id: None,
                 internal_order_id: "o".into(),
                 broker_order_id: None,
                 symbol: "X".into(),
@@ -1468,6 +1507,7 @@ mod tests {
             },
             BrokerEvent::Fill {
                 broker_message_id: "m".into(),
+                broker_fill_id: None,
                 internal_order_id: "o".into(),
                 broker_order_id: None,
                 symbol: "X".into(),
@@ -1513,11 +1553,12 @@ mod tests {
         );
     }
     #[test]
-    fn apply_queue_sort_is_canonical() {
+    fn canonical_apply_order_does_not_depend_on_broker_message_id() {
         use mqk_execution::Side;
-        // Two events for the same message/order: Ack must sort before Fill by rank.
+        // Delivery order was fill -> ack even though lexicographic message-id is opposite.
         let fill = BrokerEvent::Fill {
-            broker_message_id: "msg-a".into(),
+            broker_message_id: "z-msg".into(),
+            broker_fill_id: None,
             internal_order_id: "ord-1".into(),
             broker_order_id: None,
             symbol: "X".into(),
@@ -1527,23 +1568,202 @@ mod tests {
             fee_micros: 0,
         };
         let ack = BrokerEvent::Ack {
-            broker_message_id: "msg-a".into(),
+            broker_message_id: "a-msg".into(),
             internal_order_id: "ord-1".into(),
             broker_order_id: None,
         };
-        let mut queue: Vec<(String, BrokerEvent)> =
-            vec![("msg-a".into(), fill), ("msg-a".into(), ack)];
-        queue.sort_by(|(a_msg, a_ev), (b_msg, b_ev)| {
-            a_msg
-                .cmp(b_msg)
-                .then_with(|| a_ev.internal_order_id().cmp(b_ev.internal_order_id()))
-                .then_with(|| event_kind_rank(a_ev).cmp(&event_kind_rank(b_ev)))
-        });
+        let mut queue: Vec<(i64, String, BrokerEvent)> =
+            vec![(42, "z-msg".into(), fill), (43, "a-msg".into(), ack)];
+        queue.sort_by_key(|(inbox_id, _, _)| *inbox_id);
         assert!(
-            matches!(queue[0].1, BrokerEvent::Ack { .. }),
-            "Ack (rank 0) must sort before Fill (rank 2) on same message/order"
+            matches!(queue[0].2, BrokerEvent::Fill { .. }),
+            "canonical apply order must follow durable inbox ingest order, not broker_message_id"
         );
     }
+
+    #[test]
+    fn out_of_order_broker_delivery_uses_real_ordering_truth() {
+        use mqk_execution::Side;
+
+        let queue = build_canonical_apply_queue(vec![
+            mqk_db::InboxRow {
+                inbox_id: 10,
+                run_id: Uuid::nil(),
+                broker_message_id: "z-msg".into(),
+                broker_fill_id: None,
+                broker_sequence_id: None,
+                broker_timestamp: None,
+                message_json: serde_json::to_value(BrokerEvent::Fill {
+                    broker_message_id: "z-msg".into(),
+                    broker_fill_id: None,
+                    internal_order_id: "ord-1".into(),
+                    broker_order_id: None,
+                    symbol: "X".into(),
+                    side: Side::Buy,
+                    delta_qty: 1,
+                    price_micros: 1,
+                    fee_micros: 0,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+            mqk_db::InboxRow {
+                inbox_id: 11,
+                run_id: Uuid::nil(),
+                broker_message_id: "a-msg".into(),
+                broker_fill_id: None,
+                broker_sequence_id: None,
+                broker_timestamp: None,
+                message_json: serde_json::to_value(BrokerEvent::Ack {
+                    broker_message_id: "a-msg".into(),
+                    internal_order_id: "ord-1".into(),
+                    broker_order_id: None,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+        ])
+        .expect("canonical queue should build");
+
+        assert_eq!(queue[0].0, 10);
+        assert!(matches!(queue[0].2, BrokerEvent::Fill { .. }));
+    }
+
+    #[test]
+    fn restart_replay_preserves_durable_apply_order() {
+        use mqk_execution::Side;
+
+        let first_pass = build_canonical_apply_queue(vec![
+            mqk_db::InboxRow {
+                inbox_id: 200,
+                run_id: Uuid::nil(),
+                broker_message_id: "m-2".into(),
+                broker_fill_id: None,
+                broker_sequence_id: None,
+                broker_timestamp: None,
+                message_json: serde_json::to_value(BrokerEvent::PartialFill {
+                    broker_message_id: "m-2".into(),
+                    broker_fill_id: None,
+                    internal_order_id: "ord-r".into(),
+                    broker_order_id: None,
+                    symbol: "X".into(),
+                    side: Side::Buy,
+                    delta_qty: 2,
+                    price_micros: 2,
+                    fee_micros: 0,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+            mqk_db::InboxRow {
+                inbox_id: 201,
+                run_id: Uuid::nil(),
+                broker_message_id: "m-1".into(),
+                broker_fill_id: None,
+                broker_sequence_id: None,
+                broker_timestamp: None,
+                message_json: serde_json::to_value(BrokerEvent::Ack {
+                    broker_message_id: "m-1".into(),
+                    internal_order_id: "ord-r".into(),
+                    broker_order_id: None,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+        ])
+        .unwrap();
+        let second_pass = build_canonical_apply_queue(vec![
+            mqk_db::InboxRow {
+                inbox_id: 200,
+                run_id: Uuid::nil(),
+                broker_message_id: "m-2".into(),
+                broker_fill_id: None,
+                broker_sequence_id: None,
+                broker_timestamp: None,
+                message_json: serde_json::to_value(BrokerEvent::PartialFill {
+                    broker_message_id: "m-2".into(),
+                    broker_fill_id: None,
+                    internal_order_id: "ord-r".into(),
+                    broker_order_id: None,
+                    symbol: "X".into(),
+                    side: Side::Buy,
+                    delta_qty: 2,
+                    price_micros: 2,
+                    fee_micros: 0,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+            mqk_db::InboxRow {
+                inbox_id: 201,
+                run_id: Uuid::nil(),
+                broker_message_id: "m-1".into(),
+                broker_fill_id: None,
+                broker_sequence_id: None,
+                broker_timestamp: None,
+                message_json: serde_json::to_value(BrokerEvent::Ack {
+                    broker_message_id: "m-1".into(),
+                    internal_order_id: "ord-r".into(),
+                    broker_order_id: None,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+        ])
+        .unwrap();
+
+        let first_ids: Vec<i64> = first_pass.into_iter().map(|x| x.0).collect();
+        let second_ids: Vec<i64> = second_pass.into_iter().map(|x| x.0).collect();
+        assert_eq!(first_ids, second_ids);
+    }
+
+    #[test]
+    fn ambiguous_ordering_truth_fails_closed() {
+        let err = build_canonical_apply_queue(vec![
+            mqk_db::InboxRow {
+                inbox_id: 7,
+                run_id: Uuid::nil(),
+                broker_message_id: "m-1".into(),
+                broker_fill_id: None,
+                broker_sequence_id: None,
+                broker_timestamp: None,
+                message_json: serde_json::to_value(BrokerEvent::Ack {
+                    broker_message_id: "m-1".into(),
+                    internal_order_id: "ord-a".into(),
+                    broker_order_id: None,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+            mqk_db::InboxRow {
+                inbox_id: 7,
+                run_id: Uuid::nil(),
+                broker_message_id: "m-2".into(),
+                broker_fill_id: None,
+                broker_sequence_id: None,
+                broker_timestamp: None,
+                message_json: serde_json::to_value(BrokerEvent::Reject {
+                    broker_message_id: "m-2".into(),
+                    internal_order_id: "ord-a".into(),
+                    broker_order_id: None,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+        ])
+        .expect_err("duplicate canonical key must fail closed");
+
+        assert!(err.to_string().contains("AMBIGUOUS_CANONICAL_ORDER"));
+    }
+
     // -----------------------------------------------------------------------
     // Section C - apply_fill_step unit tests
     // -----------------------------------------------------------------------
@@ -1557,6 +1777,7 @@ mod tests {
     fn make_partial_fill_event(internal_id: &str, msg_id: &str, qty: i64) -> BrokerEvent {
         BrokerEvent::PartialFill {
             broker_message_id: msg_id.to_string(),
+            broker_fill_id: None,
             internal_order_id: internal_id.to_string(),
             broker_order_id: None,
             symbol: "SPY".to_string(),
@@ -1569,6 +1790,7 @@ mod tests {
     fn make_fill_event(internal_id: &str, msg_id: &str, qty: i64) -> BrokerEvent {
         BrokerEvent::Fill {
             broker_message_id: msg_id.to_string(),
+            broker_fill_id: None,
             internal_order_id: internal_id.to_string(),
             broker_order_id: None,
             symbol: "SPY".to_string(),
@@ -1697,15 +1919,8 @@ mod tests {
     }
     #[test]
     fn non_terminal_events_do_not_remove_broker_map() {
-        let non_terminal_events = vec![
-            make_ack_event("ord-non-terminal", "ack-msg"),
-            make_partial_fill_event("ord-non-terminal", "partial-msg", 10),
-            make_cancel_reject_event("ord-non-terminal", "cancel-reject-msg"),
-            make_replace_ack_event("ord-non-terminal", "replace-ack-msg", 120),
-            make_replace_reject_event("ord-non-terminal", "replace-reject-msg"),
-        ];
-
-        for event in non_terminal_events {
+        // Ack on a live open order: non-terminal, mapping must remain.
+        {
             let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
             oms.insert(
                 "ord-non-terminal".to_string(),
@@ -1717,18 +1932,136 @@ mod tests {
             let outcome = apply_event_and_maybe_remove_broker_mapping(
                 &mut oms,
                 &mut order_map,
-                &event,
-                event.broker_message_id(),
+                &make_ack_event("ord-non-terminal", "ack-msg"),
+                "ack-msg",
             )
-            .expect("non-terminal event apply must not fail");
+            .expect("ack apply must not fail");
 
             assert!(
                 !outcome.terminal_apply_succeeded,
-                "non-terminal event must not request broker-map cleanup"
+                "ack must not request broker-map cleanup"
             );
             assert!(
                 order_map.broker_id("ord-non-terminal").is_some(),
-                "non-terminal events must retain the broker mapping"
+                "ack must retain the broker mapping"
+            );
+        }
+
+        // Partial fill on an open order: non-terminal, mapping must remain.
+        {
+            let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+            oms.insert(
+                "ord-non-terminal".to_string(),
+                OmsOrder::new("ord-non-terminal", "SPY", 120),
+            );
+            let mut order_map = BrokerOrderMap::new();
+            order_map.register("ord-non-terminal", "broker-non-terminal");
+
+            let outcome = apply_event_and_maybe_remove_broker_mapping(
+                &mut oms,
+                &mut order_map,
+                &make_partial_fill_event("ord-non-terminal", "partial-msg", 10),
+                "partial-msg",
+            )
+            .expect("partial fill apply must not fail");
+
+            assert!(
+                !outcome.terminal_apply_succeeded,
+                "partial fill must not request broker-map cleanup"
+            );
+            assert!(
+                order_map.broker_id("ord-non-terminal").is_some(),
+                "partial fill must retain the broker mapping"
+            );
+        }
+
+        // CancelReject is only legal from CancelPending.
+        {
+            let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+            let mut order = OmsOrder::new("ord-non-terminal", "SPY", 120);
+            order
+                .apply(&OmsEvent::CancelRequest, Some("cancel-request-msg"))
+                .expect("seed cancel-pending state");
+            oms.insert("ord-non-terminal".to_string(), order);
+
+            let mut order_map = BrokerOrderMap::new();
+            order_map.register("ord-non-terminal", "broker-non-terminal");
+
+            let outcome = apply_event_and_maybe_remove_broker_mapping(
+                &mut oms,
+                &mut order_map,
+                &make_cancel_reject_event("ord-non-terminal", "cancel-reject-msg"),
+                "cancel-reject-msg",
+            )
+            .expect("cancel reject apply must not fail");
+
+            assert!(
+                !outcome.terminal_apply_succeeded,
+                "cancel reject must not request broker-map cleanup"
+            );
+            assert!(
+                order_map.broker_id("ord-non-terminal").is_some(),
+                "cancel reject must retain the broker mapping"
+            );
+        }
+
+        // ReplaceAck is only legal from ReplacePending.
+        {
+            let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+            let mut order = OmsOrder::new("ord-non-terminal", "SPY", 120);
+            order
+                .apply(&OmsEvent::ReplaceRequest, Some("replace-request-msg"))
+                .expect("seed replace-pending state");
+            oms.insert("ord-non-terminal".to_string(), order);
+
+            let mut order_map = BrokerOrderMap::new();
+            order_map.register("ord-non-terminal", "broker-non-terminal");
+
+            let outcome = apply_event_and_maybe_remove_broker_mapping(
+                &mut oms,
+                &mut order_map,
+                &make_replace_ack_event("ord-non-terminal", "replace-ack-msg", 120),
+                "replace-ack-msg",
+            )
+            .expect("replace ack apply must not fail");
+
+            assert!(
+                !outcome.terminal_apply_succeeded,
+                "replace ack must not request broker-map cleanup"
+            );
+            assert!(
+                order_map.broker_id("ord-non-terminal").is_some(),
+                "replace ack must retain the broker mapping"
+            );
+        }
+
+        // ReplaceReject is only legal from ReplacePending.
+        {
+            let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+            let mut order = OmsOrder::new("ord-non-terminal", "SPY", 120);
+            order
+                .apply(&OmsEvent::ReplaceRequest, Some("replace-request-msg"))
+                .expect("seed replace-pending state");
+            oms.insert("ord-non-terminal".to_string(), order);
+
+            let mut order_map = BrokerOrderMap::new();
+            order_map.register("ord-non-terminal", "broker-non-terminal");
+
+            let outcome = apply_event_and_maybe_remove_broker_mapping(
+                &mut oms,
+                &mut order_map,
+                &make_replace_reject_event("ord-non-terminal", "replace-reject-msg"),
+                "replace-reject-msg",
+            )
+            .expect("replace reject apply must not fail");
+
+            assert!(
+                !outcome.terminal_apply_succeeded,
+                "replace reject must not request broker-map cleanup"
+            );
+            assert!(
+                order_map.broker_id("ord-non-terminal").is_some(),
+                "replace reject must retain the broker mapping"
             );
         }
     }
@@ -1887,6 +2220,34 @@ mod tests {
         );
         // filled_qty must not have advanced.
         assert_eq!(oms["ord-3"].filled_qty, 60);
+    }
+
+    #[test]
+    fn duplicate_economic_fill_id_across_messages_is_deduped() {
+        let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+        oms.insert("ord-3b".to_string(), OmsOrder::new("ord-3b", "SPY", 100));
+
+        let mut ev1 = make_partial_fill_event("ord-3b", "transport-msg-1", 60);
+        let mut ev2 = make_partial_fill_event("ord-3b", "transport-msg-2", 60);
+        if let BrokerEvent::PartialFill { broker_fill_id, .. } = &mut ev1 {
+            *broker_fill_id = Some("econ-fill-1".to_string());
+        }
+        if let BrokerEvent::PartialFill { broker_fill_id, .. } = &mut ev2 {
+            *broker_fill_id = Some("econ-fill-1".to_string());
+        }
+
+        let first = apply_fill_step(&mut oms, "ord-3b", &ev1, "transport-msg-1")
+            .unwrap()
+            .expect("first apply should mutate portfolio");
+        assert_eq!(first.qty, 60);
+        assert_eq!(oms["ord-3b"].filled_qty, 60);
+
+        let second = apply_fill_step(&mut oms, "ord-3b", &ev2, "transport-msg-2").unwrap();
+        assert!(
+            second.is_none(),
+            "same broker_fill_id should dedupe even when broker_message_id changes"
+        );
+        assert_eq!(oms["ord-3b"].filled_qty, 60);
     }
     /// Section C - T6.
     /// A non-fill event (Ack) for an order not present in oms_orders must

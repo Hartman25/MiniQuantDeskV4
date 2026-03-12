@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { fetchOperatorModel } from "./api";
+import { classifyPanelSources } from "./sourceAuthority";
 import { DEFAULT_PREFLIGHT, DEFAULT_STATUS, type SystemModel } from "./types";
 
 const FALLBACK_MODEL: SystemModel = {
@@ -55,6 +56,14 @@ const FALLBACK_MODEL: SystemModel = {
     mockSections: [],
     message: "No daemon connection established yet",
   },
+  panelSources: classifyPanelSources({
+    state: "disconnected",
+    reachable: false,
+    realEndpoints: [],
+    missingEndpoints: [],
+    mockSections: [],
+    message: "No daemon connection established yet",
+  }, false),
   connected: false,
   lastUpdatedAt: null,
 };

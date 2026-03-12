@@ -35,21 +35,54 @@
 use mqk_execution::{BrokerError, GateRefusal, SubmitError};
 
 #[test]
-fn a1_is_retryable_correct_per_variant() {
-    assert!(!BrokerError::AmbiguousSubmit { detail: "x".into() }.is_retryable());
+fn a1_safe_pre_send_retry_correct_per_variant() {
+    assert!(!BrokerError::AmbiguousSubmit { detail: "x".into() }.is_safe_pre_send_retry());
     assert!(!BrokerError::Reject {
         code: "c".into(),
         detail: "x".into()
     }
-    .is_retryable());
-    assert!(!BrokerError::Transient { detail: "x".into() }.is_retryable());
+    .is_safe_pre_send_retry());
+    assert!(!BrokerError::Transient { detail: "x".into() }.is_safe_pre_send_retry());
     assert!(BrokerError::RateLimit {
         retry_after_ms: Some(1000),
+        non_delivery_proven: true,
         detail: "x".into()
     }
-    .is_retryable());
-    assert!(!BrokerError::AuthSession { detail: "x".into() }.is_retryable());
-    assert!(BrokerError::Transport { detail: "x".into() }.is_retryable());
+    .is_safe_pre_send_retry());
+    assert!(!BrokerError::RateLimit {
+        retry_after_ms: Some(1000),
+        non_delivery_proven: false,
+        detail: "x".into()
+    }
+    .is_safe_pre_send_retry());
+    assert!(!BrokerError::AuthSession { detail: "x".into() }.is_safe_pre_send_retry());
+    assert!(BrokerError::Transport {
+        non_delivery_proven: true,
+        detail: "x".into()
+    }
+    .is_safe_pre_send_retry());
+}
+
+#[test]
+fn a1_ambiguous_send_outcome_correct_per_variant() {
+    assert!(BrokerError::AmbiguousSubmit { detail: "x".into() }.is_ambiguous_send_outcome());
+    assert!(!BrokerError::Reject {
+        code: "c".into(),
+        detail: "x".into()
+    }
+    .is_ambiguous_send_outcome());
+    assert!(BrokerError::RateLimit {
+        retry_after_ms: None,
+        non_delivery_proven: false,
+        detail: "x".into()
+    }
+    .is_ambiguous_send_outcome());
+    assert!(!BrokerError::RateLimit {
+        retry_after_ms: None,
+        non_delivery_proven: true,
+        detail: "x".into()
+    }
+    .is_ambiguous_send_outcome());
 }
 
 #[test]
@@ -63,11 +96,16 @@ fn a1_requires_halt_correct_per_variant() {
     assert!(!BrokerError::Transient { detail: "x".into() }.requires_halt());
     assert!(!BrokerError::RateLimit {
         retry_after_ms: None,
+        non_delivery_proven: true,
         detail: "x".into()
     }
     .requires_halt());
     assert!(BrokerError::AuthSession { detail: "x".into() }.requires_halt());
-    assert!(!BrokerError::Transport { detail: "x".into() }.requires_halt());
+    assert!(!BrokerError::Transport {
+        non_delivery_proven: true,
+        detail: "x".into()
+    }
+    .requires_halt());
 }
 
 #[test]
@@ -80,6 +118,7 @@ fn a2_submit_error_display_includes_inner_detail() {
     );
 
     let broker_err = SubmitError::Broker(BrokerError::Transport {
+        non_delivery_proven: true,
         detail: "connection refused".into(),
     });
     let s = broker_err.to_string();
@@ -132,6 +171,8 @@ mod db_tests {
     const B2_RUN_ID: &str = "29200004-0000-0000-0000-000000000000";
     const B3_RUN_ID: &str = "29200005-0000-0000-0000-000000000000";
     const B4_RUN_ID: &str = "29200006-0000-0000-0000-000000000000";
+    const B5_RUN_ID: &str = "29200007-0000-0000-0000-000000000000";
+    const B6_RUN_ID: &str = "29200008-0000-0000-0000-000000000000";
 
     // -----------------------------------------------------------------------
     // Gate stubs — all pass
@@ -210,6 +251,7 @@ mod db_tests {
             _token: &BrokerInvokeToken,
         ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
             Err(BrokerError::Transport {
+                non_delivery_proven: true,
                 detail: "test transport error".into(),
             })
         }
@@ -297,6 +339,94 @@ mod db_tests {
         ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
             Err(BrokerError::AuthSession {
                 detail: "test auth session expired".into(),
+            })
+        }
+        fn cancel_order(
+            &self,
+            _id: &str,
+            _token: &BrokerInvokeToken,
+        ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
+            Ok(BrokerCancelResponse {
+                broker_order_id: "x".into(),
+                cancelled_at: 0,
+                status: "ok".into(),
+            })
+        }
+        fn replace_order(
+            &self,
+            req: BrokerReplaceRequest,
+            _token: &BrokerInvokeToken,
+        ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
+            Ok(BrokerReplaceResponse {
+                broker_order_id: req.broker_order_id,
+                replaced_at: 0,
+                status: "ok".into(),
+            })
+        }
+        fn fetch_events(
+            &self,
+            _cursor: Option<&str>,
+            _token: &BrokerInvokeToken,
+        ) -> std::result::Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError>
+        {
+            Ok((vec![], None))
+        }
+    }
+
+    struct DelayedAckBroker;
+    impl BrokerAdapter for DelayedAckBroker {
+        fn submit_order(
+            &self,
+            _req: BrokerSubmitRequest,
+            _token: &BrokerInvokeToken,
+        ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
+            Err(BrokerError::AmbiguousSubmit {
+                detail: "delayed broker ack window; submit outcome unknown".into(),
+            })
+        }
+        fn cancel_order(
+            &self,
+            _id: &str,
+            _token: &BrokerInvokeToken,
+        ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
+            Ok(BrokerCancelResponse {
+                broker_order_id: "x".into(),
+                cancelled_at: 0,
+                status: "ok".into(),
+            })
+        }
+        fn replace_order(
+            &self,
+            req: BrokerReplaceRequest,
+            _token: &BrokerInvokeToken,
+        ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
+            Ok(BrokerReplaceResponse {
+                broker_order_id: req.broker_order_id,
+                replaced_at: 0,
+                status: "ok".into(),
+            })
+        }
+        fn fetch_events(
+            &self,
+            _cursor: Option<&str>,
+            _token: &BrokerInvokeToken,
+        ) -> std::result::Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError>
+        {
+            Ok((vec![], None))
+        }
+    }
+
+    struct RateLimitAmbiguousBroker;
+    impl BrokerAdapter for RateLimitAmbiguousBroker {
+        fn submit_order(
+            &self,
+            _req: BrokerSubmitRequest,
+            _token: &BrokerInvokeToken,
+        ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
+            Err(BrokerError::RateLimit {
+                retry_after_ms: Some(1_000),
+                non_delivery_proven: false,
+                detail: "rate-limit encountered after uncertain submit boundary".into(),
             })
         }
         fn cancel_order(
@@ -669,6 +799,162 @@ mod db_tests {
         );
 
         cleanup_run(&pool, run_id).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delayed_broker_ack_does_not_get_treated_as_safe_local_failure() -> Result<()> {
+        let url = match std::env::var(mqk_db::ENV_DB_URL) {
+            Ok(v) if !v.trim().is_empty() => v,
+            _ => {
+                eprintln!("SKIP delayed_broker_ack_does_not_get_treated_as_safe_local_failure: MQK_DATABASE_URL not set");
+                return Ok(());
+            }
+        };
+        let pool = require_pool(&url).await;
+        mqk_db::migrate(&pool).await?;
+
+        let run_id: Uuid = B5_RUN_ID.parse().unwrap();
+        let idem = "a3-b5-delayed-ack-ord-001";
+        cleanup_run(&pool, run_id).await?;
+        sqlx::query("delete from sys_arm_state where sentinel_id = 1")
+            .execute(&pool)
+            .await?;
+        seed_running_run(&pool, run_id).await?;
+
+        let created = mqk_db::outbox_enqueue(
+            &pool,
+            run_id,
+            idem,
+            json!({"symbol": "SPY", "quantity": 1, "order_type": "market", "time_in_force": "day"}),
+        )
+        .await?;
+        assert!(created, "outbox row must be created");
+
+        let mut orch = make_orchestrator(pool.clone(), run_id, DelayedAckBroker);
+        let _ = orch
+            .tick()
+            .await
+            .expect_err("tick must fail closed on delayed-ack ambiguity");
+
+        let status = outbox_status(&pool, idem).await?;
+        assert_eq!(status.as_deref(), Some("AMBIGUOUS"));
+
+        let run = mqk_db::fetch_run(&pool, run_id).await?;
+        assert!(matches!(run.status, mqk_db::RunStatus::Halted));
+
+        cleanup_run(&pool, run_id).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rate_limit_retry_window_is_handled_honestly() -> Result<()> {
+        let url = match std::env::var(mqk_db::ENV_DB_URL) {
+            Ok(v) if !v.trim().is_empty() => v,
+            _ => {
+                eprintln!(
+                    "SKIP rate_limit_retry_window_is_handled_honestly: MQK_DATABASE_URL not set"
+                );
+                return Ok(());
+            }
+        };
+        let pool = require_pool(&url).await;
+        mqk_db::migrate(&pool).await?;
+
+        // Proved non-delivery rate limit -> safe reset to PENDING.
+        let run_id_safe: Uuid = B2_RUN_ID.parse().unwrap();
+        let idem_safe = "a3-b6-ratelimit-safe-ord-001";
+        cleanup_run(&pool, run_id_safe).await?;
+        seed_running_run(&pool, run_id_safe).await?;
+        let created = mqk_db::outbox_enqueue(
+            &pool,
+            run_id_safe,
+            idem_safe,
+            json!({"symbol": "SPY", "quantity": 1, "order_type": "market", "time_in_force": "day"}),
+        )
+        .await?;
+        assert!(created);
+        struct RateLimitSafeBroker;
+        impl BrokerAdapter for RateLimitSafeBroker {
+            fn submit_order(
+                &self,
+                _req: BrokerSubmitRequest,
+                _token: &BrokerInvokeToken,
+            ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
+                Err(BrokerError::RateLimit {
+                    retry_after_ms: Some(1_000),
+                    non_delivery_proven: true,
+                    detail: "pre-admission throttle".into(),
+                })
+            }
+            fn cancel_order(
+                &self,
+                _id: &str,
+                _token: &BrokerInvokeToken,
+            ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
+                Ok(BrokerCancelResponse {
+                    broker_order_id: "x".into(),
+                    cancelled_at: 0,
+                    status: "ok".into(),
+                })
+            }
+            fn replace_order(
+                &self,
+                req: BrokerReplaceRequest,
+                _token: &BrokerInvokeToken,
+            ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
+                Ok(BrokerReplaceResponse {
+                    broker_order_id: req.broker_order_id,
+                    replaced_at: 0,
+                    status: "ok".into(),
+                })
+            }
+            fn fetch_events(
+                &self,
+                _cursor: Option<&str>,
+                _token: &BrokerInvokeToken,
+            ) -> std::result::Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError>
+            {
+                Ok((vec![], None))
+            }
+        }
+        let mut orch = make_orchestrator(pool.clone(), run_id_safe, RateLimitSafeBroker);
+        let _ = orch
+            .tick()
+            .await
+            .expect_err("safe ratelimit returns submit error and resets row");
+        let status_safe = outbox_status(&pool, idem_safe).await?;
+        assert_eq!(status_safe.as_deref(), Some("PENDING"));
+
+        // Unknown-delivery rate limit -> ambiguous + halt/disarm.
+        let run_id_amb: Uuid = B6_RUN_ID.parse().unwrap();
+        let idem_amb = "a3-b6-ratelimit-amb-ord-001";
+        cleanup_run(&pool, run_id_amb).await?;
+        sqlx::query("delete from sys_arm_state where sentinel_id = 1")
+            .execute(&pool)
+            .await?;
+        seed_running_run(&pool, run_id_amb).await?;
+        let created = mqk_db::outbox_enqueue(
+            &pool,
+            run_id_amb,
+            idem_amb,
+            json!({"symbol": "SPY", "quantity": 1, "order_type": "market", "time_in_force": "day"}),
+        )
+        .await?;
+        assert!(created);
+        let mut orch = make_orchestrator(pool.clone(), run_id_amb, RateLimitAmbiguousBroker);
+        let _ = orch
+            .tick()
+            .await
+            .expect_err("ambiguous ratelimit must fail closed");
+        let status_amb = outbox_status(&pool, idem_amb).await?;
+        assert_eq!(status_amb.as_deref(), Some("AMBIGUOUS"));
+
+        let run = mqk_db::fetch_run(&pool, run_id_amb).await?;
+        assert!(matches!(run.status, mqk_db::RunStatus::Halted));
+
+        cleanup_run(&pool, run_id_safe).await?;
+        cleanup_run(&pool, run_id_amb).await?;
         Ok(())
     }
 }

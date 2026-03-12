@@ -105,6 +105,18 @@ async fn seed_run_and_outbox(pool: &PgPool, run_id: Uuid, idem_key: &str) -> Res
 /// Remove test data for the given run (cascades oms_outbox from runs delete).
 /// broker_order_map rows must already be gone before calling this.
 async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
+    sqlx::query(
+        r#"
+        delete from broker_order_map
+        where internal_id in (
+            select idempotency_key from oms_outbox where run_id = $1
+        )
+        "#,
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?;
+
     sqlx::query("delete from runs where run_id = $1")
         .bind(run_id)
         .execute(pool)
@@ -138,6 +150,13 @@ async fn w1_crash_after_sent_before_ack_no_double_submit() -> anyhow::Result<()>
         mqk_db::outbox_claim_batch(&pool, 1, "eb5-dispatcher", chrono::Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "must claim the PENDING row");
 
+    let dispatching =
+        mqk_db::outbox_mark_dispatching(&pool, key, "eb5-dispatcher", Utc::now()).await?;
+    assert!(
+        dispatching,
+        "must mark CLAIMED -> DISPATCHING before broker submit"
+    );
+
     // Broker stub: submit the order. Broker now has it.
     let mut broker = mqk_testkit::FakeBroker::new();
     broker.submit(key, json!({"symbol":"SPY","qty":1}));
@@ -147,9 +166,14 @@ async fn w1_crash_after_sent_before_ack_no_double_submit() -> anyhow::Result<()>
         "broker must record exactly one submit"
     );
 
-    // Mark outbox SENT to record the dispatch attempt.
-    let sent = mqk_db::outbox_mark_sent(&pool, key, chrono::Utc::now()).await?;
-    assert!(sent, "outbox_mark_sent must transition CLAIMED → SENT");
+    // Atomically persist SENT + broker_map to record the dispatch attempt.
+    let sent =
+        mqk_db::outbox_mark_sent_with_broker_map(&pool, key, "test-broker-id", chrono::Utc::now())
+            .await?;
+    assert!(
+        sent,
+        "outbox_mark_sent_with_broker_map must transition CLAIMED → SENT"
+    );
 
     // --- CRASH: process exits here, mark_acked never called ---
     // DB state: outbox = SENT, broker has the order.
@@ -279,7 +303,8 @@ async fn w3_acked_row_not_reinspected_on_second_restart() -> anyhow::Result<()> 
 
     let mut broker = mqk_testkit::FakeBroker::new();
     broker.submit(key, json!({"symbol":"SPY","qty":1}));
-    mqk_db::outbox_mark_sent(&pool, key, chrono::Utc::now()).await?;
+    mqk_db::outbox_mark_sent_with_broker_map(&pool, key, "test-broker-id", chrono::Utc::now())
+        .await?;
 
     // First recovery: marks the row ACKED.
     let first = mqk_testkit::recover_outbox_against_broker(&pool, run_id, &mut broker).await?;

@@ -146,6 +146,7 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
                 .ok_or(NormalizeError::MissingField("price"))?;
             Ok(BrokerEvent::PartialFill {
                 broker_message_id,
+                broker_fill_id: None,
                 internal_order_id,
                 broker_order_id: Some(broker_order_id),
                 symbol: ev.order.symbol.clone(),
@@ -169,6 +170,7 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
                 .ok_or(NormalizeError::MissingField("price"))?;
             Ok(BrokerEvent::Fill {
                 broker_message_id,
+                broker_fill_id: None,
                 internal_order_id,
                 broker_order_id: Some(broker_order_id),
                 symbol: ev.order.symbol.clone(),

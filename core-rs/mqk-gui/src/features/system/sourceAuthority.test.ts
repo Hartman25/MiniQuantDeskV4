@@ -1,0 +1,64 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { CORE_PANEL_KEYS, type DataSourceDetail } from "./types.ts";
+import { classifyAuthority, classifyPanelSources } from "./sourceAuthority.ts";
+
+function baseDataSource(overrides: Partial<DataSourceDetail> = {}): DataSourceDetail {
+  return {
+    state: "real",
+    reachable: true,
+    realEndpoints: [],
+    missingEndpoints: [],
+    mockSections: [],
+    ...overrides,
+  };
+}
+
+test("disconnected operator model returns unknown for all panels", () => {
+  const sources = classifyPanelSources(baseDataSource({ state: "disconnected", reachable: false }), false);
+  for (const panel of CORE_PANEL_KEYS) {
+    assert.equal(sources[panel], "unknown");
+  }
+});
+
+test("mock fallback model returns placeholder for all panels", () => {
+  const sources = classifyPanelSources(baseDataSource({ state: "mock", mockSections: ["all"] }), true);
+  for (const panel of CORE_PANEL_KEYS) {
+    assert.equal(sources[panel], "placeholder");
+  }
+});
+
+test("pure DB evidence classifies as db_truth", () => {
+  assert.equal(classifyAuthority({ hasDb: true, hasRuntime: false, hasBroker: false, hasPlaceholder: false }, true), "db_truth");
+});
+
+test("pure runtime evidence classifies as runtime_memory", () => {
+  assert.equal(classifyAuthority({ hasDb: false, hasRuntime: true, hasBroker: false, hasPlaceholder: false }, true), "runtime_memory");
+});
+
+test("pure broker evidence classifies as broker_snapshot", () => {
+  assert.equal(classifyAuthority({ hasDb: false, hasRuntime: false, hasBroker: true, hasPlaceholder: false }, true), "broker_snapshot");
+});
+
+test("multiple real evidence types classify as mixed", () => {
+  assert.equal(classifyAuthority({ hasDb: true, hasRuntime: true, hasBroker: false, hasPlaceholder: false }, true), "mixed");
+});
+
+test("placeholder plus real evidence is classified conservatively as mixed", () => {
+  assert.equal(classifyAuthority({ hasDb: true, hasRuntime: false, hasBroker: false, hasPlaceholder: true }, true), "mixed");
+});
+
+test("panel source map is exhaustive for every core panel", () => {
+  const sources = classifyPanelSources(
+    baseDataSource({
+      realEndpoints: ["/api/v1/system/status", "/api/v1/system/preflight", "/api/v1/system/runtime-leadership"],
+      mockSections: [],
+    }),
+    true,
+  );
+
+  assert.deepEqual(Object.keys(sources).sort(), [...CORE_PANEL_KEYS].sort());
+  for (const panel of CORE_PANEL_KEYS) {
+    assert.ok(sources[panel]);
+  }
+});

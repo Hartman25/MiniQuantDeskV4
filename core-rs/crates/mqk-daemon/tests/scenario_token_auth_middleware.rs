@@ -156,3 +156,28 @@ async fn control_routes_do_not_bypass_auth_policy() {
     let json = parse_json(body);
     assert_eq!(json["gate"], "operator_token");
 }
+
+#[tokio::test]
+async fn control_surface_has_no_detached_shadow_mount() {
+    let router = make_router(state::OperatorAuthMode::TokenRequired(
+        "control-secret".to_string(),
+    ));
+
+    let canonical = Request::builder()
+        .method("GET")
+        .uri("/control/status")
+        .header("Authorization", "Bearer control-secret")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (canonical_status, _canonical_body) = call(router.clone(), canonical).await;
+    assert_ne!(canonical_status, StatusCode::NOT_FOUND);
+
+    let shadow = Request::builder()
+        .method("GET")
+        .uri("/v1/control/status")
+        .header("Authorization", "Bearer control-secret")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (shadow_status, _shadow_body) = call(router, shadow).await;
+    assert_eq!(shadow_status, StatusCode::NOT_FOUND);
+}

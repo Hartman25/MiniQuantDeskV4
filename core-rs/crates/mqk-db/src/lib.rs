@@ -936,12 +936,23 @@ pub struct InboxRow {
     pub inbox_id: i64,
     pub run_id: Uuid,
     pub broker_message_id: String,
+    pub broker_fill_id: Option<String>,
+    pub broker_sequence_id: Option<String>,
+    pub broker_timestamp: Option<String>,
     pub message_json: Value,
     pub received_at_utc: DateTime<Utc>,
     /// NULL until inbox_mark_applied() is called after a successful portfolio
     /// apply.  Rows with applied_at_utc IS NULL are returned by
     /// inbox_load_unapplied_for_run() for crash-recovery replay (Patch D2).
     pub applied_at_utc: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BrokerEventIdentity {
+    pub broker_message_id: String,
+    pub broker_fill_id: Option<String>,
+    pub broker_sequence_id: Option<String>,
+    pub broker_timestamp: Option<String>,
 }
 
 /// Enqueue an order intent into oms_outbox.
@@ -1193,48 +1204,6 @@ pub async fn outbox_fetch_by_idempotency_key(
     }))
 }
 
-/// Mark a CLAIMED or DISPATCHING outbox row as SENT (sets sent_at_utc).
-///
-/// Returns true if a row transitioned to SENT; false if not found or not in
-/// an acceptable pre-SENT state.
-///
-/// Accepts both `CLAIMED` and `DISPATCHING` for backward compatibility:
-/// - Production path (RT-5): `DISPATCHING → SENT` (row was marked DISPATCHING
-///   before `gateway.submit()`).
-/// - Legacy test path: `CLAIMED → SENT` (tests that skip `outbox_mark_dispatching`).
-///
-/// **Patch L3 enforcement:** only rows that have been claimed via
-/// `outbox_claim_batch` can be marked SENT. Attempting to mark a PENDING row
-/// SENT without first claiming it returns `false`, preventing a rogue
-/// dispatcher from bypassing the claim/lock protocol.
-///
-/// `sent_at` is caller-supplied — no SQL `now()` in this function (FC-7
-/// policy: wall-clock excluded from the dispatch path).  In production,
-/// pass `time_source.now_utc()`; in tests, pass an explicit timestamp.
-pub async fn outbox_mark_sent(
-    pool: &PgPool,
-    idempotency_key: &str,
-    sent_at: DateTime<Utc>,
-) -> Result<bool> {
-    let row: Option<(i64,)> = sqlx::query_as(
-        r#"
-        update oms_outbox
-           set status      = 'SENT',
-               sent_at_utc = coalesce(sent_at_utc, $2)
-         where idempotency_key = $1
-           and status in ('CLAIMED', 'DISPATCHING')
-        returning outbox_id
-        "#,
-    )
-    .bind(idempotency_key)
-    .bind(sent_at)
-    .fetch_optional(pool)
-    .await
-    .context("outbox_mark_sent failed")?;
-
-    Ok(row.is_some())
-}
-
 /// Atomically persist `internal_id → broker_id` and transition the outbox row
 /// to `SENT`.
 ///
@@ -1252,7 +1221,7 @@ pub async fn outbox_mark_sent(
 /// not occur, the transaction is not committed, so the broker map upsert is
 /// rolled back as well.
 ///
-/// Accepts both `CLAIMED` and `DISPATCHING` for parity with `outbox_mark_sent`:
+/// Accepts both `CLAIMED` and `DISPATCHING`:
 /// - Production path (RT-5): `DISPATCHING → SENT`
 /// - Legacy test path: `CLAIMED → SENT`
 pub async fn outbox_mark_sent_with_broker_map(
@@ -1547,6 +1516,168 @@ pub async fn load_arm_state(pool: &PgPool) -> Result<Option<(String, Option<Stri
     Ok(row)
 }
 
+#[derive(Debug, Clone)]
+pub struct RiskBlockState {
+    pub blocked: bool,
+    pub reason: Option<String>,
+    pub updated_at_utc: DateTime<Utc>,
+}
+
+/// Persist the current risk-block posture to `sys_risk_block_state` (singleton row).
+pub async fn persist_risk_block_state(
+    pool: &PgPool,
+    blocked: bool,
+    reason: Option<&str>,
+    updated_at: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into sys_risk_block_state (sentinel_id, blocked, reason, updated_at_utc)
+        values (1, $1, $2, $3)
+        on conflict (sentinel_id) do update
+            set blocked        = excluded.blocked,
+                reason         = excluded.reason,
+                updated_at_utc = excluded.updated_at_utc
+        "#,
+    )
+    .bind(blocked)
+    .bind(reason)
+    .bind(updated_at)
+    .execute(pool)
+    .await
+    .context("persist_risk_block_state failed")?;
+    Ok(())
+}
+
+/// Load the last persisted risk-block posture.
+pub async fn load_risk_block_state(pool: &PgPool) -> Result<Option<RiskBlockState>> {
+    let row = sqlx::query(
+        r#"
+        select blocked, reason, updated_at_utc
+        from sys_risk_block_state
+        where sentinel_id = 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await
+    .context("load_risk_block_state failed")?;
+
+    let Some(row) = row else { return Ok(None) };
+    Ok(Some(RiskBlockState {
+        blocked: row.try_get("blocked")?,
+        reason: row.try_get("reason")?,
+        updated_at_utc: row.try_get("updated_at_utc")?,
+    }))
+}
+
+#[derive(Debug, Clone)]
+pub struct ReconcileStatusState {
+    pub status: String,
+    pub last_run_at_utc: Option<DateTime<Utc>>,
+    pub snapshot_watermark_ms: Option<i64>,
+    pub mismatched_positions: i32,
+    pub mismatched_orders: i32,
+    pub mismatched_fills: i32,
+    pub unmatched_broker_events: i32,
+    pub note: Option<String>,
+    pub updated_at_utc: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistReconcileStatusState<'a> {
+    pub status: &'a str,
+    pub last_run_at_utc: Option<DateTime<Utc>>,
+    pub snapshot_watermark_ms: Option<i64>,
+    pub mismatched_positions: i32,
+    pub mismatched_orders: i32,
+    pub mismatched_fills: i32,
+    pub unmatched_broker_events: i32,
+    pub note: Option<&'a str>,
+    pub updated_at_utc: DateTime<Utc>,
+}
+
+/// Persist the current reconcile status posture to `sys_reconcile_status_state`.
+pub async fn persist_reconcile_status_state(
+    pool: &PgPool,
+    state: &PersistReconcileStatusState<'_>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into sys_reconcile_status_state (
+            sentinel_id,
+            status,
+            last_run_at_utc,
+            snapshot_watermark_ms,
+            mismatched_positions,
+            mismatched_orders,
+            mismatched_fills,
+            unmatched_broker_events,
+            note,
+            updated_at_utc
+        )
+        values (1, $1, $2, $3, $4, $5, $6, $7, $8, $9)
+        on conflict (sentinel_id) do update
+            set status = excluded.status,
+                last_run_at_utc = excluded.last_run_at_utc,
+                snapshot_watermark_ms = excluded.snapshot_watermark_ms,
+                mismatched_positions = excluded.mismatched_positions,
+                mismatched_orders = excluded.mismatched_orders,
+                mismatched_fills = excluded.mismatched_fills,
+                unmatched_broker_events = excluded.unmatched_broker_events,
+                note = excluded.note,
+                updated_at_utc = excluded.updated_at_utc
+        "#,
+    )
+    .bind(state.status)
+    .bind(state.last_run_at_utc)
+    .bind(state.snapshot_watermark_ms)
+    .bind(state.mismatched_positions)
+    .bind(state.mismatched_orders)
+    .bind(state.mismatched_fills)
+    .bind(state.unmatched_broker_events)
+    .bind(state.note)
+    .bind(state.updated_at_utc)
+    .execute(pool)
+    .await
+    .context("persist_reconcile_status_state failed")?;
+    Ok(())
+}
+
+/// Load the last persisted reconcile status posture.
+pub async fn load_reconcile_status_state(pool: &PgPool) -> Result<Option<ReconcileStatusState>> {
+    let row = sqlx::query(
+        r#"
+        select status,
+               last_run_at_utc,
+               snapshot_watermark_ms,
+               mismatched_positions,
+               mismatched_orders,
+               mismatched_fills,
+               unmatched_broker_events,
+               note,
+               updated_at_utc
+        from sys_reconcile_status_state
+        where sentinel_id = 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await
+    .context("load_reconcile_status_state failed")?;
+
+    let Some(row) = row else { return Ok(None) };
+    Ok(Some(ReconcileStatusState {
+        status: row.try_get("status")?,
+        last_run_at_utc: row.try_get("last_run_at_utc")?,
+        snapshot_watermark_ms: row.try_get("snapshot_watermark_ms")?,
+        mismatched_positions: row.try_get("mismatched_positions")?,
+        mismatched_orders: row.try_get("mismatched_orders")?,
+        mismatched_fills: row.try_get("mismatched_fills")?,
+        unmatched_broker_events: row.try_get("unmatched_broker_events")?,
+        note: row.try_get("note")?,
+        updated_at_utc: row.try_get("updated_at_utc")?,
+    }))
+}
+
 /// Insert a broker message/fill into oms_inbox with dedupe on (run_id, broker_message_id).
 ///
 /// Idempotent behavior:
@@ -1573,20 +1704,56 @@ pub async fn inbox_insert_deduped(
     broker_message_id: &str,
     message_json: Value,
 ) -> Result<bool> {
+    inbox_insert_deduped_with_identity(
+        pool,
+        run_id,
+        &BrokerEventIdentity {
+            broker_message_id: broker_message_id.to_string(),
+            broker_fill_id: None,
+            broker_sequence_id: None,
+            broker_timestamp: None,
+        },
+        message_json,
+    )
+    .await
+}
+
+/// Insert a broker message/fill into oms_inbox with explicit identity fields.
+///
+/// Dedupe rule is transport-only and explicit:
+/// - conflict key: `(run_id, broker_message_id)`
+/// - `broker_fill_id` is optional economic identity metadata and does NOT
+///   participate in inbox insertion dedupe.
+pub async fn inbox_insert_deduped_with_identity(
+    pool: &PgPool,
+    run_id: Uuid,
+    identity: &BrokerEventIdentity,
+    message_json: Value,
+) -> Result<bool> {
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
-        insert into oms_inbox (run_id, broker_message_id, message_json)
-        values ($1, $2, $3)
+        insert into oms_inbox (
+            run_id,
+            broker_message_id,
+            broker_fill_id,
+            broker_sequence_id,
+            broker_timestamp,
+            message_json
+        )
+        values ($1, $2, $3, $4, $5, $6)
         on conflict (run_id, broker_message_id) do nothing
         returning inbox_id
         "#,
     )
     .bind(run_id)
-    .bind(broker_message_id)
+    .bind(&identity.broker_message_id)
+    .bind(&identity.broker_fill_id)
+    .bind(&identity.broker_sequence_id)
+    .bind(&identity.broker_timestamp)
     .bind(message_json)
     .fetch_optional(pool)
     .await
-    .context("inbox_insert_deduped failed")?;
+    .context("inbox_insert_deduped_with_identity failed")?;
 
     Ok(row.is_some())
 }
@@ -1635,20 +1802,22 @@ pub async fn inbox_mark_applied(
 /// (`applied_at_utc IS NULL`).
 ///
 /// Call this at startup/recovery to identify fills whose apply step did not
-/// complete before a crash.  Replay these events in canonical (`broker_message_id`)
-/// order; each apply must be idempotent so re-applying a partially-applied fill is
-/// safe.  After successfully applying each row, call `inbox_mark_applied`.
+/// complete before a crash. Replay these events in canonical durable ingest
+/// order (`inbox_id ASC`), independent of `broker_message_id`; each apply must
+/// be idempotent so re-applying a partially-applied fill is safe. After
+/// successfully applying each row, call `inbox_mark_applied`.
 ///
 /// Uses the partial index `idx_inbox_run_unapplied` for efficiency.
 pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<InboxRow>> {
     let rows = sqlx::query(
         r#"
-        select inbox_id, run_id, broker_message_id, message_json,
+        select inbox_id, run_id, broker_message_id, broker_fill_id,
+               broker_sequence_id, broker_timestamp, message_json,
                received_at_utc, applied_at_utc
           from oms_inbox
          where run_id = $1
            and applied_at_utc is null
-         order by broker_message_id asc
+         order by inbox_id asc
         "#,
     )
     .bind(run_id)
@@ -1662,6 +1831,9 @@ pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result
             inbox_id: row.try_get("inbox_id")?,
             run_id: row.try_get("run_id")?,
             broker_message_id: row.try_get("broker_message_id")?,
+            broker_fill_id: row.try_get("broker_fill_id")?,
+            broker_sequence_id: row.try_get("broker_sequence_id")?,
+            broker_timestamp: row.try_get("broker_timestamp")?,
             message_json: row.try_get("message_json")?,
             received_at_utc: row.try_get("received_at_utc")?,
             applied_at_utc: row.try_get("applied_at_utc")?,

@@ -1,9 +1,9 @@
 //! Scenario: Crash Recovery No Double Order
 //!
 //! # Invariant under test
-//! When a process crashes after broker submit but before mark_acked, the
-//! recovery path must detect that the broker already has the order and NOT
-//! resubmit. broker.submit_count() must remain exactly 1.
+//! When a process crashes after atomic SENT+broker-map persistence but before
+//! mark_acked, the recovery path must detect that the broker already has the
+//! order and NOT resubmit. broker.submit_count() must remain exactly 1.
 //!
 //! # PROOF LANE
 //!
@@ -89,9 +89,13 @@ async fn crash_recovery_does_not_double_submit_when_broker_already_has_order() -
     assert_eq!(broker.submit_count(), 1);
 
     // Record that we attempted to send (but did NOT ack).
-    let sent =
-        mqk_db::outbox_mark_sent(&pool, &claimed_row.row.idempotency_key, chrono::Utc::now())
-            .await?;
+    let sent = mqk_db::outbox_mark_sent_with_broker_map(
+        &pool,
+        &claimed_row.row.idempotency_key,
+        "test-broker-id",
+        chrono::Utc::now(),
+    )
+    .await?;
     assert!(sent, "outbox_mark_sent must transition claimed row to SENT");
 
     // "Restart" recovery: should see outbox row as SENT/unacked,

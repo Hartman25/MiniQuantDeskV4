@@ -2,19 +2,17 @@
 //!
 //! # Invariant under test
 //!
-//! `POST /v1/run/halt` sets `ig.halted = true` in the integrity state.
-//! Because `IntegrityState::is_execution_blocked()` = `disarmed || halted`,
-//! a subsequent `POST /v1/run/start` returns 403 until the operator explicitly
-//! calls `POST /v1/integrity/arm` — the sole escape from any blocked state.
+//! The daemon now treats `/v1/run/halt` as a DB-authoritative lifecycle action.
+//! In no-DB mode that route may fail closed, so this file does **not** prove the
+//! halted state by assuming the route succeeds.
 //!
-//! `POST /v1/integrity/arm` clears BOTH `disarmed` AND `halted`, mirroring
-//! the `ArmState::arm()` semantics proved in the pure-logic layer tests.
+//! Instead, these tests cover two honest surfaces separately:
 //!
-//! Three tests:
-//!
-//! 1. After halt, run/start returns 403 (deadman blocks dispatch).
-//! 2. After halt, GET /v1/status reports `integrity_armed: false`.
-//! 3. After halt then explicit arm, run/start still fails closed without DB-backed runtime ownership.
+//! 1. `POST /v1/run/halt` fails closed without runtime DB truth.
+//! 2. A halted/disarmed integrity state blocks `POST /v1/run/start` with 403.
+//! 3. `GET /v1/status` reports `integrity_armed = false` after halted state is asserted.
+//! 4. `POST /v1/integrity/arm` is the sole escape from halted/disarmed state,
+//!    but `POST /v1/run/start` still returns 503 until DB-backed runtime truth exists.
 //!
 //! All tests are pure in-process; no DB or network required.
 
@@ -24,10 +22,6 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
 use tower::ServiceExt; // oneshot
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, bytes::Bytes) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
@@ -45,39 +39,60 @@ fn parse_json(b: bytes::Bytes) -> serde_json::Value {
     serde_json::from_slice(&b).expect("body is not valid JSON")
 }
 
-/// Arm the integrity gate (required before any run can start; Patch C1).
 async fn arm(st: &Arc<state::AppState>) {
     let req = Request::builder()
         .method("POST")
         .uri("/v1/integrity/arm")
         .body(axum::body::Body::empty())
         .unwrap();
-    let (status, _) = call(routes::build_router(Arc::clone(st)), req).await;
-    assert_eq!(status, StatusCode::OK, "arm must succeed");
+    let (status, body) = call(routes::build_router(Arc::clone(st)), req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "arm must succeed: {}",
+        parse_json(body)
+    );
 }
 
-/// Halt the run (sets ig.halted = true; Patch C2).
-async fn halt(st: &Arc<state::AppState>) {
+async fn force_halted(st: &Arc<state::AppState>) {
+    let mut integrity = st.integrity.write().await;
+    integrity.disarmed = true;
+    integrity.halted = true;
+}
+
+#[tokio::test]
+async fn halt_route_fails_closed_without_db_truth() {
+    let st = Arc::new(state::AppState::new());
+    arm(&st).await;
+
     let req = Request::builder()
         .method("POST")
         .uri("/v1/run/halt")
         .body(axum::body::Body::empty())
         .unwrap();
-    let (status, _) = call(routes::build_router(Arc::clone(st)), req).await;
-    assert_eq!(status, StatusCode::OK, "halt must succeed");
-}
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
 
-// ---------------------------------------------------------------------------
-// 1. run/start returns 403 after halt (deadman blocks dispatch)
-// ---------------------------------------------------------------------------
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "run/halt must fail closed when runtime DB is not configured"
+    );
+
+    let json = parse_json(body);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("runtime DB is not configured"),
+        "body should explain DB-backed runtime requirement: {json}"
+    );
+}
 
 #[tokio::test]
 async fn run_start_returns_403_after_halt() {
     let st = Arc::new(state::AppState::new());
 
-    // Arm first so the halt is meaningful (arm then halt, not just boot-disarmed).
-    arm(&st).await;
-    halt(&st).await;
+    force_halted(&st).await;
 
     let req = Request::builder()
         .method("POST")
@@ -89,9 +104,10 @@ async fn run_start_returns_403_after_halt() {
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "run/start must be 403 after halt (deadman sticky)"
+        "run/start must be 403 after halted integrity state"
     );
     let json = parse_json(body);
+    assert_eq!(json["gate"], "integrity_armed");
     assert!(
         json["error"]
             .as_str()
@@ -101,44 +117,35 @@ async fn run_start_returns_403_after_halt() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 2. Status reports integrity_armed = false after halt
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn status_shows_not_armed_after_halt() {
     let st = Arc::new(state::AppState::new());
 
-    arm(&st).await;
-    halt(&st).await;
+    force_halted(&st).await;
 
     let req = Request::builder()
         .method("GET")
         .uri("/v1/status")
         .body(axum::body::Body::empty())
         .unwrap();
-    let (_, body) = call(routes::build_router(Arc::clone(&st)), req).await;
-    let json = parse_json(body);
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
 
+    assert_eq!(status, StatusCode::OK, "status route must stay readable");
+
+    let json = parse_json(body);
+    assert_eq!(json["state"], "halted");
     assert_eq!(
         json["integrity_armed"], false,
-        "status must report integrity_armed=false after halt (Patch C2)"
+        "status must report integrity_armed=false after halted state"
     );
 }
-
-// ---------------------------------------------------------------------------
-// 3. After halt then explicit arm, run/start still requires DB-backed runtime
-//    ownership proof
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn run_start_requires_db_after_halt_then_arm() {
     let st = Arc::new(state::AppState::new());
 
-    arm(&st).await;
-    halt(&st).await;
+    force_halted(&st).await;
 
-    // Confirm blocked.
     let req = Request::builder()
         .method("POST")
         .uri("/v1/run/start")
@@ -147,10 +154,8 @@ async fn run_start_requires_db_after_halt_then_arm() {
     let (status, _) = call(routes::build_router(Arc::clone(&st)), req).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "must be blocked after halt");
 
-    // Re-arm — the sole escape from any blocked integrity state.
     arm(&st).await;
 
-    // Now start succeeds.
     let req = Request::builder()
         .method("POST")
         .uri("/v1/run/start")

@@ -120,6 +120,7 @@ impl DeterministicFillEngine {
 
         vec![BrokerEvent::Fill {
             broker_message_id,
+            broker_fill_id: None,
             internal_order_id: ord.internal_order_id.clone(),
             broker_order_id: Some(ord.internal_order_id.clone()),
             symbol: ord.symbol.clone(),

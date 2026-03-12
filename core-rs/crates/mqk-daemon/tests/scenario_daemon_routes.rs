@@ -205,7 +205,7 @@ async fn run_stop_on_idle_remains_idle() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn run_halt_sets_state_halted_without_active_run() {
+async fn run_halt_requires_db_backed_runtime_authority() {
     let st = Arc::new(state::AppState::new_with_operator_auth(
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
@@ -216,12 +216,16 @@ async fn run_halt_sets_state_halted_without_active_run() {
         .body(axum::body::Body::empty())
         .unwrap();
     let (status, body) = call(routes::build_router(Arc::clone(&st)), halt_req).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 
     let json = parse_json(body);
-    assert_eq!(json["state"], "halted");
-    assert!(json["active_run_id"].is_null());
-    assert_eq!(json["integrity_armed"], false);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("runtime DB is not configured"),
+        "body should explain DB-backed runtime requirement: {json}"
+    );
 }
 
 // ---------------------------------------------------------------------------
