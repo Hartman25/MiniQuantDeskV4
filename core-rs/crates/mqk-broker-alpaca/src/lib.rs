@@ -560,6 +560,7 @@ fn classify_http_status(status: reqwest::StatusCode, body: &str) -> BrokerError 
         },
         429 => BrokerError::RateLimit {
             retry_after_ms: None,
+            non_delivery_proven: true,
             detail: body.to_string(),
         },
         c if c >= 500 => BrokerError::Transient {

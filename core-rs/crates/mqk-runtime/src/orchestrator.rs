@@ -334,7 +334,7 @@ where
                 Ok(r) => r,
                 Err(e) => {
                     // A3: per-class outbox row disposition.
-                    use mqk_execution::{BrokerError, GateRefusal, SubmitError};
+                    use mqk_execution::{GateRefusal, SubmitError};
                     match &e {
                         SubmitError::Gate(GateRefusal::RiskBlocked(denial)) => {
                             // B2: capture the structured risk denial for the B4
@@ -355,7 +355,7 @@ where
                         }
                         SubmitError::Broker(be) if be.requires_halt() => {
                             let now = self.time_source.now_utc();
-                            if matches!(be, BrokerError::AmbiguousSubmit { .. }) {
+                            if be.is_ambiguous_send_outcome() {
                                 // A4: Transition DISPATCHING → AMBIGUOUS (explicit quarantine).
                                 // Row cannot re-enter dispatch without explicit operator/reconcile
                                 // release via outbox_reset_ambiguous_to_pending.
@@ -382,13 +382,25 @@ where
                                 .await;
                             }
                         }
-                        SubmitError::Broker(be) if be.is_retryable() => {
-                            // Transport / RateLimit: request never left the local host.
+                        SubmitError::Broker(be) if be.is_safe_pre_send_retry() => {
+                            // Safe retry class: local non-delivery is proven.
                             // Reset row to PENDING for re-dispatch on the next tick.
                             let _ =
                                 mqk_db::outbox_reset_dispatching_to_pending(&self.pool, &order_id)
                                     .await;
                             eprintln!("WARN broker_submit_retryable order_id={order_id} error={e}");
+                        }
+                        SubmitError::Broker(be) if be.is_ambiguous_send_outcome() => {
+                            // Ambiguous transport/broker outcome - fail closed.
+                            let now = self.time_source.now_utc();
+                            let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
+                            let _ = persist_halt_and_disarm(
+                                &self.pool,
+                                self.run_id,
+                                now,
+                                "AmbiguousSubmit",
+                            )
+                            .await;
                         }
                         SubmitError::Broker(_) => {
                             // Reject / Transient: mark FAILED, requires operator.
