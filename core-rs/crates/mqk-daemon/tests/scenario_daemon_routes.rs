@@ -17,7 +17,9 @@ use tower::ServiceExt; // oneshot
 
 /// Build a fresh in-process router backed by a clean AppState.
 fn make_router() -> axum::Router {
-    let st = Arc::new(state::AppState::new());
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
     routes::build_router(st)
 }
 
@@ -110,7 +112,9 @@ async fn status_returns_200_with_integrity_armed_field() {
 
 #[tokio::test]
 async fn run_start_requires_db_backed_runtime_after_arm() {
-    let st = Arc::new(state::AppState::new());
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
 
     let arm_req = Request::builder()
         .method("POST")
@@ -144,7 +148,9 @@ async fn run_start_requires_db_backed_runtime_after_arm() {
 
 #[tokio::test]
 async fn cannot_report_running_from_placeholder_state_alone() {
-    let st = Arc::new(state::AppState::new());
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
     {
         let mut status = st.status.write().await;
         status.state = "running".to_string();
@@ -174,7 +180,9 @@ async fn cannot_report_running_from_placeholder_state_alone() {
 
 #[tokio::test]
 async fn run_stop_on_idle_remains_idle() {
-    let st = Arc::new(state::AppState::new());
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
 
     let stop_req = Request::builder()
         .method("POST")
@@ -198,7 +206,9 @@ async fn run_stop_on_idle_remains_idle() {
 
 #[tokio::test]
 async fn run_halt_sets_state_halted_without_active_run() {
-    let st = Arc::new(state::AppState::new());
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
 
     let halt_req = Request::builder()
         .method("POST")
@@ -220,7 +230,9 @@ async fn run_halt_sets_state_halted_without_active_run() {
 
 #[tokio::test]
 async fn integrity_arm_sets_armed_true() {
-    let st = Arc::new(state::AppState::new());
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
 
     // Disarm first so we can verify arm actually changes state.
     let disarm_req = Request::builder()
@@ -249,7 +261,9 @@ async fn integrity_arm_sets_armed_true() {
 
 #[tokio::test]
 async fn integrity_disarm_sets_armed_false() {
-    let st = Arc::new(state::AppState::new());
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
 
     let req = Request::builder()
         .method("POST")
@@ -269,7 +283,9 @@ async fn integrity_disarm_sets_armed_false() {
 
 #[tokio::test]
 async fn status_reflects_integrity_armed_flag() {
-    let st = Arc::new(state::AppState::new());
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
 
     // Default: disarmed (Patch C1 — fail-closed at boot).
     let req = Request::builder()
@@ -321,7 +337,9 @@ async fn status_reflects_integrity_armed_flag() {
 
 #[tokio::test]
 async fn run_start_refused_403_when_integrity_disarmed() {
-    let st = Arc::new(state::AppState::new());
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
 
     // Disarm first.
     let disarm_req = Request::builder()
@@ -357,7 +375,9 @@ async fn run_start_refused_403_when_integrity_disarmed() {
 
 #[tokio::test]
 async fn run_start_requires_db_after_rearm() {
-    let st = Arc::new(state::AppState::new());
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
 
     let disarm_req = Request::builder()
         .method("POST")
@@ -574,7 +594,9 @@ async fn api_execution_summary_derives_counts_from_broker_snapshot() {
     use chrono::{Duration, Utc};
     use mqk_schemas::{BrokerAccount, BrokerOrder, BrokerSnapshot};
 
-    let st = Arc::new(state::AppState::new());
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
     {
         let mut lock = st.broker_snapshot.write().await;
         *lock = Some(BrokerSnapshot {
@@ -650,7 +672,9 @@ async fn api_portfolio_and_risk_summary_derive_from_snapshot() {
     use chrono::Utc;
     use mqk_schemas::{BrokerAccount, BrokerPosition, BrokerSnapshot};
 
-    let st = Arc::new(state::AppState::new());
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
     {
         let mut lock = st.broker_snapshot.write().await;
         *lock = Some(BrokerSnapshot {

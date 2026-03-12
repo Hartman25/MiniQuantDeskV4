@@ -29,6 +29,7 @@ const DAEMON_MODE: &str = "PAPER";
 const DAEMON_ADAPTER_ID: &str = "paper";
 const DAEMON_RUN_CONFIG_HASH: &str = "daemon-runtime-paper-v1";
 const EXECUTION_LOOP_INTERVAL: Duration = Duration::from_secs(1);
+const DEV_ALLOW_NO_OPERATOR_TOKEN_ENV: &str = "MQK_DEV_ALLOW_NO_OPERATOR_TOKEN";
 
 // ---------------------------------------------------------------------------
 // BusMsg — SSE event bus payload
@@ -167,6 +168,23 @@ struct ExecutionLoopHandle {
     join_handle: JoinHandle<ExecutionLoopExit>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OperatorAuthMode {
+    TokenRequired(String),
+    ExplicitDevNoToken,
+    MissingTokenFailClosed,
+}
+
+impl OperatorAuthMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::TokenRequired(_) => "token_required",
+            Self::ExplicitDevNoToken => "explicit_dev_no_token",
+            Self::MissingTokenFailClosed => "missing_token_fail_closed",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AppState
 // ---------------------------------------------------------------------------
@@ -193,8 +211,8 @@ pub struct AppState {
     pub execution_snapshot: Arc<RwLock<Option<mqk_runtime::observability::ExecutionSnapshot>>>,
     /// Latest monotonic reconcile result known to the daemon.
     reconcile_status: Arc<RwLock<ReconcileStatusSnapshot>>,
-    /// Bearer token required on all operator (POST/DELETE) routes.
-    pub operator_token: Option<String>,
+    /// Operator auth posture for privileged routes.
+    pub operator_auth: OperatorAuthMode,
     /// The single daemon-owned execution loop handle, if any.
     execution_loop: Arc<Mutex<Option<ExecutionLoopHandle>>>,
     /// Serializes start/stop/halt transitions so the daemon never spawns duplicates.
@@ -208,28 +226,37 @@ impl Default for AppState {
 }
 
 impl AppState {
-    /// Create application state, reading `MQK_OPERATOR_TOKEN` from the environment.
+    /// Create in-process application state for local development and tests.
+    ///
+    /// The real daemon startup path uses [`Self::new_with_db`], which resolves
+    /// environment-derived operator auth and now fails closed by default.
     pub fn new() -> Self {
-        let token = std::env::var("MQK_OPERATOR_TOKEN")
-            .ok()
-            .filter(|s| !s.is_empty());
-        Self::new_inner(token, None)
+        Self::new_inner(OperatorAuthMode::ExplicitDevNoToken, None)
+    }
+
+    /// Create application state with an explicit operator-auth mode.
+    pub fn new_with_operator_auth(operator_auth: OperatorAuthMode) -> Self {
+        Self::new_inner(operator_auth, None)
     }
 
     /// Create application state with an explicit operator token.
+    ///
+    /// `None` is an explicit dev/test opt-in to no-token operator access; it
+    /// does not represent the environment-derived production default.
     pub fn new_with_token(token: Option<String>) -> Self {
-        Self::new_inner(token, None)
+        let operator_auth = match token {
+            Some(token) => OperatorAuthMode::TokenRequired(token),
+            None => OperatorAuthMode::ExplicitDevNoToken,
+        };
+        Self::new_inner(operator_auth, None)
     }
 
     /// Create application state with a live DB pool.
     pub fn new_with_db(db: PgPool) -> Self {
-        let token = std::env::var("MQK_OPERATOR_TOKEN")
-            .ok()
-            .filter(|s| !s.is_empty());
-        Self::new_inner(token, Some(db))
+        Self::new_inner(operator_auth_mode_from_env(), Some(db))
     }
 
-    fn new_inner(operator_token: Option<String>, db: Option<PgPool>) -> Self {
+    fn new_inner(operator_auth: OperatorAuthMode, db: Option<PgPool>) -> Self {
         let (bus, _rx) = broadcast::channel::<BusMsg>(1024);
 
         let build = BuildInfo {
@@ -258,10 +285,14 @@ impl AppState {
             broker_snapshot: Arc::new(RwLock::new(None)),
             execution_snapshot: Arc::new(RwLock::new(None)),
             reconcile_status: Arc::new(RwLock::new(initial_reconcile_status())),
-            operator_token,
+            operator_auth,
             execution_loop: Arc::new(Mutex::new(None)),
             lifecycle_op: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub fn operator_auth_mode(&self) -> &OperatorAuthMode {
+        &self.operator_auth
     }
 
     pub async fn current_reconcile_snapshot(&self) -> ReconcileStatusSnapshot {
@@ -799,6 +830,41 @@ fn default_node_id(service: &str) -> String {
     let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "UNKNOWN_HOST".to_string());
     let user = std::env::var("USERNAME").unwrap_or_else(|_| "UNKNOWN_USER".to_string());
     format!("{service}|{host}|{user}|pid={}", std::process::id())
+}
+
+pub fn operator_auth_mode_from_env_values(
+    operator_token: Option<&str>,
+    dev_allow_no_token: Option<&str>,
+) -> OperatorAuthMode {
+    if let Some(token) = operator_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        return OperatorAuthMode::TokenRequired(token.to_string());
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        if dev_allow_no_token
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            return OperatorAuthMode::ExplicitDevNoToken;
+        }
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = dev_allow_no_token;
+    }
+
+    OperatorAuthMode::MissingTokenFailClosed
+}
+
+fn operator_auth_mode_from_env() -> OperatorAuthMode {
+    let operator_token = std::env::var("MQK_OPERATOR_TOKEN").ok();
+    let dev_allow_no_token = std::env::var(DEV_ALLOW_NO_OPERATOR_TOKEN_ENV).ok();
+    operator_auth_mode_from_env_values(operator_token.as_deref(), dev_allow_no_token.as_deref())
 }
 
 /// Monotonically increasing uptime since first call (process lifetime).

@@ -525,22 +525,26 @@ where
             // without a proven OMS order context in memory.  On Err (unknown-
             // order fill OR illegal OMS transition), halt the run and disarm
             // before propagating - same pattern as capital invariant violations.
-            let fill_opt =
-                match apply_fill_step(&mut self.oms_orders, &internal_id, &event, &msg_id) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        let now = self.time_source.now_utc();
-                        // Mandatory halt + disarm before surfacing the OMS error.
-                        // If the DB writes fail their error takes precedence - failing
-                        // to persist HALTED is more dangerous than the OMS fault itself.
-                        persist_halt_and_disarm(&self.pool, self.run_id, now, "IntegrityViolation")
-                            .await?;
-                        return Err(e.context(format!(
-                            "UNKNOWN_ORDER_FILL: run {} halted and disarmed (Section C)",
-                            self.run_id
-                        )));
-                    }
-                };
+            let apply_outcome = match apply_broker_event_step(
+                &mut self.oms_orders,
+                &internal_id,
+                &event,
+                &msg_id,
+            ) {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    let now = self.time_source.now_utc();
+                    // Mandatory halt + disarm before surfacing the OMS error.
+                    // If the DB writes fail their error takes precedence - failing
+                    // to persist HALTED is more dangerous than the OMS fault itself.
+                    persist_halt_and_disarm(&self.pool, self.run_id, now, "IntegrityViolation")
+                        .await?;
+                    return Err(e.context(format!(
+                        "UNKNOWN_ORDER_FILL: run {} halted and disarmed (Section C)",
+                        self.run_id
+                    )));
+                }
+            };
             // RT-9: Phase 3b - when a live broker Ack carries the exchange-assigned
             // order ID, register it in the in-memory order map.  For paper brokers
             // `broker_order_id` is `None` (the ID was already registered in Phase 1
@@ -557,7 +561,7 @@ where
             // None is returned for: non-fill events, non-fill events for unknown
             // orders, and no-op replays (duplicate event_id or late fill on a
             // terminal OMS order where filled_qty did not advance).
-            if let Some(fill) = fill_opt {
+            if let Some(fill) = apply_outcome.fill {
                 apply_entry(&mut self.portfolio, LedgerEntry::Fill(fill));
             }
             // Step 8: assert capital invariants - I9-1 persistence requirement.
@@ -575,6 +579,14 @@ where
                     "INVARIANT_VIOLATED: run {} halted and disarmed (I9-1)",
                     self.run_id
                 )));
+            }
+            // EXE-03R: terminal lifecycle events must clear broker-order mappings
+            // before the inbox row is marked applied. If a crash occurs after
+            // mark_applied but before cleanup, the durable inbox fence would
+            // suppress replay and strand a stale broker mapping permanently.
+            if apply_outcome.terminal_apply_succeeded {
+                mqk_db::broker_map_remove(&self.pool, &internal_id).await?;
+                remove_broker_mapping_from_memory(&mut self.order_map, &internal_id);
             }
             // Step 9: commit - mark the inbox row as applied.
             mqk_db::inbox_mark_applied(
@@ -1045,6 +1057,16 @@ fn event_kind_rank(event: &BrokerEvent) -> u8 {
         BrokerEvent::Reject { .. } => 7,
     }
 }
+
+#[derive(Debug)]
+struct AppliedBrokerEventOutcome {
+    fill: Option<Fill>,
+    terminal_apply_succeeded: bool,
+}
+
+fn remove_broker_mapping_from_memory(order_map: &mut BrokerOrderMap, internal_id: &str) {
+    order_map.deregister(internal_id);
+}
 /// Assert that the incremental portfolio state is consistent with a full
 /// recompute from the ledger.
 ///
@@ -1164,6 +1186,25 @@ async fn persist_halt_and_disarm(
 ///   portfolio mutation.
 ///
 /// The caller is responsible for halting and disarming on `Err`.
+fn apply_broker_event_step(
+    oms_orders: &mut BTreeMap<String, OmsOrder>,
+    internal_id: &str,
+    event: &BrokerEvent,
+    msg_id: &str,
+) -> anyhow::Result<AppliedBrokerEventOutcome> {
+    let pre_state = oms_orders.get(internal_id).map(|order| order.state.clone());
+    let fill = apply_fill_step(oms_orders, internal_id, event, msg_id)?;
+    let terminal_apply_succeeded = match (pre_state.as_ref(), oms_orders.get(internal_id)) {
+        (Some(pre_state), Some(order)) => !pre_state.is_terminal() && order.state.is_terminal(),
+        _ => false,
+    };
+
+    Ok(AppliedBrokerEventOutcome {
+        fill,
+        terminal_apply_succeeded,
+    })
+}
+
 fn apply_fill_step(
     oms_orders: &mut BTreeMap<String, OmsOrder>,
     internal_id: &str,
@@ -1536,6 +1577,224 @@ mod tests {
             price_micros: 450_000_000,
             fee_micros: 0,
         }
+    }
+    fn make_cancel_ack_event(internal_id: &str, msg_id: &str) -> BrokerEvent {
+        BrokerEvent::CancelAck {
+            broker_message_id: msg_id.to_string(),
+            internal_order_id: internal_id.to_string(),
+            broker_order_id: None,
+        }
+    }
+    fn make_reject_event(internal_id: &str, msg_id: &str) -> BrokerEvent {
+        BrokerEvent::Reject {
+            broker_message_id: msg_id.to_string(),
+            internal_order_id: internal_id.to_string(),
+            broker_order_id: None,
+        }
+    }
+    fn make_cancel_reject_event(internal_id: &str, msg_id: &str) -> BrokerEvent {
+        BrokerEvent::CancelReject {
+            broker_message_id: msg_id.to_string(),
+            internal_order_id: internal_id.to_string(),
+            broker_order_id: None,
+        }
+    }
+    fn make_replace_ack_event(internal_id: &str, msg_id: &str, qty: i64) -> BrokerEvent {
+        BrokerEvent::ReplaceAck {
+            broker_message_id: msg_id.to_string(),
+            internal_order_id: internal_id.to_string(),
+            broker_order_id: None,
+            new_total_qty: qty,
+        }
+    }
+    fn make_replace_reject_event(internal_id: &str, msg_id: &str) -> BrokerEvent {
+        BrokerEvent::ReplaceReject {
+            broker_message_id: msg_id.to_string(),
+            internal_order_id: internal_id.to_string(),
+            broker_order_id: None,
+        }
+    }
+    fn apply_event_and_maybe_remove_broker_mapping(
+        oms_orders: &mut BTreeMap<String, OmsOrder>,
+        order_map: &mut BrokerOrderMap,
+        event: &BrokerEvent,
+        msg_id: &str,
+    ) -> anyhow::Result<AppliedBrokerEventOutcome> {
+        let internal_id = event.internal_order_id().to_string();
+        let outcome = apply_broker_event_step(oms_orders, &internal_id, event, msg_id)?;
+        if outcome.terminal_apply_succeeded {
+            remove_broker_mapping_from_memory(order_map, &internal_id);
+        }
+        Ok(outcome)
+    }
+    #[test]
+    fn fill_terminal_apply_success_removes_broker_map() {
+        let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+        oms.insert(
+            "ord-fill".to_string(),
+            OmsOrder::new("ord-fill", "SPY", 100),
+        );
+        let mut order_map = BrokerOrderMap::new();
+        order_map.register("ord-fill", "broker-fill");
+
+        let outcome = apply_event_and_maybe_remove_broker_mapping(
+            &mut oms,
+            &mut order_map,
+            &make_fill_event("ord-fill", "fill-msg", 100),
+            "fill-msg",
+        )
+        .expect("terminal fill apply must succeed");
+
+        assert!(outcome.terminal_apply_succeeded);
+        assert_eq!(
+            oms["ord-fill"].state,
+            mqk_execution::oms::state_machine::OrderState::Filled
+        );
+        assert!(
+            order_map.broker_id("ord-fill").is_none(),
+            "successful terminal fill apply must remove the broker mapping"
+        );
+    }
+    #[test]
+    fn cancel_ack_unknown_order_does_not_remove_broker_map() {
+        let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+        let mut order_map = BrokerOrderMap::new();
+        order_map.register("ord-cancel", "broker-cancel");
+
+        let outcome = apply_event_and_maybe_remove_broker_mapping(
+            &mut oms,
+            &mut order_map,
+            &make_cancel_ack_event("ord-cancel", "cancel-msg"),
+            "cancel-msg",
+        )
+        .expect("unknown cancel-ack should be skipped safely");
+
+        assert!(!outcome.terminal_apply_succeeded);
+        assert!(
+            order_map.broker_id("ord-cancel").is_some(),
+            "unknown-order cancel-ack must not remove the broker mapping"
+        );
+    }
+    #[test]
+    fn reject_unknown_order_does_not_remove_broker_map() {
+        let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+        let mut order_map = BrokerOrderMap::new();
+        order_map.register("ord-reject", "broker-reject");
+
+        let outcome = apply_event_and_maybe_remove_broker_mapping(
+            &mut oms,
+            &mut order_map,
+            &make_reject_event("ord-reject", "reject-msg"),
+            "reject-msg",
+        )
+        .expect("unknown reject should be skipped safely");
+
+        assert!(!outcome.terminal_apply_succeeded);
+        assert!(
+            order_map.broker_id("ord-reject").is_some(),
+            "unknown-order reject must not remove the broker mapping"
+        );
+    }
+    #[test]
+    fn non_terminal_events_do_not_remove_broker_map() {
+        let non_terminal_events = vec![
+            make_ack_event("ord-non-terminal", "ack-msg"),
+            make_partial_fill_event("ord-non-terminal", "partial-msg", 10),
+            make_cancel_reject_event("ord-non-terminal", "cancel-reject-msg"),
+            make_replace_ack_event("ord-non-terminal", "replace-ack-msg", 120),
+            make_replace_reject_event("ord-non-terminal", "replace-reject-msg"),
+        ];
+
+        for event in non_terminal_events {
+            let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+            oms.insert(
+                "ord-non-terminal".to_string(),
+                OmsOrder::new("ord-non-terminal", "SPY", 120),
+            );
+            let mut order_map = BrokerOrderMap::new();
+            order_map.register("ord-non-terminal", "broker-non-terminal");
+
+            let outcome = apply_event_and_maybe_remove_broker_mapping(
+                &mut oms,
+                &mut order_map,
+                &event,
+                event.broker_message_id(),
+            )
+            .expect("non-terminal event apply must not fail");
+
+            assert!(
+                !outcome.terminal_apply_succeeded,
+                "non-terminal event must not request broker-map cleanup"
+            );
+            assert!(
+                order_map.broker_id("ord-non-terminal").is_some(),
+                "non-terminal events must retain the broker mapping"
+            );
+        }
+    }
+    #[test]
+    fn replayed_terminal_noop_does_not_incorrectly_remove_mapping_or_break_idempotence() {
+        let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+        let mut terminal = OmsOrder::new("ord-replay", "SPY", 100);
+        terminal
+            .apply(&OmsEvent::Fill { delta_qty: 100 }, Some("fill-msg"))
+            .expect("seed terminal fill state");
+        oms.insert("ord-replay".to_string(), terminal);
+        let mut order_map = BrokerOrderMap::new();
+        order_map.register("ord-replay", "broker-replay");
+
+        let outcome = apply_event_and_maybe_remove_broker_mapping(
+            &mut oms,
+            &mut order_map,
+            &make_fill_event("ord-replay", "fill-late", 100),
+            "fill-late",
+        )
+        .expect("late terminal-looking fill replay must be a safe no-op");
+
+        assert!(outcome.fill.is_none());
+        assert!(!outcome.terminal_apply_succeeded);
+        assert!(
+            order_map.broker_id("ord-replay").is_some(),
+            "terminal-looking no-op replay must not remove the mapping solely by event kind"
+        );
+        assert_eq!(
+            oms["ord-replay"].state,
+            mqk_execution::oms::state_machine::OrderState::Filled,
+            "late replay must preserve terminal OMS state"
+        );
+    }
+    #[test]
+    fn terminal_cleanup_occurs_before_mark_applied_or_is_otherwise_proven_durably_safe() {
+        let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+        let mut order = OmsOrder::new("ord-cancel-pending", "SPY", 100);
+        order
+            .apply(&OmsEvent::CancelRequest, Some("cancel-request"))
+            .expect("seed cancel pending state");
+        oms.insert("ord-cancel-pending".to_string(), order);
+        let mut order_map = BrokerOrderMap::new();
+        order_map.register("ord-cancel-pending", "broker-cancel-pending");
+
+        let outcome = apply_event_and_maybe_remove_broker_mapping(
+            &mut oms,
+            &mut order_map,
+            &make_cancel_ack_event("ord-cancel-pending", "cancel-ack-msg"),
+            "cancel-ack-msg",
+        )
+        .expect("cancel-ack terminal apply must succeed");
+
+        assert!(
+            outcome.terminal_apply_succeeded,
+            "cleanup gate must only open after OMS has successfully reached a terminal state"
+        );
+        assert_eq!(
+            oms["ord-cancel-pending"].state,
+            mqk_execution::oms::state_machine::OrderState::Cancelled,
+            "terminal state must be applied before cleanup can run"
+        );
+        assert!(
+            order_map.broker_id("ord-cancel-pending").is_none(),
+            "once terminal apply succeeds, runtime cleanup can safely remove the mapping before mark_applied"
+        );
     }
     /// Section C - T1.
     /// A Fill event for an order not present in oms_orders must return

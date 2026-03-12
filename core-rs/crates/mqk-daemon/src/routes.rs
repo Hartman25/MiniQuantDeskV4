@@ -4,6 +4,8 @@
 //! middleware layers.  All handlers are `pub(crate)` so the scenario tests in
 //! `tests/` can compose the router directly.
 
+pub mod control;
+
 use std::{convert::Infallible, sync::Arc};
 
 use axum::{
@@ -31,57 +33,66 @@ use crate::{
         TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
-    state::{AppState, BusMsg, RuntimeLifecycleError},
+    state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError},
 };
 
 // ---------------------------------------------------------------------------
 // S7-1: Token auth middleware
 // ---------------------------------------------------------------------------
 
-/// Axum middleware that enforces Bearer-token authentication on operator routes.
+/// Axum middleware that enforces fail-closed operator authentication.
 ///
-/// # S7-1 — No Unauthenticated Operator Actions
+/// # RT-03R — Fail-Closed Auth in Production
 ///
-/// When `AppState::operator_token` is `Some(token)`, every request that
-/// reaches this middleware layer must carry:
+/// The daemon now distinguishes three explicit privileged-route postures:
 ///
-/// ```text
-/// Authorization: Bearer <token>
-/// ```
+/// - [`OperatorAuthMode::TokenRequired`] — a valid `Authorization: Bearer ...`
+///   header is mandatory.
+/// - [`OperatorAuthMode::ExplicitDevNoToken`] — a caller intentionally opted
+///   into local no-token development; privileged routes are reachable.
+/// - [`OperatorAuthMode::MissingTokenFailClosed`] — no trustworthy operator
+///   token is configured, so privileged routes are denied explicitly.
 ///
-/// A missing or incorrect header causes an immediate `401 Unauthorized`
-/// response with a `GateRefusedResponse` body.  The downstream handler is
-/// never reached.
-///
-/// When `AppState::operator_token` is `None` (env var `MQK_OPERATOR_TOKEN`
-/// not set), the middleware is a no-op — all requests pass through.  This
-/// fail-open posture is intentional for loopback-only development
-/// environments and is hardened in production by S7-2 (loopback bind).
+/// Loopback bind is not treated as sufficient authorization for privileged
+/// actions. Missing operator auth now fails closed instead of passing through.
 async fn token_auth_middleware(
     State(st): State<Arc<AppState>>,
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if let Some(ref expected_token) = st.operator_token {
-        let provided = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
+    match st.operator_auth_mode() {
+        OperatorAuthMode::TokenRequired(expected_token) => {
+            let provided = req
+                .headers()
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer "));
 
-        if provided != Some(expected_token.as_str()) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(GateRefusedResponse {
-                    error: "GATE_REFUSED: valid Bearer token required on operator routes"
-                        .to_string(),
-                    gate: "operator_token".to_string(),
-                }),
-            )
-                .into_response();
+            if provided != Some(expected_token.as_str()) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(GateRefusedResponse {
+                        error: "GATE_REFUSED: valid Bearer token required on operator routes"
+                            .to_string(),
+                        gate: "operator_token".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+
+            next.run(req).await
         }
+        OperatorAuthMode::ExplicitDevNoToken => next.run(req).await,
+        OperatorAuthMode::MissingTokenFailClosed => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(GateRefusedResponse {
+                error: "GATE_REFUSED: operator token missing; privileged routes stay disabled until MQK_OPERATOR_TOKEN is configured or explicit debug-only dev mode is selected"
+                    .to_string(),
+                gate: "operator_auth_config".to_string(),
+            }),
+        )
+            .into_response(),
     }
-    next.run(req).await
 }
 
 // ---------------------------------------------------------------------------
@@ -96,9 +107,9 @@ async fn token_auth_middleware(
 /// |---------------|--------------------------------------|---------------|
 /// | Telemetry     | GET /v1/health, /v1/status, /v1/stream | No          |
 /// | Trading read  | GET /v1/trading/*                    | No            |
-/// | Operator      | POST/DELETE /v1/run/*, /v1/integrity/*, /v1/trading/snapshot | Yes (Bearer) |
+/// | Operator      | POST/DELETE /v1/run/*, /v1/integrity/*, /v1/trading/snapshot, /control/* | Yes |
 ///
-/// Operator routes are wrapped in [`token_auth_middleware`].  Telemetry and
+/// Operator routes are wrapped in [`token_auth_middleware`]. Telemetry and
 /// read routes are on the public sub-router — no middleware is applied.
 ///
 /// Middleware layers (CORS, tracing) are **not** applied here; `main.rs`
@@ -138,7 +149,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/trading/snapshot",
             axum::routing::delete(trading_snapshot_clear),
         )
-        // S7-1: apply token auth to every operator route.
+        .merge(control::router())
+        // RT-03R: apply auth consistently to every privileged route, including
+        // /control/* surfaces.
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             token_auth_middleware,

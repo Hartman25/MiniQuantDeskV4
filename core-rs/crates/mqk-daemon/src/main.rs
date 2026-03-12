@@ -4,9 +4,6 @@
 //! state, wires middleware, and starts the HTTP server. All route handlers
 //! live in `routes.rs`; all shared state types live in `state.rs`.
 
-#[path = "routes/control.rs"]
-mod control;
-
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
@@ -16,7 +13,7 @@ use tower_http::{
     cors::CorsLayer,
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
 };
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,10 +26,23 @@ async fn main() -> anyhow::Result<()> {
         .context("mqk-daemon requires MQK_DATABASE_URL for real runtime lifecycle control")?;
 
     let shared = Arc::new(state::AppState::new_with_db(db));
+    match shared.operator_auth_mode() {
+        state::OperatorAuthMode::TokenRequired(_) => {
+            info!(
+                operator_auth = shared.operator_auth_mode().label(),
+                "operator auth configured; privileged routes require Bearer token"
+            );
+        }
+        state::OperatorAuthMode::ExplicitDevNoToken => {
+            warn!(operator_auth = shared.operator_auth_mode().label(), "explicit debug-only no-token operator mode enabled; do not treat loopback bind as sufficient authorization");
+        }
+        state::OperatorAuthMode::MissingTokenFailClosed => {
+            warn!(operator_auth = shared.operator_auth_mode().label(), "operator token missing; privileged routes will fail closed until MQK_OPERATOR_TOKEN is configured");
+        }
+    }
     state::spawn_heartbeat(shared.bus.clone(), Duration::from_secs(1));
 
     let app = routes::build_router(Arc::clone(&shared))
-        .merge(control::router(Arc::clone(&shared)))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))

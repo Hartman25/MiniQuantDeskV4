@@ -1,18 +1,7 @@
-//! Scenario: Daemon boot is fail-closed — Patch C1
+//! Scenario: Daemon boot is fail-closed.
 //!
-//! # Invariant under test
-//!
-//! `AppState::new()` initialises `IntegrityState` with `disarmed = true`
-//! (fail-closed). The daemon must require an explicit operator arm before any
-//! broker operation is permitted.
-//!
-//! Three tests:
-//!
-//! 1. Fresh status snapshot exposes `integrity_armed: false`.
-//! 2. `POST /v1/run/start` returns 403 on a fresh (never-armed) daemon.
-//! 3. `POST /v1/run/start` still fails closed after arm when no DB-backed runtime is configured.
-//!
-//! All tests are pure in-process; no DB or network required.
+//! These tests keep the original integrity fail-closed coverage while proving
+//! missing operator auth now fails closed on privileged routes by default.
 
 use std::sync::Arc;
 
@@ -20,10 +9,6 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
 use tower::ServiceExt; // oneshot
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, bytes::Bytes) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
@@ -41,10 +26,6 @@ fn parse_json(b: bytes::Bytes) -> serde_json::Value {
     serde_json::from_slice(&b).expect("body is not valid JSON")
 }
 
-// ---------------------------------------------------------------------------
-// 1. Fresh status snapshot reports integrity_armed = false
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn boot_status_reports_integrity_disarmed() {
     let st = Arc::new(state::AppState::new());
@@ -58,19 +39,32 @@ async fn boot_status_reports_integrity_disarmed() {
 
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
-    assert_eq!(
-        json["integrity_armed"], false,
-        "daemon must boot disarmed (fail-closed, Patch C1)"
-    );
+    assert_eq!(json["integrity_armed"], false);
 }
 
-// ---------------------------------------------------------------------------
-// 2. run/start returns 403 before any arm call
-// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn production_mode_without_token_refuses_startup_or_operator_access() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::MissingTokenFailClosed,
+    ));
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let json = parse_json(body);
+    assert_eq!(json["gate"], "operator_auth_config");
+}
 
 #[tokio::test]
-async fn run_start_returns_403_before_arm() {
-    let st = Arc::new(state::AppState::new());
+async fn run_start_returns_403_before_arm_in_explicit_dev_no_token_mode() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
 
     let req = Request::builder()
         .method("POST")
@@ -82,38 +76,30 @@ async fn run_start_returns_403_before_arm() {
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "run/start must be blocked at boot (integrity never armed)"
+        "run/start must still be blocked at boot when integrity was never armed"
     );
     let json = parse_json(body);
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("GATE_REFUSED"),
-        "body should contain GATE_REFUSED: {json}"
-    );
+    assert!(json["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("GATE_REFUSED"));
     assert_eq!(json["gate"], "integrity_armed");
 }
 
-// ---------------------------------------------------------------------------
-// 3. run/start still fails closed after explicit arm when DB/runtime ownership
-//    cannot be proven
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
-async fn run_start_requires_db_after_explicit_arm() {
-    let st = Arc::new(state::AppState::new());
+async fn run_start_requires_db_after_explicit_arm_in_explicit_dev_no_token_mode() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
 
-    // Arm explicitly.
     let arm_req = Request::builder()
         .method("POST")
         .uri("/v1/integrity/arm")
         .body(axum::body::Body::empty())
         .unwrap();
     let (arm_status, _) = call(routes::build_router(Arc::clone(&st)), arm_req).await;
-    assert_eq!(arm_status, StatusCode::OK, "arm must succeed");
+    assert_eq!(arm_status, StatusCode::OK);
 
-    // Now start is allowed.
     let start_req = Request::builder()
         .method("POST")
         .uri("/v1/run/start")
@@ -121,11 +107,7 @@ async fn run_start_requires_db_after_explicit_arm() {
         .unwrap();
     let (status, body) = call(routes::build_router(Arc::clone(&st)), start_req).await;
 
-    assert_eq!(
-        status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "run/start must fail closed when no DB-backed runtime is configured"
-    );
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let json = parse_json(body);
     assert!(
         json["error"]
