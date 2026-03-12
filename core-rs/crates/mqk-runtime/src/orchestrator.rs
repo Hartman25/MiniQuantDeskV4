@@ -223,6 +223,8 @@ where
             }
         }
         self.refresh_or_acquire_runtime_leadership().await?;
+        mqk_db::persist_risk_block_state(&self.pool, false, None, self.time_source.now_utc())
+            .await?;
         // ------------------------------------------------------------------
         // Phase 0b - A4: restart quarantine for ambiguous outbox rows.
         //
@@ -341,6 +343,13 @@ where
                             // diagnostics snapshot. The denial is stored in-memory
                             // and overlaid by snapshot() onto SystemBlockState.
                             self.last_risk_denial = Some(denial.clone());
+                            mqk_db::persist_risk_block_state(
+                                &self.pool,
+                                true,
+                                Some(denial.reason_code()),
+                                self.time_source.now_utc(),
+                            )
+                            .await?;
                             // Gate refused before touching the broker.
                             // Row is DISPATCHING but request never left.
                             // Mark FAILED; requires operator review.

@@ -1547,6 +1547,168 @@ pub async fn load_arm_state(pool: &PgPool) -> Result<Option<(String, Option<Stri
     Ok(row)
 }
 
+#[derive(Debug, Clone)]
+pub struct RiskBlockState {
+    pub blocked: bool,
+    pub reason: Option<String>,
+    pub updated_at_utc: DateTime<Utc>,
+}
+
+/// Persist the current risk-block posture to `sys_risk_block_state` (singleton row).
+pub async fn persist_risk_block_state(
+    pool: &PgPool,
+    blocked: bool,
+    reason: Option<&str>,
+    updated_at: DateTime<Utc>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into sys_risk_block_state (sentinel_id, blocked, reason, updated_at_utc)
+        values (1, $1, $2, $3)
+        on conflict (sentinel_id) do update
+            set blocked        = excluded.blocked,
+                reason         = excluded.reason,
+                updated_at_utc = excluded.updated_at_utc
+        "#,
+    )
+    .bind(blocked)
+    .bind(reason)
+    .bind(updated_at)
+    .execute(pool)
+    .await
+    .context("persist_risk_block_state failed")?;
+    Ok(())
+}
+
+/// Load the last persisted risk-block posture.
+pub async fn load_risk_block_state(pool: &PgPool) -> Result<Option<RiskBlockState>> {
+    let row = sqlx::query(
+        r#"
+        select blocked, reason, updated_at_utc
+        from sys_risk_block_state
+        where sentinel_id = 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await
+    .context("load_risk_block_state failed")?;
+
+    let Some(row) = row else { return Ok(None) };
+    Ok(Some(RiskBlockState {
+        blocked: row.try_get("blocked")?,
+        reason: row.try_get("reason")?,
+        updated_at_utc: row.try_get("updated_at_utc")?,
+    }))
+}
+
+#[derive(Debug, Clone)]
+pub struct ReconcileStatusState {
+    pub status: String,
+    pub last_run_at_utc: Option<DateTime<Utc>>,
+    pub snapshot_watermark_ms: Option<i64>,
+    pub mismatched_positions: i32,
+    pub mismatched_orders: i32,
+    pub mismatched_fills: i32,
+    pub unmatched_broker_events: i32,
+    pub note: Option<String>,
+    pub updated_at_utc: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PersistReconcileStatusState<'a> {
+    pub status: &'a str,
+    pub last_run_at_utc: Option<DateTime<Utc>>,
+    pub snapshot_watermark_ms: Option<i64>,
+    pub mismatched_positions: i32,
+    pub mismatched_orders: i32,
+    pub mismatched_fills: i32,
+    pub unmatched_broker_events: i32,
+    pub note: Option<&'a str>,
+    pub updated_at_utc: DateTime<Utc>,
+}
+
+/// Persist the current reconcile status posture to `sys_reconcile_status_state`.
+pub async fn persist_reconcile_status_state(
+    pool: &PgPool,
+    state: &PersistReconcileStatusState<'_>,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into sys_reconcile_status_state (
+            sentinel_id,
+            status,
+            last_run_at_utc,
+            snapshot_watermark_ms,
+            mismatched_positions,
+            mismatched_orders,
+            mismatched_fills,
+            unmatched_broker_events,
+            note,
+            updated_at_utc
+        )
+        values (1, $1, $2, $3, $4, $5, $6, $7, $8, $9)
+        on conflict (sentinel_id) do update
+            set status = excluded.status,
+                last_run_at_utc = excluded.last_run_at_utc,
+                snapshot_watermark_ms = excluded.snapshot_watermark_ms,
+                mismatched_positions = excluded.mismatched_positions,
+                mismatched_orders = excluded.mismatched_orders,
+                mismatched_fills = excluded.mismatched_fills,
+                unmatched_broker_events = excluded.unmatched_broker_events,
+                note = excluded.note,
+                updated_at_utc = excluded.updated_at_utc
+        "#,
+    )
+    .bind(state.status)
+    .bind(state.last_run_at_utc)
+    .bind(state.snapshot_watermark_ms)
+    .bind(state.mismatched_positions)
+    .bind(state.mismatched_orders)
+    .bind(state.mismatched_fills)
+    .bind(state.unmatched_broker_events)
+    .bind(state.note)
+    .bind(state.updated_at_utc)
+    .execute(pool)
+    .await
+    .context("persist_reconcile_status_state failed")?;
+    Ok(())
+}
+
+/// Load the last persisted reconcile status posture.
+pub async fn load_reconcile_status_state(pool: &PgPool) -> Result<Option<ReconcileStatusState>> {
+    let row = sqlx::query(
+        r#"
+        select status,
+               last_run_at_utc,
+               snapshot_watermark_ms,
+               mismatched_positions,
+               mismatched_orders,
+               mismatched_fills,
+               unmatched_broker_events,
+               note,
+               updated_at_utc
+        from sys_reconcile_status_state
+        where sentinel_id = 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await
+    .context("load_reconcile_status_state failed")?;
+
+    let Some(row) = row else { return Ok(None) };
+    Ok(Some(ReconcileStatusState {
+        status: row.try_get("status")?,
+        last_run_at_utc: row.try_get("last_run_at_utc")?,
+        snapshot_watermark_ms: row.try_get("snapshot_watermark_ms")?,
+        mismatched_positions: row.try_get("mismatched_positions")?,
+        mismatched_orders: row.try_get("mismatched_orders")?,
+        mismatched_fills: row.try_get("mismatched_fills")?,
+        unmatched_broker_events: row.try_get("unmatched_broker_events")?,
+        note: row.try_get("note")?,
+        updated_at_utc: row.try_get("updated_at_utc")?,
+    }))
+}
+
 /// Insert a broker message/fill into oms_inbox with dedupe on (run_id, broker_message_id).
 ///
 /// Idempotent behavior:

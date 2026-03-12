@@ -295,3 +295,50 @@ async fn restart_reconstructs_safe_runtime_status() {
         run_id.to_string()
     );
 }
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn durable_reconcile_status_survives_restart() {
+    let pool = lifecycle_pool().await;
+    mqk_db::persist_reconcile_status_state(
+        &pool,
+        &mqk_db::PersistReconcileStatusState {
+            status: "dirty",
+            last_run_at_utc: Some(chrono::Utc::now()),
+            snapshot_watermark_ms: Some(1234),
+            mismatched_positions: 1,
+            mismatched_orders: 2,
+            mismatched_fills: 3,
+            unmatched_broker_events: 4,
+            note: Some("durable test"),
+            updated_at_utc: chrono::Utc::now(),
+        },
+    )
+    .await
+    .expect("persist reconcile status");
+
+    let st = Arc::new(state::AppState::new_with_db(pool));
+    let reconcile = st.current_reconcile_snapshot().await;
+    assert_eq!(reconcile.status, "dirty");
+    assert_eq!(reconcile.snapshot_watermark_ms, Some(1234));
+    assert_eq!(reconcile.mismatched_orders, 2);
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn durable_arm_state_overrides_in_memory_optimism() {
+    let pool = lifecycle_pool().await;
+    mqk_db::persist_arm_state(&pool, "DISARMED", Some("OperatorDisarm"))
+        .await
+        .expect("persist arm state");
+
+    let st = Arc::new(state::AppState::new_with_db(pool));
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+
+    let current = status(&st).await;
+    assert_eq!(current["integrity_armed"], false);
+}

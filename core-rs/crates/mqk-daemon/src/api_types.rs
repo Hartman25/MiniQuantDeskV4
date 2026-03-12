@@ -164,6 +164,7 @@ pub struct RiskSummaryResponse {
 pub struct ReconcileSummaryResponse {
     pub status: String,
     pub last_run_at: Option<String>,
+    pub snapshot_watermark_ms: Option<i64>,
     pub mismatched_positions: usize,
     pub mismatched_orders: usize,
     pub mismatched_fills: usize,

@@ -24,6 +24,10 @@ pub struct ControlStatus {
     pub run_notes: Option<String>,
     pub reconcile_status: String,
     pub reconcile_notes: Option<String>,
+    pub integrity_state: String,
+    pub integrity_reason: Option<String>,
+    pub risk_blocked: bool,
+    pub risk_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,13 +40,12 @@ pub struct RestartResponse {
     pub restart_id: String,
 }
 
-pub fn router(state: Arc<AppState>) -> Router {
+pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/control/status", get(status))
         .route("/control/disarm", post(disarm))
         .route("/control/arm", post(arm))
         .route("/control/restart", post(restart))
-        .with_state(state)
 }
 
 async fn status(State(state): State<Arc<AppState>>) -> Response {
@@ -59,6 +62,27 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
         Err(err) => return lifecycle_error_response(err),
     };
     let reconcile_status = state.current_reconcile_snapshot().await;
+    let (integrity_state, integrity_reason) = match mqk_db::load_arm_state(db).await {
+        Ok(Some((state, reason))) => (state, reason),
+        Ok(None) => ("DISARMED".to_string(), Some("BootDefault".to_string())),
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("control/status arm state query failed: {err}"),
+            )
+                .into_response();
+        }
+    };
+    let risk_state = match mqk_db::load_risk_block_state(db).await {
+        Ok(value) => value,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("control/status risk state query failed: {err}"),
+            )
+                .into_response();
+        }
+    };
 
     let desired_armed: bool = match sqlx::query_scalar(
         r#"
@@ -118,6 +142,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             run_notes: runtime_status.notes.clone(),
             reconcile_status: reconcile_status.status.clone(),
             reconcile_notes: reconcile_status.note.clone(),
+            integrity_state: integrity_state.clone(),
+            integrity_reason: integrity_reason.clone(),
+            risk_blocked: risk_state.as_ref().is_some_and(|r| r.blocked),
+            risk_reason: risk_state.as_ref().and_then(|r| r.reason.clone()),
         },
         None => ControlStatus {
             desired_armed,
@@ -131,6 +159,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             run_notes: runtime_status.notes.clone(),
             reconcile_status: reconcile_status.status.clone(),
             reconcile_notes: reconcile_status.note.clone(),
+            integrity_state,
+            integrity_reason,
+            risk_blocked: risk_state.as_ref().is_some_and(|r| r.blocked),
+            risk_reason: risk_state.as_ref().and_then(|r| r.reason.clone()),
         },
     };
 
@@ -150,6 +182,13 @@ async fn disarm(State(state): State<Arc<AppState>>) -> Response {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("control/disarm write failed: {err}"),
+        )
+            .into_response();
+    }
+    if let Err(err) = mqk_db::persist_arm_state(db, "DISARMED", Some("OperatorDisarm")).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("control/disarm persist arm state failed: {err}"),
         )
             .into_response();
     }
@@ -176,6 +215,13 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("control/arm write failed: {err}"),
+        )
+            .into_response();
+    }
+    if let Err(err) = mqk_db::persist_arm_state(db, "ARMED", None).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("control/arm persist arm state failed: {err}"),
         )
             .into_response();
     }

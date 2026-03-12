@@ -76,6 +76,7 @@ pub struct StatusSnapshot {
 pub struct ReconcileStatusSnapshot {
     pub status: String,
     pub last_run_at: Option<String>,
+    pub snapshot_watermark_ms: Option<i64>,
     pub mismatched_positions: usize,
     pub mismatched_orders: usize,
     pub mismatched_fills: usize,
@@ -296,6 +297,20 @@ impl AppState {
     }
 
     pub async fn current_reconcile_snapshot(&self) -> ReconcileStatusSnapshot {
+        if let Some(db) = self.db.as_ref() {
+            if let Ok(Some(durable)) = mqk_db::load_reconcile_status_state(db).await {
+                return ReconcileStatusSnapshot {
+                    status: durable.status,
+                    last_run_at: durable.last_run_at_utc.map(|ts| ts.to_rfc3339()),
+                    snapshot_watermark_ms: durable.snapshot_watermark_ms,
+                    mismatched_positions: durable.mismatched_positions.max(0) as usize,
+                    mismatched_orders: durable.mismatched_orders.max(0) as usize,
+                    mismatched_fills: durable.mismatched_fills.max(0) as usize,
+                    unmatched_broker_events: durable.unmatched_broker_events.max(0) as usize,
+                    note: durable.note,
+                };
+            }
+        }
         self.reconcile_status.read().await.clone()
     }
 
@@ -303,9 +318,16 @@ impl AppState {
         let reaped = self.reap_finished_execution_loop().await?;
         let reaped_note = reaped.and_then(|exit| exit.note);
         let integrity = self.integrity.read().await;
-        let integrity_armed = !integrity.is_execution_blocked();
-        let locally_halted = integrity.halted;
+        let mut integrity_armed = !integrity.is_execution_blocked();
+        let mut locally_halted = integrity.halted;
         drop(integrity);
+
+        if let Some(db) = self.db.as_ref() {
+            if let Ok(Some((state, reason))) = mqk_db::load_arm_state(db).await {
+                integrity_armed = state == "ARMED";
+                locally_halted = matches!(reason.as_deref(), Some("OperatorHalt"));
+            }
+        }
         let cached_notes = self.status.read().await.notes.clone();
 
         if let Some(run_id) = self.active_owned_run_id().await {
@@ -607,6 +629,7 @@ impl AppState {
             integrity.halted = true;
         }
 
+        let db = self.db_pool()?;
         if let Some(handle) = handle {
             let run_id = handle.run_id;
             let _ = handle.stop_tx.send(ExecutionLoopCommand::Stop);
@@ -615,14 +638,13 @@ impl AppState {
                 .await
                 .map_err(|err| RuntimeLifecycleError::internal("halt join failed", err))?;
 
-            let db = self.db_pool()?;
             mqk_db::halt_run(&db, run_id, Utc::now())
                 .await
                 .map_err(|err| RuntimeLifecycleError::internal("halt_run failed", err))?;
-            mqk_db::persist_arm_state(&db, "DISARMED", Some("OperatorHalt"))
-                .await
-                .map_err(|err| RuntimeLifecycleError::internal("persist_arm_state failed", err))?;
         }
+        mqk_db::persist_arm_state(&db, "DISARMED", Some("OperatorHalt"))
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("persist_arm_state failed", err))?;
 
         let snapshot = StatusSnapshot {
             daemon_uptime_secs: uptime_secs(),
@@ -817,6 +839,27 @@ impl AppState {
     }
 
     pub async fn publish_reconcile_snapshot(&self, snapshot: ReconcileStatusSnapshot) {
+        if let Some(db) = self.db.as_ref() {
+            let _ = mqk_db::persist_reconcile_status_state(
+                db,
+                &mqk_db::PersistReconcileStatusState {
+                    status: &snapshot.status,
+                    last_run_at_utc: snapshot
+                        .last_run_at
+                        .as_deref()
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                        .map(|ts| ts.with_timezone(&Utc)),
+                    snapshot_watermark_ms: snapshot.snapshot_watermark_ms,
+                    mismatched_positions: snapshot.mismatched_positions as i32,
+                    mismatched_orders: snapshot.mismatched_orders as i32,
+                    mismatched_fills: snapshot.mismatched_fills as i32,
+                    unmatched_broker_events: snapshot.unmatched_broker_events as i32,
+                    note: snapshot.note.as_deref(),
+                    updated_at_utc: Utc::now(),
+                },
+            )
+            .await;
+        }
         let mut status = self.reconcile_status.write().await;
         *status = snapshot;
     }
@@ -892,6 +935,7 @@ fn initial_reconcile_status() -> ReconcileStatusSnapshot {
     ReconcileStatusSnapshot {
         status: "unknown".to_string(),
         last_run_at: None,
+        snapshot_watermark_ms: None,
         mismatched_positions: 0,
         mismatched_orders: 0,
         mismatched_fills: 0,
@@ -947,6 +991,7 @@ fn reconcile_counts(report: &mqk_reconcile::ReconcileReport) -> (usize, usize, u
 fn reconcile_status_from_report(
     report: &mqk_reconcile::ReconcileReport,
     broker: &mqk_reconcile::BrokerSnapshot,
+    watermark: &SnapshotWatermark,
 ) -> ReconcileStatusSnapshot {
     let (mismatched_positions, mismatched_orders, mismatched_fills, unmatched_broker_events) =
         reconcile_counts(report);
@@ -958,6 +1003,7 @@ fn reconcile_status_from_report(
             "dirty".to_string()
         },
         last_run_at: reconcile_last_run_at(broker.fetched_at_ms),
+        snapshot_watermark_ms: Some(watermark.last_accepted_ms()),
         mismatched_positions,
         mismatched_orders,
         mismatched_fills,
@@ -972,6 +1018,7 @@ fn reconcile_status_from_report(
 
 fn reconcile_status_from_stale(
     stale: &mqk_reconcile::StaleBrokerSnapshot,
+    watermark: &SnapshotWatermark,
 ) -> ReconcileStatusSnapshot {
     let (last_run_at, note) = match stale.freshness {
         SnapshotFreshness::Stale {
@@ -997,6 +1044,7 @@ fn reconcile_status_from_stale(
 
     ReconcileStatusSnapshot {
         status: "stale".to_string(),
+        snapshot_watermark_ms: Some(watermark.last_accepted_ms()),
         last_run_at,
         mismatched_positions: 0,
         mismatched_orders: 0,
@@ -1025,6 +1073,12 @@ async fn publish_reconcile_failure(
         let mut ig = state.integrity.write().await;
         ig.disarmed = true;
         ig.halted = true;
+    }
+
+    if let Some(db) = state.db.as_ref() {
+        let _ = mqk_db::persist_arm_state(db, "DISARMED", Some("ReconcileDrift")).await;
+        let _ =
+            mqk_db::persist_risk_block_state(db, true, Some("RECONCILE_BLOCKED"), Utc::now()).await;
     }
 
     let active_run_id = state.status.read().await.active_run_id;
@@ -1151,13 +1205,15 @@ pub fn spawn_reconcile_tick<L, B>(
             match mqk_reconcile::reconcile_monotonic(&mut watermark, &local, &broker) {
                 Ok(report) if report.is_clean() => {
                     state
-                        .publish_reconcile_snapshot(reconcile_status_from_report(&report, &broker))
+                        .publish_reconcile_snapshot(reconcile_status_from_report(
+                            &report, &broker, &watermark,
+                        ))
                         .await;
                 }
                 Ok(report) => {
                     publish_reconcile_failure(
                         &state,
-                        reconcile_status_from_report(&report, &broker),
+                        reconcile_status_from_report(&report, &broker, &watermark),
                         "reconcile drift detected - system disarmed (REC-01R)",
                     )
                     .await;
@@ -1169,13 +1225,13 @@ pub fn spawn_reconcile_tick<L, B>(
                             &previous,
                             format!(
                                 "stale broker snapshot rejected; retaining prior dirty reconcile state: {}",
-                                reconcile_status_from_stale(&stale)
+                                reconcile_status_from_stale(&stale, &watermark)
                                     .note
                                     .unwrap_or_else(|| "stale broker snapshot rejected".to_string())
                             ),
                         )
                     } else {
-                        reconcile_status_from_stale(&stale)
+                        reconcile_status_from_stale(&stale, &watermark)
                     };
                     publish_reconcile_failure(
                         &state,
