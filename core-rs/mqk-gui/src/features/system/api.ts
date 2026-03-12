@@ -1,5 +1,6 @@
 import { getDaemonUrl } from "../../config";
 import { MOCK_MODEL } from "./mockData";
+import { withClassifiedPanelSources } from "./sourceAuthority";
 import type {
   AlertTriageRow,
   ArtifactRegistrySummary,
@@ -697,7 +698,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     daemonReachable,
   });
 
-  return {
+  return withClassifiedPanelSources({
     status: objectOrFallback(
       statusProbe.ok && statusProbe.endpoint === "/api/v1/system/status"
         ? statusProbe.data
@@ -749,7 +750,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     dataSource,
     connected,
     lastUpdatedAt: nowIso(),
-  };
+  });
 }
 
 export async function fetchExecutionTimeline(internalOrderId: string): Promise<ExecutionTimeline | null> {

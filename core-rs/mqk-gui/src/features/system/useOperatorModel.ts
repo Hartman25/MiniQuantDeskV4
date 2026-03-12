@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchCausalityTrace, fetchExecutionChart, fetchExecutionReplay, fetchExecutionTimeline, fetchExecutionTrace, fetchOperatorModel, invokeOperatorAction, requestSystemModeTransition } from "./api";
 import { DEFAULT_PREFLIGHT, DEFAULT_STATUS, type OperatorActionDefinition, type OperatorActionReceipt, type SystemModel } from "./types";
+import { classifyPanelSources } from "./sourceAuthority";
 
 const FALLBACK_MODEL: SystemModel = {
   status: DEFAULT_STATUS,
@@ -99,6 +100,14 @@ const FALLBACK_MODEL: SystemModel = {
     message: "No daemon connection established yet",
   },
   connected: false,
+  panelSources: classifyPanelSources({
+    state: "disconnected",
+    reachable: false,
+    realEndpoints: [],
+    missingEndpoints: [],
+    mockSections: [],
+    message: "No daemon connection established yet",
+  }, false),
   lastUpdatedAt: null,
 };
 

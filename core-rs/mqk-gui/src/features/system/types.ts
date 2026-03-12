@@ -8,6 +8,34 @@ export type OperatorTimelineCategory = "alert" | "operator_action" | "mode_trans
 
 export type DataSourceState = "real" | "partial" | "mock" | "disconnected";
 
+export type SourceAuthority = "db_truth" | "runtime_memory" | "broker_snapshot" | "placeholder" | "mixed" | "unknown";
+
+export const CORE_PANEL_KEYS = [
+  "dashboard",
+  "metrics",
+  "execution",
+  "risk",
+  "portfolio",
+  "reconcile",
+  "strategy",
+  "audit",
+  "ops",
+  "settings",
+  "topology",
+  "transport",
+  "incidents",
+  "alerts",
+  "session",
+  "config",
+  "marketData",
+  "runtime",
+  "artifacts",
+  "operatorTimeline",
+] as const;
+
+export type CorePanelKey = (typeof CORE_PANEL_KEYS)[number];
+export type PanelSourceMap = Record<CorePanelKey, SourceAuthority>;
+
 export interface DataSourceDetail {
   state: DataSourceState;
   reachable: boolean;
@@ -915,6 +943,7 @@ export interface SystemModel {
   operatorTimeline: OperatorTimelineEvent[];
   actionCatalog: OperatorActionDefinition[];
   dataSource: DataSourceDetail;
+  panelSources: PanelSourceMap;
   connected: boolean;
   lastUpdatedAt: string | null;
 }

@@ -8,6 +8,10 @@ export function SessionScreen({ model }: { model: SystemModel }) {
 
   return (
     <div className="screen-grid desk-screen-grid">
+      <p className="panel-subtitle" aria-label="Source authority legend">
+        Source labels: DB truth = persisted records, Runtime memory = in-process state, Broker snapshot = latest broker fetch, Placeholder = mock/fallback, Mixed = multiple sources.
+      </p>
+
       <div className="summary-grid summary-grid-four">
         <StatCard title="Market Session" value={s.market_session} detail="Current exchange session" tone="good" />
         <StatCard title="Calendar State" value={s.exchange_calendar_state} detail="Exchange calendar view" tone="neutral" />
