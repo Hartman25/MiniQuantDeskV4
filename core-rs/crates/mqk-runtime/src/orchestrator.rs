@@ -353,42 +353,69 @@ where
                             // Mark FAILED; requires operator review.
                             let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
                         }
-                        SubmitError::Broker(be) if be.requires_halt() => {
+                        SubmitError::Broker(BrokerError::AmbiguousSubmit { .. }) => {
                             let now = self.time_source.now_utc();
-                            if matches!(be, BrokerError::AmbiguousSubmit { .. }) {
-                                // A4: Transition DISPATCHING → AMBIGUOUS (explicit quarantine).
-                                // Row cannot re-enter dispatch without explicit operator/reconcile
-                                // release via outbox_reset_ambiguous_to_pending.
-                                let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
-                                // Halt+disarm - "AmbiguousSubmit" is now a valid DB reason
-                                // (migration 0020). Phase-0b quarantine blocks any restart.
-                                let _ = persist_halt_and_disarm(
-                                    &self.pool,
-                                    self.run_id,
-                                    now,
-                                    "AmbiguousSubmit",
-                                )
-                                .await;
-                            } else {
-                                // AuthSession: credentials revoked - mark FAILED + halt.
-                                // "AuthSession" is now a valid DB reason (migration 0020).
-                                let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
-                                let _ = persist_halt_and_disarm(
-                                    &self.pool,
-                                    self.run_id,
-                                    now,
-                                    "AuthSession",
-                                )
-                                .await;
-                            }
+                            // Transition DISPATCHING → AMBIGUOUS (explicit quarantine).
+                            // Row cannot re-enter dispatch without explicit operator/reconcile
+                            // release via outbox_reset_ambiguous_to_pending.
+                            let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
+                            // Halt+disarm - "AmbiguousSubmit" is a durable quarantine reason.
+                            let _ = persist_halt_and_disarm(
+                                &self.pool,
+                                self.run_id,
+                                now,
+                                "AmbiguousSubmit",
+                            )
+                            .await;
                         }
-                        SubmitError::Broker(be) if be.is_retryable() => {
-                            // Transport / RateLimit: request never left the local host.
+                        SubmitError::Broker(BrokerError::AuthSession { .. }) => {
+                            let now = self.time_source.now_utc();
+                            // AuthSession: credentials revoked - mark FAILED + halt.
+                            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                            let _ = persist_halt_and_disarm(
+                                &self.pool,
+                                self.run_id,
+                                now,
+                                "AuthSession",
+                            )
+                            .await;
+                        }
+                        SubmitError::Broker(BrokerError::Transport {
+                            non_delivery_proven: true,
+                            ..
+                        })
+                        | SubmitError::Broker(BrokerError::RateLimit {
+                            non_delivery_proven: true,
+                            ..
+                        }) => {
+                            // Proven pre-send / pre-processing failure.
                             // Reset row to PENDING for re-dispatch on the next tick.
                             let _ =
                                 mqk_db::outbox_reset_dispatching_to_pending(&self.pool, &order_id)
                                     .await;
                             eprintln!("WARN broker_submit_retryable order_id={order_id} error={e}");
+                        }
+                        SubmitError::Broker(BrokerError::Transport {
+                            non_delivery_proven: false,
+                            ..
+                        })
+                        | SubmitError::Broker(BrokerError::RateLimit {
+                            non_delivery_proven: false,
+                            ..
+                        }) => {
+                            let now = self.time_source.now_utc();
+                            // Non-delivery is not proven: fail closed as ambiguous submit.
+                            let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
+                            let _ = persist_halt_and_disarm(
+                                &self.pool,
+                                self.run_id,
+                                now,
+                                "AmbiguousSubmit",
+                            )
+                            .await;
+                            eprintln!(
+                                "WARN broker_submit_non_delivery_unproven_quarantined order_id={order_id} error={e}"
+                            );
                         }
                         SubmitError::Broker(_) => {
                             // Reject / Transient: mark FAILED, requires operator.

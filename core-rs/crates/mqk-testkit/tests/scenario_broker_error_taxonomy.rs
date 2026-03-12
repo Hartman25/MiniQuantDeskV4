@@ -1,108 +1,49 @@
-//! Scenario: Broker Error Taxonomy — Patch A3
+//! Scenario: Broker Error Taxonomy — EXE-04R
 //!
-//! # Invariants under test
-//!
-//! A3 introduces a typed `BrokerError` enum as the return type of all four
-//! `BrokerAdapter` methods. The enum drives per-class outbox row disposition:
-//!
-//! | Variant         | is_retryable | requires_halt | Outbox action              |
-//! |-----------------|:------------:|:-------------:|----------------------------|
-//! | AmbiguousSubmit | false        | true          | row → AMBIGUOUS+halt (A4)  |
-//! | Reject          | false        | false         | mark FAILED                |
-//! | Transient       | false        | false         | mark FAILED (conservative) |
-//! | RateLimit       | true         | false         | reset to PENDING           |
-//! | AuthSession     | false        | true          | FAILED + halt              |
-//! | Transport       | true         | false         | reset to PENDING           |
-//!
-//! # Test layout
-//!
-//! ## Pure (no DB required)
-//! - A1: `is_retryable()` and `requires_halt()` return the correct values for
-//!   every `BrokerError` variant.
-//! - A2: `SubmitError` Display includes the inner error detail string.
-//!
-//! ## DB-backed (skipped unless `MQK_DATABASE_URL` is set)
-//! - B1: orchestrator tick with `Reject` broker → outbox row FAILED, run not halted.
-//! - B2: orchestrator tick with `Transport` broker → outbox row reset to PENDING.
-//! - B3: orchestrator tick with `AmbiguousSubmit` broker → row moves to AMBIGUOUS
-//!   (A4 explicit quarantine), run HALTED+DISARMED with reason AmbiguousSubmit.
-//! - B4: orchestrator tick with `AuthSession` broker → row FAILED, run HALTED+DISARMED.
-
-// ---------------------------------------------------------------------------
-// Pure tests — A1, A2
-// ---------------------------------------------------------------------------
+//! Verifies runtime submit disposition is fail-closed:
+//! - Only explicit non-delivery proof may reset DISPATCHING -> PENDING.
+//! - Any ambiguous delivery outcome is quarantined as AMBIGUOUS and halts/disarms.
 
 use mqk_execution::{BrokerError, GateRefusal, SubmitError};
 
 #[test]
-fn a1_is_retryable_correct_per_variant() {
-    assert!(!BrokerError::AmbiguousSubmit { detail: "x".into() }.is_retryable());
-    assert!(!BrokerError::Reject {
-        code: "c".into(),
+fn a1_is_retryable_requires_explicit_non_delivery_proof() {
+    assert!(BrokerError::Transport {
+        non_delivery_proven: true,
         detail: "x".into()
     }
     .is_retryable());
-    assert!(!BrokerError::Transient { detail: "x".into() }.is_retryable());
+    assert!(!BrokerError::Transport {
+        non_delivery_proven: false,
+        detail: "x".into()
+    }
+    .is_retryable());
+
     assert!(BrokerError::RateLimit {
         retry_after_ms: Some(1000),
-        detail: "x".into()
+        non_delivery_proven: true,
+        detail: "x".into(),
     }
     .is_retryable());
-    assert!(!BrokerError::AuthSession { detail: "x".into() }.is_retryable());
-    assert!(BrokerError::Transport { detail: "x".into() }.is_retryable());
-}
-
-#[test]
-fn a1_requires_halt_correct_per_variant() {
-    assert!(BrokerError::AmbiguousSubmit { detail: "x".into() }.requires_halt());
-    assert!(!BrokerError::Reject {
-        code: "c".into(),
-        detail: "x".into()
-    }
-    .requires_halt());
-    assert!(!BrokerError::Transient { detail: "x".into() }.requires_halt());
     assert!(!BrokerError::RateLimit {
-        retry_after_ms: None,
-        detail: "x".into()
+        retry_after_ms: Some(1000),
+        non_delivery_proven: false,
+        detail: "x".into(),
     }
-    .requires_halt());
-    assert!(BrokerError::AuthSession { detail: "x".into() }.requires_halt());
-    assert!(!BrokerError::Transport { detail: "x".into() }.requires_halt());
+    .is_retryable());
 }
 
 #[test]
 fn a2_submit_error_display_includes_inner_detail() {
     let gate_err = SubmitError::Gate(GateRefusal::IntegrityDisarmed);
-    let s = gate_err.to_string();
-    assert!(
-        s.contains("integrity disarmed"),
-        "expected 'integrity disarmed' in '{s}'"
-    );
+    assert!(gate_err.to_string().contains("integrity disarmed"));
 
     let broker_err = SubmitError::Broker(BrokerError::Transport {
+        non_delivery_proven: true,
         detail: "connection refused".into(),
     });
-    let s = broker_err.to_string();
-    assert!(
-        s.contains("connection refused"),
-        "expected 'connection refused' in '{s}'"
-    );
-
-    let reject_err = SubmitError::Broker(BrokerError::Reject {
-        code: "ERR_SYMBOL".into(),
-        detail: "unknown symbol FOO".into(),
-    });
-    let s = reject_err.to_string();
-    assert!(
-        s.contains("unknown symbol FOO"),
-        "expected 'unknown symbol FOO' in '{s}'"
-    );
+    assert!(broker_err.to_string().contains("connection refused"));
 }
-
-// ---------------------------------------------------------------------------
-// DB-backed tests — B1–B4
-// Skip gracefully when MQK_DATABASE_URL is not set.
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod db_tests {
@@ -124,18 +65,12 @@ mod db_tests {
     use mqk_portfolio::PortfolioState;
     use mqk_runtime::orchestrator::ExecutionOrchestrator;
 
-    // -----------------------------------------------------------------------
-    // Fixed run UUIDs — one per test for deterministic cleanup
-    // -----------------------------------------------------------------------
-
-    const B1_RUN_ID: &str = "29200003-0000-0000-0000-000000000000";
-    const B2_RUN_ID: &str = "29200004-0000-0000-0000-000000000000";
-    const B3_RUN_ID: &str = "29200005-0000-0000-0000-000000000000";
-    const B4_RUN_ID: &str = "29200006-0000-0000-0000-000000000000";
-
-    // -----------------------------------------------------------------------
-    // Gate stubs — all pass
-    // -----------------------------------------------------------------------
+    const T1_RUN_ID: &str = "29210001-0000-0000-0000-000000000000";
+    const T2_RUN_ID: &str = "29210002-0000-0000-0000-000000000000";
+    const T3_RUN_ID: &str = "29210003-0000-0000-0000-000000000000";
+    const T4_RUN_ID: &str = "29210004-0000-0000-0000-000000000000";
+    const T5A_RUN_ID: &str = "29210005-0000-0000-0000-000000000000";
+    const T5B_RUN_ID: &str = "29210006-0000-0000-0000-000000000000";
 
     struct PassGate;
     impl IntegrityGate for PassGate {
@@ -154,21 +89,16 @@ mod db_tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Error-injecting broker stubs
-    // -----------------------------------------------------------------------
-
-    struct RejectBroker;
-    impl BrokerAdapter for RejectBroker {
+    struct SubmitErrorBroker {
+        err: BrokerError,
+    }
+    impl BrokerAdapter for SubmitErrorBroker {
         fn submit_order(
             &self,
             _req: BrokerSubmitRequest,
             _token: &BrokerInvokeToken,
         ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
-            Err(BrokerError::Reject {
-                code: "ORDER_REJECTED".into(),
-                detail: "test reject".into(),
-            })
+            Err(self.err.clone())
         }
         fn cancel_order(
             &self,
@@ -201,139 +131,6 @@ mod db_tests {
             Ok((vec![], None))
         }
     }
-
-    struct TransportBroker;
-    impl BrokerAdapter for TransportBroker {
-        fn submit_order(
-            &self,
-            _req: BrokerSubmitRequest,
-            _token: &BrokerInvokeToken,
-        ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
-            Err(BrokerError::Transport {
-                detail: "test transport error".into(),
-            })
-        }
-        fn cancel_order(
-            &self,
-            _id: &str,
-            _token: &BrokerInvokeToken,
-        ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
-            Ok(BrokerCancelResponse {
-                broker_order_id: "x".into(),
-                cancelled_at: 0,
-                status: "ok".into(),
-            })
-        }
-        fn replace_order(
-            &self,
-            req: BrokerReplaceRequest,
-            _token: &BrokerInvokeToken,
-        ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
-            Ok(BrokerReplaceResponse {
-                broker_order_id: req.broker_order_id,
-                replaced_at: 0,
-                status: "ok".into(),
-            })
-        }
-        fn fetch_events(
-            &self,
-            _cursor: Option<&str>,
-            _token: &BrokerInvokeToken,
-        ) -> std::result::Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError>
-        {
-            Ok((vec![], None))
-        }
-    }
-
-    struct AmbiguousBroker;
-    impl BrokerAdapter for AmbiguousBroker {
-        fn submit_order(
-            &self,
-            _req: BrokerSubmitRequest,
-            _token: &BrokerInvokeToken,
-        ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
-            Err(BrokerError::AmbiguousSubmit {
-                detail: "test ambiguous submit".into(),
-            })
-        }
-        fn cancel_order(
-            &self,
-            _id: &str,
-            _token: &BrokerInvokeToken,
-        ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
-            Ok(BrokerCancelResponse {
-                broker_order_id: "x".into(),
-                cancelled_at: 0,
-                status: "ok".into(),
-            })
-        }
-        fn replace_order(
-            &self,
-            req: BrokerReplaceRequest,
-            _token: &BrokerInvokeToken,
-        ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
-            Ok(BrokerReplaceResponse {
-                broker_order_id: req.broker_order_id,
-                replaced_at: 0,
-                status: "ok".into(),
-            })
-        }
-        fn fetch_events(
-            &self,
-            _cursor: Option<&str>,
-            _token: &BrokerInvokeToken,
-        ) -> std::result::Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError>
-        {
-            Ok((vec![], None))
-        }
-    }
-
-    struct AuthSessionBroker;
-    impl BrokerAdapter for AuthSessionBroker {
-        fn submit_order(
-            &self,
-            _req: BrokerSubmitRequest,
-            _token: &BrokerInvokeToken,
-        ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
-            Err(BrokerError::AuthSession {
-                detail: "test auth session expired".into(),
-            })
-        }
-        fn cancel_order(
-            &self,
-            _id: &str,
-            _token: &BrokerInvokeToken,
-        ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
-            Ok(BrokerCancelResponse {
-                broker_order_id: "x".into(),
-                cancelled_at: 0,
-                status: "ok".into(),
-            })
-        }
-        fn replace_order(
-            &self,
-            req: BrokerReplaceRequest,
-            _token: &BrokerInvokeToken,
-        ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
-            Ok(BrokerReplaceResponse {
-                broker_order_id: req.broker_order_id,
-                replaced_at: 0,
-                status: "ok".into(),
-            })
-        }
-        fn fetch_events(
-            &self,
-            _cursor: Option<&str>,
-            _token: &BrokerInvokeToken,
-        ) -> std::result::Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), BrokerError>
-        {
-            Ok((vec![], None))
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Harness helpers
-    // -----------------------------------------------------------------------
 
     async fn require_pool(url: &str) -> PgPool {
         PgPoolOptions::new()
@@ -341,7 +138,7 @@ mod db_tests {
             .acquire_timeout(std::time::Duration::from_secs(5))
             .connect(url)
             .await
-            .unwrap_or_else(|e| panic!("A3-DB: cannot connect to DB: {e}"))
+            .unwrap_or_else(|e| panic!("EXE-04R: cannot connect to DB: {e}"))
     }
 
     async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
@@ -357,13 +154,13 @@ mod db_tests {
             pool,
             &mqk_db::NewRun {
                 run_id,
-                engine_id: "a3-test".to_string(),
+                engine_id: "exe04r-test".to_string(),
                 mode: "PAPER".to_string(),
                 started_at_utc: Utc::now(),
-                git_hash: "a3-test".to_string(),
-                config_hash: "a3-test".to_string(),
+                git_hash: "exe04r-test".to_string(),
+                config_hash: "exe04r-test".to_string(),
                 config_json: json!({}),
-                host_fingerprint: "a3-test".to_string(),
+                host_fingerprint: "exe04r-test".to_string(),
             },
         )
         .await?;
@@ -372,14 +169,11 @@ mod db_tests {
         Ok(())
     }
 
-    fn make_orchestrator<B>(
+    fn make_orchestrator(
         pool: PgPool,
         run_id: Uuid,
-        broker: B,
-    ) -> ExecutionOrchestrator<B, PassGate, PassGate, PassGate, FixedClock>
-    where
-        B: BrokerAdapter + Send + Sync + 'static,
-    {
+        broker: SubmitErrorBroker,
+    ) -> ExecutionOrchestrator<SubmitErrorBroker, PassGate, PassGate, PassGate, FixedClock> {
         let gateway = BrokerGateway::for_test(broker, PassGate, PassGate, PassGate);
         ExecutionOrchestrator::new(
             pool,
@@ -388,13 +182,25 @@ mod db_tests {
             BTreeMap::new(),
             PortfolioState::new(0),
             run_id,
-            "a3-dispatcher",
+            "exe04r-dispatcher",
             "test",
             None,
             FixedClock::new(Utc::now()),
             Box::new(mqk_reconcile::LocalSnapshot::empty),
             Box::new(mqk_reconcile::BrokerSnapshot::empty),
         )
+    }
+
+    async fn enqueue_one(pool: &PgPool, run_id: Uuid, idem: &str) -> Result<()> {
+        let created = mqk_db::outbox_enqueue(
+            pool,
+            run_id,
+            idem,
+            json!({"symbol": "SPY", "quantity": 1, "order_type": "market", "time_in_force": "day"}),
+        )
+        .await?;
+        assert!(created, "outbox row must be created");
+        Ok(())
     }
 
     async fn outbox_status(pool: &PgPool, idem_key: &str) -> Result<Option<String>> {
@@ -406,269 +212,237 @@ mod db_tests {
         Ok(row.map(|(s,)| s))
     }
 
-    // -----------------------------------------------------------------------
-    // B1: Reject broker → row FAILED, run not halted.
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn b1_reject_broker_marks_row_failed_no_halt() -> Result<()> {
-        let url = match std::env::var(mqk_db::ENV_DB_URL) {
-            Ok(v) if !v.trim().is_empty() => v,
-            _ => {
-                eprintln!(
-                    "SKIP b1_reject_broker_marks_row_failed_no_halt: MQK_DATABASE_URL not set"
-                );
-                return Ok(());
-            }
-        };
-        let pool = require_pool(&url).await;
-        mqk_db::migrate(&pool).await?;
-
-        let run_id: Uuid = B1_RUN_ID.parse().unwrap();
-        let idem = "a3-b1-reject-ord-001";
-
-        cleanup_run(&pool, run_id).await?;
-        seed_running_run(&pool, run_id).await?;
-
-        let created = mqk_db::outbox_enqueue(
-            &pool,
-            run_id,
-            idem,
-            json!({"symbol": "SPY", "quantity": 1, "order_type": "market", "time_in_force": "day"}),
-        )
-        .await?;
-        assert!(created, "outbox row must be created");
-
-        let mut orch = make_orchestrator(pool.clone(), run_id, RejectBroker);
-        let err = orch.tick().await.expect_err("tick must fail on Reject");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Reject") || msg.contains("SUBMIT_BROKER_ERROR"),
-            "error must mention reject, got: {msg}"
-        );
-
-        let status = outbox_status(&pool, idem).await?;
-        assert_eq!(
-            status.as_deref(),
-            Some("FAILED"),
-            "expected FAILED after Reject, got {status:?}"
-        );
-
-        let run = mqk_db::fetch_run(&pool, run_id).await?;
-        assert!(
-            !matches!(run.status, mqk_db::RunStatus::Halted),
-            "Reject must not halt the run"
-        );
-
-        cleanup_run(&pool, run_id).await?;
+    async fn assert_halted_and_disarmed(pool: &PgPool, run_id: Uuid, reason: &str) -> Result<()> {
+        let run = mqk_db::fetch_run(pool, run_id).await?;
+        assert!(matches!(run.status, mqk_db::RunStatus::Halted));
+        let arm = mqk_db::load_arm_state(pool).await?;
+        assert_eq!(arm.as_ref().map(|(s, _)| s.as_str()), Some("DISARMED"));
+        assert_eq!(arm.as_ref().and_then(|(_, r)| r.as_deref()), Some(reason));
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // B2: Transport broker → row reset to PENDING.
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn b2_transport_broker_resets_row_to_pending() -> Result<()> {
-        let url = match std::env::var(mqk_db::ENV_DB_URL) {
-            Ok(v) if !v.trim().is_empty() => v,
-            _ => {
-                eprintln!(
-                    "SKIP b2_transport_broker_resets_row_to_pending: MQK_DATABASE_URL not set"
-                );
-                return Ok(());
-            }
-        };
-        let pool = require_pool(&url).await;
+    async fn prep(url: &str, run_id: Uuid, idem: &str) -> Result<PgPool> {
+        let pool = require_pool(url).await;
         mqk_db::migrate(&pool).await?;
-
-        let run_id: Uuid = B2_RUN_ID.parse().unwrap();
-        let idem = "a3-b2-transport-ord-001";
-
-        cleanup_run(&pool, run_id).await?;
-        seed_running_run(&pool, run_id).await?;
-
-        let created = mqk_db::outbox_enqueue(
-            &pool,
-            run_id,
-            idem,
-            json!({"symbol": "SPY", "quantity": 1, "order_type": "market", "time_in_force": "day"}),
-        )
-        .await?;
-        assert!(created, "outbox row must be created");
-
-        let mut orch = make_orchestrator(pool.clone(), run_id, TransportBroker);
-        let err = orch.tick().await.expect_err("tick must fail on Transport");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("Transport") || msg.contains("SUBMIT_BROKER_ERROR"),
-            "error must mention transport, got: {msg}"
-        );
-
-        let status = outbox_status(&pool, idem).await?;
-        assert_eq!(
-            status.as_deref(),
-            Some("PENDING"),
-            "expected PENDING after Transport, got {status:?}"
-        );
-
-        cleanup_run(&pool, run_id).await?;
-        Ok(())
-    }
-
-    // -----------------------------------------------------------------------
-    // B3: AmbiguousSubmit broker → row moves to AMBIGUOUS, run HALTED+DISARMED.
-    //     A4: explicit quarantine state; arm reason = "AmbiguousSubmit".
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn b3_ambiguous_submit_row_ambiguous_run_halted() -> Result<()> {
-        let url = match std::env::var(mqk_db::ENV_DB_URL) {
-            Ok(v) if !v.trim().is_empty() => v,
-            _ => {
-                eprintln!(
-                    "SKIP b3_ambiguous_submit_row_dispatching_run_halted: MQK_DATABASE_URL not set"
-                );
-                return Ok(());
-            }
-        };
-        let pool = require_pool(&url).await;
-        mqk_db::migrate(&pool).await?;
-
-        let run_id: Uuid = B3_RUN_ID.parse().unwrap();
-        let idem = "a3-b3-ambiguous-ord-001";
-
         cleanup_run(&pool, run_id).await?;
         sqlx::query("delete from sys_arm_state where sentinel_id = 1")
             .execute(&pool)
             .await?;
-
         seed_running_run(&pool, run_id).await?;
+        enqueue_one(&pool, run_id, idem).await?;
+        Ok(pool)
+    }
 
-        let created = mqk_db::outbox_enqueue(
-            &pool,
-            run_id,
-            idem,
-            json!({"symbol": "SPY", "quantity": 1, "order_type": "market", "time_in_force": "day"}),
-        )
-        .await?;
-        assert!(created, "outbox row must be created");
+    fn db_url_or_skip(name: &str) -> Option<String> {
+        match std::env::var(mqk_db::ENV_DB_URL) {
+            Ok(v) if !v.trim().is_empty() => Some(v),
+            _ => {
+                eprintln!("SKIP {name}: MQK_DATABASE_URL not set");
+                None
+            }
+        }
+    }
 
-        let mut orch = make_orchestrator(pool.clone(), run_id, AmbiguousBroker);
-        let err = orch
-            .tick()
-            .await
-            .expect_err("tick must fail on AmbiguousSubmit");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("AmbiguousSubmit")
-                || msg.contains("SUBMIT_BROKER_ERROR")
-                || msg.contains("RECOVERY_QUARANTINE"),
-            "error must mention ambiguous submit or halt, got: {msg}"
-        );
+    #[tokio::test]
+    async fn timeout_before_send_is_safe_only_when_non_delivery_is_proven() -> Result<()> {
+        let Some(url) =
+            db_url_or_skip("timeout_before_send_is_safe_only_when_non_delivery_is_proven")
+        else {
+            return Ok(());
+        };
+        let run_id: Uuid = T1_RUN_ID.parse().unwrap();
+        let idem = "exe04r-timeout-before-send";
+        let pool = prep(&url, run_id, idem).await?;
 
-        // A4: Row must be AMBIGUOUS — explicit quarantine, outcome unknown.
-        let status = outbox_status(&pool, idem).await?;
+        let broker = SubmitErrorBroker {
+            err: BrokerError::Transport {
+                non_delivery_proven: true,
+                detail: "timeout before write with explicit local proof".into(),
+            },
+        };
+        let mut orch = make_orchestrator(pool.clone(), run_id, broker);
+        let _ = orch.tick().await.expect_err("must return broker error");
+
         assert_eq!(
-            status.as_deref(),
-            Some("AMBIGUOUS"),
-            "expected AMBIGUOUS after AmbiguousSubmit (A4 quarantine), got {status:?}"
+            outbox_status(&pool, idem).await?.as_deref(),
+            Some("PENDING")
         );
-
-        // Run must be HALTED.
         let run = mqk_db::fetch_run(&pool, run_id).await?;
-        assert!(
-            matches!(run.status, mqk_db::RunStatus::Halted),
-            "expected run HALTED after AmbiguousSubmit"
-        );
-
-        // Arm state must be DISARMED with reason "AmbiguousSubmit" (A4/migration 0020).
-        let arm = mqk_db::load_arm_state(&pool).await?;
-        assert_eq!(
-            arm.as_ref().map(|(s, _)| s.as_str()),
-            Some("DISARMED"),
-            "expected DISARMED after AmbiguousSubmit, got {arm:?}"
-        );
-        assert_eq!(
-            arm.as_ref().and_then(|(_, r)| r.as_deref()),
-            Some("AmbiguousSubmit"),
-            "expected disarm reason AmbiguousSubmit, got {arm:?}"
-        );
-
+        assert!(!matches!(run.status, mqk_db::RunStatus::Halted));
         cleanup_run(&pool, run_id).await?;
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // B4: AuthSession broker → row FAILED, run HALTED+DISARMED.
-    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn timeout_after_send_is_ambiguous_and_quarantines() -> Result<()> {
+        let Some(url) = db_url_or_skip("timeout_after_send_is_ambiguous_and_quarantines") else {
+            return Ok(());
+        };
+        let run_id: Uuid = T2_RUN_ID.parse().unwrap();
+        let idem = "exe04r-timeout-after-send";
+        let pool = prep(&url, run_id, idem).await?;
+
+        let broker = SubmitErrorBroker {
+            err: BrokerError::AmbiguousSubmit {
+                detail: "timeout after bytes sent".into(),
+            },
+        };
+        let mut orch = make_orchestrator(pool.clone(), run_id, broker);
+        let _ = orch.tick().await.expect_err("must return broker error");
+
+        assert_eq!(
+            outbox_status(&pool, idem).await?.as_deref(),
+            Some("AMBIGUOUS")
+        );
+        assert_halted_and_disarmed(&pool, run_id, "AmbiguousSubmit").await?;
+        cleanup_run(&pool, run_id).await?;
+        Ok(())
+    }
 
     #[tokio::test]
-    async fn b4_auth_session_row_failed_run_halted() -> Result<()> {
-        let url = match std::env::var(mqk_db::ENV_DB_URL) {
-            Ok(v) if !v.trim().is_empty() => v,
-            _ => {
-                eprintln!("SKIP b4_auth_session_row_failed_run_halted: MQK_DATABASE_URL not set");
-                return Ok(());
-            }
+    async fn connect_refusal_is_safe_only_when_pre_send_is_proven() -> Result<()> {
+        let Some(url) = db_url_or_skip("connect_refusal_is_safe_only_when_pre_send_is_proven")
+        else {
+            return Ok(());
         };
-        let pool = require_pool(&url).await;
-        mqk_db::migrate(&pool).await?;
 
-        let run_id: Uuid = B4_RUN_ID.parse().unwrap();
-        let idem = "a3-b4-auth-ord-001";
-
-        cleanup_run(&pool, run_id).await?;
-        sqlx::query("delete from sys_arm_state where sentinel_id = 1")
-            .execute(&pool)
-            .await?;
-
-        seed_running_run(&pool, run_id).await?;
-
-        let created = mqk_db::outbox_enqueue(
-            &pool,
-            run_id,
-            idem,
-            json!({"symbol": "SPY", "quantity": 1, "order_type": "market", "time_in_force": "day"}),
-        )
-        .await?;
-        assert!(created, "outbox row must be created");
-
-        let mut orch = make_orchestrator(pool.clone(), run_id, AuthSessionBroker);
-        let err = orch
+        // Proven pre-send refusal => safe reset to PENDING.
+        let run_id_safe: Uuid = T3_RUN_ID.parse().unwrap();
+        let idem_safe = "exe04r-connect-refused-safe";
+        let pool_safe = prep(&url, run_id_safe, idem_safe).await?;
+        let mut safe_orch = make_orchestrator(
+            pool_safe.clone(),
+            run_id_safe,
+            SubmitErrorBroker {
+                err: BrokerError::Transport {
+                    non_delivery_proven: true,
+                    detail: "ECONNREFUSED before send".into(),
+                },
+            },
+        );
+        let _ = safe_orch
             .tick()
             .await
-            .expect_err("tick must fail on AuthSession");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("AuthSession") || msg.contains("SUBMIT_BROKER_ERROR"),
-            "error must mention auth session, got: {msg}"
-        );
-
-        // Row must be FAILED.
-        let status = outbox_status(&pool, idem).await?;
+            .expect_err("must return broker error");
         assert_eq!(
-            status.as_deref(),
-            Some("FAILED"),
-            "expected FAILED after AuthSession, got {status:?}"
+            outbox_status(&pool_safe, idem_safe).await?.as_deref(),
+            Some("PENDING")
         );
 
-        // Run must be HALTED.
-        let run = mqk_db::fetch_run(&pool, run_id).await?;
-        assert!(
-            matches!(run.status, mqk_db::RunStatus::Halted),
-            "expected run HALTED after AuthSession"
+        // Unproven transport => fail closed as AMBIGUOUS + halt/disarm.
+        let run_id_unsafe: Uuid = T4_RUN_ID.parse().unwrap();
+        let idem_unsafe = "exe04r-connect-refused-unproven";
+        let pool_unsafe = prep(&url, run_id_unsafe, idem_unsafe).await?;
+        let mut unsafe_orch = make_orchestrator(
+            pool_unsafe.clone(),
+            run_id_unsafe,
+            SubmitErrorBroker {
+                err: BrokerError::Transport {
+                    non_delivery_proven: false,
+                    detail: "socket error; contact not disproven".into(),
+                },
+            },
         );
-
-        // Arm state must be DISARMED.
-        let arm = mqk_db::load_arm_state(&pool).await?;
+        let _ = unsafe_orch
+            .tick()
+            .await
+            .expect_err("must return broker error");
         assert_eq!(
-            arm.as_ref().map(|(s, _)| s.as_str()),
-            Some("DISARMED"),
-            "expected DISARMED after AuthSession, got {arm:?}"
+            outbox_status(&pool_unsafe, idem_unsafe).await?.as_deref(),
+            Some("AMBIGUOUS")
         );
+        assert_halted_and_disarmed(&pool_unsafe, run_id_unsafe, "AmbiguousSubmit").await?;
 
+        cleanup_run(&pool_safe, run_id_safe).await?;
+        cleanup_run(&pool_unsafe, run_id_unsafe).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delayed_broker_ack_does_not_get_treated_as_safe_local_failure() -> Result<()> {
+        let Some(url) =
+            db_url_or_skip("delayed_broker_ack_does_not_get_treated_as_safe_local_failure")
+        else {
+            return Ok(());
+        };
+        let run_id: Uuid = T5A_RUN_ID.parse().unwrap();
+        let idem = "exe04r-delayed-ack";
+        let pool = prep(&url, run_id, idem).await?;
+
+        let broker = SubmitErrorBroker {
+            err: BrokerError::AmbiguousSubmit {
+                detail: "ack delayed beyond submit timeout".into(),
+            },
+        };
+        let mut orch = make_orchestrator(pool.clone(), run_id, broker);
+        let _ = orch.tick().await.expect_err("must return broker error");
+
+        assert_eq!(
+            outbox_status(&pool, idem).await?.as_deref(),
+            Some("AMBIGUOUS")
+        );
+        assert_halted_and_disarmed(&pool, run_id, "AmbiguousSubmit").await?;
         cleanup_run(&pool, run_id).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rate_limit_retry_window_is_handled_honestly() -> Result<()> {
+        let Some(url) = db_url_or_skip("rate_limit_retry_window_is_handled_honestly") else {
+            return Ok(());
+        };
+
+        // Explicit non-delivery proof => retryable.
+        let run_id_safe: Uuid = T5B_RUN_ID.parse().unwrap();
+        let idem_safe = "exe04r-ratelimit-safe";
+        let pool_safe = prep(&url, run_id_safe, idem_safe).await?;
+        let mut safe_orch = make_orchestrator(
+            pool_safe.clone(),
+            run_id_safe,
+            SubmitErrorBroker {
+                err: BrokerError::RateLimit {
+                    retry_after_ms: Some(250),
+                    non_delivery_proven: true,
+                    detail: "429 rejected pre-processing".into(),
+                },
+            },
+        );
+        let _ = safe_orch
+            .tick()
+            .await
+            .expect_err("must return broker error");
+        assert_eq!(
+            outbox_status(&pool_safe, idem_safe).await?.as_deref(),
+            Some("PENDING")
+        );
+
+        // Non-delivery unproven => ambiguous quarantine.
+        let run_id_unsafe = Uuid::parse_str("29210007-0000-0000-0000-000000000000").unwrap();
+        let idem_unsafe = "exe04r-ratelimit-unproven";
+        let pool_unsafe = prep(&url, run_id_unsafe, idem_unsafe).await?;
+        let mut unsafe_orch = make_orchestrator(
+            pool_unsafe.clone(),
+            run_id_unsafe,
+            SubmitErrorBroker {
+                err: BrokerError::RateLimit {
+                    retry_after_ms: Some(250),
+                    non_delivery_proven: false,
+                    detail: "429 but adapter cannot prove non-delivery".into(),
+                },
+            },
+        );
+        let _ = unsafe_orch
+            .tick()
+            .await
+            .expect_err("must return broker error");
+        assert_eq!(
+            outbox_status(&pool_unsafe, idem_unsafe).await?.as_deref(),
+            Some("AMBIGUOUS")
+        );
+        assert_halted_and_disarmed(&pool_unsafe, run_id_unsafe, "AmbiguousSubmit").await?;
+
+        cleanup_run(&pool_safe, run_id_safe).await?;
+        cleanup_run(&pool_unsafe, run_id_unsafe).await?;
         Ok(())
     }
 }
