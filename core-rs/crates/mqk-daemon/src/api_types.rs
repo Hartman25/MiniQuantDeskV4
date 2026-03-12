@@ -98,6 +98,7 @@ pub struct SystemStatusResponse {
     pub integrity_status: String,
     pub audit_writer_status: String,
     pub last_heartbeat: Option<String>,
+    pub deadman_status: String,
     pub loop_latency_ms: Option<u64>,
     pub active_account_id: Option<String>,
     pub config_profile: Option<String>,

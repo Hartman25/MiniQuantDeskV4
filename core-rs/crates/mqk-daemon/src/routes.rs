@@ -149,7 +149,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/trading/snapshot",
             axum::routing::delete(trading_snapshot_clear),
         )
-        .merge(control::router())
+        .merge(control::router(state.clone()))
         // RT-03R: apply auth consistently to every privileged route, including
         // /control/* surfaces.
         .layer(axum::middleware::from_fn_with_state(
@@ -427,7 +427,8 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             reconcile_status,
             integrity_status,
             audit_writer_status: "unknown".to_string(),
-            last_heartbeat: None,
+            last_heartbeat: status.deadman_last_heartbeat_utc.clone(),
+            deadman_status: status.deadman_status.clone(),
             loop_latency_ms: None,
             active_account_id: None,
             config_profile: None,

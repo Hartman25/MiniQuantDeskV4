@@ -29,6 +29,7 @@ const DAEMON_MODE: &str = "PAPER";
 const DAEMON_ADAPTER_ID: &str = "paper";
 const DAEMON_RUN_CONFIG_HASH: &str = "daemon-runtime-paper-v1";
 const EXECUTION_LOOP_INTERVAL: Duration = Duration::from_secs(1);
+const DEADMAN_TTL_SECONDS: i64 = 5;
 const DEV_ALLOW_NO_OPERATOR_TOKEN_ENV: &str = "MQK_DEV_ALLOW_NO_OPERATOR_TOKEN";
 
 // ---------------------------------------------------------------------------
@@ -70,6 +71,9 @@ pub struct StatusSnapshot {
     pub notes: Option<String>,
     /// Reflects `IntegrityState::is_execution_blocked()` negation: true = armed.
     pub integrity_armed: bool,
+    /// Durable deadman truth for the current daemon run lifecycle.
+    pub deadman_status: String,
+    pub deadman_last_heartbeat_utc: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -270,6 +274,8 @@ impl AppState {
             state: "idle".to_string(),
             notes: Some("runtime idle; explicit arm and start required".to_string()),
             integrity_armed: false,
+            deadman_status: "inactive".to_string(),
+            deadman_last_heartbeat_utc: None,
         };
 
         let mut boot_integrity = IntegrityState::new();
@@ -309,12 +315,15 @@ impl AppState {
         let cached_notes = self.status.read().await.notes.clone();
 
         if let Some(run_id) = self.active_owned_run_id().await {
+            let deadman = self.deadman_truth_for_run(run_id).await?;
             let snapshot = StatusSnapshot {
                 daemon_uptime_secs: uptime_secs(),
                 active_run_id: Some(run_id),
                 state: "running".to_string(),
                 notes: Some("daemon owns active execution loop".to_string()),
                 integrity_armed,
+                deadman_status: deadman.status,
+                deadman_last_heartbeat_utc: deadman.last_heartbeat_utc,
             };
             self.publish_status(snapshot.clone()).await;
             return Ok(snapshot);
@@ -332,16 +341,21 @@ impl AppState {
                     })?;
                 match latest {
                     Some(run) => match run.status {
-                        mqk_db::RunStatus::Running | mqk_db::RunStatus::Armed => StatusSnapshot {
-                            daemon_uptime_secs: uptime_secs(),
-                            active_run_id: Some(run.run_id),
-                            state: "unknown".to_string(),
-                            notes: Some(
-                                "durable run is active but this daemon does not own a live execution loop"
-                                    .to_string(),
-                            ),
-                            integrity_armed,
-                        },
+                        mqk_db::RunStatus::Running | mqk_db::RunStatus::Armed => {
+                            let deadman = self.deadman_truth_for_run(run.run_id).await?;
+                            StatusSnapshot {
+                                daemon_uptime_secs: uptime_secs(),
+                                active_run_id: Some(run.run_id),
+                                state: "unknown".to_string(),
+                                notes: Some(
+                                    "durable run is active but this daemon does not own a live execution loop"
+                                        .to_string(),
+                                ),
+                                integrity_armed,
+                                deadman_status: deadman.status,
+                                deadman_last_heartbeat_utc: deadman.last_heartbeat_utc,
+                            }
+                        }
                         mqk_db::RunStatus::Halted => StatusSnapshot {
                             daemon_uptime_secs: uptime_secs(),
                             active_run_id: Some(run.run_id),
@@ -350,21 +364,39 @@ impl AppState {
                                 .clone()
                                 .or_else(|| Some("durable run halted".to_string())),
                             integrity_armed,
+                            deadman_status: "expired".to_string(),
+                            deadman_last_heartbeat_utc: run
+                                .last_heartbeat_utc
+                                .map(|ts| ts.to_rfc3339()),
                         },
                         mqk_db::RunStatus::Created | mqk_db::RunStatus::Stopped => StatusSnapshot {
                             daemon_uptime_secs: uptime_secs(),
                             active_run_id: None,
-                            state: if locally_halted { "halted".to_string() } else { "idle".to_string() },
+                            state: if locally_halted {
+                                "halted".to_string()
+                            } else {
+                                "idle".to_string()
+                            },
                             notes: reaped_note.clone().or(cached_notes),
                             integrity_armed,
+                            deadman_status: "inactive".to_string(),
+                            deadman_last_heartbeat_utc: run
+                                .last_heartbeat_utc
+                                .map(|ts| ts.to_rfc3339()),
                         },
                     },
                     None => StatusSnapshot {
                         daemon_uptime_secs: uptime_secs(),
                         active_run_id: None,
-                        state: if locally_halted { "halted".to_string() } else { "idle".to_string() },
+                        state: if locally_halted {
+                            "halted".to_string()
+                        } else {
+                            "idle".to_string()
+                        },
                         notes: reaped_note.clone().or(cached_notes),
                         integrity_armed,
+                        deadman_status: "inactive".to_string(),
+                        deadman_last_heartbeat_utc: None,
                     },
                 }
             }
@@ -378,6 +410,8 @@ impl AppState {
                 },
                 notes: reaped_note.or(cached_notes),
                 integrity_armed,
+                deadman_status: "unavailable".to_string(),
+                deadman_last_heartbeat_utc: None,
             },
         };
 
@@ -519,6 +553,8 @@ impl AppState {
             state: "running".to_string(),
             notes: Some("daemon owns active execution loop".to_string()),
             integrity_armed: self.integrity_armed().await,
+            deadman_status: "healthy".to_string(),
+            deadman_last_heartbeat_utc: Some(Utc::now().to_rfc3339()),
         };
         self.publish_status(snapshot.clone()).await;
         Ok(snapshot)
@@ -630,6 +666,8 @@ impl AppState {
             state: "halted".to_string(),
             notes: Some("operator halt asserted; execution loop disarmed".to_string()),
             integrity_armed: false,
+            deadman_status: "expired".to_string(),
+            deadman_last_heartbeat_utc: None,
         };
         self.publish_status(snapshot.clone()).await;
         Ok(snapshot)
@@ -768,6 +806,8 @@ impl AppState {
                     state: "idle".to_string(),
                     notes: exit.note,
                     integrity_armed: self.integrity_armed().await,
+                    deadman_status: "inactive".to_string(),
+                    deadman_last_heartbeat_utc: None,
                 })
                 .await;
                 Ok(None)
@@ -819,6 +859,64 @@ impl AppState {
     pub async fn publish_reconcile_snapshot(&self, snapshot: ReconcileStatusSnapshot) {
         let mut status = self.reconcile_status.write().await;
         *status = snapshot;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DeadmanTruth {
+    status: String,
+    last_heartbeat_utc: Option<String>,
+}
+
+impl AppState {
+    async fn deadman_truth_for_run(
+        &self,
+        run_id: Uuid,
+    ) -> Result<DeadmanTruth, RuntimeLifecycleError> {
+        let db = self.db_pool()?;
+        let now = Utc::now();
+        let halted = mqk_db::enforce_deadman_or_halt(&db, run_id, DEADMAN_TTL_SECONDS, now)
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("deadman enforce failed", err))?;
+        let run = mqk_db::fetch_run(&db, run_id)
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("deadman fetch_run failed", err))?;
+
+        if halted {
+            mqk_db::persist_arm_state(&db, "DISARMED", Some("DeadmanExpired"))
+                .await
+                .map_err(|err| {
+                    RuntimeLifecycleError::internal("deadman persist_arm_state failed", err)
+                })?;
+            {
+                let mut integrity = self.integrity.write().await;
+                integrity.disarmed = true;
+                integrity.halted = true;
+            }
+        }
+
+        let status = match run.status {
+            mqk_db::RunStatus::Running => {
+                let expired = mqk_db::deadman_expired(&db, run_id, DEADMAN_TTL_SECONDS, now)
+                    .await
+                    .map_err(|err| RuntimeLifecycleError::internal("deadman check failed", err))?;
+                if expired {
+                    "expired"
+                } else {
+                    "healthy"
+                }
+            }
+            mqk_db::RunStatus::Halted => "expired",
+            mqk_db::RunStatus::Armed | mqk_db::RunStatus::Created | mqk_db::RunStatus::Stopped => {
+                "inactive"
+            }
+        }
+        .to_string();
+
+        Ok(DeadmanTruth {
+            status,
+            last_heartbeat_utc: run.last_heartbeat_utc.map(|ts| ts.to_rfc3339()),
+        })
     }
 }
 
@@ -1034,6 +1132,8 @@ async fn publish_reconcile_failure(
         state: "halted".to_string(),
         notes: Some(note.to_string()),
         integrity_armed: false,
+        deadman_status: "unknown".to_string(),
+        deadman_last_heartbeat_utc: None,
     };
     state.publish_status(snapshot).await;
     let _ = state.bus.send(BusMsg::LogLine {
@@ -1050,6 +1150,7 @@ fn spawn_execution_loop(
     let (stop_tx, mut stop_rx) = watch::channel(ExecutionLoopCommand::Run);
     let snapshot_cache = Arc::clone(&state.execution_snapshot);
     let db = state.db.clone();
+    let integrity = Arc::clone(&state.integrity);
 
     let join_handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);
@@ -1061,6 +1162,43 @@ fn spawn_execution_loop(
                     }
                 }
                 _ = ticker.tick() => {
+                    if let Some(ref pool) = db {
+                        let now = Utc::now();
+                        match mqk_db::enforce_deadman_or_halt(pool, run_id, DEADMAN_TTL_SECONDS, now).await {
+                            Ok(true) => {
+                                let _ = mqk_db::persist_arm_state(pool, "DISARMED", Some("DeadmanExpired")).await;
+                                {
+                                    let mut ig = integrity.write().await;
+                                    ig.disarmed = true;
+                                    ig.halted = true;
+                                }
+                                if let Err(release_err) = orchestrator.release_runtime_leadership().await {
+                                    tracing::warn!("runtime_lease_release_failed error={release_err}");
+                                }
+                                return ExecutionLoopExit {
+                                    note: Some("execution loop halted: deadman expired".to_string()),
+                                };
+                            }
+                            Ok(false) => {}
+                            Err(err) => {
+                                tracing::error!("execution_loop_deadman_check_failed error={err}");
+                                let _ = mqk_db::halt_run(pool, run_id, now).await;
+                                let _ = mqk_db::persist_arm_state(pool, "DISARMED", Some("DeadmanSupervisorFailure")).await;
+                                {
+                                    let mut ig = integrity.write().await;
+                                    ig.disarmed = true;
+                                    ig.halted = true;
+                                }
+                                if let Err(release_err) = orchestrator.release_runtime_leadership().await {
+                                    tracing::warn!("runtime_lease_release_failed error={release_err}");
+                                }
+                                return ExecutionLoopExit {
+                                    note: Some(format!("execution loop halted: deadman check failed: {err}")),
+                                };
+                            }
+                        }
+                    }
+
                     if let Err(err) = orchestrator.tick().await {
                         tracing::error!("execution_loop_halt error={err}");
                         if let Err(release_err) = orchestrator.release_runtime_leadership().await {
@@ -1072,8 +1210,16 @@ fn spawn_execution_loop(
                     }
 
                     if let Some(ref pool) = db {
-                        if let Err(err) = mqk_db::heartbeat_run(pool, run_id, Utc::now()).await {
+                        let now = Utc::now();
+                        if let Err(err) = mqk_db::heartbeat_run(pool, run_id, now).await {
                             tracing::error!("execution_loop_heartbeat_failed error={err}");
+                            let _ = mqk_db::halt_run(pool, run_id, now).await;
+                            let _ = mqk_db::persist_arm_state(pool, "DISARMED", Some("DeadmanHeartbeatPersistFailed")).await;
+                            {
+                                let mut ig = integrity.write().await;
+                                ig.disarmed = true;
+                                ig.halted = true;
+                            }
                             if let Err(release_err) = orchestrator.release_runtime_leadership().await {
                                 tracing::warn!("runtime_lease_release_failed error={release_err}");
                             }

@@ -22,6 +22,8 @@ pub struct ControlStatus {
     pub run_state: String,
     pub run_owned_locally: bool,
     pub run_notes: Option<String>,
+    pub deadman_status: String,
+    pub deadman_last_heartbeat_utc: Option<String>,
     pub reconcile_status: String,
     pub reconcile_notes: Option<String>,
 }
@@ -36,7 +38,7 @@ pub struct RestartResponse {
     pub restart_id: String,
 }
 
-pub fn router(state: Arc<AppState>) -> Router {
+pub fn router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/control/status", get(status))
         .route("/control/disarm", post(disarm))
@@ -116,6 +118,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             run_state: runtime_status.state.clone(),
             run_owned_locally: runtime_status.state == "running",
             run_notes: runtime_status.notes.clone(),
+            deadman_status: runtime_status.deadman_status.clone(),
+            deadman_last_heartbeat_utc: runtime_status.deadman_last_heartbeat_utc.clone(),
             reconcile_status: reconcile_status.status.clone(),
             reconcile_notes: reconcile_status.note.clone(),
         },
@@ -129,6 +133,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             run_state: runtime_status.state.clone(),
             run_owned_locally: runtime_status.state == "running",
             run_notes: runtime_status.notes.clone(),
+            deadman_status: runtime_status.deadman_status.clone(),
+            deadman_last_heartbeat_utc: runtime_status.deadman_last_heartbeat_utc.clone(),
             reconcile_status: reconcile_status.status.clone(),
             reconcile_notes: reconcile_status.note.clone(),
         },
@@ -253,6 +259,8 @@ async fn publish_integrity_status(state: &Arc<AppState>, integrity_armed: bool, 
             state: "unknown".to_string(),
             notes: None,
             integrity_armed,
+            deadman_status: "unknown".to_string(),
+            deadman_last_heartbeat_utc: None,
         },
     };
     snapshot.integrity_armed = integrity_armed;
