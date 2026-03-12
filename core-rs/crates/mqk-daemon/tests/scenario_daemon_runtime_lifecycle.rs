@@ -295,3 +295,41 @@ async fn restart_reconstructs_safe_runtime_status() {
         run_id.to_string()
     );
 }
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn durable_halted_run_is_reported_as_halted_by_operator_surfaces() {
+    let st = daemon_state().await;
+    arm(&st).await;
+
+    let started = start(&st).await;
+    let run_id = Uuid::parse_str(started["active_run_id"].as_str().expect("run_id string"))
+        .expect("valid run uuid");
+
+    let _ = halt(&st).await;
+
+    let status_json = status(&st).await;
+    assert_eq!(status_json["state"], "halted");
+    assert_eq!(
+        status_json["active_run_id"],
+        serde_json::Value::String(run_id.to_string())
+    );
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(make_router(Arc::clone(&st)), req).await;
+    assert_eq!(code, StatusCode::OK);
+    let system = parse_json(body);
+    assert_eq!(system["runtime_status"], "halted");
+    assert_eq!(system["kill_switch_active"], true);
+    assert_eq!(system["has_warning"], true);
+
+    let pool = st.db.as_ref().expect("db configured");
+    let run = mqk_db::fetch_run(pool, run_id).await.expect("fetch run");
+    assert!(matches!(run.status, mqk_db::RunStatus::Halted));
+
+    st.stop_for_shutdown().await;
+}
