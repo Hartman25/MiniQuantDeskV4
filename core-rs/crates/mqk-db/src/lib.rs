@@ -1635,9 +1635,10 @@ pub async fn inbox_mark_applied(
 /// (`applied_at_utc IS NULL`).
 ///
 /// Call this at startup/recovery to identify fills whose apply step did not
-/// complete before a crash.  Replay these events in canonical (`broker_message_id`)
-/// order; each apply must be idempotent so re-applying a partially-applied fill is
-/// safe.  After successfully applying each row, call `inbox_mark_applied`.
+/// complete before a crash. Replay these events in canonical durable ingest
+/// order (`inbox_id ASC`), independent of `broker_message_id`; each apply must
+/// be idempotent so re-applying a partially-applied fill is safe. After
+/// successfully applying each row, call `inbox_mark_applied`.
 ///
 /// Uses the partial index `idx_inbox_run_unapplied` for efficiency.
 pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<InboxRow>> {
@@ -1648,7 +1649,7 @@ pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result
           from oms_inbox
          where run_id = $1
            and applied_at_utc is null
-         order by broker_message_id asc
+         order by inbox_id asc
         "#,
     )
     .bind(run_id)

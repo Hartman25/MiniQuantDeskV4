@@ -498,25 +498,13 @@ where
         // ------------------------------------------------------------------
         self.refresh_or_acquire_runtime_leadership().await?;
         let unapplied = mqk_db::inbox_load_unapplied_for_run(&self.pool, self.run_id).await?;
-        // Phase 3a: RT-4 - deserialize all rows, then sort into canonical apply order.
+        // Phase 3a: EXE-02R - deserialize all rows, then sort into canonical apply order.
         //
-        // Sort key: (broker_message_id ASC, internal_order_id ASC, event_kind_rank ASC).
-        // The DB already orders by broker_message_id ASC; the in-process sort makes
-        // the final order deterministic regardless of DB row ordering or future index changes.
-        let mut apply_queue: Vec<(String, BrokerEvent)> = Vec::with_capacity(unapplied.len());
-        for row in unapplied {
-            let msg_id = row.broker_message_id;
-            let event: BrokerEvent = serde_json::from_value(row.message_json)?;
-            apply_queue.push((msg_id, event));
-        }
-        apply_queue.sort_by(|(a_msg, a_ev), (b_msg, b_ev)| {
-            a_msg
-                .cmp(b_msg)
-                .then_with(|| a_ev.internal_order_id().cmp(b_ev.internal_order_id()))
-                .then_with(|| event_kind_rank(a_ev).cmp(&event_kind_rank(b_ev)))
-        });
+        // Canonical key is durable inbox ingest order (`inbox_id ASC`), not
+        // `broker_message_id`. Message IDs remain dedupe identity only.
+        let apply_queue = build_canonical_apply_queue(unapplied)?;
         // Phase 3b: apply in canonical order.
-        for (msg_id, event) in apply_queue {
+        for (_inbox_id, msg_id, event) in apply_queue {
             self.refresh_or_acquire_runtime_leadership().await?;
             let internal_id = event.internal_order_id().to_string();
             // Steps 6+7: OMS context guard → portfolio apply (Section C).
@@ -1003,6 +991,29 @@ fn broker_event_to_oms_event(event: &BrokerEvent) -> OmsEvent {
 ///
 /// Returns `None` for non-fill events (Ack, CancelAck, etc.).
 /// Degenerate fills with `delta_qty <= 0` are rejected.
+fn build_canonical_apply_queue(
+    unapplied: Vec<mqk_db::InboxRow>,
+) -> anyhow::Result<Vec<(i64, String, BrokerEvent)>> {
+    let mut apply_queue: Vec<(i64, String, BrokerEvent)> = Vec::with_capacity(unapplied.len());
+    for row in unapplied {
+        let inbox_id = row.inbox_id;
+        let msg_id = row.broker_message_id;
+        let event: BrokerEvent = serde_json::from_value(row.message_json)?;
+        apply_queue.push((inbox_id, msg_id, event));
+    }
+    apply_queue.sort_by_key(|(inbox_id, _, _)| *inbox_id);
+
+    for pair in apply_queue.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(anyhow!(
+                "AMBIGUOUS_CANONICAL_ORDER: duplicate inbox_id {} in apply queue",
+                pair[0].0
+            ));
+        }
+    }
+    Ok(apply_queue)
+}
+
 fn broker_event_to_fill(event: &BrokerEvent) -> Option<Fill> {
     match event {
         BrokerEvent::Fill {
@@ -1039,12 +1050,7 @@ fn broker_event_to_fill(event: &BrokerEvent) -> Option<Fill> {
         _ => None,
     }
 }
-/// RT-4: Canonical rank for `BrokerEvent` variants in the deterministic apply queue.
-///
-/// Ordering intent: Ack before fills before cancel/replace; within a kind the
-/// SQL `broker_message_id ASC` order dominates.  This rank is used only as a
-/// tie-breaker when two events share the same `broker_message_id` AND the same
-/// `internal_order_id`.
+#[cfg(test)]
 fn event_kind_rank(event: &BrokerEvent) -> u8 {
     match event {
         BrokerEvent::Ack { .. } => 0,
@@ -1513,11 +1519,11 @@ mod tests {
         );
     }
     #[test]
-    fn apply_queue_sort_is_canonical() {
+    fn canonical_apply_order_does_not_depend_on_broker_message_id() {
         use mqk_execution::Side;
-        // Two events for the same message/order: Ack must sort before Fill by rank.
+        // Delivery order was fill -> ack even though lexicographic message-id is opposite.
         let fill = BrokerEvent::Fill {
-            broker_message_id: "msg-a".into(),
+            broker_message_id: "z-msg".into(),
             internal_order_id: "ord-1".into(),
             broker_order_id: None,
             symbol: "X".into(),
@@ -1527,23 +1533,175 @@ mod tests {
             fee_micros: 0,
         };
         let ack = BrokerEvent::Ack {
-            broker_message_id: "msg-a".into(),
+            broker_message_id: "a-msg".into(),
             internal_order_id: "ord-1".into(),
             broker_order_id: None,
         };
-        let mut queue: Vec<(String, BrokerEvent)> =
-            vec![("msg-a".into(), fill), ("msg-a".into(), ack)];
-        queue.sort_by(|(a_msg, a_ev), (b_msg, b_ev)| {
-            a_msg
-                .cmp(b_msg)
-                .then_with(|| a_ev.internal_order_id().cmp(b_ev.internal_order_id()))
-                .then_with(|| event_kind_rank(a_ev).cmp(&event_kind_rank(b_ev)))
-        });
+        let mut queue: Vec<(i64, String, BrokerEvent)> =
+            vec![(42, "z-msg".into(), fill), (43, "a-msg".into(), ack)];
+        queue.sort_by_key(|(inbox_id, _, _)| *inbox_id);
         assert!(
-            matches!(queue[0].1, BrokerEvent::Ack { .. }),
-            "Ack (rank 0) must sort before Fill (rank 2) on same message/order"
+            matches!(queue[0].2, BrokerEvent::Fill { .. }),
+            "canonical apply order must follow durable inbox ingest order, not broker_message_id"
         );
     }
+
+    #[test]
+    fn out_of_order_broker_delivery_uses_real_ordering_truth() {
+        use mqk_execution::Side;
+
+        let queue = build_canonical_apply_queue(vec![
+            mqk_db::InboxRow {
+                inbox_id: 10,
+                run_id: Uuid::nil(),
+                broker_message_id: "z-msg".into(),
+                message_json: serde_json::to_value(BrokerEvent::Fill {
+                    broker_message_id: "z-msg".into(),
+                    internal_order_id: "ord-1".into(),
+                    broker_order_id: None,
+                    symbol: "X".into(),
+                    side: Side::Buy,
+                    delta_qty: 1,
+                    price_micros: 1,
+                    fee_micros: 0,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+            mqk_db::InboxRow {
+                inbox_id: 11,
+                run_id: Uuid::nil(),
+                broker_message_id: "a-msg".into(),
+                message_json: serde_json::to_value(BrokerEvent::Ack {
+                    broker_message_id: "a-msg".into(),
+                    internal_order_id: "ord-1".into(),
+                    broker_order_id: None,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+        ])
+        .expect("canonical queue should build");
+
+        assert_eq!(queue[0].0, 10);
+        assert!(matches!(queue[0].2, BrokerEvent::Fill { .. }));
+    }
+
+    #[test]
+    fn restart_replay_preserves_durable_apply_order() {
+        use mqk_execution::Side;
+
+        let first_pass = build_canonical_apply_queue(vec![
+            mqk_db::InboxRow {
+                inbox_id: 200,
+                run_id: Uuid::nil(),
+                broker_message_id: "m-2".into(),
+                message_json: serde_json::to_value(BrokerEvent::PartialFill {
+                    broker_message_id: "m-2".into(),
+                    internal_order_id: "ord-r".into(),
+                    broker_order_id: None,
+                    symbol: "X".into(),
+                    side: Side::Buy,
+                    delta_qty: 2,
+                    price_micros: 2,
+                    fee_micros: 0,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+            mqk_db::InboxRow {
+                inbox_id: 201,
+                run_id: Uuid::nil(),
+                broker_message_id: "m-1".into(),
+                message_json: serde_json::to_value(BrokerEvent::Ack {
+                    broker_message_id: "m-1".into(),
+                    internal_order_id: "ord-r".into(),
+                    broker_order_id: None,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+        ])
+        .unwrap();
+        let second_pass = build_canonical_apply_queue(vec![
+            mqk_db::InboxRow {
+                inbox_id: 200,
+                run_id: Uuid::nil(),
+                broker_message_id: "m-2".into(),
+                message_json: serde_json::to_value(BrokerEvent::PartialFill {
+                    broker_message_id: "m-2".into(),
+                    internal_order_id: "ord-r".into(),
+                    broker_order_id: None,
+                    symbol: "X".into(),
+                    side: Side::Buy,
+                    delta_qty: 2,
+                    price_micros: 2,
+                    fee_micros: 0,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+            mqk_db::InboxRow {
+                inbox_id: 201,
+                run_id: Uuid::nil(),
+                broker_message_id: "m-1".into(),
+                message_json: serde_json::to_value(BrokerEvent::Ack {
+                    broker_message_id: "m-1".into(),
+                    internal_order_id: "ord-r".into(),
+                    broker_order_id: None,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+        ])
+        .unwrap();
+
+        let first_ids: Vec<i64> = first_pass.into_iter().map(|x| x.0).collect();
+        let second_ids: Vec<i64> = second_pass.into_iter().map(|x| x.0).collect();
+        assert_eq!(first_ids, second_ids);
+    }
+
+    #[test]
+    fn ambiguous_ordering_truth_fails_closed() {
+        let err = build_canonical_apply_queue(vec![
+            mqk_db::InboxRow {
+                inbox_id: 7,
+                run_id: Uuid::nil(),
+                broker_message_id: "m-1".into(),
+                message_json: serde_json::to_value(BrokerEvent::Ack {
+                    broker_message_id: "m-1".into(),
+                    internal_order_id: "ord-a".into(),
+                    broker_order_id: None,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+            mqk_db::InboxRow {
+                inbox_id: 7,
+                run_id: Uuid::nil(),
+                broker_message_id: "m-2".into(),
+                message_json: serde_json::to_value(BrokerEvent::Reject {
+                    broker_message_id: "m-2".into(),
+                    internal_order_id: "ord-a".into(),
+                    broker_order_id: None,
+                })
+                .unwrap(),
+                received_at_utc: chrono::Utc::now(),
+                applied_at_utc: None,
+            },
+        ])
+        .expect_err("duplicate canonical key must fail closed");
+
+        assert!(err.to_string().contains("AMBIGUOUS_CANONICAL_ORDER"));
+    }
+
     // -----------------------------------------------------------------------
     // Section C - apply_fill_step unit tests
     // -----------------------------------------------------------------------

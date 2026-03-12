@@ -70,7 +70,7 @@ fn require_db_url() -> String {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn replayed_broker_event_is_deduped_after_restart() -> anyhow::Result<()> {
+async fn restart_replay_preserves_durable_apply_order() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
     cleanup_inbox(&pool).await?;
     let run_id = make_run(&pool).await?;

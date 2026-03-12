@@ -61,7 +61,7 @@ fn require_db_url() -> String {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn duplicate_fill_storm_collapses_to_one_inbox_row() -> anyhow::Result<()> {
+async fn duplicate_events_remain_dedupe_safe_under_new_ordering() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
     cleanup_inbox(&pool).await?;
     let run_id = make_run(&pool).await?;

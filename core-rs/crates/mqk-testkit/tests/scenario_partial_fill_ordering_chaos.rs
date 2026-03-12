@@ -1,8 +1,8 @@
 ﻿//! Scenario: Partial Fill Ordering Chaos
 //!
 //! # Invariant under test
-//! Out-of-order partial fill delivery must still produce a deterministic,
-//! non-duplicated inbox set keyed by broker_message_id.
+//! Out-of-order partial fill delivery must preserve durable ingest ordering
+//! independent of broker_message_id while remaining dedupe-safe.
 
 use chrono::Utc;
 use mqk_execution::{BrokerEvent, Side};
@@ -62,7 +62,7 @@ fn require_db_url() -> String {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn out_of_order_partial_fills_remain_distinct_and_deterministic() -> anyhow::Result<()> {
+async fn out_of_order_broker_delivery_uses_real_ordering_truth() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
     cleanup_inbox(&pool).await?;
     let run_id = make_run(&pool).await?;
@@ -110,14 +110,13 @@ async fn out_of_order_partial_fills_remain_distinct_and_deterministic() -> anyho
         .await?;
     }
 
-    let mut ids: Vec<String> = mqk_db::inbox_load_unapplied_for_run(&pool, run_id)
+    let ids: Vec<String> = mqk_db::inbox_load_unapplied_for_run(&pool, run_id)
         .await?
         .into_iter()
         .map(|r| r.broker_message_id)
         .collect();
-    ids.sort();
 
-    assert_eq!(ids, vec!["pf-1", "pf-2", "pf-3"]);
+    assert_eq!(ids, vec!["pf-3", "pf-1", "pf-2"]);
 
     Ok(())
 }
