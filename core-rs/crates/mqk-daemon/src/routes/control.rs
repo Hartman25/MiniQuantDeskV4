@@ -7,7 +7,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::state::{AppState, RuntimeLifecycleError};
 
@@ -24,25 +24,16 @@ pub struct ControlStatus {
     pub run_notes: Option<String>,
     pub reconcile_status: String,
     pub reconcile_notes: Option<String>,
+    pub deadman_armed_state: String,
+    pub deadman_reason: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct RestartRequest {
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RestartResponse {
-    pub restart_id: String,
-}
-
-pub fn router(state: Arc<AppState>) -> Router {
+pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/control/status", get(status))
         .route("/control/disarm", post(disarm))
         .route("/control/arm", post(arm))
         .route("/control/restart", post(restart))
-        .with_state(state)
 }
 
 async fn status(State(state): State<Arc<AppState>>) -> Response {
@@ -105,6 +96,29 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             }
         };
 
+    let arm_state_row: Option<(String, Option<String>)> = match sqlx::query_as(
+        r#"
+        SELECT state, reason
+          FROM sys_arm_state
+         WHERE sentinel_id = 1
+        "#,
+    )
+    .fetch_optional(db)
+    .await
+    {
+        Ok(row) => row,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("control/status arm-state query failed: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let (deadman_armed_state, deadman_reason) =
+        arm_state_row.unwrap_or_else(|| ("DISARMED".to_string(), Some("BootDefault".to_string())));
+
     let response = match lease_row {
         Some((holder_id, epoch, lease_expires_at, lease_expired)) => ControlStatus {
             desired_armed,
@@ -118,6 +132,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             run_notes: runtime_status.notes.clone(),
             reconcile_status: reconcile_status.status.clone(),
             reconcile_notes: reconcile_status.note.clone(),
+            deadman_armed_state: deadman_armed_state.clone(),
+            deadman_reason: deadman_reason.clone(),
         },
         None => ControlStatus {
             desired_armed,
@@ -131,6 +147,8 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             run_notes: runtime_status.notes.clone(),
             reconcile_status: reconcile_status.status.clone(),
             reconcile_notes: reconcile_status.note.clone(),
+            deadman_armed_state,
+            deadman_reason,
         },
     };
 
@@ -190,41 +208,15 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn restart(State(state): State<Arc<AppState>>, Json(req): Json<RestartRequest>) -> Response {
-    let Some(db) = state.db.as_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "control DB is not configured on this daemon",
-        )
-            .into_response();
-    };
-
-    let restart_id = format!(
-        "restart-{}-{}",
-        state.node_id,
-        chrono::Utc::now().timestamp_micros()
-    );
-
-    if let Err(err) = sqlx::query(
-        r#"
-        INSERT INTO runtime_restart_requests (restart_id, requested_by, requested_at, reason)
-        VALUES ($1, $2, now(), $3)
-        "#,
+async fn restart() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": "GATE_REFUSED: /control/restart is disabled because daemon-owned restart semantics are not authoritative yet",
+            "gate": "restart_not_authoritative"
+        })),
     )
-    .bind(&restart_id)
-    .bind(&state.node_id)
-    .bind(req.reason.as_deref())
-    .execute(db)
-    .await
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("control/restart write failed: {err}"),
-        )
-            .into_response();
-    }
-
-    (StatusCode::ACCEPTED, Json(RestartResponse { restart_id })).into_response()
+        .into_response()
 }
 
 async fn write_desired_armed(db: &sqlx::PgPool, desired_armed: bool) -> anyhow::Result<()> {

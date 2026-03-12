@@ -111,6 +111,40 @@ async fn status(st: &Arc<state::AppState>) -> serde_json::Value {
     parse_json(body)
 }
 
+async fn control_status(st: &Arc<state::AppState>) -> serde_json::Value {
+    let req = Request::builder()
+        .method("GET")
+        .uri("/control/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(make_router(Arc::clone(st)), req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "control/status failed: {}",
+        parse_json(body.clone())
+    );
+    parse_json(body)
+}
+
+async fn control_arm(st: &Arc<state::AppState>) -> StatusCode {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/control/arm")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    call(make_router(Arc::clone(st)), req).await.0
+}
+
+async fn control_disarm(st: &Arc<state::AppState>) -> StatusCode {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/control/disarm")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    call(make_router(Arc::clone(st)), req).await.0
+}
+
 async fn stop(st: &Arc<state::AppState>) -> serde_json::Value {
     let req = Request::builder()
         .method("POST")
@@ -294,4 +328,94 @@ async fn restart_reconstructs_safe_runtime_status() {
         current["active_run_id"].as_str().unwrap_or(""),
         run_id.to_string()
     );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn control_status_reflects_real_runtime_truth() {
+    let st = daemon_state().await;
+    let pool = st.db.as_ref().expect("db configured");
+
+    sqlx::query(
+        r#"
+        INSERT INTO runtime_control_state (id, desired_armed, updated_at)
+        VALUES (1, true, now())
+        ON CONFLICT (id) DO UPDATE
+           SET desired_armed = excluded.desired_armed,
+               updated_at = excluded.updated_at
+        "#,
+    )
+    .execute(pool)
+    .await
+    .expect("seed runtime_control_state");
+
+    sqlx::query(
+        r#"
+        INSERT INTO runtime_leader_lease (id, holder_id, epoch, lease_expires_at, updated_at)
+        VALUES (1, 'scenario-daemon', 7, now() + interval '30 seconds', now())
+        ON CONFLICT (id) DO UPDATE
+           SET holder_id = excluded.holder_id,
+               epoch = excluded.epoch,
+               lease_expires_at = excluded.lease_expires_at,
+               updated_at = excluded.updated_at
+        "#,
+    )
+    .execute(pool)
+    .await
+    .expect("seed runtime_leader_lease");
+
+    mqk_db::persist_arm_state(pool, "DISARMED", Some("DeadmanHalt"))
+        .await
+        .expect("persist arm state");
+
+    let body = control_status(&st).await;
+    assert_eq!(body["desired_armed"], true);
+    assert_eq!(body["leader_holder_id"], "scenario-daemon");
+    assert_eq!(body["leader_epoch"], 7);
+    assert_eq!(body["deadman_armed_state"], "DISARMED");
+    assert_eq!(body["deadman_reason"], "DeadmanHalt");
+    assert_eq!(body["reconcile_status"], "unknown");
+    assert_eq!(body["run_state"], "idle");
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn control_disarm_is_durable_or_explicitly_scoped() {
+    let st = daemon_state().await;
+    let pool = st.db.as_ref().expect("db configured");
+
+    assert_eq!(control_arm(&st).await, StatusCode::NO_CONTENT);
+    let armed: bool =
+        sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
+            .fetch_one(pool)
+            .await
+            .expect("read desired_armed after arm");
+    assert!(armed);
+
+    assert_eq!(control_disarm(&st).await, StatusCode::NO_CONTENT);
+    let disarmed: bool =
+        sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
+            .fetch_one(pool)
+            .await
+            .expect("read desired_armed after disarm");
+    assert!(!disarmed);
+}
+
+#[tokio::test]
+async fn control_restart_fails_closed_if_not_authoritative() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/control/restart")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(r#"{"reason":"operator request"}"#))
+        .unwrap();
+    let (status, body) = call(make_router(st), req).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let json = parse_json(body);
+    assert_eq!(json["gate"], "restart_not_authoritative");
 }
