@@ -936,12 +936,23 @@ pub struct InboxRow {
     pub inbox_id: i64,
     pub run_id: Uuid,
     pub broker_message_id: String,
+    pub broker_fill_id: Option<String>,
+    pub broker_sequence_id: Option<String>,
+    pub broker_timestamp: Option<String>,
     pub message_json: Value,
     pub received_at_utc: DateTime<Utc>,
     /// NULL until inbox_mark_applied() is called after a successful portfolio
     /// apply.  Rows with applied_at_utc IS NULL are returned by
     /// inbox_load_unapplied_for_run() for crash-recovery replay (Patch D2).
     pub applied_at_utc: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BrokerEventIdentity {
+    pub broker_message_id: String,
+    pub broker_fill_id: Option<String>,
+    pub broker_sequence_id: Option<String>,
+    pub broker_timestamp: Option<String>,
 }
 
 /// Enqueue an order intent into oms_outbox.
@@ -1573,20 +1584,56 @@ pub async fn inbox_insert_deduped(
     broker_message_id: &str,
     message_json: Value,
 ) -> Result<bool> {
+    inbox_insert_deduped_with_identity(
+        pool,
+        run_id,
+        &BrokerEventIdentity {
+            broker_message_id: broker_message_id.to_string(),
+            broker_fill_id: None,
+            broker_sequence_id: None,
+            broker_timestamp: None,
+        },
+        message_json,
+    )
+    .await
+}
+
+/// Insert a broker message/fill into oms_inbox with explicit identity fields.
+///
+/// Dedupe rule is transport-only and explicit:
+/// - conflict key: `(run_id, broker_message_id)`
+/// - `broker_fill_id` is optional economic identity metadata and does NOT
+///   participate in inbox insertion dedupe.
+pub async fn inbox_insert_deduped_with_identity(
+    pool: &PgPool,
+    run_id: Uuid,
+    identity: &BrokerEventIdentity,
+    message_json: Value,
+) -> Result<bool> {
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
-        insert into oms_inbox (run_id, broker_message_id, message_json)
-        values ($1, $2, $3)
+        insert into oms_inbox (
+            run_id,
+            broker_message_id,
+            broker_fill_id,
+            broker_sequence_id,
+            broker_timestamp,
+            message_json
+        )
+        values ($1, $2, $3, $4, $5, $6)
         on conflict (run_id, broker_message_id) do nothing
         returning inbox_id
         "#,
     )
     .bind(run_id)
-    .bind(broker_message_id)
+    .bind(&identity.broker_message_id)
+    .bind(&identity.broker_fill_id)
+    .bind(&identity.broker_sequence_id)
+    .bind(&identity.broker_timestamp)
     .bind(message_json)
     .fetch_optional(pool)
     .await
-    .context("inbox_insert_deduped failed")?;
+    .context("inbox_insert_deduped_with_identity failed")?;
 
     Ok(row.is_some())
 }
@@ -1643,7 +1690,8 @@ pub async fn inbox_mark_applied(
 pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<InboxRow>> {
     let rows = sqlx::query(
         r#"
-        select inbox_id, run_id, broker_message_id, message_json,
+        select inbox_id, run_id, broker_message_id, broker_fill_id,
+               broker_sequence_id, broker_timestamp, message_json,
                received_at_utc, applied_at_utc
           from oms_inbox
          where run_id = $1
@@ -1662,6 +1710,9 @@ pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result
             inbox_id: row.try_get("inbox_id")?,
             run_id: row.try_get("run_id")?,
             broker_message_id: row.try_get("broker_message_id")?,
+            broker_fill_id: row.try_get("broker_fill_id")?,
+            broker_sequence_id: row.try_get("broker_sequence_id")?,
+            broker_timestamp: row.try_get("broker_timestamp")?,
             message_json: row.try_get("message_json")?,
             received_at_utc: row.try_get("received_at_utc")?,
             applied_at_utc: row.try_get("applied_at_utc")?,

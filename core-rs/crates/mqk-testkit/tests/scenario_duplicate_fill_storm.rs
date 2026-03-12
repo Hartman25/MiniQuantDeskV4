@@ -1,4 +1,4 @@
-﻿//! Scenario: Duplicate Fill Storm
+//! Scenario: Duplicate Fill Storm
 //!
 //! # Invariant under test
 //! Many duplicate copies of the same fill event must collapse to one durable inbox row.
@@ -68,6 +68,7 @@ async fn duplicate_fill_storm_collapses_to_one_inbox_row() -> anyhow::Result<()>
 
     let ev = BrokerEvent::PartialFill {
         broker_message_id: "storm-fill-1".to_string(),
+        broker_fill_id: None,
         internal_order_id: "ord-storm".to_string(),
         broker_order_id: Some("broker-storm".to_string()),
         symbol: "QQQ".to_string(),

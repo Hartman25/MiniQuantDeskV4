@@ -453,10 +453,16 @@ where
         };
         for event in &events {
             let msg_json = serde_json::to_value(event)?;
-            mqk_db::inbox_insert_deduped(
+            let event_identity = event.identity();
+            mqk_db::inbox_insert_deduped_with_identity(
                 &self.pool,
                 self.run_id,
-                event.broker_message_id(),
+                &mqk_db::BrokerEventIdentity {
+                    broker_message_id: event_identity.broker_message_id,
+                    broker_fill_id: event_identity.broker_fill_id,
+                    broker_sequence_id: event_identity.broker_sequence_id,
+                    broker_timestamp: event_identity.broker_timestamp,
+                },
                 msg_json,
             )
             .await?;
@@ -1219,8 +1225,9 @@ fn apply_fill_step(
     match oms_orders.get_mut(internal_id) {
         Some(order) => {
             let pre_qty = order.filled_qty;
+            let economic_event_id = event.broker_fill_id().unwrap_or(msg_id);
             order
-                .apply(&oms_event, Some(msg_id))
+                .apply(&oms_event, Some(economic_event_id))
                 .map_err(|e| anyhow!("OMS transition error for '{}': {}", internal_id, e))?;
             // No-op detection: if this is a fill event and filled_qty has not
             // advanced, OMS applied a silent no-op (duplicate event_id or fill
@@ -1281,6 +1288,7 @@ mod tests {
         use mqk_execution::Side;
         let ev = BrokerEvent::Fill {
             broker_message_id: "msg-1".to_string(),
+            broker_fill_id: None,
             internal_order_id: "ord-1".to_string(),
             broker_order_id: None,
             symbol: "AAPL".to_string(),
@@ -1297,6 +1305,7 @@ mod tests {
         use mqk_execution::Side;
         let ev = BrokerEvent::Fill {
             broker_message_id: "msg-2".to_string(),
+            broker_fill_id: None,
             internal_order_id: "ord-2".to_string(),
             broker_order_id: None,
             symbol: "MSFT".to_string(),
@@ -1375,6 +1384,7 @@ mod tests {
         use mqk_execution::Side;
         let ev = BrokerEvent::Fill {
             broker_message_id: "msg-4".to_string(),
+            broker_fill_id: None,
             internal_order_id: "ord-4".to_string(),
             broker_order_id: None,
             symbol: "X".to_string(),
@@ -1396,6 +1406,7 @@ mod tests {
             },
             BrokerEvent::Fill {
                 broker_message_id: "m".to_string(),
+                broker_fill_id: None,
                 internal_order_id: "o".to_string(),
                 broker_order_id: None,
                 symbol: "X".to_string(),
@@ -1406,6 +1417,7 @@ mod tests {
             },
             BrokerEvent::PartialFill {
                 broker_message_id: "m".to_string(),
+                broker_fill_id: None,
                 internal_order_id: "o".to_string(),
                 broker_order_id: None,
                 symbol: "X".to_string(),
@@ -1458,6 +1470,7 @@ mod tests {
             },
             BrokerEvent::PartialFill {
                 broker_message_id: "m".into(),
+                broker_fill_id: None,
                 internal_order_id: "o".into(),
                 broker_order_id: None,
                 symbol: "X".into(),
@@ -1468,6 +1481,7 @@ mod tests {
             },
             BrokerEvent::Fill {
                 broker_message_id: "m".into(),
+                broker_fill_id: None,
                 internal_order_id: "o".into(),
                 broker_order_id: None,
                 symbol: "X".into(),
@@ -1518,6 +1532,7 @@ mod tests {
         // Two events for the same message/order: Ack must sort before Fill by rank.
         let fill = BrokerEvent::Fill {
             broker_message_id: "msg-a".into(),
+            broker_fill_id: None,
             internal_order_id: "ord-1".into(),
             broker_order_id: None,
             symbol: "X".into(),
@@ -1557,6 +1572,7 @@ mod tests {
     fn make_partial_fill_event(internal_id: &str, msg_id: &str, qty: i64) -> BrokerEvent {
         BrokerEvent::PartialFill {
             broker_message_id: msg_id.to_string(),
+            broker_fill_id: None,
             internal_order_id: internal_id.to_string(),
             broker_order_id: None,
             symbol: "SPY".to_string(),
@@ -1569,6 +1585,7 @@ mod tests {
     fn make_fill_event(internal_id: &str, msg_id: &str, qty: i64) -> BrokerEvent {
         BrokerEvent::Fill {
             broker_message_id: msg_id.to_string(),
+            broker_fill_id: None,
             internal_order_id: internal_id.to_string(),
             broker_order_id: None,
             symbol: "SPY".to_string(),
@@ -1887,6 +1904,34 @@ mod tests {
         );
         // filled_qty must not have advanced.
         assert_eq!(oms["ord-3"].filled_qty, 60);
+    }
+
+    #[test]
+    fn duplicate_economic_fill_id_across_messages_is_deduped() {
+        let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+        oms.insert("ord-3b".to_string(), OmsOrder::new("ord-3b", "SPY", 100));
+
+        let mut ev1 = make_partial_fill_event("ord-3b", "transport-msg-1", 60);
+        let mut ev2 = make_partial_fill_event("ord-3b", "transport-msg-2", 60);
+        if let BrokerEvent::PartialFill { broker_fill_id, .. } = &mut ev1 {
+            *broker_fill_id = Some("econ-fill-1".to_string());
+        }
+        if let BrokerEvent::PartialFill { broker_fill_id, .. } = &mut ev2 {
+            *broker_fill_id = Some("econ-fill-1".to_string());
+        }
+
+        let first = apply_fill_step(&mut oms, "ord-3b", &ev1, "transport-msg-1")
+            .unwrap()
+            .expect("first apply should mutate portfolio");
+        assert_eq!(first.qty, 60);
+        assert_eq!(oms["ord-3b"].filled_qty, 60);
+
+        let second = apply_fill_step(&mut oms, "ord-3b", &ev2, "transport-msg-2").unwrap();
+        assert!(
+            second.is_none(),
+            "same broker_fill_id should dedupe even when broker_message_id changes"
+        );
+        assert_eq!(oms["ord-3b"].filled_qty, 60);
     }
     /// Section C - T6.
     /// A non-fill event (Ack) for an order not present in oms_orders must

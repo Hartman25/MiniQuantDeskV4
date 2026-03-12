@@ -253,3 +253,84 @@ async fn broker_message_id_uniqueness_is_run_scoped() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn transport_dedupe_is_distinct_from_economic_fill_identity() -> anyhow::Result<()> {
+    let url = std::env::var(mqk_db::ENV_DB_URL).expect("MQK_DATABASE_URL must be set");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await?;
+
+    mqk_db::migrate(&pool).await?;
+
+    let run_id = Uuid::new_v4();
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "MAIN".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: Utc::now(),
+            git_hash: "TEST".to_string(),
+            config_hash: "CFG".to_string(),
+            config_json: json!({"x": 1}),
+            host_fingerprint: "TESTHOST".to_string(),
+        },
+    )
+    .await?;
+
+    let fill_id = format!("ECON-FILL-{}", Uuid::new_v4());
+    let msg_1 = format!("transport-1-{}", Uuid::new_v4());
+    let msg_2 = format!("transport-2-{}", Uuid::new_v4());
+
+    let first = mqk_db::inbox_insert_deduped_with_identity(
+        &pool,
+        run_id,
+        &mqk_db::BrokerEventIdentity {
+            broker_message_id: msg_1.clone(),
+            broker_fill_id: Some(fill_id.clone()),
+            broker_sequence_id: None,
+            broker_timestamp: None,
+        },
+        json!({"msg": 1}),
+    )
+    .await?;
+    assert!(first, "first transport event should insert");
+
+    let second = mqk_db::inbox_insert_deduped_with_identity(
+        &pool,
+        run_id,
+        &mqk_db::BrokerEventIdentity {
+            broker_message_id: msg_2,
+            broker_fill_id: Some(fill_id),
+            broker_sequence_id: None,
+            broker_timestamp: None,
+        },
+        json!({"msg": 2}),
+    )
+    .await?;
+    assert!(
+        second,
+        "a distinct broker_message_id should insert even when broker_fill_id matches"
+    );
+
+    let duplicate_transport = mqk_db::inbox_insert_deduped_with_identity(
+        &pool,
+        run_id,
+        &mqk_db::BrokerEventIdentity {
+            broker_message_id: msg_1,
+            broker_fill_id: None,
+            broker_sequence_id: None,
+            broker_timestamp: None,
+        },
+        json!({"msg": 1}),
+    )
+    .await?;
+    assert!(
+        !duplicate_transport,
+        "transport dedupe should still be keyed by broker_message_id"
+    );
+
+    Ok(())
+}
