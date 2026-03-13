@@ -11,9 +11,12 @@ use std::time::Duration;
 
 use anyhow::Context;
 use chrono::Utc;
+use mqk_broker_alpaca::{AlpacaBrokerAdapter, AlpacaConfig};
 use mqk_broker_paper::LockedPaperBroker;
 use mqk_execution::{
-    wiring::build_gateway, BrokerOrderMap, IntegrityGate, ReconcileGate, RiskDecision, RiskGate,
+    wiring::build_gateway, BrokerAdapter, BrokerCancelResponse, BrokerEvent, BrokerInvokeToken,
+    BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
+    BrokerSubmitResponse, IntegrityGate, ReconcileGate,
 };
 use mqk_integrity::IntegrityState;
 use mqk_portfolio::PortfolioState;
@@ -25,9 +28,9 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 const DAEMON_ENGINE_ID: &str = "mqk-daemon";
-const DAEMON_MODE: &str = "PAPER";
-const DAEMON_ADAPTER_ID: &str = "paper";
-const DAEMON_RUN_CONFIG_HASH: &str = "daemon-runtime-paper-v1";
+const DAEMON_BROKER_MODE_ENV: &str = "MQK_DAEMON_BROKER_MODE";
+const DAEMON_BROKER_API_KEY_ENV: &str = "MQK_BROKER_API_KEY";
+const DAEMON_BROKER_API_SECRET_ENV: &str = "MQK_BROKER_API_SECRET";
 const EXECUTION_LOOP_INTERVAL: Duration = Duration::from_secs(1);
 const DEADMAN_TTL_SECONDS: i64 = 5;
 const DEV_ALLOW_NO_OPERATOR_TOKEN_ENV: &str = "MQK_DEV_ALLOW_NO_OPERATOR_TOKEN";
@@ -129,31 +132,152 @@ impl IntegrityGate for StateIntegrityGate {
     }
 }
 
-#[derive(Clone, Copy)]
-struct AllowRiskGate;
-
-impl RiskGate for AllowRiskGate {
-    fn evaluate_gate(&self) -> RiskDecision {
-        RiskDecision::Allow
-    }
+#[derive(Clone)]
+struct ReconcileStatusGate {
+    status: Arc<RwLock<ReconcileStatusSnapshot>>,
 }
 
-#[derive(Clone, Copy)]
-struct CleanReconcileGate;
-
-impl ReconcileGate for CleanReconcileGate {
+impl ReconcileGate for ReconcileStatusGate {
     fn is_clean(&self) -> bool {
-        true
+        self.status
+            .try_read()
+            .map(|status| status.status == "ok")
+            .unwrap_or(false)
     }
 }
 
 type DaemonOrchestrator = mqk_runtime::orchestrator::ExecutionOrchestrator<
-    LockedPaperBroker,
+    DaemonBrokerAdapter,
     StateIntegrityGate,
-    AllowRiskGate,
-    CleanReconcileGate,
+    mqk_runtime::runtime_risk::RuntimeRiskGate,
+    ReconcileStatusGate,
     mqk_runtime::orchestrator::WallClock,
 >;
+
+enum DaemonBrokerAdapter {
+    Paper(LockedPaperBroker),
+    Alpaca(AlpacaBrokerAdapter),
+}
+
+impl BrokerAdapter for DaemonBrokerAdapter {
+    fn submit_order(
+        &self,
+        req: BrokerSubmitRequest,
+        token: &BrokerInvokeToken,
+    ) -> std::result::Result<BrokerSubmitResponse, mqk_execution::BrokerError> {
+        match self {
+            Self::Paper(adapter) => adapter.submit_order(req, token),
+            Self::Alpaca(adapter) => adapter.submit_order(req, token),
+        }
+    }
+
+    fn cancel_order(
+        &self,
+        order_id: &str,
+        token: &BrokerInvokeToken,
+    ) -> std::result::Result<BrokerCancelResponse, mqk_execution::BrokerError> {
+        match self {
+            Self::Paper(adapter) => adapter.cancel_order(order_id, token),
+            Self::Alpaca(adapter) => adapter.cancel_order(order_id, token),
+        }
+    }
+
+    fn replace_order(
+        &self,
+        req: BrokerReplaceRequest,
+        token: &BrokerInvokeToken,
+    ) -> std::result::Result<BrokerReplaceResponse, mqk_execution::BrokerError> {
+        match self {
+            Self::Paper(adapter) => adapter.replace_order(req, token),
+            Self::Alpaca(adapter) => adapter.replace_order(req, token),
+        }
+    }
+
+    fn fetch_events(
+        &self,
+        cursor: Option<&str>,
+        token: &BrokerInvokeToken,
+    ) -> std::result::Result<(Vec<BrokerEvent>, Option<String>), mqk_execution::BrokerError> {
+        match self {
+            Self::Paper(adapter) => adapter.fetch_events(cursor, token),
+            Self::Alpaca(adapter) => adapter.fetch_events(cursor, token),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeBrokerMode {
+    Paper,
+    AlpacaPaper,
+    AlpacaLive,
+    Unavailable { reason: String },
+}
+
+impl RuntimeBrokerMode {
+    fn mode(&self) -> &'static str {
+        match self {
+            Self::Paper | Self::AlpacaPaper => "PAPER",
+            Self::AlpacaLive => "LIVE",
+            Self::Unavailable { .. } => "UNAVAILABLE",
+        }
+    }
+
+    fn adapter_id(&self) -> &'static str {
+        match self {
+            Self::Paper => "paper",
+            Self::AlpacaPaper => "alpaca_paper",
+            Self::AlpacaLive => "alpaca_live",
+            Self::Unavailable { .. } => "unavailable",
+        }
+    }
+
+    fn run_config_hash(&self) -> &'static str {
+        match self {
+            Self::Paper => "daemon-runtime-paper-v1",
+            Self::AlpacaPaper => "daemon-runtime-alpaca-paper-v1",
+            Self::AlpacaLive => "daemon-runtime-alpaca-live-v1",
+            Self::Unavailable { .. } => "daemon-runtime-unavailable-v1",
+        }
+    }
+
+    fn build_adapter(&self) -> Result<DaemonBrokerAdapter, RuntimeLifecycleError> {
+        match self {
+            Self::Paper => Ok(DaemonBrokerAdapter::Paper(LockedPaperBroker::new())),
+            Self::AlpacaPaper | Self::AlpacaLive => {
+                let base_url = if self == &Self::AlpacaPaper {
+                    "https://paper-api.alpaca.markets"
+                } else {
+                    "https://api.alpaca.markets"
+                };
+                let api_key_id = std::env::var(DAEMON_BROKER_API_KEY_ENV).map_err(|_| {
+                    RuntimeLifecycleError::ServiceUnavailable(format!(
+                        "{} is required for {} adapter",
+                        DAEMON_BROKER_API_KEY_ENV,
+                        self.adapter_id()
+                    ))
+                })?;
+                let api_secret_key = std::env::var(DAEMON_BROKER_API_SECRET_ENV).map_err(|_| {
+                    RuntimeLifecycleError::ServiceUnavailable(format!(
+                        "{} is required for {} adapter",
+                        DAEMON_BROKER_API_SECRET_ENV,
+                        self.adapter_id()
+                    ))
+                })?;
+
+                Ok(DaemonBrokerAdapter::Alpaca(AlpacaBrokerAdapter::new(
+                    AlpacaConfig {
+                        base_url: base_url.to_string(),
+                        api_key_id,
+                        api_secret_key,
+                    },
+                )))
+            }
+            Self::Unavailable { reason } => Err(RuntimeLifecycleError::ServiceUnavailable(
+                format!("daemon runtime broker wiring unavailable: {reason}"),
+            )),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutionLoopCommand {
@@ -218,6 +342,7 @@ pub struct AppState {
     reconcile_status: Arc<RwLock<ReconcileStatusSnapshot>>,
     /// Operator auth posture for privileged routes.
     pub operator_auth: OperatorAuthMode,
+    runtime_broker_mode: RuntimeBrokerMode,
     /// The single daemon-owned execution loop handle, if any.
     execution_loop: Arc<Mutex<Option<ExecutionLoopHandle>>>,
     /// Serializes start/stop/halt transitions so the daemon never spawns duplicates.
@@ -236,12 +361,16 @@ impl AppState {
     /// The real daemon startup path uses [`Self::new_with_db`], which resolves
     /// environment-derived operator auth and now fails closed by default.
     pub fn new() -> Self {
-        Self::new_inner(OperatorAuthMode::ExplicitDevNoToken, None)
+        Self::new_inner(
+            OperatorAuthMode::ExplicitDevNoToken,
+            RuntimeBrokerMode::Paper,
+            None,
+        )
     }
 
     /// Create application state with an explicit operator-auth mode.
     pub fn new_with_operator_auth(operator_auth: OperatorAuthMode) -> Self {
-        Self::new_inner(operator_auth, None)
+        Self::new_inner(operator_auth, RuntimeBrokerMode::Paper, None)
     }
 
     /// Create application state with an explicit operator token.
@@ -253,15 +382,23 @@ impl AppState {
             Some(token) => OperatorAuthMode::TokenRequired(token),
             None => OperatorAuthMode::ExplicitDevNoToken,
         };
-        Self::new_inner(operator_auth, None)
+        Self::new_inner(operator_auth, RuntimeBrokerMode::Paper, None)
     }
 
     /// Create application state with a live DB pool.
     pub fn new_with_db(db: PgPool) -> Self {
-        Self::new_inner(operator_auth_mode_from_env(), Some(db))
+        Self::new_inner(
+            operator_auth_mode_from_env(),
+            runtime_broker_mode_from_env(),
+            Some(db),
+        )
     }
 
-    fn new_inner(operator_auth: OperatorAuthMode, db: Option<PgPool>) -> Self {
+    fn new_inner(
+        operator_auth: OperatorAuthMode,
+        runtime_broker_mode: RuntimeBrokerMode,
+        db: Option<PgPool>,
+    ) -> Self {
         let (bus, _rx) = broadcast::channel::<BusMsg>(1024);
 
         let build = BuildInfo {
@@ -293,6 +430,7 @@ impl AppState {
             execution_snapshot: Arc::new(RwLock::new(None)),
             reconcile_status: Arc::new(RwLock::new(initial_reconcile_status())),
             operator_auth,
+            runtime_broker_mode,
             execution_loop: Arc::new(Mutex::new(None)),
             lifecycle_op: Arc::new(Mutex::new(())),
         }
@@ -353,14 +491,18 @@ impl AppState {
 
         let snapshot = match self.db.as_ref() {
             Some(db) => {
-                let latest = mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                    .await
-                    .map_err(|err| {
-                        RuntimeLifecycleError::internal(
-                            "current_status_snapshot run lookup failed",
-                            err,
-                        )
-                    })?;
+                let latest = mqk_db::fetch_latest_run_for_engine(
+                    db,
+                    DAEMON_ENGINE_ID,
+                    self.runtime_broker_mode.mode(),
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeLifecycleError::internal(
+                        "current_status_snapshot run lookup failed",
+                        err,
+                    )
+                })?;
                 match latest {
                     Some(run) => match run.status {
                         mqk_db::RunStatus::Running | mqk_db::RunStatus::Armed => {
@@ -462,12 +604,13 @@ impl AppState {
         }
 
         let db = self.db_pool()?;
-        if let Some(active) =
-            mqk_db::fetch_active_run_for_engine(&db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                .await
-                .map_err(|err| {
-                    RuntimeLifecycleError::internal("start active-run lookup failed", err)
-                })?
+        if let Some(active) = mqk_db::fetch_active_run_for_engine(
+            &db,
+            DAEMON_ENGINE_ID,
+            self.runtime_broker_mode.mode(),
+        )
+        .await
+        .map_err(|err| RuntimeLifecycleError::internal("start active-run lookup failed", err))?
         {
             return Err(RuntimeLifecycleError::Conflict(format!(
                 "durable active run exists without local ownership: {}",
@@ -475,11 +618,13 @@ impl AppState {
             )));
         }
 
-        let latest = mqk_db::fetch_latest_run_for_engine(&db, DAEMON_ENGINE_ID, DAEMON_MODE)
-            .await
-            .map_err(|err| {
-                RuntimeLifecycleError::internal("start latest-run lookup failed", err)
-            })?;
+        let latest = mqk_db::fetch_latest_run_for_engine(
+            &db,
+            DAEMON_ENGINE_ID,
+            self.runtime_broker_mode.mode(),
+        )
+        .await
+        .map_err(|err| RuntimeLifecycleError::internal("start latest-run lookup failed", err))?;
 
         let run_id = match latest.as_ref() {
             Some(run) => match run.status {
@@ -504,14 +649,14 @@ impl AppState {
                     &mqk_db::NewRun {
                         run_id,
                         engine_id: DAEMON_ENGINE_ID.to_string(),
-                        mode: DAEMON_MODE.to_string(),
+                        mode: self.runtime_broker_mode.mode().to_string(),
                         started_at_utc: Utc::now(),
                         git_hash: "UNKNOWN".to_string(),
-                        config_hash: DAEMON_RUN_CONFIG_HASH.to_string(),
+                        config_hash: self.runtime_broker_mode.run_config_hash().to_string(),
                         config_json: serde_json::json!({
                             "runtime": "mqk-daemon",
-                            "adapter": DAEMON_ADAPTER_ID,
-                            "mode": DAEMON_MODE,
+                            "adapter": self.runtime_broker_mode.adapter_id(),
+                            "mode": self.runtime_broker_mode.mode(),
                         }),
                         host_fingerprint: self.node_id.clone(),
                     },
@@ -591,16 +736,15 @@ impl AppState {
             Some(handle) => handle,
             None => {
                 if let Some(db) = self.db.as_ref() {
-                    if let Some(active) =
-                        mqk_db::fetch_active_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                            .await
-                            .map_err(|err| {
-                                RuntimeLifecycleError::internal(
-                                    "stop active-run lookup failed",
-                                    err,
-                                )
-                            })?
-                    {
+                    if let Some(active) = mqk_db::fetch_active_run_for_engine(
+                        db,
+                        DAEMON_ENGINE_ID,
+                        self.runtime_broker_mode.mode(),
+                    )
+                    .await
+                    .map_err(|err| {
+                        RuntimeLifecycleError::internal("stop active-run lookup failed", err)
+                    })? {
                         return Err(RuntimeLifecycleError::Conflict(format!(
                             "durable active run exists without local ownership: {}",
                             active.run_id
@@ -644,13 +788,15 @@ impl AppState {
         let handle = self.take_execution_loop_for_control().await?;
         if handle.is_none() {
             if let Some(db) = self.db.as_ref() {
-                if let Some(active) =
-                    mqk_db::fetch_active_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                        .await
-                        .map_err(|err| {
-                            RuntimeLifecycleError::internal("halt active-run lookup failed", err)
-                        })?
-                {
+                if let Some(active) = mqk_db::fetch_active_run_for_engine(
+                    db,
+                    DAEMON_ENGINE_ID,
+                    self.runtime_broker_mode.mode(),
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeLifecycleError::internal("halt active-run lookup failed", err)
+                })? {
                     return Err(RuntimeLifecycleError::Conflict(format!(
                         "durable active run exists without local ownership: {}",
                         active.run_id
@@ -743,7 +889,7 @@ impl AppState {
             "#,
         )
         .bind(DAEMON_ENGINE_ID)
-        .bind(DAEMON_MODE)
+        .bind(self.runtime_broker_mode.mode())
         .fetch_one(db)
         .await
         .map_err(|err| RuntimeLifecycleError::internal("next_daemon_run_id failed", err))?;
@@ -752,7 +898,10 @@ impl AppState {
             &Uuid::NAMESPACE_DNS,
             format!(
                 "mqk-daemon.run.v2|{}|{}|{}|{}",
-                self.node_id, DAEMON_ENGINE_ID, DAEMON_MODE, generation
+                self.node_id,
+                DAEMON_ENGINE_ID,
+                self.runtime_broker_mode.mode(),
+                generation
             )
             .as_bytes(),
         ))
@@ -771,18 +920,46 @@ impl AppState {
             order_map.register(&internal_id, &broker_id);
         }
 
-        let broker_cursor = mqk_db::load_broker_cursor(&db, DAEMON_ADAPTER_ID)
+        let broker_cursor = mqk_db::load_broker_cursor(&db, self.runtime_broker_mode.adapter_id())
             .await
             .map_err(|err| RuntimeLifecycleError::internal("load_broker_cursor failed", err))?;
 
+        let runtime_config = serde_json::json!({
+            "runtime": "mqk-daemon",
+            "adapter": self.runtime_broker_mode.adapter_id(),
+            "mode": self.runtime_broker_mode.mode(),
+        });
+
         let gateway = build_gateway(
-            LockedPaperBroker::new(),
+            self.runtime_broker_mode.build_adapter()?,
             StateIntegrityGate {
                 integrity: Arc::clone(&self.integrity),
             },
-            AllowRiskGate,
-            CleanReconcileGate,
+            mqk_runtime::runtime_risk::RuntimeRiskGate::from_run_config(&runtime_config, 1_000_000),
+            ReconcileStatusGate {
+                status: Arc::clone(&self.reconcile_status),
+            },
         );
+
+        let execution_snapshot = Arc::clone(&self.execution_snapshot);
+        let local_snapshot_provider = Box::new(move || {
+            let snapshot = execution_snapshot
+                .try_read()
+                .ok()
+                .and_then(|guard| guard.as_ref().cloned())
+                .expect("local snapshot unavailable; daemon runtime remains fail-closed");
+            reconcile_local_snapshot_from_execution(&snapshot)
+        });
+
+        let broker_snapshot = Arc::clone(&self.broker_snapshot);
+        let broker_snapshot_provider = Box::new(move || {
+            let snapshot = broker_snapshot
+                .try_read()
+                .ok()
+                .and_then(|guard| guard.as_ref().cloned())
+                .expect("broker snapshot unavailable; daemon runtime remains fail-closed");
+            reconcile_broker_snapshot_from_cache(&snapshot)
+        });
 
         Ok(mqk_runtime::orchestrator::ExecutionOrchestrator::new(
             db,
@@ -792,11 +969,11 @@ impl AppState {
             PortfolioState::new(0),
             run_id,
             self.node_id.clone(),
-            DAEMON_ADAPTER_ID,
+            self.runtime_broker_mode.adapter_id(),
             broker_cursor,
             mqk_runtime::orchestrator::WallClock,
-            Box::new(mqk_reconcile::LocalSnapshot::empty),
-            Box::new(mqk_reconcile::BrokerSnapshot::empty),
+            local_snapshot_provider,
+            broker_snapshot_provider,
         ))
     }
 
@@ -1006,6 +1183,179 @@ fn operator_auth_mode_from_env() -> OperatorAuthMode {
     let operator_token = std::env::var("MQK_OPERATOR_TOKEN").ok();
     let dev_allow_no_token = std::env::var(DEV_ALLOW_NO_OPERATOR_TOKEN_ENV).ok();
     operator_auth_mode_from_env_values(operator_token.as_deref(), dev_allow_no_token.as_deref())
+}
+
+fn runtime_broker_mode_from_env() -> RuntimeBrokerMode {
+    let broker_mode = std::env::var(DAEMON_BROKER_MODE_ENV).ok();
+    runtime_broker_mode_from_env_values(broker_mode.as_deref())
+}
+
+pub fn runtime_broker_mode_from_env_values(broker_mode: Option<&str>) -> RuntimeBrokerMode {
+    match broker_mode
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        None | Some("") | Some("paper") => RuntimeBrokerMode::Paper,
+        Some("alpaca_paper") => RuntimeBrokerMode::AlpacaPaper,
+        Some("alpaca_live") => RuntimeBrokerMode::AlpacaLive,
+        Some(other) => RuntimeBrokerMode::Unavailable {
+            reason: format!(
+                "unsupported {} value '{other}' (expected paper|alpaca_paper|alpaca_live)",
+                DAEMON_BROKER_MODE_ENV
+            ),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use mqk_runtime::observability::{ExecutionSnapshot, PortfolioSnapshot, PositionSnapshot};
+    use tokio::sync::RwLock;
+
+    use super::{
+        reconcile_broker_snapshot_from_cache, reconcile_local_snapshot_from_execution,
+        runtime_broker_mode_from_env_values, ReconcileStatusGate, ReconcileStatusSnapshot,
+        RuntimeBrokerMode,
+    };
+    use mqk_execution::ReconcileGate;
+
+    #[test]
+    fn runtime_broker_mode_defaults_to_paper() {
+        assert_eq!(
+            runtime_broker_mode_from_env_values(None),
+            RuntimeBrokerMode::Paper
+        );
+        assert_eq!(
+            runtime_broker_mode_from_env_values(Some("")),
+            RuntimeBrokerMode::Paper
+        );
+    }
+
+    #[test]
+    fn runtime_broker_mode_parses_explicit_paper_and_live_modes() {
+        assert_eq!(
+            runtime_broker_mode_from_env_values(Some("paper")),
+            RuntimeBrokerMode::Paper
+        );
+        assert_eq!(
+            runtime_broker_mode_from_env_values(Some("alpaca_paper")),
+            RuntimeBrokerMode::AlpacaPaper
+        );
+        assert_eq!(
+            runtime_broker_mode_from_env_values(Some("alpaca_live")),
+            RuntimeBrokerMode::AlpacaLive
+        );
+    }
+
+    #[test]
+    fn runtime_broker_mode_rejects_unknown_values_fail_closed() {
+        let mode = runtime_broker_mode_from_env_values(Some("bogus"));
+        let RuntimeBrokerMode::Unavailable { reason } = mode else {
+            panic!("unknown broker mode must fail closed");
+        };
+        assert!(reason.contains("MQK_DAEMON_BROKER_MODE"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_status_gate_allows_only_ok_state() {
+        let status = Arc::new(RwLock::new(ReconcileStatusSnapshot {
+            status: "ok".to_string(),
+            last_run_at: None,
+            snapshot_watermark_ms: None,
+            mismatched_positions: 0,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: None,
+        }));
+        let gate = ReconcileStatusGate {
+            status: Arc::clone(&status),
+        };
+        assert!(gate.is_clean());
+
+        status.write().await.status = "dirty".to_string();
+        assert!(!gate.is_clean());
+    }
+
+    #[test]
+    fn reconcile_local_snapshot_uses_execution_positions() {
+        let execution = ExecutionSnapshot {
+            run_id: None,
+            active_orders: vec![],
+            pending_outbox: vec![],
+            recent_inbox_events: vec![],
+            portfolio: PortfolioSnapshot {
+                cash_micros: 0,
+                realized_pnl_micros: 0,
+                positions: vec![PositionSnapshot {
+                    symbol: "AAPL".to_string(),
+                    net_qty: 7,
+                }],
+            },
+            system_block_state: None,
+            snapshot_at_utc: Utc::now(),
+        };
+
+        let snapshot = reconcile_local_snapshot_from_execution(&execution);
+        assert_eq!(snapshot.positions.get("AAPL"), Some(&7));
+    }
+
+    #[test]
+    fn reconcile_broker_snapshot_uses_cached_broker_positions() {
+        let broker = mqk_schemas::BrokerSnapshot {
+            captured_at_utc: Utc::now(),
+            account: mqk_schemas::BrokerAccount {
+                equity: "0".to_string(),
+                cash: "0".to_string(),
+                currency: "USD".to_string(),
+            },
+            orders: vec![],
+            fills: vec![],
+            positions: vec![mqk_schemas::BrokerPosition {
+                symbol: "MSFT".to_string(),
+                qty: "5".to_string(),
+                avg_price: "0".to_string(),
+            }],
+        };
+
+        let snapshot = reconcile_broker_snapshot_from_cache(&broker);
+        assert_eq!(snapshot.positions.get("MSFT"), Some(&5));
+    }
+
+    #[test]
+    fn runtime_broker_mode_paper_builds_adapter() {
+        let adapter = RuntimeBrokerMode::Paper
+            .build_adapter()
+            .expect("paper adapter must build");
+        assert!(matches!(adapter, super::DaemonBrokerAdapter::Paper(_)));
+    }
+
+    #[test]
+    fn runtime_broker_mode_alpaca_requires_credentials_fail_closed() {
+        let api_key = std::env::var(super::DAEMON_BROKER_API_KEY_ENV).ok();
+        let api_secret = std::env::var(super::DAEMON_BROKER_API_SECRET_ENV).ok();
+        std::env::remove_var(super::DAEMON_BROKER_API_KEY_ENV);
+        std::env::remove_var(super::DAEMON_BROKER_API_SECRET_ENV);
+
+        let err = match RuntimeBrokerMode::AlpacaPaper.build_adapter() {
+            Ok(_) => panic!("alpaca paper without credentials must fail closed"),
+            Err(err) => err,
+        };
+        let super::RuntimeLifecycleError::ServiceUnavailable(message) = err else {
+            panic!("missing alpaca credentials must be service unavailable");
+        };
+        assert!(message.contains(super::DAEMON_BROKER_API_KEY_ENV));
+
+        if let Some(value) = api_key {
+            std::env::set_var(super::DAEMON_BROKER_API_KEY_ENV, value)
+        }
+        if let Some(value) = api_secret {
+            std::env::set_var(super::DAEMON_BROKER_API_SECRET_ENV, value)
+        }
+    }
 }
 
 /// Monotonically increasing uptime since first call (process lifetime).
@@ -1308,6 +1658,39 @@ fn spawn_execution_loop(
         run_id,
         stop_tx,
         join_handle,
+    }
+}
+
+fn reconcile_local_snapshot_from_execution(
+    execution: &mqk_runtime::observability::ExecutionSnapshot,
+) -> mqk_reconcile::LocalSnapshot {
+    let mut positions = BTreeMap::new();
+    for position in &execution.portfolio.positions {
+        positions.insert(position.symbol.clone(), position.net_qty);
+    }
+
+    mqk_reconcile::LocalSnapshot {
+        orders: BTreeMap::new(),
+        positions,
+    }
+}
+
+fn reconcile_broker_snapshot_from_cache(
+    snapshot: &mqk_schemas::BrokerSnapshot,
+) -> mqk_reconcile::BrokerSnapshot {
+    let mut positions = BTreeMap::new();
+    for position in &snapshot.positions {
+        let qty = position
+            .qty
+            .parse::<i64>()
+            .expect("invalid broker snapshot quantity; daemon runtime remains fail-closed");
+        positions.insert(position.symbol.clone(), qty);
+    }
+
+    mqk_reconcile::BrokerSnapshot {
+        orders: BTreeMap::new(),
+        positions,
+        fetched_at_ms: snapshot.captured_at_utc.timestamp_millis(),
     }
 }
 
