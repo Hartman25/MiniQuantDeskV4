@@ -1471,6 +1471,62 @@ pub async fn outbox_list_unacked_for_run(pool: &PgPool, run_id: Uuid) -> Result<
 // Arm state persistence — Patch L7
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmState {
+    Armed,
+    Disarmed,
+}
+
+impl ArmState {
+    pub const fn as_db_value(self) -> &'static str {
+        match self {
+            ArmState::Armed => "ARMED",
+            ArmState::Disarmed => "DISARMED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisarmReason {
+    BootDefault,
+    ManualDisarm,
+    OperatorDisarm,
+    OperatorHalt,
+    DeadmanHalt,
+    DeadmanExpired,
+    DeadmanSupervisorFailure,
+    DeadmanHeartbeatPersistFailed,
+    IntegrityViolation,
+    ReconcileDrift,
+    RecoveryQuarantine,
+    AmbiguousSubmit,
+    AuthSession,
+    LeaderLeaseLost,
+    LeaderLeaseUnavailable,
+}
+
+impl DisarmReason {
+    pub const fn as_db_value(self) -> &'static str {
+        match self {
+            DisarmReason::BootDefault => "BootDefault",
+            DisarmReason::ManualDisarm => "ManualDisarm",
+            DisarmReason::OperatorDisarm => "OperatorDisarm",
+            DisarmReason::OperatorHalt => "OperatorHalt",
+            DisarmReason::DeadmanHalt => "DeadmanHalt",
+            DisarmReason::DeadmanExpired => "DeadmanExpired",
+            DisarmReason::DeadmanSupervisorFailure => "DeadmanSupervisorFailure",
+            DisarmReason::DeadmanHeartbeatPersistFailed => "DeadmanHeartbeatPersistFailed",
+            DisarmReason::IntegrityViolation => "IntegrityViolation",
+            DisarmReason::ReconcileDrift => "ReconcileDrift",
+            DisarmReason::RecoveryQuarantine => "RecoveryQuarantine",
+            DisarmReason::AmbiguousSubmit => "AmbiguousSubmit",
+            DisarmReason::AuthSession => "AuthSession",
+            DisarmReason::LeaderLeaseLost => "LeaderLeaseLost",
+            DisarmReason::LeaderLeaseUnavailable => "LeaderLeaseUnavailable",
+        }
+    }
+}
+
 /// Persist the current arm state to `sys_arm_state` (upsert singleton row).
 ///
 /// `state` must be `"ARMED"` or `"DISARMED"`.
@@ -1493,6 +1549,19 @@ pub async fn persist_arm_state(pool: &PgPool, state: &str, reason: Option<&str>)
     .await
     .context("persist_arm_state failed")?;
     Ok(())
+}
+
+pub async fn persist_arm_state_canonical(
+    pool: &PgPool,
+    state: ArmState,
+    reason: Option<DisarmReason>,
+) -> Result<()> {
+    persist_arm_state(
+        pool,
+        state.as_db_value(),
+        reason.map(DisarmReason::as_db_value),
+    )
+    .await
 }
 
 /// Load the last persisted arm state.
@@ -2073,4 +2142,55 @@ pub async fn reconcile_checkpoint_load_latest(
         result_hash: row.try_get("result_hash")?,
         created_at_utc: row.try_get("created_at_utc")?,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ArmState, DisarmReason};
+
+    #[test]
+    fn arm_state_db_values_are_stable() {
+        assert_eq!(ArmState::Armed.as_db_value(), "ARMED");
+        assert_eq!(ArmState::Disarmed.as_db_value(), "DISARMED");
+    }
+
+    #[test]
+    fn disarm_reason_db_values_are_stable() {
+        assert_eq!(DisarmReason::BootDefault.as_db_value(), "BootDefault");
+        assert_eq!(DisarmReason::ManualDisarm.as_db_value(), "ManualDisarm");
+        assert_eq!(DisarmReason::OperatorDisarm.as_db_value(), "OperatorDisarm");
+        assert_eq!(DisarmReason::OperatorHalt.as_db_value(), "OperatorHalt");
+        assert_eq!(DisarmReason::DeadmanHalt.as_db_value(), "DeadmanHalt");
+        assert_eq!(DisarmReason::DeadmanExpired.as_db_value(), "DeadmanExpired");
+        assert_eq!(
+            DisarmReason::DeadmanSupervisorFailure.as_db_value(),
+            "DeadmanSupervisorFailure"
+        );
+        assert_eq!(
+            DisarmReason::DeadmanHeartbeatPersistFailed.as_db_value(),
+            "DeadmanHeartbeatPersistFailed"
+        );
+        assert_eq!(
+            DisarmReason::IntegrityViolation.as_db_value(),
+            "IntegrityViolation"
+        );
+        assert_eq!(DisarmReason::ReconcileDrift.as_db_value(), "ReconcileDrift");
+        assert_eq!(
+            DisarmReason::RecoveryQuarantine.as_db_value(),
+            "RecoveryQuarantine"
+        );
+        assert_eq!(
+            DisarmReason::AmbiguousSubmit.as_db_value(),
+            "AmbiguousSubmit"
+        );
+        assert_eq!(DisarmReason::AuthSession.as_db_value(), "AuthSession");
+        assert_eq!(
+            DisarmReason::LeaderLeaseLost.as_db_value(),
+            "LeaderLeaseLost"
+        );
+        assert_eq!(
+            DisarmReason::LeaderLeaseUnavailable.as_db_value(),
+            "LeaderLeaseUnavailable"
+        );
+    }
 }

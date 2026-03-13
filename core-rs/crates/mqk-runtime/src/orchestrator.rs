@@ -249,7 +249,13 @@ where
                 // On success the Phase-0 HALT_GUARD will block any future tick() on
                 // any orchestrator instance for this run_id.
                 // A4: use "RecoveryQuarantine" (added in migration 0017 for this purpose).
-                persist_halt_and_disarm(&self.pool, self.run_id, now, "RecoveryQuarantine").await?;
+                persist_halt_and_disarm(
+                    &self.pool,
+                    self.run_id,
+                    now,
+                    mqk_db::DisarmReason::RecoveryQuarantine,
+                )
+                .await?;
                 let details = summarize_ambiguous_outbox(&ambiguous);
                 return Err(anyhow!(
                     "RECOVERY_QUARANTINE: run {} has {} ambiguous outbox row(s); \
@@ -280,7 +286,13 @@ where
             {
                 let now = self.time_source.now_utc();
                 // Mandatory halt + disarm - same fail-closed contract as Phase 0b.
-                persist_halt_and_disarm(&self.pool, self.run_id, now, "ReconcileDrift").await?;
+                persist_halt_and_disarm(
+                    &self.pool,
+                    self.run_id,
+                    now,
+                    mqk_db::DisarmReason::ReconcileDrift,
+                )
+                .await?;
                 return match err {
                     MonotonicReconcileError::Dirty => Err(anyhow!(
                         "RECONCILE_DRIFT: run {} halted and disarmed; dispatch refused",
@@ -369,24 +381,24 @@ where
                                 // Row cannot re-enter dispatch without explicit operator/reconcile
                                 // release via outbox_reset_ambiguous_to_pending.
                                 let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
-                                // Halt+disarm - "AmbiguousSubmit" is now a valid DB reason
+                                // Halt+disarm - mqk_db::DisarmReason::AmbiguousSubmit is now a valid DB reason
                                 // (migration 0020). Phase-0b quarantine blocks any restart.
                                 let _ = persist_halt_and_disarm(
                                     &self.pool,
                                     self.run_id,
                                     now,
-                                    "AmbiguousSubmit",
+                                    mqk_db::DisarmReason::AmbiguousSubmit,
                                 )
                                 .await;
                             } else {
                                 // AuthSession: credentials revoked - mark FAILED + halt.
-                                // "AuthSession" is now a valid DB reason (migration 0020).
+                                // mqk_db::DisarmReason::AuthSession is now a valid DB reason (migration 0020).
                                 let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
                                 let _ = persist_halt_and_disarm(
                                     &self.pool,
                                     self.run_id,
                                     now,
-                                    "AuthSession",
+                                    mqk_db::DisarmReason::AuthSession,
                                 )
                                 .await;
                             }
@@ -407,7 +419,7 @@ where
                                 &self.pool,
                                 self.run_id,
                                 now,
-                                "AmbiguousSubmit",
+                                mqk_db::DisarmReason::AmbiguousSubmit,
                             )
                             .await;
                         }
@@ -551,8 +563,13 @@ where
                     // Mandatory halt + disarm before surfacing the OMS error.
                     // If the DB writes fail their error takes precedence - failing
                     // to persist HALTED is more dangerous than the OMS fault itself.
-                    persist_halt_and_disarm(&self.pool, self.run_id, now, "IntegrityViolation")
-                        .await?;
+                    persist_halt_and_disarm(
+                        &self.pool,
+                        self.run_id,
+                        now,
+                        mqk_db::DisarmReason::IntegrityViolation,
+                    )
+                    .await?;
                     return Err(e.context(format!(
                         "UNKNOWN_ORDER_FILL: run {} halted and disarmed (Section C)",
                         self.run_id
@@ -588,7 +605,13 @@ where
             // is durably written to DB.
             if let Err(inv_err) = check_capital_invariants(&self.portfolio) {
                 let now = self.time_source.now_utc();
-                persist_halt_and_disarm(&self.pool, self.run_id, now, "IntegrityViolation").await?;
+                persist_halt_and_disarm(
+                    &self.pool,
+                    self.run_id,
+                    now,
+                    mqk_db::DisarmReason::IntegrityViolation,
+                )
+                .await?;
                 return Err(inv_err.context(format!(
                     "INVARIANT_VIOLATED: run {} halted and disarmed (I9-1)",
                     self.run_id
@@ -689,8 +712,13 @@ where
                 }
                 Err(err) => {
                     self.runtime_epoch = None;
-                    persist_halt_and_disarm(&self.pool, self.run_id, now, "LeaderLeaseLost")
-                        .await?;
+                    persist_halt_and_disarm(
+                        &self.pool,
+                        self.run_id,
+                        now,
+                        mqk_db::DisarmReason::LeaderLeaseLost,
+                    )
+                    .await?;
                     return Err(anyhow!(
                         "RUNTIME_LEASE_LOST: run {} holder={} epoch={} error={}",
                         self.run_id,
@@ -714,8 +742,13 @@ where
                 Ok(())
             }
             mqk_db::runtime_lease::LeaseAcquireOutcome::HeldByOther(current) => {
-                persist_halt_and_disarm(&self.pool, self.run_id, now, "LeaderLeaseUnavailable")
-                    .await?;
+                persist_halt_and_disarm(
+                    &self.pool,
+                    self.run_id,
+                    now,
+                    mqk_db::DisarmReason::LeaderLeaseUnavailable,
+                )
+                .await?;
                 Err(anyhow!(
                     "RUNTIME_LEASE_UNAVAILABLE: run {} refused holder={} current_holder={} current_epoch={} expires_at={}",
                     self.run_id,
@@ -1179,20 +1212,22 @@ async fn persist_halt_and_disarm(
     pool: &PgPool,
     run_id: Uuid,
     now: chrono::DateTime<chrono::Utc>,
-    reason: &'static str,
+    reason: mqk_db::DisarmReason,
 ) -> anyhow::Result<()> {
     mqk_db::halt_run(pool, run_id, now).await.with_context(|| {
         format!(
             "HALT_PERSISTENCE_FAILURE: run {run_id} - runs.status=HALTED could not be \
-                 written (reason={reason}); Phase-0 halt guard on restart is NOT guaranteed"
+                 written (reason={}); Phase-0 halt guard on restart is NOT guaranteed",
+            reason.as_db_value()
         )
     })?;
-    mqk_db::persist_arm_state(pool, "DISARMED", Some(reason))
+    mqk_db::persist_arm_state_canonical(pool, mqk_db::ArmState::Disarmed, Some(reason))
         .await
         .with_context(|| {
             format!(
                 "ARM_STATE_PERSISTENCE_FAILURE: run {run_id} - sys_arm_state=DISARMED could \
-                 not be written (reason={reason}); runs.status=HALTED was persisted"
+                 not be written (reason={}); runs.status=HALTED was persisted",
+                reason.as_db_value()
             )
         })?;
     Ok(())

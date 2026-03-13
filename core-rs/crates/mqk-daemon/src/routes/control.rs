@@ -204,7 +204,13 @@ async fn disarm(State(state): State<Arc<AppState>>) -> Response {
         )
             .into_response();
     }
-    if let Err(err) = mqk_db::persist_arm_state(db, "DISARMED", Some("OperatorDisarm")).await {
+    if let Err(err) = mqk_db::persist_arm_state_canonical(
+        db,
+        mqk_db::ArmState::Disarmed,
+        Some(mqk_db::DisarmReason::OperatorDisarm),
+    )
+    .await
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("control/disarm persist arm state failed: {err}"),
@@ -237,7 +243,7 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
         )
             .into_response();
     }
-    if let Err(err) = mqk_db::persist_arm_state(db, "ARMED", None).await {
+    if let Err(err) = mqk_db::persist_arm_state_canonical(db, mqk_db::ArmState::Armed, None).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("control/arm persist arm state failed: {err}"),

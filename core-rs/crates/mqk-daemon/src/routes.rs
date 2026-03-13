@@ -249,7 +249,9 @@ pub(crate) async fn integrity_arm(State(st): State<Arc<AppState>>) -> impl IntoR
     }
 
     if let Some(db) = st.db.as_ref() {
-        if let Err(err) = mqk_db::persist_arm_state(db, "ARMED", None).await {
+        if let Err(err) =
+            mqk_db::persist_arm_state_canonical(db, mqk_db::ArmState::Armed, None).await
+        {
             return runtime_error_response(RuntimeLifecycleError::Internal(format!(
                 "integrity/arm persist_arm_state failed: {err}"
             )));
@@ -289,7 +291,13 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
     }
 
     if let Some(db) = st.db.as_ref() {
-        if let Err(err) = mqk_db::persist_arm_state(db, "DISARMED", Some("OperatorDisarm")).await {
+        if let Err(err) = mqk_db::persist_arm_state_canonical(
+            db,
+            mqk_db::ArmState::Disarmed,
+            Some(mqk_db::DisarmReason::OperatorDisarm),
+        )
+        .await
+        {
             return runtime_error_response(RuntimeLifecycleError::Internal(format!(
                 "integrity/disarm persist_arm_state failed: {err}"
             )));

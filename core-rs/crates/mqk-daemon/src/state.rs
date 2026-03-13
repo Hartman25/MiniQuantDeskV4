@@ -678,9 +678,13 @@ impl AppState {
                 .await
                 .map_err(|err| RuntimeLifecycleError::internal("halt_run failed", err))?;
         }
-        mqk_db::persist_arm_state(&db, "DISARMED", Some("OperatorHalt"))
-            .await
-            .map_err(|err| RuntimeLifecycleError::internal("persist_arm_state failed", err))?;
+        mqk_db::persist_arm_state_canonical(
+            &db,
+            mqk_db::ArmState::Disarmed,
+            Some(mqk_db::DisarmReason::OperatorHalt),
+        )
+        .await
+        .map_err(|err| RuntimeLifecycleError::internal("persist_arm_state failed", err))?;
 
         let snapshot = StatusSnapshot {
             daemon_uptime_secs: uptime_secs(),
@@ -926,11 +930,15 @@ impl AppState {
             .map_err(|err| RuntimeLifecycleError::internal("deadman fetch_run failed", err))?;
 
         if halted {
-            mqk_db::persist_arm_state(&db, "DISARMED", Some("DeadmanExpired"))
-                .await
-                .map_err(|err| {
-                    RuntimeLifecycleError::internal("deadman persist_arm_state failed", err)
-                })?;
+            mqk_db::persist_arm_state_canonical(
+                &db,
+                mqk_db::ArmState::Disarmed,
+                Some(mqk_db::DisarmReason::DeadmanExpired),
+            )
+            .await
+            .map_err(|err| {
+                RuntimeLifecycleError::internal("deadman persist_arm_state failed", err)
+            })?;
             {
                 let mut integrity = self.integrity.write().await;
                 integrity.disarmed = true;
@@ -1174,7 +1182,12 @@ async fn publish_reconcile_failure(
     }
 
     if let Some(db) = state.db.as_ref() {
-        let _ = mqk_db::persist_arm_state(db, "DISARMED", Some("ReconcileDrift")).await;
+        let _ = mqk_db::persist_arm_state_canonical(
+            db,
+            mqk_db::ArmState::Disarmed,
+            Some(mqk_db::DisarmReason::ReconcileDrift),
+        )
+        .await;
         let _ =
             mqk_db::persist_risk_block_state(db, true, Some("RECONCILE_BLOCKED"), Utc::now()).await;
     }
@@ -1220,7 +1233,12 @@ fn spawn_execution_loop(
                         let now = Utc::now();
                         match mqk_db::enforce_deadman_or_halt(pool, run_id, DEADMAN_TTL_SECONDS, now).await {
                             Ok(true) => {
-                                let _ = mqk_db::persist_arm_state(pool, "DISARMED", Some("DeadmanExpired")).await;
+                                let _ = mqk_db::persist_arm_state_canonical(
+                                    pool,
+                                    mqk_db::ArmState::Disarmed,
+                                    Some(mqk_db::DisarmReason::DeadmanExpired),
+                                )
+                                .await;
                                 {
                                     let mut ig = integrity.write().await;
                                     ig.disarmed = true;
@@ -1237,7 +1255,12 @@ fn spawn_execution_loop(
                             Err(err) => {
                                 tracing::error!("execution_loop_deadman_check_failed error={err}");
                                 let _ = mqk_db::halt_run(pool, run_id, now).await;
-                                let _ = mqk_db::persist_arm_state(pool, "DISARMED", Some("DeadmanSupervisorFailure")).await;
+                                let _ = mqk_db::persist_arm_state_canonical(
+                                    pool,
+                                    mqk_db::ArmState::Disarmed,
+                                    Some(mqk_db::DisarmReason::DeadmanSupervisorFailure),
+                                )
+                                .await;
                                 {
                                     let mut ig = integrity.write().await;
                                     ig.disarmed = true;
@@ -1268,7 +1291,12 @@ fn spawn_execution_loop(
                         if let Err(err) = mqk_db::heartbeat_run(pool, run_id, now).await {
                             tracing::error!("execution_loop_heartbeat_failed error={err}");
                             let _ = mqk_db::halt_run(pool, run_id, now).await;
-                            let _ = mqk_db::persist_arm_state(pool, "DISARMED", Some("DeadmanHeartbeatPersistFailed")).await;
+                            let _ = mqk_db::persist_arm_state_canonical(
+                                pool,
+                                mqk_db::ArmState::Disarmed,
+                                Some(mqk_db::DisarmReason::DeadmanHeartbeatPersistFailed),
+                            )
+                            .await;
                             {
                                 let mut ig = integrity.write().await;
                                 ig.disarmed = true;
