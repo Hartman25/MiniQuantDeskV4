@@ -1,15 +1,23 @@
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
+import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatMoney, formatPercent } from "../../lib/format";
+import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
 export function RiskScreen({ model }: { model: SystemModel }) {
   const r = model.riskSummary;
+  const truthState = panelTruthRenderState(model, "risk");
   const activeSuppressions = model.strategySuppressions.filter((row) => row.state === "active");
+
+  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+    return <TruthStateNotice state={truthState} />;
+  }
 
   return (
     <div className="screen-grid desk-screen-grid">
+      {truthState ? <TruthStateNotice state={truthState} /> : null}
       <div className="summary-grid summary-grid-four">
         <StatCard title="Gross Exposure" value={formatMoney(r.gross_exposure)} detail="Current deployed gross capital" tone="neutral" />
         <StatCard title="Net Exposure" value={formatMoney(r.net_exposure)} detail="Directional net capital" tone="neutral" />

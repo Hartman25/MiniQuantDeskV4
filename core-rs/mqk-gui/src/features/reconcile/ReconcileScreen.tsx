@@ -1,16 +1,24 @@
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
+import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime } from "../../lib/format";
-import type { SystemModel } from "../system/types";
 import { CausalityTraceViewer } from "../execution/components/CausalityTraceViewer";
 import { ExecutionReplayViewer } from "../execution/components/ExecutionReplayViewer";
+import { panelTruthRenderState } from "../system/truthRendering";
+import type { SystemModel } from "../system/types";
 
 export function ReconcileScreen({ model }: { model: SystemModel }) {
   const r = model.reconcileSummary;
+  const truthState = panelTruthRenderState(model, "reconcile");
+
+  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+    return <TruthStateNotice state={truthState} />;
+  }
 
   return (
     <div className="screen-grid desk-screen-grid">
+      {truthState ? <TruthStateNotice state={truthState} /> : null}
       <div className="summary-grid summary-grid-four">
         <StatCard
           title="Reconcile Status"
