@@ -13,11 +13,12 @@ use anyhow::Context;
 use chrono::Utc;
 use mqk_broker_paper::LockedPaperBroker;
 use mqk_execution::{
-    wiring::build_gateway, BrokerOrderMap, IntegrityGate, ReconcileGate, RiskDecision, RiskGate,
+    wiring::build_gateway, BrokerOrderMap, IntegrityGate, ReconcileGate,
 };
 use mqk_integrity::IntegrityState;
 use mqk_portfolio::PortfolioState;
 use mqk_reconcile::{ReconcileDiff, SnapshotFreshness, SnapshotWatermark};
+use mqk_runtime::runtime_risk::RuntimeRiskGate;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
@@ -31,6 +32,7 @@ const DAEMON_RUN_CONFIG_HASH: &str = "daemon-runtime-paper-v1";
 const EXECUTION_LOOP_INTERVAL: Duration = Duration::from_secs(1);
 const DEADMAN_TTL_SECONDS: i64 = 5;
 const DEV_ALLOW_NO_OPERATOR_TOKEN_ENV: &str = "MQK_DEV_ALLOW_NO_OPERATOR_TOKEN";
+const DAEMON_INITIAL_EQUITY_MICROS: i64 = 100_000 * 1_000_000;
 
 // ---------------------------------------------------------------------------
 // BusMsg — SSE event bus payload
@@ -130,15 +132,6 @@ impl IntegrityGate for StateIntegrityGate {
 }
 
 #[derive(Clone, Copy)]
-struct AllowRiskGate;
-
-impl RiskGate for AllowRiskGate {
-    fn evaluate_gate(&self) -> RiskDecision {
-        RiskDecision::Allow
-    }
-}
-
-#[derive(Clone, Copy)]
 struct CleanReconcileGate;
 
 impl ReconcileGate for CleanReconcileGate {
@@ -150,7 +143,7 @@ impl ReconcileGate for CleanReconcileGate {
 type DaemonOrchestrator = mqk_runtime::orchestrator::ExecutionOrchestrator<
     LockedPaperBroker,
     StateIntegrityGate,
-    AllowRiskGate,
+    RuntimeRiskGate,
     CleanReconcileGate,
     mqk_runtime::orchestrator::WallClock,
 >;
@@ -512,6 +505,14 @@ impl AppState {
                             "runtime": "mqk-daemon",
                             "adapter": DAEMON_ADAPTER_ID,
                             "mode": DAEMON_MODE,
+                            "risk": {
+                                "initial_equity_micros": DAEMON_INITIAL_EQUITY_MICROS,
+                                "daily_loss_limit": 0.05,
+                                "max_drawdown": 0.10,
+                                "reject_storm": {"max_rejects": 10},
+                                "pdt_auto_enabled": true,
+                                "missing_protective_stop_flattens": true,
+                            },
                         }),
                         host_fingerprint: self.node_id.clone(),
                     },
@@ -775,12 +776,22 @@ impl AppState {
             .await
             .map_err(|err| RuntimeLifecycleError::internal("load_broker_cursor failed", err))?;
 
+        let run = mqk_db::fetch_run(&db, run_id)
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("fetch_run failed", err))?;
+
+        let initial_equity_micros = run
+            .config_json
+            .pointer("/risk/initial_equity_micros")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+
         let gateway = build_gateway(
             LockedPaperBroker::new(),
             StateIntegrityGate {
                 integrity: Arc::clone(&self.integrity),
             },
-            AllowRiskGate,
+            RuntimeRiskGate::from_run_config(&run.config_json, initial_equity_micros),
             CleanReconcileGate,
         );
 
