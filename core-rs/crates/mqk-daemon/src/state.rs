@@ -12,9 +12,7 @@ use std::time::Duration;
 use anyhow::Context;
 use chrono::Utc;
 use mqk_broker_paper::LockedPaperBroker;
-use mqk_execution::{
-    wiring::build_gateway, BrokerOrderMap, IntegrityGate, ReconcileGate, RiskDecision, RiskGate,
-};
+use mqk_execution::{wiring::build_gateway, BrokerOrderMap, IntegrityGate, ReconcileGate};
 use mqk_integrity::IntegrityState;
 use mqk_portfolio::PortfolioState;
 use mqk_reconcile::{ReconcileDiff, SnapshotFreshness, SnapshotWatermark};
@@ -130,15 +128,6 @@ impl IntegrityGate for StateIntegrityGate {
 }
 
 #[derive(Clone, Copy)]
-struct AllowRiskGate;
-
-impl RiskGate for AllowRiskGate {
-    fn evaluate_gate(&self) -> RiskDecision {
-        RiskDecision::Allow
-    }
-}
-
-#[derive(Clone, Copy)]
 struct CleanReconcileGate;
 
 impl ReconcileGate for CleanReconcileGate {
@@ -150,7 +139,7 @@ impl ReconcileGate for CleanReconcileGate {
 type DaemonOrchestrator = mqk_runtime::orchestrator::ExecutionOrchestrator<
     LockedPaperBroker,
     StateIntegrityGate,
-    AllowRiskGate,
+    mqk_runtime::runtime_risk::RuntimeRiskGate,
     CleanReconcileGate,
     mqk_runtime::orchestrator::WallClock,
 >;
@@ -763,6 +752,15 @@ impl AppState {
         db: PgPool,
         run_id: Uuid,
     ) -> Result<DaemonOrchestrator, RuntimeLifecycleError> {
+        let run = mqk_db::fetch_run(&db, run_id)
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("fetch_run failed", err))?;
+        let initial_equity_micros = run
+            .config_json
+            .pointer("/risk/initial_equity_micros")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0);
+
         let mut order_map = BrokerOrderMap::new();
         let existing = mqk_db::broker_map_load(&db)
             .await
@@ -780,7 +778,12 @@ impl AppState {
             StateIntegrityGate {
                 integrity: Arc::clone(&self.integrity),
             },
-            AllowRiskGate,
+            mqk_runtime::runtime_risk::RuntimeRiskGate::from_run_config(
+                &run.config_json,
+                initial_equity_micros,
+                0,
+                0,
+            ),
             CleanReconcileGate,
         );
 
