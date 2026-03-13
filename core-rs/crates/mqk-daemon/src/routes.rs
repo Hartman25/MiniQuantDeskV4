@@ -27,11 +27,12 @@ use tracing::info;
 
 use crate::{
     api_types::{
-        DiagnosticsSnapshotResponse, ExecutionSummaryResponse, GateRefusedResponse, HealthResponse,
+        AlertItem, ArtifactRegistryResponse, AuditOperatorActionItem, DiagnosticsSnapshotResponse,
+        ExecutionSummaryResponse, FeedEventItem, GateRefusedResponse, HealthResponse,
         IntegrityResponse, PortfolioSummaryResponse, PreflightStatusResponse,
-        ReconcileSummaryResponse, RiskSummaryResponse, SystemStatusResponse,
-        TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
-        TradingPositionsResponse, TradingSnapshotResponse,
+        ReconcileSummaryResponse, RiskSummaryResponse, RuntimeLeadershipResponse,
+        SystemMetadataResponse, SystemStatusResponse, TradingAccountResponse, TradingFillsResponse,
+        TradingOrdersResponse, TradingPositionsResponse, TradingSnapshotResponse,
     },
     state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError},
 };
@@ -126,6 +127,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/portfolio/summary", get(portfolio_summary))
         .route("/api/v1/risk/summary", get(risk_summary))
         .route("/api/v1/reconcile/status", get(reconcile_status))
+        .route("/api/v1/alerts/active", get(alerts_active))
+        .route("/api/v1/events/feed", get(events_feed))
+        .route(
+            "/api/v1/audit/operator-actions",
+            get(audit_operator_actions),
+        )
+        .route("/api/v1/system/metadata", get(system_metadata))
+        .route(
+            "/api/v1/system/runtime-leadership",
+            get(system_runtime_leadership),
+        )
+        .route("/api/v1/audit/artifacts", get(audit_artifacts))
         // DAEMON-1: trading read APIs (placeholder until broker wiring exists)
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
@@ -670,6 +683,144 @@ pub(crate) async fn reconcile_status(State(st): State<Arc<AppState>>) -> impl In
             unmatched_broker_events: reconcile.unmatched_broker_events,
         }),
     )
+}
+
+pub(crate) async fn alerts_active(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+    let reconcile = st.current_reconcile_snapshot().await;
+
+    let mut alerts: Vec<AlertItem> = Vec::new();
+
+    if status.state == "halted" {
+        alerts.push(AlertItem {
+            id: "runtime-halted".to_string(),
+            severity: "critical".to_string(),
+            title: "Runtime halted".to_string(),
+            message: "Execution runtime is halted and requires operator intervention.".to_string(),
+            domain: "integrity".to_string(),
+            acknowledged: false,
+        });
+    }
+
+    if !status.integrity_armed {
+        alerts.push(AlertItem {
+            id: "integrity-disarmed".to_string(),
+            severity: "warning".to_string(),
+            title: "Integrity disarmed".to_string(),
+            message: "Integrity gate is disarmed; execution dispatch is blocked.".to_string(),
+            domain: "integrity".to_string(),
+            acknowledged: false,
+        });
+    }
+
+    if reconcile.status != "ok" {
+        alerts.push(AlertItem {
+            id: format!("reconcile-{}", reconcile.status),
+            severity: if reconcile.status == "unknown" {
+                "info".to_string()
+            } else {
+                "warning".to_string()
+            },
+            title: "Reconcile status not clean".to_string(),
+            message: format!(
+                "Reconcile status is '{}'{}",
+                reconcile.status,
+                reconcile
+                    .note
+                    .as_ref()
+                    .map(|n| format!(" ({n})"))
+                    .unwrap_or_default()
+            ),
+            domain: "reconcile".to_string(),
+            acknowledged: false,
+        });
+    }
+
+    (StatusCode::OK, Json(alerts)).into_response()
+}
+
+pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+
+    let event = FeedEventItem {
+        id: "daemon-status".to_string(),
+        at: chrono::Utc::now().to_rfc3339(),
+        severity: if status.state == "halted" {
+            "critical".to_string()
+        } else if status.integrity_armed {
+            "info".to_string()
+        } else {
+            "warning".to_string()
+        },
+        source: "mqk-daemon".to_string(),
+        text: format!(
+            "runtime_state={} integrity_armed={} deadman_status={}",
+            status.state, status.integrity_armed, status.deadman_status
+        ),
+    };
+
+    (StatusCode::OK, Json(vec![event])).into_response()
+}
+
+pub(crate) async fn audit_operator_actions(State(_st): State<Arc<AppState>>) -> impl IntoResponse {
+    let empty: Vec<AuditOperatorActionItem> = Vec::new();
+    (StatusCode::OK, Json(empty)).into_response()
+}
+
+pub(crate) async fn system_metadata(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(SystemMetadataResponse {
+            build_version: st.build.version.to_string(),
+            api_version: "v1".to_string(),
+            broker_adapter: "paper".to_string(),
+            endpoint_status: "ok".to_string(),
+        }),
+    )
+        .into_response()
+}
+
+pub(crate) async fn system_runtime_leadership(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(RuntimeLeadershipResponse {
+            leader_node: st.node_id.clone(),
+            leader_lease_state: if st.db.is_some() {
+                "unknown".to_string()
+            } else {
+                "lost".to_string()
+            },
+            generation_id: "unknown".to_string(),
+            restart_count_24h: 0,
+            last_restart_at: None,
+            post_restart_recovery_state: "unknown".to_string(),
+            recovery_checkpoint: "unavailable".to_string(),
+            checkpoints: Vec::new(),
+        }),
+    )
+        .into_response()
+}
+
+pub(crate) async fn audit_artifacts(State(_st): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(ArtifactRegistryResponse {
+            last_updated_at: None,
+            ready_count: 0,
+            pending_count: 0,
+            failed_count: 0,
+            artifacts: Vec::new(),
+        }),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

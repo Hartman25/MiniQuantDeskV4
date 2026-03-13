@@ -180,3 +180,91 @@ pub struct ReconcileSummaryResponse {
 pub struct DiagnosticsSnapshotResponse {
     pub snapshot: Option<ExecutionSnapshot>,
 }
+
+// ---------------------------------------------------------------------------
+// Operator-plane read coverage (DMON-08)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertItem {
+    pub id: String,
+    pub severity: String,
+    pub title: String,
+    pub message: String,
+    pub domain: String,
+    pub acknowledged: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedEventItem {
+    pub id: String,
+    pub at: String,
+    pub severity: String,
+    pub source: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditOperatorActionItem {
+    pub audit_ref: String,
+    pub at: String,
+    pub actor: String,
+    pub action_key: String,
+    pub environment: String,
+    pub target_scope: String,
+    pub result_state: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemMetadataResponse {
+    pub build_version: String,
+    pub api_version: String,
+    pub broker_adapter: String,
+    pub endpoint_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCheckpointResponse {
+    pub checkpoint_id: String,
+    pub checkpoint_type: String,
+    pub timestamp: String,
+    pub generation_id: String,
+    pub leader_node: String,
+    pub status: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeLeadershipResponse {
+    pub leader_node: String,
+    pub leader_lease_state: String,
+    pub generation_id: String,
+    pub restart_count_24h: usize,
+    pub last_restart_at: Option<String>,
+    pub post_restart_recovery_state: String,
+    pub recovery_checkpoint: String,
+    pub checkpoints: Vec<RuntimeCheckpointResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactRegistryItem {
+    pub artifact_id: String,
+    pub artifact_type: String,
+    pub created_at: String,
+    pub status: String,
+    pub linked_order_id: Option<String>,
+    pub linked_incident_id: Option<String>,
+    pub linked_run_id: Option<String>,
+    pub storage_path: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactRegistryResponse {
+    pub last_updated_at: Option<String>,
+    pub ready_count: usize,
+    pub pending_count: usize,
+    pub failed_count: usize,
+    pub artifacts: Vec<ArtifactRegistryItem>,
+}

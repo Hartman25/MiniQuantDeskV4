@@ -761,3 +761,115 @@ async fn api_reconcile_status_exists_and_is_explicitly_unknown() {
     assert_eq!(json["mismatched_fills"], 0);
     assert_eq!(json["unmatched_broker_events"], 0);
 }
+
+#[tokio::test]
+async fn api_alerts_active_reports_truthful_state_driven_alerts() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/alerts/active")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    let alerts = json.as_array().expect("alerts array");
+    assert!(!alerts.is_empty());
+    assert!(alerts
+        .iter()
+        .any(|a| a["id"] == "integrity-disarmed" && a["severity"] == "warning"));
+    assert!(alerts
+        .iter()
+        .any(|a| a["id"] == "reconcile-unknown" && a["severity"] == "info"));
+}
+
+#[tokio::test]
+async fn api_events_feed_exposes_current_status_event() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/events/feed")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    let feed = json.as_array().expect("feed array");
+    assert_eq!(feed.len(), 1);
+    assert_eq!(feed[0]["id"], "daemon-status");
+    assert_eq!(feed[0]["source"], "mqk-daemon");
+    assert_eq!(feed[0]["severity"], "warning");
+    assert!(feed[0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .contains("integrity_armed=false"));
+}
+
+#[tokio::test]
+async fn api_audit_metadata_runtime_and_artifact_surfaces_are_operator_honest() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    let audit_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/audit/operator-actions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (audit_status, audit_body) = call(routes::build_router(Arc::clone(&st)), audit_req).await;
+    assert_eq!(audit_status, StatusCode::OK);
+    assert_eq!(parse_json(audit_body), serde_json::json!([]));
+
+    let metadata_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/metadata")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (metadata_status, metadata_body) =
+        call(routes::build_router(Arc::clone(&st)), metadata_req).await;
+    assert_eq!(metadata_status, StatusCode::OK);
+    let metadata = parse_json(metadata_body);
+    assert_eq!(metadata["api_version"], "v1");
+    assert_eq!(metadata["broker_adapter"], "paper");
+    assert_eq!(metadata["endpoint_status"], "ok");
+
+    let leadership_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/runtime-leadership")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (leadership_status, leadership_body) =
+        call(routes::build_router(Arc::clone(&st)), leadership_req).await;
+    assert_eq!(leadership_status, StatusCode::OK);
+    let leadership = parse_json(leadership_body);
+    assert_eq!(leadership["leader_lease_state"], "lost");
+    assert_eq!(leadership["generation_id"], "unknown");
+    assert_eq!(leadership["post_restart_recovery_state"], "unknown");
+    assert_eq!(leadership["recovery_checkpoint"], "unavailable");
+    assert_eq!(leadership["checkpoints"], serde_json::json!([]));
+
+    let artifacts_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/audit/artifacts")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (artifacts_status, artifacts_body) =
+        call(routes::build_router(Arc::clone(&st)), artifacts_req).await;
+    assert_eq!(artifacts_status, StatusCode::OK);
+    let artifacts = parse_json(artifacts_body);
+    assert!(artifacts["last_updated_at"].is_null());
+    assert_eq!(artifacts["ready_count"], 0);
+    assert_eq!(artifacts["pending_count"], 0);
+    assert_eq!(artifacts["failed_count"], 0);
+    assert_eq!(artifacts["artifacts"], serde_json::json!([]));
+}
