@@ -15,7 +15,7 @@
 //! | `submit_order`  | `POST   /v2/orders`                    | AmbiguousSubmit on unknown timeout |
 //! | `cancel_order`  | `DELETE /v2/orders/{broker_order_id}`  | 404/422 → Reject                   |
 //! | `replace_order` | `GET+PATCH /v2/orders/{id}`            | Fetches filled_qty before PATCH    |
-//! | `fetch_events`  | `GET /v2/account/activities`           | Polling; FILL/PARTIAL_FILL only    |
+//! | `fetch_events`  | `GET /v2/account/activities`           | Polling; maps lifecycle activities  |
 //!
 //! # A5 inbound lifecycle status
 //!
@@ -24,19 +24,20 @@
 //! CancelReject, ReplaceAck, ReplaceReject, Reject - as proven by contract
 //! tests (C1-C10) and inbound lifecycle tests (IL-1-IL-11).
 //!
-//! **`fetch_events` production path (partial):** REST polling via
-//! `GET /v2/account/activities` only surfaces `FILL` and `PARTIAL_FILL`
-//! activities.  The following 6 lifecycle variants are **not delivered** by the
-//! current `fetch_events` implementation:
-//!   - `Ack` (Alpaca events: `new`, `pending_new`, `accepted`)
-//!   - `CancelAck` (Alpaca events: `canceled`, `expired`)
-//!   - `CancelReject` (Alpaca event: `cancel_rejected`)
-//!   - `ReplaceAck` (Alpaca event: `replaced`)
-//!   - `ReplaceReject` (Alpaca event: `replace_rejected`)
-//!   - `Reject` (Alpaca event: `rejected`)
+//! **`fetch_events` production path (authoritative classes):** REST polling via
+//! `GET /v2/account/activities` is normalized into canonical lifecycle events
+//! for these Alpaca activity classes:
+//!   - `NEW` / `PENDING_NEW` / `ACCEPTED` → `Ack`
+//!   - `PARTIAL_FILL` → `PartialFill`
+//!   - `FILL` → `Fill`
+//!   - `CANCELED` / `EXPIRED` → `CancelAck`
+//!   - `CANCEL_REJECTED` → `CancelReject`
+//!   - `REPLACED` → `ReplaceAck`
+//!   - `REPLACE_REJECTED` → `ReplaceReject`
+//!   - `REJECTED` → `Reject`
 //!
-//! A future patch must add the Alpaca websocket trade-update stream to deliver
-//! the full lifecycle through `fetch_events`.
+//! Unrecognized account activity classes are rejected by `activity_to_trade_update`
+//! and surfaced as a transient mapping error (fail-closed).
 //!
 //! # No randomness, no wall-clock reads
 //!
@@ -327,9 +328,6 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
             .or_else(|| state.rest_activity_after.clone());
         let mut events = Vec::new();
         for activity in &activities {
-            if !matches!(activity.activity_type.as_str(), "FILL" | "PARTIAL_FILL") {
-                continue;
-            }
             let order = self.fetch_order(&activity.order_id)?;
             let trade_update =
                 activity_to_trade_update(activity, &order).map_err(|e| BrokerError::Transient {
@@ -398,7 +396,8 @@ pub fn build_replace_body(
 /// Convert an `AlpacaOrderActivity` (REST polling) into an `AlpacaTradeUpdate`
 /// (normalizer input), given the full order state from a parallel order lookup.
 ///
-/// Only `"FILL"` and `"PARTIAL_FILL"` activity types are supported.
+/// Supported activity types are mapped deterministically to canonical lifecycle
+/// classes via the same event names consumed by `normalize_trade_update`.
 ///
 /// # Errors
 ///
@@ -409,8 +408,14 @@ pub fn activity_to_trade_update(
 ) -> Result<AlpacaTradeUpdate, String> {
     // Map Alpaca uppercase activity_type to normalizer event string.
     let event_type = match activity.activity_type.as_str() {
+        "NEW" | "PENDING_NEW" | "ACCEPTED" => "new",
         "FILL" => "fill",
         "PARTIAL_FILL" => "partial_fill",
+        "CANCELED" | "EXPIRED" => "canceled",
+        "CANCEL_REJECTED" => "cancel_rejected",
+        "REPLACED" => "replaced",
+        "REPLACE_REJECTED" => "replace_rejected",
+        "REJECTED" => "rejected",
         other => {
             return Err(format!(
                 "activity_to_trade_update: unsupported activity_type: {other:?}"

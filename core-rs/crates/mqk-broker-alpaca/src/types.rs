@@ -223,14 +223,18 @@ pub struct AlpacaOrderFull {
 // ---------------------------------------------------------------------------
 /// A single account activity record from `GET /v2/account/activities`.
 ///
-/// `fetch_events` uses this polling endpoint (in place of the websocket
-/// trade-update stream) to retrieve fill events.  Only `FILL` and
-/// `PARTIAL_FILL` activity types are converted to canonical `BrokerEvent`s.
+/// `fetch_events` uses this polling endpoint as broker ingress input and maps
+/// known order-lifecycle activity classes into canonical lifecycle events.
 ///
-/// Non-fill activities (dividends, rebates, adjustments) are silently
-/// skipped in `fetch_events`.  Ack / cancel / replace events are not
-/// available via REST polling; a websocket integration would be required
-/// to deliver those in real-time.
+/// Supported activity types:
+/// - `NEW` / `PENDING_NEW` / `ACCEPTED`
+/// - `PARTIAL_FILL` / `FILL`
+/// - `CANCELED` / `EXPIRED`
+/// - `CANCEL_REJECTED`
+/// - `REPLACED` / `REPLACE_REJECTED`
+/// - `REJECTED`
+///
+/// Unknown activity types are rejected by mapping logic (fail-closed).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AlpacaOrderActivity {
     /// Unique activity ID.
@@ -241,9 +245,7 @@ pub struct AlpacaOrderActivity {
     ///
     /// Format: `"YYYYMMDDHHMMSS{fraction}::{uuid}"`.
     pub id: String,
-    /// Activity type from Alpaca, e.g. `"FILL"`, `"PARTIAL_FILL"`, `"DIV"`.
-    ///
-    /// Only `FILL` and `PARTIAL_FILL` are processed; all others are skipped.
+    /// Activity type from Alpaca, e.g. `"NEW"`, `"FILL"`, `"CANCELED"`, `"DIV"`.
     pub activity_type: String,
     /// Alpaca broker-assigned order UUID.
     pub order_id: String,

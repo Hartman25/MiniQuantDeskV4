@@ -10,7 +10,8 @@
 //! L6  build_replace_body: limit price micros → decimal string at wire boundary.
 //! L7  activity_to_trade_update + normalize: FILL activity produces BrokerEvent::Fill.
 //! L8  activity_to_trade_update + normalize: PARTIAL_FILL activity produces PartialFill.
-//! L9  activity_to_trade_update: unknown activity_type returns Err (normalizer enforced).
+//! L9  activity_to_trade_update + normalize: non-fill lifecycle activities map canonically.
+//! L10 activity_to_trade_update: unknown activity_type returns Err (normalizer enforced).
 //! L10 BrokerEvent::Fill from activity carries deterministic broker_message_id format.
 //! L11 adapter submit_order fails with Transport/AmbiguousSubmit on unreachable URL.
 //! L12 adapter cancel_order fails with Transport on unreachable URL.
@@ -314,10 +315,66 @@ fn l8_partial_fill_activity_through_normalization_pipeline() {
     }
 }
 // ---------------------------------------------------------------------------
-// L9 - unknown activity_type returns Err (normalizer is NOT bypassed)
+// L9 - non-fill lifecycle activity types map through canonical normalization
 // ---------------------------------------------------------------------------
 #[test]
-fn l9_unknown_activity_type_returns_err_not_empty_event() {
+fn l9_non_fill_lifecycle_activity_types_map_canonically() {
+    let cases = [
+        ("NEW", "new", "Ack"),
+        ("PENDING_NEW", "new", "Ack"),
+        ("ACCEPTED", "new", "Ack"),
+        ("CANCELED", "canceled", "CancelAck"),
+        ("EXPIRED", "canceled", "CancelAck"),
+        ("CANCEL_REJECTED", "cancel_rejected", "CancelReject"),
+        ("REPLACED", "replaced", "ReplaceAck"),
+        ("REPLACE_REJECTED", "replace_rejected", "ReplaceReject"),
+        ("REJECTED", "rejected", "Reject"),
+    ];
+
+    for (activity_type, expected_event, expected_variant) in cases {
+        let activity = make_activity(
+            "20240615093200000::activity-l9",
+            activity_type,
+            "alpaca-broker-uuid-l9",
+            "2024-06-15T09:32:00.000000Z",
+            None,
+            None,
+            "buy",
+            "AAPL",
+        );
+        let order = make_order_full(
+            "alpaca-broker-uuid-l9",
+            "internal-ord-l9",
+            "AAPL",
+            "buy",
+            "100",
+            "0",
+        );
+        let trade_update = activity_to_trade_update(&activity, &order)
+            .expect("known lifecycle activity_type must map to trade update");
+        assert_eq!(trade_update.event, expected_event);
+        let normalized = normalize_trade_update(&trade_update)
+            .expect("mapped lifecycle trade update must normalize");
+        let variant_ok = match normalized {
+            BrokerEvent::Ack { .. } => expected_variant == "Ack",
+            BrokerEvent::CancelAck { .. } => expected_variant == "CancelAck",
+            BrokerEvent::CancelReject { .. } => expected_variant == "CancelReject",
+            BrokerEvent::ReplaceAck { .. } => expected_variant == "ReplaceAck",
+            BrokerEvent::ReplaceReject { .. } => expected_variant == "ReplaceReject",
+            BrokerEvent::Reject { .. } => expected_variant == "Reject",
+            _ => false,
+        };
+        assert!(
+            variant_ok,
+            "activity_type={activity_type} expected variant={expected_variant}, got {normalized:?}"
+        );
+    }
+}
+// ---------------------------------------------------------------------------
+// L10 - unknown activity_type returns Err (normalizer is NOT bypassed)
+// ---------------------------------------------------------------------------
+#[test]
+fn l10_unknown_activity_type_returns_err_not_empty_event() {
     // "DIV" (dividend) must not pass through the normalizer.
     let activity = make_activity(
         "20240615093200000::activity-l9",
@@ -349,7 +406,7 @@ fn l9_unknown_activity_type_returns_err_not_empty_event() {
     );
 }
 #[test]
-fn l9_non_fill_activity_not_silently_normalized() {
+fn l10_non_fill_activity_not_silently_normalized() {
     for activity_type in &["ACATC", "ACATS", "CSD", "CSW", "PTC", "REORG", "SSO", "SSP"] {
         let activity = make_activity(
             "act-id",
