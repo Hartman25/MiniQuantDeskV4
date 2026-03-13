@@ -337,6 +337,16 @@ where
                 Err(e) => {
                     // A3: per-class outbox row disposition.
                     use mqk_execution::{GateRefusal, SubmitError};
+                    let submit_cleanup_failure =
+                        |cleanup_step: &str, cleanup_err: anyhow::Error| {
+                            anyhow!(
+                            "SUBMIT_CLEANUP_PERSISTENCE_FAILURE: order_id={} cleanup_step={} submit_error={} cleanup_error={}",
+                            order_id,
+                            cleanup_step,
+                            e,
+                            cleanup_err
+                        )
+                        };
                     match &e {
                         SubmitError::Gate(GateRefusal::RiskBlocked(denial)) => {
                             // B2: capture the structured risk denial for the B4
@@ -353,14 +363,28 @@ where
                             // Gate refused before touching the broker.
                             // Row is DISPATCHING but request never left.
                             // Mark FAILED; requires operator review.
-                            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                            if let Err(cleanup_err) =
+                                mqk_db::outbox_mark_failed(&self.pool, &order_id).await
+                            {
+                                return Err(submit_cleanup_failure(
+                                    "outbox_mark_failed",
+                                    cleanup_err.into(),
+                                ));
+                            }
                         }
                         SubmitError::Gate(_) => {
                             // Other gate refusals (IntegrityDisarmed, ReconcileNotClean)
                             // - gate refused before touching the broker.
                             // Row is DISPATCHING but request never left.
                             // Mark FAILED; requires operator review.
-                            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                            if let Err(cleanup_err) =
+                                mqk_db::outbox_mark_failed(&self.pool, &order_id).await
+                            {
+                                return Err(submit_cleanup_failure(
+                                    "outbox_mark_failed",
+                                    cleanup_err.into(),
+                                ));
+                            }
                         }
                         SubmitError::Broker(be) if be.requires_halt() => {
                             let now = self.time_source.now_utc();
@@ -368,27 +392,53 @@ where
                                 // A4: Transition DISPATCHING → AMBIGUOUS (explicit quarantine).
                                 // Row cannot re-enter dispatch without explicit operator/reconcile
                                 // release via outbox_reset_ambiguous_to_pending.
-                                let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
+                                if let Err(cleanup_err) =
+                                    mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await
+                                {
+                                    return Err(submit_cleanup_failure(
+                                        "outbox_mark_ambiguous",
+                                        cleanup_err.into(),
+                                    ));
+                                }
                                 // Halt+disarm - "AmbiguousSubmit" is now a valid DB reason
                                 // (migration 0020). Phase-0b quarantine blocks any restart.
-                                let _ = persist_halt_and_disarm(
+                                if let Err(cleanup_err) = persist_halt_and_disarm(
                                     &self.pool,
                                     self.run_id,
                                     now,
                                     "AmbiguousSubmit",
                                 )
-                                .await;
+                                .await
+                                {
+                                    return Err(submit_cleanup_failure(
+                                        "persist_halt_and_disarm(AmbiguousSubmit)",
+                                        cleanup_err,
+                                    ));
+                                }
                             } else {
                                 // AuthSession: credentials revoked - mark FAILED + halt.
                                 // "AuthSession" is now a valid DB reason (migration 0020).
-                                let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
-                                let _ = persist_halt_and_disarm(
+                                if let Err(cleanup_err) =
+                                    mqk_db::outbox_mark_failed(&self.pool, &order_id).await
+                                {
+                                    return Err(submit_cleanup_failure(
+                                        "outbox_mark_failed",
+                                        cleanup_err.into(),
+                                    ));
+                                }
+                                if let Err(cleanup_err) = persist_halt_and_disarm(
                                     &self.pool,
                                     self.run_id,
                                     now,
                                     "AuthSession",
                                 )
-                                .await;
+                                .await
+                                {
+                                    return Err(submit_cleanup_failure(
+                                        "persist_halt_and_disarm(AuthSession)",
+                                        cleanup_err,
+                                    ));
+                                }
                             }
                         }
                         SubmitError::Broker(be) if be.is_safe_pre_send_retry() => {
@@ -402,18 +452,38 @@ where
                         SubmitError::Broker(be) if be.is_ambiguous_send_outcome() => {
                             // Ambiguous transport/broker outcome - fail closed.
                             let now = self.time_source.now_utc();
-                            let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
-                            let _ = persist_halt_and_disarm(
+                            if let Err(cleanup_err) =
+                                mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await
+                            {
+                                return Err(submit_cleanup_failure(
+                                    "outbox_mark_ambiguous",
+                                    cleanup_err.into(),
+                                ));
+                            }
+                            if let Err(cleanup_err) = persist_halt_and_disarm(
                                 &self.pool,
                                 self.run_id,
                                 now,
                                 "AmbiguousSubmit",
                             )
-                            .await;
+                            .await
+                            {
+                                return Err(submit_cleanup_failure(
+                                    "persist_halt_and_disarm(AmbiguousSubmit)",
+                                    cleanup_err,
+                                ));
+                            }
                         }
                         SubmitError::Broker(_) => {
                             // Reject / Transient: mark FAILED, requires operator.
-                            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                            if let Err(cleanup_err) =
+                                mqk_db::outbox_mark_failed(&self.pool, &order_id).await
+                            {
+                                return Err(submit_cleanup_failure(
+                                    "outbox_mark_failed",
+                                    cleanup_err.into(),
+                                ));
+                            }
                             eprintln!(
                                 "WARN broker_submit_non_retryable order_id={order_id} error={e}"
                             );
