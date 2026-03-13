@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::state::{AppState, RuntimeLifecycleError};
+use crate::state::{AppState, RestartTruthSnapshot, RuntimeLifecycleError};
 
 #[derive(Debug, Serialize)]
 pub struct ControlStatus {
@@ -255,12 +255,40 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn restart() -> Response {
+async fn restart(State(state): State<Arc<AppState>>) -> Response {
+    let restart_truth = match state.restart_truth_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return lifecycle_error_response(err);
+        }
+    };
+
+    restart_not_authoritative_response(restart_truth)
+}
+
+fn restart_not_authoritative_response(restart_truth: RestartTruthSnapshot) -> Response {
+    let conflict_note = if restart_truth.durable_active_without_local_ownership {
+        "durable active run exists without local runtime ownership; restart would overstate authority"
+    } else if restart_truth.local_owned_run_id.is_some() {
+        "local runtime is active but restart authority is not yet durable/proven"
+    } else {
+        "no active local runtime; restart intent is not authoritative"
+    };
+
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(serde_json::json!({
             "error": "GATE_REFUSED: /control/restart is disabled because daemon-owned restart semantics are not authoritative yet",
-            "gate": "restart_not_authoritative"
+            "gate": "restart_not_authoritative",
+            "restart_authority": "not_authoritative",
+            "requested_action": "restart",
+            "achieved_action": "none",
+            "control_truth": {
+                "local_owned_run_id": restart_truth.local_owned_run_id,
+                "durable_active_run_id": restart_truth.durable_active_run_id,
+                "durable_active_without_local_ownership": restart_truth.durable_active_without_local_ownership,
+                "note": conflict_note,
+            }
         })),
     )
         .into_response()

@@ -578,6 +578,13 @@ async fn control_restart_fails_closed_if_not_authoritative() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let json = parse_json(body);
     assert_eq!(json["gate"], "restart_not_authoritative");
+    assert_eq!(json["restart_authority"], "not_authoritative");
+    assert_eq!(json["requested_action"], "restart");
+    assert_eq!(json["achieved_action"], "none");
+    assert_eq!(
+        json["control_truth"]["durable_active_without_local_ownership"],
+        false
+    );
 }
 
 #[tokio::test]
@@ -616,4 +623,52 @@ async fn durable_halted_run_is_reported_as_halted_by_operator_surfaces() {
     assert!(matches!(run.status, mqk_db::RunStatus::Halted));
 
     st.stop_for_shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn control_restart_surfaces_durable_runtime_conflict_truth() {
+    let pool = lifecycle_pool().await;
+    let run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"mqk-daemon-rt02-restart-conflict");
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: chrono::Utc::now(),
+            git_hash: "TEST".to_string(),
+            config_hash: "daemon-runtime-paper-v1".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "TESTHOST".to_string(),
+        },
+    )
+    .await
+    .expect("insert run");
+    mqk_db::arm_run(&pool, run_id).await.expect("arm run");
+    mqk_db::begin_run(&pool, run_id).await.expect("begin run");
+
+    let st = Arc::new(state::AppState::new_with_db(pool));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/control/restart")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(r#"{"reason":"operator request"}"#))
+        .unwrap();
+    let (status, body) = call(make_router(st), req).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let json = parse_json(body);
+    assert_eq!(json["gate"], "restart_not_authoritative");
+    assert_eq!(json["restart_authority"], "not_authoritative");
+    assert_eq!(json["requested_action"], "restart");
+    assert_eq!(json["achieved_action"], "none");
+    assert_eq!(
+        json["control_truth"]["durable_active_run_id"],
+        run_id.to_string()
+    );
+    assert_eq!(
+        json["control_truth"]["durable_active_without_local_ownership"],
+        true
+    );
 }

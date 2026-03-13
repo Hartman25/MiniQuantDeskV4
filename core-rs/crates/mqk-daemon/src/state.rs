@@ -88,6 +88,13 @@ pub struct ReconcileStatusSnapshot {
     pub note: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RestartTruthSnapshot {
+    pub local_owned_run_id: Option<Uuid>,
+    pub durable_active_run_id: Option<Uuid>,
+    pub durable_active_without_local_ownership: bool,
+}
+
 #[derive(Debug)]
 pub enum RuntimeLifecycleError {
     ServiceUnavailable(String),
@@ -318,6 +325,30 @@ impl AppState {
             }
         }
         self.reconcile_status.read().await.clone()
+    }
+
+    pub async fn restart_truth_snapshot(
+        &self,
+    ) -> Result<RestartTruthSnapshot, RuntimeLifecycleError> {
+        let local_owned_run_id = self.active_owned_run_id().await;
+        let durable_active_run_id = match self.db.as_ref() {
+            Some(db) => mqk_db::fetch_active_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
+                .await
+                .map_err(|err| {
+                    RuntimeLifecycleError::internal("restart active-run lookup failed", err)
+                })?
+                .map(|run| run.run_id),
+            None => None,
+        };
+
+        let durable_active_without_local_ownership =
+            durable_active_run_id.is_some() && local_owned_run_id != durable_active_run_id;
+
+        Ok(RestartTruthSnapshot {
+            local_owned_run_id,
+            durable_active_run_id,
+            durable_active_without_local_ownership,
+        })
     }
 
     pub async fn current_status_snapshot(&self) -> Result<StatusSnapshot, RuntimeLifecycleError> {
