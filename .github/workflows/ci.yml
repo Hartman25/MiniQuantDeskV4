@@ -37,6 +37,39 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+
+  gui-contract:
+    name: "GUI Build + Daemon Contract Gate"
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./core-rs
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: core-rs/mqk-gui/package-lock.json
+
+      - name: GUI build gate (tsc + vite build)
+        run: |
+          cd mqk-gui
+          npm ci
+          npm run build
+
+      - name: Show explicit GUI/daemon contract waivers
+        run: |
+          test -s ../docs/ci/gui_daemon_contract_waivers.md
+          cat ../docs/ci/gui_daemon_contract_waivers.md
+
+      - name: Daemon/GUI contract gate (authoritative endpoints)
+        run: cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate
   guards:
     name: "Safety Guards (P0-1)"
     runs-on: ubuntu-latest
