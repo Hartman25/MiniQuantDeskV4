@@ -1720,17 +1720,19 @@ pub async fn inbox_insert_deduped(
 
 /// Insert a broker message/fill into oms_inbox with explicit identity fields.
 ///
-/// Dedupe rule is transport-only and explicit:
-/// - conflict key: `(run_id, broker_message_id)`
-/// - `broker_fill_id` is optional economic identity metadata and does NOT
-///   participate in inbox insertion dedupe.
+/// Dedupe rules:
+/// - transport conflict key: `(run_id, broker_message_id)`
+/// - economic fill conflict key: `(run_id, broker_fill_id)` when
+///   `broker_fill_id` is present
+/// - explicit fallback: if `broker_fill_id` is absent, dedupe remains
+///   transport-only.
 pub async fn inbox_insert_deduped_with_identity(
     pool: &PgPool,
     run_id: Uuid,
     identity: &BrokerEventIdentity,
     message_json: Value,
 ) -> Result<bool> {
-    let row: Option<(i64,)> = sqlx::query_as(
+    let row: Option<(i64,)> = match sqlx::query_as(
         r#"
         insert into oms_inbox (
             run_id,
@@ -1753,7 +1755,15 @@ pub async fn inbox_insert_deduped_with_identity(
     .bind(message_json)
     .fetch_optional(pool)
     .await
-    .context("inbox_insert_deduped_with_identity failed")?;
+    {
+        Ok(row) => row,
+        Err(e) => {
+            if is_unique_constraint_violation(&e, "uq_inbox_run_broker_fill_id") {
+                return Ok(false);
+            }
+            return Err(anyhow::Error::new(e).context("inbox_insert_deduped_with_identity failed"));
+        }
+    };
 
     Ok(row.is_some())
 }

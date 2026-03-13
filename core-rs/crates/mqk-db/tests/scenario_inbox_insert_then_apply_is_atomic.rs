@@ -255,7 +255,7 @@ async fn broker_message_id_uniqueness_is_run_scoped() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn transport_dedupe_is_distinct_from_economic_fill_identity() -> anyhow::Result<()> {
+async fn economic_fill_identity_is_durably_deduped() -> anyhow::Result<()> {
     let url = std::env::var(mqk_db::ENV_DB_URL).expect("MQK_DATABASE_URL must be set");
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
@@ -311,8 +311,8 @@ async fn transport_dedupe_is_distinct_from_economic_fill_identity() -> anyhow::R
     )
     .await?;
     assert!(
-        second,
-        "a distinct broker_message_id should insert even when broker_fill_id matches"
+        !second,
+        "same broker_fill_id under a different broker_message_id must dedupe durably"
     );
 
     let duplicate_transport = mqk_db::inbox_insert_deduped_with_identity(
@@ -330,6 +330,40 @@ async fn transport_dedupe_is_distinct_from_economic_fill_identity() -> anyhow::R
     assert!(
         !duplicate_transport,
         "transport dedupe should still be keyed by broker_message_id"
+    );
+
+    let no_fill_msg_1 = format!("transport-no-fill-1-{}", Uuid::new_v4());
+    let no_fill_msg_2 = format!("transport-no-fill-2-{}", Uuid::new_v4());
+
+    let no_fill_first = mqk_db::inbox_insert_deduped_with_identity(
+        &pool,
+        run_id,
+        &mqk_db::BrokerEventIdentity {
+            broker_message_id: no_fill_msg_1,
+            broker_fill_id: None,
+            broker_sequence_id: None,
+            broker_timestamp: None,
+        },
+        json!({"msg": 3}),
+    )
+    .await?;
+    assert!(no_fill_first, "first transport-only insert should succeed");
+
+    let no_fill_second = mqk_db::inbox_insert_deduped_with_identity(
+        &pool,
+        run_id,
+        &mqk_db::BrokerEventIdentity {
+            broker_message_id: no_fill_msg_2,
+            broker_fill_id: None,
+            broker_sequence_id: None,
+            broker_timestamp: None,
+        },
+        json!({"msg": 4}),
+    )
+    .await?;
+    assert!(
+        no_fill_second,
+        "when broker_fill_id is absent, fallback behavior remains transport-only"
     );
 
     Ok(())
