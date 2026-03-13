@@ -140,6 +140,24 @@ pub struct ExecutionSummaryResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionOrderRowResponse {
+    pub internal_order_id: String,
+    pub broker_order_id: Option<String>,
+    pub symbol: String,
+    pub strategy_id: String,
+    pub side: String,
+    pub order_type: String,
+    pub requested_qty: f64,
+    pub filled_qty: f64,
+    pub current_status: String,
+    pub current_stage: String,
+    pub age_ms: i64,
+    pub has_warning: bool,
+    pub has_critical: bool,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioSummaryResponse {
     pub account_equity: f64,
     pub cash: f64,
@@ -162,6 +180,17 @@ pub struct RiskSummaryResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskDenialRowResponse {
+    pub id: String,
+    pub at: String,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub rule: String,
+    pub message: String,
+    pub severity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReconcileSummaryResponse {
     pub status: String,
     pub last_run_at: Option<String>,
@@ -170,6 +199,17 @@ pub struct ReconcileSummaryResponse {
     pub mismatched_orders: usize,
     pub mismatched_fills: usize,
     pub unmatched_broker_events: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconcileMismatchRowResponse {
+    pub id: String,
+    pub domain: String,
+    pub symbol: String,
+    pub internal_value: String,
+    pub broker_value: String,
+    pub status: String,
+    pub note: String,
 }
 
 // ---------------------------------------------------------------------------

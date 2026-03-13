@@ -761,3 +761,83 @@ async fn api_reconcile_status_exists_and_is_explicitly_unknown() {
     assert_eq!(json["mismatched_fills"], 0);
     assert_eq!(json["unmatched_broker_events"], 0);
 }
+
+#[tokio::test]
+async fn api_execution_orders_maps_snapshot_orders_to_rows() {
+    use chrono::{Duration, Utc};
+    use mqk_schemas::{BrokerAccount, BrokerOrder, BrokerSnapshot};
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    {
+        let mut lock = st.broker_snapshot.write().await;
+        *lock = Some(BrokerSnapshot {
+            captured_at_utc: Utc::now(),
+            account: BrokerAccount {
+                equity: "1000".to_string(),
+                cash: "500".to_string(),
+                currency: "USD".to_string(),
+            },
+            positions: Vec::new(),
+            fills: Vec::new(),
+            orders: vec![BrokerOrder {
+                broker_order_id: "bo-1".to_string(),
+                client_order_id: "io-1".to_string(),
+                symbol: "AAPL".to_string(),
+                side: "buy".to_string(),
+                r#type: "limit".to_string(),
+                status: "submitted".to_string(),
+                qty: "10".to_string(),
+                limit_price: Some("100".to_string()),
+                stop_price: None,
+                created_at_utc: Utc::now() - Duration::minutes(6),
+            }],
+        });
+    }
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/execution/orders")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json.as_array().unwrap().len(), 1);
+    let row = &json[0];
+    assert_eq!(row["internal_order_id"], "io-1");
+    assert_eq!(row["broker_order_id"], "bo-1");
+    assert_eq!(row["current_status"], "submitted");
+    assert_eq!(row["current_stage"], "dispatching");
+    assert_eq!(row["requested_qty"].as_f64().unwrap(), 10.0);
+    assert_eq!(row["filled_qty"].as_f64().unwrap(), 0.0);
+    assert_eq!(row["strategy_id"], "unknown");
+    assert_eq!(row["has_warning"], true);
+    assert_eq!(row["has_critical"], false);
+}
+
+#[tokio::test]
+async fn api_risk_denials_and_reconcile_mismatches_are_empty_without_durable_state() {
+    let router = make_router();
+
+    let risk_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/denials")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (risk_status, risk_body) = call(router.clone(), risk_req).await;
+    assert_eq!(risk_status, StatusCode::OK);
+    assert_eq!(parse_json(risk_body), serde_json::json!([]));
+
+    let reconcile_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/reconcile/mismatches")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (reconcile_status, reconcile_body) = call(router, reconcile_req).await;
+    assert_eq!(reconcile_status, StatusCode::OK);
+    assert_eq!(parse_json(reconcile_body), serde_json::json!([]));
+}

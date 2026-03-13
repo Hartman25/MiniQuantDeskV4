@@ -27,9 +27,10 @@ use tracing::info;
 
 use crate::{
     api_types::{
-        DiagnosticsSnapshotResponse, ExecutionSummaryResponse, GateRefusedResponse, HealthResponse,
-        IntegrityResponse, PortfolioSummaryResponse, PreflightStatusResponse,
-        ReconcileSummaryResponse, RiskSummaryResponse, SystemStatusResponse,
+        DiagnosticsSnapshotResponse, ExecutionOrderRowResponse, ExecutionSummaryResponse,
+        GateRefusedResponse, HealthResponse, IntegrityResponse, PortfolioSummaryResponse,
+        PreflightStatusResponse, ReconcileMismatchRowResponse, ReconcileSummaryResponse,
+        RiskDenialRowResponse, RiskSummaryResponse, SystemStatusResponse,
         TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
@@ -123,9 +124,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/system/status", get(system_status))
         .route("/api/v1/system/preflight", get(system_preflight))
         .route("/api/v1/execution/summary", get(execution_summary))
+        .route("/api/v1/execution/orders", get(execution_orders))
         .route("/api/v1/portfolio/summary", get(portfolio_summary))
         .route("/api/v1/risk/summary", get(risk_summary))
+        .route("/api/v1/risk/denials", get(risk_denials))
         .route("/api/v1/reconcile/status", get(reconcile_status))
+        .route("/api/v1/reconcile/mismatches", get(reconcile_mismatches))
         // DAEMON-1: trading read APIs (placeholder until broker wiring exists)
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
@@ -577,6 +581,53 @@ pub(crate) async fn execution_summary(State(st): State<Arc<AppState>>) -> impl I
     (StatusCode::OK, Json(summary)).into_response()
 }
 
+pub(crate) async fn execution_orders(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.broker_snapshot.read().await.clone();
+    let now = chrono::Utc::now();
+
+    let rows = if let Some(snapshot) = snap {
+        snapshot
+            .orders
+            .into_iter()
+            .map(|order| {
+                let age_ms = (now - order.created_at_utc).num_milliseconds().max(0);
+                let current_status = order.status;
+                let current_stage = if is_terminal_order_status(current_status.as_str()) {
+                    "terminal"
+                } else if is_dispatching_order_status(current_status.as_str()) {
+                    "dispatching"
+                } else if is_pending_order_status(current_status.as_str()) {
+                    "pending"
+                } else {
+                    "active"
+                }
+                .to_string();
+
+                ExecutionOrderRowResponse {
+                    internal_order_id: order.client_order_id,
+                    broker_order_id: Some(order.broker_order_id),
+                    symbol: order.symbol,
+                    strategy_id: "unknown".to_string(),
+                    side: order.side,
+                    order_type: order.r#type,
+                    requested_qty: parse_decimal(&order.qty),
+                    filled_qty: 0.0,
+                    current_status,
+                    current_stage,
+                    age_ms,
+                    has_warning: age_ms >= 300_000,
+                    has_critical: false,
+                    updated_at: order.created_at_utc.to_rfc3339(),
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    (StatusCode::OK, Json(rows)).into_response()
+}
+
 pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
 
@@ -670,6 +721,102 @@ pub(crate) async fn reconcile_status(State(st): State<Arc<AppState>>) -> impl In
             unmatched_broker_events: reconcile.unmatched_broker_events,
         }),
     )
+}
+
+pub(crate) async fn risk_denials(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let durable_risk = if let Some(db) = st.db.as_ref() {
+        mqk_db::load_risk_block_state(db).await.ok().flatten()
+    } else {
+        None
+    };
+
+    let rows = durable_risk
+        .filter(|state| state.blocked)
+        .map(|state| {
+            vec![RiskDenialRowResponse {
+                id: "durable-risk-block".to_string(),
+                at: state.updated_at_utc.to_rfc3339(),
+                strategy_id: "unknown".to_string(),
+                symbol: "*".to_string(),
+                rule: "risk_block_state".to_string(),
+                message: state
+                    .reason
+                    .unwrap_or_else(|| "Risk gate blocked by durable daemon state".to_string()),
+                severity: "critical".to_string(),
+            }]
+        })
+        .unwrap_or_default();
+
+    (StatusCode::OK, Json(rows)).into_response()
+}
+
+pub(crate) async fn reconcile_mismatches(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let reconcile = st.current_reconcile_snapshot().await;
+    let status = if reconcile.status.eq_ignore_ascii_case("ok") {
+        "ok"
+    } else {
+        "warning"
+    }
+    .to_string();
+
+    let mut mismatches = Vec::new();
+    if reconcile.mismatched_positions > 0 {
+        mismatches.push(ReconcileMismatchRowResponse {
+            id: "reconcile-position-mismatch".to_string(),
+            domain: "position".to_string(),
+            symbol: "*".to_string(),
+            internal_value: reconcile.mismatched_positions.to_string(),
+            broker_value: "unknown".to_string(),
+            status: status.clone(),
+            note: reconcile
+                .note
+                .clone()
+                .unwrap_or_else(|| "Position mismatches are tracked as an aggregate count".to_string()),
+        });
+    }
+    if reconcile.mismatched_orders > 0 {
+        mismatches.push(ReconcileMismatchRowResponse {
+            id: "reconcile-order-mismatch".to_string(),
+            domain: "order".to_string(),
+            symbol: "*".to_string(),
+            internal_value: reconcile.mismatched_orders.to_string(),
+            broker_value: "unknown".to_string(),
+            status: status.clone(),
+            note: reconcile
+                .note
+                .clone()
+                .unwrap_or_else(|| "Order mismatches are tracked as an aggregate count".to_string()),
+        });
+    }
+    if reconcile.mismatched_fills > 0 {
+        mismatches.push(ReconcileMismatchRowResponse {
+            id: "reconcile-fill-mismatch".to_string(),
+            domain: "fill".to_string(),
+            symbol: "*".to_string(),
+            internal_value: reconcile.mismatched_fills.to_string(),
+            broker_value: "unknown".to_string(),
+            status: status.clone(),
+            note: reconcile
+                .note
+                .clone()
+                .unwrap_or_else(|| "Fill mismatches are tracked as an aggregate count".to_string()),
+        });
+    }
+    if reconcile.unmatched_broker_events > 0 {
+        mismatches.push(ReconcileMismatchRowResponse {
+            id: "reconcile-event-mismatch".to_string(),
+            domain: "event".to_string(),
+            symbol: "*".to_string(),
+            internal_value: "unknown".to_string(),
+            broker_value: reconcile.unmatched_broker_events.to_string(),
+            status,
+            note: reconcile
+                .note
+                .unwrap_or_else(|| "Unmatched broker events are tracked as an aggregate count".to_string()),
+        });
+    }
+
+    (StatusCode::OK, Json(mismatches)).into_response()
 }
 
 // ---------------------------------------------------------------------------
