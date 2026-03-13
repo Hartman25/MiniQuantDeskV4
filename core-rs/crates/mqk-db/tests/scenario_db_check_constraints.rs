@@ -7,7 +7,7 @@
 //! `check_violation`), independent of any application-layer validation.
 //!
 //! Columns / consistency rules verified:
-//!   - `oms_outbox.status`               (PENDING|CLAIMED|SENT|ACKED|FAILED)
+//!   - `oms_outbox.status`               (PENDING|CLAIMED|DISPATCHING|SENT|ACKED|FAILED|AMBIGUOUS)
 //!   - `runs.mode`                       (PAPER|LIVE|BACKTEST)
 //!   - `sys_arm_state.state`             (ARMED|DISARMED)
 //!   - `sys_arm_state.reason`            (nullable DisarmReason variants)
@@ -155,7 +155,40 @@ async fn check_constraints_reject_invalid_enum_values() -> anyhow::Result<()> {
     );
 
     // -----------------------------------------------------------------------
-    // 5. sys_reconcile_checkpoint.verdict CHECK — invalid verdict must be rejected
+    // 5. sys_arm_state.reason CHECK — currently-used runtime reasons must be accepted
+    // -----------------------------------------------------------------------
+
+    for valid_reason in [
+        "BootDefault",
+        "ManualDisarm",
+        "DeadmanHalt",
+        "IntegrityViolation",
+        "ReconcileDrift",
+        "RecoveryQuarantine",
+        "AmbiguousSubmit",
+        "AuthSession",
+        "OperatorDisarm",
+        "OperatorHalt",
+        "DeadmanExpired",
+        "DeadmanSupervisorFailure",
+        "DeadmanHeartbeatPersistFailed",
+        "LeaderLeaseLost",
+        "LeaderLeaseUnavailable",
+    ] {
+        sqlx::query(
+            r#"
+            insert into sys_arm_state (sentinel_id, state, reason)
+            values (1, 'DISARMED', $1)
+            on conflict (sentinel_id) do update set reason = excluded.reason
+            "#,
+        )
+        .bind(valid_reason)
+        .execute(&pool)
+        .await?;
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. sys_reconcile_checkpoint.verdict CHECK — invalid verdict must be rejected
     // -----------------------------------------------------------------------
     //
     // Important: sys_reconcile_checkpoint has NOT NULL columns beyond the ones
@@ -180,7 +213,7 @@ async fn check_constraints_reject_invalid_enum_values() -> anyhow::Result<()> {
     );
 
     // -----------------------------------------------------------------------
-    // 6. oms_outbox claimed_metadata_present CHECK (FC-4)
+    // 7. oms_outbox claimed_metadata_present CHECK (FC-4)
     //    CLAIMED row without claimed_at_utc / claimed_by must be rejected.
     // -----------------------------------------------------------------------
 
@@ -202,7 +235,7 @@ async fn check_constraints_reject_invalid_enum_values() -> anyhow::Result<()> {
     );
 
     // -----------------------------------------------------------------------
-    // 7. oms_outbox pending_metadata_absent CHECK (FC-4)
+    // 8. oms_outbox pending_metadata_absent CHECK (FC-4)
     //    PENDING row with claimed_at_utc set must be rejected.
     // -----------------------------------------------------------------------
     //
