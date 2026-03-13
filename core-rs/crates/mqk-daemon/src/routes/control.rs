@@ -53,6 +53,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
         Ok(snapshot) => snapshot,
         Err(err) => return lifecycle_error_response(err),
     };
+    let local_owned_run_id = state.locally_owned_run_id().await;
+    let run_owned_locally = local_owned_run_id
+        .zip(runtime_status.active_run_id)
+        .is_some_and(|(local, active)| local == active);
     let reconcile_status = state.current_reconcile_snapshot().await;
     let (integrity_state, integrity_reason) = match mqk_db::load_arm_state(db).await {
         Ok(Some((state, reason))) => (state, reason),
@@ -153,7 +157,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             lease_expired: Some(lease_expired),
             active_run_id: runtime_status.active_run_id,
             run_state: runtime_status.state.clone(),
-            run_owned_locally: runtime_status.state == "running",
+            run_owned_locally,
             run_notes: runtime_status.notes.clone(),
             reconcile_status: reconcile_status.status.clone(),
             reconcile_notes: reconcile_status.note.clone(),
@@ -172,7 +176,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             lease_expired: None,
             active_run_id: runtime_status.active_run_id,
             run_state: runtime_status.state.clone(),
-            run_owned_locally: runtime_status.state == "running",
+            run_owned_locally,
             run_notes: runtime_status.notes.clone(),
             reconcile_status: reconcile_status.status.clone(),
             reconcile_notes: reconcile_status.note.clone(),

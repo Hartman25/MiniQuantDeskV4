@@ -536,6 +536,37 @@ async fn control_status_reflects_real_runtime_truth() {
     assert_eq!(body["deadman_reason"], "DeadmanHalt");
     assert_eq!(body["reconcile_status"], "unknown");
     assert_eq!(body["run_state"], "idle");
+    assert_eq!(body["run_owned_locally"], false);
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn status_does_not_overstate_running_on_local_handle_without_durable_active_run() {
+    let st = daemon_state().await;
+    arm(&st).await;
+
+    let started = start(&st).await;
+    let run_id = Uuid::parse_str(started["active_run_id"].as_str().expect("run_id string"))
+        .expect("valid run uuid");
+
+    let pool = st.db.as_ref().expect("db configured");
+    mqk_db::stop_run(pool, run_id)
+        .await
+        .expect("stop run durably");
+
+    let status_json = status(&st).await;
+    assert_eq!(status_json["state"], "unknown");
+    assert_eq!(
+        status_json["active_run_id"],
+        serde_json::Value::Null,
+        "durable stopped run must not be reported as running via local ownership"
+    );
+
+    let control = control_status(&st).await;
+    assert_eq!(control["run_state"], "unknown");
+    assert_eq!(control["run_owned_locally"], false);
+
+    st.stop_for_shutdown().await;
 }
 
 #[tokio::test]

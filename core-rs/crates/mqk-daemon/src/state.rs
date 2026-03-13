@@ -323,6 +323,7 @@ impl AppState {
     pub async fn current_status_snapshot(&self) -> Result<StatusSnapshot, RuntimeLifecycleError> {
         let reaped = self.reap_finished_execution_loop().await?;
         let reaped_note = reaped.and_then(|exit| exit.note);
+        let local_owned_run_id = self.active_owned_run_id().await;
         let integrity = self.integrity.read().await;
         let mut integrity_armed = !integrity.is_execution_blocked();
         let mut locally_halted = integrity.halted;
@@ -335,21 +336,6 @@ impl AppState {
             }
         }
         let cached_notes = self.status.read().await.notes.clone();
-
-        if let Some(run_id) = self.active_owned_run_id().await {
-            let deadman = self.deadman_truth_for_run(run_id).await?;
-            let snapshot = StatusSnapshot {
-                daemon_uptime_secs: uptime_secs(),
-                active_run_id: Some(run_id),
-                state: "running".to_string(),
-                notes: Some("daemon owns active execution loop".to_string()),
-                integrity_armed,
-                deadman_status: deadman.status,
-                deadman_last_heartbeat_utc: deadman.last_heartbeat_utc,
-            };
-            self.publish_status(snapshot.clone()).await;
-            return Ok(snapshot);
-        }
 
         let snapshot = match self.db.as_ref() {
             Some(db) => {
@@ -365,17 +351,40 @@ impl AppState {
                     Some(run) => match run.status {
                         mqk_db::RunStatus::Running | mqk_db::RunStatus::Armed => {
                             let deadman = self.deadman_truth_for_run(run.run_id).await?;
-                            StatusSnapshot {
-                                daemon_uptime_secs: uptime_secs(),
-                                active_run_id: Some(run.run_id),
-                                state: "unknown".to_string(),
-                                notes: Some(
-                                    "durable run is active but this daemon does not own a live execution loop"
-                                        .to_string(),
-                                ),
-                                integrity_armed,
-                                deadman_status: deadman.status,
-                                deadman_last_heartbeat_utc: deadman.last_heartbeat_utc,
+                            match local_owned_run_id {
+                                Some(local_run_id) if local_run_id == run.run_id => StatusSnapshot {
+                                    daemon_uptime_secs: uptime_secs(),
+                                    active_run_id: Some(run.run_id),
+                                    state: "running".to_string(),
+                                    notes: Some("daemon owns active execution loop".to_string()),
+                                    integrity_armed,
+                                    deadman_status: deadman.status,
+                                    deadman_last_heartbeat_utc: deadman.last_heartbeat_utc,
+                                },
+                                Some(local_run_id) => StatusSnapshot {
+                                    daemon_uptime_secs: uptime_secs(),
+                                    active_run_id: Some(run.run_id),
+                                    state: "unknown".to_string(),
+                                    notes: Some(format!(
+                                        "durable run {durable_run} is active but local ownership points to {local_run_id}",
+                                        durable_run = run.run_id
+                                    )),
+                                    integrity_armed,
+                                    deadman_status: deadman.status,
+                                    deadman_last_heartbeat_utc: deadman.last_heartbeat_utc,
+                                },
+                                None => StatusSnapshot {
+                                    daemon_uptime_secs: uptime_secs(),
+                                    active_run_id: Some(run.run_id),
+                                    state: "unknown".to_string(),
+                                    notes: Some(
+                                        "durable run is active but this daemon does not own a live execution loop"
+                                            .to_string(),
+                                    ),
+                                    integrity_armed,
+                                    deadman_status: deadman.status,
+                                    deadman_last_heartbeat_utc: deadman.last_heartbeat_utc,
+                                },
                             }
                         }
                         mqk_db::RunStatus::Halted => StatusSnapshot {
@@ -391,31 +400,48 @@ impl AppState {
                                 .last_heartbeat_utc
                                 .map(|ts| ts.to_rfc3339()),
                         },
-                        mqk_db::RunStatus::Created | mqk_db::RunStatus::Stopped => StatusSnapshot {
-                            daemon_uptime_secs: uptime_secs(),
-                            active_run_id: None,
-                            state: if locally_halted {
-                                "halted".to_string()
-                            } else {
-                                "idle".to_string()
-                            },
-                            notes: reaped_note.clone().or(cached_notes),
-                            integrity_armed,
-                            deadman_status: "inactive".to_string(),
-                            deadman_last_heartbeat_utc: run
-                                .last_heartbeat_utc
-                                .map(|ts| ts.to_rfc3339()),
-                        },
+                        mqk_db::RunStatus::Created | mqk_db::RunStatus::Stopped => {
+                            StatusSnapshot {
+                                daemon_uptime_secs: uptime_secs(),
+                                active_run_id: None,
+                                state: if local_owned_run_id.is_some() {
+                                    "unknown".to_string()
+                                } else if locally_halted {
+                                    "halted".to_string()
+                                } else {
+                                    "idle".to_string()
+                                },
+                                notes: if local_owned_run_id.is_some() {
+                                    Some("local execution loop present but durable run is not active".to_string())
+                                } else {
+                                    reaped_note.clone().or(cached_notes)
+                                },
+                                integrity_armed,
+                                deadman_status: "inactive".to_string(),
+                                deadman_last_heartbeat_utc: run
+                                    .last_heartbeat_utc
+                                    .map(|ts| ts.to_rfc3339()),
+                            }
+                        }
                     },
                     None => StatusSnapshot {
                         daemon_uptime_secs: uptime_secs(),
                         active_run_id: None,
-                        state: if locally_halted {
+                        state: if local_owned_run_id.is_some() {
+                            "unknown".to_string()
+                        } else if locally_halted {
                             "halted".to_string()
                         } else {
                             "idle".to_string()
                         },
-                        notes: reaped_note.clone().or(cached_notes),
+                        notes: if local_owned_run_id.is_some() {
+                            Some(
+                                "local execution loop present but no durable daemon run exists"
+                                    .to_string(),
+                            )
+                        } else {
+                            reaped_note.clone().or(cached_notes)
+                        },
                         integrity_armed,
                         deadman_status: "inactive".to_string(),
                         deadman_last_heartbeat_utc: None,
@@ -425,12 +451,18 @@ impl AppState {
             None => StatusSnapshot {
                 daemon_uptime_secs: uptime_secs(),
                 active_run_id: None,
-                state: if locally_halted {
+                state: if local_owned_run_id.is_some() {
+                    "running".to_string()
+                } else if locally_halted {
                     "halted".to_string()
                 } else {
                     "idle".to_string()
                 },
-                notes: reaped_note.or(cached_notes),
+                notes: if local_owned_run_id.is_some() {
+                    Some("daemon owns active execution loop".to_string())
+                } else {
+                    reaped_note.or(cached_notes)
+                },
                 integrity_armed,
                 deadman_status: "unavailable".to_string(),
                 deadman_last_heartbeat_utc: None,
@@ -805,6 +837,10 @@ impl AppState {
         lock.as_ref()
             .filter(|handle| !handle.join_handle.is_finished())
             .map(|handle| handle.run_id)
+    }
+
+    pub async fn locally_owned_run_id(&self) -> Option<Uuid> {
+        self.active_owned_run_id().await
     }
 
     async fn take_execution_loop_for_control(
