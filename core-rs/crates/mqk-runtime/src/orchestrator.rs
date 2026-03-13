@@ -554,7 +554,7 @@ where
                     persist_halt_and_disarm(&self.pool, self.run_id, now, "IntegrityViolation")
                         .await?;
                     return Err(e.context(format!(
-                        "UNKNOWN_ORDER_FILL: run {} halted and disarmed (Section C)",
+                        "BROKER_EVENT_APPLY_FAIL_CLOSED: run {} halted and disarmed (Section C)",
                         self.run_id
                     )));
                 }
@@ -572,9 +572,9 @@ where
                 self.order_map.register(&internal_id, bid);
             }
             // Apply portfolio fill - only if apply_fill_step returned Some(fill).
-            // None is returned for: non-fill events, non-fill events for unknown
-            // orders, and no-op replays (duplicate event_id or late fill on a
-            // terminal OMS order where filled_qty did not advance).
+            // None is returned for non-fill events on known orders and no-op
+            // replays (duplicate event_id or late fill on a terminal OMS order
+            // where filled_qty did not advance).
             if let Some(fill) = apply_outcome.fill {
                 apply_entry(&mut self.portfolio, LedgerEntry::Fill(fill));
             }
@@ -1207,9 +1207,8 @@ async fn persist_halt_and_disarm(
 ///   order in memory. If none is found, `Err` is returned immediately -
 ///   the caller must halt and disarm before propagating.
 ///
-/// - Non-fill events (Ack, CancelAck, etc.) for unknown orders are silently
-///   skipped. They carry no portfolio effect and can arrive after a crash
-///   before the in-memory order map has been rebuilt.
+/// - Unknown-order non-fill lifecycle events (Ack, CancelAck, Reject, etc.)
+///   are treated as lifecycle divergence and fail closed.
 ///
 /// - Duplicate fill replays are detected by comparing `order.filled_qty`
 ///   before and after `apply()`. If `filled_qty` did not advance on a fill
@@ -1275,8 +1274,12 @@ fn apply_fill_step(
             ));
         }
         None => {
-            // Non-fill event for unknown order - silently skipped.
-            // No OMS transition, no portfolio effect.
+            return Err(anyhow!(
+                "UNKNOWN_ORDER_NON_FILL_LIFECYCLE_DIVERGENCE: broker_message_id='{}' internal_order_id='{}' \
+                 - non-fill lifecycle event has no OMS order context in memory; refusing silent skip (Section C)",
+                msg_id,
+                internal_id
+            ));
         }
     }
     Ok(broker_event_to_fill(event))
@@ -1883,15 +1886,18 @@ mod tests {
         let mut order_map = BrokerOrderMap::new();
         order_map.register("ord-cancel", "broker-cancel");
 
-        let outcome = apply_event_and_maybe_remove_broker_mapping(
+        let err = apply_event_and_maybe_remove_broker_mapping(
             &mut oms,
             &mut order_map,
             &make_cancel_ack_event("ord-cancel", "cancel-msg"),
             "cancel-msg",
         )
-        .expect("unknown cancel-ack should be skipped safely");
+        .expect_err("unknown cancel-ack must fail closed");
+        assert!(
+            err.to_string()
+                .contains("UNKNOWN_ORDER_NON_FILL_LIFECYCLE_DIVERGENCE")
+        );
 
-        assert!(!outcome.terminal_apply_succeeded);
         assert!(
             order_map.broker_id("ord-cancel").is_some(),
             "unknown-order cancel-ack must not remove the broker mapping"
@@ -1903,15 +1909,18 @@ mod tests {
         let mut order_map = BrokerOrderMap::new();
         order_map.register("ord-reject", "broker-reject");
 
-        let outcome = apply_event_and_maybe_remove_broker_mapping(
+        let err = apply_event_and_maybe_remove_broker_mapping(
             &mut oms,
             &mut order_map,
             &make_reject_event("ord-reject", "reject-msg"),
             "reject-msg",
         )
-        .expect("unknown reject should be skipped safely");
+        .expect_err("unknown reject must fail closed");
+        assert!(
+            err.to_string()
+                .contains("UNKNOWN_ORDER_NON_FILL_LIFECYCLE_DIVERGENCE")
+        );
 
-        assert!(!outcome.terminal_apply_succeeded);
         assert!(
             order_map.broker_id("ord-reject").is_some(),
             "unknown-order reject must not remove the broker mapping"
@@ -2251,17 +2260,17 @@ mod tests {
     }
     /// Section C - T6.
     /// A non-fill event (Ack) for an order not present in oms_orders must
-    /// return Ok(None) - not Err.  Unknown-order Acks are silently skipped
-    /// because they carry no portfolio effect and can arrive legitimately after
-    /// a crash during restart recovery.
+    /// fail closed as lifecycle divergence (Err), not silently return Ok(None).
     #[test]
-    fn unknown_order_non_fill_is_silently_skipped() {
+    fn unknown_order_non_fill_fails_closed() {
         let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
         let ev = make_ack_event("ord-ghost", "ack-msg-ghost");
         let result = apply_fill_step(&mut oms, "ord-ghost", &ev, "ack-msg-ghost");
+        let err = result.expect_err("non-fill event for unknown order must fail closed");
         assert!(
-            result.unwrap().is_none(),
-            "non-fill event for unknown order must return Ok(None), not Err"
+            err.to_string()
+                .contains("UNKNOWN_ORDER_NON_FILL_LIFECYCLE_DIVERGENCE"),
+            "error should surface explicit lifecycle divergence code"
         );
     }
 
