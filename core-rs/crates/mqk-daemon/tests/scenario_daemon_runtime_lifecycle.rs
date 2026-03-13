@@ -127,22 +127,24 @@ async fn control_status(st: &Arc<state::AppState>) -> serde_json::Value {
     parse_json(body)
 }
 
-async fn control_arm(st: &Arc<state::AppState>) -> StatusCode {
+async fn control_arm(st: &Arc<state::AppState>) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method("POST")
         .uri("/control/arm")
         .body(axum::body::Body::empty())
         .unwrap();
-    call(make_router(Arc::clone(st)), req).await.0
+    let (status, body) = call(make_router(Arc::clone(st)), req).await;
+    (status, parse_json(body))
 }
 
-async fn control_disarm(st: &Arc<state::AppState>) -> StatusCode {
+async fn control_disarm(st: &Arc<state::AppState>) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method("POST")
         .uri("/control/disarm")
         .body(axum::body::Body::empty())
         .unwrap();
-    call(make_router(Arc::clone(st)), req).await.0
+    let (status, body) = call(make_router(Arc::clone(st)), req).await;
+    (status, parse_json(body))
 }
 
 async fn stop(st: &Arc<state::AppState>) -> serde_json::Value {
@@ -544,7 +546,10 @@ async fn control_disarm_is_durable_or_explicitly_scoped() {
     let st = daemon_state().await;
     let pool = st.db.as_ref().expect("db configured");
 
-    assert_eq!(control_arm(&st).await, StatusCode::NO_CONTENT);
+    let (arm_status, arm_body) = control_arm(&st).await;
+    assert_eq!(arm_status, StatusCode::OK);
+    assert_eq!(arm_body["requested_action"], "control.arm");
+    assert_eq!(arm_body["accepted"], true);
     let armed: bool =
         sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
             .fetch_one(pool)
@@ -552,7 +557,10 @@ async fn control_disarm_is_durable_or_explicitly_scoped() {
             .expect("read desired_armed after arm");
     assert!(armed);
 
-    assert_eq!(control_disarm(&st).await, StatusCode::NO_CONTENT);
+    let (disarm_status, disarm_body) = control_disarm(&st).await;
+    assert_eq!(disarm_status, StatusCode::OK);
+    assert_eq!(disarm_body["requested_action"], "control.disarm");
+    assert_eq!(disarm_body["accepted"], true);
     let disarmed: bool =
         sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
             .fetch_one(pool)
@@ -577,7 +585,9 @@ async fn control_restart_fails_closed_if_not_authoritative() {
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let json = parse_json(body);
-    assert_eq!(json["gate"], "restart_not_authoritative");
+    assert_eq!(json["requested_action"], "control.restart");
+    assert_eq!(json["accepted"], false);
+    assert_eq!(json["blockers"][0], "restart_not_authoritative");
 }
 
 #[tokio::test]

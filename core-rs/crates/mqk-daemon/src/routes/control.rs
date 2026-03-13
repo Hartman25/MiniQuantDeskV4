@@ -9,7 +9,10 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::state::{AppState, RuntimeLifecycleError};
+use crate::{
+    api_types::{OperatorActionAuditFields, OperatorActionResponse},
+    state::{AppState, RuntimeLifecycleError},
+};
 
 #[derive(Debug, Serialize)]
 pub struct ControlStatus {
@@ -38,6 +41,34 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/control/disarm", post(disarm))
         .route("/control/arm", post(arm))
         .route("/control/restart", post(restart))
+}
+
+fn operator_action_response(
+    requested_action: &str,
+    accepted: bool,
+    disposition: &str,
+    resulting_integrity_state: Option<&str>,
+    resulting_desired_armed: Option<bool>,
+    blockers: Vec<String>,
+    warnings: Vec<String>,
+    durable_targets: Vec<String>,
+) -> OperatorActionResponse {
+    OperatorActionResponse {
+        requested_action: requested_action.to_string(),
+        accepted,
+        disposition: disposition.to_string(),
+        resulting_integrity_state: resulting_integrity_state.map(ToString::to_string),
+        resulting_desired_armed,
+        blockers,
+        warnings,
+        environment: std::env::var("MQK_ENV").ok(),
+        scope: Some("daemon_instance".to_string()),
+        audit: OperatorActionAuditFields {
+            durable_db_write: accepted,
+            durable_targets,
+            audit_event_id: None,
+        },
+    }
 }
 
 async fn status(State(state): State<Arc<AppState>>) -> Response {
@@ -218,7 +249,23 @@ async fn disarm(State(state): State<Arc<AppState>>) -> Response {
     }
 
     publish_integrity_status(&state, false, "control: desired_armed=false").await;
-    StatusCode::NO_CONTENT.into_response()
+    (
+        StatusCode::OK,
+        Json(operator_action_response(
+            "control.disarm",
+            true,
+            "applied",
+            Some("DISARMED"),
+            Some(false),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                "runtime_control_state.desired_armed".to_string(),
+                "sys_arm_state.state".to_string(),
+            ],
+        )),
+    )
+        .into_response()
 }
 
 async fn arm(State(state): State<Arc<AppState>>) -> Response {
@@ -252,16 +299,38 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
     }
 
     publish_integrity_status(&state, true, "control: desired_armed=true").await;
-    StatusCode::NO_CONTENT.into_response()
+    (
+        StatusCode::OK,
+        Json(operator_action_response(
+            "control.arm",
+            true,
+            "applied",
+            Some("ARMED"),
+            Some(true),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                "runtime_control_state.desired_armed".to_string(),
+                "sys_arm_state.state".to_string(),
+            ],
+        )),
+    )
+        .into_response()
 }
 
 async fn restart() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({
-            "error": "GATE_REFUSED: /control/restart is disabled because daemon-owned restart semantics are not authoritative yet",
-            "gate": "restart_not_authoritative"
-        })),
+        Json(operator_action_response(
+            "control.restart",
+            false,
+            "not_authoritative",
+            None,
+            None,
+            vec!["restart_not_authoritative".to_string()],
+            Vec::new(),
+            Vec::new(),
+        )),
     )
         .into_response()
 }

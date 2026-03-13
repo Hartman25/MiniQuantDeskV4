@@ -46,6 +46,44 @@ pub struct IntegrityResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Authoritative operator control actions — DMON-06
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorActionAuditFields {
+    /// Whether this action produced a durable DB write that the daemon can prove.
+    pub durable_db_write: bool,
+    /// Human-readable write target(s) for the durable state update.
+    pub durable_targets: Vec<String>,
+    /// Optional audit/event id if emitted by current architecture.
+    pub audit_event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorActionResponse {
+    /// Explicit action contract identifier (e.g., "control.arm").
+    pub requested_action: String,
+    /// Whether the daemon accepted this action request.
+    pub accepted: bool,
+    /// Disposition summary (e.g., "applied", "rejected", "not_authoritative").
+    pub disposition: String,
+    /// Resulting arming state where known by current architecture.
+    pub resulting_integrity_state: Option<String>,
+    /// Resulting desired armed state where known by current architecture.
+    pub resulting_desired_armed: Option<bool>,
+    /// Blockers that caused rejection.
+    pub blockers: Vec<String>,
+    /// Non-blocking warnings for operator visibility.
+    pub warnings: Vec<String>,
+    /// Daemon environment/profile scope if known.
+    pub environment: Option<String>,
+    /// Action scope (local/cluster/etc.) where known.
+    pub scope: Option<String>,
+    /// Auditability metadata that this daemon can currently prove.
+    pub audit: OperatorActionAuditFields,
+}
+
+// ---------------------------------------------------------------------------
 // Trading read APIs — DAEMON-1
 // ---------------------------------------------------------------------------
 
