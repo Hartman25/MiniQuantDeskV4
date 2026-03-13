@@ -66,6 +66,28 @@ docker exec -it mqk-postgres psql -U mqk -d postgres -c "CREATE DATABASE mqk_v4_
 Set the connection string (PowerShell):
 
 $env:MQK_DATABASE_URL = "postgres://mqk:mqk@localhost:5432/mqk_v4_test"
+
+### DB-backed proof lane bootstrap (repo-native)
+
+From repo root:
+
+```bash
+bash scripts/db_proof_bootstrap.sh
+```
+
+- This command is the repo-native DB proof harness used by CI's `db-proof` job.
+- It fails closed when `MQK_DATABASE_URL` is missing or DB-backed proofs fail.
+- It runs only the DB-backed proof subset (not the full workspace).
+
+One-command local Postgres bootstrap + DB proof run:
+
+```bash
+bash scripts/db_proof_bootstrap.sh --start-postgres
+```
+
+- `--start-postgres` starts/reuses local Docker container `mqk-postgres-proof` and sets `MQK_DATABASE_URL=postgres://mqk:mqk@127.0.0.1:5432/mqk_test`.
+- Local DB proofs remain environment-dependent on Docker availability and port `5432`.
+
 Execution Boundary Guarantees
 
 The execution path is intentionally constrained.
