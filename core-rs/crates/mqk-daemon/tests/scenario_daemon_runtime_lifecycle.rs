@@ -617,3 +617,76 @@ async fn durable_halted_run_is_reported_as_halted_by_operator_surfaces() {
 
     st.stop_for_shutdown().await;
 }
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn hostile_restart_with_poisoned_local_cache_still_reports_durable_halt_truth() {
+    let pool = lifecycle_pool().await;
+    let durable_run_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        b"mqk-daemon-rt01r-hostile-restart-durable-run",
+    );
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id: durable_run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: chrono::Utc::now(),
+            git_hash: "TEST".to_string(),
+            config_hash: "daemon-runtime-paper-v1".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "TESTHOST".to_string(),
+        },
+    )
+    .await
+    .expect("insert durable run");
+    mqk_db::arm_run(&pool, durable_run_id)
+        .await
+        .expect("arm durable run");
+    mqk_db::halt_run(&pool, durable_run_id, chrono::Utc::now())
+        .await
+        .expect("halt durable run");
+    mqk_db::persist_arm_state(&pool, "DISARMED", Some("OperatorHalt"))
+        .await
+        .expect("persist durable operator halt");
+
+    let st = Arc::new(state::AppState::new_with_db(pool));
+    {
+        let mut status = st.status.write().await;
+        status.state = "running".to_string();
+        status.active_run_id = Some(Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            b"mqk-daemon-rt01r-hostile-restart-poisoned-run",
+        ));
+        status.notes = Some("poisoned in-memory runtime cache".to_string());
+        status.integrity_armed = true;
+    }
+
+    let runtime = status(&st).await;
+    assert_eq!(runtime["state"], "halted");
+    assert_eq!(
+        runtime["active_run_id"],
+        serde_json::Value::String(durable_run_id.to_string())
+    );
+
+    let control = control_status(&st).await;
+    assert_eq!(control["run_state"], "halted");
+    assert_eq!(control["run_owned_locally"], false);
+    assert_eq!(control["deadman_armed_state"], "DISARMED");
+    assert_eq!(control["deadman_reason"], "OperatorHalt");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(make_router(Arc::clone(&st)), req).await;
+    assert_eq!(code, StatusCode::OK);
+    let system = parse_json(body);
+    assert_eq!(system["runtime_status"], "halted");
+    assert_eq!(system["kill_switch_active"], true);
+    assert_eq!(system["has_warning"], true);
+
+    st.stop_for_shutdown().await;
+}
