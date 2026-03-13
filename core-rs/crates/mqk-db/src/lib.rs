@@ -1279,11 +1279,36 @@ pub async fn outbox_mark_sent_with_broker_map(
 /// Mark an outbox row as ACKED.
 /// Returns true if transitioned, false if not found.
 pub async fn outbox_mark_acked(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
+    let current_status: Option<(String,)> = sqlx::query_as(
+        r#"
+        select status
+        from oms_outbox
+        where idempotency_key = $1
+        "#,
+    )
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await
+    .context("outbox_mark_acked load current status failed")?;
+
+    let Some((status,)) = current_status else {
+        return Ok(false);
+    };
+
+    if status != "SENT" {
+        return Err(anyhow!(
+            "outbox_mark_acked invalid transition for key {}: {} -> ACKED",
+            idempotency_key,
+            status
+        ));
+    }
+
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
         update oms_outbox
         set status = 'ACKED'
         where idempotency_key = $1
+          and status = 'SENT'
         returning outbox_id
         "#,
     )
@@ -1292,7 +1317,30 @@ pub async fn outbox_mark_acked(pool: &PgPool, idempotency_key: &str) -> Result<b
     .await
     .context("outbox_mark_acked failed")?;
 
-    Ok(row.is_some())
+    if row.is_none() {
+        let latest_status: Option<(String,)> = sqlx::query_as(
+            r#"
+            select status
+            from oms_outbox
+            where idempotency_key = $1
+            "#,
+        )
+        .bind(idempotency_key)
+        .fetch_optional(pool)
+        .await
+        .context("outbox_mark_acked load latest status failed")?;
+
+        return match latest_status {
+            Some((latest,)) => Err(anyhow!(
+                "outbox_mark_acked invalid transition for key {}: {} -> ACKED",
+                idempotency_key,
+                latest
+            )),
+            None => Ok(false),
+        };
+    }
+
+    Ok(true)
 }
 
 /// Mark a CLAIMED or DISPATCHING outbox row as FAILED.
