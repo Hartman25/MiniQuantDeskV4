@@ -138,12 +138,17 @@ impl RiskGate for AllowRiskGate {
     }
 }
 
-#[derive(Clone, Copy)]
-struct CleanReconcileGate;
+#[derive(Clone)]
+struct ReconcileTruthGate {
+    reconcile_status: Arc<RwLock<ReconcileStatusSnapshot>>,
+}
 
-impl ReconcileGate for CleanReconcileGate {
+impl ReconcileGate for ReconcileTruthGate {
     fn is_clean(&self) -> bool {
-        true
+        self.reconcile_status
+            .try_read()
+            .map(|snapshot| snapshot.status == "ok")
+            .unwrap_or(false)
     }
 }
 
@@ -151,7 +156,7 @@ type DaemonOrchestrator = mqk_runtime::orchestrator::ExecutionOrchestrator<
     LockedPaperBroker,
     StateIntegrityGate,
     AllowRiskGate,
-    CleanReconcileGate,
+    ReconcileTruthGate,
     mqk_runtime::orchestrator::WallClock,
 >;
 
@@ -781,7 +786,9 @@ impl AppState {
                 integrity: Arc::clone(&self.integrity),
             },
             AllowRiskGate,
-            CleanReconcileGate,
+            ReconcileTruthGate {
+                reconcile_status: Arc::clone(&self.reconcile_status),
+            },
         );
 
         Ok(mqk_runtime::orchestrator::ExecutionOrchestrator::new(
@@ -902,6 +909,41 @@ impl AppState {
         }
         let mut status = self.reconcile_status.write().await;
         *status = snapshot;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_truth_gate_allows_only_ok_status() {
+        let reconcile_status = Arc::new(RwLock::new(initial_reconcile_status()));
+        let gate = ReconcileTruthGate {
+            reconcile_status: Arc::clone(&reconcile_status),
+        };
+
+        assert!(!gate.is_clean(), "unknown reconcile must fail closed");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            reconcile_status.write().await.status = "dirty".to_string();
+        });
+        assert!(!gate.is_clean(), "dirty reconcile must block dispatch");
+
+        rt.block_on(async {
+            reconcile_status.write().await.status = "stale".to_string();
+        });
+        assert!(!gate.is_clean(), "stale reconcile must block dispatch");
+
+        rt.block_on(async {
+            reconcile_status.write().await.status = "ok".to_string();
+        });
+        assert!(gate.is_clean(), "ok reconcile may allow dispatch");
     }
 }
 
