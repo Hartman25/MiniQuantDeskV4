@@ -116,11 +116,11 @@ pub struct SystemStatusResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreflightStatusResponse {
     pub daemon_reachable: bool,
-    pub db_reachable: bool,
-    pub broker_config_present: bool,
-    pub market_data_config_present: bool,
-    pub audit_writer_ready: bool,
-    pub runtime_idle: bool,
+    pub db_reachable: Option<bool>,
+    pub broker_config_present: Option<bool>,
+    pub market_data_config_present: Option<bool>,
+    pub audit_writer_ready: Option<bool>,
+    pub runtime_idle: Option<bool>,
     pub strategy_disarmed: bool,
     pub execution_disarmed: bool,
     pub live_routing_disabled: bool,

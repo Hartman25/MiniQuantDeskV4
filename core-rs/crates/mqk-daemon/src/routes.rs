@@ -491,10 +491,13 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
     }
 
     let mut blockers = vec![
-        "DB reachability is unproven by daemon state.".to_string(),
-        "Broker config presence is unproven by daemon state.".to_string(),
-        "Market data config presence is unproven by daemon state.".to_string(),
-        "Audit writer readiness is unproven by daemon state.".to_string(),
+        "DB reachability is unavailable from current daemon preflight wiring.".to_string(),
+        "Broker config presence is unavailable from current daemon preflight wiring."
+            .to_string(),
+        "Market data config presence is unavailable from current daemon preflight wiring."
+            .to_string(),
+        "Audit writer readiness is unavailable from current daemon preflight wiring."
+            .to_string(),
     ];
     if execution_disarmed {
         blockers.push("Execution is disarmed at the integrity gate.".to_string());
@@ -504,11 +507,11 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         StatusCode::OK,
         Json(PreflightStatusResponse {
             daemon_reachable: true,
-            db_reachable: false,
-            broker_config_present: false,
-            market_data_config_present: false,
-            audit_writer_ready: false,
-            runtime_idle: status.state != "running",
+            db_reachable: None,
+            broker_config_present: None,
+            market_data_config_present: None,
+            audit_writer_ready: None,
+            runtime_idle: Some(status.state != "running"),
             strategy_disarmed,
             execution_disarmed,
             live_routing_disabled: true,
