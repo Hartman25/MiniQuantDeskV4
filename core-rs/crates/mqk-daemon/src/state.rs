@@ -797,13 +797,26 @@ impl AppState {
         let broker_seed_reconcile = reconcile_broker_snapshot_from_schema(&broker_seed)
             .map_err(|err| RuntimeLifecycleError::ServiceUnavailable(err.to_string()))?;
 
+        let local_snapshot_guard = self.execution_snapshot.read().await;
+        let local_seed = local_snapshot_guard.clone().ok_or_else(|| {
+            RuntimeLifecycleError::ServiceUnavailable(
+                "local runtime snapshot truth is unavailable; refusing to start runtime with placeholder local state"
+                    .to_string(),
+            )
+        })?;
+        drop(local_snapshot_guard);
+
+        let local_seed_reconcile = reconcile_local_snapshot_from_runtime(&local_seed);
         let local_snapshots = Arc::clone(&self.execution_snapshot);
         let local_snapshot_provider = move || {
-            local_snapshots
+            let Some(snapshot) = local_snapshots
                 .try_read()
                 .ok()
-                .and_then(|snapshot| snapshot.as_ref().map(reconcile_local_snapshot_from_runtime))
-                .unwrap_or_else(mqk_reconcile::LocalSnapshot::empty)
+                .and_then(|snapshot| snapshot.clone())
+            else {
+                return local_seed_reconcile.clone();
+            };
+            reconcile_local_snapshot_from_runtime(&snapshot)
         };
 
         let broker_snapshot_provider = move || {

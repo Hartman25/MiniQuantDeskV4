@@ -193,7 +193,59 @@ async fn daemon_state() -> Arc<state::AppState> {
             positions: vec![],
         });
     }
+    {
+        let mut execution = state.execution_snapshot.write().await;
+        *execution = Some(mqk_runtime::observability::ExecutionSnapshot {
+            run_id: None,
+            active_orders: vec![],
+            pending_outbox: vec![],
+            recent_inbox_events: vec![],
+            portfolio: mqk_runtime::observability::PortfolioSnapshot {
+                cash_micros: 0,
+                realized_pnl_micros: 0,
+                positions: vec![],
+            },
+            system_block_state: None,
+            snapshot_at_utc: chrono::Utc::now(),
+        });
+    }
     state
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn start_refuses_without_local_snapshot_truth() {
+    let st = Arc::new(state::AppState::new_with_db(lifecycle_pool().await));
+    {
+        let mut broker = st.broker_snapshot.write().await;
+        *broker = Some(mqk_schemas::BrokerSnapshot {
+            captured_at_utc: chrono::Utc::now(),
+            account: mqk_schemas::BrokerAccount {
+                equity: "100000".to_string(),
+                cash: "100000".to_string(),
+                currency: "USD".to_string(),
+            },
+            orders: vec![],
+            fills: vec![],
+            positions: vec![],
+        });
+    }
+    arm(&st).await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(make_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        parse_json(body)["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("local runtime snapshot truth is unavailable"),
+        "start must fail closed when local runtime truth is unavailable"
+    );
 }
 
 #[tokio::test]
