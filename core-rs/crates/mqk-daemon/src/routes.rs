@@ -27,14 +27,18 @@ use tracing::info;
 
 use crate::{
     api_types::{
-        DiagnosticsSnapshotResponse, ExecutionSummaryResponse, GateRefusedResponse, HealthResponse,
-        IntegrityResponse, PortfolioSummaryResponse, PreflightStatusResponse,
-        ReconcileSummaryResponse, RiskSummaryResponse, SystemStatusResponse,
-        TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
+        ConfigDiffRow, ConfigFingerprintResponse, DiagnosticsSnapshotResponse,
+        ExecutionSummaryResponse, GateRefusedResponse, HealthResponse, IntegrityResponse,
+        PortfolioSummaryResponse, PreflightStatusResponse, ReconcileSummaryResponse,
+        RiskSummaryResponse, SessionStateResponse, StrategySummaryRow, StrategySuppressionRow,
+        SystemStatusResponse, TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
     state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError},
 };
+
+const DAEMON_ENGINE_ID: &str = "mqk-daemon";
+const DAEMON_MODE: &str = "PAPER";
 
 // ---------------------------------------------------------------------------
 // S7-1: Token auth middleware
@@ -126,6 +130,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/portfolio/summary", get(portfolio_summary))
         .route("/api/v1/risk/summary", get(risk_summary))
         .route("/api/v1/reconcile/status", get(reconcile_status))
+        .route("/api/v1/system/session", get(system_session))
+        .route(
+            "/api/v1/system/config-fingerprint",
+            get(system_config_fingerprint),
+        )
+        .route("/api/v1/system/config-diffs", get(system_config_diffs))
+        .route("/api/v1/strategy/summary", get(strategy_summary))
+        .route("/api/v1/strategy/suppressions", get(strategy_suppressions))
         // DAEMON-1: trading read APIs (placeholder until broker wiring exists)
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
@@ -670,6 +682,113 @@ pub(crate) async fn reconcile_status(State(st): State<Arc<AppState>>) -> impl In
             unmatched_broker_events: reconcile.unmatched_broker_events,
         }),
     )
+}
+
+pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+    let strategy_allowed = status.integrity_armed;
+
+    (
+        StatusCode::OK,
+        Json(SessionStateResponse {
+            daemon_mode: DAEMON_MODE.to_string(),
+            operator_auth_mode: st.operator_auth_mode().label().to_string(),
+            strategy_allowed,
+            execution_allowed: strategy_allowed,
+            system_trading_window: if strategy_allowed {
+                "enabled".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            market_session: "unknown".to_string(),
+            exchange_calendar_state: "unknown".to_string(),
+            notes: vec![
+                "Market session and exchange calendar state are unavailable from current daemon wiring."
+                    .to_string(),
+            ],
+        }),
+    )
+        .into_response()
+}
+
+pub(crate) async fn system_config_fingerprint(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let latest_run = if let Some(db) = st.db.as_ref() {
+        mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
+    (
+        StatusCode::OK,
+        Json(ConfigFingerprintResponse {
+            config_hash: latest_run
+                .as_ref()
+                .map(|run| run.config_hash.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            risk_policy_version: "unknown".to_string(),
+            strategy_bundle_version: "unknown".to_string(),
+            build_version: st.build.version.to_string(),
+            environment_profile: DAEMON_MODE.to_ascii_lowercase(),
+            runtime_generation_id: latest_run
+                .as_ref()
+                .map(|run| run.run_id.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            last_restart_at: latest_run
+                .as_ref()
+                .map(|run| run.started_at_utc.to_rfc3339()),
+        }),
+    )
+        .into_response()
+}
+
+pub(crate) async fn system_config_diffs() -> impl IntoResponse {
+    (StatusCode::OK, Json::<Vec<ConfigDiffRow>>(Vec::new())).into_response()
+}
+
+pub(crate) async fn strategy_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+
+    (
+        StatusCode::OK,
+        Json(vec![StrategySummaryRow {
+            strategy_id: "daemon_integrity_gate".to_string(),
+            enabled: true,
+            armed: status.integrity_armed,
+            health: if status.integrity_armed {
+                "ok".to_string()
+            } else {
+                "warning".to_string()
+            },
+            universe: "unknown".to_string(),
+            pending_intents: 0,
+            open_positions: 0,
+            today_pnl: 0.0,
+            drawdown_pct: 0.0,
+            regime: "unknown".to_string(),
+            throttle_state: "unknown".to_string(),
+            last_decision_time: None,
+        }]),
+    )
+        .into_response()
+}
+
+pub(crate) async fn strategy_suppressions() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json::<Vec<StrategySuppressionRow>>(Vec::new()),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------

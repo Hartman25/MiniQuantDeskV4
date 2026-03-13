@@ -761,3 +761,104 @@ async fn api_reconcile_status_exists_and_is_explicitly_unknown() {
     assert_eq!(json["mismatched_fills"], 0);
     assert_eq!(json["unmatched_broker_events"], 0);
 }
+
+#[tokio::test]
+async fn api_system_session_reports_truthful_mode_and_operator_auth() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::MissingTokenFailClosed,
+    ));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["daemon_mode"], "PAPER");
+    assert_eq!(json["operator_auth_mode"], "missing_token_fail_closed");
+    assert_eq!(json["strategy_allowed"], false);
+    assert_eq!(json["execution_allowed"], false);
+    assert_eq!(json["system_trading_window"], "disabled");
+    assert_eq!(json["market_session"], "unknown");
+    assert_eq!(json["exchange_calendar_state"], "unknown");
+}
+
+#[tokio::test]
+async fn api_strategy_summary_tracks_integrity_gate_truth() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = parse_json(body);
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["armed"], false);
+    assert_eq!(rows[0]["health"], "warning");
+
+    let arm_req = Request::builder()
+        .method("POST")
+        .uri("/v1/integrity/arm")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let _ = call(routes::build_router(Arc::clone(&st)), arm_req).await;
+
+    let req2 = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (_, body2) = call(routes::build_router(Arc::clone(&st)), req2).await;
+    let rows2 = parse_json(body2);
+    assert_eq!(rows2[0]["armed"], true);
+    assert_eq!(rows2[0]["health"], "ok");
+}
+
+#[tokio::test]
+async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
+    let router = make_router();
+
+    let fp_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/config-fingerprint")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (fp_status, fp_body) = call(router.clone(), fp_req).await;
+    assert_eq!(fp_status, StatusCode::OK);
+    let fp = parse_json(fp_body);
+    assert_eq!(fp["config_hash"], "unknown");
+    assert_eq!(fp["runtime_generation_id"], "unknown");
+    assert_eq!(fp["environment_profile"], "paper");
+    assert!(fp["last_restart_at"].is_null());
+
+    let diff_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/config-diffs")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (diff_status, diff_body) = call(router.clone(), diff_req).await;
+    assert_eq!(diff_status, StatusCode::OK);
+    let diffs = parse_json(diff_body);
+    assert!(diffs.is_array());
+    assert_eq!(diffs.as_array().unwrap().len(), 0);
+
+    let suppressions_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/suppressions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (suppressions_status, suppressions_body) = call(router, suppressions_req).await;
+    assert_eq!(suppressions_status, StatusCode::OK);
+    let suppressions = parse_json(suppressions_body);
+    assert!(suppressions.is_array());
+    assert_eq!(suppressions.as_array().unwrap().len(), 0);
+}

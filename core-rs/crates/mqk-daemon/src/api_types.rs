@@ -172,6 +172,67 @@ pub struct ReconcileSummaryResponse {
     pub unmatched_broker_events: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionStateResponse {
+    pub daemon_mode: String,
+    pub operator_auth_mode: String,
+    pub strategy_allowed: bool,
+    pub execution_allowed: bool,
+    pub system_trading_window: String,
+    pub market_session: String,
+    pub exchange_calendar_state: String,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigFingerprintResponse {
+    pub config_hash: String,
+    pub risk_policy_version: String,
+    pub strategy_bundle_version: String,
+    pub build_version: String,
+    pub environment_profile: String,
+    pub runtime_generation_id: String,
+    pub last_restart_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigDiffRow {
+    pub diff_id: String,
+    pub changed_at: String,
+    pub changed_domain: String,
+    pub before_version: String,
+    pub after_version: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategySummaryRow {
+    pub strategy_id: String,
+    pub enabled: bool,
+    pub armed: bool,
+    pub health: String,
+    pub universe: String,
+    pub pending_intents: usize,
+    pub open_positions: usize,
+    pub today_pnl: f64,
+    pub drawdown_pct: f64,
+    pub regime: String,
+    pub throttle_state: String,
+    pub last_decision_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategySuppressionRow {
+    pub suppression_id: String,
+    pub strategy_id: String,
+    pub state: String,
+    pub trigger_domain: String,
+    pub trigger_reason: String,
+    pub started_at: String,
+    pub cleared_at: Option<String>,
+    pub note: String,
+}
+
 // ---------------------------------------------------------------------------
 // /api/v1/diagnostics/snapshot (B4)
 // ---------------------------------------------------------------------------
