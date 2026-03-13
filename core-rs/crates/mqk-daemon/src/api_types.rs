@@ -130,33 +130,36 @@ pub struct PreflightStatusResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionSummaryResponse {
+    pub has_snapshot: bool,
     pub active_orders: usize,
     pub pending_orders: usize,
     pub dispatching_orders: usize,
     pub reject_count_today: usize,
-    pub cancel_replace_count_today: usize,
+    pub cancel_replace_count_today: Option<usize>,
     pub avg_ack_latency_ms: Option<u64>,
     pub stuck_orders: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioSummaryResponse {
-    pub account_equity: f64,
-    pub cash: f64,
-    pub long_market_value: f64,
-    pub short_market_value: f64,
-    pub daily_pnl: f64,
-    pub buying_power: f64,
+    pub has_snapshot: bool,
+    pub account_equity: Option<f64>,
+    pub cash: Option<f64>,
+    pub long_market_value: Option<f64>,
+    pub short_market_value: Option<f64>,
+    pub daily_pnl: Option<f64>,
+    pub buying_power: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskSummaryResponse {
-    pub gross_exposure: f64,
-    pub net_exposure: f64,
-    pub concentration_pct: f64,
-    pub daily_pnl: f64,
-    pub drawdown_pct: f64,
-    pub loss_limit_utilization_pct: f64,
+    pub has_snapshot: bool,
+    pub gross_exposure: Option<f64>,
+    pub net_exposure: Option<f64>,
+    pub concentration_pct: Option<f64>,
+    pub daily_pnl: Option<f64>,
+    pub drawdown_pct: Option<f64>,
+    pub loss_limit_utilization_pct: Option<f64>,
     pub kill_switch_active: bool,
     pub active_breaches: usize,
 }

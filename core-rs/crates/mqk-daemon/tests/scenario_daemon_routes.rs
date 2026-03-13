@@ -663,12 +663,57 @@ async fn api_execution_summary_derives_counts_from_broker_snapshot() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
+    assert_eq!(json["has_snapshot"], true);
     assert_eq!(json["active_orders"], 2);
     assert_eq!(json["pending_orders"], 1);
     assert_eq!(json["dispatching_orders"], 1);
     assert_eq!(json["reject_count_today"], 1);
     assert_eq!(json["stuck_orders"], 1);
+    assert!(json["cancel_replace_count_today"].is_null());
     assert!(json["avg_ack_latency_ms"].is_null());
+}
+
+#[tokio::test]
+async fn api_summary_surfaces_are_explicitly_unavailable_without_snapshot() {
+    let router = make_router();
+
+    let execution_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/execution/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (execution_status, execution_body) = call(router.clone(), execution_req).await;
+    assert_eq!(execution_status, StatusCode::OK);
+    let execution_json = parse_json(execution_body);
+    assert_eq!(execution_json["has_snapshot"], false);
+    assert!(execution_json["cancel_replace_count_today"].is_null());
+    assert!(execution_json["avg_ack_latency_ms"].is_null());
+
+    let portfolio_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/portfolio/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (portfolio_status, portfolio_body) = call(router.clone(), portfolio_req).await;
+    assert_eq!(portfolio_status, StatusCode::OK);
+    let portfolio_json = parse_json(portfolio_body);
+    assert_eq!(portfolio_json["has_snapshot"], false);
+    assert!(portfolio_json["account_equity"].is_null());
+    assert!(portfolio_json["cash"].is_null());
+    assert!(portfolio_json["daily_pnl"].is_null());
+
+    let risk_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (risk_status, risk_body) = call(router, risk_req).await;
+    assert_eq!(risk_status, StatusCode::OK);
+    let risk_json = parse_json(risk_body);
+    assert_eq!(risk_json["has_snapshot"], false);
+    assert!(risk_json["gross_exposure"].is_null());
+    assert!(risk_json["net_exposure"].is_null());
+    assert!(risk_json["loss_limit_utilization_pct"].is_null());
 }
 
 #[tokio::test]
@@ -714,6 +759,7 @@ async fn api_portfolio_and_risk_summary_derive_from_snapshot() {
         call(routes::build_router(Arc::clone(&st)), portfolio_req).await;
     assert_eq!(portfolio_status, StatusCode::OK);
     let portfolio_json = parse_json(portfolio_body);
+    assert_eq!(portfolio_json["has_snapshot"], true);
     assert_eq!(portfolio_json["account_equity"].as_f64().unwrap(), 1500.5);
     assert_eq!(portfolio_json["cash"].as_f64().unwrap(), 500.25);
     assert_eq!(
@@ -734,6 +780,7 @@ async fn api_portfolio_and_risk_summary_derive_from_snapshot() {
     let (risk_status, risk_body) = call(routes::build_router(Arc::clone(&st)), risk_req).await;
     assert_eq!(risk_status, StatusCode::OK);
     let risk_json = parse_json(risk_body);
+    assert_eq!(risk_json["has_snapshot"], true);
     assert_eq!(risk_json["gross_exposure"].as_f64().unwrap(), 1100.0);
     assert_eq!(risk_json["net_exposure"].as_f64().unwrap(), 900.0);
     assert!((risk_json["concentration_pct"].as_f64().unwrap() - 90.9090909090909).abs() < 1e-9);

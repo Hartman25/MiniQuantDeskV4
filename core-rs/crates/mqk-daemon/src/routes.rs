@@ -554,21 +554,23 @@ pub(crate) async fn execution_summary(State(st): State<Arc<AppState>>) -> impl I
             .count();
 
         ExecutionSummaryResponse {
+            has_snapshot: true,
             active_orders,
             pending_orders,
             dispatching_orders,
             reject_count_today,
-            cancel_replace_count_today: 0,
+            cancel_replace_count_today: None,
             avg_ack_latency_ms: None,
             stuck_orders,
         }
     } else {
         ExecutionSummaryResponse {
+            has_snapshot: false,
             active_orders: 0,
             pending_orders: 0,
             dispatching_orders: 0,
             reject_count_today: 0,
-            cancel_replace_count_today: 0,
+            cancel_replace_count_today: None,
             avg_ack_latency_ms: None,
             stuck_orders: 0,
         }
@@ -586,21 +588,23 @@ pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl I
         let (long_market_value, short_market_value, _, _) = exposure_breakdown(&snapshot.positions);
 
         PortfolioSummaryResponse {
-            account_equity,
-            cash,
-            long_market_value,
-            short_market_value,
-            daily_pnl: 0.0,
-            buying_power: cash,
+            has_snapshot: true,
+            account_equity: Some(account_equity),
+            cash: Some(cash),
+            long_market_value: Some(long_market_value),
+            short_market_value: Some(short_market_value),
+            daily_pnl: None,
+            buying_power: Some(cash),
         }
     } else {
         PortfolioSummaryResponse {
-            account_equity: 0.0,
-            cash: 0.0,
-            long_market_value: 0.0,
-            short_market_value: 0.0,
-            daily_pnl: 0.0,
-            buying_power: 0.0,
+            has_snapshot: false,
+            account_equity: None,
+            cash: None,
+            long_market_value: None,
+            short_market_value: None,
+            daily_pnl: None,
+            buying_power: None,
         }
     };
 
@@ -630,23 +634,25 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
         };
 
         RiskSummaryResponse {
-            gross_exposure,
-            net_exposure,
-            concentration_pct,
-            daily_pnl: 0.0,
-            drawdown_pct: 0.0,
-            loss_limit_utilization_pct: 0.0,
+            has_snapshot: true,
+            gross_exposure: Some(gross_exposure),
+            net_exposure: Some(net_exposure),
+            concentration_pct: Some(concentration_pct),
+            daily_pnl: None,
+            drawdown_pct: None,
+            loss_limit_utilization_pct: None,
             kill_switch_active: risk_blocked,
             active_breaches: usize::from(risk_blocked),
         }
     } else {
         RiskSummaryResponse {
-            gross_exposure: 0.0,
-            net_exposure: 0.0,
-            concentration_pct: 0.0,
-            daily_pnl: 0.0,
-            drawdown_pct: 0.0,
-            loss_limit_utilization_pct: 0.0,
+            has_snapshot: false,
+            gross_exposure: None,
+            net_exposure: None,
+            concentration_pct: None,
+            daily_pnl: None,
+            drawdown_pct: None,
+            loss_limit_utilization_pct: None,
             kill_switch_active: risk_blocked,
             active_breaches: usize::from(risk_blocked),
         }
