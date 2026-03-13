@@ -89,7 +89,7 @@ pub struct TradingSnapshotResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStatusResponse {
-    pub environment: String,
+    pub environment: Option<String>,
     pub runtime_status: String,
     pub broker_status: String,
     pub db_status: String,
@@ -106,7 +106,7 @@ pub struct SystemStatusResponse {
     pub has_critical: bool,
     pub strategy_armed: bool,
     pub execution_armed: bool,
-    pub live_routing_enabled: bool,
+    pub live_routing_enabled: Option<bool>,
     pub kill_switch_active: bool,
     pub risk_halt_active: bool,
     pub integrity_halt_active: bool,

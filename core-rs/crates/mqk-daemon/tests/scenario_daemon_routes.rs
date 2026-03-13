@@ -568,9 +568,10 @@ async fn api_system_status_returns_gui_contract() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
-    assert_eq!(json["environment"], "paper");
+    assert!(json["environment"].is_null());
     assert_eq!(json["runtime_status"], "idle");
     assert_eq!(json["integrity_status"], "warning");
+    assert_eq!(json["live_routing_enabled"], false);
     assert_eq!(json["daemon_reachable"], true);
 }
 

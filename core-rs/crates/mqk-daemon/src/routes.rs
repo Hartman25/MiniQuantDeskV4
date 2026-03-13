@@ -33,7 +33,7 @@ use crate::{
         TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
-    state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError},
+    state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot},
 };
 
 // ---------------------------------------------------------------------------
@@ -364,6 +364,37 @@ fn runtime_status_from_state(state: &str) -> &'static str {
     }
 }
 
+async fn environment_and_live_routing_truth(
+    st: &AppState,
+    status: &StatusSnapshot,
+) -> (Option<String>, Option<bool>) {
+    let live_routing_enabled = match status.state.as_str() {
+        "idle" | "halted" => Some(false),
+        _ => None,
+    };
+
+    let Some(run_id) = status.active_run_id else {
+        return (None, live_routing_enabled);
+    };
+
+    let Some(db) = st.db.as_ref() else {
+        return (None, live_routing_enabled);
+    };
+
+    let Ok(run) = mqk_db::fetch_run(db, run_id).await else {
+        return (None, live_routing_enabled);
+    };
+
+    let environment = Some(run.mode.to_ascii_lowercase());
+    let live_routing_enabled = if status.state == "running" {
+        Some(run.mode.eq_ignore_ascii_case("LIVE"))
+    } else {
+        live_routing_enabled
+    };
+
+    (environment, live_routing_enabled)
+}
+
 fn is_terminal_order_status(status: &str) -> bool {
     matches!(
         status,
@@ -428,6 +459,8 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
     };
 
     let runtime_status = runtime_status_from_state(&status.state).to_string();
+    let (environment, live_routing_enabled) =
+        environment_and_live_routing_truth(&st, &status).await;
     let broker_status = if snapshot_present { "ok" } else { "warning" }.to_string();
     let integrity_status = if integrity_armed { "ok" } else { "warning" }.to_string();
     let reconcile_status = reconcile.status.clone();
@@ -441,7 +474,7 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
     (
         StatusCode::OK,
         Json(SystemStatusResponse {
-            environment: "paper".to_string(),
+            environment,
             runtime_status,
             broker_status,
             db_status: "unknown".to_string(),
@@ -458,7 +491,7 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             has_critical,
             strategy_armed: integrity_armed,
             execution_armed: integrity_armed,
-            live_routing_enabled: false,
+            live_routing_enabled,
             kill_switch_active: status.state == "halted",
             risk_halt_active: risk_blocked,
             integrity_halt_active: !integrity_armed,
