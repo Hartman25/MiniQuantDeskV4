@@ -21,6 +21,8 @@ type PanelEvidenceHints = {
   placeholder: string[];
 };
 
+export type FieldEvidenceHints = PanelEvidenceHints;
+
 const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
   dashboard: { db: ["/portfolio", "/reconcile"], runtime: ["/system/status", "/system/preflight"], broker: ["/broker", "/execution/orders"], placeholder: ["status", "preflight"] },
   metrics: { db: ["/metrics"], runtime: ["/metrics"], broker: ["/metrics"], placeholder: ["metrics"] },
@@ -69,6 +71,26 @@ export function classifyAuthority(signal: EvidenceSignal, connected: boolean): S
   if (signal.hasRuntime) return "runtime_memory";
   if (signal.hasBroker) return "broker_snapshot";
   return "unknown";
+}
+
+export function classifyFieldSource(dataSource: DataSourceDetail, connected: boolean, hints: FieldEvidenceHints): SourceAuthority {
+  if (!connected || dataSource.state === "disconnected") {
+    return "unknown";
+  }
+
+  if (dataSource.state === "mock") {
+    return "placeholder";
+  }
+
+  return classifyAuthority(
+    {
+      hasDb: hasEndpoint(dataSource.realEndpoints, hints.db),
+      hasRuntime: hasEndpoint(dataSource.realEndpoints, hints.runtime),
+      hasBroker: hasEndpoint(dataSource.realEndpoints, hints.broker),
+      hasPlaceholder: hasMockSection(dataSource.mockSections, hints.placeholder),
+    },
+    connected,
+  );
 }
 
 export function emptyPanelSourceMap(authority: SourceAuthority): PanelSourceMap {

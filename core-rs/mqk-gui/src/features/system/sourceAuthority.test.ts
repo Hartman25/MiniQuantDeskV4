@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { CORE_PANEL_KEYS, type DataSourceDetail } from "./types.ts";
-import { classifyAuthority, classifyPanelSources } from "./sourceAuthority.ts";
+import { classifyAuthority, classifyFieldSource, classifyPanelSources } from "./sourceAuthority.ts";
 
 function baseDataSource(overrides: Partial<DataSourceDetail> = {}): DataSourceDetail {
   return {
@@ -61,4 +61,25 @@ test("panel source map is exhaustive for every core panel", () => {
   for (const panel of CORE_PANEL_KEYS) {
     assert.ok(sources[panel]);
   }
+});
+
+
+test("field source classification returns placeholder for mock datasource", () => {
+  const authority = classifyFieldSource(
+    baseDataSource({ state: "mock", mockSections: ["status"] }),
+    true,
+    { db: ["/system/status"], runtime: ["/system/status"], broker: [], placeholder: ["status"] },
+  );
+
+  assert.equal(authority, "placeholder");
+});
+
+test("field source classification surfaces mixed when db and runtime both back a field", () => {
+  const authority = classifyFieldSource(
+    baseDataSource({ realEndpoints: ["/api/v1/system/status", "/api/v1/system/config-fingerprint"] }),
+    true,
+    { db: ["/system/config-fingerprint"], runtime: ["/system/status"], broker: [], placeholder: [] },
+  );
+
+  assert.equal(authority, "mixed");
 });

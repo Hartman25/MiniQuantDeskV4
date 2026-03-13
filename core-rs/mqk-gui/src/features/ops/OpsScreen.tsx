@@ -1,4 +1,6 @@
+import { FieldSourceAuthority } from "../../components/common/FieldSourceAuthority";
 import { Panel } from "../../components/common/Panel";
+import { classifyFieldSource, type FieldEvidenceHints } from "../system/sourceAuthority";
 import type { EnvironmentMode, OperatorActionDefinition, SystemModel } from "../system/types";
 
 function levelLabel(level: OperatorActionDefinition["level"]): string {
@@ -18,6 +20,14 @@ function levelLabel(level: OperatorActionDefinition["level"]): string {
 
 const TARGET_MODES: EnvironmentMode[] = ["backtest", "paper", "live"];
 
+const MODE_FIELD_HINTS: Record<"environment" | "runtime" | "liveRouting" | "generation" | "sourceState", FieldEvidenceHints> = {
+  environment: { db: ["/system/runtime-leadership", "/system/config-fingerprint"], runtime: ["/system/status"], broker: [], placeholder: ["runtimeLeadership", "status"] },
+  runtime: { db: [], runtime: ["/system/status"], broker: [], placeholder: ["status"] },
+  liveRouting: { db: ["/system/config-fingerprint"], runtime: ["/system/status"], broker: [], placeholder: ["status", "configFingerprint"] },
+  generation: { db: ["/system/runtime-leadership"], runtime: ["/system/runtime-leadership"], broker: [], placeholder: ["runtimeLeadership"] },
+  sourceState: { db: [], runtime: [], broker: [], placeholder: ["all", "status", "runtimeLeadership"] },
+};
+
 export function OpsScreen({
   model,
   onRunAction,
@@ -32,11 +42,46 @@ export function OpsScreen({
       <Panel title="System mode transition" subtitle="Mode changes require a controlled daemon restart and configuration reload. This is not a casual runtime toggle.">
         <div className="mode-transition-panel">
           <div className="mode-transition-meta">
-            <div><span>Current mode</span><strong>{model.status.environment}</strong></div>
-            <div><span>Runtime</span><strong>{model.status.runtime_status}</strong></div>
-            <div><span>Live routing</span><strong>{model.status.live_routing_enabled ? "enabled" : "disabled"}</strong></div>
-            <div><span>Generation</span><strong>{model.runtimeLeadership.generation_id}</strong></div>
-            <div><span>Source state</span><strong>{model.dataSource.state}</strong></div>
+            <div>
+              <span>Current mode</span>
+              <strong>{model.status.environment}</strong>
+              <FieldSourceAuthority
+                fieldKey="ops-current-mode"
+                authority={classifyFieldSource(model.dataSource, model.connected, MODE_FIELD_HINTS.environment)}
+              />
+            </div>
+            <div>
+              <span>Runtime</span>
+              <strong>{model.status.runtime_status}</strong>
+              <FieldSourceAuthority
+                fieldKey="ops-runtime-status"
+                authority={classifyFieldSource(model.dataSource, model.connected, MODE_FIELD_HINTS.runtime)}
+              />
+            </div>
+            <div>
+              <span>Live routing</span>
+              <strong>{model.status.live_routing_enabled ? "enabled" : "disabled"}</strong>
+              <FieldSourceAuthority
+                fieldKey="ops-live-routing"
+                authority={classifyFieldSource(model.dataSource, model.connected, MODE_FIELD_HINTS.liveRouting)}
+              />
+            </div>
+            <div>
+              <span>Generation</span>
+              <strong>{model.runtimeLeadership.generation_id}</strong>
+              <FieldSourceAuthority
+                fieldKey="ops-generation"
+                authority={classifyFieldSource(model.dataSource, model.connected, MODE_FIELD_HINTS.generation)}
+              />
+            </div>
+            <div>
+              <span>Source state</span>
+              <strong>{model.dataSource.state}</strong>
+              <FieldSourceAuthority
+                fieldKey="ops-source-state"
+                authority={classifyFieldSource(model.dataSource, model.connected, MODE_FIELD_HINTS.sourceState)}
+              />
+            </div>
           </div>
           <div className="mode-toggle-row">
             {TARGET_MODES.map((mode) => (
