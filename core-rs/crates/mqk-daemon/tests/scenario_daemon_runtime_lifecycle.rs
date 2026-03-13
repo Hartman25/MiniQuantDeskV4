@@ -496,15 +496,18 @@ async fn control_status_reflects_real_runtime_truth() {
     let st = daemon_state().await;
     let pool = st.db.as_ref().expect("db configured");
 
+    let now_utc = chrono::Utc::now();
+
     sqlx::query(
         r#"
         INSERT INTO runtime_control_state (id, desired_armed, updated_at)
-        VALUES (1, true, now())
+        VALUES (1, true, $1)
         ON CONFLICT (id) DO UPDATE
            SET desired_armed = excluded.desired_armed,
                updated_at = excluded.updated_at
         "#,
     )
+    .bind(now_utc)
     .execute(pool)
     .await
     .expect("seed runtime_control_state");
@@ -512,7 +515,7 @@ async fn control_status_reflects_real_runtime_truth() {
     sqlx::query(
         r#"
         INSERT INTO runtime_leader_lease (id, holder_id, epoch, lease_expires_at, updated_at)
-        VALUES (1, 'scenario-daemon', 7, now() + interval '30 seconds', now())
+        VALUES (1, 'scenario-daemon', 7, $1, $2)
         ON CONFLICT (id) DO UPDATE
            SET holder_id = excluded.holder_id,
                epoch = excluded.epoch,
@@ -520,6 +523,8 @@ async fn control_status_reflects_real_runtime_truth() {
                updated_at = excluded.updated_at
         "#,
     )
+    .bind(now_utc + chrono::Duration::seconds(30))
+    .bind(now_utc)
     .execute(pool)
     .await
     .expect("seed runtime_leader_lease");

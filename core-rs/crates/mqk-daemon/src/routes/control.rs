@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
+
 use axum::{
     extract::State,
     http::StatusCode,
@@ -97,29 +99,28 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
         }
     };
 
-    let lease_row: Option<(String, i64, chrono::DateTime<chrono::Utc>, bool)> =
-        match sqlx::query_as(
-            r#"
+    let now_utc = control_plane_now_utc();
+    let lease_row: Option<(String, i64, DateTime<Utc>)> = match sqlx::query_as(
+        r#"
             SELECT holder_id,
                    epoch,
-                   lease_expires_at,
-                   lease_expires_at <= now() AS lease_expired
+                   lease_expires_at
               FROM runtime_leader_lease
              WHERE id = 1
             "#,
-        )
-        .fetch_optional(db)
-        .await
-        {
-            Ok(row) => row,
-            Err(err) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("control/status runtime lease query failed: {err}"),
-                )
-                    .into_response();
-            }
-        };
+    )
+    .fetch_optional(db)
+    .await
+    {
+        Ok(row) => row,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("control/status runtime lease query failed: {err}"),
+            )
+                .into_response();
+        }
+    };
 
     let arm_state_row: Option<(String, Option<String>)> = match sqlx::query_as(
         r#"
@@ -145,12 +146,12 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
         arm_state_row.unwrap_or_else(|| ("DISARMED".to_string(), Some("BootDefault".to_string())));
 
     let response = match lease_row {
-        Some((holder_id, epoch, lease_expires_at, lease_expired)) => ControlStatus {
+        Some((holder_id, epoch, lease_expires_at)) => ControlStatus {
             desired_armed,
             leader_holder_id: Some(holder_id),
             leader_epoch: Some(epoch),
             lease_expires_at_utc: Some(lease_expires_at.to_rfc3339()),
-            lease_expired: Some(lease_expired),
+            lease_expired: Some(lease_expires_at <= now_utc),
             active_run_id: runtime_status.active_run_id,
             run_state: runtime_status.state.clone(),
             run_owned_locally: runtime_status.state == "running",
@@ -267,20 +268,26 @@ async fn restart() -> Response {
 }
 
 async fn write_desired_armed(db: &sqlx::PgPool, desired_armed: bool) -> anyhow::Result<()> {
+    let updated_at_utc = control_plane_now_utc();
     sqlx::query(
         r#"
         INSERT INTO runtime_control_state (id, desired_armed, updated_at)
-        VALUES (1, $1, now())
+        VALUES (1, $1, $2)
         ON CONFLICT (id) DO UPDATE
            SET desired_armed = excluded.desired_armed,
                updated_at    = excluded.updated_at
         "#,
     )
     .bind(desired_armed)
+    .bind(updated_at_utc)
     .execute(db)
     .await?;
 
     Ok(())
+}
+
+fn control_plane_now_utc() -> DateTime<Utc> {
+    Utc::now()
 }
 
 async fn publish_integrity_status(state: &Arc<AppState>, integrity_armed: bool, note: &str) {
