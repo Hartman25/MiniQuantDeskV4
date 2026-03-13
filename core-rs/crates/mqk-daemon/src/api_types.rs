@@ -53,27 +53,35 @@ use mqk_schemas::{BrokerAccount, BrokerFill, BrokerOrder, BrokerPosition, Broker
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradingAccountResponse {
-    /// Whether the daemon currently has any broker snapshot loaded in memory.
-    pub has_snapshot: bool,
-    pub account: BrokerAccount,
+    /// Explicit snapshot truth state for operator-honest read semantics.
+    ///
+    /// - `no_snapshot` = no broker snapshot is loaded.
+    /// - `stale_snapshot` = reconcile has flagged snapshot freshness as stale.
+    /// - `current_snapshot` = daemon has a currently-usable broker snapshot.
+    pub snapshot_state: String,
+    pub snapshot_captured_at_utc: Option<String>,
+    pub account: Option<BrokerAccount>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradingPositionsResponse {
-    pub has_snapshot: bool,
-    pub positions: Vec<BrokerPosition>,
+    pub snapshot_state: String,
+    pub snapshot_captured_at_utc: Option<String>,
+    pub positions: Option<Vec<BrokerPosition>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradingOrdersResponse {
-    pub has_snapshot: bool,
-    pub orders: Vec<BrokerOrder>,
+    pub snapshot_state: String,
+    pub snapshot_captured_at_utc: Option<String>,
+    pub orders: Option<Vec<BrokerOrder>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradingFillsResponse {
-    pub has_snapshot: bool,
-    pub fills: Vec<BrokerFill>,
+    pub snapshot_state: String,
+    pub snapshot_captured_at_utc: Option<String>,
+    pub fills: Option<Vec<BrokerFill>>,
 }
 
 /// Full raw snapshot (if available). This is intentionally read-only.

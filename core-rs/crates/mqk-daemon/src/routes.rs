@@ -676,25 +676,36 @@ pub(crate) async fn reconcile_status(State(st): State<Arc<AppState>>) -> impl In
 // GET /v1/trading/*  — DAEMON-1 (read-only placeholders)
 // ---------------------------------------------------------------------------
 
+fn trading_snapshot_state_label(reconcile_status: &str, has_snapshot: bool) -> &'static str {
+    if !has_snapshot {
+        "no_snapshot"
+    } else if reconcile_status == "stale" {
+        "stale_snapshot"
+    } else {
+        "current_snapshot"
+    }
+}
+
 pub(crate) async fn trading_account(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
+    let reconcile = st.current_reconcile_snapshot().await;
 
-    let (has_snapshot, account) = match snap {
-        Some(s) => (true, s.account),
-        None => (
-            false,
-            mqk_schemas::BrokerAccount {
-                equity: "0".to_string(),
-                cash: "0".to_string(),
-                currency: "USD".to_string(),
-            },
-        ),
+    let snapshot_state =
+        trading_snapshot_state_label(&reconcile.status, snap.is_some()).to_string();
+    let snapshot_captured_at_utc = snap
+        .as_ref()
+        .map(|snapshot| snapshot.captured_at_utc.to_rfc3339());
+    let account = if snapshot_state == "current_snapshot" {
+        snap.map(|snapshot| snapshot.account)
+    } else {
+        None
     };
 
     (
         StatusCode::OK,
         Json(TradingAccountResponse {
-            has_snapshot,
+            snapshot_state,
+            snapshot_captured_at_utc,
             account,
         }),
     )
@@ -702,15 +713,24 @@ pub(crate) async fn trading_account(State(st): State<Arc<AppState>>) -> impl Int
 
 pub(crate) async fn trading_positions(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
-    let (has_snapshot, positions) = match snap {
-        Some(s) => (true, s.positions),
-        None => (false, Vec::new()),
+    let reconcile = st.current_reconcile_snapshot().await;
+
+    let snapshot_state =
+        trading_snapshot_state_label(&reconcile.status, snap.is_some()).to_string();
+    let snapshot_captured_at_utc = snap
+        .as_ref()
+        .map(|snapshot| snapshot.captured_at_utc.to_rfc3339());
+    let positions = if snapshot_state == "current_snapshot" {
+        snap.map(|snapshot| snapshot.positions)
+    } else {
+        None
     };
 
     (
         StatusCode::OK,
         Json(TradingPositionsResponse {
-            has_snapshot,
+            snapshot_state,
+            snapshot_captured_at_utc,
             positions,
         }),
     )
@@ -718,15 +738,24 @@ pub(crate) async fn trading_positions(State(st): State<Arc<AppState>>) -> impl I
 
 pub(crate) async fn trading_orders(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
-    let (has_snapshot, orders) = match snap {
-        Some(s) => (true, s.orders),
-        None => (false, Vec::new()),
+    let reconcile = st.current_reconcile_snapshot().await;
+
+    let snapshot_state =
+        trading_snapshot_state_label(&reconcile.status, snap.is_some()).to_string();
+    let snapshot_captured_at_utc = snap
+        .as_ref()
+        .map(|snapshot| snapshot.captured_at_utc.to_rfc3339());
+    let orders = if snapshot_state == "current_snapshot" {
+        snap.map(|snapshot| snapshot.orders)
+    } else {
+        None
     };
 
     (
         StatusCode::OK,
         Json(TradingOrdersResponse {
-            has_snapshot,
+            snapshot_state,
+            snapshot_captured_at_utc,
             orders,
         }),
     )
@@ -734,15 +763,24 @@ pub(crate) async fn trading_orders(State(st): State<Arc<AppState>>) -> impl Into
 
 pub(crate) async fn trading_fills(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
-    let (has_snapshot, fills) = match snap {
-        Some(s) => (true, s.fills),
-        None => (false, Vec::new()),
+    let reconcile = st.current_reconcile_snapshot().await;
+
+    let snapshot_state =
+        trading_snapshot_state_label(&reconcile.status, snap.is_some()).to_string();
+    let snapshot_captured_at_utc = snap
+        .as_ref()
+        .map(|snapshot| snapshot.captured_at_utc.to_rfc3339());
+    let fills = if snapshot_state == "current_snapshot" {
+        snap.map(|snapshot| snapshot.fills)
+    } else {
+        None
     };
 
     (
         StatusCode::OK,
         Json(TradingFillsResponse {
-            has_snapshot,
+            snapshot_state,
+            snapshot_captured_at_utc,
             fills,
         }),
     )

@@ -444,7 +444,7 @@ async fn unknown_route_returns_404() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn trading_account_returns_200_and_has_snapshot_false_by_default() {
+async fn trading_account_returns_no_snapshot_state_by_default() {
     let router = make_router();
     let req = Request::builder()
         .method("GET")
@@ -456,12 +456,13 @@ async fn trading_account_returns_200_and_has_snapshot_false_by_default() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
-    assert_eq!(json["has_snapshot"], false);
-    assert_eq!(json["account"]["currency"], "USD");
+    assert_eq!(json["snapshot_state"], "no_snapshot");
+    assert!(json["snapshot_captured_at_utc"].is_null());
+    assert!(json["account"].is_null());
 }
 
 #[tokio::test]
-async fn trading_positions_returns_empty_vec_by_default() {
+async fn trading_positions_returns_no_snapshot_state_by_default() {
     let router = make_router();
     let req = Request::builder()
         .method("GET")
@@ -473,13 +474,13 @@ async fn trading_positions_returns_empty_vec_by_default() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
-    assert_eq!(json["has_snapshot"], false);
-    assert!(json["positions"].is_array());
-    assert_eq!(json["positions"].as_array().unwrap().len(), 0);
+    assert_eq!(json["snapshot_state"], "no_snapshot");
+    assert!(json["snapshot_captured_at_utc"].is_null());
+    assert!(json["positions"].is_null());
 }
 
 #[tokio::test]
-async fn trading_orders_returns_empty_vec_by_default() {
+async fn trading_orders_returns_no_snapshot_state_by_default() {
     let router = make_router();
     let req = Request::builder()
         .method("GET")
@@ -491,13 +492,13 @@ async fn trading_orders_returns_empty_vec_by_default() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
-    assert_eq!(json["has_snapshot"], false);
-    assert!(json["orders"].is_array());
-    assert_eq!(json["orders"].as_array().unwrap().len(), 0);
+    assert_eq!(json["snapshot_state"], "no_snapshot");
+    assert!(json["snapshot_captured_at_utc"].is_null());
+    assert!(json["orders"].is_null());
 }
 
 #[tokio::test]
-async fn trading_fills_returns_empty_vec_by_default() {
+async fn trading_fills_returns_no_snapshot_state_by_default() {
     let router = make_router();
     let req = Request::builder()
         .method("GET")
@@ -509,9 +510,48 @@ async fn trading_fills_returns_empty_vec_by_default() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
-    assert_eq!(json["has_snapshot"], false);
-    assert!(json["fills"].is_array());
-    assert_eq!(json["fills"].as_array().unwrap().len(), 0);
+    assert_eq!(json["snapshot_state"], "no_snapshot");
+    assert!(json["snapshot_captured_at_utc"].is_null());
+    assert!(json["fills"].is_null());
+}
+
+#[tokio::test]
+async fn trading_positions_marks_stale_snapshot_state_and_hides_payload() {
+    use chrono::Utc;
+    use mqk_daemon::state::ReconcileStatusSnapshot;
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    {
+        let mut lock = st.broker_snapshot.write().await;
+        *lock = Some(sample_snapshot());
+    }
+    st.publish_reconcile_snapshot(ReconcileStatusSnapshot {
+        status: "stale".to_string(),
+        last_run_at: Some(Utc::now().to_rfc3339()),
+        snapshot_watermark_ms: Some(Utc::now().timestamp_millis()),
+        mismatched_positions: 0,
+        mismatched_orders: 0,
+        mismatched_fills: 0,
+        unmatched_broker_events: 0,
+        note: Some("stale snapshot".to_string()),
+    })
+    .await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/trading/positions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["snapshot_state"], "stale_snapshot");
+    assert!(json["snapshot_captured_at_utc"].is_string());
+    assert!(json["positions"].is_null());
 }
 
 #[tokio::test]

@@ -134,7 +134,7 @@ async fn read_only_routes_follow_existing_auth_policy() {
         .unwrap();
     let (trading_status, trading_body) = call(router, trading_req).await;
     assert_eq!(trading_status, StatusCode::OK);
-    assert_eq!(parse_json(trading_body)["has_snapshot"], false);
+    assert_eq!(parse_json(trading_body)["snapshot_state"], "no_snapshot");
 }
 
 #[tokio::test]
