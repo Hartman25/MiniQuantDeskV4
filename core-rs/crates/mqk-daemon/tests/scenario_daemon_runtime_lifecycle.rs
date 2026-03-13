@@ -178,7 +178,44 @@ async fn halt(st: &Arc<state::AppState>) -> serde_json::Value {
 }
 
 async fn daemon_state() -> Arc<state::AppState> {
-    Arc::new(state::AppState::new_with_db(lifecycle_pool().await))
+    let state = Arc::new(state::AppState::new_with_db(lifecycle_pool().await));
+    {
+        let mut broker = state.broker_snapshot.write().await;
+        *broker = Some(mqk_schemas::BrokerSnapshot {
+            captured_at_utc: chrono::Utc::now(),
+            account: mqk_schemas::BrokerAccount {
+                equity: "100000".to_string(),
+                cash: "100000".to_string(),
+                currency: "USD".to_string(),
+            },
+            orders: vec![],
+            fills: vec![],
+            positions: vec![],
+        });
+    }
+    state
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn start_refuses_without_broker_snapshot_truth() {
+    let st = Arc::new(state::AppState::new_with_db(lifecycle_pool().await));
+    arm(&st).await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(make_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        parse_json(body)["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("broker snapshot truth is unavailable"),
+        "start must fail closed when broker truth is unavailable"
+    );
 }
 
 #[tokio::test]

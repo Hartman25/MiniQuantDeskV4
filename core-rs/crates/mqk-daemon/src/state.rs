@@ -763,6 +763,15 @@ impl AppState {
         db: PgPool,
         run_id: Uuid,
     ) -> Result<DaemonOrchestrator, RuntimeLifecycleError> {
+        let broker_snapshot_guard = self.broker_snapshot.read().await;
+        let broker_seed = broker_snapshot_guard.clone().ok_or_else(|| {
+            RuntimeLifecycleError::ServiceUnavailable(
+                "broker snapshot truth is unavailable; refusing to start runtime with placeholder broker state"
+                    .to_string(),
+            )
+        })?;
+        drop(broker_snapshot_guard);
+
         let mut order_map = BrokerOrderMap::new();
         let existing = mqk_db::broker_map_load(&db)
             .await
@@ -784,6 +793,32 @@ impl AppState {
             CleanReconcileGate,
         );
 
+        let broker_snapshots = Arc::clone(&self.broker_snapshot);
+        let broker_seed_reconcile = reconcile_broker_snapshot_from_schema(&broker_seed)
+            .map_err(|err| RuntimeLifecycleError::ServiceUnavailable(err.to_string()))?;
+
+        let local_snapshots = Arc::clone(&self.execution_snapshot);
+        let local_snapshot_provider = move || {
+            local_snapshots
+                .try_read()
+                .ok()
+                .and_then(|snapshot| snapshot.as_ref().map(reconcile_local_snapshot_from_runtime))
+                .unwrap_or_else(mqk_reconcile::LocalSnapshot::empty)
+        };
+
+        let broker_snapshot_provider = move || {
+            let Some(schema_snapshot) = broker_snapshots
+                .try_read()
+                .ok()
+                .and_then(|snapshot| snapshot.clone())
+            else {
+                return broker_seed_reconcile.clone();
+            };
+
+            reconcile_broker_snapshot_from_schema(&schema_snapshot)
+                .unwrap_or_else(|_| broker_seed_reconcile.clone())
+        };
+
         Ok(mqk_runtime::orchestrator::ExecutionOrchestrator::new(
             db,
             gateway,
@@ -795,8 +830,8 @@ impl AppState {
             DAEMON_ADAPTER_ID,
             broker_cursor,
             mqk_runtime::orchestrator::WallClock,
-            Box::new(mqk_reconcile::LocalSnapshot::empty),
-            Box::new(mqk_reconcile::BrokerSnapshot::empty),
+            Box::new(local_snapshot_provider),
+            Box::new(broker_snapshot_provider),
         ))
     }
 
@@ -1043,6 +1078,121 @@ fn initial_reconcile_status() -> ReconcileStatusSnapshot {
                 .to_string(),
         ),
     }
+}
+
+fn parse_signed_qty(raw: &str) -> Option<i64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(value) = trimmed.parse::<i64>() {
+        return Some(value);
+    }
+
+    let (sign, magnitude) = if let Some(rest) = trimmed.strip_prefix('-') {
+        (-1_i64, rest)
+    } else if let Some(rest) = trimmed.strip_prefix('+') {
+        (1_i64, rest)
+    } else {
+        (1_i64, trimmed)
+    };
+
+    let (whole, frac) = magnitude.split_once('.')?;
+    if frac.chars().any(|c| c != '0') {
+        return None;
+    }
+    let base = whole.parse::<i64>().ok()?;
+    Some(sign * base)
+}
+
+fn reconcile_side_from_schema(raw: &str) -> mqk_reconcile::Side {
+    if raw.eq_ignore_ascii_case("sell") {
+        mqk_reconcile::Side::Sell
+    } else {
+        mqk_reconcile::Side::Buy
+    }
+}
+
+fn reconcile_order_status_from_schema(raw: &str) -> mqk_reconcile::OrderStatus {
+    if raw.eq_ignore_ascii_case("new") {
+        mqk_reconcile::OrderStatus::New
+    } else if raw.eq_ignore_ascii_case("accepted") {
+        mqk_reconcile::OrderStatus::Accepted
+    } else if raw.eq_ignore_ascii_case("partially_filled")
+        || raw.eq_ignore_ascii_case("partial_fill")
+    {
+        mqk_reconcile::OrderStatus::PartiallyFilled
+    } else if raw.eq_ignore_ascii_case("filled") {
+        mqk_reconcile::OrderStatus::Filled
+    } else if raw.eq_ignore_ascii_case("canceled") || raw.eq_ignore_ascii_case("cancelled") {
+        mqk_reconcile::OrderStatus::Canceled
+    } else if raw.eq_ignore_ascii_case("rejected") {
+        mqk_reconcile::OrderStatus::Rejected
+    } else {
+        mqk_reconcile::OrderStatus::Unknown
+    }
+}
+
+fn reconcile_local_snapshot_from_runtime(
+    snapshot: &mqk_runtime::observability::ExecutionSnapshot,
+) -> mqk_reconcile::LocalSnapshot {
+    let positions = snapshot
+        .portfolio
+        .positions
+        .iter()
+        .map(|position| (position.symbol.clone(), position.net_qty))
+        .collect();
+
+    mqk_reconcile::LocalSnapshot {
+        orders: BTreeMap::new(),
+        positions,
+    }
+}
+
+fn reconcile_broker_snapshot_from_schema(
+    snapshot: &mqk_schemas::BrokerSnapshot,
+) -> Result<mqk_reconcile::BrokerSnapshot, &'static str> {
+    let fetched_at_ms = snapshot.captured_at_utc.timestamp_millis();
+    if fetched_at_ms <= 0 {
+        return Err("broker snapshot timestamp is invalid; refusing ambiguous broker truth");
+    }
+
+    let mut positions = BTreeMap::new();
+    for position in &snapshot.positions {
+        let qty = parse_signed_qty(&position.qty).ok_or(
+            "broker snapshot contains non-integer position qty; refusing ambiguous broker truth",
+        )?;
+        positions.insert(position.symbol.clone(), qty);
+    }
+
+    let mut orders = BTreeMap::new();
+    for order in &snapshot.orders {
+        let qty = parse_signed_qty(&order.qty).ok_or(
+            "broker snapshot contains non-integer order qty; refusing ambiguous broker truth",
+        )?;
+        let order_id = if order.client_order_id.trim().is_empty() {
+            order.broker_order_id.clone()
+        } else {
+            order.client_order_id.clone()
+        };
+        orders.insert(
+            order_id.clone(),
+            mqk_reconcile::OrderSnapshot::new(
+                order_id,
+                order.symbol.clone(),
+                reconcile_side_from_schema(&order.side),
+                qty,
+                0,
+                reconcile_order_status_from_schema(&order.status),
+            ),
+        );
+    }
+
+    Ok(mqk_reconcile::BrokerSnapshot {
+        orders,
+        positions,
+        fetched_at_ms,
+    })
 }
 
 fn reconcile_unknown_status(note: impl Into<String>) -> ReconcileStatusSnapshot {
