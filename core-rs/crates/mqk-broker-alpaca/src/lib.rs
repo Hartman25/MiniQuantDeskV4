@@ -400,6 +400,9 @@ pub fn build_replace_body(
 ///
 /// Only `"FILL"` and `"PARTIAL_FILL"` activity types are supported.
 ///
+/// The activity `id` is mapped to `broker_fill_id` so downstream consumers can
+/// treat it as strong broker-native economic fill identity.
+///
 /// # Errors
 ///
 /// Returns `Err(String)` if `activity.activity_type` is not a recognised fill type.
@@ -431,6 +434,7 @@ pub fn activity_to_trade_update(
         order: alpaca_order,
         price: activity.price.clone(),
         qty: activity.qty.clone(),
+        broker_fill_id: Some(activity.id.clone()),
     })
 }
 pub fn decode_fetch_cursor(cursor: Option<&str>) -> Result<AlpacaFetchCursor, BrokerError> {

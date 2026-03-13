@@ -50,6 +50,12 @@ pub struct AlpacaTradeUpdate {
     /// For `"partial_fill"` / `"fill"`: the quantity executed in this event,
     /// not the cumulative total.
     pub qty: Option<String>,
+    /// Stable broker-native fill identity when Alpaca supplies one.
+    ///
+    /// This is distinct from `timestamp`/`event` message identity and should
+    /// be used for economic fill identity only when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_fill_id: Option<String>,
 }
 /// Adapter-owned opaque inbound resume state persisted in `broker_event_cursor`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

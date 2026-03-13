@@ -146,7 +146,7 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
                 .ok_or(NormalizeError::MissingField("price"))?;
             Ok(BrokerEvent::PartialFill {
                 broker_message_id,
-                broker_fill_id: None,
+                broker_fill_id: ev.broker_fill_id.clone(),
                 internal_order_id,
                 broker_order_id: Some(broker_order_id),
                 symbol: ev.order.symbol.clone(),
@@ -170,7 +170,7 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
                 .ok_or(NormalizeError::MissingField("price"))?;
             Ok(BrokerEvent::Fill {
                 broker_message_id,
-                broker_fill_id: None,
+                broker_fill_id: ev.broker_fill_id.clone(),
                 internal_order_id,
                 broker_order_id: Some(broker_order_id),
                 symbol: ev.order.symbol.clone(),
@@ -260,6 +260,7 @@ mod tests {
             order: ord,
             price: price.map(str::to_string),
             qty: qty.map(str::to_string),
+            broker_fill_id: None,
         }
     }
     #[test]
@@ -275,6 +276,19 @@ mod tests {
         assert_eq!(ev.broker_order_id(), Some("alpaca-uuid-001"));
         assert_eq!(ev.internal_order_id(), "internal-001");
     }
+    #[test]
+    fn fill_event_propagates_broker_fill_id() {
+        let mut u = update(
+            "fill",
+            order("alpaca-uuid-001", "internal-001", "AAPL", "buy", "100"),
+            Some("150.50"),
+            Some("5"),
+        );
+        u.broker_fill_id = Some("fill-econ-1".to_string());
+        let ev = normalize_trade_update(&u).unwrap();
+        assert_eq!(ev.broker_fill_id(), Some("fill-econ-1"));
+    }
+
     #[test]
     fn unknown_event_returns_error() {
         let u = update(

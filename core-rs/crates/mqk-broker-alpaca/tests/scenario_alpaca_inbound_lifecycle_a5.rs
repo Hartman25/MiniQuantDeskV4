@@ -84,6 +84,7 @@ fn make_update(
         order: ord,
         price: price.map(str::to_string),
         qty: qty.map(str::to_string),
+        broker_fill_id: None,
     }
 }
 /// Default order using the shared test constants (buy side, given qty).
