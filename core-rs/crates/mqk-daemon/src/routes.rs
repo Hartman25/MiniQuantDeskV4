@@ -27,9 +27,9 @@ use tracing::info;
 
 use crate::{
     api_types::{
-        DiagnosticsSnapshotResponse, ExecutionSummaryResponse, GateRefusedResponse, HealthResponse,
-        IntegrityResponse, PortfolioSummaryResponse, PreflightStatusResponse,
-        ReconcileSummaryResponse, RiskSummaryResponse, SystemStatusResponse,
+        DiagnosticsSnapshotResponse, ExecutionSummaryResponse, FaultSignal, GateRefusedResponse,
+        HealthResponse, IntegrityResponse, PortfolioSummaryResponse, PreflightStatusResponse,
+        ReconcileSummaryResponse, RiskSummaryResponse, RuntimeErrorResponse, SystemStatusResponse,
         TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
@@ -250,9 +250,10 @@ pub(crate) async fn integrity_arm(State(st): State<Arc<AppState>>) -> impl IntoR
 
     if let Some(db) = st.db.as_ref() {
         if let Err(err) = mqk_db::persist_arm_state(db, "ARMED", None).await {
-            return runtime_error_response(RuntimeLifecycleError::Internal(format!(
-                "integrity/arm persist_arm_state failed: {err}"
-            )));
+            return runtime_error_response(RuntimeLifecycleError::Internal {
+                fault_class: "control.persistence.integrity_arm",
+                message: format!("integrity/arm persist_arm_state failed: {err}"),
+            });
         }
     }
 
@@ -290,9 +291,10 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
 
     if let Some(db) = st.db.as_ref() {
         if let Err(err) = mqk_db::persist_arm_state(db, "DISARMED", Some("OperatorDisarm")).await {
-            return runtime_error_response(RuntimeLifecycleError::Internal(format!(
-                "integrity/disarm persist_arm_state failed: {err}"
-            )));
+            return runtime_error_response(RuntimeLifecycleError::Internal {
+                fault_class: "control.persistence.integrity_disarm",
+                message: format!("integrity/disarm persist_arm_state failed: {err}"),
+            });
         }
     }
 
@@ -324,30 +326,107 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
 
 fn runtime_error_response(err: RuntimeLifecycleError) -> Response {
     match err {
-        RuntimeLifecycleError::Forbidden { gate, message } => (
+        RuntimeLifecycleError::Forbidden {
+            fault_class,
+            gate,
+            message,
+        } => (
             StatusCode::FORBIDDEN,
-            Json(GateRefusedResponse {
+            Json(RuntimeErrorResponse {
                 error: message,
-                gate,
+                fault_class: fault_class.to_string(),
+                gate: Some(gate),
             }),
         )
             .into_response(),
-        RuntimeLifecycleError::ServiceUnavailable(message) => (
+        RuntimeLifecycleError::ServiceUnavailable {
+            fault_class,
+            message,
+        } => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({ "error": message })),
+            Json(RuntimeErrorResponse {
+                error: message,
+                fault_class: fault_class.to_string(),
+                gate: None,
+            }),
         )
             .into_response(),
-        RuntimeLifecycleError::Conflict(message) => (
+        RuntimeLifecycleError::Conflict {
+            fault_class,
+            message,
+        } => (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": message })),
+            Json(RuntimeErrorResponse {
+                error: message,
+                fault_class: fault_class.to_string(),
+                gate: None,
+            }),
         )
             .into_response(),
-        RuntimeLifecycleError::Internal(message) => (
+        RuntimeLifecycleError::Internal {
+            fault_class,
+            message,
+        } => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": message })),
+            Json(RuntimeErrorResponse {
+                error: message,
+                fault_class: fault_class.to_string(),
+                gate: None,
+            }),
         )
             .into_response(),
     }
+}
+
+fn build_fault_signals(
+    status: &crate::state::StatusSnapshot,
+    reconcile: &crate::state::ReconcileStatusSnapshot,
+    risk_blocked: bool,
+) -> Vec<FaultSignal> {
+    let mut signals = Vec::new();
+
+    if status.state == "unknown" {
+        signals.push(FaultSignal {
+            class: "runtime.truth_mismatch.durable_active_without_local_owner".to_string(),
+            severity: "critical".to_string(),
+            summary: "Durable run appears active without daemon-owned runtime loop.".to_string(),
+            detail: status.notes.clone(),
+        });
+    }
+
+    if matches!(reconcile.status.as_str(), "dirty" | "stale" | "unavailable") {
+        signals.push(FaultSignal {
+            class: format!("reconcile.dispatch_block.{}", reconcile.status),
+            severity: if reconcile.status == "dirty" {
+                "critical"
+            } else {
+                "warning"
+            }
+            .to_string(),
+            summary: "Reconcile state blocks or degrades safe dispatch.".to_string(),
+            detail: reconcile.note.clone(),
+        });
+    }
+
+    if risk_blocked {
+        signals.push(FaultSignal {
+            class: "risk.dispatch_denied.engine_blocked".to_string(),
+            severity: "critical".to_string(),
+            summary: "Risk engine indicates dispatch is blocked.".to_string(),
+            detail: None,
+        });
+    }
+
+    if status.state == "halted" {
+        signals.push(FaultSignal {
+            class: "runtime.halt.operator_or_safety".to_string(),
+            severity: "critical".to_string(),
+            summary: "Runtime is halted; dispatch remains fail-closed.".to_string(),
+            detail: status.notes.clone(),
+        });
+    }
+
+    signals
 }
 
 fn parse_decimal(value: &str) -> f64 {
@@ -463,6 +542,7 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             risk_halt_active: risk_blocked,
             integrity_halt_active: !integrity_armed,
             daemon_reachable: true,
+            fault_signals: build_fault_signals(&status, &reconcile, risk_blocked),
         }),
     )
         .into_response()

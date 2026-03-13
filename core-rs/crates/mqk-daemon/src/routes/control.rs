@@ -9,7 +9,10 @@ use axum::{
 };
 use serde::Serialize;
 
-use crate::state::{AppState, RuntimeLifecycleError};
+use crate::{
+    api_types::RuntimeErrorResponse,
+    state::{AppState, RuntimeLifecycleError},
+};
 
 #[derive(Debug, Serialize)]
 pub struct ControlStatus {
@@ -303,24 +306,53 @@ async fn publish_integrity_status(state: &Arc<AppState>, integrity_armed: bool, 
 
 fn lifecycle_error_response(err: RuntimeLifecycleError) -> Response {
     match err {
-        RuntimeLifecycleError::Forbidden { gate, message } => (
+        RuntimeLifecycleError::Forbidden {
+            fault_class,
+            gate,
+            message,
+        } => (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({ "error": message, "gate": gate })),
+            Json(RuntimeErrorResponse {
+                error: message,
+                fault_class: fault_class.to_string(),
+                gate: Some(gate),
+            }),
         )
             .into_response(),
-        RuntimeLifecycleError::ServiceUnavailable(message) => (
+        RuntimeLifecycleError::ServiceUnavailable {
+            fault_class,
+            message,
+        } => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({ "error": message })),
+            Json(RuntimeErrorResponse {
+                error: message,
+                fault_class: fault_class.to_string(),
+                gate: None,
+            }),
         )
             .into_response(),
-        RuntimeLifecycleError::Conflict(message) => (
+        RuntimeLifecycleError::Conflict {
+            fault_class,
+            message,
+        } => (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": message })),
+            Json(RuntimeErrorResponse {
+                error: message,
+                fault_class: fault_class.to_string(),
+                gate: None,
+            }),
         )
             .into_response(),
-        RuntimeLifecycleError::Internal(message) => (
+        RuntimeLifecycleError::Internal {
+            fault_class,
+            message,
+        } => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": message })),
+            Json(RuntimeErrorResponse {
+                error: message,
+                fault_class: fault_class.to_string(),
+                gate: None,
+            }),
         )
             .into_response(),
     }

@@ -111,6 +111,22 @@ pub struct SystemStatusResponse {
     pub risk_halt_active: bool,
     pub integrity_halt_active: bool,
     pub daemon_reachable: bool,
+    pub fault_signals: Vec<FaultSignal>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FaultSignal {
+    pub class: String,
+    pub severity: String,
+    pub summary: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeErrorResponse {
+    pub error: String,
+    pub fault_class: String,
+    pub gate: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

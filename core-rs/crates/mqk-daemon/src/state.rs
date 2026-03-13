@@ -90,25 +90,76 @@ pub struct ReconcileStatusSnapshot {
 
 #[derive(Debug)]
 pub enum RuntimeLifecycleError {
-    ServiceUnavailable(String),
-    Forbidden { gate: String, message: String },
-    Conflict(String),
-    Internal(String),
+    ServiceUnavailable {
+        fault_class: &'static str,
+        message: String,
+    },
+    Forbidden {
+        fault_class: &'static str,
+        gate: String,
+        message: String,
+    },
+    Conflict {
+        fault_class: &'static str,
+        message: String,
+    },
+    Internal {
+        fault_class: &'static str,
+        message: String,
+    },
 }
 
 impl RuntimeLifecycleError {
-    fn internal(context: &str, err: impl fmt::Display) -> Self {
-        Self::Internal(format!("{context}: {err}"))
+    fn service_unavailable(fault_class: &'static str, message: impl Into<String>) -> Self {
+        Self::ServiceUnavailable {
+            fault_class,
+            message: message.into(),
+        }
+    }
+
+    fn forbidden(
+        fault_class: &'static str,
+        gate: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Forbidden {
+            fault_class,
+            gate: gate.into(),
+            message: message.into(),
+        }
+    }
+
+    fn conflict(fault_class: &'static str, message: impl Into<String>) -> Self {
+        Self::Conflict {
+            fault_class,
+            message: message.into(),
+        }
+    }
+
+    fn internal(context: &'static str, err: impl fmt::Display) -> Self {
+        Self::Internal {
+            fault_class: context,
+            message: format!("{context}: {err}"),
+        }
+    }
+
+    pub fn fault_class(&self) -> &'static str {
+        match self {
+            Self::ServiceUnavailable { fault_class, .. }
+            | Self::Forbidden { fault_class, .. }
+            | Self::Conflict { fault_class, .. }
+            | Self::Internal { fault_class, .. } => fault_class,
+        }
     }
 }
 
 impl fmt::Display for RuntimeLifecycleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ServiceUnavailable(msg) => f.write_str(msg),
+            Self::ServiceUnavailable { message, .. } => f.write_str(message),
             Self::Forbidden { message, .. } => f.write_str(message),
-            Self::Conflict(msg) => f.write_str(msg),
-            Self::Internal(msg) => f.write_str(msg),
+            Self::Conflict { message, .. } => f.write_str(message),
+            Self::Internal { message, .. } => f.write_str(message),
         }
     }
 }
@@ -448,17 +499,18 @@ impl AppState {
         self.reap_finished_execution_loop().await?;
 
         if self.integrity.read().await.is_execution_blocked() {
-            return Err(RuntimeLifecycleError::Forbidden {
-                gate: "integrity_armed".to_string(),
-                message: "GATE_REFUSED: integrity disarmed or halted; arm integrity first"
-                    .to_string(),
-            });
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.control_refusal.integrity_disarmed",
+                "integrity_armed",
+                "GATE_REFUSED: integrity disarmed or halted; arm integrity first",
+            ));
         }
 
         if let Some(run_id) = self.active_owned_run_id().await {
-            return Err(RuntimeLifecycleError::Conflict(format!(
-                "runtime already active under local ownership: {run_id}"
-            )));
+            return Err(RuntimeLifecycleError::conflict(
+                "runtime.control_refusal.already_owned",
+                format!("runtime already active under local ownership: {run_id}"),
+            ));
         }
 
         let db = self.db_pool()?;
@@ -469,10 +521,13 @@ impl AppState {
                     RuntimeLifecycleError::internal("start active-run lookup failed", err)
                 })?
         {
-            return Err(RuntimeLifecycleError::Conflict(format!(
-                "durable active run exists without local ownership: {}",
-                active.run_id
-            )));
+            return Err(RuntimeLifecycleError::conflict(
+                "runtime.truth_mismatch.durable_active_without_local_owner",
+                format!(
+                    "durable active run exists without local ownership: {}",
+                    active.run_id
+                ),
+            ));
         }
 
         let latest = mqk_db::fetch_latest_run_for_engine(&db, DAEMON_ENGINE_ID, DAEMON_MODE)
@@ -485,16 +540,19 @@ impl AppState {
             Some(run) => match run.status {
                 mqk_db::RunStatus::Created | mqk_db::RunStatus::Stopped => run.run_id,
                 mqk_db::RunStatus::Halted => {
-                    return Err(RuntimeLifecycleError::Conflict(format!(
-                        "durable run {} is halted; operator must clear the halted lifecycle before starting again",
-                        run.run_id
-                    )))
+                    return Err(RuntimeLifecycleError::conflict(
+                        "runtime.start_refused.halted_lifecycle",
+                        format!(
+                            "durable run {} is halted; operator must clear the halted lifecycle before starting again",
+                            run.run_id
+                        ),
+                    ))
                 }
                 mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running => {
-                    return Err(RuntimeLifecycleError::Conflict(format!(
-                        "durable run {} is already active",
-                        run.run_id
-                    )))
+                    return Err(RuntimeLifecycleError::conflict(
+                        "runtime.start_refused.durable_run_active",
+                        format!("durable run {} is already active", run.run_id),
+                    ))
                 }
             },
             None => {
@@ -548,9 +606,10 @@ impl AppState {
             let message = err.to_string();
             let _ = orchestrator.release_runtime_leadership().await;
             if message.contains("RUNTIME_LEASE") {
-                return Err(RuntimeLifecycleError::Conflict(format!(
-                    "runtime leader lease unavailable: {message}"
-                )));
+                return Err(RuntimeLifecycleError::conflict(
+                    "runtime.start_refused.service_unavailable",
+                    format!("runtime leader lease unavailable: {message}"),
+                ));
             }
             return Err(RuntimeLifecycleError::internal(
                 "start initial tick failed",
@@ -562,8 +621,9 @@ impl AppState {
         {
             let mut lock = self.execution_loop.lock().await;
             if lock.is_some() {
-                return Err(RuntimeLifecycleError::Conflict(
-                    "runtime ownership changed while starting; refusing duplicate loop".to_string(),
+                return Err(RuntimeLifecycleError::conflict(
+                    "runtime.start_refused.local_ownership_conflict",
+                    "runtime ownership changed while starting; refusing duplicate loop",
                 ));
             }
             *lock = Some(handle);
@@ -601,10 +661,13 @@ impl AppState {
                                 )
                             })?
                     {
-                        return Err(RuntimeLifecycleError::Conflict(format!(
-                            "durable active run exists without local ownership: {}",
-                            active.run_id
-                        )));
+                        return Err(RuntimeLifecycleError::conflict(
+                            "runtime.truth_mismatch.durable_active_without_local_owner",
+                            format!(
+                                "durable active run exists without local ownership: {}",
+                                active.run_id
+                            ),
+                        ));
                     }
                 }
                 return self.current_status_snapshot().await;
@@ -651,10 +714,13 @@ impl AppState {
                             RuntimeLifecycleError::internal("halt active-run lookup failed", err)
                         })?
                 {
-                    return Err(RuntimeLifecycleError::Conflict(format!(
-                        "durable active run exists without local ownership: {}",
-                        active.run_id
-                    )));
+                    return Err(RuntimeLifecycleError::conflict(
+                        "runtime.truth_mismatch.durable_active_without_local_owner",
+                        format!(
+                            "durable active run exists without local ownership: {}",
+                            active.run_id
+                        ),
+                    ));
                 }
             }
         }
@@ -727,8 +793,9 @@ impl AppState {
 
     fn db_pool(&self) -> Result<PgPool, RuntimeLifecycleError> {
         self.db.clone().ok_or_else(|| {
-            RuntimeLifecycleError::ServiceUnavailable(
-                "runtime DB is not configured on this daemon".to_string(),
+            RuntimeLifecycleError::service_unavailable(
+                "runtime.start_refused.service_unavailable",
+                "runtime DB is not configured on this daemon",
             )
         })
     }

@@ -140,6 +140,10 @@ async fn run_start_requires_db_backed_runtime_after_arm() {
             .contains("runtime DB is not configured"),
         "body should explain DB-backed runtime requirement: {json}"
     );
+    assert_eq!(
+        json["fault_class"],
+        "runtime.start_refused.service_unavailable"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +379,10 @@ async fn run_start_refused_403_when_integrity_disarmed() {
         "body should contain GATE_REFUSED: {json}"
     );
     assert_eq!(json["gate"], "integrity_armed");
+    assert_eq!(
+        json["fault_class"],
+        "runtime.control_refusal.integrity_disarmed"
+    );
 }
 
 #[tokio::test]
@@ -572,6 +580,7 @@ async fn api_system_status_returns_gui_contract() {
     assert_eq!(json["runtime_status"], "idle");
     assert_eq!(json["integrity_status"], "warning");
     assert_eq!(json["daemon_reachable"], true);
+    assert!(json["fault_signals"].is_array());
 }
 
 #[tokio::test]
