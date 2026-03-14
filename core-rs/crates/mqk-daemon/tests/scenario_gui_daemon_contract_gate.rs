@@ -33,6 +33,47 @@ fn parse_json(b: bytes::Bytes) -> serde_json::Value {
     serde_json::from_slice(&b).expect("body is not valid JSON")
 }
 
+fn looks_placeholder(value: &str) -> bool {
+    let lowered = value.to_ascii_lowercase();
+    ["placeholder", "synthetic", "simulated", "mock", "example"]
+        .iter()
+        .any(|needle| lowered.contains(needle))
+}
+
+fn assert_authoritative_empty_or_semantic_rows(
+    uri: &str,
+    rows: &[serde_json::Value],
+    required_row_keys: &[&str],
+) {
+    if rows.is_empty() {
+        // Empty is acceptable for newly booted or quiet systems, but the response
+        // still has to be authoritative from the daemon contract surface.
+        return;
+    }
+
+    for (idx, row) in rows.iter().enumerate() {
+        let obj = row
+            .as_object()
+            .unwrap_or_else(|| panic!("{uri}[{idx}] must be a JSON object"));
+
+        for key in required_row_keys {
+            assert!(
+                obj.contains_key(*key),
+                "{uri}[{idx}] missing required semantic key '{key}': {row}"
+            );
+        }
+
+        for (field, value) in obj {
+            if let Some(s) = value.as_str() {
+                assert!(
+                    !looks_placeholder(s),
+                    "{uri}[{idx}].{field} looks synthetic/placeholder instead of durable truth: {s}"
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
     let router = make_router();
@@ -203,5 +244,94 @@ async fn gui_contract_legacy_api_surfaces_have_expected_shape() {
     assert!(
         fills_json.get("has_snapshot").is_none(),
         "stale has_snapshot flag must not exist on accepted DMON-04 fills contract"
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_audit_operator_actions_must_be_authoritative_truth() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/audit/operator-actions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/audit/operator-actions must be implemented as a hard-gated daemon contract surface"
+    );
+
+    let json = parse_json(body);
+    let rows = json
+        .as_array()
+        .expect("/api/v1/audit/operator-actions must return a JSON array");
+    assert_authoritative_empty_or_semantic_rows(
+        "/api/v1/audit/operator-actions",
+        rows,
+        &["audit_ref", "at", "actor", "action_key", "result_state"],
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_audit_artifacts_must_be_authoritative_truth() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/audit/artifacts")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/audit/artifacts must be implemented as a hard-gated daemon contract surface"
+    );
+
+    let json = parse_json(body);
+    let artifacts = json
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .expect("/api/v1/audit/artifacts must return an object with an artifacts array");
+
+    assert_authoritative_empty_or_semantic_rows(
+        "/api/v1/audit/artifacts.artifacts",
+        artifacts,
+        &[
+            "artifact_id",
+            "artifact_type",
+            "created_at",
+            "status",
+            "storage_path",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_operator_timeline_must_be_authoritative_truth() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/ops/operator-timeline")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/ops/operator-timeline must be implemented as a hard-gated daemon contract surface"
+    );
+
+    let json = parse_json(body);
+    let events = json
+        .as_array()
+        .expect("/api/v1/ops/operator-timeline must return a JSON array");
+    assert_authoritative_empty_or_semantic_rows(
+        "/api/v1/ops/operator-timeline",
+        events,
+        &["timeline_event_id", "at", "category", "severity", "title"],
     );
 }
