@@ -21,6 +21,8 @@ use axum::{
 };
 use futures_util::{Stream, StreamExt};
 use mqk_schemas::BrokerPosition;
+use serde_json::Value;
+use sqlx::Row;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
@@ -403,6 +405,7 @@ fn build_fault_signals(
     status: &crate::state::StatusSnapshot,
     reconcile: &crate::state::ReconcileStatusSnapshot,
     risk_blocked: bool,
+    dependency_notes: &[String],
 ) -> Vec<FaultSignal> {
     let mut signals = Vec::new();
 
@@ -447,7 +450,38 @@ fn build_fault_signals(
         });
     }
 
+    for note in dependency_notes {
+        signals.push(FaultSignal {
+            class: "system.dependency".to_string(),
+            severity: "warning".to_string(),
+            summary: note.clone(),
+            detail: None,
+        });
+    }
+
     signals
+}
+
+async fn daemon_db_reachability(st: &AppState) -> (bool, Option<String>) {
+    let Some(db) = st.db.as_ref() else {
+        return (
+            false,
+            Some("runtime DB is not configured on this daemon".to_string()),
+        );
+    };
+
+    match mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE).await {
+        Ok(_) => (true, None),
+        Err(err) => (false, Some(err.to_string())),
+    }
+}
+
+fn config_string(config_json: &Value, path: &[&str]) -> Option<String> {
+    let mut cursor = config_json;
+    for segment in path {
+        cursor = cursor.get(*segment)?;
+    }
+    cursor.as_str().map(ToOwned::to_owned)
 }
 
 fn parse_decimal(value: &str) -> f64 {
@@ -561,8 +595,20 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
     let runtime_status = runtime_status_from_state(&status.state).to_string();
     let (environment, live_routing_enabled) =
         environment_and_live_routing_truth(&st, &status).await;
+    let (db_reachable, db_error) = daemon_db_reachability(&st).await;
     let broker_status = if snapshot_present { "ok" } else { "warning" }.to_string();
     let integrity_status = if integrity_armed { "ok" } else { "warning" }.to_string();
+    let db_status = if db_reachable { "ok" } else { "unavailable" }.to_string();
+    let audit_writer_status = if db_reachable { "ok" } else { "unavailable" }.to_string();
+
+    let mut dependency_notes = vec![
+        "Market-data health is unavailable: daemon does not own a market-data dependency in this architecture."
+            .to_string(),
+    ];
+    if let Some(err) = db_error {
+        dependency_notes.push(format!("DB reachability check failed: {err}"));
+    }
+
     let reconcile_status = reconcile.status.clone();
     let has_critical = matches!(reconcile_status.as_str(), "dirty" | "stale");
     let has_warning = broker_status != "ok"
@@ -577,16 +623,16 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             environment,
             runtime_status,
             broker_status,
-            db_status: "unknown".to_string(),
-            market_data_health: "unknown".to_string(),
+            db_status,
+            market_data_health: "unavailable".to_string(),
             reconcile_status,
             integrity_status,
-            audit_writer_status: "unknown".to_string(),
+            audit_writer_status,
             last_heartbeat: status.deadman_last_heartbeat_utc.clone(),
             deadman_status: status.deadman_status.clone(),
             loop_latency_ms: None,
             active_account_id: None,
-            config_profile: None,
+            config_profile: Some(DAEMON_MODE.to_ascii_lowercase()),
             has_warning,
             has_critical,
             strategy_armed: integrity_armed,
@@ -596,7 +642,12 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             risk_halt_active: risk_blocked,
             integrity_halt_active: !integrity_armed,
             daemon_reachable: true,
-            fault_signals: build_fault_signals(&status, &reconcile, risk_blocked),
+            fault_signals: build_fault_signals(
+                &status,
+                &reconcile,
+                risk_blocked,
+                &dependency_notes,
+            ),
         }),
     )
         .into_response()
@@ -611,26 +662,35 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         let ig = st.integrity.read().await;
         !ig.is_execution_blocked()
     };
+    let (db_reachable, db_error) = daemon_db_reachability(&st).await;
+    let broker_config_present = true;
+    let market_data_config_present = false;
+    let audit_writer_ready = db_reachable;
 
     let strategy_disarmed = !integrity_armed;
     let execution_disarmed = !integrity_armed;
 
-    let mut warnings = vec![
-        "Preflight is partially derived from in-memory daemon state; DB, broker config, market data config, and audit writer readiness are not wired yet.".to_string(),
-    ];
+    let mut warnings = vec![];
     if status.notes.is_some() {
         warnings.push(
             "Daemon status contains placeholder notes; runtime wiring is incomplete.".to_string(),
         );
     }
+    if let Some(err) = db_error {
+        warnings.push(format!("DB reachability check failed: {err}"));
+    }
 
-    let mut blockers = vec![
-        "DB reachability is unavailable from current daemon preflight wiring.".to_string(),
-        "Broker config presence is unavailable from current daemon preflight wiring.".to_string(),
-        "Market data config presence is unavailable from current daemon preflight wiring."
-            .to_string(),
-        "Audit writer readiness is unavailable from current daemon preflight wiring.".to_string(),
-    ];
+    let mut blockers = Vec::new();
+    if !db_reachable {
+        blockers.push("Runtime DB is not reachable by this daemon.".to_string());
+    }
+    if !market_data_config_present {
+        blockers
+            .push("Market-data dependency is unproven/unconfigured for this daemon.".to_string());
+    }
+    if !audit_writer_ready {
+        blockers.push("Audit writer dependency is not ready (DB unreachable).".to_string());
+    }
     if execution_disarmed {
         blockers.push("Execution is disarmed at the integrity gate.".to_string());
     }
@@ -639,10 +699,10 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         StatusCode::OK,
         Json(PreflightStatusResponse {
             daemon_reachable: true,
-            db_reachable: None,
-            broker_config_present: None,
-            market_data_config_present: None,
-            audit_writer_ready: None,
+            db_reachable: Some(db_reachable),
+            broker_config_present: Some(broker_config_present),
+            market_data_config_present: Some(market_data_config_present),
+            audit_writer_ready: Some(audit_writer_ready),
             runtime_idle: Some(status.state != "running"),
             strategy_disarmed,
             execution_disarmed,
@@ -819,6 +879,12 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
         Err(err) => return runtime_error_response(err),
     };
     let strategy_allowed = status.integrity_armed;
+    let exchange_calendar_state = "unavailable".to_string();
+    let market_session = if status.state == "running" {
+        "unavailable_while_running".to_string()
+    } else {
+        "closed".to_string()
+    };
 
     (
         StatusCode::OK,
@@ -832,10 +898,10 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
             } else {
                 "disabled".to_string()
             },
-            market_session: "unknown".to_string(),
-            exchange_calendar_state: "unknown".to_string(),
+            market_session,
+            exchange_calendar_state,
             notes: vec![
-                "Market session and exchange calendar state are unavailable from current daemon wiring."
+                "Exchange calendar truth is unavailable: daemon run config currently does not carry a calendar selector."
                     .to_string(),
             ],
         }),
@@ -861,15 +927,21 @@ pub(crate) async fn system_config_fingerprint(
             config_hash: latest_run
                 .as_ref()
                 .map(|run| run.config_hash.clone())
-                .unwrap_or_else(|| "unknown".to_string()),
-            risk_policy_version: "unknown".to_string(),
-            strategy_bundle_version: "unknown".to_string(),
+                .unwrap_or_else(|| "unavailable".to_string()),
+            risk_policy_version: latest_run
+                .as_ref()
+                .and_then(|run| config_string(&run.config_json, &["risk", "policy_version"]))
+                .unwrap_or_else(|| "unavailable".to_string()),
+            strategy_bundle_version: latest_run
+                .as_ref()
+                .and_then(|run| config_string(&run.config_json, &["strategy", "bundle_version"]))
+                .unwrap_or_else(|| "unavailable".to_string()),
             build_version: st.build.version.to_string(),
             environment_profile: DAEMON_MODE.to_ascii_lowercase(),
             runtime_generation_id: latest_run
                 .as_ref()
                 .map(|run| run.run_id.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
+                .unwrap_or_else(|| "unavailable".to_string()),
             last_restart_at: latest_run
                 .as_ref()
                 .map(|run| run.started_at_utc.to_rfc3339()),
@@ -878,8 +950,70 @@ pub(crate) async fn system_config_fingerprint(
         .into_response()
 }
 
-pub(crate) async fn system_config_diffs() -> impl IntoResponse {
-    (StatusCode::OK, Json::<Vec<ConfigDiffRow>>(Vec::new())).into_response()
+pub(crate) async fn system_config_diffs(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let Some(db) = st.db.as_ref() else {
+        return (StatusCode::OK, Json::<Vec<ConfigDiffRow>>(Vec::new())).into_response();
+    };
+
+    let rows = match sqlx::query(
+        r#"
+        select run_id, started_at_utc, config_hash, config_json
+        from runs
+        where engine_id = $1
+          and mode = $2
+        order by started_at_utc desc, run_id desc
+        limit 2
+        "#,
+    )
+    .bind(DAEMON_ENGINE_ID)
+    .bind(DAEMON_MODE)
+    .fetch_all(db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return (StatusCode::OK, Json::<Vec<ConfigDiffRow>>(Vec::new())).into_response(),
+    };
+
+    if rows.len() < 2 {
+        return (StatusCode::OK, Json::<Vec<ConfigDiffRow>>(Vec::new())).into_response();
+    }
+
+    let latest = &rows[0];
+    let previous = &rows[1];
+    let latest_hash: String = latest.try_get("config_hash").unwrap_or_default();
+    let latest_json: Value = latest.try_get("config_json").unwrap_or(Value::Null);
+    let latest_started: chrono::DateTime<chrono::Utc> = latest
+        .try_get("started_at_utc")
+        .unwrap_or_else(|_| chrono::Utc::now());
+    let latest_run_id: uuid::Uuid = latest
+        .try_get("run_id")
+        .unwrap_or_else(|_| uuid::Uuid::nil());
+    let previous_hash: String = previous.try_get("config_hash").unwrap_or_default();
+    let previous_json: Value = previous.try_get("config_json").unwrap_or(Value::Null);
+
+    let mut diffs = Vec::new();
+    if latest_hash != previous_hash {
+        diffs.push(ConfigDiffRow {
+            diff_id: format!("run:{latest_run_id}:config_hash"),
+            changed_at: latest_started.to_rfc3339(),
+            changed_domain: "run.config_hash".to_string(),
+            before_version: previous_hash.clone(),
+            after_version: latest_hash.clone(),
+            summary: "Runtime config hash changed between latest two daemon runs.".to_string(),
+        });
+    }
+    if latest_json != previous_json {
+        diffs.push(ConfigDiffRow {
+            diff_id: format!("run:{latest_run_id}:config_json"),
+            changed_at: latest_started.to_rfc3339(),
+            changed_domain: "run.config_json".to_string(),
+            before_version: previous_hash,
+            after_version: latest_hash,
+            summary: "Runtime config JSON changed between latest two daemon runs.".to_string(),
+        });
+    }
+
+    (StatusCode::OK, Json(diffs)).into_response()
 }
 
 pub(crate) async fn strategy_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {

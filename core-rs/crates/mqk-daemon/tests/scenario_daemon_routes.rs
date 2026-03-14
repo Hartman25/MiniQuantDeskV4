@@ -626,7 +626,11 @@ async fn api_system_status_returns_gui_contract() {
     let json = parse_json(body);
     assert!(json["environment"].is_null());
     assert_eq!(json["runtime_status"], "idle");
+    assert_eq!(json["db_status"], "unavailable");
+    assert_eq!(json["market_data_health"], "unavailable");
     assert_eq!(json["integrity_status"], "warning");
+    assert_eq!(json["audit_writer_status"], "unavailable");
+    assert_eq!(json["config_profile"], "paper");
     assert_eq!(json["live_routing_enabled"], false);
     assert_eq!(json["daemon_reachable"], true);
     assert!(json["fault_signals"].is_array());
@@ -646,13 +650,13 @@ async fn api_system_preflight_is_fail_closed_for_unproven_dependencies() {
 
     let json = parse_json(body);
     assert_eq!(json["daemon_reachable"], true);
-    assert!(json["db_reachable"].is_null());
-    assert!(json["broker_config_present"].is_null());
-    assert!(json["market_data_config_present"].is_null());
-    assert!(json["audit_writer_ready"].is_null());
+    assert_eq!(json["db_reachable"], false);
+    assert_eq!(json["broker_config_present"], true);
+    assert_eq!(json["market_data_config_present"], false);
+    assert_eq!(json["audit_writer_ready"], false);
     assert_eq!(json["runtime_idle"], true);
     assert_eq!(json["execution_disarmed"], true);
-    assert!(json["blockers"].as_array().unwrap().len() >= 4);
+    assert!(json["blockers"].as_array().unwrap().len() >= 3);
 }
 
 #[tokio::test]
@@ -892,8 +896,8 @@ async fn api_system_session_reports_truthful_mode_and_operator_auth() {
     assert_eq!(json["strategy_allowed"], false);
     assert_eq!(json["execution_allowed"], false);
     assert_eq!(json["system_trading_window"], "disabled");
-    assert_eq!(json["market_session"], "unknown");
-    assert_eq!(json["exchange_calendar_state"], "unknown");
+    assert_eq!(json["market_session"], "closed");
+    assert_eq!(json["exchange_calendar_state"], "unavailable");
 }
 
 #[tokio::test]
@@ -944,8 +948,10 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
     let (fp_status, fp_body) = call(router.clone(), fp_req).await;
     assert_eq!(fp_status, StatusCode::OK);
     let fp = parse_json(fp_body);
-    assert_eq!(fp["config_hash"], "unknown");
-    assert_eq!(fp["runtime_generation_id"], "unknown");
+    assert_eq!(fp["config_hash"], "unavailable");
+    assert_eq!(fp["runtime_generation_id"], "unavailable");
+    assert_eq!(fp["risk_policy_version"], "unavailable");
+    assert_eq!(fp["strategy_bundle_version"], "unavailable");
     assert_eq!(fp["environment_profile"], "paper");
     assert!(fp["last_restart_at"].is_null());
 
