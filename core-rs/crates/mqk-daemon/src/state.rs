@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use mqk_broker_paper::LockedPaperBroker;
 use mqk_execution::{wiring::build_gateway, BrokerOrderMap, IntegrityGate, ReconcileGate};
 use mqk_integrity::IntegrityState;
@@ -1263,7 +1263,7 @@ pub fn spawn_heartbeat(bus: broadcast::Sender<BusMsg>, interval: Duration) {
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            let ts = Utc::now().timestamp_millis();
+            let ts = Utc::now().timestamp_millis(); // allow: ops-metadata
             let _ = bus.send(BusMsg::Heartbeat { ts_millis: ts });
         }
     });
@@ -1357,7 +1357,12 @@ fn reconcile_local_snapshot_from_runtime(
 fn reconcile_broker_snapshot_from_schema(
     snapshot: &mqk_schemas::BrokerSnapshot,
 ) -> Result<mqk_reconcile::BrokerSnapshot, &'static str> {
-    let fetched_at_ms = snapshot.captured_at_utc.timestamp_millis();
+    let fetched_at_ms = snapshot
+        .captured_at_utc
+        .timestamp()
+        .checked_mul(1_000)
+        .and_then(|ms| ms.checked_add(i64::from(snapshot.captured_at_utc.timestamp_subsec_millis())))
+        .ok_or("broker snapshot timestamp overflow; refusing ambiguous broker truth")?;
     if fetched_at_ms <= 0 {
         return Err("broker snapshot timestamp is invalid; refusing ambiguous broker truth");
     }
@@ -1408,7 +1413,11 @@ fn reconcile_unknown_status(note: impl Into<String>) -> ReconcileStatusSnapshot 
 }
 
 fn reconcile_last_run_at(fetched_at_ms: i64) -> Option<String> {
-    chrono::DateTime::<Utc>::from_timestamp_millis(fetched_at_ms).map(|ts| ts.to_rfc3339())
+    let secs = fetched_at_ms.div_euclid(1_000);
+    let millis = fetched_at_ms.rem_euclid(1_000) as u32;
+    Utc.timestamp_opt(secs, millis * 1_000_000)
+        .single()
+        .map(|ts| ts.to_rfc3339())
 }
 
 fn reconcile_counts(report: &mqk_reconcile::ReconcileReport) -> (usize, usize, usize, usize) {

@@ -2752,7 +2752,13 @@ mod tests {
             .expect("valid timestamp")
     }
     async fn make_running_run(pool: &PgPool, started_at: chrono::DateTime<chrono::Utc>) -> Uuid {
-        let run_id = Uuid::new_v4();
+        static NEXT_TEST_RUN_SEQ: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let seq = NEXT_TEST_RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let run_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("mqk-runtime.test.run|{started_at}|{seq}").as_bytes(),
+        );
         mqk_db::insert_run(
             pool,
             &mqk_db::NewRun {

@@ -1843,6 +1843,15 @@ pub async fn inbox_insert_deduped(
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
+    // DET-02: never inject wall-clock time in the dedupe path.
+    // Prefer payload event timestamp when available; otherwise use epoch.
+    let received_at = {
+        let secs = event_ts_ms.div_euclid(1_000);
+        let millis = event_ts_ms.rem_euclid(1_000) as u32;
+        DateTime::<Utc>::from_timestamp(secs, millis * 1_000_000)
+            .unwrap_or_else(|| DateTime::<Utc>::UNIX_EPOCH)
+    };
+
     inbox_insert_deduped_with_identity(
         pool,
         run_id,
@@ -1853,7 +1862,7 @@ pub async fn inbox_insert_deduped(
         event_kind,
         &message_json,
         event_ts_ms,
-        Utc::now(),
+        received_at,
     )
     .await
 }
