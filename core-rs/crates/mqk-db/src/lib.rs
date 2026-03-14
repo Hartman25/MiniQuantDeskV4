@@ -1853,7 +1853,7 @@ pub async fn inbox_insert_deduped(
         event_kind,
         &message_json,
         event_ts_ms,
-        Utc::now(),
+        Utc::now(), // allow: ops-metadata
     )
     .await
 }

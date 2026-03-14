@@ -1263,7 +1263,7 @@ pub fn spawn_heartbeat(bus: broadcast::Sender<BusMsg>, interval: Duration) {
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            let ts = Utc::now().timestamp_millis();
+            let ts = Utc::now().timestamp_millis(); // allow: ops-metadata
             let _ = bus.send(BusMsg::Heartbeat { ts_millis: ts });
         }
     });
@@ -1357,7 +1357,7 @@ fn reconcile_local_snapshot_from_runtime(
 fn reconcile_broker_snapshot_from_schema(
     snapshot: &mqk_schemas::BrokerSnapshot,
 ) -> Result<mqk_reconcile::BrokerSnapshot, &'static str> {
-    let fetched_at_ms = snapshot.captured_at_utc.timestamp_millis();
+    let fetched_at_ms = snapshot.captured_at_utc.timestamp_millis(); // allow: ops-metadata
     if fetched_at_ms <= 0 {
         return Err("broker snapshot timestamp is invalid; refusing ambiguous broker truth");
     }
@@ -1408,7 +1408,7 @@ fn reconcile_unknown_status(note: impl Into<String>) -> ReconcileStatusSnapshot 
 }
 
 fn reconcile_last_run_at(fetched_at_ms: i64) -> Option<String> {
-    chrono::DateTime::<Utc>::from_timestamp_millis(fetched_at_ms).map(|ts| ts.to_rfc3339())
+    chrono::DateTime::<Utc>::from_timestamp_millis(fetched_at_ms).map(|ts| ts.to_rfc3339()) // allow: ops-metadata
 }
 
 fn reconcile_counts(report: &mqk_reconcile::ReconcileReport) -> (usize, usize, usize, usize) {

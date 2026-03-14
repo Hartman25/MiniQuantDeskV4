@@ -2752,7 +2752,7 @@ mod tests {
             .expect("valid timestamp")
     }
     async fn make_running_run(pool: &PgPool, started_at: chrono::DateTime<chrono::Utc>) -> Uuid {
-        let run_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4(); // allow: test-only fixture identity
         mqk_db::insert_run(
             pool,
             &mqk_db::NewRun {
