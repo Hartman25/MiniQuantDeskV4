@@ -39,7 +39,6 @@ use crate::{
 };
 
 const DAEMON_ENGINE_ID: &str = "mqk-daemon";
-const DAEMON_MODE: &str = "PAPER";
 
 // ---------------------------------------------------------------------------
 // S7-1: Token auth middleware
@@ -487,7 +486,7 @@ async fn environment_and_live_routing_truth(
 
     let environment = Some(run.mode.to_ascii_lowercase());
     let live_routing_enabled = if status.state == "running" {
-        Some(run.mode.eq_ignore_ascii_case("LIVE"))
+        Some(run.mode.eq_ignore_ascii_case("LIVE") || run.mode.eq_ignore_ascii_case("LIVE-CAPITAL"))
     } else {
         live_routing_enabled
     };
@@ -575,6 +574,10 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
         StatusCode::OK,
         Json(SystemStatusResponse {
             environment,
+            daemon_mode: st.deployment_mode().as_api_label().to_string(),
+            adapter_id: st.adapter_id().to_string(),
+            deployment_start_allowed: st.deployment_readiness().start_allowed,
+            deployment_blocker: st.deployment_readiness().blocker.clone(),
             runtime_status,
             broker_status,
             db_status: "unknown".to_string(),
@@ -635,10 +638,17 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         blockers.push("Execution is disarmed at the integrity gate.".to_string());
     }
 
+    if let Some(blocker) = st.deployment_readiness().blocker.clone() {
+        blockers.push(blocker);
+    }
+
     (
         StatusCode::OK,
         Json(PreflightStatusResponse {
             daemon_reachable: true,
+            daemon_mode: st.deployment_mode().as_api_label().to_string(),
+            adapter_id: st.adapter_id().to_string(),
+            deployment_start_allowed: st.deployment_readiness().start_allowed,
             db_reachable: None,
             broker_config_present: None,
             market_data_config_present: None,
@@ -823,7 +833,10 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
     (
         StatusCode::OK,
         Json(SessionStateResponse {
-            daemon_mode: DAEMON_MODE.to_string(),
+            daemon_mode: st.deployment_mode().as_db_mode().to_string(),
+            adapter_id: st.adapter_id().to_string(),
+            deployment_start_allowed: st.deployment_readiness().start_allowed,
+            deployment_blocker: st.deployment_readiness().blocker.clone(),
             operator_auth_mode: st.operator_auth_mode().label().to_string(),
             strategy_allowed,
             execution_allowed: strategy_allowed,
@@ -847,7 +860,7 @@ pub(crate) async fn system_config_fingerprint(
     State(st): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let latest_run = if let Some(db) = st.db.as_ref() {
-        mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
+        mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, st.deployment_mode().as_db_mode())
             .await
             .ok()
             .flatten()
@@ -861,11 +874,12 @@ pub(crate) async fn system_config_fingerprint(
             config_hash: latest_run
                 .as_ref()
                 .map(|run| run.config_hash.clone())
-                .unwrap_or_else(|| "unknown".to_string()),
+                .unwrap_or_else(|| st.run_config_hash().to_string()),
+            adapter_id: st.adapter_id().to_string(),
             risk_policy_version: "unknown".to_string(),
             strategy_bundle_version: "unknown".to_string(),
             build_version: st.build.version.to_string(),
-            environment_profile: DAEMON_MODE.to_ascii_lowercase(),
+            environment_profile: st.deployment_mode().as_api_label().to_string(),
             runtime_generation_id: latest_run
                 .as_ref()
                 .map(|run| run.run_id.to_string())

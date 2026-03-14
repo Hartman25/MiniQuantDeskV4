@@ -23,12 +23,14 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 const DAEMON_ENGINE_ID: &str = "mqk-daemon";
-const DAEMON_MODE: &str = "PAPER";
-const DAEMON_ADAPTER_ID: &str = "paper";
-const DAEMON_RUN_CONFIG_HASH: &str = "daemon-runtime-paper-v1";
+const DEFAULT_DAEMON_DEPLOYMENT_MODE: &str = "paper";
+const DEFAULT_DAEMON_ADAPTER_ID: &str = "paper";
+const DAEMON_RUN_CONFIG_HASH_PREFIX: &str = "daemon-runtime";
 const EXECUTION_LOOP_INTERVAL: Duration = Duration::from_secs(1);
 const DEADMAN_TTL_SECONDS: i64 = 5;
 const DEV_ALLOW_NO_OPERATOR_TOKEN_ENV: &str = "MQK_DEV_ALLOW_NO_OPERATOR_TOKEN";
+const DAEMON_DEPLOYMENT_MODE_ENV: &str = "MQK_DAEMON_DEPLOYMENT_MODE";
+const DAEMON_ADAPTER_ID_ENV: &str = "MQK_DAEMON_ADAPTER_ID";
 
 // ---------------------------------------------------------------------------
 // BusMsg — SSE event bus payload
@@ -232,6 +234,48 @@ pub enum OperatorAuthMode {
     MissingTokenFailClosed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum DeploymentMode {
+    Backtest,
+    Paper,
+    LiveShadow,
+    LiveCapital,
+}
+
+impl DeploymentMode {
+    pub fn as_db_mode(&self) -> &'static str {
+        match self {
+            Self::Backtest => "BACKTEST",
+            Self::Paper => "PAPER",
+            Self::LiveShadow => "LIVE-SHADOW",
+            Self::LiveCapital => "LIVE-CAPITAL",
+        }
+    }
+
+    pub fn as_api_label(&self) -> &'static str {
+        match self {
+            Self::Backtest => "backtest",
+            Self::Paper => "paper",
+            Self::LiveShadow => "live-shadow",
+            Self::LiveCapital => "live-capital",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DeploymentReadiness {
+    pub start_allowed: bool,
+    pub blocker: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeSelection {
+    pub deployment_mode: DeploymentMode,
+    pub adapter_id: String,
+    pub run_config_hash: String,
+    pub readiness: DeploymentReadiness,
+}
+
 impl OperatorAuthMode {
     pub fn label(&self) -> &'static str {
         match self {
@@ -270,6 +314,8 @@ pub struct AppState {
     reconcile_status: Arc<RwLock<ReconcileStatusSnapshot>>,
     /// Operator auth posture for privileged routes.
     pub operator_auth: OperatorAuthMode,
+    /// Runtime adapter/deployment selection resolved from config/env at bootstrap.
+    runtime_selection: RuntimeSelection,
     /// The single daemon-owned execution loop handle, if any.
     execution_loop: Arc<Mutex<Option<ExecutionLoopHandle>>>,
     /// Serializes start/stop/halt transitions so the daemon never spawns duplicates.
@@ -334,6 +380,8 @@ impl AppState {
         let mut boot_integrity = IntegrityState::new();
         boot_integrity.disarmed = true;
 
+        let runtime_selection = runtime_selection_from_env();
+
         Self {
             bus,
             node_id: default_node_id(build.service),
@@ -345,6 +393,7 @@ impl AppState {
             execution_snapshot: Arc::new(RwLock::new(None)),
             reconcile_status: Arc::new(RwLock::new(initial_reconcile_status())),
             operator_auth,
+            runtime_selection,
             execution_loop: Arc::new(Mutex::new(None)),
             lifecycle_op: Arc::new(Mutex::new(())),
         }
@@ -352,6 +401,26 @@ impl AppState {
 
     pub fn operator_auth_mode(&self) -> &OperatorAuthMode {
         &self.operator_auth
+    }
+
+    pub fn runtime_selection(&self) -> &RuntimeSelection {
+        &self.runtime_selection
+    }
+
+    pub fn deployment_mode(&self) -> DeploymentMode {
+        self.runtime_selection.deployment_mode
+    }
+
+    pub fn adapter_id(&self) -> &str {
+        &self.runtime_selection.adapter_id
+    }
+
+    pub fn run_config_hash(&self) -> &str {
+        &self.runtime_selection.run_config_hash
+    }
+
+    pub fn deployment_readiness(&self) -> &DeploymentReadiness {
+        &self.runtime_selection.readiness
     }
 
     pub async fn current_reconcile_snapshot(&self) -> ReconcileStatusSnapshot {
@@ -377,12 +446,16 @@ impl AppState {
     ) -> Result<RestartTruthSnapshot, RuntimeLifecycleError> {
         let local_owned_run_id = self.active_owned_run_id().await;
         let durable_active_run_id = match self.db.as_ref() {
-            Some(db) => mqk_db::fetch_active_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                .await
-                .map_err(|err| {
-                    RuntimeLifecycleError::internal("restart active-run lookup failed", err)
-                })?
-                .map(|run| run.run_id),
+            Some(db) => mqk_db::fetch_active_run_for_engine(
+                db,
+                DAEMON_ENGINE_ID,
+                self.deployment_mode().as_db_mode(),
+            )
+            .await
+            .map_err(|err| {
+                RuntimeLifecycleError::internal("restart active-run lookup failed", err)
+            })?
+            .map(|run| run.run_id),
             None => None,
         };
 
@@ -415,14 +488,18 @@ impl AppState {
 
         let snapshot = match self.db.as_ref() {
             Some(db) => {
-                let latest = mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                    .await
-                    .map_err(|err| {
-                        RuntimeLifecycleError::internal(
-                            "current_status_snapshot run lookup failed",
-                            err,
-                        )
-                    })?;
+                let latest = mqk_db::fetch_latest_run_for_engine(
+                    db,
+                    DAEMON_ENGINE_ID,
+                    self.deployment_mode().as_db_mode(),
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeLifecycleError::internal(
+                        "current_status_snapshot run lookup failed",
+                        err,
+                    )
+                })?;
                 match latest {
                     Some(run) => match run.status {
                         mqk_db::RunStatus::Running | mqk_db::RunStatus::Armed => {
@@ -555,6 +632,17 @@ impl AppState {
         let _op = self.lifecycle_op.lock().await;
         self.reap_finished_execution_loop().await?;
 
+        if !self.deployment_readiness().start_allowed {
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.deployment_mode_unproven",
+                "deployment_mode",
+                self.deployment_readiness()
+                    .blocker
+                    .clone()
+                    .unwrap_or_else(|| "deployment mode is not start-ready".to_string()),
+            ));
+        }
+
         if self.integrity.read().await.is_execution_blocked() {
             return Err(RuntimeLifecycleError::forbidden(
                 "runtime.control_refusal.integrity_disarmed",
@@ -571,12 +659,13 @@ impl AppState {
         }
 
         let db = self.db_pool()?;
-        if let Some(active) =
-            mqk_db::fetch_active_run_for_engine(&db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                .await
-                .map_err(|err| {
-                    RuntimeLifecycleError::internal("start active-run lookup failed", err)
-                })?
+        if let Some(active) = mqk_db::fetch_active_run_for_engine(
+            &db,
+            DAEMON_ENGINE_ID,
+            self.deployment_mode().as_db_mode(),
+        )
+        .await
+        .map_err(|err| RuntimeLifecycleError::internal("start active-run lookup failed", err))?
         {
             return Err(RuntimeLifecycleError::conflict(
                 "runtime.truth_mismatch.durable_active_without_local_owner",
@@ -587,11 +676,13 @@ impl AppState {
             ));
         }
 
-        let latest = mqk_db::fetch_latest_run_for_engine(&db, DAEMON_ENGINE_ID, DAEMON_MODE)
-            .await
-            .map_err(|err| {
-                RuntimeLifecycleError::internal("start latest-run lookup failed", err)
-            })?;
+        let latest = mqk_db::fetch_latest_run_for_engine(
+            &db,
+            DAEMON_ENGINE_ID,
+            self.deployment_mode().as_db_mode(),
+        )
+        .await
+        .map_err(|err| RuntimeLifecycleError::internal("start latest-run lookup failed", err))?;
 
         let run_id = match latest.as_ref() {
             Some(run) => match run.status {
@@ -619,14 +710,14 @@ impl AppState {
                     &mqk_db::NewRun {
                         run_id,
                         engine_id: DAEMON_ENGINE_ID.to_string(),
-                        mode: DAEMON_MODE.to_string(),
+                        mode: self.deployment_mode().as_db_mode().to_string(),
                         started_at_utc: Utc::now(),
                         git_hash: "UNKNOWN".to_string(),
-                        config_hash: DAEMON_RUN_CONFIG_HASH.to_string(),
+                        config_hash: self.run_config_hash().to_string(),
                         config_json: serde_json::json!({
                             "runtime": "mqk-daemon",
-                            "adapter": DAEMON_ADAPTER_ID,
-                            "mode": DAEMON_MODE,
+                            "adapter": self.adapter_id(),
+                            "mode": self.deployment_mode().as_db_mode(),
                         }),
                         host_fingerprint: self.node_id.clone(),
                     },
@@ -708,16 +799,15 @@ impl AppState {
             Some(handle) => handle,
             None => {
                 if let Some(db) = self.db.as_ref() {
-                    if let Some(active) =
-                        mqk_db::fetch_active_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                            .await
-                            .map_err(|err| {
-                                RuntimeLifecycleError::internal(
-                                    "stop active-run lookup failed",
-                                    err,
-                                )
-                            })?
-                    {
+                    if let Some(active) = mqk_db::fetch_active_run_for_engine(
+                        db,
+                        DAEMON_ENGINE_ID,
+                        self.deployment_mode().as_db_mode(),
+                    )
+                    .await
+                    .map_err(|err| {
+                        RuntimeLifecycleError::internal("stop active-run lookup failed", err)
+                    })? {
                         return Err(RuntimeLifecycleError::conflict(
                             "runtime.truth_mismatch.durable_active_without_local_owner",
                             format!(
@@ -764,13 +854,15 @@ impl AppState {
         let handle = self.take_execution_loop_for_control().await?;
         if handle.is_none() {
             if let Some(db) = self.db.as_ref() {
-                if let Some(active) =
-                    mqk_db::fetch_active_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                        .await
-                        .map_err(|err| {
-                            RuntimeLifecycleError::internal("halt active-run lookup failed", err)
-                        })?
-                {
+                if let Some(active) = mqk_db::fetch_active_run_for_engine(
+                    db,
+                    DAEMON_ENGINE_ID,
+                    self.deployment_mode().as_db_mode(),
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeLifecycleError::internal("halt active-run lookup failed", err)
+                })? {
                     return Err(RuntimeLifecycleError::conflict(
                         "runtime.truth_mismatch.durable_active_without_local_owner",
                         format!(
@@ -871,7 +963,7 @@ impl AppState {
             "#,
         )
         .bind(DAEMON_ENGINE_ID)
-        .bind(DAEMON_MODE)
+        .bind(self.deployment_mode().as_db_mode())
         .fetch_one(db)
         .await
         .map_err(|err| RuntimeLifecycleError::internal("next_daemon_run_id failed", err))?;
@@ -880,7 +972,10 @@ impl AppState {
             &Uuid::NAMESPACE_DNS,
             format!(
                 "mqk-daemon.run.v2|{}|{}|{}|{}",
-                self.node_id, DAEMON_ENGINE_ID, DAEMON_MODE, generation
+                self.node_id,
+                DAEMON_ENGINE_ID,
+                self.deployment_mode().as_db_mode(),
+                generation
             )
             .as_bytes(),
         ))
@@ -917,7 +1012,7 @@ impl AppState {
             order_map.register(&internal_id, &broker_id);
         }
 
-        let broker_cursor = mqk_db::load_broker_cursor(&db, DAEMON_ADAPTER_ID)
+        let broker_cursor = mqk_db::load_broker_cursor(&db, self.adapter_id())
             .await
             .map_err(|err| RuntimeLifecycleError::internal("load_broker_cursor failed", err))?;
 
@@ -989,7 +1084,7 @@ impl AppState {
             PortfolioState::new(0),
             run_id,
             self.node_id.clone(),
-            DAEMON_ADAPTER_ID,
+            self.adapter_id(),
             broker_cursor,
             mqk_runtime::orchestrator::WallClock,
             Box::new(local_snapshot_provider),
@@ -1110,6 +1205,40 @@ impl AppState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn runtime_selection_defaults_to_paper_ready() {
+        let selection = runtime_selection_from_env_values(None, None);
+        assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
+        assert_eq!(selection.adapter_id, "paper");
+        assert!(selection.readiness.start_allowed);
+        assert!(selection.readiness.blocker.is_none());
+    }
+
+    #[test]
+    fn runtime_selection_fail_closes_unproven_modes() {
+        let selection = runtime_selection_from_env_values(Some("live-capital"), Some("alpaca"));
+        assert_eq!(selection.deployment_mode, DeploymentMode::LiveCapital);
+        assert!(!selection.readiness.start_allowed);
+        assert!(selection
+            .readiness
+            .blocker
+            .as_deref()
+            .unwrap_or("")
+            .contains("unsupported/unproven"));
+    }
+
+    #[test]
+    fn runtime_selection_fail_closes_paper_with_nonpaper_adapter() {
+        let selection = runtime_selection_from_env_values(Some("paper"), Some("alpaca"));
+        assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
+        assert!(!selection.readiness.start_allowed);
+        assert!(selection
+            .readiness
+            .blocker
+            .as_deref()
+            .unwrap_or("")
+            .contains("requires adapter 'paper'"));
+    }
     #[test]
     fn reconcile_truth_gate_allows_only_ok_status() {
         let reconcile_status = Arc::new(RwLock::new(initial_reconcile_status()));
@@ -1246,6 +1375,84 @@ fn operator_auth_mode_from_env() -> OperatorAuthMode {
     let operator_token = std::env::var("MQK_OPERATOR_TOKEN").ok();
     let dev_allow_no_token = std::env::var(DEV_ALLOW_NO_OPERATOR_TOKEN_ENV).ok();
     operator_auth_mode_from_env_values(operator_token.as_deref(), dev_allow_no_token.as_deref())
+}
+
+fn runtime_selection_from_env_values(
+    mode: Option<&str>,
+    adapter_id: Option<&str>,
+) -> RuntimeSelection {
+    let deployment_mode = parse_deployment_mode(mode).unwrap_or_else(|| {
+        parse_deployment_mode(Some(DEFAULT_DAEMON_DEPLOYMENT_MODE))
+            .expect("default deployment mode must be valid")
+    });
+    let adapter = adapter_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_DAEMON_ADAPTER_ID)
+        .to_ascii_lowercase();
+
+    let readiness = deployment_mode_readiness(deployment_mode, &adapter);
+
+    RuntimeSelection {
+        deployment_mode,
+        adapter_id: adapter,
+        run_config_hash: format!(
+            "{}-{}-{}-v1",
+            DAEMON_RUN_CONFIG_HASH_PREFIX,
+            deployment_mode.as_api_label(),
+            if readiness.start_allowed {
+                "ready"
+            } else {
+                "blocked"
+            }
+        ),
+        readiness,
+    }
+}
+
+fn runtime_selection_from_env() -> RuntimeSelection {
+    let mode = std::env::var(DAEMON_DEPLOYMENT_MODE_ENV).ok();
+    let adapter_id = std::env::var(DAEMON_ADAPTER_ID_ENV).ok();
+    runtime_selection_from_env_values(mode.as_deref(), adapter_id.as_deref())
+}
+
+fn parse_deployment_mode(raw: Option<&str>) -> Option<DeploymentMode> {
+    let value = raw?.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "paper" => Some(DeploymentMode::Paper),
+        "backtest" => Some(DeploymentMode::Backtest),
+        "live-shadow" | "live_shadow" | "liveshadow" => Some(DeploymentMode::LiveShadow),
+        "live-capital" | "live_capital" | "livecapital" | "live" => {
+            Some(DeploymentMode::LiveCapital)
+        }
+        _ => None,
+    }
+}
+
+fn deployment_mode_readiness(mode: DeploymentMode, adapter_id: &str) -> DeploymentReadiness {
+    match mode {
+        DeploymentMode::Paper if adapter_id == "paper" => DeploymentReadiness {
+            start_allowed: true,
+            blocker: None,
+        },
+        DeploymentMode::Paper => DeploymentReadiness {
+            start_allowed: false,
+            blocker: Some(format!(
+                "deployment mode '{}' currently requires adapter 'paper'; got '{}'",
+                mode.as_api_label(),
+                adapter_id
+            )),
+        },
+        DeploymentMode::Backtest | DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
+            DeploymentReadiness {
+                start_allowed: false,
+                blocker: Some(format!(
+                    "deployment mode '{}' is unsupported/unproven in current daemon architecture; refusing start fail-closed",
+                    mode.as_api_label()
+                )),
+            }
+        }
+    }
 }
 
 /// Monotonically increasing uptime since first call (process lifetime).

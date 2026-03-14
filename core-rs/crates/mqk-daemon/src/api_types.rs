@@ -136,6 +136,10 @@ pub struct TradingSnapshotResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStatusResponse {
     pub environment: Option<String>,
+    pub daemon_mode: String,
+    pub adapter_id: String,
+    pub deployment_start_allowed: bool,
+    pub deployment_blocker: Option<String>,
     pub runtime_status: String,
     pub broker_status: String,
     pub db_status: String,
@@ -178,6 +182,9 @@ pub struct RuntimeErrorResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreflightStatusResponse {
     pub daemon_reachable: bool,
+    pub daemon_mode: String,
+    pub adapter_id: String,
+    pub deployment_start_allowed: bool,
     pub db_reachable: Option<bool>,
     pub broker_config_present: Option<bool>,
     pub market_data_config_present: Option<bool>,
@@ -240,6 +247,9 @@ pub struct ReconcileSummaryResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStateResponse {
     pub daemon_mode: String,
+    pub adapter_id: String,
+    pub deployment_start_allowed: bool,
+    pub deployment_blocker: Option<String>,
     pub operator_auth_mode: String,
     pub strategy_allowed: bool,
     pub execution_allowed: bool,
@@ -252,6 +262,7 @@ pub struct SessionStateResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigFingerprintResponse {
     pub config_hash: String,
+    pub adapter_id: String,
     pub risk_policy_version: String,
     pub strategy_bundle_version: String,
     pub build_version: String,

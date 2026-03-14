@@ -18,6 +18,10 @@ use crate::{
 
 #[derive(Debug, Serialize)]
 pub struct ControlStatus {
+    pub daemon_mode: String,
+    pub adapter_id: String,
+    pub deployment_start_allowed: bool,
+    pub deployment_blocker: Option<String>,
     pub desired_armed: bool,
     pub leader_holder_id: Option<String>,
     pub leader_epoch: Option<i64>,
@@ -182,6 +186,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
 
     let response = match lease_row {
         Some((holder_id, epoch, lease_expires_at)) => ControlStatus {
+            daemon_mode: state.deployment_mode().as_api_label().to_string(),
+            adapter_id: state.adapter_id().to_string(),
+            deployment_start_allowed: state.deployment_readiness().start_allowed,
+            deployment_blocker: state.deployment_readiness().blocker.clone(),
             desired_armed,
             leader_holder_id: Some(holder_id),
             leader_epoch: Some(epoch),
@@ -201,6 +209,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             deadman_reason: deadman_reason.clone(),
         },
         None => ControlStatus {
+            daemon_mode: state.deployment_mode().as_api_label().to_string(),
+            adapter_id: state.adapter_id().to_string(),
+            deployment_start_allowed: state.deployment_readiness().start_allowed,
+            deployment_blocker: state.deployment_readiness().blocker.clone(),
             desired_armed,
             leader_holder_id: None,
             leader_epoch: None,
