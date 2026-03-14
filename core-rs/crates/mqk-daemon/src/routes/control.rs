@@ -54,6 +54,7 @@ fn operator_action_response(
     blockers: Vec<String>,
     warnings: Vec<String>,
     durable_targets: Vec<String>,
+    audit_event_id: Option<String>,
 ) -> OperatorActionResponse {
     OperatorActionResponse {
         requested_action: requested_action.to_string(),
@@ -68,7 +69,7 @@ fn operator_action_response(
         audit: OperatorActionAuditFields {
             durable_db_write: accepted,
             durable_targets,
-            audit_event_id: None,
+            audit_event_id,
         },
     }
 }
@@ -260,6 +261,18 @@ async fn disarm(State(state): State<Arc<AppState>>) -> Response {
     }
 
     publish_integrity_status(&state, false, "control: desired_armed=false").await;
+    let audit_event_id = write_operator_audit_event(
+        db,
+        "control.disarm",
+        serde_json::json!({
+            "action": "control.disarm",
+            "state": "DISARMED",
+            "desired_armed": false,
+            "correlation_id": uuid::Uuid::new_v4().to_string(),
+        }),
+    )
+    .await;
+
     (
         StatusCode::OK,
         Json(operator_action_response(
@@ -274,6 +287,7 @@ async fn disarm(State(state): State<Arc<AppState>>) -> Response {
                 "runtime_control_state.desired_armed".to_string(),
                 "sys_arm_state.state".to_string(),
             ],
+            audit_event_id,
         )),
     )
         .into_response()
@@ -310,6 +324,18 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
     }
 
     publish_integrity_status(&state, true, "control: desired_armed=true").await;
+    let audit_event_id = write_operator_audit_event(
+        db,
+        "control.arm",
+        serde_json::json!({
+            "action": "control.arm",
+            "state": "ARMED",
+            "desired_armed": true,
+            "correlation_id": uuid::Uuid::new_v4().to_string(),
+        }),
+    )
+    .await;
+
     (
         StatusCode::OK,
         Json(operator_action_response(
@@ -324,6 +350,7 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
                 "runtime_control_state.desired_armed".to_string(),
                 "sys_arm_state.state".to_string(),
             ],
+            audit_event_id,
         )),
     )
         .into_response()
@@ -338,6 +365,43 @@ async fn restart(State(state): State<Arc<AppState>>) -> Response {
     };
 
     restart_not_authoritative_response(restart_truth)
+}
+
+async fn write_operator_audit_event(
+    db: &sqlx::PgPool,
+    action: &str,
+    payload: serde_json::Value,
+) -> Option<String> {
+    let Some(run_id) = mqk_db::fetch_latest_run_for_engine(db, "mqk-daemon", "PAPER")
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.run_id)
+    else {
+        return None;
+    };
+
+    let event_id = uuid::Uuid::new_v4();
+    let write = mqk_db::insert_audit_event(
+        db,
+        &mqk_db::NewAuditEvent {
+            event_id,
+            run_id,
+            ts_utc: chrono::Utc::now(),
+            topic: "operator".to_string(),
+            event_type: action.to_string(),
+            payload,
+            hash_prev: None,
+            hash_self: None,
+        },
+    )
+    .await;
+
+    if write.is_ok() {
+        Some(event_id.to_string())
+    } else {
+        None
+    }
 }
 
 fn restart_not_authoritative_response(restart_truth: RestartTruthSnapshot) -> Response {

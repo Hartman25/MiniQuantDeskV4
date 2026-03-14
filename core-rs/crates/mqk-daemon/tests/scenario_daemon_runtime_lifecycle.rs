@@ -140,6 +140,22 @@ async fn control_status(st: &Arc<state::AppState>) -> serde_json::Value {
     parse_json(body)
 }
 
+async fn operator_timeline(st: &Arc<state::AppState>) -> serde_json::Value {
+    let req = authed(Request::builder())
+        .method("GET")
+        .uri("/api/v1/audit/operator-timeline")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(make_router(Arc::clone(st)), req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "timeline failed: {}",
+        parse_json(body.clone())
+    );
+    parse_json(body)
+}
+
 async fn control_arm(st: &Arc<state::AppState>) -> (StatusCode, serde_json::Value) {
     let req = authed(Request::builder())
         .method("POST")
@@ -245,6 +261,30 @@ async fn start_spawns_real_execution_loop() {
     assert!(matches!(run.status, mqk_db::RunStatus::Running));
 
     st.stop_for_shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn runtime_actions_are_visible_in_operator_timeline() {
+    let st = daemon_state().await;
+    arm(&st).await;
+    let _ = start(&st).await;
+    let _ = stop(&st).await;
+
+    let timeline = operator_timeline(&st).await;
+    let entries = timeline["entries"].as_array().expect("entries array");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["event_type"].as_str() == Some("runtime.started")),
+        "expected runtime.started in operator timeline: {timeline}"
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["event_type"].as_str() == Some("runtime.stopped")),
+        "expected runtime.stopped in operator timeline: {timeline}"
+    );
 }
 
 #[tokio::test]

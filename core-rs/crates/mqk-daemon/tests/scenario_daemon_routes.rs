@@ -236,6 +236,36 @@ async fn run_halt_requires_db_backed_runtime_authority() {
     );
 }
 
+#[tokio::test]
+async fn audit_artifact_registry_requires_db() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/audit/artifacts")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let json = parse_json(body);
+    assert!(json["error"].as_str().unwrap_or("").contains("audit DB"));
+}
+
+#[tokio::test]
+async fn audit_operator_timeline_requires_db() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/audit/operator-timeline")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let json = parse_json(body);
+    assert!(json["error"].as_str().unwrap_or("").contains("audit DB"));
+}
+
 // ---------------------------------------------------------------------------
 // POST /v1/integrity/arm
 // ---------------------------------------------------------------------------

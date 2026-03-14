@@ -306,3 +306,46 @@ pub struct StrategySuppressionRow {
 pub struct DiagnosticsSnapshotResponse {
     pub snapshot: Option<ExecutionSnapshot>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditProvenanceRef {
+    pub correlation_id: Option<String>,
+    pub parent_event_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactRegistryEntry {
+    pub event_id: String,
+    pub run_id: String,
+    pub ts_utc: String,
+    pub artifact_key: Option<String>,
+    pub artifact_uri: Option<String>,
+    pub artifact_kind: Option<String>,
+    pub topic: String,
+    pub event_type: String,
+    pub provenance: AuditProvenanceRef,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactRegistryResponse {
+    pub entries: Vec<ArtifactRegistryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorTimelineEntry {
+    pub event_id: String,
+    pub run_id: String,
+    pub ts_utc: String,
+    pub event_type: String,
+    pub action: Option<String>,
+    pub state: Option<String>,
+    pub source: String,
+    pub provenance: AuditProvenanceRef,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorTimelineResponse {
+    pub entries: Vec<OperatorTimelineEntry>,
+}

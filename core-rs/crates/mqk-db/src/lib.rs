@@ -228,6 +228,57 @@ pub struct NewAuditEvent {
 }
 
 #[derive(Debug, Clone)]
+pub struct AuditEventRow {
+    pub event_id: Uuid,
+    pub run_id: Uuid,
+    pub ts_utc: DateTime<Utc>,
+    pub topic: String,
+    pub event_type: String,
+    pub payload: Value,
+    pub hash_prev: Option<String>,
+    pub hash_self: Option<String>,
+}
+
+/// Fetch newest-first audit events from durable storage.
+pub async fn fetch_recent_audit_events(pool: &PgPool, limit: i64) -> Result<Vec<AuditEventRow>> {
+    let rows = sqlx::query(
+        r#"
+        select
+          event_id,
+          run_id,
+          ts_utc,
+          topic,
+          event_type,
+          payload,
+          hash_prev,
+          hash_self
+        from audit_events
+        order by ts_utc desc, event_id desc
+        limit $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_audit_events failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(AuditEventRow {
+            event_id: row.try_get("event_id")?,
+            run_id: row.try_get("run_id")?,
+            ts_utc: row.try_get("ts_utc")?,
+            topic: row.try_get("topic")?,
+            event_type: row.try_get("event_type")?,
+            payload: row.try_get("payload")?,
+            hash_prev: row.try_get("hash_prev")?,
+            hash_self: row.try_get("hash_self")?,
+        });
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone)]
 pub enum RunStatus {
     Created,
     Armed,

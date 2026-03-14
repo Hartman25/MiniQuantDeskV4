@@ -27,9 +27,10 @@ use tracing::info;
 
 use crate::{
     api_types::{
-        ConfigDiffRow, ConfigFingerprintResponse, DiagnosticsSnapshotResponse,
-        ExecutionSummaryResponse, FaultSignal, GateRefusedResponse, HealthResponse,
-        IntegrityResponse, PortfolioSummaryResponse, PreflightStatusResponse,
+        ArtifactRegistryEntry, ArtifactRegistryResponse, AuditProvenanceRef, ConfigDiffRow,
+        ConfigFingerprintResponse, DiagnosticsSnapshotResponse, ExecutionSummaryResponse,
+        FaultSignal, GateRefusedResponse, HealthResponse, IntegrityResponse, OperatorTimelineEntry,
+        OperatorTimelineResponse, PortfolioSummaryResponse, PreflightStatusResponse,
         ReconcileSummaryResponse, RiskSummaryResponse, RuntimeErrorResponse, SessionStateResponse,
         StrategySummaryRow, StrategySuppressionRow, SystemStatusResponse, TradingAccountResponse,
         TradingFillsResponse, TradingOrdersResponse, TradingPositionsResponse,
@@ -139,6 +140,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/system/config-diffs", get(system_config_diffs))
         .route("/api/v1/strategy/summary", get(strategy_summary))
         .route("/api/v1/strategy/suppressions", get(strategy_suppressions))
+        .route("/api/v1/audit/artifacts", get(audit_artifact_registry))
+        .route(
+            "/api/v1/audit/operator-timeline",
+            get(audit_operator_timeline),
+        )
         // DAEMON-1: trading read APIs (placeholder until broker wiring exists)
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
@@ -1122,6 +1128,135 @@ pub(crate) async fn diagnostics_snapshot(State(st): State<Arc<AppState>>) -> imp
         StatusCode::OK,
         Json(DiagnosticsSnapshotResponse { snapshot }),
     )
+}
+
+pub(crate) async fn audit_artifact_registry(State(st): State<Arc<AppState>>) -> Response {
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "audit DB is not configured on this daemon"
+            })),
+        )
+            .into_response();
+    };
+
+    let rows = match mqk_db::fetch_recent_audit_events(db, 500).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("audit artifact query failed: {err}")
+                })),
+            )
+                .into_response()
+        }
+    };
+
+    let entries = rows
+        .into_iter()
+        .filter(|row| {
+            row.topic.eq_ignore_ascii_case("artifact")
+                || row.payload.get("artifact_key").is_some()
+                || row.payload.get("artifact_uri").is_some()
+                || row.payload.get("artifact_kind").is_some()
+        })
+        .map(|row| ArtifactRegistryEntry {
+            event_id: row.event_id.to_string(),
+            run_id: row.run_id.to_string(),
+            ts_utc: row.ts_utc.to_rfc3339(),
+            artifact_key: row
+                .payload
+                .get("artifact_key")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string),
+            artifact_uri: row
+                .payload
+                .get("artifact_uri")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string),
+            artifact_kind: row
+                .payload
+                .get("artifact_kind")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string),
+            topic: row.topic,
+            event_type: row.event_type,
+            provenance: provenance_from_payload(&row.payload),
+            payload: row.payload,
+        })
+        .collect();
+
+    (StatusCode::OK, Json(ArtifactRegistryResponse { entries })).into_response()
+}
+
+pub(crate) async fn audit_operator_timeline(State(st): State<Arc<AppState>>) -> Response {
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "audit DB is not configured on this daemon"
+            })),
+        )
+            .into_response();
+    };
+
+    let rows = match mqk_db::fetch_recent_audit_events(db, 500).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("audit operator timeline query failed: {err}")
+                })),
+            )
+                .into_response()
+        }
+    };
+
+    let entries = rows
+        .into_iter()
+        .filter(|row| {
+            row.topic.eq_ignore_ascii_case("operator")
+                || row.topic.eq_ignore_ascii_case("runtime")
+                || row.topic.eq_ignore_ascii_case("integrity")
+        })
+        .map(|row| OperatorTimelineEntry {
+            event_id: row.event_id.to_string(),
+            run_id: row.run_id.to_string(),
+            ts_utc: row.ts_utc.to_rfc3339(),
+            event_type: row.event_type,
+            action: row
+                .payload
+                .get("action")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string),
+            state: row
+                .payload
+                .get("state")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string),
+            source: row.topic,
+            provenance: provenance_from_payload(&row.payload),
+            payload: row.payload,
+        })
+        .collect();
+
+    (StatusCode::OK, Json(OperatorTimelineResponse { entries })).into_response()
+}
+
+fn provenance_from_payload(payload: &serde_json::Value) -> AuditProvenanceRef {
+    AuditProvenanceRef {
+        correlation_id: payload
+            .get("correlation_id")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string),
+        parent_event_id: payload
+            .get("parent_event_id")
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string),
+    }
 }
 
 // ---------------------------------------------------------------------------

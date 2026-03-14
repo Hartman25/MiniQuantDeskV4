@@ -696,6 +696,16 @@ impl AppState {
             deadman_last_heartbeat_utc: Some(Utc::now().to_rfc3339()),
         };
         self.publish_status(snapshot.clone()).await;
+        self.append_runtime_audit_event(
+            run_id,
+            "runtime.started",
+            serde_json::json!({
+                "action": "v1.run.start",
+                "state": "running",
+                "correlation_id": uuid::Uuid::new_v4().to_string(),
+            }),
+        )
+        .await;
         Ok(snapshot)
     }
 
@@ -749,6 +759,16 @@ impl AppState {
             mqk_db::stop_run(&db, run_id)
                 .await
                 .map_err(|err| RuntimeLifecycleError::internal("stop_run failed", err))?;
+            self.append_runtime_audit_event(
+                run_id,
+                "runtime.stopped",
+                serde_json::json!({
+                    "action": "v1.run.stop",
+                    "state": "stopped",
+                    "correlation_id": uuid::Uuid::new_v4().to_string(),
+                }),
+            )
+            .await;
         }
 
         let snapshot = self.current_status_snapshot().await?;
@@ -800,6 +820,16 @@ impl AppState {
             mqk_db::halt_run(&db, run_id, Utc::now())
                 .await
                 .map_err(|err| RuntimeLifecycleError::internal("halt_run failed", err))?;
+            self.append_runtime_audit_event(
+                run_id,
+                "runtime.halted",
+                serde_json::json!({
+                    "action": "v1.run.halt",
+                    "state": "halted",
+                    "correlation_id": uuid::Uuid::new_v4().to_string(),
+                }),
+            )
+            .await;
         }
         mqk_db::persist_arm_state_canonical(
             &db,
@@ -1103,6 +1133,32 @@ impl AppState {
         }
         let mut status = self.reconcile_status.write().await;
         *status = snapshot;
+    }
+
+    async fn append_runtime_audit_event(
+        &self,
+        run_id: Uuid,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) {
+        let Some(db) = self.db.as_ref() else {
+            return;
+        };
+
+        let _ = mqk_db::insert_audit_event(
+            db,
+            &mqk_db::NewAuditEvent {
+                event_id: Uuid::new_v4(),
+                run_id,
+                ts_utc: Utc::now(),
+                topic: "runtime".to_string(),
+                event_type: event_type.to_string(),
+                payload,
+                hash_prev: None,
+                hash_self: None,
+            },
+        )
+        .await;
     }
 }
 
