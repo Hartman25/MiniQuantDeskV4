@@ -1843,6 +1843,14 @@ pub async fn inbox_insert_deduped(
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
+    let received_at = message_json
+        .get("received_at_utc")
+        .and_then(|v| v.as_str())
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|| DateTime::<Utc>::from_timestamp_millis(event_ts_ms))
+        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+
     inbox_insert_deduped_with_identity(
         pool,
         run_id,
@@ -1853,7 +1861,7 @@ pub async fn inbox_insert_deduped(
         event_kind,
         &message_json,
         event_ts_ms,
-        Utc::now(),
+        received_at,
     )
     .await
 }
@@ -1885,7 +1893,7 @@ pub async fn inbox_insert_deduped_with_identity(
             internal_order_id,
             broker_order_id,
             event_kind,
-            event_json,
+            message_json,
             event_ts_ms,
             received_at_utc,
             applied_at_utc
@@ -1912,7 +1920,9 @@ pub async fn inbox_insert_deduped_with_identity(
             if db_err.code().as_deref() == Some("23505")
                 && matches!(
                     db_err.constraint(),
-                    Some("uq_inbox_run_broker_message_id") | Some("uq_inbox_run_broker_fill_id")
+                    Some("uq_inbox_run_broker_message_id")
+                        | Some("uq_inbox_run_message")
+                        | Some("uq_inbox_run_broker_fill_id")
                 ) =>
         {
             Ok(false)
