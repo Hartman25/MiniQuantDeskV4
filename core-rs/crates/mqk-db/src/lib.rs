@@ -1801,6 +1801,12 @@ pub async fn load_reconcile_status_state(pool: &PgPool) -> Result<Option<Reconci
 /// ```
 /// On crash between insert and mark_applied: the row surfaces in
 /// `inbox_load_unapplied_for_run` for recovery replay.
+fn received_at_utc_from_event_ts_ms(event_ts_ms: i64) -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp_millis(event_ts_ms).unwrap_or_else(|| {
+        DateTime::<Utc>::from_timestamp_millis(0).expect("unix epoch timestamp is valid")
+    })
+}
+
 pub async fn inbox_insert_deduped(
     pool: &PgPool,
     run_id: Uuid,
@@ -1853,7 +1859,7 @@ pub async fn inbox_insert_deduped(
         event_kind,
         &message_json,
         event_ts_ms,
-        Utc::now(),
+        received_at_utc_from_event_ts_ms(event_ts_ms),
     )
     .await
 }

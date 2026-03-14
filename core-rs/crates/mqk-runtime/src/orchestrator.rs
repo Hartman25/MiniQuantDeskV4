@@ -178,7 +178,7 @@ where
             time_source,
             local_snapshot_provider,
             broker_snapshot_provider,
-            runtime_holder_id: derive_runtime_holder_id(&dispatcher_id, run_id),
+            runtime_holder_id: derive_runtime_holder_id(&dispatcher_id),
             runtime_epoch: None,
             runtime_lease_ttl_secs: RUNTIME_LEASE_TTL_SECS,
             reconcile_watermark: SnapshotWatermark::new(),
@@ -1136,16 +1136,15 @@ fn summarize_ambiguous_outbox(rows: &[mqk_db::AmbiguousOutboxRow]) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
-fn derive_runtime_holder_id(dispatcher_id: &str, run_id: Uuid) -> String {
+fn derive_runtime_holder_id(dispatcher_id: &str) -> String {
     let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "UNKNOWN_HOST".to_string());
     let user = std::env::var("USERNAME").unwrap_or_else(|_| "UNKNOWN_USER".to_string());
     format!(
-        "{}|{}|{}|pid={}|run={}",
+        "{}|{}|{}|pid={}",
         dispatcher_id,
         host,
         user,
-        std::process::id(),
-        run_id
+        std::process::id()
     )
 }
 // ---------------------------------------------------------------------------
@@ -2752,7 +2751,7 @@ mod tests {
             .expect("valid timestamp")
     }
     async fn make_running_run(pool: &PgPool, started_at: chrono::DateTime<chrono::Utc>) -> Uuid {
-        let run_id = Uuid::new_v4();
+        let run_id = Uuid::from_u128(started_at.timestamp_millis() as u128 + 1);
         mqk_db::insert_run(
             pool,
             &mqk_db::NewRun {
@@ -2906,3 +2905,5 @@ mod tests {
         assert_eq!(lease.holder_id, "other-runtime");
     }
 }
+
+

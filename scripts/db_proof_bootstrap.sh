@@ -80,7 +80,7 @@ echo "Using MQK_DATABASE_URL=$MQK_DATABASE_URL"
 
 cd "$CORE_RS_DIR"
 
-echo "== DB proof: migration bootstrap / idempotence =="
+echo "== DB proof: authoritative migration bootstrap + replay =="
 cargo test -p mqk-db --test scenario_migrate_idempotent_on_clean_db -- --ignored --test-threads=1
 
 echo "== DB proof: inbox dedupe + apply atomicity =="
@@ -96,3 +96,4 @@ cargo test -p mqk-testkit --test scenario_broker_cursor_restart -- --test-thread
 cargo test -p mqk-testkit --test scenario_restart_quarantines_dispatching_outbox -- --test-threads=1
 
 echo "DB proof lane passed."
+

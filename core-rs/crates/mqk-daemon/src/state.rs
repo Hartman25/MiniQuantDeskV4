@@ -620,7 +620,7 @@ impl AppState {
                         run_id,
                         engine_id: DAEMON_ENGINE_ID.to_string(),
                         mode: DAEMON_MODE.to_string(),
-                        started_at_utc: Utc::now(),
+                        started_at_utc: daemon_now_utc(),
                         git_hash: "UNKNOWN".to_string(),
                         config_hash: DAEMON_RUN_CONFIG_HASH.to_string(),
                         config_json: serde_json::json!({
@@ -652,7 +652,7 @@ impl AppState {
                 err,
             ));
         }
-        if let Err(err) = mqk_db::heartbeat_run(&db, run_id, Utc::now()).await {
+        if let Err(err) = mqk_db::heartbeat_run(&db, run_id, daemon_now_utc()).await {
             let _ = orchestrator.release_runtime_leadership().await;
             return Err(RuntimeLifecycleError::internal(
                 "start initial heartbeat failed",
@@ -693,7 +693,7 @@ impl AppState {
             notes: Some("daemon owns active execution loop".to_string()),
             integrity_armed: self.integrity_armed().await,
             deadman_status: "healthy".to_string(),
-            deadman_last_heartbeat_utc: Some(Utc::now().to_rfc3339()),
+            deadman_last_heartbeat_utc: Some(daemon_now_utc().to_rfc3339()),
         };
         self.publish_status(snapshot.clone()).await;
         Ok(snapshot)
@@ -797,7 +797,7 @@ impl AppState {
                 .await
                 .map_err(|err| RuntimeLifecycleError::internal("halt join failed", err))?;
 
-            mqk_db::halt_run(&db, run_id, Utc::now())
+            mqk_db::halt_run(&db, run_id, daemon_now_utc())
                 .await
                 .map_err(|err| RuntimeLifecycleError::internal("halt_run failed", err))?;
         }
@@ -1096,7 +1096,7 @@ impl AppState {
                     mismatched_fills: snapshot.mismatched_fills as i32,
                     unmatched_broker_events: snapshot.unmatched_broker_events as i32,
                     note: snapshot.note.as_deref(),
-                    updated_at_utc: Utc::now(),
+                    updated_at_utc: daemon_now_utc(),
                 },
             )
             .await;
@@ -1153,7 +1153,7 @@ impl AppState {
         run_id: Uuid,
     ) -> Result<DeadmanTruth, RuntimeLifecycleError> {
         let db = self.db_pool()?;
-        let now = Utc::now();
+        let now = daemon_now_utc();
         let halted = mqk_db::enforce_deadman_or_halt(&db, run_id, DEADMAN_TTL_SECONDS, now)
             .await
             .map_err(|err| RuntimeLifecycleError::internal("deadman enforce failed", err))?;
@@ -1263,10 +1263,14 @@ pub fn spawn_heartbeat(bus: broadcast::Sender<BusMsg>, interval: Duration) {
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            let ts = Utc::now().timestamp_millis();
+            let ts = daemon_now_utc().timestamp_millis();
             let _ = bus.send(BusMsg::Heartbeat { ts_millis: ts });
         }
     });
+}
+
+fn daemon_now_utc() -> chrono::DateTime<Utc> {
+    mqk_db::TimeSource::now_utc(&mqk_runtime::orchestrator::WallClock)
 }
 
 fn initial_reconcile_status() -> ReconcileStatusSnapshot {
@@ -1536,7 +1540,7 @@ async fn publish_reconcile_failure(
         )
         .await;
         let _ =
-            mqk_db::persist_risk_block_state(db, true, Some("RECONCILE_BLOCKED"), Utc::now()).await;
+            mqk_db::persist_risk_block_state(db, true, Some("RECONCILE_BLOCKED"), daemon_now_utc()).await;
     }
 
     let active_run_id = state.status.read().await.active_run_id;
@@ -1577,7 +1581,7 @@ fn spawn_execution_loop(
                 }
                 _ = ticker.tick() => {
                     if let Some(ref pool) = db {
-                        let now = Utc::now();
+                        let now = daemon_now_utc();
                         match mqk_db::enforce_deadman_or_halt(pool, run_id, DEADMAN_TTL_SECONDS, now).await {
                             Ok(true) => {
                                 let _ = mqk_db::persist_arm_state_canonical(
@@ -1634,7 +1638,7 @@ fn spawn_execution_loop(
                     }
 
                     if let Some(ref pool) = db {
-                        let now = Utc::now();
+                        let now = daemon_now_utc();
                         if let Err(err) = mqk_db::heartbeat_run(pool, run_id, now).await {
                             tracing::error!("execution_loop_heartbeat_failed error={err}");
                             let _ = mqk_db::halt_run(pool, run_id, now).await;
@@ -1765,3 +1769,4 @@ pub fn spawn_reconcile_tick<L, B>(
         }
     });
 }
+
