@@ -83,6 +83,20 @@ cd "$CORE_RS_DIR"
 echo "== DB proof: migration bootstrap / idempotence =="
 cargo test -p mqk-db --test scenario_migrate_idempotent_on_clean_db -- --ignored --test-threads=1
 
+echo "== DB proof: daemon DB-backed lifecycle truth (start/stop/halt/disarm/status/deadman) =="
+cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle -- --test-threads=1
+
+echo "== DB proof: run lifecycle + deadman enforcement =="
+cargo test -p mqk-db --test scenario_run_lifecycle_enforced -- --test-threads=1
+cargo test -p mqk-db --test scenario_deadman_enforces_halt -- --test-threads=1
+
+echo "== DB proof: runtime leader lease acquire/refresh/release/stale-owner =="
+cargo test -p mqk-db --lib runtime_lease::tests::acquire_when_no_lease_exists -- --test-threads=1
+cargo test -p mqk-db --lib runtime_lease::tests::second_contender_cannot_acquire_active_lease -- --test-threads=1
+cargo test -p mqk-db --lib runtime_lease::tests::expired_lease_can_be_reacquired -- --test-threads=1
+cargo test -p mqk-db --lib runtime_lease::tests::stale_epoch_cannot_renew -- --test-threads=1
+cargo test -p mqk-db --lib runtime_lease::tests::release_allows_new_acquire -- --test-threads=1
+
 echo "== DB proof: inbox dedupe + apply atomicity =="
 cargo test -p mqk-db --test scenario_inbox_insert_then_apply_is_atomic -- --test-threads=1
 cargo test -p mqk-db --test scenario_inbox_apply_atomic_recovery -- --test-threads=1
@@ -90,9 +104,25 @@ cargo test -p mqk-db --test scenario_inbox_apply_atomic_recovery -- --test-threa
 echo "== DB proof: outbox claim + dispatch =="
 cargo test -p mqk-db --test scenario_outbox_first_enforced -- --test-threads=1
 cargo test -p mqk-db --test scenario_outbox_claim_lock_prevents_double_dispatch -- --test-threads=1
+cargo test -p mqk-db --test scenario_outbox_ack_transition_guard -- --test-threads=1
+cargo test -p mqk-db --test scenario_outbox_idempotency_prevents_double_submit -- --test-threads=1
+
+echo "== DB proof: stale-claim recovery quarantine =="
+cargo test -p mqk-db --test scenario_stale_claim_recovery -- --test-threads=1
+
+echo "== DB proof: inbox dedupe + apply-fence =="
+cargo test -p mqk-db --test scenario_inbox_dedupe_prevents_double_fill -- --test-threads=1
 
 echo "== DB proof: broker cursor + restart quarantine =="
 cargo test -p mqk-testkit --test scenario_broker_cursor_restart -- --test-threads=1
 cargo test -p mqk-testkit --test scenario_restart_quarantines_dispatching_outbox -- --test-threads=1
+
+echo "== DB proof: arm preflight + DB constraints =="
+cargo test -p mqk-db --test scenario_arm_preflight_requires_reconcile -- --test-threads=1
+cargo test -p mqk-db --test scenario_arm_preflight_blocks_zero_risk_limits -- --test-threads=1
+cargo test -p mqk-db --test scenario_arm_preflight_forged_audit_rejected -- --test-threads=1
+cargo test -p mqk-db --test scenario_db_check_constraints -- --test-threads=1
+cargo test -p mqk-db --test scenario_broker_map_fk_enforced -- --test-threads=1
+cargo test -p mqk-db --test scenario_idempotency_constraints -- --test-threads=1
 
 echo "DB proof lane passed."

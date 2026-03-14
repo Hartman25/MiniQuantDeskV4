@@ -210,7 +210,7 @@ mod tests {
             panic!(
                 "DB tests require MQK_DATABASE_URL; run: \
                  MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
-                 cargo test -p mqk-db runtime_lease -- --include-ignored"
+                 cargo test -p mqk-db --lib runtime_lease"
             )
         });
 
@@ -236,7 +236,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
     async fn acquire_when_no_lease_exists() {
         let pool = test_pool().await;
 
@@ -257,7 +256,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
     async fn second_contender_cannot_acquire_active_lease() {
         let pool = test_pool().await;
 
@@ -283,7 +281,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
     async fn expired_lease_can_be_reacquired() {
         let pool = test_pool().await;
 
@@ -309,7 +306,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
     async fn stale_epoch_cannot_renew() {
         let pool = test_pool().await;
 
@@ -338,7 +334,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
     async fn release_allows_new_acquire() {
         let pool = test_pool().await;
 

@@ -5,7 +5,6 @@ use uuid::Uuid;
 ///
 /// DB-backed test. Skips if MQK_DATABASE_URL is not set.
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn deadman_enforce_halts_running_when_heartbeat_stale() -> anyhow::Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,

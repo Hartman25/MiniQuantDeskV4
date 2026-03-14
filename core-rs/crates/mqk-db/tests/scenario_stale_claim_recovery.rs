@@ -66,7 +66,7 @@ fn require_db_url() -> String {
         Err(_) => panic!(
             "DB tests require MQK_DATABASE_URL; run: \
              MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
-             cargo test -p mqk-db -- --include-ignored"
+             cargo test -p mqk-db --test scenario_stale_claim_recovery"
         ),
     }
 }
@@ -78,7 +78,6 @@ fn require_db_url() -> String {
 //
 
 #[tokio::test]
-#[ignore]
 async fn stale_claim_older_than_threshold_reset_to_pending() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
     cleanup_outbox(&pool).await?;
@@ -120,7 +119,6 @@ async fn stale_claim_older_than_threshold_reset_to_pending() -> anyhow::Result<(
 //
 
 #[tokio::test]
-#[ignore]
 async fn fresh_claim_newer_than_threshold_untouched() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
     cleanup_outbox(&pool).await?;
@@ -158,7 +156,6 @@ async fn fresh_claim_newer_than_threshold_untouched() -> anyhow::Result<()> {
 //
 
 #[tokio::test]
-#[ignore]
 async fn sent_rows_never_reset_by_stale_reaper() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
     cleanup_outbox(&pool).await?;
