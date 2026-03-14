@@ -205,3 +205,40 @@ async fn gui_contract_legacy_api_surfaces_have_expected_shape() {
         "stale has_snapshot flag must not exist on accepted DMON-04 fills contract"
     );
 }
+
+#[tokio::test]
+async fn gui_contract_operator_actions_audit_surface_has_authoritative_shape() {
+    let router = make_router();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/audit/operator-actions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    let arr = json
+        .as_array()
+        .expect("/api/v1/audit/operator-actions must return a JSON array");
+
+    if let Some(first) = arr.first() {
+        for key in [
+            "audit_ref",
+            "at",
+            "actor",
+            "action_key",
+            "environment",
+            "target_scope",
+            "result_state",
+            "warnings",
+        ] {
+            assert!(
+                first.get(key).is_some(),
+                "operator-actions row missing required key '{key}': {first}"
+            );
+        }
+    }
+}

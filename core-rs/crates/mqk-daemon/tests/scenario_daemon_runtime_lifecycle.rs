@@ -753,6 +753,17 @@ async fn control_disarm_is_durable_or_explicitly_scoped() {
     assert_eq!(arm_status, StatusCode::OK);
     assert_eq!(arm_body["requested_action"], "control.arm");
     assert_eq!(arm_body["accepted"], true);
+    let arm_audit_event_id = arm_body["audit"]["audit_event_id"]
+        .as_str()
+        .expect("arm audit_event_id present");
+    let arm_audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE event_id::text = $1 AND topic = 'operator_action'",
+    )
+    .bind(arm_audit_event_id)
+    .fetch_one(pool)
+    .await
+    .expect("verify arm audit row");
+    assert_eq!(arm_audit_count, 1);
     let armed: bool =
         sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
             .fetch_one(pool)
@@ -764,6 +775,17 @@ async fn control_disarm_is_durable_or_explicitly_scoped() {
     assert_eq!(disarm_status, StatusCode::OK);
     assert_eq!(disarm_body["requested_action"], "control.disarm");
     assert_eq!(disarm_body["accepted"], true);
+    let disarm_audit_event_id = disarm_body["audit"]["audit_event_id"]
+        .as_str()
+        .expect("disarm audit_event_id present");
+    let disarm_audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE event_id::text = $1 AND topic = 'operator_action'",
+    )
+    .bind(disarm_audit_event_id)
+    .fetch_one(pool)
+    .await
+    .expect("verify disarm audit row");
+    assert_eq!(disarm_audit_count, 1);
     let disarmed: bool =
         sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
             .fetch_one(pool)

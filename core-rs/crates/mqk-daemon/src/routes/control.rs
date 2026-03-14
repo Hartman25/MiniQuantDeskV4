@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use serde_json::json;
+use uuid::Uuid;
 
 use axum::{
     extract::State,
@@ -42,6 +44,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/control/status", get(status))
         .route("/control/disarm", post(disarm))
         .route("/control/arm", post(arm))
+        .route(
+            "/api/v1/audit/operator-actions",
+            get(operator_actions_audit),
+        )
         .route("/control/restart", post(restart))
 }
 
@@ -54,6 +60,7 @@ fn operator_action_response(
     blockers: Vec<String>,
     warnings: Vec<String>,
     durable_targets: Vec<String>,
+    audit_event_id: Option<Uuid>,
 ) -> OperatorActionResponse {
     OperatorActionResponse {
         requested_action: requested_action.to_string(),
@@ -68,9 +75,21 @@ fn operator_action_response(
         audit: OperatorActionAuditFields {
             durable_db_write: accepted,
             durable_targets,
-            audit_event_id: None,
+            audit_event_id: audit_event_id.map(|id| id.to_string()),
         },
     }
+}
+
+#[derive(Debug, Serialize)]
+struct OperatorActionAuditRow {
+    audit_ref: String,
+    at: String,
+    actor: String,
+    action_key: String,
+    environment: String,
+    target_scope: String,
+    result_state: String,
+    warnings: Vec<String>,
 }
 
 async fn status(State(state): State<Arc<AppState>>) -> Response {
@@ -259,6 +278,17 @@ async fn disarm(State(state): State<Arc<AppState>>) -> Response {
         integrity.disarmed = true;
     }
 
+    let audit_event_id = match persist_operator_action_audit(db, "control.disarm").await {
+        Ok(id) => id,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("control/disarm audit persistence failed: {err}"),
+            )
+                .into_response();
+        }
+    };
+
     publish_integrity_status(&state, false, "control: desired_armed=false").await;
     (
         StatusCode::OK,
@@ -274,6 +304,7 @@ async fn disarm(State(state): State<Arc<AppState>>) -> Response {
                 "runtime_control_state.desired_armed".to_string(),
                 "sys_arm_state.state".to_string(),
             ],
+            Some(audit_event_id),
         )),
     )
         .into_response()
@@ -309,6 +340,17 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
         integrity.halted = false;
     }
 
+    let audit_event_id = match persist_operator_action_audit(db, "control.arm").await {
+        Ok(id) => id,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("control/arm audit persistence failed: {err}"),
+            )
+                .into_response();
+        }
+    };
+
     publish_integrity_status(&state, true, "control: desired_armed=true").await;
     (
         StatusCode::OK,
@@ -324,9 +366,76 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
                 "runtime_control_state.desired_armed".to_string(),
                 "sys_arm_state.state".to_string(),
             ],
+            Some(audit_event_id),
         )),
     )
         .into_response()
+}
+
+async fn operator_actions_audit(State(state): State<Arc<AppState>>) -> Response {
+    let Some(db) = state.db.as_ref() else {
+        return (StatusCode::OK, Json(Vec::<OperatorActionAuditRow>::new())).into_response();
+    };
+
+    let rows: Vec<(Uuid, DateTime<Utc>, serde_json::Value)> = match sqlx::query_as(
+        r#"
+        SELECT event_id, ts_utc, payload
+          FROM audit_events
+         WHERE topic = 'operator_action'
+         ORDER BY ts_utc DESC
+         LIMIT 200
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("audit/operator-actions query failed: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let environment = std::env::var("MQK_ENV").unwrap_or_else(|_| "paper".to_string());
+    let body: Vec<OperatorActionAuditRow> = rows
+        .into_iter()
+        .map(|(event_id, ts_utc, payload)| OperatorActionAuditRow {
+            audit_ref: event_id.to_string(),
+            at: ts_utc.to_rfc3339(),
+            actor: payload
+                .get("actor")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("operator")
+                .to_string(),
+            action_key: payload
+                .get("requested_action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            environment: environment.clone(),
+            target_scope: "daemon_instance".to_string(),
+            result_state: payload
+                .get("disposition")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            warnings: payload
+                .get("warnings")
+                .and_then(serde_json::Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(ToString::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect();
+
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 async fn restart(State(state): State<Arc<AppState>>) -> Response {
@@ -389,6 +498,57 @@ async fn write_desired_armed(db: &sqlx::PgPool, desired_armed: bool) -> anyhow::
 
 fn control_plane_now_utc() -> DateTime<Utc> {
     Utc::now()
+}
+
+async fn persist_operator_action_audit(
+    db: &sqlx::PgPool,
+    requested_action: &str,
+) -> anyhow::Result<Uuid> {
+    let run = mqk_db::fetch_latest_run_for_engine(db, "mqk-daemon", "PAPER").await?;
+    let run_id = if let Some(run) = run {
+        run.run_id
+    } else {
+        let run_id = Uuid::new_v4();
+        mqk_db::insert_run(
+            db,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "mqk-daemon".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: Utc::now(),
+                git_hash: "daemon-control-audit".to_string(),
+                config_hash: "daemon-control-audit".to_string(),
+                config_json: json!({"source":"control.operator_action"}),
+                host_fingerprint: "daemon-control".to_string(),
+            },
+        )
+        .await?;
+        run_id
+    };
+
+    let event_id = Uuid::new_v4();
+    mqk_db::insert_audit_event(
+        db,
+        &mqk_db::NewAuditEvent {
+            event_id,
+            run_id,
+            ts_utc: Utc::now(),
+            topic: "operator_action".to_string(),
+            event_type: requested_action.to_string(),
+            payload: json!({
+                "actor": "operator",
+                "requested_action": requested_action,
+                "accepted": true,
+                "disposition": "applied",
+                "warnings": [],
+            }),
+            hash_prev: None,
+            hash_self: None,
+        },
+    )
+    .await?;
+
+    Ok(event_id)
 }
 
 async fn publish_integrity_status(state: &Arc<AppState>, integrity_armed: bool, note: &str) {
