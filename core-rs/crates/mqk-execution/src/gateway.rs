@@ -343,7 +343,7 @@ where
         &self,
         internal_id: &str,
         order_map: &BrokerOrderMap,
-        quantity: i32,
+        quantity: i64,
         limit_price: Option<i64>,
         time_in_force: String,
     ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {

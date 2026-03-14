@@ -1,3 +1,6 @@
+-- Historical note: filename is preserved for deployed migration-chain safety.
+-- Authoritative intent is recorded in migrations/manifest.json (id 0018).
+
 -- Runtime leader lease + epoch table
 
 CREATE TABLE IF NOT EXISTS runtime_leader_lease (

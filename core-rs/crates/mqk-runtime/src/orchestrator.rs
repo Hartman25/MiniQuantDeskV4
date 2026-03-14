@@ -222,9 +222,6 @@ where
                 ));
             }
         }
-        self.refresh_or_acquire_runtime_leadership().await?;
-        mqk_db::persist_risk_block_state(&self.pool, false, None, self.time_source.now_utc())
-            .await?;
         // ------------------------------------------------------------------
         // Phase 0b - A4: restart quarantine for ambiguous outbox rows.
         //
@@ -260,6 +257,9 @@ where
                 ));
             }
         }
+        self.refresh_or_acquire_runtime_leadership().await?;
+        mqk_db::persist_risk_block_state(&self.pool, false, None, self.time_source.now_utc())
+            .await?;
         // ------------------------------------------------------------------
         // Phase 0c - Patch 4A: reconcile drift enforcement.
         //
@@ -298,8 +298,9 @@ where
         // Phase 1: Claim and submit outbox rows.
         // ------------------------------------------------------------------
         self.refresh_or_acquire_runtime_leadership().await?;
-        let claimed = mqk_db::outbox_claim_batch(
+        let claimed = mqk_db::outbox_claim_batch_for_run(
             &self.pool,
+            self.run_id,
             1,
             &self.dispatcher_id,
             self.time_source.now_utc(),
@@ -474,16 +475,10 @@ where
         };
         for event in &events {
             let msg_json = serde_json::to_value(event)?;
-            let event_identity = event.identity();
-            mqk_db::inbox_insert_deduped_with_identity(
+            let _inserted = mqk_db::inbox_insert_deduped(
                 &self.pool,
                 self.run_id,
-                &mqk_db::BrokerEventIdentity {
-                    broker_message_id: event_identity.broker_message_id,
-                    broker_fill_id: event_identity.broker_fill_id,
-                    broker_sequence_id: event_identity.broker_sequence_id,
-                    broker_timestamp: event_identity.broker_timestamp,
-                },
+                event.broker_message_id(),
                 msg_json,
             )
             .await?;
@@ -774,7 +769,7 @@ fn validated_order_symbol(order_json: &serde_json::Value) -> anyhow::Result<Stri
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ValidatedOrderQuantity {
     signed_qty: i64,
-    quantity: i32,
+    quantity: i64,
 }
 
 fn validated_order_side(
@@ -840,8 +835,7 @@ fn validated_order_quantity(
 
     Ok(ValidatedOrderQuantity {
         signed_qty,
-        quantity: i32::try_from(effective_qty)
-            .context("invalid submit payload: quantity out of range for broker request")?,
+        quantity: effective_qty,
     })
 }
 

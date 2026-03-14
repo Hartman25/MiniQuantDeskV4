@@ -15,7 +15,7 @@
 //! | `submit_order`  | `POST   /v2/orders`                    | AmbiguousSubmit on unknown timeout |
 //! | `cancel_order`  | `DELETE /v2/orders/{broker_order_id}`  | 404/422 → Reject                   |
 //! | `replace_order` | `GET+PATCH /v2/orders/{id}`            | Fetches filled_qty before PATCH    |
-//! | `fetch_events`  | `GET /v2/account/activities`           | Polling; FILL/PARTIAL_FILL only    |
+//! | `fetch_events`  | `GET /v2/account/activities`           | Polling; maps lifecycle activities  |
 //!
 //! # A5 inbound lifecycle status
 //!
@@ -327,9 +327,6 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
             .or_else(|| state.rest_activity_after.clone());
         let mut events = Vec::new();
         for activity in &activities {
-            if !matches!(activity.activity_type.as_str(), "FILL" | "PARTIAL_FILL") {
-                continue;
-            }
             let order = self.fetch_order(&activity.order_id)?;
             let trade_update =
                 activity_to_trade_update(activity, &order).map_err(|e| BrokerError::Transient {
@@ -383,12 +380,12 @@ pub fn build_submit_body(req: &BrokerSubmitRequest) -> AlpacaSubmitBody {
 /// The canonical `BrokerReplaceRequest.quantity` carries the new open-leaves
 /// count.  This function computes `new_total = filled_qty + new_leaves_qty`.
 pub fn build_replace_body(
-    new_leaves_qty: i32,
+    new_leaves_qty: i64,
     filled_qty: i64,
     limit_price: Option<i64>,
     time_in_force: &str,
 ) -> AlpacaReplaceBody {
-    let new_total_qty = filled_qty + new_leaves_qty as i64;
+    let new_total_qty = filled_qty + new_leaves_qty;
     AlpacaReplaceBody {
         qty: new_total_qty.to_string(),
         limit_price: limit_price.map(micros_to_price_str),
@@ -400,6 +397,9 @@ pub fn build_replace_body(
 ///
 /// Only `"FILL"` and `"PARTIAL_FILL"` activity types are supported.
 ///
+/// The activity `id` is mapped to `broker_fill_id` so downstream consumers can
+/// treat it as strong broker-native economic fill identity.
+///
 /// # Errors
 ///
 /// Returns `Err(String)` if `activity.activity_type` is not a recognised fill type.
@@ -409,8 +409,14 @@ pub fn activity_to_trade_update(
 ) -> Result<AlpacaTradeUpdate, String> {
     // Map Alpaca uppercase activity_type to normalizer event string.
     let event_type = match activity.activity_type.as_str() {
+        "NEW" | "PENDING_NEW" | "ACCEPTED" => "new",
         "FILL" => "fill",
         "PARTIAL_FILL" => "partial_fill",
+        "CANCELED" | "EXPIRED" => "canceled",
+        "CANCEL_REJECTED" => "cancel_rejected",
+        "REPLACED" => "replaced",
+        "REPLACE_REJECTED" => "replace_rejected",
+        "REJECTED" => "rejected",
         other => {
             return Err(format!(
                 "activity_to_trade_update: unsupported activity_type: {other:?}"
@@ -431,6 +437,7 @@ pub fn activity_to_trade_update(
         order: alpaca_order,
         price: activity.price.clone(),
         qty: activity.qty.clone(),
+        broker_fill_id: Some(activity.id.clone()),
     })
 }
 pub fn decode_fetch_cursor(cursor: Option<&str>) -> Result<AlpacaFetchCursor, BrokerError> {

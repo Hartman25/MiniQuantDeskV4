@@ -4,7 +4,7 @@ const AUTHORITY_LABELS: Record<SourceAuthority, string> = {
   db_truth: "DB truth",
   runtime_memory: "Runtime memory",
   broker_snapshot: "Broker snapshot",
-  placeholder: "Placeholder",
+  placeholder: "Unavailable (no backend truth)",
   mixed: "Mixed",
   unknown: "Unknown",
 };

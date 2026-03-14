@@ -28,6 +28,8 @@ secrets.local
 # -----------------------------
 exports/
 runtime/
+!core-rs/mqk-gui/src/features/runtime/
+!core-rs/mqk-gui/src/features/runtime/RuntimeScreen.tsx
 logs/
 *.log
 

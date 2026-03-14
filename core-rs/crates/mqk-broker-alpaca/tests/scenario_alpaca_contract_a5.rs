@@ -56,6 +56,7 @@ fn update(
         order: ord,
         price: price.map(str::to_string),
         qty: qty.map(str::to_string),
+        broker_fill_id: None,
     }
 }
 

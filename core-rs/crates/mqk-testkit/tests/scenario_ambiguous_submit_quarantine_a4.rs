@@ -30,12 +30,14 @@
 #[cfg(test)]
 mod db_tests {
     use std::collections::BTreeMap;
+    use std::sync::OnceLock;
 
     use anyhow::Result;
     use chrono::Utc;
     use serde_json::json;
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
+    use tokio::sync::{Mutex, MutexGuard};
     use uuid::Uuid;
 
     use mqk_db::FixedClock;
@@ -55,6 +57,12 @@ mod db_tests {
     const S2_RUN_ID: &str = "29200008-0000-0000-0000-000000000000";
     const S3_RUN_ID: &str = "29200009-0000-0000-0000-000000000000";
     const S4_RUN_ID: &str = "29200010-0000-0000-0000-000000000000";
+
+    static A4_DB_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    async fn acquire_a4_db_test_lock() -> MutexGuard<'static, ()> {
+        A4_DB_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().await
+    }
 
     // -----------------------------------------------------------------------
     // Gate stubs — all pass (so gate refusals cannot mask broker errors)
@@ -207,6 +215,13 @@ mod db_tests {
         Ok(())
     }
 
+    async fn reset_a4_runtime_lease(pool: &PgPool) -> Result<()> {
+        sqlx::query("delete from runtime_leader_lease where holder_id like 'a4-dispatcher|%'")
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
     async fn seed_running_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
         mqk_db::insert_run(
             pool,
@@ -248,7 +263,7 @@ mod db_tests {
             None,
             FixedClock::new(Utc::now()),
             Box::new(mqk_reconcile::LocalSnapshot::empty),
-            Box::new(mqk_reconcile::BrokerSnapshot::empty),
+            Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
         )
     }
 
@@ -276,6 +291,8 @@ mod db_tests {
 
     #[tokio::test]
     async fn s1_ambiguous_submit_marks_row_ambiguous_and_halts() -> Result<()> {
+        let _guard = acquire_a4_db_test_lock().await;
+
         let url = match require_db_url() {
             Some(u) => u,
             None => {
@@ -291,6 +308,7 @@ mod db_tests {
 
         cleanup_run(&pool, run_id).await?;
         reset_arm_state(&pool).await?;
+        reset_a4_runtime_lease(&pool).await?;
 
         seed_running_run(&pool, run_id).await?;
         assert!(mqk_db::outbox_enqueue(&pool, run_id, idem, order_json()).await?);
@@ -306,7 +324,6 @@ mod db_tests {
             "error must reference AmbiguousSubmit, got: {msg}"
         );
 
-        // Row must be AMBIGUOUS — explicit quarantine state (A4).
         let status = outbox_status(&pool, idem).await?;
         assert_eq!(
             status.as_deref(),
@@ -314,15 +331,12 @@ mod db_tests {
             "A4: row must be AMBIGUOUS after AmbiguousSubmit, got {status:?}"
         );
 
-        // Run must be HALTED.
         let run = mqk_db::fetch_run(&pool, run_id).await?;
         assert!(
             matches!(run.status, mqk_db::RunStatus::Halted),
             "run must be HALTED after AmbiguousSubmit"
         );
 
-        // Arm must be DISARMED with reason "AmbiguousSubmit" (migration 0020 makes
-        // this a valid constraint value, so the write succeeds and is durable).
         let arm = mqk_db::load_arm_state(&pool).await?;
         assert_eq!(
             arm.as_ref().map(|(s, _)| s.as_str()),
@@ -341,18 +355,12 @@ mod db_tests {
 
     // -----------------------------------------------------------------------
     // S2: Restart with AMBIGUOUS row present → Phase-0b quarantines.
-    //
-    // Simulates: a prior tick wrote AMBIGUOUS (from AmbiguousSubmit) and
-    // halted the run. A fresh orchestrator instance is created (simulating
-    // process restart). It must detect the AMBIGUOUS row via
-    // outbox_load_restart_ambiguous_for_run and refuse dispatch.
-    //
-    // Crucially the broker must never be called — NeverSubmitBroker panics
-    // if submit_order is reached.
     // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn s2_restart_with_ambiguous_row_quarantines_before_dispatch() -> Result<()> {
+        let _guard = acquire_a4_db_test_lock().await;
+
         let url = match require_db_url() {
             Some(u) => u,
             None => {
@@ -368,16 +376,14 @@ mod db_tests {
 
         cleanup_run(&pool, run_id).await?;
         reset_arm_state(&pool).await?;
+        reset_a4_runtime_lease(&pool).await?;
 
-        // Seed a RUNNING run and place the row into AMBIGUOUS via the DB path
-        // (simulating what the first tick did before the process was restarted).
         seed_running_run(&pool, run_id).await?;
         assert!(mqk_db::outbox_enqueue(&pool, run_id, idem, order_json()).await?);
 
-        // Claim → DISPATCHING → AMBIGUOUS (replicating what the orchestrator does
-        // on an AmbiguousSubmit, without going through the full tick).
         let claimed =
-            mqk_db::outbox_claim_batch(&pool, 1, "a4-setup-dispatcher", Utc::now()).await?;
+            mqk_db::outbox_claim_batch_for_run(&pool, run_id, 1, "a4-setup-dispatcher", Utc::now())
+                .await?;
         assert_eq!(claimed.len(), 1, "S2 setup: claim must succeed");
         assert!(
             mqk_db::outbox_mark_dispatching(&pool, idem, "a4-setup-dispatcher", Utc::now()).await?,
@@ -388,15 +394,17 @@ mod db_tests {
             "S2 setup: DISPATCHING → AMBIGUOUS"
         );
 
-        // Run is still RUNNING (the process "restarted" before halt was persisted).
+        // Simulate a restart that happened before the halt/disarm persistence from the
+        // original ambiguous submit path. Phase-0b must overwrite this durable state to
+        // RecoveryQuarantine when it rediscovers the AMBIGUOUS row.
+        mqk_db::persist_arm_state(&pool, "ARMED", None).await?;
+
         let run = mqk_db::fetch_run(&pool, run_id).await?;
         assert!(
             matches!(run.status, mqk_db::RunStatus::Running),
             "S2 setup: run must be RUNNING before the restarted tick"
         );
 
-        // Fresh orchestrator instance (restarted process) — uses NeverSubmitBroker
-        // to prove that the broker is never reached during quarantine.
         let mut orch = make_orchestrator(pool.clone(), run_id, NeverSubmitBroker);
         let err = orch
             .tick()
@@ -408,7 +416,6 @@ mod db_tests {
             "error must contain RECOVERY_QUARANTINE, got: {msg}"
         );
 
-        // Row must still be AMBIGUOUS — Phase-0b halts before touching the outbox.
         let status = outbox_status(&pool, idem).await?;
         assert_eq!(
             status.as_deref(),
@@ -416,14 +423,12 @@ mod db_tests {
             "row must remain AMBIGUOUS after quarantine tick, got {status:?}"
         );
 
-        // Run must now be HALTED.
         let run = mqk_db::fetch_run(&pool, run_id).await?;
         assert!(
             matches!(run.status, mqk_db::RunStatus::Halted),
             "run must be HALTED after quarantine tick"
         );
 
-        // Arm state must be DISARMED with reason RecoveryQuarantine.
         let arm = mqk_db::load_arm_state(&pool).await?;
         assert_eq!(
             arm.as_ref().map(|(s, _)| s.as_str()),
@@ -442,16 +447,12 @@ mod db_tests {
 
     // -----------------------------------------------------------------------
     // S3: outbox_claim_batch never claims an AMBIGUOUS row.
-    //
-    // Structural enforcement: AMBIGUOUS rows cannot enter the ordinary dispatch
-    // path because outbox_claim_batch uses WHERE status = 'PENDING'. This test
-    // proves that even with a PENDING + AMBIGUOUS row in the DB, claim_batch
-    // only returns the PENDING one — the AMBIGUOUS row is invisible to the
-    // dispatcher.
     // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn s3_claim_batch_never_claims_ambiguous_row() -> Result<()> {
+        let _guard = acquire_a4_db_test_lock().await;
+
         let url = match require_db_url() {
             Some(u) => u,
             None => {
@@ -470,16 +471,17 @@ mod db_tests {
 
         cleanup_run(&pool, run_id).await?;
         reset_arm_state(&pool).await?;
+        reset_a4_runtime_lease(&pool).await?;
         seed_running_run(&pool, run_id).await?;
 
-        // Place two rows: one AMBIGUOUS, one PENDING.
         assert!(
             mqk_db::outbox_enqueue(&pool, run_id, idem_ambiguous, order_json()).await?,
             "S3: first outbox_enqueue must succeed"
         );
         {
-            // Drive the first row to AMBIGUOUS.
-            let claimed = mqk_db::outbox_claim_batch(&pool, 1, "s3-dispatcher", Utc::now()).await?;
+            let claimed =
+                mqk_db::outbox_claim_batch_for_run(&pool, run_id, 1, "s3-dispatcher", Utc::now())
+                    .await?;
             assert_eq!(claimed.len(), 1);
             assert!(
                 mqk_db::outbox_mark_dispatching(&pool, idem_ambiguous, "s3-dispatcher", Utc::now())
@@ -493,8 +495,9 @@ mod db_tests {
             "S3: second outbox_enqueue must succeed"
         );
 
-        // claim_batch with batch_size=10 — should only return the PENDING row.
-        let claimed = mqk_db::outbox_claim_batch(&pool, 10, "s3-dispatcher", Utc::now()).await?;
+        let claimed =
+            mqk_db::outbox_claim_batch_for_run(&pool, run_id, 10, "s3-dispatcher", Utc::now())
+                .await?;
         let claimed_keys: Vec<&str> = claimed
             .iter()
             .map(|r| r.row.idempotency_key.as_str())
@@ -509,7 +512,6 @@ mod db_tests {
             "S3: PENDING row must be claimable (got {claimed_keys:?})"
         );
 
-        // Confirm AMBIGUOUS row is still AMBIGUOUS (claim_batch did not touch it).
         let status = outbox_status(&pool, idem_ambiguous).await?;
         assert_eq!(
             status.as_deref(),
@@ -523,17 +525,12 @@ mod db_tests {
 
     // -----------------------------------------------------------------------
     // S4: outbox_reset_ambiguous_to_pending is the only safe release path.
-    //
-    // Proves:
-    // (a) Without calling reset, the AMBIGUOUS row is permanently excluded from
-    //     claim_batch.
-    // (b) After reset_ambiguous_to_pending, the row is PENDING and claim_batch
-    //     can claim it.
-    // (c) reset returns false on a non-AMBIGUOUS row (idempotency / safety).
     // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn s4_reset_ambiguous_to_pending_is_only_safe_release_path() -> Result<()> {
+        let _guard = acquire_a4_db_test_lock().await;
+
         let url = match require_db_url() {
             Some(u) => u,
             None => {
@@ -549,12 +546,14 @@ mod db_tests {
 
         cleanup_run(&pool, run_id).await?;
         reset_arm_state(&pool).await?;
+        reset_a4_runtime_lease(&pool).await?;
         seed_running_run(&pool, run_id).await?;
 
         assert!(mqk_db::outbox_enqueue(&pool, run_id, idem, order_json()).await?);
 
-        // Drive row to AMBIGUOUS.
-        let claimed = mqk_db::outbox_claim_batch(&pool, 1, "s4-dispatcher", Utc::now()).await?;
+        let claimed =
+            mqk_db::outbox_claim_batch_for_run(&pool, run_id, 1, "s4-dispatcher", Utc::now())
+                .await?;
         assert_eq!(claimed.len(), 1, "S4: claim must succeed");
         assert!(
             mqk_db::outbox_mark_dispatching(&pool, idem, "s4-dispatcher", Utc::now()).await?,
@@ -565,19 +564,17 @@ mod db_tests {
             "S4: DISPATCHING → AMBIGUOUS"
         );
 
-        // (a) Without reset: claim_batch returns nothing for this row.
         let before_reset =
-            mqk_db::outbox_claim_batch(&pool, 10, "s4-dispatcher", Utc::now()).await?;
+            mqk_db::outbox_claim_batch_for_run(&pool, run_id, 10, "s4-dispatcher", Utc::now())
+                .await?;
         assert!(
             before_reset.is_empty(),
             "S4: claim_batch must return empty while row is AMBIGUOUS"
         );
 
-        // (c) reset on non-AMBIGUOUS row returns false.
         let noop = mqk_db::outbox_reset_ambiguous_to_pending(&pool, "nonexistent-key").await?;
         assert!(!noop, "S4: reset on nonexistent key must return false");
 
-        // (b) Release via the safe path.
         let released = mqk_db::outbox_reset_ambiguous_to_pending(&pool, idem).await?;
         assert!(released, "S4: reset_ambiguous_to_pending must return true");
 
@@ -588,9 +585,9 @@ mod db_tests {
             "S4: row must be PENDING after reset_ambiguous_to_pending, got {status:?}"
         );
 
-        // After release, claim_batch can now claim the row.
         let after_reset =
-            mqk_db::outbox_claim_batch(&pool, 10, "s4-dispatcher", Utc::now()).await?;
+            mqk_db::outbox_claim_batch_for_run(&pool, run_id, 10, "s4-dispatcher", Utc::now())
+                .await?;
         assert_eq!(
             after_reset.len(),
             1,
@@ -601,7 +598,6 @@ mod db_tests {
             "S4: claimed row must be the released row"
         );
 
-        // Second call to reset on the now-CLAIMED row must return false (no-op).
         let double_reset = mqk_db::outbox_reset_ambiguous_to_pending(&pool, idem).await?;
         assert!(
             !double_reset,

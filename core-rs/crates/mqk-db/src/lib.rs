@@ -14,7 +14,7 @@ pub const ENV_DB_URL: &str = "MQK_DATABASE_URL";
 pub mod runtime_lease;
 
 // ---------------------------------------------------------------------------
-// TimeSource — injectable clock abstraction (FC-5)
+// TimeSource â€” injectable clock abstraction (FC-5)
 // ---------------------------------------------------------------------------
 
 /// Abstraction over a UTC clock, injected wherever enforcement or
@@ -298,7 +298,7 @@ fn run_row_from_row(row: PgRow) -> Result<RunRow> {
 
 pub async fn fetch_run(pool: &PgPool, run_id: Uuid) -> Result<RunRow> {
     let row = sqlx::query(
-        r#"""
+        r#"
         select
           run_id,
           engine_id,
@@ -316,7 +316,7 @@ pub async fn fetch_run(pool: &PgPool, run_id: Uuid) -> Result<RunRow> {
           last_heartbeat_utc
         from runs
         where run_id = $1
-        """#,
+        "#,
     )
     .bind(run_id)
     .fetch_one(pool)
@@ -332,7 +332,7 @@ pub async fn fetch_latest_run_for_engine(
     mode: &str,
 ) -> Result<Option<RunRow>> {
     let row = sqlx::query(
-        r#"""
+        r#"
         select
           run_id,
           engine_id,
@@ -353,7 +353,7 @@ pub async fn fetch_latest_run_for_engine(
           and mode = $2
         order by started_at_utc desc, run_id desc
         limit 1
-        """#,
+        "#,
     )
     .bind(engine_id)
     .bind(mode)
@@ -370,7 +370,7 @@ pub async fn fetch_active_run_for_engine(
     mode: &str,
 ) -> Result<Option<RunRow>> {
     let row = sqlx::query(
-        r#"""
+        r#"
         select
           run_id,
           engine_id,
@@ -392,7 +392,7 @@ pub async fn fetch_active_run_for_engine(
           and status in ('ARMED', 'RUNNING')
         order by started_at_utc desc, run_id desc
         limit 1
-        """#,
+        "#,
     )
     .bind(engine_id)
     .bind(mode)
@@ -472,7 +472,7 @@ pub async fn arm_preflight(pool: &PgPool, run_id: Uuid) -> Result<()> {
     //    Previously this checked audit_events.event_type='CLEAN', which was forgeable
     //    by calling insert_audit_event() with any payload.  Now we check the dedicated
     //    sys_reconcile_checkpoint table, written only by reconcile_checkpoint_write().
-    //    A forged audit event is insufficient — only a genuine reconcile checkpoint passes.
+    //    A forged audit event is insufficient â€” only a genuine reconcile checkpoint passes.
     if is_live && require_clean_reconcile {
         let checkpoint = reconcile_checkpoint_load_latest(pool, run_id).await?;
         match checkpoint.as_ref().map(|c| c.verdict.as_str()) {
@@ -486,7 +486,7 @@ pub async fn arm_preflight(pool: &PgPool, run_id: Uuid) -> Result<()> {
             None => {
                 return Err(anyhow!(
                     "arm_preflight requires clean reconcile checkpoint: \
-                     no sys_reconcile_checkpoint row found for run — \
+                     no sys_reconcile_checkpoint row found for run â€” \
                      insert_audit_event alone is insufficient (PATCH B1)"
                 ));
             }
@@ -839,7 +839,7 @@ pub async fn outbox_load_restart_ambiguous_for_run(
 /// The `_priv` field is `pub(crate)`, preventing struct-literal construction
 /// outside this crate. The only `pub(crate)` constructor (`OutboxClaimToken::new`)
 /// is called exclusively inside `outbox_claim_batch`, which atomically performs
-/// `FOR UPDATE SKIP LOCKED` — the DB lock IS the proof.
+/// `FOR UPDATE SKIP LOCKED` â€” the DB lock IS the proof.
 ///
 /// External code may name this type (needed to implement `BrokerAdapter` and
 /// call `BrokerGateway::submit`) but cannot construct it. In production, the
@@ -847,10 +847,10 @@ pub async fn outbox_load_restart_ambiguous_for_run(
 /// [`OutboxClaimToken::for_test`] is available as an explicit escape hatch.
 ///
 /// ```text
-/// ✅  let claimed = outbox_claim_batch(&pool, …).await?;   // production path
+/// âœ…  let claimed = outbox_claim_batch(&pool, â€¦).await?;   // production path
 ///     let token = &claimed[0].token;
-/// ✅  OutboxClaimToken::for_test(id, key)                  // tests only
-/// ❌  OutboxClaimToken { _priv: (), … }                    // ERROR: private field
+/// âœ…  OutboxClaimToken::for_test(id, key)                  // tests only
+/// âŒ  OutboxClaimToken { _priv: (), â€¦ }                    // ERROR: private field
 /// ```
 #[allow(clippy::manual_non_exhaustive)]
 #[derive(Debug, Clone)]
@@ -866,18 +866,18 @@ pub struct OutboxClaimToken {
 impl OutboxClaimToken {
     /// Construct a claim token from a successfully claimed outbox row.
     ///
-    /// `pub(crate)` — only callable inside `mqk-db`. Callers outside this
+    /// `pub(crate)` â€” only callable inside `mqk-db`. Callers outside this
     /// crate must obtain tokens via [`outbox_claim_batch`].
     ///
     /// # Compile-time gate
     ///
     /// Compiled only when at least one of the following is active:
-    /// - `test` — for the `for_test` escape hatch used in unit tests
-    /// - `feature = "runtime-claim"` — for `outbox_claim_batch` (production path)
-    /// - `feature = "testkit"` — for integration test infrastructure
+    /// - `test` â€” for the `for_test` escape hatch used in unit tests
+    /// - `feature = "runtime-claim"` â€” for `outbox_claim_batch` (production path)
+    /// - `feature = "testkit"` â€” for integration test infrastructure
     ///
     /// In a plain `cargo build` / `cargo clippy` without any of these, this
-    /// function is not present and cannot be called — enforcing the RT-1 gate.
+    /// function is not present and cannot be called â€” enforcing the RT-1 gate.
     #[cfg(any(test, feature = "runtime-claim", feature = "testkit"))]
     pub(crate) fn new(outbox_id: i64, idempotency_key: impl Into<String>) -> Self {
         Self {
@@ -897,7 +897,7 @@ impl OutboxClaimToken {
     /// - the `testkit` Cargo feature is explicitly enabled.
     ///
     /// The `testkit` feature MUST NOT be listed in any production crate's
-    /// `[dependencies]` — only in `[dev-dependencies]` of test/testkit crates.
+    /// `[dependencies]` â€” only in `[dev-dependencies]` of test/testkit crates.
     ///
     /// In production, tokens are returned exclusively by [`outbox_claim_batch`],
     /// coupling each token to a real DB-level `FOR UPDATE SKIP LOCKED` row
@@ -990,18 +990,18 @@ pub async fn outbox_enqueue(
 ///
 /// Uses `FOR UPDATE SKIP LOCKED` so concurrent dispatchers never claim the same row.
 /// Returns [`ClaimedOutboxRow`]s, each containing the claimed [`OutboxRow`] **and**
-/// an [`OutboxClaimToken`] constructed from the DB row — coupling the token to the
+/// an [`OutboxClaimToken`] constructed from the DB row â€” coupling the token to the
 /// actual lock (FC-2). Returns an empty `Vec` if no `PENDING` rows are available.
 ///
 /// The caller MUST:
 /// - call `outbox_mark_dispatching` immediately before `gateway.submit()`, THEN
-/// - call `outbox_mark_sent` after a successful submit (DISPATCHING → SENT), OR
+/// - call `outbox_mark_sent` after a successful submit (DISPATCHING â†’ SENT), OR
 /// - call `outbox_mark_failed` on submit failure (row quarantined as FAILED).
 ///
-/// `outbox_release_claim` (CLAIMED → PENDING) is only valid while the row is
-/// still CLAIMED — i.e. before `outbox_mark_dispatching` is called.
+/// `outbox_release_claim` (CLAIMED â†’ PENDING) is only valid while the row is
+/// still CLAIMED â€” i.e. before `outbox_mark_dispatching` is called.
 ///
-/// # Availability — RT-1 single-dispatcher gate
+/// # Availability â€” RT-1 single-dispatcher gate
 ///
 /// This function is only compiled when `feature = "runtime-claim"` (enabled
 /// exclusively by `mqk-runtime`) or `feature = "testkit"` (test infrastructure)
@@ -1009,38 +1009,70 @@ pub async fn outbox_enqueue(
 /// to call this function from those crates produces `error[E0425]` at compile time.
 // RT-1: gate enforced here. Do not remove without updating the prover.
 #[cfg(any(feature = "runtime-claim", feature = "testkit"))]
-pub async fn outbox_claim_batch(
+async fn outbox_claim_batch_inner(
     pool: &PgPool,
+    run_id: Option<Uuid>,
     batch_size: i64,
     dispatcher_id: &str,
     claimed_at: DateTime<Utc>,
 ) -> Result<Vec<ClaimedOutboxRow>> {
-    let rows = sqlx::query(
-        r#"
-        with to_claim as (
-            select outbox_id
-            from oms_outbox
-            where status = 'PENDING'
-            order by outbox_id asc
-            limit $1
-            for update skip locked
+    let rows = if let Some(run_id) = run_id {
+        sqlx::query(
+            r#"
+            with to_claim as (
+                select outbox_id
+                from oms_outbox
+                where run_id = $2
+                  and status = 'PENDING'
+                order by outbox_id asc
+                limit $1
+                for update skip locked
+            )
+            update oms_outbox
+               set status         = 'CLAIMED',
+                   claimed_at_utc = $4,
+                   claimed_by     = $3
+             where outbox_id in (select outbox_id from to_claim)
+            returning outbox_id, run_id, idempotency_key, order_json, status,
+                      created_at_utc, sent_at_utc, claimed_at_utc, claimed_by,
+                      dispatching_at_utc, dispatch_attempt_id
+            "#,
         )
-        update oms_outbox
-           set status         = 'CLAIMED',
-               claimed_at_utc = $3,
-               claimed_by     = $2
-         where outbox_id in (select outbox_id from to_claim)
-        returning outbox_id, run_id, idempotency_key, order_json, status,
-                  created_at_utc, sent_at_utc, claimed_at_utc, claimed_by,
-                  dispatching_at_utc, dispatch_attempt_id
-        "#,
-    )
-    .bind(batch_size)
-    .bind(dispatcher_id)
-    .bind(claimed_at)
-    .fetch_all(pool)
-    .await
-    .context("outbox_claim_batch failed")?;
+        .bind(batch_size)
+        .bind(run_id)
+        .bind(dispatcher_id)
+        .bind(claimed_at)
+        .fetch_all(pool)
+        .await
+        .context("outbox_claim_batch_for_run failed")?
+    } else {
+        sqlx::query(
+            r#"
+            with to_claim as (
+                select outbox_id
+                from oms_outbox
+                where status = 'PENDING'
+                order by outbox_id asc
+                limit $1
+                for update skip locked
+            )
+            update oms_outbox
+               set status         = 'CLAIMED',
+                   claimed_at_utc = $3,
+                   claimed_by     = $2
+             where outbox_id in (select outbox_id from to_claim)
+            returning outbox_id, run_id, idempotency_key, order_json, status,
+                      created_at_utc, sent_at_utc, claimed_at_utc, claimed_by,
+                      dispatching_at_utc, dispatch_attempt_id
+            "#,
+        )
+        .bind(batch_size)
+        .bind(dispatcher_id)
+        .bind(claimed_at)
+        .fetch_all(pool)
+        .await
+        .context("outbox_claim_batch failed")?
+    };
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -1064,6 +1096,27 @@ pub async fn outbox_claim_batch(
         });
     }
     Ok(out)
+}
+
+#[cfg(any(feature = "runtime-claim", feature = "testkit"))]
+pub async fn outbox_claim_batch(
+    pool: &PgPool,
+    batch_size: i64,
+    dispatcher_id: &str,
+    claimed_at: DateTime<Utc>,
+) -> Result<Vec<ClaimedOutboxRow>> {
+    outbox_claim_batch_inner(pool, None, batch_size, dispatcher_id, claimed_at).await
+}
+
+#[cfg(any(feature = "runtime-claim", feature = "testkit"))]
+pub async fn outbox_claim_batch_for_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    batch_size: i64,
+    dispatcher_id: &str,
+    claimed_at: DateTime<Utc>,
+) -> Result<Vec<ClaimedOutboxRow>> {
+    outbox_claim_batch_inner(pool, Some(run_id), batch_size, dispatcher_id, claimed_at).await
 }
 
 /// Release a CLAIMED row back to PENDING.
@@ -1095,15 +1148,15 @@ pub async fn outbox_release_claim(pool: &PgPool, idempotency_key: &str) -> Resul
 /// `gateway.submit()`.
 ///
 /// Writing DISPATCHING before the broker call closes the W4 crash window:
-/// `outbox_reset_stale_claims` only resets `CLAIMED` rows — a crash between
+/// `outbox_reset_stale_claims` only resets `CLAIMED` rows â€” a crash between
 /// `outbox_mark_dispatching` and `outbox_mark_sent` leaves the row in
 /// `DISPATCHING`, preventing silent requeue and double-submit on restart.
 ///
-/// `dispatching_at` is caller-supplied (no SQL `now()` — FC-7 policy).
+/// `dispatching_at` is caller-supplied (no SQL `now()` â€” FC-7 policy).
 /// `dispatch_attempt_id` identifies which dispatcher instance was in-flight;
 /// used for crash-recovery audit.
 ///
-/// Returns `true` if the row transitioned `CLAIMED → DISPATCHING`; `false` if
+/// Returns `true` if the row transitioned `CLAIMED â†’ DISPATCHING`; `false` if
 /// not found or not in `CLAIMED` state.
 pub async fn outbox_mark_dispatching(
     pool: &PgPool,
@@ -1132,13 +1185,13 @@ pub async fn outbox_mark_dispatching(
     Ok(row.is_some())
 }
 
-/// Reset stale CLAIMED rows back to PENDING — the crash-recovery reaper (FC-6).
+/// Reset stale CLAIMED rows back to PENDING â€” the crash-recovery reaper (FC-6).
 ///
 /// Called on orchestrator startup (and optionally on a periodic sweep) to
 /// recover rows left in CLAIMED state by a crashed or stuck dispatcher.
 ///
 /// A row is considered stale when its `claimed_at_utc` is strictly earlier
-/// than `stale_threshold`.  The threshold is caller-supplied — no wall-clock
+/// than `stale_threshold`.  The threshold is caller-supplied â€” no wall-clock
 /// inside this function (FC-5 policy).  In production, pass
 /// `time_source.now_utc() - stale_duration`; in tests, pass an explicit
 /// timestamp.
@@ -1204,7 +1257,7 @@ pub async fn outbox_fetch_by_idempotency_key(
     }))
 }
 
-/// Atomically persist `internal_id → broker_id` and transition the outbox row
+/// Atomically persist `internal_id â†’ broker_id` and transition the outbox row
 /// to `SENT`.
 ///
 /// This closes the Patch 3A durability gap:
@@ -1222,8 +1275,8 @@ pub async fn outbox_fetch_by_idempotency_key(
 /// rolled back as well.
 ///
 /// Accepts both `CLAIMED` and `DISPATCHING`:
-/// - Production path (RT-5): `DISPATCHING → SENT`
-/// - Legacy test path: `CLAIMED → SENT`
+/// - Production path (RT-5): `DISPATCHING â†’ SENT`
+/// - Legacy test path: `CLAIMED â†’ SENT`
 pub async fn outbox_mark_sent_with_broker_map(
     pool: &PgPool,
     internal_id: &str,
@@ -1298,7 +1351,7 @@ pub async fn outbox_mark_acked(pool: &PgPool, idempotency_key: &str) -> Result<b
 /// Mark a CLAIMED or DISPATCHING outbox row as FAILED.
 ///
 /// Returns true if a row transitioned to FAILED; false otherwise.
-/// Accepts both `CLAIMED` and `DISPATCHING` — use `outbox_claim_batch` first.
+/// Accepts both `CLAIMED` and `DISPATCHING` â€” use `outbox_claim_batch` first.
 /// After RT-5, the production submit-failure path calls this with a DISPATCHING row.
 pub async fn outbox_mark_failed(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
     let row: Option<(i64,)> = sqlx::query_as(
@@ -1321,7 +1374,7 @@ pub async fn outbox_mark_failed(pool: &PgPool, idempotency_key: &str) -> Result<
 /// Reset a `DISPATCHING` row back to `PENDING` for safe retry.
 ///
 /// Used by the orchestrator when the broker adapter returns a retryable error
-/// (`Transport` or `RateLimit`) — i.e., the request provably never reached the
+/// (`Transport` or `RateLimit`) â€” i.e., the request provably never reached the
 /// broker.  Clears the claim fields so `outbox_claim_batch` can re-claim the
 /// row on the next tick.
 ///
@@ -1362,11 +1415,11 @@ pub async fn outbox_reset_dispatching_to_pending(
 /// Unlike `DISPATCHING` (which is also written for rows that crashed mid-
 /// dispatch), `AMBIGUOUS` explicitly encodes "broker confirmed: outcome
 /// unknown". It is structurally prevented from re-entering normal dispatch:
-/// - `outbox_claim_batch` only claims `PENDING` rows — `AMBIGUOUS` is skipped.
+/// - `outbox_claim_batch` only claims `PENDING` rows â€” `AMBIGUOUS` is skipped.
 /// - `outbox_load_restart_ambiguous_for_run` always returns `AMBIGUOUS` rows.
 /// - The only exit is `outbox_reset_ambiguous_to_pending`.
 ///
-/// Returns `true` if the row transitioned `DISPATCHING → AMBIGUOUS`; `false`
+/// Returns `true` if the row transitioned `DISPATCHING â†’ AMBIGUOUS`; `false`
 /// if not found or not in `DISPATCHING` state.
 pub async fn outbox_mark_ambiguous(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
     let row: Option<(i64,)> = sqlx::query_as(
@@ -1426,7 +1479,7 @@ pub async fn outbox_reset_ambiguous_to_pending(
 
 /// Recovery query: list outbox rows that are not terminal (not ACKED).
 ///
-/// Includes PENDING, CLAIMED, DISPATCHING, SENT, FAILED, and AMBIGUOUS rows —
+/// Includes PENDING, CLAIMED, DISPATCHING, SENT, FAILED, and AMBIGUOUS rows â€”
 /// all statuses that indicate the order has not yet been confirmed by the broker.
 ///
 /// NOTE: This does NOT talk to broker yet.
@@ -1468,7 +1521,7 @@ pub async fn outbox_list_unacked_for_run(pool: &PgPool, run_id: Uuid) -> Result<
 }
 
 // ---------------------------------------------------------------------------
-// Arm state persistence — Patch L7
+// Arm state persistence â€” Patch L7
 // ---------------------------------------------------------------------------
 
 /// Persist the current arm state to `sys_arm_state` (upsert singleton row).
@@ -1497,7 +1550,7 @@ pub async fn persist_arm_state(pool: &PgPool, state: &str, reason: Option<&str>)
 
 /// Load the last persisted arm state.
 ///
-/// Returns `None` if no state has ever been persisted (fresh system — caller
+/// Returns `None` if no state has ever been persisted (fresh system â€” caller
 /// should treat this as `DISARMED / BootDefault`).
 ///
 /// Returns `Some((state, reason))` where `state` is `"ARMED"` or `"DISARMED"`
@@ -1514,6 +1567,56 @@ pub async fn load_arm_state(pool: &PgPool) -> Result<Option<(String, Option<Stri
     .await
     .context("load_arm_state failed")?;
     Ok(row)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmState {
+    Armed,
+    Disarmed,
+}
+
+impl ArmState {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Armed => "ARMED",
+            Self::Disarmed => "DISARMED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisarmReason {
+    OperatorDisarm,
+    OperatorHalt,
+    ReconcileDrift,
+    DeadmanExpired,
+    DeadmanSupervisorFailure,
+    DeadmanHeartbeatPersistFailed,
+}
+
+impl DisarmReason {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::OperatorDisarm => "OperatorDisarm",
+            Self::OperatorHalt => "OperatorHalt",
+            Self::ReconcileDrift => "ReconcileDrift",
+            Self::DeadmanExpired => "DeadmanExpired",
+            Self::DeadmanSupervisorFailure => "DeadmanSupervisorFailure",
+            Self::DeadmanHeartbeatPersistFailed => "DeadmanHeartbeatPersistFailed",
+        }
+    }
+}
+
+pub async fn persist_arm_state_canonical(
+    pool: &PgPool,
+    state: ArmState,
+    reason: Option<DisarmReason>,
+) -> Result<()> {
+    let reason_str = match state {
+        ArmState::Armed => None,
+        ArmState::Disarmed => reason.map(DisarmReason::as_db_str),
+    };
+    persist_arm_state(pool, state.as_db_str(), reason_str).await
 }
 
 #[derive(Debug, Clone)]
@@ -1685,7 +1788,7 @@ pub async fn load_reconcile_status_state(pool: &PgPool) -> Result<Option<Reconci
 ///   second row.
 /// - If inserted, returns Ok(true).
 ///
-/// RT-3: dedupe is scoped to the run — the same broker_message_id can appear in different
+/// RT-3: dedupe is scoped to the run â€” the same broker_message_id can appear in different
 /// runs without collision (broker IDs are only unique within a session).
 ///
 /// Patch D2 caller contract:
@@ -1702,18 +1805,55 @@ pub async fn inbox_insert_deduped(
     pool: &PgPool,
     run_id: Uuid,
     broker_message_id: &str,
-    message_json: Value,
+    message_json: serde_json::Value,
 ) -> Result<bool> {
+    // Legacy compatibility shim:
+    // older callers only provide (run_id, broker_message_id, message_json).
+    // Derive the richer identity fields best-effort from the payload, then
+    // delegate to the canonical insert path.
+
+    let broker_fill_id = message_json.get("broker_fill_id").and_then(|v| v.as_str());
+
+    let internal_order_id = message_json
+        .get("internal_order_id")
+        .or_else(|| message_json.get("order_id"))
+        .or_else(|| message_json.get("client_order_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(broker_message_id);
+
+    let broker_order_id = message_json
+        .get("broker_order_id")
+        .or_else(|| message_json.get("order_id"))
+        .or_else(|| message_json.get("client_order_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(internal_order_id);
+
+    let event_kind = message_json
+        .get("event_kind")
+        .or_else(|| message_json.get("kind"))
+        .or_else(|| message_json.get("event_type"))
+        .or_else(|| message_json.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("UNKNOWN");
+
+    let event_ts_ms = message_json
+        .get("event_ts_ms")
+        .or_else(|| message_json.get("ts_ms"))
+        .or_else(|| message_json.get("timestamp_ms"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
     inbox_insert_deduped_with_identity(
         pool,
         run_id,
-        &BrokerEventIdentity {
-            broker_message_id: broker_message_id.to_string(),
-            broker_fill_id: None,
-            broker_sequence_id: None,
-            broker_timestamp: None,
-        },
-        message_json,
+        broker_message_id,
+        broker_fill_id,
+        internal_order_id,
+        broker_order_id,
+        event_kind,
+        &message_json,
+        event_ts_ms,
+        Utc::now(),
     )
     .await
 }
@@ -1727,37 +1867,60 @@ pub async fn inbox_insert_deduped(
 pub async fn inbox_insert_deduped_with_identity(
     pool: &PgPool,
     run_id: Uuid,
-    identity: &BrokerEventIdentity,
-    message_json: Value,
+    broker_message_id: &str,
+    broker_fill_id: Option<&str>,
+    internal_order_id: &str,
+    broker_order_id: &str,
+    event_kind: &str,
+    event_json: &serde_json::Value,
+    event_ts_ms: i64,
+    received_at: DateTime<Utc>,
 ) -> Result<bool> {
-    let row: Option<(i64,)> = sqlx::query_as(
+    let insert_result = sqlx::query(
         r#"
         insert into oms_inbox (
             run_id,
             broker_message_id,
             broker_fill_id,
-            broker_sequence_id,
-            broker_timestamp,
-            message_json
+            internal_order_id,
+            broker_order_id,
+            event_kind,
+            event_json,
+            event_ts_ms,
+            received_at_utc,
+            applied_at_utc
         )
-        values ($1, $2, $3, $4, $5, $6)
-        on conflict (run_id, broker_message_id) do nothing
-        returning inbox_id
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, null)
         "#,
     )
     .bind(run_id)
-    .bind(&identity.broker_message_id)
-    .bind(&identity.broker_fill_id)
-    .bind(&identity.broker_sequence_id)
-    .bind(&identity.broker_timestamp)
-    .bind(message_json)
-    .fetch_optional(pool)
-    .await
-    .context("inbox_insert_deduped_with_identity failed")?;
+    .bind(broker_message_id)
+    .bind(broker_fill_id)
+    .bind(internal_order_id)
+    .bind(broker_order_id)
+    .bind(event_kind)
+    .bind(event_json)
+    .bind(event_ts_ms)
+    .bind(received_at)
+    .execute(pool)
+    .await;
 
-    Ok(row.is_some())
+    match insert_result {
+        Ok(done) => Ok(done.rows_affected() == 1),
+
+        Err(sqlx::Error::Database(db_err))
+            if db_err.code().as_deref() == Some("23505")
+                && matches!(
+                    db_err.constraint(),
+                    Some("uq_inbox_run_broker_message_id") | Some("uq_inbox_run_broker_fill_id")
+                ) =>
+        {
+            Ok(false)
+        }
+
+        Err(e) => Err(e).context("inbox_insert_deduped_with_identity failed"),
+    }
 }
-
 /// Stamp `applied_at_utc` on an inbox row after its fill has been
 /// successfully applied to in-process portfolio state.
 ///
@@ -1766,9 +1929,9 @@ pub async fn inbox_insert_deduped_with_identity(
 /// - Rows where `applied_at_utc IS NULL` appear in
 ///   `inbox_load_unapplied_for_run` and must be replayed at startup.
 ///
-/// RT-3: `run_id` is now required — dedupe is scoped to (run_id, broker_message_id).
+/// RT-3: `run_id` is now required â€” dedupe is scoped to (run_id, broker_message_id).
 ///
-/// `applied_at` is caller-supplied — no SQL `now()` in this function (FC-8
+/// `applied_at` is caller-supplied â€” no SQL `now()` in this function (FC-8
 /// policy: wall-clock excluded from the fill-apply path).  In production,
 /// pass `time_source.now_utc()`; in tests, pass an explicit timestamp.
 ///
@@ -1843,13 +2006,13 @@ pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result
 }
 
 // ---------------------------------------------------------------------------
-// Broker order ID map persistence — Patch A4
+// Broker order ID map persistence â€” Patch A4
 // ---------------------------------------------------------------------------
 
-/// Persist (or update) an `internal_id → broker_id` mapping after a successful
+/// Persist (or update) an `internal_id â†’ broker_id` mapping after a successful
 /// broker submit.
 ///
-/// Uses `ON CONFLICT … DO UPDATE` so idempotent retries (e.g. after a crash
+/// Uses `ON CONFLICT â€¦ DO UPDATE` so idempotent retries (e.g. after a crash
 /// between submit and `outbox_mark_sent`) safely overwrite rather than fail.
 ///
 /// Call this immediately after a confirmed broker submit, before returning from
@@ -1871,7 +2034,7 @@ pub async fn broker_map_upsert(pool: &PgPool, internal_id: &str, broker_id: &str
     Ok(())
 }
 
-/// Remove an `internal_id → broker_id` mapping when an order reaches a terminal
+/// Remove an `internal_id â†’ broker_id` mapping when an order reaches a terminal
 /// state (filled, cancel-ack, rejected).
 ///
 /// Silently succeeds if `internal_id` is not present (idempotent cleanup).
@@ -1889,7 +2052,7 @@ pub async fn broker_map_remove(pool: &PgPool, internal_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Load all live `internal_id → broker_id` pairs from DB.
+/// Load all live `internal_id â†’ broker_id` pairs from DB.
 ///
 /// Called at daemon startup to repopulate the in-memory `BrokerOrderMap`
 /// (see `mqk-execution/id_map.rs`) so cancel/replace operations can target the
@@ -1919,14 +2082,14 @@ pub async fn broker_map_load(pool: &PgPool) -> Result<Vec<(String, String)>> {
 }
 
 // ---------------------------------------------------------------------------
-// Reconcile checkpoint — Patch B1
+// Reconcile checkpoint â€” Patch B1
 // ---------------------------------------------------------------------------
 
 /// A persisted reconcile checkpoint written by the reconcile engine.
 ///
 /// `arm_preflight` checks this table (not `audit_events`) for reconcile
 /// cleanliness.  A CLEAN verdict here requires the reconcile engine to have
-/// called `reconcile_checkpoint_write` — inserting a fake audit event is
+/// called `reconcile_checkpoint_write` â€” inserting a fake audit event is
 /// insufficient.
 #[derive(Debug, Clone)]
 pub struct ReconcileCheckpoint {
@@ -1981,7 +2144,7 @@ pub async fn reconcile_checkpoint_write(
 }
 
 // ---------------------------------------------------------------------------
-// Broker event cursor — Patch A2
+// Broker event cursor â€” Patch A2
 // ---------------------------------------------------------------------------
 
 /// Load the persisted broker event cursor for the given adapter.

@@ -27,14 +27,19 @@ use tracing::info;
 
 use crate::{
     api_types::{
-        DiagnosticsSnapshotResponse, ExecutionSummaryResponse, GateRefusedResponse, HealthResponse,
+        ConfigDiffRow, ConfigFingerprintResponse, DiagnosticsSnapshotResponse,
+        ExecutionSummaryResponse, FaultSignal, GateRefusedResponse, HealthResponse,
         IntegrityResponse, PortfolioSummaryResponse, PreflightStatusResponse,
-        ReconcileSummaryResponse, RiskSummaryResponse, SystemStatusResponse,
-        TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
-        TradingPositionsResponse, TradingSnapshotResponse,
+        ReconcileSummaryResponse, RiskSummaryResponse, RuntimeErrorResponse, SessionStateResponse,
+        StrategySummaryRow, StrategySuppressionRow, SystemStatusResponse, TradingAccountResponse,
+        TradingFillsResponse, TradingOrdersResponse, TradingPositionsResponse,
+        TradingSnapshotResponse,
     },
-    state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError},
+    state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot},
 };
+
+const DAEMON_ENGINE_ID: &str = "mqk-daemon";
+const DAEMON_MODE: &str = "PAPER";
 
 // ---------------------------------------------------------------------------
 // S7-1: Token auth middleware
@@ -126,6 +131,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/portfolio/summary", get(portfolio_summary))
         .route("/api/v1/risk/summary", get(risk_summary))
         .route("/api/v1/reconcile/status", get(reconcile_status))
+        .route("/api/v1/system/session", get(system_session))
+        .route(
+            "/api/v1/system/config-fingerprint",
+            get(system_config_fingerprint),
+        )
+        .route("/api/v1/system/config-diffs", get(system_config_diffs))
+        .route("/api/v1/strategy/summary", get(strategy_summary))
+        .route("/api/v1/strategy/suppressions", get(strategy_suppressions))
         // DAEMON-1: trading read APIs (placeholder until broker wiring exists)
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
@@ -249,10 +262,13 @@ pub(crate) async fn integrity_arm(State(st): State<Arc<AppState>>) -> impl IntoR
     }
 
     if let Some(db) = st.db.as_ref() {
-        if let Err(err) = mqk_db::persist_arm_state(db, "ARMED", None).await {
-            return runtime_error_response(RuntimeLifecycleError::Internal(format!(
-                "integrity/arm persist_arm_state failed: {err}"
-            )));
+        if let Err(err) =
+            mqk_db::persist_arm_state_canonical(db, mqk_db::ArmState::Armed, None).await
+        {
+            return runtime_error_response(RuntimeLifecycleError::Internal {
+                fault_class: "control.persistence.integrity_arm",
+                message: format!("integrity/arm persist_arm_state failed: {err}"),
+            });
         }
     }
 
@@ -289,10 +305,17 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
     }
 
     if let Some(db) = st.db.as_ref() {
-        if let Err(err) = mqk_db::persist_arm_state(db, "DISARMED", Some("OperatorDisarm")).await {
-            return runtime_error_response(RuntimeLifecycleError::Internal(format!(
-                "integrity/disarm persist_arm_state failed: {err}"
-            )));
+        if let Err(err) = mqk_db::persist_arm_state_canonical(
+            db,
+            mqk_db::ArmState::Disarmed,
+            Some(mqk_db::DisarmReason::OperatorDisarm),
+        )
+        .await
+        {
+            return runtime_error_response(RuntimeLifecycleError::Internal {
+                fault_class: "control.persistence.integrity_disarm",
+                message: format!("integrity/disarm persist_arm_state failed: {err}"),
+            });
         }
     }
 
@@ -324,30 +347,107 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
 
 fn runtime_error_response(err: RuntimeLifecycleError) -> Response {
     match err {
-        RuntimeLifecycleError::Forbidden { gate, message } => (
+        RuntimeLifecycleError::Forbidden {
+            fault_class,
+            gate,
+            message,
+        } => (
             StatusCode::FORBIDDEN,
-            Json(GateRefusedResponse {
+            Json(RuntimeErrorResponse {
                 error: message,
-                gate,
+                fault_class: fault_class.to_string(),
+                gate: Some(gate),
             }),
         )
             .into_response(),
-        RuntimeLifecycleError::ServiceUnavailable(message) => (
+        RuntimeLifecycleError::ServiceUnavailable {
+            fault_class,
+            message,
+        } => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({ "error": message })),
+            Json(RuntimeErrorResponse {
+                error: message,
+                fault_class: fault_class.to_string(),
+                gate: None,
+            }),
         )
             .into_response(),
-        RuntimeLifecycleError::Conflict(message) => (
+        RuntimeLifecycleError::Conflict {
+            fault_class,
+            message,
+        } => (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({ "error": message })),
+            Json(RuntimeErrorResponse {
+                error: message,
+                fault_class: fault_class.to_string(),
+                gate: None,
+            }),
         )
             .into_response(),
-        RuntimeLifecycleError::Internal(message) => (
+        RuntimeLifecycleError::Internal {
+            fault_class,
+            message,
+        } => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": message })),
+            Json(RuntimeErrorResponse {
+                error: message,
+                fault_class: fault_class.to_string(),
+                gate: None,
+            }),
         )
             .into_response(),
     }
+}
+
+fn build_fault_signals(
+    status: &crate::state::StatusSnapshot,
+    reconcile: &crate::state::ReconcileStatusSnapshot,
+    risk_blocked: bool,
+) -> Vec<FaultSignal> {
+    let mut signals = Vec::new();
+
+    if status.state == "unknown" {
+        signals.push(FaultSignal {
+            class: "runtime.truth_mismatch.durable_active_without_local_owner".to_string(),
+            severity: "critical".to_string(),
+            summary: "Durable run appears active without daemon-owned runtime loop.".to_string(),
+            detail: status.notes.clone(),
+        });
+    }
+
+    if matches!(reconcile.status.as_str(), "dirty" | "stale" | "unavailable") {
+        signals.push(FaultSignal {
+            class: format!("reconcile.dispatch_block.{}", reconcile.status),
+            severity: if reconcile.status == "dirty" {
+                "critical"
+            } else {
+                "warning"
+            }
+            .to_string(),
+            summary: "Reconcile state blocks or degrades safe dispatch.".to_string(),
+            detail: reconcile.note.clone(),
+        });
+    }
+
+    if risk_blocked {
+        signals.push(FaultSignal {
+            class: "risk.dispatch_denied.engine_blocked".to_string(),
+            severity: "critical".to_string(),
+            summary: "Risk engine indicates dispatch is blocked.".to_string(),
+            detail: None,
+        });
+    }
+
+    if status.state == "halted" {
+        signals.push(FaultSignal {
+            class: "runtime.halt.operator_or_safety".to_string(),
+            severity: "critical".to_string(),
+            summary: "Runtime is halted; dispatch remains fail-closed.".to_string(),
+            detail: status.notes.clone(),
+        });
+    }
+
+    signals
 }
 
 fn parse_decimal(value: &str) -> f64 {
@@ -362,6 +462,37 @@ fn runtime_status_from_state(state: &str) -> &'static str {
         "unknown" => "unknown",
         _ => "degraded",
     }
+}
+
+async fn environment_and_live_routing_truth(
+    st: &AppState,
+    status: &StatusSnapshot,
+) -> (Option<String>, Option<bool>) {
+    let live_routing_enabled = match status.state.as_str() {
+        "idle" | "halted" => Some(false),
+        _ => None,
+    };
+
+    let Some(run_id) = status.active_run_id else {
+        return (None, live_routing_enabled);
+    };
+
+    let Some(db) = st.db.as_ref() else {
+        return (None, live_routing_enabled);
+    };
+
+    let Ok(run) = mqk_db::fetch_run(db, run_id).await else {
+        return (None, live_routing_enabled);
+    };
+
+    let environment = Some(run.mode.to_ascii_lowercase());
+    let live_routing_enabled = if status.state == "running" {
+        Some(run.mode.eq_ignore_ascii_case("LIVE"))
+    } else {
+        live_routing_enabled
+    };
+
+    (environment, live_routing_enabled)
 }
 
 fn is_terminal_order_status(status: &str) -> bool {
@@ -428,6 +559,8 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
     };
 
     let runtime_status = runtime_status_from_state(&status.state).to_string();
+    let (environment, live_routing_enabled) =
+        environment_and_live_routing_truth(&st, &status).await;
     let broker_status = if snapshot_present { "ok" } else { "warning" }.to_string();
     let integrity_status = if integrity_armed { "ok" } else { "warning" }.to_string();
     let reconcile_status = reconcile.status.clone();
@@ -441,7 +574,7 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
     (
         StatusCode::OK,
         Json(SystemStatusResponse {
-            environment: "paper".to_string(),
+            environment,
             runtime_status,
             broker_status,
             db_status: "unknown".to_string(),
@@ -458,11 +591,12 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             has_critical,
             strategy_armed: integrity_armed,
             execution_armed: integrity_armed,
-            live_routing_enabled: false,
+            live_routing_enabled,
             kill_switch_active: status.state == "halted",
             risk_halt_active: risk_blocked,
             integrity_halt_active: !integrity_armed,
             daemon_reachable: true,
+            fault_signals: build_fault_signals(&status, &reconcile, risk_blocked),
         }),
     )
         .into_response()
@@ -491,10 +625,11 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
     }
 
     let mut blockers = vec![
-        "DB reachability is unproven by daemon state.".to_string(),
-        "Broker config presence is unproven by daemon state.".to_string(),
-        "Market data config presence is unproven by daemon state.".to_string(),
-        "Audit writer readiness is unproven by daemon state.".to_string(),
+        "DB reachability is unavailable from current daemon preflight wiring.".to_string(),
+        "Broker config presence is unavailable from current daemon preflight wiring.".to_string(),
+        "Market data config presence is unavailable from current daemon preflight wiring."
+            .to_string(),
+        "Audit writer readiness is unavailable from current daemon preflight wiring.".to_string(),
     ];
     if execution_disarmed {
         blockers.push("Execution is disarmed at the integrity gate.".to_string());
@@ -504,11 +639,11 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         StatusCode::OK,
         Json(PreflightStatusResponse {
             daemon_reachable: true,
-            db_reachable: false,
-            broker_config_present: false,
-            market_data_config_present: false,
-            audit_writer_ready: false,
-            runtime_idle: status.state != "running",
+            db_reachable: None,
+            broker_config_present: None,
+            market_data_config_present: None,
+            audit_writer_ready: None,
+            runtime_idle: Some(status.state != "running"),
             strategy_disarmed,
             execution_disarmed,
             live_routing_disabled: true,
@@ -554,21 +689,23 @@ pub(crate) async fn execution_summary(State(st): State<Arc<AppState>>) -> impl I
             .count();
 
         ExecutionSummaryResponse {
+            has_snapshot: true,
             active_orders,
             pending_orders,
             dispatching_orders,
             reject_count_today,
-            cancel_replace_count_today: 0,
+            cancel_replace_count_today: None,
             avg_ack_latency_ms: None,
             stuck_orders,
         }
     } else {
         ExecutionSummaryResponse {
+            has_snapshot: false,
             active_orders: 0,
             pending_orders: 0,
             dispatching_orders: 0,
             reject_count_today: 0,
-            cancel_replace_count_today: 0,
+            cancel_replace_count_today: None,
             avg_ack_latency_ms: None,
             stuck_orders: 0,
         }
@@ -586,21 +723,23 @@ pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl I
         let (long_market_value, short_market_value, _, _) = exposure_breakdown(&snapshot.positions);
 
         PortfolioSummaryResponse {
-            account_equity,
-            cash,
-            long_market_value,
-            short_market_value,
-            daily_pnl: 0.0,
-            buying_power: cash,
+            has_snapshot: true,
+            account_equity: Some(account_equity),
+            cash: Some(cash),
+            long_market_value: Some(long_market_value),
+            short_market_value: Some(short_market_value),
+            daily_pnl: None,
+            buying_power: Some(cash),
         }
     } else {
         PortfolioSummaryResponse {
-            account_equity: 0.0,
-            cash: 0.0,
-            long_market_value: 0.0,
-            short_market_value: 0.0,
-            daily_pnl: 0.0,
-            buying_power: 0.0,
+            has_snapshot: false,
+            account_equity: None,
+            cash: None,
+            long_market_value: None,
+            short_market_value: None,
+            daily_pnl: None,
+            buying_power: None,
         }
     };
 
@@ -630,23 +769,25 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
         };
 
         RiskSummaryResponse {
-            gross_exposure,
-            net_exposure,
-            concentration_pct,
-            daily_pnl: 0.0,
-            drawdown_pct: 0.0,
-            loss_limit_utilization_pct: 0.0,
+            has_snapshot: true,
+            gross_exposure: Some(gross_exposure),
+            net_exposure: Some(net_exposure),
+            concentration_pct: Some(concentration_pct),
+            daily_pnl: None,
+            drawdown_pct: None,
+            loss_limit_utilization_pct: None,
             kill_switch_active: risk_blocked,
             active_breaches: usize::from(risk_blocked),
         }
     } else {
         RiskSummaryResponse {
-            gross_exposure: 0.0,
-            net_exposure: 0.0,
-            concentration_pct: 0.0,
-            daily_pnl: 0.0,
-            drawdown_pct: 0.0,
-            loss_limit_utilization_pct: 0.0,
+            has_snapshot: false,
+            gross_exposure: None,
+            net_exposure: None,
+            concentration_pct: None,
+            daily_pnl: None,
+            drawdown_pct: None,
+            loss_limit_utilization_pct: None,
             kill_switch_active: risk_blocked,
             active_breaches: usize::from(risk_blocked),
         }
@@ -672,29 +813,147 @@ pub(crate) async fn reconcile_status(State(st): State<Arc<AppState>>) -> impl In
     )
 }
 
+pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+    let strategy_allowed = status.integrity_armed;
+
+    (
+        StatusCode::OK,
+        Json(SessionStateResponse {
+            daemon_mode: DAEMON_MODE.to_string(),
+            operator_auth_mode: st.operator_auth_mode().label().to_string(),
+            strategy_allowed,
+            execution_allowed: strategy_allowed,
+            system_trading_window: if strategy_allowed {
+                "enabled".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            market_session: "unknown".to_string(),
+            exchange_calendar_state: "unknown".to_string(),
+            notes: vec![
+                "Market session and exchange calendar state are unavailable from current daemon wiring."
+                    .to_string(),
+            ],
+        }),
+    )
+        .into_response()
+}
+
+pub(crate) async fn system_config_fingerprint(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let latest_run = if let Some(db) = st.db.as_ref() {
+        mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
+    (
+        StatusCode::OK,
+        Json(ConfigFingerprintResponse {
+            config_hash: latest_run
+                .as_ref()
+                .map(|run| run.config_hash.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            risk_policy_version: "unknown".to_string(),
+            strategy_bundle_version: "unknown".to_string(),
+            build_version: st.build.version.to_string(),
+            environment_profile: DAEMON_MODE.to_ascii_lowercase(),
+            runtime_generation_id: latest_run
+                .as_ref()
+                .map(|run| run.run_id.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            last_restart_at: latest_run
+                .as_ref()
+                .map(|run| run.started_at_utc.to_rfc3339()),
+        }),
+    )
+        .into_response()
+}
+
+pub(crate) async fn system_config_diffs() -> impl IntoResponse {
+    (StatusCode::OK, Json::<Vec<ConfigDiffRow>>(Vec::new())).into_response()
+}
+
+pub(crate) async fn strategy_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+
+    (
+        StatusCode::OK,
+        Json(vec![StrategySummaryRow {
+            strategy_id: "daemon_integrity_gate".to_string(),
+            enabled: true,
+            armed: status.integrity_armed,
+            health: if status.integrity_armed {
+                "ok".to_string()
+            } else {
+                "warning".to_string()
+            },
+            universe: "unknown".to_string(),
+            pending_intents: 0,
+            open_positions: 0,
+            today_pnl: 0.0,
+            drawdown_pct: 0.0,
+            regime: "unknown".to_string(),
+            throttle_state: "unknown".to_string(),
+            last_decision_time: None,
+        }]),
+    )
+        .into_response()
+}
+
+pub(crate) async fn strategy_suppressions() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json::<Vec<StrategySuppressionRow>>(Vec::new()),
+    )
+        .into_response()
+}
+
 // ---------------------------------------------------------------------------
 // GET /v1/trading/*  — DAEMON-1 (read-only placeholders)
 // ---------------------------------------------------------------------------
 
+fn trading_snapshot_state_label(reconcile_status: &str, has_snapshot: bool) -> &'static str {
+    if !has_snapshot {
+        "no_snapshot"
+    } else if reconcile_status == "stale" {
+        "stale_snapshot"
+    } else {
+        "current_snapshot"
+    }
+}
+
 pub(crate) async fn trading_account(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
+    let reconcile = st.current_reconcile_snapshot().await;
 
-    let (has_snapshot, account) = match snap {
-        Some(s) => (true, s.account),
-        None => (
-            false,
-            mqk_schemas::BrokerAccount {
-                equity: "0".to_string(),
-                cash: "0".to_string(),
-                currency: "USD".to_string(),
-            },
-        ),
+    let snapshot_state =
+        trading_snapshot_state_label(&reconcile.status, snap.is_some()).to_string();
+    let snapshot_captured_at_utc = snap
+        .as_ref()
+        .map(|snapshot| snapshot.captured_at_utc.to_rfc3339());
+    let account = if snapshot_state == "current_snapshot" {
+        snap.map(|snapshot| snapshot.account)
+    } else {
+        None
     };
 
     (
         StatusCode::OK,
         Json(TradingAccountResponse {
-            has_snapshot,
+            snapshot_state,
+            snapshot_captured_at_utc,
             account,
         }),
     )
@@ -702,15 +961,24 @@ pub(crate) async fn trading_account(State(st): State<Arc<AppState>>) -> impl Int
 
 pub(crate) async fn trading_positions(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
-    let (has_snapshot, positions) = match snap {
-        Some(s) => (true, s.positions),
-        None => (false, Vec::new()),
+    let reconcile = st.current_reconcile_snapshot().await;
+
+    let snapshot_state =
+        trading_snapshot_state_label(&reconcile.status, snap.is_some()).to_string();
+    let snapshot_captured_at_utc = snap
+        .as_ref()
+        .map(|snapshot| snapshot.captured_at_utc.to_rfc3339());
+    let positions = if snapshot_state == "current_snapshot" {
+        snap.map(|snapshot| snapshot.positions)
+    } else {
+        None
     };
 
     (
         StatusCode::OK,
         Json(TradingPositionsResponse {
-            has_snapshot,
+            snapshot_state,
+            snapshot_captured_at_utc,
             positions,
         }),
     )
@@ -718,15 +986,24 @@ pub(crate) async fn trading_positions(State(st): State<Arc<AppState>>) -> impl I
 
 pub(crate) async fn trading_orders(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
-    let (has_snapshot, orders) = match snap {
-        Some(s) => (true, s.orders),
-        None => (false, Vec::new()),
+    let reconcile = st.current_reconcile_snapshot().await;
+
+    let snapshot_state =
+        trading_snapshot_state_label(&reconcile.status, snap.is_some()).to_string();
+    let snapshot_captured_at_utc = snap
+        .as_ref()
+        .map(|snapshot| snapshot.captured_at_utc.to_rfc3339());
+    let orders = if snapshot_state == "current_snapshot" {
+        snap.map(|snapshot| snapshot.orders)
+    } else {
+        None
     };
 
     (
         StatusCode::OK,
         Json(TradingOrdersResponse {
-            has_snapshot,
+            snapshot_state,
+            snapshot_captured_at_utc,
             orders,
         }),
     )
@@ -734,15 +1011,24 @@ pub(crate) async fn trading_orders(State(st): State<Arc<AppState>>) -> impl Into
 
 pub(crate) async fn trading_fills(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
-    let (has_snapshot, fills) = match snap {
-        Some(s) => (true, s.fills),
-        None => (false, Vec::new()),
+    let reconcile = st.current_reconcile_snapshot().await;
+
+    let snapshot_state =
+        trading_snapshot_state_label(&reconcile.status, snap.is_some()).to_string();
+    let snapshot_captured_at_utc = snap
+        .as_ref()
+        .map(|snapshot| snapshot.captured_at_utc.to_rfc3339());
+    let fills = if snapshot_state == "current_snapshot" {
+        snap.map(|snapshot| snapshot.fills)
+    } else {
+        None
     };
 
     (
         StatusCode::OK,
         Json(TradingFillsResponse {
-            has_snapshot,
+            snapshot_state,
+            snapshot_captured_at_utc,
             fills,
         }),
     )

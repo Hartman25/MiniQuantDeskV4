@@ -4,7 +4,7 @@
 //! They prove that the daemon's run control routes are wired to a real owned
 //! execution loop instead of placeholder in-memory state mutations.
 
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use axum::http::{Request, StatusCode};
@@ -12,6 +12,19 @@ use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
 use tower::ServiceExt;
 use uuid::Uuid;
+
+const TEST_OPERATOR_TOKEN: &str = "test-operator-token";
+static TEST_OPERATOR_TOKEN_INIT: Once = Once::new();
+
+fn ensure_test_operator_token() {
+    TEST_OPERATOR_TOKEN_INIT.call_once(|| {
+        std::env::set_var("MQK_OPERATOR_TOKEN", TEST_OPERATOR_TOKEN);
+    });
+}
+
+fn authed(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+    builder.header("Authorization", format!("Bearer {TEST_OPERATOR_TOKEN}"))
+}
 
 async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, bytes::Bytes) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
@@ -70,7 +83,7 @@ fn make_router(st: Arc<state::AppState>) -> axum::Router {
 }
 
 async fn arm(st: &Arc<state::AppState>) {
-    let req = Request::builder()
+    let req = authed(Request::builder())
         .method("POST")
         .uri("/v1/integrity/arm")
         .body(axum::body::Body::empty())
@@ -80,7 +93,7 @@ async fn arm(st: &Arc<state::AppState>) {
 }
 
 async fn start(st: &Arc<state::AppState>) -> serde_json::Value {
-    let req = Request::builder()
+    let req = authed(Request::builder())
         .method("POST")
         .uri("/v1/run/start")
         .body(axum::body::Body::empty())
@@ -96,7 +109,7 @@ async fn start(st: &Arc<state::AppState>) -> serde_json::Value {
 }
 
 async fn status(st: &Arc<state::AppState>) -> serde_json::Value {
-    let req = Request::builder()
+    let req = authed(Request::builder())
         .method("GET")
         .uri("/v1/status")
         .body(axum::body::Body::empty())
@@ -112,7 +125,7 @@ async fn status(st: &Arc<state::AppState>) -> serde_json::Value {
 }
 
 async fn control_status(st: &Arc<state::AppState>) -> serde_json::Value {
-    let req = Request::builder()
+    let req = authed(Request::builder())
         .method("GET")
         .uri("/control/status")
         .body(axum::body::Body::empty())
@@ -127,26 +140,28 @@ async fn control_status(st: &Arc<state::AppState>) -> serde_json::Value {
     parse_json(body)
 }
 
-async fn control_arm(st: &Arc<state::AppState>) -> StatusCode {
-    let req = Request::builder()
+async fn control_arm(st: &Arc<state::AppState>) -> (StatusCode, serde_json::Value) {
+    let req = authed(Request::builder())
         .method("POST")
         .uri("/control/arm")
         .body(axum::body::Body::empty())
         .unwrap();
-    call(make_router(Arc::clone(st)), req).await.0
+    let (status, body) = call(make_router(Arc::clone(st)), req).await;
+    (status, parse_json(body))
 }
 
-async fn control_disarm(st: &Arc<state::AppState>) -> StatusCode {
-    let req = Request::builder()
+async fn control_disarm(st: &Arc<state::AppState>) -> (StatusCode, serde_json::Value) {
+    let req = authed(Request::builder())
         .method("POST")
         .uri("/control/disarm")
         .body(axum::body::Body::empty())
         .unwrap();
-    call(make_router(Arc::clone(st)), req).await.0
+    let (status, body) = call(make_router(Arc::clone(st)), req).await;
+    (status, parse_json(body))
 }
 
 async fn stop(st: &Arc<state::AppState>) -> serde_json::Value {
-    let req = Request::builder()
+    let req = authed(Request::builder())
         .method("POST")
         .uri("/v1/run/stop")
         .body(axum::body::Body::empty())
@@ -162,7 +177,7 @@ async fn stop(st: &Arc<state::AppState>) -> serde_json::Value {
 }
 
 async fn halt(st: &Arc<state::AppState>) -> serde_json::Value {
-    let req = Request::builder()
+    let req = authed(Request::builder())
         .method("POST")
         .uri("/v1/run/halt")
         .body(axum::body::Body::empty())
@@ -178,7 +193,39 @@ async fn halt(st: &Arc<state::AppState>) -> serde_json::Value {
 }
 
 async fn daemon_state() -> Arc<state::AppState> {
-    Arc::new(state::AppState::new_with_db(lifecycle_pool().await))
+    ensure_test_operator_token();
+    let state = Arc::new(state::AppState::new_with_db(lifecycle_pool().await));
+    {
+        let mut broker = state.broker_snapshot.write().await;
+        *broker = Some(mqk_schemas::BrokerSnapshot {
+            captured_at_utc: chrono::Utc::now(),
+            account: mqk_schemas::BrokerAccount {
+                equity: "100000".to_string(),
+                cash: "100000".to_string(),
+                currency: "USD".to_string(),
+            },
+            orders: vec![],
+            fills: vec![],
+            positions: vec![],
+        });
+    }
+    {
+        let mut execution = state.execution_snapshot.write().await;
+        *execution = Some(mqk_runtime::observability::ExecutionSnapshot {
+            run_id: None,
+            active_orders: vec![],
+            pending_outbox: vec![],
+            recent_inbox_events: vec![],
+            portfolio: mqk_runtime::observability::PortfolioSnapshot {
+                cash_micros: 0,
+                realized_pnl_micros: 0,
+                positions: vec![],
+            },
+            system_block_state: None,
+            snapshot_at_utc: chrono::Utc::now(),
+        });
+    }
+    state
 }
 
 #[tokio::test]
@@ -202,12 +249,133 @@ async fn start_spawns_real_execution_loop() {
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn control_restart_surfaces_durable_runtime_conflict_truth() {
+    let pool = lifecycle_pool().await;
+    let run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"mqk-daemon-rt02-restart-conflict");
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: chrono::Utc::now(),
+            git_hash: "TEST".to_string(),
+            config_hash: "daemon-runtime-paper-v1".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "TESTHOST".to_string(),
+        },
+    )
+    .await
+    .expect("insert run");
+    mqk_db::arm_run(&pool, run_id).await.expect("arm run");
+    mqk_db::begin_run(&pool, run_id).await.expect("begin run");
+
+    let st = Arc::new(state::AppState::new_with_db(pool));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/control/restart")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(r#"{"reason":"operator request"}"#))
+        .unwrap();
+    let (status, body) = call(make_router(st), req).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let json = parse_json(body);
+    assert_eq!(json["gate"], "restart_not_authoritative");
+    assert_eq!(json["restart_authority"], "not_authoritative");
+    assert_eq!(json["requested_action"], "restart");
+    assert_eq!(json["achieved_action"], "none");
+    assert_eq!(
+        json["control_truth"]["durable_active_run_id"],
+        run_id.to_string()
+    );
+    assert_eq!(
+        json["control_truth"]["durable_active_without_local_ownership"],
+        true
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn hostile_restart_with_poisoned_local_cache_still_reports_durable_halt_truth() {
+    let pool = lifecycle_pool().await;
+    let durable_run_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        b"mqk-daemon-rt01r-hostile-restart-durable-run",
+    );
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id: durable_run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: chrono::Utc::now(),
+            git_hash: "TEST".to_string(),
+            config_hash: "daemon-runtime-paper-v1".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "TESTHOST".to_string(),
+        },
+    )
+    .await
+    .expect("insert durable run");
+    mqk_db::arm_run(&pool, durable_run_id)
+        .await
+        .expect("arm durable run");
+    mqk_db::halt_run(&pool, durable_run_id, chrono::Utc::now())
+        .await
+        .expect("halt durable run");
+    mqk_db::persist_arm_state(&pool, "DISARMED", Some("OperatorHalt"))
+        .await
+        .expect("persist durable operator halt");
+
+    let st = Arc::new(state::AppState::new_with_db(pool));
+    {
+        let mut status = st.status.write().await;
+        status.state = "running".to_string();
+        status.active_run_id = Some(Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            b"mqk-daemon-rt01r-hostile-restart-poisoned-run",
+        ));
+        status.notes = Some("poisoned in-memory runtime cache".to_string());
+        status.integrity_armed = true;
+    }
+
+    let runtime = status(&st).await;
+    assert_eq!(runtime["state"], "halted");
+    assert_eq!(
+        runtime["active_run_id"],
+        serde_json::Value::String(durable_run_id.to_string())
+    );
+
+    let control = control_status(&st).await;
+    assert_eq!(control["run_state"], "halted");
+    assert_eq!(control["run_owned_locally"], false);
+    assert_eq!(control["deadman_armed_state"], "DISARMED");
+    assert_eq!(control["deadman_reason"], "OperatorHalt");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(make_router(Arc::clone(&st)), req).await;
+    assert_eq!(code, StatusCode::OK);
+    let system = parse_json(body);
+    assert_eq!(system["runtime_status"], "halted");
+    assert_eq!(system["kill_switch_active"], true);
+    assert_eq!(system["has_warning"], true);
+
+    st.stop_for_shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn duplicate_start_is_rejected() {
     let st = daemon_state().await;
     arm(&st).await;
     let _ = start(&st).await;
 
-    let req = Request::builder()
+    let req = authed(Request::builder())
         .method("POST")
         .uri("/v1/run/start")
         .body(axum::body::Body::empty())
@@ -351,7 +519,7 @@ async fn runtime_refuses_to_continue_after_deadman_expiry() {
     .expect("force stale heartbeat");
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
-    let req = Request::builder()
+    let req = authed(Request::builder())
         .method("POST")
         .uri("/v1/run/start")
         .body(axum::body::Body::empty())
@@ -396,7 +564,7 @@ async fn status_surface_reports_deadman_truth() {
     let run_id = Uuid::parse_str(started["active_run_id"].as_str().expect("run_id string"))
         .expect("valid run uuid");
 
-    let req = Request::builder()
+    let req = authed(Request::builder())
         .method("GET")
         .uri("/api/v1/system/status")
         .body(axum::body::Body::empty())
@@ -416,7 +584,7 @@ async fn status_surface_reports_deadman_truth() {
     .expect("force stale heartbeat");
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
-    let req2 = Request::builder()
+    let req2 = authed(Request::builder())
         .method("GET")
         .uri("/api/v1/system/status")
         .body(axum::body::Body::empty())
@@ -481,6 +649,7 @@ async fn restart_reconstructs_safe_runtime_status() {
     mqk_db::arm_run(&pool, run_id).await.expect("arm run");
     mqk_db::begin_run(&pool, run_id).await.expect("begin run");
 
+    ensure_test_operator_token();
     let st = Arc::new(state::AppState::new_with_db(pool));
     let current = status(&st).await;
     assert_eq!(current["state"], "unknown");
@@ -496,15 +665,18 @@ async fn control_status_reflects_real_runtime_truth() {
     let st = daemon_state().await;
     let pool = st.db.as_ref().expect("db configured");
 
+    let now_utc = chrono::Utc::now();
+
     sqlx::query(
         r#"
         INSERT INTO runtime_control_state (id, desired_armed, updated_at)
-        VALUES (1, true, now())
+        VALUES (1, true, $1)
         ON CONFLICT (id) DO UPDATE
            SET desired_armed = excluded.desired_armed,
                updated_at = excluded.updated_at
         "#,
     )
+    .bind(now_utc)
     .execute(pool)
     .await
     .expect("seed runtime_control_state");
@@ -512,7 +684,7 @@ async fn control_status_reflects_real_runtime_truth() {
     sqlx::query(
         r#"
         INSERT INTO runtime_leader_lease (id, holder_id, epoch, lease_expires_at, updated_at)
-        VALUES (1, 'scenario-daemon', 7, now() + interval '30 seconds', now())
+        VALUES (1, 'scenario-daemon', 7, $1, $2)
         ON CONFLICT (id) DO UPDATE
            SET holder_id = excluded.holder_id,
                epoch = excluded.epoch,
@@ -520,6 +692,8 @@ async fn control_status_reflects_real_runtime_truth() {
                updated_at = excluded.updated_at
         "#,
     )
+    .bind(now_utc + chrono::Duration::seconds(30))
+    .bind(now_utc)
     .execute(pool)
     .await
     .expect("seed runtime_leader_lease");
@@ -536,6 +710,37 @@ async fn control_status_reflects_real_runtime_truth() {
     assert_eq!(body["deadman_reason"], "DeadmanHalt");
     assert_eq!(body["reconcile_status"], "unknown");
     assert_eq!(body["run_state"], "idle");
+    assert_eq!(body["run_owned_locally"], false);
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn status_does_not_overstate_running_on_local_handle_without_durable_active_run() {
+    let st = daemon_state().await;
+    arm(&st).await;
+
+    let started = start(&st).await;
+    let run_id = Uuid::parse_str(started["active_run_id"].as_str().expect("run_id string"))
+        .expect("valid run uuid");
+
+    let pool = st.db.as_ref().expect("db configured");
+    mqk_db::stop_run(pool, run_id)
+        .await
+        .expect("stop run durably");
+
+    let status_json = status(&st).await;
+    assert_eq!(status_json["state"], "unknown");
+    assert_eq!(
+        status_json["active_run_id"],
+        serde_json::Value::Null,
+        "durable stopped run must not be reported as running via local ownership"
+    );
+
+    let control = control_status(&st).await;
+    assert_eq!(control["run_state"], "unknown");
+    assert_eq!(control["run_owned_locally"], false);
+
+    st.stop_for_shutdown().await;
 }
 
 #[tokio::test]
@@ -544,7 +749,10 @@ async fn control_disarm_is_durable_or_explicitly_scoped() {
     let st = daemon_state().await;
     let pool = st.db.as_ref().expect("db configured");
 
-    assert_eq!(control_arm(&st).await, StatusCode::NO_CONTENT);
+    let (arm_status, arm_body) = control_arm(&st).await;
+    assert_eq!(arm_status, StatusCode::OK);
+    assert_eq!(arm_body["requested_action"], "control.arm");
+    assert_eq!(arm_body["accepted"], true);
     let armed: bool =
         sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
             .fetch_one(pool)
@@ -552,7 +760,10 @@ async fn control_disarm_is_durable_or_explicitly_scoped() {
             .expect("read desired_armed after arm");
     assert!(armed);
 
-    assert_eq!(control_disarm(&st).await, StatusCode::NO_CONTENT);
+    let (disarm_status, disarm_body) = control_disarm(&st).await;
+    assert_eq!(disarm_status, StatusCode::OK);
+    assert_eq!(disarm_body["requested_action"], "control.disarm");
+    assert_eq!(disarm_body["accepted"], true);
     let disarmed: bool =
         sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
             .fetch_one(pool)
@@ -578,6 +789,13 @@ async fn control_restart_fails_closed_if_not_authoritative() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     let json = parse_json(body);
     assert_eq!(json["gate"], "restart_not_authoritative");
+    assert_eq!(json["restart_authority"], "not_authoritative");
+    assert_eq!(json["requested_action"], "restart");
+    assert_eq!(json["achieved_action"], "none");
+    assert_eq!(
+        json["control_truth"]["durable_active_without_local_ownership"],
+        false
+    );
 }
 
 #[tokio::test]
@@ -599,7 +817,7 @@ async fn durable_halted_run_is_reported_as_halted_by_operator_surfaces() {
         serde_json::Value::String(run_id.to_string())
     );
 
-    let req = Request::builder()
+    let req = authed(Request::builder())
         .method("GET")
         .uri("/api/v1/system/status")
         .body(axum::body::Body::empty())

@@ -37,6 +37,39 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+
+  gui-contract:
+    name: "GUI Build + Daemon Contract Gate"
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ./core-rs
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: core-rs/mqk-gui/package-lock.json
+
+      - name: GUI build gate (tsc + vite build)
+        run: |
+          cd mqk-gui
+          npm ci
+          npm run build
+
+      - name: Show explicit GUI/daemon contract waivers
+        run: |
+          test -s ../docs/ci/gui_daemon_contract_waivers.md
+          cat ../docs/ci/gui_daemon_contract_waivers.md
+
+      - name: Daemon/GUI contract gate (authoritative endpoints)
+        run: cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate
   guards:
     name: "Safety Guards (P0-1)"
     runs-on: ubuntu-latest
@@ -146,34 +179,5 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Install postgres client tools
-        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
-
-      - name: Wait for Postgres readiness
-        run: |
-          for i in {1..30}; do
-            if pg_isready -h 127.0.0.1 -p 5432 -U mqk -d mqk_test; then
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "Postgres did not become ready in time"
-          exit 1
-
-      - name: Migration bootstrap / idempotence proof
-        run: cargo test -p mqk-db --test scenario_migrate_idempotent_on_clean_db -- --ignored --test-threads=1
-
-      - name: Inbox dedupe and apply atomicity proofs
-        run: |
-          cargo test -p mqk-db --test scenario_inbox_insert_then_apply_is_atomic -- --test-threads=1
-          cargo test -p mqk-db --test scenario_inbox_apply_atomic_recovery -- --test-threads=1
-
-      - name: Outbox claim and dispatch proofs
-        run: |
-          cargo test -p mqk-db --test scenario_outbox_first_enforced -- --test-threads=1
-          cargo test -p mqk-db --test scenario_outbox_claim_lock_prevents_double_dispatch -- --test-threads=1
-
-      - name: Broker cursor and restart quarantine proofs
-        run: |
-          cargo test -p mqk-testkit --test scenario_broker_cursor_restart -- --test-threads=1
-          cargo test -p mqk-testkit --test scenario_restart_quarantines_dispatching_outbox -- --test-threads=1
+      - name: Run repo-native DB proof harness
+        run: bash ../scripts/db_proof_bootstrap.sh

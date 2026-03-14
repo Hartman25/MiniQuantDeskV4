@@ -16,11 +16,22 @@ type Result<T> = std::result::Result<T, BrokerError>;
 // BrokerEvent — canonical inbound broker event type
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FillIdentityStrength {
+    /// Stable, broker-native economic fill identity.
+    StrongBrokerNative,
+    /// No broker-native fill identity was provided; only message identity exists.
+    WeakMessageDerived,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BrokerEventIdentity {
     pub broker_message_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broker_fill_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_identity_strength: Option<FillIdentityStrength>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broker_sequence_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,11 +166,33 @@ impl BrokerEvent {
         }
     }
 
+    /// Strength classification of fill identity semantics for this event.
+    ///
+    /// - `Some(StrongBrokerNative)` for fill events that carry a stable
+    ///   broker-native economic fill id.
+    /// - `Some(WeakMessageDerived)` for fill events that do not carry a
+    ///   broker-native fill id and would otherwise fall back to transport
+    ///   message identity.
+    /// - `None` for non-fill lifecycle events.
+    pub fn fill_identity_strength(&self) -> Option<FillIdentityStrength> {
+        match self {
+            Self::PartialFill { broker_fill_id, .. } | Self::Fill { broker_fill_id, .. } => {
+                Some(if broker_fill_id.is_some() {
+                    FillIdentityStrength::StrongBrokerNative
+                } else {
+                    FillIdentityStrength::WeakMessageDerived
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Canonical identity tuple for this broker event.
     pub fn identity(&self) -> BrokerEventIdentity {
         BrokerEventIdentity {
             broker_message_id: self.broker_message_id().to_string(),
             broker_fill_id: self.broker_fill_id().map(ToString::to_string),
+            fill_identity_strength: self.fill_identity_strength(),
             broker_sequence_id: None,
             broker_timestamp: None,
         }
@@ -244,7 +277,7 @@ pub struct BrokerSubmitRequest {
     pub symbol: String,
     /// Direction of the order. Quantity is always positive; side carries direction.
     pub side: crate::types::Side,
-    pub quantity: i32,
+    pub quantity: i64,
     pub order_type: String,
     /// Limit price in integer micros (1 unit = 1_000_000). `None` for market orders.
     pub limit_price: Option<i64>,
@@ -273,7 +306,7 @@ pub struct BrokerCancelResponse {
 #[derive(Debug, Clone)]
 pub struct BrokerReplaceRequest {
     pub broker_order_id: String,
-    pub quantity: i32,
+    pub quantity: i64,
     /// Limit price in integer micros (1 unit = 1_000_000). `None` for market orders.
     pub limit_price: Option<i64>,
     pub time_in_force: String,
@@ -510,5 +543,47 @@ mod tests {
         };
         let resp = router.route_replace(req).unwrap();
         assert_eq!(resp.status, "replaced");
+    }
+
+    #[test]
+    fn fill_identity_strength_is_strong_when_broker_fill_id_present() {
+        let ev = BrokerEvent::Fill {
+            broker_message_id: "msg-1".to_string(),
+            broker_fill_id: Some("econ-1".to_string()),
+            internal_order_id: "ord-1".to_string(),
+            broker_order_id: Some("brk-1".to_string()),
+            symbol: "AAPL".to_string(),
+            side: crate::types::Side::Buy,
+            delta_qty: 1,
+            price_micros: 100_000_000,
+            fee_micros: 0,
+        };
+        assert_eq!(
+            ev.fill_identity_strength(),
+            Some(FillIdentityStrength::StrongBrokerNative)
+        );
+        assert_eq!(
+            ev.identity().fill_identity_strength,
+            ev.fill_identity_strength()
+        );
+    }
+
+    #[test]
+    fn fill_identity_strength_is_weak_without_broker_fill_id() {
+        let ev = BrokerEvent::PartialFill {
+            broker_message_id: "msg-2".to_string(),
+            broker_fill_id: None,
+            internal_order_id: "ord-1".to_string(),
+            broker_order_id: Some("brk-1".to_string()),
+            symbol: "AAPL".to_string(),
+            side: crate::types::Side::Buy,
+            delta_qty: 1,
+            price_micros: 100_000_000,
+            fee_micros: 0,
+        };
+        assert_eq!(
+            ev.fill_identity_strength(),
+            Some(FillIdentityStrength::WeakMessageDerived)
+        );
     }
 }

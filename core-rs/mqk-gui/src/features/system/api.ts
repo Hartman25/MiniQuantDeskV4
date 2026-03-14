@@ -1,5 +1,4 @@
 import { getDaemonUrl } from "../../config";
-import { MOCK_MODEL } from "./mockData";
 import { withClassifiedPanelSources } from "./sourceAuthority";
 import type {
   AlertTriageRow,
@@ -43,6 +42,7 @@ import type {
   SystemStatus,
   TransportSummary,
 } from "./types";
+import { DEFAULT_PREFLIGHT, DEFAULT_STATUS } from "./types";
 
 interface EndpointFetchResult<T> {
   ok: boolean;
@@ -284,7 +284,7 @@ function deriveExecutionStage(status: string): string {
 }
 
 function mapLegacyStatusToSystemStatus(legacy: LegacyDaemonStatusSnapshot): SystemStatus {
-  const base = { ...MOCK_MODEL.status };
+  const base = { ...DEFAULT_STATUS };
   const state = String(legacy.state ?? "").toLowerCase();
   const runtimeStatus: SystemStatus["runtime_status"] =
     state.includes("halt")
@@ -319,7 +319,7 @@ function mapLegacyStatusToSystemStatus(legacy: LegacyDaemonStatusSnapshot): Syst
 
 function deriveLegacyPreflight(status: LegacyDaemonStatusSnapshot): PreflightStatus {
   return {
-    ...MOCK_MODEL.preflight,
+    ...DEFAULT_PREFLIGHT,
     daemon_reachable: true,
     runtime_idle: !String(status.state ?? "").toLowerCase().includes("run"),
     strategy_disarmed: !status.integrity_armed,
@@ -516,9 +516,9 @@ function deriveDataSourceDetail(args: {
       state === "disconnected"
         ? "Daemon unreachable; GUI is not receiving live data."
         : state === "mock"
-          ? "Mock fallback active."
+          ? "Connected, but no tracked backend truth endpoints resolved."
           : state === "partial"
-            ? "Mixed real and fallback data."
+            ? "Mixed resolved and unresolved backend truth across panels."
             : "All tracked surfaces resolved from daemon endpoints.",
   };
 }
@@ -625,7 +625,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
 
   const executionOrders = Array.isArray(executionOrdersR.data)
     ? executionOrdersR.data
-    : mapLegacyTradingOrdersToExecutionOrders(legacyOrdersResponse) ?? MOCK_MODEL.executionOrders;
+    : mapLegacyTradingOrdersToExecutionOrders(legacyOrdersResponse) ?? [];
 
   const firstOrderId = executionOrders[0]?.internal_order_id;
   const [selectedTimeline, executionTrace, executionReplay, executionChart, causalityTrace] = firstOrderId
@@ -698,6 +698,126 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     daemonReachable,
   });
 
+  const unavailableStatus: SystemStatus = {
+    ...DEFAULT_STATUS,
+    daemon_reachable: connected,
+  };
+  const unavailablePreflight: PreflightStatus = {
+    ...DEFAULT_PREFLIGHT,
+    daemon_reachable: connected,
+    blockers: connected ? ["Backend preflight truth unavailable"] : ["Daemon unreachable"],
+  };
+  const unavailableExecutionSummary: ExecutionSummary = {
+    active_orders: 0,
+    pending_orders: 0,
+    dispatching_orders: 0,
+    reject_count_today: 0,
+    cancel_replace_count_today: 0,
+    avg_ack_latency_ms: null,
+    stuck_orders: 0,
+  };
+  const unavailableOmsOverview: OmsOverview = {
+    total_active_orders: 0,
+    stuck_orders: 0,
+    missing_transition_orders: 0,
+    state_nodes: [],
+    transition_edges: [],
+    orders: [],
+  };
+  const unavailableMetrics: SystemMetrics = {
+    runtime: { key: "runtime", title: "Runtime", description: "Backend truth unavailable", series: [] },
+    execution: { key: "execution", title: "Execution", description: "Backend truth unavailable", series: [] },
+    fillQuality: { key: "fill_quality", title: "Fill Quality", description: "Backend truth unavailable", series: [] },
+    reconciliation: { key: "reconciliation", title: "Reconciliation", description: "Backend truth unavailable", series: [] },
+    riskSafety: { key: "risk_safety", title: "Risk/Safety", description: "Backend truth unavailable", series: [] },
+  };
+  const unavailablePortfolioSummary: PortfolioSummary = {
+    account_equity: 0,
+    cash: 0,
+    long_market_value: 0,
+    short_market_value: 0,
+    daily_pnl: 0,
+    buying_power: 0,
+  };
+  const unavailableRiskSummary: RiskSummary = {
+    gross_exposure: 0,
+    net_exposure: 0,
+    concentration_pct: 0,
+    daily_pnl: 0,
+    drawdown_pct: 0,
+    loss_limit_utilization_pct: 0,
+    kill_switch_active: false,
+    active_breaches: 0,
+  };
+  const unavailableReconcileSummary: ReconcileSummary = {
+    status: "unknown",
+    last_run_at: null,
+    mismatched_positions: 0,
+    mismatched_orders: 0,
+    mismatched_fills: 0,
+    unmatched_broker_events: 0,
+  };
+  const unavailableMetadata: MetadataSummary = {
+    build_version: "unknown",
+    api_version: "unknown",
+    broker_adapter: "unknown",
+    endpoint_status: "unknown",
+  };
+  const unavailableTopology: ServiceTopology = { updated_at: nowIso(), services: [] };
+  const unavailableTransport: TransportSummary = {
+    outbox_depth: 0,
+    inbox_depth: 0,
+    max_claim_age_ms: 0,
+    dispatch_retries: 0,
+    orphaned_claims: 0,
+    duplicate_inbox_events: 0,
+    queues: [],
+  };
+  const unavailableSessionState: SessionStateSummary = {
+    market_session: "closed",
+    exchange_calendar_state: "closed",
+    system_trading_window: "disabled",
+    strategy_allowed: false,
+    next_session_change_at: null,
+    notes: connected ? ["Backend session truth unavailable"] : ["Daemon unreachable"],
+  };
+  const unavailableConfigFingerprint: ConfigFingerprintSummary = {
+    config_hash: "unknown",
+    risk_policy_version: "unknown",
+    strategy_bundle_version: "unknown",
+    build_version: "unknown",
+    environment_profile: "unknown",
+    runtime_generation_id: "unknown",
+    last_restart_at: null,
+  };
+  const unavailableMarketDataQuality: MarketDataQualitySummary = {
+    overall_health: "unknown",
+    freshness_sla_ms: 0,
+    stale_symbol_count: 0,
+    missing_bar_count: 0,
+    venue_disagreement_count: 0,
+    strategy_blocks: 0,
+    venues: [],
+    issues: [],
+  };
+  const unavailableRuntimeLeadership: RuntimeLeadershipSummary = {
+    leader_node: "unknown",
+    leader_lease_state: "lost",
+    generation_id: "unknown",
+    restart_count_24h: 0,
+    last_restart_at: null,
+    post_restart_recovery_state: "degraded",
+    recovery_checkpoint: "unknown",
+    checkpoints: [],
+  };
+  const unavailableArtifactRegistry: ArtifactRegistrySummary = {
+    last_updated_at: null,
+    ready_count: 0,
+    pending_count: 0,
+    failed_count: 0,
+    artifacts: [],
+  };
+
   return withClassifiedPanelSources({
     status: objectOrFallback(
       statusProbe.ok && statusProbe.endpoint === "/api/v1/system/status"
@@ -705,48 +825,48 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
         : legacyStatus
           ? mapLegacyStatusToSystemStatus(legacyStatus)
           : null,
-      connected ? MOCK_MODEL.status : { ...MOCK_MODEL.status, daemon_reachable: false },
+      unavailableStatus,
     ),
     preflight: objectOrFallback(
       preflightR.ok ? preflightR.data : legacyStatus ? deriveLegacyPreflight(legacyStatus) : null,
-      connected ? MOCK_MODEL.preflight : { ...MOCK_MODEL.preflight, daemon_reachable: false, blockers: ["Daemon unreachable"] },
+      unavailablePreflight,
     ),
-    executionSummary: executionSummary ?? MOCK_MODEL.executionSummary,
+    executionSummary: executionSummary ?? unavailableExecutionSummary,
     executionOrders,
-    selectedTimeline: objectOrFallback(selectedTimeline, MOCK_MODEL.selectedTimeline),
-    omsOverview: useObject("omsOverview", omsOverviewR, MOCK_MODEL.omsOverview),
-    executionTrace: objectOrFallback(executionTrace, MOCK_MODEL.executionTrace),
-    executionReplay: objectOrFallback(executionReplay, MOCK_MODEL.executionReplay),
-    executionChart: objectOrFallback(executionChart, MOCK_MODEL.executionChart),
-    causalityTrace: objectOrFallback(causalityTrace, MOCK_MODEL.causalityTrace),
-    metrics: useObject("metrics", metricsR, MOCK_MODEL.metrics),
-    portfolioSummary: portfolioSummary ?? MOCK_MODEL.portfolioSummary,
-    positions: positions ?? MOCK_MODEL.positions,
-    openOrders: openOrders ?? MOCK_MODEL.openOrders,
-    fills: fills ?? MOCK_MODEL.fills,
-    riskSummary: useObject("riskSummary", riskSummaryR, MOCK_MODEL.riskSummary),
-    riskDenials: useArray("riskDenials", riskDenialsR, MOCK_MODEL.riskDenials),
-    reconcileSummary: useObject("reconcileSummary", reconcileSummaryR, MOCK_MODEL.reconcileSummary),
-    mismatches: useArray("mismatches", mismatchesR, MOCK_MODEL.mismatches),
-    strategies: useArray("strategies", strategiesR, MOCK_MODEL.strategies),
-    alerts: useArray("alerts", alertsR, MOCK_MODEL.alerts),
-    feed: useArray("feed", feedR, MOCK_MODEL.feed),
-    auditActions: useArray("auditActions", auditActionsR, MOCK_MODEL.auditActions),
-    metadata: metadata ?? MOCK_MODEL.metadata,
-    topology: useObject("topology", topologyR, MOCK_MODEL.topology),
-    transport: useObject("transport", transportR, MOCK_MODEL.transport),
-    incidents: useArray("incidents", incidentsR, MOCK_MODEL.incidents),
-    replaceCancelChains: useArray("replaceCancelChains", replaceCancelChainsR, MOCK_MODEL.replaceCancelChains),
-    alertTriage: useArray("alertTriage", alertTriageR, MOCK_MODEL.alertTriage),
-    sessionState: useObject("sessionState", sessionStateR, MOCK_MODEL.sessionState),
-    configFingerprint: useObject("configFingerprint", configFingerprintR, MOCK_MODEL.configFingerprint),
-    marketDataQuality: useObject("marketDataQuality", marketDataQualityR, MOCK_MODEL.marketDataQuality),
-    runtimeLeadership: useObject("runtimeLeadership", runtimeLeadershipR, MOCK_MODEL.runtimeLeadership),
-    artifactRegistry: useObject("artifactRegistry", artifactRegistryR, MOCK_MODEL.artifactRegistry),
-    strategySuppressions: useArray("strategySuppressions", strategySuppressionsR, MOCK_MODEL.strategySuppressions),
-    configDiffs: useArray("configDiffs", configDiffsR, MOCK_MODEL.configDiffs),
-    operatorTimeline: useArray("operatorTimeline", operatorTimelineR, MOCK_MODEL.operatorTimeline),
-    actionCatalog: connected ? MOCK_MODEL.actionCatalog : [],
+    selectedTimeline,
+    omsOverview: useObject("omsOverview", omsOverviewR, unavailableOmsOverview),
+    executionTrace,
+    executionReplay,
+    executionChart,
+    causalityTrace,
+    metrics: useObject("metrics", metricsR, unavailableMetrics),
+    portfolioSummary: portfolioSummary ?? unavailablePortfolioSummary,
+    positions: positions ?? [],
+    openOrders: openOrders ?? [],
+    fills: fills ?? [],
+    riskSummary: useObject("riskSummary", riskSummaryR, unavailableRiskSummary),
+    riskDenials: useArray("riskDenials", riskDenialsR, []),
+    reconcileSummary: useObject("reconcileSummary", reconcileSummaryR, unavailableReconcileSummary),
+    mismatches: useArray("mismatches", mismatchesR, []),
+    strategies: useArray("strategies", strategiesR, []),
+    alerts: useArray("alerts", alertsR, []),
+    feed: useArray("feed", feedR, []),
+    auditActions: useArray("auditActions", auditActionsR, []),
+    metadata: metadata ?? unavailableMetadata,
+    topology: useObject("topology", topologyR, unavailableTopology),
+    transport: useObject("transport", transportR, unavailableTransport),
+    incidents: useArray("incidents", incidentsR, []),
+    replaceCancelChains: useArray("replaceCancelChains", replaceCancelChainsR, []),
+    alertTriage: useArray("alertTriage", alertTriageR, []),
+    sessionState: useObject("sessionState", sessionStateR, unavailableSessionState),
+    configFingerprint: useObject("configFingerprint", configFingerprintR, unavailableConfigFingerprint),
+    marketDataQuality: useObject("marketDataQuality", marketDataQualityR, unavailableMarketDataQuality),
+    runtimeLeadership: useObject("runtimeLeadership", runtimeLeadershipR, unavailableRuntimeLeadership),
+    artifactRegistry: useObject("artifactRegistry", artifactRegistryR, unavailableArtifactRegistry),
+    strategySuppressions: useArray("strategySuppressions", strategySuppressionsR, []),
+    configDiffs: useArray("configDiffs", configDiffsR, []),
+    operatorTimeline: useArray("operatorTimeline", operatorTimelineR, []),
+    actionCatalog: [],
     dataSource,
     connected,
     lastUpdatedAt: nowIso(),

@@ -1,0 +1,163 @@
+{
+  "manifest_version": 1,
+  "authoritative_for": "core-rs/crates/mqk-db/migrations/*.sql",
+  "rules": [
+    "Historical migration filenames are immutable and must not be renamed after deployment.",
+    "Intent and historical naming clarifications must be recorded in this manifest.",
+    "Validation must fail if a SQL migration file exists without a manifest entry, or vice versa."
+  ],
+  "migrations": [
+    {
+      "id": "0001",
+      "path": "0001_init.sql",
+      "status": "applied",
+      "intent": "Create foundational runs and audit_events tables."
+    },
+    {
+      "id": "0002",
+      "path": "0002_run_lifecycle.sql",
+      "status": "applied",
+      "intent": "Add run lifecycle status/timestamp columns and status constraint."
+    },
+    {
+      "id": "0003",
+      "path": "0003_backtest_schema.sql",
+      "status": "applied",
+      "intent": "Add backtest/replay schema including md_bars and run_events."
+    },
+    {
+      "id": "0004",
+      "path": "0004_md_quality_reports.sql",
+      "status": "applied",
+      "intent": "Add md_quality_reports ingest quality table and index."
+    },
+    {
+      "id": "0005",
+      "path": "0005_outbox_claim.sql",
+      "status": "applied",
+      "intent": "Add outbox claim tracking columns for dispatcher claim-lock semantics."
+    },
+    {
+      "id": "0006",
+      "path": "0006_arm_state.sql",
+      "status": "applied",
+      "intent": "Add singleton sys_arm_state table for fail-closed persisted arm state."
+    },
+    {
+      "id": "0007",
+      "path": "0007_broker_order_map.sql",
+      "status": "applied",
+      "intent": "Add broker_order_map persistence for crash-safe cancel/replace recovery."
+    },
+    {
+      "id": "0008",
+      "path": "0008_reconcile_checkpoint.sql",
+      "status": "applied",
+      "intent": "Add reconcile checkpoint watermark persistence."
+    },
+    {
+      "id": "0009",
+      "path": "0009_check_constraints.sql",
+      "status": "applied",
+      "intent": "Add/strengthen DB constraints enforcing allowed state values and relationships."
+    },
+    {
+      "id": "0010",
+      "path": "0010_idempotency_constraints.sql",
+      "status": "applied",
+      "intent": "Add idempotency constraints for outbox/inbox safety."
+    },
+    {
+      "id": "0011",
+      "path": "0011_inbox_applied_column.sql",
+      "status": "applied",
+      "intent": "Add inbox applied tracking column(s) for atomic apply semantics."
+    },
+    {
+      "id": "0012",
+      "path": "0012_drop_reconcile_checkpoint_default.sql",
+      "status": "applied",
+      "intent": "Remove implicit default from reconcile checkpoint timestamp field(s)."
+    },
+    {
+      "id": "0013",
+      "path": "0013_broker_map_outbox_fk.sql",
+      "status": "applied",
+      "intent": "Add/repair FK relationship between broker mapping and outbox rows."
+    },
+    {
+      "id": "0014",
+      "path": "0014_outbox_claim_consistency_check.sql",
+      "status": "applied",
+      "intent": "Add consistency checks around outbox claim metadata/state transitions."
+    },
+    {
+      "id": "0015",
+      "path": "0015_inbox_dedupe_run_scoped.sql",
+      "status": "applied",
+      "intent": "Scope inbox dedupe uniqueness to run identity."
+    },
+    {
+      "id": "0016",
+      "path": "0016_outbox_dispatching_state.sql",
+      "status": "applied",
+      "intent": "Add explicit DISPATCHING outbox state support."
+    },
+    {
+      "id": "0017",
+      "path": "0017_arm_state_reason_recovery_quarantine.sql",
+      "status": "applied",
+      "intent": "Expand arm-state disarm reasons to include recovery quarantine semantics."
+    },
+    {
+      "id": "0017-hold",
+      "path": "hold/0017_inbox_broker_fill_id_global_unique.sql",
+      "status": "held",
+      "intent": "Held alternative migration for global broker_fill_id uniqueness; not part of deployed chain."
+    },
+    {
+      "id": "0018",
+      "path": "0018_outbox_allow_dispatching.sql",
+      "status": "applied",
+      "intent": "Create runtime_leader_lease, runtime_control_state, and runtime_restart_requests tables.",
+      "historical_filename_mismatch": true,
+      "filename_note": "Filename mentions outbox dispatching, but deployed content establishes runtime leader/control/restart tables. Name is preserved for migration-history safety."
+    },
+    {
+      "id": "0019",
+      "path": "0019_broker_event_cursor.sql",
+      "status": "applied",
+      "intent": "Add durable broker_event_cursor table for restart-safe event consumption."
+    },
+    {
+      "id": "0020",
+      "path": "0020_outbox_ambiguous_status.sql",
+      "status": "applied",
+      "intent": "Add explicit AMBIGUOUS outbox status and supporting constraints."
+    },
+    {
+      "id": "0021",
+      "path": "0021_inbox_identity_columns.sql",
+      "status": "applied",
+      "intent": "Add explicit broker identity/lineage columns on inbox rows."
+    },
+    {
+      "id": "0022",
+      "path": "0022_operator_durable_truth.sql",
+      "status": "applied",
+      "intent": "Add durable operator truth tables for risk block and reconcile status."
+    },
+    {
+      "id": "0023",
+      "path": "0023_arm_state_reason_lease_deadman_runtime.sql",
+      "status": "applied",
+      "intent": "Extend sys_arm_state.reason constraints to include operator/runtime lease and deadman disarm reasons already used by durable control surfaces."
+    },
+    {
+      "id": "0024",
+      "path": "0024_inbox_fill_dedupe.sql",
+      "status": "applied",
+      "intent": "Add unique economic fill dedupe on (run_id, broker_fill_id) while preserving transport-message dedupe."
+    }
+  ]
+}

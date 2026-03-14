@@ -48,7 +48,7 @@ fn make_submit_req(
     order_id: &str,
     symbol: &str,
     side: Side,
-    quantity: i32,
+    quantity: i64,
     order_type: &str,
     limit_price: Option<i64>,
 ) -> BrokerSubmitRequest {
@@ -261,11 +261,16 @@ fn l7_fill_activity_through_normalization_pipeline() {
     // Fill fields
     match event {
         BrokerEvent::Fill {
+            broker_fill_id,
             delta_qty,
             price_micros,
             fee_micros,
             ..
         } => {
+            assert_eq!(
+                broker_fill_id.as_deref(),
+                Some("20240615093000000::activity-l7")
+            );
             assert_eq!(delta_qty, 100);
             assert_eq!(price_micros, 150_500_000);
             assert_eq!(fee_micros, 0, "Alpaca does not carry per-trade fee data");
@@ -303,10 +308,15 @@ fn l8_partial_fill_activity_through_normalization_pipeline() {
     assert_eq!(event.broker_order_id(), Some("alpaca-broker-uuid-l8"));
     match event {
         BrokerEvent::PartialFill {
+            broker_fill_id,
             delta_qty,
             price_micros,
             ..
         } => {
+            assert_eq!(
+                broker_fill_id.as_deref(),
+                Some("20240615093100000::activity-l8")
+            );
             assert_eq!(delta_qty, 40);
             assert_eq!(price_micros, 200_250_000);
         }
@@ -314,10 +324,66 @@ fn l8_partial_fill_activity_through_normalization_pipeline() {
     }
 }
 // ---------------------------------------------------------------------------
-// L9 - unknown activity_type returns Err (normalizer is NOT bypassed)
+// L9 - non-fill lifecycle activity types map through canonical normalization
 // ---------------------------------------------------------------------------
 #[test]
-fn l9_unknown_activity_type_returns_err_not_empty_event() {
+fn l9_non_fill_lifecycle_activity_types_map_canonically() {
+    let cases = [
+        ("NEW", "new", "Ack"),
+        ("PENDING_NEW", "new", "Ack"),
+        ("ACCEPTED", "new", "Ack"),
+        ("CANCELED", "canceled", "CancelAck"),
+        ("EXPIRED", "canceled", "CancelAck"),
+        ("CANCEL_REJECTED", "cancel_rejected", "CancelReject"),
+        ("REPLACED", "replaced", "ReplaceAck"),
+        ("REPLACE_REJECTED", "replace_rejected", "ReplaceReject"),
+        ("REJECTED", "rejected", "Reject"),
+    ];
+
+    for (activity_type, expected_event, expected_variant) in cases {
+        let activity = make_activity(
+            "20240615093200000::activity-l9",
+            activity_type,
+            "alpaca-broker-uuid-l9",
+            "2024-06-15T09:32:00.000000Z",
+            None,
+            None,
+            "buy",
+            "AAPL",
+        );
+        let order = make_order_full(
+            "alpaca-broker-uuid-l9",
+            "internal-ord-l9",
+            "AAPL",
+            "buy",
+            "100",
+            "0",
+        );
+        let trade_update = activity_to_trade_update(&activity, &order)
+            .expect("known lifecycle activity_type must map to trade update");
+        assert_eq!(trade_update.event, expected_event);
+        let normalized = normalize_trade_update(&trade_update)
+            .expect("mapped lifecycle trade update must normalize");
+        let variant_ok = match normalized {
+            BrokerEvent::Ack { .. } => expected_variant == "Ack",
+            BrokerEvent::CancelAck { .. } => expected_variant == "CancelAck",
+            BrokerEvent::CancelReject { .. } => expected_variant == "CancelReject",
+            BrokerEvent::ReplaceAck { .. } => expected_variant == "ReplaceAck",
+            BrokerEvent::ReplaceReject { .. } => expected_variant == "ReplaceReject",
+            BrokerEvent::Reject { .. } => expected_variant == "Reject",
+            _ => false,
+        };
+        assert!(
+            variant_ok,
+            "activity_type={activity_type} expected variant={expected_variant}, got {normalized:?}"
+        );
+    }
+}
+// ---------------------------------------------------------------------------
+// L10 - unknown activity_type returns Err (normalizer is NOT bypassed)
+// ---------------------------------------------------------------------------
+#[test]
+fn l10_unknown_activity_type_returns_err_not_empty_event() {
     // "DIV" (dividend) must not pass through the normalizer.
     let activity = make_activity(
         "20240615093200000::activity-l9",
@@ -349,7 +415,7 @@ fn l9_unknown_activity_type_returns_err_not_empty_event() {
     );
 }
 #[test]
-fn l9_non_fill_activity_not_silently_normalized() {
+fn l10_non_fill_activity_not_silently_normalized() {
     for activity_type in &["ACATC", "ACATS", "CSD", "CSW", "PTC", "REORG", "SSO", "SSP"] {
         let activity = make_activity(
             "act-id",
@@ -377,8 +443,37 @@ fn l9_non_fill_activity_not_silently_normalized() {
     }
 }
 // ---------------------------------------------------------------------------
-// L10 - broker_message_id format: proves normalizer was executed
+// L10 - stable broker_fill_id and deterministic broker_message_id
 // ---------------------------------------------------------------------------
+
+#[test]
+fn l10_fill_activity_exposes_stable_broker_fill_id() {
+    let broker_id = "alpaca-broker-uuid-l10-fill-id";
+    let activity_id = "20240615093300000::l10-fill-id";
+    let activity = make_activity(
+        activity_id,
+        "FILL",
+        broker_id,
+        "2024-06-15T09:33:00.000000Z",
+        Some("100.00"),
+        Some("1"),
+        "buy",
+        "AAPL",
+    );
+    let order = make_order_full(
+        broker_id,
+        "internal-ord-l10-fill-id",
+        "AAPL",
+        "buy",
+        "1",
+        "1",
+    );
+    let trade_update = activity_to_trade_update(&activity, &order).unwrap();
+    assert_eq!(trade_update.broker_fill_id.as_deref(), Some(activity_id));
+    let event = normalize_trade_update(&trade_update).unwrap();
+    assert_eq!(event.broker_fill_id(), Some(activity_id));
+}
+
 #[test]
 fn l10_fill_event_broker_message_id_has_deterministic_alpaca_format() {
     let broker_id = "alpaca-broker-uuid-l10";

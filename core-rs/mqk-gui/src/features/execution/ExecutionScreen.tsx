@@ -3,7 +3,9 @@ import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
 import { TimelineStageStrip } from "../../components/common/TimelineStageStrip";
+import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatDurationMs } from "../../lib/format";
+import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 import { CausalityTraceViewer } from "./components/CausalityTraceViewer";
 import { ExecutionReplayViewer } from "./components/ExecutionReplayViewer";
@@ -23,14 +25,20 @@ export function ExecutionScreen({
   timelineLoading: boolean;
 }) {
   const timeline = model.selectedTimeline;
+  const truthState = panelTruthRenderState(model, "execution");
   const [selectedReplayFrameIndex, setSelectedReplayFrameIndex] = useState(0);
 
   useEffect(() => {
     setSelectedReplayFrameIndex(model.executionReplay?.current_frame_index ?? 0);
   }, [model.executionReplay?.replay_id]);
 
+  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+    return <TruthStateNotice state={truthState} />;
+  }
+
   return (
     <div className="screen-grid desk-screen-grid execution-workspace">
+      {truthState ? <TruthStateNotice state={truthState} /> : null}
       <div className="summary-grid summary-grid-four">
         <StatCard
           title="Active Orders"

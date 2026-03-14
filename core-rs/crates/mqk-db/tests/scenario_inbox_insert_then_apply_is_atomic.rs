@@ -14,6 +14,9 @@
 use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
+use anyhow::Result;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 
 // ---------------------------------------------------------------------------
 // Helper: apply gate (simulates ledger mutation as an in-process counter)
@@ -26,6 +29,27 @@ fn apply_if_inserted(inserted: bool, apply_count: &mut u32) {
     if inserted {
         *apply_count += 1;
     }
+}
+
+fn require_db_url() -> String {
+    std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
+        panic!(
+            "PROOF: MQK_DATABASE_URL is not set.\n\
+             This is a load-bearing proof test and cannot be skipped.\n\
+             Set MQK_DATABASE_URL to a live Postgres instance and re-run."
+        )
+    })
+}
+
+async fn connect_db(url: &str) -> Result<PgPool> {
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect(url)
+        .await?;
+
+    mqk_db::migrate(&pool).await?;
+    Ok(pool)
 }
 
 // ---------------------------------------------------------------------------
@@ -255,81 +279,120 @@ async fn broker_message_id_uniqueness_is_run_scoped() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn transport_dedupe_is_distinct_from_economic_fill_identity() -> anyhow::Result<()> {
-    let url = std::env::var(mqk_db::ENV_DB_URL).expect("MQK_DATABASE_URL must be set");
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
-
+async fn economic_fill_identity_is_durably_deduped() -> Result<()> {
+    let url = require_db_url();
+    let pool = connect_db(&url).await?;
     mqk_db::migrate(&pool).await?;
 
     let run_id = Uuid::new_v4();
-    mqk_db::insert_run(
-        &pool,
-        &mqk_db::NewRun {
-            run_id,
-            engine_id: "MAIN".to_string(),
-            mode: "PAPER".to_string(),
-            started_at_utc: Utc::now(),
-            git_hash: "TEST".to_string(),
-            config_hash: "CFG".to_string(),
-            config_json: json!({"x": 1}),
-            host_fingerprint: "TESTHOST".to_string(),
-        },
-    )
-    .await?;
+    let now = Utc::now();
 
-    let fill_id = format!("ECON-FILL-{}", Uuid::new_v4());
-    let msg_1 = format!("transport-1-{}", Uuid::new_v4());
-    let msg_2 = format!("transport-2-{}", Uuid::new_v4());
+    let new_run = mqk_db::NewRun {
+        run_id,
+        engine_id: "test-engine".to_string(),
+        mode: "PAPER".to_string(),
+        started_at_utc: now,
+        git_hash: "test-git".to_string(),
+        config_hash: "test-config".to_string(),
+        config_json: json!({}),
+        host_fingerprint: "test-host".to_string(),
+    };
+    mqk_db::insert_run(&pool, &new_run).await?;
+
+    let internal_order_id = "internal-order-1";
+    let broker_order_id = "broker-order-1";
+    let event_kind = "fill";
+    let event_ts_ms = 1_700_000_000_000_i64;
+    let received_at = now;
+
+    let fill_id = "fill-abc-123".to_string();
+    let msg_1 = "msg-1".to_string();
+    let msg_2 = "msg-2".to_string();
+    let no_fill_msg_1 = "msg-3".to_string();
+    let no_fill_msg_2 = "msg-4".to_string();
 
     let first = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
         run_id,
-        &mqk_db::BrokerEventIdentity {
-            broker_message_id: msg_1.clone(),
-            broker_fill_id: Some(fill_id.clone()),
-            broker_sequence_id: None,
-            broker_timestamp: None,
-        },
-        json!({"msg": 1}),
+        &msg_1,
+        Some(fill_id.as_str()),
+        internal_order_id,
+        broker_order_id,
+        event_kind,
+        &json!({"msg": 1}),
+        event_ts_ms,
+        received_at,
     )
     .await?;
-    assert!(first, "first transport event should insert");
+    assert!(first, "first fill insert must succeed");
 
     let second = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
         run_id,
-        &mqk_db::BrokerEventIdentity {
-            broker_message_id: msg_2,
-            broker_fill_id: Some(fill_id),
-            broker_sequence_id: None,
-            broker_timestamp: None,
-        },
-        json!({"msg": 2}),
+        &msg_2,
+        Some(fill_id.as_str()),
+        internal_order_id,
+        broker_order_id,
+        event_kind,
+        &json!({"msg": 2}),
+        event_ts_ms + 1,
+        received_at,
     )
     .await?;
     assert!(
-        second,
-        "a distinct broker_message_id should insert even when broker_fill_id matches"
+        !second,
+        "same economic fill identity must dedupe even with different broker_message_id"
     );
 
     let duplicate_transport = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
         run_id,
-        &mqk_db::BrokerEventIdentity {
-            broker_message_id: msg_1,
-            broker_fill_id: None,
-            broker_sequence_id: None,
-            broker_timestamp: None,
-        },
-        json!({"msg": 1}),
+        &msg_1,
+        None,
+        internal_order_id,
+        broker_order_id,
+        event_kind,
+        &json!({"msg": 1}),
+        event_ts_ms,
+        received_at,
     )
     .await?;
     assert!(
         !duplicate_transport,
-        "transport dedupe should still be keyed by broker_message_id"
+        "same broker_message_id must dedupe transport duplicate"
+    );
+
+    let no_fill_first = mqk_db::inbox_insert_deduped_with_identity(
+        &pool,
+        run_id,
+        &no_fill_msg_1,
+        None,
+        internal_order_id,
+        broker_order_id,
+        event_kind,
+        &json!({"msg": 3}),
+        event_ts_ms + 2,
+        received_at,
+    )
+    .await?;
+    assert!(no_fill_first, "first no-fill insert must succeed");
+
+    let no_fill_second = mqk_db::inbox_insert_deduped_with_identity(
+        &pool,
+        run_id,
+        &no_fill_msg_2,
+        None,
+        internal_order_id,
+        broker_order_id,
+        event_kind,
+        &json!({"msg": 4}),
+        event_ts_ms + 3,
+        received_at,
+    )
+    .await?;
+    assert!(
+        no_fill_second,
+        "different broker_message_id without broker_fill_id must not dedupe"
     );
 
     Ok(())

@@ -140,6 +140,10 @@ async fn run_start_requires_db_backed_runtime_after_arm() {
             .contains("runtime DB is not configured"),
         "body should explain DB-backed runtime requirement: {json}"
     );
+    assert_eq!(
+        json["fault_class"],
+        "runtime.start_refused.service_unavailable"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +229,10 @@ async fn run_halt_requires_db_backed_runtime_authority() {
             .unwrap_or("")
             .contains("runtime DB is not configured"),
         "body should explain DB-backed runtime requirement: {json}"
+    );
+    assert_eq!(
+        json["fault_class"],
+        "runtime.start_refused.service_unavailable"
     );
 }
 
@@ -375,6 +383,10 @@ async fn run_start_refused_403_when_integrity_disarmed() {
         "body should contain GATE_REFUSED: {json}"
     );
     assert_eq!(json["gate"], "integrity_armed");
+    assert_eq!(
+        json["fault_class"],
+        "runtime.control_refusal.integrity_disarmed"
+    );
 }
 
 #[tokio::test]
@@ -420,6 +432,10 @@ async fn run_start_requires_db_after_rearm() {
             .contains("runtime DB is not configured"),
         "body should explain DB-backed runtime requirement: {json}"
     );
+    assert_eq!(
+        json["fault_class"],
+        "runtime.start_refused.service_unavailable"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -444,7 +460,7 @@ async fn unknown_route_returns_404() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn trading_account_returns_200_and_has_snapshot_false_by_default() {
+async fn trading_account_returns_no_snapshot_state_by_default() {
     let router = make_router();
     let req = Request::builder()
         .method("GET")
@@ -456,12 +472,13 @@ async fn trading_account_returns_200_and_has_snapshot_false_by_default() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
-    assert_eq!(json["has_snapshot"], false);
-    assert_eq!(json["account"]["currency"], "USD");
+    assert_eq!(json["snapshot_state"], "no_snapshot");
+    assert!(json["snapshot_captured_at_utc"].is_null());
+    assert!(json["account"].is_null());
 }
 
 #[tokio::test]
-async fn trading_positions_returns_empty_vec_by_default() {
+async fn trading_positions_returns_no_snapshot_state_by_default() {
     let router = make_router();
     let req = Request::builder()
         .method("GET")
@@ -473,13 +490,13 @@ async fn trading_positions_returns_empty_vec_by_default() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
-    assert_eq!(json["has_snapshot"], false);
-    assert!(json["positions"].is_array());
-    assert_eq!(json["positions"].as_array().unwrap().len(), 0);
+    assert_eq!(json["snapshot_state"], "no_snapshot");
+    assert!(json["snapshot_captured_at_utc"].is_null());
+    assert!(json["positions"].is_null());
 }
 
 #[tokio::test]
-async fn trading_orders_returns_empty_vec_by_default() {
+async fn trading_orders_returns_no_snapshot_state_by_default() {
     let router = make_router();
     let req = Request::builder()
         .method("GET")
@@ -491,13 +508,13 @@ async fn trading_orders_returns_empty_vec_by_default() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
-    assert_eq!(json["has_snapshot"], false);
-    assert!(json["orders"].is_array());
-    assert_eq!(json["orders"].as_array().unwrap().len(), 0);
+    assert_eq!(json["snapshot_state"], "no_snapshot");
+    assert!(json["snapshot_captured_at_utc"].is_null());
+    assert!(json["orders"].is_null());
 }
 
 #[tokio::test]
-async fn trading_fills_returns_empty_vec_by_default() {
+async fn trading_fills_returns_no_snapshot_state_by_default() {
     let router = make_router();
     let req = Request::builder()
         .method("GET")
@@ -509,9 +526,48 @@ async fn trading_fills_returns_empty_vec_by_default() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
-    assert_eq!(json["has_snapshot"], false);
-    assert!(json["fills"].is_array());
-    assert_eq!(json["fills"].as_array().unwrap().len(), 0);
+    assert_eq!(json["snapshot_state"], "no_snapshot");
+    assert!(json["snapshot_captured_at_utc"].is_null());
+    assert!(json["fills"].is_null());
+}
+
+#[tokio::test]
+async fn trading_positions_marks_stale_snapshot_state_and_hides_payload() {
+    use chrono::Utc;
+    use mqk_daemon::state::ReconcileStatusSnapshot;
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    {
+        let mut lock = st.broker_snapshot.write().await;
+        *lock = Some(sample_snapshot());
+    }
+    st.publish_reconcile_snapshot(ReconcileStatusSnapshot {
+        status: "stale".to_string(),
+        last_run_at: Some(Utc::now().to_rfc3339()),
+        snapshot_watermark_ms: Some(Utc::now().timestamp_millis()),
+        mismatched_positions: 0,
+        mismatched_orders: 0,
+        mismatched_fills: 0,
+        unmatched_broker_events: 0,
+        note: Some("stale snapshot".to_string()),
+    })
+    .await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/trading/positions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["snapshot_state"], "stale_snapshot");
+    assert!(json["snapshot_captured_at_utc"].is_string());
+    assert!(json["positions"].is_null());
 }
 
 #[tokio::test]
@@ -568,10 +624,12 @@ async fn api_system_status_returns_gui_contract() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
-    assert_eq!(json["environment"], "paper");
+    assert!(json["environment"].is_null());
     assert_eq!(json["runtime_status"], "idle");
     assert_eq!(json["integrity_status"], "warning");
+    assert_eq!(json["live_routing_enabled"], false);
     assert_eq!(json["daemon_reachable"], true);
+    assert!(json["fault_signals"].is_array());
 }
 
 #[tokio::test]
@@ -588,7 +646,11 @@ async fn api_system_preflight_is_fail_closed_for_unproven_dependencies() {
 
     let json = parse_json(body);
     assert_eq!(json["daemon_reachable"], true);
-    assert_eq!(json["db_reachable"], false);
+    assert!(json["db_reachable"].is_null());
+    assert!(json["broker_config_present"].is_null());
+    assert!(json["market_data_config_present"].is_null());
+    assert!(json["audit_writer_ready"].is_null());
+    assert_eq!(json["runtime_idle"], true);
     assert_eq!(json["execution_disarmed"], true);
     assert!(json["blockers"].as_array().unwrap().len() >= 4);
 }
@@ -663,12 +725,57 @@ async fn api_execution_summary_derives_counts_from_broker_snapshot() {
     assert_eq!(status, StatusCode::OK);
 
     let json = parse_json(body);
+    assert_eq!(json["has_snapshot"], true);
     assert_eq!(json["active_orders"], 2);
     assert_eq!(json["pending_orders"], 1);
     assert_eq!(json["dispatching_orders"], 1);
     assert_eq!(json["reject_count_today"], 1);
     assert_eq!(json["stuck_orders"], 1);
+    assert!(json["cancel_replace_count_today"].is_null());
     assert!(json["avg_ack_latency_ms"].is_null());
+}
+
+#[tokio::test]
+async fn api_summary_surfaces_are_explicitly_unavailable_without_snapshot() {
+    let router = make_router();
+
+    let execution_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/execution/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (execution_status, execution_body) = call(router.clone(), execution_req).await;
+    assert_eq!(execution_status, StatusCode::OK);
+    let execution_json = parse_json(execution_body);
+    assert_eq!(execution_json["has_snapshot"], false);
+    assert!(execution_json["cancel_replace_count_today"].is_null());
+    assert!(execution_json["avg_ack_latency_ms"].is_null());
+
+    let portfolio_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/portfolio/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (portfolio_status, portfolio_body) = call(router.clone(), portfolio_req).await;
+    assert_eq!(portfolio_status, StatusCode::OK);
+    let portfolio_json = parse_json(portfolio_body);
+    assert_eq!(portfolio_json["has_snapshot"], false);
+    assert!(portfolio_json["account_equity"].is_null());
+    assert!(portfolio_json["cash"].is_null());
+    assert!(portfolio_json["daily_pnl"].is_null());
+
+    let risk_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (risk_status, risk_body) = call(router, risk_req).await;
+    assert_eq!(risk_status, StatusCode::OK);
+    let risk_json = parse_json(risk_body);
+    assert_eq!(risk_json["has_snapshot"], false);
+    assert!(risk_json["gross_exposure"].is_null());
+    assert!(risk_json["net_exposure"].is_null());
+    assert!(risk_json["loss_limit_utilization_pct"].is_null());
 }
 
 #[tokio::test]
@@ -714,6 +821,7 @@ async fn api_portfolio_and_risk_summary_derive_from_snapshot() {
         call(routes::build_router(Arc::clone(&st)), portfolio_req).await;
     assert_eq!(portfolio_status, StatusCode::OK);
     let portfolio_json = parse_json(portfolio_body);
+    assert_eq!(portfolio_json["has_snapshot"], true);
     assert_eq!(portfolio_json["account_equity"].as_f64().unwrap(), 1500.5);
     assert_eq!(portfolio_json["cash"].as_f64().unwrap(), 500.25);
     assert_eq!(
@@ -734,6 +842,7 @@ async fn api_portfolio_and_risk_summary_derive_from_snapshot() {
     let (risk_status, risk_body) = call(routes::build_router(Arc::clone(&st)), risk_req).await;
     assert_eq!(risk_status, StatusCode::OK);
     let risk_json = parse_json(risk_body);
+    assert_eq!(risk_json["has_snapshot"], true);
     assert_eq!(risk_json["gross_exposure"].as_f64().unwrap(), 1100.0);
     assert_eq!(risk_json["net_exposure"].as_f64().unwrap(), 900.0);
     assert!((risk_json["concentration_pct"].as_f64().unwrap() - 90.9090909090909).abs() < 1e-9);
@@ -760,4 +869,105 @@ async fn api_reconcile_status_exists_and_is_explicitly_unknown() {
     assert_eq!(json["mismatched_orders"], 0);
     assert_eq!(json["mismatched_fills"], 0);
     assert_eq!(json["unmatched_broker_events"], 0);
+}
+
+#[tokio::test]
+async fn api_system_session_reports_truthful_mode_and_operator_auth() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::MissingTokenFailClosed,
+    ));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["daemon_mode"], "PAPER");
+    assert_eq!(json["operator_auth_mode"], "missing_token_fail_closed");
+    assert_eq!(json["strategy_allowed"], false);
+    assert_eq!(json["execution_allowed"], false);
+    assert_eq!(json["system_trading_window"], "disabled");
+    assert_eq!(json["market_session"], "unknown");
+    assert_eq!(json["exchange_calendar_state"], "unknown");
+}
+
+#[tokio::test]
+async fn api_strategy_summary_tracks_integrity_gate_truth() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = parse_json(body);
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["armed"], false);
+    assert_eq!(rows[0]["health"], "warning");
+
+    let arm_req = Request::builder()
+        .method("POST")
+        .uri("/v1/integrity/arm")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let _ = call(routes::build_router(Arc::clone(&st)), arm_req).await;
+
+    let req2 = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (_, body2) = call(routes::build_router(Arc::clone(&st)), req2).await;
+    let rows2 = parse_json(body2);
+    assert_eq!(rows2[0]["armed"], true);
+    assert_eq!(rows2[0]["health"], "ok");
+}
+
+#[tokio::test]
+async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
+    let router = make_router();
+
+    let fp_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/config-fingerprint")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (fp_status, fp_body) = call(router.clone(), fp_req).await;
+    assert_eq!(fp_status, StatusCode::OK);
+    let fp = parse_json(fp_body);
+    assert_eq!(fp["config_hash"], "unknown");
+    assert_eq!(fp["runtime_generation_id"], "unknown");
+    assert_eq!(fp["environment_profile"], "paper");
+    assert!(fp["last_restart_at"].is_null());
+
+    let diff_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/config-diffs")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (diff_status, diff_body) = call(router.clone(), diff_req).await;
+    assert_eq!(diff_status, StatusCode::OK);
+    let diffs = parse_json(diff_body);
+    assert!(diffs.is_array());
+    assert_eq!(diffs.as_array().unwrap().len(), 0);
+
+    let suppressions_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/suppressions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (suppressions_status, suppressions_body) = call(router, suppressions_req).await;
+    assert_eq!(suppressions_status, StatusCode::OK);
+    let suppressions = parse_json(suppressions_body);
+    assert!(suppressions.is_array());
+    assert_eq!(suppressions.as_array().unwrap().len(), 0);
 }
