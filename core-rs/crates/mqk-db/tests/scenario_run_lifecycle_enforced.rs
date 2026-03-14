@@ -3,7 +3,6 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn run_lifecycle_enforced_and_live_exclusive() -> anyhow::Result<()> {
     // Skip if no DB configured (local + CI friendly).
     let url = match std::env::var(mqk_db::ENV_DB_URL) {

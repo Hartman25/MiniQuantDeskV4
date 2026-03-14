@@ -229,7 +229,6 @@ async fn daemon_state() -> Arc<state::AppState> {
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn start_spawns_real_execution_loop() {
     let st = daemon_state().await;
     arm(&st).await;
@@ -296,7 +295,6 @@ async fn control_restart_surfaces_durable_runtime_conflict_truth() {
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn hostile_restart_with_poisoned_local_cache_still_reports_durable_halt_truth() {
     let pool = lifecycle_pool().await;
     let durable_run_id = Uuid::new_v5(
@@ -394,7 +392,6 @@ async fn duplicate_start_is_rejected() {
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn stop_terminates_active_loop() {
     let st = daemon_state().await;
     arm(&st).await;
@@ -412,7 +409,6 @@ async fn stop_terminates_active_loop() {
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn halt_disarms_or_halts_active_loop() {
     let st = daemon_state().await;
     arm(&st).await;
@@ -450,7 +446,6 @@ async fn status_reflects_real_loop_ownership() {
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn runtime_loop_heartbeats_deadman_while_running() {
     let st = daemon_state().await;
     arm(&st).await;
@@ -470,7 +465,6 @@ async fn runtime_loop_heartbeats_deadman_while_running() {
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn deadman_expiry_halts_and_disarms_runtime() {
     let st = daemon_state().await;
     arm(&st).await;
@@ -501,7 +495,6 @@ async fn deadman_expiry_halts_and_disarms_runtime() {
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn runtime_refuses_to_continue_after_deadman_expiry() {
     let st = daemon_state().await;
     arm(&st).await;
@@ -556,7 +549,6 @@ async fn heartbeat_persistence_failure_fails_closed() {
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn status_surface_reports_deadman_truth() {
     let st = daemon_state().await;
     arm(&st).await;
@@ -799,7 +791,6 @@ async fn control_restart_fails_closed_if_not_authoritative() {
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn durable_halted_run_is_reported_as_halted_by_operator_surfaces() {
     let st = daemon_state().await;
     arm(&st).await;

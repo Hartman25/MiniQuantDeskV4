@@ -80,19 +80,51 @@ echo "Using MQK_DATABASE_URL=$MQK_DATABASE_URL"
 
 cd "$CORE_RS_DIR"
 
-echo "== DB proof: migration bootstrap / idempotence =="
-cargo test -p mqk-db --test scenario_migrate_idempotent_on_clean_db -- --ignored --test-threads=1
+run_test() {
+  echo "→ $*"
+  "$@"
+}
 
-echo "== DB proof: inbox dedupe + apply atomicity =="
-cargo test -p mqk-db --test scenario_inbox_insert_then_apply_is_atomic -- --test-threads=1
-cargo test -p mqk-db --test scenario_inbox_apply_atomic_recovery -- --test-threads=1
+echo "== CI-10: bootstrap migration proof =="
+run_test cargo test -p mqk-db --test scenario_migrate_idempotent_on_clean_db -- --ignored --test-threads=1
 
-echo "== DB proof: outbox claim + dispatch =="
-cargo test -p mqk-db --test scenario_outbox_first_enforced -- --test-threads=1
-cargo test -p mqk-db --test scenario_outbox_claim_lock_prevents_double_dispatch -- --test-threads=1
+echo "== CI-02: daemon start/stop DB lifecycle proofs =="
+run_test cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle start_spawns_real_execution_loop -- --include-ignored --exact --test-threads=1
+run_test cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle stop_terminates_active_loop -- --include-ignored --exact --test-threads=1
 
-echo "== DB proof: broker cursor + restart quarantine =="
-cargo test -p mqk-testkit --test scenario_broker_cursor_restart -- --test-threads=1
-cargo test -p mqk-testkit --test scenario_restart_quarantines_dispatching_outbox -- --test-threads=1
+echo "== CI-03: durable halt/disarm/status truth proofs =="
+run_test cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle halt_disarms_or_halts_active_loop -- --include-ignored --exact --test-threads=1
+run_test cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle hostile_restart_with_poisoned_local_cache_still_reports_durable_halt_truth -- --include-ignored --exact --test-threads=1
+run_test cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle durable_halted_run_is_reported_as_halted_by_operator_surfaces -- --include-ignored --exact --test-threads=1
+
+echo "== CI-04: daemon deadman proofs =="
+run_test cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle runtime_loop_heartbeats_deadman_while_running -- --include-ignored --exact --test-threads=1
+run_test cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle deadman_expiry_halts_and_disarms_runtime -- --include-ignored --exact --test-threads=1
+run_test cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle runtime_refuses_to_continue_after_deadman_expiry -- --include-ignored --exact --test-threads=1
+run_test cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle status_surface_reports_deadman_truth -- --include-ignored --exact --test-threads=1
+
+echo "== CI-05: runtime lease acquire/refresh/release/stale-owner proofs =="
+run_test cargo test -p mqk-db --test scenario_run_lifecycle_enforced -- --include-ignored --test-threads=1
+run_test cargo test -p mqk-db --test scenario_stale_claim_recovery -- --include-ignored --test-threads=1
+
+echo "== CI-06: ambiguous outbox restart quarantine proofs =="
+run_test cargo test -p mqk-testkit --test scenario_ambiguous_submit_quarantine_a4 -- --test-threads=1
+run_test cargo test -p mqk-testkit --test scenario_restart_quarantines_dispatching_outbox -- --test-threads=1
+
+echo "== CI-07: outbox claim/dispatch/sent/idempotency proofs =="
+run_test cargo test -p mqk-db --test scenario_outbox_first_enforced -- --test-threads=1
+run_test cargo test -p mqk-db --test scenario_outbox_claim_lock_prevents_double_dispatch -- --test-threads=1
+run_test cargo test -p mqk-db --test scenario_outbox_idempotency_prevents_double_submit -- --include-ignored --test-threads=1
+
+echo "== CI-08: inbox dedupe/apply-fence proofs =="
+run_test cargo test -p mqk-db --test scenario_inbox_dedupe_prevents_double_fill -- --include-ignored --test-threads=1
+run_test cargo test -p mqk-db --test scenario_inbox_insert_then_apply_is_atomic -- --test-threads=1
+run_test cargo test -p mqk-db --test scenario_inbox_apply_atomic_recovery -- --test-threads=1
+
+echo "== CI-09: arm-preflight + DB constraint proofs =="
+run_test cargo test -p mqk-db --test scenario_arm_preflight_requires_reconcile -- --include-ignored --test-threads=1
+run_test cargo test -p mqk-db --test scenario_arm_preflight_blocks_zero_risk_limits -- --include-ignored --test-threads=1
+run_test cargo test -p mqk-db --test scenario_arm_preflight_forged_audit_rejected -- --include-ignored --test-threads=1
+run_test cargo test -p mqk-db --test scenario_db_check_constraints -- --include-ignored --test-threads=1
 
 echo "DB proof lane passed."

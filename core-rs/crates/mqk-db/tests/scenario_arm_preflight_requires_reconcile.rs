@@ -20,7 +20,6 @@ use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn forged_audit_event_cannot_satisfy_arming() -> Result<()> {
     let url = match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) if !v.trim().is_empty() => v,

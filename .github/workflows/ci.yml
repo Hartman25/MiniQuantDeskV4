@@ -80,6 +80,9 @@ jobs:
       - name: Run unsafe-pattern guard
         run: bash scripts/guards/check_unsafe_patterns.sh
 
+      - name: Run ignored load-bearing proof guard
+        run: bash scripts/guards/check_ignored_load_bearing_proofs.sh
+
   rust:
     name: "Rust (fmt + clippy + test)"
     runs-on: ubuntu-latest
