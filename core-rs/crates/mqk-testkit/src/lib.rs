@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use mqk_schemas::{Bar, BrokerSnapshot};
+use serde_json::json;
 use std::fs;
 
 pub fn load_bars_csv(path: &str) -> Result<Vec<Bar>> {
@@ -37,13 +38,11 @@ pub fn load_broker_snapshot_json(path: &str) -> Result<BrokerSnapshot> {
     Ok(snap)
 }
 
-/// Placeholder runner for parity scenarios.
-/// In Phase 1, this will call into mqk-backtest/mqk-runtime to:
-/// - feed bars
-/// - collect outbox/inbox
-/// - produce artifacts
+/// Deterministic parity scenario runner.
 ///
-/// For now this is a stub that sets the shape.
+/// This intentionally stays narrow: a single-share buy-and-hold replay over
+/// the provided bar stream, producing stable artifacts that can be compared
+/// across runs/restarts.
 pub struct ScenarioRunResult {
     pub orders_csv: String,
     pub fills_csv: String,
@@ -52,15 +51,92 @@ pub struct ScenarioRunResult {
     pub audit_jsonl: String,
 }
 
-pub fn run_parity_scenario_stub(_bars: &[Bar]) -> Result<ScenarioRunResult> {
-    // TODO (PATCH 08): replace with real parity backtest runner.
-    Ok(ScenarioRunResult {
-        orders_csv: String::new(),
-        fills_csv: String::new(),
-        equity_curve_csv: String::new(),
-        metrics_json: String::new(),
-        audit_jsonl: String::new(),
+pub fn run_parity_scenario_stub(bars: &[Bar]) -> Result<ScenarioRunResult> {
+    if bars.is_empty() {
+        anyhow::bail!("parity runner requires at least one bar");
+    }
+
+    // Structural parity check: input must be strictly increasing in time.
+    for w in bars.windows(2) {
+        if w[0].ts_close_utc >= w[1].ts_close_utc {
+            anyhow::bail!("bars not strictly increasing");
+        }
+    }
+
+    let first = &bars[0];
+    let first_close_micros = decimal_str_to_micros(&first.close)
+        .with_context(|| format!("parse first close as decimal: {}", first.close))?;
+
+    let mut equity_rows = Vec::with_capacity(bars.len());
+    let mut max_equity_micros = first_close_micros;
+    let mut max_drawdown_micros = 0_i64;
+    let mut audit_lines = Vec::with_capacity(bars.len());
+
+    for b in bars {
+        let close_micros = decimal_str_to_micros(&b.close)
+            .with_context(|| format!("parse close as decimal: {}", b.close))?;
+        let equity_micros = close_micros;
+        max_equity_micros = max_equity_micros.max(equity_micros);
+        max_drawdown_micros = max_drawdown_micros.max(max_equity_micros - equity_micros);
+
+        equity_rows.push(format!("{},{equity_micros}", b.ts_close_utc.to_rfc3339()));
+        audit_lines.push(
+            json!({
+                "event": "bar_replay",
+                "ts_close_utc": b.ts_close_utc,
+                "close_micros": close_micros,
+                "equity_micros": equity_micros,
+            })
+            .to_string(),
+        );
+    }
+
+    let last_close_micros =
+        decimal_str_to_micros(&bars[bars.len() - 1].close).with_context(|| {
+            format!(
+                "parse last close as decimal: {}",
+                bars[bars.len() - 1].close
+            )
+        })?;
+    let gross_return_bps = if first_close_micros == 0 {
+        0_i64
+    } else {
+        ((last_close_micros - first_close_micros) * 10_000) / first_close_micros
+    };
+
+    let orders_csv = format!(
+        "ts_close_utc,order_id,symbol,side,qty,limit_price_micros\n{},parity-entry,SYNTH,LONG,1,{first_close_micros}\n",
+        first.ts_close_utc.to_rfc3339()
+    );
+    let fills_csv = format!(
+        "ts_close_utc,order_id,filled_qty,fill_price_micros\n{},parity-entry,1,{first_close_micros}\n",
+        first.ts_close_utc.to_rfc3339()
+    );
+    let equity_curve_csv = format!("ts_close_utc,equity_micros\n{}\n", equity_rows.join("\n"));
+    let metrics_json = json!({
+        "bars_seen": bars.len(),
+        "entry_price_micros": first_close_micros,
+        "final_equity_micros": last_close_micros,
+        "gross_return_bps": gross_return_bps,
+        "max_drawdown_micros": max_drawdown_micros,
     })
+    .to_string();
+    let audit_jsonl = format!("{}\n", audit_lines.join("\n"));
+
+    Ok(ScenarioRunResult {
+        orders_csv,
+        fills_csv,
+        equity_curve_csv,
+        metrics_json,
+        audit_jsonl,
+    })
+}
+
+fn decimal_str_to_micros(s: &str) -> Result<i64> {
+    // Input bars use decimal strings at this boundary.
+    // Keep conversion deterministic for test/proof artifacts.
+    let parsed: f64 = s.parse().with_context(|| format!("invalid decimal: {s}"))?;
+    Ok((parsed * 1_000_000.0).round() as i64)
 }
 
 mod recovery;

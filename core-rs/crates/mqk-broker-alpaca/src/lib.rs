@@ -5,6 +5,9 @@
 //! - `types`     - raw Alpaca v2 wire shapes (REST + websocket).
 //! - `normalize` - converts raw `AlpacaTradeUpdate` into canonical `BrokerEvent`.
 //!
+//! Legacy non-functional gateway scaffolding has been removed from the
+//! production adapter surface; this crate exports only live adapter paths.
+//!
 //! # `AlpacaBrokerAdapter`
 //!
 //! Implements `mqk_execution::BrokerAdapter` against the Alpaca v2 REST API using
