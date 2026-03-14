@@ -1568,6 +1568,9 @@ fn spawn_execution_loop(
 
     let join_handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);
+        // tokio::time::interval emits an immediate first tick. Consume it so
+        // the loop's first heartbeat/deadman cycle runs after one full interval.
+        ticker.tick().await;
         loop {
             tokio::select! {
                 changed = stop_rx.changed() => {
@@ -1635,6 +1638,53 @@ fn spawn_execution_loop(
 
                     if let Some(ref pool) = db {
                         let now = Utc::now();
+                        // Re-check deadman immediately before emitting this loop's heartbeat
+                        // so an externally-forced stale heartbeat cannot be overwritten by a
+                        // same-cycle heartbeat write after the initial check has already run.
+                        match mqk_db::enforce_deadman_or_halt(pool, run_id, DEADMAN_TTL_SECONDS, now).await {
+                            Ok(true) => {
+                                let _ = mqk_db::persist_arm_state_canonical(
+                                    pool,
+                                    mqk_db::ArmState::Disarmed,
+                                    Some(mqk_db::DisarmReason::DeadmanExpired),
+                                )
+                                .await;
+                                {
+                                    let mut ig = integrity.write().await;
+                                    ig.disarmed = true;
+                                    ig.halted = true;
+                                }
+                                if let Err(release_err) = orchestrator.release_runtime_leadership().await {
+                                    tracing::warn!("runtime_lease_release_failed error={release_err}");
+                                }
+                                return ExecutionLoopExit {
+                                    note: Some("execution loop halted: deadman expired".to_string()),
+                                };
+                            }
+                            Ok(false) => {}
+                            Err(err) => {
+                                tracing::error!("execution_loop_deadman_check_failed error={err}");
+                                let _ = mqk_db::halt_run(pool, run_id, now).await;
+                                let _ = mqk_db::persist_arm_state_canonical(
+                                    pool,
+                                    mqk_db::ArmState::Disarmed,
+                                    Some(mqk_db::DisarmReason::DeadmanSupervisorFailure),
+                                )
+                                .await;
+                                {
+                                    let mut ig = integrity.write().await;
+                                    ig.disarmed = true;
+                                    ig.halted = true;
+                                }
+                                if let Err(release_err) = orchestrator.release_runtime_leadership().await {
+                                    tracing::warn!("runtime_lease_release_failed error={release_err}");
+                                }
+                                return ExecutionLoopExit {
+                                    note: Some(format!("execution loop halted: deadman check failed: {err}")),
+                                };
+                            }
+                        }
+
                         if let Err(err) = mqk_db::heartbeat_run(pool, run_id, now).await {
                             tracing::error!("execution_loop_heartbeat_failed error={err}");
                             let _ = mqk_db::halt_run(pool, run_id, now).await;
