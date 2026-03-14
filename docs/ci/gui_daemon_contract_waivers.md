@@ -29,7 +29,7 @@ Legacy trading response contract enforced by the harness follows accepted DMON-0
 
 ## Explicitly deferred from TEST-02 gate
 
-The GUI probes additional detail endpoints that are not yet authoritative daemon contract surfaces and therefore remain explicitly deferred in this patch:
+The GUI probes additional detail endpoints that are not yet authoritative daemon contract surfaces and therefore remain explicitly deferred:
 
 - `/api/v1/system/metadata`
 - `/api/v1/execution/orders`
@@ -43,7 +43,6 @@ The GUI probes additional detail endpoints that are not yet authoritative daemon
 - `/api/v1/strategy/summary`
 - `/api/v1/alerts/active`
 - `/api/v1/events/feed`
-- `/api/v1/audit/operator-actions`
 - `/api/v1/system/topology`
 - `/api/v1/execution/transport`
 - `/api/v1/incidents`
@@ -53,9 +52,7 @@ The GUI probes additional detail endpoints that are not yet authoritative daemon
 - `/api/v1/system/config-fingerprint`
 - `/api/v1/market-data/quality`
 - `/api/v1/system/runtime-leadership`
-- `/api/v1/audit/artifacts`
 - `/api/v1/strategy/suppressions`
 - `/api/v1/system/config-diffs`
-- `/api/v1/ops/operator-timeline`
 
 These waivers are visible by design so deferred coverage is explicit instead of silently ignored.

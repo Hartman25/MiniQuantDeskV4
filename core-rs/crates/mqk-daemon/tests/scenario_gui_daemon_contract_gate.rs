@@ -37,7 +37,7 @@ fn parse_json(b: bytes::Bytes) -> serde_json::Value {
 async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
     let router = make_router();
 
-    let cases: [(&str, &[&str]); 6] = [
+    let cases: [(&str, &[&str]); 9] = [
         (
             "/api/v1/system/status",
             &[
@@ -92,6 +92,18 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
                 "unmatched_broker_events",
             ],
         ),
+        (
+            "/api/v1/audit/operator-actions",
+            &["canonical_route", "backend", "rows"],
+        ),
+        (
+            "/api/v1/audit/artifacts",
+            &["canonical_route", "backend", "rows"],
+        ),
+        (
+            "/api/v1/ops/operator-timeline",
+            &["canonical_route", "backend", "rows"],
+        ),
     ];
 
     for (uri, required_keys) in cases {
@@ -111,7 +123,37 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
                 "{uri} missing required key '{key}' in response: {json}"
             );
         }
+
+        if uri == "/api/v1/audit/operator-actions"
+            || uri == "/api/v1/audit/artifacts"
+            || uri == "/api/v1/ops/operator-timeline"
+        {
+            assert_eq!(json["rows"].as_array().map(|v| v.is_empty()), Some(true));
+            assert_eq!(
+                json["canonical_route"].as_str(),
+                Some(uri),
+                "{uri} must declare canonical route identity"
+            );
+            assert!(
+                json["backend"]
+                    .as_str()
+                    .is_some_and(|v| v.contains("postgres")),
+                "{uri} must expose durable backend source"
+            );
+        }
     }
+
+    let legacy_timeline_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/audit/operator-timeline")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (legacy_timeline_status, _) = call(router, legacy_timeline_req).await;
+    assert_eq!(
+        legacy_timeline_status,
+        StatusCode::NOT_FOUND,
+        "legacy /api/v1/audit/operator-timeline alias must stay unmounted; canonical path is /api/v1/ops/operator-timeline"
+    );
 }
 
 #[tokio::test]

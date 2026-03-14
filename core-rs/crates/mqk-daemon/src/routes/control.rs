@@ -260,6 +260,7 @@ async fn disarm(State(state): State<Arc<AppState>>) -> Response {
     }
 
     publish_integrity_status(&state, false, "control: desired_armed=false").await;
+    let _ = write_control_operator_audit_event(&state, "control.disarm", "DISARMED").await;
     (
         StatusCode::OK,
         Json(operator_action_response(
@@ -310,6 +311,7 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
     }
 
     publish_integrity_status(&state, true, "control: desired_armed=true").await;
+    let _ = write_control_operator_audit_event(&state, "control.arm", "ARMED").await;
     (
         StatusCode::OK,
         Json(operator_action_response(
@@ -407,6 +409,42 @@ async fn publish_integrity_status(state: &Arc<AppState>, integrity_armed: bool, 
     snapshot.integrity_armed = integrity_armed;
     snapshot.notes = Some(note.to_string());
     state.publish_status(snapshot).await;
+}
+
+async fn write_control_operator_audit_event(
+    state: &Arc<AppState>,
+    event_type: &str,
+    runtime_transition: &str,
+) -> anyhow::Result<()> {
+    let Some(db) = state.db.as_ref() else {
+        return Ok(());
+    };
+    let run_id = state
+        .current_status_snapshot()
+        .await
+        .ok()
+        .and_then(|s| s.active_run_id);
+    let Some(run_id) = run_id else {
+        return Ok(());
+    };
+
+    mqk_db::insert_audit_event(
+        db,
+        &mqk_db::NewAuditEvent {
+            event_id: uuid::Uuid::new_v4(),
+            run_id,
+            ts_utc: chrono::Utc::now(),
+            topic: "operator".to_string(),
+            event_type: event_type.to_string(),
+            payload: serde_json::json!({
+                "runtime_transition": runtime_transition,
+                "source": "mqk-daemon.routes.control",
+            }),
+            hash_prev: None,
+            hash_self: None,
+        },
+    )
+    .await
 }
 
 fn lifecycle_error_response(err: RuntimeLifecycleError) -> Response {

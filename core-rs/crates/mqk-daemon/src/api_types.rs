@@ -83,6 +83,56 @@ pub struct OperatorActionResponse {
     pub audit: OperatorActionAuditFields,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorActionAuditRow {
+    pub audit_event_id: String,
+    pub ts_utc: String,
+    pub requested_action: String,
+    pub disposition: String,
+    pub run_id: Option<String>,
+    pub runtime_transition: Option<String>,
+    pub provenance_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorActionsAuditResponse {
+    pub canonical_route: String,
+    pub backend: String,
+    pub rows: Vec<OperatorActionAuditRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditArtifactRow {
+    pub artifact_id: String,
+    pub artifact_type: String,
+    pub run_id: String,
+    pub created_at_utc: String,
+    pub provenance_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditArtifactsResponse {
+    pub canonical_route: String,
+    pub backend: String,
+    pub rows: Vec<AuditArtifactRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorTimelineRow {
+    pub ts_utc: String,
+    pub kind: String,
+    pub run_id: Option<String>,
+    pub detail: String,
+    pub provenance_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorTimelineResponse {
+    pub canonical_route: String,
+    pub backend: String,
+    pub rows: Vec<OperatorTimelineRow>,
+}
+
 // ---------------------------------------------------------------------------
 // Trading read APIs — DAEMON-1
 // ---------------------------------------------------------------------------
