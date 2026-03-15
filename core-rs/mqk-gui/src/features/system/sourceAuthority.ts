@@ -24,26 +24,147 @@ type PanelEvidenceHints = {
 export type FieldEvidenceHints = PanelEvidenceHints;
 
 const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
-  dashboard: { db: ["/portfolio", "/reconcile"], runtime: ["/system/status", "/system/preflight"], broker: ["/broker", "/execution/orders"], placeholder: ["status", "preflight"] },
-  metrics: { db: ["/metrics"], runtime: ["/metrics"], broker: ["/metrics"], placeholder: ["metrics"] },
-  execution: { db: ["/execution/timeline", "/execution/trace"], runtime: ["/execution/summary", "/execution/orders"], broker: ["/execution/orders", "/execution/replay"], placeholder: ["executionSummary", "executionOrders"] },
-  risk: { db: ["/risk/summary"], runtime: ["/system/status"], broker: ["/execution/orders"], placeholder: ["riskSummary"] },
-  portfolio: { db: ["/portfolio/positions", "/portfolio/summary"], runtime: ["/portfolio"], broker: ["/execution/fills"], placeholder: ["portfolioSummary", "positions", "fills"] },
-  reconcile: { db: ["/reconcile/summary", "/reconcile/mismatches"], runtime: ["/system/runtime-leadership"], broker: ["/reconcile", "/broker"], placeholder: ["reconcileSummary", "mismatches"] },
-  strategy: { db: ["/strategy/suppressions"], runtime: ["/strategy/rows"], broker: ["/execution/orders"], placeholder: ["strategies", "strategySuppressions"] },
-  audit: { db: ["/audit/operator-actions"], runtime: ["/system/metadata"], broker: [], placeholder: ["auditActions"] },
-  ops: { db: ["/system/config-diffs"], runtime: ["/system/status", "/system/preflight"], broker: ["/broker"], placeholder: ["status", "preflight", "configDiffs"] },
-  settings: { db: ["/system/config-diffs"], runtime: ["/system/metadata"], broker: [], placeholder: ["metadata", "configDiffs"] },
-  topology: { db: ["/system/topology"], runtime: ["/system/topology"], broker: ["/broker"], placeholder: ["topology"] },
-  transport: { db: ["/system/transport"], runtime: ["/system/transport"], broker: ["/broker"], placeholder: ["transport"] },
-  incidents: { db: ["/system/incidents"], runtime: ["/system/incidents"], broker: ["/broker"], placeholder: ["incidents"] },
-  alerts: { db: ["/system/alerts"], runtime: ["/system/status"], broker: ["/broker"], placeholder: ["alerts"] },
-  session: { db: ["/system/session-state"], runtime: ["/system/status"], broker: [], placeholder: ["sessionState"] },
-  config: { db: ["/system/config-fingerprint"], runtime: ["/system/runtime-leadership"], broker: [], placeholder: ["configFingerprint", "runtimeLeadership"] },
-  marketData: { db: ["/system/market-data-quality"], runtime: ["/system/status"], broker: ["/broker", "/market-data"], placeholder: ["marketDataQuality"] },
-  runtime: { db: ["/system/runtime-leadership"], runtime: ["/system/status", "/system/preflight", "/system/runtime-leadership"], broker: [], placeholder: ["runtimeLeadership", "status", "preflight"] },
-  artifacts: { db: ["/system/artifacts"], runtime: ["/system/operator-timeline"], broker: [], placeholder: ["artifactRegistry"] },
-  operatorTimeline: { db: ["/system/operator-timeline"], runtime: ["/system/operator-timeline"], broker: ["/broker"], placeholder: ["operatorTimeline"] },
+  // Dashboard is a summary of multiple source types: inherently mixed in a healthy system.
+  dashboard: {
+    db: ["/reconcile/status"],
+    runtime: ["/system/status", "/system/preflight", "/execution/summary"],
+    broker: ["/portfolio/summary", "/trading/account"],
+    placeholder: ["status", "preflight", "portfolioSummary"],
+  },
+  // Metrics endpoint is deferred; when implemented it will be runtime daemon state.
+  metrics: {
+    db: [],
+    runtime: ["/metrics/dashboards"],
+    broker: [],
+    placeholder: ["metrics"],
+  },
+  // Canonical orders/summary come from OMS (runtime). Legacy /trading/orders is broker snapshot.
+  // Timeline/trace/replay are DB-backed audit artifacts.
+  execution: {
+    db: ["/execution/timeline", "/execution/trace", "/execution/replay"],
+    runtime: ["/execution/summary", "/execution/orders"],
+    broker: ["/trading/orders"],
+    placeholder: ["executionSummary", "executionOrders"],
+  },
+  // Risk summary is derived from the execution snapshot (runtime memory). Denials are DB-logged.
+  risk: {
+    db: ["/risk/denials"],
+    runtime: ["/risk/summary", "/system/status"],
+    broker: [],
+    placeholder: ["riskSummary", "riskDenials"],
+  },
+  // Portfolio data originates from the broker (account/positions/fills are broker snapshot).
+  portfolio: {
+    db: [],
+    runtime: [],
+    broker: ["/portfolio/summary", "/portfolio/positions", "/portfolio/fills", "/trading/account", "/trading/positions", "/trading/fills"],
+    placeholder: ["portfolioSummary", "positions", "fills"],
+  },
+  // Reconcile records are persisted in Postgres — always DB truth.
+  reconcile: {
+    db: ["/reconcile/status", "/reconcile/mismatches"],
+    runtime: [],
+    broker: [],
+    placeholder: ["reconcileSummary", "mismatches"],
+  },
+  // Strategy rows are runtime OMS state. Suppressions are DB-persisted records.
+  strategy: {
+    db: ["/strategy/suppressions"],
+    runtime: ["/strategy/summary"],
+    broker: [],
+    placeholder: ["strategies", "strategySuppressions"],
+  },
+  // Audit surfaces are always DB-backed (postgres.audit_events / postgres.artifacts).
+  audit: {
+    db: ["/audit/operator-actions", "/audit/artifacts", "/ops/operator-timeline"],
+    runtime: [],
+    broker: [],
+    placeholder: ["auditActions", "artifactRegistry", "operatorTimeline"],
+  },
+  // Ops panel mixes runtime status with DB operator history and config diffs.
+  ops: {
+    db: ["/ops/operator-timeline", "/system/config-diffs"],
+    runtime: ["/system/status", "/system/preflight"],
+    broker: [],
+    placeholder: ["status", "preflight", "configDiffs", "operatorTimeline"],
+  },
+  // Config fingerprint and metadata are daemon runtime state. Config diffs are DB-persisted.
+  settings: {
+    db: ["/system/config-diffs"],
+    runtime: ["/system/metadata", "/system/config-fingerprint", "/system/runtime-leadership"],
+    broker: [],
+    placeholder: ["metadata", "configFingerprint", "runtimeLeadership", "configDiffs"],
+  },
+  // Topology is daemon runtime state — no DB backing.
+  topology: {
+    db: [],
+    runtime: ["/system/topology"],
+    broker: [],
+    placeholder: ["topology"],
+  },
+  // Transport is daemon runtime state (outbox/inbox depth from execution layer).
+  transport: {
+    db: [],
+    runtime: ["/execution/transport"],
+    broker: [],
+    placeholder: ["transport"],
+  },
+  // Incidents are persisted records (DB).
+  incidents: {
+    db: ["/incidents"],
+    runtime: [],
+    broker: [],
+    placeholder: ["incidents"],
+  },
+  // Active alerts are live daemon state (runtime). Triage records are DB-persisted.
+  alerts: {
+    db: ["/alerts/triage"],
+    runtime: ["/alerts/active", "/system/status"],
+    broker: [],
+    placeholder: ["alerts", "alertTriage"],
+  },
+  // Session state (trading windows, calendar) is daemon runtime — no DB.
+  session: {
+    db: [],
+    runtime: ["/system/session", "/system/status"],
+    broker: [],
+    placeholder: ["sessionState"],
+  },
+  // Config fingerprint and runtime leadership are daemon runtime state. Diffs are DB.
+  config: {
+    db: ["/system/config-diffs"],
+    runtime: ["/system/config-fingerprint", "/system/runtime-leadership"],
+    broker: [],
+    placeholder: ["configFingerprint", "runtimeLeadership", "configDiffs"],
+  },
+  // Market data quality assessment is daemon runtime state.
+  marketData: {
+    db: [],
+    runtime: ["/market-data/quality", "/system/status"],
+    broker: [],
+    placeholder: ["marketDataQuality"],
+  },
+  // Runtime leadership is pure daemon runtime state — no DB query backing in current arch.
+  runtime: {
+    db: [],
+    runtime: ["/system/runtime-leadership", "/system/status", "/system/preflight"],
+    broker: [],
+    placeholder: ["runtimeLeadership", "status", "preflight"],
+  },
+  // Artifact registry is DB-backed (audit artifact records).
+  artifacts: {
+    db: ["/audit/artifacts", "/ops/operator-timeline"],
+    runtime: [],
+    broker: [],
+    placeholder: ["artifactRegistry", "operatorTimeline"],
+  },
+  // Operator timeline is durable DB audit log.
+  operatorTimeline: {
+    db: ["/ops/operator-timeline", "/audit/operator-actions"],
+    runtime: [],
+    broker: [],
+    placeholder: ["operatorTimeline", "auditActions"],
+  },
 };
 
 function hasEndpoint(realEndpoints: string[], hints: string[]) {

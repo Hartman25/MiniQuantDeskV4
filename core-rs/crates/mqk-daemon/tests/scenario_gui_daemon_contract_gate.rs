@@ -47,7 +47,7 @@ fn has_unavailable_marker(value: &str) -> bool {
 async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
     let router = make_router();
 
-    let cases: [(&str, &[&str]); 9] = [
+    let cases: [(&str, &[&str]); 11] = [
         (
             "/api/v1/system/status",
             &[
@@ -65,6 +65,10 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
                 "execution_disarmed",
                 "blockers",
             ],
+        ),
+        (
+            "/api/v1/system/metadata",
+            &["build_version", "api_version", "broker_adapter", "endpoint_status"],
         ),
         (
             "/api/v1/execution/summary",
@@ -114,6 +118,15 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
             "/api/v1/ops/operator-timeline",
             &["canonical_route", "backend", "rows"],
         ),
+        (
+            "/api/v1/system/runtime-leadership",
+            &[
+                "leader_node",
+                "leader_lease_state",
+                "generation_id",
+                "post_restart_recovery_state",
+            ],
+        ),
     ];
 
     for (uri, required_keys) in cases {
@@ -149,6 +162,45 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
                     .as_str()
                     .is_some_and(|v| v.contains("postgres")),
                 "{uri} must expose durable backend source"
+            );
+        }
+
+        if uri == "/api/v1/system/metadata" {
+            // api_version must be exactly "v1".
+            assert_eq!(json_str(&json, "api_version"), "v1");
+            // paper adapter in test state.
+            assert_eq!(json_str(&json, "broker_adapter"), "paper");
+            assert_eq!(json_str(&json, "adapter_id"), "paper");
+            // disarmed in test state → endpoint_status must be "warning".
+            assert_eq!(json_str(&json, "endpoint_status"), "warning");
+            // build_version must be a non-empty string.
+            assert!(
+                json["build_version"].as_str().is_some_and(|v| !v.is_empty()),
+                "/api/v1/system/metadata build_version must be a non-empty string"
+            );
+        }
+
+        if uri == "/api/v1/system/runtime-leadership" {
+            // Single-node daemon always reports "local".
+            assert_eq!(json_str(&json, "leader_node"), "local");
+            // No active run in test state → idle → lease is "lost".
+            assert_eq!(json_str(&json, "leader_lease_state"), "lost");
+            // generation_id must be a non-empty string (synthetic fallback is fine).
+            assert!(
+                json["generation_id"].as_str().is_some_and(|v| !v.is_empty()),
+                "/api/v1/system/runtime-leadership generation_id must be non-empty"
+            );
+            // No DB pool in test state → restart_count_24h must be 0.
+            assert_eq!(json["restart_count_24h"].as_u64(), Some(0));
+            // No run history in test state → last_restart_at must be null.
+            assert_eq!(json["last_restart_at"], serde_json::Value::Null);
+            // Reconcile status "unknown" in test state → "in_progress".
+            assert_eq!(json_str(&json, "post_restart_recovery_state"), "in_progress");
+            // No DB → checkpoints must be an empty array.
+            assert_eq!(
+                json["checkpoints"].as_array().map(|v| v.is_empty()),
+                Some(true),
+                "/api/v1/system/runtime-leadership checkpoints must be empty in test state"
             );
         }
     }
@@ -187,8 +239,13 @@ async fn gui_system_status_and_preflight_surfaces_are_semantically_truthful() {
     assert_eq!(json_str(&status, "adapter_id"), "paper");
     assert_eq!(status["deployment_start_allowed"], true);
     assert!(status["deployment_blocker"].is_null());
-    assert!(has_unavailable_marker(json_str(&status, "db_status")));
-    assert!(has_unavailable_marker(json_str(&status, "audit_writer_status")));
+    // No DB pool in test state → db_status must be "unavailable" (not "unknown").
+    // "unknown" = unchecked; "unavailable" = checked and confirmed no pool.
+    assert_eq!(json_str(&status, "db_status"), "unavailable");
+    assert_eq!(json_str(&status, "audit_writer_status"), "unavailable");
+    // No market data subsystem wired → must be "not_configured", not "unknown".
+    // "unknown" = we didn't even check; "not_configured" = explicitly absent.
+    assert_eq!(json_str(&status, "market_data_health"), "not_configured");
 
     let preflight_req = Request::builder()
         .method("GET")
@@ -205,15 +262,31 @@ async fn gui_system_status_and_preflight_surfaces_are_semantically_truthful() {
     assert_eq!(preflight["strategy_disarmed"], true);
     assert_eq!(preflight["execution_disarmed"], true);
     assert_eq!(preflight["live_routing_disabled"], true);
+    // No DB pool in test state → db_reachable must be null (not a synthetic blocker).
     assert_eq!(preflight["db_reachable"], serde_json::Value::Null);
-    assert_eq!(preflight["broker_config_present"], serde_json::Value::Null);
+    // Paper adapter → broker_config_present is Some(false) → JSON false, not null.
+    assert_eq!(preflight["broker_config_present"], false);
+    // Market data config is genuinely unknown at this level → must stay null.
     assert_eq!(preflight["market_data_config_present"], serde_json::Value::Null);
+    // Audit writer proxies DB; no DB pool → null.
     assert_eq!(preflight["audit_writer_ready"], serde_json::Value::Null);
-    assert!(preflight["blockers"]
+
+    let blockers: Vec<&str> = preflight["blockers"]
         .as_array()
         .expect("blockers array")
         .iter()
-        .any(|b| b.as_str() == Some("Execution is disarmed at the integrity gate.")));
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    // Synthetic "unavailable from wiring" blockers must be gone.
+    assert!(
+        !blockers.iter().any(|s| s.contains("unavailable from current daemon preflight wiring")),
+        "synthetic wiring blockers must not appear in preflight response: {blockers:?}"
+    );
+    // Real execution-disarmed blocker must still be present.
+    assert!(
+        blockers.iter().any(|s| *s == "Execution is disarmed at the integrity gate."),
+        "real execution-disarmed blocker must be present: {blockers:?}"
+    );
 }
 
 #[tokio::test]

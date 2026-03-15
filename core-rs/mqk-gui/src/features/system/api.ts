@@ -67,12 +67,6 @@ interface LegacyDaemonStatusSnapshot {
   integrity_armed: boolean;
 }
 
-interface LegacyHealthResponse {
-  ok: boolean;
-  service: string;
-  version: string;
-}
-
 interface LegacyTradingAccountResponse {
   has_snapshot: boolean;
   account: {
@@ -328,19 +322,6 @@ function mapLegacyStatusToSystemStatus(legacy: LegacyDaemonStatusSnapshot): Syst
   };
 }
 
-function deriveLegacyPreflight(status: LegacyDaemonStatusSnapshot): PreflightStatus {
-  return {
-    ...DEFAULT_PREFLIGHT,
-    daemon_reachable: true,
-    runtime_idle: !String(status.state ?? "").toLowerCase().includes("run"),
-    strategy_disarmed: !status.integrity_armed,
-    execution_disarmed: !status.integrity_armed,
-    live_routing_disabled: true,
-    warnings: ["Derived from legacy /v1/status; canonical preflight endpoint unavailable."],
-    blockers: [],
-  };
-}
-
 function legacyActionPaths(actionKey: string): string[] {
   switch (actionKey) {
     case "start-system":
@@ -488,16 +469,6 @@ function deriveExecutionSummaryFromOrders(orders: ExecutionOrderRow[] | null): E
   };
 }
 
-function mapLegacyHealthToMetadata(health: LegacyHealthResponse | null): MetadataSummary | null {
-  if (!health) return null;
-  return {
-    build_version: health.version,
-    api_version: "v1",
-    broker_adapter: "unknown",
-    endpoint_status: health.ok ? "ok" : "warning",
-  };
-}
-
 function deriveDataSourceDetail(args: {
   probeResults: EndpointFetchResult<unknown>[];
   usedMockSections: string[];
@@ -536,12 +507,15 @@ function deriveDataSourceDetail(args: {
 
 export async function fetchOperatorModel(): Promise<SystemModel> {
   const statusProbe = await fetchJsonCandidates<SystemStatus | LegacyDaemonStatusSnapshot>(["/api/v1/system/status", "/v1/status"]);
-  const healthProbe = await fetchJsonCandidates<MetadataSummary | LegacyHealthResponse>(["/api/v1/system/metadata", "/v1/health"]);
+  const healthProbe = await fetchJsonCandidates<MetadataSummary>(["/api/v1/system/metadata"]);
 
-  const legacyStatus =
+  // Extract legacy status only when the statusProbe itself resolved via the
+  // legacy path.  Do NOT fire a second fetch — canonical is preferred and if
+  // canonical failed the probe already tried the legacy path as a fallback.
+  const legacyStatusFromProbe: LegacyDaemonStatusSnapshot | null =
     statusProbe.ok && statusProbe.endpoint === "/v1/status"
       ? (statusProbe.data as LegacyDaemonStatusSnapshot)
-      : await tryFetchJson<LegacyDaemonStatusSnapshot>(["/v1/status"]);
+      : null;
 
   const probes = await Promise.all([
     fetchJsonCandidates<PreflightStatus>(["/api/v1/system/preflight"]),
@@ -609,7 +583,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     operatorTimelineR,
   ] = probes;
 
-  const daemonReachable = statusProbe.ok || healthProbe.ok || Boolean(legacyStatus) || probes.some((p) => p.ok);
+  const daemonReachable = statusProbe.ok || healthProbe.ok || Boolean(legacyStatusFromProbe) || probes.some((p) => p.ok);
   const connected = daemonReachable;
 
   const legacyOrdersResponse = executionOrdersR.ok && executionOrdersR.endpoint === "/v1/trading/orders"
@@ -628,10 +602,6 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
 
   const legacyFillsResponse = fillsR.ok && fillsR.endpoint === "/v1/trading/fills"
     ? (fillsR.data as LegacyTradingFillsResponse)
-    : null;
-
-  const legacyHealthResponse = healthProbe.ok && healthProbe.endpoint === "/v1/health"
-    ? (healthProbe.data as LegacyHealthResponse)
     : null;
 
   const executionOrders = Array.isArray(executionOrdersR.data)
@@ -692,9 +662,9 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   if (!fills) usedMockSections.push("fills");
 
   const metadata =
-    healthProbe.ok && healthProbe.endpoint === "/api/v1/system/metadata" && healthProbe.data !== undefined
+    healthProbe.ok && healthProbe.data !== undefined
       ? (healthProbe.data as MetadataSummary)
-      : mapLegacyHealthToMetadata(legacyHealthResponse);
+      : null;
   if (!metadata) usedMockSections.push("metadata");
 
   if (!selectedTimeline) usedMockSections.push("selectedTimeline");
@@ -833,13 +803,18 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     status: objectOrFallback(
       statusProbe.ok && statusProbe.endpoint === "/api/v1/system/status"
         ? statusProbe.data
-        : legacyStatus
-          ? mapLegacyStatusToSystemStatus(legacyStatus)
+        // statusProbe already tried /v1/status as a fallback before giving up;
+        // if it resolved there, use the legacy mapping.  No additional fetch.
+        : legacyStatusFromProbe
+          ? mapLegacyStatusToSystemStatus(legacyStatusFromProbe)
           : null,
       unavailableStatus,
     ),
+    // Preflight is fail-closed: if the canonical endpoint did not return a
+    // valid response, surface explicit unavailable state rather than a
+    // silently-derived fake preflight with no blockers.
     preflight: objectOrFallback(
-      preflightR.ok ? preflightR.data : legacyStatus ? deriveLegacyPreflight(legacyStatus) : null,
+      preflightR.ok ? preflightR.data : null,
       unavailablePreflight,
     ),
     executionSummary: executionSummary ?? unavailableExecutionSummary,

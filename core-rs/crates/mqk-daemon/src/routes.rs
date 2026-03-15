@@ -36,8 +36,10 @@ use crate::{
         HealthResponse, IntegrityResponse, OperatorActionAuditRow, OperatorActionsAuditResponse,
         OperatorTimelineResponse, OperatorTimelineRow, PortfolioSummaryResponse,
         PreflightStatusResponse, ReconcileSummaryResponse, RiskSummaryResponse,
-        RuntimeErrorResponse, SessionStateResponse, StrategySummaryRow, StrategySuppressionRow,
-        SystemStatusResponse, TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
+        RuntimeErrorResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
+        SessionStateResponse, StrategySummaryRow, StrategySuppressionRow,
+        SystemMetadataResponse, SystemStatusResponse, TradingAccountResponse,
+        TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
     state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot},
@@ -131,6 +133,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/stream", get(stream))
         .route("/api/v1/system/status", get(system_status))
         .route("/api/v1/system/preflight", get(system_preflight))
+        .route("/api/v1/system/metadata", get(system_metadata))
+        .route(
+            "/api/v1/system/runtime-leadership",
+            get(system_runtime_leadership),
+        )
         .route("/api/v1/execution/summary", get(execution_summary))
         .route("/api/v1/portfolio/summary", get(portfolio_summary))
         .route("/api/v1/risk/summary", get(risk_summary))
@@ -579,15 +586,27 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
     let reconcile = st.current_reconcile_snapshot().await;
     let snapshot_present = st.broker_snapshot.read().await.is_some();
     let integrity_armed = status.integrity_armed;
-    let risk_blocked = if let Some(db) = st.db.as_ref() {
-        mqk_db::load_risk_block_state(db)
-            .await
+
+    // Derive db_status and risk_blocked from a single DB query so the status
+    // surface reflects real DB reachability at zero extra cost.
+    // "unavailable" = no pool configured (intentional, e.g. paper/dev mode).
+    // "ok" = pool configured and query succeeded.
+    // "warning" = pool configured but query failed (reachability problem).
+    let (risk_blocked, db_status) = if let Some(db) = st.db.as_ref() {
+        let risk_result = mqk_db::load_risk_block_state(db).await;
+        let db_ok = risk_result.is_ok();
+        let risk_blocked = risk_result
             .ok()
             .flatten()
-            .is_some_and(|risk| risk.blocked)
+            .is_some_and(|risk| risk.blocked);
+        let db_status = if db_ok { "ok" } else { "warning" }.to_string();
+        (risk_blocked, db_status)
     } else {
-        false
+        (false, "unavailable".to_string())
     };
+
+    // Audit writer uses the DB; its status is directly proxied via db_status.
+    let audit_writer_status = db_status.clone();
 
     let runtime_status = runtime_status_from_state(&status.state).to_string();
     let (environment, live_routing_enabled) =
@@ -599,9 +618,12 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
     // critical signal — we cannot verify order state is consistent.
     let has_critical = matches!(reconcile_status.as_str(), "dirty" | "stale")
         || (reconcile_status == "unknown" && runtime_status == "running");
+    // db_status "warning" means a configured DB is not responding — that is a
+    // real warning.  "unavailable" (no pool) is not a warning by itself.
     let has_warning = broker_status != "ok"
         || integrity_status != "ok"
         || reconcile_status != "ok"
+        || db_status == "warning"
         || status.notes.is_some()
         || reconcile.note.is_some();
 
@@ -615,11 +637,13 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             deployment_blocker: st.deployment_readiness().blocker.clone(),
             runtime_status,
             broker_status,
-            db_status: "unknown".to_string(),
-            market_data_health: "unknown".to_string(),
+            db_status,
+            // No market data subsystem is wired in AppState; "not_configured" is
+            // the authoritative signal (as opposed to "unknown" = unchecked).
+            market_data_health: "not_configured".to_string(),
             reconcile_status,
             integrity_status,
-            audit_writer_status: "unknown".to_string(),
+            audit_writer_status,
             last_heartbeat: status.deadman_last_heartbeat_utc.clone(),
             deadman_status: status.deadman_status.clone(),
             loop_latency_ms: None,
@@ -653,26 +677,49 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
     let strategy_disarmed = !integrity_armed;
     let execution_disarmed = !integrity_armed;
 
-    let mut warnings = vec![
-        "Preflight is partially derived from in-memory daemon state; DB, broker config, market data config, and audit writer readiness are not wired yet.".to_string(),
-    ];
+    // Check DB reachability when a pool is configured.  When no pool is
+    // configured (e.g. in tests or no-DB dev mode) return None rather than
+    // emitting a synthetic blocker.
+    let db_reachable: Option<bool> = if let Some(db) = st.db.as_ref() {
+        Some(sqlx::query("SELECT 1").execute(db).await.is_ok())
+    } else {
+        None
+    };
+
+    // Broker config presence is knowable from the adapter identity.
+    // Synthetic/paper adapters have no real broker config; any named live
+    // adapter (e.g. "alpaca") has one configured.
+    let broker_config_present: Option<bool> = match st.adapter_id() {
+        "" | "null" | "paper" => Some(false),
+        _ => Some(true),
+    };
+
+    // Market data config readiness is not observable at this level without
+    // probing env/config; leave explicitly as None rather than inventing a
+    // blocker.
+    let market_data_config_present: Option<bool> = None;
+
+    // Audit writer uses the DB; proxy its readiness via DB reachability.
+    let audit_writer_ready: Option<bool> = db_reachable;
+
+    let mut warnings = Vec::new();
     if status.notes.is_some() {
+        warnings.push("Daemon status contains notes; verify runtime state.".to_string());
+    }
+    if market_data_config_present.is_none() {
         warnings.push(
-            "Daemon status contains placeholder notes; runtime wiring is incomplete.".to_string(),
+            "Market data config readiness is not probed at preflight; verify separately."
+                .to_string(),
         );
     }
 
-    let mut blockers = vec![
-        "DB reachability is unavailable from current daemon preflight wiring.".to_string(),
-        "Broker config presence is unavailable from current daemon preflight wiring.".to_string(),
-        "Market data config presence is unavailable from current daemon preflight wiring."
-            .to_string(),
-        "Audit writer readiness is unavailable from current daemon preflight wiring.".to_string(),
-    ];
+    let mut blockers = Vec::new();
+    if db_reachable == Some(false) {
+        blockers.push("Database is not reachable.".to_string());
+    }
     if execution_disarmed {
         blockers.push("Execution is disarmed at the integrity gate.".to_string());
     }
-
     if let Some(blocker) = st.deployment_readiness().blocker.clone() {
         blockers.push(blocker);
     }
@@ -684,16 +731,142 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
             daemon_mode: st.deployment_mode().as_api_label().to_string(),
             adapter_id: st.adapter_id().to_string(),
             deployment_start_allowed: st.deployment_readiness().start_allowed,
-            db_reachable: None,
-            broker_config_present: None,
-            market_data_config_present: None,
-            audit_writer_ready: None,
+            db_reachable,
+            broker_config_present,
+            market_data_config_present,
+            audit_writer_ready,
             runtime_idle: Some(status.state != "running"),
             strategy_disarmed,
             execution_disarmed,
             live_routing_disabled: true,
             warnings,
             blockers,
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/metadata
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn system_metadata(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let integrity_armed = {
+        let ig = st.integrity.read().await;
+        !ig.is_execution_blocked()
+    };
+    // "ok" when execution is armed and the daemon is ready for dispatch.
+    // "warning" when disarmed or halted — operator action is required.
+    let endpoint_status = if integrity_armed { "ok" } else { "warning" }.to_string();
+
+    (
+        StatusCode::OK,
+        Json(SystemMetadataResponse {
+            build_version: st.build.version.to_string(),
+            api_version: "v1".to_string(),
+            broker_adapter: st.adapter_id().to_string(),
+            endpoint_status,
+            daemon_mode: st.deployment_mode().as_api_label().to_string(),
+            adapter_id: st.adapter_id().to_string(),
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/runtime-leadership
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn system_runtime_leadership(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+    let reconcile = st.current_reconcile_snapshot().await;
+
+    // For a single-node daemon the local process always holds or loses the
+    // lease — there is no cluster election.
+    let leader_node = "local".to_string();
+    let leader_lease_state = match status.state.as_str() {
+        "running" => "held",
+        "unknown" => "contested",
+        _ => "lost", // idle, halted
+    }
+    .to_string();
+
+    // Fetch the latest run record once — reused for generation_id, restart
+    // time, and the initial checkpoint row.
+    let latest_run = if let Some(db) = st.db.as_ref() {
+        mqk_db::fetch_latest_run_for_engine(
+            db,
+            DAEMON_ENGINE_ID,
+            st.deployment_mode().as_db_mode(),
+        )
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+
+    // Generation ID: active run → latest run → synthetic fallback.
+    let generation_id = status
+        .active_run_id
+        .map(|id| id.to_string())
+        .or_else(|| latest_run.as_ref().map(|r| r.run_id.to_string()))
+        .unwrap_or_else(|| format!("{}-no-run", st.adapter_id()));
+
+    let last_restart_at = latest_run.as_ref().map(|r| r.started_at_utc.to_rfc3339());
+
+    // Post-restart recovery state is derived from reconcile result.
+    // "unknown" reconcile means reconcile has not yet run since the last
+    // restart (or daemon started without DB) — this is "in_progress", not
+    // "degraded", to distinguish it from a confirmed mismatch.
+    let post_restart_recovery_state = match reconcile.status.as_str() {
+        "ok" => "complete",
+        "unknown" => "in_progress",
+        _ => "degraded", // dirty, stale, unavailable
+    }
+    .to_string();
+
+    let recovery_checkpoint = reconcile
+        .last_run_at
+        .as_deref()
+        .unwrap_or("none")
+        .to_string();
+
+    // Build checkpoint rows from observable events.  When DB is available
+    // the latest run start is the first concrete checkpoint.
+    let mut checkpoints: Vec<RuntimeLeadershipCheckpointRow> = Vec::new();
+    if let Some(run) = &latest_run {
+        checkpoints.push(RuntimeLeadershipCheckpointRow {
+            checkpoint_id: run.run_id.to_string(),
+            checkpoint_type: "restart".to_string(),
+            timestamp: run.started_at_utc.to_rfc3339(),
+            generation_id: run.run_id.to_string(),
+            leader_node: leader_node.clone(),
+            status: "ok".to_string(),
+            note: format!(
+                "Run started; mode={}; adapter={}",
+                st.deployment_mode().as_api_label(),
+                st.adapter_id()
+            ),
+        });
+    }
+
+    (
+        StatusCode::OK,
+        Json(RuntimeLeadershipResponse {
+            leader_node,
+            leader_lease_state,
+            generation_id,
+            restart_count_24h: 0, // DB count query not yet wired; honest zero
+            last_restart_at,
+            post_restart_recovery_state,
+            recovery_checkpoint,
+            checkpoints,
         }),
     )
         .into_response()

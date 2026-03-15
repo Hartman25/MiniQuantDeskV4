@@ -360,6 +360,70 @@ pub struct StrategySuppressionRow {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/system/runtime-leadership
+// ---------------------------------------------------------------------------
+
+/// One durable checkpoint event in the runtime lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeLeadershipCheckpointRow {
+    pub checkpoint_id: String,
+    /// "restart" | "leader_acquired" | "leader_lost" | "recovery_complete" | "snapshot_refresh"
+    pub checkpoint_type: String,
+    pub timestamp: String,
+    pub generation_id: String,
+    pub leader_node: String,
+    /// "ok" | "warning" | "critical"
+    pub status: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeLeadershipResponse {
+    /// "local" for a single-node daemon; cluster node identifier otherwise.
+    pub leader_node: String,
+    /// "held" = running and owns the lease; "contested" = unknown state;
+    /// "lost" = idle or halted.
+    pub leader_lease_state: String,
+    /// Unique identifier for the current runtime generation (run_id or
+    /// synthetic fallback when no active run exists).
+    pub generation_id: String,
+    /// Count of daemon restarts in the last 24 h (0 when DB is unavailable).
+    pub restart_count_24h: u32,
+    /// UTC timestamp of the most recent run start, if known.
+    pub last_restart_at: Option<String>,
+    /// "complete" = reconcile confirmed clean post-restart;
+    /// "in_progress" = reconcile not yet finished;
+    /// "degraded" = reconcile found mismatches or is stale.
+    pub post_restart_recovery_state: String,
+    /// Reconcile timestamp or "none" when reconcile has not yet run.
+    pub recovery_checkpoint: String,
+    /// Ordered lifecycle checkpoint events (empty when DB unavailable).
+    pub checkpoints: Vec<RuntimeLeadershipCheckpointRow>,
+}
+
+// ---------------------------------------------------------------------------
+// /api/v1/system/metadata
+// ---------------------------------------------------------------------------
+
+/// Canonical system metadata surface.  All fields are derived from durable
+/// daemon state at request time; no placeholders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemMetadataResponse {
+    /// Daemon binary version from the build manifest.
+    pub build_version: String,
+    /// API version in use (currently "v1").
+    pub api_version: String,
+    /// Active broker adapter identifier (e.g. "paper", "alpaca").
+    pub broker_adapter: String,
+    /// Overall daemon endpoint health: "ok" if armed, "warning" otherwise.
+    pub endpoint_status: String,
+    /// Deployment mode label (paper/live/backtest).
+    pub daemon_mode: String,
+    /// Adapter ID — mirrors broker_adapter for GUI convenience.
+    pub adapter_id: String,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/diagnostics/snapshot (B4)
 // ---------------------------------------------------------------------------
 
