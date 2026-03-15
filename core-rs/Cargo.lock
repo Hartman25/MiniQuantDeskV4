@@ -1942,6 +1942,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "mqk-broker-alpaca",
  "mqk-broker-paper",
  "mqk-db",
  "mqk-execution",

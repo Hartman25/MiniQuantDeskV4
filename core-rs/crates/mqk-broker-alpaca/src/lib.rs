@@ -5,6 +5,9 @@
 //! - `types`     - raw Alpaca v2 wire shapes (REST + websocket).
 //! - `normalize` - converts raw `AlpacaTradeUpdate` into canonical `BrokerEvent`.
 //!
+//! Legacy non-functional gateway scaffolding has been removed from the
+//! production adapter surface; this crate exports only live adapter paths.
+//!
 //! # `AlpacaBrokerAdapter`
 //!
 //! Implements `mqk_execution::BrokerAdapter` against the Alpaca v2 REST API using
@@ -17,34 +20,39 @@
 //! | `replace_order` | `GET+PATCH /v2/orders/{id}`            | Fetches filled_qty before PATCH    |
 //! | `fetch_events`  | `GET /v2/account/activities`           | Polling; maps lifecycle activities  |
 //!
-//! # A5 inbound lifecycle status
+//! # Inbound lifecycle coverage
 //!
 //! **Normalization boundary (fully proven):** `normalize_trade_update` handles
 //! all 8 canonical lifecycle variants - Ack, PartialFill, Fill, CancelAck,
 //! CancelReject, ReplaceAck, ReplaceReject, Reject - as proven by contract
-//! tests (C1-C10) and inbound lifecycle tests (IL-1-IL-11).
+//! tests (C1-C10), inbound lifecycle tests (IL-1-IL-11), and canonical
+//! event-mapping tests (BRK-03R/04R/05R/06R).
 //!
-//! **`fetch_events` production path (partial):** REST polling via
-//! `GET /v2/account/activities` only surfaces `FILL` and `PARTIAL_FILL`
-//! activities.  The following 6 lifecycle variants are **not delivered** by the
-//! current `fetch_events` implementation:
-//!   - `Ack` (Alpaca events: `new`, `pending_new`, `accepted`)
-//!   - `CancelAck` (Alpaca events: `canceled`, `expired`)
-//!   - `CancelReject` (Alpaca event: `cancel_rejected`)
-//!   - `ReplaceAck` (Alpaca event: `replaced`)
-//!   - `ReplaceReject` (Alpaca event: `replace_rejected`)
-//!   - `Reject` (Alpaca event: `rejected`)
+//! **Websocket inbound lane (BRK-01R, complete):** `parse_ws_message` +
+//! `build_inbound_batch_from_ws_update` deliver the full lifecycle for all
+//! 11 Alpaca event strings → 8 canonical `BrokerEvent` variants.  All event
+//! types (Ack, CancelAck, CancelReject, ReplaceAck, ReplaceReject, Reject,
+//! PartialFill, Fill) are proven to flow through the WS ingest path.
 //!
-//! A future patch must add the Alpaca websocket trade-update stream to deliver
-//! the full lifecycle through `fetch_events`.
+//! **REST activity polling boundary:** `GET /v2/account/activities` at the
+//! Alpaca API level only returns `FILL` and `PARTIAL_FILL` activity records.
+//! The `activity_to_trade_update` function in this crate handles all known
+//! activity types for defensive completeness, but in practice only fill-class
+//! events arrive via REST.  All lifecycle events are authoritative via the WS
+//! path.
 //!
 //! # No randomness, no wall-clock reads
 //!
 //! `AlpacaBrokerAdapter` itself introduces no timestamps or UUIDs.  All
 //! identifiers used in canonical events come from the Alpaca response payload
 //! and are normalised through `normalize_trade_update`.
+pub mod inbound;
 pub mod normalize;
 pub mod types;
+pub use inbound::{
+    build_inbound_batch_from_ws_update, mark_gap_detected, parse_ws_message, AlpacaWsMessage,
+    InboundBatch, WsParseError,
+};
 use crate::normalize::normalize_trade_update;
 use crate::types::{
     AlpacaFetchCursor, AlpacaOrder, AlpacaOrderActivity, AlpacaOrderFull, AlpacaReplaceBody,

@@ -6,6 +6,7 @@
 //! → OMS state machine → portfolio state.  No other code path may submit to
 //! the broker.
 
+pub mod alpaca_inbound;
 pub mod observability;
 pub mod orchestrator;
 pub mod runtime_risk;

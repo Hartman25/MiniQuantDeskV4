@@ -189,6 +189,12 @@ async fn cleanup_cursor(pool: &PgPool, adapter_id: &str) -> Result<()> {
         .await?;
     Ok(())
 }
+async fn cleanup_lease(pool: &PgPool) -> Result<()> {
+    sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
 fn make_tracking_orch(
     pool: PgPool,
     run_id: Uuid,
@@ -337,6 +343,7 @@ async fn a2_orchestrator_advances_db_cursor_after_tick() -> Result<()> {
     // ── Post-test cleanup ──────────────────────────────────────────────────
     cleanup_run(&pool, run_id).await?;
     cleanup_cursor(&pool, A2_ADAPTER_ID).await?;
+    cleanup_lease(&pool).await?;
     Ok(())
 }
 // ---------------------------------------------------------------------------
@@ -369,6 +376,7 @@ async fn a3_orchestrator_resumes_from_db_cursor() -> Result<()> {
     // ── Pre-test cleanup ───────────────────────────────────────────────────
     cleanup_run(&pool, run_id).await?;
     cleanup_cursor(&pool, A3_ADAPTER_ID).await?;
+    cleanup_lease(&pool).await?;
     // ── Seed a RUNNING run ─────────────────────────────────────────────────
     seed_running_run(&pool, run_id).await?;
     // ── Simulate a prior process having written cursor "resume-from-42" ───
@@ -474,6 +482,7 @@ async fn a4_orchestrator_persists_fetch_error_cursor_state() -> Result<()> {
     let run_id: Uuid = A4_RUN_ID.parse().expect("A4_RUN_ID must be a valid UUID");
     cleanup_run(&pool, run_id).await?;
     cleanup_cursor(&pool, A4_ADAPTER_ID).await?;
+    cleanup_lease(&pool).await?;
     seed_running_run(&pool, run_id).await?;
     let persisted_cursor =
         r#"{"schema_version":1,"rest_activity_after":"20240615093001000::activity","trade_updates":{"status":"cold_start_unproven"}}"#

@@ -74,6 +74,12 @@ async fn lifecycle_pool() -> sqlx::PgPool {
         .execute(&pool)
         .await
         .expect("cleanup daemon runs");
+    // DMON-06: clear persisted reconcile status so each test starts from
+    // "unknown" rather than inheriting a stale "ok" from a prior session.
+    sqlx::query("DELETE FROM sys_reconcile_status_state")
+        .execute(&pool)
+        .await
+        .expect("cleanup sys_reconcile_status_state");
 
     pool
 }
@@ -249,7 +255,7 @@ async fn start_spawns_real_execution_loop() {
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
-async fn control_restart_surfaces_durable_runtime_conflict_truth() {
+async fn control_restart_route_is_not_exposed_even_with_durable_runtime_conflict_truth() {
     let pool = lifecycle_pool().await;
     let run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"mqk-daemon-rt02-restart-conflict");
     mqk_db::insert_run(
@@ -270,29 +276,19 @@ async fn control_restart_surfaces_durable_runtime_conflict_truth() {
     mqk_db::arm_run(&pool, run_id).await.expect("arm run");
     mqk_db::begin_run(&pool, run_id).await.expect("begin run");
 
+    // Ensure the operator token is set so auth succeeds and we can see whether
+    // the route itself returns 404 (not exposed) vs 401 (auth rejected first).
+    ensure_test_operator_token();
     let st = Arc::new(state::AppState::new_with_db(pool));
-    let req = Request::builder()
+    let req = authed(Request::builder())
         .method("POST")
         .uri("/control/restart")
         .header("content-type", "application/json")
         .body(axum::body::Body::from(r#"{"reason":"operator request"}"#))
         .unwrap();
-    let (status, body) = call(make_router(st), req).await;
+    let (status, _body) = call(make_router(st), req).await;
 
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    let json = parse_json(body);
-    assert_eq!(json["gate"], "restart_not_authoritative");
-    assert_eq!(json["restart_authority"], "not_authoritative");
-    assert_eq!(json["requested_action"], "restart");
-    assert_eq!(json["achieved_action"], "none");
-    assert_eq!(
-        json["control_truth"]["durable_active_run_id"],
-        run_id.to_string()
-    );
-    assert_eq!(
-        json["control_truth"]["durable_active_without_local_ownership"],
-        true
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -479,6 +475,15 @@ async fn deadman_expiry_halts_and_disarms_runtime() {
         .expect("valid run uuid");
 
     let pool = st.db.as_ref().expect("db configured");
+    // Wait for tick 0 to complete (including heartbeat_run) before injecting the
+    // stale heartbeat.  Without this, the stale UPDATE races with the execution
+    // loop's initial tick: if tick 0's deadman SELECT resolves before the UPDATE
+    // commits, tick 0's heartbeat_run refreshes the heartbeat and every
+    // subsequent tick sees a fresh value (age ≈ 1 s < DEADMAN_TTL_SECONDS=5 s),
+    // so the deadman never fires.  800 ms >> worst-case tick-0 duration on
+    // a local DB, ensuring heartbeat_run has already written before we overwrite.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
     sqlx::query(
         "UPDATE runs SET last_heartbeat_utc = now() - interval '10 second' WHERE run_id = $1",
     )
@@ -487,6 +492,9 @@ async fn deadman_expiry_halts_and_disarms_runtime() {
     .await
     .expect("force stale heartbeat");
 
+    // Tick 1 fires at ≈ 1 s from loop start (≈ 200 ms after the stale UPDATE
+    // above).  Its deadman check sees age ≈ 10 s > TTL=5 s and halts the run.
+    // Sleep 1 500 ms to give tick 1 time to detect and persist the halt.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let run = mqk_db::fetch_run(pool, run_id).await.expect("fetch run");
@@ -510,6 +518,11 @@ async fn runtime_refuses_to_continue_after_deadman_expiry() {
         .expect("valid run uuid");
 
     let pool = st.db.as_ref().expect("db configured");
+    // Same race-condition fix as deadman_expiry_halts_and_disarms_runtime: wait
+    // for tick 0 to finish heartbeat_run before injecting the stale value so
+    // tick 1's deadman check reliably detects it.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
     sqlx::query(
         "UPDATE runs SET last_heartbeat_utc = now() - interval '10 second' WHERE run_id = $1",
     )
@@ -575,6 +588,12 @@ async fn status_surface_reports_deadman_truth() {
     assert_eq!(json["deadman_status"], "healthy");
 
     let pool = st.db.as_ref().expect("db configured");
+    // Wait for the execution loop's tick 0 to complete its heartbeat_run before
+    // injecting the stale value, matching the pattern from
+    // deadman_expiry_halts_and_disarms_runtime.  Without this, the stale UPDATE
+    // can race with tick 0's heartbeat_run.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
     sqlx::query(
         "UPDATE runs SET last_heartbeat_utc = now() - interval '10 second' WHERE run_id = $1",
     )
@@ -582,6 +601,9 @@ async fn status_surface_reports_deadman_truth() {
     .execute(pool)
     .await
     .expect("force stale heartbeat");
+    // Sleep long enough for tick 1 (fires ≈1 s after tick 0) to detect the stale
+    // heartbeat and exit.  The deadman pre-check guarantees the loop cannot
+    // refresh a stale heartbeat, so this longer sleep is safe.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let req2 = authed(Request::builder())
@@ -753,6 +775,17 @@ async fn control_disarm_is_durable_or_explicitly_scoped() {
     assert_eq!(arm_status, StatusCode::OK);
     assert_eq!(arm_body["requested_action"], "control.arm");
     assert_eq!(arm_body["accepted"], true);
+    let arm_audit_event_id = arm_body["audit"]["audit_event_id"]
+        .as_str()
+        .expect("arm audit_event_id present");
+    let arm_audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE event_id::text = $1 AND topic = 'operator'",
+    )
+    .bind(arm_audit_event_id)
+    .fetch_one(pool)
+    .await
+    .expect("verify arm audit row");
+    assert_eq!(arm_audit_count, 1);
     let armed: bool =
         sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
             .fetch_one(pool)
@@ -764,6 +797,17 @@ async fn control_disarm_is_durable_or_explicitly_scoped() {
     assert_eq!(disarm_status, StatusCode::OK);
     assert_eq!(disarm_body["requested_action"], "control.disarm");
     assert_eq!(disarm_body["accepted"], true);
+    let disarm_audit_event_id = disarm_body["audit"]["audit_event_id"]
+        .as_str()
+        .expect("disarm audit_event_id present");
+    let disarm_audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_events WHERE event_id::text = $1 AND topic = 'operator'",
+    )
+    .bind(disarm_audit_event_id)
+    .fetch_one(pool)
+    .await
+    .expect("verify disarm audit row");
+    assert_eq!(disarm_audit_count, 1);
     let disarmed: bool =
         sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
             .fetch_one(pool)
@@ -773,7 +817,7 @@ async fn control_disarm_is_durable_or_explicitly_scoped() {
 }
 
 #[tokio::test]
-async fn control_restart_fails_closed_if_not_authoritative() {
+async fn control_restart_route_is_not_exposed() {
     let st = Arc::new(state::AppState::new_with_operator_auth(
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
@@ -784,18 +828,9 @@ async fn control_restart_fails_closed_if_not_authoritative() {
         .header("content-type", "application/json")
         .body(axum::body::Body::from(r#"{"reason":"operator request"}"#))
         .unwrap();
-    let (status, body) = call(make_router(st), req).await;
+    let (status, _body) = call(make_router(st), req).await;
 
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    let json = parse_json(body);
-    assert_eq!(json["gate"], "restart_not_authoritative");
-    assert_eq!(json["restart_authority"], "not_authoritative");
-    assert_eq!(json["requested_action"], "restart");
-    assert_eq!(json["achieved_action"], "none");
-    assert_eq!(
-        json["control_truth"]["durable_active_without_local_ownership"],
-        false
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

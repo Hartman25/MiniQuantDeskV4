@@ -1,8 +1,8 @@
-//! B4: Observability & Operator Diagnostics — pure in-memory tests.
+//! B4: Observability & Operator Diagnostics proofs.
 //!
-//! All tests use only in-memory types (no DB, no async).  They prove that the
-//! pure builder functions in `mqk_runtime::observability` produce correct,
-//! deterministic output from known inputs.
+//! Most tests here validate pure in-memory builder behavior.
+//! `b4_11_collect_db_snapshot_end_to_end` adds a DB-backed proof to validate
+//! the end-to-end observability collection path.
 
 use std::collections::BTreeMap;
 
@@ -19,6 +19,23 @@ use mqk_runtime::observability::{
 };
 use serde_json::json;
 use uuid::Uuid;
+
+async fn runtime_test_pool() -> sqlx::PgPool {
+    let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
+        panic!(
+            "DB tests require MQK_DATABASE_URL; run: \
+             MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
+             cargo test -p mqk-runtime scenario_observability_b4 -- --include-ignored"
+        )
+    });
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("connect");
+    mqk_db::migrate(&pool).await.expect("migrate");
+    pool
+}
 
 // ---------------------------------------------------------------------------
 // B4-1: empty OMS yields no active orders
@@ -263,4 +280,78 @@ fn b4_9_system_block_halted_takes_priority_over_disarmed() {
 fn b4_10_system_block_none_when_not_blocked() {
     let block = build_system_block_state(false, false, None, vec![]);
     assert!(block.is_none(), "expected no block state when healthy");
+}
+
+// ---------------------------------------------------------------------------
+// B4-11: DB-backed end-to-end observability collection proof
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL integration DB"]
+async fn b4_11_collect_db_snapshot_end_to_end() {
+    let pool = runtime_test_pool().await;
+    let run_id = Uuid::new_v4();
+    let started_at = Utc::now();
+
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: format!("obs-e2e-{run_id}"),
+            mode: "PAPER".to_string(),
+            started_at_utc: started_at,
+            git_hash: "TEST".to_string(),
+            config_hash: "cfg-test".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "test-host".to_string(),
+        },
+    )
+    .await
+    .expect("insert run");
+    mqk_db::arm_run(&pool, run_id).await.expect("arm run");
+    mqk_db::begin_run(&pool, run_id).await.expect("begin run");
+
+    mqk_db::outbox_enqueue(
+        &pool,
+        run_id,
+        "obs-e2e-idem-1",
+        serde_json::json!({"symbol": "AAPL", "qty": 1}),
+    )
+    .await
+    .expect("enqueue outbox");
+
+    mqk_db::inbox_insert_deduped(
+        &pool,
+        run_id,
+        "obs-e2e-msg-1",
+        serde_json::json!({"type": "fill", "qty": 1}),
+    )
+    .await
+    .expect("insert inbox");
+
+    // Force both halt and disarm to prove priority ordering in the DB-backed path.
+    mqk_db::halt_run(&pool, run_id, Utc::now())
+        .await
+        .expect("halt run");
+    mqk_db::persist_arm_state(&pool, "DISARMED", Some("manual disarm"))
+        .await
+        .expect("persist disarm");
+
+    let snap = mqk_runtime::observability::collect_db_snapshot(&pool, run_id, started_at)
+        .await
+        .expect("collect snapshot");
+
+    assert_eq!(snap.run_id, Some(run_id));
+    assert_eq!(snap.pending_outbox.len(), 1, "unacked outbox rows surfaced");
+    assert_eq!(
+        snap.recent_inbox_events.len(),
+        1,
+        "unapplied inbox rows surfaced"
+    );
+    assert_eq!(snap.recent_inbox_events[0].event_type, "fill");
+
+    let block = snap
+        .system_block_state
+        .expect("blocked state must be present");
+    assert_eq!(block.reason_code, "HALTED_IN_DB");
 }

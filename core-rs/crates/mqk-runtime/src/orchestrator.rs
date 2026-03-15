@@ -475,11 +475,28 @@ where
         };
         for event in &events {
             let msg_json = serde_json::to_value(event)?;
-            let _inserted = mqk_db::inbox_insert_deduped(
+            let event_kind = match event {
+                BrokerEvent::Ack { .. } => "ack",
+                BrokerEvent::PartialFill { .. } => "partial_fill",
+                BrokerEvent::Fill { .. } => "fill",
+                BrokerEvent::CancelAck { .. } => "cancel_ack",
+                BrokerEvent::CancelReject { .. } => "cancel_reject",
+                BrokerEvent::ReplaceAck { .. } => "replace_ack",
+                BrokerEvent::ReplaceReject { .. } => "replace_reject",
+                BrokerEvent::Reject { .. } => "reject",
+            };
+            let now = self.time_source.now_utc();
+            let _inserted = mqk_db::inbox_insert_deduped_with_identity(
                 &self.pool,
                 self.run_id,
                 event.broker_message_id(),
-                msg_json,
+                event.broker_fill_id(),
+                event.internal_order_id(),
+                event.broker_order_id().unwrap_or(event.internal_order_id()),
+                event_kind,
+                &msg_json,
+                0,
+                now,
             )
             .await?;
         }

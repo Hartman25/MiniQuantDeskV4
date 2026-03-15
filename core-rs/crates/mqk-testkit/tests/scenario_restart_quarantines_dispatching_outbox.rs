@@ -211,7 +211,9 @@ async fn restart_quarantines_dispatching_row_and_refuses_dispatch() -> Result<()
     .await?;
     assert!(created, "outbox row must be created");
 
-    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "patch2-dispatcher", Utc::now()).await?;
+    let claimed =
+        mqk_db::outbox_claim_batch_for_run(&pool, run_id, 1, "patch2-dispatcher", Utc::now())
+            .await?;
     assert_eq!(claimed.len(), 1, "must claim the pending row");
 
     let marked =

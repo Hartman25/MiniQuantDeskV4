@@ -31,7 +31,7 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
   portfolio: { db: ["/portfolio/positions", "/portfolio/summary"], runtime: ["/portfolio"], broker: ["/execution/fills"], placeholder: ["portfolioSummary", "positions", "fills"] },
   reconcile: { db: ["/reconcile/summary", "/reconcile/mismatches"], runtime: ["/system/runtime-leadership"], broker: ["/reconcile", "/broker"], placeholder: ["reconcileSummary", "mismatches"] },
   strategy: { db: ["/strategy/suppressions"], runtime: ["/strategy/rows"], broker: ["/execution/orders"], placeholder: ["strategies", "strategySuppressions"] },
-  audit: { db: ["/audit/actions"], runtime: ["/system/metadata"], broker: [], placeholder: ["auditActions"] },
+  audit: { db: ["/audit/operator-actions"], runtime: ["/system/metadata"], broker: [], placeholder: ["auditActions"] },
   ops: { db: ["/system/config-diffs"], runtime: ["/system/status", "/system/preflight"], broker: ["/broker"], placeholder: ["status", "preflight", "configDiffs"] },
   settings: { db: ["/system/config-diffs"], runtime: ["/system/metadata"], broker: [], placeholder: ["metadata", "configDiffs"] },
   topology: { db: ["/system/topology"], runtime: ["/system/topology"], broker: ["/broker"], placeholder: ["topology"] },

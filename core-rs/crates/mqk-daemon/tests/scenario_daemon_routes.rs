@@ -656,62 +656,64 @@ async fn api_system_preflight_is_fail_closed_for_unproven_dependencies() {
 }
 
 #[tokio::test]
-async fn api_execution_summary_derives_counts_from_broker_snapshot() {
-    use chrono::{Duration, Utc};
-    use mqk_schemas::{BrokerAccount, BrokerOrder, BrokerSnapshot};
+async fn api_execution_summary_derives_counts_from_execution_snapshot() {
+    use mqk_runtime::observability::{
+        ExecutionSnapshot, OrderSnapshot, OutboxSnapshot, PortfolioSnapshot,
+    };
 
     let st = Arc::new(state::AppState::new_with_operator_auth(
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
     {
-        let mut lock = st.broker_snapshot.write().await;
-        *lock = Some(BrokerSnapshot {
-            captured_at_utc: Utc::now(),
-            account: BrokerAccount {
-                equity: "1000".to_string(),
-                cash: "400".to_string(),
-                currency: "USD".to_string(),
-            },
-            positions: Vec::new(),
-            fills: Vec::new(),
-            orders: vec![
-                BrokerOrder {
-                    broker_order_id: "bo-1".to_string(),
-                    client_order_id: "io-1".to_string(),
+        let mut lock = st.execution_snapshot.write().await;
+        *lock = Some(ExecutionSnapshot {
+            run_id: None,
+            active_orders: vec![
+                OrderSnapshot {
+                    order_id: "io-1".to_string(),
+                    broker_order_id: None,
                     symbol: "AAPL".to_string(),
-                    side: "buy".to_string(),
-                    r#type: "limit".to_string(),
-                    status: "new".to_string(),
-                    qty: "10".to_string(),
-                    limit_price: Some("100".to_string()),
-                    stop_price: None,
-                    created_at_utc: Utc::now() - Duration::minutes(6),
+                    status: "Open".to_string(),
+                    total_qty: 10,
+                    filled_qty: 0,
                 },
-                BrokerOrder {
-                    broker_order_id: "bo-2".to_string(),
-                    client_order_id: "io-2".to_string(),
+                OrderSnapshot {
+                    order_id: "io-2".to_string(),
+                    broker_order_id: None,
                     symbol: "MSFT".to_string(),
-                    side: "sell".to_string(),
-                    r#type: "market".to_string(),
-                    status: "submitted".to_string(),
-                    qty: "5".to_string(),
-                    limit_price: None,
-                    stop_price: None,
-                    created_at_utc: Utc::now(),
-                },
-                BrokerOrder {
-                    broker_order_id: "bo-3".to_string(),
-                    client_order_id: "io-3".to_string(),
-                    symbol: "NVDA".to_string(),
-                    side: "buy".to_string(),
-                    r#type: "market".to_string(),
-                    status: "rejected".to_string(),
-                    qty: "1".to_string(),
-                    limit_price: None,
-                    stop_price: None,
-                    created_at_utc: Utc::now(),
+                    status: "Open".to_string(),
+                    total_qty: 5,
+                    filled_qty: 0,
                 },
             ],
+            pending_outbox: vec![
+                OutboxSnapshot {
+                    outbox_id: 1,
+                    idempotency_key: "io-3".to_string(),
+                    status: "PENDING".to_string(),
+                    created_at_utc: chrono::Utc::now(),
+                    sent_at_utc: None,
+                    claimed_at_utc: None,
+                    dispatching_at_utc: None,
+                },
+                OutboxSnapshot {
+                    outbox_id: 2,
+                    idempotency_key: "io-4".to_string(),
+                    status: "SENT".to_string(),
+                    created_at_utc: chrono::Utc::now(),
+                    sent_at_utc: None,
+                    claimed_at_utc: None,
+                    dispatching_at_utc: None,
+                },
+            ],
+            recent_inbox_events: vec![],
+            portfolio: PortfolioSnapshot {
+                cash_micros: 0,
+                realized_pnl_micros: 0,
+                positions: vec![],
+            },
+            system_block_state: None,
+            snapshot_at_utc: chrono::Utc::now(),
         });
     }
 
@@ -729,8 +731,8 @@ async fn api_execution_summary_derives_counts_from_broker_snapshot() {
     assert_eq!(json["active_orders"], 2);
     assert_eq!(json["pending_orders"], 1);
     assert_eq!(json["dispatching_orders"], 1);
-    assert_eq!(json["reject_count_today"], 1);
-    assert_eq!(json["stuck_orders"], 1);
+    assert_eq!(json["reject_count_today"], 0);
+    assert_eq!(json["stuck_orders"], 0);
     assert!(json["cancel_replace_count_today"].is_null());
     assert!(json["avg_ack_latency_ms"].is_null());
 }
@@ -888,12 +890,16 @@ async fn api_system_session_reports_truthful_mode_and_operator_auth() {
 
     let json = parse_json(body);
     assert_eq!(json["daemon_mode"], "PAPER");
+    assert_eq!(json["adapter_id"], "paper");
+    assert_eq!(json["deployment_start_allowed"], true);
+    assert!(json["deployment_blocker"].is_null());
     assert_eq!(json["operator_auth_mode"], "missing_token_fail_closed");
     assert_eq!(json["strategy_allowed"], false);
     assert_eq!(json["execution_allowed"], false);
     assert_eq!(json["system_trading_window"], "disabled");
-    assert_eq!(json["market_session"], "unknown");
-    assert_eq!(json["exchange_calendar_state"], "unknown");
+    // Paper mode → AlwaysOn calendar; market is always open.
+    assert_eq!(json["market_session"], "open");
+    assert_eq!(json["exchange_calendar_state"], "always_on");
 }
 
 #[tokio::test]
@@ -944,7 +950,8 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
     let (fp_status, fp_body) = call(router.clone(), fp_req).await;
     assert_eq!(fp_status, StatusCode::OK);
     let fp = parse_json(fp_body);
-    assert_eq!(fp["config_hash"], "unknown");
+    assert_eq!(fp["config_hash"], "daemon-runtime-paper-ready-v1");
+    assert_eq!(fp["adapter_id"], "paper");
     assert_eq!(fp["runtime_generation_id"], "unknown");
     assert_eq!(fp["environment_profile"], "paper");
     assert!(fp["last_restart_at"].is_null());
@@ -970,4 +977,370 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
     let suppressions = parse_json(suppressions_body);
     assert!(suppressions.is_array());
     assert_eq!(suppressions.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn system_status_and_preflight_surface_mode_truth() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let status_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status_code, status_body) = call(router.clone(), status_req).await;
+    assert_eq!(status_code, StatusCode::OK);
+    let status_json = parse_json(status_body);
+    assert_eq!(status_json["daemon_mode"], "paper");
+    assert_eq!(status_json["adapter_id"], "paper");
+    assert_eq!(status_json["deployment_start_allowed"], true);
+    assert!(status_json["deployment_blocker"].is_null());
+
+    let preflight_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/preflight")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (preflight_code, preflight_body) = call(router, preflight_req).await;
+    assert_eq!(preflight_code, StatusCode::OK);
+    let preflight_json = parse_json(preflight_body);
+    assert_eq!(preflight_json["daemon_mode"], "paper");
+    assert_eq!(preflight_json["adapter_id"], "paper");
+    assert_eq!(preflight_json["deployment_start_allowed"], true);
+}
+
+#[tokio::test]
+async fn non_paper_deployment_mode_is_explicitly_fail_closed() {
+    std::env::set_var("MQK_DAEMON_DEPLOYMENT_MODE", "live-shadow");
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    std::env::remove_var("MQK_DAEMON_DEPLOYMENT_MODE");
+
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let json = parse_json(body);
+    assert_eq!(
+        json["fault_class"],
+        "runtime.start_refused.deployment_mode_unproven"
+    );
+    assert_eq!(json["gate"], "deployment_mode");
+
+    let session_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (session_code, session_body) = call(routes::build_router(st), session_req).await;
+    assert_eq!(session_code, StatusCode::OK);
+    let session_json = parse_json(session_body);
+    assert_eq!(session_json["daemon_mode"], "LIVE-SHADOW");
+    assert_eq!(session_json["deployment_start_allowed"], false);
+    assert_eq!(session_json["adapter_id"], "paper");
+    assert!(session_json["deployment_blocker"]
+        .as_str()
+        .unwrap_or("")
+        .contains("unsupported/unproven"));
+}
+
+// ---------------------------------------------------------------------------
+// PROD-02 proof tests
+// ---------------------------------------------------------------------------
+
+/// PROD-02-A: Armed integrity + no active durable run → execution_allowed must
+/// be false and system_trading_window must be "disabled".
+///
+/// Before PROD-02 the system returned execution_allowed:true and
+/// system_trading_window:"enabled" whenever integrity was armed, even with no
+/// run active.  That overclaim is now closed.
+#[tokio::test]
+async fn prod02_armed_but_idle_execution_not_allowed() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    // Arm integrity — simulate operator having armed the gate.
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+
+    // No run has been started; state is still "idle".
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    // strategy gate reflects armed state
+    assert_eq!(json["strategy_allowed"], true, "strategy should be armed");
+    // execution gate must NOT be open without a durable active run
+    assert_eq!(
+        json["execution_allowed"], false,
+        "execution_allowed must be false when no active run exists"
+    );
+    assert_eq!(
+        json["system_trading_window"], "disabled",
+        "trading window must be disabled when no active run exists"
+    );
+}
+
+/// PROD-02-B: Running state with no reconcile result yet must produce
+/// has_critical:true and the unproven-reconcile fault signal.
+///
+/// A daemon that has an active execution loop but has not completed a
+/// reconcile tick cannot verify order consistency.  Operator surfaces must
+/// reflect that as critical rather than silently omitting it.
+#[tokio::test]
+async fn prod02_running_without_reconcile_result_is_critical() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    // Arm integrity.
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+
+    // Inject a fake execution loop so current_status_snapshot returns "running".
+    // Reconcile status remains at the default "unknown" (no DB, no tick yet).
+    let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"prod02-test-run");
+    st.inject_running_loop_for_test(run_id).await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(
+        json["runtime_status"], "running",
+        "runtime_status must reflect the injected execution loop"
+    );
+    assert_eq!(
+        json["reconcile_status"], "unknown",
+        "reconcile_status must be unknown before first tick"
+    );
+    assert_eq!(
+        json["has_critical"], true,
+        "has_critical must be true when running with unknown reconcile"
+    );
+
+    // The fault_signals array must contain the unproven-reconcile class.
+    let signals = json["fault_signals"].as_array().expect("fault_signals must be array");
+    let classes: Vec<&str> = signals
+        .iter()
+        .filter_map(|s| s["class"].as_str())
+        .collect();
+    assert!(
+        classes
+            .iter()
+            .any(|c| *c == "reconcile.unproven.running_without_reconcile_result"),
+        "expected reconcile.unproven.running_without_reconcile_result in fault_signals, got: {:?}",
+        classes
+    );
+}
+
+/// PROD-02-C: Halted and unknown runtime states must never expose
+/// live_routing_enabled:null.  Both must return an explicit Some(false).
+#[tokio::test]
+async fn prod02_non_running_states_return_explicit_false_live_routing() {
+    // ---- idle state ----
+    let st_idle = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (_, idle_body) = call(routes::build_router(Arc::clone(&st_idle)), req).await;
+    let idle_json = parse_json(idle_body);
+    assert_eq!(
+        idle_json["live_routing_enabled"], false,
+        "live_routing_enabled must be explicit false when idle"
+    );
+    assert_eq!(idle_json["runtime_status"], "idle");
+
+    // ---- halted state ----
+    let st_halted = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    {
+        let mut ig = st_halted.integrity.write().await;
+        ig.halted = true;
+    }
+
+    let req2 = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (_, halted_body) = call(routes::build_router(Arc::clone(&st_halted)), req2).await;
+    let halted_json = parse_json(halted_body);
+    assert_eq!(
+        halted_json["live_routing_enabled"], false,
+        "live_routing_enabled must be explicit false when halted"
+    );
+    assert_eq!(halted_json["runtime_status"], "halted");
+    assert_eq!(
+        halted_json["kill_switch_active"], true,
+        "kill_switch_active must be true when halted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CTRL-03: Exchange calendar / market session truth
+// ---------------------------------------------------------------------------
+
+/// Paper/backtest mode → AlwaysOn calendar → market always open.
+#[tokio::test]
+async fn ctrl03_paper_mode_reports_always_on_calendar_and_open_market() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode(
+        state::DeploymentMode::Paper,
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    assert_eq!(
+        json["exchange_calendar_state"], "always_on",
+        "paper mode must surface always_on calendar"
+    );
+    assert_eq!(
+        json["market_session"], "open",
+        "AlwaysOn calendar must always report market as open"
+    );
+}
+
+/// Backtest mode → AlwaysOn calendar → market always open.
+#[tokio::test]
+async fn ctrl03_backtest_mode_reports_always_on_calendar() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode(
+        state::DeploymentMode::Backtest,
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    assert_eq!(json["exchange_calendar_state"], "always_on");
+    assert_eq!(json["market_session"], "open");
+}
+
+/// LiveCapital mode → NyseWeekdays calendar.  market_session is wall-clock
+/// dependent (open or closed); we assert the label is one of the two valid
+/// values — never "unknown".
+#[tokio::test]
+async fn ctrl03_live_capital_mode_reports_nyse_weekdays_calendar() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode(
+        state::DeploymentMode::LiveCapital,
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    assert_eq!(
+        json["exchange_calendar_state"], "nyse_weekdays",
+        "live-capital mode must surface nyse_weekdays calendar"
+    );
+    let ms = json["market_session"].as_str().unwrap_or("MISSING");
+    assert!(
+        ms == "open" || ms == "closed",
+        "market_session must be 'open' or 'closed', never 'unknown'; got '{ms}'"
+    );
+    assert_ne!(
+        ms, "unknown",
+        "market_session must not be the placeholder 'unknown'"
+    );
+}
+
+/// LiveShadow mode → NyseWeekdays calendar.
+#[tokio::test]
+async fn ctrl03_live_shadow_mode_reports_nyse_weekdays_calendar() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode(
+        state::DeploymentMode::LiveShadow,
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    assert_eq!(json["exchange_calendar_state"], "nyse_weekdays");
+    let ms = json["market_session"].as_str().unwrap_or("MISSING");
+    assert!(
+        ms == "open" || ms == "closed",
+        "market_session must be 'open' or 'closed'; got '{ms}'"
+    );
+}
+
+/// notes array must be empty — no stale unavailability message.
+#[tokio::test]
+async fn ctrl03_session_response_notes_are_empty_after_wiring() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode(
+        state::DeploymentMode::Paper,
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    let notes = json["notes"].as_array().expect("notes must be an array");
+    assert!(
+        notes.is_empty(),
+        "notes must be empty after CTRL-03 wiring; got: {notes:?}"
+    );
 }
