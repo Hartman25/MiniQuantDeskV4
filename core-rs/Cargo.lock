@@ -1751,6 +1751,7 @@ dependencies = [
  "mqk-portfolio",
  "mqk-risk",
  "mqk-strategy",
+ "uuid",
 ]
 
 [[package]]

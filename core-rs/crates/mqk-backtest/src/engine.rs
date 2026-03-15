@@ -32,7 +32,10 @@ use mqk_strategy::{
     StrategyHostError,
 };
 
-use crate::types::{BacktestBar, BacktestConfig, BacktestReport};
+use crate::types::{
+    BacktestBar, BacktestConfig, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport,
+    OrderStatus,
+};
 
 /// Backtest error variants.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,8 +92,10 @@ pub struct BacktestEngine {
     recent_bars: Vec<BarStub>,
     /// Last known price per symbol (for equity/mark computation).
     last_prices: MarkMap,
-    /// All fills recorded during the run.
-    fills: Vec<Fill>,
+    /// All order intents recorded during the run (filled AND rejected).
+    orders: Vec<BacktestOrder>,
+    /// All fills recorded during the run (with per-fill provenance).
+    fills: Vec<BacktestFill>,
     /// Equity curve: (end_ts, equity_micros).
     equity_curve: Vec<(i64, i64)>,
     /// Whether the engine has halted.
@@ -146,6 +151,7 @@ impl BacktestEngine {
             risk_config,
             recent_bars: Vec::new(),
             last_prices: BTreeMap::new(),
+            orders: Vec::new(),
             fills: Vec::new(),
             equity_curve: Vec::new(),
             halted: false,
@@ -340,8 +346,11 @@ impl BacktestEngine {
                 }
             };
 
-            // 6. Process each intent through allocation-cap + risk + fill
-            for intent in &intents {
+            // 6. Process each intent through allocation-cap + risk + fill.
+            //
+            // BKT-01P: enumerate intents so each fill carries a deterministic
+            // order_id derived from (bar_end_ts, symbol, side, intent_seq).
+            for (intent_seq, intent) in intents.iter().enumerate() {
                 if self.halted {
                     break;
                 }
@@ -351,6 +360,21 @@ impl BacktestEngine {
                     &self.portfolio.positions,
                     &self.last_prices,
                 );
+
+                // BKT-04P: compute order identity before any gate so the order
+                // can be logged regardless of the outcome (cap reject, risk reject, fill).
+                let is_buy = matches!(intent.side, ExecSide::Buy);
+                let order_id = BacktestFill::make_order_id(
+                    bar.end_ts,
+                    &intent.symbol,
+                    is_buy,
+                    intent_seq,
+                );
+                let bkt_side = if is_buy {
+                    BacktestOrderSide::Buy
+                } else {
+                    BacktestOrderSide::Sell
+                };
 
                 // PATCH 13: allocation cap enforcement — only for risk-increasing intents
                 let is_risk_reducing = self.is_intent_risk_reducing(intent);
@@ -379,6 +403,15 @@ impl BacktestEngine {
                     )
                     .is_err()
                     {
+                        // BKT-04P: allocation cap rejection — log as Rejected order
+                        self.orders.push(BacktestOrder {
+                            order_id,
+                            bar_end_ts: bar.end_ts,
+                            symbol: intent.symbol.clone(),
+                            side: bkt_side,
+                            qty: intent.qty,
+                            status: OrderStatus::Rejected,
+                        });
                         continue;
                     }
                 }
@@ -403,17 +436,62 @@ impl BacktestEngine {
                             ExecSide::Buy => PfSide::Buy,
                             ExecSide::Sell => PfSide::Sell,
                         };
-                        let fill =
-                            Fill::new(intent.symbol.clone(), pf_side, intent.qty, fill_price, 0);
-                        apply_fill(&mut self.portfolio, &fill);
-                        self.fills.push(fill);
+                        let fill_id = BacktestFill::make_fill_id(&order_id);
+                        // BKT-03P: compute commission fee at fill time
+                        let fee = self.config.commission.compute_fee(intent.qty, fill_price);
+                        let inner =
+                            Fill::new(intent.symbol.clone(), pf_side, intent.qty, fill_price, fee);
+                        apply_fill(&mut self.portfolio, &inner);
+                        self.fills.push(BacktestFill {
+                            fill_id,
+                            order_id,
+                            bar_end_ts: bar.end_ts,
+                            inner,
+                        });
+                        // BKT-04P: log order as filled
+                        self.orders.push(BacktestOrder {
+                            order_id,
+                            bar_end_ts: bar.end_ts,
+                            symbol: intent.symbol.clone(),
+                            side: bkt_side,
+                            qty: intent.qty,
+                            status: OrderStatus::Filled,
+                        });
                     }
-                    RiskAction::Reject => {}
+                    RiskAction::Reject => {
+                        // BKT-04P: log rejected order (no fill)
+                        self.orders.push(BacktestOrder {
+                            order_id,
+                            bar_end_ts: bar.end_ts,
+                            symbol: intent.symbol.clone(),
+                            side: bkt_side,
+                            qty: intent.qty,
+                            status: OrderStatus::Rejected,
+                        });
+                    }
                     RiskAction::Halt => {
+                        // BKT-04P: log halt-triggering order
+                        self.orders.push(BacktestOrder {
+                            order_id,
+                            bar_end_ts: bar.end_ts,
+                            symbol: intent.symbol.clone(),
+                            side: bkt_side,
+                            qty: intent.qty,
+                            status: OrderStatus::HaltTriggered,
+                        });
                         self.halted = true;
                         self.halt_reason = Some(format!("{:?}", risk_decision.reason));
                     }
                     RiskAction::FlattenAndHalt => {
+                        // BKT-04P: log halt-triggering order before flatten
+                        self.orders.push(BacktestOrder {
+                            order_id,
+                            bar_end_ts: bar.end_ts,
+                            symbol: intent.symbol.clone(),
+                            side: bkt_side,
+                            qty: intent.qty,
+                            status: OrderStatus::HaltTriggered,
+                        });
                         self.flatten_all(bar);
                         self.halted = true;
                         self.halt_reason = Some(format!("{:?}", risk_decision.reason));
@@ -434,6 +512,7 @@ impl BacktestEngine {
             halted: self.halted,
             halt_reason: self.halt_reason.clone(),
             equity_curve: self.equity_curve.clone(),
+            orders: self.orders.clone(),
             fills: self.fills.clone(),
             last_prices: self.last_prices.clone(),
             execution_blocked: self.execution_blocked,
@@ -510,10 +589,14 @@ impl BacktestEngine {
         }
     }
 
-    /// Flatten all positions deterministically (alphabetical order by symbol).
+    /// Flatten all positions deterministically (BTreeMap alphabetical order by symbol).
+    ///
+    /// BKT-01P: each flatten fill carries a deterministic order_id derived from
+    /// (bar_end_ts, symbol, symbol_seq) to distinguish it from intent-driven fills.
+    /// BKT-04P: each flatten fill also emits a BacktestOrder with status Filled.
     fn flatten_all(&mut self, bar: &BacktestBar) {
         let symbols: Vec<String> = self.portfolio.positions.keys().cloned().collect();
-        for sym in symbols {
+        for (symbol_seq, sym) in symbols.into_iter().enumerate() {
             let qty = match self.portfolio.positions.get(&sym) {
                 Some(pos) => pos.qty_signed(),
                 None => continue,
@@ -522,16 +605,34 @@ impl BacktestEngine {
                 continue;
             }
 
-            let (side, abs_qty) = if qty > 0 {
-                (PfSide::Sell, qty)
+            let (pf_side, bkt_side, abs_qty) = if qty > 0 {
+                (PfSide::Sell, BacktestOrderSide::Sell, qty)
             } else {
-                (PfSide::Buy, -qty)
+                (PfSide::Buy, BacktestOrderSide::Buy, -qty)
             };
 
             let mark = *self.last_prices.get(&sym).unwrap_or(&bar.close_micros);
-            let fill = Fill::new(sym, side, abs_qty, mark, 0);
-            apply_fill(&mut self.portfolio, &fill);
-            self.fills.push(fill);
+            let order_id = BacktestFill::make_flatten_order_id(bar.end_ts, &sym, symbol_seq);
+            let fill_id = BacktestFill::make_fill_id(&order_id);
+            // BKT-03P: apply commission to flatten fills too
+            let fee = self.config.commission.compute_fee(abs_qty, mark);
+            let inner = Fill::new(sym.clone(), pf_side, abs_qty, mark, fee);
+            apply_fill(&mut self.portfolio, &inner);
+            self.fills.push(BacktestFill {
+                fill_id,
+                order_id,
+                bar_end_ts: bar.end_ts,
+                inner,
+            });
+            // BKT-04P: log flatten order as filled
+            self.orders.push(BacktestOrder {
+                order_id,
+                bar_end_ts: bar.end_ts,
+                symbol: sym,
+                side: bkt_side,
+                qty: abs_qty,
+                status: OrderStatus::Filled,
+            });
         }
     }
 }

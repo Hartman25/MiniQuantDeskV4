@@ -249,8 +249,10 @@ pub fn compute_metrics(input: &PromotionInput) -> PromotionMetrics {
     // Sharpe (daily-bucketed)
     let sharpe = compute_sharpe_daily(eq);
 
-    // Profit factor (FIFO lot matcher)
-    let (pf, num_trades) = compute_profit_factor(fills);
+    // Profit factor (FIFO lot matcher).
+    // BKT-01P: BacktestFill wraps Fill; extract inner Fill refs for the FIFO matcher.
+    let inner_fills: Vec<Fill> = fills.iter().map(|f| f.inner.clone()).collect();
+    let (pf, num_trades) = compute_profit_factor(&inner_fills);
 
     // Profitable months % (UTC month bucketing)
     let (profitable_months_pct, num_months) = compute_profitable_months_pct(eq);

@@ -95,6 +95,7 @@ fn config_with_integrity(stale_threshold_ticks: u64) -> BacktestConfig {
             slippage_bps: 0,
             volatility_mult_bps: 0,
         },
+        commission: mqk_backtest::CommissionModel::ZERO,
         // PATCH 22: integrity ON
         integrity_enabled: true,
         integrity_stale_threshold_ticks: stale_threshold_ticks,

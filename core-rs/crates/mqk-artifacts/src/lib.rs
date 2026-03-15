@@ -120,6 +120,9 @@ struct BacktestMetrics<'a> {
     halt_reason: Option<&'a str>,
     execution_blocked: bool,
     bars: usize,
+    orders: usize,
+    orders_filled: usize,
+    orders_rejected: usize,
     fills: usize,
     final_equity_micros: i64,
     symbols: Vec<&'a str>,
@@ -143,16 +146,47 @@ pub fn write_backtest_report(run_dir: &Path, report: &mqk_backtest::BacktestRepo
         )
     })?;
 
-    // fills.csv (match placeholder header used by init_run_artifacts)
-    // NOTE: Fill currently has no IDs or timestamps in core structs, so we emit blank IDs.
-    // `ts_utc` is emitted as the first equity_curve timestamp when available; otherwise 0.
-    let default_ts = report.equity_curve.first().map(|(ts, _)| *ts).unwrap_or(0);
+    // orders.csv — BKT-04P: one row per intent (filled AND rejected).
+    let mut orders_csv =
+        String::from("ts_utc,order_id,symbol,side,qty,order_type,limit_price,stop_price,status\n");
+    for o in &report.orders {
+        let side_str = match o.side {
+            mqk_backtest::BacktestOrderSide::Buy => "BUY",
+            mqk_backtest::BacktestOrderSide::Sell => "SELL",
+        };
+        let status_str = match o.status {
+            mqk_backtest::OrderStatus::Filled => "FILLED",
+            mqk_backtest::OrderStatus::Rejected => "REJECTED",
+            mqk_backtest::OrderStatus::HaltTriggered => "HALT_TRIGGERED",
+        };
+        orders_csv.push_str(&format!(
+            "{},{},{},{},{},MARKET,,{}\n",
+            o.bar_end_ts,
+            o.order_id,
+            o.symbol,
+            side_str,
+            o.qty,
+            status_str,
+        ));
+    }
+    let orders_path = run_dir.join("orders.csv");
+    fs::write(&orders_path, orders_csv)
+        .with_context(|| format!("write orders.csv failed: {}", orders_path.display()))?;
+
+    // fills.csv — BKT-01P: per-fill provenance with real bar timestamp and deterministic UUIDs.
     let mut fills_csv = String::from("ts_utc,fill_id,order_id,symbol,side,qty,price,fee\n");
     for f in &report.fills {
         let side = format!("{:?}", f.side).to_uppercase(); // BUY / SELL deterministically
         fills_csv.push_str(&format!(
             "{},{},{},{},{},{},{},{}\n",
-            default_ts, "", "", f.symbol, side, f.qty, f.price_micros, f.fee_micros
+            f.bar_end_ts, // exact bar end timestamp — unique per fill
+            f.fill_id,    // deterministic UUIDv5 per fill
+            f.order_id,   // deterministic UUIDv5 per originating order intent
+            f.symbol,
+            side,
+            f.qty,
+            f.price_micros,
+            f.fee_micros
         ));
     }
     let fills_path = run_dir.join("fills.csv");
@@ -181,12 +215,26 @@ pub fn write_backtest_report(run_dir: &Path, report: &mqk_backtest::BacktestRepo
         .map(|(k, v)| (k.as_str(), *v))
         .collect::<std::collections::BTreeMap<_, _>>();
 
+    let orders_filled = report
+        .orders
+        .iter()
+        .filter(|o| o.status == mqk_backtest::OrderStatus::Filled)
+        .count();
+    let orders_rejected = report
+        .orders
+        .iter()
+        .filter(|o| o.status == mqk_backtest::OrderStatus::Rejected)
+        .count();
+
     let metrics = BacktestMetrics {
         schema_version: 1,
         halted: report.halted,
         halt_reason: report.halt_reason.as_deref(),
         execution_blocked: report.execution_blocked,
         bars: report.equity_curve.len(),
+        orders: report.orders.len(),
+        orders_filled,
+        orders_rejected,
         fills: report.fills.len(),
         final_equity_micros: final_equity,
         symbols,

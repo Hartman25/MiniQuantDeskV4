@@ -92,6 +92,7 @@ fn alignment_config(initial_cash_micros: i64, daily_loss_limit_micros: i64) -> B
             slippage_bps: 0,
             volatility_mult_bps: 0,
         },
+        commission: mqk_backtest::CommissionModel::ZERO,
         integrity_enabled: false,
         integrity_stale_threshold_ticks: 0,
         integrity_gap_tolerance_bars: 0,

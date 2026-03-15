@@ -1,9 +1,15 @@
-﻿use anyhow::{Context, Result};
+use anyhow::{Context, Result};
+use chrono::Utc;
 use std::path::Path;
+use uuid::Uuid;
 
 use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine};
 use mqk_execution::{StrategyOutput, TargetPosition};
 use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
+
+// ---------------------------------------------------------------------------
+// CSV backtest runner
+// ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_backtest_csv(
@@ -35,15 +41,50 @@ pub async fn run_backtest_csv(
     cfg.integrity_stale_threshold_ticks = integrity_stale_threshold_ticks;
     cfg.integrity_gap_tolerance_bars = integrity_gap_tolerance_bars;
 
+    // BKT-02P: derive deterministic run identity from config + strategy + git.
+    let config_hash = cfg.config_id().to_string();
+    let git_hash = bkt_git_hash();
+    let strategy_name = "noop";
+    let run_id = derive_backtest_run_id(strategy_name, &config_hash, &git_hash);
+
+    println!("run_id={}", run_id);
+    println!("config_hash={}", config_hash);
+    println!("git_hash={}", git_hash);
+    println!("strategy={}", strategy_name);
+
     let mut engine = BacktestEngine::new(cfg);
     engine.add_strategy(Box::new(NoOpStrategy::new(timeframe_secs)))?;
 
     let report = engine.run(&bars).context("backtest run failed")?;
 
+    // BKT-02P: if an output directory is requested, initialize the full run
+    // artifact structure (manifest.json + placeholder files) before writing
+    // the backtest report into the run subdirectory.
     if let Some(dir) = out_dir.as_deref() {
-        mqk_artifacts::write_backtest_report(Path::new(dir), &report)
-            .with_context(|| format!("write backtest artifacts failed: {}", dir))?;
-        println!("artifacts_written=true out_dir={}", dir);
+        let host_fp = bkt_host_fingerprint();
+        let init_result = mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
+            exports_root: Path::new(dir),
+            schema_version: 1,
+            run_id,
+            engine_id: "mqk-backtest",
+            mode: "backtest",
+            git_hash: &git_hash,
+            config_hash: &config_hash,
+            host_fingerprint: &host_fp,
+            now_utc: Utc::now(), // allow: operational manifest timestamp
+        })
+        .with_context(|| format!("init run artifacts failed: {}", dir))?;
+
+        mqk_artifacts::write_backtest_report(&init_result.run_dir, &report).with_context(|| {
+            format!(
+                "write backtest artifacts failed: {}",
+                init_result.run_dir.display()
+            )
+        })?;
+
+        println!("artifacts_written=true");
+        println!("artifacts_dir={}", init_result.run_dir.display());
+        println!("manifest={}", init_result.manifest_path.display());
     } else {
         println!("artifacts_written=false");
     }
@@ -67,6 +108,10 @@ pub async fn run_backtest_csv(
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// DB backtest runner
+// ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run_backtest_db(
@@ -133,6 +178,17 @@ pub async fn run_backtest_db(
     cfg.shadow_mode = shadow;
     cfg.integrity_enabled = integrity_enabled;
 
+    // BKT-02P: derive deterministic run identity.
+    let config_hash = cfg.config_id().to_string();
+    let git_hash = bkt_git_hash();
+    let strategy_name = "noop";
+    let run_id = derive_backtest_run_id(strategy_name, &config_hash, &git_hash);
+
+    println!("run_id={}", run_id);
+    println!("config_hash={}", config_hash);
+    println!("git_hash={}", git_hash);
+    println!("strategy={}", strategy_name);
+
     let mut engine = BacktestEngine::new(cfg);
     engine.add_strategy(Box::new(NoOpStrategy::new(timeframe_secs)))?;
 
@@ -158,6 +214,10 @@ pub async fn run_backtest_db(
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Strategy stubs (used by CLI backtest runners above)
+// ---------------------------------------------------------------------------
 
 struct NoOpStrategy {
     spec: StrategySpec,
@@ -219,6 +279,57 @@ impl Strategy for BuyThenExitStrategy {
         }])
     }
 }
+
+// ---------------------------------------------------------------------------
+// BKT-02P: run identity helpers
+// ---------------------------------------------------------------------------
+
+/// Derive a deterministic backtest run ID.
+///
+/// Scoped under `"mqk-bkt.run.v1"` to distinguish backtest runs from live/paper
+/// runs (which use `"mqk-cli.run.v1"` in run.rs).
+fn derive_backtest_run_id(strategy_name: &str, config_hash: &str, git_hash: &str) -> Uuid {
+    let data = format!(
+        "mqk-bkt.run.v1|{}|{}|{}",
+        strategy_name, config_hash, git_hash
+    );
+    Uuid::new_v5(&Uuid::NAMESPACE_DNS, data.as_bytes())
+}
+
+/// Best-effort short git hash of the running binary.
+fn bkt_git_hash() -> String {
+    use std::process::Command;
+    Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "UNKNOWN".to_string())
+}
+
+/// Best-effort host fingerprint for the artifact manifest.
+fn bkt_host_fingerprint() -> String {
+    let hostname = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "UNKNOWN_HOST".to_string());
+    let username = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "UNKNOWN_USER".to_string());
+    format!(
+        "{}@{}:{}/{}",
+        username,
+        hostname,
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Date utilities (DB loader path)
+// ---------------------------------------------------------------------------
 
 fn epoch_secs_to_yyyymmdd(epoch_secs: i64) -> u32 {
     let days = epoch_secs.div_euclid(86_400);
