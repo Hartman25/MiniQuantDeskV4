@@ -12,9 +12,13 @@ use std::time::Duration;
 use anyhow::Context;
 use chrono::Utc;
 use mqk_broker_paper::LockedPaperBroker;
-use mqk_execution::{wiring::build_gateway, BrokerOrderMap, IntegrityGate, ReconcileGate};
+use mqk_execution::{
+    oms::state_machine::{OmsEvent, OmsOrder, OrderState},
+    wiring::build_gateway,
+    BrokerEvent, BrokerOrderMap, IntegrityGate, ReconcileGate,
+};
 use mqk_integrity::IntegrityState;
-use mqk_portfolio::PortfolioState;
+use mqk_portfolio::{apply_entry, LedgerEntry, PortfolioState};
 use mqk_reconcile::{ReconcileDiff, SnapshotFreshness, SnapshotWatermark};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -23,12 +27,14 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 const DAEMON_ENGINE_ID: &str = "mqk-daemon";
-const DAEMON_MODE: &str = "PAPER";
-const DAEMON_ADAPTER_ID: &str = "paper";
-const DAEMON_RUN_CONFIG_HASH: &str = "daemon-runtime-paper-v1";
+const DEFAULT_DAEMON_DEPLOYMENT_MODE: &str = "paper";
+const DEFAULT_DAEMON_ADAPTER_ID: &str = "paper";
+const DAEMON_RUN_CONFIG_HASH_PREFIX: &str = "daemon-runtime";
 const EXECUTION_LOOP_INTERVAL: Duration = Duration::from_secs(1);
 const DEADMAN_TTL_SECONDS: i64 = 5;
 const DEV_ALLOW_NO_OPERATOR_TOKEN_ENV: &str = "MQK_DEV_ALLOW_NO_OPERATOR_TOKEN";
+const DAEMON_DEPLOYMENT_MODE_ENV: &str = "MQK_DAEMON_DEPLOYMENT_MODE";
+const DAEMON_ADAPTER_ID_ENV: &str = "MQK_DAEMON_ADAPTER_ID";
 
 // ---------------------------------------------------------------------------
 // BusMsg — SSE event bus payload
@@ -232,6 +238,48 @@ pub enum OperatorAuthMode {
     MissingTokenFailClosed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum DeploymentMode {
+    Backtest,
+    Paper,
+    LiveShadow,
+    LiveCapital,
+}
+
+impl DeploymentMode {
+    pub fn as_db_mode(&self) -> &'static str {
+        match self {
+            Self::Backtest => "BACKTEST",
+            Self::Paper => "PAPER",
+            Self::LiveShadow => "LIVE-SHADOW",
+            Self::LiveCapital => "LIVE-CAPITAL",
+        }
+    }
+
+    pub fn as_api_label(&self) -> &'static str {
+        match self {
+            Self::Backtest => "backtest",
+            Self::Paper => "paper",
+            Self::LiveShadow => "live-shadow",
+            Self::LiveCapital => "live-capital",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DeploymentReadiness {
+    pub start_allowed: bool,
+    pub blocker: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeSelection {
+    pub deployment_mode: DeploymentMode,
+    pub adapter_id: String,
+    pub run_config_hash: String,
+    pub readiness: DeploymentReadiness,
+}
+
 impl OperatorAuthMode {
     pub fn label(&self) -> &'static str {
         match self {
@@ -266,10 +314,15 @@ pub struct AppState {
     pub broker_snapshot: Arc<RwLock<Option<mqk_schemas::BrokerSnapshot>>>,
     /// Latest execution pipeline snapshot from the owned loop.
     pub execution_snapshot: Arc<RwLock<Option<mqk_runtime::observability::ExecutionSnapshot>>>,
+    /// Per-order side cache (order_id → reconcile Side) populated from outbox
+    /// order_json at bootstrap and refreshed every execution tick (DMON-05).
+    pub local_order_sides: Arc<RwLock<BTreeMap<String, mqk_reconcile::Side>>>,
     /// Latest monotonic reconcile result known to the daemon.
     reconcile_status: Arc<RwLock<ReconcileStatusSnapshot>>,
     /// Operator auth posture for privileged routes.
     pub operator_auth: OperatorAuthMode,
+    /// Runtime adapter/deployment selection resolved from config/env at bootstrap.
+    runtime_selection: RuntimeSelection,
     /// The single daemon-owned execution loop handle, if any.
     execution_loop: Arc<Mutex<Option<ExecutionLoopHandle>>>,
     /// Serializes start/stop/halt transitions so the daemon never spawns duplicates.
@@ -334,6 +387,8 @@ impl AppState {
         let mut boot_integrity = IntegrityState::new();
         boot_integrity.disarmed = true;
 
+        let runtime_selection = runtime_selection_from_env();
+
         Self {
             bus,
             node_id: default_node_id(build.service),
@@ -343,8 +398,10 @@ impl AppState {
             integrity: Arc::new(RwLock::new(boot_integrity)),
             broker_snapshot: Arc::new(RwLock::new(None)),
             execution_snapshot: Arc::new(RwLock::new(None)),
+            local_order_sides: Arc::new(RwLock::new(BTreeMap::new())),
             reconcile_status: Arc::new(RwLock::new(initial_reconcile_status())),
             operator_auth,
+            runtime_selection,
             execution_loop: Arc::new(Mutex::new(None)),
             lifecycle_op: Arc::new(Mutex::new(())),
         }
@@ -352,6 +409,26 @@ impl AppState {
 
     pub fn operator_auth_mode(&self) -> &OperatorAuthMode {
         &self.operator_auth
+    }
+
+    pub fn runtime_selection(&self) -> &RuntimeSelection {
+        &self.runtime_selection
+    }
+
+    pub fn deployment_mode(&self) -> DeploymentMode {
+        self.runtime_selection.deployment_mode
+    }
+
+    pub fn adapter_id(&self) -> &str {
+        &self.runtime_selection.adapter_id
+    }
+
+    pub fn run_config_hash(&self) -> &str {
+        &self.runtime_selection.run_config_hash
+    }
+
+    pub fn deployment_readiness(&self) -> &DeploymentReadiness {
+        &self.runtime_selection.readiness
     }
 
     pub async fn current_reconcile_snapshot(&self) -> ReconcileStatusSnapshot {
@@ -377,12 +454,16 @@ impl AppState {
     ) -> Result<RestartTruthSnapshot, RuntimeLifecycleError> {
         let local_owned_run_id = self.active_owned_run_id().await;
         let durable_active_run_id = match self.db.as_ref() {
-            Some(db) => mqk_db::fetch_active_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                .await
-                .map_err(|err| {
-                    RuntimeLifecycleError::internal("restart active-run lookup failed", err)
-                })?
-                .map(|run| run.run_id),
+            Some(db) => mqk_db::fetch_active_run_for_engine(
+                db,
+                DAEMON_ENGINE_ID,
+                self.deployment_mode().as_db_mode(),
+            )
+            .await
+            .map_err(|err| {
+                RuntimeLifecycleError::internal("restart active-run lookup failed", err)
+            })?
+            .map(|run| run.run_id),
             None => None,
         };
 
@@ -415,14 +496,18 @@ impl AppState {
 
         let snapshot = match self.db.as_ref() {
             Some(db) => {
-                let latest = mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                    .await
-                    .map_err(|err| {
-                        RuntimeLifecycleError::internal(
-                            "current_status_snapshot run lookup failed",
-                            err,
-                        )
-                    })?;
+                let latest = mqk_db::fetch_latest_run_for_engine(
+                    db,
+                    DAEMON_ENGINE_ID,
+                    self.deployment_mode().as_db_mode(),
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeLifecycleError::internal(
+                        "current_status_snapshot run lookup failed",
+                        err,
+                    )
+                })?;
                 match latest {
                     Some(run) => match run.status {
                         mqk_db::RunStatus::Running | mqk_db::RunStatus::Armed => {
@@ -555,6 +640,17 @@ impl AppState {
         let _op = self.lifecycle_op.lock().await;
         self.reap_finished_execution_loop().await?;
 
+        if !self.deployment_readiness().start_allowed {
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.deployment_mode_unproven",
+                "deployment_mode",
+                self.deployment_readiness()
+                    .blocker
+                    .clone()
+                    .unwrap_or_else(|| "deployment mode is not start-ready".to_string()),
+            ));
+        }
+
         if self.integrity.read().await.is_execution_blocked() {
             return Err(RuntimeLifecycleError::forbidden(
                 "runtime.control_refusal.integrity_disarmed",
@@ -571,12 +667,13 @@ impl AppState {
         }
 
         let db = self.db_pool()?;
-        if let Some(active) =
-            mqk_db::fetch_active_run_for_engine(&db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                .await
-                .map_err(|err| {
-                    RuntimeLifecycleError::internal("start active-run lookup failed", err)
-                })?
+        if let Some(active) = mqk_db::fetch_active_run_for_engine(
+            &db,
+            DAEMON_ENGINE_ID,
+            self.deployment_mode().as_db_mode(),
+        )
+        .await
+        .map_err(|err| RuntimeLifecycleError::internal("start active-run lookup failed", err))?
         {
             return Err(RuntimeLifecycleError::conflict(
                 "runtime.truth_mismatch.durable_active_without_local_owner",
@@ -587,11 +684,13 @@ impl AppState {
             ));
         }
 
-        let latest = mqk_db::fetch_latest_run_for_engine(&db, DAEMON_ENGINE_ID, DAEMON_MODE)
-            .await
-            .map_err(|err| {
-                RuntimeLifecycleError::internal("start latest-run lookup failed", err)
-            })?;
+        let latest = mqk_db::fetch_latest_run_for_engine(
+            &db,
+            DAEMON_ENGINE_ID,
+            self.deployment_mode().as_db_mode(),
+        )
+        .await
+        .map_err(|err| RuntimeLifecycleError::internal("start latest-run lookup failed", err))?;
 
         let run_id = match latest.as_ref() {
             Some(run) => match run.status {
@@ -619,14 +718,14 @@ impl AppState {
                     &mqk_db::NewRun {
                         run_id,
                         engine_id: DAEMON_ENGINE_ID.to_string(),
-                        mode: DAEMON_MODE.to_string(),
+                        mode: self.deployment_mode().as_db_mode().to_string(),
                         started_at_utc: Utc::now(),
                         git_hash: "UNKNOWN".to_string(),
-                        config_hash: DAEMON_RUN_CONFIG_HASH.to_string(),
+                        config_hash: self.run_config_hash().to_string(),
                         config_json: serde_json::json!({
                             "runtime": "mqk-daemon",
-                            "adapter": DAEMON_ADAPTER_ID,
-                            "mode": DAEMON_MODE,
+                            "adapter": self.adapter_id(),
+                            "mode": self.deployment_mode().as_db_mode(),
                         }),
                         host_fingerprint: self.node_id.clone(),
                     },
@@ -708,16 +807,15 @@ impl AppState {
             Some(handle) => handle,
             None => {
                 if let Some(db) = self.db.as_ref() {
-                    if let Some(active) =
-                        mqk_db::fetch_active_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                            .await
-                            .map_err(|err| {
-                                RuntimeLifecycleError::internal(
-                                    "stop active-run lookup failed",
-                                    err,
-                                )
-                            })?
-                    {
+                    if let Some(active) = mqk_db::fetch_active_run_for_engine(
+                        db,
+                        DAEMON_ENGINE_ID,
+                        self.deployment_mode().as_db_mode(),
+                    )
+                    .await
+                    .map_err(|err| {
+                        RuntimeLifecycleError::internal("stop active-run lookup failed", err)
+                    })? {
                         return Err(RuntimeLifecycleError::conflict(
                             "runtime.truth_mismatch.durable_active_without_local_owner",
                             format!(
@@ -764,13 +862,15 @@ impl AppState {
         let handle = self.take_execution_loop_for_control().await?;
         if handle.is_none() {
             if let Some(db) = self.db.as_ref() {
-                if let Some(active) =
-                    mqk_db::fetch_active_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
-                        .await
-                        .map_err(|err| {
-                            RuntimeLifecycleError::internal("halt active-run lookup failed", err)
-                        })?
-                {
+                if let Some(active) = mqk_db::fetch_active_run_for_engine(
+                    db,
+                    DAEMON_ENGINE_ID,
+                    self.deployment_mode().as_db_mode(),
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeLifecycleError::internal("halt active-run lookup failed", err)
+                })? {
                     return Err(RuntimeLifecycleError::conflict(
                         "runtime.truth_mismatch.durable_active_without_local_owner",
                         format!(
@@ -871,7 +971,7 @@ impl AppState {
             "#,
         )
         .bind(DAEMON_ENGINE_ID)
-        .bind(DAEMON_MODE)
+        .bind(self.deployment_mode().as_db_mode())
         .fetch_one(db)
         .await
         .map_err(|err| RuntimeLifecycleError::internal("next_daemon_run_id failed", err))?;
@@ -880,10 +980,81 @@ impl AppState {
             &Uuid::NAMESPACE_DNS,
             format!(
                 "mqk-daemon.run.v2|{}|{}|{}|{}",
-                self.node_id, DAEMON_ENGINE_ID, DAEMON_MODE, generation
+                self.node_id,
+                DAEMON_ENGINE_ID,
+                self.deployment_mode().as_db_mode(),
+                generation
             )
             .as_bytes(),
         ))
+    }
+
+    /// DMON-03/04: Recover OMS order map, per-order side cache, and portfolio
+    /// from durable DB truth (outbox submitted rows + applied inbox events).
+    ///
+    /// The orchestrator's Phase 3 will separately process UNAPPLIED inbox rows
+    /// (crash window), so there is no double-apply risk.
+    async fn recover_oms_and_portfolio(
+        db: &PgPool,
+        run_id: Uuid,
+        initial_equity_micros: i64,
+    ) -> Result<
+        (
+            BTreeMap<String, OmsOrder>,
+            BTreeMap<String, mqk_reconcile::Side>,
+            PortfolioState,
+        ),
+        RuntimeLifecycleError,
+    > {
+        let submitted = mqk_db::outbox_load_submitted_for_run(db, run_id)
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("outbox_load_submitted_for_run", err))?;
+        let applied = mqk_db::inbox_load_all_applied_for_run(db, run_id)
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("inbox_load_all_applied_for_run", err))?;
+
+        // Build OMS orders and side map from submitted outbox rows.
+        let mut oms_orders: BTreeMap<String, OmsOrder> = BTreeMap::new();
+        let mut sides: BTreeMap<String, mqk_reconcile::Side> = BTreeMap::new();
+        for row in &submitted {
+            let Some(symbol) = outbox_json_symbol(&row.order_json) else {
+                continue;
+            };
+            let Some(qty) = outbox_json_qty(&row.order_json) else {
+                continue;
+            };
+            let side = outbox_json_side(&row.order_json);
+            let order_id = row.idempotency_key.clone();
+            sides.insert(order_id.clone(), side);
+            oms_orders.insert(order_id.clone(), OmsOrder::new(&order_id, symbol, qty));
+        }
+
+        // Reconstruct portfolio starting from initial equity.
+        let mut portfolio = PortfolioState::new(initial_equity_micros);
+
+        // Apply APPLIED inbox events to advance OMS state and portfolio.
+        for row in &applied {
+            let event: BrokerEvent = match serde_json::from_value(row.message_json.clone()) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let internal_id = event.internal_order_id().to_string();
+            let oms_event = broker_event_to_oms_event(&event);
+            if let Some(order) = oms_orders.get_mut(&internal_id) {
+                // Ignore transition errors; the orchestrator's Phase 3 will handle
+                // unapplied events in the crash window.
+                let _ = order.apply(&oms_event, Some(&row.broker_message_id));
+            }
+            if let Some(fill) = broker_event_to_portfolio_fill(&event) {
+                apply_entry(&mut portfolio, LedgerEntry::Fill(fill));
+            }
+        }
+
+        // Remove terminal orders from both maps.
+        oms_orders.retain(|_, o| !o.state.is_terminal());
+        sides.retain(|order_id, _| oms_orders.contains_key(order_id));
+
+        Ok((oms_orders, sides, portfolio))
     }
 
     async fn build_execution_orchestrator(
@@ -900,14 +1071,37 @@ impl AppState {
             .and_then(|value| value.as_i64())
             .unwrap_or(0);
 
-        let broker_snapshot_guard = self.broker_snapshot.read().await;
-        let broker_seed = broker_snapshot_guard.clone().ok_or_else(|| {
-            RuntimeLifecycleError::service_unavailable(
-                "runtime.start_refused.service_unavailable",
-                "broker snapshot truth is unavailable; refusing to start runtime with placeholder broker state",
-            )
-        })?;
-        drop(broker_snapshot_guard);
+        // DMON-03 + DMON-04: Recover OMS orders, side cache, and portfolio from
+        // durable DB truth (submitted outbox rows + applied inbox events).
+        let (oms_orders, recovered_sides, portfolio) =
+            Self::recover_oms_and_portfolio(&db, run_id, initial_equity_micros).await?;
+
+        // Seed the shared side cache so reconcile closures have side info immediately.
+        {
+            let mut sides_lock = self.local_order_sides.write().await;
+            *sides_lock = recovered_sides.clone();
+        }
+
+        // DMON-01: If broker_snapshot is absent, synthesize one from recovered DB
+        // truth so the reconcile gate has a consistent starting point.  For paper
+        // mode the broker's view IS the local OMS, so the synthesis is exact.
+        let broker_seed = {
+            let broker_snapshot_guard = self.broker_snapshot.read().await;
+            if let Some(existing) = broker_snapshot_guard.clone() {
+                existing
+            } else {
+                drop(broker_snapshot_guard);
+                let now = Utc::now();
+                let synth = synthesize_paper_broker_snapshot(
+                    &oms_orders,
+                    &recovered_sides,
+                    &portfolio,
+                    now,
+                );
+                *self.broker_snapshot.write().await = Some(synth.clone());
+                synth
+            }
+        };
 
         let mut order_map = BrokerOrderMap::new();
         let existing = mqk_db::broker_map_load(&db)
@@ -917,7 +1111,7 @@ impl AppState {
             order_map.register(&internal_id, &broker_id);
         }
 
-        let broker_cursor = mqk_db::load_broker_cursor(&db, DAEMON_ADAPTER_ID)
+        let broker_cursor = mqk_db::load_broker_cursor(&db, self.adapter_id())
             .await
             .map_err(|err| RuntimeLifecycleError::internal("load_broker_cursor failed", err))?;
 
@@ -946,17 +1140,22 @@ impl AppState {
                 )
             })?;
 
-        let local_snapshot_guard = self.execution_snapshot.read().await;
-        let local_seed = local_snapshot_guard.clone().ok_or_else(|| {
-            RuntimeLifecycleError::service_unavailable(
-                "runtime.start_refused.service_unavailable",
-                "local runtime snapshot truth is unavailable; refusing to start runtime with placeholder local state",
-            )
-        })?;
-        drop(local_snapshot_guard);
+        // DMON-02: Allow absent execution_snapshot; use an empty local snapshot
+        // seed rather than refusing to start.
+        let local_seed_reconcile = {
+            let local_snapshot_guard = self.execution_snapshot.read().await;
+            if let Some(snap) = local_snapshot_guard.clone() {
+                let sides = self.local_order_sides.read().await;
+                reconcile_local_snapshot_from_runtime_with_sides(&snap, &sides)
+            } else {
+                mqk_reconcile::LocalSnapshot::empty()
+            }
+        };
 
-        let local_seed_reconcile = reconcile_local_snapshot_from_runtime(&local_seed);
+        // DMON-05: Closures read from the shared side cache so that each
+        // reconcile tick uses the current order-side mapping.
         let local_snapshots = Arc::clone(&self.execution_snapshot);
+        let side_cache_for_local = Arc::clone(&self.local_order_sides);
         let local_snapshot_provider = move || {
             let Some(snapshot) = local_snapshots
                 .try_read()
@@ -965,7 +1164,11 @@ impl AppState {
             else {
                 return local_seed_reconcile.clone();
             };
-            reconcile_local_snapshot_from_runtime(&snapshot)
+            let sides = side_cache_for_local
+                .try_read()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            reconcile_local_snapshot_from_runtime_with_sides(&snapshot, &sides)
         };
 
         let broker_snapshot_provider = move || {
@@ -985,11 +1188,11 @@ impl AppState {
             db,
             gateway,
             order_map,
-            BTreeMap::new(),
-            PortfolioState::new(0),
+            oms_orders,
+            portfolio,
             run_id,
             self.node_id.clone(),
-            DAEMON_ADAPTER_ID,
+            self.adapter_id(),
             broker_cursor,
             mqk_runtime::orchestrator::WallClock,
             Box::new(local_snapshot_provider),
@@ -1110,6 +1313,40 @@ impl AppState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn runtime_selection_defaults_to_paper_ready() {
+        let selection = runtime_selection_from_env_values(None, None);
+        assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
+        assert_eq!(selection.adapter_id, "paper");
+        assert!(selection.readiness.start_allowed);
+        assert!(selection.readiness.blocker.is_none());
+    }
+
+    #[test]
+    fn runtime_selection_fail_closes_unproven_modes() {
+        let selection = runtime_selection_from_env_values(Some("live-capital"), Some("alpaca"));
+        assert_eq!(selection.deployment_mode, DeploymentMode::LiveCapital);
+        assert!(!selection.readiness.start_allowed);
+        assert!(selection
+            .readiness
+            .blocker
+            .as_deref()
+            .unwrap_or("")
+            .contains("unsupported/unproven"));
+    }
+
+    #[test]
+    fn runtime_selection_fail_closes_paper_with_nonpaper_adapter() {
+        let selection = runtime_selection_from_env_values(Some("paper"), Some("alpaca"));
+        assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
+        assert!(!selection.readiness.start_allowed);
+        assert!(selection
+            .readiness
+            .blocker
+            .as_deref()
+            .unwrap_or("")
+            .contains("requires adapter 'paper'"));
+    }
     #[test]
     fn reconcile_truth_gate_allows_only_ok_status() {
         let reconcile_status = Arc::new(RwLock::new(initial_reconcile_status()));
@@ -1248,6 +1485,84 @@ fn operator_auth_mode_from_env() -> OperatorAuthMode {
     operator_auth_mode_from_env_values(operator_token.as_deref(), dev_allow_no_token.as_deref())
 }
 
+fn runtime_selection_from_env_values(
+    mode: Option<&str>,
+    adapter_id: Option<&str>,
+) -> RuntimeSelection {
+    let deployment_mode = parse_deployment_mode(mode).unwrap_or_else(|| {
+        parse_deployment_mode(Some(DEFAULT_DAEMON_DEPLOYMENT_MODE))
+            .expect("default deployment mode must be valid")
+    });
+    let adapter = adapter_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_DAEMON_ADAPTER_ID)
+        .to_ascii_lowercase();
+
+    let readiness = deployment_mode_readiness(deployment_mode, &adapter);
+
+    RuntimeSelection {
+        deployment_mode,
+        adapter_id: adapter,
+        run_config_hash: format!(
+            "{}-{}-{}-v1",
+            DAEMON_RUN_CONFIG_HASH_PREFIX,
+            deployment_mode.as_api_label(),
+            if readiness.start_allowed {
+                "ready"
+            } else {
+                "blocked"
+            }
+        ),
+        readiness,
+    }
+}
+
+fn runtime_selection_from_env() -> RuntimeSelection {
+    let mode = std::env::var(DAEMON_DEPLOYMENT_MODE_ENV).ok();
+    let adapter_id = std::env::var(DAEMON_ADAPTER_ID_ENV).ok();
+    runtime_selection_from_env_values(mode.as_deref(), adapter_id.as_deref())
+}
+
+fn parse_deployment_mode(raw: Option<&str>) -> Option<DeploymentMode> {
+    let value = raw?.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "paper" => Some(DeploymentMode::Paper),
+        "backtest" => Some(DeploymentMode::Backtest),
+        "live-shadow" | "live_shadow" | "liveshadow" => Some(DeploymentMode::LiveShadow),
+        "live-capital" | "live_capital" | "livecapital" | "live" => {
+            Some(DeploymentMode::LiveCapital)
+        }
+        _ => None,
+    }
+}
+
+fn deployment_mode_readiness(mode: DeploymentMode, adapter_id: &str) -> DeploymentReadiness {
+    match mode {
+        DeploymentMode::Paper if adapter_id == "paper" => DeploymentReadiness {
+            start_allowed: true,
+            blocker: None,
+        },
+        DeploymentMode::Paper => DeploymentReadiness {
+            start_allowed: false,
+            blocker: Some(format!(
+                "deployment mode '{}' currently requires adapter 'paper'; got '{}'",
+                mode.as_api_label(),
+                adapter_id
+            )),
+        },
+        DeploymentMode::Backtest | DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
+            DeploymentReadiness {
+                start_allowed: false,
+                blocker: Some(format!(
+                    "deployment mode '{}' is unsupported/unproven in current daemon architecture; refusing start fail-closed",
+                    mode.as_api_label()
+                )),
+            }
+        }
+    }
+}
+
 /// Monotonically increasing uptime since first call (process lifetime).
 pub fn uptime_secs() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -1350,6 +1665,267 @@ fn reconcile_local_snapshot_from_runtime(
 
     mqk_reconcile::LocalSnapshot {
         orders: BTreeMap::new(),
+        positions,
+    }
+}
+
+/// DMON-05: like `reconcile_local_snapshot_from_runtime` but also includes
+/// active orders, using the side cache to supply the required `Side` field.
+fn reconcile_local_snapshot_from_runtime_with_sides(
+    snapshot: &mqk_runtime::observability::ExecutionSnapshot,
+    sides: &BTreeMap<String, mqk_reconcile::Side>,
+) -> mqk_reconcile::LocalSnapshot {
+    let positions = snapshot
+        .portfolio
+        .positions
+        .iter()
+        .map(|pos| (pos.symbol.clone(), pos.net_qty))
+        .collect();
+
+    let orders = snapshot
+        .active_orders
+        .iter()
+        .map(|order| {
+            let side = sides
+                .get(&order.order_id)
+                .cloned()
+                .unwrap_or(mqk_reconcile::Side::Buy);
+            let status = oms_execution_status_to_reconcile(&order.status);
+            let snap = mqk_reconcile::OrderSnapshot {
+                order_id: order.order_id.clone(),
+                symbol: order.symbol.clone(),
+                side,
+                qty: order.total_qty,
+                filled_qty: order.filled_qty,
+                status,
+            };
+            (order.order_id.clone(), snap)
+        })
+        .collect();
+
+    mqk_reconcile::LocalSnapshot { orders, positions }
+}
+
+fn oms_execution_status_to_reconcile(status: &str) -> mqk_reconcile::OrderStatus {
+    let raw = status.to_ascii_lowercase();
+    if raw == "filled" {
+        mqk_reconcile::OrderStatus::Filled
+    } else if raw == "canceled" || raw == "cancelled" {
+        mqk_reconcile::OrderStatus::Canceled
+    } else if raw == "rejected" {
+        mqk_reconcile::OrderStatus::Rejected
+    } else {
+        mqk_reconcile::OrderStatus::Unknown
+    }
+}
+
+fn outbox_json_symbol(json: &serde_json::Value) -> Option<String> {
+    json.get("symbol")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn outbox_json_qty(json: &serde_json::Value) -> Option<i64> {
+    // Accept both "qty" and "quantity" keys; value must be positive.
+    let raw = json.get("qty").or_else(|| json.get("quantity"))?;
+    let n = raw.as_i64()?;
+    if n > 0 { Some(n) } else { None }
+}
+
+fn outbox_json_side(json: &serde_json::Value) -> mqk_reconcile::Side {
+    match json.get("side").and_then(|v| v.as_str()) {
+        Some(s) if s.eq_ignore_ascii_case("sell") => mqk_reconcile::Side::Sell,
+        _ => mqk_reconcile::Side::Buy,
+    }
+}
+
+fn broker_event_to_oms_event(event: &BrokerEvent) -> OmsEvent {
+    match event {
+        BrokerEvent::Ack { .. } => OmsEvent::Ack,
+        BrokerEvent::PartialFill { delta_qty, .. } => OmsEvent::PartialFill { delta_qty: *delta_qty },
+        BrokerEvent::Fill { delta_qty, .. } => OmsEvent::Fill { delta_qty: *delta_qty },
+        BrokerEvent::CancelAck { .. } => OmsEvent::CancelAck,
+        BrokerEvent::CancelReject { .. } => OmsEvent::CancelReject,
+        BrokerEvent::ReplaceAck { new_total_qty, .. } => OmsEvent::ReplaceAck { new_total_qty: *new_total_qty },
+        BrokerEvent::ReplaceReject { .. } => OmsEvent::ReplaceReject,
+        BrokerEvent::Reject { .. } => OmsEvent::Reject,
+    }
+}
+
+fn broker_event_to_portfolio_fill(event: &BrokerEvent) -> Option<mqk_portfolio::Fill> {
+    match event {
+        BrokerEvent::Fill {
+            symbol,
+            side,
+            delta_qty,
+            price_micros,
+            fee_micros,
+            ..
+        }
+        | BrokerEvent::PartialFill {
+            symbol,
+            side,
+            delta_qty,
+            price_micros,
+            fee_micros,
+            ..
+        } => {
+            let portfolio_side = match side {
+                mqk_execution::types::Side::Buy => mqk_portfolio::Side::Buy,
+                mqk_execution::types::Side::Sell => mqk_portfolio::Side::Sell,
+            };
+            Some(mqk_portfolio::Fill {
+                symbol: symbol.clone(),
+                side: portfolio_side,
+                qty: *delta_qty,
+                price_micros: *price_micros,
+                fee_micros: *fee_micros,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn oms_state_to_broker_status(state: &OrderState) -> &'static str {
+    match state {
+        OrderState::Open => "new",
+        OrderState::PartiallyFilled => "partially_filled",
+        OrderState::Filled => "filled",
+        OrderState::CancelPending => "pending_cancel",
+        OrderState::Cancelled => "canceled",
+        OrderState::ReplacePending => "pending_replace",
+        OrderState::Rejected => "rejected",
+    }
+}
+
+/// DMON-01: Synthesize a `BrokerSnapshot` from recovered OMS + portfolio truth.
+/// Used when no prior broker snapshot exists in memory (cold start / first tick).
+fn synthesize_paper_broker_snapshot(
+    oms_orders: &BTreeMap<String, OmsOrder>,
+    sides: &BTreeMap<String, mqk_reconcile::Side>,
+    portfolio: &PortfolioState,
+    now: chrono::DateTime<Utc>,
+) -> mqk_schemas::BrokerSnapshot {
+    let orders: Vec<mqk_schemas::BrokerOrder> = oms_orders
+        .values()
+        .map(|order| {
+            let side_str = sides
+                .get(&order.order_id)
+                .map(|s| match s {
+                    mqk_reconcile::Side::Buy => "buy",
+                    mqk_reconcile::Side::Sell => "sell",
+                })
+                .unwrap_or("buy");
+            mqk_schemas::BrokerOrder {
+                broker_order_id: order.order_id.clone(),
+                client_order_id: order.order_id.clone(),
+                symbol: order.symbol.clone(),
+                side: side_str.to_string(),
+                r#type: "market".to_string(),
+                status: oms_state_to_broker_status(&order.state).to_string(),
+                qty: order.total_qty.to_string(),
+                limit_price: None,
+                stop_price: None,
+                created_at_utc: now,
+            }
+        })
+        .collect();
+
+    let positions: Vec<mqk_schemas::BrokerPosition> = portfolio
+        .positions
+        .iter()
+        .filter_map(|(symbol, pos)| {
+            let net: i64 = pos.lots.iter().map(|l| l.qty_signed).sum();
+            if net == 0 {
+                None
+            } else {
+                Some(mqk_schemas::BrokerPosition {
+                    symbol: symbol.clone(),
+                    qty: net.to_string(),
+                    avg_price: "0".to_string(),
+                })
+            }
+        })
+        .collect();
+
+    let cash_whole = portfolio.cash_micros / 1_000_000;
+    let account = mqk_schemas::BrokerAccount {
+        equity: cash_whole.to_string(),
+        cash: cash_whole.to_string(),
+        currency: "USD".to_string(),
+    };
+
+    mqk_schemas::BrokerSnapshot {
+        captured_at_utc: now,
+        account,
+        orders,
+        fills: vec![],
+        positions,
+    }
+}
+
+/// DMON-05 (tick): Synthesize a paper-broker snapshot from the latest execution
+/// snapshot and side cache.  Called every execution tick to keep broker_snapshot
+/// in sync with the live OMS so the reconcile gate never sees local vs. broker
+/// drift in paper mode.
+fn synthesize_broker_snapshot_from_execution(
+    snapshot: &mqk_runtime::observability::ExecutionSnapshot,
+    sides: &BTreeMap<String, mqk_reconcile::Side>,
+    now: chrono::DateTime<Utc>,
+) -> mqk_schemas::BrokerSnapshot {
+    let orders: Vec<mqk_schemas::BrokerOrder> = snapshot
+        .active_orders
+        .iter()
+        .map(|order| {
+            let side_str = sides
+                .get(&order.order_id)
+                .map(|s| match s {
+                    mqk_reconcile::Side::Buy => "buy",
+                    mqk_reconcile::Side::Sell => "sell",
+                })
+                .unwrap_or("buy");
+            mqk_schemas::BrokerOrder {
+                broker_order_id: order
+                    .broker_order_id
+                    .clone()
+                    .unwrap_or_else(|| order.order_id.clone()),
+                client_order_id: order.order_id.clone(),
+                symbol: order.symbol.clone(),
+                side: side_str.to_string(),
+                r#type: "market".to_string(),
+                status: order.status.to_ascii_lowercase(),
+                qty: order.total_qty.to_string(),
+                limit_price: None,
+                stop_price: None,
+                created_at_utc: now,
+            }
+        })
+        .collect();
+
+    let positions: Vec<mqk_schemas::BrokerPosition> = snapshot
+        .portfolio
+        .positions
+        .iter()
+        .map(|pos| mqk_schemas::BrokerPosition {
+            symbol: pos.symbol.clone(),
+            qty: pos.net_qty.to_string(),
+            avg_price: "0".to_string(),
+        })
+        .collect();
+
+    let cash_whole = snapshot.portfolio.cash_micros / 1_000_000;
+    let account = mqk_schemas::BrokerAccount {
+        equity: cash_whole.to_string(),
+        cash: cash_whole.to_string(),
+        currency: "USD".to_string(),
+    };
+
+    mqk_schemas::BrokerSnapshot {
+        captured_at_utc: now,
+        account,
+        orders,
+        fills: vec![],
         positions,
     }
 }
@@ -1563,6 +2139,9 @@ fn spawn_execution_loop(
 ) -> ExecutionLoopHandle {
     let (stop_tx, mut stop_rx) = watch::channel(ExecutionLoopCommand::Run);
     let snapshot_cache = Arc::clone(&state.execution_snapshot);
+    // DMON-05: shared caches updated every tick so reconcile closures stay current.
+    let broker_snapshot_cache = Arc::clone(&state.broker_snapshot);
+    let side_cache = Arc::clone(&state.local_order_sides);
     let db = state.db.clone();
     let integrity = Arc::clone(&state.integrity);
 
@@ -1625,6 +2204,20 @@ fn spawn_execution_loop(
 
                     if let Err(err) = orchestrator.tick().await {
                         tracing::error!("execution_loop_halt error={err}");
+                        // Safety net: durably halt the run so it cannot stay in a
+                        // zombie RUNNING state after the loop exits.  For cases
+                        // where tick() already called persist_halt_and_disarm
+                        // internally (reconcile drift, recovery quarantine, etc.),
+                        // halt_run is idempotent.  For generic DB errors it
+                        // prevents a run that is permanently Running with no loop.
+                        if let Some(ref pool) = db {
+                            let now = Utc::now();
+                            let _ = mqk_db::halt_run(pool, run_id, now).await;
+                        }
+                        {
+                            let mut ig = integrity.write().await;
+                            ig.halted = true;
+                        }
                         if let Err(release_err) = orchestrator.release_runtime_leadership().await {
                             tracing::warn!("runtime_lease_release_failed error={release_err}");
                         }
@@ -1660,6 +2253,30 @@ fn spawn_execution_loop(
 
                     match orchestrator.snapshot().await.context("snapshot failed") {
                         Ok(snapshot) => {
+                            // DMON-05: refresh side cache from outbox, then synthesize
+                            // broker snapshot from local OMS truth so paper-mode
+                            // reconcile always sees a consistent local == broker view.
+                            if let Some(ref pool) = db {
+                                if let Ok(outbox_rows) =
+                                    mqk_db::outbox_list_unacked_for_run(pool, run_id).await
+                                {
+                                    let mut sides = side_cache.write().await;
+                                    for row in &outbox_rows {
+                                        sides.insert(
+                                            row.idempotency_key.clone(),
+                                            outbox_json_side(&row.order_json),
+                                        );
+                                    }
+                                }
+                                let sides_snapshot = side_cache.read().await.clone();
+                                let now = Utc::now();
+                                let synth = synthesize_broker_snapshot_from_execution(
+                                    &snapshot,
+                                    &sides_snapshot,
+                                    now,
+                                );
+                                *broker_snapshot_cache.write().await = Some(synth);
+                            }
                             *snapshot_cache.write().await = Some(snapshot);
                         }
                         Err(err) => {

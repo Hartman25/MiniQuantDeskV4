@@ -897,10 +897,9 @@ export interface OperatorActionReceipt {
   environment: EnvironmentMode;
   live_routing_enabled: boolean;
   result_state: string;
-  audit_reference: string;
+  audit_reference: string | null;
   warnings: string[];
   blocking_failures: string[];
-  simulated?: boolean;
 }
 
 export interface SystemModel {

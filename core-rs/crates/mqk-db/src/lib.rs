@@ -1843,6 +1843,14 @@ pub async fn inbox_insert_deduped(
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
+    let received_at = message_json
+        .get("received_at_utc")
+        .and_then(|v| v.as_str())
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|| DateTime::<Utc>::from_timestamp_millis(event_ts_ms))
+        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+
     inbox_insert_deduped_with_identity(
         pool,
         run_id,
@@ -1853,7 +1861,7 @@ pub async fn inbox_insert_deduped(
         event_kind,
         &message_json,
         event_ts_ms,
-        Utc::now(),
+        received_at,
     )
     .await
 }
@@ -1885,7 +1893,7 @@ pub async fn inbox_insert_deduped_with_identity(
             internal_order_id,
             broker_order_id,
             event_kind,
-            event_json,
+            message_json,
             event_ts_ms,
             received_at_utc,
             applied_at_utc
@@ -1912,7 +1920,9 @@ pub async fn inbox_insert_deduped_with_identity(
             if db_err.code().as_deref() == Some("23505")
                 && matches!(
                     db_err.constraint(),
-                    Some("uq_inbox_run_broker_message_id") | Some("uq_inbox_run_broker_fill_id")
+                    Some("uq_inbox_run_broker_message_id")
+                        | Some("uq_inbox_run_message")
+                        | Some("uq_inbox_run_broker_fill_id")
                 ) =>
         {
             Ok(false)
@@ -1987,6 +1997,89 @@ pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result
     .fetch_all(pool)
     .await
     .context("inbox_load_unapplied_for_run failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(InboxRow {
+            inbox_id: row.try_get("inbox_id")?,
+            run_id: row.try_get("run_id")?,
+            broker_message_id: row.try_get("broker_message_id")?,
+            broker_fill_id: row.try_get("broker_fill_id")?,
+            broker_sequence_id: row.try_get("broker_sequence_id")?,
+            broker_timestamp: row.try_get("broker_timestamp")?,
+            message_json: row.try_get("message_json")?,
+            received_at_utc: row.try_get("received_at_utc")?,
+            applied_at_utc: row.try_get("applied_at_utc")?,
+        });
+    }
+    Ok(out)
+}
+
+/// Load outbox rows with status SENT or ACKED (submitted to broker), ordered
+/// by outbox_id asc.  Used at cold-start to reconstruct the in-flight OMS
+/// order map without querying the broker.
+pub async fn outbox_load_submitted_for_run(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<Vec<OutboxRow>> {
+    let rows = sqlx::query(
+        r#"
+        select outbox_id, run_id, idempotency_key, order_json, status,
+               created_at_utc, sent_at_utc, claimed_at_utc, claimed_by,
+               dispatching_at_utc, dispatch_attempt_id
+          from oms_outbox
+         where run_id = $1
+           and status in ('SENT', 'ACKED')
+         order by outbox_id asc
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .context("outbox_load_submitted_for_run failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(OutboxRow {
+            outbox_id: row.try_get("outbox_id")?,
+            run_id: row.try_get("run_id")?,
+            idempotency_key: row.try_get("idempotency_key")?,
+            order_json: row.try_get("order_json")?,
+            status: row.try_get("status")?,
+            created_at_utc: row.try_get("created_at_utc")?,
+            sent_at_utc: row.try_get("sent_at_utc")?,
+            claimed_at_utc: row.try_get("claimed_at_utc")?,
+            claimed_by: row.try_get("claimed_by")?,
+            dispatching_at_utc: row.try_get("dispatching_at_utc")?,
+            dispatch_attempt_id: row.try_get("dispatch_attempt_id")?,
+        });
+    }
+    Ok(out)
+}
+
+/// Load all applied inbox rows (`applied_at_utc IS NOT NULL`), ordered by
+/// inbox_id asc.  Used at cold-start to replay fills into the portfolio and
+/// advance OMS order state.  Disjoint from the unapplied set processed by
+/// Phase 3, so no double-apply risk.
+pub async fn inbox_load_all_applied_for_run(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<Vec<InboxRow>> {
+    let rows = sqlx::query(
+        r#"
+        select inbox_id, run_id, broker_message_id, broker_fill_id,
+               broker_sequence_id, broker_timestamp, message_json,
+               received_at_utc, applied_at_utc
+          from oms_inbox
+         where run_id = $1
+           and applied_at_utc is not null
+         order by inbox_id asc
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .context("inbox_load_all_applied_for_run failed")?;
 
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {

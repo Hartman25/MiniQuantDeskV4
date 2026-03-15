@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use serde_json::json;
 
 use axum::{
     extract::State,
@@ -18,6 +19,10 @@ use crate::{
 
 #[derive(Debug, Serialize)]
 pub struct ControlStatus {
+    pub daemon_mode: String,
+    pub adapter_id: String,
+    pub deployment_start_allowed: bool,
+    pub deployment_blocker: Option<String>,
     pub desired_armed: bool,
     pub leader_holder_id: Option<String>,
     pub leader_epoch: Option<i64>,
@@ -42,7 +47,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/control/status", get(status))
         .route("/control/disarm", post(disarm))
         .route("/control/arm", post(arm))
-        .route("/control/restart", post(restart))
 }
 
 fn operator_action_response(
@@ -54,6 +58,7 @@ fn operator_action_response(
     blockers: Vec<String>,
     warnings: Vec<String>,
     durable_targets: Vec<String>,
+    audit_event_id: Option<uuid::Uuid>,
 ) -> OperatorActionResponse {
     OperatorActionResponse {
         requested_action: requested_action.to_string(),
@@ -68,7 +73,7 @@ fn operator_action_response(
         audit: OperatorActionAuditFields {
             durable_db_write: accepted,
             durable_targets,
-            audit_event_id: None,
+            audit_event_id: audit_event_id.map(|id| id.to_string()),
         },
     }
 }
@@ -182,6 +187,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
 
     let response = match lease_row {
         Some((holder_id, epoch, lease_expires_at)) => ControlStatus {
+            daemon_mode: state.deployment_mode().as_api_label().to_string(),
+            adapter_id: state.adapter_id().to_string(),
+            deployment_start_allowed: state.deployment_readiness().start_allowed,
+            deployment_blocker: state.deployment_readiness().blocker.clone(),
             desired_armed,
             leader_holder_id: Some(holder_id),
             leader_epoch: Some(epoch),
@@ -201,6 +210,10 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             deadman_reason: deadman_reason.clone(),
         },
         None => ControlStatus {
+            daemon_mode: state.deployment_mode().as_api_label().to_string(),
+            adapter_id: state.adapter_id().to_string(),
+            deployment_start_allowed: state.deployment_readiness().start_allowed,
+            deployment_blocker: state.deployment_readiness().blocker.clone(),
             desired_armed,
             leader_holder_id: None,
             leader_epoch: None,
@@ -260,6 +273,16 @@ async fn disarm(State(state): State<Arc<AppState>>) -> Response {
     }
 
     publish_integrity_status(&state, false, "control: desired_armed=false").await;
+    let audit_event_id = match write_control_operator_audit_event(&state, "control.disarm", "DISARMED").await {
+        Ok(id) => id,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("control/disarm audit persistence failed: {err}"),
+            )
+                .into_response();
+        }
+    };
     (
         StatusCode::OK,
         Json(operator_action_response(
@@ -274,6 +297,7 @@ async fn disarm(State(state): State<Arc<AppState>>) -> Response {
                 "runtime_control_state.desired_armed".to_string(),
                 "sys_arm_state.state".to_string(),
             ],
+            audit_event_id,
         )),
     )
         .into_response()
@@ -310,6 +334,16 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
     }
 
     publish_integrity_status(&state, true, "control: desired_armed=true").await;
+    let audit_event_id = match write_control_operator_audit_event(&state, "control.arm", "ARMED").await {
+        Ok(id) => id,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("control/arm audit persistence failed: {err}"),
+            )
+                .into_response();
+        }
+    };
     (
         StatusCode::OK,
         Json(operator_action_response(
@@ -324,6 +358,7 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
                 "runtime_control_state.desired_armed".to_string(),
                 "sys_arm_state.state".to_string(),
             ],
+            audit_event_id,
         )),
     )
         .into_response()
@@ -407,6 +442,75 @@ async fn publish_integrity_status(state: &Arc<AppState>, integrity_armed: bool, 
     snapshot.integrity_armed = integrity_armed;
     snapshot.notes = Some(note.to_string());
     state.publish_status(snapshot).await;
+}
+
+async fn write_control_operator_audit_event(
+    state: &Arc<AppState>,
+    event_type: &str,
+    runtime_transition: &str,
+) -> anyhow::Result<Option<uuid::Uuid>> {
+    let Some(db) = state.db.as_ref() else {
+        return Ok(None);
+    };
+
+    let run_id = if let Some(run_id) = state
+        .current_status_snapshot()
+        .await
+        .ok()
+        .and_then(|s| s.active_run_id)
+    {
+        run_id
+    } else if let Some(run) = mqk_db::fetch_latest_run_for_engine(
+        db,
+        "mqk-daemon",
+        state.deployment_mode().as_db_mode(),
+    )
+    .await?
+    {
+        run.run_id
+    } else {
+        let run_id = uuid::Uuid::new_v4();
+        mqk_db::insert_run(
+            db,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "mqk-daemon".to_string(),
+                mode: state.deployment_mode().as_db_mode().to_string(),
+                started_at_utc: chrono::Utc::now(),
+                git_hash: "daemon-control-audit".to_string(),
+                config_hash: state.run_config_hash().to_string(),
+                config_json: json!({"source": "control.operator_action"}),
+                host_fingerprint: state.node_id.clone(),
+            },
+        )
+        .await?;
+        run_id
+    };
+
+    let event_id = uuid::Uuid::new_v4();
+    mqk_db::insert_audit_event(
+        db,
+        &mqk_db::NewAuditEvent {
+            event_id,
+            run_id,
+            ts_utc: chrono::Utc::now(),
+            topic: "operator".to_string(),
+            event_type: event_type.to_string(),
+            payload: serde_json::json!({
+                "requested_action": event_type,
+                "accepted": true,
+                "disposition": "applied",
+                "runtime_transition": runtime_transition,
+                "warnings": [],
+                "source": "mqk-daemon.routes.control",
+            }),
+            hash_prev: None,
+            hash_self: None,
+        },
+    )
+    .await?;
+
+    Ok(Some(event_id))
 }
 
 fn lifecycle_error_response(err: RuntimeLifecycleError) -> Response {

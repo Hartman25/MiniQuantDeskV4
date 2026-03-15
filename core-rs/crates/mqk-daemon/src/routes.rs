@@ -21,25 +21,26 @@ use axum::{
 };
 use futures_util::{Stream, StreamExt};
 use mqk_schemas::BrokerPosition;
+use sqlx::Row;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
 
 use crate::{
     api_types::{
-        ConfigDiffRow, ConfigFingerprintResponse, DiagnosticsSnapshotResponse,
-        ExecutionSummaryResponse, FaultSignal, GateRefusedResponse, HealthResponse,
-        IntegrityResponse, PortfolioSummaryResponse, PreflightStatusResponse,
-        ReconcileSummaryResponse, RiskSummaryResponse, RuntimeErrorResponse, SessionStateResponse,
-        StrategySummaryRow, StrategySuppressionRow, SystemStatusResponse, TradingAccountResponse,
-        TradingFillsResponse, TradingOrdersResponse, TradingPositionsResponse,
-        TradingSnapshotResponse,
+        AuditArtifactRow, AuditArtifactsResponse, ConfigDiffRow, ConfigFingerprintResponse,
+        DiagnosticsSnapshotResponse, ExecutionSummaryResponse, FaultSignal, GateRefusedResponse,
+        HealthResponse, IntegrityResponse, OperatorActionAuditRow, OperatorActionsAuditResponse,
+        OperatorTimelineResponse, OperatorTimelineRow, PortfolioSummaryResponse,
+        PreflightStatusResponse, ReconcileSummaryResponse, RiskSummaryResponse,
+        RuntimeErrorResponse, SessionStateResponse, StrategySummaryRow, StrategySuppressionRow,
+        SystemStatusResponse, TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
+        TradingPositionsResponse, TradingSnapshotResponse,
     },
     state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot},
 };
 
 const DAEMON_ENGINE_ID: &str = "mqk-daemon";
-const DAEMON_MODE: &str = "PAPER";
 
 // ---------------------------------------------------------------------------
 // S7-1: Token auth middleware
@@ -139,6 +140,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/system/config-diffs", get(system_config_diffs))
         .route("/api/v1/strategy/summary", get(strategy_summary))
         .route("/api/v1/strategy/suppressions", get(strategy_suppressions))
+        .route(
+            "/api/v1/audit/operator-actions",
+            get(audit_operator_actions),
+        )
+        .route("/api/v1/audit/artifacts", get(audit_artifacts))
+        .route("/api/v1/ops/operator-timeline", get(ops_operator_timeline))
         // DAEMON-1: trading read APIs (placeholder until broker wiring exists)
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
@@ -216,6 +223,9 @@ pub(crate) async fn run_start(State(st): State<Arc<AppState>>) -> Response {
     match st.start_execution_runtime().await {
         Ok(snapshot) => {
             info!(run_id = ?snapshot.active_run_id, "run/start");
+            if let Some(run_id) = snapshot.active_run_id {
+                let _ = write_operator_audit_event(&st, Some(run_id), "run.start", "RUNNING").await;
+            }
             (StatusCode::OK, Json(snapshot)).into_response()
         }
         Err(err) => runtime_error_response(err),
@@ -230,6 +240,8 @@ pub(crate) async fn run_stop(State(st): State<Arc<AppState>>) -> Response {
     match st.stop_execution_runtime().await {
         Ok(snapshot) => {
             info!("run/stop");
+            let _ = write_operator_audit_event(&st, snapshot.active_run_id, "run.stop", "STOPPED")
+                .await;
             (StatusCode::OK, Json(snapshot)).into_response()
         }
         Err(err) => runtime_error_response(err),
@@ -244,6 +256,8 @@ pub(crate) async fn run_halt(State(st): State<Arc<AppState>>) -> Response {
     match st.halt_execution_runtime().await {
         Ok(snapshot) => {
             info!("run/halt");
+            let _ =
+                write_operator_audit_event(&st, snapshot.active_run_id, "run.halt", "HALTED").await;
             (StatusCode::OK, Json(snapshot)).into_response()
         }
         Err(err) => runtime_error_response(err),
@@ -487,7 +501,7 @@ async fn environment_and_live_routing_truth(
 
     let environment = Some(run.mode.to_ascii_lowercase());
     let live_routing_enabled = if status.state == "running" {
-        Some(run.mode.eq_ignore_ascii_case("LIVE"))
+        Some(run.mode.eq_ignore_ascii_case("LIVE") || run.mode.eq_ignore_ascii_case("LIVE-CAPITAL"))
     } else {
         live_routing_enabled
     };
@@ -575,6 +589,10 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
         StatusCode::OK,
         Json(SystemStatusResponse {
             environment,
+            daemon_mode: st.deployment_mode().as_api_label().to_string(),
+            adapter_id: st.adapter_id().to_string(),
+            deployment_start_allowed: st.deployment_readiness().start_allowed,
+            deployment_blocker: st.deployment_readiness().blocker.clone(),
             runtime_status,
             broker_status,
             db_status: "unknown".to_string(),
@@ -635,10 +653,17 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         blockers.push("Execution is disarmed at the integrity gate.".to_string());
     }
 
+    if let Some(blocker) = st.deployment_readiness().blocker.clone() {
+        blockers.push(blocker);
+    }
+
     (
         StatusCode::OK,
         Json(PreflightStatusResponse {
             daemon_reachable: true,
+            daemon_mode: st.deployment_mode().as_api_label().to_string(),
+            adapter_id: st.adapter_id().to_string(),
+            deployment_start_allowed: st.deployment_readiness().start_allowed,
             db_reachable: None,
             broker_config_present: None,
             market_data_config_present: None,
@@ -655,37 +680,21 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
 }
 
 pub(crate) async fn execution_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    let snap = st.broker_snapshot.read().await.clone();
-    let now = chrono::Utc::now();
+    // DMON-06: derive counts from execution_snapshot (local OMS truth) instead
+    // of broker_snapshot so this surface reflects the daemon's own order state.
+    let snap = st.execution_snapshot.read().await.clone();
 
     let summary = if let Some(snapshot) = snap {
-        let active_orders = snapshot
-            .orders
-            .iter()
-            .filter(|order| !is_terminal_order_status(order.status.as_str()))
-            .count();
+        let active_orders = snapshot.active_orders.len();
         let pending_orders = snapshot
-            .orders
+            .pending_outbox
             .iter()
-            .filter(|order| is_pending_order_status(order.status.as_str()))
+            .filter(|o| o.status == "PENDING" || o.status == "CLAIMED")
             .count();
         let dispatching_orders = snapshot
-            .orders
+            .pending_outbox
             .iter()
-            .filter(|order| is_dispatching_order_status(order.status.as_str()))
-            .count();
-        let reject_count_today = snapshot
-            .orders
-            .iter()
-            .filter(|order| order.status.eq_ignore_ascii_case("rejected"))
-            .count();
-        let stuck_orders = snapshot
-            .orders
-            .iter()
-            .filter(|order| {
-                !is_terminal_order_status(order.status.as_str())
-                    && (now - order.created_at_utc).num_minutes() >= 5
-            })
+            .filter(|o| o.status == "DISPATCHING" || o.status == "SENT")
             .count();
 
         ExecutionSummaryResponse {
@@ -693,10 +702,10 @@ pub(crate) async fn execution_summary(State(st): State<Arc<AppState>>) -> impl I
             active_orders,
             pending_orders,
             dispatching_orders,
-            reject_count_today,
+            reject_count_today: 0,
             cancel_replace_count_today: None,
             avg_ack_latency_ms: None,
-            stuck_orders,
+            stuck_orders: 0,
         }
     } else {
         ExecutionSummaryResponse {
@@ -823,7 +832,10 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
     (
         StatusCode::OK,
         Json(SessionStateResponse {
-            daemon_mode: DAEMON_MODE.to_string(),
+            daemon_mode: st.deployment_mode().as_db_mode().to_string(),
+            adapter_id: st.adapter_id().to_string(),
+            deployment_start_allowed: st.deployment_readiness().start_allowed,
+            deployment_blocker: st.deployment_readiness().blocker.clone(),
             operator_auth_mode: st.operator_auth_mode().label().to_string(),
             strategy_allowed,
             execution_allowed: strategy_allowed,
@@ -847,7 +859,7 @@ pub(crate) async fn system_config_fingerprint(
     State(st): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let latest_run = if let Some(db) = st.db.as_ref() {
-        mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, DAEMON_MODE)
+        mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, st.deployment_mode().as_db_mode())
             .await
             .ok()
             .flatten()
@@ -861,11 +873,12 @@ pub(crate) async fn system_config_fingerprint(
             config_hash: latest_run
                 .as_ref()
                 .map(|run| run.config_hash.clone())
-                .unwrap_or_else(|| "unknown".to_string()),
+                .unwrap_or_else(|| st.run_config_hash().to_string()),
+            adapter_id: st.adapter_id().to_string(),
             risk_policy_version: "unknown".to_string(),
             strategy_bundle_version: "unknown".to_string(),
             build_version: st.build.version.to_string(),
-            environment_profile: DAEMON_MODE.to_ascii_lowercase(),
+            environment_profile: st.deployment_mode().as_api_label().to_string(),
             runtime_generation_id: latest_run
                 .as_ref()
                 .map(|run| run.run_id.to_string())
@@ -918,6 +931,329 @@ pub(crate) async fn strategy_suppressions() -> impl IntoResponse {
         Json::<Vec<StrategySuppressionRow>>(Vec::new()),
     )
         .into_response()
+}
+
+pub(crate) async fn audit_operator_actions(State(st): State<Arc<AppState>>) -> Response {
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(OperatorActionsAuditResponse {
+                canonical_route: "/api/v1/audit/operator-actions".to_string(),
+                backend: "postgres.audit_events".to_string(),
+                rows: Vec::new(),
+            }),
+        )
+            .into_response();
+    };
+
+    let rows = match sqlx::query(
+        r#"
+        select event_id, run_id, ts_utc, event_type
+        from audit_events
+        where topic = 'operator'
+        order by ts_utc desc
+        limit 200
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RuntimeErrorResponse {
+                    error: format!("audit/operator-actions query failed: {err}"),
+                    fault_class: "audit.operator_actions.query_failed".to_string(),
+                    gate: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            let event_id: uuid::Uuid = row.get("event_id");
+            let run_id: Option<uuid::Uuid> = row.get("run_id");
+            let ts_utc: chrono::DateTime<chrono::Utc> = row.get("ts_utc");
+            let event_type: String = row.get("event_type");
+            OperatorActionAuditRow {
+                audit_event_id: event_id.to_string(),
+                ts_utc: ts_utc.to_rfc3339(),
+                requested_action: event_type.clone(),
+                disposition: "applied".to_string(),
+                run_id: run_id.map(|v| v.to_string()),
+                runtime_transition: runtime_transition_for_action(&event_type),
+                provenance_ref: format!("audit_events:{}", event_id),
+            }
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(OperatorActionsAuditResponse {
+            canonical_route: "/api/v1/audit/operator-actions".to_string(),
+            backend: "postgres.audit_events".to_string(),
+            rows,
+        }),
+    )
+        .into_response()
+}
+
+pub(crate) async fn audit_artifacts(State(st): State<Arc<AppState>>) -> Response {
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(AuditArtifactsResponse {
+                canonical_route: "/api/v1/audit/artifacts".to_string(),
+                backend: "postgres.runs".to_string(),
+                rows: Vec::new(),
+            }),
+        )
+            .into_response();
+    };
+
+    let runs = match sqlx::query(
+        r#"
+        select run_id, started_at_utc
+        from runs
+        order by started_at_utc desc, run_id desc
+        limit 200
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(runs) => runs,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RuntimeErrorResponse {
+                    error: format!("audit/artifacts query failed: {err}"),
+                    fault_class: "audit.artifacts.query_failed".to_string(),
+                    gate: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    let rows = runs
+        .into_iter()
+        .map(|row| {
+            let run_id: uuid::Uuid = row.get("run_id");
+            let started_at_utc: chrono::DateTime<chrono::Utc> = row.get("started_at_utc");
+            AuditArtifactRow {
+                artifact_id: format!("run-config:{}", run_id),
+                artifact_type: "run_config".to_string(),
+                run_id: run_id.to_string(),
+                created_at_utc: started_at_utc.to_rfc3339(),
+                provenance_ref: format!("runs:{}", run_id),
+            }
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(AuditArtifactsResponse {
+            canonical_route: "/api/v1/audit/artifacts".to_string(),
+            backend: "postgres.runs".to_string(),
+            rows,
+        }),
+    )
+        .into_response()
+}
+
+pub(crate) async fn ops_operator_timeline(State(st): State<Arc<AppState>>) -> Response {
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(OperatorTimelineResponse {
+                canonical_route: "/api/v1/ops/operator-timeline".to_string(),
+                backend: "postgres.runs+postgres.audit_events".to_string(),
+                rows: Vec::new(),
+            }),
+        )
+            .into_response();
+    };
+
+    let runs = match sqlx::query(
+        r#"
+        select run_id, started_at_utc, armed_at_utc, running_at_utc, stopped_at_utc, halted_at_utc
+        from runs
+        order by started_at_utc desc, run_id desc
+        limit 200
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(runs) => runs,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RuntimeErrorResponse {
+                    error: format!("ops/operator-timeline runs query failed: {err}"),
+                    fault_class: "ops.operator_timeline.query_failed".to_string(),
+                    gate: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    let mut rows: Vec<OperatorTimelineRow> = Vec::new();
+    for row in &runs {
+        let run_id: uuid::Uuid = row.get("run_id");
+        let started_at_utc: chrono::DateTime<chrono::Utc> = row.get("started_at_utc");
+        let armed_at_utc: Option<chrono::DateTime<chrono::Utc>> = row.get("armed_at_utc");
+        let running_at_utc: Option<chrono::DateTime<chrono::Utc>> = row.get("running_at_utc");
+        let stopped_at_utc: Option<chrono::DateTime<chrono::Utc>> = row.get("stopped_at_utc");
+        let halted_at_utc: Option<chrono::DateTime<chrono::Utc>> = row.get("halted_at_utc");
+
+        rows.push(OperatorTimelineRow {
+            ts_utc: started_at_utc.to_rfc3339(),
+            kind: "runtime_transition".to_string(),
+            run_id: Some(run_id.to_string()),
+            detail: "CREATED".to_string(),
+            provenance_ref: format!("runs:{}:started_at_utc", run_id),
+        });
+        if let Some(ts) = armed_at_utc {
+            rows.push(OperatorTimelineRow {
+                ts_utc: ts.to_rfc3339(),
+                kind: "runtime_transition".to_string(),
+                run_id: Some(run_id.to_string()),
+                detail: "ARMED".to_string(),
+                provenance_ref: format!("runs:{}:armed_at_utc", run_id),
+            });
+        }
+        if let Some(ts) = running_at_utc {
+            rows.push(OperatorTimelineRow {
+                ts_utc: ts.to_rfc3339(),
+                kind: "runtime_transition".to_string(),
+                run_id: Some(run_id.to_string()),
+                detail: "RUNNING".to_string(),
+                provenance_ref: format!("runs:{}:running_at_utc", run_id),
+            });
+        }
+        if let Some(ts) = stopped_at_utc {
+            rows.push(OperatorTimelineRow {
+                ts_utc: ts.to_rfc3339(),
+                kind: "runtime_transition".to_string(),
+                run_id: Some(run_id.to_string()),
+                detail: "STOPPED".to_string(),
+                provenance_ref: format!("runs:{}:stopped_at_utc", run_id),
+            });
+        }
+        if let Some(ts) = halted_at_utc {
+            rows.push(OperatorTimelineRow {
+                ts_utc: ts.to_rfc3339(),
+                kind: "runtime_transition".to_string(),
+                run_id: Some(run_id.to_string()),
+                detail: "HALTED".to_string(),
+                provenance_ref: format!("runs:{}:halted_at_utc", run_id),
+            });
+        }
+    }
+
+    let operator_events = match sqlx::query(
+        r#"
+        select event_id, run_id, ts_utc, event_type
+        from audit_events
+        where topic = 'operator'
+        order by ts_utc desc
+        limit 200
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RuntimeErrorResponse {
+                    error: format!("ops/operator-timeline operator events query failed: {err}"),
+                    fault_class: "ops.operator_timeline.query_failed".to_string(),
+                    gate: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    for row in operator_events {
+        let event_id: uuid::Uuid = row.get("event_id");
+        let run_id: Option<uuid::Uuid> = row.get("run_id");
+        let ts_utc: chrono::DateTime<chrono::Utc> = row.get("ts_utc");
+        let event_type: String = row.get("event_type");
+
+        rows.push(OperatorTimelineRow {
+            ts_utc: ts_utc.to_rfc3339(),
+            kind: "operator_action".to_string(),
+            run_id: run_id.map(|id| id.to_string()),
+            detail: event_type,
+            provenance_ref: format!("audit_events:{}", event_id),
+        });
+    }
+
+    rows.sort_by(|a, b| b.ts_utc.cmp(&a.ts_utc));
+
+    (
+        StatusCode::OK,
+        Json(OperatorTimelineResponse {
+            canonical_route: "/api/v1/ops/operator-timeline".to_string(),
+            backend: "postgres.runs+postgres.audit_events".to_string(),
+            rows,
+        }),
+    )
+        .into_response()
+}
+
+async fn write_operator_audit_event(
+    st: &Arc<AppState>,
+    run_id: Option<uuid::Uuid>,
+    event_type: &str,
+    runtime_transition: &str,
+) -> anyhow::Result<()> {
+    let Some(db) = st.db.as_ref() else {
+        return Ok(());
+    };
+    let Some(run_id) = run_id else {
+        return Ok(());
+    };
+
+    let event_id = uuid::Uuid::new_v4();
+    mqk_db::insert_audit_event(
+        db,
+        &mqk_db::NewAuditEvent {
+            event_id,
+            run_id,
+            ts_utc: chrono::Utc::now(),
+            topic: "operator".to_string(),
+            event_type: event_type.to_string(),
+            payload: serde_json::json!({
+                "runtime_transition": runtime_transition,
+                "source": "mqk-daemon.routes",
+            }),
+            hash_prev: None,
+            hash_self: None,
+        },
+    )
+    .await
+}
+
+fn runtime_transition_for_action(action: &str) -> Option<String> {
+    match action {
+        "control.arm" => Some("ARMED".to_string()),
+        "control.disarm" => Some("DISARMED".to_string()),
+        "run.start" => Some("RUNNING".to_string()),
+        "run.stop" => Some("STOPPED".to_string()),
+        "run.halt" => Some("HALTED".to_string()),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

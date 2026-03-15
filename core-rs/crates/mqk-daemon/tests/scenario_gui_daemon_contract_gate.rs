@@ -33,11 +33,21 @@ fn parse_json(b: bytes::Bytes) -> serde_json::Value {
     serde_json::from_slice(&b).expect("body is not valid JSON")
 }
 
+fn json_str<'a>(json: &'a serde_json::Value, key: &str) -> &'a str {
+    json.get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("missing string key '{key}' in response: {json}"))
+}
+
+fn has_unavailable_marker(value: &str) -> bool {
+    matches!(value, "unknown" | "unavailable" | "not_configured")
+}
+
 #[tokio::test]
 async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
     let router = make_router();
 
-    let cases: [(&str, &[&str]); 6] = [
+    let cases: [(&str, &[&str]); 9] = [
         (
             "/api/v1/system/status",
             &[
@@ -92,6 +102,18 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
                 "unmatched_broker_events",
             ],
         ),
+        (
+            "/api/v1/audit/operator-actions",
+            &["canonical_route", "backend", "rows"],
+        ),
+        (
+            "/api/v1/audit/artifacts",
+            &["canonical_route", "backend", "rows"],
+        ),
+        (
+            "/api/v1/ops/operator-timeline",
+            &["canonical_route", "backend", "rows"],
+        ),
     ];
 
     for (uri, required_keys) in cases {
@@ -111,7 +133,146 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
                 "{uri} missing required key '{key}' in response: {json}"
             );
         }
+
+        if uri == "/api/v1/audit/operator-actions"
+            || uri == "/api/v1/audit/artifacts"
+            || uri == "/api/v1/ops/operator-timeline"
+        {
+            assert_eq!(json["rows"].as_array().map(|v| v.is_empty()), Some(true));
+            assert_eq!(
+                json["canonical_route"].as_str(),
+                Some(uri),
+                "{uri} must declare canonical route identity"
+            );
+            assert!(
+                json["backend"]
+                    .as_str()
+                    .is_some_and(|v| v.contains("postgres")),
+                "{uri} must expose durable backend source"
+            );
+        }
     }
+
+    let legacy_timeline_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/audit/operator-timeline")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (legacy_timeline_status, _) = call(router, legacy_timeline_req).await;
+    assert_eq!(
+        legacy_timeline_status,
+        StatusCode::NOT_FOUND,
+        "legacy /api/v1/audit/operator-timeline alias must stay unmounted; canonical path is /api/v1/ops/operator-timeline"
+    );
+}
+
+#[tokio::test]
+async fn gui_system_status_and_preflight_surfaces_are_semantically_truthful() {
+    let router = make_router();
+
+    let status_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status_code, status_body) = call(router.clone(), status_req).await;
+    assert_eq!(status_code, StatusCode::OK);
+    let status = parse_json(status_body);
+    assert_eq!(status["daemon_reachable"], true);
+    assert_eq!(json_str(&status, "runtime_status"), "idle");
+    assert_eq!(json_str(&status, "integrity_status"), "warning");
+    assert_eq!(status["strategy_armed"], false);
+    assert_eq!(status["execution_armed"], false);
+    assert_eq!(json_str(&status, "daemon_mode"), "paper");
+    assert_eq!(json_str(&status, "adapter_id"), "paper");
+    assert_eq!(status["deployment_start_allowed"], true);
+    assert!(status["deployment_blocker"].is_null());
+    assert!(has_unavailable_marker(json_str(&status, "db_status")));
+    assert!(has_unavailable_marker(json_str(&status, "audit_writer_status")));
+
+    let preflight_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/preflight")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (preflight_code, preflight_body) = call(router, preflight_req).await;
+    assert_eq!(preflight_code, StatusCode::OK);
+    let preflight = parse_json(preflight_body);
+    assert_eq!(preflight["daemon_reachable"], true);
+    assert_eq!(json_str(&preflight, "daemon_mode"), "paper");
+    assert_eq!(json_str(&preflight, "adapter_id"), "paper");
+    assert_eq!(preflight["deployment_start_allowed"], true);
+    assert_eq!(preflight["strategy_disarmed"], true);
+    assert_eq!(preflight["execution_disarmed"], true);
+    assert_eq!(preflight["live_routing_disabled"], true);
+    assert_eq!(preflight["db_reachable"], serde_json::Value::Null);
+    assert_eq!(preflight["broker_config_present"], serde_json::Value::Null);
+    assert_eq!(preflight["market_data_config_present"], serde_json::Value::Null);
+    assert_eq!(preflight["audit_writer_ready"], serde_json::Value::Null);
+    assert!(preflight["blockers"]
+        .as_array()
+        .expect("blockers array")
+        .iter()
+        .any(|b| b.as_str() == Some("Execution is disarmed at the integrity gate.")));
+}
+
+#[tokio::test]
+async fn gui_session_config_strategy_and_audit_surfaces_are_semantically_truthful() {
+    let router = make_router();
+
+    let session_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (session_status, session_body) = call(router.clone(), session_req).await;
+    assert_eq!(session_status, StatusCode::OK);
+    let session = parse_json(session_body);
+    assert_eq!(json_str(&session, "daemon_mode"), "PAPER");
+    assert_eq!(json_str(&session, "adapter_id"), "paper");
+    assert_eq!(session["deployment_start_allowed"], true);
+    assert!(session["deployment_blocker"].is_null());
+    assert_eq!(session["strategy_allowed"], false);
+    assert_eq!(session["execution_allowed"], false);
+
+    let config_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/config-fingerprint")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (config_status, config_body) = call(router.clone(), config_req).await;
+    assert_eq!(config_status, StatusCode::OK);
+    let config = parse_json(config_body);
+    assert_eq!(json_str(&config, "adapter_id"), "paper");
+    assert_eq!(json_str(&config, "environment_profile"), "paper");
+    assert_eq!(json_str(&config, "config_hash"), "daemon-runtime-paper-ready-v1");
+    assert!(config["build_version"].is_string());
+
+    let strategy_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (strategy_status, strategy_body) = call(router.clone(), strategy_req).await;
+    assert_eq!(strategy_status, StatusCode::OK);
+    let strategy_rows = parse_json(strategy_body);
+    let rows = strategy_rows.as_array().expect("strategy summary array");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["strategy_id"], "daemon_integrity_gate");
+    assert_eq!(rows[0]["armed"], false);
+    assert_eq!(rows[0]["health"], "warning");
+
+    let audit_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/audit/operator-actions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (audit_status, audit_body) = call(router, audit_req).await;
+    assert_eq!(audit_status, StatusCode::OK);
+    let audit = parse_json(audit_body);
+    assert_eq!(audit["canonical_route"], "/api/v1/audit/operator-actions");
+    assert_eq!(audit["backend"], "postgres.audit_events");
+    assert!(audit["rows"].is_array());
 }
 
 #[tokio::test]

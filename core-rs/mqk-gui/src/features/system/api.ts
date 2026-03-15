@@ -134,6 +134,17 @@ interface LegacyIntegrityResponse {
   state: string;
 }
 
+interface DaemonOperatorActionResponse {
+  requested_action: string;
+  accepted: boolean;
+  disposition: string;
+  warnings?: string[];
+  environment?: SystemStatus["environment"];
+  audit?: {
+    audit_event_id?: string | null;
+  };
+}
+
 async function fetchJsonCandidate<T>(path: string): Promise<EndpointFetchResult<T>> {
   try {
     const url = new URL(path, getDaemonUrl()).toString();
@@ -340,10 +351,10 @@ function legacyActionPaths(actionKey: string): string[] {
       return ["/v1/run/halt"];
     case "arm-execution":
     case "arm-strategy":
-      return ["/v1/integrity/arm"];
+      return ["/control/arm", "/v1/integrity/arm"];
     case "disarm-execution":
     case "disarm-strategy":
-      return ["/v1/integrity/disarm"];
+      return ["/control/disarm", "/v1/integrity/disarm"];
     default:
       return [];
   }
@@ -899,7 +910,10 @@ function mapLegacyOperatorActionResponse(
 ): OperatorActionReceipt | null {
   if (!response.ok) return null;
 
-  const payload = response.data as Partial<OperatorActionReceipt & LegacyDaemonStatusSnapshot & LegacyIntegrityResponse> | undefined;
+  const payload = response.data as
+    | Partial<OperatorActionReceipt & LegacyDaemonStatusSnapshot & LegacyIntegrityResponse>
+    | DaemonOperatorActionResponse
+    | undefined;
   if (!payload || typeof payload !== "object") {
     return {
       ok: true,
@@ -908,7 +922,21 @@ function mapLegacyOperatorActionResponse(
       live_routing_enabled: false,
       result_state: "accepted",
       warnings: ["Operator action completed but returned no JSON payload."],
-      audit_reference: `${actionKey}-${Date.now()}`,
+      audit_reference: null,
+      blocking_failures: [],
+    };
+  }
+
+  if ("requested_action" in payload || "disposition" in payload) {
+    const operatorPayload = payload as DaemonOperatorActionResponse;
+    return {
+      ok: operatorPayload.accepted ?? true,
+      action_key: operatorPayload.requested_action ?? actionKey,
+      environment: operatorPayload.environment ?? "paper",
+      live_routing_enabled: false,
+      result_state: operatorPayload.disposition ?? "accepted",
+      warnings: operatorPayload.warnings ?? [],
+      audit_reference: operatorPayload.audit?.audit_event_id ?? null,
       blocking_failures: [],
     };
   }
@@ -921,9 +949,8 @@ function mapLegacyOperatorActionResponse(
       live_routing_enabled: payload.live_routing_enabled ?? false,
       result_state: payload.result_state ?? "accepted",
       warnings: payload.warnings ?? [],
-      audit_reference: payload.audit_reference ?? `${actionKey}-${Date.now()}`,
+      audit_reference: payload.audit_reference ?? null,
       blocking_failures: payload.blocking_failures ?? [],
-      simulated: payload.simulated,
     };
   }
 
@@ -935,7 +962,7 @@ function mapLegacyOperatorActionResponse(
       live_routing_enabled: false,
       result_state: String(payload.state ?? "accepted"),
       warnings: [],
-      audit_reference: `${actionKey}-${Date.now()}`,
+      audit_reference: null,
       blocking_failures: [],
     };
   }
@@ -951,15 +978,12 @@ function failedOperatorActionReceipt(
   const blockingFailures: string[] = [];
   const warnings: string[] = [];
   let resultState = "unavailable";
-  let simulated = true;
 
   if (failure.status === 401) {
     resultState = "unauthorized";
-    simulated = false;
     blockingFailures.push("Daemon refused operator action: valid Bearer token required.");
   } else if (failure.status === 403) {
     resultState = "refused";
-    simulated = false;
     blockingFailures.push("Daemon refused operator action at the gate.");
   } else if (failure.status === 404) {
     blockingFailures.push(`Operator action endpoint missing for ${actionKey}.`);
@@ -978,9 +1002,8 @@ function failedOperatorActionReceipt(
     live_routing_enabled: false,
     result_state: resultState,
     warnings,
-    audit_reference: `${actionKey}-${Date.now()}`,
+    audit_reference: null,
     blocking_failures: blockingFailures,
-    simulated,
   };
 }
 
@@ -1017,9 +1040,8 @@ export async function requestSystemModeTransition(
       live_routing_enabled: payload.live_routing_enabled ?? false,
       result_state: payload.result_state ?? "accepted",
       warnings: payload.warnings ?? [],
-      audit_reference: payload.audit_reference ?? `audit-change-system-mode-${Date.now()}`,
+      audit_reference: payload.audit_reference ?? null,
       blocking_failures: payload.blocking_failures ?? [],
-      simulated: payload.simulated,
     };
   }
 

@@ -80,6 +80,9 @@ jobs:
       - name: Run unsafe-pattern guard
         run: bash scripts/guards/check_unsafe_patterns.sh
 
+      - name: Run migration governance guard
+        run: bash scripts/guards/check_migration_governance.sh
+
   rust:
     name: "Rust (fmt + clippy + test)"
     runs-on: ubuntu-latest

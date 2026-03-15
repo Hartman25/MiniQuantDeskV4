@@ -656,62 +656,64 @@ async fn api_system_preflight_is_fail_closed_for_unproven_dependencies() {
 }
 
 #[tokio::test]
-async fn api_execution_summary_derives_counts_from_broker_snapshot() {
-    use chrono::{Duration, Utc};
-    use mqk_schemas::{BrokerAccount, BrokerOrder, BrokerSnapshot};
+async fn api_execution_summary_derives_counts_from_execution_snapshot() {
+    use mqk_runtime::observability::{
+        ExecutionSnapshot, OrderSnapshot, OutboxSnapshot, PortfolioSnapshot,
+    };
 
     let st = Arc::new(state::AppState::new_with_operator_auth(
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
     {
-        let mut lock = st.broker_snapshot.write().await;
-        *lock = Some(BrokerSnapshot {
-            captured_at_utc: Utc::now(),
-            account: BrokerAccount {
-                equity: "1000".to_string(),
-                cash: "400".to_string(),
-                currency: "USD".to_string(),
-            },
-            positions: Vec::new(),
-            fills: Vec::new(),
-            orders: vec![
-                BrokerOrder {
-                    broker_order_id: "bo-1".to_string(),
-                    client_order_id: "io-1".to_string(),
+        let mut lock = st.execution_snapshot.write().await;
+        *lock = Some(ExecutionSnapshot {
+            run_id: None,
+            active_orders: vec![
+                OrderSnapshot {
+                    order_id: "io-1".to_string(),
+                    broker_order_id: None,
                     symbol: "AAPL".to_string(),
-                    side: "buy".to_string(),
-                    r#type: "limit".to_string(),
-                    status: "new".to_string(),
-                    qty: "10".to_string(),
-                    limit_price: Some("100".to_string()),
-                    stop_price: None,
-                    created_at_utc: Utc::now() - Duration::minutes(6),
+                    status: "Open".to_string(),
+                    total_qty: 10,
+                    filled_qty: 0,
                 },
-                BrokerOrder {
-                    broker_order_id: "bo-2".to_string(),
-                    client_order_id: "io-2".to_string(),
+                OrderSnapshot {
+                    order_id: "io-2".to_string(),
+                    broker_order_id: None,
                     symbol: "MSFT".to_string(),
-                    side: "sell".to_string(),
-                    r#type: "market".to_string(),
-                    status: "submitted".to_string(),
-                    qty: "5".to_string(),
-                    limit_price: None,
-                    stop_price: None,
-                    created_at_utc: Utc::now(),
-                },
-                BrokerOrder {
-                    broker_order_id: "bo-3".to_string(),
-                    client_order_id: "io-3".to_string(),
-                    symbol: "NVDA".to_string(),
-                    side: "buy".to_string(),
-                    r#type: "market".to_string(),
-                    status: "rejected".to_string(),
-                    qty: "1".to_string(),
-                    limit_price: None,
-                    stop_price: None,
-                    created_at_utc: Utc::now(),
+                    status: "Open".to_string(),
+                    total_qty: 5,
+                    filled_qty: 0,
                 },
             ],
+            pending_outbox: vec![
+                OutboxSnapshot {
+                    outbox_id: 1,
+                    idempotency_key: "io-3".to_string(),
+                    status: "PENDING".to_string(),
+                    created_at_utc: chrono::Utc::now(),
+                    sent_at_utc: None,
+                    claimed_at_utc: None,
+                    dispatching_at_utc: None,
+                },
+                OutboxSnapshot {
+                    outbox_id: 2,
+                    idempotency_key: "io-4".to_string(),
+                    status: "SENT".to_string(),
+                    created_at_utc: chrono::Utc::now(),
+                    sent_at_utc: None,
+                    claimed_at_utc: None,
+                    dispatching_at_utc: None,
+                },
+            ],
+            recent_inbox_events: vec![],
+            portfolio: PortfolioSnapshot {
+                cash_micros: 0,
+                realized_pnl_micros: 0,
+                positions: vec![],
+            },
+            system_block_state: None,
+            snapshot_at_utc: chrono::Utc::now(),
         });
     }
 
@@ -729,8 +731,8 @@ async fn api_execution_summary_derives_counts_from_broker_snapshot() {
     assert_eq!(json["active_orders"], 2);
     assert_eq!(json["pending_orders"], 1);
     assert_eq!(json["dispatching_orders"], 1);
-    assert_eq!(json["reject_count_today"], 1);
-    assert_eq!(json["stuck_orders"], 1);
+    assert_eq!(json["reject_count_today"], 0);
+    assert_eq!(json["stuck_orders"], 0);
     assert!(json["cancel_replace_count_today"].is_null());
     assert!(json["avg_ack_latency_ms"].is_null());
 }
@@ -888,6 +890,9 @@ async fn api_system_session_reports_truthful_mode_and_operator_auth() {
 
     let json = parse_json(body);
     assert_eq!(json["daemon_mode"], "PAPER");
+    assert_eq!(json["adapter_id"], "paper");
+    assert_eq!(json["deployment_start_allowed"], true);
+    assert!(json["deployment_blocker"].is_null());
     assert_eq!(json["operator_auth_mode"], "missing_token_fail_closed");
     assert_eq!(json["strategy_allowed"], false);
     assert_eq!(json["execution_allowed"], false);
@@ -944,7 +949,8 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
     let (fp_status, fp_body) = call(router.clone(), fp_req).await;
     assert_eq!(fp_status, StatusCode::OK);
     let fp = parse_json(fp_body);
-    assert_eq!(fp["config_hash"], "unknown");
+    assert_eq!(fp["config_hash"], "daemon-runtime-paper-ready-v1");
+    assert_eq!(fp["adapter_id"], "paper");
     assert_eq!(fp["runtime_generation_id"], "unknown");
     assert_eq!(fp["environment_profile"], "paper");
     assert!(fp["last_restart_at"].is_null());
@@ -970,4 +976,82 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
     let suppressions = parse_json(suppressions_body);
     assert!(suppressions.is_array());
     assert_eq!(suppressions.as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn system_status_and_preflight_surface_mode_truth() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let status_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status_code, status_body) = call(router.clone(), status_req).await;
+    assert_eq!(status_code, StatusCode::OK);
+    let status_json = parse_json(status_body);
+    assert_eq!(status_json["daemon_mode"], "paper");
+    assert_eq!(status_json["adapter_id"], "paper");
+    assert_eq!(status_json["deployment_start_allowed"], true);
+    assert!(status_json["deployment_blocker"].is_null());
+
+    let preflight_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/preflight")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (preflight_code, preflight_body) = call(router, preflight_req).await;
+    assert_eq!(preflight_code, StatusCode::OK);
+    let preflight_json = parse_json(preflight_body);
+    assert_eq!(preflight_json["daemon_mode"], "paper");
+    assert_eq!(preflight_json["adapter_id"], "paper");
+    assert_eq!(preflight_json["deployment_start_allowed"], true);
+}
+
+#[tokio::test]
+async fn non_paper_deployment_mode_is_explicitly_fail_closed() {
+    std::env::set_var("MQK_DAEMON_DEPLOYMENT_MODE", "live-shadow");
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    std::env::remove_var("MQK_DAEMON_DEPLOYMENT_MODE");
+
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let json = parse_json(body);
+    assert_eq!(
+        json["fault_class"],
+        "runtime.start_refused.deployment_mode_unproven"
+    );
+    assert_eq!(json["gate"], "deployment_mode");
+
+    let session_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (session_code, session_body) = call(routes::build_router(st), session_req).await;
+    assert_eq!(session_code, StatusCode::OK);
+    let session_json = parse_json(session_body);
+    assert_eq!(session_json["daemon_mode"], "LIVE-SHADOW");
+    assert_eq!(session_json["deployment_start_allowed"], false);
+    assert_eq!(session_json["adapter_id"], "paper");
+    assert!(session_json["deployment_blocker"]
+        .as_str()
+        .unwrap_or("")
+        .contains("unsupported/unproven"));
 }
