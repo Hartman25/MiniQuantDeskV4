@@ -8,6 +8,9 @@ pub mod control;
 
 use std::{convert::Infallible, sync::Arc};
 
+use chrono::Utc;
+use mqk_integrity::CalendarSpec;
+
 use axum::{
     extract::State,
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
@@ -867,12 +870,19 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
             } else {
                 "disabled".to_string()
             },
-            market_session: "unknown".to_string(),
-            exchange_calendar_state: "unknown".to_string(),
-            notes: vec![
-                "Market session and exchange calendar state are unavailable from current daemon wiring."
-                    .to_string(),
-            ],
+            market_session: {
+                let now_ts = Utc::now().timestamp();
+                if st.calendar_spec().is_session_bar_end(now_ts) {
+                    "open".to_string()
+                } else {
+                    "closed".to_string()
+                }
+            },
+            exchange_calendar_state: match st.calendar_spec() {
+                CalendarSpec::NyseWeekdays => "nyse_weekdays".to_string(),
+                CalendarSpec::AlwaysOn => "always_on".to_string(),
+            },
+            notes: vec![],
         }),
     )
         .into_response()

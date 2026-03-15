@@ -897,8 +897,9 @@ async fn api_system_session_reports_truthful_mode_and_operator_auth() {
     assert_eq!(json["strategy_allowed"], false);
     assert_eq!(json["execution_allowed"], false);
     assert_eq!(json["system_trading_window"], "disabled");
-    assert_eq!(json["market_session"], "unknown");
-    assert_eq!(json["exchange_calendar_state"], "unknown");
+    // Paper mode → AlwaysOn calendar; market is always open.
+    assert_eq!(json["market_session"], "open");
+    assert_eq!(json["exchange_calendar_state"], "always_on");
 }
 
 #[tokio::test]
@@ -1211,5 +1212,135 @@ async fn prod02_non_running_states_return_explicit_false_live_routing() {
     assert_eq!(
         halted_json["kill_switch_active"], true,
         "kill_switch_active must be true when halted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CTRL-03: Exchange calendar / market session truth
+// ---------------------------------------------------------------------------
+
+/// Paper/backtest mode → AlwaysOn calendar → market always open.
+#[tokio::test]
+async fn ctrl03_paper_mode_reports_always_on_calendar_and_open_market() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode(
+        state::DeploymentMode::Paper,
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    assert_eq!(
+        json["exchange_calendar_state"], "always_on",
+        "paper mode must surface always_on calendar"
+    );
+    assert_eq!(
+        json["market_session"], "open",
+        "AlwaysOn calendar must always report market as open"
+    );
+}
+
+/// Backtest mode → AlwaysOn calendar → market always open.
+#[tokio::test]
+async fn ctrl03_backtest_mode_reports_always_on_calendar() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode(
+        state::DeploymentMode::Backtest,
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    assert_eq!(json["exchange_calendar_state"], "always_on");
+    assert_eq!(json["market_session"], "open");
+}
+
+/// LiveCapital mode → NyseWeekdays calendar.  market_session is wall-clock
+/// dependent (open or closed); we assert the label is one of the two valid
+/// values — never "unknown".
+#[tokio::test]
+async fn ctrl03_live_capital_mode_reports_nyse_weekdays_calendar() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode(
+        state::DeploymentMode::LiveCapital,
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    assert_eq!(
+        json["exchange_calendar_state"], "nyse_weekdays",
+        "live-capital mode must surface nyse_weekdays calendar"
+    );
+    let ms = json["market_session"].as_str().unwrap_or("MISSING");
+    assert!(
+        ms == "open" || ms == "closed",
+        "market_session must be 'open' or 'closed', never 'unknown'; got '{ms}'"
+    );
+    assert_ne!(
+        ms, "unknown",
+        "market_session must not be the placeholder 'unknown'"
+    );
+}
+
+/// LiveShadow mode → NyseWeekdays calendar.
+#[tokio::test]
+async fn ctrl03_live_shadow_mode_reports_nyse_weekdays_calendar() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode(
+        state::DeploymentMode::LiveShadow,
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    assert_eq!(json["exchange_calendar_state"], "nyse_weekdays");
+    let ms = json["market_session"].as_str().unwrap_or("MISSING");
+    assert!(
+        ms == "open" || ms == "closed",
+        "market_session must be 'open' or 'closed'; got '{ms}'"
+    );
+}
+
+/// notes array must be empty — no stale unavailability message.
+#[tokio::test]
+async fn ctrl03_session_response_notes_are_empty_after_wiring() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode(
+        state::DeploymentMode::Paper,
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    let notes = json["notes"].as_array().expect("notes must be an array");
+    assert!(
+        notes.is_empty(),
+        "notes must be empty after CTRL-03 wiring; got: {notes:?}"
     );
 }

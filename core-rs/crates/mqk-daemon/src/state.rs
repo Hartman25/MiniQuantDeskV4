@@ -17,7 +17,7 @@ use mqk_execution::{
     wiring::build_gateway,
     BrokerEvent, BrokerOrderMap, IntegrityGate, ReconcileGate,
 };
-use mqk_integrity::IntegrityState;
+use mqk_integrity::{CalendarSpec, IntegrityState};
 use mqk_portfolio::{apply_entry, LedgerEntry, PortfolioState};
 use mqk_reconcile::{ReconcileDiff, SnapshotFreshness, SnapshotWatermark};
 use serde::{Deserialize, Serialize};
@@ -330,6 +330,9 @@ pub struct AppState {
     execution_loop: Arc<Mutex<Option<ExecutionLoopHandle>>>,
     /// Serializes start/stop/halt transitions so the daemon never spawns duplicates.
     lifecycle_op: Arc<Mutex<()>>,
+    /// Authoritative exchange calendar spec derived from deployment mode at construction.
+    /// `NyseWeekdays` for live-equity modes; `AlwaysOn` for paper/backtest.
+    calendar_spec: CalendarSpec,
 }
 
 impl Default for AppState {
@@ -369,6 +372,28 @@ impl AppState {
         Self::new_inner(operator_auth_mode_from_env(), Some(db))
     }
 
+    /// Create application state with an explicit deployment mode for tests.
+    ///
+    /// Named with `_for_test_` to signal intent; production code must derive
+    /// the deployment mode from environment via [`Self::new_with_db`].
+    pub fn new_for_test_with_mode(mode: DeploymentMode) -> Self {
+        let mut state = Self::new_inner(OperatorAuthMode::ExplicitDevNoToken, None);
+        // Override runtime_selection and calendar_spec to use the specified mode.
+        state.runtime_selection = RuntimeSelection {
+            deployment_mode: mode,
+            adapter_id: state.runtime_selection.adapter_id.clone(),
+            run_config_hash: state.runtime_selection.run_config_hash.clone(),
+            readiness: state.runtime_selection.readiness.clone(),
+        };
+        state.calendar_spec = match mode {
+            DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
+                CalendarSpec::NyseWeekdays
+            }
+            DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
+        };
+        state
+    }
+
     fn new_inner(operator_auth: OperatorAuthMode, db: Option<PgPool>) -> Self {
         let (bus, _rx) = broadcast::channel::<BusMsg>(1024);
 
@@ -392,6 +417,15 @@ impl AppState {
 
         let runtime_selection = runtime_selection_from_env();
 
+        // Derive calendar spec from deployment mode.  Live-equity modes use
+        // the authoritative NYSE calendar; paper/backtest are always-on.
+        let calendar_spec = match runtime_selection.deployment_mode {
+            DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
+                CalendarSpec::NyseWeekdays
+            }
+            DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
+        };
+
         Self {
             bus,
             node_id: default_node_id(build.service),
@@ -407,6 +441,7 @@ impl AppState {
             runtime_selection,
             execution_loop: Arc::new(Mutex::new(None)),
             lifecycle_op: Arc::new(Mutex::new(())),
+            calendar_spec,
         }
     }
 
@@ -420,6 +455,11 @@ impl AppState {
 
     pub fn deployment_mode(&self) -> DeploymentMode {
         self.runtime_selection.deployment_mode
+    }
+
+    /// Authoritative exchange calendar spec for this deployment mode.
+    pub fn calendar_spec(&self) -> CalendarSpec {
+        self.calendar_spec
     }
 
     pub fn adapter_id(&self) -> &str {
