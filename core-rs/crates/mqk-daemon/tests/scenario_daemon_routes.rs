@@ -1055,3 +1055,161 @@ async fn non_paper_deployment_mode_is_explicitly_fail_closed() {
         .unwrap_or("")
         .contains("unsupported/unproven"));
 }
+
+// ---------------------------------------------------------------------------
+// PROD-02 proof tests
+// ---------------------------------------------------------------------------
+
+/// PROD-02-A: Armed integrity + no active durable run → execution_allowed must
+/// be false and system_trading_window must be "disabled".
+///
+/// Before PROD-02 the system returned execution_allowed:true and
+/// system_trading_window:"enabled" whenever integrity was armed, even with no
+/// run active.  That overclaim is now closed.
+#[tokio::test]
+async fn prod02_armed_but_idle_execution_not_allowed() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    // Arm integrity — simulate operator having armed the gate.
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+
+    // No run has been started; state is still "idle".
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    // strategy gate reflects armed state
+    assert_eq!(json["strategy_allowed"], true, "strategy should be armed");
+    // execution gate must NOT be open without a durable active run
+    assert_eq!(
+        json["execution_allowed"], false,
+        "execution_allowed must be false when no active run exists"
+    );
+    assert_eq!(
+        json["system_trading_window"], "disabled",
+        "trading window must be disabled when no active run exists"
+    );
+}
+
+/// PROD-02-B: Running state with no reconcile result yet must produce
+/// has_critical:true and the unproven-reconcile fault signal.
+///
+/// A daemon that has an active execution loop but has not completed a
+/// reconcile tick cannot verify order consistency.  Operator surfaces must
+/// reflect that as critical rather than silently omitting it.
+#[tokio::test]
+async fn prod02_running_without_reconcile_result_is_critical() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    // Arm integrity.
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+
+    // Inject a fake execution loop so current_status_snapshot returns "running".
+    // Reconcile status remains at the default "unknown" (no DB, no tick yet).
+    let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"prod02-test-run");
+    st.inject_running_loop_for_test(run_id).await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(
+        json["runtime_status"], "running",
+        "runtime_status must reflect the injected execution loop"
+    );
+    assert_eq!(
+        json["reconcile_status"], "unknown",
+        "reconcile_status must be unknown before first tick"
+    );
+    assert_eq!(
+        json["has_critical"], true,
+        "has_critical must be true when running with unknown reconcile"
+    );
+
+    // The fault_signals array must contain the unproven-reconcile class.
+    let signals = json["fault_signals"].as_array().expect("fault_signals must be array");
+    let classes: Vec<&str> = signals
+        .iter()
+        .filter_map(|s| s["class"].as_str())
+        .collect();
+    assert!(
+        classes
+            .iter()
+            .any(|c| *c == "reconcile.unproven.running_without_reconcile_result"),
+        "expected reconcile.unproven.running_without_reconcile_result in fault_signals, got: {:?}",
+        classes
+    );
+}
+
+/// PROD-02-C: Halted and unknown runtime states must never expose
+/// live_routing_enabled:null.  Both must return an explicit Some(false).
+#[tokio::test]
+async fn prod02_non_running_states_return_explicit_false_live_routing() {
+    // ---- idle state ----
+    let st_idle = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (_, idle_body) = call(routes::build_router(Arc::clone(&st_idle)), req).await;
+    let idle_json = parse_json(idle_body);
+    assert_eq!(
+        idle_json["live_routing_enabled"], false,
+        "live_routing_enabled must be explicit false when idle"
+    );
+    assert_eq!(idle_json["runtime_status"], "idle");
+
+    // ---- halted state ----
+    let st_halted = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    {
+        let mut ig = st_halted.integrity.write().await;
+        ig.halted = true;
+    }
+
+    let req2 = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (_, halted_body) = call(routes::build_router(Arc::clone(&st_halted)), req2).await;
+    let halted_json = parse_json(halted_body);
+    assert_eq!(
+        halted_json["live_routing_enabled"], false,
+        "live_routing_enabled must be explicit false when halted"
+    );
+    assert_eq!(halted_json["runtime_status"], "halted");
+    assert_eq!(
+        halted_json["kill_switch_active"], true,
+        "kill_switch_active must be true when halted"
+    );
+}

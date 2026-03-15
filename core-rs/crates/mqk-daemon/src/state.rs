@@ -32,6 +32,9 @@ const DEFAULT_DAEMON_ADAPTER_ID: &str = "paper";
 const DAEMON_RUN_CONFIG_HASH_PREFIX: &str = "daemon-runtime";
 const EXECUTION_LOOP_INTERVAL: Duration = Duration::from_secs(1);
 const DEADMAN_TTL_SECONDS: i64 = 5;
+/// DMON-06: background reconcile tick interval.  30 s gives the execution loop
+/// sufficient time to populate execution_snapshot before the first tick fires.
+const RECONCILE_TICK_INTERVAL: Duration = Duration::from_secs(30);
 const DEV_ALLOW_NO_OPERATOR_TOKEN_ENV: &str = "MQK_DEV_ALLOW_NO_OPERATOR_TOKEN";
 const DAEMON_DEPLOYMENT_MODE_ENV: &str = "MQK_DAEMON_DEPLOYMENT_MODE";
 const DAEMON_ADAPTER_ID_ENV: &str = "MQK_DAEMON_ADAPTER_ID";
@@ -773,6 +776,13 @@ impl AppState {
             ));
         }
 
+        // DMON-06: Pre-populate execution_snapshot from the initial orchestrator
+        // state (after the first tick) so the reconcile tick has a valid non-empty
+        // local snapshot on its first fire rather than falling back to empty.
+        if let Ok(initial_snapshot) = orchestrator.snapshot().await {
+            *self.execution_snapshot.write().await = Some(initial_snapshot);
+        }
+
         let handle = spawn_execution_loop(Arc::clone(self), orchestrator, run_id);
         {
             let mut lock = self.execution_loop.lock().await;
@@ -783,6 +793,29 @@ impl AppState {
                 ));
             }
             *lock = Some(handle);
+        }
+
+        // DMON-06: Spawn background reconcile tick so local order-drift results
+        // are published to AppState.reconcile_status and surfaced via the
+        // /api/v1/reconcile/status and /api/v1/system/status endpoints.
+        {
+            let snap_arc = Arc::clone(&self.execution_snapshot);
+            let sides_arc = Arc::clone(&self.local_order_sides);
+            let broker_arc = Arc::clone(&self.broker_snapshot);
+            let local_fn = move || {
+                let snapshot = snap_arc.try_read().ok().and_then(|g| g.clone());
+                if let Some(snapshot) = snapshot {
+                    let sides = sides_arc.try_read().map(|g| g.clone()).unwrap_or_default();
+                    reconcile_local_snapshot_from_runtime_with_sides(&snapshot, &sides)
+                } else {
+                    mqk_reconcile::LocalSnapshot::empty()
+                }
+            };
+            let broker_fn = move || {
+                let schema = broker_arc.try_read().ok().and_then(|g| g.clone())?;
+                reconcile_broker_snapshot_from_schema(&schema).ok()
+            };
+            spawn_reconcile_tick(Arc::clone(self), local_fn, broker_fn, RECONCILE_TICK_INTERVAL);
         }
 
         let snapshot = StatusSnapshot {
@@ -1306,6 +1339,34 @@ impl AppState {
         }
         let mut status = self.reconcile_status.write().await;
         *status = snapshot;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test-only helpers (pub so integration tests in tests/ can reach them;
+// never called from production code paths).
+// ---------------------------------------------------------------------------
+
+impl AppState {
+    /// Inject a never-finishing fake execution loop so that
+    /// `current_status_snapshot()` returns `state == "running"` without
+    /// a real DB or orchestrator.  Used by PROD-02 route scenario tests.
+    ///
+    /// **Never call this outside of tests.**
+    pub async fn inject_running_loop_for_test(&self, run_id: Uuid) {
+        let (stop_tx, _stop_rx) = watch::channel(ExecutionLoopCommand::Run);
+        let join_handle: JoinHandle<ExecutionLoopExit> = tokio::spawn(async {
+            // Sleep for a day — the test will complete long before this fires.
+            tokio::time::sleep(std::time::Duration::from_secs(86_400)).await;
+            ExecutionLoopExit { note: None }
+        });
+        let handle = ExecutionLoopHandle {
+            run_id,
+            stop_tx,
+            join_handle,
+        };
+        let mut lock = self.execution_loop.lock().await;
+        *lock = Some(handle);
     }
 }
 
@@ -2314,7 +2375,12 @@ pub fn spawn_reconcile_tick<L, B>(
     B: Fn() -> Option<mqk_reconcile::BrokerSnapshot> + Send + 'static,
 {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
+        // Use interval_at so the first tick fires after one full `interval`
+        // rather than immediately.  This prevents the reconcile from writing
+        // DB state before execution_snapshot is populated and avoids polluting
+        // shared test DBs during short-lived lifecycle integration tests.
+        let start = tokio::time::Instant::now() + interval;
+        let mut ticker = tokio::time::interval_at(start, interval);
         let mut watermark = SnapshotWatermark::new();
         loop {
             ticker.tick().await;

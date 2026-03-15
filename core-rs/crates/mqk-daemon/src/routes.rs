@@ -443,6 +443,17 @@ fn build_fault_signals(
         });
     }
 
+    // PROD-02: reconcile "unknown" while the runtime is running means the first
+    // reconcile tick has not yet completed — order consistency is unproven.
+    if reconcile.status == "unknown" && status.state == "running" {
+        signals.push(FaultSignal {
+            class: "reconcile.unproven.running_without_reconcile_result".to_string(),
+            severity: "critical".to_string(),
+            summary: "Runtime is running but reconcile result is unproven; order consistency cannot be verified.".to_string(),
+            detail: None,
+        });
+    }
+
     if risk_blocked {
         signals.push(FaultSignal {
             class: "risk.dispatch_denied.engine_blocked".to_string(),
@@ -482,8 +493,11 @@ async fn environment_and_live_routing_truth(
     st: &AppState,
     status: &StatusSnapshot,
 ) -> (Option<String>, Option<bool>) {
+    // PROD-02: "unknown" state means durable active-run truth is unresolved;
+    // fail-closed with explicit Some(false) rather than emitting None which
+    // could be misread as "not yet determined, possibly live".
     let live_routing_enabled = match status.state.as_str() {
-        "idle" | "halted" => Some(false),
+        "idle" | "halted" | "unknown" => Some(false),
         _ => None,
     };
 
@@ -578,7 +592,10 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
     let broker_status = if snapshot_present { "ok" } else { "warning" }.to_string();
     let integrity_status = if integrity_armed { "ok" } else { "warning" }.to_string();
     let reconcile_status = reconcile.status.clone();
-    let has_critical = matches!(reconcile_status.as_str(), "dirty" | "stale");
+    // PROD-02: reconcile "unknown" while the runtime is actively running is a
+    // critical signal — we cannot verify order state is consistent.
+    let has_critical = matches!(reconcile_status.as_str(), "dirty" | "stale")
+        || (reconcile_status == "unknown" && runtime_status == "running");
     let has_warning = broker_status != "ok"
         || integrity_status != "ok"
         || reconcile_status != "ok"
@@ -828,6 +845,12 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
         Err(err) => return runtime_error_response(err),
     };
     let strategy_allowed = status.integrity_armed;
+    // PROD-02: execution is only allowed when integrity is armed AND there is a
+    // durable active run owned by this daemon.  Integrity-armed-but-idle is not
+    // execution-capable — surfacing it as "enabled" is a misleading overclaim.
+    let execution_allowed = strategy_allowed
+        && status.state == "running"
+        && status.active_run_id.is_some();
 
     (
         StatusCode::OK,
@@ -838,8 +861,8 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
             deployment_blocker: st.deployment_readiness().blocker.clone(),
             operator_auth_mode: st.operator_auth_mode().label().to_string(),
             strategy_allowed,
-            execution_allowed: strategy_allowed,
-            system_trading_window: if strategy_allowed {
+            execution_allowed,
+            system_trading_window: if execution_allowed {
                 "enabled".to_string()
             } else {
                 "disabled".to_string()
