@@ -1,11 +1,18 @@
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
+import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatLabel, formatNumber } from "../../lib/format";
+import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
 export function RuntimeScreen({ model }: { model: SystemModel }) {
   const runtime = model.runtimeLeadership;
+  const truthState = panelTruthRenderState(model, "runtime");
+
+  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+    return <TruthStateNotice state={truthState} />;
+  }
 
   return (
     <div className="screen-grid desk-screen-grid">

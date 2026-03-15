@@ -1,8 +1,16 @@
 import { Panel } from "../../components/common/Panel";
+import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import type { SystemModel } from "../system/types";
 import { MetricStripChart } from "../execution/components/MetricStripChart";
+import { panelTruthRenderState } from "../system/truthRendering";
 
 export function MetricsScreen({ model }: { model: SystemModel }) {
+  const truthState = panelTruthRenderState(model, "metrics");
+
+  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+    return <TruthStateNotice state={truthState} />;
+  }
+
   return (
     <div className="screen-grid desk-screen-grid">
       <div className="desk-panel-grid desk-panel-grid-primary">

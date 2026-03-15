@@ -11,12 +11,12 @@
 //! These tests require a live Postgres instance (MQK_DATABASE_URL).
 //! Without it each test skips with a log message — CI-safe.
 
+use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
-use uuid::Uuid;
-use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Helper: apply gate (simulates ledger mutation as an in-process counter)

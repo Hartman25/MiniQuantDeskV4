@@ -1,12 +1,19 @@
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
+import { TruthStateNotice } from "../../components/common/TruthStateNotice";
+import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
 export function AlertsScreen({ model }: { model: SystemModel }) {
   const critical = model.alerts.filter((a) => a.severity === "critical").length;
   const warning = model.alerts.filter((a) => a.severity === "warning").length;
   const info = model.alerts.filter((a) => a.severity === "info").length;
+  const truthState = panelTruthRenderState(model, "alerts");
+
+  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+    return <TruthStateNotice state={truthState} />;
+  }
 
   return (
     <div className="screen-grid desk-screen-grid">

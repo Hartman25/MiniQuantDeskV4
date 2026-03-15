@@ -1,11 +1,18 @@
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
+import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatDurationMs } from "../../lib/format";
+import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
 export function MarketDataScreen({ model }: { model: SystemModel }) {
   const q = model.marketDataQuality;
+  const truthState = panelTruthRenderState(model, "marketData");
+
+  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+    return <TruthStateNotice state={truthState} />;
+  }
 
   return (
     <div className="screen-grid desk-screen-grid">

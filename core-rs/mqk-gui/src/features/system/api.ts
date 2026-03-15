@@ -68,7 +68,7 @@ interface LegacyDaemonStatusSnapshot {
 }
 
 interface LegacyTradingAccountResponse {
-  has_snapshot: boolean;
+  // has_snapshot removed: DMON-04 contract replaced it with snapshot_state + snapshot_captured_at_utc.
   account: {
     equity: string;
     cash: string;
@@ -83,7 +83,7 @@ interface LegacyTradingPosition {
 }
 
 interface LegacyTradingPositionsResponse {
-  has_snapshot: boolean;
+  // has_snapshot removed: DMON-04 contract.
   positions: LegacyTradingPosition[];
 }
 
@@ -101,7 +101,7 @@ interface LegacyTradingOrder {
 }
 
 interface LegacyTradingOrdersResponse {
-  has_snapshot: boolean;
+  // has_snapshot removed: DMON-04 contract.
   orders: LegacyTradingOrder[];
 }
 
@@ -118,7 +118,7 @@ interface LegacyTradingFill {
 }
 
 interface LegacyTradingFillsResponse {
-  has_snapshot: boolean;
+  // has_snapshot removed: DMON-04 contract.
   fills: LegacyTradingFill[];
 }
 
@@ -787,7 +787,10 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     generation_id: "unknown",
     restart_count_24h: 0,
     last_restart_at: null,
-    post_restart_recovery_state: "degraded",
+    // Use "in_progress" not "degraded": "degraded" in panelTruthRenderState
+    // triggers a system-wide degraded overlay on every panel.  The fallback
+    // represents missing truth, not a real degraded recovery state.
+    post_restart_recovery_state: "in_progress",
     recovery_checkpoint: "unknown",
     checkpoints: [],
   };

@@ -1,10 +1,18 @@
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
+import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import type { SystemModel } from "../system/types";
 import { formatDateTime, formatLatency } from "../../lib/format";
 import { MetricStripChart } from "../execution/components/MetricStripChart";
+import { panelTruthRenderState } from "../system/truthRendering";
 
 export function DashboardScreen({ model }: { model: SystemModel }) {
+  // Dashboard is composite — only block on full disconnection or mock mode, not on partial endpoint absence.
+  const truthState = panelTruthRenderState(model, "dashboard");
+  if (truthState === "unavailable" || truthState === "unimplemented") {
+    return <TruthStateNotice state={truthState} />;
+  }
+
   const {
     status,
     alerts,

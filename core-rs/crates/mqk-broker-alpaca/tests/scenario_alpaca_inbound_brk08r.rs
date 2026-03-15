@@ -163,7 +163,10 @@ fn brk08r_r3_mark_gap_always_produces_gap_detected() {
     for prev in [&cold, &live, &gap] {
         let result = mark_gap_detected(prev, "test gap");
         assert!(
-            matches!(result.trade_updates, AlpacaTradeUpdatesResume::GapDetected { .. }),
+            matches!(
+                result.trade_updates,
+                AlpacaTradeUpdatesResume::GapDetected { .. }
+            ),
             "expected GapDetected for prev={prev:?}"
         );
     }
@@ -231,8 +234,14 @@ fn brk08r_o1_out_of_order_messages_normalize_to_same_individual_events() {
     // Process in reverse order — individual event content is unchanged.
     let fill_event_rev = normalize_trade_update(&fill_update).unwrap();
     let ack_event_rev = normalize_trade_update(&ack_update).unwrap();
-    assert_eq!(ack_event.broker_message_id(), ack_event_rev.broker_message_id());
-    assert_eq!(fill_event.broker_message_id(), fill_event_rev.broker_message_id());
+    assert_eq!(
+        ack_event.broker_message_id(),
+        ack_event_rev.broker_message_id()
+    );
+    assert_eq!(
+        fill_event.broker_message_id(),
+        fill_event_rev.broker_message_id()
+    );
     assert!(matches!(ack_event, BrokerEvent::Ack { .. }));
     assert!(matches!(fill_event, BrokerEvent::Fill { .. }));
 }
@@ -252,7 +261,10 @@ fn brk08r_c1_peek_cursor_does_not_consume_batch() {
     assert_eq!(batch.events.len(), 1);
     // Can peek again.
     let cursor = batch.peek_cursor();
-    assert!(matches!(cursor.trade_updates, AlpacaTradeUpdatesResume::Live { .. }));
+    assert!(matches!(
+        cursor.trade_updates,
+        AlpacaTradeUpdatesResume::Live { .. }
+    ));
 }
 /// C2: encode_cursor_for_persist produces valid JSON that round-trips through
 /// serde_json to an identical AlpacaFetchCursor.
@@ -263,7 +275,10 @@ fn brk08r_c2_encode_cursor_for_persist_round_trips() {
     let batch = build_inbound_batch_from_ws_update(&prev, update).unwrap();
     let json = batch.encode_cursor_for_persist().unwrap();
     let decoded: AlpacaFetchCursor = serde_json::from_str(&json).unwrap();
-    assert!(matches!(decoded.trade_updates, AlpacaTradeUpdatesResume::Live { .. }));
+    assert!(matches!(
+        decoded.trade_updates,
+        AlpacaTradeUpdatesResume::Live { .. }
+    ));
     assert_eq!(decoded.rest_activity_after.as_deref(), Some("rest-abc"));
 }
 /// C3: into_cursor_for_persist returns the raw AlpacaFetchCursor and the
@@ -289,7 +304,10 @@ fn brk08r_c4_into_cursor_for_persist_is_consuming() {
     let _cursor = batch.into_cursor_for_persist();
     // batch is moved; accessing it here would be a compile error.
     // This test passes if it compiles and the cursor is a valid Live cursor.
-    assert!(matches!(_cursor.trade_updates, AlpacaTradeUpdatesResume::Live { .. }));
+    assert!(matches!(
+        _cursor.trade_updates,
+        AlpacaTradeUpdatesResume::Live { .. }
+    ));
 }
 /// C5: The cursor produced by build_inbound_batch_from_ws_update carries the
 /// deterministic message_id derived from the event payload, not from a clock.
@@ -371,8 +389,7 @@ fn brk08r_g4_gap_preserves_rest_activity_after() {
     let rest = Some("rest-cursor-xyz");
     let cold = AlpacaFetchCursor::cold_start_unproven(rest.map(str::to_string));
     let live = AlpacaFetchCursor::live(rest.map(str::to_string), "msg-id", TS_A);
-    let gap_prev =
-        AlpacaFetchCursor::gap_detected(rest.map(str::to_string), None, None, "prior");
+    let gap_prev = AlpacaFetchCursor::gap_detected(rest.map(str::to_string), None, None, "prior");
     for prev in [&cold, &live, &gap_prev] {
         let g = mark_gap_detected(prev, "gap");
         assert_eq!(
@@ -395,7 +412,10 @@ fn brk08r_g5_gap_cursor_serde_round_trip() {
     let json = serde_json::to_string(&gap).unwrap();
     let decoded: AlpacaFetchCursor = serde_json::from_str(&json).unwrap();
     assert_eq!(gap, decoded);
-    assert!(matches!(decoded.trade_updates, AlpacaTradeUpdatesResume::GapDetected { .. }));
+    assert!(matches!(
+        decoded.trade_updates,
+        AlpacaTradeUpdatesResume::GapDetected { .. }
+    ));
 }
 // ---------------------------------------------------------------------------
 // P — WS message parsing
@@ -551,7 +571,10 @@ fn brk08r_i1_full_ws_lane_happy_path() {
     // Encode cursor — valid JSON.
     let json = batch.encode_cursor_for_persist().unwrap();
     let decoded: AlpacaFetchCursor = serde_json::from_str(&json).unwrap();
-    assert!(matches!(decoded.trade_updates, AlpacaTradeUpdatesResume::Live { .. }));
+    assert!(matches!(
+        decoded.trade_updates,
+        AlpacaTradeUpdatesResume::Live { .. }
+    ));
 }
 /// I2: Cursor chain: three sequential WS messages each produce a distinct
 /// Live cursor with the correct last_message_id from each event.
@@ -568,7 +591,9 @@ fn brk08r_i2_cursor_chain_three_messages() {
         let batch = build_inbound_batch_from_ws_update(&cursor, update).unwrap();
         let new_cursor = batch.into_cursor_for_persist();
         match &new_cursor.trade_updates {
-            AlpacaTradeUpdatesResume::Live { last_message_id, .. } => {
+            AlpacaTradeUpdatesResume::Live {
+                last_message_id, ..
+            } => {
                 message_ids.push(last_message_id.clone());
             }
             other => panic!("expected Live, got {other:?}"),

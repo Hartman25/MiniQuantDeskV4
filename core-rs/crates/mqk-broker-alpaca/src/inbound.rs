@@ -321,7 +321,12 @@ mod tests {
             filled_qty: "0".to_string(),
         }
     }
-    fn make_trade_update(event: &str, order_id: &str, client_id: &str, ts: &str) -> AlpacaTradeUpdate {
+    fn make_trade_update(
+        event: &str,
+        order_id: &str,
+        client_id: &str,
+        ts: &str,
+    ) -> AlpacaTradeUpdate {
         AlpacaTradeUpdate {
             event: event.to_string(),
             timestamp: ts.to_string(),
@@ -469,8 +474,7 @@ mod tests {
     }
     #[test]
     fn parse_authorization_message() {
-        let raw =
-            br#"[{"T":"authorization","status":"authorized","action":"authenticate"}]"#;
+        let raw = br#"[{"T":"authorization","status":"authorized","action":"authenticate"}]"#;
         let msgs = parse_ws_message(raw).unwrap();
         assert_eq!(msgs.len(), 1);
         match &msgs[0] {

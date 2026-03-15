@@ -79,9 +79,7 @@ fn ws_bytes(event: &str, extra_fields: Option<serde_json::Value>) -> Vec<u8> {
         }
     });
     if let Some(fields) = extra_fields {
-        if let (Some(obj), Some(extra_obj)) =
-            (data.as_object_mut(), fields.as_object())
-        {
+        if let (Some(obj), Some(extra_obj)) = (data.as_object_mut(), fields.as_object()) {
             for (k, v) in extra_obj {
                 obj.insert(k.clone(), v.clone());
             }
@@ -94,10 +92,7 @@ fn ingest(event: &str, extra: Option<serde_json::Value>) -> BrokerEvent {
     ingest_batch(event, extra).0
 }
 /// Parse a WS frame and return the InboundBatch (caller owns it for cursor checks).
-fn ingest_batch(
-    event: &str,
-    extra: Option<serde_json::Value>,
-) -> (BrokerEvent, AlpacaFetchCursor) {
+fn ingest_batch(event: &str, extra: Option<serde_json::Value>) -> (BrokerEvent, AlpacaFetchCursor) {
     let raw = ws_bytes(event, extra);
     let msgs = parse_ws_message(&raw).expect("parse failed");
     let tu = match msgs.into_iter().next().unwrap() {
@@ -129,7 +124,10 @@ fn brk03r_a1_new_produces_ack_with_correct_identity() {
                 format!("alpaca:{BROKER_ID}:new:{TS}"),
                 "A1: broker_message_id must follow deterministic format"
             );
-            assert_eq!(internal_order_id, CLIENT_ID, "A1: internal_order_id is client_order_id");
+            assert_eq!(
+                internal_order_id, CLIENT_ID,
+                "A1: internal_order_id is client_order_id"
+            );
             assert_eq!(
                 broker_order_id.as_deref(),
                 Some(BROKER_ID),
@@ -199,7 +197,11 @@ fn brk03r_a5_ack_broker_order_id_is_alpaca_order_id_not_client_id() {
 #[test]
 fn brk03r_a6_ack_internal_order_id_is_client_order_id() {
     let ev = ingest("new", None);
-    assert_eq!(ev.internal_order_id(), CLIENT_ID, "A6: internal_order_id is client_order_id");
+    assert_eq!(
+        ev.internal_order_id(),
+        CLIENT_ID,
+        "A6: internal_order_id is client_order_id"
+    );
     assert_ne!(
         ev.internal_order_id(),
         BROKER_ID,
@@ -213,9 +215,18 @@ fn brk03r_a7_all_ack_strings_produce_distinct_message_ids() {
     let new_id = ingest("new", None).broker_message_id().to_string();
     let pnew_id = ingest("pending_new", None).broker_message_id().to_string();
     let acc_id = ingest("accepted", None).broker_message_id().to_string();
-    assert_ne!(new_id, pnew_id, "A7: new and pending_new must have distinct IDs");
-    assert_ne!(pnew_id, acc_id, "A7: pending_new and accepted must have distinct IDs");
-    assert_ne!(new_id, acc_id, "A7: new and accepted must have distinct IDs");
+    assert_ne!(
+        new_id, pnew_id,
+        "A7: new and pending_new must have distinct IDs"
+    );
+    assert_ne!(
+        pnew_id, acc_id,
+        "A7: pending_new and accepted must have distinct IDs"
+    );
+    assert_ne!(
+        new_id, acc_id,
+        "A7: new and accepted must have distinct IDs"
+    );
 }
 // ---------------------------------------------------------------------------
 // BRK-04R — CancelAck / CancelReject mapping
@@ -278,18 +289,33 @@ fn brk04r_k3_cancel_rejected_produces_cancel_reject_with_correct_identity() {
 fn brk04r_k4_cancel_ack_and_cancel_reject_are_distinct_variants() {
     let ack = ingest("canceled", None);
     let reject = ingest("cancel_rejected", None);
-    assert!(matches!(ack, BrokerEvent::CancelAck { .. }), "K4: canceled → CancelAck");
-    assert!(matches!(reject, BrokerEvent::CancelReject { .. }), "K4: cancel_rejected → CancelReject");
+    assert!(
+        matches!(ack, BrokerEvent::CancelAck { .. }),
+        "K4: canceled → CancelAck"
+    );
+    assert!(
+        matches!(reject, BrokerEvent::CancelReject { .. }),
+        "K4: cancel_rejected → CancelReject"
+    );
 }
 /// K5: broker_message_id for "canceled" and "expired" include their event string.
 #[test]
 fn brk04r_k5_cancel_message_ids_include_event_string() {
     let canceled_id = ingest("canceled", None).broker_message_id().to_string();
     let expired_id = ingest("expired", None).broker_message_id().to_string();
-    assert!(canceled_id.contains(":canceled:"), "K5: canceled ID must contain ':canceled:'");
-    assert!(expired_id.contains(":expired:"), "K5: expired ID must contain ':expired:'");
+    assert!(
+        canceled_id.contains(":canceled:"),
+        "K5: canceled ID must contain ':canceled:'"
+    );
+    assert!(
+        expired_id.contains(":expired:"),
+        "K5: expired ID must contain ':expired:'"
+    );
     // They are distinct even on the same order/timestamp.
-    assert_ne!(canceled_id, expired_id, "K5: canceled and expired must have distinct IDs");
+    assert_ne!(
+        canceled_id, expired_id,
+        "K5: canceled and expired must have distinct IDs"
+    );
 }
 // ---------------------------------------------------------------------------
 // BRK-05R — ReplaceAck / ReplaceReject mapping
@@ -312,7 +338,10 @@ fn brk05r_p1_replaced_produces_replace_ack_with_new_total_qty() {
             );
             assert_eq!(internal_order_id, CLIENT_ID);
             assert_eq!(broker_order_id.as_deref(), Some(BROKER_ID));
-            assert_eq!(*new_total_qty, 200, "P1: new_total_qty comes from order.qty");
+            assert_eq!(
+                *new_total_qty, 200,
+                "P1: new_total_qty comes from order.qty"
+            );
         }
         other => panic!("P1: expected ReplaceAck, got {other:?}"),
     }
@@ -355,8 +384,14 @@ fn brk05r_p3_replace_ack_new_total_qty_from_order_qty_not_filled_qty() {
 fn brk05r_p4_replace_ack_and_replace_reject_are_distinct_variants() {
     let ack = ingest("replaced", None);
     let reject = ingest("replace_rejected", None);
-    assert!(matches!(ack, BrokerEvent::ReplaceAck { .. }), "P4: replaced → ReplaceAck");
-    assert!(matches!(reject, BrokerEvent::ReplaceReject { .. }), "P4: replace_rejected → ReplaceReject");
+    assert!(
+        matches!(ack, BrokerEvent::ReplaceAck { .. }),
+        "P4: replaced → ReplaceAck"
+    );
+    assert!(
+        matches!(reject, BrokerEvent::ReplaceReject { .. }),
+        "P4: replace_rejected → ReplaceReject"
+    );
 }
 /// P5: Cursor from a ReplaceAck batch is Live with the correct last_message_id.
 #[test]
@@ -418,7 +453,10 @@ fn brk06r_r2_reject_broker_message_id_is_deterministic() {
 #[test]
 fn brk06r_r3_reject_cursor_advances_to_live() {
     let (ev, cursor) = ingest_batch("rejected", None);
-    assert!(matches!(ev, BrokerEvent::Reject { .. }), "R3: rejected → Reject");
+    assert!(
+        matches!(ev, BrokerEvent::Reject { .. }),
+        "R3: rejected → Reject"
+    );
     assert!(
         matches!(cursor.trade_updates, AlpacaTradeUpdatesResume::Live { .. }),
         "R3: cursor must advance to Live after Reject event"
@@ -430,7 +468,10 @@ fn brk06r_r4_reject_is_distinct_from_cancel_reject_and_replace_reject() {
     let reject = ingest("rejected", None);
     let cancel_reject = ingest("cancel_rejected", None);
     let replace_reject = ingest("replace_rejected", None);
-    assert!(matches!(reject, BrokerEvent::Reject { .. }), "R4: rejected → Reject");
+    assert!(
+        matches!(reject, BrokerEvent::Reject { .. }),
+        "R4: rejected → Reject"
+    );
     assert!(
         matches!(cancel_reject, BrokerEvent::CancelReject { .. }),
         "R4: cancel_rejected → CancelReject"
@@ -440,9 +481,18 @@ fn brk06r_r4_reject_is_distinct_from_cancel_reject_and_replace_reject() {
         "R4: replace_rejected → ReplaceReject"
     );
     // All three have distinct broker_message_ids.
-    assert_ne!(reject.broker_message_id(), cancel_reject.broker_message_id());
-    assert_ne!(reject.broker_message_id(), replace_reject.broker_message_id());
-    assert_ne!(cancel_reject.broker_message_id(), replace_reject.broker_message_id());
+    assert_ne!(
+        reject.broker_message_id(),
+        cancel_reject.broker_message_id()
+    );
+    assert_ne!(
+        reject.broker_message_id(),
+        replace_reject.broker_message_id()
+    );
+    assert_ne!(
+        cancel_reject.broker_message_id(),
+        replace_reject.broker_message_id()
+    );
 }
 // ---------------------------------------------------------------------------
 // Cross-patch: all 11 Alpaca event strings through the WS path
@@ -479,7 +529,11 @@ fn cross_patch_xp1_all_11_event_strings_normalize_through_ws_path() {
             "XP1: {event} must normalize through WS path without error"
         );
         let batch = result.unwrap();
-        assert_eq!(batch.events.len(), 1, "XP1: {event} must produce exactly one event");
+        assert_eq!(
+            batch.events.len(),
+            1,
+            "XP1: {event} must produce exactly one event"
+        );
         // Cursor must advance to Live.
         let cursor = batch.into_cursor_for_persist();
         assert!(

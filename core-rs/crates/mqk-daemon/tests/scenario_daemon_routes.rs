@@ -1152,11 +1152,10 @@ async fn prod02_running_without_reconcile_result_is_critical() {
     );
 
     // The fault_signals array must contain the unproven-reconcile class.
-    let signals = json["fault_signals"].as_array().expect("fault_signals must be array");
-    let classes: Vec<&str> = signals
-        .iter()
-        .filter_map(|s| s["class"].as_str())
-        .collect();
+    let signals = json["fault_signals"]
+        .as_array()
+        .expect("fault_signals must be array");
+    let classes: Vec<&str> = signals.iter().filter_map(|s| s["class"].as_str()).collect();
     assert!(
         classes
             .iter()

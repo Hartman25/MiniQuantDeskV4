@@ -273,16 +273,17 @@ async fn disarm(State(state): State<Arc<AppState>>) -> Response {
     }
 
     publish_integrity_status(&state, false, "control: desired_armed=false").await;
-    let audit_event_id = match write_control_operator_audit_event(&state, "control.disarm", "DISARMED").await {
-        Ok(id) => id,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("control/disarm audit persistence failed: {err}"),
-            )
-                .into_response();
-        }
-    };
+    let audit_event_id =
+        match write_control_operator_audit_event(&state, "control.disarm", "DISARMED").await {
+            Ok(id) => id,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("control/disarm audit persistence failed: {err}"),
+                )
+                    .into_response();
+            }
+        };
     (
         StatusCode::OK,
         Json(operator_action_response(
@@ -334,16 +335,17 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
     }
 
     publish_integrity_status(&state, true, "control: desired_armed=true").await;
-    let audit_event_id = match write_control_operator_audit_event(&state, "control.arm", "ARMED").await {
-        Ok(id) => id,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("control/arm audit persistence failed: {err}"),
-            )
-                .into_response();
-        }
-    };
+    let audit_event_id =
+        match write_control_operator_audit_event(&state, "control.arm", "ARMED").await {
+            Ok(id) => id,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("control/arm audit persistence failed: {err}"),
+                )
+                    .into_response();
+            }
+        };
     (
         StatusCode::OK,
         Json(operator_action_response(
@@ -460,12 +462,9 @@ async fn write_control_operator_audit_event(
         .and_then(|s| s.active_run_id)
     {
         run_id
-    } else if let Some(run) = mqk_db::fetch_latest_run_for_engine(
-        db,
-        "mqk-daemon",
-        state.deployment_mode().as_db_mode(),
-    )
-    .await?
+    } else if let Some(run) =
+        mqk_db::fetch_latest_run_for_engine(db, "mqk-daemon", state.deployment_mode().as_db_mode())
+            .await?
     {
         run.run_id
     } else {

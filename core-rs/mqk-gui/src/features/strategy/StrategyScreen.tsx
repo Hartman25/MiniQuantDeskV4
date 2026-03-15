@@ -1,13 +1,20 @@
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
+import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatMoney, formatPercent } from "../../lib/format";
+import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
 export function StrategyScreen({ model }: { model: SystemModel }) {
   const armed = model.strategies.filter((s) => s.armed).length;
   const throttled = model.strategies.filter((s) => s.throttle_state !== "normal").length;
   const unhealthy = model.strategies.filter((s) => s.health !== "ok").length;
+  const truthState = panelTruthRenderState(model, "strategy");
+
+  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+    return <TruthStateNotice state={truthState} />;
+  }
 
   return (
     <div className="screen-grid desk-screen-grid">

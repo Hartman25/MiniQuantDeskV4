@@ -39,10 +39,6 @@ fn json_str<'a>(json: &'a serde_json::Value, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing string key '{key}' in response: {json}"))
 }
 
-fn has_unavailable_marker(value: &str) -> bool {
-    matches!(value, "unknown" | "unavailable" | "not_configured")
-}
-
 #[tokio::test]
 async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
     let router = make_router();
@@ -68,7 +64,12 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
         ),
         (
             "/api/v1/system/metadata",
-            &["build_version", "api_version", "broker_adapter", "endpoint_status"],
+            &[
+                "build_version",
+                "api_version",
+                "broker_adapter",
+                "endpoint_status",
+            ],
         ),
         (
             "/api/v1/execution/summary",
@@ -175,7 +176,9 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
             assert_eq!(json_str(&json, "endpoint_status"), "warning");
             // build_version must be a non-empty string.
             assert!(
-                json["build_version"].as_str().is_some_and(|v| !v.is_empty()),
+                json["build_version"]
+                    .as_str()
+                    .is_some_and(|v| !v.is_empty()),
                 "/api/v1/system/metadata build_version must be a non-empty string"
             );
         }
@@ -187,7 +190,9 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
             assert_eq!(json_str(&json, "leader_lease_state"), "lost");
             // generation_id must be a non-empty string (synthetic fallback is fine).
             assert!(
-                json["generation_id"].as_str().is_some_and(|v| !v.is_empty()),
+                json["generation_id"]
+                    .as_str()
+                    .is_some_and(|v| !v.is_empty()),
                 "/api/v1/system/runtime-leadership generation_id must be non-empty"
             );
             // No DB pool in test state → restart_count_24h must be 0.
@@ -195,7 +200,10 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
             // No run history in test state → last_restart_at must be null.
             assert_eq!(json["last_restart_at"], serde_json::Value::Null);
             // Reconcile status "unknown" in test state → "in_progress".
-            assert_eq!(json_str(&json, "post_restart_recovery_state"), "in_progress");
+            assert_eq!(
+                json_str(&json, "post_restart_recovery_state"),
+                "in_progress"
+            );
             // No DB → checkpoints must be an empty array.
             assert_eq!(
                 json["checkpoints"].as_array().map(|v| v.is_empty()),
@@ -267,7 +275,10 @@ async fn gui_system_status_and_preflight_surfaces_are_semantically_truthful() {
     // Paper adapter → broker_config_present is Some(false) → JSON false, not null.
     assert_eq!(preflight["broker_config_present"], false);
     // Market data config is genuinely unknown at this level → must stay null.
-    assert_eq!(preflight["market_data_config_present"], serde_json::Value::Null);
+    assert_eq!(
+        preflight["market_data_config_present"],
+        serde_json::Value::Null
+    );
     // Audit writer proxies DB; no DB pool → null.
     assert_eq!(preflight["audit_writer_ready"], serde_json::Value::Null);
 
@@ -279,12 +290,16 @@ async fn gui_system_status_and_preflight_surfaces_are_semantically_truthful() {
         .collect();
     // Synthetic "unavailable from wiring" blockers must be gone.
     assert!(
-        !blockers.iter().any(|s| s.contains("unavailable from current daemon preflight wiring")),
+        !blockers
+            .iter()
+            .any(|s| s.contains("unavailable from current daemon preflight wiring")),
         "synthetic wiring blockers must not appear in preflight response: {blockers:?}"
     );
     // Real execution-disarmed blocker must still be present.
     assert!(
-        blockers.iter().any(|s| *s == "Execution is disarmed at the integrity gate."),
+        blockers
+            .iter()
+            .any(|s| *s == "Execution is disarmed at the integrity gate."),
         "real execution-disarmed blocker must be present: {blockers:?}"
     );
 }
@@ -318,7 +333,10 @@ async fn gui_session_config_strategy_and_audit_surfaces_are_semantically_truthfu
     let config = parse_json(config_body);
     assert_eq!(json_str(&config, "adapter_id"), "paper");
     assert_eq!(json_str(&config, "environment_profile"), "paper");
-    assert_eq!(json_str(&config, "config_hash"), "daemon-runtime-paper-ready-v1");
+    assert_eq!(
+        json_str(&config, "config_hash"),
+        "daemon-runtime-paper-ready-v1"
+    );
     assert!(config["build_version"].is_string());
 
     let strategy_req = Request::builder()

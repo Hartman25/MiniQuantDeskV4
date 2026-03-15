@@ -1895,6 +1895,7 @@ pub async fn inbox_insert_deduped(
 /// - conflict key: `(run_id, broker_message_id)`
 /// - `broker_fill_id` is optional economic identity metadata and does NOT
 ///   participate in inbox insertion dedupe.
+#[allow(clippy::too_many_arguments)]
 pub async fn inbox_insert_deduped_with_identity(
     pool: &PgPool,
     run_id: Uuid,
@@ -2041,10 +2042,7 @@ pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result
 /// Load outbox rows with status SENT or ACKED (submitted to broker), ordered
 /// by outbox_id asc.  Used at cold-start to reconstruct the in-flight OMS
 /// order map without querying the broker.
-pub async fn outbox_load_submitted_for_run(
-    pool: &PgPool,
-    run_id: Uuid,
-) -> Result<Vec<OutboxRow>> {
+pub async fn outbox_load_submitted_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<OutboxRow>> {
     let rows = sqlx::query(
         r#"
         select outbox_id, run_id, idempotency_key, order_json, status,
@@ -2084,10 +2082,7 @@ pub async fn outbox_load_submitted_for_run(
 /// inbox_id asc.  Used at cold-start to replay fills into the portfolio and
 /// advance OMS order state.  Disjoint from the unapplied set processed by
 /// Phase 3, so no double-apply risk.
-pub async fn inbox_load_all_applied_for_run(
-    pool: &PgPool,
-    run_id: Uuid,
-) -> Result<Vec<InboxRow>> {
+pub async fn inbox_load_all_applied_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<InboxRow>> {
     let rows = sqlx::query(
         r#"
         select inbox_id, run_id, broker_message_id, broker_fill_id,

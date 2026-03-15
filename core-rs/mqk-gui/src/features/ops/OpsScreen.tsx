@@ -1,6 +1,8 @@
 import { FieldSourceAuthority } from "../../components/common/FieldSourceAuthority";
 import { Panel } from "../../components/common/Panel";
+import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { classifyFieldSource, type FieldEvidenceHints } from "../system/sourceAuthority";
+import { panelTruthRenderState } from "../system/truthRendering";
 import type { EnvironmentMode, OperatorActionDefinition, SystemModel } from "../system/types";
 
 function levelLabel(level: OperatorActionDefinition["level"]): string {
@@ -21,10 +23,14 @@ function levelLabel(level: OperatorActionDefinition["level"]): string {
 const TARGET_MODES: EnvironmentMode[] = ["backtest", "paper", "live"];
 
 const MODE_FIELD_HINTS: Record<"environment" | "runtime" | "liveRouting" | "generation" | "sourceState", FieldEvidenceHints> = {
-  environment: { db: ["/system/runtime-leadership", "/system/config-fingerprint"], runtime: ["/system/status"], broker: [], placeholder: ["runtimeLeadership", "status"] },
+  // daemon_mode / environment comes from system/status and config-fingerprint — both runtime memory.
+  environment: { db: [], runtime: ["/system/status", "/system/config-fingerprint"], broker: [], placeholder: ["status", "configFingerprint"] },
+  // runtime_status is pure daemon runtime state.
   runtime: { db: [], runtime: ["/system/status"], broker: [], placeholder: ["status"] },
-  liveRouting: { db: ["/system/config-fingerprint"], runtime: ["/system/status"], broker: [], placeholder: ["status", "configFingerprint"] },
-  generation: { db: ["/system/runtime-leadership"], runtime: ["/system/runtime-leadership"], broker: [], placeholder: ["runtimeLeadership"] },
+  // live_routing_enabled is derived from system/status — runtime memory.
+  liveRouting: { db: [], runtime: ["/system/status"], broker: [], placeholder: ["status"] },
+  // generation_id comes from runtime-leadership — runtime memory, no DB backing in current arch.
+  generation: { db: [], runtime: ["/system/runtime-leadership"], broker: [], placeholder: ["runtimeLeadership"] },
   sourceState: { db: [], runtime: [], broker: [], placeholder: ["all", "status", "runtimeLeadership"] },
 };
 
@@ -37,6 +43,12 @@ export function OpsScreen({
   onRunAction: (action: OperatorActionDefinition) => void;
   onChangeMode: (targetMode: EnvironmentMode) => void;
 }) {
+  const truthState = panelTruthRenderState(model, "ops");
+
+  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+    return <TruthStateNotice state={truthState} />;
+  }
+
   return (
     <div className="screen-grid desk-screen-grid">
       <Panel title="System mode transition" subtitle="Mode changes require a controlled daemon restart and configuration reload. This is not a casual runtime toggle.">

@@ -1,12 +1,19 @@
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
+import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime } from "../../lib/format";
+import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
 export function IncidentsScreen({ model }: { model: SystemModel }) {
   const critical = model.incidents.filter((i) => i.severity === "critical").length;
   const investigating = model.incidents.filter((i) => i.status === "investigating").length;
+  const truthState = panelTruthRenderState(model, "incidents");
+
+  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+    return <TruthStateNotice state={truthState} />;
+  }
 
   return (
     <div className="screen-grid desk-screen-grid">

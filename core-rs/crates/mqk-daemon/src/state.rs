@@ -386,9 +386,7 @@ impl AppState {
             readiness: state.runtime_selection.readiness.clone(),
         };
         state.calendar_spec = match mode {
-            DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
-                CalendarSpec::NyseWeekdays
-            }
+            DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => CalendarSpec::NyseWeekdays,
             DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
         };
         state
@@ -420,9 +418,7 @@ impl AppState {
         // Derive calendar spec from deployment mode.  Live-equity modes use
         // the authoritative NYSE calendar; paper/backtest are always-on.
         let calendar_spec = match runtime_selection.deployment_mode {
-            DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
-                CalendarSpec::NyseWeekdays
-            }
+            DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => CalendarSpec::NyseWeekdays,
             DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
         };
 
@@ -855,7 +851,12 @@ impl AppState {
                 let schema = broker_arc.try_read().ok().and_then(|g| g.clone())?;
                 reconcile_broker_snapshot_from_schema(&schema).ok()
             };
-            spawn_reconcile_tick(Arc::clone(self), local_fn, broker_fn, RECONCILE_TICK_INTERVAL);
+            spawn_reconcile_tick(
+                Arc::clone(self),
+                local_fn,
+                broker_fn,
+                RECONCILE_TICK_INTERVAL,
+            );
         }
 
         let snapshot = StatusSnapshot {
@@ -1084,7 +1085,9 @@ impl AppState {
             .map_err(|err| RuntimeLifecycleError::internal("outbox_load_submitted_for_run", err))?;
         let applied = mqk_db::inbox_load_all_applied_for_run(db, run_id)
             .await
-            .map_err(|err| RuntimeLifecycleError::internal("inbox_load_all_applied_for_run", err))?;
+            .map_err(|err| {
+                RuntimeLifecycleError::internal("inbox_load_all_applied_for_run", err)
+            })?;
 
         // Build OMS orders and side map from submitted outbox rows.
         let mut oms_orders: BTreeMap<String, OmsOrder> = BTreeMap::new();
@@ -1831,7 +1834,11 @@ fn outbox_json_qty(json: &serde_json::Value) -> Option<i64> {
     // Accept both "qty" and "quantity" keys; value must be positive.
     let raw = json.get("qty").or_else(|| json.get("quantity"))?;
     let n = raw.as_i64()?;
-    if n > 0 { Some(n) } else { None }
+    if n > 0 {
+        Some(n)
+    } else {
+        None
+    }
 }
 
 fn outbox_json_side(json: &serde_json::Value) -> mqk_reconcile::Side {
@@ -1844,11 +1851,17 @@ fn outbox_json_side(json: &serde_json::Value) -> mqk_reconcile::Side {
 fn broker_event_to_oms_event(event: &BrokerEvent) -> OmsEvent {
     match event {
         BrokerEvent::Ack { .. } => OmsEvent::Ack,
-        BrokerEvent::PartialFill { delta_qty, .. } => OmsEvent::PartialFill { delta_qty: *delta_qty },
-        BrokerEvent::Fill { delta_qty, .. } => OmsEvent::Fill { delta_qty: *delta_qty },
+        BrokerEvent::PartialFill { delta_qty, .. } => OmsEvent::PartialFill {
+            delta_qty: *delta_qty,
+        },
+        BrokerEvent::Fill { delta_qty, .. } => OmsEvent::Fill {
+            delta_qty: *delta_qty,
+        },
         BrokerEvent::CancelAck { .. } => OmsEvent::CancelAck,
         BrokerEvent::CancelReject { .. } => OmsEvent::CancelReject,
-        BrokerEvent::ReplaceAck { new_total_qty, .. } => OmsEvent::ReplaceAck { new_total_qty: *new_total_qty },
+        BrokerEvent::ReplaceAck { new_total_qty, .. } => OmsEvent::ReplaceAck {
+            new_total_qty: *new_total_qty,
+        },
         BrokerEvent::ReplaceReject { .. } => OmsEvent::ReplaceReject,
         BrokerEvent::Reject { .. } => OmsEvent::Reject,
     }

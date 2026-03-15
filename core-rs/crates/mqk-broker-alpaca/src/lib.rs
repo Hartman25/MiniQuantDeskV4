@@ -49,15 +49,15 @@
 pub mod inbound;
 pub mod normalize;
 pub mod types;
-pub use inbound::{
-    build_inbound_batch_from_ws_update, mark_gap_detected, parse_ws_message, AlpacaWsMessage,
-    InboundBatch, WsParseError,
-};
 use crate::normalize::normalize_trade_update;
 use crate::types::{
     AlpacaFetchCursor, AlpacaOrder, AlpacaOrderActivity, AlpacaOrderFull, AlpacaReplaceBody,
     AlpacaReplaceResponse, AlpacaSubmitBody, AlpacaSubmitResponse, AlpacaTradeUpdate,
     AlpacaTradeUpdatesResume,
+};
+pub use inbound::{
+    build_inbound_batch_from_ws_update, mark_gap_detected, parse_ws_message, AlpacaWsMessage,
+    InboundBatch, WsParseError,
 };
 use mqk_execution::{
     micros_to_price, BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent,

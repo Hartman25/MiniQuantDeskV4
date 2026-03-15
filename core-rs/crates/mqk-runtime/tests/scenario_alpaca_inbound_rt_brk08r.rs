@@ -40,7 +40,9 @@
 use chrono::Utc;
 use mqk_broker_alpaca::types::{AlpacaFetchCursor, AlpacaTradeUpdatesResume};
 use mqk_db::{NewRun, ENV_DB_URL};
-use mqk_runtime::alpaca_inbound::{persist_ws_gap_cursor, process_ws_inbound_batch, WsIngestOutcome};
+use mqk_runtime::alpaca_inbound::{
+    persist_ws_gap_cursor, process_ws_inbound_batch, WsIngestOutcome,
+};
 use serde_json::json;
 use uuid::Uuid;
 // ---------------------------------------------------------------------------
@@ -163,22 +165,18 @@ async fn rt_i1_ws_update_enters_inbox_and_cursor_advances() {
     let raw = ws_bytes_new_order(&broker_id, &client_id, ts);
     let prev_cursor = AlpacaFetchCursor::cold_start_unproven(None);
     let now = Utc::now();
-    let outcome = process_ws_inbound_batch(
-        &pool,
-        run_id,
-        &adapter_id,
-        &raw,
-        &prev_cursor,
-        now,
-    )
-    .await
-    .expect("process_ws_inbound_batch failed");
+    let outcome = process_ws_inbound_batch(&pool, run_id, &adapter_id, &raw, &prev_cursor, now)
+        .await
+        .expect("process_ws_inbound_batch failed");
     // One event was ingested.
     match &outcome {
         WsIngestOutcome::EventsIngested { count, new_cursor } => {
             assert_eq!(*count, 1, "expected 1 event ingested");
             assert!(
-                matches!(new_cursor.trade_updates, AlpacaTradeUpdatesResume::Live { .. }),
+                matches!(
+                    new_cursor.trade_updates,
+                    AlpacaTradeUpdatesResume::Live { .. }
+                ),
                 "expected Live cursor after ingest"
             );
         }
@@ -189,8 +187,8 @@ async fn rt_i1_ws_update_enters_inbox_and_cursor_advances() {
         .await
         .expect("load_broker_cursor failed");
     assert!(persisted.is_some(), "cursor must be persisted after ingest");
-    let cursor: AlpacaFetchCursor = serde_json::from_str(persisted.unwrap().as_str())
-        .expect("cursor must be valid JSON");
+    let cursor: AlpacaFetchCursor =
+        serde_json::from_str(persisted.unwrap().as_str()).expect("cursor must be valid JSON");
     assert!(
         matches!(cursor.trade_updates, AlpacaTradeUpdatesResume::Live { .. }),
         "persisted cursor must be Live"
@@ -227,7 +225,10 @@ async fn rt_i2_duplicate_ws_message_deduplicates_and_cursor_advances() {
     let outcome1 = process_ws_inbound_batch(&pool, run_id, &adapter_id, &raw, &prev_cursor, now)
         .await
         .expect("first process failed");
-    assert!(matches!(outcome1, WsIngestOutcome::EventsIngested { count: 1, .. }));
+    assert!(matches!(
+        outcome1,
+        WsIngestOutcome::EventsIngested { count: 1, .. }
+    ));
     // Second call with identical bytes: inbox deduplicates (Ok(false)).
     // Cursor still advances to the same position (idempotent).
     let outcome2 = process_ws_inbound_batch(&pool, run_id, &adapter_id, &raw, &prev_cursor, now)
@@ -245,7 +246,11 @@ async fn rt_i2_duplicate_ws_message_deduplicates_and_cursor_advances() {
     let unapplied = mqk_db::inbox_load_unapplied_for_run(&pool, run_id)
         .await
         .expect("inbox_load_unapplied_for_run failed");
-    assert_eq!(unapplied.len(), 1, "exactly one inbox row despite two calls");
+    assert_eq!(
+        unapplied.len(),
+        1,
+        "exactly one inbox row despite two calls"
+    );
 }
 // ---------------------------------------------------------------------------
 // RT-I3: Two trade-updates in one frame → both ingested → cursor at last
@@ -270,7 +275,9 @@ async fn rt_i3_two_updates_in_one_frame_both_ingested_cursor_at_last() {
             assert_eq!(*count, 2, "expected 2 events ingested");
             // Cursor must be at the fill event (last in the frame).
             match &new_cursor.trade_updates {
-                AlpacaTradeUpdatesResume::Live { last_message_id, .. } => {
+                AlpacaTradeUpdatesResume::Live {
+                    last_message_id, ..
+                } => {
                     // Fill event is last; message_id format: alpaca:{id}:fill:{ts}
                     assert!(
                         last_message_id.contains(":fill:"),
@@ -294,7 +301,9 @@ async fn rt_i3_two_updates_in_one_frame_both_ingested_cursor_at_last() {
         .expect("cursor must be set");
     let c: AlpacaFetchCursor = serde_json::from_str(&persisted).unwrap();
     match &c.trade_updates {
-        AlpacaTradeUpdatesResume::Live { last_message_id, .. } => {
+        AlpacaTradeUpdatesResume::Live {
+            last_message_id, ..
+        } => {
             assert!(
                 last_message_id.contains(":fill:"),
                 "DB cursor must be at fill event"
@@ -335,7 +344,10 @@ async fn rt_i4_non_trade_update_frame_produces_no_actionable_events() {
     let unapplied = mqk_db::inbox_load_unapplied_for_run(&pool, run_id)
         .await
         .expect("inbox_load_unapplied_for_run failed");
-    assert!(unapplied.is_empty(), "no inbox rows for protocol-only frames");
+    assert!(
+        unapplied.is_empty(),
+        "no inbox rows for protocol-only frames"
+    );
 }
 // ---------------------------------------------------------------------------
 // RT-I5: Cold-start cursor → Live cursor persisted after ingest
@@ -359,7 +371,10 @@ async fn rt_i5_cold_start_cursor_transitions_to_live_after_ingest() {
     match outcome {
         WsIngestOutcome::EventsIngested { new_cursor, .. } => {
             assert!(
-                matches!(new_cursor.trade_updates, AlpacaTradeUpdatesResume::Live { .. }),
+                matches!(
+                    new_cursor.trade_updates,
+                    AlpacaTradeUpdatesResume::Live { .. }
+                ),
                 "cold-start must transition to Live after first event"
             );
         }
@@ -371,7 +386,10 @@ async fn rt_i5_cold_start_cursor_transitions_to_live_after_ingest() {
         .unwrap()
         .unwrap();
     let stored: AlpacaFetchCursor = serde_json::from_str(&stored_json).unwrap();
-    assert!(matches!(stored.trade_updates, AlpacaTradeUpdatesResume::Live { .. }));
+    assert!(matches!(
+        stored.trade_updates,
+        AlpacaTradeUpdatesResume::Live { .. }
+    ));
 }
 // ---------------------------------------------------------------------------
 // RT-I6: Gap cursor → process event → Live cursor persisted
@@ -395,7 +413,10 @@ async fn rt_i6_gap_cursor_transitions_to_live_after_ws_ingest() {
     match outcome {
         WsIngestOutcome::EventsIngested { new_cursor, .. } => {
             assert!(
-                matches!(new_cursor.trade_updates, AlpacaTradeUpdatesResume::Live { .. }),
+                matches!(
+                    new_cursor.trade_updates,
+                    AlpacaTradeUpdatesResume::Live { .. }
+                ),
                 "gap cursor must transition to Live after WS ingest"
             );
         }
@@ -421,7 +442,10 @@ async fn rt_g1_persist_gap_from_live_writes_gap_detected_to_db() {
         .await
         .expect("persist_ws_gap_cursor failed");
     assert!(
-        matches!(gap.trade_updates, AlpacaTradeUpdatesResume::GapDetected { .. }),
+        matches!(
+            gap.trade_updates,
+            AlpacaTradeUpdatesResume::GapDetected { .. }
+        ),
         "returned cursor must be GapDetected"
     );
     // Verify DB state.
@@ -431,12 +455,17 @@ async fn rt_g1_persist_gap_from_live_writes_gap_detected_to_db() {
         .expect("cursor must be set");
     let stored: AlpacaFetchCursor = serde_json::from_str(&stored_json).unwrap();
     assert!(
-        matches!(stored.trade_updates, AlpacaTradeUpdatesResume::GapDetected { .. }),
+        matches!(
+            stored.trade_updates,
+            AlpacaTradeUpdatesResume::GapDetected { .. }
+        ),
         "DB cursor must be GapDetected"
     );
     // Verify last_message_id is preserved from the Live cursor.
     match &stored.trade_updates {
-        AlpacaTradeUpdatesResume::GapDetected { last_message_id, .. } => {
+        AlpacaTradeUpdatesResume::GapDetected {
+            last_message_id, ..
+        } => {
             assert_eq!(
                 last_message_id.as_deref(),
                 Some("last-msg-id-xyz"),
@@ -521,7 +550,10 @@ async fn rt_g4_after_gap_persist_ws_batch_advances_to_live() {
     let gap = persist_ws_gap_cursor(&pool, &adapter_id, &live, "disconnect before g4", now)
         .await
         .expect("persist_ws_gap_cursor failed");
-    assert!(matches!(gap.trade_updates, AlpacaTradeUpdatesResume::GapDetected { .. }));
+    assert!(matches!(
+        gap.trade_updates,
+        AlpacaTradeUpdatesResume::GapDetected { .. }
+    ));
     // After gap is persisted, a new WS event comes in.
     let raw = ws_bytes_new_order(&broker_id, &client_id, "2024-06-15T09:30:00.000000Z");
     let outcome = process_ws_inbound_batch(&pool, run_id, &adapter_id, &raw, &gap, now)
@@ -530,7 +562,10 @@ async fn rt_g4_after_gap_persist_ws_batch_advances_to_live() {
     match outcome {
         WsIngestOutcome::EventsIngested { new_cursor, .. } => {
             assert!(
-                matches!(new_cursor.trade_updates, AlpacaTradeUpdatesResume::Live { .. }),
+                matches!(
+                    new_cursor.trade_updates,
+                    AlpacaTradeUpdatesResume::Live { .. }
+                ),
                 "WS lane advances gap → Live on new events"
             );
         }
@@ -542,7 +577,10 @@ async fn rt_g4_after_gap_persist_ws_batch_advances_to_live() {
         .unwrap()
         .unwrap();
     let c: AlpacaFetchCursor = serde_json::from_str(&stored).unwrap();
-    assert!(matches!(c.trade_updates, AlpacaTradeUpdatesResume::Live { .. }));
+    assert!(matches!(
+        c.trade_updates,
+        AlpacaTradeUpdatesResume::Live { .. }
+    ));
 }
 // ---------------------------------------------------------------------------
 // RT-O1: BRK-02R ordering: inbox insert before cursor advance (structural proof)
@@ -591,7 +629,9 @@ async fn rt_o1_after_ingest_both_inbox_row_and_cursor_exist_in_db() {
     // Verify that the cursor in DB encodes the same last_message_id.
     let c: AlpacaFetchCursor = serde_json::from_str(cursor.unwrap().as_str()).unwrap();
     match c.trade_updates {
-        AlpacaTradeUpdatesResume::Live { last_message_id, .. } => {
+        AlpacaTradeUpdatesResume::Live {
+            last_message_id, ..
+        } => {
             assert_eq!(last_message_id, expected_mid);
         }
         other => panic!("expected Live cursor, got {other:?}"),

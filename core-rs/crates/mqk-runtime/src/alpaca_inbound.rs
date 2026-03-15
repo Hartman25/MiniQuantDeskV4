@@ -45,10 +45,10 @@
 //! seen — the system does not stall on replay.
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
+use mqk_broker_alpaca::types::AlpacaFetchCursor;
 use mqk_broker_alpaca::{
     build_inbound_batch_from_ws_update, mark_gap_detected, parse_ws_message, AlpacaWsMessage,
 };
-use mqk_broker_alpaca::types::AlpacaFetchCursor;
 use mqk_execution::BrokerEvent;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -144,8 +144,8 @@ pub async fn process_ws_inbound_batch(
         // the cursor.  If any insert returns Err, the function returns
         // immediately and advance_broker_cursor is never reached (BRK-02R).
         for event in &batch.events {
-            let msg_json = serde_json::to_value(event)
-                .context("ws_inbound: event serialization failed")?;
+            let msg_json =
+                serde_json::to_value(event).context("ws_inbound: event serialization failed")?;
             let event_kind = broker_event_kind(event);
             mqk_db::inbox_insert_deduped_with_identity(
                 pool,
@@ -213,8 +213,8 @@ pub async fn persist_ws_gap_cursor(
     now: DateTime<Utc>,
 ) -> anyhow::Result<AlpacaFetchCursor> {
     let gap = mark_gap_detected(prev_cursor, gap_detail);
-    let cursor_json = serde_json::to_string(&gap)
-        .context("persist_gap_cursor: cursor serialization failed")?;
+    let cursor_json =
+        serde_json::to_string(&gap).context("persist_gap_cursor: cursor serialization failed")?;
     mqk_db::advance_broker_cursor(pool, adapter_id, &cursor_json, now)
         .await
         .context("persist_gap_cursor: advance_broker_cursor failed")?;

@@ -29,9 +29,7 @@ async fn migration_bootstrap_and_replay_follow_authoritative_manifest() -> anyho
     sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
         .execute(&pool)
         .await?;
-    sqlx::query("CREATE SCHEMA public")
-        .execute(&pool)
-        .await?;
+    sqlx::query("CREATE SCHEMA public").execute(&pool).await?;
 
     mqk_db::migrate(&pool).await?;
 

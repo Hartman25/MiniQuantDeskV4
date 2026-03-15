@@ -37,9 +37,8 @@ use crate::{
         OperatorTimelineResponse, OperatorTimelineRow, PortfolioSummaryResponse,
         PreflightStatusResponse, ReconcileSummaryResponse, RiskSummaryResponse,
         RuntimeErrorResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
-        SessionStateResponse, StrategySummaryRow, StrategySuppressionRow,
-        SystemMetadataResponse, SystemStatusResponse, TradingAccountResponse,
-        TradingFillsResponse, TradingOrdersResponse,
+        SessionStateResponse, StrategySummaryRow, StrategySuppressionRow, SystemMetadataResponse,
+        SystemStatusResponse, TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
     state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot},
@@ -595,10 +594,7 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
     let (risk_blocked, db_status) = if let Some(db) = st.db.as_ref() {
         let risk_result = mqk_db::load_risk_block_state(db).await;
         let db_ok = risk_result.is_ok();
-        let risk_blocked = risk_result
-            .ok()
-            .flatten()
-            .is_some_and(|risk| risk.blocked);
+        let risk_blocked = risk_result.ok().flatten().is_some_and(|risk| risk.blocked);
         let db_status = if db_ok { "ok" } else { "warning" }.to_string();
         (risk_blocked, db_status)
     } else {
@@ -799,14 +795,10 @@ pub(crate) async fn system_runtime_leadership(
     // Fetch the latest run record once — reused for generation_id, restart
     // time, and the initial checkpoint row.
     let latest_run = if let Some(db) = st.db.as_ref() {
-        mqk_db::fetch_latest_run_for_engine(
-            db,
-            DAEMON_ENGINE_ID,
-            st.deployment_mode().as_db_mode(),
-        )
-        .await
-        .ok()
-        .flatten()
+        mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, st.deployment_mode().as_db_mode())
+            .await
+            .ok()
+            .flatten()
     } else {
         None
     };
@@ -1024,9 +1016,8 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
     // PROD-02: execution is only allowed when integrity is armed AND there is a
     // durable active run owned by this daemon.  Integrity-armed-but-idle is not
     // execution-capable — surfacing it as "enabled" is a misleading overclaim.
-    let execution_allowed = strategy_allowed
-        && status.state == "running"
-        && status.active_run_id.is_some();
+    let execution_allowed =
+        strategy_allowed && status.state == "running" && status.active_run_id.is_some();
 
     (
         StatusCode::OK,
