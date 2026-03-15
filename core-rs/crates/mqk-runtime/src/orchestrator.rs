@@ -313,7 +313,7 @@ where
             // Build a submit request from the outbox order_json.
             let req = build_submit_request(&claimed_row.row)?;
             let symbol = req.symbol.clone();
-            let qty = i64::from(req.quantity);
+            let qty = req.quantity;
             // Step 3a: RT-5 - write DISPATCHING before calling gateway.submit().
             //
             // Closes crash window W4: if the process crashes between here and

@@ -110,6 +110,9 @@ impl InboundBatch {
 /// [{"T":"listening","streams":["trade_updates"]}]
 /// [{"T":"error","code":400,"msg":"invalid syntax"}]
 /// ```
+// The TradeUpdate variant is intentionally large: boxing every inbound WS message
+// in the single-threaded parse path adds allocation overhead for no safety gain.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum AlpacaWsMessage {
     /// An order lifecycle event from the trade-update stream.

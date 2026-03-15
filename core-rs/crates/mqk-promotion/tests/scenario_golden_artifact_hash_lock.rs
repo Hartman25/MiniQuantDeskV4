@@ -94,6 +94,7 @@ fn good_report() -> BacktestReport {
         halted: false,
         halt_reason: None,
         equity_curve: good_equity_curve(),
+        orders: vec![],
         fills: vec![],
         last_prices: BTreeMap::new(),
         execution_blocked: false,

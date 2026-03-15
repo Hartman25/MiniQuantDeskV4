@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
 
-use mqk_backtest::BacktestReport;
+use mqk_backtest::{BacktestFill, BacktestReport};
 use mqk_portfolio::{Fill, Side};
+
+fn bf(inner: Fill) -> BacktestFill {
+    BacktestFill { fill_id: uuid::Uuid::nil(), order_id: uuid::Uuid::nil(), bar_end_ts: 0, inner }
+}
 use mqk_promotion::{
     build_report, evaluate_promotion, write_promotion_report_json, ArtifactLock, PromotionConfig,
     PromotionInput, StressSuiteResult,
@@ -27,20 +31,21 @@ fn passes_all_thresholds() {
     // Create fills: 3 profitable round-trip trades (buy then sell at higher price)
     let fills = vec![
         // Trade 1: buy 100 @ 10.00, sell 100 @ 12.00 => profit 200
-        Fill::new("AAPL", Side::Buy, 100, 10_000_000, 0),
-        Fill::new("AAPL", Side::Sell, 100, 12_000_000, 0),
+        bf(Fill::new("AAPL", Side::Buy, 100, 10_000_000, 0)),
+        bf(Fill::new("AAPL", Side::Sell, 100, 12_000_000, 0)),
         // Trade 2: buy 50 @ 20.00, sell 50 @ 25.00 => profit 250
-        Fill::new("MSFT", Side::Buy, 50, 20_000_000, 0),
-        Fill::new("MSFT", Side::Sell, 50, 25_000_000, 0),
+        bf(Fill::new("MSFT", Side::Buy, 50, 20_000_000, 0)),
+        bf(Fill::new("MSFT", Side::Sell, 50, 25_000_000, 0)),
         // Trade 3: short 80 @ 15.00, cover 80 @ 12.00 => profit 240
-        Fill::new("GOOG", Side::Sell, 80, 15_000_000, 0),
-        Fill::new("GOOG", Side::Buy, 80, 12_000_000, 0),
+        bf(Fill::new("GOOG", Side::Sell, 80, 15_000_000, 0)),
+        bf(Fill::new("GOOG", Side::Buy, 80, 12_000_000, 0)),
     ];
 
     let report = BacktestReport {
         halted: false,
         halt_reason: None,
         equity_curve,
+        orders: vec![],
         fills,
         last_prices: BTreeMap::new(),
         execution_blocked: false,

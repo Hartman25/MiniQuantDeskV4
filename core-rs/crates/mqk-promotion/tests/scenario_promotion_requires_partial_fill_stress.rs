@@ -10,8 +10,12 @@
 
 use std::collections::BTreeMap;
 
-use mqk_backtest::BacktestReport;
+use mqk_backtest::{BacktestFill, BacktestReport};
 use mqk_portfolio::{Fill, Side};
+
+fn bf(inner: Fill) -> BacktestFill {
+    BacktestFill { fill_id: uuid::Uuid::nil(), order_id: uuid::Uuid::nil(), bar_end_ts: 0, inner }
+}
 use mqk_promotion::{
     evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, StressSuiteResult,
 };
@@ -33,10 +37,10 @@ fn good_equity_curve() -> Vec<(i64, i64)> {
 }
 
 /// Profitable round-trip fills that yield a high profit factor.
-fn good_fills() -> Vec<Fill> {
+fn good_fills() -> Vec<BacktestFill> {
     vec![
-        Fill::new("SPY", Side::Buy, 100, 10_000_000, 0),
-        Fill::new("SPY", Side::Sell, 100, 12_000_000, 0),
+        bf(Fill::new("SPY", Side::Buy, 100, 10_000_000, 0)),
+        bf(Fill::new("SPY", Side::Sell, 100, 12_000_000, 0)),
     ]
 }
 
@@ -56,6 +60,7 @@ fn good_report() -> BacktestReport {
         halted: false,
         halt_reason: None,
         equity_curve: good_equity_curve(),
+        orders: vec![],
         fills: good_fills(),
         last_prices: BTreeMap::new(),
         execution_blocked: false,
@@ -208,9 +213,9 @@ fn stress_suite_passed_with_good_metrics_allows_promotion() {
 #[test]
 fn partial_fills_profit_factor_computed_correctly() {
     let fills = vec![
-        Fill::new("SPY", Side::Buy, 100, 10_000_000, 0),
-        Fill::new("SPY", Side::Sell, 60, 12_000_000, 0), // partial close at profit
-        Fill::new("SPY", Side::Sell, 40, 8_000_000, 0),  // remaining at loss
+        bf(Fill::new("SPY", Side::Buy, 100, 10_000_000, 0)),
+        bf(Fill::new("SPY", Side::Sell, 60, 12_000_000, 0)), // partial close at profit
+        bf(Fill::new("SPY", Side::Sell, 40, 8_000_000, 0)),  // remaining at loss
     ];
 
     let day = 86_400i64;
@@ -218,6 +223,7 @@ fn partial_fills_profit_factor_computed_correctly() {
         halted: false,
         halt_reason: None,
         equity_curve: vec![(0, 1_000_000_000), (180 * day, 1_100_000_000)],
+        orders: vec![],
         fills,
         last_prices: BTreeMap::new(),
         execution_blocked: false,
@@ -270,8 +276,8 @@ fn partial_fills_profit_factor_computed_correctly() {
 #[test]
 fn cancel_after_partial_fill_no_phantom_pnl() {
     let fills = vec![
-        Fill::new("SPY", Side::Buy, 10, 10_000_000, 0), // only 10 of 100 executed
-        Fill::new("SPY", Side::Sell, 10, 11_000_000, 0), // close position
+        bf(Fill::new("SPY", Side::Buy, 10, 10_000_000, 0)), // only 10 of 100 executed
+        bf(Fill::new("SPY", Side::Sell, 10, 11_000_000, 0)), // close position
     ];
 
     let day = 86_400i64;
@@ -279,6 +285,7 @@ fn cancel_after_partial_fill_no_phantom_pnl() {
         halted: false,
         halt_reason: None,
         equity_curve: vec![(0, 1_000_000_000), (180 * day, 1_100_000_000)],
+        orders: vec![],
         fills,
         last_prices: BTreeMap::new(),
         execution_blocked: false,

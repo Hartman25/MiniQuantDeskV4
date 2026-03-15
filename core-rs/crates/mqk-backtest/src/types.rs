@@ -548,9 +548,39 @@ impl BacktestBar {
 // BacktestReport
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Deterministic run-identity namespace
+// ---------------------------------------------------------------------------
+
+/// Namespace for MQK backtest run IDs.
+/// Bytes: "mqk_bkt_run__ns0" (ASCII, padded to 16 bytes).
+const BACKTEST_RUN_NS: Uuid = Uuid::from_bytes([
+    0x6d, 0x71, 0x6b, 0x5f, 0x62, 0x6b, 0x74, 0x5f, 0x72, 0x75, 0x6e, 0x5f, 0x5f, 0x6e, 0x73, 0x30,
+]);
+
+/// Derive a deterministic backtest run ID.
+///
+/// BKT-05P: run identity is a UUIDv5 over `"mqk-bkt.run.v1|{strategy_name}|{config_id}"`.
+/// The `config_id` already encodes every parameter, so this ID is unique per
+/// (strategy × full config). Suitable for artifact manifests and audit trails.
+pub fn derive_run_id(strategy_name: &str, config_id: &Uuid) -> Uuid {
+    let data = format!("mqk-bkt.run.v1|{}|{}", strategy_name, config_id);
+    Uuid::new_v5(&BACKTEST_RUN_NS, data.as_bytes())
+}
+
+// ---------------------------------------------------------------------------
+// BacktestReport
+// ---------------------------------------------------------------------------
+
 /// Backtest report produced after a run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BacktestReport {
+    /// BKT-05P: Name of the strategy that drove this run.
+    /// Populated from `StrategySpec::name`; empty string if no strategy was registered.
+    pub strategy_name: String,
+    /// BKT-05P: Deterministic run identity UUID.
+    /// Derived via UUIDv5 over (strategy_name, config_id). Stable across identical replays.
+    pub run_id: Uuid,
     /// Whether the backtest halted early.
     pub halted: bool,
     /// Reason for halt (if any).

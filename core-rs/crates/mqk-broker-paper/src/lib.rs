@@ -165,7 +165,7 @@ impl BrokerAdapter for LockedPaperBroker {
         // P1-02:
         // Submit-side direction is explicit on the request; quantity is always positive.
         let side = req.side;
-        let abs_qty: i64 = (req.quantity as i64).saturating_abs();
+        let abs_qty: i64 = req.quantity.saturating_abs();
 
         let state = PaperOrderState::new(req.order_id.clone(), req.symbol.clone(), side, abs_qty);
 
@@ -257,7 +257,7 @@ impl BrokerAdapter for LockedPaperBroker {
         }
 
         if let Some(o) = inner.open.get_mut(&oid) {
-            let new_abs: i64 = (req.quantity as i64).saturating_abs();
+            let new_abs: i64 = req.quantity.saturating_abs();
 
             // P1-03: Reject replace with zero open leaves (invalid quantity).
             if new_abs == 0 {

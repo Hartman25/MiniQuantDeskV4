@@ -9,8 +9,12 @@
 
 use std::collections::BTreeMap;
 
-use mqk_backtest::BacktestReport;
+use mqk_backtest::{BacktestFill, BacktestReport};
 use mqk_portfolio::{Fill, Side};
+
+fn bf(inner: Fill) -> BacktestFill {
+    BacktestFill { fill_id: uuid::Uuid::nil(), order_id: uuid::Uuid::nil(), bar_end_ts: 0, inner }
+}
 use mqk_promotion::{
     evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, StressSuiteResult,
 };
@@ -29,16 +33,17 @@ fn make_profitable_report() -> BacktestReport {
 
     // Profitable round-trip trades
     let fills = vec![
-        Fill::new("AAPL", Side::Buy, 100, 10_000_000, 0),
-        Fill::new("AAPL", Side::Sell, 100, 12_000_000, 0),
-        Fill::new("MSFT", Side::Buy, 50, 20_000_000, 0),
-        Fill::new("MSFT", Side::Sell, 50, 25_000_000, 0),
+        bf(Fill::new("AAPL", Side::Buy, 100, 10_000_000, 0)),
+        bf(Fill::new("AAPL", Side::Sell, 100, 12_000_000, 0)),
+        bf(Fill::new("MSFT", Side::Buy, 50, 20_000_000, 0)),
+        bf(Fill::new("MSFT", Side::Sell, 50, 25_000_000, 0)),
     ];
 
     BacktestReport {
         halted: false,
         halt_reason: None,
         equity_curve,
+        orders: vec![],
         fills,
         last_prices: BTreeMap::new(),
         execution_blocked: false,
@@ -59,16 +64,17 @@ fn make_unprofitable_report() -> BacktestReport {
 
     // Losing round-trip trades
     let fills = vec![
-        Fill::new("AAPL", Side::Buy, 100, 12_000_000, 0),
-        Fill::new("AAPL", Side::Sell, 100, 10_000_000, 0), // loss
-        Fill::new("MSFT", Side::Buy, 50, 25_000_000, 0),
-        Fill::new("MSFT", Side::Sell, 50, 20_000_000, 0), // loss
+        bf(Fill::new("AAPL", Side::Buy, 100, 12_000_000, 0)),
+        bf(Fill::new("AAPL", Side::Sell, 100, 10_000_000, 0)), // loss
+        bf(Fill::new("MSFT", Side::Buy, 50, 25_000_000, 0)),
+        bf(Fill::new("MSFT", Side::Sell, 50, 20_000_000, 0)), // loss
     ];
 
     BacktestReport {
         halted: false,
         halt_reason: None,
         equity_curve,
+        orders: vec![],
         fills,
         last_prices: BTreeMap::new(),
         execution_blocked: false,
@@ -212,14 +218,15 @@ fn halted_backtest_metrics_computed_from_partial_curve() {
     ];
 
     let fills = vec![
-        Fill::new("AAPL", Side::Buy, 10, 10_000_000, 0),
-        Fill::new("AAPL", Side::Sell, 10, 10_500_000, 0),
+        bf(Fill::new("AAPL", Side::Buy, 10, 10_000_000, 0)),
+        bf(Fill::new("AAPL", Side::Sell, 10, 10_500_000, 0)),
     ];
 
     let report = BacktestReport {
         halted: true,
         halt_reason: Some("daily_loss_limit".to_string()),
         equity_curve,
+        orders: vec![],
         fills,
         last_prices: BTreeMap::new(),
         execution_blocked: false,

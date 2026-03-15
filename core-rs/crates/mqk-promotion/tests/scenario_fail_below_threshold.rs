@@ -17,6 +17,7 @@ fn fails_when_below_multiple_thresholds() {
         halted: false,
         halt_reason: None,
         equity_curve: vec![(0, 1_000_000), (day, 1_000_000), (2 * day, 1_000_000)],
+        orders: vec![],
         fills: vec![],
         last_prices: BTreeMap::new(),
         execution_blocked: false,
@@ -75,6 +76,7 @@ fn fails_with_large_drawdown() {
             (2 * month, 700_000),
             (3 * month, 800_000), // end below start
         ],
+        orders: vec![],
         fills: vec![],
         last_prices: BTreeMap::new(),
         execution_blocked: false,

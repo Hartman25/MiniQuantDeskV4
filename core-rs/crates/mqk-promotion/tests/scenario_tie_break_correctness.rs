@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
 
-use mqk_backtest::BacktestReport;
+use mqk_backtest::{BacktestFill, BacktestReport};
 use mqk_portfolio::{Fill, Side};
+
+fn bf(inner: Fill) -> BacktestFill {
+    BacktestFill { fill_id: uuid::Uuid::nil(), order_id: uuid::Uuid::nil(), bar_end_ts: 0, inner }
+}
 use mqk_promotion::{
     pick_winner, select_best, ArtifactLock, Candidate, PromotionConfig, PromotionInput,
     PromotionMetrics, StressSuiteResult,
@@ -41,10 +45,10 @@ fn make_equity_curve(
 }
 
 /// Helper: build fills with one profitable round-trip.
-fn make_profitable_fills() -> Vec<Fill> {
+fn make_profitable_fills() -> Vec<BacktestFill> {
     vec![
-        Fill::new("SYM", Side::Buy, 100, 10_000_000, 0),
-        Fill::new("SYM", Side::Sell, 100, 15_000_000, 0),
+        bf(Fill::new("SYM", Side::Buy, 100, 10_000_000, 0)),
+        bf(Fill::new("SYM", Side::Sell, 100, 15_000_000, 0)),
     ]
 }
 
@@ -117,6 +121,7 @@ fn select_best_picks_correct_winner() {
                     halted: false,
                     halt_reason: None,
                     equity_curve: eq_1,
+                    orders: vec![],
                     fills: make_profitable_fills(),
                     last_prices: BTreeMap::new(),
                     execution_blocked: false,
@@ -133,6 +138,7 @@ fn select_best_picks_correct_winner() {
                     halted: false,
                     halt_reason: None,
                     equity_curve: eq_2,
+                    orders: vec![],
                     fills: vec![],
                     last_prices: BTreeMap::new(),
                     execution_blocked: false,
@@ -149,6 +155,7 @@ fn select_best_picks_correct_winner() {
                     halted: false,
                     halt_reason: None,
                     equity_curve: eq_3,
+                    orders: vec![],
                     fills: make_profitable_fills(),
                     last_prices: BTreeMap::new(),
                     execution_blocked: false,
