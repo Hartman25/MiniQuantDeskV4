@@ -2289,6 +2289,27 @@ fn spawn_execution_loop(
 
                     if let Some(ref pool) = db {
                         let now = Utc::now();
+                        // Deadman pre-check: if the heartbeat is already stale, the
+                        // execution loop must not refresh it.  Sending a fresh heartbeat
+                        // for an expired run would mask the expiry from the status surface
+                        // and create a zombie loop. Exit and let the operator surface
+                        // detect + persist the expired state on the next status query.
+                        if let Ok(true) =
+                            mqk_db::deadman_expired(pool, run_id, DEADMAN_TTL_SECONDS, now).await
+                        {
+                            tracing::error!(
+                                run_id = %run_id,
+                                "execution_loop_deadman_expired: heartbeat stale, self-terminating without refresh"
+                            );
+                            if let Err(release_err) =
+                                orchestrator.release_runtime_leadership().await
+                            {
+                                tracing::warn!("runtime_lease_release_failed error={release_err}");
+                            }
+                            return ExecutionLoopExit {
+                                note: Some("execution loop exited: deadman expired".to_string()),
+                            };
+                        }
                         if let Err(err) = mqk_db::heartbeat_run(pool, run_id, now).await {
                             tracing::error!("execution_loop_heartbeat_failed error={err}");
                             let _ = mqk_db::halt_run(pool, run_id, now).await;

@@ -74,6 +74,12 @@ async fn lifecycle_pool() -> sqlx::PgPool {
         .execute(&pool)
         .await
         .expect("cleanup daemon runs");
+    // DMON-06: clear persisted reconcile status so each test starts from
+    // "unknown" rather than inheriting a stale "ok" from a prior session.
+    sqlx::query("DELETE FROM sys_reconcile_status_state")
+        .execute(&pool)
+        .await
+        .expect("cleanup sys_reconcile_status_state");
 
     pool
 }
@@ -270,8 +276,11 @@ async fn control_restart_route_is_not_exposed_even_with_durable_runtime_conflict
     mqk_db::arm_run(&pool, run_id).await.expect("arm run");
     mqk_db::begin_run(&pool, run_id).await.expect("begin run");
 
+    // Ensure the operator token is set so auth succeeds and we can see whether
+    // the route itself returns 404 (not exposed) vs 401 (auth rejected first).
+    ensure_test_operator_token();
     let st = Arc::new(state::AppState::new_with_db(pool));
-    let req = Request::builder()
+    let req = authed(Request::builder())
         .method("POST")
         .uri("/control/restart")
         .header("content-type", "application/json")
@@ -579,6 +588,12 @@ async fn status_surface_reports_deadman_truth() {
     assert_eq!(json["deadman_status"], "healthy");
 
     let pool = st.db.as_ref().expect("db configured");
+    // Wait for the execution loop's tick 0 to complete its heartbeat_run before
+    // injecting the stale value, matching the pattern from
+    // deadman_expiry_halts_and_disarms_runtime.  Without this, the stale UPDATE
+    // can race with tick 0's heartbeat_run.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
     sqlx::query(
         "UPDATE runs SET last_heartbeat_utc = now() - interval '10 second' WHERE run_id = $1",
     )
@@ -586,6 +601,9 @@ async fn status_surface_reports_deadman_truth() {
     .execute(pool)
     .await
     .expect("force stale heartbeat");
+    // Sleep long enough for tick 1 (fires ≈1 s after tick 0) to detect the stale
+    // heartbeat and exit.  The deadman pre-check guarantees the loop cannot
+    // refresh a stale heartbeat, so this longer sleep is safe.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let req2 = authed(Request::builder())

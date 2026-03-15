@@ -50,15 +50,19 @@ async fn forged_audit_event_cannot_satisfy_arming() -> Result<()> {
     )
     .await?;
 
-    // Insert a forged/non-authoritative event payload directly; this must not satisfy arming.
+    // Insert a forged/non-authoritative event payload directly into audit_events.
+    // After PATCH B1, arm_preflight checks sys_reconcile_checkpoint — not audit_events —
+    // so this row must NOT satisfy arming even though it looks like a reconcile event.
     sqlx::query(
         r#"
-        insert into audit_log (run_id, ts_utc, event_type, payload_json)
-        values ($1, now(), $2, $3)
+        insert into audit_events (event_id, run_id, ts_utc, topic, event_type, payload)
+        values ($1, $2, now(), $3, $4, $5)
         "#,
     )
+    .bind(Uuid::new_v4())
     .bind(run_id)
-    .bind("reconcile_clean")
+    .bind("reconcile")
+    .bind("CLEAN")
     .bind(json!({
         "forged": true,
         "source": "test_direct_insert"

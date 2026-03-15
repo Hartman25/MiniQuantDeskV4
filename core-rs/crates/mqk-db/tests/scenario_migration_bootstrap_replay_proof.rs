@@ -25,7 +25,11 @@ async fn migration_bootstrap_and_replay_follow_authoritative_manifest() -> anyho
         .connect(&db_url)
         .await?;
 
-    sqlx::query("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;")
+    // sqlx prepared-statement protocol rejects multi-statement strings; split.
+    sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
+        .execute(&pool)
+        .await?;
+    sqlx::query("CREATE SCHEMA public")
         .execute(&pool)
         .await?;
 

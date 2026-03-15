@@ -1332,11 +1332,14 @@ pub async fn outbox_mark_sent_with_broker_map(
 /// Mark an outbox row as ACKED.
 /// Returns true if transitioned, false if not found.
 pub async fn outbox_mark_acked(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
+    // Only SENT → ACKED is a valid transition.  Any other predecessor is an
+    // explicit protocol violation and must return Err, not a silent Ok(false).
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
         update oms_outbox
-        set status = 'ACKED'
-        where idempotency_key = $1
+           set status = 'ACKED'
+         where idempotency_key = $1
+           and status = 'SENT'
         returning outbox_id
         "#,
     )
@@ -1345,7 +1348,27 @@ pub async fn outbox_mark_acked(pool: &PgPool, idempotency_key: &str) -> Result<b
     .await
     .context("outbox_mark_acked failed")?;
 
-    Ok(row.is_some())
+    if row.is_some() {
+        return Ok(true);
+    }
+
+    // Row was not updated.  Distinguish "already ACKED" (idempotent ok) from
+    // "wrong predecessor state" (protocol violation → Err).
+    let existing: Option<(String,)> =
+        sqlx::query_as("SELECT status FROM oms_outbox WHERE idempotency_key = $1")
+            .bind(idempotency_key)
+            .fetch_optional(pool)
+            .await
+            .context("outbox_mark_acked status check failed")?;
+
+    match existing {
+        Some((status,)) if status == "ACKED" => Ok(false), // already acked; idempotent
+        Some((status,)) => Err(anyhow!(
+            "outbox_mark_acked: invalid transition from {status} to ACKED \
+             (only SENT → ACKED is valid)"
+        )),
+        None => Ok(false), // row not found; caller can treat as no-op
+    }
 }
 
 /// Mark a CLAIMED or DISPATCHING outbox row as FAILED.

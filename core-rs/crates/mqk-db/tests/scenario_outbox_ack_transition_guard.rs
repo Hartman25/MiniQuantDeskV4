@@ -56,7 +56,7 @@ fn require_db_url() -> String {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn ack_from_sent_succeeds() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
     cleanup_outbox(&pool).await?;
@@ -83,7 +83,7 @@ async fn ack_from_sent_succeeds() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn ack_from_non_sent_fails_explicitly() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
     cleanup_outbox(&pool).await?;

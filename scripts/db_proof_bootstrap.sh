@@ -85,16 +85,48 @@ cargo test -p mqk-db --test scenario_migration_manifest_matches_files -- --test-
 cargo test -p mqk-db --test scenario_migrate_idempotent_on_clean_db -- --ignored --test-threads=1
 cargo test -p mqk-db --test scenario_migration_bootstrap_replay_proof -- --ignored --test-threads=1
 
-echo "== DB proof: inbox dedupe + apply atomicity =="
+# CI-08: inbox dedupe + apply-fence proofs
+echo "== CI-08: inbox dedupe + apply-fence =="
 cargo test -p mqk-db --test scenario_inbox_insert_then_apply_is_atomic -- --test-threads=1
 cargo test -p mqk-db --test scenario_inbox_apply_atomic_recovery -- --test-threads=1
+cargo test -p mqk-db --test scenario_inbox_dedupe_prevents_double_fill -- --ignored --test-threads=1
 
-echo "== DB proof: outbox claim + dispatch =="
-cargo test -p mqk-db --test scenario_outbox_first_enforced -- --test-threads=1
-cargo test -p mqk-db --test scenario_outbox_claim_lock_prevents_double_dispatch -- --test-threads=1
+# CI-07: outbox claim, dispatch, sent, idempotency proofs
+echo "== CI-07: outbox claim + dispatch + sent + idempotency =="
+cargo test -p mqk-db --features testkit --test scenario_outbox_first_enforced -- --test-threads=1
+cargo test -p mqk-db --features testkit --test scenario_outbox_claim_lock_prevents_double_dispatch -- --test-threads=1
+cargo test -p mqk-db --test scenario_outbox_idempotency_prevents_double_submit -- --ignored --test-threads=1
+cargo test -p mqk-db --test scenario_outbox_ack_transition_guard -- --ignored --test-threads=1
+cargo test -p mqk-db --features testkit --test scenario_stale_claim_recovery -- --ignored --test-threads=1
+cargo test -p mqk-db --features testkit --test scenario_recovery_query_returns_pending_outbox -- --ignored --test-threads=1
 
-echo "== DB proof: broker cursor + restart quarantine =="
+# CI-06: ambiguous outbox restart quarantine proofs
+echo "== CI-06: broker cursor + restart quarantine =="
 cargo test -p mqk-testkit --test scenario_broker_cursor_restart -- --test-threads=1
 cargo test -p mqk-testkit --test scenario_restart_quarantines_dispatching_outbox -- --test-threads=1
 
-echo "DB proof lane passed."
+# CI-05: runtime lease acquire, refresh, release, stale-owner proofs
+echo "== CI-05: runtime lease =="
+cargo test -p mqk-db runtime_lease -- --ignored --test-threads=1
+
+# CI-04: daemon deadman proofs
+echo "== CI-04: daemon deadman =="
+cargo test -p mqk-db --test scenario_deadman_enforces_halt -- --ignored --test-threads=1
+
+# CI-03 + CI-04 + CI-02: all daemon runtime lifecycle proofs in one binary
+# (cargo test accepts only one TESTNAME filter before --; run the whole file once
+#  with --ignored so every scenario_daemon_runtime_lifecycle proof is exercised)
+echo "== CI-04/CI-03/CI-02: daemon runtime lifecycle (deadman + halt + start/stop) =="
+cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle -- --ignored --test-threads=1
+
+# CI-09: arm-preflight and DB constraint proofs
+echo "== CI-09: arm-preflight + DB constraints =="
+cargo test -p mqk-db --features testkit --test scenario_arm_preflight_blocks_zero_risk_limits -- --ignored --test-threads=1
+cargo test -p mqk-db --features testkit --test scenario_arm_preflight_forged_audit_rejected -- --ignored --test-threads=1
+cargo test -p mqk-db --features testkit --test scenario_arm_preflight_requires_reconcile -- --ignored --test-threads=1
+cargo test -p mqk-db --features testkit --test scenario_db_check_constraints -- --ignored --test-threads=1
+cargo test -p mqk-db --test scenario_run_lifecycle_enforced -- --ignored --test-threads=1
+cargo test -p mqk-db --features testkit --test scenario_idempotency_constraints -- --ignored --test-threads=1
+
+echo ""
+echo "DB proof lane passed (CI-10: full mandatory proof matrix)."

@@ -83,6 +83,9 @@ jobs:
       - name: Run migration governance guard
         run: bash scripts/guards/check_migration_governance.sh
 
+      - name: CI-11 - Enforce no bare ignored load-bearing proof tests
+        run: bash scripts/guards/check_ignored_load_bearing_proofs.sh
+
   rust:
     name: "Rust (fmt + clippy + test)"
     runs-on: ubuntu-latest
