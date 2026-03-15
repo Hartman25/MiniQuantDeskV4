@@ -24,6 +24,7 @@ mqk-execution = { path = "../mqk-execution", features = ["runtime-boundary"] }
 
 mqk-portfolio = { path = "../mqk-portfolio" }
 mqk-reconcile = { path = "../mqk-reconcile" }
+mqk-broker-alpaca = { path = "../mqk-broker-alpaca" }
 mqk-broker-paper = { path = "../mqk-broker-paper" }
 mqk-risk = { path = "../mqk-risk" }
 
