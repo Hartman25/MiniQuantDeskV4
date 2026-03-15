@@ -1,172 +1,217 @@
 # MiniQuantDeskV4 — Technical README
 
-This is the **hands-on** setup and ops guide for MiniQuantDeskV4.
+This is the hands-on setup and operator guide for MiniQuantDeskV4.
 
-**Core ideas:**
-- deterministic inputs/outputs
-- explicit run lifecycle
-- integrity/risk gates before any execution boundary
-- OMS-controlled order lifecycle and idempotent broker event ingestion
-- scenario-driven validation (treat brokers/data as adversarial)
+## **What This Document Is For**
 
----
+This file is the practical companion to the top-level README.
 
-## Repository Structure
+Use it for:
+- local setup
+- verification commands
+- DB proof execution
+- daemon and GUI startup
+- CLI usage
+- current operational boundaries
+
+Use the root README for the high-level system story.
+
+## **Core Principles**
+
+- **Deterministic inputs and outputs**
+- **Explicit run lifecycle**
+- **Integrity and risk gates before execution**
+- **OMS-controlled order lifecycle**
+- **Durable outbox / inbox truth**
+- **Scenario-driven reliability validation**
+- **Fail-closed operator posture where truth is missing**
+
+## **Repository Structure**
 
 - `core-rs/` — Rust workspace
-  - `crates/` — subsystem crates
-    - `mqk-db` — persistence, outbox/inbox, run lifecycle, broker mapping
+  - `crates/`
+    - `mqk-config` — layered config loading and config-hash support
+    - `mqk-db` — persistence, outbox/inbox, run lifecycle, broker mapping, proof-backed DB contracts
+    - `mqk-audit` — audit and structured event support
+    - `mqk-artifacts` — run artifact initialization and report writing
+    - `mqk-cli` — CLI entrypoint
     - `mqk-execution` — broker gateway, order router, OMS state machine
+    - `mqk-portfolio` — fill application and position/accounting behavior
+    - `mqk-risk` — execution-boundary risk controls
+    - `mqk-integrity` — stale/gap/disagreement controls
+    - `mqk-reconcile` — broker snapshot normalization and mismatch handling
+    - `mqk-strategy` — strategy interface layer
+    - `mqk-backtest` — deterministic backtest engine
+    - `mqk-promotion` — promotion/evaluation layer
     - `mqk-broker-paper` — deterministic paper broker adapter
-    - `mqk-broker-alpaca` — live broker adapter
-    - `mqk-runtime` — execution orchestrator / authoritative tick path
-    - `mqk-reconcile` — broker snapshot normalization and drift handling
-    - `mqk-risk` — execution boundary risk controls
-    - `mqk-testkit` — scenario-driven execution and reliability test helpers
-  - `mqk-gui/` — GUI control console (Tauri/React)
-- `research-py/` — optional Python research CLI that emits deterministic run artifacts
-- `config/` — layered config: defaults, environments, engines, risk profiles, stress profiles
-- `runtime/` — runtime scaffolding/config (if present for your environment)
-- `tests/fixtures/` — fixtures used by scenario tests
+    - `mqk-broker-alpaca` — live broker adapter under hardening
+    - `mqk-daemon` — HTTP control plane
+    - `mqk-runtime` — authoritative execution path
+    - `mqk-testkit` — scenario-driven reliability harness
+    - `mqk-md` — historical/provider market-data support
+  - `mqk-gui/` — Vite/React operator console
+- `research-py/` — optional Python research CLI
+- `config/` — layered config set
+- `scripts/` — repo-native helper and proof scripts
+- `docs/` — specs, checklists, runbooks, audits
 
----
+## **Prerequisites**
 
-## Prereqs
+### **Core Workspace**
+- Rust stable toolchain
+- Docker
 
-### Core (Rust workspace)
-- Rust (stable toolchain)
-- Docker (recommended for Postgres)
-
-### GUI (optional)
+### **GUI**
 - Node.js + npm
-- Tauri prerequisites (platform-dependent)
 
-### Research (optional)
-- Python 3.11+ recommended
-- `pip` (or `uv` if you choose)
+### **Windows-Specific**
+- Git Bash is useful because the repo-native DB proof harness is a shell script
+- PowerShell is fine for Rust, Docker, daemon, and GUI commands
 
----
+## **Database and DB Proof Lane**
 
-## Database (Postgres 16)
-
-### Start Postgres via Docker (example)
+### **Recommended Local Proof DB**
+Run a dedicated local proof container so your repo testing does not collide with an existing local Postgres on port `5432`.
 
 ```powershell
-docker run --name mqk-postgres `
+docker run --name mqk-postgres-proof `
   -e POSTGRES_USER=mqk `
   -e POSTGRES_PASSWORD=mqk `
-  -e POSTGRES_DB=mqk_v4 `
-  -p 5432:5432 `
+  -e POSTGRES_DB=mqk_test `
+  -p 55432:5432 `
   -d postgres:16
+```
 
-(Optional but recommended) create a dedicated test DB:
+Sanity-check it:
 
-docker exec -it mqk-postgres psql -U mqk -d postgres -c "CREATE DATABASE mqk_v4_test;"
+```powershell
+docker exec mqk-postgres-proof pg_isready -U mqk -d mqk_test
+docker exec mqk-postgres-proof psql -U mqk -d mqk_test -c "select current_user, current_database();"
+```
 
-Set the connection string (PowerShell):
-
-$env:MQK_DATABASE_URL = "postgres://mqk:mqk@localhost:5432/mqk_v4_test"
-
-### DB-backed proof lane bootstrap (repo-native)
-
+### **Repo-Native DB Proof Harness**
 From repo root:
 
-```bash
-bash scripts/db_proof_bootstrap.sh
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" -lc 'export MQK_DATABASE_URL="postgres://mqk:mqk@127.0.0.1:55432/mqk_test"; export DATABASE_URL="$MQK_DATABASE_URL"; ./scripts/db_proof_bootstrap.sh 2>&1 | tee db-proof.log'
 ```
 
-- This command is the repo-native DB proof harness used by CI's `db-proof` job.
-- It fails closed when `MQK_DATABASE_URL` is missing or DB-backed proofs fail.
-- It runs only the DB-backed proof subset (not the full workspace).
+What this proves:
+- migration manifest / replay safety
+- inbox dedupe and apply-fence behavior
+- outbox idempotency / claim / recovery behavior
+- restart quarantine behavior
+- runtime lease behavior
+- deadman / runtime lifecycle behavior
+- arm-preflight and DB constraint behavior
 
-One-command local Postgres bootstrap + DB proof run:
+This is the same proof lane CI uses in the `db-proof` job.
 
-```bash
-bash scripts/db_proof_bootstrap.sh --start-postgres
-```
+### **Fallback Local DB Helpers**
+Also present in `scripts/`:
+- `reset-mqk-testdb.ps1`
+- `psql-local.ps1`
+- `test-db.ps1`
 
-- `--start-postgres` starts/reuses local Docker container `mqk-postgres-proof` and sets `MQK_DATABASE_URL=postgres://mqk:mqk@127.0.0.1:5432/mqk_test`.
-- Local DB proofs remain environment-dependent on Docker availability and port `5432`.
+Those are useful helpers, but the authoritative proof harness is `db_proof_bootstrap.sh`.
 
-Execution Boundary Guarantees
+## **Core Verification Commands**
 
-The execution path is intentionally constrained.
+All Rust commands below assume you are in `core-rs/`.
 
-Order intent does not call broker adapters directly.
-
-The authoritative path is:
-
-outbox claim
-  -> gateway submit
-  -> broker response persistence
-  -> inbox event ingestion
-  -> OMS transition
-  -> portfolio mutation
-
-Operational guarantees within scope:
-
-broker submission is routed through a single gateway choke-point
-
-broker events are ingested through a durable inbox with deduplication
-
-OMS lifecycle transitions are explicit and reject illegal state changes
-
-cancel/replace after partial fills preserves already-filled quantity
-
-restart replay safety is driven by durable inbox state, not in-memory OMS state
-
-Non-goal of this document:
-
-this file does not claim that live broker resume/cursor handling is complete unless explicitly stated elsewhere in the current hardening plan
-
-Rust Workspace Commands
-
-All commands below assume you are in core-rs/.
-
-Format / Lint / Test
-cargo fmt
+### **Formatting / Lint / Broad Test**
+```powershell
+cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+```
 
-Focused execution hardening gate:
+### **GUI Contract Gate**
+```powershell
+cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate
+```
 
+### **Focused Execution / Runtime / Paper Checks**
+```powershell
 cargo test -p mqk-execution --features testkit
 cargo test -p mqk-broker-paper
 cargo test -p mqk-runtime
 cargo test -p mqk-testkit
-CLI Entry Point
+```
 
-The CLI binary is mqk (crate: mqk-cli).
+### **Workspace Build**
+```powershell
+cargo build --workspace
+```
 
-Run it via cargo:
+## **Current Deployment Reality**
 
+This matters because the technical README should not lie.
+
+### **What the daemon supports today**
+- paper deployment with the `paper` adapter
+
+### **What the daemon currently refuses fail-closed**
+- `backtest`
+- `live-shadow`
+- `live-capital`
+
+The current daemon selection path treats those modes as unsupported/unproven in the present architecture and refuses startup.
+
+### **Default bind posture**
+- default bind: `127.0.0.1:8899`
+- non-loopback bind requires explicit opt-in via environment configuration
+
+### **Operator auth posture**
+If `MQK_OPERATOR_TOKEN` is not configured, privileged routes fail closed.
+
+## **CLI Entry Point**
+
+The CLI binary is `mqk`.
+
+From `core-rs/`:
+
+```powershell
 cargo run -p mqk-cli -- --help
-CLI: Common Operations
-DB status + migrations
-# Status
-cargo run -p mqk-cli -- db status
+```
 
-# Apply migrations
+## **CLI — Common Operations**
+
+### **DB Status and Migrations**
+```powershell
+cargo run -p mqk-cli -- db status
 cargo run -p mqk-cli -- db migrate
-# Guardrail: refuses when LIVE is ARMED/RUNNING unless you acknowledge:
 cargo run -p mqk-cli -- db migrate --yes
+```
 
 Migrations live under:
+- `core-rs/crates/mqk-db/migrations/`
+- `core-rs/migrations/` for top-level/runtime-related additions
 
-core-rs/crates/mqk-db/migrations/
+### **Config Hash**
+```powershell
+cargo run -p mqk-cli -- config-hash config/defaults/base.yaml config/environments/windows-dev.yaml config/engines/main.yaml
+```
 
-Market Data: Canonical md_bars
-Ingest from CSV → md_bars
+### **Market Data — CSV Ingest**
+```powershell
 cargo run -p mqk-cli -- md ingest-csv --path "<PATH_TO_CSV>" --timeframe "1D" --source "csv"
-Ingest from provider → md_bars (provider path scaffolding)
+```
+
+### **Market Data — Provider Ingest**
+```powershell
 cargo run -p mqk-cli -- md ingest-provider `
   --source "twelvedata" `
   --symbols "SPY,QQQ" `
   --timeframe "1D" `
   --start "2000-01-01" `
   --end "2026-01-01"
-Deterministic Backtests
-Backtest from a bars CSV
+```
+
+## **Deterministic Backtests**
+
+### **Backtest from CSV**
+```powershell
 cargo run -p mqk-cli -- backtest csv `
   --bars "<PATH_TO_BARS_CSV>" `
   --timeframe-secs 60 `
@@ -174,127 +219,198 @@ cargo run -p mqk-cli -- backtest csv `
   --integrity-enabled true `
   --integrity-stale-threshold-ticks 120 `
   --integrity-gap-tolerance-bars 0
+```
 
-Optional deterministic artifact output:
+Optional artifact output:
 
-cargo run -p mqk-cli -- backtest csv --bars "<PATH>" --out-dir "runs/backtests"
-Backtest from Postgres md_bars
+```powershell
+cargo run -p mqk-cli -- backtest csv `
+  --bars "<PATH_TO_BARS_CSV>" `
+  --out-dir "runs/backtests"
+```
+
+### **Backtest from Postgres `md_bars`**
+```powershell
 cargo run -p mqk-cli -- backtest db `
   --timeframe "1D" `
   --start-end-ts 946684800 `
   --end-end-ts 1704067200 `
   --symbols "SPY,QQQ"
+```
 
-Note: start_end_ts / end_end_ts are epoch seconds for the bar end_ts range.
+Notes:
+- `start_end_ts` and `end_end_ts` are epoch seconds over the bar `end_ts` range
+- the backtest engine is deterministic, but the full promotion-grade backtest/provenance layer is still being hardened
 
-Run Lifecycle (paper/live scaffolding)
-
-The Rust core enforces an explicit lifecycle and is designed to refuse unsafe transitions.
+## **Run Lifecycle**
 
 Typical flow:
 
-# Create run
-cargo run -p mqk-cli -- run start --engine "MAIN" --mode "PAPER" --config "config/defaults/base.yaml" --config "config/environments/windows-dev.yaml" --config "config/engines/main.yaml"
+### **Create a Run**
+```powershell
+cargo run -p mqk-cli -- run start `
+  --engine "MAIN" `
+  --mode "PAPER" `
+  --config "config/defaults/base.yaml" `
+  --config "config/environments/windows-dev.yaml" `
+  --config "config/engines/main.yaml"
+```
 
-# Arm run
+### **Arm**
+```powershell
 cargo run -p mqk-cli -- run arm --run-id "<RUN_ID>"
+```
 
-# Begin
+### **Begin**
+```powershell
 cargo run -p mqk-cli -- run begin --run-id "<RUN_ID>"
+```
 
-# Stop
+### **Heartbeat**
+```powershell
+cargo run -p mqk-cli -- run heartbeat --run-id "<RUN_ID>"
+```
+
+### **Stop**
+```powershell
 cargo run -p mqk-cli -- run stop --run-id "<RUN_ID>"
+```
 
-Other run commands exist (status / halt / loop / heartbeat / deadman enforcement) — see:
+### **Halt**
+```powershell
+cargo run -p mqk-cli -- run halt --run-id "<RUN_ID>" --reason "manual halt"
+```
 
+### **Status**
+```powershell
+cargo run -p mqk-cli -- run status --run-id "<RUN_ID>"
+```
+
+Other lifecycle helpers exist:
+```powershell
 cargo run -p mqk-cli -- run --help
-Execution Notes (Current Hardening State)
+```
 
-What is already enforced in the execution layer:
+## **Daemon**
 
-broker gateway as the single submission choke-point
+Run from `core-rs/`:
 
-internal ↔ broker order identity mapping
-
-idempotent broker event ingestion
-
-OMS lifecycle correctness for fills, cancels, rejects, and replace flows
-
-partial-fill-safe cancel/replace behavior in paper mode
-
-restart replay safety for previously ingested inbox rows
-
-What is still under active hardening:
-
-durable broker event cursor / restart resume state
-
-broker error taxonomy and retry policy
-
-ambiguous submit quarantine
-
-live broker adapter completion / contract proof
-
-single-runtime / leader-lease enforcement
-
-Treat the system as reliability-hardened infrastructure in progress, not as a completed live-capital platform.
-
-Daemon (Control Plane)
-
-Run the daemon:
-
+```powershell
+$env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
 cargo run -p mqk-daemon
+```
 
-The daemon exposes:
+Default local URL:
+- `http://127.0.0.1:8899`
 
-status endpoints
+You may also need:
+```powershell
+$env:MQK_OPERATOR_TOKEN = "<your-token>"
+```
 
-lifecycle endpoints
+if you want privileged routes to succeed instead of failing closed.
 
-SSE status stream
+## **GUI**
 
-Exact host/port are config-driven.
+Run from `core-rs/mqk-gui/`:
 
-GUI (Control Console)
-
-From core-rs/mqk-gui/:
-
-npm install
-npx tsc --noEmit
+```powershell
+npm ci
 npm run build
+npm run dev
+```
 
-Dev mode (requires daemon reachable):
+Default dev URL:
+- `http://127.0.0.1:5173`
 
-npm run tauri dev
-Python Research (Optional)
+The GUI defaults to daemon URL:
+- `http://127.0.0.1:8899`
 
-From research-py/:
+### **Important**
+The desktop/Tauri shell is not the primary documented path here.  
+The practical repo-native operator flow today is:
+- run daemon
+- run Vite GUI
+- point the GUI at the daemon
 
+## **One-Shot Local Launch (Two Shells)**
+
+### **Shell 1 — Daemon**
+```powershell
+cd C:\Users\<YOU>\Desktop\MiniQuantDeskV4\core-rs
+$env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
+cargo run -p mqk-daemon
+```
+
+### **Shell 2 — GUI**
+```powershell
+cd C:\Users\<YOU>\Desktop\MiniQuantDeskV4\core-rs\mqk-gui
+npm ci
+npm run dev
+```
+
+If you use `Start-Process`, keep the DB URL assignment quoted correctly inside the spawned command.
+
+## **Python Research Layer (Optional)**
+
+From `research-py/`:
+
+```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -U pip
 .\.venv\Scripts\python.exe -m pip install -e .
-
-Run the research CLI:
-
 .\.venv\Scripts\python.exe -m mqk_research.cli --help
+```
 
-This layer is intended to produce deterministic artifacts (manifests + CSV outputs) that the Rust backtest/execution layers can consume.
+This layer is intended to emit deterministic artifacts that the Rust backtest/execution stack can consume.
 
-Dev Discipline
+## **CI Overview**
 
-This repo is designed to be patched one scoped change at a time:
+The current GitHub Actions pipeline includes:
 
-implement one invariant (small + surgical)
+- **GUI contract lane**
+  - GUI build
+  - daemon/GUI contract gate
 
-add/extend a scenario test that proves it
+- **Safety guards**
+  - unsafe-pattern checks
+  - migration-governance checks
+  - ignored-proof hygiene checks
 
-run: cargo fmt, cargo test --workspace, cargo clippy ... -D warnings
+- **Rust lane**
+  - `cargo fmt --check`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace`
 
-commit with a patch label + rationale
+- **DB proof lane**
+  - repo-native Postgres proof harness
 
-Roadmap / hardening plan:
+## **Development Discipline**
 
-MiniQuantDesk_V4_Master_Patch_Plan_v2.md
+This repo is designed to be patched in small, test-backed units.
 
-patch_tracker_updated.md
+Recommended discipline:
+1. change one invariant at a time
+2. add or extend a scenario test that proves it
+3. run targeted checks first
+4. run broader checks after milestone patches
+5. only commit once the patch and its directly affected surfaces are proven
 
-MiniQuantDesk_V4_90plus_Patch_Tracker.md
+## **Current Technical Caveats**
+
+Be honest about these:
+
+- the daemon/operator plane is improving, but not all GUI detail surfaces are fully authoritative yet
+- the daemon currently fail-closes unsupported/unproven deployment modes
+- the backtest system is strong, but still being hardened toward promotion-grade provenance and lifecycle realism
+- “scenario-tested” does **not** mean “safe for live capital by default”
+
+## **Reference Docs**
+
+Useful repo docs:
+- `docs/GUI_CONVERGENCE_CHECKLIST.md`
+- `docs/ci/gui_daemon_contract_waivers.md`
+- `docs/specs/`
+- `docs/runbooks/`
+- `MiniQuantDesk_V4_90plus_Patch_Tracker.md`
+- `MiniQuantDeskV4_Foundation_Patch_Tracker.md`

@@ -1,383 +1,288 @@
-MiniQuantDeskV4
-<p align="center"> <img src="assets/logo/miniquantdesk_banner_wide.png" alt="MiniQuantDesk" width="520"> </p> <p align="center"> <strong>Deterministic, Risk-First Execution and Capital Allocation Framework</strong><br/> Rust Core • Explicit Lifecycle • Engine Isolation • Scenario-Tested </p> <p align="center"> <img src="https://img.shields.io/badge/Rust-stable-orange?logo=rust" /> <img src="https://img.shields.io/badge/Mode-deterministic-purple" /> <img src="https://img.shields.io/badge/Focus-risk%20%26%20reliability-blue" /> <img src="https://img.shields.io/badge/Status-reliability%20hardening-lightgrey" /> </p>
-Overview
+# MiniQuantDeskV4
+
+<p align="center">
+  <img src="assets/logo/miniquantdesk_banner_wide.png" alt="MiniQuantDesk" width="520">
+</p>
+
+<p align="center">
+  <strong>Deterministic, Risk-First Execution and Capital Allocation Framework</strong><br/>
+  Rust Core • Explicit Lifecycle • DB-Backed Safety • Scenario-Tested
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-stable-orange?logo=rust" />
+  <img src="https://img.shields.io/badge/Mode-deterministic-purple" />
+  <img src="https://img.shields.io/badge/Focus-risk%20%26%20reliability-blue" />
+  <img src="https://img.shields.io/badge/CI-gui%20%2B%20rust%20%2B%20db--proof-success" />
+</p>
+
+## **Overview**
 
 MiniQuantDeskV4 is a structured quantitative trading system built around one principle:
 
-Capital protection is a systems problem.
+> **Capital protection is a systems problem.**
 
-This repository is not a signal library or strategy toy.
-It is an execution spine designed to enforce discipline and mechanical safety boundaries.
+This repository is not a signal toy and not a broker-click wrapper.  
+It is a deterministic execution spine designed to enforce discipline, explicit lifecycle control, durable state, and fail-closed behavior under adversarial assumptions.
 
-Built for:
+It is built for:
 
-Retail traders who want institutional structure
+- traders who want institutional structure instead of ad hoc scripts
+- developers building serious trading infrastructure
+- systematic workflows that need deterministic replay, bounded state transitions, and durable audit surfaces
 
-Developers building serious trading infrastructure
+The system is engineered under hostile assumptions:
 
-Systematic traders who care about deterministic behavior
+- market data can be stale, missing, or internally inconsistent
+- brokers can drift, duplicate, or delay events
+- orders can partially fill or arrive out of order
+- processes can restart at the worst possible boundary
+- humans can misconfigure the control plane
 
-Internal tooling stacks that require explicit invariants
+Safety is enforced architecturally, not socially.
 
-The system is engineered under adversarial assumptions:
+## **Architecture**
 
-Market data can be stale or incomplete
+<p align="center">
+  <img src="assets/diagrams/architecture.svg" alt="MiniQuantDeskV4 Architecture" width="900" />
+</p>
 
-Brokers can drift or return inconsistent state
+**High-level flow**
 
-Orders can partially fill
-
-Systems can restart mid-execution
-
-Humans can misconfigure workflows
-
-Safety is enforced architecturally — not socially.
-
-Architecture
-<p align="center"> <img src="assets/diagrams/architecture.svg" alt="MiniQuantDeskV4 Architecture" width="900" /> </p>
-
-High-level flow:
-
-Market Data / Research Artifacts
-↓
-Market Data Ingest + Quality Gates
-↓
-Deterministic Backtest Engine
-↓
-Integrity + Risk Gates
-↓
-Execution Boundary
-↓
-Lifecycle + DB Enforcement
-↓
+Market Data / Research Artifacts  
+↓  
+Canonical Market Data + Quality Gates  
+↓  
+Deterministic Backtest / Promotion Path  
+↓  
+Integrity + Risk Gates  
+↓  
+Execution Boundary  
+↓  
+Outbox / Broker / Inbox / OMS  
+↓  
+Portfolio Mutation + Reconcile  
+↓  
 Control Plane (CLI / Daemon / GUI)
 
-Core properties:
+**Core properties**
 
-Deterministic event replay
+- deterministic event replay
+- worst-case ambiguity modeling
+- database-enforced lifecycle constraints
+- explicit OMS order-state control
+- engine-level capital isolation
+- reconcile gating before arming sensitive modes
+- loopback-by-default operator surface
 
-Worst-case ambiguity modeling
+## **Core Characteristics**
 
-Database-enforced lifecycle constraints
+| Property | Description |
+|---|---|
+| **Deterministic** | Same inputs should produce the same replay, fills, and artifacts. |
+| **Risk-First** | Integrity and risk gates sit in front of the execution boundary. |
+| **Lifecycle Controlled** | Runs move through explicit status transitions instead of ad hoc process state. |
+| **OMS-Governed** | Order lifecycle transitions are constrained by the OMS state machine. |
+| **DB-Enforced Safety** | Durable outbox/inbox, run lifecycle, broker mapping, and lease/control truth live in Postgres. |
+| **Scenario-Tested** | Reliability work is backed by adversarial scenario tests, not comments. |
+| **Operator-Aware** | Daemon + GUI are being hardened as truth surfaces rather than decorative dashboards. |
 
-Engine-level capital isolation
+## **Repository Structure**
 
-Reconciliation gating before LIVE arming
-
-Core Characteristics
-Property	Description
-Deterministic	Event-sourced backtesting and replay
-Risk-First	Allocation limits enforced at execution boundary
-Lifecycle Controlled	CREATED → ARMED → RUNNING → STOPPED
-Execution Invariants	OMS state machine enforces order lifecycle correctness
-Engine-Isolated	Capital segregation per engine
-DB-Enforced Safety	LIVE exclusivity + lifecycle constraints
-Scenario-Tested	Adversarial cases (partials, late fills, restart replay, drift, etc.)
-Execution Safety Model
-
-MiniQuantDeskV4 enforces execution safety through layered boundaries.
-
-Intent
-↓
-Outbox (durable intent queue)
-↓
-Execution orchestrator
-↓
-Integrity + Risk gates
-↓
-Broker gateway choke-point
-↓
-Broker adapter normalization
-↓
-Durable inbox event ingestion
-↓
-OMS state machine
-↓
-Portfolio mutation
-
-Safety invariants enforced by the execution layer:
-
-No order lifecycle transition occurs outside the OMS state machine
-
-Broker events are idempotently ingested through a durable inbox
-
-Cancel/replace semantics preserve already-filled quantity
-
-Broker identity mapping is maintained across restart
-
-Late broker events cannot corrupt order state
-
-Execution correctness is validated through adversarial scenario tests
-
-Repository Structure
+```text
 core-rs/
   crates/
+    mqk-isolation
+    mqk-schemas
+    mqk-config
     mqk-db
-    mqk-md
-    mqk-integrity
-    mqk-risk
+    mqk-audit
+    mqk-artifacts
+    mqk-cli
+    mqk-testkit
     mqk-execution
+    mqk-portfolio
+    mqk-risk
+    mqk-integrity
+    mqk-reconcile
+    mqk-strategy
+    mqk-backtest
+    mqk-promotion
     mqk-broker-paper
     mqk-broker-alpaca
-    mqk-backtest
-    mqk-reconcile
-    mqk-promotion
-    mqk-isolation
-    mqk-strategy
-    mqk-audit
-    mqk-testkit
     mqk-daemon
+    mqk-runtime
+    mqk-md
 
   mqk-gui/
 
 research-py/
-
-Rust forms the authoritative execution layer.
-Python research emits deterministic artifacts consumed by the Rust spine.
-
-What Works Today
-Market Data
-
-Canonical md_bars ingest
-
-CSV + provider ingestion path
-
-Data quality gate reporting
-
-Gap detection + incomplete bar rejection
-
-Backtesting
-
-Deterministic event replay
-
-Worst-case ambiguity modeling
-
-Scenario-driven validation
-
-Execution Engine
-
-Explicit OMS order state machine
-
-Broker adapter normalization layer
-
-Deterministic outbox dispatch pipeline
-
-Durable inbox event ingestion
-
-Idempotent broker event handling
-
-Cancel / replace correctness across partial fills
-
-Internal ↔ broker order identity mapping
-
-Risk & Integrity
-
-Allocation / exposure caps
-
-PDT helper module
-
-Stale feed disarm
-
-Feed disagreement halt logic
-
-Deadman-style kill paths
-
-Reconciliation
-
-Snapshot normalization adapter
-
-Drift detection
-
-Reconcile-before-arm gating (configurable)
-
-Control Plane
-
-CLI workflows
-
-HTTP daemon for lifecycle + status
-
-GUI console with status streaming (SSE)
-
-Reliability Hardening Status
-
-This project is under structured reliability hardening.
-
-Completed
-
-Lifecycle enforcement
-
-Engine isolation
-
-Deterministic replay
-
-Market data ingest + quality reporting
-
-Control plane wiring
-
-OMS state machine for order lifecycle
-
-Idempotent broker event ingestion
-
-Cancel / replace correctness after partial fills
-
-Scenario coverage across subsystems
-
-In Progress
-
-Durable broker event cursor / restart resume
-
-Broker error taxonomy + retry policy
-
-Ambiguous submit quarantine
-
-Live broker adapter completion
-
-Leader lease / single-runtime enforcement
-
-Periodic reconcile tick with hard halt capability
-
-“Scenario-tested” does not imply production-live safety.
-
-Execution Reliability Roadmap
-
-Execution reliability work is organized into explicit hardening phases.
-
-Current focus areas:
-
-Durable broker event cursor and restart-safe event replay
-
-Broker error taxonomy with explicit retry behavior
-
-Ambiguous submit quarantine and operator release workflow
-
-Live broker adapter completion with contract testing
-
-Single-runtime enforcement via database-backed leader lease
-
-Adversarial execution scenario expansion
-
-The goal is to ensure that restart, network disruption, broker inconsistency,
-and event ordering anomalies cannot corrupt order lifecycle state.
-
-Reliability hardening is prioritized over feature expansion.
-
-Security Model
-
-MiniQuantDeskV4 assumes:
-
-The local environment may be misconfigured
-
-External data feeds are untrusted
-
-Broker APIs may return inconsistent or delayed state
-
-Restarts may occur at unsafe boundaries
-
-Security and safety are enforced through:
-
-Deterministic execution paths (no hidden randomness)
-
-Database-enforced lifecycle constraints
-
-Explicit state transitions
-
-Isolation between engines
-
-Integrity + risk gates before execution
-
-Reconciliation hooks before LIVE arming
-
-This repository does not attempt to:
-
-Provide hardened secret management
-
-Implement network-level security controls
-
-Protect against host-level compromise
-
-Guarantee broker API correctness
-
-Operational security is the responsibility of the deployment environment.
-
-System Guarantees & Non-Guarantees
-What the System Guarantees (Within Scope)
-
-Deterministic backtest replay given identical inputs
-
-Explicit lifecycle state enforcement
-
-Single LIVE run per engine (database constrained)
-
-Capital allocation caps enforced at execution boundary
-
-Idempotent broker event ingestion
-
-Correct order lifecycle transitions through OMS state machine
-
-Scenario-driven validation of adversarial cases
-
-What the System Does NOT Guarantee
-
-Profitability
-
-Broker correctness
-
-Protection from infrastructure misconfiguration
-
-Immunity to exchange-level anomalies
-
-Automatic capital preservation without proper configuration
-
-This framework reduces structural risk.
-It does not eliminate market risk.
-
-Quick Start
-
-This is a systems project focused on reproducibility and safety invariants.
-
-1. Clone
+config/
+scripts/
+docs/
+```
+
+Rust is the authoritative execution and control layer.  
+Python research is optional and is intended to emit deterministic artifacts that the Rust spine can consume.
+
+## **What Works Today**
+
+### **Market Data**
+- canonical `md_bars` ingest
+- CSV and provider ingestion paths
+- data quality reporting
+- stale/gap/incomplete-bar handling in the data path
+
+### **Backtesting**
+- deterministic replay
+- conservative fill modeling
+- scenario-driven validation
+- promotion-facing backtest infrastructure under active hardening
+
+### **Execution Core**
+- explicit OMS order state machine
+- durable outbox submission flow
+- durable inbox event ingestion
+- idempotent broker-event handling
+- broker/internal order identity mapping
+- partial-fill-aware cancel/replace semantics
+
+### **Risk, Integrity, and Reconcile**
+- allocation/exposure boundary checks
+- stale feed and disagreement controls
+- deadman-style enforcement paths
+- reconcile normalization and mismatch detection
+- arming preflight tied to durable truth
+
+### **Control Plane**
+- CLI workflows for DB, market data, runs, and backtests
+- HTTP daemon with control/status surfaces
+- Vite/React GUI operator console
+- GUI/daemon contract gate in CI
+
+## **Current Operational Status**
+
+This repo has real institutional bones, but it is **not** yet a fully live-capital-ready operator platform.
+
+**What is strong right now**
+- core DB-backed safety model
+- OMS and durable execution-path structure
+- repo-native DB proof lane
+- daemon/GUI contract gating
+- deterministic paper path and backtest infrastructure
+
+**What is still intentionally fail-closed or under hardening**
+- live-shadow deployment
+- limited live-capital deployment
+- full daemon-level backtest deployment
+- complete operator-truth coverage across all GUI detail surfaces
+- full live broker wiring proof through the daemon/runtime plane
+
+**Important current daemon posture**
+- default bind is loopback-only: `127.0.0.1:8899`
+- non-loopback bind requires explicit opt-in
+- privileged routes fail closed until `MQK_OPERATOR_TOKEN` is configured
+- current daemon architecture allows **paper** startup with the paper adapter and refuses unsupported/unproven deployment modes fail-closed
+
+## **Verification and CI**
+
+The repo now has multiple verification lanes instead of one generic “cargo test and hope” story.
+
+**CI lanes**
+- **GUI contract gate** — GUI build plus authoritative daemon contract test
+- **Safety guards** — unsafe-pattern and migration-governance checks
+- **Rust lane** — `fmt`, `clippy`, and broad workspace tests
+- **DB proof lane** — repo-native Postgres-backed safety proof harness
+
+**Local proof harness**
+- `scripts/db_proof_bootstrap.sh`
+- `scripts/db_proof_bootstrap.sh --start-postgres`
+
+That DB lane is the load-bearing proof path for migrations, inbox/outbox durability, restart quarantine, lease/deadman, and arming constraints.
+
+## **Quick Start**
+
+### **1. Clone**
+```powershell
 git clone <your-repo-url>
 cd MiniQuantDeskV4
-2. Requirements
+```
 
-Rust (stable toolchain)
+### **2. Requirements**
+- Rust stable toolchain
+- Docker
+- Node.js + npm (for the GUI)
+- Git Bash on Windows if you want to run the repo-native shell proof harness directly
 
-Docker (recommended for Postgres)
-
-3. Start Postgres (Example)
-docker run --name mqk-postgres \
-  -e POSTGRES_USER=mqk_user \
-  -e POSTGRES_PASSWORD=mqk_pass \
-  -e POSTGRES_DB=mqk \
-  -p 5432:5432 \
+### **3. Start a local proof database**
+```powershell
+docker run --name mqk-postgres-proof `
+  -e POSTGRES_USER=mqk `
+  -e POSTGRES_PASSWORD=mqk `
+  -e POSTGRES_DB=mqk_test `
+  -p 55432:5432 `
   -d postgres:16
-4. Build + Test
+```
+
+### **4. Run the DB proof lane**
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" -lc 'export MQK_DATABASE_URL="postgres://mqk:mqk@127.0.0.1:55432/mqk_test"; export DATABASE_URL="$MQK_DATABASE_URL"; ./scripts/db_proof_bootstrap.sh'
+```
+
+### **5. Build and test the Rust workspace**
+```powershell
 cd core-rs
-cargo fmt
+cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+```
 
-All tests should pass before modifying behavior.
+### **6. Run the daemon**
+```powershell
+cd core-rs
+$env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
+cargo run -p mqk-daemon
+```
 
-5. Optional: Control Plane
+### **7. Run the GUI**
+```powershell
+cd core-rs\mqk-gui
+npm ci
+npm run dev
+```
 
-Daemon exposes lifecycle + status endpoints
+Open:
+- GUI: `http://127.0.0.1:5173`
+- Daemon: `http://127.0.0.1:8899`
 
-GUI provides control console over daemon
+## **Design Philosophy**
 
-See README_TECHNICAL.md for exact commands and configuration.
+> **Returns are a strategy problem. Blow-ups are a systems problem.**
 
-Design Philosophy
+MiniQuantDeskV4 is engineered primarily to address the second.
 
-Returns are a strategy problem.
-Blow-ups are a systems problem.
+## **Scope and Non-Goals**
 
-MiniQuantDeskV4 is engineered to address the second.
+**Within scope**
+- deterministic backtest replay
+- explicit lifecycle enforcement
+- durable execution-path truth
+- idempotent broker-event handling
+- operator/control-plane hardening
+- scenario-based reliability validation
 
-Disclaimer
+**Not promised by this repo**
+- profitability
+- broker correctness
+- exchange correctness
+- host-level security
+- secret-management hardening
+- safe live deployment without operator review and additional controls
 
-This repository is an engineering framework for systematic capital allocation research.
+## **Disclaimer**
 
-It is not financial advice.
+This repository is an engineering framework for systematic capital allocation research and operator-safe execution design.
 
-Do not deploy real capital without independent operational review, monitoring infrastructure, and governance controls.
+It is **not** financial advice.
+
+Do not deploy real capital without independent operational review, monitoring, governance controls, and a verified live-trading runbook.
