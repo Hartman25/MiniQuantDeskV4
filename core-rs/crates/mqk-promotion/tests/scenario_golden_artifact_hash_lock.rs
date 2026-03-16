@@ -96,6 +96,7 @@ fn good_report() -> BacktestReport {
         equity_curve: good_equity_curve(),
         strategy_name: String::new(),
         run_id: uuid::Uuid::nil(),
+        config_id: uuid::Uuid::nil(),
         orders: vec![],
         fills: vec![],
         last_prices: BTreeMap::new(),

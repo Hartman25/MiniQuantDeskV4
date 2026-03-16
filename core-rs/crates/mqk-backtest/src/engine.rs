@@ -520,6 +520,7 @@ impl BacktestEngine {
         Ok(BacktestReport {
             strategy_name,
             run_id,
+            config_id,
             halted: self.halted,
             halt_reason: self.halt_reason.clone(),
             equity_curve: self.equity_curve.clone(),

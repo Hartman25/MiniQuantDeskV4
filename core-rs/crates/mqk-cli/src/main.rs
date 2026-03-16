@@ -79,6 +79,15 @@ enum BacktestCmd {
         #[arg(long)]
         bars: String,
 
+        /// Strategy name to run (see `mqk backtest list-strategies`).
+        /// Available: swing_momentum, mean_reversion, volatility_breakout, intraday_scalper.
+        #[arg(long, default_value = "swing_momentum")]
+        strategy: String,
+
+        /// Primary symbol for the strategy.
+        #[arg(long, default_value = "SPY")]
+        symbol: String,
+
         /// Timeframe seconds (must match strategy spec).
         #[arg(long, default_value_t = 60)]
         timeframe_secs: i64,
@@ -125,6 +134,14 @@ enum BacktestCmd {
         /// Optional comma-separated symbol list. If omitted, loads all symbols.
         #[arg(long)]
         symbols: Option<String>,
+
+        /// Strategy name to run.
+        #[arg(long, default_value = "swing_momentum")]
+        strategy: String,
+
+        /// Primary symbol for the strategy.
+        #[arg(long, default_value = "SPY")]
+        symbol: String,
 
         /// Strategy timeframe in seconds.
         #[arg(long, default_value_t = 60)]
@@ -421,6 +438,8 @@ async fn main() -> Result<()> {
         Commands::Backtest { cmd } => match cmd {
             BacktestCmd::Csv {
                 bars,
+                strategy,
+                symbol,
                 timeframe_secs,
                 initial_cash_micros,
                 shadow,
@@ -431,6 +450,8 @@ async fn main() -> Result<()> {
             } => {
                 run_backtest_csv(
                     bars,
+                    strategy,
+                    symbol,
                     timeframe_secs,
                     initial_cash_micros,
                     shadow,
@@ -446,6 +467,8 @@ async fn main() -> Result<()> {
                 start_end_ts,
                 end_end_ts,
                 symbols,
+                strategy,
+                symbol,
                 timeframe_secs,
                 initial_cash_micros,
                 shadow,
@@ -456,6 +479,8 @@ async fn main() -> Result<()> {
                     start_end_ts,
                     end_end_ts,
                     symbols,
+                    strategy,
+                    symbol,
                     timeframe_secs,
                     initial_cash_micros,
                     shadow,

@@ -581,6 +581,9 @@ pub struct BacktestReport {
     /// BKT-05P: Deterministic run identity UUID.
     /// Derived via UUIDv5 over (strategy_name, config_id). Stable across identical replays.
     pub run_id: Uuid,
+    /// Deterministic config identity UUID (UUIDv5 over canonical config string).
+    /// Suitable as the `config_hash` in artifact manifests.
+    pub config_id: Uuid,
     /// Whether the backtest halted early.
     pub halted: bool,
     /// Reason for halt (if any).

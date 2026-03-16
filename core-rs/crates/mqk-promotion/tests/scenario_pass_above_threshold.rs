@@ -47,6 +47,7 @@ fn passes_all_thresholds() {
         equity_curve,
         strategy_name: String::new(),
         run_id: uuid::Uuid::nil(),
+        config_id: uuid::Uuid::nil(),
         orders: vec![],
         fills,
         last_prices: BTreeMap::new(),

@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::Path;
-use uuid::Uuid;
 
 use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine};
-use mqk_execution::{StrategyOutput, TargetPosition};
-use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
+use mqk_strategy::{engines::register_builtin_strategies, PluginRegistry};
 
 // ---------------------------------------------------------------------------
 // CSV backtest runner
@@ -14,6 +12,8 @@ use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
 #[allow(clippy::too_many_arguments)]
 pub async fn run_backtest_csv(
     bars_path: String,
+    strategy: String,
+    symbol: String,
     timeframe_secs: i64,
     initial_cash_micros: i64,
     shadow: bool,
@@ -36,26 +36,38 @@ pub async fn run_backtest_csv(
     cfg.timeframe_secs = timeframe_secs;
     cfg.initial_cash_micros = initial_cash_micros;
     cfg.shadow_mode = shadow;
-
     cfg.integrity_enabled = integrity_enabled;
     cfg.integrity_stale_threshold_ticks = integrity_stale_threshold_ticks;
     cfg.integrity_gap_tolerance_bars = integrity_gap_tolerance_bars;
 
-    // BKT-02P: derive deterministic run identity from config + strategy + git.
-    let config_hash = cfg.config_id().to_string();
-    let git_hash = bkt_git_hash();
-    let strategy_name = "noop";
-    let run_id = derive_backtest_run_id(strategy_name, &config_hash, &git_hash);
-
-    println!("run_id={}", run_id);
-    println!("config_hash={}", config_hash);
-    println!("git_hash={}", git_hash);
-    println!("strategy={}", strategy_name);
+    // BKT-06P: resolve strategy from built-in plugin registry.
+    let mut reg = PluginRegistry::new();
+    register_builtin_strategies(&mut reg, &symbol)
+        .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
+    let strategy_instance = reg.instantiate(&strategy).with_context(|| {
+        let available: Vec<_> = reg.list().iter().map(|m| m.name.as_str()).collect();
+        format!(
+            "unknown strategy '{}'; available: {}",
+            strategy,
+            available.join(", ")
+        )
+    })?;
 
     let mut engine = BacktestEngine::new(cfg);
-    engine.add_strategy(Box::new(NoOpStrategy::new(timeframe_secs)))?;
+    engine
+        .add_strategy(strategy_instance)
+        .with_context(|| format!("add_strategy failed for '{}'", strategy))?;
 
     let report = engine.run(&bars).context("backtest run failed")?;
+
+    // BKT-05P / BKT-06P: identity fields come directly from the report.
+    let config_hash = report.config_id.to_string();
+    let git_hash = bkt_git_hash();
+
+    println!("run_id={}", report.run_id);
+    println!("strategy={}", report.strategy_name);
+    println!("git_hash={}", git_hash);
+    println!("config_hash={}", config_hash);
 
     // BKT-02P: if an output directory is requested, initialize the full run
     // artifact structure (manifest.json + placeholder files) before writing
@@ -65,7 +77,7 @@ pub async fn run_backtest_csv(
         let init_result = mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
             exports_root: Path::new(dir),
             schema_version: 1,
-            run_id,
+            run_id: report.run_id,
             engine_id: "mqk-backtest",
             mode: "backtest",
             git_hash: &git_hash,
@@ -98,6 +110,7 @@ pub async fn run_backtest_csv(
     println!("backtest_ok=true");
     println!("source=csv");
     println!("bars_loaded={}", bars.len());
+    println!("orders={}", report.orders.len());
     println!("fills={}", report.fills.len());
     println!("execution_blocked={}", report.execution_blocked);
     println!("halted={}", report.halted);
@@ -119,6 +132,8 @@ pub async fn run_backtest_db(
     start_end_ts: i64,
     end_end_ts: i64,
     symbols_csv: Option<String>,
+    strategy: String,
+    symbol: String,
     timeframe_secs: i64,
     initial_cash_micros: i64,
     shadow: bool,
@@ -178,21 +193,31 @@ pub async fn run_backtest_db(
     cfg.shadow_mode = shadow;
     cfg.integrity_enabled = integrity_enabled;
 
-    // BKT-02P: derive deterministic run identity.
-    let config_hash = cfg.config_id().to_string();
-    let git_hash = bkt_git_hash();
-    let strategy_name = "noop";
-    let run_id = derive_backtest_run_id(strategy_name, &config_hash, &git_hash);
-
-    println!("run_id={}", run_id);
-    println!("config_hash={}", config_hash);
-    println!("git_hash={}", git_hash);
-    println!("strategy={}", strategy_name);
+    // BKT-06P: resolve strategy from built-in plugin registry.
+    let mut reg = PluginRegistry::new();
+    register_builtin_strategies(&mut reg, &symbol)
+        .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
+    let strategy_instance = reg.instantiate(&strategy).with_context(|| {
+        let available: Vec<_> = reg.list().iter().map(|m| m.name.as_str()).collect();
+        format!(
+            "unknown strategy '{}'; available: {}",
+            strategy,
+            available.join(", ")
+        )
+    })?;
 
     let mut engine = BacktestEngine::new(cfg);
-    engine.add_strategy(Box::new(NoOpStrategy::new(timeframe_secs)))?;
+    engine
+        .add_strategy(strategy_instance)
+        .with_context(|| format!("add_strategy failed for '{}'", strategy))?;
 
     let report = engine.run(&bars).context("backtest run failed")?;
+
+    let git_hash = bkt_git_hash();
+
+    println!("run_id={}", report.run_id);
+    println!("strategy={}", report.strategy_name);
+    println!("git_hash={}", git_hash);
 
     let final_equity = report
         .equity_curve
@@ -204,6 +229,7 @@ pub async fn run_backtest_db(
     println!("source=db");
     println!("timeframe={}", timeframe);
     println!("bars_loaded={}", bars.len());
+    println!("orders={}", report.orders.len());
     println!("fills={}", report.fills.len());
     println!("execution_blocked={}", report.execution_blocked);
     println!("halted={}", report.halted);
@@ -216,85 +242,8 @@ pub async fn run_backtest_db(
 }
 
 // ---------------------------------------------------------------------------
-// Strategy stubs (used by CLI backtest runners above)
+// Helpers
 // ---------------------------------------------------------------------------
-
-struct NoOpStrategy {
-    spec: StrategySpec,
-}
-
-impl NoOpStrategy {
-    fn new(timeframe_secs: i64) -> Self {
-        Self {
-            spec: StrategySpec::new("noop", timeframe_secs),
-        }
-    }
-}
-
-impl Strategy for NoOpStrategy {
-    fn spec(&self) -> StrategySpec {
-        self.spec.clone()
-    }
-
-    fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
-        StrategyOutput::new(vec![])
-    }
-}
-
-#[allow(dead_code)]
-struct BuyThenExitStrategy {
-    spec: StrategySpec,
-    qty: i64,
-    exit_tick: u64,
-}
-
-#[allow(dead_code)]
-impl BuyThenExitStrategy {
-    fn new(timeframe_secs: i64, qty: i64, exit_tick: u64) -> Self {
-        Self {
-            spec: StrategySpec::new("buy_then_exit", timeframe_secs),
-            qty,
-            exit_tick,
-        }
-    }
-}
-
-#[allow(dead_code)]
-impl Strategy for BuyThenExitStrategy {
-    fn spec(&self) -> StrategySpec {
-        self.spec.clone()
-    }
-
-    fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
-        let qty = if ctx.now_tick == 0 {
-            self.qty
-        } else if ctx.now_tick >= self.exit_tick {
-            0
-        } else {
-            self.qty
-        };
-        StrategyOutput::new(vec![TargetPosition {
-            symbol: "TEST".to_string(),
-            qty,
-        }])
-    }
-}
-
-// ---------------------------------------------------------------------------
-// BKT-02P: run identity helpers
-// ---------------------------------------------------------------------------
-
-/// Derive a deterministic backtest run ID.
-///
-/// Scoped under `"mqk-bkt.run.v1"` to distinguish backtest runs from live/paper
-/// runs (which use `"mqk-cli.run.v1"` in run.rs).
-fn derive_backtest_run_id(strategy_name: &str, config_hash: &str, git_hash: &str) -> Uuid {
-    let data = format!(
-        "mqk-bkt.run.v1|{}|{}|{}",
-        strategy_name, config_hash, git_hash
-    );
-    Uuid::new_v5(&Uuid::NAMESPACE_DNS, data.as_bytes())
-}
 
 /// Best-effort short git hash of the running binary.
 fn bkt_git_hash() -> String {
