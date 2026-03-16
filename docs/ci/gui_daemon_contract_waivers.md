@@ -28,6 +28,11 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
 ### Strategy
 
 - `/api/v1/strategy/summary` — shape + semantic truth (strategy_id, armed, health fields)
+- `/api/v1/strategy/suppressions` — array shape; empty in test state (Vec<StrategySuppressionRow>)
+
+### System config surfaces
+
+- `/api/v1/system/config-diffs` — array shape; empty in test state (Vec<ConfigDiffRow>)
 
 ### Audit and operator surfaces
 
@@ -75,5 +80,3 @@ Waivers are explicit so deferred coverage is visible, not silently ignored.
 - `/api/v1/execution/replace-cancel-chains`
 - `/api/v1/alerts/triage`
 - `/api/v1/market-data/quality`
-- `/api/v1/strategy/suppressions`
-- `/api/v1/system/config-diffs`

@@ -50,6 +50,48 @@ Legacy fallback only on network error or 404. TypeScript zero errors. 18/18 trut
 intentionally-unmounted. Stale `broker_config_present.is_null()` corrected to `== false`.
 Full daemon test suite: all pass.
 
+### H-5: Full screen truth-state closure (11 remaining screens)
+**Status:** DONE
+**Files:** `AlertsScreen`, `TransportScreen`, `TopologyScreen`, `IncidentsScreen`, `MetricsScreen`,
+`MarketDataScreen`, `StrategyScreen`, `ConfigScreen`, `ArtifactsScreen`, `AuditScreen`,
+`OperatorTimelineScreen`
+**What changed:** All 11 screens changed from partial `if (truthState === "unimplemented" || ...)`
+guard to canonical `if (truthState !== null)` hard-block. `stale` and `degraded` now block
+everywhere, not just on the 8 original live-data screens. TSC clean. 18/18 truth tests pass.
+
+### H-6: Action catalog derived from daemon truth
+**Status:** DONE
+**Files:** `api.ts` (`buildActionCatalog`, `resolvedStatus` extraction)
+**What changed:** `actionCatalog` was hardcoded `[]`. Now derived via `buildActionCatalog(resolvedStatus,
+connected)` which reads `execution_armed`, `kill_switch_active`, `runtime_status` from the
+daemon-fetched `SystemStatus`. Correct arm/disarm/start/stop/kill-switch entries surface
+automatically from live state. TSC clean.
+
+### H-7: Dead mode-change control paths removed
+**Status:** DONE
+**Files:** `useOperatorModel.ts` (`requestModeChange` removed), `screenRegistry.tsx`
+(`changeMode` removed from `ScreenRenderContext`), `AppShell.tsx` (`handleChangeMode` removed)
+**What changed:** `handleChangeMode` → `requestModeChange` → `requestSystemModeTransition` →
+`/api/v1/ops/change-mode` (404) chain is fully deleted. Zero grep hits. TSC clean.
+
+### H-8: Legacy fallback authority propagation
+**Status:** DONE
+**Files:** `api.ts` (lines 715–740)
+**What changed:** `portfolioSummary`, `positions`, `openOrders`, `fills` now extract a
+`…Canonical` boolean. `usedMockSections.push` fires when the canonical endpoint failed
+(not just when the mapped result is null). Legacy-path data with fabricated zeros now
+propagates degraded authority through `panelSources` → `panelTruthRenderState` → screen
+hard-block. TSC clean.
+
+### H-9: Contract gate burn-down — promoted 2 waivered routes
+**Status:** DONE
+**Files:** `scenario_gui_daemon_contract_gate.rs` (6th test added),
+`gui_daemon_contract_waivers.md` (2 entries promoted)
+**What changed:** `/api/v1/system/config-diffs` and `/api/v1/strategy/suppressions` moved
+from "Explicitly deferred" to enforced. New test
+`gui_contract_recently_promoted_array_surfaces_have_expected_shape` proves 200 + empty
+array in test state for both. Contract gate: 6/6 pass.
+
 ---
 
 ## P0 — Foundation (make GUI a real workstation, keep current controls working)

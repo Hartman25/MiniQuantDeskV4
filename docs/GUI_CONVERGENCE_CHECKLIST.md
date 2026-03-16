@@ -2,7 +2,7 @@
 
 Use this after applying all future GUI patches.
 
-Last verified: 2026-03 (Hardening Series H-1 through H-4 complete)
+Last verified: 2026-03 (Hardening Series H-1 through H-9, PC-1 through PC-3 complete)
 
 ## Compile and repair
 - [ ] `npx tsc --noEmit` — zero TypeScript errors
@@ -16,7 +16,7 @@ Last verified: 2026-03 (Hardening Series H-1 through H-4 complete)
 - [ ] desk mode toggle persists
 - [ ] no full-page vertical scrolling on desktop
 
-## Screen validation
+## Screen validation (all 20 registered screens)
 - [ ] dashboard renders
 - [ ] execution renders
 - [ ] risk renders
@@ -24,41 +24,69 @@ Last verified: 2026-03 (Hardening Series H-1 through H-4 complete)
 - [ ] portfolio renders
 - [ ] ops renders
 - [ ] runtime renders
-- [ ] metrics / transport / topology render
-- [ ] alerts / incidents / audit / artifacts / strategy render
+- [ ] session renders
+- [ ] config renders
+- [ ] strategy renders
+- [ ] audit renders
+- [ ] artifacts renders
+- [ ] operatorTimeline renders
+- [ ] alerts renders
+- [ ] incidents renders
+- [ ] metrics renders
+- [ ] transport renders
+- [ ] topology renders
+- [ ] marketData renders
+- [ ] settings renders (no truth gate — intentional, static config surface)
 
-## Truth-model validation (H-1 requirement)
-- [ ] All 8 critical live-data screens use `if (truthState !== null)` hard-block pattern
+## Truth-model validation (H-1 + H-5 requirement)
+- [ ] All 19 operator-facing screens use `if (truthState !== null)` hard-block (SettingsScreen intentionally excluded)
 - [ ] No screen renders live data under `stale` or `degraded` truth state
 - [ ] No inline soft-notice pattern (`{truthState ? <Notice /> : null}`) on live-data screens
 - [ ] `panelTruthRenderState` returns null (green) when all panel endpoints resolve
 - [ ] `dataSource` exists on `SystemModel`; status bar shows source state
-- [ ] `node --experimental-strip-types --test src/features/system/truthRendering.test.ts` — 18/18 pass
+- [ ] `node --experimental-strip-types --test src/features/system/truthRendering.test.ts` — 20/20 pass
 
 ## Ops surface validation (H-2 requirement)
-- [ ] Mode-change buttons are disabled with panel notice
+- [ ] Mode-change buttons are disabled with panel notice and accurate explanation
 - [ ] `/api/v1/ops/action` arm-execution → 200 accepted
 - [ ] `/api/v1/ops/action` change-system-mode → 409 not_authoritative
 - [ ] `/api/v1/ops/change-mode` is not mounted (404)
-- [ ] `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — 5/5 pass
+- [ ] `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — 6/6 pass
 
-## API authority validation (H-3 requirement)
+## API authority validation (H-3 + PC-1 requirement)
 - [ ] `invokeOperatorAction` does NOT fall through to legacy on 400/403/409 from canonical
 - [ ] Legacy fallback only fires on network error or 404
-- [ ] `onChangeMode` prop is NOT present on `OpsScreen`
+- [ ] `requestSystemModeTransition` function is NOT present in api.ts (removed PC-1)
+- [ ] `change-system-mode` is NOT in `OperatorActionDefinition.action_key` union (removed PC-1)
+- [ ] `onChangeMode` prop is NOT present on `OpsScreen` (removed H-7)
 
-## Daemon contract gate (H-4 requirement)
+## Action catalog validation (H-6 + PC-1 requirement)
+- [ ] `actionCatalog` is derived from daemon-fetched `resolvedStatus`, not hardcoded
+- [ ] `buildActionCatalog` only includes actions the daemon can actually execute
+- [ ] `buildActionCatalog` returns `[]` when daemon is not reachable
+- [ ] When canonical `/api/v1/system/status` fails, "status" is pushed to `usedMockSections`
+- [ ] The ops truth gate fires ("unimplemented") when only legacy status resolved
+
+## Fallback authority propagation (PATCH 4 + PC-3 requirement)
+- [ ] `portfolioSummary`, `positions`, `openOrders`, `fills` push to `usedMockSections` when legacy fires (PATCH 4)
+- [ ] `executionOrders` pushes "executionOrders" to `usedMockSections` when legacy fires (PC-3)
+- [ ] `executionSummary` pushes "executionSummary" when canonical probe fails (PC-3)
+- [ ] `status` pushes "status" when legacy `/v1/status` fires instead of canonical (PC-1)
+
+## Daemon contract gate (H-4 + H-9 requirement)
 - [ ] `cargo test -p mqk-daemon` — all pass, zero failures
+- [ ] `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — 6/6 pass
 - [ ] `cargo clippy --workspace -- -D warnings` — zero errors
 - [ ] `gui_daemon_contract_waivers.md` reflects current enforced + deferred state
+- [ ] No mounted+tested routes remain in the waiver list
 
 ## Daemon agreement validation
 - [ ] `/api/v1/system/status` resolves cleanly (canonical preferred)
-- [ ] `/v1/status` legacy fallback still resolves and maps correctly
-- [ ] `/v1/trading/account` mapping does not break portfolio summary
-- [ ] `/v1/trading/positions` mapping does not break positions
-- [ ] `/v1/trading/orders` mapping does not break orders tables
-- [ ] `/v1/trading/fills` mapping does not break fills tables
+- [ ] `/v1/status` legacy fallback still resolves and maps correctly; triggers "status" in mockSections
+- [ ] `/v1/trading/account` mapping does not break portfolio summary; propagates degraded authority
+- [ ] `/v1/trading/positions` mapping does not break positions; propagates degraded authority
+- [ ] `/v1/trading/orders` mapping does not break orders tables; propagates degraded authority
+- [ ] `/v1/trading/fills` mapping does not break fills tables; propagates degraded authority
 
 ## Final hygiene
 - [ ] Remove stale backup imports if any remain
