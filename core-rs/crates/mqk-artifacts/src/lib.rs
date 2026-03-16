@@ -426,7 +426,10 @@ mod tests {
         assert_eq!(v["schema_version"], 1, "schema_version must be 1");
         assert!(v["fills"].is_number(), "fills count must be present");
         assert!(v["orders"].is_number(), "orders count must be present");
-        assert!(v["run_id"].is_string(), "run_id must be present in metrics.json");
+        assert!(
+            v["run_id"].is_string(),
+            "run_id must be present in metrics.json"
+        );
         assert!(
             v["strategy_name"].is_string(),
             "strategy_name must be present in metrics.json"

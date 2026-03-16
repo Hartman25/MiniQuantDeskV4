@@ -4,9 +4,12 @@ use mqk_backtest::{derive_run_id, BacktestConfig, BacktestFill, BacktestReport};
 use mqk_portfolio::{Fill, Side};
 
 fn bf(inner: Fill) -> BacktestFill {
+    // fill_id / order_id are not used by promotion metric evaluation;
+    // deterministic synthetic IDs rather than nil to avoid placeholder slop.
+    let ns = uuid::Uuid::from_bytes([0u8; 16]);
     BacktestFill {
-        fill_id: uuid::Uuid::nil(),
-        order_id: uuid::Uuid::nil(),
+        fill_id: uuid::Uuid::new_v5(&ns, b"prom_test_fill"),
+        order_id: uuid::Uuid::new_v5(&ns, b"prom_test_order"),
         bar_end_ts: 0,
         inner,
     }
