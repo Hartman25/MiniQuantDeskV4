@@ -121,11 +121,7 @@ async fn required_gui_origins_receive_acao_on_preflight() {
 
 #[tokio::test]
 async fn unknown_origin_receives_no_acao() {
-    let blocked = [
-        "https://evil.example.com",
-        "http://attacker.local",
-        "null",
-    ];
+    let blocked = ["https://evil.example.com", "http://attacker.local", "null"];
 
     for origin in blocked {
         let acao = get_acao(origin).await;
@@ -152,10 +148,7 @@ async fn acao_is_never_wildcard() {
     for origin in allowed {
         let acao = get_acao(origin).await;
         if let Some(val) = acao {
-            assert_ne!(
-                val, "*",
-                "ACAO must not be wildcard for origin '{origin}'"
-            );
+            assert_ne!(val, "*", "ACAO must not be wildcard for origin '{origin}'");
         }
     }
 }
