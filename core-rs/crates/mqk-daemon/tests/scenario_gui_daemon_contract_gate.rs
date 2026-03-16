@@ -543,6 +543,96 @@ async fn gui_ops_action_endpoint_dispatches_correctly() {
 }
 
 #[tokio::test]
+async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
+    // Proves that /api/v1/ops/catalog:
+    // 1. Returns 200 with the canonical_route self-identifier.
+    // 2. Returns exactly the 5 supported action keys — no fantasy keys.
+    // 3. Does NOT include change-system-mode (returns 409 from dispatcher).
+    // 4. Each entry has all required fields.
+    // 5. Availability is state-correct: disarmed test state means
+    //    arm-execution=enabled, disarm-execution=disabled,
+    //    start-system=enabled (idle), stop-system=disabled (not running),
+    //    kill-switch=enabled (not halted).
+    let router = make_router();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/ops/catalog")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK, "/api/v1/ops/catalog must return 200");
+
+    let json = parse_json(body);
+
+    // Shape: canonical_route and actions array.
+    assert_eq!(
+        json["canonical_route"].as_str(),
+        Some("/api/v1/ops/catalog"),
+        "ops/catalog must self-identify canonical_route"
+    );
+    let actions = json["actions"].as_array().expect("/api/v1/ops/catalog must have an 'actions' array");
+
+    // Exactly 5 entries.
+    assert_eq!(actions.len(), 5, "catalog must have exactly 5 entries; got: {actions:?}");
+
+    // Collect action_key values.
+    let keys: Vec<&str> = actions
+        .iter()
+        .filter_map(|a| a["action_key"].as_str())
+        .collect();
+
+    // The 5 supported keys must be present.
+    for expected_key in &["arm-execution", "disarm-execution", "start-system", "stop-system", "kill-switch"] {
+        assert!(
+            keys.contains(expected_key),
+            "catalog must contain action_key '{expected_key}'; got keys: {keys:?}"
+        );
+    }
+
+    // change-system-mode must NOT appear — it returns 409 from the dispatcher.
+    assert!(
+        !keys.contains(&"change-system-mode"),
+        "change-system-mode must not appear in catalog (returns 409 from dispatcher)"
+    );
+
+    // Each entry must have all required fields.
+    for entry in actions {
+        let key = entry["action_key"].as_str().unwrap_or("?");
+        assert!(entry["label"].is_string(), "{key}: missing 'label'");
+        assert!(entry["level"].is_number(), "{key}: missing 'level'");
+        assert!(entry["description"].is_string(), "{key}: missing 'description'");
+        assert!(entry["requires_reason"].is_boolean(), "{key}: missing 'requires_reason'");
+        assert!(entry["confirm_text"].is_string(), "{key}: missing 'confirm_text'");
+        assert!(entry["enabled"].is_boolean(), "{key}: missing 'enabled'");
+    }
+
+    // State-specific availability in test state (no DB, disarmed, idle, not halted).
+    let by_key = |k: &str| -> &serde_json::Value {
+        actions.iter().find(|a| a["action_key"].as_str() == Some(k)).unwrap()
+    };
+
+    // Disarmed → arm-execution must be enabled.
+    assert_eq!(by_key("arm-execution")["enabled"], true, "arm-execution must be enabled in disarmed test state");
+
+    // Disarmed → disarm-execution must be disabled.
+    assert_eq!(by_key("disarm-execution")["enabled"], false, "disarm-execution must be disabled in disarmed test state");
+    assert!(
+        by_key("disarm-execution")["disabled_reason"].is_string(),
+        "disarm-execution must have a disabled_reason in disarmed state"
+    );
+
+    // Idle, not halted → start-system must be enabled.
+    assert_eq!(by_key("start-system")["enabled"], true, "start-system must be enabled in idle test state");
+
+    // Not running → stop-system must be disabled.
+    assert_eq!(by_key("stop-system")["enabled"], false, "stop-system must be disabled in idle test state");
+
+    // Not halted → kill-switch must be enabled.
+    assert_eq!(by_key("kill-switch")["enabled"], true, "kill-switch must be enabled in non-halted test state");
+}
+
+#[tokio::test]
 async fn gui_contract_recently_promoted_array_surfaces_have_expected_shape() {
     // These two routes were previously in the TEST-02 waiver list.  They are
     // now mounted and return deterministic empty arrays in test state.

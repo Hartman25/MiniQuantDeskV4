@@ -82,11 +82,12 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     placeholder: ["auditActions", "artifactRegistry", "operatorTimeline"],
   },
   // Ops panel mixes runtime status with DB operator history and config diffs.
+  // /ops/catalog is daemon runtime state: availability changes with each runtime state change.
   ops: {
     db: ["/ops/operator-timeline", "/system/config-diffs"],
-    runtime: ["/system/status", "/system/preflight"],
+    runtime: ["/system/status", "/system/preflight", "/ops/catalog"],
     broker: [],
-    placeholder: ["status", "preflight", "configDiffs", "operatorTimeline"],
+    placeholder: ["status", "preflight", "configDiffs", "operatorTimeline", "actionCatalog"],
   },
   // Config fingerprint and metadata are daemon runtime state. Config diffs are DB-persisted.
   settings: {

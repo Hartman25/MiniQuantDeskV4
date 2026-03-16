@@ -31,9 +31,10 @@ use tracing::info;
 
 use crate::{
     api_types::{
-        AuditArtifactRow, AuditArtifactsResponse, ConfigDiffRow, ConfigFingerprintResponse,
-        DiagnosticsSnapshotResponse, ExecutionSummaryResponse, FaultSignal, GateRefusedResponse,
-        HealthResponse, IntegrityResponse, OperatorActionAuditFields, OperatorActionAuditRow,
+        ActionCatalogEntry, ActionCatalogResponse, AuditArtifactRow, AuditArtifactsResponse,
+        ConfigDiffRow, ConfigFingerprintResponse, DiagnosticsSnapshotResponse,
+        ExecutionSummaryResponse, FaultSignal, GateRefusedResponse, HealthResponse,
+        IntegrityResponse, OperatorActionAuditFields, OperatorActionAuditRow,
         OperatorActionResponse, OperatorActionsAuditResponse, OperatorTimelineResponse,
         OperatorTimelineRow, OpsActionRequest, PortfolioSummaryResponse, PreflightStatusResponse,
         ReconcileSummaryResponse, RiskSummaryResponse, RuntimeErrorResponse,
@@ -156,6 +157,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/audit/artifacts", get(audit_artifacts))
         .route("/api/v1/ops/operator-timeline", get(ops_operator_timeline))
+        // Canonical Action Catalog: state-aware availability for all supported operator actions.
+        // Read-only — no auth required.  Aligned with POST /api/v1/ops/action dispatcher.
+        .route("/api/v1/ops/catalog", get(ops_catalog))
         // DAEMON-1: trading read APIs (placeholder until broker wiring exists)
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
@@ -643,6 +647,122 @@ pub(crate) async fn ops_action(
         )
             .into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/ops/catalog — canonical Action Catalog
+// ---------------------------------------------------------------------------
+
+/// Return the canonical operator Action Catalog with state-aware availability.
+///
+/// The catalog lists exactly the action keys that `POST /api/v1/ops/action` can
+/// execute successfully right now.  `enabled` and `disabled_reason` reflect the
+/// daemon's live integrity + runtime state at the moment of the request.
+///
+/// `change-system-mode` is intentionally absent from the catalog because it returns
+/// 409 from the dispatcher (mode transitions require a controlled daemon restart).
+pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let (is_disarmed, is_halted_integrity) = {
+        let ig = st.integrity.read().await;
+        (ig.disarmed, ig.halted)
+    };
+
+    let state_str = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot.state,
+        Err(_) => "idle".to_string(),
+    };
+
+    let armed = !is_disarmed && !is_halted_integrity;
+    let halted = is_halted_integrity || state_str == "halted";
+    let running = state_str == "running";
+    let idle = state_str == "idle";
+
+    let actions = vec![
+        ActionCatalogEntry {
+            action_key: "arm-execution".to_string(),
+            label: "Arm Execution".to_string(),
+            level: 1,
+            description: "Arm the execution integrity gate. Required before any live order dispatch.".to_string(),
+            requires_reason: false,
+            confirm_text: "Confirm: arm execution gate".to_string(),
+            enabled: !armed && !halted,
+            disabled_reason: if armed {
+                Some("Execution is already armed.".to_string())
+            } else if halted {
+                Some("Cannot arm while system is halted.".to_string())
+            } else {
+                None
+            },
+        },
+        ActionCatalogEntry {
+            action_key: "disarm-execution".to_string(),
+            label: "Disarm Execution".to_string(),
+            level: 1,
+            description: "Disarm the execution integrity gate. Stops new order dispatch immediately.".to_string(),
+            requires_reason: false,
+            confirm_text: "Confirm: disarm execution gate".to_string(),
+            enabled: armed,
+            disabled_reason: if !armed {
+                Some("Execution is already disarmed.".to_string())
+            } else {
+                None
+            },
+        },
+        ActionCatalogEntry {
+            action_key: "start-system".to_string(),
+            label: "Start System".to_string(),
+            level: 1,
+            description: "Start the execution runtime. System must be idle to start.".to_string(),
+            requires_reason: false,
+            confirm_text: "Confirm: start execution runtime".to_string(),
+            enabled: idle && !halted,
+            disabled_reason: if halted {
+                Some("Cannot start while system is halted.".to_string())
+            } else if running {
+                Some("System is already running.".to_string())
+            } else if !idle {
+                Some("System must be idle to start.".to_string())
+            } else {
+                None
+            },
+        },
+        ActionCatalogEntry {
+            action_key: "stop-system".to_string(),
+            label: "Stop System".to_string(),
+            level: 2,
+            description: "Stop the execution runtime gracefully. Drains pending outbox before halting.".to_string(),
+            requires_reason: false,
+            confirm_text: "Confirm: stop execution runtime".to_string(),
+            enabled: running,
+            disabled_reason: if !running {
+                Some("System is not currently running.".to_string())
+            } else {
+                None
+            },
+        },
+        ActionCatalogEntry {
+            action_key: "kill-switch".to_string(),
+            label: "Kill Switch".to_string(),
+            level: 3,
+            description: "Immediately halt all execution and disarm. Use only in emergency. Requires reason.".to_string(),
+            requires_reason: true,
+            confirm_text: "Type CONFIRM to activate kill switch -- this halts all execution immediately".to_string(),
+            enabled: !halted,
+            disabled_reason: if halted {
+                Some("System is already halted.".to_string())
+            } else {
+                None
+            },
+        },
+    ];
+
+    (
+        StatusCode::OK,
+        Json(ActionCatalogResponse {
+            canonical_route: "/api/v1/ops/catalog".to_string(),
+            actions,
+        }),
+    )
 }
 
 // ---------------------------------------------------------------------------

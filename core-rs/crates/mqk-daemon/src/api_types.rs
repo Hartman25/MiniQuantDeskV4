@@ -440,6 +440,49 @@ pub struct OpsActionRequest {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/ops/catalog — canonical Action Catalog
+// ---------------------------------------------------------------------------
+
+/// One entry in the canonical operator Action Catalog.
+///
+/// The catalog lists every action the daemon's `/api/v1/ops/action` dispatcher
+/// can actually execute right now.  `enabled` reflects current runtime state;
+/// `disabled_reason` explains why the action is unavailable when `enabled` is false.
+///
+/// `change-system-mode` is intentionally absent — it returns 409 from ops_action
+/// (mode transitions require a controlled daemon restart).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionCatalogEntry {
+    /// Canonical action identifier, e.g. "arm-execution".
+    pub action_key: String,
+    /// Human-readable label for operator UI.
+    pub label: String,
+    /// Severity level: 0 = informational, 1 = normal, 2 = elevated, 3 = emergency.
+    pub level: u8,
+    /// Human-readable description of what this action does.
+    pub description: String,
+    /// Whether this action requires an operator reason string.
+    pub requires_reason: bool,
+    /// Confirmation prompt text shown before the action executes.
+    pub confirm_text: String,
+    /// Whether this action is currently executable given system state.
+    pub enabled: bool,
+    /// Why the action is disabled; None when enabled is true.
+    pub disabled_reason: Option<String>,
+}
+
+/// Response body for GET /api/v1/ops/catalog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionCatalogResponse {
+    /// Self-identifying canonical route.
+    pub canonical_route: String,
+    /// All actions the daemon currently supports.  State-aware availability
+    /// (enabled/disabled_reason) is computed from the live daemon state at
+    /// request time.
+    pub actions: Vec<ActionCatalogEntry>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/diagnostics/snapshot (B4)
 // ---------------------------------------------------------------------------
 

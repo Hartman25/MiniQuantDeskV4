@@ -654,26 +654,17 @@ export const MOCK_METADATA: MetadataSummary = {
   endpoint_status: "ok",
 };
 
+// MOCK_ACTION_CATALOG contains only the 7 action keys the daemon ops_action dispatcher
+// actually supports. Fantasy keys (enable-live-routing, pause-new-entries, reconcile-now,
+// flatten-all, cancel-all-open-orders, resume-after-halt, ack-alert) are removed because
+// the daemon returns 400 for them. "change-system-mode" returns 409 and is absent by design.
+// In production the catalog is fetched from GET /api/v1/ops/catalog (daemon-authoritative).
 export const MOCK_ACTION_CATALOG: OperatorActionDefinition[] = [
-  { action_key: "start-system", label: "Start runtime", level: 1, description: "Start the daemon-managed runtime loop.", requiresReason: false, confirmText: "Start the runtime?", disabled: false },
-  { action_key: "stop-system", label: "Stop runtime", level: 2, description: "Stop new processing and drain safely.", requiresReason: true, confirmText: "Stop the runtime?", disabled: false },
-  { action_key: "arm-strategy", label: "Arm strategies", level: 1, description: "Permit strategies to emit intents.", requiresReason: false, confirmText: "Arm strategies?", disabled: false },
-  { action_key: "disarm-strategy", label: "Disarm strategies", level: 2, description: "Stop new strategy intents immediately.", requiresReason: true, confirmText: "Disarm strategies?", disabled: false },
-  { action_key: "arm-execution", label: "Arm execution", level: 2, description: "Permit daemon to submit approved orders.", requiresReason: true, confirmText: "Arm execution?", disabled: false },
-  { action_key: "disarm-execution", label: "Disarm execution", level: 2, description: "Block further outbound execution actions.", requiresReason: true, confirmText: "Disarm execution?", disabled: false },
-  { action_key: "enable-live-routing", label: "Enable live routing", level: 3, description: "Allow live-capital routing only when environment is live.", requiresReason: true, confirmText: "Enable live routing?", disabled: false },
-  { action_key: "disable-live-routing", label: "Disable live routing", level: 3, description: "Immediately prevent new live routing.", requiresReason: true, confirmText: "Disable live routing?", disabled: false },
-  { action_key: "pause-new-entries", label: "Pause new entries", level: 1, description: "Hold new entries while keeping exits available.", requiresReason: false, confirmText: "Pause new entries?", disabled: false },
-  { action_key: "resume-new-entries", label: "Resume new entries", level: 1, description: "Re-enable entries after operator review.", requiresReason: false, confirmText: "Resume new entries?", disabled: false },
-  { action_key: "reconcile-now", label: "Run reconcile now", level: 1, description: "Trigger an immediate reconcile cycle.", requiresReason: false, confirmText: "Run reconcile now?", disabled: false },
-  { action_key: "refresh-broker-snapshot", label: "Refresh broker snapshot", level: 1, description: "Pull latest broker state for diagnostics.", requiresReason: false, confirmText: "Refresh broker snapshot?", disabled: false },
-  { action_key: "cancel-all-open-orders", label: "Cancel all open orders", level: 3, description: "Issue cancel-all through daemon safeguards.", requiresReason: true, confirmText: "Cancel all open orders?", disabled: false },
-  { action_key: "flatten-all", label: "Flatten all positions", level: 3, description: "Emergency flatten through guarded daemon path.", requiresReason: true, confirmText: "Flatten all positions?", disabled: false },
-  { action_key: "kill-switch", label: "Kill switch", level: 3, description: "Global hard stop.", requiresReason: true, confirmText: "Trigger kill switch?", disabled: false },
-  { action_key: "resume-after-halt", label: "Resume after halt", level: 2, description: "Resume after operator verification.", requiresReason: true, confirmText: "Resume after halt?", disabled: false },
-  { action_key: "ack-alert", label: "Acknowledge alert", level: 0, description: "Mark alert acknowledged.", requiresReason: false, confirmText: "Acknowledge alert?", disabled: false },
-  // "change-system-mode" intentionally removed: mode transitions require a controlled daemon
-  // restart, not an API call. The daemon returns 409 for that key as defense-in-depth.
+  { action_key: "arm-execution", label: "Arm Execution", level: 1, description: "Arm the execution integrity gate. Required before any live order dispatch.", requiresReason: false, confirmText: "Confirm: arm execution gate", enabled: true, disabled: false },
+  { action_key: "disarm-execution", label: "Disarm Execution", level: 1, description: "Disarm the execution integrity gate. Stops new order dispatch immediately.", requiresReason: false, confirmText: "Confirm: disarm execution gate", enabled: false, disabledReason: "Execution is already disarmed.", disabled: true },
+  { action_key: "start-system", label: "Start System", level: 1, description: "Start the execution runtime. System must be idle to start.", requiresReason: false, confirmText: "Confirm: start execution runtime", enabled: true, disabled: false },
+  { action_key: "stop-system", label: "Stop System", level: 2, description: "Stop the execution runtime gracefully. Drains pending outbox before halting.", requiresReason: false, confirmText: "Confirm: stop execution runtime", enabled: false, disabledReason: "System is not currently running.", disabled: true },
+  { action_key: "kill-switch", label: "Kill Switch", level: 3, description: "Immediately halt all execution and disarm. Use only in emergency. Requires reason.", requiresReason: true, confirmText: "Type CONFIRM to activate kill switch -- this halts all execution immediately", enabled: true, disabled: false },
 ];
 
 

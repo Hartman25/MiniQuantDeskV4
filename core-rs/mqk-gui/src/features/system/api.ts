@@ -140,6 +140,23 @@ interface DaemonOperatorActionResponse {
   };
 }
 
+// Matches the daemon's ActionCatalogEntry shape (snake_case from JSON).
+interface DaemonActionCatalogEntry {
+  action_key: string;
+  label: string;
+  level: number;
+  description: string;
+  requires_reason: boolean;
+  confirm_text: string;
+  enabled: boolean;
+  disabled_reason?: string | null;
+}
+
+interface DaemonActionCatalogResponse {
+  canonical_route: string;
+  actions: DaemonActionCatalogEntry[];
+}
+
 async function fetchJsonCandidate<T>(path: string): Promise<EndpointFetchResult<T>> {
   try {
     const url = new URL(path, getDaemonUrl()).toString();
@@ -346,78 +363,31 @@ function objectOrFallback<T>(value: unknown, fallback: T): T {
   return value && typeof value === "object" ? (value as T) : fallback;
 }
 
-function buildActionCatalog(status: SystemStatus, daemonReachable: boolean): OperatorActionDefinition[] {
-  // Catalog is derived from daemon-fetched status -- only actions the daemon can actually
-  // execute right now. Empty if daemon is not reachable (OpsScreen is truth-blocked anyway).
-  if (!daemonReachable) return [];
+// Supported action keys the daemon can execute (matches ops_action dispatcher).
+const DAEMON_SUPPORTED_ACTION_KEYS = new Set([
+  "arm-execution",
+  "arm-strategy",
+  "disarm-execution",
+  "disarm-strategy",
+  "start-system",
+  "stop-system",
+  "kill-switch",
+]);
 
-  const catalog: OperatorActionDefinition[] = [];
-  const armed = status.execution_armed;
-  const halted = status.kill_switch_active || status.runtime_status === "halted";
-  const idle = status.runtime_status === "idle";
-  const running = status.runtime_status === "running" || status.runtime_status === "starting";
-
-  if (!armed && !halted) {
-    catalog.push({
-      action_key: "arm-execution",
-      label: "Arm Execution",
-      level: 1,
-      description: "Arm the execution integrity gate. Required before any live order dispatch.",
-      requiresReason: false,
-      confirmText: "Confirm: arm execution gate",
-      disabled: false,
-    });
-  }
-
-  if (armed) {
-    catalog.push({
-      action_key: "disarm-execution",
-      label: "Disarm Execution",
-      level: 1,
-      description: "Disarm the execution integrity gate. Stops new order dispatch immediately.",
-      requiresReason: false,
-      confirmText: "Confirm: disarm execution gate",
-      disabled: false,
-    });
-  }
-
-  if (idle && !halted) {
-    catalog.push({
-      action_key: "start-system",
-      label: "Start System",
-      level: 1,
-      description: "Start the execution runtime. System must be armed and idle.",
-      requiresReason: false,
-      confirmText: "Confirm: start execution runtime",
-      disabled: false,
-    });
-  }
-
-  if (running) {
-    catalog.push({
-      action_key: "stop-system",
-      label: "Stop System",
-      level: 2,
-      description: "Stop the execution runtime gracefully. Drains pending outbox before halting.",
-      requiresReason: false,
-      confirmText: "Confirm: stop execution runtime",
-      disabled: false,
-    });
-  }
-
-  if (!halted) {
-    catalog.push({
-      action_key: "kill-switch",
-      label: "Kill Switch",
-      level: 3,
-      description: "Immediately halt all execution and disarm. Use only in emergency. Requires reason.",
-      requiresReason: true,
-      confirmText: "Type CONFIRM to activate kill switch -- this halts all execution immediately",
-      disabled: false,
-    });
-  }
-
-  return catalog;
+function mapDaemonCatalog(response: DaemonActionCatalogResponse): OperatorActionDefinition[] {
+  return response.actions
+    .filter((entry) => DAEMON_SUPPORTED_ACTION_KEYS.has(entry.action_key))
+    .map((entry) => ({
+      action_key: entry.action_key as OperatorActionDefinition["action_key"],
+      label: entry.label,
+      level: Math.min(3, Math.max(0, entry.level)) as 0 | 1 | 2 | 3,
+      description: entry.description,
+      requiresReason: entry.requires_reason,
+      confirmText: entry.confirm_text,
+      enabled: entry.enabled,
+      disabledReason: entry.disabled_reason ?? undefined,
+      disabled: !entry.enabled,
+    }));
 }
 
 function mapLegacyPositionsResponse(response: LegacyTradingPositionsResponse | null): PositionRow[] | null {
@@ -624,6 +594,8 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     fetchJsonCandidates<StrategySuppressionRow[]>(["/api/v1/strategy/suppressions"]),
     fetchJsonCandidates<ConfigDiffRow[]>(["/api/v1/system/config-diffs"]),
     fetchJsonCandidates<OperatorTimelineEvent[]>(["/api/v1/ops/operator-timeline"]),
+    // Canonical Action Catalog: daemon-authoritative action availability.
+    fetchJsonCandidates<DaemonActionCatalogResponse>(["/api/v1/ops/catalog"]),
   ]);
 
   const [
@@ -657,6 +629,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     strategySuppressionsR,
     configDiffsR,
     operatorTimelineR,
+    actionCatalogR,
   ] = probes;
 
   const daemonReachable = statusProbe.ok || healthProbe.ok || Boolean(legacyStatusFromProbe) || probes.some((p) => p.ok);
@@ -765,6 +738,24 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   if (!executionReplay) usedMockSections.push("executionReplay");
   if (!executionChart) usedMockSections.push("executionChart");
   if (!causalityTrace) usedMockSections.push("causalityTrace");
+
+  // Resolve action catalog BEFORE dataSource computation so a catalog endpoint failure
+  // is visible in dataSource.mockSections and properly degrades the ops panel authority.
+  const catalogResult = (() => {
+    if (actionCatalogR.ok && actionCatalogR.data !== undefined) {
+      const raw = actionCatalogR.data as DaemonActionCatalogResponse;
+      if (raw.actions && Array.isArray(raw.actions)) {
+        return mapDaemonCatalog(raw);
+      }
+    }
+    return null;
+  })();
+  // null means the endpoint was unreachable or returned an invalid shape.
+  // An empty array is valid and means no actions are currently available (e.g., all halted).
+  if (catalogResult === null) {
+    usedMockSections.push("actionCatalog");
+  }
+  const resolvedActionCatalog: OperatorActionDefinition[] = catalogResult ?? [];
 
   const dataSource = deriveDataSourceDetail({
     probeResults: [statusProbe, healthProbe, ...probes],
@@ -950,7 +941,10 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     strategySuppressions: useArray("strategySuppressions", strategySuppressionsR, []),
     configDiffs: useArray("configDiffs", configDiffsR, []),
     operatorTimeline: useArray("operatorTimeline", operatorTimelineR, []),
-    actionCatalog: buildActionCatalog(resolvedStatus, connected),
+    // Daemon-authoritative Action Catalog from GET /api/v1/ops/catalog.
+    // Resolved before dataSource so catalog failures reach dataSource.mockSections
+    // and degrade the ops panel truth authority correctly.
+    actionCatalog: resolvedActionCatalog,
     dataSource,
     connected,
     lastUpdatedAt: nowIso(),

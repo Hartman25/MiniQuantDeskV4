@@ -864,32 +864,28 @@ export interface MetadataSummary {
 }
 
 export interface OperatorActionDefinition {
+  // Only the action keys the daemon can actually execute via POST /api/v1/ops/action.
+  // "change-system-mode" is intentionally excluded — it returns 409 (requires restart).
+  // "arm-strategy" / "disarm-strategy" are daemon-accepted aliases for arm/disarm-execution
+  // and may appear in legacy paths; they are included here for mapping completeness.
   action_key:
+    | "arm-execution"
+    | "arm-strategy"
+    | "disarm-execution"
+    | "disarm-strategy"
     | "start-system"
     | "stop-system"
-    | "arm-strategy"
-    | "disarm-strategy"
-    | "arm-execution"
-    | "disarm-execution"
-    | "enable-live-routing"
-    | "disable-live-routing"
-    | "pause-new-entries"
-    | "resume-new-entries"
-    | "reconcile-now"
-    | "refresh-broker-snapshot"
-    | "flatten-all"
-    | "cancel-all-open-orders"
-    | "kill-switch"
-    | "resume-after-halt"
-    | "ack-alert";
-  // "change-system-mode" intentionally excluded — mode transitions require a controlled
-  // daemon restart with configuration reload. The daemon returns 409 for that action key
-  // as defense-in-depth. Only keys the daemon can actually execute are listed here.
+    | "kill-switch";
   label: string;
   level: ActionLevel;
   description: string;
   requiresReason: boolean;
   confirmText: string;
+  /** Whether this action is currently executable given daemon runtime state. */
+  enabled: boolean;
+  /** Populated when enabled is false; explains why the action is unavailable. */
+  disabledReason?: string;
+  /** @deprecated Use !enabled instead. Kept for backward compatibility with OpsScreen rendering. */
   disabled: boolean;
 }
 
