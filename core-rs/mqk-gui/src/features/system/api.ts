@@ -712,29 +712,32 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       : deriveExecutionSummaryFromOrders(executionOrders);
   if (!executionSummary) usedMockSections.push("executionSummary");
 
-  const portfolioSummary =
-    portfolioSummaryR.ok && portfolioSummaryR.endpoint === "/api/v1/portfolio/summary" && portfolioSummaryR.data !== undefined
-      ? (portfolioSummaryR.data as PortfolioSummary)
-      : mapLegacyPortfolioSummary(legacyAccountResponse);
-  if (!portfolioSummary) usedMockSections.push("portfolioSummary");
+  const portfolioSummaryCanonical =
+    portfolioSummaryR.ok &&
+    portfolioSummaryR.endpoint === "/api/v1/portfolio/summary" &&
+    portfolioSummaryR.data !== undefined;
+  const portfolioSummary = portfolioSummaryCanonical
+    ? (portfolioSummaryR.data as PortfolioSummary)
+    : mapLegacyPortfolioSummary(legacyAccountResponse);
+  if (!portfolioSummary || !portfolioSummaryCanonical) usedMockSections.push("portfolioSummary");
 
-  const positions =
-    positionsR.ok && Array.isArray(positionsR.data)
-      ? (positionsR.data as PositionRow[])
-      : mapLegacyPositionsResponse(legacyPositionsResponse);
-  if (!positions) usedMockSections.push("positions");
+  const positionsCanonical = positionsR.ok && Array.isArray(positionsR.data);
+  const positions = positionsCanonical
+    ? (positionsR.data as PositionRow[])
+    : mapLegacyPositionsResponse(legacyPositionsResponse);
+  if (!positions || !positionsCanonical) usedMockSections.push("positions");
 
-  const openOrders =
-    openOrdersR.ok && Array.isArray(openOrdersR.data)
-      ? (openOrdersR.data as OpenOrderRow[])
-      : mapLegacyTradingOrdersToOpenOrders(legacyOrdersResponse);
-  if (!openOrders) usedMockSections.push("openOrders");
+  const openOrdersCanonical = openOrdersR.ok && Array.isArray(openOrdersR.data);
+  const openOrders = openOrdersCanonical
+    ? (openOrdersR.data as OpenOrderRow[])
+    : mapLegacyTradingOrdersToOpenOrders(legacyOrdersResponse);
+  if (!openOrders || !openOrdersCanonical) usedMockSections.push("openOrders");
 
-  const fills =
-    fillsR.ok && Array.isArray(fillsR.data)
-      ? (fillsR.data as FillRow[])
-      : mapLegacyTradingFillsToRows(legacyFillsResponse);
-  if (!fills) usedMockSections.push("fills");
+  const fillsCanonical = fillsR.ok && Array.isArray(fillsR.data);
+  const fills = fillsCanonical
+    ? (fillsR.data as FillRow[])
+    : mapLegacyTradingFillsToRows(legacyFillsResponse);
+  if (!fills || !fillsCanonical) usedMockSections.push("fills");
 
   const metadata =
     healthProbe.ok && healthProbe.data !== undefined
