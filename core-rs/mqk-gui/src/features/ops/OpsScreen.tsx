@@ -37,11 +37,9 @@ const MODE_FIELD_HINTS: Record<"environment" | "runtime" | "liveRouting" | "gene
 export function OpsScreen({
   model,
   onRunAction,
-  onChangeMode,
 }: {
   model: SystemModel;
   onRunAction: (action: OperatorActionDefinition) => void;
-  onChangeMode: (targetMode: EnvironmentMode) => void;
 }) {
   const truthState = panelTruthRenderState(model, "ops");
 

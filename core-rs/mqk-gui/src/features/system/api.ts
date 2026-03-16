@@ -989,15 +989,37 @@ export async function invokeOperatorAction(
   actionKey: string,
   params: Record<string, unknown>,
 ): Promise<OperatorActionReceipt> {
-  const response = await postJson<Partial<OperatorActionReceipt> | LegacyDaemonStatusSnapshot | LegacyIntegrityResponse>(
-    ["/api/v1/ops/action", ...legacyActionPaths(actionKey)],
+  // Try the canonical dispatcher first. A 400/403/409 from canonical is a
+  // definitive daemon decision and MUST NOT fall through to legacy paths.
+  // Only fall back to legacy when canonical was unreachable (network error,
+  // status === undefined) or explicitly absent (status === 404).
+  const canonicalResult = await postJson<Partial<OperatorActionReceipt> | LegacyDaemonStatusSnapshot | LegacyIntegrityResponse>(
+    ["/api/v1/ops/action"],
     { action_key: actionKey, ...params },
   );
 
-  const mapped = mapLegacyOperatorActionResponse(actionKey, response);
-  if (mapped) return mapped;
+  const canonicalDefinitive = canonicalResult.ok || (canonicalResult.status !== undefined && canonicalResult.status !== 404);
+  if (canonicalDefinitive) {
+    const mapped = mapLegacyOperatorActionResponse(actionKey, canonicalResult);
+    if (mapped) return mapped;
+    return failedOperatorActionReceipt(actionKey, canonicalResult);
+  }
 
-  return failedOperatorActionReceipt(actionKey, response);
+  // Canonical was not found (404) or was unreachable (no status = network error).
+  // Fall back to legacy action paths for older daemon versions.
+  const legacyPaths = legacyActionPaths(actionKey);
+  if (legacyPaths.length === 0) {
+    return failedOperatorActionReceipt(actionKey, canonicalResult);
+  }
+
+  const legacyResult = await postJson<Partial<OperatorActionReceipt> | LegacyDaemonStatusSnapshot | LegacyIntegrityResponse>(
+    legacyPaths,
+    { action_key: actionKey, ...params },
+  );
+
+  const mapped = mapLegacyOperatorActionResponse(actionKey, legacyResult);
+  if (mapped) return mapped;
+  return failedOperatorActionReceipt(actionKey, legacyResult);
 }
 
 export async function requestSystemModeTransition(

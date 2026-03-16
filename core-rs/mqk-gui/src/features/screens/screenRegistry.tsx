@@ -153,7 +153,7 @@ export const SCREEN_REGISTRY: Record<ScreenKey, ScreenDefinition> = {
   ops: {
     title: "Operator Actions",
     description: "Explicit action catalog with guarded and emergency controls.",
-    render: ({ model, runAction, changeMode }) => <OpsScreen model={model} onRunAction={runAction} onChangeMode={changeMode} />,
+    render: ({ model, runAction }) => <OpsScreen model={model} onRunAction={runAction} />,
   },
   settings: {
     title: "Settings / Operations",
