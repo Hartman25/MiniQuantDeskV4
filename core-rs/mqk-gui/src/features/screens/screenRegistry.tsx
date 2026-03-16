@@ -48,7 +48,6 @@ export interface ScreenRenderContext {
   selectTimeline: (internalOrderId: string) => void;
   timelineLoading: boolean;
   runAction: (action: OperatorActionDefinition) => void;
-  changeMode: (targetMode: SystemModel["status"]["environment"]) => void;
 }
 
 export interface ScreenDefinition {

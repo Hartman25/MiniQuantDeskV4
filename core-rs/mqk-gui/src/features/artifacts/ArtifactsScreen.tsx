@@ -10,7 +10,7 @@ export function ArtifactsScreen({ model }: { model: SystemModel }) {
   const a = model.artifactRegistry;
   const truthState = panelTruthRenderState(model, "artifacts");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

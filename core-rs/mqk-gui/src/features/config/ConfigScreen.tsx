@@ -10,7 +10,7 @@ export function ConfigScreen({ model }: { model: SystemModel }) {
   const c = model.configFingerprint;
   const truthState = panelTruthRenderState(model, "config");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

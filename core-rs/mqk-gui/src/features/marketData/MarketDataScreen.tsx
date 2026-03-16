@@ -10,7 +10,7 @@ export function MarketDataScreen({ model }: { model: SystemModel }) {
   const q = model.marketDataQuality;
   const truthState = panelTruthRenderState(model, "marketData");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

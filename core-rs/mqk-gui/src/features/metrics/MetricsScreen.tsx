@@ -7,7 +7,7 @@ import { panelTruthRenderState } from "../system/truthRendering";
 export function MetricsScreen({ model }: { model: SystemModel }) {
   const truthState = panelTruthRenderState(model, "metrics");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

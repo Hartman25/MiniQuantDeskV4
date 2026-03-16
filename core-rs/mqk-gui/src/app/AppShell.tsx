@@ -13,7 +13,7 @@ import { PreflightGate } from "../components/preflight/PreflightGate";
 import { GlobalStatusBar } from "../components/status/GlobalStatusBar";
 import { SCREEN_REGISTRY, type ScreenKey } from "../features/screens/screenRegistry";
 import { useOperatorModel } from "../features/system/useOperatorModel";
-import type { EnvironmentMode, OperatorActionDefinition } from "../features/system/types";
+import type { OperatorActionDefinition } from "../features/system/types";
 import { formatDateTime } from "../lib/format";
 
 type DeskMode = "single" | "two" | "three";
@@ -138,7 +138,6 @@ export function AppShell() {
     timelineLoading,
     actionReceipt,
     runAction,
-    requestModeChange,
   } = useOperatorModel();
 
   const screen = SCREEN_REGISTRY[activeScreen];
@@ -168,29 +167,6 @@ export function AppShell() {
     }
   };
 
-  const handleChangeMode = async (targetMode: EnvironmentMode) => {
-    if (targetMode === model.status.environment) return;
-
-    const typed = window.prompt(
-      [
-        `Change system mode from ${model.status.environment.toUpperCase()} to ${targetMode.toUpperCase()}.`,
-        "This will request a controlled daemon restart and configuration reload.",
-        `Type ${targetMode.toUpperCase()} to confirm.`,
-      ].join("\\n\\n"),
-      "",
-    );
-    if ((typed ?? "").trim().toUpperCase() !== targetMode.toUpperCase()) return;
-
-    const reason =
-      window.prompt(
-        `Reason required for mode transition to ${targetMode.toUpperCase()}:`,
-        "Controlled environment change",
-      ) ?? "";
-    if (!reason.trim()) return;
-
-    await requestModeChange(targetMode, reason.trim());
-    await refresh();
-  };
 
   const handleRunAction = async (action: OperatorActionDefinition) => {
     const reason = action.requiresReason
@@ -283,7 +259,6 @@ export function AppShell() {
                 selectTimeline: (internalOrderId) => void selectTimeline(internalOrderId),
                 timelineLoading,
                 runAction: (action) => void handleRunAction(action),
-                changeMode: (targetMode) => void handleChangeMode(targetMode),
               })}
             </WorkspaceFrame>
 

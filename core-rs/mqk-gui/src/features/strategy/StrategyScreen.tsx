@@ -12,7 +12,7 @@ export function StrategyScreen({ model }: { model: SystemModel }) {
   const unhealthy = model.strategies.filter((s) => s.health !== "ok").length;
   const truthState = panelTruthRenderState(model, "strategy");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

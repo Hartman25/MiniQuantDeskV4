@@ -11,7 +11,7 @@ export function IncidentsScreen({ model }: { model: SystemModel }) {
   const investigating = model.incidents.filter((i) => i.status === "investigating").length;
   const truthState = panelTruthRenderState(model, "incidents");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

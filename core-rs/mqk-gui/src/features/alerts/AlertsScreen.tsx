@@ -11,7 +11,7 @@ export function AlertsScreen({ model }: { model: SystemModel }) {
   const info = model.alerts.filter((a) => a.severity === "info").length;
   const truthState = panelTruthRenderState(model, "alerts");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

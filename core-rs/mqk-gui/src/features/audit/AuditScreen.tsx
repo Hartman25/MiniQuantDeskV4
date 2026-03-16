@@ -9,7 +9,7 @@ import type { SystemModel } from "../system/types";
 export function AuditScreen({ model }: { model: SystemModel }) {
   const truthState = panelTruthRenderState(model, "audit");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

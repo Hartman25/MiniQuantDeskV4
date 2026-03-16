@@ -21,6 +21,7 @@ import type {
   MetadataSummary,
   OmsOverview,
   OpenOrderRow,
+  OperatorActionDefinition,
   OperatorActionReceipt,
   OperatorAlert,
   OperatorTimelineEvent,
@@ -345,6 +346,80 @@ function objectOrFallback<T>(value: unknown, fallback: T): T {
   return value && typeof value === "object" ? (value as T) : fallback;
 }
 
+function buildActionCatalog(status: SystemStatus, daemonReachable: boolean): OperatorActionDefinition[] {
+  // Catalog is derived from daemon-fetched status -- only actions the daemon can actually
+  // execute right now. Empty if daemon is not reachable (OpsScreen is truth-blocked anyway).
+  if (!daemonReachable) return [];
+
+  const catalog: OperatorActionDefinition[] = [];
+  const armed = status.execution_armed;
+  const halted = status.kill_switch_active || status.runtime_status === "halted";
+  const idle = status.runtime_status === "idle";
+  const running = status.runtime_status === "running" || status.runtime_status === "starting";
+
+  if (!armed && !halted) {
+    catalog.push({
+      action_key: "arm-execution",
+      label: "Arm Execution",
+      level: 1,
+      description: "Arm the execution integrity gate. Required before any live order dispatch.",
+      requiresReason: false,
+      confirmText: "Confirm: arm execution gate",
+      disabled: false,
+    });
+  }
+
+  if (armed) {
+    catalog.push({
+      action_key: "disarm-execution",
+      label: "Disarm Execution",
+      level: 1,
+      description: "Disarm the execution integrity gate. Stops new order dispatch immediately.",
+      requiresReason: false,
+      confirmText: "Confirm: disarm execution gate",
+      disabled: false,
+    });
+  }
+
+  if (idle && !halted) {
+    catalog.push({
+      action_key: "start-system",
+      label: "Start System",
+      level: 1,
+      description: "Start the execution runtime. System must be armed and idle.",
+      requiresReason: false,
+      confirmText: "Confirm: start execution runtime",
+      disabled: false,
+    });
+  }
+
+  if (running) {
+    catalog.push({
+      action_key: "stop-system",
+      label: "Stop System",
+      level: 2,
+      description: "Stop the execution runtime gracefully. Drains pending outbox before halting.",
+      requiresReason: false,
+      confirmText: "Confirm: stop execution runtime",
+      disabled: false,
+    });
+  }
+
+  if (!halted) {
+    catalog.push({
+      action_key: "kill-switch",
+      label: "Kill Switch",
+      level: 3,
+      description: "Immediately halt all execution and disarm. Use only in emergency. Requires reason.",
+      requiresReason: true,
+      confirmText: "Type CONFIRM to activate kill switch -- this halts all execution immediately",
+      disabled: false,
+    });
+  }
+
+  return catalog;
+}
+
 function mapLegacyPositionsResponse(response: LegacyTradingPositionsResponse | null): PositionRow[] | null {
   if (!response) return null;
   return response.positions.map((position) => {
@@ -510,7 +585,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const healthProbe = await fetchJsonCandidates<MetadataSummary>(["/api/v1/system/metadata"]);
 
   // Extract legacy status only when the statusProbe itself resolved via the
-  // legacy path.  Do NOT fire a second fetch — canonical is preferred and if
+  // legacy path.  Do NOT fire a second fetch â€” canonical is preferred and if
   // canonical failed the probe already tried the legacy path as a fallback.
   const legacyStatusFromProbe: LegacyDaemonStatusSnapshot | null =
     statusProbe.ok && statusProbe.endpoint === "/v1/status"
@@ -802,17 +877,19 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     artifacts: [],
   };
 
+  const resolvedStatus: SystemStatus = objectOrFallback(
+    statusProbe.ok && statusProbe.endpoint === "/api/v1/system/status"
+      ? statusProbe.data
+      // statusProbe already tried /v1/status as a fallback before giving up;
+      // if it resolved there, use the legacy mapping.  No additional fetch.
+      : legacyStatusFromProbe
+        ? mapLegacyStatusToSystemStatus(legacyStatusFromProbe)
+        : null,
+    unavailableStatus,
+  );
+
   return withClassifiedPanelSources({
-    status: objectOrFallback(
-      statusProbe.ok && statusProbe.endpoint === "/api/v1/system/status"
-        ? statusProbe.data
-        // statusProbe already tried /v1/status as a fallback before giving up;
-        // if it resolved there, use the legacy mapping.  No additional fetch.
-        : legacyStatusFromProbe
-          ? mapLegacyStatusToSystemStatus(legacyStatusFromProbe)
-          : null,
-      unavailableStatus,
-    ),
+    status: resolvedStatus,
     // Preflight is fail-closed: if the canonical endpoint did not return a
     // valid response, surface explicit unavailable state rather than a
     // silently-derived fake preflight with no blockers.
@@ -855,7 +932,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     strategySuppressions: useArray("strategySuppressions", strategySuppressionsR, []),
     configDiffs: useArray("configDiffs", configDiffsR, []),
     operatorTimeline: useArray("operatorTimeline", operatorTimelineR, []),
-    actionCatalog: [],
+    actionCatalog: buildActionCatalog(resolvedStatus, connected),
     dataSource,
     connected,
     lastUpdatedAt: nowIso(),

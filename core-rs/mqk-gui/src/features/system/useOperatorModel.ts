@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { fetchCausalityTrace, fetchExecutionChart, fetchExecutionReplay, fetchExecutionTimeline, fetchExecutionTrace, fetchOperatorModel, invokeOperatorAction, requestSystemModeTransition } from "./api";
+import { fetchCausalityTrace, fetchExecutionChart, fetchExecutionReplay, fetchExecutionTimeline, fetchExecutionTrace, fetchOperatorModel, invokeOperatorAction } from "./api";
 import { classifyPanelSources } from "./sourceAuthority";
 import { DEFAULT_PREFLIGHT, DEFAULT_STATUS, type OperatorActionDefinition, type OperatorActionReceipt, type SystemModel } from "./types";
 
@@ -158,15 +158,6 @@ export function useOperatorModel(pollIntervalMs = 5000) {
 
 
 
-  const requestModeChange = useCallback(
-    async (targetMode: SystemModel["status"]["environment"], reason: string) => {
-      const receipt = await requestSystemModeTransition(targetMode, reason);
-      setActionReceipt(receipt);
-      return receipt;
-    },
-    [model],
-  );
-
   const runAction = useCallback(
     async (action: OperatorActionDefinition, args: { reason?: string; target_scope?: string; alert_id?: string }) => {
       const receipt = await invokeOperatorAction(action.action_key, args);
@@ -177,7 +168,7 @@ export function useOperatorModel(pollIntervalMs = 5000) {
   );
 
   return useMemo(
-    () => ({ model, loading, refresh, selectTimeline, timelineLoading, actionReceipt, runAction, requestModeChange }),
-    [actionReceipt, loading, model, refresh, runAction, requestModeChange, selectTimeline, timelineLoading],
+    () => ({ model, loading, refresh, selectTimeline, timelineLoading, actionReceipt, runAction }),
+    [actionReceipt, loading, model, refresh, runAction, selectTimeline, timelineLoading],
   );
 }

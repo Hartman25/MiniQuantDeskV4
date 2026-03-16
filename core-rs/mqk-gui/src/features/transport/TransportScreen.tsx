@@ -10,7 +10,7 @@ export function TransportScreen({ model }: { model: SystemModel }) {
   const t = model.transport;
   const truthState = panelTruthRenderState(model, "transport");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

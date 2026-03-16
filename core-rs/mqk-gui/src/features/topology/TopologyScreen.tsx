@@ -8,7 +8,7 @@ import type { SystemModel } from "../system/types";
 export function TopologyScreen({ model }: { model: SystemModel }) {
   const truthState = panelTruthRenderState(model, "topology");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 
