@@ -7,12 +7,8 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
-use axum::http::{HeaderValue, Method};
-use mqk_daemon::{bind, routes, state};
-use tower_http::{
-    cors::CorsLayer,
-    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
-};
+use mqk_daemon::{bind, cors, routes, state};
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{info, warn, Level};
 
 #[tokio::main]
@@ -48,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
-        .layer(cors_localhost_only());
+        .layer(cors::gui_cors_layer());
 
     let addr = bind::resolve_bind_addr_from_env()?;
     info!("mqk-daemon listening on http://{}", addr);
@@ -73,26 +69,4 @@ fn init_tracing() {
         .init();
 }
 
-/// CORS: allow only localhost origins.
-fn cors_localhost_only() -> CorsLayer {
-    let allowed_origins = [
-        "http://localhost",
-        "http://127.0.0.1",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:1420",
-        "http://127.0.0.1:1420",
-    ];
 
-    let origins: Vec<HeaderValue> = allowed_origins
-        .iter()
-        .filter_map(|o| HeaderValue::from_str(o).ok())
-        .collect();
-
-    CorsLayer::new()
-        .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST])
-        .allow_headers(tower_http::cors::Any)
-}

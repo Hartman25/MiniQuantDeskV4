@@ -5,6 +5,7 @@
 
 pub mod api_types;
 pub mod bind;
+pub mod cors;
 pub mod dev_gate;
 pub mod routes;
 pub mod state;
