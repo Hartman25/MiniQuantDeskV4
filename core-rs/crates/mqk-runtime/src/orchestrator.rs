@@ -844,6 +844,11 @@ fn validated_order_quantity(
     let effective_qty = signed_qty.checked_abs().ok_or_else(|| {
         anyhow!("invalid submit payload: quantity out of range for broker request")
     })?;
+    if effective_qty > i32::MAX as i64 {
+        return Err(anyhow!(
+            "invalid submit payload: quantity out of range for broker request"
+        ));
+    }
     if effective_qty == 0 {
         return Err(anyhow!(
             "invalid submit payload: effective quantity must be positive"
