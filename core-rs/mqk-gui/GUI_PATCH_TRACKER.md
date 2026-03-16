@@ -1,7 +1,7 @@
 # MiniQuantDesk GUI Patch Tracker (Source of Truth)
 
-Owner: Zach  
-Mode: **Option A** — GUI is a client; daemon is the control-plane (HTTP/SSE).  
+Owner: Zach
+Mode: **Option A** — GUI is a client; daemon is the control-plane (HTTP/SSE).
 Rule: **One patch at a time.** Each patch includes exact files + tests.
 
 ---
@@ -12,6 +12,43 @@ Rule: **One patch at a time.** Each patch includes exact files + tests.
 - IN-PROGRESS
 - DONE
 - BLOCKED (note why)
+
+---
+
+## Hardening Series (GUI/Daemon Operator Console, completed 2026-03)
+
+These patches hardened the GUI to institutional-grade truth enforcement and operator safety.
+Completed before the roadmap patches below.
+
+### H-1: Truth-state hard-closure at all screen boundaries
+**Status:** DONE
+**Files:** `DashboardScreen`, `ExecutionScreen`, `RiskScreen`, `ReconcileScreen`, `PortfolioScreen`,
+`SessionScreen`, `RuntimeScreen`, `OpsScreen`, `truthRendering.test.ts`
+**What changed:** All 8 critical live-data screens use `if (truthState !== null)` hard-block.
+Previously `stale` and `degraded` fell through silently or produced only a soft inline notice.
+7 new tests added. 18/18 truth tests pass.
+
+### H-2: Ops contract closure — `/api/v1/ops/action` mounted
+**Status:** DONE
+**Files:** `OpsScreen.tsx`, `api_types.rs` (`OpsActionRequest`), `routes.rs` (handler + mount),
+`scenario_gui_daemon_contract_gate.rs` (5th test)
+**What changed:** `/api/v1/ops/action` dispatches arm/disarm/start/stop/halt (200),
+change-system-mode (409 CONFLICT), unknown key (400). Mode-change buttons disabled with
+operator notice. Contract gate: 5/5 tests pass.
+
+### H-3: Canonical route authority tightening
+**Status:** DONE
+**Files:** `api.ts` (`invokeOperatorAction`), `OpsScreen.tsx` (`onChangeMode` removed),
+`screenRegistry.tsx`
+**What changed:** `invokeOperatorAction` no longer falls through to legacy on 400/403/409.
+Legacy fallback only on network error or 404. TypeScript zero errors. 18/18 truth tests pass.
+
+### H-4: Contract gate/waiver burn-down
+**Status:** DONE
+**Files:** `gui_daemon_contract_waivers.md`, `scenario_daemon_routes.rs`
+**What changed:** Waivers doc updated with `/api/v1/ops/action` enforced + `/api/v1/ops/change-mode`
+intentionally-unmounted. Stale `broker_config_present.is_null()` corrected to `== false`.
+Full daemon test suite: all pass.
 
 ---
 

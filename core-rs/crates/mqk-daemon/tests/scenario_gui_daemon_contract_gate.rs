@@ -524,12 +524,12 @@ async fn gui_ops_action_endpoint_dispatches_correctly() {
         Some("not_authoritative"),
         "change-system-mode disposition must be 'not_authoritative': {j}"
     );
-    // blocker must explain that a restart is required.
+    // blockers array must contain an entry explaining that a restart is required.
     assert!(
-        j["blocker"]
-            .as_str()
-            .is_some_and(|v| v.contains("restart")),
-        "change-system-mode blocker must mention restart: {j}"
+        j["blockers"]
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(|v| v.as_str().is_some_and(|s| s.contains("restart")))),
+        "change-system-mode blockers must mention restart: {j}"
     );
 
     // unknown key: must return 400 BAD_REQUEST, accepted=false.
