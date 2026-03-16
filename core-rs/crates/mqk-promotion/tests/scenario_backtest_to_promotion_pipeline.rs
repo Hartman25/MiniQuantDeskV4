@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use mqk_backtest::{BacktestFill, BacktestReport};
+use mqk_backtest::{derive_run_id, BacktestConfig, BacktestFill, BacktestReport};
 use mqk_portfolio::{Fill, Side};
 
 fn bf(inner: Fill) -> BacktestFill {
@@ -18,6 +18,33 @@ fn bf(inner: Fill) -> BacktestFill {
 use mqk_promotion::{
     evaluate_promotion, ArtifactLock, PromotionConfig, PromotionInput, StressSuiteResult,
 };
+
+/// Build a BacktestReport with deterministic real provenance but a synthetic equity curve.
+///
+/// Uses `derive_run_id` so `run_id` is non-nil and traceably derived from strategy+config,
+/// satisfying the provenance gate without requiring a full engine run.
+fn make_report_with_provenance(
+    strategy_name: &str,
+    equity_curve: Vec<(i64, i64)>,
+    fills: Vec<BacktestFill>,
+    halted: bool,
+    halt_reason: Option<String>,
+) -> BacktestReport {
+    let config_id = BacktestConfig::test_defaults().config_id();
+    let run_id = derive_run_id(strategy_name, &config_id);
+    BacktestReport {
+        strategy_name: strategy_name.to_string(),
+        run_id,
+        config_id,
+        halted,
+        halt_reason,
+        equity_curve,
+        orders: vec![],
+        fills,
+        last_prices: BTreeMap::new(),
+        execution_blocked: false,
+    }
+}
 
 /// Build a profitable BacktestReport: steady equity growth, profitable fills.
 fn make_profitable_report() -> BacktestReport {
@@ -39,18 +66,7 @@ fn make_profitable_report() -> BacktestReport {
         bf(Fill::new("MSFT", Side::Sell, 50, 25_000_000, 0)),
     ];
 
-    BacktestReport {
-        halted: false,
-        halt_reason: None,
-        equity_curve,
-        strategy_name: String::new(),
-        run_id: uuid::Uuid::nil(),
-        config_id: uuid::Uuid::nil(),
-        orders: vec![],
-        fills,
-        last_prices: BTreeMap::new(),
-        execution_blocked: false,
-    }
+    make_report_with_provenance("pipeline_profitable_v1", equity_curve, fills, false, None)
 }
 
 /// Build an unprofitable BacktestReport: declining equity, losing fills.
@@ -73,18 +89,7 @@ fn make_unprofitable_report() -> BacktestReport {
         bf(Fill::new("MSFT", Side::Sell, 50, 20_000_000, 0)), // loss
     ];
 
-    BacktestReport {
-        halted: false,
-        halt_reason: None,
-        equity_curve,
-        strategy_name: String::new(),
-        run_id: uuid::Uuid::nil(),
-        config_id: uuid::Uuid::nil(),
-        orders: vec![],
-        fills,
-        last_prices: BTreeMap::new(),
-        execution_blocked: false,
-    }
+    make_report_with_provenance("pipeline_losing_v1", equity_curve, fills, false, None)
 }
 
 /// Lenient config that profitable report should easily pass.
@@ -228,18 +233,13 @@ fn halted_backtest_metrics_computed_from_partial_curve() {
         bf(Fill::new("AAPL", Side::Sell, 10, 10_500_000, 0)),
     ];
 
-    let report = BacktestReport {
-        halted: true,
-        halt_reason: Some("daily_loss_limit".to_string()),
+    let report = make_report_with_provenance(
+        "pipeline_halted_v1",
         equity_curve,
-        strategy_name: String::new(),
-        run_id: uuid::Uuid::nil(),
-        config_id: uuid::Uuid::nil(),
-        orders: vec![],
         fills,
-        last_prices: BTreeMap::new(),
-        execution_blocked: false,
-    };
+        true,
+        Some("daily_loss_limit".to_string()),
+    );
 
     let config = lenient_config();
     let input = PromotionInput {

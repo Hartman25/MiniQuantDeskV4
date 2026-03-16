@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
 use mqk_portfolio::{Fill, Side};
+use uuid::Uuid;
 
 use crate::types::{
     Candidate, PromotionConfig, PromotionDecision, PromotionInput, PromotionMetrics,
-    PromotionReport,
+    PromotionReport, RunProvenance,
 };
 
 // ============================================================================
@@ -15,6 +16,32 @@ use crate::types::{
 pub fn evaluate_promotion(config: &PromotionConfig, input: &PromotionInput) -> PromotionDecision {
     let metrics = compute_metrics(input);
     let mut fail_reasons = Vec::new();
+
+    // Provenance gate: run_id must be non-nil.
+    //
+    // A nil run_id means the BacktestReport was constructed by hand (test fixture
+    // or fabricated input) rather than produced by the backtest engine.
+    // Promotion must not pass on fabricated reports.
+    if input.report.run_id == Uuid::nil() {
+        fail_reasons.push(
+            "Provenance rejected: run_id is nil — BacktestReport was not produced by the \
+             backtest engine. Only engine-produced reports with a deterministic run_id \
+             (derived via derive_run_id) are eligible for promotion."
+                .to_string(),
+        );
+    }
+
+    // Provenance gate: strategy_name must be non-empty.
+    //
+    // An empty strategy_name means no strategy was registered before the run,
+    // which is not a valid promotion candidate.
+    if input.report.strategy_name.is_empty() {
+        fail_reasons.push(
+            "Provenance rejected: strategy_name is empty — no strategy was registered for \
+             this run. A promotion candidate must be associated with a named strategy."
+                .to_string(),
+        );
+    }
 
     // Patch B6 — Artifact hash-lock gate: manifest + audit chain must be verified.
     if input.artifact_lock.is_none() {
@@ -194,14 +221,26 @@ pub fn select_best(
     best
 }
 
-/// Build a full PromotionReport from a decision (convenience for single eval).
+/// Build a full PromotionReport from a decision and the originating input.
+///
+/// The `input` is used to extract `RunProvenance` so that the stored report
+/// carries the run_id, strategy_name, and config_id of the evaluated backtest.
 pub fn build_report(
     config: &PromotionConfig,
+    input: &PromotionInput,
     decision: &PromotionDecision,
     winner_id: Option<String>,
 ) -> PromotionReport {
+    let provenance = RunProvenance {
+        run_id: input.report.run_id,
+        strategy_name: input.report.strategy_name.clone(),
+        config_id: input.report.config_id,
+        halted: input.report.halted,
+        halt_reason: input.report.halt_reason.clone(),
+    };
     PromotionReport {
         config: *config,
+        provenance,
         metrics: decision.metrics.clone(),
         decision: decision.clone(),
         winner_id,
@@ -268,6 +307,7 @@ pub fn compute_metrics(input: &PromotionInput) -> PromotionMetrics {
         duration_days,
         num_months,
         num_trades,
+        execution_blocked: input.report.execution_blocked,
     }
 }
 

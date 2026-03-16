@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mqk_backtest::BacktestReport;
+use mqk_backtest::{derive_run_id, BacktestConfig, BacktestReport};
 use mqk_promotion::{evaluate_promotion, PromotionConfig, PromotionInput};
 
 /// Synthetic equity curve that clearly violates at least 2 thresholds:
@@ -12,14 +12,17 @@ use mqk_promotion::{evaluate_promotion, PromotionConfig, PromotionInput};
 fn fails_when_below_multiple_thresholds() {
     let day = 86_400i64;
 
-    // Flat equity for 2 days — no growth, no drawdown
+    // Flat equity for 2 days — no growth, no drawdown.
+    // Real provenance so this test fails on METRICS, not on provenance gates.
+    let config_id = BacktestConfig::test_defaults().config_id();
+    let run_id = derive_run_id("flat_equity_strategy_v1", &config_id);
     let report = BacktestReport {
         halted: false,
         halt_reason: None,
         equity_curve: vec![(0, 1_000_000), (day, 1_000_000), (2 * day, 1_000_000)],
-        strategy_name: String::new(),
-        run_id: uuid::Uuid::nil(),
-        config_id: uuid::Uuid::nil(),
+        strategy_name: "flat_equity_strategy_v1".to_string(),
+        run_id,
+        config_id,
         orders: vec![],
         fills: vec![],
         last_prices: BTreeMap::new(),
@@ -69,7 +72,10 @@ fn fails_with_large_drawdown() {
     let day = 86_400i64;
     let month = 30 * day;
 
-    // Equity drops from 1M to 600K (40% drawdown), then recovers to 800K
+    // Equity drops from 1M to 600K (40% drawdown), then recovers to 800K.
+    // Real provenance so this test fails on METRICS (MDD), not on provenance gates.
+    let config_id = BacktestConfig::test_defaults().config_id();
+    let run_id = derive_run_id("large_drawdown_strategy_v1", &config_id);
     let report = BacktestReport {
         halted: false,
         halt_reason: None,
@@ -79,9 +85,9 @@ fn fails_with_large_drawdown() {
             (2 * month, 700_000),
             (3 * month, 800_000), // end below start
         ],
-        strategy_name: String::new(),
-        run_id: uuid::Uuid::nil(),
-        config_id: uuid::Uuid::nil(),
+        strategy_name: "large_drawdown_strategy_v1".to_string(),
+        run_id,
+        config_id,
         orders: vec![],
         fills: vec![],
         last_prices: BTreeMap::new(),

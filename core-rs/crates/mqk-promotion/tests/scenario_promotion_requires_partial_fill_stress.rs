@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use mqk_backtest::{BacktestFill, BacktestReport};
+use mqk_backtest::{derive_run_id, BacktestConfig, BacktestFill, BacktestReport};
 use mqk_portfolio::{Fill, Side};
 
 fn bf(inner: Fill) -> BacktestFill {
@@ -56,13 +56,15 @@ fn lenient_config() -> PromotionConfig {
 }
 
 fn good_report() -> BacktestReport {
+    let config_id = BacktestConfig::test_defaults().config_id();
+    let run_id = derive_run_id("stress_suite_test_strategy_v1", &config_id);
     BacktestReport {
         halted: false,
         halt_reason: None,
         equity_curve: good_equity_curve(),
-        strategy_name: String::new(),
-        run_id: uuid::Uuid::nil(),
-        config_id: uuid::Uuid::nil(),
+        strategy_name: "stress_suite_test_strategy_v1".to_string(),
+        run_id,
+        config_id,
         orders: vec![],
         fills: good_fills(),
         last_prices: BTreeMap::new(),
@@ -222,13 +224,15 @@ fn partial_fills_profit_factor_computed_correctly() {
     ];
 
     let day = 86_400i64;
+    let config_id = BacktestConfig::test_defaults().config_id();
+    let run_id = derive_run_id("partial_fills_pf_strategy_v1", &config_id);
     let report = BacktestReport {
         halted: false,
         halt_reason: None,
         equity_curve: vec![(0, 1_000_000_000), (180 * day, 1_100_000_000)],
-        strategy_name: String::new(),
-        run_id: uuid::Uuid::nil(),
-        config_id: uuid::Uuid::nil(),
+        strategy_name: "partial_fills_pf_strategy_v1".to_string(),
+        run_id,
+        config_id,
         orders: vec![],
         fills,
         last_prices: BTreeMap::new(),
@@ -287,13 +291,15 @@ fn cancel_after_partial_fill_no_phantom_pnl() {
     ];
 
     let day = 86_400i64;
+    let config_id = BacktestConfig::test_defaults().config_id();
+    let run_id = derive_run_id("cancel_partial_fill_strategy_v1", &config_id);
     let report = BacktestReport {
         halted: false,
         halt_reason: None,
         equity_curve: vec![(0, 1_000_000_000), (180 * day, 1_100_000_000)],
-        strategy_name: String::new(),
-        run_id: uuid::Uuid::nil(),
-        config_id: uuid::Uuid::nil(),
+        strategy_name: "cancel_partial_fill_strategy_v1".to_string(),
+        run_id,
+        config_id,
         orders: vec![],
         fills,
         last_prices: BTreeMap::new(),

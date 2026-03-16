@@ -11,3 +11,6 @@ serde_json = "1"
 uuid = { version = "1", features = ["serde", "v4"] }
 
 mqk-backtest = { path = "../mqk-backtest" }
+
+[dev-dependencies]
+mqk-portfolio = { path = "../mqk-portfolio" }

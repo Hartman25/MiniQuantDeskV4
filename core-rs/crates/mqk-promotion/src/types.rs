@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use mqk_backtest::BacktestReport;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::artifact_gate::ArtifactLock;
 
@@ -113,6 +114,14 @@ pub struct PromotionMetrics {
     pub duration_days: f64,
     pub num_months: usize,
     pub num_trades: usize,
+    /// Whether integrity checks blocked execution during the backtest run.
+    ///
+    /// When `true`, all fills were produced before the integrity gate fired.
+    /// A run where execution was blocked from bar 1 onward has zero fills and
+    /// zero trades, which typically causes CAGR, profit_factor, and
+    /// profitable_months_pct to all be 0 — promotion will fail on metrics alone.
+    /// Surfaces `BacktestReport.execution_blocked` in the promotion record.
+    pub execution_blocked: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -132,10 +141,37 @@ pub struct PromotionDecision {
 // Report
 // ---------------------------------------------------------------------------
 
+/// Backtest run provenance carried through to the promotion report.
+///
+/// These fields link a promotion report back to the exact backtest run
+/// that was evaluated. They are extracted from [`BacktestReport`] and
+/// stored in the promotion artifact so that a stored `promotion_report.json`
+/// is unambiguously traceable to its source run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunProvenance {
+    /// Deterministic run identity UUID from [`BacktestReport::run_id`].
+    /// Non-nil when the report was produced by the backtest engine.
+    pub run_id: Uuid,
+    /// Strategy name from [`BacktestReport::strategy_name`].
+    pub strategy_name: String,
+    /// Config identity UUID from [`BacktestReport::config_id`].
+    pub config_id: Uuid,
+    /// Whether the run halted early.
+    pub halted: bool,
+    /// Halt reason, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub halt_reason: Option<String>,
+}
+
 /// Full promotion report artifact (serializable to JSON).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromotionReport {
     pub config: PromotionConfig,
+    /// Provenance of the backtest run that was promoted/rejected.
+    ///
+    /// Enables a stored `promotion_report.json` to be traced back to the
+    /// exact run_id, strategy, and config that generated it.
+    pub provenance: RunProvenance,
     pub metrics: PromotionMetrics,
     pub decision: PromotionDecision,
     /// Winner candidate id (set by select_best, None for single evaluation).

@@ -9,5 +9,5 @@ pub use evaluator::{
 };
 pub use types::{
     write_promotion_report_json, Candidate, PromotionConfig, PromotionDecision, PromotionInput,
-    PromotionMetrics, PromotionReport, StressSuiteResult,
+    PromotionMetrics, PromotionReport, RunProvenance, StressSuiteResult,
 };

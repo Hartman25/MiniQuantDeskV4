@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mqk_audit::AuditWriter;
-use mqk_backtest::BacktestReport;
+use mqk_backtest::{derive_run_id, BacktestConfig, BacktestReport};
 use mqk_promotion::{
     evaluate_promotion, lock_artifact_from_str, ArtifactLock, LockError, PromotionConfig,
     PromotionInput, StressSuiteResult,
@@ -90,13 +90,15 @@ fn good_equity_curve() -> Vec<(i64, i64)> {
 }
 
 fn good_report() -> BacktestReport {
+    let config_id = BacktestConfig::test_defaults().config_id();
+    let run_id = derive_run_id("golden_artifact_strategy_v1", &config_id);
     BacktestReport {
         halted: false,
         halt_reason: None,
         equity_curve: good_equity_curve(),
-        strategy_name: String::new(),
-        run_id: uuid::Uuid::nil(),
-        config_id: uuid::Uuid::nil(),
+        strategy_name: "golden_artifact_strategy_v1".to_string(),
+        run_id,
+        config_id,
         orders: vec![],
         fills: vec![],
         last_prices: BTreeMap::new(),

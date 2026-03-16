@@ -561,8 +561,22 @@ const BACKTEST_RUN_NS: Uuid = Uuid::from_bytes([
 /// Derive a deterministic backtest run ID.
 ///
 /// BKT-05P: run identity is a UUIDv5 over `"mqk-bkt.run.v1|{strategy_name}|{config_id}"`.
-/// The `config_id` already encodes every parameter, so this ID is unique per
-/// (strategy × full config). Suitable for artifact manifests and audit trails.
+/// The `config_id` encodes every [`BacktestConfig`] parameter, so this ID is unique per
+/// (strategy × full config).
+///
+/// # Input-data identity limitation
+///
+/// **The input bar data is NOT incorporated into this ID.**
+/// Two runs with different bar data but the same strategy name and config will produce
+/// the **same** `run_id`. This is a known provenance gap: full input-data identity
+/// (a hash of the bar sequence) has not yet been wired into the identity chain.
+///
+/// Until that gap is closed, callers must not rely on `run_id` alone to distinguish
+/// runs that differ only in input data. When writing artifact manifests, include the
+/// data source, date range, and symbol list alongside `run_id` in the manifest so
+/// the artifact set is unambiguously identified even without a bar-sequence hash.
+///
+/// Tracking: `BacktestReport.input_data_hash` will carry this value when implemented.
 pub fn derive_run_id(strategy_name: &str, config_id: &Uuid) -> Uuid {
     let data = format!("mqk-bkt.run.v1|{}|{}", strategy_name, config_id);
     Uuid::new_v5(&BACKTEST_RUN_NS, data.as_bytes())
@@ -579,7 +593,13 @@ pub struct BacktestReport {
     /// Populated from `StrategySpec::name`; empty string if no strategy was registered.
     pub strategy_name: String,
     /// BKT-05P: Deterministic run identity UUID.
-    /// Derived via UUIDv5 over (strategy_name, config_id). Stable across identical replays.
+    ///
+    /// Derived via `derive_run_id(strategy_name, config_id)`. Stable across replays that
+    /// use the same strategy, same config, **and same input bar data**.
+    ///
+    /// **Input-data identity gap**: bar data is NOT hashed into this ID. Two runs with
+    /// different bar sequences but the same strategy + config produce the same `run_id`.
+    /// See [`derive_run_id`] for the full limitation note.
     pub run_id: Uuid,
     /// Deterministic config identity UUID (UUIDv5 over canonical config string).
     /// Suitable as the `config_hash` in artifact manifests.

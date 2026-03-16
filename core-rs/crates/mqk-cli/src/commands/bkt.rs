@@ -138,6 +138,7 @@ pub async fn run_backtest_db(
     initial_cash_micros: i64,
     shadow: bool,
     integrity_enabled: bool,
+    out_dir: Option<String>,
 ) -> Result<()> {
     if timeframe_secs <= 0 {
         anyhow::bail!("--timeframe-secs must be > 0");
@@ -213,11 +214,46 @@ pub async fn run_backtest_db(
 
     let report = engine.run(&bars).context("backtest run failed")?;
 
+    // BKT-05P / BKT-06P: identity fields come directly from the report.
+    let config_hash = report.config_id.to_string();
     let git_hash = bkt_git_hash();
 
     println!("run_id={}", report.run_id);
     println!("strategy={}", report.strategy_name);
     println!("git_hash={}", git_hash);
+    println!("config_hash={}", config_hash);
+
+    // BKT-02P: if an output directory is requested, initialize the full run
+    // artifact structure (manifest.json + placeholder files) before writing
+    // the backtest report into the run subdirectory.
+    if let Some(dir) = out_dir.as_deref() {
+        let host_fp = bkt_host_fingerprint();
+        let init_result = mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
+            exports_root: Path::new(dir),
+            schema_version: 1,
+            run_id: report.run_id,
+            engine_id: "mqk-backtest",
+            mode: "backtest",
+            git_hash: &git_hash,
+            config_hash: &config_hash,
+            host_fingerprint: &host_fp,
+            now_utc: Utc::now(), // allow: operational manifest timestamp
+        })
+        .with_context(|| format!("init run artifacts failed: {}", dir))?;
+
+        mqk_artifacts::write_backtest_report(&init_result.run_dir, &report).with_context(|| {
+            format!(
+                "write backtest artifacts failed: {}",
+                init_result.run_dir.display()
+            )
+        })?;
+
+        println!("artifacts_written=true");
+        println!("artifacts_dir={}", init_result.run_dir.display());
+        println!("manifest={}", init_result.manifest_path.display());
+    } else {
+        println!("artifacts_written=false");
+    }
 
     let final_equity = report
         .equity_curve

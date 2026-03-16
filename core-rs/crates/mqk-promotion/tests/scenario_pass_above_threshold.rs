@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mqk_backtest::{BacktestFill, BacktestReport};
+use mqk_backtest::{derive_run_id, BacktestConfig, BacktestFill, BacktestReport};
 use mqk_portfolio::{Fill, Side};
 
 fn bf(inner: Fill) -> BacktestFill {
@@ -41,13 +41,16 @@ fn passes_all_thresholds() {
         bf(Fill::new("GOOG", Side::Buy, 80, 12_000_000, 0)),
     ];
 
+    // Use real provenance: non-nil run_id derived from a named strategy + config identity.
+    let config_id = BacktestConfig::test_defaults().config_id();
+    let run_id = derive_run_id("passes_all_thresholds_strategy", &config_id);
     let report = BacktestReport {
         halted: false,
         halt_reason: None,
         equity_curve,
-        strategy_name: String::new(),
-        run_id: uuid::Uuid::nil(),
-        config_id: uuid::Uuid::nil(),
+        strategy_name: "passes_all_thresholds_strategy".to_string(),
+        run_id,
+        config_id,
         orders: vec![],
         fills,
         last_prices: BTreeMap::new(),
@@ -101,8 +104,8 @@ fn passes_all_thresholds() {
     );
     assert_eq!(decision.metrics.num_trades, 3, "should have 3 round trips");
 
-    // Also test the report JSON artifact writer
-    let report = build_report(&config, &decision, None);
+    // Also test the report JSON artifact writer — verify provenance is stored in output
+    let report = build_report(&config, &input, &decision, None);
     let tmp_dir = std::env::temp_dir().join(format!("mqk_promo_test_pass_{}", std::process::id()));
     let path = write_promotion_report_json(&tmp_dir, &report).unwrap();
     assert!(path.exists(), "report file should exist");

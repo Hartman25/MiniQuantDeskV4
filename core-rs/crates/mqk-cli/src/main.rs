@@ -158,6 +158,10 @@ enum BacktestCmd {
         /// Enable integrity checks.
         #[arg(long, default_value_t = true)]
         integrity_enabled: bool,
+
+        /// Optional output directory for deterministic artifacts (fills/equity/metrics/manifest).
+        #[arg(long)]
+        out_dir: Option<String>,
     },
 }
 
@@ -473,6 +477,7 @@ async fn main() -> Result<()> {
                 initial_cash_micros,
                 shadow,
                 integrity_enabled,
+                out_dir,
             } => {
                 run_backtest_db(
                     timeframe,
@@ -485,6 +490,7 @@ async fn main() -> Result<()> {
                     initial_cash_micros,
                     shadow,
                     integrity_enabled,
+                    out_dir,
                 )
                 .await?;
             }

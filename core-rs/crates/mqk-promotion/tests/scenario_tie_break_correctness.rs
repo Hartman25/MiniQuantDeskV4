@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mqk_backtest::{BacktestFill, BacktestReport};
+use mqk_backtest::{derive_run_id, BacktestConfig, BacktestFill, BacktestReport};
 use mqk_portfolio::{Fill, Side};
 
 fn bf(inner: Fill) -> BacktestFill {
@@ -10,6 +10,31 @@ use mqk_promotion::{
     pick_winner, select_best, ArtifactLock, Candidate, PromotionConfig, PromotionInput,
     PromotionMetrics, StressSuiteResult,
 };
+
+/// Build a BacktestReport with deterministic (non-nil) provenance but synthetic equity/fills.
+///
+/// Uses `derive_run_id` + `BacktestConfig::test_defaults().config_id()` so the provenance
+/// gates pass without requiring a full engine run.
+fn report_with_provenance(
+    strategy_name: &str,
+    equity_curve: Vec<(i64, i64)>,
+    fills: Vec<BacktestFill>,
+) -> BacktestReport {
+    let config_id = BacktestConfig::test_defaults().config_id();
+    let run_id = derive_run_id(strategy_name, &config_id);
+    BacktestReport {
+        strategy_name: strategy_name.to_string(),
+        run_id,
+        config_id,
+        halted: false,
+        halt_reason: None,
+        equity_curve,
+        orders: vec![],
+        fills,
+        last_prices: BTreeMap::new(),
+        execution_blocked: false,
+    }
+}
 
 /// Helper: build a monotonically growing equity curve over N months.
 /// growth_per_month is a fraction (e.g. 0.05 = 5%).
@@ -68,6 +93,7 @@ fn tiebreak_equal_sharpe_lower_mdd_wins() {
         duration_days: 180.0,
         num_months: 6,
         num_trades: 5,
+        execution_blocked: false,
     };
 
     let metrics_b = PromotionMetrics {
@@ -81,6 +107,7 @@ fn tiebreak_equal_sharpe_lower_mdd_wins() {
         duration_days: 180.0,
         num_months: 6,
         num_trades: 5,
+        execution_blocked: false,
     };
 
     let winner = pick_winner("A", &metrics_a, "B", &metrics_b);
@@ -117,18 +144,7 @@ fn select_best_picks_correct_winner() {
             id: "C1".into(),
             input: PromotionInput {
                 initial_equity_micros: 1_000_000,
-                report: BacktestReport {
-                    halted: false,
-                    halt_reason: None,
-                    equity_curve: eq_1,
-                    strategy_name: String::new(),
-                    run_id: uuid::Uuid::nil(),
-                    config_id: uuid::Uuid::nil(),
-                    orders: vec![],
-                    fills: make_profitable_fills(),
-                    last_prices: BTreeMap::new(),
-                    execution_blocked: false,
-                },
+                report: report_with_provenance("candidate_c1", eq_1, make_profitable_fills()),
                 stress_suite: Some(StressSuiteResult::pass(1)),
                 artifact_lock: Some(ArtifactLock::new_for_testing("cfg", "git")), // B6
             },
@@ -137,38 +153,17 @@ fn select_best_picks_correct_winner() {
             id: "C2".into(),
             input: PromotionInput {
                 initial_equity_micros: 1_000_000,
-                report: BacktestReport {
-                    halted: false,
-                    halt_reason: None,
-                    equity_curve: eq_2,
-                    strategy_name: String::new(),
-                    run_id: uuid::Uuid::nil(),
-                    config_id: uuid::Uuid::nil(),
-                    orders: vec![],
-                    fills: vec![],
-                    last_prices: BTreeMap::new(),
-                    execution_blocked: false,
-                },
+                // C2 fails on MDD; provenance gates pass but MDD gate fires.
+                report: report_with_provenance("candidate_c2", eq_2, vec![]),
                 stress_suite: Some(StressSuiteResult::pass(1)),
-                artifact_lock: None, // B6: C2 fails on MDD; lock not needed
+                artifact_lock: Some(ArtifactLock::new_for_testing("cfg", "git")), // needs lock; fails on metrics
             },
         },
         Candidate {
             id: "C3".into(),
             input: PromotionInput {
                 initial_equity_micros: 1_000_000,
-                report: BacktestReport {
-                    halted: false,
-                    halt_reason: None,
-                    equity_curve: eq_3,
-                    strategy_name: String::new(),
-                    run_id: uuid::Uuid::nil(),
-                    config_id: uuid::Uuid::nil(),
-                    orders: vec![],
-                    fills: make_profitable_fills(),
-                    last_prices: BTreeMap::new(),
-                    execution_blocked: false,
-                },
+                report: report_with_provenance("candidate_c3", eq_3, make_profitable_fills()),
                 stress_suite: Some(StressSuiteResult::pass(1)),
                 artifact_lock: Some(ArtifactLock::new_for_testing("cfg", "git")), // B6
             },
@@ -203,6 +198,7 @@ fn tiebreak_lexicographic_fallback() {
         duration_days: 180.0,
         num_months: 6,
         num_trades: 5,
+        execution_blocked: false,
     };
 
     let winner = pick_winner("Beta", &metrics, "Alpha", &metrics);

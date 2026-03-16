@@ -25,6 +25,7 @@ fn finite_metrics() -> PromotionMetrics {
         duration_days: 365.0,
         num_months: 12,
         num_trades: 50,
+        execution_blocked: false,
     }
 }
 
