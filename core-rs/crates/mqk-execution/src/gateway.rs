@@ -222,6 +222,7 @@ where
     ///
     /// `pub(crate)` - FC-3: external callers must use the production wiring path
     /// or the test escape hatch `BrokerGateway::for_test`.
+    #[cfg(any(test, feature = "testkit", feature = "runtime-boundary"))]
     pub(crate) fn new(broker: B, integrity: IG, risk: RG, reconcile: RecG) -> Self {
         Self {
             router: OrderRouter::new(broker),

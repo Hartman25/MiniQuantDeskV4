@@ -420,6 +420,7 @@ pub(crate) struct OrderRouter<B: BrokerAdapter> {
 }
 
 impl<B: BrokerAdapter> OrderRouter<B> {
+    #[cfg(any(test, feature = "testkit", feature = "runtime-boundary"))]
     pub(crate) fn new(broker: B) -> Self {
         Self { broker }
     }
