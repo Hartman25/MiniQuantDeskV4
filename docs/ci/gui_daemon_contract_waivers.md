@@ -40,13 +40,19 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
 - `/api/v1/audit/artifacts` — shape + backend identity
 - `/api/v1/ops/operator-timeline` — shape + backend identity
 
-### Operator action dispatcher
+### Operator action dispatcher and catalog
 
 - `/api/v1/ops/action` — POST; dispatch semantics proven:
   - `arm-execution` → 200, accepted=true, disposition="applied"
   - `disarm-execution` → 200, accepted=true, disposition="applied"
   - `change-system-mode` → 409 CONFLICT, accepted=false, disposition="not_authoritative" (mode transition requires daemon restart; this action key is intentionally not authoritative via API)
   - unknown key → 400 BAD_REQUEST, accepted=false
+
+- `/api/v1/ops/catalog` — GET; daemon-authoritative Action Catalog:
+  - Returns `canonical_route` + `actions` array (exactly 5 entries in test state)
+  - Each entry: `action_key`, `label`, `level`, `description`, `requires_reason`, `confirm_text`, `enabled`, `disabled_reason`
+  - State-correct availability proven: disarmed → arm-execution=true, disarm-execution=false; idle → start-system=true, stop-system=false; not-halted → kill-switch=true
+  - `change-system-mode` is absent (would return 409 from dispatcher)
 
 Note: `/api/v1/ops/change-mode` is intentionally NOT mounted. Mode transitions require a controlled restart with configuration reload. The GUI disables mode-change buttons and surfaces a panel notice. The `change-system-mode` action key through `/api/v1/ops/action` returns 409 as a defense-in-depth rejection.
 

@@ -59,13 +59,14 @@ Full daemon test suite: all pass.
 guard to canonical `if (truthState !== null)` hard-block. `stale` and `degraded` now block
 everywhere, not just on the 8 original live-data screens. TSC clean. 18/18 truth tests pass.
 
-### H-6: Action catalog derived from daemon truth
+### H-6: Action catalog derived from daemon truth (superseded by PC-4 below)
 **Status:** DONE
 **Files:** `api.ts` (`buildActionCatalog`, `resolvedStatus` extraction)
 **What changed:** `actionCatalog` was hardcoded `[]`. Now derived via `buildActionCatalog(resolvedStatus,
 connected)` which reads `execution_armed`, `kill_switch_active`, `runtime_status` from the
 daemon-fetched `SystemStatus`. Correct arm/disarm/start/stop/kill-switch entries surface
 automatically from live state. TSC clean.
+**Note:** Superseded by PC-4 (daemon-backed catalog). `buildActionCatalog` is fully removed in PC-4.
 
 ### H-7: Dead mode-change control paths removed
 **Status:** DONE
@@ -91,6 +92,43 @@ hard-block. TSC clean.
 from "Explicitly deferred" to enforced. New test
 `gui_contract_recently_promoted_array_surfaces_have_expected_shape` proves 200 + empty
 array in test state for both. Contract gate: 6/6 pass.
+
+### PC-1: Final truth-model hardening — operator-console endstate verification
+**Status:** DONE
+**Files:** `api.ts` (fallback authority audit, `executionOrders`/`executionSummary` propagation)
+**What changed:** Verified `portfolioSummary`, `positions`, `openOrders`, `fills` legacy
+fallbacks already propagate degraded authority. Added explicit canonical guards for
+`executionOrders` and `executionSummary`. TSC clean.
+
+### PC-2: Legacy status fallback truth propagation
+**Status:** DONE
+**Files:** `api.ts` (status mock-section push when legacy fires)
+**What changed:** When canonical `/api/v1/system/status` fails and `/v1/status` is used,
+"status" is pushed to `usedMockSections`. Ops panel authority degrades to "placeholder".
+Ops truth gate fires when only legacy status resolved.
+
+### PC-3: requestSystemModeTransition fully removed
+**Status:** DONE
+**Files:** `useOperatorModel.ts`, `screenRegistry.tsx`, `AppShell.tsx`, `api.ts`
+**What changed:** Entire mode-change chain (`handleChangeMode` → `requestModeChange` →
+`requestSystemModeTransition` → `/api/v1/ops/change-mode`) deleted. Zero grep hits.
+Comment documenting removal added to `api.ts`.
+
+### PC-4: Daemon-backed Action Catalog (FINAL CLOSURE)
+**Status:** DONE
+**Files:**
+- `core-rs/crates/mqk-daemon/src/api_types.rs` — `ActionCatalogEntry`, `ActionCatalogResponse`
+- `core-rs/crates/mqk-daemon/src/routes.rs` — `ops_catalog` handler, mounted as public GET
+- `core-rs/mqk-gui/src/features/system/types.ts` — `OperatorActionDefinition` union pruned to 7 daemon-supported keys; `enabled` + `disabledReason` fields added
+- `core-rs/mqk-gui/src/features/system/api.ts` — `buildActionCatalog()` removed; catalog fetched from `GET /api/v1/ops/catalog`; catalog resolution before `dataSource` so failures degrade ops panel authority
+- `core-rs/mqk-gui/src/features/system/sourceAuthority.ts` — `/ops/catalog` added to ops panel runtime hints; `actionCatalog` added to ops panel placeholder hints
+- `core-rs/mqk-gui/src/features/system/mockData.ts` — `MOCK_ACTION_CATALOG` pruned to 5 daemon-supported entries with `enabled` field
+- `core-rs/crates/mqk-daemon/tests/scenario_gui_daemon_contract_gate.rs` — `gui_ops_catalog_endpoint_is_daemon_authoritative` test added (7th test)
+- `docs/ci/gui_daemon_contract_waivers.md` — `/api/v1/ops/catalog` added to enforced section
+**What changed:** Action Catalog is no longer client-synthesized. Daemon serves `GET /api/v1/ops/catalog`
+with state-aware `enabled`/`disabled_reason` per entry. Fantasy action keys removed from type union.
+Catalog failure degrades ops panel truth authority and triggers truth gate. Contract gate: 7/7 pass.
+TSC clean. 30/30 GUI tests pass.
 
 ---
 
