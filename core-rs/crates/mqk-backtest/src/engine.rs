@@ -33,8 +33,8 @@ use mqk_strategy::{
 };
 
 use crate::types::{
-    BacktestBar, BacktestConfig, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport,
-    OrderStatus,
+    derive_run_id, BacktestBar, BacktestConfig, BacktestFill, BacktestOrder, BacktestOrderSide,
+    BacktestReport, OrderStatus,
 };
 
 /// Backtest error variants.
@@ -508,7 +508,18 @@ impl BacktestEngine {
             self.equity_curve.push((bar.end_ts, equity));
         }
 
+        // BKT-05P: strategy identity — derive from spec if registered.
+        let strategy_name = self
+            .host
+            .spec()
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        let config_id = self.config.config_id();
+        let run_id = derive_run_id(&strategy_name, &config_id);
+
         Ok(BacktestReport {
+            strategy_name,
+            run_id,
             halted: self.halted,
             halt_reason: self.halt_reason.clone(),
             equity_curve: self.equity_curve.clone(),

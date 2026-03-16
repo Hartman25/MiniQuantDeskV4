@@ -1757,22 +1757,6 @@ fn reconcile_order_status_from_schema(raw: &str) -> mqk_reconcile::OrderStatus {
     }
 }
 
-fn reconcile_local_snapshot_from_runtime(
-    snapshot: &mqk_runtime::observability::ExecutionSnapshot,
-) -> mqk_reconcile::LocalSnapshot {
-    let positions = snapshot
-        .portfolio
-        .positions
-        .iter()
-        .map(|position| (position.symbol.clone(), position.net_qty))
-        .collect();
-
-    mqk_reconcile::LocalSnapshot {
-        orders: BTreeMap::new(),
-        positions,
-    }
-}
-
 /// DMON-05: like `reconcile_local_snapshot_from_runtime` but also includes
 /// active orders, using the side cache to supply the required `Side` field.
 fn reconcile_local_snapshot_from_runtime_with_sides(

@@ -532,21 +532,6 @@ async fn environment_and_live_routing_truth(
     (environment, live_routing_enabled)
 }
 
-fn is_terminal_order_status(status: &str) -> bool {
-    matches!(
-        status,
-        "filled" | "cancelled" | "canceled" | "rejected" | "expired" | "done_for_day"
-    )
-}
-
-fn is_pending_order_status(status: &str) -> bool {
-    matches!(status, "new" | "pending" | "accepted")
-}
-
-fn is_dispatching_order_status(status: &str) -> bool {
-    status.contains("submit")
-}
-
 fn position_market_value(position: &BrokerPosition) -> f64 {
     parse_decimal(&position.qty) * parse_decimal(&position.avg_price)
 }

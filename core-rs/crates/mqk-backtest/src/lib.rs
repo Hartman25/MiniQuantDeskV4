@@ -21,6 +21,6 @@ pub use corporate_actions::{CorporateActionPolicy, ForbidEntry}; // Patch B4
 pub use engine::{BacktestEngine, BacktestError};
 pub use loader::{load_csv_file, parse_csv_bars, LoadError};
 pub use types::{
-    BacktestBar, BacktestConfig, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport,
-    CommissionModel, OrderStatus, StressProfile,
+    derive_run_id, BacktestBar, BacktestConfig, BacktestFill, BacktestOrder, BacktestOrderSide,
+    BacktestReport, CommissionModel, OrderStatus, StressProfile,
 };

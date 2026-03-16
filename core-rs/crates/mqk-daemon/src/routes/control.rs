@@ -49,6 +49,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/control/arm", post(arm))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn operator_action_response(
     requested_action: &str,
     accepted: bool,
@@ -198,7 +199,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             lease_expired: Some(lease_expires_at <= now_utc),
             active_run_id: runtime_status.active_run_id,
             run_state: runtime_status.state.clone(),
-            run_owned_locally: run_owned_locally,
+            run_owned_locally,
             run_notes: runtime_status.notes.clone(),
             reconcile_status: reconcile_status.status.clone(),
             reconcile_notes: reconcile_status.note.clone(),
@@ -221,7 +222,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Response {
             lease_expired: None,
             active_run_id: runtime_status.active_run_id,
             run_state: runtime_status.state.clone(),
-            run_owned_locally: run_owned_locally,
+            run_owned_locally,
             run_notes: runtime_status.notes.clone(),
             reconcile_status: reconcile_status.status.clone(),
             reconcile_notes: reconcile_status.note.clone(),
@@ -366,6 +367,7 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
         .into_response()
 }
 
+#[allow(dead_code)]
 async fn restart(State(state): State<Arc<AppState>>) -> Response {
     let restart_truth = match state.restart_truth_snapshot().await {
         Ok(snapshot) => snapshot,
@@ -377,6 +379,7 @@ async fn restart(State(state): State<Arc<AppState>>) -> Response {
     restart_not_authoritative_response(restart_truth)
 }
 
+#[allow(dead_code)]
 fn restart_not_authoritative_response(restart_truth: RestartTruthSnapshot) -> Response {
     let conflict_note = if restart_truth.durable_active_without_local_ownership {
         "durable active run exists without local runtime ownership; restart would overstate authority"
