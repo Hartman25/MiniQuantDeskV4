@@ -123,6 +123,27 @@ interface LegacyTradingFillsResponse {
   fills: LegacyTradingFill[];
 }
 
+// Canonical portfolio surfaces (Cluster 2).  snapshot_state discriminates
+// "active broker snapshot" from "no broker snapshot loaded" without HTTP
+// status string matching.  GUI checks the typed field, not an error string.
+interface PortfolioPositionsResponse {
+  snapshot_state: "active" | "no_snapshot";
+  captured_at_utc: string | null;
+  rows: PositionRow[];
+}
+
+interface PortfolioOpenOrdersResponse {
+  snapshot_state: "active" | "no_snapshot";
+  captured_at_utc: string | null;
+  rows: OpenOrderRow[];
+}
+
+interface PortfolioFillsResponse {
+  snapshot_state: "active" | "no_snapshot";
+  captured_at_utc: string | null;
+  rows: FillRow[];
+}
+
 interface LegacyIntegrityResponse {
   armed: boolean;
   active_run_id: string | null;
@@ -566,13 +587,59 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const probes = await Promise.all([
     fetchJsonCandidates<PreflightStatus>(["/api/v1/system/preflight"]),
     fetchJsonCandidates<ExecutionSummary>(["/api/v1/execution/summary"]),
-    fetchJsonCandidates<ExecutionOrderRow[] | LegacyTradingOrdersResponse>(["/api/v1/execution/orders", "/v1/trading/orders"]),
+    // Execution orders: two-step fetch to distinguish "no snapshot" from "not mounted".
+    // HTTP 503 = OMS loop has no snapshot → keep canonical path as missing (record in
+    //   missingEndpoints) so isMissingPanelTruth fires and the execution panel blocks.
+    //   Do NOT fall through to legacy broker orders — that would hide the missing truth.
+    // HTTP 404 / network error = canonical not mounted → fall through to /v1/trading/orders.
+    (async (): Promise<EndpointFetchResult<ExecutionOrderRow[] | LegacyTradingOrdersResponse>> => {
+      const canonical = await fetchJsonCandidate<ExecutionOrderRow[]>("/api/v1/execution/orders");
+      if (canonical.ok) return canonical;
+      // 503 = explicit no-snapshot signal; keep canonical as the failed probe result.
+      if (canonical.error === "HTTP 503") return canonical;
+      // Any other failure (404 = unmounted, network error) → try legacy path.
+      return fetchJsonCandidate<LegacyTradingOrdersResponse>("/v1/trading/orders");
+    })(),
     fetchJsonCandidates<OmsOverview>(["/api/v1/oms/overview"]),
     fetchJsonCandidates<SystemMetrics>(["/api/v1/metrics/dashboards"]),
     fetchJsonCandidates<PortfolioSummary | LegacyTradingAccountResponse>(["/api/v1/portfolio/summary", "/v1/trading/account"]),
-    fetchJsonCandidates<PositionRow[] | LegacyTradingPositionsResponse>(["/api/v1/portfolio/positions", "/v1/trading/positions"]),
-    fetchJsonCandidates<OpenOrderRow[] | LegacyTradingOrdersResponse>(["/api/v1/portfolio/orders/open", "/v1/trading/orders"]),
-    fetchJsonCandidates<FillRow[] | LegacyTradingFillsResponse>(["/api/v1/portfolio/fills", "/v1/trading/fills"]),
+    // Portfolio positions: canonical route returns snapshot_state wrapper.
+    // "active" → rows are real broker truth; "no_snapshot" → broker snapshot absent.
+    // no_snapshot is returned as a failed probe (ok: false) so the endpoint lands in
+    // missingEndpoints and isMissingPanelTruth fires, blocking the portfolio panel.
+    // HTTP failure (404 = unmounted, network error) → fall through to legacy.
+    (async (): Promise<EndpointFetchResult<PortfolioPositionsResponse | LegacyTradingPositionsResponse>> => {
+      const canonical = await fetchJsonCandidate<PortfolioPositionsResponse>("/api/v1/portfolio/positions");
+      if (canonical.ok) {
+        if ((canonical.data as PortfolioPositionsResponse).snapshot_state === "no_snapshot") {
+          return { ...canonical, ok: false, error: "no_broker_snapshot" };
+        }
+        return canonical;
+      }
+      return fetchJsonCandidate<LegacyTradingPositionsResponse>("/v1/trading/positions");
+    })(),
+    // Portfolio open orders: same snapshot_state pattern as positions.
+    (async (): Promise<EndpointFetchResult<PortfolioOpenOrdersResponse | LegacyTradingOrdersResponse>> => {
+      const canonical = await fetchJsonCandidate<PortfolioOpenOrdersResponse>("/api/v1/portfolio/orders/open");
+      if (canonical.ok) {
+        if ((canonical.data as PortfolioOpenOrdersResponse).snapshot_state === "no_snapshot") {
+          return { ...canonical, ok: false, error: "no_broker_snapshot" };
+        }
+        return canonical;
+      }
+      return fetchJsonCandidate<LegacyTradingOrdersResponse>("/v1/trading/orders");
+    })(),
+    // Portfolio fills: same snapshot_state pattern as positions.
+    (async (): Promise<EndpointFetchResult<PortfolioFillsResponse | LegacyTradingFillsResponse>> => {
+      const canonical = await fetchJsonCandidate<PortfolioFillsResponse>("/api/v1/portfolio/fills");
+      if (canonical.ok) {
+        if ((canonical.data as PortfolioFillsResponse).snapshot_state === "no_snapshot") {
+          return { ...canonical, ok: false, error: "no_broker_snapshot" };
+        }
+        return canonical;
+      }
+      return fetchJsonCandidate<LegacyTradingFillsResponse>("/v1/trading/fills");
+    })(),
     fetchJsonCandidates<RiskSummary>(["/api/v1/risk/summary"]),
     fetchJsonCandidates<RiskDenialRow[]>(["/api/v1/risk/denials"]),
     fetchJsonCandidates<ReconcileSummary>(["/api/v1/reconcile/status"]),
@@ -653,10 +720,17 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     ? (fillsR.data as LegacyTradingFillsResponse)
     : null;
 
+  // HTTP 503 from /api/v1/execution/orders = explicit no-snapshot signal.
+  // In that case the probe stays as { ok: false, endpoint: "/api/v1/execution/orders" }
+  // so the endpoint lands in missingEndpoints, isMissingPanelTruth fires, and the
+  // execution panel blocks.  Do NOT use legacy orders to fill this gap.
+  const executionOrdersIsNoSnapshot = !executionOrdersR.ok && executionOrdersR.error === "HTTP 503";
   const executionOrdersCanonical = executionOrdersR.ok && Array.isArray(executionOrdersR.data);
   const executionOrders = executionOrdersCanonical
     ? (executionOrdersR.data as ExecutionOrderRow[])
-    : mapLegacyTradingOrdersToExecutionOrders(legacyOrdersResponse) ?? [];
+    : executionOrdersIsNoSnapshot
+      ? []  // No-snapshot signal: return empty rather than misleading legacy broker orders.
+      : mapLegacyTradingOrdersToExecutionOrders(legacyOrdersResponse) ?? [];
 
   const firstOrderId = executionOrders[0]?.internal_order_id;
   const [selectedTimeline, executionTrace, executionReplay, executionChart, causalityTrace] = firstOrderId
@@ -677,9 +751,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   // classification degrades to "placeholder" (or "mixed") so the truth gate
   // fires and the action catalog is not shown on approximate legacy data.
   if (!statusCanonical) usedMockSections.push("status");
-  // executionOrders from legacy (/v1/trading/orders) has fabricated strategy_id and
-  // derived execution_stage. Mark as non-canonical so the execution panel's authority
-  // degrades to "mixed" rather than "runtime_memory".
+  // executionOrders non-canonical in two cases:
+  //   1. Legacy path used (/v1/trading/orders): fabricated strategy_id/stage → "mixed" authority.
+  //   2. No-snapshot signal (HTTP 503): canonical endpoint in missingEndpoints; "executionOrders"
+  //      in mockSections. Combined with missingEndpoints, isMissingPanelTruth fires for the
+  //      execution panel → no_snapshot gate blocks the screen.
   if (!executionOrdersCanonical) usedMockSections.push("executionOrders");
 
   const useObject = <T,>(key: string, result: EndpointFetchResult<T>, fallback: T): T => {
@@ -709,23 +785,39 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     : mapLegacyPortfolioSummary(legacyAccountResponse);
   if (!portfolioSummary || !portfolioSummaryCanonical) usedMockSections.push("portfolioSummary");
 
-  const positionsCanonical = positionsR.ok && Array.isArray(positionsR.data);
-  const positions = positionsCanonical
-    ? (positionsR.data as PositionRow[])
+  // Canonical portfolio routes return a structured wrapper with snapshot_state.
+  // "active" = broker snapshot present; rows are authoritative (may be empty).
+  // "no_snapshot" = broker snapshot absent; rows are empty, must not be read as truth.
+  // The check is on the typed snapshot_state field — not HTTP status string matching.
+  const positionsIsCanonical =
+    positionsR.ok && positionsR.endpoint === "/api/v1/portfolio/positions";
+  const positionsIsActive =
+    positionsIsCanonical &&
+    (positionsR.data as PortfolioPositionsResponse).snapshot_state === "active";
+  const positions = positionsIsActive
+    ? (positionsR.data as PortfolioPositionsResponse).rows
     : mapLegacyPositionsResponse(legacyPositionsResponse);
-  if (!positions || !positionsCanonical) usedMockSections.push("positions");
+  if (!positionsIsActive) usedMockSections.push("positions");
 
-  const openOrdersCanonical = openOrdersR.ok && Array.isArray(openOrdersR.data);
-  const openOrders = openOrdersCanonical
-    ? (openOrdersR.data as OpenOrderRow[])
+  const openOrdersIsCanonical =
+    openOrdersR.ok && openOrdersR.endpoint === "/api/v1/portfolio/orders/open";
+  const openOrdersIsActive =
+    openOrdersIsCanonical &&
+    (openOrdersR.data as PortfolioOpenOrdersResponse).snapshot_state === "active";
+  const openOrders = openOrdersIsActive
+    ? (openOrdersR.data as PortfolioOpenOrdersResponse).rows
     : mapLegacyTradingOrdersToOpenOrders(legacyOrdersResponse);
-  if (!openOrders || !openOrdersCanonical) usedMockSections.push("openOrders");
+  if (!openOrdersIsActive) usedMockSections.push("openOrders");
 
-  const fillsCanonical = fillsR.ok && Array.isArray(fillsR.data);
-  const fills = fillsCanonical
-    ? (fillsR.data as FillRow[])
+  const fillsIsCanonical =
+    fillsR.ok && fillsR.endpoint === "/api/v1/portfolio/fills";
+  const fillsIsActive =
+    fillsIsCanonical &&
+    (fillsR.data as PortfolioFillsResponse).snapshot_state === "active";
+  const fills = fillsIsActive
+    ? (fillsR.data as PortfolioFillsResponse).rows
     : mapLegacyTradingFillsToRows(legacyFillsResponse);
-  if (!fills || !fillsCanonical) usedMockSections.push("fills");
+  if (!fillsIsActive) usedMockSections.push("fills");
 
   const metadata =
     healthProbe.ok && healthProbe.data !== undefined

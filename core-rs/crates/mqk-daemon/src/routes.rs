@@ -32,11 +32,13 @@ use tracing::info;
 use crate::{
     api_types::{
         ActionCatalogEntry, ActionCatalogResponse, AuditArtifactRow, AuditArtifactsResponse,
-        ConfigDiffRow, ConfigFingerprintResponse, DiagnosticsSnapshotResponse,
-        ExecutionOrderRow, ExecutionSummaryResponse, FaultSignal, GateRefusedResponse,
-        HealthResponse, IntegrityResponse, OperatorActionAuditFields, OperatorActionAuditRow,
+        ConfigDiffRow, ConfigFingerprintResponse, DiagnosticsSnapshotResponse, ExecutionOrderRow,
+        ExecutionSummaryResponse, FaultSignal, GateRefusedResponse, HealthResponse,
+        IntegrityResponse, OperatorActionAuditFields, OperatorActionAuditRow,
         OperatorActionResponse, OperatorActionsAuditResponse, OperatorTimelineResponse,
-        OperatorTimelineRow, OpsActionRequest, PortfolioSummaryResponse, PreflightStatusResponse,
+        OperatorTimelineRow, OpsActionRequest, PortfolioFillRow, PortfolioFillsResponse,
+        PortfolioOpenOrderRow, PortfolioOpenOrdersResponse, PortfolioPositionRow,
+        PortfolioPositionsResponse, PortfolioSummaryResponse, PreflightStatusResponse,
         ReconcileSummaryResponse, RiskSummaryResponse, RuntimeErrorResponse,
         RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
         StrategySummaryRow, StrategySuppressionRow, SystemMetadataResponse, SystemStatusResponse,
@@ -142,6 +144,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/execution/summary", get(execution_summary))
         .route("/api/v1/execution/orders", get(execution_orders))
         .route("/api/v1/portfolio/summary", get(portfolio_summary))
+        .route("/api/v1/portfolio/positions", get(portfolio_positions))
+        .route("/api/v1/portfolio/orders/open", get(portfolio_open_orders))
+        .route("/api/v1/portfolio/fills", get(portfolio_fills))
         .route("/api/v1/risk/summary", get(risk_summary))
         .route("/api/v1/reconcile/status", get(reconcile_status))
         .route("/api/v1/system/session", get(system_session))
@@ -1321,43 +1326,58 @@ pub(crate) async fn execution_summary(State(st): State<Arc<AppState>>) -> impl I
 
 pub(crate) async fn execution_orders(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     // Canonical OMS truth: active orders from the in-memory execution snapshot.
-    // Fields not tracked at OMS snapshot level carry explicit architectural defaults
-    // documented on ExecutionOrderRow in api_types.rs.
+    //
+    // SEMANTIC INVARIANT: this route distinguishes two states that must NOT be
+    // conflated:
+    //   • HTTP 200 + [] → execution snapshot exists; there are zero active orders.
+    //   • HTTP 503       → no execution snapshot; OMS truth is unavailable.
+    //
+    // The GUI reads the 503 as a "no_snapshot" signal and keeps this endpoint in
+    // missingEndpoints so isMissingPanelTruth fires and the execution panel blocks.
+    // Returning 200 + [] for both states would let the GUI render an empty order
+    // list as authoritative healthy truth when the execution loop has never started.
     let snap = st.execution_snapshot.read().await.clone();
 
-    let rows: Vec<ExecutionOrderRow> = if let Some(snapshot) = snap {
-        let updated_at = snapshot.snapshot_at_utc.to_rfc3339();
-        snapshot
-            .active_orders
-            .iter()
-            .map(|o| {
-                let has_critical = o.status == "Rejected";
-                let current_stage = oms_stage_label(&o.status).to_string();
-                ExecutionOrderRow {
-                    internal_order_id: o.order_id.clone(),
-                    broker_order_id: o.broker_order_id.clone(),
-                    symbol: o.symbol.clone(),
-                    // "runtime" = sourced from OMS runtime layer, not broker snapshot.
-                    strategy_id: "runtime".to_string(),
-                    // OMS enforces total_qty > 0 (long-only); "buy" is architecturally correct.
-                    side: "buy".to_string(),
-                    // Order type not captured at OMS snapshot level.
-                    order_type: "market".to_string(),
-                    requested_qty: o.total_qty,
-                    filled_qty: o.filled_qty,
-                    current_status: o.status.clone(),
-                    current_stage,
-                    // Per-order creation time not tracked in OMS snapshot.
-                    age_ms: 0,
-                    has_warning: false,
-                    has_critical,
-                    updated_at: updated_at.clone(),
-                }
-            })
-            .collect()
-    } else {
-        vec![]
+    let Some(snapshot) = snap else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "no_execution_snapshot",
+                "detail": "Execution loop has not started or has no active run; OMS order truth is unavailable."
+            })),
+        )
+            .into_response();
     };
+
+    let updated_at = snapshot.snapshot_at_utc.to_rfc3339();
+    let rows: Vec<ExecutionOrderRow> = snapshot
+        .active_orders
+        .iter()
+        .map(|o| {
+            let has_critical = o.status == "Rejected";
+            let current_stage = oms_stage_label(&o.status).to_string();
+            ExecutionOrderRow {
+                internal_order_id: o.order_id.clone(),
+                broker_order_id: o.broker_order_id.clone(),
+                symbol: o.symbol.clone(),
+                // "runtime" = sourced from OMS runtime layer, not broker snapshot.
+                strategy_id: "runtime".to_string(),
+                // OMS enforces total_qty > 0 (long-only); "buy" is architecturally correct.
+                side: "buy".to_string(),
+                // Order type not captured at OMS snapshot level.
+                order_type: "market".to_string(),
+                requested_qty: o.total_qty,
+                filled_qty: o.filled_qty,
+                current_status: o.status.clone(),
+                current_stage,
+                // Per-order creation time not tracked in OMS snapshot.
+                age_ms: 0,
+                has_warning: false,
+                has_critical,
+                updated_at: updated_at.clone(),
+            }
+        })
+        .collect();
 
     (StatusCode::OK, Json(rows)).into_response()
 }
@@ -1392,6 +1412,163 @@ pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl I
     };
 
     (StatusCode::OK, Json(summary)).into_response()
+}
+
+/// GET /api/v1/portfolio/positions
+///
+/// Returns broker-snapshot positions as canonical `PortfolioPositionRow` rows.
+///
+/// - `snapshot_state: "active"` + rows when `broker_snapshot` is loaded.
+///   An empty `rows` array is authoritative ("zero positions in broker view").
+/// - `snapshot_state: "no_snapshot"` + empty rows when no snapshot is loaded.
+///   The GUI must NOT treat this as "zero positions"; it is missing broker truth.
+pub(crate) async fn portfolio_positions(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.broker_snapshot.read().await.clone();
+    match snap {
+        None => (
+            StatusCode::OK,
+            Json(PortfolioPositionsResponse {
+                snapshot_state: "no_snapshot".to_string(),
+                captured_at_utc: None,
+                rows: vec![],
+            }),
+        )
+            .into_response(),
+        Some(snapshot) => {
+            let captured_at_utc = snapshot.captured_at_utc.to_rfc3339();
+            let rows = snapshot
+                .positions
+                .iter()
+                .map(|p| {
+                    let qty = p.qty.parse::<i64>().unwrap_or(0);
+                    let avg_price = parse_decimal(&p.avg_price);
+                    PortfolioPositionRow {
+                        symbol: p.symbol.clone(),
+                        strategy_id: "broker".to_string(),
+                        qty,
+                        avg_price,
+                        mark_price: 0.0,
+                        unrealized_pnl: 0.0,
+                        realized_pnl_today: 0.0,
+                        broker_qty: qty,
+                        drift: false,
+                    }
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(PortfolioPositionsResponse {
+                    snapshot_state: "active".to_string(),
+                    captured_at_utc: Some(captured_at_utc),
+                    rows,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// GET /api/v1/portfolio/orders/open
+///
+/// Returns broker-snapshot open orders as canonical `PortfolioOpenOrderRow` rows.
+///
+/// - `snapshot_state: "active"` + rows when `broker_snapshot` is loaded.
+/// - `snapshot_state: "no_snapshot"` + empty rows when no snapshot is loaded.
+pub(crate) async fn portfolio_open_orders(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.broker_snapshot.read().await.clone();
+    match snap {
+        None => (
+            StatusCode::OK,
+            Json(PortfolioOpenOrdersResponse {
+                snapshot_state: "no_snapshot".to_string(),
+                captured_at_utc: None,
+                rows: vec![],
+            }),
+        )
+            .into_response(),
+        Some(snapshot) => {
+            let captured_at_utc = snapshot.captured_at_utc.to_rfc3339();
+            let rows = snapshot
+                .orders
+                .iter()
+                .map(|o| {
+                    let requested_qty = o.qty.parse::<i64>().unwrap_or(0);
+                    PortfolioOpenOrderRow {
+                        internal_order_id: o.client_order_id.clone(),
+                        symbol: o.symbol.clone(),
+                        strategy_id: "broker".to_string(),
+                        side: o.side.clone(),
+                        status: o.status.clone(),
+                        requested_qty,
+                        filled_qty: 0,
+                        entered_at: o.created_at_utc.to_rfc3339(),
+                    }
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(PortfolioOpenOrdersResponse {
+                    snapshot_state: "active".to_string(),
+                    captured_at_utc: Some(captured_at_utc),
+                    rows,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// GET /api/v1/portfolio/fills
+///
+/// Returns broker-snapshot fills as canonical `PortfolioFillRow` rows.
+///
+/// - `snapshot_state: "active"` + rows when `broker_snapshot` is loaded.
+/// - `snapshot_state: "no_snapshot"` + empty rows when no snapshot is loaded.
+pub(crate) async fn portfolio_fills(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.broker_snapshot.read().await.clone();
+    match snap {
+        None => (
+            StatusCode::OK,
+            Json(PortfolioFillsResponse {
+                snapshot_state: "no_snapshot".to_string(),
+                captured_at_utc: None,
+                rows: vec![],
+            }),
+        )
+            .into_response(),
+        Some(snapshot) => {
+            let captured_at_utc = snapshot.captured_at_utc.to_rfc3339();
+            let rows = snapshot
+                .fills
+                .iter()
+                .map(|f| {
+                    let qty = f.qty.parse::<i64>().unwrap_or(0);
+                    let price = parse_decimal(&f.price);
+                    PortfolioFillRow {
+                        fill_id: f.broker_fill_id.clone(),
+                        internal_order_id: f.client_order_id.clone(),
+                        symbol: f.symbol.clone(),
+                        strategy_id: "broker".to_string(),
+                        side: f.side.clone(),
+                        qty,
+                        price,
+                        broker_exec_id: f.broker_fill_id.clone(),
+                        applied: true,
+                        at: f.ts_utc.to_rfc3339(),
+                    }
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(PortfolioFillsResponse {
+                    snapshot_state: "active".to_string(),
+                    captured_at_utc: Some(captured_at_utc),
+                    rows,
+                }),
+            )
+                .into_response()
+        }
+    }
 }
 
 pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {

@@ -7,13 +7,24 @@ export type TruthRenderState = "unimplemented" | "unavailable" | "stale" | "no_s
 // Rules: top-level probes only — no per-order/per-id fragments;
 // paths must match what fetchOperatorModel() actually probes.
 const PANEL_TRUTH_ENDPOINTS: Partial<Record<CorePanelKey, string[]>> = {
-  // Both summary and orders must be absent before signalling no_snapshot.
-  execution: ["/execution/summary", "/execution/orders"],
+  // execution_orders (HTTP 503) is the definitive "no OMS truth" signal.
+  // execution_summary can return HTTP 200 with has_snapshot=false and zero counts —
+  // those zeros are honest (there are zero active orders because no loop is running).
+  // But an empty orders list is ambiguous: it could mean "genuinely none" or "no snapshot".
+  // The 503→missingEndpoints path resolves that ambiguity; only execution_orders being
+  // absent should fire no_snapshot.  A single-item hint collapses every() to a simple
+  // "is this endpoint missing?" check.
+  execution: ["/execution/orders"],
   risk: ["/risk/summary"],
   // Daemon mounts /reconcile/status — not /reconcile/summary.
   reconcile: ["/reconcile/status", "/reconcile/mismatches"],
-  // Portfolio data is broker snapshot; operator must know if it is absent.
-  portfolio: ["/portfolio/summary"],
+  // Portfolio row truth is gated on /portfolio/positions, not /portfolio/summary.
+  // portfolio/summary returns HTTP 200 even when broker_snapshot is absent (has_snapshot:false),
+  // so it never appears in missingEndpoints and cannot drive the no_snapshot gate.
+  // The /portfolio/positions IIFE in api.ts returns ok:false when snapshot_state === "no_snapshot",
+  // landing the endpoint in missingEndpoints and firing this gate.
+  // Authoritative empty rows ("active" + []) are NOT caught here — only missing truth blocks.
+  portfolio: ["/portfolio/positions"],
   // Strategy armed/health state is operator-critical runtime truth.
   strategy: ["/strategy/summary"],
   // Session state drives trading-window decisions.

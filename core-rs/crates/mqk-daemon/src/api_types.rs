@@ -524,6 +524,114 @@ pub struct ExecutionOrderRow {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/portfolio/positions  /api/v1/portfolio/orders/open  /api/v1/portfolio/fills
+// Canonical broker-snapshot portfolio surfaces (Cluster 2)
+// ---------------------------------------------------------------------------
+
+/// One broker-layer position row.
+///
+/// Fields with no broker-snapshot equivalent carry explicit architectural
+/// defaults:
+/// - `strategy_id`: `"broker"` — positions are not attributed to a strategy at
+///   the broker snapshot level.
+/// - `mark_price`, `unrealized_pnl`, `realized_pnl_today`: `0.0` — mark-to-
+///   market data is not present in the broker snapshot.
+/// - `drift`: `false` — reconcile-level position drift is not assessed at the
+///   broker snapshot layer.
+/// - `broker_qty`: same as `qty` — the row IS the broker view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioPositionRow {
+    pub symbol: String,
+    /// Source-layer attribution: `"broker"` for broker-snapshot rows.
+    pub strategy_id: String,
+    pub qty: i64,
+    pub avg_price: f64,
+    /// `0.0` — mark prices are not in the broker snapshot.
+    pub mark_price: f64,
+    /// `0.0` — broker snapshot has no unrealized PnL.
+    pub unrealized_pnl: f64,
+    /// `0.0` — broker snapshot has no today-only realized PnL.
+    pub realized_pnl_today: f64,
+    /// Equals `qty` — this row is sourced from the broker view.
+    pub broker_qty: i64,
+    /// `false` — reconcile-level drift is not assessed here.
+    pub drift: bool,
+}
+
+/// Response wrapper for `/api/v1/portfolio/positions`.
+///
+/// `snapshot_state`:
+/// - `"active"` — broker snapshot is present; `rows` is authoritative (may be
+///   empty when the account holds no positions).
+/// - `"no_snapshot"` — no broker snapshot is loaded; `rows` is always empty
+///   and must NOT be treated as authoritative zero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioPositionsResponse {
+    pub snapshot_state: String,
+    pub captured_at_utc: Option<String>,
+    pub rows: Vec<PortfolioPositionRow>,
+}
+
+/// One broker-layer open-order row.
+///
+/// - `strategy_id`: `"broker"`.
+/// - `filled_qty`: `0` — broker snapshot does not track partial fills per order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioOpenOrderRow {
+    /// Client order ID assigned by this daemon (= `client_order_id` in broker snapshot).
+    pub internal_order_id: String,
+    pub symbol: String,
+    /// `"broker"` — open orders are not strategy-attributed at this layer.
+    pub strategy_id: String,
+    pub side: String,
+    pub status: String,
+    pub requested_qty: i64,
+    /// `0` — partial fill quantity is not tracked in the broker snapshot.
+    pub filled_qty: i64,
+    pub entered_at: String,
+}
+
+/// Response wrapper for `/api/v1/portfolio/orders/open`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioOpenOrdersResponse {
+    pub snapshot_state: String,
+    pub captured_at_utc: Option<String>,
+    pub rows: Vec<PortfolioOpenOrderRow>,
+}
+
+/// One broker-layer fill row.
+///
+/// - `strategy_id`: `"broker"`.
+/// - `applied`: `true` — fills present in the broker snapshot are by definition
+///   already applied.
+/// - `broker_exec_id`: equals `fill_id` (= `broker_fill_id` from broker API).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioFillRow {
+    pub fill_id: String,
+    /// Client order ID of the order that generated this fill.
+    pub internal_order_id: String,
+    pub symbol: String,
+    /// `"broker"` — fills are not strategy-attributed at the broker snapshot layer.
+    pub strategy_id: String,
+    pub side: String,
+    pub qty: i64,
+    pub price: f64,
+    /// Equals `fill_id` — uses broker fill ID as the execution ID.
+    pub broker_exec_id: String,
+    /// `true` — fills in the snapshot are already applied.
+    pub applied: bool,
+    pub at: String,
+}
+
+/// Response wrapper for `/api/v1/portfolio/fills`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioFillsResponse {
+    pub snapshot_state: String,
+    pub captured_at_utc: Option<String>,
+    pub rows: Vec<PortfolioFillRow>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/diagnostics/snapshot (B4)
 // ---------------------------------------------------------------------------
 

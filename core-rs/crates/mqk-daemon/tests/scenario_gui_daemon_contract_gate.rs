@@ -690,11 +690,16 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
 }
 
 #[tokio::test]
-async fn gui_contract_execution_orders_is_canonical_oms_array() {
-    // /api/v1/execution/orders must:
-    // 1. Return 200 with a JSON array (not a wrapped object).
-    // 2. Return empty array in test state (no execution snapshot injected).
-    // 3. Confirm the legacy /v1/trading/orders is still mounted separately.
+async fn gui_contract_execution_orders_503_without_snapshot() {
+    // /api/v1/execution/orders must return HTTP 503 when no execution snapshot exists.
+    //
+    // SEMANTIC INVARIANT: 503 = "no OMS snapshot, truth unavailable".
+    //   This is distinct from 200 + [] = "snapshot exists, zero active orders".
+    //   503 causes the GUI to keep the endpoint in missingEndpoints so
+    //   isMissingPanelTruth fires and the execution panel hard-blocks.
+    //
+    // Without this invariant, the GUI would render an empty order list as
+    // authoritative healthy truth when the execution loop has never started.
     let router = make_router();
 
     let req = Request::builder()
@@ -705,19 +710,24 @@ async fn gui_contract_execution_orders_is_canonical_oms_array() {
     let (status, body) = call(router.clone(), req).await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "/api/v1/execution/orders must return 200"
+        StatusCode::SERVICE_UNAVAILABLE,
+        "/api/v1/execution/orders must return 503 when no execution snapshot is present"
     );
+
+    // Body must be a JSON object with error/detail fields for debuggability.
     let json = parse_json(body);
     assert!(
-        json.as_array().is_some(),
-        "/api/v1/execution/orders must return a JSON array; got: {json}"
+        json.get("error").is_some(),
+        "/api/v1/execution/orders 503 body must have 'error' field; got: {json}"
     );
-    // No execution snapshot in test state → always empty.
+    assert!(
+        json.get("detail").is_some(),
+        "/api/v1/execution/orders 503 body must have 'detail' field; got: {json}"
+    );
     assert_eq!(
-        json.as_array().map(|v| v.is_empty()),
-        Some(true),
-        "/api/v1/execution/orders must be empty in no-snapshot test state"
+        json["error"].as_str(),
+        Some("no_execution_snapshot"),
+        "/api/v1/execution/orders 503 error key must be 'no_execution_snapshot'"
     );
 
     // Legacy broker-snapshot path must still resolve independently.
@@ -731,6 +741,59 @@ async fn gui_contract_execution_orders_is_canonical_oms_array() {
         legacy_status,
         StatusCode::OK,
         "/v1/trading/orders must remain mounted alongside canonical /api/v1/execution/orders"
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_execution_orders_200_array_with_injected_snapshot() {
+    // When an execution snapshot is injected into AppState, the endpoint must return
+    // HTTP 200 + a bare JSON array.  Zero active orders in the snapshot → empty array.
+    // This proves the distinction: 200 + [] means "snapshot active, no orders" (not "no snapshot").
+    use chrono::DateTime;
+    use mqk_runtime::observability::{ExecutionSnapshot, PortfolioSnapshot};
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    // Inject a minimal snapshot: loop is running, no active orders.
+    let snap = ExecutionSnapshot {
+        run_id: None,
+        active_orders: vec![],
+        pending_outbox: vec![],
+        recent_inbox_events: vec![],
+        portfolio: PortfolioSnapshot {
+            cash_micros: 0,
+            realized_pnl_micros: 0,
+            positions: vec![],
+        },
+        system_block_state: None,
+        snapshot_at_utc: DateTime::from_timestamp(0, 0).expect("unix epoch is valid"),
+    };
+    *st.execution_snapshot.write().await = Some(snap);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/execution/orders")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/execution/orders must return 200 when execution snapshot is present"
+    );
+    let json = parse_json(body);
+    assert!(
+        json.as_array().is_some(),
+        "/api/v1/execution/orders with snapshot must return a JSON array; got: {json}"
+    );
+    // Snapshot has zero active orders → empty array.
+    assert_eq!(
+        json.as_array().map(|v| v.is_empty()),
+        Some(true),
+        "/api/v1/execution/orders must be empty array when snapshot has no active orders"
     );
 }
 
@@ -786,5 +849,343 @@ async fn gui_contract_recently_promoted_array_surfaces_have_expected_shape() {
         json.as_array().map(|v| v.is_empty()),
         Some(true),
         "/api/v1/strategy/suppressions must be empty in test state"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cluster 2 — canonical portfolio surfaces (positions, orders/open, fills)
+// ---------------------------------------------------------------------------
+//
+// Contract invariants proven here:
+//  1. When broker_snapshot is absent: HTTP 200, snapshot_state = "no_snapshot",
+//     rows = [] (empty array), captured_at_utc = null.
+//  2. When broker_snapshot is present: HTTP 200, snapshot_state = "active",
+//     captured_at_utc is non-null, rows reflect the injected data.
+//
+// This distinguishes "authoritative empty snapshot" from "no broker truth".
+// GUI reads snapshot_state as a typed field — not an HTTP status string.
+
+#[tokio::test]
+async fn gui_contract_portfolio_positions_no_snapshot() {
+    // Without a broker snapshot, /api/v1/portfolio/positions must return HTTP 200
+    // with snapshot_state = "no_snapshot" so the GUI knows truth is unavailable.
+    let router = make_router();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/portfolio/positions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/portfolio/positions must return HTTP 200"
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["snapshot_state"].as_str(),
+        Some("no_snapshot"),
+        "snapshot_state must be no_snapshot when broker_snapshot is absent; got: {json}"
+    );
+    assert!(
+        json["rows"].as_array().is_some_and(|v| v.is_empty()),
+        "rows must be empty when snapshot_state is no_snapshot; got: {json}"
+    );
+    assert!(
+        json["captured_at_utc"].is_null(),
+        "captured_at_utc must be null when snapshot_state is no_snapshot; got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_portfolio_positions_active_snapshot() {
+    // With an injected broker snapshot, /api/v1/portfolio/positions must return
+    // snapshot_state = "active" and rows reflecting the injected positions.
+    use chrono::DateTime;
+    use mqk_schemas::{BrokerAccount, BrokerSnapshot};
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let snap = BrokerSnapshot {
+        captured_at_utc: DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+        account: BrokerAccount {
+            equity: "100000.00".to_string(),
+            cash: "50000.00".to_string(),
+            currency: "USD".to_string(),
+        },
+        orders: vec![],
+        fills: vec![],
+        positions: vec![mqk_schemas::BrokerPosition {
+            symbol: "AAPL".to_string(),
+            qty: "10".to_string(),
+            avg_price: "175.50".to_string(),
+        }],
+    };
+    *st.broker_snapshot.write().await = Some(snap);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/portfolio/positions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/portfolio/positions must return HTTP 200"
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["snapshot_state"].as_str(),
+        Some("active"),
+        "snapshot_state must be active when broker_snapshot is present; got: {json}"
+    );
+    assert!(
+        json["captured_at_utc"].as_str().is_some(),
+        "captured_at_utc must be non-null when snapshot_state is active; got: {json}"
+    );
+    let rows = json["rows"].as_array().expect("rows must be a JSON array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "rows must reflect the injected positions; got: {json}"
+    );
+    assert_eq!(
+        rows[0]["symbol"].as_str(),
+        Some("AAPL"),
+        "row symbol must match injected position; got: {json}"
+    );
+    assert_eq!(
+        rows[0]["qty"].as_i64(),
+        Some(10),
+        "row qty must match injected position; got: {json}"
+    );
+    assert_eq!(
+        rows[0]["strategy_id"].as_str(),
+        Some("broker"),
+        "strategy_id must be broker for broker-layer rows; got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_portfolio_open_orders_no_snapshot() {
+    let router = make_router();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/portfolio/orders/open")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/portfolio/orders/open must return HTTP 200"
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["snapshot_state"].as_str(),
+        Some("no_snapshot"),
+        "snapshot_state must be no_snapshot when broker_snapshot is absent; got: {json}"
+    );
+    assert!(
+        json["rows"].as_array().is_some_and(|v| v.is_empty()),
+        "rows must be empty when snapshot_state is no_snapshot; got: {json}"
+    );
+    assert!(
+        json["captured_at_utc"].is_null(),
+        "captured_at_utc must be null when snapshot_state is no_snapshot; got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_portfolio_open_orders_active_snapshot() {
+    use chrono::DateTime;
+    use mqk_schemas::{BrokerAccount, BrokerOrder, BrokerSnapshot};
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let snap = BrokerSnapshot {
+        captured_at_utc: DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+        account: BrokerAccount {
+            equity: "100000.00".to_string(),
+            cash: "50000.00".to_string(),
+            currency: "USD".to_string(),
+        },
+        orders: vec![BrokerOrder {
+            broker_order_id: "broker-ord-1".to_string(),
+            client_order_id: "client-ord-1".to_string(),
+            symbol: "TSLA".to_string(),
+            side: "buy".to_string(),
+            r#type: "market".to_string(),
+            status: "new".to_string(),
+            qty: "5".to_string(),
+            limit_price: None,
+            stop_price: None,
+            created_at_utc: DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+        }],
+        fills: vec![],
+        positions: vec![],
+    };
+    *st.broker_snapshot.write().await = Some(snap);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/portfolio/orders/open")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/portfolio/orders/open must return HTTP 200"
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["snapshot_state"].as_str(),
+        Some("active"),
+        "snapshot_state must be active when broker_snapshot is present; got: {json}"
+    );
+    let rows = json["rows"].as_array().expect("rows must be a JSON array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "rows must reflect the injected order; got: {json}"
+    );
+    assert_eq!(
+        rows[0]["internal_order_id"].as_str(),
+        Some("client-ord-1"),
+        "internal_order_id must equal client_order_id from broker snapshot; got: {json}"
+    );
+    assert_eq!(
+        rows[0]["symbol"].as_str(),
+        Some("TSLA"),
+        "symbol must match injected order; got: {json}"
+    );
+    assert_eq!(
+        rows[0]["strategy_id"].as_str(),
+        Some("broker"),
+        "strategy_id must be broker for broker-layer rows; got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_portfolio_fills_no_snapshot() {
+    let router = make_router();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/portfolio/fills")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/portfolio/fills must return HTTP 200"
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["snapshot_state"].as_str(),
+        Some("no_snapshot"),
+        "snapshot_state must be no_snapshot when broker_snapshot is absent; got: {json}"
+    );
+    assert!(
+        json["rows"].as_array().is_some_and(|v| v.is_empty()),
+        "rows must be empty when snapshot_state is no_snapshot; got: {json}"
+    );
+    assert!(
+        json["captured_at_utc"].is_null(),
+        "captured_at_utc must be null when snapshot_state is no_snapshot; got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_portfolio_fills_active_snapshot() {
+    use chrono::DateTime;
+    use mqk_schemas::{BrokerAccount, BrokerFill, BrokerSnapshot};
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let snap = BrokerSnapshot {
+        captured_at_utc: DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+        account: BrokerAccount {
+            equity: "100000.00".to_string(),
+            cash: "50000.00".to_string(),
+            currency: "USD".to_string(),
+        },
+        orders: vec![],
+        fills: vec![BrokerFill {
+            broker_fill_id: "fill-001".to_string(),
+            broker_order_id: "broker-ord-1".to_string(),
+            client_order_id: "client-ord-1".to_string(),
+            symbol: "NVDA".to_string(),
+            side: "buy".to_string(),
+            qty: "3".to_string(),
+            price: "450.25".to_string(),
+            fee: "0.00".to_string(),
+            ts_utc: DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+        }],
+        positions: vec![],
+    };
+    *st.broker_snapshot.write().await = Some(snap);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/portfolio/fills")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/portfolio/fills must return HTTP 200"
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["snapshot_state"].as_str(),
+        Some("active"),
+        "snapshot_state must be active when broker_snapshot is present; got: {json}"
+    );
+    let rows = json["rows"].as_array().expect("rows must be a JSON array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "rows must reflect the injected fill; got: {json}"
+    );
+    assert_eq!(
+        rows[0]["fill_id"].as_str(),
+        Some("fill-001"),
+        "fill_id must equal broker_fill_id from broker snapshot; got: {json}"
+    );
+    assert_eq!(
+        rows[0]["symbol"].as_str(),
+        Some("NVDA"),
+        "symbol must match injected fill; got: {json}"
+    );
+    assert_eq!(
+        rows[0]["applied"].as_bool(),
+        Some(true),
+        "applied must be true for fills in broker snapshot; got: {json}"
+    );
+    assert_eq!(
+        rows[0]["broker_exec_id"].as_str(),
+        Some("fill-001"),
+        "broker_exec_id must equal fill_id; got: {json}"
+    );
+    assert_eq!(
+        rows[0]["strategy_id"].as_str(),
+        Some("broker"),
+        "strategy_id must be broker for broker-layer rows; got: {json}"
     );
 }

@@ -18,8 +18,20 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
 ### Execution and portfolio summaries
 
 - `/api/v1/execution/summary` — shape check (active_orders, pending_orders, dispatching_orders, reject_count_today)
-- `/api/v1/execution/orders` — canonical OMS array; empty in test state (no snapshot); row fields: internal_order_id, broker_order_id, symbol, strategy_id, side, order_type, requested_qty, filled_qty, current_status, current_stage, age_ms, has_warning, has_critical, updated_at; legacy `/v1/trading/orders` confirmed still mounted
+- `/api/v1/execution/orders` — canonical OMS array with fail-closed semantics:
+  - HTTP 503 when no execution snapshot (OMS loop not running) → endpoint lands in `missingEndpoints` → `isMissingPanelTruth` fires → execution panel blocks with `no_snapshot`
+  - HTTP 200 + bare JSON array when snapshot is active; zero active orders returns `[]` (authoritative empty)
+  - Legacy `/v1/trading/orders` confirmed still mounted; GUI falls through to it only on 404/network error (not on 503)
+  - Tests: `gui_contract_execution_orders_503_without_snapshot` + `gui_contract_execution_orders_200_array_with_injected_snapshot`
 - `/api/v1/portfolio/summary` — shape check (account_equity, cash, long_market_value, buying_power)
+- `/api/v1/portfolio/positions` — structured wrapper (`snapshot_state`, `captured_at_utc`, `rows`):
+  - `snapshot_state: "active"` + rows when broker snapshot is loaded; empty `rows` is authoritative (account has no positions)
+  - `snapshot_state: "no_snapshot"` + empty rows when no broker snapshot; GUI checks typed field, not HTTP status string
+  - Tests: `gui_contract_portfolio_positions_no_snapshot` + `gui_contract_portfolio_positions_active_snapshot`
+- `/api/v1/portfolio/orders/open` — same structured wrapper pattern; `internal_order_id` = `client_order_id` from broker snapshot
+  - Tests: `gui_contract_portfolio_open_orders_no_snapshot` + `gui_contract_portfolio_open_orders_active_snapshot`
+- `/api/v1/portfolio/fills` — same structured wrapper pattern; `applied: true` for all fills in snapshot
+  - Tests: `gui_contract_portfolio_fills_no_snapshot` + `gui_contract_portfolio_fills_active_snapshot`
 
 ### Risk and reconcile summaries
 
@@ -71,9 +83,6 @@ Note: `/api/v1/ops/change-mode` is intentionally NOT mounted. Mode transitions r
 These endpoints are probed by the GUI but not yet authoritative daemon contract surfaces.
 Waivers are explicit so deferred coverage is visible, not silently ignored.
 
-- `/api/v1/portfolio/positions`
-- `/api/v1/portfolio/orders/open`
-- `/api/v1/portfolio/fills`
 - `/api/v1/oms/overview`
 - `/api/v1/metrics/dashboards`
 - `/api/v1/risk/denials`

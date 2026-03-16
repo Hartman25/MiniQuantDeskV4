@@ -91,21 +91,51 @@ test("no_snapshot does not fire when reconcile/status resolves (real state)", ()
   assert.equal(state, null);
 });
 
-test("no_snapshot fires for portfolio panel when portfolio/summary missing in partial mode", () => {
+test("no_snapshot fires for portfolio panel when portfolio/positions is missing in partial mode", () => {
+  // Simulates: broker_snapshot absent → positions IIFE returns ok:false →
+  // /api/v1/portfolio/positions in missingEndpoints → isMissingPanelTruth fires.
+  // portfolio/summary stays in realEndpoints (it returns HTTP 200 even when has_snapshot=false),
+  // but that is intentional — only the row-level gate matters for the panel block.
   const state = panelTruthRenderState(
     buildModel({
       dataSource: {
         state: "partial",
         reachable: true,
-        realEndpoints: ["/api/v1/system/status"],
-        missingEndpoints: ["/api/v1/portfolio/summary"],
+        realEndpoints: ["/api/v1/system/status", "/api/v1/portfolio/summary"],
+        missingEndpoints: ["/api/v1/portfolio/positions"],
+        mockSections: ["positions", "openOrders", "fills"],
+      },
+      panelSources: { portfolio: "mixed" } as Record<string, SourceAuthority> as SystemModel["panelSources"],
+    }),
+    "portfolio",
+  );
+  assert.equal(state, "no_snapshot");
+});
+
+test("no_snapshot does NOT fire for portfolio when positions resolves active (authoritative empty is safe)", () => {
+  // Simulates: broker_snapshot present, account holds zero positions.
+  // positions IIFE returns ok:true + snapshot_state="active" + rows=[].
+  // /api/v1/portfolio/positions is in realEndpoints — not missingEndpoints.
+  // isMissingPanelTruth must NOT fire. Authoritative empty ≠ missing truth.
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "real",
+        reachable: true,
+        realEndpoints: [
+          "/api/v1/portfolio/summary",
+          "/api/v1/portfolio/positions",
+          "/api/v1/portfolio/orders/open",
+          "/api/v1/portfolio/fills",
+        ],
+        missingEndpoints: [],
         mockSections: [],
       },
       panelSources: { portfolio: "broker_snapshot" } as Record<string, SourceAuthority> as SystemModel["panelSources"],
     }),
     "portfolio",
   );
-  assert.equal(state, "no_snapshot");
+  assert.equal(state, null, "active snapshot with zero rows must render as healthy (null)");
 });
 
 test("no_snapshot fires for strategy panel when strategy/summary missing in partial mode", () => {
@@ -285,6 +315,51 @@ test("ops panel returns null when canonical status resolves (status not in mockS
       panelSources: { ops: "runtime_memory" } as Record<string, SourceAuthority> as SystemModel["panelSources"],
     }),
     "ops",
+  );
+  assert.equal(state, null);
+});
+
+// --- execution orders no-snapshot semantic gate (Cluster 1 retry) ---
+// Proves that HTTP 503 from /api/v1/execution/orders (→ missingEndpoints) blocks
+// the execution panel even when execution_summary still resolves at HTTP 200.
+
+test("no_snapshot fires for execution panel when execution_orders is missing in partial mode", () => {
+  // Simulates: daemon returns 503 from /api/v1/execution/orders (no execution loop running).
+  // execution_summary is still in realEndpoints (HTTP 200, has_snapshot=false, zero counts).
+  // With hint ["/execution/orders"] and every(), the check reduces to:
+  //   "is /execution/orders in missingEndpoints?" → yes → no_snapshot fires.
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "partial",
+        reachable: true,
+        realEndpoints: ["/api/v1/execution/summary"],
+        missingEndpoints: ["/api/v1/execution/orders"],
+        mockSections: ["executionOrders"],
+      },
+      panelSources: { execution: "mixed" } as Record<string, SourceAuthority> as SystemModel["panelSources"],
+    }),
+    "execution",
+  );
+  assert.equal(state, "no_snapshot");
+});
+
+test("no_snapshot does not fire for execution when execution_orders resolves (snapshot active)", () => {
+  // Simulates: daemon has a live execution snapshot → 200 + array.
+  // Both execution_summary and execution_orders are in realEndpoints.
+  // isMissingPanelTruth: state is "real" → returns false immediately.
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "real",
+        reachable: true,
+        realEndpoints: ["/api/v1/execution/summary", "/api/v1/execution/orders"],
+        missingEndpoints: [],
+        mockSections: [],
+      },
+      panelSources: { execution: "runtime_memory" } as Record<string, SourceAuthority> as SystemModel["panelSources"],
+    }),
+    "execution",
   );
   assert.equal(state, null);
 });

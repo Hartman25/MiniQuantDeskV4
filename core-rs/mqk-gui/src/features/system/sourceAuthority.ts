@@ -53,12 +53,12 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: [],
     placeholder: ["riskSummary", "riskDenials"],
   },
-  // Portfolio data originates from the broker (account/positions/fills are broker snapshot).
+  // Portfolio data originates from the broker (account/positions/orders/fills are broker snapshot).
   portfolio: {
     db: [],
     runtime: [],
-    broker: ["/portfolio/summary", "/portfolio/positions", "/portfolio/fills", "/trading/account", "/trading/positions", "/trading/fills"],
-    placeholder: ["portfolioSummary", "positions", "fills"],
+    broker: ["/portfolio/summary", "/portfolio/positions", "/portfolio/orders/open", "/portfolio/fills", "/trading/account", "/trading/positions", "/trading/fills"],
+    placeholder: ["portfolioSummary", "positions", "openOrders", "fills"],
   },
   // Reconcile records are persisted in Postgres — always DB truth.
   reconcile: {
