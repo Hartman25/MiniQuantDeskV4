@@ -672,7 +672,8 @@ export const MOCK_ACTION_CATALOG: OperatorActionDefinition[] = [
   { action_key: "kill-switch", label: "Kill switch", level: 3, description: "Global hard stop.", requiresReason: true, confirmText: "Trigger kill switch?", disabled: false },
   { action_key: "resume-after-halt", label: "Resume after halt", level: 2, description: "Resume after operator verification.", requiresReason: true, confirmText: "Resume after halt?", disabled: false },
   { action_key: "ack-alert", label: "Acknowledge alert", level: 0, description: "Mark alert acknowledged.", requiresReason: false, confirmText: "Acknowledge alert?", disabled: false },
-  { action_key: "change-system-mode", label: "Change system mode", level: 3, description: "Perform a controlled mode transition with daemon restart and config reload.", requiresReason: true, confirmText: "Change system mode?", disabled: false },
+  // "change-system-mode" intentionally removed: mode transitions require a controlled daemon
+  // restart, not an API call. The daemon returns 409 for that key as defense-in-depth.
 ];
 
 

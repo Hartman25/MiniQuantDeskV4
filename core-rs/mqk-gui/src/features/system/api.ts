@@ -585,8 +585,9 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const healthProbe = await fetchJsonCandidates<MetadataSummary>(["/api/v1/system/metadata"]);
 
   // Extract legacy status only when the statusProbe itself resolved via the
-  // legacy path.  Do NOT fire a second fetch â€” canonical is preferred and if
+  // legacy path.  Do NOT fire a second fetch — canonical is preferred and if
   // canonical failed the probe already tried the legacy path as a fallback.
+  const statusCanonical = statusProbe.ok && statusProbe.endpoint === "/api/v1/system/status";
   const legacyStatusFromProbe: LegacyDaemonStatusSnapshot | null =
     statusProbe.ok && statusProbe.endpoint === "/v1/status"
       ? (statusProbe.data as LegacyDaemonStatusSnapshot)
@@ -679,8 +680,9 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     ? (fillsR.data as LegacyTradingFillsResponse)
     : null;
 
-  const executionOrders = Array.isArray(executionOrdersR.data)
-    ? executionOrdersR.data
+  const executionOrdersCanonical = executionOrdersR.ok && Array.isArray(executionOrdersR.data);
+  const executionOrders = executionOrdersCanonical
+    ? (executionOrdersR.data as ExecutionOrderRow[])
     : mapLegacyTradingOrdersToExecutionOrders(legacyOrdersResponse) ?? [];
 
   const firstOrderId = executionOrders[0]?.internal_order_id;
@@ -695,6 +697,18 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     : [null, null, null, null, null];
 
   const usedMockSections: string[] = [];
+
+  // When system status resolved via legacy (/v1/status) instead of canonical
+  // (/api/v1/system/status), mark it as non-canonical. "status" is in the ops
+  // panel's placeholder evidence hints — this push ensures the ops authority
+  // classification degrades to "placeholder" (or "mixed") so the truth gate
+  // fires and the action catalog is not shown on approximate legacy data.
+  if (!statusCanonical) usedMockSections.push("status");
+  // executionOrders from legacy (/v1/trading/orders) has fabricated strategy_id and
+  // derived execution_stage. Mark as non-canonical so the execution panel's authority
+  // degrades to "mixed" rather than "runtime_memory".
+  if (!executionOrdersCanonical) usedMockSections.push("executionOrders");
+
   const useObject = <T,>(key: string, result: EndpointFetchResult<T>, fallback: T): T => {
     if (result.ok && result.data !== undefined) return result.data;
     usedMockSections.push(key);
@@ -710,7 +724,8 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     executionSummaryR.ok && executionSummaryR.data !== undefined
       ? executionSummaryR.data
       : deriveExecutionSummaryFromOrders(executionOrders);
-  if (!executionSummary) usedMockSections.push("executionSummary");
+  // Push when canonical failed (even if derived summary is non-null from legacy orders).
+  if (!executionSummary || !executionSummaryR.ok) usedMockSections.push("executionSummary");
 
   const portfolioSummaryCanonical =
     portfolioSummaryR.ok &&
@@ -1102,28 +1117,8 @@ export async function invokeOperatorAction(
   return failedOperatorActionReceipt(actionKey, legacyResult);
 }
 
-export async function requestSystemModeTransition(
-  targetMode: SystemStatus["environment"],
-  reason: string,
-): Promise<OperatorActionReceipt> {
-  const response = await postJson<Partial<OperatorActionReceipt>>(
-    ["/api/v1/ops/change-mode"],
-    { target_mode: targetMode, reason },
-  );
-
-  if (response.ok && response.data) {
-    const payload = response.data;
-    return {
-      ok: payload.ok ?? true,
-      action_key: payload.action_key ?? "change-system-mode",
-      environment: payload.environment ?? targetMode,
-      live_routing_enabled: payload.live_routing_enabled ?? false,
-      result_state: payload.result_state ?? "accepted",
-      warnings: payload.warnings ?? [],
-      audit_reference: payload.audit_reference ?? null,
-      blocking_failures: payload.blocking_failures ?? [],
-    };
-  }
-
-  return failedOperatorActionReceipt("change-system-mode", response, targetMode);
-}
+// requestSystemModeTransition was removed (H-7 / PC-1):
+// /api/v1/ops/change-mode is intentionally NOT mounted on the daemon.
+// Mode transitions require a controlled restart with configuration reload.
+// The change-system-mode action key returns 409 from /api/v1/ops/action
+// as a defense-in-depth rejection. Callers were removed in H-7.

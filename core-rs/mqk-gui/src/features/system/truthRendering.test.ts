@@ -250,3 +250,41 @@ test("no_snapshot does not fire for alerts when alerts/active resolves", () => {
   );
   assert.equal(state, null);
 });
+
+// --- status canonical tracking (PC-1 closure) ---
+
+test("ops panel returns unimplemented when status resolved via legacy only (status in mockSections)", () => {
+  // Simulates: statusCanonical=false → usedMockSections.push("status")
+  // ops evidence hints have placeholder: ["status", ...] so authority degrades to "placeholder".
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "partial",
+        reachable: true,
+        realEndpoints: ["/v1/status"],
+        missingEndpoints: [],
+        mockSections: ["status"],
+      },
+      panelSources: { ops: "placeholder" } as Record<string, SourceAuthority> as SystemModel["panelSources"],
+    }),
+    "ops",
+  );
+  assert.equal(state, "unimplemented");
+});
+
+test("ops panel returns null when canonical status resolves (status not in mockSections)", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "real",
+        reachable: true,
+        realEndpoints: ["/api/v1/system/status"],
+        missingEndpoints: [],
+        mockSections: [],
+      },
+      panelSources: { ops: "runtime_memory" } as Record<string, SourceAuthority> as SystemModel["panelSources"],
+    }),
+    "ops",
+  );
+  assert.equal(state, null);
+});

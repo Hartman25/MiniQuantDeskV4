@@ -541,3 +541,58 @@ async fn gui_ops_action_endpoint_dispatches_correctly() {
     );
     assert_eq!(j["accepted"], false, "unknown action accepted must be false: {j}");
 }
+
+#[tokio::test]
+async fn gui_contract_recently_promoted_array_surfaces_have_expected_shape() {
+    // These two routes were previously in the TEST-02 waiver list.  They are
+    // now mounted and return deterministic empty arrays in test state.
+    let router = make_router();
+
+    // /api/v1/system/config-diffs — Vec<ConfigDiffRow>
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/config-diffs")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router.clone(), req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/system/config-diffs must return 200"
+    );
+    let json = parse_json(body);
+    assert!(
+        json.as_array().is_some(),
+        "/api/v1/system/config-diffs must return a JSON array; got: {json}"
+    );
+    // No DB in test state → always empty.
+    assert_eq!(
+        json.as_array().map(|v| v.is_empty()),
+        Some(true),
+        "/api/v1/system/config-diffs must be empty in test state"
+    );
+
+    // /api/v1/strategy/suppressions — Vec<StrategySuppressionRow>
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/suppressions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/strategy/suppressions must return 200"
+    );
+    let json = parse_json(body);
+    assert!(
+        json.as_array().is_some(),
+        "/api/v1/strategy/suppressions must return a JSON array; got: {json}"
+    );
+    // No active suppressions in test state → always empty.
+    assert_eq!(
+        json.as_array().map(|v| v.is_empty()),
+        Some(true),
+        "/api/v1/strategy/suppressions must be empty in test state"
+    );
+}

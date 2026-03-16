@@ -881,8 +881,10 @@ export interface OperatorActionDefinition {
     | "cancel-all-open-orders"
     | "kill-switch"
     | "resume-after-halt"
-    | "ack-alert"
-    | "change-system-mode";
+    | "ack-alert";
+  // "change-system-mode" intentionally excluded — mode transitions require a controlled
+  // daemon restart with configuration reload. The daemon returns 409 for that action key
+  // as defense-in-depth. Only keys the daemon can actually execute are listed here.
   label: string;
   level: ActionLevel;
   description: string;
