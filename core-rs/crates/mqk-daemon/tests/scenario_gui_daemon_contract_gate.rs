@@ -297,9 +297,7 @@ async fn gui_system_status_and_preflight_surfaces_are_semantically_truthful() {
     );
     // Real execution-disarmed blocker must still be present.
     assert!(
-        blockers
-            .iter()
-            .any(|s| *s == "Execution is disarmed at the integrity gate."),
+        blockers.contains(&"Execution is disarmed at the integrity gate."),
         "real execution-disarmed blocker must be present: {blockers:?}"
     );
 }
@@ -485,7 +483,10 @@ async fn gui_ops_action_endpoint_dispatches_correctly() {
     // arm-execution: must return 200, accepted=true, disposition="applied".
     let (s, j) = post_action(router.clone(), "arm-execution").await;
     assert_eq!(s, StatusCode::OK, "arm-execution must return 200: {j}");
-    assert_eq!(j["accepted"], true, "arm-execution accepted must be true: {j}");
+    assert_eq!(
+        j["accepted"], true,
+        "arm-execution accepted must be true: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("applied"),
@@ -493,14 +494,19 @@ async fn gui_ops_action_endpoint_dispatches_correctly() {
     );
     // requested_action reflects the handler's internal canonical name ("control.arm").
     assert!(
-        j["requested_action"].as_str().is_some_and(|v| !v.is_empty()),
+        j["requested_action"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()),
         "arm-execution requested_action must be a non-empty string: {j}"
     );
 
     // disarm-execution: must return 200, accepted=true, disposition="applied".
     let (s, j) = post_action(router.clone(), "disarm-execution").await;
     assert_eq!(s, StatusCode::OK, "disarm-execution must return 200: {j}");
-    assert_eq!(j["accepted"], true, "disarm-execution accepted must be true: {j}");
+    assert_eq!(
+        j["accepted"], true,
+        "disarm-execution accepted must be true: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("applied"),
@@ -526,9 +532,9 @@ async fn gui_ops_action_endpoint_dispatches_correctly() {
     );
     // blockers array must contain an entry explaining that a restart is required.
     assert!(
-        j["blockers"]
-            .as_array()
-            .is_some_and(|arr| arr.iter().any(|v| v.as_str().is_some_and(|s| s.contains("restart")))),
+        j["blockers"].as_array().is_some_and(|arr| arr
+            .iter()
+            .any(|v| v.as_str().is_some_and(|s| s.contains("restart")))),
         "change-system-mode blockers must mention restart: {j}"
     );
 
@@ -539,7 +545,10 @@ async fn gui_ops_action_endpoint_dispatches_correctly() {
         StatusCode::BAD_REQUEST,
         "unknown action key must return 400: {j}"
     );
-    assert_eq!(j["accepted"], false, "unknown action accepted must be false: {j}");
+    assert_eq!(
+        j["accepted"], false,
+        "unknown action accepted must be false: {j}"
+    );
 }
 
 #[tokio::test]
@@ -561,7 +570,11 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         .body(axum::body::Body::empty())
         .unwrap();
     let (status, body) = call(router, req).await;
-    assert_eq!(status, StatusCode::OK, "/api/v1/ops/catalog must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/ops/catalog must return 200"
+    );
 
     let json = parse_json(body);
 
@@ -571,10 +584,16 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         Some("/api/v1/ops/catalog"),
         "ops/catalog must self-identify canonical_route"
     );
-    let actions = json["actions"].as_array().expect("/api/v1/ops/catalog must have an 'actions' array");
+    let actions = json["actions"]
+        .as_array()
+        .expect("/api/v1/ops/catalog must have an 'actions' array");
 
     // Exactly 5 entries.
-    assert_eq!(actions.len(), 5, "catalog must have exactly 5 entries; got: {actions:?}");
+    assert_eq!(
+        actions.len(),
+        5,
+        "catalog must have exactly 5 entries; got: {actions:?}"
+    );
 
     // Collect action_key values.
     let keys: Vec<&str> = actions
@@ -583,7 +602,13 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         .collect();
 
     // The 5 supported keys must be present.
-    for expected_key in &["arm-execution", "disarm-execution", "start-system", "stop-system", "kill-switch"] {
+    for expected_key in &[
+        "arm-execution",
+        "disarm-execution",
+        "start-system",
+        "stop-system",
+        "kill-switch",
+    ] {
         assert!(
             keys.contains(expected_key),
             "catalog must contain action_key '{expected_key}'; got keys: {keys:?}"
@@ -601,35 +626,67 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         let key = entry["action_key"].as_str().unwrap_or("?");
         assert!(entry["label"].is_string(), "{key}: missing 'label'");
         assert!(entry["level"].is_number(), "{key}: missing 'level'");
-        assert!(entry["description"].is_string(), "{key}: missing 'description'");
-        assert!(entry["requires_reason"].is_boolean(), "{key}: missing 'requires_reason'");
-        assert!(entry["confirm_text"].is_string(), "{key}: missing 'confirm_text'");
+        assert!(
+            entry["description"].is_string(),
+            "{key}: missing 'description'"
+        );
+        assert!(
+            entry["requires_reason"].is_boolean(),
+            "{key}: missing 'requires_reason'"
+        );
+        assert!(
+            entry["confirm_text"].is_string(),
+            "{key}: missing 'confirm_text'"
+        );
         assert!(entry["enabled"].is_boolean(), "{key}: missing 'enabled'");
     }
 
     // State-specific availability in test state (no DB, disarmed, idle, not halted).
     let by_key = |k: &str| -> &serde_json::Value {
-        actions.iter().find(|a| a["action_key"].as_str() == Some(k)).unwrap()
+        actions
+            .iter()
+            .find(|a| a["action_key"].as_str() == Some(k))
+            .unwrap()
     };
 
     // Disarmed → arm-execution must be enabled.
-    assert_eq!(by_key("arm-execution")["enabled"], true, "arm-execution must be enabled in disarmed test state");
+    assert_eq!(
+        by_key("arm-execution")["enabled"],
+        true,
+        "arm-execution must be enabled in disarmed test state"
+    );
 
     // Disarmed → disarm-execution must be disabled.
-    assert_eq!(by_key("disarm-execution")["enabled"], false, "disarm-execution must be disabled in disarmed test state");
+    assert_eq!(
+        by_key("disarm-execution")["enabled"],
+        false,
+        "disarm-execution must be disabled in disarmed test state"
+    );
     assert!(
         by_key("disarm-execution")["disabled_reason"].is_string(),
         "disarm-execution must have a disabled_reason in disarmed state"
     );
 
     // Idle, not halted → start-system must be enabled.
-    assert_eq!(by_key("start-system")["enabled"], true, "start-system must be enabled in idle test state");
+    assert_eq!(
+        by_key("start-system")["enabled"],
+        true,
+        "start-system must be enabled in idle test state"
+    );
 
     // Not running → stop-system must be disabled.
-    assert_eq!(by_key("stop-system")["enabled"], false, "stop-system must be disabled in idle test state");
+    assert_eq!(
+        by_key("stop-system")["enabled"],
+        false,
+        "stop-system must be disabled in idle test state"
+    );
 
     // Not halted → kill-switch must be enabled.
-    assert_eq!(by_key("kill-switch")["enabled"], true, "kill-switch must be enabled in non-halted test state");
+    assert_eq!(
+        by_key("kill-switch")["enabled"],
+        true,
+        "kill-switch must be enabled in non-halted test state"
+    );
 }
 
 #[tokio::test]

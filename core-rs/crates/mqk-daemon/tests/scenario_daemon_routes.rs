@@ -1159,9 +1159,7 @@ async fn prod02_running_without_reconcile_result_is_critical() {
         .expect("fault_signals must be array");
     let classes: Vec<&str> = signals.iter().filter_map(|s| s["class"].as_str()).collect();
     assert!(
-        classes
-            .iter()
-            .any(|c| *c == "reconcile.unproven.running_without_reconcile_result"),
+        classes.contains(&"reconcile.unproven.running_without_reconcile_result"),
         "expected reconcile.unproven.running_without_reconcile_result in fault_signals, got: {:?}",
         classes
     );

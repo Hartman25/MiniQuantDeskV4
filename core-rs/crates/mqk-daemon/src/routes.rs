@@ -682,7 +682,9 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             action_key: "arm-execution".to_string(),
             label: "Arm Execution".to_string(),
             level: 1,
-            description: "Arm the execution integrity gate. Required before any live order dispatch.".to_string(),
+            description:
+                "Arm the execution integrity gate. Required before any live order dispatch."
+                    .to_string(),
             requires_reason: false,
             confirm_text: "Confirm: arm execution gate".to_string(),
             enabled: !armed && !halted,
@@ -698,7 +700,9 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             action_key: "disarm-execution".to_string(),
             label: "Disarm Execution".to_string(),
             level: 1,
-            description: "Disarm the execution integrity gate. Stops new order dispatch immediately.".to_string(),
+            description:
+                "Disarm the execution integrity gate. Stops new order dispatch immediately."
+                    .to_string(),
             requires_reason: false,
             confirm_text: "Confirm: disarm execution gate".to_string(),
             enabled: armed,
@@ -730,7 +734,9 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             action_key: "stop-system".to_string(),
             label: "Stop System".to_string(),
             level: 2,
-            description: "Stop the execution runtime gracefully. Drains pending outbox before halting.".to_string(),
+            description:
+                "Stop the execution runtime gracefully. Drains pending outbox before halting."
+                    .to_string(),
             requires_reason: false,
             confirm_text: "Confirm: stop execution runtime".to_string(),
             enabled: running,
@@ -744,9 +750,13 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             action_key: "kill-switch".to_string(),
             label: "Kill Switch".to_string(),
             level: 3,
-            description: "Immediately halt all execution and disarm. Use only in emergency. Requires reason.".to_string(),
+            description:
+                "Immediately halt all execution and disarm. Use only in emergency. Requires reason."
+                    .to_string(),
             requires_reason: true,
-            confirm_text: "Type CONFIRM to activate kill switch -- this halts all execution immediately".to_string(),
+            confirm_text:
+                "Type CONFIRM to activate kill switch -- this halts all execution immediately"
+                    .to_string(),
             enabled: !halted,
             disabled_reason: if halted {
                 Some("System is already halted.".to_string())
