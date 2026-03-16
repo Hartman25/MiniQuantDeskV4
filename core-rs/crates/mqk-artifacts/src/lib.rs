@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub struct RunManifest {
     pub schema_version: i32,
     pub run_id: Uuid,
+    pub strategy_name: String,
     pub engine_id: String,
     pub mode: String,
     pub git_hash: String,
@@ -32,6 +33,7 @@ pub struct InitRunArtifactsArgs<'a> {
     pub exports_root: &'a Path, // e.g. ../exports
     pub schema_version: i32,
     pub run_id: Uuid,
+    pub strategy_name: &'a str,
     pub engine_id: &'a str,
     pub mode: &'a str,
     pub git_hash: &'a str,
@@ -73,6 +75,7 @@ pub fn init_run_artifacts(args: InitRunArtifactsArgs<'_>) -> Result<InitRunArtif
     let manifest = RunManifest {
         schema_version: args.schema_version,
         run_id: args.run_id,
+        strategy_name: args.strategy_name.to_string(),
         engine_id: args.engine_id.to_string(),
         mode: args.mode.to_string(),
         git_hash: args.git_hash.to_string(),
@@ -116,6 +119,8 @@ fn ensure_file_exists_with(path: &Path, contents_if_create: &str) -> Result<()> 
 #[derive(Debug, Clone, Serialize)]
 struct BacktestMetrics<'a> {
     schema_version: i32,
+    run_id: Uuid,
+    strategy_name: &'a str,
     halted: bool,
     halt_reason: Option<&'a str>,
     execution_blocked: bool,
@@ -225,6 +230,8 @@ pub fn write_backtest_report(run_dir: &Path, report: &mqk_backtest::BacktestRepo
 
     let metrics = BacktestMetrics {
         schema_version: 1,
+        run_id: report.run_id,
+        strategy_name: report.strategy_name.as_str(),
         halted: report.halted,
         halt_reason: report.halt_reason.as_deref(),
         execution_blocked: report.execution_blocked,
@@ -419,6 +426,15 @@ mod tests {
         assert_eq!(v["schema_version"], 1, "schema_version must be 1");
         assert!(v["fills"].is_number(), "fills count must be present");
         assert!(v["orders"].is_number(), "orders count must be present");
+        assert!(v["run_id"].is_string(), "run_id must be present in metrics.json");
+        assert!(
+            v["strategy_name"].is_string(),
+            "strategy_name must be present in metrics.json"
+        );
+        assert_eq!(
+            v["strategy_name"], "test_strategy",
+            "strategy_name must match report"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

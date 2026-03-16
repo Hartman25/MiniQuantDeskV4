@@ -14,6 +14,7 @@ fn scenario_run_artifacts_manifest_created() -> Result<()> {
         exports_root,
         schema_version: 1,
         run_id,
+        strategy_name: "test_strategy",
         engine_id: "MAIN",
         mode: "PAPER",
         git_hash: "deadbeef",

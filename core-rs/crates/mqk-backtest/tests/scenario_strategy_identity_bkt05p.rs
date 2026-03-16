@@ -182,3 +182,55 @@ fn derive_run_id_differs_on_strategy_name() {
         "different strategy names must yield different run_ids"
     );
 }
+
+// ---------------------------------------------------------------------------
+// I8: Input-data identity gap — same strategy+config, different bars → same run_id
+// ---------------------------------------------------------------------------
+
+/// Explicitly proves the documented limitation: `run_id` does NOT encode bar
+/// data.  Two runs with the same strategy name and config but different bar
+/// sequences produce the **same** `run_id`.
+///
+/// This test exists to make the gap observable and prevent it from being
+/// silently "fixed" without updating all downstream callers that depend on
+/// the current stable-key semantics.  If bar-data hashing is ever added,
+/// this test must be updated alongside the `derive_run_id` doc comment and
+/// `BacktestReport::run_id` field doc, and the `input_data_hash` tracking
+/// ticket closed.
+#[test]
+fn run_id_does_not_encode_input_bar_data() {
+    let cfg = BacktestConfig::test_defaults();
+
+    // Two bar sequences that differ in price — different data, same identity inputs.
+    let bars_a = vec![bar(1_700_000_060)]; // price 100_000_000 micros
+    let bars_b = {
+        let mut b = bar(1_700_000_060);
+        b.close_micros = 120_000_000; // different close price
+        vec![b]
+    };
+
+    let mut engine_a = BacktestEngine::new(cfg.clone());
+    engine_a
+        .add_strategy(Box::new(NamedStrategy("same_strat")))
+        .unwrap();
+    let r_a = engine_a.run(&bars_a).unwrap();
+
+    let mut engine_b = BacktestEngine::new(cfg);
+    engine_b
+        .add_strategy(Box::new(NamedStrategy("same_strat")))
+        .unwrap();
+    let r_b = engine_b.run(&bars_b).unwrap();
+
+    // Sanity: the two runs DID see different data (equity diverged).
+    assert_ne!(
+        r_a.equity_curve, r_b.equity_curve,
+        "equity curves must differ when bar prices differ — confirms different input data"
+    );
+
+    // The provenance gap: run_id is identical despite different bar data.
+    assert_eq!(
+        r_a.run_id, r_b.run_id,
+        "KNOWN LIMITATION: run_id is identical for runs that differ only in bar data; \
+         bar-data hashing has not been wired into derive_run_id"
+    );
+}

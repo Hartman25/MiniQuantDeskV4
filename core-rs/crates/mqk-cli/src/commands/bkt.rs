@@ -60,8 +60,9 @@ pub async fn run_backtest_csv(
 
     let report = engine.run(&bars).context("backtest run failed")?;
 
-    // BKT-05P / BKT-06P: identity fields come directly from the report.
+    // BKT-05P: run identity — deterministic, from the report (NOT environmental).
     let config_hash = report.config_id.to_string();
+    // BKT-06P: git_hash is operational artifact metadata — NOT part of run_id.
     let git_hash = bkt_git_hash();
 
     println!("run_id={}", report.run_id);
@@ -78,6 +79,7 @@ pub async fn run_backtest_csv(
             exports_root: Path::new(dir),
             schema_version: 1,
             run_id: report.run_id,
+            strategy_name: &report.strategy_name,
             engine_id: "mqk-backtest",
             mode: "backtest",
             git_hash: &git_hash,
@@ -214,8 +216,9 @@ pub async fn run_backtest_db(
 
     let report = engine.run(&bars).context("backtest run failed")?;
 
-    // BKT-05P / BKT-06P: identity fields come directly from the report.
+    // BKT-05P: run identity — deterministic, from the report (NOT environmental).
     let config_hash = report.config_id.to_string();
+    // BKT-06P: git_hash is operational artifact metadata — NOT part of run_id.
     let git_hash = bkt_git_hash();
 
     println!("run_id={}", report.run_id);
@@ -232,6 +235,7 @@ pub async fn run_backtest_db(
             exports_root: Path::new(dir),
             schema_version: 1,
             run_id: report.run_id,
+            strategy_name: &report.strategy_name,
             engine_id: "mqk-backtest",
             mode: "backtest",
             git_hash: &git_hash,

@@ -35,6 +35,7 @@ fn valid_manifest_json() -> String {
     r#"{
         "schema_version": 1,
         "run_id": "00000000-0000-0000-0000-000000000001",
+        "strategy_name": "golden_artifact_strategy_v1",
         "engine_id": "mqk_backtest",
         "mode": "backtest",
         "git_hash": "abc123def456789abcdef",
@@ -265,6 +266,7 @@ fn missing_config_hash_lock_fails() {
     let manifest = r#"{
         "schema_version": 1,
         "run_id": "00000000-0000-0000-0000-000000000002",
+        "strategy_name": "test_strategy",
         "engine_id": "test",
         "mode": "backtest",
         "git_hash": "abc123",
@@ -301,6 +303,7 @@ fn missing_git_hash_lock_fails() {
     let manifest = r#"{
         "schema_version": 1,
         "run_id": "00000000-0000-0000-0000-000000000003",
+        "strategy_name": "test_strategy",
         "engine_id": "test",
         "mode": "backtest",
         "git_hash": "",

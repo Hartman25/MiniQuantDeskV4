@@ -120,6 +120,34 @@ fn passes_all_thresholds() {
     let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
     assert_eq!(parsed["decision"]["passed"], true);
 
+    // Verify provenance fields are serialized into the promotion report JSON.
+    // This proves that a stored promotion_report.json is traceable back to its
+    // source run without needing any external lookup.
+    let prov = &parsed["provenance"];
+    assert!(
+        prov["run_id"].is_string(),
+        "provenance.run_id must be a string in promotion_report.json"
+    );
+    assert_ne!(
+        prov["run_id"].as_str().unwrap(),
+        "00000000-0000-0000-0000-000000000000",
+        "provenance.run_id must be non-nil"
+    );
+    assert_eq!(
+        prov["run_id"].as_str().unwrap(),
+        run_id.to_string(),
+        "provenance.run_id must match the report's run_id"
+    );
+    assert_eq!(
+        prov["strategy_name"].as_str().unwrap(),
+        "passes_all_thresholds_strategy",
+        "provenance.strategy_name must match the report's strategy_name"
+    );
+    assert!(
+        prov["config_id"].is_string(),
+        "provenance.config_id must be present"
+    );
+
     // Cleanup
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
