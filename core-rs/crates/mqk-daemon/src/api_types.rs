@@ -483,6 +483,47 @@ pub struct ActionCatalogResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/execution/orders — canonical OMS order surface
+// ---------------------------------------------------------------------------
+
+/// One live order row sourced from the in-memory OMS runtime snapshot.
+///
+/// Fields that are not tracked at the OMS snapshot level carry explicit
+/// architectural defaults:
+/// - `strategy_id`: `"runtime"` — the OMS layer has no strategy attribution.
+/// - `side`: `"buy"` — OMS enforces `total_qty > 0` (long-only in current arch).
+/// - `order_type`: `"market"` — order type is not captured in OMS state.
+/// - `age_ms`: `0` — per-order creation time is not in the OMS snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionOrderRow {
+    /// Internal (client) order identifier assigned by this daemon.
+    pub internal_order_id: String,
+    /// Broker-assigned order ID; `None` until the submit is confirmed.
+    pub broker_order_id: Option<String>,
+    pub symbol: String,
+    /// Source-layer attribution: `"runtime"` for OMS-truth rows.
+    pub strategy_id: String,
+    /// `"buy"` — OMS enforces long-only in current architecture.
+    pub side: String,
+    /// `"market"` — order type is not captured at OMS snapshot level.
+    pub order_type: String,
+    pub requested_qty: i64,
+    pub filled_qty: i64,
+    /// Canonical OMS state: `"Open"` | `"PartiallyFilled"` | `"Filled"` |
+    /// `"CancelPending"` | `"Cancelled"` | `"ReplacePending"` | `"Rejected"`
+    pub current_status: String,
+    /// Display-friendly lifecycle stage derived from `current_status`.
+    pub current_stage: String,
+    /// Always `0`: per-order creation timestamps are not in the OMS snapshot.
+    pub age_ms: u64,
+    pub has_warning: bool,
+    /// `true` when `current_status == "Rejected"`.
+    pub has_critical: bool,
+    /// RFC 3339 timestamp of the execution snapshot that produced this row.
+    pub updated_at: String,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/diagnostics/snapshot (B4)
 // ---------------------------------------------------------------------------
 

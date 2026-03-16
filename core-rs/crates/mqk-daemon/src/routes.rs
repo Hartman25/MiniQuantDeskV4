@@ -33,8 +33,8 @@ use crate::{
     api_types::{
         ActionCatalogEntry, ActionCatalogResponse, AuditArtifactRow, AuditArtifactsResponse,
         ConfigDiffRow, ConfigFingerprintResponse, DiagnosticsSnapshotResponse,
-        ExecutionSummaryResponse, FaultSignal, GateRefusedResponse, HealthResponse,
-        IntegrityResponse, OperatorActionAuditFields, OperatorActionAuditRow,
+        ExecutionOrderRow, ExecutionSummaryResponse, FaultSignal, GateRefusedResponse,
+        HealthResponse, IntegrityResponse, OperatorActionAuditFields, OperatorActionAuditRow,
         OperatorActionResponse, OperatorActionsAuditResponse, OperatorTimelineResponse,
         OperatorTimelineRow, OpsActionRequest, PortfolioSummaryResponse, PreflightStatusResponse,
         ReconcileSummaryResponse, RiskSummaryResponse, RuntimeErrorResponse,
@@ -140,6 +140,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(system_runtime_leadership),
         )
         .route("/api/v1/execution/summary", get(execution_summary))
+        .route("/api/v1/execution/orders", get(execution_orders))
         .route("/api/v1/portfolio/summary", get(portfolio_summary))
         .route("/api/v1/risk/summary", get(risk_summary))
         .route("/api/v1/reconcile/status", get(reconcile_status))
@@ -899,6 +900,20 @@ fn parse_decimal(value: &str) -> f64 {
     value.parse::<f64>().unwrap_or(0.0)
 }
 
+/// Map an OMS canonical state name to a display-friendly lifecycle stage label.
+fn oms_stage_label(status: &str) -> &'static str {
+    match status {
+        "Open" => "Submitted",
+        "PartiallyFilled" => "Partial Fill",
+        "Filled" => "Filled",
+        "CancelPending" => "Cancel Pending",
+        "Cancelled" => "Cancelled",
+        "ReplacePending" => "Replace Pending",
+        "Rejected" => "Rejected",
+        _ => "Unknown",
+    }
+}
+
 fn runtime_status_from_state(state: &str) -> &'static str {
     match state {
         "idle" => "idle",
@@ -1302,6 +1317,49 @@ pub(crate) async fn execution_summary(State(st): State<Arc<AppState>>) -> impl I
     };
 
     (StatusCode::OK, Json(summary)).into_response()
+}
+
+pub(crate) async fn execution_orders(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    // Canonical OMS truth: active orders from the in-memory execution snapshot.
+    // Fields not tracked at OMS snapshot level carry explicit architectural defaults
+    // documented on ExecutionOrderRow in api_types.rs.
+    let snap = st.execution_snapshot.read().await.clone();
+
+    let rows: Vec<ExecutionOrderRow> = if let Some(snapshot) = snap {
+        let updated_at = snapshot.snapshot_at_utc.to_rfc3339();
+        snapshot
+            .active_orders
+            .iter()
+            .map(|o| {
+                let has_critical = o.status == "Rejected";
+                let current_stage = oms_stage_label(&o.status).to_string();
+                ExecutionOrderRow {
+                    internal_order_id: o.order_id.clone(),
+                    broker_order_id: o.broker_order_id.clone(),
+                    symbol: o.symbol.clone(),
+                    // "runtime" = sourced from OMS runtime layer, not broker snapshot.
+                    strategy_id: "runtime".to_string(),
+                    // OMS enforces total_qty > 0 (long-only); "buy" is architecturally correct.
+                    side: "buy".to_string(),
+                    // Order type not captured at OMS snapshot level.
+                    order_type: "market".to_string(),
+                    requested_qty: o.total_qty,
+                    filled_qty: o.filled_qty,
+                    current_status: o.status.clone(),
+                    current_stage,
+                    // Per-order creation time not tracked in OMS snapshot.
+                    age_ms: 0,
+                    has_warning: false,
+                    has_critical,
+                    updated_at: updated_at.clone(),
+                }
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
+    (StatusCode::OK, Json(rows)).into_response()
 }
 
 pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {

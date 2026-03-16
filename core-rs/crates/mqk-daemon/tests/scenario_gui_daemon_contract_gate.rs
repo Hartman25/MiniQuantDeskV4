@@ -690,6 +690,51 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
 }
 
 #[tokio::test]
+async fn gui_contract_execution_orders_is_canonical_oms_array() {
+    // /api/v1/execution/orders must:
+    // 1. Return 200 with a JSON array (not a wrapped object).
+    // 2. Return empty array in test state (no execution snapshot injected).
+    // 3. Confirm the legacy /v1/trading/orders is still mounted separately.
+    let router = make_router();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/execution/orders")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router.clone(), req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/execution/orders must return 200"
+    );
+    let json = parse_json(body);
+    assert!(
+        json.as_array().is_some(),
+        "/api/v1/execution/orders must return a JSON array; got: {json}"
+    );
+    // No execution snapshot in test state → always empty.
+    assert_eq!(
+        json.as_array().map(|v| v.is_empty()),
+        Some(true),
+        "/api/v1/execution/orders must be empty in no-snapshot test state"
+    );
+
+    // Legacy broker-snapshot path must still resolve independently.
+    let legacy_req = Request::builder()
+        .method("GET")
+        .uri("/v1/trading/orders")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (legacy_status, _) = call(router, legacy_req).await;
+    assert_eq!(
+        legacy_status,
+        StatusCode::OK,
+        "/v1/trading/orders must remain mounted alongside canonical /api/v1/execution/orders"
+    );
+}
+
+#[tokio::test]
 async fn gui_contract_recently_promoted_array_surfaces_have_expected_shape() {
     // These two routes were previously in the TEST-02 waiver list.  They are
     // now mounted and return deterministic empty arrays in test state.

@@ -18,6 +18,7 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
 ### Execution and portfolio summaries
 
 - `/api/v1/execution/summary` — shape check (active_orders, pending_orders, dispatching_orders, reject_count_today)
+- `/api/v1/execution/orders` — canonical OMS array; empty in test state (no snapshot); row fields: internal_order_id, broker_order_id, symbol, strategy_id, side, order_type, requested_qty, filled_qty, current_status, current_stage, age_ms, has_warning, has_critical, updated_at; legacy `/v1/trading/orders` confirmed still mounted
 - `/api/v1/portfolio/summary` — shape check (account_equity, cash, long_market_value, buying_power)
 
 ### Risk and reconcile summaries
@@ -70,7 +71,6 @@ Note: `/api/v1/ops/change-mode` is intentionally NOT mounted. Mode transitions r
 These endpoints are probed by the GUI but not yet authoritative daemon contract surfaces.
 Waivers are explicit so deferred coverage is visible, not silently ignored.
 
-- `/api/v1/execution/orders`
 - `/api/v1/portfolio/positions`
 - `/api/v1/portfolio/orders/open`
 - `/api/v1/portfolio/fills`
