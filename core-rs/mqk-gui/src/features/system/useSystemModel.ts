@@ -42,7 +42,9 @@ const FALLBACK_MODEL: SystemModel = {
   sessionState: { market_session: "closed", exchange_calendar_state: "closed", system_trading_window: "disabled", strategy_allowed: false, next_session_change_at: null, notes: [] },
   configFingerprint: { config_hash: "unknown", risk_policy_version: "unknown", strategy_bundle_version: "unknown", build_version: "unknown", environment_profile: "unknown", runtime_generation_id: "unknown", last_restart_at: null },
   marketDataQuality: { overall_health: "unknown", freshness_sla_ms: 0, stale_symbol_count: 0, missing_bar_count: 0, venue_disagreement_count: 0, strategy_blocks: 0, venues: [], issues: [] },
-  runtimeLeadership: { leader_node: "unknown", leader_lease_state: "lost", generation_id: "unknown", restart_count_24h: 0, last_restart_at: null, post_restart_recovery_state: "degraded", recovery_checkpoint: "unknown", checkpoints: [] },
+  // "in_progress" not "degraded": "degraded" triggers a system-wide degraded overlay.
+  // The fallback represents missing truth (no daemon data yet), not a real degraded recovery state.
+  runtimeLeadership: { leader_node: "unknown", leader_lease_state: "lost", generation_id: "unknown", restart_count_24h: 0, last_restart_at: null, post_restart_recovery_state: "in_progress", recovery_checkpoint: "unknown", checkpoints: [] },
   artifactRegistry: { last_updated_at: null, ready_count: 0, pending_count: 0, failed_count: 0, artifacts: [] },
   strategySuppressions: [],
   configDiffs: [],
