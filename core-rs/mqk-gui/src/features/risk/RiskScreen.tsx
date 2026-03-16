@@ -11,13 +11,14 @@ export function RiskScreen({ model }: { model: SystemModel }) {
   const truthState = panelTruthRenderState(model, "risk");
   const activeSuppressions = model.strategySuppressions.filter((row) => row.state === "active");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  // Hard-close on any compromised truth state: stale risk figures (concentration, loss-limit
+  // utilization, kill switch) must not render as authoritative. Inline notice is insufficient.
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 
   return (
     <div className="screen-grid desk-screen-grid">
-      {truthState ? <TruthStateNotice state={truthState} /> : null}
       <div className="summary-grid summary-grid-four">
         <StatCard title="Gross Exposure" value={formatMoney(r.gross_exposure)} detail="Current deployed gross capital" tone="neutral" />
         <StatCard title="Net Exposure" value={formatMoney(r.net_exposure)} detail="Directional net capital" tone="neutral" />

@@ -9,7 +9,9 @@ export function SessionScreen({ model }: { model: SystemModel }) {
   const s = model.sessionState;
   const truthState = panelTruthRenderState(model, "session");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  // Hard-close on any compromised truth state: trading window decisions must never be
+  // based on stale or degraded session state. Any non-null truth state is a hard stop.
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

@@ -32,13 +32,15 @@ export function ExecutionScreen({
     setSelectedReplayFrameIndex(model.executionReplay?.current_frame_index ?? 0);
   }, [model.executionReplay?.replay_id]);
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  // Hard-close on any compromised truth state: stale execution orders and dispatching counts
+  // must not render as current data. Inline notice is insufficient — operator sees data + warning,
+  // reads data first, and acts on stale order state.
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 
   return (
     <div className="screen-grid desk-screen-grid execution-workspace">
-      {truthState ? <TruthStateNotice state={truthState} /> : null}
       <div className="summary-grid summary-grid-four">
         <StatCard
           title="Active Orders"

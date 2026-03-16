@@ -33,12 +33,13 @@ use crate::{
     api_types::{
         AuditArtifactRow, AuditArtifactsResponse, ConfigDiffRow, ConfigFingerprintResponse,
         DiagnosticsSnapshotResponse, ExecutionSummaryResponse, FaultSignal, GateRefusedResponse,
-        HealthResponse, IntegrityResponse, OperatorActionAuditRow, OperatorActionsAuditResponse,
-        OperatorTimelineResponse, OperatorTimelineRow, PortfolioSummaryResponse,
-        PreflightStatusResponse, ReconcileSummaryResponse, RiskSummaryResponse,
-        RuntimeErrorResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
-        SessionStateResponse, StrategySummaryRow, StrategySuppressionRow, SystemMetadataResponse,
-        SystemStatusResponse, TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
+        HealthResponse, IntegrityResponse, OperatorActionAuditFields, OperatorActionAuditRow,
+        OperatorActionResponse, OperatorActionsAuditResponse, OperatorTimelineResponse,
+        OperatorTimelineRow, OpsActionRequest, PortfolioSummaryResponse, PreflightStatusResponse,
+        ReconcileSummaryResponse, RiskSummaryResponse, RuntimeErrorResponse,
+        RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
+        StrategySummaryRow, StrategySuppressionRow, SystemMetadataResponse, SystemStatusResponse,
+        TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
     state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot},
@@ -172,6 +173,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/run/halt", post(run_halt))
         .route("/v1/integrity/arm", post(integrity_arm))
         .route("/v1/integrity/disarm", post(integrity_disarm))
+        // Canonical operator action dispatcher (GUI primary path).
+        // Dispatches arm/disarm/start/stop/halt. Returns 409 for change-system-mode
+        // (not authoritative: requires controlled restart). Returns 400 for unknown keys.
+        .route("/api/v1/ops/action", post(ops_action))
         // DAEMON-2: dev-only snapshot inject/clear
         .route("/v1/trading/snapshot", post(trading_snapshot_set))
         .route(
@@ -362,6 +367,282 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
         }),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/ops/action — canonical GUI action dispatcher
+// ---------------------------------------------------------------------------
+
+/// Canonical operator action dispatcher.
+///
+/// The GUI's `invokeOperatorAction` calls this path first. Accepted action_keys:
+/// - `arm-execution` / `arm-strategy`     → arm integrity gate
+/// - `disarm-execution` / `disarm-strategy` → disarm integrity gate
+/// - `start-system`                        → start execution runtime
+/// - `stop-system`                         → stop execution runtime
+/// - `kill-switch`                         → halt execution runtime
+/// - `change-system-mode`                  → 409: not authoritative (restart required)
+/// - anything else                         → 400: unknown action
+pub(crate) async fn ops_action(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<OpsActionRequest>,
+) -> Response {
+    let action_key = body.action_key.as_str();
+
+    match action_key {
+        "arm-execution" | "arm-strategy" => {
+            {
+                let mut ig = st.integrity.write().await;
+                ig.disarmed = false;
+                ig.halted = false;
+            }
+            if let Some(db) = st.db.as_ref() {
+                if let Err(err) =
+                    mqk_db::persist_arm_state_canonical(db, mqk_db::ArmState::Armed, None).await
+                {
+                    return runtime_error_response(RuntimeLifecycleError::Internal {
+                        fault_class: "ops.action.arm",
+                        message: format!("ops/action arm persist failed: {err}"),
+                    });
+                }
+            }
+            info!("ops/action arm");
+            let _ = st.bus.send(BusMsg::LogLine {
+                level: "INFO".to_string(),
+                msg: "ops/action: integrity armed".to_string(),
+            });
+            (
+                StatusCode::OK,
+                Json(OperatorActionResponse {
+                    requested_action: "control.arm".to_string(),
+                    accepted: true,
+                    disposition: "applied".to_string(),
+                    resulting_integrity_state: Some("ARMED".to_string()),
+                    resulting_desired_armed: Some(true),
+                    blockers: vec![],
+                    warnings: vec![],
+                    environment: Some(st.deployment_mode().as_api_label().to_string()),
+                    scope: Some("daemon_instance".to_string()),
+                    audit: OperatorActionAuditFields {
+                        durable_db_write: st.db.is_some(),
+                        durable_targets: if st.db.is_some() {
+                            vec!["sys_arm_state".to_string()]
+                        } else {
+                            vec![]
+                        },
+                        audit_event_id: None,
+                    },
+                }),
+            )
+                .into_response()
+        }
+
+        "disarm-execution" | "disarm-strategy" => {
+            {
+                let mut ig = st.integrity.write().await;
+                ig.disarmed = true;
+            }
+            if let Some(db) = st.db.as_ref() {
+                if let Err(err) = mqk_db::persist_arm_state_canonical(
+                    db,
+                    mqk_db::ArmState::Disarmed,
+                    Some(mqk_db::DisarmReason::OperatorDisarm),
+                )
+                .await
+                {
+                    return runtime_error_response(RuntimeLifecycleError::Internal {
+                        fault_class: "ops.action.disarm",
+                        message: format!("ops/action disarm persist failed: {err}"),
+                    });
+                }
+            }
+            info!("ops/action disarm");
+            let _ = st.bus.send(BusMsg::LogLine {
+                level: "WARN".to_string(),
+                msg: "ops/action: integrity DISARMED".to_string(),
+            });
+            (
+                StatusCode::OK,
+                Json(OperatorActionResponse {
+                    requested_action: "control.disarm".to_string(),
+                    accepted: true,
+                    disposition: "applied".to_string(),
+                    resulting_integrity_state: Some("DISARMED".to_string()),
+                    resulting_desired_armed: Some(false),
+                    blockers: vec![],
+                    warnings: vec![],
+                    environment: Some(st.deployment_mode().as_api_label().to_string()),
+                    scope: Some("daemon_instance".to_string()),
+                    audit: OperatorActionAuditFields {
+                        durable_db_write: st.db.is_some(),
+                        durable_targets: if st.db.is_some() {
+                            vec!["sys_arm_state".to_string()]
+                        } else {
+                            vec![]
+                        },
+                        audit_event_id: None,
+                    },
+                }),
+            )
+                .into_response()
+        }
+
+        "start-system" => match st.start_execution_runtime().await {
+            Ok(snapshot) => {
+                info!("ops/action start-system");
+                if let Some(run_id) = snapshot.active_run_id {
+                    let _ =
+                        write_operator_audit_event(&st, Some(run_id), "run.start", "RUNNING").await;
+                }
+                (
+                    StatusCode::OK,
+                    Json(OperatorActionResponse {
+                        requested_action: "start-system".to_string(),
+                        accepted: true,
+                        disposition: "applied".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: st.db.is_some(),
+                            durable_targets: if st.db.is_some() {
+                                vec!["audit_events".to_string()]
+                            } else {
+                                vec![]
+                            },
+                            audit_event_id: None,
+                        },
+                    }),
+                )
+                    .into_response()
+            }
+            Err(err) => runtime_error_response(err),
+        },
+
+        "stop-system" => match st.stop_execution_runtime().await {
+            Ok(snapshot) => {
+                info!("ops/action stop-system");
+                let _ =
+                    write_operator_audit_event(&st, snapshot.active_run_id, "run.stop", "STOPPED")
+                        .await;
+                (
+                    StatusCode::OK,
+                    Json(OperatorActionResponse {
+                        requested_action: "stop-system".to_string(),
+                        accepted: true,
+                        disposition: "applied".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: st.db.is_some(),
+                            durable_targets: if st.db.is_some() {
+                                vec!["audit_events".to_string()]
+                            } else {
+                                vec![]
+                            },
+                            audit_event_id: None,
+                        },
+                    }),
+                )
+                    .into_response()
+            }
+            Err(err) => runtime_error_response(err),
+        },
+
+        "kill-switch" => match st.halt_execution_runtime().await {
+            Ok(snapshot) => {
+                info!("ops/action kill-switch");
+                let _ =
+                    write_operator_audit_event(&st, snapshot.active_run_id, "run.halt", "HALTED")
+                        .await;
+                (
+                    StatusCode::OK,
+                    Json(OperatorActionResponse {
+                        requested_action: "kill-switch".to_string(),
+                        accepted: true,
+                        disposition: "applied".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: st.db.is_some(),
+                            durable_targets: if st.db.is_some() {
+                                vec!["audit_events".to_string()]
+                            } else {
+                                vec![]
+                            },
+                            audit_event_id: None,
+                        },
+                    }),
+                )
+                    .into_response()
+            }
+            Err(err) => runtime_error_response(err),
+        },
+
+        "change-system-mode" => (
+            // Mode transitions require a controlled daemon restart with configuration reload.
+            // This cannot be done via API in the current architecture.
+            // The GUI disables mode-change buttons to prevent this from being called,
+            // but fail-close here as a defense-in-depth gate.
+            StatusCode::CONFLICT,
+            Json(OperatorActionResponse {
+                requested_action: "change-system-mode".to_string(),
+                accepted: false,
+                disposition: "not_authoritative".to_string(),
+                resulting_integrity_state: None,
+                resulting_desired_armed: None,
+                blockers: vec![
+                    "Mode transitions require a controlled daemon restart with configuration reload. \
+                     This is not authoritative via API in the current architecture.".to_string(),
+                ],
+                warnings: vec![],
+                environment: Some(st.deployment_mode().as_api_label().to_string()),
+                scope: Some("daemon_instance".to_string()),
+                audit: OperatorActionAuditFields {
+                    durable_db_write: false,
+                    durable_targets: vec![],
+                    audit_event_id: None,
+                },
+            }),
+        )
+            .into_response(),
+
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(OperatorActionResponse {
+                requested_action: body.action_key.clone(),
+                accepted: false,
+                disposition: "unknown_action".to_string(),
+                resulting_integrity_state: None,
+                resulting_desired_armed: None,
+                blockers: vec![format!(
+                    "Unknown action_key '{}'; accepted keys: arm-execution, arm-strategy, \
+                     disarm-execution, disarm-strategy, start-system, stop-system, kill-switch",
+                    body.action_key
+                )],
+                warnings: vec![],
+                environment: Some(st.deployment_mode().as_api_label().to_string()),
+                scope: Some("daemon_instance".to_string()),
+                audit: OperatorActionAuditFields {
+                    durable_db_write: false,
+                    durable_targets: vec![],
+                    audit_event_id: None,
+                },
+            }),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------

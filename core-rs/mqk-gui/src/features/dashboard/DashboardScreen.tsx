@@ -7,9 +7,11 @@ import { MetricStripChart } from "../execution/components/MetricStripChart";
 import { panelTruthRenderState } from "../system/truthRendering";
 
 export function DashboardScreen({ model }: { model: SystemModel }) {
-  // Dashboard is composite — only block on full disconnection or mock mode, not on partial endpoint absence.
+  // Hard-close on any compromised truth state: dashboard shows armed/disarmed status, kill switch,
+  // equity, and risk figures. A stale or degraded summary reads as normal — this is actively
+  // misleading. Any non-null truth state blocks the entire surface.
   const truthState = panelTruthRenderState(model, "dashboard");
-  if (truthState === "unavailable" || truthState === "unimplemented") {
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

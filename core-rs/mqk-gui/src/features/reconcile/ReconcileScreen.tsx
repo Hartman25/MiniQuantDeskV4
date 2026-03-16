@@ -12,13 +12,14 @@ export function ReconcileScreen({ model }: { model: SystemModel }) {
   const r = model.reconcileSummary;
   const truthState = panelTruthRenderState(model, "reconcile");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  // Hard-close on any compromised truth state: stale mismatch counts and reconcile status
+  // reporting "clean" when drift exists is the worst possible false signal on this surface.
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 
   return (
     <div className="screen-grid desk-screen-grid">
-      {truthState ? <TruthStateNotice state={truthState} /> : null}
       <div className="summary-grid summary-grid-four">
         <StatCard
           title="Reconcile Status"

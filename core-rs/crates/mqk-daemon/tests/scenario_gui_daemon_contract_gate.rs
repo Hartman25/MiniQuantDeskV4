@@ -457,3 +457,87 @@ async fn gui_contract_legacy_api_surfaces_have_expected_shape() {
         "stale has_snapshot flag must not exist on accepted DMON-04 fills contract"
     );
 }
+
+#[tokio::test]
+async fn gui_ops_action_endpoint_dispatches_correctly() {
+    use axum::http::header;
+
+    let router = make_router();
+
+    // Helper: POST /api/v1/ops/action with a JSON body.
+    async fn post_action(
+        router: axum::Router,
+        action_key: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let body = serde_json::json!({ "action_key": action_key, "reason": null });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/ops/action")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let (status, bytes) = call(router, req).await;
+        let json = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .expect("ops/action response must be valid JSON");
+        (status, json)
+    }
+
+    // arm-execution: must return 200, accepted=true, disposition="applied".
+    let (s, j) = post_action(router.clone(), "arm-execution").await;
+    assert_eq!(s, StatusCode::OK, "arm-execution must return 200: {j}");
+    assert_eq!(j["accepted"], true, "arm-execution accepted must be true: {j}");
+    assert_eq!(
+        j["disposition"].as_str(),
+        Some("applied"),
+        "arm-execution disposition must be 'applied': {j}"
+    );
+    // requested_action reflects the handler's internal canonical name ("control.arm").
+    assert!(
+        j["requested_action"].as_str().is_some_and(|v| !v.is_empty()),
+        "arm-execution requested_action must be a non-empty string: {j}"
+    );
+
+    // disarm-execution: must return 200, accepted=true, disposition="applied".
+    let (s, j) = post_action(router.clone(), "disarm-execution").await;
+    assert_eq!(s, StatusCode::OK, "disarm-execution must return 200: {j}");
+    assert_eq!(j["accepted"], true, "disarm-execution accepted must be true: {j}");
+    assert_eq!(
+        j["disposition"].as_str(),
+        Some("applied"),
+        "disarm-execution disposition must be 'applied': {j}"
+    );
+
+    // change-system-mode: must return 409 CONFLICT, accepted=false, disposition="not_authoritative".
+    // Route is not mounted on the daemon — mode transition requires a controlled restart.
+    let (s, j) = post_action(router.clone(), "change-system-mode").await;
+    assert_eq!(
+        s,
+        StatusCode::CONFLICT,
+        "change-system-mode must return 409: {j}"
+    );
+    assert_eq!(
+        j["accepted"], false,
+        "change-system-mode accepted must be false: {j}"
+    );
+    assert_eq!(
+        j["disposition"].as_str(),
+        Some("not_authoritative"),
+        "change-system-mode disposition must be 'not_authoritative': {j}"
+    );
+    // blocker must explain that a restart is required.
+    assert!(
+        j["blocker"]
+            .as_str()
+            .is_some_and(|v| v.contains("restart")),
+        "change-system-mode blocker must mention restart: {j}"
+    );
+
+    // unknown key: must return 400 BAD_REQUEST, accepted=false.
+    let (s, j) = post_action(router.clone(), "not-a-real-action").await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "unknown action key must return 400: {j}"
+    );
+    assert_eq!(j["accepted"], false, "unknown action accepted must be false: {j}");
+}

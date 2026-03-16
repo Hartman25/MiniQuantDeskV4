@@ -10,7 +10,9 @@ export function RuntimeScreen({ model }: { model: SystemModel }) {
   const runtime = model.runtimeLeadership;
   const truthState = panelTruthRenderState(model, "runtime");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  // Hard-close on any compromised truth state: degraded recovery state shown as clean
+  // leadership truth would be misleading about the most critical runtime invariant.
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

@@ -424,6 +424,22 @@ pub struct SystemMetadataResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/ops/action  — canonical operator action dispatcher
+// ---------------------------------------------------------------------------
+
+/// Request body for POST /api/v1/ops/action.
+/// `action_key` is the canonical GUI action identifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpsActionRequest {
+    /// Canonical action key: "arm-execution", "arm-strategy", "disarm-execution",
+    /// "disarm-strategy", "start-system", "stop-system", "kill-switch",
+    /// "change-system-mode" (returns 409 — not yet authoritative).
+    pub action_key: String,
+    /// Optional reason string for audit trail. Not required by the dispatcher.
+    pub reason: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/diagnostics/snapshot (B4)
 // ---------------------------------------------------------------------------
 

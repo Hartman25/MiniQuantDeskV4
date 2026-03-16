@@ -10,7 +10,9 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
   const p = model.portfolioSummary;
   const truthState = panelTruthRenderState(model, "portfolio");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  // Hard-close on any compromised truth state: stale equity and positions are directly
+  // dangerous under live conditions. Silent pass-through of stale/degraded is not acceptable.
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 

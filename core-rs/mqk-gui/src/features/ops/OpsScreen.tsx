@@ -45,7 +45,10 @@ export function OpsScreen({
 }) {
   const truthState = panelTruthRenderState(model, "ops");
 
-  if (truthState === "unimplemented" || truthState === "unavailable" || truthState === "no_snapshot") {
+  // Hard-close on any compromised truth state: ops is the mode-change and action surface.
+  // An operator must not be able to ARM, change mode, or execute actions under stale or
+  // degraded system truth. Every non-null truth state is a hard stop here.
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 
@@ -95,14 +98,22 @@ export function OpsScreen({
               />
             </div>
           </div>
+          {/* Mode-change buttons are disabled: /api/v1/ops/change-mode is not yet mounted on the
+              daemon. Mode transitions require a controlled restart with configuration reload — this
+              cannot be done via API in the current architecture. Buttons remain visible so the
+              operator knows the surface exists but cannot be misled into believing a click works. */}
+          <p className="panel-notice panel-notice-warn">
+            Mode transition is not yet available via the console. A controlled daemon restart with configuration reload is required. This route is not mounted.
+          </p>
           <div className="mode-toggle-row">
             {TARGET_MODES.map((mode) => (
               <button
                 key={mode}
                 type="button"
                 className={`mode-toggle ${model.status.environment === mode ? "is-active" : ""} ${mode === "live" ? "is-live" : ""}`}
-                onClick={() => onChangeMode(mode)}
-                disabled={model.status.environment === mode}
+                disabled
+                aria-disabled="true"
+                title="Mode transition not available — daemon restart required"
               >
                 <span>{mode.toUpperCase()}</span>
                 <small>{mode === "live" ? "controlled restart required" : "safe environment transition"}</small>

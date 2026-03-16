@@ -133,6 +133,90 @@ test("returns null (green) when all panel truth endpoints resolve", () => {
   }
 });
 
+// --- stale/degraded hard-block coverage (PATCH-1 closure) ---
+
+test("stale fires for ops panel when heartbeat exceeds threshold", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      status: {
+        runtime_status: "running",
+        last_heartbeat: new Date(Date.now() - 125_000).toISOString(),
+      } as SystemModel["status"],
+    }),
+    "ops",
+  );
+  assert.equal(state, "stale");
+});
+
+test("stale fires for dashboard panel when heartbeat exceeds threshold", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      status: {
+        runtime_status: "running",
+        last_heartbeat: new Date(Date.now() - 125_000).toISOString(),
+      } as SystemModel["status"],
+    }),
+    "dashboard",
+  );
+  assert.equal(state, "stale");
+});
+
+test("degraded fires for execution panel when runtime_status is degraded", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      status: { runtime_status: "degraded" } as SystemModel["status"],
+    }),
+    "execution",
+  );
+  assert.equal(state, "degraded");
+});
+
+test("degraded fires for portfolio panel when runtime_status is degraded", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      status: { runtime_status: "degraded" } as SystemModel["status"],
+    }),
+    "portfolio",
+  );
+  assert.equal(state, "degraded");
+});
+
+test("degraded fires for reconcile panel when runtime_status is degraded", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      status: { runtime_status: "degraded" } as SystemModel["status"],
+    }),
+    "reconcile",
+  );
+  assert.equal(state, "degraded");
+});
+
+test("degraded fires for session panel when runtime_status is degraded", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      status: { runtime_status: "degraded" } as SystemModel["status"],
+    }),
+    "session",
+  );
+  assert.equal(state, "degraded");
+});
+
+test("null returned for ops panel when truth is fully healthy", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "real",
+        reachable: true,
+        realEndpoints: ["/api/v1/system/status"],
+        missingEndpoints: [],
+        mockSections: [],
+      },
+    }),
+    "ops",
+  );
+  assert.equal(state, null);
+});
+
 test("no_snapshot fires for alerts panel when alerts/active missing in partial mode", () => {
   const state = panelTruthRenderState(
     buildModel({
