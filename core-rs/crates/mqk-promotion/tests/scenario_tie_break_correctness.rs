@@ -4,7 +4,12 @@ use mqk_backtest::{derive_run_id, BacktestConfig, BacktestFill, BacktestReport};
 use mqk_portfolio::{Fill, Side};
 
 fn bf(inner: Fill) -> BacktestFill {
-    BacktestFill { fill_id: uuid::Uuid::nil(), order_id: uuid::Uuid::nil(), bar_end_ts: 0, inner }
+    BacktestFill {
+        fill_id: uuid::Uuid::nil(),
+        order_id: uuid::Uuid::nil(),
+        bar_end_ts: 0,
+        inner,
+    }
 }
 use mqk_promotion::{
     pick_winner, select_best, ArtifactLock, Candidate, PromotionConfig, PromotionInput,

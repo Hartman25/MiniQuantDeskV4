@@ -93,8 +93,7 @@ fn per_share_commission_matches_expected() {
     assert_eq!(
         fill.fee_micros, expected_fee,
         "per-share fee must match compute_fee({}, {})",
-        fill.qty,
-        fill.price_micros
+        fill.qty, fill.price_micros
     );
     assert!(fill.fee_micros > 0, "per-share fee must be positive");
     // 10 shares * 5_000 micros = 50_000 micros
@@ -119,7 +118,10 @@ fn bps_commission_matches_expected() {
 
     let fill = &report.fills[0];
     let expected_fee = model.compute_fee(fill.qty, fill.price_micros);
-    assert_eq!(fill.fee_micros, expected_fee, "bps fee must match compute_fee");
+    assert_eq!(
+        fill.fee_micros, expected_fee,
+        "bps fee must match compute_fee"
+    );
     assert!(fill.fee_micros > 0, "bps fee must be positive");
     assert_eq!(fill.fee_micros, 100_000);
 }
@@ -156,8 +158,16 @@ fn nonzero_commission_reduces_equity() {
         bps_of_notional: 0,
     });
 
-    let zero_equity = zero_report.equity_curve.last().map(|(_, e)| *e).unwrap_or(0);
-    let paid_equity = paid_report.equity_curve.last().map(|(_, e)| *e).unwrap_or(0);
+    let zero_equity = zero_report
+        .equity_curve
+        .last()
+        .map(|(_, e)| *e)
+        .unwrap_or(0);
+    let paid_equity = paid_report
+        .equity_curve
+        .last()
+        .map(|(_, e)| *e)
+        .unwrap_or(0);
 
     assert!(
         paid_equity < zero_equity,
@@ -196,7 +206,11 @@ fn compute_fee_zero_qty_returns_zero() {
         per_share_micros: 5_000,
         bps_of_notional: 2,
     };
-    assert_eq!(m.compute_fee(0, 100_000_000), 0, "zero qty must produce zero fee");
+    assert_eq!(
+        m.compute_fee(0, 100_000_000),
+        0,
+        "zero qty must produce zero fee"
+    );
 }
 
 #[test]

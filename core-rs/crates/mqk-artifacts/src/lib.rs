@@ -163,12 +163,7 @@ pub fn write_backtest_report(run_dir: &Path, report: &mqk_backtest::BacktestRepo
         // Backtest orders are always MARKET with no limit or stop price (both empty).
         orders_csv.push_str(&format!(
             "{},{},{},{},{},MARKET,,,{}\n",
-            o.bar_end_ts,
-            o.order_id,
-            o.symbol,
-            side_str,
-            o.qty,
-            status_str,
+            o.bar_end_ts, o.order_id, o.symbol, side_str, o.qty, status_str,
         ));
     }
     let orders_path = run_dir.join("orders.csv");
@@ -315,16 +310,14 @@ mod tests {
     /// the wrong slot).
     #[test]
     fn orders_csv_header_matches_row_column_count() {
-        let tmp = std::env::temp_dir()
-            .join(format!("mqk_art_test_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("mqk_art_test_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let report = test_report_with_orders();
         write_backtest_report(&tmp, &report).unwrap();
 
         let orders_csv = std::fs::read_to_string(tmp.join("orders.csv")).unwrap();
-        let lines: Vec<&str> =
-            orders_csv.lines().filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = orders_csv.lines().filter(|l| !l.is_empty()).collect();
 
         assert!(!lines.is_empty(), "orders.csv must not be empty");
         let header = lines[0];
@@ -338,9 +331,13 @@ mod tests {
         for (i, row) in lines[1..].iter().enumerate() {
             let row_cols = row.split(',').count();
             assert_eq!(
-                row_cols, header_cols,
+                row_cols,
+                header_cols,
                 "data row {} has {} columns but header has {}; row: '{}'",
-                i + 1, row_cols, header_cols, row
+                i + 1,
+                row_cols,
+                header_cols,
+                row
             );
         }
 
@@ -350,16 +347,14 @@ mod tests {
     /// ART-02: fills.csv header column count must match every data row.
     #[test]
     fn fills_csv_header_matches_row_column_count() {
-        let tmp = std::env::temp_dir()
-            .join(format!("mqk_art_test_fills_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("mqk_art_test_fills_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let report = test_report_with_orders();
         write_backtest_report(&tmp, &report).unwrap();
 
         let fills_csv = std::fs::read_to_string(tmp.join("fills.csv")).unwrap();
-        let lines: Vec<&str> =
-            fills_csv.lines().filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = fills_csv.lines().filter(|l| !l.is_empty()).collect();
 
         assert!(!lines.is_empty(), "fills.csv must not be empty");
         let header = lines[0];
@@ -373,9 +368,13 @@ mod tests {
         for (i, row) in lines[1..].iter().enumerate() {
             let row_cols = row.split(',').count();
             assert_eq!(
-                row_cols, header_cols,
+                row_cols,
+                header_cols,
                 "fills row {} has {} columns but header has {}; row: '{}'",
-                i + 1, row_cols, header_cols, row
+                i + 1,
+                row_cols,
+                header_cols,
+                row
             );
         }
 
@@ -385,16 +384,14 @@ mod tests {
     /// ART-03: equity_curve.csv header/row agreement.
     #[test]
     fn equity_csv_header_matches_row_column_count() {
-        let tmp = std::env::temp_dir()
-            .join(format!("mqk_art_test_eq_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("mqk_art_test_eq_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let report = test_report_with_orders();
         write_backtest_report(&tmp, &report).unwrap();
 
         let eq_csv = std::fs::read_to_string(tmp.join("equity_curve.csv")).unwrap();
-        let lines: Vec<&str> =
-            eq_csv.lines().filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = eq_csv.lines().filter(|l| !l.is_empty()).collect();
 
         assert!(!lines.is_empty());
         let header_cols = lines[0].split(',').count();
@@ -410,8 +407,7 @@ mod tests {
     /// ART-04: metrics.json is valid JSON with schema_version=1 and required fields.
     #[test]
     fn metrics_json_is_valid_and_versioned() {
-        let tmp = std::env::temp_dir()
-            .join(format!("mqk_art_test_metrics_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("mqk_art_test_metrics_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let report = test_report_with_orders();
@@ -433,8 +429,7 @@ mod tests {
     /// and left column 8 (status) empty.
     #[test]
     fn orders_csv_status_column_is_correct() {
-        let tmp = std::env::temp_dir()
-            .join(format!("mqk_art_test_status_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("mqk_art_test_status_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let report = test_report_with_orders();

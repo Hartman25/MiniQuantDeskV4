@@ -19,7 +19,15 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 fn bar(ts: i64) -> BacktestBar {
-    BacktestBar::new("SPY", ts, 100_000_000, 100_000_000, 100_000_000, 100_000_000, 1_000)
+    BacktestBar::new(
+        "SPY",
+        ts,
+        100_000_000,
+        100_000_000,
+        100_000_000,
+        100_000_000,
+        1_000,
+    )
 }
 
 struct NamedStrategy(&'static str);
@@ -64,11 +72,7 @@ fn strategy_name_matches_spec() {
 #[test]
 fn run_id_is_not_nil() {
     let report = run_with_name("my_scalper_v1");
-    assert_ne!(
-        report.run_id,
-        Uuid::nil(),
-        "run_id must not be nil"
-    );
+    assert_ne!(report.run_id, Uuid::nil(), "run_id must not be nil");
 }
 
 // ---------------------------------------------------------------------------
@@ -173,5 +177,8 @@ fn derive_run_id_differs_on_strategy_name() {
     let config_id = cfg.config_id();
     let id_a = derive_run_id("strat_a", &config_id);
     let id_b = derive_run_id("strat_b", &config_id);
-    assert_ne!(id_a, id_b, "different strategy names must yield different run_ids");
+    assert_ne!(
+        id_a, id_b,
+        "different strategy names must yield different run_ids"
+    );
 }

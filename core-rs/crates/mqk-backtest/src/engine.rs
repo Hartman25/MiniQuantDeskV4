@@ -364,12 +364,8 @@ impl BacktestEngine {
                 // BKT-04P: compute order identity before any gate so the order
                 // can be logged regardless of the outcome (cap reject, risk reject, fill).
                 let is_buy = matches!(intent.side, ExecSide::Buy);
-                let order_id = BacktestFill::make_order_id(
-                    bar.end_ts,
-                    &intent.symbol,
-                    is_buy,
-                    intent_seq,
-                );
+                let order_id =
+                    BacktestFill::make_order_id(bar.end_ts, &intent.symbol, is_buy, intent_seq);
                 let bkt_side = if is_buy {
                     BacktestOrderSide::Buy
                 } else {
@@ -509,11 +505,7 @@ impl BacktestEngine {
         }
 
         // BKT-05P: strategy identity — derive from spec if registered.
-        let strategy_name = self
-            .host
-            .spec()
-            .map(|s| s.name.clone())
-            .unwrap_or_default();
+        let strategy_name = self.host.spec().map(|s| s.name.clone()).unwrap_or_default();
         let config_id = self.config.config_id();
         let run_id = derive_run_id(&strategy_name, &config_id);
 

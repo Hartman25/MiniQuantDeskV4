@@ -133,10 +133,7 @@ fn filled_order_id_matches_fill_order_id() {
     assert_eq!(report.fills.len(), 2);
 
     for fill in &report.fills {
-        let matching_order = report
-            .orders
-            .iter()
-            .find(|o| o.order_id == fill.order_id);
+        let matching_order = report.orders.iter().find(|o| o.order_id == fill.order_id);
 
         assert!(
             matching_order.is_some(),
@@ -165,12 +162,11 @@ fn rejected_order_has_no_fill() {
     engine.add_strategy(Box::new(OverExpose)).unwrap();
     let report = engine.run(&bars).unwrap();
 
-    for order in report.orders.iter().filter(|o| {
-        matches!(
-            o.status,
-            OrderStatus::Rejected | OrderStatus::HaltTriggered
-        )
-    }) {
+    for order in report
+        .orders
+        .iter()
+        .filter(|o| matches!(o.status, OrderStatus::Rejected | OrderStatus::HaltTriggered))
+    {
         let has_fill = report.fills.iter().any(|f| f.order_id == order.order_id);
         assert!(
             !has_fill,
@@ -207,8 +203,14 @@ fn order_log_is_deterministic_across_replays() {
     assert_eq!(r1.orders.len(), r2.orders.len());
 
     for (o1, o2) in r1.orders.iter().zip(r2.orders.iter()) {
-        assert_eq!(o1.order_id, o2.order_id, "order_id must be stable across replays");
-        assert_eq!(o1.bar_end_ts, o2.bar_end_ts, "bar_end_ts must be stable across replays");
+        assert_eq!(
+            o1.order_id, o2.order_id,
+            "order_id must be stable across replays"
+        );
+        assert_eq!(
+            o1.bar_end_ts, o2.bar_end_ts,
+            "bar_end_ts must be stable across replays"
+        );
         assert_eq!(o1.status, o2.status, "status must be stable across replays");
     }
 }
