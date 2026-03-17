@@ -728,6 +728,9 @@ export interface SessionStateSummary {
   system_trading_window: "enabled" | "disabled" | "exit_only";
   strategy_allowed: boolean;
   next_session_change_at: string | null;
+  /** Stable identifier for the calendar spec driving this response.
+   *  "always_on" (paper/backtest) or "nyse_weekdays" (live/shadow). */
+  calendar_spec_id?: string;
   notes: string[];
 }
 

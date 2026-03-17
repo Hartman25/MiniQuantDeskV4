@@ -56,6 +56,62 @@ impl CalendarSpec {
         }
     }
 
+    /// Stable identifier for this calendar spec.
+    ///
+    /// Returns `"always_on"` or `"nyse_weekdays"`. Intended for operator
+    /// tooling and diagnostics — not an operational session state value.
+    pub fn spec_id(&self) -> &'static str {
+        match self {
+            CalendarSpec::AlwaysOn => "always_on",
+            CalendarSpec::NyseWeekdays => "nyse_weekdays",
+        }
+    }
+
+    /// Classify the current market session for operator display.
+    ///
+    /// Returns one of `"regular"`, `"premarket"`, `"after_hours"`, `"closed"`.
+    ///
+    /// For `AlwaysOn` (paper / backtest): always `"regular"` — synthetic
+    /// always-on policy, no exchange-backed session truth.
+    /// For `NyseWeekdays` (live / shadow): time-of-day classification against
+    /// NYSE session hours (09:30–16:00 ET, DST-aware).
+    pub fn classify_market_session(&self, now_ts: i64) -> &'static str {
+        match self {
+            CalendarSpec::AlwaysOn => "regular",
+            CalendarSpec::NyseWeekdays => nyse_classify_session(now_ts),
+        }
+    }
+
+    /// Classify the exchange calendar operational state for operator display.
+    ///
+    /// Returns one of `"open"`, `"closed"`, `"holiday"`.
+    ///
+    /// For `AlwaysOn`: always `"open"` (synthetic).
+    /// For `NyseWeekdays`: `"holiday"` on exchange holidays, `"closed"` on
+    /// weekends, `"open"` on regular trading days regardless of time-of-day.
+    pub fn classify_exchange_calendar(&self, now_ts: i64) -> &'static str {
+        match self {
+            CalendarSpec::AlwaysOn => "open",
+            CalendarSpec::NyseWeekdays => nyse_classify_exchange(now_ts),
+        }
+    }
+
+    /// Operator-facing note describing the authority basis of session truth.
+    ///
+    /// Included in `SessionStateResponse.notes` so the operator can tell
+    /// whether session/market state is exchange-sourced, heuristic, or
+    /// synthetic policy-driven.
+    pub fn session_truth_note(&self) -> &'static str {
+        match self {
+            CalendarSpec::AlwaysOn => {
+                "session_truth: synthetic policy-driven (always-on, no exchange calendar backing)"
+            }
+            CalendarSpec::NyseWeekdays => {
+                "session_truth: heuristic from NYSE weekday calendar (not exchange-sourced)"
+            }
+        }
+    }
+
     /// Counts the number of bar-sized slots in the **open** interval
     /// `(prev_end_ts, next_end_ts)` that fall within a trading session.
     ///
@@ -145,6 +201,69 @@ fn is_nyse_session_end(end_ts: i64) -> bool {
     let open = 9 * 3600 + 30 * 60; //  9:30:00 = 34200 seconds
     let close = 16 * 3600; // 16:00:00 = 57600 seconds
     et_secs > open && et_secs <= close
+}
+
+/// Classify the market session type for a given wall-clock timestamp on the
+/// NYSE weekday calendar.
+///
+/// Returns one of `"regular"`, `"premarket"`, `"after_hours"`, `"closed"`.
+/// Weekend and holiday timestamps return `"closed"`.
+fn nyse_classify_session(now_ts: i64) -> &'static str {
+    let utc_dt: DateTime<Utc> = match Utc.timestamp_opt(now_ts, 0) {
+        LocalResult::Single(dt) => dt,
+        _ => return "closed",
+    };
+    let et_dt = utc_dt.with_timezone(&New_York);
+
+    if matches!(et_dt.weekday(), Weekday::Sat | Weekday::Sun) {
+        return "closed";
+    }
+    let (year, month, day) = (
+        et_dt.year() as i64,
+        et_dt.month() as i64,
+        et_dt.day() as i64,
+    );
+    if is_nyse_holiday(year, month, day) {
+        return "closed";
+    }
+
+    let et_secs = et_dt.hour() as i64 * 3600 + et_dt.minute() as i64 * 60 + et_dt.second() as i64;
+    let open = 9 * 3600 + 30 * 60; //  9:30:00 ET
+    let close = 16 * 3600; // 16:00:00 ET
+
+    if et_secs <= open {
+        "premarket"
+    } else if et_secs <= close {
+        "regular"
+    } else {
+        "after_hours"
+    }
+}
+
+/// Classify the exchange calendar operational state for a given wall-clock
+/// timestamp on the NYSE weekday calendar.
+///
+/// Returns `"holiday"` on market holidays, `"closed"` on weekends, and
+/// `"open"` on regular trading days (regardless of time-of-day).
+fn nyse_classify_exchange(now_ts: i64) -> &'static str {
+    let utc_dt: DateTime<Utc> = match Utc.timestamp_opt(now_ts, 0) {
+        LocalResult::Single(dt) => dt,
+        _ => return "closed",
+    };
+    let et_dt = utc_dt.with_timezone(&New_York);
+
+    if matches!(et_dt.weekday(), Weekday::Sat | Weekday::Sun) {
+        return "closed";
+    }
+    let (year, month, day) = (
+        et_dt.year() as i64,
+        et_dt.month() as i64,
+        et_dt.day() as i64,
+    );
+    if is_nyse_holiday(year, month, day) {
+        return "holiday";
+    }
+    "open"
 }
 
 // ---------------------------------------------------------------------------

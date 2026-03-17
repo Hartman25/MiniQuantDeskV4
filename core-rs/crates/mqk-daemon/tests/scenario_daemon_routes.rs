@@ -900,9 +900,15 @@ async fn api_system_session_reports_truthful_mode_and_operator_auth() {
     assert_eq!(json["strategy_allowed"], false);
     assert_eq!(json["execution_allowed"], false);
     assert_eq!(json["system_trading_window"], "disabled");
-    // Paper mode → AlwaysOn calendar; market is always open.
-    assert_eq!(json["market_session"], "open");
-    assert_eq!(json["exchange_calendar_state"], "always_on");
+    // Paper mode → AlwaysOn calendar → synthetic always-on session truth.
+    assert_eq!(json["market_session"], "regular");
+    assert_eq!(json["exchange_calendar_state"], "open");
+    assert_eq!(json["calendar_spec_id"], "always_on");
+    let notes = json["notes"].as_array().expect("notes must be array");
+    assert!(
+        !notes.is_empty(),
+        "notes must carry provenance for always-on session truth"
+    );
 }
 
 #[tokio::test]
@@ -1219,9 +1225,12 @@ async fn prod02_non_running_states_return_explicit_false_live_routing() {
 // CTRL-03: Exchange calendar / market session truth
 // ---------------------------------------------------------------------------
 
-/// Paper/backtest mode → AlwaysOn calendar → market always open.
+/// Paper mode → AlwaysOn calendar → synthetic session truth.
+///
+/// market_session must be "regular" (synthetic always-on), exchange_calendar_state
+/// must be "open" (synthetic), calendar_spec_id must be "always_on".
 #[tokio::test]
-async fn ctrl03_paper_mode_reports_always_on_calendar_and_open_market() {
+async fn ctrl03_paper_mode_reports_always_on_calendar_and_regular_market() {
     let st = Arc::new(state::AppState::new_for_test_with_mode(
         state::DeploymentMode::Paper,
     ));
@@ -1236,16 +1245,20 @@ async fn ctrl03_paper_mode_reports_always_on_calendar_and_open_market() {
     let json = parse_json(body);
 
     assert_eq!(
-        json["exchange_calendar_state"], "always_on",
-        "paper mode must surface always_on calendar"
+        json["calendar_spec_id"], "always_on",
+        "paper mode must surface always_on calendar spec"
     );
     assert_eq!(
-        json["market_session"], "open",
-        "AlwaysOn calendar must always report market as open"
+        json["exchange_calendar_state"], "open",
+        "AlwaysOn calendar must report exchange state as open (synthetic)"
+    );
+    assert_eq!(
+        json["market_session"], "regular",
+        "AlwaysOn calendar must report market session as regular (synthetic always-on)"
     );
 }
 
-/// Backtest mode → AlwaysOn calendar → market always open.
+/// Backtest mode → AlwaysOn calendar → synthetic session truth.
 #[tokio::test]
 async fn ctrl03_backtest_mode_reports_always_on_calendar() {
     let st = Arc::new(state::AppState::new_for_test_with_mode(
@@ -1261,13 +1274,16 @@ async fn ctrl03_backtest_mode_reports_always_on_calendar() {
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
 
-    assert_eq!(json["exchange_calendar_state"], "always_on");
-    assert_eq!(json["market_session"], "open");
+    assert_eq!(json["calendar_spec_id"], "always_on");
+    assert_eq!(json["exchange_calendar_state"], "open");
+    assert_eq!(json["market_session"], "regular");
 }
 
-/// LiveCapital mode → NyseWeekdays calendar.  market_session is wall-clock
-/// dependent (open or closed); we assert the label is one of the two valid
-/// values — never "unknown".
+/// LiveCapital mode → NyseWeekdays calendar.
+///
+/// market_session must be one of the canonical classified values.
+/// exchange_calendar_state must be one of the canonical operational values.
+/// Neither may be a raw spec name like "nyse_weekdays".
 #[tokio::test]
 async fn ctrl03_live_capital_mode_reports_nyse_weekdays_calendar() {
     let st = Arc::new(state::AppState::new_for_test_with_mode(
@@ -1284,17 +1300,22 @@ async fn ctrl03_live_capital_mode_reports_nyse_weekdays_calendar() {
     let json = parse_json(body);
 
     assert_eq!(
-        json["exchange_calendar_state"], "nyse_weekdays",
-        "live-capital mode must surface nyse_weekdays calendar"
+        json["calendar_spec_id"], "nyse_weekdays",
+        "live-capital mode must surface nyse_weekdays as calendar_spec_id"
     );
     let ms = json["market_session"].as_str().unwrap_or("MISSING");
+    const VALID_MARKET_SESSION: &[&str] = &["premarket", "regular", "after_hours", "closed"];
     assert!(
-        ms == "open" || ms == "closed",
-        "market_session must be 'open' or 'closed', never 'unknown'; got '{ms}'"
+        VALID_MARKET_SESSION.contains(&ms),
+        "market_session must be one of {VALID_MARKET_SESSION:?}; got '{ms}'"
     );
-    assert_ne!(
-        ms, "unknown",
-        "market_session must not be the placeholder 'unknown'"
+    let ecs = json["exchange_calendar_state"]
+        .as_str()
+        .unwrap_or("MISSING");
+    const VALID_EXCHANGE_STATE: &[&str] = &["open", "closed", "holiday"];
+    assert!(
+        VALID_EXCHANGE_STATE.contains(&ecs),
+        "exchange_calendar_state must be one of {VALID_EXCHANGE_STATE:?}; got '{ecs}'"
     );
 }
 
@@ -1314,17 +1335,19 @@ async fn ctrl03_live_shadow_mode_reports_nyse_weekdays_calendar() {
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
 
-    assert_eq!(json["exchange_calendar_state"], "nyse_weekdays");
+    assert_eq!(json["calendar_spec_id"], "nyse_weekdays");
     let ms = json["market_session"].as_str().unwrap_or("MISSING");
+    const VALID_MARKET_SESSION: &[&str] = &["premarket", "regular", "after_hours", "closed"];
     assert!(
-        ms == "open" || ms == "closed",
-        "market_session must be 'open' or 'closed'; got '{ms}'"
+        VALID_MARKET_SESSION.contains(&ms),
+        "market_session must be one of {VALID_MARKET_SESSION:?}; got '{ms}'"
     );
 }
 
-/// notes array must be empty — no stale unavailability message.
+/// notes array must carry provenance — every session response explains the
+/// authority basis of the session truth it reports.
 #[tokio::test]
-async fn ctrl03_session_response_notes_are_empty_after_wiring() {
+async fn ctrl03_session_response_notes_carry_provenance() {
     let st = Arc::new(state::AppState::new_for_test_with_mode(
         state::DeploymentMode::Paper,
     ));
@@ -1340,7 +1363,12 @@ async fn ctrl03_session_response_notes_are_empty_after_wiring() {
 
     let notes = json["notes"].as_array().expect("notes must be an array");
     assert!(
-        notes.is_empty(),
-        "notes must be empty after CTRL-03 wiring; got: {notes:?}"
+        !notes.is_empty(),
+        "notes must carry session_truth provenance; got empty array"
+    );
+    let note_str = notes[0].as_str().unwrap_or("");
+    assert!(
+        note_str.contains("session_truth"),
+        "first note must be a session_truth provenance note; got: {note_str:?}"
     );
 }

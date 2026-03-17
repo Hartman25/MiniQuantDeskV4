@@ -9,7 +9,6 @@ pub mod control;
 use std::{convert::Infallible, sync::Arc};
 
 use chrono::Utc;
-use mqk_integrity::CalendarSpec;
 
 use axum::{
     extract::State,
@@ -1904,6 +1903,8 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
     let execution_allowed =
         strategy_allowed && status.state == "running" && status.active_run_id.is_some();
 
+    let calendar = st.calendar_spec();
+    let now_ts = Utc::now().timestamp(); // allow: operator-metadata wall-clock
     (
         StatusCode::OK,
         Json(SessionStateResponse {
@@ -1919,19 +1920,14 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
             } else {
                 "disabled".to_string()
             },
-            market_session: {
-                let now_ts = Utc::now().timestamp();
-                if st.calendar_spec().is_session_bar_end(now_ts) {
-                    "open".to_string()
-                } else {
-                    "closed".to_string()
-                }
-            },
-            exchange_calendar_state: match st.calendar_spec() {
-                CalendarSpec::NyseWeekdays => "nyse_weekdays".to_string(),
-                CalendarSpec::AlwaysOn => "always_on".to_string(),
-            },
-            notes: vec![],
+            // Classify the market session using the dedicated session-truth
+            // methods rather than the gap-detection `is_session_bar_end`.
+            // AlwaysOn (paper/backtest) → "regular" (synthetic policy).
+            // NyseWeekdays (live/shadow) → time-of-day classification (heuristic).
+            market_session: calendar.classify_market_session(now_ts).to_string(),
+            exchange_calendar_state: calendar.classify_exchange_calendar(now_ts).to_string(),
+            calendar_spec_id: calendar.spec_id().to_string(),
+            notes: vec![calendar.session_truth_note().to_string()],
         }),
     )
         .into_response()

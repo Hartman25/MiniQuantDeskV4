@@ -322,8 +322,16 @@ pub struct SessionStateResponse {
     pub strategy_allowed: bool,
     pub execution_allowed: bool,
     pub system_trading_window: String,
+    /// Classified market session type: `"regular"` | `"premarket"` | `"after_hours"` | `"closed"`.
+    /// For paper/backtest (always-on policy): always `"regular"`.
     pub market_session: String,
+    /// Operational exchange calendar state: `"open"` | `"closed"` | `"holiday"`.
+    /// For paper/backtest (always-on policy): always `"open"`.
     pub exchange_calendar_state: String,
+    /// Stable identifier for the calendar spec driving this session response.
+    /// `"always_on"` (paper/backtest) or `"nyse_weekdays"` (live/shadow).
+    pub calendar_spec_id: String,
+    /// Operator-facing notes describing the authority basis of session truth.
     pub notes: Vec<String>,
 }
 
