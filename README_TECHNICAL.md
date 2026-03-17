@@ -186,8 +186,9 @@ cargo run -p mqk-cli -- db migrate --yes
 ```
 
 Migrations live under:
-- `core-rs/crates/mqk-db/migrations/`
-- `core-rs/migrations/` for top-level/runtime-related additions
+- `core-rs/crates/mqk-db/migrations/` — the only authoritative migration source
+
+There is exactly one migration authority. Any SQL file tracked under a path containing `/migrations/` but outside `core-rs/crates/mqk-db/migrations/` is rejected by `scripts/guards/check_migration_governance.sh` and the CI guard step.
 
 ### **Config Hash**
 ```powershell
