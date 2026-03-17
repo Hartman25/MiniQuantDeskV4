@@ -1183,6 +1183,30 @@ pub async fn fetch_md_bars(
     Ok(out)
 }
 
+/// Return the maximum `end_ts` stored in `md_bars` for a given (symbol, timeframe) pair.
+///
+/// Returns `None` when no bars exist yet — the caller must require a `--full-start` date
+/// before issuing an incremental fetch.  Returns `Some(ts)` when at least one bar is present;
+/// the caller subtracts an overlap window before requesting new bars from the provider.
+///
+/// Uses a single `max(end_ts)` aggregate query with explicit NULL handling via sqlx scalar.
+pub async fn latest_stored_bar_end_ts(
+    pool: &PgPool,
+    symbol: &str,
+    timeframe: &str,
+) -> Result<Option<i64>> {
+    let val: Option<i64> =
+        sqlx::query_scalar("select max(end_ts) from md_bars where symbol = $1 and timeframe = $2")
+            .bind(symbol)
+            .bind(timeframe)
+            .fetch_one(pool)
+            .await
+            .with_context(|| {
+                format!("latest_stored_bar_end_ts query failed for {symbol}/{timeframe}")
+            })?;
+    Ok(val)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

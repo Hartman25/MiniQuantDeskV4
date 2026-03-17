@@ -208,6 +208,65 @@ cargo run -p mqk-cli -- md ingest-provider `
   --end "2026-01-01"
 ```
 
+### **Market Data — Incremental Sync (`sync-provider`)**
+
+`sync-provider` detects the latest stored bar per symbol and fetches only the bars needed to
+extend coverage.  An overlap window is subtracted from the latest stored bar's date to re-ingest
+recent bars and handle late completions.
+
+**First run — no bars exist yet (full backfill required):**
+```powershell
+cargo run -p mqk-cli -- md sync-provider `
+  --source "twelvedata" `
+  --symbols "SPY,QQQ" `
+  --timeframe "1D" `
+  --full-start "2020-01-01"
+```
+
+**Subsequent runs — incremental (no `--full-start` needed once bars exist):**
+```powershell
+cargo run -p mqk-cli -- md sync-provider `
+  --source "twelvedata" `
+  --symbols "SPY,QQQ" `
+  --timeframe "1D"
+```
+
+**Override end date or overlap:**
+```powershell
+cargo run -p mqk-cli -- md sync-provider `
+  --source "twelvedata" `
+  --symbols "SPY" `
+  --timeframe "1D" `
+  --end "2026-03-01" `
+  --overlap-days 10
+```
+
+**Overlap defaults:** 5 calendar days for `1D`, 2 days for `5m`, 1 day for `1m`.
+
+**`--end` default:** today's date (wall clock, operator command only — no wall clock use in
+deterministic src/ paths).
+
+**Output format (per run):**
+```
+mode=sync-provider
+ingest_id=<uuid>
+source=twelvedata
+timeframe=1D
+symbol=SPY effective_start=2026-03-11
+symbol=QQQ effective_start=2026-03-11
+rows_read=N rows_ok=N rejected=0 inserted=N updated=N
+artifact=../exports/md_ingest/<uuid>/data_quality.json
+sql=select ingest_id, created_at, stats_json from md_quality_reports where ingest_id='<uuid>';
+```
+
+**Notes:**
+- `sync-provider` and `ingest-provider` share the same ingest path (`ingest_provider_bars_to_md_bars`).
+  `ingest-provider` behavior is not changed.
+- Ingest ID is deterministic: re-running with identical inputs produces the same UUID and upserts
+  existing rows rather than duplicating them.
+- Research/backtest paths should read from `md_bars` via `fetch_md_bars` or `mqk backtest db`
+  rather than calling providers directly.
+
 ## **Deterministic Backtests**
 
 ### **Backtest from CSV**

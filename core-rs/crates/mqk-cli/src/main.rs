@@ -6,7 +6,7 @@ use std::path::PathBuf;
 mod commands;
 
 use commands::{
-    backtest::{md_ingest_csv, md_ingest_provider},
+    backtest::{md_ingest_csv, md_ingest_provider, md_sync_provider},
     bkt::{run_backtest_csv, run_backtest_db},
     load_payload,
     run::{
@@ -203,6 +203,41 @@ enum MdCmd {
         /// End date (YYYY-MM-DD)
         #[arg(long)]
         end: String,
+    },
+
+    /// Incremental historical market-data sync from a provider into canonical md_bars.
+    ///
+    /// For each symbol, detects the latest stored bar end_ts and requests only the bars
+    /// needed to extend coverage.  Requires --full-start when no bars exist for a symbol.
+    /// Overlap is subtracted from the latest stored bar's date to re-ingest recent bars
+    /// and handle late completions.
+    SyncProvider {
+        /// Provider source name (only: twelvedata)
+        #[arg(long)]
+        source: String,
+
+        /// Comma-separated symbols
+        #[arg(long)]
+        symbols: String,
+
+        /// Timeframe (1D | 1m | 5m)
+        #[arg(long)]
+        timeframe: String,
+
+        /// Initial backfill start date (YYYY-MM-DD).
+        /// Required when no bars exist yet for a symbol; ignored for symbols that already
+        /// have stored bars (incremental start is computed from the latest bar + overlap).
+        #[arg(long)]
+        full_start: Option<String>,
+
+        /// End date (YYYY-MM-DD). Defaults to today (wall clock, operator command only).
+        #[arg(long)]
+        end: Option<String>,
+
+        /// Overlap in calendar days subtracted from the latest stored bar date.
+        /// Defaults: 5 for 1D, 2 for 5m, 1 for 1m.
+        #[arg(long)]
+        overlap_days: Option<u32>,
     },
 }
 
@@ -436,6 +471,16 @@ async fn main() -> Result<()> {
                 end,
             } => {
                 md_ingest_provider(source, symbols, timeframe, start, end).await?;
+            }
+            MdCmd::SyncProvider {
+                source,
+                symbols,
+                timeframe,
+                full_start,
+                end,
+                overlap_days,
+            } => {
+                md_sync_provider(source, symbols, timeframe, full_start, end, overlap_days).await?;
             }
         },
 

@@ -52,8 +52,8 @@ impl TimeSource for FixedClock {
 pub mod md;
 
 pub use md::{
-    fetch_md_bars, CoverageTotals, FetchMdBarsArgs, IngestCsvArgs, IngestProviderBarsArgs,
-    IngestResult, MdBarRow, MdQualityReport, ProviderBar,
+    fetch_md_bars, latest_stored_bar_end_ts, CoverageTotals, FetchMdBarsArgs, IngestCsvArgs,
+    IngestProviderBarsArgs, IngestResult, MdBarRow, MdQualityReport, ProviderBar,
 };
 
 pub use md::{ingest_csv_to_md_bars, ingest_provider_bars_to_md_bars};
