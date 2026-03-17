@@ -318,6 +318,89 @@ impl BrokerKind {
 }
 
 // ---------------------------------------------------------------------------
+// AP-04: BrokerSnapshotTruthSource
+// ---------------------------------------------------------------------------
+
+/// Determines how the daemon populates `broker_snapshot`.
+///
+/// This is derived from `BrokerKind` at construction and stored explicitly so
+/// call sites never need to re-derive the policy from the adapter string.
+///
+/// `Synthetic` and `External` must never be confused:
+/// - Synthesizing from local OMS for an external broker produces incorrect truth.
+/// - Using an external fetch for paper would be wasteful and meaningless.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum BrokerSnapshotTruthSource {
+    /// Paper broker: snapshot is synthesized from local OMS + portfolio state.
+    ///
+    /// The paper fill engine IS the authoritative broker; local state exactly
+    /// equals broker truth.  Synthesis is correct and complete.
+    Synthetic,
+    /// Alpaca (external broker): snapshot must come from the AP-03 REST fetch.
+    ///
+    /// `AlpacaBrokerAdapter::fetch_broker_snapshot` is the only correct source.
+    /// Synthesizing from local OMS is prohibited — broker truth is held externally.
+    External,
+}
+
+impl BrokerSnapshotTruthSource {
+    /// Canonical lowercase string for API responses and logging.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Synthetic => "synthetic",
+            Self::External => "external",
+        }
+    }
+
+    /// Derive the snapshot truth source from a parsed broker kind.
+    ///
+    /// `None` (unrecognised adapter) maps to `Synthetic` as a conservative
+    /// default — execution for unknown adapters is already fail-closed in
+    /// `build_daemon_broker`, so this path is unreachable in practice.
+    fn from_broker_kind(kind: Option<BrokerKind>) -> Self {
+        match kind {
+            Some(BrokerKind::Alpaca) => Self::External,
+            Some(BrokerKind::Paper) | None => Self::Synthetic,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AP-04B: StrategyMarketDataSource
+// ---------------------------------------------------------------------------
+
+/// Strategy market-data source policy — where strategy signals get price data.
+///
+/// # Independence invariant
+///
+/// This policy is **completely independent** of `BrokerKind`.  Changing the
+/// broker adapter MUST NOT silently change the strategy market-data source.
+/// The two policies are separate concepts and must never be conflated.
+///
+/// Currently only `NotConfigured` is defined; additional variants will be added
+/// as specific data sources are integrated (e.g. Alpaca data feed, vendor feed).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum StrategyMarketDataSource {
+    /// No market-data subsystem is wired.  Strategy price feeds are not available.
+    ///
+    /// This is the explicit default for ALL current deployment modes, regardless
+    /// of broker kind.  It is not derived from adapter selection.
+    NotConfigured,
+}
+
+impl StrategyMarketDataSource {
+    /// Health string for `market_data_health` in API responses.
+    ///
+    /// Returns `"not_configured"` rather than `"unknown"` to signal that the
+    /// absence is intentional and checked, not merely unprobed.
+    pub fn as_health_str(&self) -> &'static str {
+        match self {
+            Self::NotConfigured => "not_configured",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DaemonBroker — enum-dispatch seam (AP-02)
 // ---------------------------------------------------------------------------
 
@@ -479,6 +562,13 @@ pub struct AppState {
     /// Authoritative exchange calendar spec derived from deployment mode at construction.
     /// `NyseWeekdays` for live-equity modes; `AlwaysOn` for paper/backtest.
     calendar_spec: CalendarSpec,
+    /// AP-04: How broker_snapshot is populated for this broker kind.
+    /// `Synthetic` = paper (local OMS synthesis); `External` = Alpaca (AP-03 REST fetch).
+    /// Derived from broker_kind at construction; must not be re-inferred at call sites.
+    pub broker_snapshot_source: BrokerSnapshotTruthSource,
+    /// AP-04B: Strategy market-data source policy.
+    /// INDEPENDENT of broker_kind — changing adapter must not change feed policy.
+    pub strategy_market_data_source: StrategyMarketDataSource,
 }
 
 impl Default for AppState {
@@ -516,6 +606,26 @@ impl AppState {
     /// Create application state with a live DB pool.
     pub fn new_with_db(db: PgPool) -> Self {
         Self::new_inner(operator_auth_mode_from_env(), Some(db))
+    }
+
+    /// Create application state with an explicit broker kind for tests.
+    ///
+    /// Named with `_for_test_` to signal intent; production code must derive
+    /// the broker kind from environment via [`Self::new_with_db`].
+    ///
+    /// This avoids setting env vars in tests (which race under parallel execution).
+    pub fn new_for_test_with_broker_kind(kind: BrokerKind) -> Self {
+        let mut state = Self::new_inner(OperatorAuthMode::ExplicitDevNoToken, None);
+        state.runtime_selection = RuntimeSelection {
+            deployment_mode: state.runtime_selection.deployment_mode,
+            broker_kind: Some(kind),
+            adapter_id: kind.as_str().to_string(),
+            run_config_hash: state.runtime_selection.run_config_hash.clone(),
+            readiness: state.runtime_selection.readiness.clone(),
+        };
+        // Re-derive snapshot source from the new broker kind so it stays consistent.
+        state.broker_snapshot_source = BrokerSnapshotTruthSource::from_broker_kind(Some(kind));
+        state
     }
 
     /// Create application state with an explicit deployment mode for tests.
@@ -571,6 +681,16 @@ impl AppState {
             DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
         };
 
+        // AP-04: Broker snapshot truth source — derived from broker kind, NOT from
+        // deployment mode.  Changing mode does not change snapshot source policy.
+        let broker_snapshot_source =
+            BrokerSnapshotTruthSource::from_broker_kind(runtime_selection.broker_kind);
+
+        // AP-04B: Strategy market-data source is always NotConfigured at this point.
+        // It is explicitly NOT derived from broker_kind so that changing the adapter
+        // does not silently change the strategy feed policy.
+        let strategy_market_data_source = StrategyMarketDataSource::NotConfigured;
+
         Self {
             bus,
             node_id: default_node_id(build.service),
@@ -587,6 +707,8 @@ impl AppState {
             execution_loop: Arc::new(Mutex::new(None)),
             lifecycle_op: Arc::new(Mutex::new(())),
             calendar_spec,
+            broker_snapshot_source,
+            strategy_market_data_source,
         }
     }
 
@@ -605,6 +727,22 @@ impl AppState {
     /// Authoritative exchange calendar spec for this deployment mode.
     pub fn calendar_spec(&self) -> CalendarSpec {
         self.calendar_spec
+    }
+
+    /// AP-04: Broker snapshot truth source for this adapter kind.
+    ///
+    /// `Synthetic` = paper (local OMS synthesis on every execution tick).
+    /// `External` = Alpaca (must come from `fetch_broker_snapshot`; synthesis prohibited).
+    pub fn broker_snapshot_source(&self) -> BrokerSnapshotTruthSource {
+        self.broker_snapshot_source
+    }
+
+    /// AP-04B: Strategy market-data source policy.
+    ///
+    /// Always returns `NotConfigured` until an explicit feed source is wired.
+    /// Independent of `broker_kind` — changing the adapter does not change feed policy.
+    pub fn strategy_market_data_source(&self) -> StrategyMarketDataSource {
+        self.strategy_market_data_source
     }
 
     pub fn adapter_id(&self) -> &str {
@@ -1321,14 +1459,23 @@ impl AppState {
             *sides_lock = recovered_sides.clone();
         }
 
-        // DMON-01: If broker_snapshot is absent, synthesize one from recovered DB
-        // truth so the reconcile gate has a consistent starting point.  For paper
-        // mode the broker's view IS the local OMS, so the synthesis is exact.
+        // AP-04: Broker snapshot seeding differs by truth source.
+        //
+        // Synthetic (paper): if no snapshot is loaded, synthesize one from recovered
+        //   OMS + portfolio truth.  The paper fill engine IS the broker, so local
+        //   state exactly equals broker truth.
+        //
+        // External (Alpaca): do NOT synthesize.  Local OMS state does not equal
+        //   external broker truth.  If no snapshot is loaded, execution start is
+        //   refused with an explicit error so the operator knows a real snapshot fetch
+        //   is required first.  (Note: external broker execution is currently
+        //   fail-closed at build_daemon_broker; this guard establishes correct
+        //   semantics for when that restriction is lifted.)
         let broker_seed = {
             let broker_snapshot_guard = self.broker_snapshot.read().await;
             if let Some(existing) = broker_snapshot_guard.clone() {
                 existing
-            } else {
+            } else if self.broker_snapshot_source == BrokerSnapshotTruthSource::Synthetic {
                 drop(broker_snapshot_guard);
                 let now = Utc::now();
                 let synth = synthesize_paper_broker_snapshot(
@@ -1339,6 +1486,12 @@ impl AppState {
                 );
                 *self.broker_snapshot.write().await = Some(synth.clone());
                 synth
+            } else {
+                return Err(RuntimeLifecycleError::service_unavailable(
+                    "runtime.start_refused.no_external_broker_snapshot",
+                    "external broker kind requires a real broker snapshot before execution; \
+                     call fetch_broker_snapshot first to populate broker truth",
+                ));
             }
         };
 
@@ -2507,6 +2660,10 @@ fn spawn_execution_loop(
     let side_cache = Arc::clone(&state.local_order_sides);
     let db = state.db.clone();
     let integrity = Arc::clone(&state.integrity);
+    // AP-04: Capture snapshot source so the tick loop can gate synthesis.
+    // For Synthetic (paper): synthesize broker snapshot from local OMS on every tick.
+    // For External (Alpaca): do NOT synthesize — broker truth comes from external fetch.
+    let broker_snapshot_source = state.broker_snapshot_source();
 
     let join_handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);
@@ -2637,9 +2794,8 @@ fn spawn_execution_loop(
 
                     match orchestrator.snapshot().await.context("snapshot failed") {
                         Ok(snapshot) => {
-                            // DMON-05: refresh side cache from outbox, then synthesize
-                            // broker snapshot from local OMS truth so paper-mode
-                            // reconcile always sees a consistent local == broker view.
+                            // DMON-05: refresh side cache from outbox so reconcile
+                            // closures have current side info.
                             if let Some(ref pool) = db {
                                 if let Ok(outbox_rows) =
                                     mqk_db::outbox_list_unacked_for_run(pool, run_id).await
@@ -2652,14 +2808,23 @@ fn spawn_execution_loop(
                                         );
                                     }
                                 }
-                                let sides_snapshot = side_cache.read().await.clone();
-                                let now = Utc::now();
-                                let synth = synthesize_broker_snapshot_from_execution(
-                                    &snapshot,
-                                    &sides_snapshot,
-                                    now,
-                                );
-                                *broker_snapshot_cache.write().await = Some(synth);
+                                // AP-04: Only synthesize broker snapshot for Synthetic source.
+                                // For paper, the fill engine IS the broker — local OMS truth
+                                // equals broker truth, so synthesis is correct.
+                                // For External (Alpaca), broker truth is held by the external
+                                // broker; synthesizing from local OMS would produce incorrect
+                                // data.  The broker snapshot must be populated by the AP-03
+                                // fetch path instead and must not be overwritten here.
+                                if broker_snapshot_source == BrokerSnapshotTruthSource::Synthetic {
+                                    let sides_snapshot = side_cache.read().await.clone();
+                                    let now = Utc::now();
+                                    let synth = synthesize_broker_snapshot_from_execution(
+                                        &snapshot,
+                                        &sides_snapshot,
+                                        now,
+                                    );
+                                    *broker_snapshot_cache.write().await = Some(synth);
+                                }
                             }
                             *snapshot_cache.write().await = Some(snapshot);
                         }

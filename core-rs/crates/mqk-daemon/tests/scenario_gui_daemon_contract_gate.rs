@@ -263,7 +263,10 @@ async fn gui_system_status_and_preflight_surfaces_are_semantically_truthful() {
     assert_eq!(json_str(&status, "audit_writer_status"), "unavailable");
     // No market data subsystem wired → must be "not_configured", not "unknown".
     // "unknown" = we didn't even check; "not_configured" = explicitly absent.
+    // AP-04B: value comes from typed StrategyMarketDataSource, independent of adapter.
     assert_eq!(json_str(&status, "market_data_health"), "not_configured");
+    // AP-04: paper adapter must surface synthetic broker snapshot source.
+    assert_eq!(json_str(&status, "broker_snapshot_source"), "synthetic");
 
     let preflight_req = Request::builder()
         .method("GET")

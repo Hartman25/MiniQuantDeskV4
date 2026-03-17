@@ -630,6 +630,10 @@ async fn api_system_status_returns_gui_contract() {
     assert_eq!(json["live_routing_enabled"], false);
     assert_eq!(json["daemon_reachable"], true);
     assert!(json["fault_signals"].is_array());
+    // AP-04: paper default must report synthetic broker snapshot source.
+    assert_eq!(json["broker_snapshot_source"], "synthetic");
+    // AP-04B: market-data health must be not_configured regardless of adapter kind.
+    assert_eq!(json["market_data_health"], "not_configured");
 }
 
 #[tokio::test]
@@ -1019,6 +1023,137 @@ async fn system_status_and_preflight_surface_mode_truth() {
     assert_eq!(preflight_json["daemon_mode"], "paper");
     assert_eq!(preflight_json["adapter_id"], "paper");
     assert_eq!(preflight_json["deployment_start_allowed"], true);
+}
+
+// ---------------------------------------------------------------------------
+// AP-04 + AP-04B: Broker snapshot source and market-data policy separation
+// ---------------------------------------------------------------------------
+
+/// AP-04: Paper adapter reports synthetic broker snapshot source.
+/// AP-04B: market_data_health is not_configured regardless of adapter kind;
+///          strategy feed policy is independent of broker selection.
+#[tokio::test]
+async fn ap04_paper_adapter_reports_synthetic_broker_snapshot_source() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    assert_eq!(
+        st.broker_snapshot_source(),
+        state::BrokerSnapshotTruthSource::Synthetic,
+        "paper broker kind must map to Synthetic snapshot source"
+    );
+    assert_eq!(
+        st.strategy_market_data_source(),
+        state::StrategyMarketDataSource::NotConfigured,
+        "strategy market-data source must be NotConfigured independent of broker kind"
+    );
+
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(router, req).await;
+    assert_eq!(code, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(
+        json["broker_snapshot_source"], "synthetic",
+        "system/status must surface synthetic source for paper adapter"
+    );
+    assert_eq!(
+        json["market_data_health"], "not_configured",
+        "market_data_health must reflect StrategyMarketDataSource::NotConfigured, not broker kind"
+    );
+}
+
+/// AP-04: Alpaca adapter kind must report external broker snapshot source.
+/// AP-04B: strategy market-data source remains NotConfigured — changing
+///          the adapter MUST NOT change the feed policy.
+///
+/// Uses `new_for_test_with_broker_kind` (no env vars) to avoid race conditions
+/// when parallel tests also read MQK_DAEMON_ADAPTER_ID.
+#[tokio::test]
+async fn ap04_alpaca_adapter_reports_external_broker_snapshot_source() {
+    let st = Arc::new(state::AppState::new_for_test_with_broker_kind(
+        state::BrokerKind::Alpaca,
+    ));
+
+    assert_eq!(
+        st.broker_snapshot_source(),
+        state::BrokerSnapshotTruthSource::External,
+        "alpaca broker kind must map to External snapshot source"
+    );
+    // AP-04B: strategy feed must NOT inherit broker kind.
+    assert_eq!(
+        st.strategy_market_data_source(),
+        state::StrategyMarketDataSource::NotConfigured,
+        "strategy market-data source must be NotConfigured even when broker is alpaca"
+    );
+
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(router, req).await;
+    assert_eq!(code, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(
+        json["broker_snapshot_source"], "external",
+        "system/status must surface external source for alpaca adapter"
+    );
+    assert_eq!(
+        json["market_data_health"], "not_configured",
+        "market_data_health must stay not_configured when adapter changes to alpaca"
+    );
+}
+
+/// AP-04B: broker_snapshot_source and market_data_health are orthogonal.
+///
+/// Proves at the type level (no env-var dependency) that `BrokerSnapshotTruthSource`
+/// and `StrategyMarketDataSource` are independent policy enums that never conflate.
+/// Also verified via the HTTP status endpoint for paper adapter.
+#[tokio::test]
+async fn ap04b_broker_snapshot_source_and_market_data_health_are_orthogonal() {
+    let paper_st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    // Type-level proof: the two policy types are distinct enums with distinct strings.
+    let snapshot_source = paper_st.broker_snapshot_source();
+    let md_source = paper_st.strategy_market_data_source();
+    assert_eq!(snapshot_source, state::BrokerSnapshotTruthSource::Synthetic);
+    assert_eq!(md_source, state::StrategyMarketDataSource::NotConfigured);
+    // Their canonical strings must differ — they encode different policy categories.
+    assert_ne!(
+        snapshot_source.as_str(),
+        md_source.as_health_str(),
+        "broker_snapshot_source and market_data_health must encode different policy categories; \
+         snapshot_source={:?} md_health={:?}",
+        snapshot_source.as_str(),
+        md_source.as_health_str(),
+    );
+
+    // HTTP-level: both fields are present and independently valued in system/status.
+    let router = routes::build_router(Arc::clone(&paper_st));
+    let (_, body) = call(
+        router,
+        Request::builder()
+            .method("GET")
+            .uri("/api/v1/system/status")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let json = parse_json(body);
+    assert_eq!(json["broker_snapshot_source"], "synthetic");
+    assert_eq!(json["market_data_health"], "not_configured");
+    assert_ne!(
+        json["broker_snapshot_source"], json["market_data_health"],
+        "system/status must surface the two policies as distinct, independent values"
+    );
 }
 
 #[tokio::test]

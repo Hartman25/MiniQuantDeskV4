@@ -192,6 +192,10 @@ pub struct SystemStatusResponse {
     pub deployment_blocker: Option<String>,
     pub runtime_status: String,
     pub broker_status: String,
+    /// AP-04: How broker_snapshot truth is sourced.
+    /// `"synthetic"` = paper (local OMS); `"external"` = Alpaca (AP-03 REST fetch).
+    /// Independent of market_data_health / strategy feed policy.
+    pub broker_snapshot_source: String,
     pub db_status: String,
     pub market_data_health: String,
     pub reconcile_status: String,

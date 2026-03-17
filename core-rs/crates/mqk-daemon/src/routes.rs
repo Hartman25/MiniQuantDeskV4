@@ -1051,10 +1051,14 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             deployment_blocker: st.deployment_readiness().blocker.clone(),
             runtime_status,
             broker_status,
+            // AP-04: surface which source populates broker_snapshot for this adapter.
+            broker_snapshot_source: st.broker_snapshot_source().as_str().to_string(),
             db_status,
-            // No market data subsystem is wired in AppState; "not_configured" is
-            // the authoritative signal (as opposed to "unknown" = unchecked).
-            market_data_health: "not_configured".to_string(),
+            // AP-04B: market_data_health is derived from the typed StrategyMarketDataSource,
+            // not hardcoded.  The value is "not_configured" for all current modes because
+            // strategy feed policy is independent of broker kind — changing the adapter
+            // does not change the feed source.
+            market_data_health: st.strategy_market_data_source().as_health_str().to_string(),
             reconcile_status,
             integrity_status,
             audit_writer_status,
