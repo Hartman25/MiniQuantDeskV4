@@ -15,7 +15,9 @@ use mqk_broker_paper::LockedPaperBroker;
 use mqk_execution::{
     oms::state_machine::{OmsEvent, OmsOrder, OrderState},
     wiring::build_gateway,
-    BrokerEvent, BrokerOrderMap, IntegrityGate, ReconcileGate,
+    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent, BrokerInvokeToken,
+    BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
+    BrokerSubmitResponse, IntegrityGate, ReconcileGate,
 };
 use mqk_integrity::{CalendarSpec, IntegrityState};
 use mqk_portfolio::{apply_entry, LedgerEntry, PortfolioState};
@@ -208,8 +210,13 @@ impl ReconcileGate for ReconcileTruthGate {
     }
 }
 
+/// Type alias for the daemon execution orchestrator.
+///
+/// The broker type parameter is `DaemonBroker` — the enum-based dispatch seam
+/// introduced in AP-02.  This alias is intentionally no longer paper-specific;
+/// any broker variant in `DaemonBroker` can be used here without changing this alias.
 type DaemonOrchestrator = mqk_runtime::orchestrator::ExecutionOrchestrator<
-    LockedPaperBroker,
+    DaemonBroker,
     StateIntegrityGate,
     mqk_runtime::runtime_risk::RuntimeRiskGate,
     ReconcileTruthGate,
@@ -307,6 +314,97 @@ impl BrokerKind {
             "alpaca" => Some(Self::Alpaca),
             _ => None,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DaemonBroker — enum-dispatch seam (AP-02)
+// ---------------------------------------------------------------------------
+
+/// Broker dispatch seam for the daemon execution orchestrator.
+///
+/// Each variant wraps a concrete broker adapter.  The enum satisfies the
+/// `BrokerAdapter` type parameter of `DaemonOrchestrator`, making the
+/// orchestrator broker-agnostic at the type level.
+///
+/// Only `Paper` is currently constructable via `build_daemon_broker`.
+/// Adding a new variant here and extending `build_daemon_broker` is the
+/// only change required to wire a new broker into daemon execution.
+pub(crate) enum DaemonBroker {
+    Paper(LockedPaperBroker),
+}
+
+impl fmt::Debug for DaemonBroker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Paper(_) => f.write_str("DaemonBroker::Paper"),
+        }
+    }
+}
+
+impl BrokerAdapter for DaemonBroker {
+    fn submit_order(
+        &self,
+        req: BrokerSubmitRequest,
+        token: &BrokerInvokeToken,
+    ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
+        match self {
+            Self::Paper(b) => b.submit_order(req, token),
+        }
+    }
+
+    fn cancel_order(
+        &self,
+        order_id: &str,
+        token: &BrokerInvokeToken,
+    ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
+        match self {
+            Self::Paper(b) => b.cancel_order(order_id, token),
+        }
+    }
+
+    fn replace_order(
+        &self,
+        req: BrokerReplaceRequest,
+        token: &BrokerInvokeToken,
+    ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
+        match self {
+            Self::Paper(b) => b.replace_order(req, token),
+        }
+    }
+
+    fn fetch_events(
+        &self,
+        cursor: Option<&str>,
+        token: &BrokerInvokeToken,
+    ) -> std::result::Result<(Vec<BrokerEvent>, Option<String>), BrokerError> {
+        match self {
+            Self::Paper(b) => b.fetch_events(cursor, token),
+        }
+    }
+}
+
+/// Construct the `DaemonBroker` variant for the given `BrokerKind`.
+///
+/// This is the **single construction seam** for broker adapters in the daemon.
+/// Nothing else in the daemon instantiates a concrete broker adapter directly;
+/// all paths go through this function so that adding/removing broker support
+/// only requires changing this one site.
+///
+/// Fails closed for any kind that is not currently wired into daemon execution.
+fn build_daemon_broker(
+    broker_kind: Option<BrokerKind>,
+) -> Result<DaemonBroker, RuntimeLifecycleError> {
+    match broker_kind {
+        Some(BrokerKind::Paper) => Ok(DaemonBroker::Paper(LockedPaperBroker::new())),
+        Some(BrokerKind::Alpaca) => Err(RuntimeLifecycleError::service_unavailable(
+            "runtime.start_refused.broker_not_wired",
+            "broker 'alpaca' is not yet wired into daemon execution",
+        )),
+        None => Err(RuntimeLifecycleError::service_unavailable(
+            "runtime.start_refused.broker_unrecognised",
+            "unrecognised broker adapter; cannot construct execution broker",
+        )),
     }
 }
 
@@ -1256,8 +1354,10 @@ impl AppState {
             .await
             .map_err(|err| RuntimeLifecycleError::internal("load_broker_cursor failed", err))?;
 
+        let daemon_broker = build_daemon_broker(self.runtime_selection.broker_kind)?;
+
         let gateway = build_gateway(
-            LockedPaperBroker::new(),
+            daemon_broker,
             StateIntegrityGate {
                 integrity: Arc::clone(&self.integrity),
             },
@@ -1542,6 +1642,45 @@ mod tests {
             .blocker
             .as_deref()
             .is_some_and(|msg| !msg.is_empty()));
+    }
+
+    // ── build_daemon_broker factory tests ────────────────────────────────
+
+    #[test]
+    fn build_daemon_broker_paper_succeeds() {
+        let result = build_daemon_broker(Some(BrokerKind::Paper));
+        assert!(
+            result.is_ok(),
+            "Paper broker must construct successfully; got: {:?}",
+            result.as_ref().err().map(|e| e.to_string())
+        );
+        // Confirm the variant is Paper.
+        let DaemonBroker::Paper(_) = result.unwrap();
+    }
+
+    #[test]
+    fn build_daemon_broker_alpaca_is_fail_closed() {
+        let result = build_daemon_broker(Some(BrokerKind::Alpaca));
+        assert!(
+            result.is_err(),
+            "Alpaca broker must fail closed (not yet wired)"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not yet wired"),
+            "error must explain alpaca is not wired; got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn build_daemon_broker_unknown_is_fail_closed() {
+        let result = build_daemon_broker(None);
+        assert!(result.is_err(), "Unknown broker (None) must fail closed");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("unrecognised"),
+            "error must mention unrecognised; got: {err_msg}"
+        );
     }
 
     #[test]
