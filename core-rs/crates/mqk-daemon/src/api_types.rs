@@ -525,12 +525,11 @@ pub struct ActionCatalogResponse {
 
 /// One live order row sourced from the in-memory OMS runtime snapshot.
 ///
-/// Fields that are not tracked at the OMS snapshot level carry explicit
-/// architectural defaults:
-/// - `strategy_id`: `"runtime"` — the OMS layer has no strategy attribution.
-/// - `side`: `"buy"` — OMS enforces `total_qty > 0` (long-only in current arch).
-/// - `order_type`: `"market"` — order type is not captured in OMS state.
-/// - `age_ms`: `0` — per-order creation time is not in the OMS snapshot.
+/// Fields that are not present in the OMS snapshot are emitted as `null`:
+/// - `strategy_id`: `null` — no strategy attribution at the OMS layer.
+/// - `side`: `null` — per-order side is not tracked in the OMS snapshot.
+/// - `order_type`: `null` — order type is not captured in OMS state.
+/// - `age_ms`: `null` — per-order creation time is not in the OMS snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionOrderRow {
     /// Internal (client) order identifier assigned by this daemon.
@@ -538,12 +537,12 @@ pub struct ExecutionOrderRow {
     /// Broker-assigned order ID; `None` until the submit is confirmed.
     pub broker_order_id: Option<String>,
     pub symbol: String,
-    /// Source-layer attribution: `"runtime"` for OMS-truth rows.
-    pub strategy_id: String,
-    /// `"buy"` — OMS enforces long-only in current architecture.
-    pub side: String,
-    /// `"market"` — order type is not captured at OMS snapshot level.
-    pub order_type: String,
+    /// `null` — OMS runtime has no strategy attribution per order.
+    pub strategy_id: Option<String>,
+    /// `null` — per-order side is not tracked in the OMS snapshot.
+    pub side: Option<String>,
+    /// `null` — order type is not captured at OMS snapshot level.
+    pub order_type: Option<String>,
     pub requested_qty: i64,
     pub filled_qty: i64,
     /// Canonical OMS state: `"Open"` | `"PartiallyFilled"` | `"Filled"` |
@@ -551,8 +550,8 @@ pub struct ExecutionOrderRow {
     pub current_status: String,
     /// Display-friendly lifecycle stage derived from `current_status`.
     pub current_stage: String,
-    /// Always `0`: per-order creation timestamps are not in the OMS snapshot.
-    pub age_ms: u64,
+    /// `null` — per-order creation timestamps are not in the OMS snapshot.
+    pub age_ms: Option<u64>,
     pub has_warning: bool,
     /// `true` when `current_status == "Rejected"`.
     pub has_critical: bool,
@@ -567,32 +566,31 @@ pub struct ExecutionOrderRow {
 
 /// One broker-layer position row.
 ///
-/// Fields with no broker-snapshot equivalent carry explicit architectural
-/// defaults:
-/// - `strategy_id`: `"broker"` — positions are not attributed to a strategy at
+/// Fields with no broker-snapshot equivalent are emitted as `null`:
+/// - `strategy_id`: `null` — positions are not attributed to a strategy at
 ///   the broker snapshot level.
-/// - `mark_price`, `unrealized_pnl`, `realized_pnl_today`: `0.0` — mark-to-
+/// - `mark_price`, `unrealized_pnl`, `realized_pnl_today`: `null` — mark-to-
 ///   market data is not present in the broker snapshot.
-/// - `drift`: `false` — reconcile-level position drift is not assessed at the
+/// - `drift`: `null` — reconcile-level position drift is not assessed at the
 ///   broker snapshot layer.
 /// - `broker_qty`: same as `qty` — the row IS the broker view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioPositionRow {
     pub symbol: String,
-    /// Source-layer attribution: `"broker"` for broker-snapshot rows.
-    pub strategy_id: String,
+    /// `null` — broker-snapshot positions have no strategy attribution.
+    pub strategy_id: Option<String>,
     pub qty: i64,
     pub avg_price: f64,
-    /// `0.0` — mark prices are not in the broker snapshot.
-    pub mark_price: f64,
-    /// `0.0` — broker snapshot has no unrealized PnL.
-    pub unrealized_pnl: f64,
-    /// `0.0` — broker snapshot has no today-only realized PnL.
-    pub realized_pnl_today: f64,
+    /// `null` — mark prices are not present in the broker snapshot.
+    pub mark_price: Option<f64>,
+    /// `null` — broker snapshot has no unrealized PnL.
+    pub unrealized_pnl: Option<f64>,
+    /// `null` — broker snapshot has no today-only realized PnL.
+    pub realized_pnl_today: Option<f64>,
     /// Equals `qty` — this row is sourced from the broker view.
     pub broker_qty: i64,
-    /// `false` — reconcile-level drift is not assessed here.
-    pub drift: bool,
+    /// `null` — reconcile-level drift is not assessed at broker snapshot layer.
+    pub drift: Option<bool>,
 }
 
 /// Response wrapper for `/api/v1/portfolio/positions`.
@@ -611,20 +609,20 @@ pub struct PortfolioPositionsResponse {
 
 /// One broker-layer open-order row.
 ///
-/// - `strategy_id`: `"broker"`.
-/// - `filled_qty`: `0` — broker snapshot does not track partial fills per order.
+/// - `strategy_id`: `null` — broker snapshot has no strategy attribution.
+/// - `filled_qty`: `null` — broker snapshot does not track partial fills per order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioOpenOrderRow {
     /// Client order ID assigned by this daemon (= `client_order_id` in broker snapshot).
     pub internal_order_id: String,
     pub symbol: String,
-    /// `"broker"` — open orders are not strategy-attributed at this layer.
-    pub strategy_id: String,
+    /// `null` — open orders are not strategy-attributed at the broker snapshot layer.
+    pub strategy_id: Option<String>,
     pub side: String,
     pub status: String,
     pub requested_qty: i64,
-    /// `0` — partial fill quantity is not tracked in the broker snapshot.
-    pub filled_qty: i64,
+    /// `null` — partial fill quantity is not tracked in the broker snapshot.
+    pub filled_qty: Option<i64>,
     pub entered_at: String,
 }
 
@@ -638,7 +636,7 @@ pub struct PortfolioOpenOrdersResponse {
 
 /// One broker-layer fill row.
 ///
-/// - `strategy_id`: `"broker"`.
+/// - `strategy_id`: `null` — broker snapshot has no strategy attribution.
 /// - `applied`: `true` — fills present in the broker snapshot are by definition
 ///   already applied.
 /// - `broker_exec_id`: equals `fill_id` (= `broker_fill_id` from broker API).
@@ -648,8 +646,8 @@ pub struct PortfolioFillRow {
     /// Client order ID of the order that generated this fill.
     pub internal_order_id: String,
     pub symbol: String,
-    /// `"broker"` — fills are not strategy-attributed at the broker snapshot layer.
-    pub strategy_id: String,
+    /// `null` — fills are not strategy-attributed at the broker snapshot layer.
+    pub strategy_id: Option<String>,
     pub side: String,
     pub qty: i64,
     pub price: f64,

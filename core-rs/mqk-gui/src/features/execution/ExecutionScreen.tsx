@@ -109,11 +109,11 @@ export function ExecutionScreen({
             columns={[
               { key: "order", title: "Order", render: (row) => row.internal_order_id },
               { key: "symbol", title: "Symbol", render: (row) => row.symbol },
-              { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
+              { key: "strategy", title: "Strategy", render: (row) => row.strategy_id ?? "—" },
               { key: "status", title: "Status", render: (row) => row.current_status },
               { key: "stage", title: "Stage", render: (row) => row.current_stage },
               { key: "qty", title: "Qty", render: (row) => `${row.filled_qty}/${row.requested_qty}` },
-              { key: "age", title: "Age", render: (row) => formatDurationMs(row.age_ms) },
+              { key: "age", title: "Age", render: (row) => formatDurationMs(row.age_ms ?? null) },
               { key: "updated", title: "Updated", render: (row) => formatDateTime(row.updated_at) },
               {
                 key: "action",
@@ -139,7 +139,7 @@ export function ExecutionScreen({
                 <div><span>Internal order</span><strong>{timeline.internal_order_id}</strong></div>
                 <div><span>Broker order</span><strong>{timeline.broker_order_id ?? "—"}</strong></div>
                 <div><span>Symbol</span><strong>{timeline.symbol}</strong></div>
-                <div><span>Strategy</span><strong>{timeline.strategy_id}</strong></div>
+                <div><span>Strategy</span><strong>{timeline.strategy_id ?? "—"}</strong></div>
                 <div><span>Status</span><strong>{timeline.current_status}</strong></div>
                 <div><span>Stage</span><strong>{timeline.current_stage}</strong></div>
                 <div><span>Qty</span><strong>{timeline.filled_qty}/{timeline.requested_qty}</strong></div>

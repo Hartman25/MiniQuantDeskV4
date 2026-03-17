@@ -987,10 +987,9 @@ async fn gui_contract_portfolio_positions_active_snapshot() {
         Some(10),
         "row qty must match injected position; got: {json}"
     );
-    assert_eq!(
-        rows[0]["strategy_id"].as_str(),
-        Some("broker"),
-        "strategy_id must be broker for broker-layer rows; got: {json}"
+    assert!(
+        rows[0]["strategy_id"].is_null(),
+        "strategy_id must be null for broker-layer position rows (no attribution at broker snapshot layer); got: {json}"
     );
 }
 
@@ -1092,10 +1091,9 @@ async fn gui_contract_portfolio_open_orders_active_snapshot() {
         Some("TSLA"),
         "symbol must match injected order; got: {json}"
     );
-    assert_eq!(
-        rows[0]["strategy_id"].as_str(),
-        Some("broker"),
-        "strategy_id must be broker for broker-layer rows; got: {json}"
+    assert!(
+        rows[0]["strategy_id"].is_null(),
+        "strategy_id must be null for broker-layer open order rows (no attribution at broker snapshot layer); got: {json}"
     );
 }
 
@@ -1206,10 +1204,9 @@ async fn gui_contract_portfolio_fills_active_snapshot() {
         Some("fill-001"),
         "broker_exec_id must equal fill_id; got: {json}"
     );
-    assert_eq!(
-        rows[0]["strategy_id"].as_str(),
-        Some("broker"),
-        "strategy_id must be broker for broker-layer rows; got: {json}"
+    assert!(
+        rows[0]["strategy_id"].is_null(),
+        "strategy_id must be null for broker-layer fill rows (no attribution at broker snapshot layer); got: {json}"
     );
 }
 
@@ -1590,14 +1587,8 @@ async fn gui_contract_operator_history_endpoints_declare_correct_backends() {
     let router = make_router();
 
     let cases: [(&str, &str); 3] = [
-        (
-            "/api/v1/audit/operator-actions",
-            "postgres.audit_events",
-        ),
-        (
-            "/api/v1/audit/artifacts",
-            "postgres.runs",
-        ),
+        ("/api/v1/audit/operator-actions", "postgres.audit_events"),
+        ("/api/v1/audit/artifacts", "postgres.runs"),
         (
             "/api/v1/ops/operator-timeline",
             "postgres.runs+postgres.audit_events",

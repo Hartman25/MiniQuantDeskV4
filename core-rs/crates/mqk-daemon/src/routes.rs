@@ -1381,18 +1381,18 @@ pub(crate) async fn execution_orders(State(st): State<Arc<AppState>>) -> impl In
                 internal_order_id: o.order_id.clone(),
                 broker_order_id: o.broker_order_id.clone(),
                 symbol: o.symbol.clone(),
-                // "runtime" = sourced from OMS runtime layer, not broker snapshot.
-                strategy_id: "runtime".to_string(),
-                // OMS enforces total_qty > 0 (long-only); "buy" is architecturally correct.
-                side: "buy".to_string(),
-                // Order type not captured at OMS snapshot level.
-                order_type: "market".to_string(),
+                // OMS runtime has no per-order strategy attribution.
+                strategy_id: None,
+                // Per-order side is not tracked in the OMS snapshot.
+                side: None,
+                // Order type is not captured at OMS snapshot level.
+                order_type: None,
                 requested_qty: o.total_qty,
                 filled_qty: o.filled_qty,
                 current_status: o.status.clone(),
                 current_stage,
                 // Per-order creation time not tracked in OMS snapshot.
-                age_ms: 0,
+                age_ms: None,
                 has_warning: false,
                 has_critical,
                 updated_at: updated_at.clone(),
@@ -1465,14 +1465,19 @@ pub(crate) async fn portfolio_positions(State(st): State<Arc<AppState>>) -> impl
                     let avg_price = parse_decimal(&p.avg_price);
                     PortfolioPositionRow {
                         symbol: p.symbol.clone(),
-                        strategy_id: "broker".to_string(),
+                        // Broker snapshot has no strategy attribution.
+                        strategy_id: None,
                         qty,
                         avg_price,
-                        mark_price: 0.0,
-                        unrealized_pnl: 0.0,
-                        realized_pnl_today: 0.0,
+                        // Mark prices are not present in the broker snapshot.
+                        mark_price: None,
+                        // Broker snapshot has no unrealized PnL.
+                        unrealized_pnl: None,
+                        // Broker snapshot has no today-only realized PnL.
+                        realized_pnl_today: None,
                         broker_qty: qty,
-                        drift: false,
+                        // Reconcile-level drift is not assessed at broker snapshot layer.
+                        drift: None,
                     }
                 })
                 .collect();
@@ -1517,11 +1522,13 @@ pub(crate) async fn portfolio_open_orders(State(st): State<Arc<AppState>>) -> im
                     PortfolioOpenOrderRow {
                         internal_order_id: o.client_order_id.clone(),
                         symbol: o.symbol.clone(),
-                        strategy_id: "broker".to_string(),
+                        // Broker snapshot has no strategy attribution.
+                        strategy_id: None,
                         side: o.side.clone(),
                         status: o.status.clone(),
                         requested_qty,
-                        filled_qty: 0,
+                        // Partial fill quantity is not tracked in the broker snapshot.
+                        filled_qty: None,
                         entered_at: o.created_at_utc.to_rfc3339(),
                     }
                 })
@@ -1569,7 +1576,8 @@ pub(crate) async fn portfolio_fills(State(st): State<Arc<AppState>>) -> impl Int
                         fill_id: f.broker_fill_id.clone(),
                         internal_order_id: f.client_order_id.clone(),
                         symbol: f.symbol.clone(),
-                        strategy_id: "broker".to_string(),
+                        // Broker snapshot has no strategy attribution.
+                        strategy_id: None,
                         side: f.side.clone(),
                         qty,
                         price,

@@ -38,15 +38,15 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
         <Panel title="Positions">
           <DataTable
             rows={model.positions}
-            rowKey={(row) => `${row.strategy_id}-${row.symbol}`}
+            rowKey={(row) => row.symbol}
             columns={[
               { key: "symbol", title: "Symbol", render: (row) => row.symbol },
               { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
               { key: "qty", title: "Qty", render: (row) => row.qty },
               { key: "avg", title: "Avg", render: (row) => formatMoney(row.avg_price) },
-              { key: "mark", title: "Mark", render: (row) => formatMoney(row.mark_price) },
-              { key: "u", title: "Unrealized", render: (row) => formatMoney(row.unrealized_pnl) },
-              { key: "drift", title: "Drift", render: (row) => (row.drift ? "Yes" : "No") },
+              { key: "mark", title: "Mark", render: (row) => formatMoney(row.mark_price ?? null) },
+              { key: "u", title: "Unrealized", render: (row) => formatMoney(row.unrealized_pnl ?? null) },
+              { key: "drift", title: "Drift", render: (row) => (row.drift == null ? "—" : row.drift ? "Yes" : "No") },
             ]}
           />
         </Panel>
@@ -61,7 +61,7 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
               { key: "id", title: "Order", render: (row) => row.internal_order_id },
               { key: "symbol", title: "Symbol", render: (row) => row.symbol },
               { key: "status", title: "Status", render: (row) => row.status },
-              { key: "qty", title: "Qty", render: (row) => `${row.filled_qty}/${row.requested_qty}` },
+              { key: "qty", title: "Qty", render: (row) => row.filled_qty != null ? `${row.filled_qty}/${row.requested_qty}` : `—/${row.requested_qty}` },
             ]}
           />
         </Panel>

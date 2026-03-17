@@ -22,15 +22,19 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
   - HTTP 503 when no execution snapshot (OMS loop not running) → endpoint lands in `missingEndpoints` → `isMissingPanelTruth` fires → execution panel blocks with `no_snapshot`
   - HTTP 200 + bare JSON array when snapshot is active; zero active orders returns `[]` (authoritative empty)
   - Legacy `/v1/trading/orders` confirmed still mounted; GUI falls through to it only on 404/network error (not on 503)
+  - Row-semantic closure (exec/portfolio patch): `strategy_id`, `side`, `order_type`, `age_ms` are `null` (not fake constants "runtime"/"buy"/"market"/0) — OMS snapshot has no source for these fields
   - Tests: `gui_contract_execution_orders_503_without_snapshot` + `gui_contract_execution_orders_200_array_with_injected_snapshot`
 - `/api/v1/portfolio/summary` — shape check (account_equity, cash, long_market_value, buying_power)
 - `/api/v1/portfolio/positions` — structured wrapper (`snapshot_state`, `captured_at_utc`, `rows`):
   - `snapshot_state: "active"` + rows when broker snapshot is loaded; empty `rows` is authoritative (account has no positions)
   - `snapshot_state: "no_snapshot"` + empty rows when no broker snapshot; GUI checks typed field, not HTTP status string
+  - Row-semantic closure: `strategy_id`, `mark_price`, `unrealized_pnl`, `realized_pnl_today`, `drift` are `null` — broker snapshot has no source for these fields; `broker_qty` is honest (equals `qty`, row IS the broker view)
   - Tests: `gui_contract_portfolio_positions_no_snapshot` + `gui_contract_portfolio_positions_active_snapshot`
 - `/api/v1/portfolio/orders/open` — same structured wrapper pattern; `internal_order_id` = `client_order_id` from broker snapshot
+  - Row-semantic closure: `strategy_id` is `null`; `filled_qty` is `null` — broker snapshot does not track partial fills per order
   - Tests: `gui_contract_portfolio_open_orders_no_snapshot` + `gui_contract_portfolio_open_orders_active_snapshot`
 - `/api/v1/portfolio/fills` — same structured wrapper pattern; `applied: true` for all fills in snapshot
+  - Row-semantic closure: `strategy_id` is `null` — broker snapshot has no strategy attribution
   - Tests: `gui_contract_portfolio_fills_no_snapshot` + `gui_contract_portfolio_fills_active_snapshot`
 
 ### Risk and reconcile summaries

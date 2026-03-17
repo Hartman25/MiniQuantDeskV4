@@ -597,7 +597,8 @@ export const MOCK_OPEN_ORDERS: OpenOrderRow[] = MOCK_EXECUTION_ORDERS.map((row) 
   internal_order_id: row.internal_order_id,
   symbol: row.symbol,
   strategy_id: row.strategy_id,
-  side: row.side,
+  // Mock execution orders always carry side; fall back to "buy" for type safety.
+  side: row.side ?? "buy",
   status: row.current_status,
   broker_order_id: row.broker_order_id,
   requested_qty: row.requested_qty,

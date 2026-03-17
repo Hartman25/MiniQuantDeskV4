@@ -138,14 +138,18 @@ export interface ExecutionOrderRow {
   internal_order_id: string;
   broker_order_id: string | null;
   symbol: string;
-  strategy_id: string;
-  side: "buy" | "sell";
-  order_type: "market" | "limit" | "stop" | "stop_limit";
+  /** null — OMS runtime has no per-order strategy attribution. */
+  strategy_id?: string;
+  /** null — per-order side is not tracked in the OMS snapshot. */
+  side?: "buy" | "sell";
+  /** null — order type is not captured at OMS snapshot level. */
+  order_type?: "market" | "limit" | "stop" | "stop_limit";
   requested_qty: number;
   filled_qty: number;
   current_status: string;
   current_stage: string;
-  age_ms: number;
+  /** null — per-order creation time is not in the OMS snapshot. */
+  age_ms?: number;
   has_warning: boolean;
   has_critical: boolean;
   updated_at: string;
@@ -559,25 +563,32 @@ export interface SystemMetrics {
 
 export interface PositionRow {
   symbol: string;
-  strategy_id: string;
+  /** null — broker-snapshot positions have no strategy attribution. */
+  strategy_id?: string;
   qty: number;
   avg_price: number;
-  mark_price: number;
-  unrealized_pnl: number;
-  realized_pnl_today: number;
+  /** null — mark prices are not present in the broker snapshot. */
+  mark_price?: number;
+  /** null — broker snapshot has no unrealized PnL. */
+  unrealized_pnl?: number;
+  /** null — broker snapshot has no today-only realized PnL. */
+  realized_pnl_today?: number;
   broker_qty: number;
-  drift: boolean;
+  /** null — reconcile-level drift is not assessed at broker snapshot layer. */
+  drift?: boolean;
 }
 
 export interface OpenOrderRow {
   internal_order_id: string;
   symbol: string;
-  strategy_id: string;
+  /** null — broker snapshot has no strategy attribution. */
+  strategy_id?: string;
   side: string;
   status: string;
   broker_order_id: string | null;
   requested_qty: number;
-  filled_qty: number;
+  /** null — partial fill quantity is not tracked in the broker snapshot. */
+  filled_qty?: number;
   entered_at: string;
 }
 
@@ -585,7 +596,8 @@ export interface FillRow {
   fill_id: string;
   internal_order_id: string;
   symbol: string;
-  strategy_id: string;
+  /** null — broker snapshot has no strategy attribution. */
+  strategy_id?: string;
   side: string;
   qty: number;
   price: number;

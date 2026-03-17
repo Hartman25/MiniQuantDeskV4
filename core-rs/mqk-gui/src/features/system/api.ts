@@ -570,7 +570,8 @@ function mapLegacyTradingOrdersToOpenOrders(response: LegacyTradingOrdersRespons
       internal_order_id: order.internal_order_id,
       symbol: order.symbol,
       strategy_id: order.strategy_id,
-      side: order.side,
+      // Legacy path: side sourced from execution order row; fall back to "unknown" if absent.
+      side: order.side ?? "unknown",
       status: order.current_status,
       broker_order_id: order.broker_order_id,
       requested_qty: order.requested_qty,
@@ -606,7 +607,7 @@ function deriveExecutionSummaryFromOrders(orders: ExecutionOrderRow[] | null): E
   });
   const dispatchingOrders = orders.filter((order) => order.current_status.includes("submit") || order.current_stage === "Dispatching");
   const rejectedOrders = orders.filter((order) => order.current_status.includes("reject"));
-  const stuckOrders = activeOrders.filter((order) => order.age_ms >= 300_000);
+  const stuckOrders = activeOrders.filter((order) => (order.age_ms ?? 0) >= 300_000);
 
   return {
     active_orders: activeOrders.length,
