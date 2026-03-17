@@ -8,7 +8,7 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
 
 ### Canonical system surfaces
 
-- `/api/v1/system/status` — shape + semantic truth (db_status, audit_writer_status, daemon_mode, adapter_id)
+- `/api/v1/system/status` — shape + semantic truth (db_status, audit_writer_status, daemon_mode, adapter_id, broker_snapshot_source, alpaca_ws_continuity, deployment_start_allowed); AP-09: external broker truth fields proven in `gui_system_status_and_preflight_surfaces_are_semantically_truthful`
 - `/api/v1/system/preflight` — shape + semantic truth (broker_config_present, db_reachable, blockers list)
 - `/api/v1/system/metadata` — shape + semantic truth (build_version, api_version, broker_adapter, endpoint_status)
 - `/api/v1/system/session` — shape + semantic truth (daemon_mode, adapter_id, strategy_allowed)

@@ -40,6 +40,10 @@ PROMOTED_FILES=(
   "crates/mqk-db/tests/scenario_migrate_idempotent_on_clean_db.rs"
   "crates/mqk-db/tests/scenario_migration_bootstrap_replay_proof.rs"
   "crates/mqk-daemon/tests/scenario_daemon_runtime_lifecycle.rs"
+  # AP series: DB-backed external broker inbound proof (BRK-08R RT path).
+  # Pure in-memory Alpaca tests in mqk-broker-alpaca/tests/ carry no #[ignore] and
+  # are not listed here; they run unconditionally via cargo test -p mqk-broker-alpaca.
+  "crates/mqk-runtime/tests/scenario_alpaca_inbound_rt_brk08r.rs"
 )
 
 violations=0
@@ -52,12 +56,13 @@ for rel_path in "${PROMOTED_FILES[@]}"; do
     continue
   fi
 
-  # Match #[ignore] on its own line (with optional leading whitespace),
-  # NOT followed by = (which would be #[ignore = "..."]).
-  # grep -n to show line numbers, grep -P for perl-compatible look-ahead.
-  if grep -n '#\[ignore\]' "$full_path" >/dev/null 2>&1; then
+  # Match #[ignore] that appears as a Rust attribute — i.e., at the start of a line
+  # with optional leading whitespace, NOT inside a comment (// or //!).
+  # Anchoring to ^[[:space:]]* ensures doc-comment lines like
+  # '//! ... `#[ignore]` ...' are never matched.
+  if grep -n '^[[:space:]]*#\[ignore\]' "$full_path" >/dev/null 2>&1; then
     echo "[CI-11] BARE #[ignore] found in $rel_path:" >&2
-    grep -n '#\[ignore\]' "$full_path" >&2
+    grep -n '^[[:space:]]*#\[ignore\]' "$full_path" >&2
     violations=$((violations + 1))
   fi
 done

@@ -280,6 +280,23 @@ TSC clean. Landing-time GUI truth tests passed; current totals should be checked
 - Patch 1 is **GUI-1** only.
 - Backtest/Research tabs are placeholders until DAEMON-4+ are implemented.
 - Next most important is **GUI-2 (configurable daemon URL)** so you can target multiple machines cleanly.
+### AP-09: External broker operator-truth semantics
+**Status:** DONE
+**Files:**
+- `core-rs/mqk-gui/src/features/system/types.ts` — `SystemStatus` + `SessionStateSummary` + `DEFAULT_STATUS`
+- `core-rs/mqk-gui/src/features/system/api.ts` — `mapLegacyStatusToSystemStatus` + `unavailableSessionState`
+- `core-rs/mqk-gui/src/features/system/truthRendering.ts` — `EXTERNAL_BROKER_GATED_PANELS`, `hasExternalBrokerContinuityGap`, AP-09 gate inserted before `isMissingPanelTruth`
+- `core-rs/mqk-gui/src/features/system/truthRendering.test.ts` — 6 new AP-09 tests
+- `core-rs/mqk-gui/src/features/system/mockData.ts` — `MOCK_STATUS` patched with 5 new required fields
+- `core-rs/crates/mqk-daemon/tests/scenario_gui_daemon_contract_gate.rs` — status shape check expanded
+**What changed:** `SystemStatus` now declares `broker_snapshot_source` (`"synthetic"|"external"`),
+`alpaca_ws_continuity` (`"not_applicable"|"cold_start_unproven"|"live"|"gap_detected"`),
+`deployment_start_allowed`, `daemon_mode`, `adapter_id`. `truthRendering.ts` gates execution
+and reconcile panels on external WS continuity: `cold_start_unproven`/`gap_detected` → `no_snapshot`.
+Portfolio is intentionally not gated (REST-independent truth). `DEFAULT_STATUS` and legacy path
+fail-closed with `synthetic`/`not_applicable`. 6 new tests; 46/46 pass. Contract gate shape
+check expanded to 9 status fields; 20/20 pass.
+
 ### REC-01: Reconcile mismatch detail route + fail-closed GUI detail gate
 **Status:** DONE
 **Files:**

@@ -85,6 +85,9 @@ Strategy logic
 mqk-cli
 Command line interface
 
+mqk-broker-alpaca
+Live Alpaca broker adapter (submit/cancel/replace/fetch-events via REST; WS inbound parse)
+
 mqk-testkit
 Scenario tests
 
@@ -232,85 +235,56 @@ Includes:
 • inbox dedupe
 • outbox idempotency
 • deterministic fill ordering
-• crash matrix tests
+• crash matrix tests (I9 series)
+• broker order map durability (EB-4: FK constraint + migration 0013)
 
 ---
 
-### Patch 2 — Restart Quarantine
+### Alpaca External Broker (AP series — AP-01 through AP-09)
 
-Patch 2 implemented restart safety.
+Deployment policy and broker implementation separation:
 
-If runtime restarts and finds outbox rows in:
+• AP-01/02: typed DeploymentMode + BrokerKind split
+• AP-03: snapshot normalization (N1-N6 pure)
+• AP-04: broker_snapshot_source emitted on every /system/status
+• AP-05: alpaca_ws_continuity daemon-owned state machine (ColdStartUnproven/Live/GapDetected)
+• AP-06/07: paper+alpaca and live-shadow+alpaca deployment modes proven
+• AP-08: live-capital+alpaca deployment mode proven (capital token gate + WS continuity check)
+• AP-09: operator-truth semantics — execution/reconcile gated on external WS continuity;
+  GUI SystemStatus typed for broker_snapshot_source + alpaca_ws_continuity
 
-```
-DISPATCHING
-SENT
-```
+Proof coverage: 75+ pure in-memory Alpaca adapter tests; 57 daemon route integration tests;
+20 GUI/daemon contract gate tests. See scripts/db_proof_bootstrap.sh for the external broker
+proof lane.
 
-without broker confirmation evidence, the system:
+---
 
-• quarantines the rows
-• persists recovery reason
-• transitions to HALT/DISARM
-• refuses further dispatch
+### GUI Hardening (H-series + PC-series)
 
-Tests:
-
-```
-scenario_restart_quarantines_dispatching_outbox
-scenario_restart_quarantines_sent_outbox
-```
+All 19 operator-facing screens hard-block on truthState !== null.
+Action catalog daemon-backed. Dead mode-change paths removed.
+Legacy fallback authority propagates through panelSources. 46/46 GUI truth tests pass.
 
 ---
 
 # Current System State
 
-Repository currently builds cleanly:
+Repository builds cleanly:
 
 ```
-cargo fmt
-cargo clippy
-cargo test --workspace
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
 ```
 
-Execution safety currently includes:
+Execution safety includes:
 
 • outbox idempotency
 • claim locking
 • inbox dedupe
 • crash restart quarantine
-
----
-
-# Remaining Critical Work
-
-Next patch:
-
-## Patch 3 — Broker Order Map Durability
-
-Goal:
-
-Persist mapping:
-
-```
-client_order_id → broker_order_id
-```
-
-before acknowledging dispatch.
-
-Why:
-
-Without this mapping:
-
-• restart cannot reconcile orders
-• fills cannot be matched reliably
-• cancel/replace safety is weakened
-
-Required tests:
-
-• broker order map survives restart
-• crash during dispatch preserves mapping
-• reconcile can match fills to correct order
+• broker order map durability
+• external broker WS continuity truth gates
 
 ---
 

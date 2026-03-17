@@ -11,7 +11,12 @@ usage() {
   cat <<'USAGE'
 Usage: bash scripts/db_proof_bootstrap.sh [--start-postgres]
 
-Default-safe DB proof harness for MiniQuantDesk V4.
+Proof harness for MiniQuantDesk V4.
+
+Runs two proof lanes:
+  1. External broker proof lane — Alpaca adapter pure in-memory tests (always runs,
+     no DB required).
+  2. DB-backed proof lane — full CI-10 mandatory matrix (requires MQK_DATABASE_URL).
 
 Options:
   --start-postgres   Start (or reuse) a local Docker Postgres 16 container
@@ -80,6 +85,14 @@ echo "Using MQK_DATABASE_URL=$MQK_DATABASE_URL"
 
 cd "$CORE_RS_DIR"
 
+# AP series: external broker proof lane.
+# These are pure in-memory tests — no MQK_DATABASE_URL required.
+# Covers: Alpaca event normalization (all 11 event strings, 8 BrokerEvent variants),
+# InboundBatch cursor contract, WS parse path, snapshot normalization (AP-03),
+# lifecycle variants, and live adapter failure-mode isolation.
+echo "== AP series: external broker proof lane (Alpaca adapter, pure in-memory) =="
+cargo test -p mqk-broker-alpaca
+
 echo "== DB proof: migration manifest + bootstrap / replay =="
 cargo test -p mqk-db --test scenario_migration_manifest_matches_files -- --test-threads=1
 cargo test -p mqk-db --test scenario_migrate_idempotent_on_clean_db -- --ignored --test-threads=1
@@ -136,4 +149,6 @@ cargo test -p mqk-db --test scenario_run_lifecycle_enforced -- --ignored --test-
 cargo test -p mqk-db --features testkit --test scenario_idempotency_constraints -- --ignored --test-threads=1
 
 echo ""
-echo "DB proof lane passed (CI-10: full mandatory proof matrix)."
+echo "All proof lanes passed:"
+echo "  External broker (AP series): Alpaca adapter pure in-memory tests."
+echo "  DB proof (CI-10): full mandatory proof matrix."
