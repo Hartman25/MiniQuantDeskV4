@@ -1053,6 +1053,10 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             broker_status,
             // AP-04: surface which source populates broker_snapshot for this adapter.
             broker_snapshot_source: st.broker_snapshot_source().as_str().to_string(),
+            // AP-05: surface daemon-owned Alpaca WS continuity truth.
+            // "not_applicable" for Paper; "cold_start_unproven"/"live"/"gap_detected" for Alpaca.
+            // Only "live" is proven continuity — all others are fail-closed.
+            alpaca_ws_continuity: st.alpaca_ws_continuity().await.as_status_str().to_string(),
             db_status,
             // AP-04B: market_data_health is derived from the typed StrategyMarketDataSource,
             // not hardcoded.  The value is "not_configured" for all current modes because

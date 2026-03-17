@@ -267,6 +267,8 @@ async fn gui_system_status_and_preflight_surfaces_are_semantically_truthful() {
     assert_eq!(json_str(&status, "market_data_health"), "not_configured");
     // AP-04: paper adapter must surface synthetic broker snapshot source.
     assert_eq!(json_str(&status, "broker_snapshot_source"), "synthetic");
+    // AP-05: paper adapter → WS continuity is not_applicable (no WS path for paper).
+    assert_eq!(json_str(&status, "alpaca_ws_continuity"), "not_applicable");
 
     let preflight_req = Request::builder()
         .method("GET")

@@ -634,6 +634,8 @@ async fn api_system_status_returns_gui_contract() {
     assert_eq!(json["broker_snapshot_source"], "synthetic");
     // AP-04B: market-data health must be not_configured regardless of adapter kind.
     assert_eq!(json["market_data_health"], "not_configured");
+    // AP-05: paper default must report not_applicable WS continuity (no WS path).
+    assert_eq!(json["alpaca_ws_continuity"], "not_applicable");
 }
 
 #[tokio::test]
@@ -1156,13 +1158,282 @@ async fn ap04b_broker_snapshot_source_and_market_data_health_are_orthogonal() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// AP-05: daemon-owned Alpaca websocket continuity tests
+// ---------------------------------------------------------------------------
+
+/// AP-05: Paper adapter reports not_applicable WS continuity.
+///
+/// Paper broker has no websocket path; continuity concept does not apply.
+/// This must be surfaced explicitly as "not_applicable" rather than as any
+/// continuity state, so the operator never confuses paper with an unproven
+/// external WS path.
 #[tokio::test]
-async fn non_paper_deployment_mode_is_explicitly_fail_closed() {
-    std::env::set_var("MQK_DAEMON_DEPLOYMENT_MODE", "live-shadow");
+async fn ap05_paper_adapter_ws_continuity_is_not_applicable() {
     let st = Arc::new(state::AppState::new_with_operator_auth(
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
-    std::env::remove_var("MQK_DAEMON_DEPLOYMENT_MODE");
+    // Type-level proof: default paper state has NotApplicable continuity.
+    assert_eq!(
+        st.alpaca_ws_continuity().await,
+        state::AlpacaWsContinuityState::NotApplicable,
+        "paper broker must have NotApplicable WS continuity"
+    );
+    assert!(
+        !st.alpaca_ws_continuity().await.is_continuity_proven(),
+        "NotApplicable must not count as proven continuity"
+    );
+
+    // HTTP-level proof: system/status surfaces not_applicable.
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(router, req).await;
+    assert_eq!(code, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(
+        json["alpaca_ws_continuity"], "not_applicable",
+        "system/status must surface not_applicable for paper adapter"
+    );
+}
+
+/// AP-05: Alpaca adapter (no DB) reports cold_start_unproven WS continuity.
+///
+/// When no persisted cursor exists, continuity is unproven.  The system
+/// must not fabricate "live" or "healthy" continuity from absence of data.
+/// Uses `new_for_test_with_broker_kind` to avoid env-var races.
+#[tokio::test]
+async fn ap05_alpaca_adapter_ws_continuity_is_cold_start_unproven() {
+    let st = Arc::new(state::AppState::new_for_test_with_broker_kind(
+        state::BrokerKind::Alpaca,
+    ));
+    // Type-level proof: Alpaca without a persisted cursor → ColdStartUnproven.
+    assert_eq!(
+        st.alpaca_ws_continuity().await,
+        state::AlpacaWsContinuityState::ColdStartUnproven,
+        "Alpaca with no persisted cursor must report ColdStartUnproven"
+    );
+    assert!(
+        !st.alpaca_ws_continuity().await.is_continuity_proven(),
+        "ColdStartUnproven must not count as proven continuity (fail-closed)"
+    );
+
+    // HTTP-level proof: system/status surfaces cold_start_unproven.
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(router, req).await;
+    assert_eq!(code, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(
+        json["alpaca_ws_continuity"], "cold_start_unproven",
+        "system/status must surface cold_start_unproven for Alpaca with no cursor"
+    );
+}
+
+/// AP-05: gap_detected and cold_start_unproven fail closed; only live is proven.
+///
+/// Proves at the type level that is_continuity_proven() is exclusively true
+/// for Live.  GapDetected, ColdStartUnproven, and NotApplicable all fail closed.
+#[test]
+fn ap05_ws_continuity_only_live_is_proven() {
+    use state::AlpacaWsContinuityState;
+
+    let not_applicable = AlpacaWsContinuityState::NotApplicable;
+    let cold_start = AlpacaWsContinuityState::ColdStartUnproven;
+    let live = AlpacaWsContinuityState::Live {
+        last_message_id: "alpaca:uuid-1:new:2024-01-01T00:00:00Z".to_string(),
+        last_event_at: "2024-01-01T00:00:00Z".to_string(),
+    };
+    let gap = AlpacaWsContinuityState::GapDetected {
+        last_message_id: Some("alpaca:uuid-1:new:2024-01-01T00:00:00Z".to_string()),
+        last_event_at: Some("2024-01-01T00:00:00Z".to_string()),
+        detail: "ws disconnect at 2024-01-01T00:01:00Z".to_string(),
+    };
+
+    assert!(
+        live.is_continuity_proven(),
+        "Live must be the only proven continuity state"
+    );
+    assert!(
+        !not_applicable.is_continuity_proven(),
+        "NotApplicable must fail closed"
+    );
+    assert!(
+        !cold_start.is_continuity_proven(),
+        "ColdStartUnproven must fail closed"
+    );
+    assert!(!gap.is_continuity_proven(), "GapDetected must fail closed");
+
+    // Status strings must be distinct and canonical.
+    assert_eq!(not_applicable.as_status_str(), "not_applicable");
+    assert_eq!(cold_start.as_status_str(), "cold_start_unproven");
+    assert_eq!(live.as_status_str(), "live");
+    assert_eq!(gap.as_status_str(), "gap_detected");
+}
+
+/// AP-05: from_cursor_json derives correct continuity from persisted cursor JSON.
+///
+/// Proves the cursor-parse path for all three AlpacaFetchCursor variant shapes.
+#[test]
+fn ap05_from_cursor_json_derives_continuity_from_persisted_cursor() {
+    use state::{AlpacaWsContinuityState, BrokerKind};
+
+    // Non-Alpaca broker kind → always NotApplicable regardless of cursor content.
+    let cold_json = r#"{"schema_version":1,"trade_updates":{"status":"cold_start_unproven"}}"#;
+    assert_eq!(
+        AlpacaWsContinuityState::from_cursor_json(Some(BrokerKind::Paper), Some(cold_json)),
+        AlpacaWsContinuityState::NotApplicable,
+        "non-Alpaca broker kind must yield NotApplicable"
+    );
+
+    // Alpaca + no cursor JSON → ColdStartUnproven.
+    assert_eq!(
+        AlpacaWsContinuityState::from_cursor_json(Some(BrokerKind::Alpaca), None),
+        AlpacaWsContinuityState::ColdStartUnproven,
+        "absent cursor must yield ColdStartUnproven"
+    );
+
+    // Alpaca + ColdStartUnproven cursor → ColdStartUnproven.
+    assert_eq!(
+        AlpacaWsContinuityState::from_cursor_json(Some(BrokerKind::Alpaca), Some(cold_json)),
+        AlpacaWsContinuityState::ColdStartUnproven,
+        "cold_start_unproven cursor must yield ColdStartUnproven"
+    );
+
+    // Alpaca + Live cursor → Live with last_message_id and last_event_at preserved.
+    let live_json = r#"{"schema_version":1,"trade_updates":{"status":"live","last_message_id":"alpaca:uuid-1:new:2024-01-01T00:00:00Z","last_event_at":"2024-01-01T00:00:00Z"}}"#;
+    let live_state =
+        AlpacaWsContinuityState::from_cursor_json(Some(BrokerKind::Alpaca), Some(live_json));
+    assert!(
+        live_state.is_continuity_proven(),
+        "live cursor must yield proven continuity"
+    );
+    assert!(
+        matches!(live_state, AlpacaWsContinuityState::Live { .. }),
+        "live cursor must yield Live variant"
+    );
+
+    // Alpaca + GapDetected cursor → GapDetected (fail-closed).
+    let gap_json = r#"{"schema_version":1,"trade_updates":{"status":"gap_detected","last_message_id":"alpaca:uuid-1:new:2024-01-01T00:00:00Z","last_event_at":"2024-01-01T00:00:00Z","detail":"ws disconnect"}}"#;
+    let gap_state =
+        AlpacaWsContinuityState::from_cursor_json(Some(BrokerKind::Alpaca), Some(gap_json));
+    assert!(
+        !gap_state.is_continuity_proven(),
+        "gap_detected cursor must fail closed"
+    );
+    assert!(
+        matches!(gap_state, AlpacaWsContinuityState::GapDetected { .. }),
+        "gap_detected cursor must yield GapDetected variant"
+    );
+
+    // Alpaca + corrupt cursor JSON → GapDetected (fail-closed, not silent ColdStart).
+    let bad_json = r#"{"this_is":"not_a_valid_cursor"}"#;
+    let bad_state =
+        AlpacaWsContinuityState::from_cursor_json(Some(BrokerKind::Alpaca), Some(bad_json));
+    assert!(
+        matches!(bad_state, AlpacaWsContinuityState::GapDetected { .. }),
+        "corrupt cursor JSON must yield GapDetected (fail-closed), not ColdStartUnproven"
+    );
+    assert!(
+        !bad_state.is_continuity_proven(),
+        "corrupt cursor must fail closed"
+    );
+}
+
+/// AP-05: update_ws_continuity seam silently no-ops for NotApplicable (Paper).
+///
+/// Paper broker must not have its NotApplicable state corrupted by a
+/// misdirected WS continuity update.
+#[tokio::test]
+async fn ap05_update_ws_continuity_noop_for_not_applicable() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    // Verify it starts as NotApplicable for paper.
+    assert_eq!(
+        st.alpaca_ws_continuity().await,
+        state::AlpacaWsContinuityState::NotApplicable
+    );
+
+    // Attempt to overwrite with ColdStartUnproven — must be silently ignored.
+    st.update_ws_continuity(state::AlpacaWsContinuityState::ColdStartUnproven)
+        .await;
+    assert_eq!(
+        st.alpaca_ws_continuity().await,
+        state::AlpacaWsContinuityState::NotApplicable,
+        "update_ws_continuity must not corrupt NotApplicable (Paper) continuity state"
+    );
+
+    // Attempt to overwrite with GapDetected — must also be silently ignored.
+    st.update_ws_continuity(state::AlpacaWsContinuityState::GapDetected {
+        last_message_id: None,
+        last_event_at: None,
+        detail: "test gap".to_string(),
+    })
+    .await;
+    assert_eq!(
+        st.alpaca_ws_continuity().await,
+        state::AlpacaWsContinuityState::NotApplicable,
+        "GapDetected update must not corrupt NotApplicable (Paper) continuity state"
+    );
+}
+
+/// AP-05: update_ws_continuity transitions Alpaca continuity state correctly.
+///
+/// Proves the seam accepts Live and GapDetected transitions for Alpaca paths.
+#[tokio::test]
+async fn ap05_update_ws_continuity_transitions_alpaca_state() {
+    let st = Arc::new(state::AppState::new_for_test_with_broker_kind(
+        state::BrokerKind::Alpaca,
+    ));
+    // Starts as ColdStartUnproven (no DB cursor).
+    assert_eq!(
+        st.alpaca_ws_continuity().await,
+        state::AlpacaWsContinuityState::ColdStartUnproven
+    );
+
+    // Transition to Live (simulates WS first batch ingested).
+    st.update_ws_continuity(state::AlpacaWsContinuityState::Live {
+        last_message_id: "alpaca:uuid-1:new:2024-01-01T00:00:00Z".to_string(),
+        last_event_at: "2024-01-01T00:00:00Z".to_string(),
+    })
+    .await;
+    assert!(
+        st.alpaca_ws_continuity().await.is_continuity_proven(),
+        "state must be Live after successful WS ingest"
+    );
+
+    // Transition to GapDetected (simulates WS disconnect).
+    st.update_ws_continuity(state::AlpacaWsContinuityState::GapDetected {
+        last_message_id: Some("alpaca:uuid-1:new:2024-01-01T00:00:00Z".to_string()),
+        last_event_at: Some("2024-01-01T00:00:00Z".to_string()),
+        detail: "ws disconnect at 2024-01-01T00:01:00Z".to_string(),
+    })
+    .await;
+    assert!(
+        !st.alpaca_ws_continuity().await.is_continuity_proven(),
+        "state must fail closed after gap detected"
+    );
+    assert_eq!(
+        st.alpaca_ws_continuity().await.as_status_str(),
+        "gap_detected"
+    );
+}
+
+#[tokio::test]
+async fn non_paper_deployment_mode_is_explicitly_fail_closed() {
+    // Use new_for_test_with_mode to avoid env-var races with parallel tests.
+    // Semantics are identical: live-shadow mode, paper adapter (default).
+    let st = Arc::new(state::AppState::new_for_test_with_mode(
+        state::DeploymentMode::LiveShadow,
+    ));
 
     {
         let mut ig = st.integrity.write().await;

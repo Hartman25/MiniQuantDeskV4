@@ -401,6 +401,137 @@ impl StrategyMarketDataSource {
 }
 
 // ---------------------------------------------------------------------------
+// AP-05: AlpacaWsContinuityState
+// ---------------------------------------------------------------------------
+
+/// AP-05: Daemon-owned Alpaca websocket continuity truth.
+///
+/// Mirrors the WS-inbound cursor state from `AlpacaTradeUpdatesResume` at the
+/// daemon level so that operator/API surfaces reflect real continuity truth
+/// without parsing raw cursor JSON at every call site.
+///
+/// # Fail-closed rule
+///
+/// Only `Live` indicates proven continuity.  All other variants fail closed:
+/// callers must not synthesise healthy continuity from `ColdStartUnproven`,
+/// `GapDetected`, or `NotApplicable`.
+///
+/// # Lifecycle
+///
+/// - Initialized from the persisted `broker_event_cursor` at
+///   `build_execution_orchestrator` time.
+/// - Updated by the WS ingest path (AP-06+) via `update_ws_continuity`.
+/// - Always `NotApplicable` for non-Alpaca broker kinds (Paper, etc.).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum AlpacaWsContinuityState {
+    /// Broker kind is not Alpaca; websocket continuity does not apply to this
+    /// adapter.  The paper fill engine is always synchronous and never requires
+    /// a WS continuity path.
+    NotApplicable,
+    /// Alpaca broker selected; no cursor has been persisted yet (fresh system
+    /// or cursor row was never written).  Cannot prove what events were received.
+    /// Fail-closed: must not be treated as proven continuity.
+    ColdStartUnproven,
+    /// WS stream was live at the last cursor persist; last known message ID and
+    /// event timestamp are retained so the stream can resume from this position.
+    Live {
+        last_message_id: String,
+        last_event_at: String,
+    },
+    /// A continuity gap was detected (e.g. WS disconnect followed by reconnect
+    /// without replay of missed messages, or a sequence gap in received IDs).
+    /// The last known position is preserved for diagnostics only.
+    ///
+    /// Fail-closed: any consumer of this state must halt or refuse to proceed.
+    /// Healthy continuity MUST NOT be reported after a gap without explicit
+    /// operator-driven recovery.
+    GapDetected {
+        last_message_id: Option<String>,
+        last_event_at: Option<String>,
+        detail: String,
+    },
+}
+
+impl AlpacaWsContinuityState {
+    /// Canonical lowercase status string for API responses and logging.
+    ///
+    /// `"live"` is the only proven-continuity value.
+    /// `"cold_start_unproven"` and `"gap_detected"` are fail-closed states.
+    /// `"not_applicable"` means a non-Alpaca broker — continuity concept does not apply.
+    pub fn as_status_str(&self) -> &'static str {
+        match self {
+            Self::NotApplicable => "not_applicable",
+            Self::ColdStartUnproven => "cold_start_unproven",
+            Self::Live { .. } => "live",
+            Self::GapDetected { .. } => "gap_detected",
+        }
+    }
+
+    /// `true` only when WS continuity is explicitly proven (`Live`).
+    ///
+    /// All other states fail closed.  `GapDetected`, `ColdStartUnproven`, and
+    /// `NotApplicable` all return `false`.  Callers must not synthesise healthy
+    /// continuity from any of these states.
+    pub fn is_continuity_proven(&self) -> bool {
+        matches!(self, Self::Live { .. })
+    }
+
+    /// Derive continuity state from a raw persisted broker-cursor JSON string.
+    ///
+    /// The JSON shape is the serialized form of `AlpacaFetchCursor` /
+    /// `AlpacaTradeUpdatesResume` (tag field `"status"`, snake_case variants).
+    ///
+    /// # Behavior
+    ///
+    /// - Non-Alpaca `broker_kind` → `NotApplicable`.
+    /// - `cursor_json = None` (no row persisted) → `ColdStartUnproven`.
+    /// - Valid JSON with `trade_updates.status = "live"` → `Live`.
+    /// - Valid JSON with `trade_updates.status = "gap_detected"` → `GapDetected`.
+    /// - Any other status or invalid JSON → `GapDetected` (fail-closed).
+    ///   A corrupt cursor must be flagged, not silently treated as absent.
+    pub fn from_cursor_json(broker_kind: Option<BrokerKind>, cursor_json: Option<&str>) -> Self {
+        let Some(BrokerKind::Alpaca) = broker_kind else {
+            return Self::NotApplicable;
+        };
+        let Some(json) = cursor_json else {
+            return Self::ColdStartUnproven;
+        };
+        // Parse into AlpacaFetchCursor to get the fully-typed trade_updates variant.
+        match serde_json::from_str::<mqk_broker_alpaca::types::AlpacaFetchCursor>(json) {
+            Ok(cursor) => Self::from_fetch_cursor(&cursor),
+            Err(e) => Self::GapDetected {
+                last_message_id: None,
+                last_event_at: None,
+                detail: format!("broker cursor parse failed at daemon startup: {e}"),
+            },
+        }
+    }
+
+    fn from_fetch_cursor(cursor: &mqk_broker_alpaca::types::AlpacaFetchCursor) -> Self {
+        use mqk_broker_alpaca::types::AlpacaTradeUpdatesResume;
+        match &cursor.trade_updates {
+            AlpacaTradeUpdatesResume::ColdStartUnproven => Self::ColdStartUnproven,
+            AlpacaTradeUpdatesResume::Live {
+                last_message_id,
+                last_event_at,
+            } => Self::Live {
+                last_message_id: last_message_id.clone(),
+                last_event_at: last_event_at.clone(),
+            },
+            AlpacaTradeUpdatesResume::GapDetected {
+                last_message_id,
+                last_event_at,
+                detail,
+            } => Self::GapDetected {
+                last_message_id: last_message_id.clone(),
+                last_event_at: last_event_at.clone(),
+                detail: detail.clone(),
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DaemonBroker — enum-dispatch seam (AP-02)
 // ---------------------------------------------------------------------------
 
@@ -569,6 +700,13 @@ pub struct AppState {
     /// AP-04B: Strategy market-data source policy.
     /// INDEPENDENT of broker_kind — changing adapter must not change feed policy.
     pub strategy_market_data_source: StrategyMarketDataSource,
+    /// AP-05: Daemon-owned Alpaca websocket continuity truth.
+    ///
+    /// Initialized from the persisted `broker_event_cursor` in the DB at
+    /// `build_execution_orchestrator` time.  Before that point (or when no DB is
+    /// configured), defaults to `ColdStartUnproven` for Alpaca and `NotApplicable`
+    /// for Paper.  Updated by the WS ingest path (AP-06+) via `update_ws_continuity`.
+    alpaca_ws_continuity: Arc<RwLock<AlpacaWsContinuityState>>,
 }
 
 impl Default for AppState {
@@ -625,6 +763,13 @@ impl AppState {
         };
         // Re-derive snapshot source from the new broker kind so it stays consistent.
         state.broker_snapshot_source = BrokerSnapshotTruthSource::from_broker_kind(Some(kind));
+        // AP-05: Re-initialize WS continuity for the new broker kind.
+        // ColdStartUnproven for Alpaca (no DB cursor loaded in test context);
+        // NotApplicable for Paper (no WS continuity concept).
+        state.alpaca_ws_continuity = Arc::new(RwLock::new(match kind {
+            BrokerKind::Alpaca => AlpacaWsContinuityState::ColdStartUnproven,
+            BrokerKind::Paper => AlpacaWsContinuityState::NotApplicable,
+        }));
         state
     }
 
@@ -637,12 +782,18 @@ impl AppState {
         // Override runtime_selection and calendar_spec to use the specified mode.
         // broker_kind is retained from the default Paper selection — the test helper
         // overrides policy (mode) while keeping the adapter unchanged.
+        // Readiness is re-derived from the new (mode, broker_kind) pair so that
+        // tests that check `deployment_start_allowed` or `deployment_blocker` see
+        // the correct gate state for the given mode.  Retaining the old readiness
+        // would silently carry paper-mode's start_allowed=true into unproven modes.
+        let broker_kind = state.runtime_selection.broker_kind;
+        let readiness = deployment_mode_readiness(mode, broker_kind);
         state.runtime_selection = RuntimeSelection {
             deployment_mode: mode,
-            broker_kind: state.runtime_selection.broker_kind,
+            broker_kind,
             adapter_id: state.runtime_selection.adapter_id.clone(),
             run_config_hash: state.runtime_selection.run_config_hash.clone(),
-            readiness: state.runtime_selection.readiness.clone(),
+            readiness,
         };
         state.calendar_spec = match mode {
             DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => CalendarSpec::NyseWeekdays,
@@ -691,6 +842,14 @@ impl AppState {
         // does not silently change the strategy feed policy.
         let strategy_market_data_source = StrategyMarketDataSource::NotConfigured;
 
+        // AP-05: WS continuity defaults to NotApplicable (paper) or ColdStartUnproven
+        // (Alpaca).  The real state is loaded from the persisted DB cursor in
+        // build_execution_orchestrator once a DB pool is available.
+        let initial_ws_continuity = match runtime_selection.broker_kind {
+            Some(BrokerKind::Alpaca) => AlpacaWsContinuityState::ColdStartUnproven,
+            _ => AlpacaWsContinuityState::NotApplicable,
+        };
+
         Self {
             bus,
             node_id: default_node_id(build.service),
@@ -709,6 +868,7 @@ impl AppState {
             calendar_spec,
             broker_snapshot_source,
             strategy_market_data_source,
+            alpaca_ws_continuity: Arc::new(RwLock::new(initial_ws_continuity)),
         }
     }
 
@@ -743,6 +903,35 @@ impl AppState {
     /// Independent of `broker_kind` — changing the adapter does not change feed policy.
     pub fn strategy_market_data_source(&self) -> StrategyMarketDataSource {
         self.strategy_market_data_source
+    }
+
+    /// AP-05: Current daemon-owned Alpaca websocket continuity state.
+    ///
+    /// `NotApplicable` for non-Alpaca broker kinds (Paper, etc.).
+    /// For Alpaca: initialized from the persisted DB cursor at orchestrator
+    /// construction; updated by the WS ingest path (AP-06+) via `update_ws_continuity`.
+    ///
+    /// Only `Live` indicates proven continuity.  `ColdStartUnproven` and
+    /// `GapDetected` are both fail-closed states.
+    pub async fn alpaca_ws_continuity(&self) -> AlpacaWsContinuityState {
+        self.alpaca_ws_continuity.read().await.clone()
+    }
+
+    /// AP-05: Update the daemon-owned WS continuity state.
+    ///
+    /// Must be called by the WS ingest path after every successful batch and
+    /// after any gap or disconnect detection.
+    ///
+    /// Silently no-ops when the current state is `NotApplicable` (Paper broker)
+    /// so a caller that does not check broker kind cannot accidentally corrupt
+    /// the continuity state for a non-Alpaca path.
+    pub async fn update_ws_continuity(&self, new_state: AlpacaWsContinuityState) {
+        let current = self.alpaca_ws_continuity.read().await.clone();
+        if current == AlpacaWsContinuityState::NotApplicable {
+            // Paper broker: continuity concept does not apply.
+            return;
+        }
+        *self.alpaca_ws_continuity.write().await = new_state;
     }
 
     pub fn adapter_id(&self) -> &str {
@@ -1506,6 +1695,17 @@ impl AppState {
         let broker_cursor = mqk_db::load_broker_cursor(&db, self.adapter_id())
             .await
             .map_err(|err| RuntimeLifecycleError::internal("load_broker_cursor failed", err))?;
+
+        // AP-05: Derive daemon-owned WS continuity truth from the persisted cursor.
+        // This is the authoritative initialization path — continuity state comes from
+        // the durable DB cursor, not from an in-memory default.  `ColdStartUnproven`
+        // is the correct default when no cursor has been written yet (fresh system or
+        // first run), not a synthetic "healthy" value.
+        let ws_continuity = AlpacaWsContinuityState::from_cursor_json(
+            self.runtime_selection.broker_kind,
+            broker_cursor.as_deref(),
+        );
+        *self.alpaca_ws_continuity.write().await = ws_continuity;
 
         let daemon_broker = build_daemon_broker(self.runtime_selection.broker_kind)?;
 

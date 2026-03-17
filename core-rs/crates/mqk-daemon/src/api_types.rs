@@ -196,6 +196,11 @@ pub struct SystemStatusResponse {
     /// `"synthetic"` = paper (local OMS); `"external"` = Alpaca (AP-03 REST fetch).
     /// Independent of market_data_health / strategy feed policy.
     pub broker_snapshot_source: String,
+    /// AP-05: Alpaca websocket continuity truth.
+    /// `"not_applicable"` for Paper; `"cold_start_unproven"`, `"live"`, or
+    /// `"gap_detected"` for Alpaca.  Only `"live"` indicates proven continuity;
+    /// all other values are fail-closed.
+    pub alpaca_ws_continuity: String,
     pub db_status: String,
     pub market_data_health: String,
     pub reconcile_status: String,
