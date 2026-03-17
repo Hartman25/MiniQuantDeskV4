@@ -213,6 +213,36 @@ async fn sync_provider_overlap_reingest_is_idempotent() -> Result<()> {
         "end_ts must be stable after overlap upsert"
     );
 
+    // Proof quality: overlap reingest must not duplicate the row. The unique
+    // (symbol, timeframe, end_ts) key should still yield exactly one stored row.
+    let (row_count,): (i64,) = sqlx::query_as(
+        "select count(*)::bigint from md_bars where symbol = $1 and timeframe = $2 and end_ts = $3",
+    )
+    .bind(sym)
+    .bind(tf)
+    .bind(ts)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        row_count, 1,
+        "overlap reingest must preserve a single row for the same symbol/timeframe/end_ts"
+    );
+
+    // Because the ingest path is an upsert, the replacement payload should be
+    // visible on the single surviving row rather than creating a duplicate.
+    let (stored_volume,): (i64,) = sqlx::query_as(
+        "select volume::bigint from md_bars where symbol = $1 and timeframe = $2 and end_ts = $3",
+    )
+    .bind(sym)
+    .bind(tf)
+    .bind(ts)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        stored_volume, 200,
+        "overlap reingest must update the existing row payload rather than duplicate it"
+    );
+
     Ok(())
 }
 

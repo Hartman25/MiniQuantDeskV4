@@ -40,7 +40,9 @@ const PANEL_TRUTH_REQUIREMENTS: Partial<Record<CorePanelKey, PanelTruthRequireme
   session: { hints: ["/system/session"] },
   // Config fingerprint is the runtime identity anchor.
   config: { hints: ["/system/config-fingerprint"] },
-  // Runtime leadership tracks daemon generation and recovery state.
+  // Runtime leadership is a mixed-derived daemon surface (runtime status plus
+  // durable run/reconcile evidence when available). Missing endpoint still blocks
+  // the runtime panel because generation/recovery truth is operator-critical.
   runtime: { hints: ["/system/runtime-leadership"] },
   // Active alert feed is deferred but absence must not show silent zero to operator.
   alerts: { hints: ["/alerts/active"] },

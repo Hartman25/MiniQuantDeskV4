@@ -2,7 +2,7 @@
 
 Use this after applying all future GUI patches.
 
-Last verified: 2026-03-16 (Hardening Series H-1 through H-9, PC-1 through PC-4 complete; daemon-backed Action Catalog)
+Last verified: 2026-03-16 (Hardening Series H-1 through H-9, PC-1 through PC-4, REC-01 complete context; daemon-backed Action Catalog and mounted reconcile mismatch detail truth)
 
 ## Compile and repair
 - [ ] `npx tsc --noEmit` — zero TypeScript errors
@@ -44,7 +44,7 @@ Last verified: 2026-03-16 (Hardening Series H-1 through H-9, PC-1 through PC-4 c
 - [ ] No inline soft-notice pattern (`{truthState ? <Notice /> : null}`) on live-data screens
 - [ ] `panelTruthRenderState` returns null (green) when all panel endpoints resolve
 - [ ] `dataSource` exists on `SystemModel`; status bar shows source state
-- [ ] `node --experimental-strip-types --test src/features/system/truthRendering.test.ts` — 20/20 pass
+- [ ] `node --experimental-strip-types --test src/features/system/sourceAuthority.test.ts src/features/system/truthRendering.test.ts` — 36/36 pass
 
 ## Ops surface validation (H-2 + PC-4 requirement)
 - [ ] Mode-change buttons are disabled with panel notice and accurate explanation
@@ -52,13 +52,13 @@ Last verified: 2026-03-16 (Hardening Series H-1 through H-9, PC-1 through PC-4 c
 - [ ] `/api/v1/ops/action` change-system-mode → 409 not_authoritative
 - [ ] `/api/v1/ops/change-mode` is not mounted (404)
 - [ ] `/api/v1/ops/catalog` → 200, 5 entries, state-correct enabled/disabled
-- [ ] `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — all pass (current contract gate count)
+- [ ] `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — all pass
 
 ## API authority validation (H-3 + PC-1 requirement)
 - [ ] `invokeOperatorAction` does NOT fall through to legacy on 400/403/409 from canonical
 - [ ] Legacy fallback only fires on network error or 404
-- [ ] `requestSystemModeTransition` function is NOT present in api.ts (removed PC-1)
-- [ ] `change-system-mode` is NOT in `OperatorActionDefinition.action_key` union (removed PC-1)
+- [ ] `requestSystemModeTransition` function is NOT present in api.ts (removed PC-3)
+- [ ] `change-system-mode` is NOT in `OperatorActionDefinition.action_key` union (removed PC-4)
 - [ ] `onChangeMode` prop is NOT present on `OpsScreen` (removed H-7)
 
 ## Action catalog validation (PC-4 requirement — daemon-backed endstate)
@@ -83,7 +83,7 @@ Last verified: 2026-03-16 (Hardening Series H-1 through H-9, PC-1 through PC-4 c
 
 ## Daemon contract gate (H-4 + H-9 + PC-4 requirement)
 - [ ] `cargo test -p mqk-daemon` — all pass, zero failures
-- [ ] `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — all pass (current contract gate count)
+- [ ] `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — all pass
 - [ ] `cargo clippy --workspace -- -D warnings` — zero errors
 - [ ] `gui_daemon_contract_waivers.md` reflects current enforced + deferred state
 - [ ] No mounted+tested routes remain in the waiver list

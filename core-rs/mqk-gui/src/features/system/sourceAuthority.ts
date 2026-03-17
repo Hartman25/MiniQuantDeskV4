@@ -23,6 +23,54 @@ type PanelEvidenceHints = {
 
 export type FieldEvidenceHints = PanelEvidenceHints;
 
+// Coarse field-level provenance hints for surfaces whose route semantics changed.
+// These intentionally prefer conservative mixed classification over falsely pure
+// labels when a single route combines durable state with live in-memory truth.
+export const FIELD_EVIDENCE_HINTS: Record<
+  "riskSummary" | "riskDenials" | "reconcileSummary" | "reconcileMismatches" | "runtimeLeadership",
+  FieldEvidenceHints
+> = {
+  // /risk/summary combines broker snapshot exposure with durable risk-block state.
+  riskSummary: {
+    db: ["/risk/summary"],
+    runtime: [],
+    broker: ["/risk/summary"],
+    placeholder: ["riskSummary"],
+  },
+  // /risk/denials is sourced from ExecutionSnapshot::recent_risk_denials.
+  riskDenials: {
+    db: [],
+    runtime: ["/risk/denials"],
+    broker: [],
+    placeholder: ["riskDenials"],
+  },
+  // /reconcile/status loads durable reconcile state when DB is available and
+  // falls back to in-memory reconcile status otherwise.
+  reconcileSummary: {
+    db: ["/reconcile/status"],
+    runtime: ["/reconcile/status"],
+    broker: [],
+    placeholder: ["reconcileSummary"],
+  },
+  // /reconcile/mismatches derives rows at request time from the current
+  // execution snapshot plus the current broker snapshot; this is not a durable
+  // mismatch table.
+  reconcileMismatches: {
+    db: [],
+    runtime: ["/reconcile/mismatches"],
+    broker: ["/reconcile/mismatches"],
+    placeholder: ["mismatches"],
+  },
+  // /system/runtime-leadership is derived from runtime status plus durable run
+  // and reconcile evidence when those records are available.
+  runtimeLeadership: {
+    db: ["/system/runtime-leadership"],
+    runtime: ["/system/runtime-leadership"],
+    broker: [],
+    placeholder: ["runtimeLeadership"],
+  },
+};
+
 const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
   // Dashboard is a summary of multiple source types: inherently mixed in a healthy system.
   dashboard: {

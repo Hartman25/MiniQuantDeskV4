@@ -104,6 +104,7 @@ What this proves:
 - runtime lease behavior
 - deadman / runtime lifecycle behavior
 - arm-preflight and DB constraint behavior
+- market-data provider ingest and incremental sync DB behavior
 
 This is the same proof lane CI uses in the `db-proof` job.
 
@@ -266,6 +267,9 @@ sql=select ingest_id, created_at, stats_json from md_quality_reports where inges
   existing rows rather than duplicating them.
 - Research/backtest paths should read from `md_bars` via `fetch_md_bars` or `mqk backtest db`
   rather than calling providers directly.
+- The repo-native DB proof lane now explicitly runs both `scenario_md_ingest_provider` and
+  `scenario_md_sync_provider`, so incremental-sync DB semantics are part of promoted proof rather than
+  hidden in ignored-only tests.
 
 ## **Deterministic Backtests**
 

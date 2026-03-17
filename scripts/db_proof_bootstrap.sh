@@ -119,6 +119,13 @@ cargo test -p mqk-db --test scenario_deadman_enforces_halt -- --ignored --test-t
 echo "== CI-04/CI-03/CI-02: daemon runtime lifecycle (deadman + halt + start/stop) =="
 cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle -- --ignored --test-threads=1
 
+# CI-11: market-data provider ingest + incremental sync proofs
+# Run the provider-ingest and sync-provider DB scenarios explicitly because they
+# are ignored by default but now part of the promoted DB proof lane.
+echo "== CI-11: market-data ingest + sync-provider =="
+cargo test -p mqk-db --test scenario_md_ingest_provider -- --ignored --test-threads=1
+cargo test -p mqk-db --test scenario_md_sync_provider -- --ignored --test-threads=1
+
 # CI-09: arm-preflight and DB constraint proofs
 echo "== CI-09: arm-preflight + DB constraints =="
 cargo test -p mqk-db --features testkit --test scenario_arm_preflight_blocks_zero_risk_limits -- --ignored --test-threads=1

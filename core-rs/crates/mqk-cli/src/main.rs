@@ -6,9 +6,9 @@ use std::path::PathBuf;
 mod commands;
 
 use commands::{
-    backtest::{md_ingest_csv, md_ingest_provider, md_sync_provider},
     bkt::{run_backtest_csv, run_backtest_db},
     load_payload,
+    md::{md_ingest_csv, md_ingest_provider, md_sync_provider},
     run::{
         run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_halt, run_heartbeat,
         run_start, run_status, run_stop,

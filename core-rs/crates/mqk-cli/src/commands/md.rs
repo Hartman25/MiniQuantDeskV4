@@ -1,7 +1,7 @@
-//! Market-data ingestion command handlers.
+//! Market-data command handlers.
 //!
-//! Covers `mqk md ingest-csv` and `mqk md ingest-provider`.
-//! These are the data-pipeline paths used for backtesting workflows.
+//! Covers `mqk md ingest-csv`, `mqk md ingest-provider`, and `mqk md sync-provider`.
+//! These handlers implement the market-data CLI surface and keep MD sync logic out of unrelated backtest modules.
 
 use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDate, Utc};

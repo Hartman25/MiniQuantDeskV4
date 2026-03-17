@@ -17,7 +17,8 @@ Rule: **One patch at a time.** Each patch includes exact files + tests.
 
 ## Hardening Series (GUI/Daemon Operator Console, completed 2026-03)
 
-These patches hardened the GUI to institutional-grade truth enforcement and operator safety.
+These patches hardened the GUI toward stricter truth enforcement and operator safety.
+Historical test-count notes below reflect landing-time proof and may not match the current repo-wide totals.
 Completed before the roadmap patches below.
 
 ### H-1: Truth-state hard-closure at all screen boundaries
@@ -45,10 +46,10 @@ Legacy fallback only on network error or 404. TypeScript zero errors. 18/18 trut
 
 ### H-4: Contract gate/waiver burn-down
 **Status:** DONE
-**Files:** `gui_daemon_contract_waivers.md`, `scenario_daemon_routes.rs`
+**Files:** `gui_daemon_contract_waivers.md`, `scenario_gui_daemon_contract_gate.rs`
 **What changed:** Waivers doc updated with `/api/v1/ops/action` enforced + `/api/v1/ops/change-mode`
 intentionally-unmounted. Stale `broker_config_present.is_null()` corrected to `== false`.
-Full daemon test suite: all pass.
+Targeted daemon contract verification passed at landing time for this patch; do not read this entry as a claim about the entire current daemon suite.
 
 ### H-5: Full screen truth-state closure (11 remaining screens)
 **Status:** DONE
@@ -128,7 +129,7 @@ Comment documenting removal added to `api.ts`.
 **What changed:** Action Catalog is no longer client-synthesized. Daemon serves `GET /api/v1/ops/catalog`
 with state-aware `enabled`/`disabled_reason` per entry. Fantasy action keys removed from type union.
 Catalog failure degrades ops panel truth authority and triggers truth gate. Contract gate: 7/7 pass.
-TSC clean. 30/30 GUI tests pass.
+TSC clean. Landing-time GUI truth tests passed; current totals should be checked from the live repo, not inferred from this historical entry.
 
 ---
 

@@ -3,8 +3,8 @@
 //! Shared utilities used by multiple command paths live here.
 //! Command-specific logic lives in the submodules.
 
-pub mod backtest;
 pub mod bkt;
+pub mod md;
 pub mod run;
 
 use anyhow::{Context, Result};

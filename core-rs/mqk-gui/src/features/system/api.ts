@@ -144,7 +144,7 @@ interface PortfolioFillsResponse {
   rows: FillRow[];
 }
 
-// Canonical risk denial truth surface (Cluster 3).
+// Canonical risk denial truth surface.
 //
 // truth_state values:
 //   "no_snapshot"  — execution loop not running; denial truth entirely absent.
@@ -160,6 +160,11 @@ interface RiskDenialsResponse {
 }
 
 
+// Canonical reconcile mismatch detail surface.
+//
+// `rows` are live derived reconcile diffs, not durable mismatch-table records.
+// The daemon only exposes them when current execution snapshot + broker snapshot
+// detail truth is authoritative and consistent with reconcile status.
 interface ReconcileMismatchesResponse {
   truth_state: "active" | "no_snapshot" | "stale";
   snapshot_at_utc: string | null;
@@ -693,6 +698,9 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
         return { ok: false, endpoint: canonical.endpoint, error: canonical.error ?? "fetch_failed" };
       }
       const data = canonical.data as ReconcileMismatchesResponse;
+      // Reconcile mismatch rows are a live derived truth surface, not a durable
+      // table read. `no_snapshot` / `stale` must therefore fail closed so empty
+      // rows never masquerade as authoritative zero mismatches.
       if (data.truth_state === "no_snapshot" || data.truth_state === "stale") {
         return { ok: false, endpoint: canonical.endpoint, error: "no_reconcile_detail_truth" };
       }

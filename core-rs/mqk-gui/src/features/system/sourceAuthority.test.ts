@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { CORE_PANEL_KEYS, type DataSourceDetail } from "./types.ts";
-import { classifyAuthority, classifyFieldSource, classifyPanelSources } from "./sourceAuthority.ts";
+import {
+  FIELD_EVIDENCE_HINTS,
+  classifyAuthority,
+  classifyFieldSource,
+  classifyPanelSources,
+} from "./sourceAuthority.ts";
 
 function baseDataSource(overrides: Partial<DataSourceDetail> = {}): DataSourceDetail {
   return {
@@ -79,6 +84,47 @@ test("field source classification surfaces mixed when db and runtime both back a
     baseDataSource({ realEndpoints: ["/api/v1/system/status", "/api/v1/system/config-fingerprint"] }),
     true,
     { db: ["/system/config-fingerprint"], runtime: ["/system/status"], broker: [], placeholder: [] },
+  );
+
+  assert.equal(authority, "mixed");
+});
+
+test("portfolio panel remains broker_snapshot when only broker-backed portfolio endpoints are present", () => {
+  const sources = classifyPanelSources(
+    baseDataSource({
+      realEndpoints: ["/api/v1/portfolio/summary", "/api/v1/portfolio/positions", "/api/v1/portfolio/orders/open", "/api/v1/portfolio/fills"],
+    }),
+    true,
+  );
+
+  assert.equal(sources.portfolio, "broker_snapshot");
+});
+
+test("risk denials field remains runtime_memory", () => {
+  const authority = classifyFieldSource(
+    baseDataSource({ realEndpoints: ["/api/v1/risk/denials"] }),
+    true,
+    FIELD_EVIDENCE_HINTS.riskDenials,
+  );
+
+  assert.equal(authority, "runtime_memory");
+});
+
+test("reconcile mismatches field is mixed because detail rows are derived from runtime plus broker snapshots", () => {
+  const authority = classifyFieldSource(
+    baseDataSource({ realEndpoints: ["/api/v1/reconcile/mismatches"] }),
+    true,
+    FIELD_EVIDENCE_HINTS.reconcileMismatches,
+  );
+
+  assert.equal(authority, "mixed");
+});
+
+test("runtime leadership field is mixed because the route blends runtime and durable evidence", () => {
+  const authority = classifyFieldSource(
+    baseDataSource({ realEndpoints: ["/api/v1/system/runtime-leadership"] }),
+    true,
+    FIELD_EVIDENCE_HINTS.runtimeLeadership,
   );
 
   assert.equal(authority, "mixed");
