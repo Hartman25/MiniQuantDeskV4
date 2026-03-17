@@ -66,6 +66,27 @@ const PANEL_TRUTH_REQUIREMENTS: Partial<Record<CorePanelKey, PanelTruthRequireme
   ops: { hints: ["/system/status"] },
 };
 
+// AP-09: Panels whose OMS-level truth depends on proven external broker WS event
+// continuity.  When broker_snapshot_source is "external" (Alpaca) but
+// alpaca_ws_continuity is not "live", these panels must not render as healthy:
+// their truth (OMS order state for execution; cross-comparison for reconcile)
+// is derived from the WS trade-updates stream and may be missing events from
+// the continuity gap window.
+//
+// Portfolio is intentionally excluded: portfolio positions come from the Alpaca
+// REST snapshot fetch, which is independent of WS event continuity.
+const EXTERNAL_BROKER_GATED_PANELS = new Set<CorePanelKey>(["execution", "reconcile"]);
+
+function hasExternalBrokerContinuityGap(model: SystemModel): boolean {
+  const source = model.status.broker_snapshot_source;
+  const continuity = model.status.alpaca_ws_continuity;
+  // Non-external source (paper, legacy-status undefined) never fires.
+  if (source !== "external") return false;
+  // "not_applicable" cannot coexist with "external" source but guard defensively.
+  // Only "live" indicates proven continuity — all other states fail-closed.
+  return continuity !== "live" && continuity !== "not_applicable";
+}
+
 function isMissingPanelTruth(model: SystemModel, panel: CorePanelKey): boolean {
   const requirement = PANEL_TRUTH_REQUIREMENTS[panel];
   if (!requirement || model.dataSource.state !== "partial") return false;
@@ -89,6 +110,11 @@ export function panelTruthRenderState(model: SystemModel, panel: CorePanelKey): 
   if (model.panelSources[panel] === "placeholder" || model.dataSource.state === "mock") return "unimplemented";
   if (model.status.runtime_status === "degraded" || model.runtimeLeadership.post_restart_recovery_state === "degraded") return "degraded";
   if (hasStaleHeartbeat(model)) return "stale";
+  // AP-09: External broker WS continuity gate.
+  // Execution and reconcile panels require proven WS event continuity when the
+  // broker is external (Alpaca).  cold_start_unproven and gap_detected both
+  // indicate that OMS state may be missing trade events — fail to no_snapshot.
+  if (EXTERNAL_BROKER_GATED_PANELS.has(panel) && hasExternalBrokerContinuityGap(model)) return "no_snapshot";
   if (isMissingPanelTruth(model, panel)) return "no_snapshot";
   return null;
 }

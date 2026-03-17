@@ -51,6 +51,13 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
                 "runtime_status",
                 "integrity_status",
                 "daemon_reachable",
+                // AP-09: external broker truth fields — GUI SystemStatus type must
+                // receive these on every status response so continuity gating works.
+                "broker_snapshot_source",
+                "alpaca_ws_continuity",
+                "deployment_start_allowed",
+                "daemon_mode",
+                "adapter_id",
             ],
         ),
         (

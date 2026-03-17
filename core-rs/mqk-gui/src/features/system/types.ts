@@ -67,6 +67,30 @@ export interface SystemStatus {
   risk_halt_active: boolean;
   integrity_halt_active: boolean;
   daemon_reachable: boolean;
+  /**
+   * AP-04: How the broker snapshot is sourced for this adapter.
+   * "synthetic" = paper (local OMS synthesis); "external" = Alpaca REST fetch.
+   * Independent of market_data_health and strategy feed policy.
+   */
+  broker_snapshot_source: "synthetic" | "external";
+  /**
+   * AP-05: Alpaca WebSocket trade-updates continuity truth.
+   * "not_applicable" for Paper; for Alpaca: "cold_start_unproven" | "live" | "gap_detected".
+   * Only "live" indicates proven continuity — all other states are fail-closed.
+   */
+  alpaca_ws_continuity: "not_applicable" | "cold_start_unproven" | "live" | "gap_detected";
+  /**
+   * AP-08: Whether the configured (deployment_mode, adapter) pair may be started.
+   * False when the mode/adapter combination is blocked or unrecognised.
+   */
+  deployment_start_allowed: boolean;
+  /**
+   * Deployment mode label from the daemon ("paper" | "live-shadow" | "live-capital" | "backtest").
+   * Distinguishes paper+alpaca from live-shadow+alpaca and live-capital+alpaca.
+   */
+  daemon_mode: string;
+  /** Broker adapter identifier ("paper" | "alpaca"). */
+  adapter_id: string;
 }
 
 export interface PreflightStatus {
@@ -732,6 +756,26 @@ export interface SessionStateSummary {
    *  "always_on" (paper/backtest) or "nyse_weekdays" (live/shadow). */
   calendar_spec_id?: string;
   notes: string[];
+  /**
+   * AP-09: Deployment mode label from daemon session truth.
+   * "PAPER" | "LIVE-SHADOW" | "LIVE-CAPITAL" | "BACKTEST".
+   * Distinguishes paper+alpaca from live-shadow+alpaca and live-capital+alpaca
+   * without requiring a separate API call.
+   */
+  daemon_mode?: string;
+  /** AP-09: Broker adapter identifier ("paper" | "alpaca"). */
+  adapter_id?: string;
+  /** AP-09: Whether the configured (mode, adapter) pair may be started. */
+  deployment_start_allowed?: boolean;
+  /** AP-09: Blocker explanation when deployment_start_allowed is false. */
+  deployment_blocker?: string | null;
+  /**
+   * AP-09: Operator auth mode from daemon.
+   * "token_required" | "explicit_dev_no_token" | "missing_token_fail_closed".
+   * Explicit dev-no-token mode is visible here so capital mode restrictions
+   * are honest on operator surfaces.
+   */
+  operator_auth_mode?: string;
 }
 
 export interface ConfigFingerprintSummary {
@@ -971,6 +1015,16 @@ export const DEFAULT_STATUS: SystemStatus = {
   risk_halt_active: false,
   integrity_halt_active: false,
   daemon_reachable: false,
+  // AP-09: Fail-closed defaults for external broker truth fields.
+  // When the daemon is unreachable the safest assumption is synthetic paper
+  // (not external) so the continuity gate in truthRendering does not fire on
+  // stale or absent status.  Actual values are populated once the canonical
+  // /api/v1/system/status response is received.
+  broker_snapshot_source: "synthetic",
+  alpaca_ws_continuity: "not_applicable",
+  deployment_start_allowed: false,
+  daemon_mode: "paper",
+  adapter_id: "paper",
 };
 
 export const DEFAULT_PREFLIGHT: PreflightStatus = {

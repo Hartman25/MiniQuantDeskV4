@@ -66,6 +66,11 @@ export const MOCK_STATUS: SystemStatus = {
   risk_halt_active: false,
   integrity_halt_active: false,
   daemon_reachable: true,
+  broker_snapshot_source: "synthetic",
+  alpaca_ws_continuity: "not_applicable",
+  deployment_start_allowed: false,
+  daemon_mode: "paper",
+  adapter_id: "paper",
 };
 
 export const MOCK_PREFLIGHT: PreflightStatus = {

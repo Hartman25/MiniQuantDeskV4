@@ -910,9 +910,7 @@ impl AppState {
             BrokerKind::Paper => AlpacaWsContinuityState::NotApplicable,
         }));
         state.calendar_spec = match mode {
-            DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
-                CalendarSpec::NyseWeekdays
-            }
+            DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => CalendarSpec::NyseWeekdays,
             DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
         };
         state
@@ -2256,8 +2254,7 @@ mod tests {
         // AP-08: live-capital+alpaca is wired; construction requires credentials.
         // Without credentials it fails on the credential check (not the mode check).
         if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
-            let result =
-                build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveCapital);
+            let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveCapital);
             assert!(
                 result.is_ok(),
                 "Alpaca+LiveCapital must succeed when credentials are present"
@@ -2502,7 +2499,10 @@ mod tests {
             "live-capital+alpaca must be allowed after AP-08; got: {:?}",
             readiness.blocker
         );
-        assert!(readiness.blocker.is_none(), "no blocker expected for allowed pair");
+        assert!(
+            readiness.blocker.is_none(),
+            "no blocker expected for allowed pair"
+        );
     }
 
     #[test]
@@ -2563,8 +2563,8 @@ mod tests {
         // should be true for ExplicitDevNoToken.
         let mode = DeploymentMode::LiveCapital;
         let auth = OperatorAuthMode::ExplicitDevNoToken;
-        let gate_fires =
-            mode == DeploymentMode::LiveCapital && !matches!(auth, OperatorAuthMode::TokenRequired(_));
+        let gate_fires = mode == DeploymentMode::LiveCapital
+            && !matches!(auth, OperatorAuthMode::TokenRequired(_));
         assert!(gate_fires, "dev-no-token must trigger capital token gate");
 
         // Positive: TokenRequired must NOT trigger the gate.
@@ -2611,10 +2611,16 @@ mod tests {
 
         // Paper+Paper and Paper+Alpaca also unchanged.
         let pp = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
-        assert!(pp.start_allowed, "paper+paper must remain allowed after AP-08");
+        assert!(
+            pp.start_allowed,
+            "paper+paper must remain allowed after AP-08"
+        );
 
         let pa = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
-        assert!(pa.start_allowed, "paper+alpaca must remain allowed after AP-08");
+        assert!(
+            pa.start_allowed,
+            "paper+alpaca must remain allowed after AP-08"
+        );
     }
 
     #[test]

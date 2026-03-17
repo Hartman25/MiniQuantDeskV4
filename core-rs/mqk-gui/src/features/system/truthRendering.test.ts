@@ -430,3 +430,109 @@ test("no_snapshot does not fire for execution when execution_orders resolves (sn
   );
   assert.equal(state, null);
 });
+
+// --- AP-09: external broker WS continuity gate ---
+// Proves that execution and reconcile panels block when broker_snapshot_source is
+// "external" but alpaca_ws_continuity is not "live" (cold_start_unproven or
+// gap_detected).  Portfolio is NOT gated — it uses the REST snapshot, not WS events.
+
+test("AP-09: no_snapshot for execution when external broker and cold_start_unproven", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      status: {
+        runtime_status: "running",
+        last_heartbeat: new Date().toISOString(),
+        broker_snapshot_source: "external",
+        alpaca_ws_continuity: "cold_start_unproven",
+      } as SystemModel["status"],
+    }),
+    "execution",
+  );
+  assert.equal(state, "no_snapshot", "external broker with cold_start_unproven must block execution panel");
+});
+
+test("AP-09: no_snapshot for reconcile when external broker and cold_start_unproven", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      status: {
+        runtime_status: "running",
+        last_heartbeat: new Date().toISOString(),
+        broker_snapshot_source: "external",
+        alpaca_ws_continuity: "cold_start_unproven",
+      } as SystemModel["status"],
+    }),
+    "reconcile",
+  );
+  assert.equal(state, "no_snapshot", "external broker with cold_start_unproven must block reconcile panel");
+});
+
+test("AP-09: no_snapshot for execution when external broker and gap_detected", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      status: {
+        runtime_status: "running",
+        last_heartbeat: new Date().toISOString(),
+        broker_snapshot_source: "external",
+        alpaca_ws_continuity: "gap_detected",
+      } as SystemModel["status"],
+    }),
+    "execution",
+  );
+  assert.equal(state, "no_snapshot", "external broker with gap_detected must block execution panel");
+});
+
+test("AP-09: null for execution when external broker and continuity is live (proven)", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      status: {
+        runtime_status: "running",
+        last_heartbeat: new Date().toISOString(),
+        broker_snapshot_source: "external",
+        alpaca_ws_continuity: "live",
+      } as SystemModel["status"],
+    }),
+    "execution",
+  );
+  assert.equal(state, null, "external broker with live continuity must not block execution panel");
+});
+
+test("AP-09: portfolio NOT gated on external broker WS continuity (REST-independent truth)", () => {
+  // Portfolio positions come from Alpaca REST snapshot, not from WS trade events.
+  // cold_start_unproven must not block portfolio — positions are still authoritative.
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "real",
+        reachable: true,
+        realEndpoints: ["/api/v1/portfolio/positions"],
+        missingEndpoints: [],
+        mockSections: [],
+      },
+      status: {
+        runtime_status: "running",
+        last_heartbeat: new Date().toISOString(),
+        broker_snapshot_source: "external",
+        alpaca_ws_continuity: "cold_start_unproven",
+      } as SystemModel["status"],
+    }),
+    "portfolio",
+  );
+  assert.equal(state, null, "portfolio must not be blocked by WS continuity gap (REST-independent)");
+});
+
+test("AP-09: synthetic broker not affected by continuity gate (paper mode unaffected)", () => {
+  // Paper mode: broker_snapshot_source = "synthetic", alpaca_ws_continuity = "not_applicable".
+  // The gate must never fire for synthetic broker regardless of continuity value.
+  const state = panelTruthRenderState(
+    buildModel({
+      status: {
+        runtime_status: "running",
+        last_heartbeat: new Date().toISOString(),
+        broker_snapshot_source: "synthetic",
+        alpaca_ws_continuity: "not_applicable",
+      } as SystemModel["status"],
+    }),
+    "execution",
+  );
+  assert.equal(state, null, "synthetic broker must never trigger external continuity gate");
+});

@@ -1525,7 +1525,8 @@ async fn ap07_live_capital_paper_adapter_remains_fail_closed() {
     assert_eq!(json["daemon_mode"], "LIVE-CAPITAL");
     // Paper adapter is blocked for live-capital even after AP-08.
     assert_eq!(
-        json["deployment_start_allowed"], false,
+        json["deployment_start_allowed"],
+        false,
         "live-capital+paper must remain fail-closed; adapter_id: {}",
         json["adapter_id"].as_str().unwrap_or("?")
     );
@@ -1624,13 +1625,14 @@ async fn ap08_live_capital_alpaca_readiness_is_allowed_in_session() {
     assert_eq!(json["daemon_mode"], "LIVE-CAPITAL");
     assert_eq!(json["adapter_id"], "alpaca");
     assert_eq!(
-        json["deployment_start_allowed"], true,
+        json["deployment_start_allowed"],
+        true,
         "live-capital+alpaca must be start-allowed after AP-08; blocker: {}",
         json["deployment_blocker"].as_str().unwrap_or("none")
     );
     assert!(
         json["deployment_blocker"].is_null()
-            || json["deployment_blocker"].as_str().unwrap_or("") .is_empty(),
+            || json["deployment_blocker"].as_str().unwrap_or("").is_empty(),
         "no blocker expected for allowed pair; got: {}",
         json["deployment_blocker"]
     );
@@ -1697,8 +1699,7 @@ async fn ap08_live_capital_dev_no_token_refused() {
     assert_eq!(code, StatusCode::FORBIDDEN);
     let json = parse_json(body);
     assert_eq!(
-        json["fault_class"],
-        "runtime.start_refused.capital_requires_operator_token",
+        json["fault_class"], "runtime.start_refused.capital_requires_operator_token",
         "capital token gate must fire for ExplicitDevNoToken; got fault_class: {}",
         json["fault_class"]
     );

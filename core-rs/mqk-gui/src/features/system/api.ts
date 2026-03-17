@@ -385,6 +385,14 @@ function mapLegacyStatusToSystemStatus(legacy: LegacyDaemonStatusSnapshot): Syst
     risk_halt_active: false,
     integrity_halt_active: !legacy.integrity_armed,
     daemon_reachable: true,
+    // AP-09: Legacy daemon (/v1/status) does not send external-broker truth fields.
+    // Default to synthetic/not_applicable (paper-only assumption) so the external
+    // broker continuity gate in truthRendering does not fire on legacy status.
+    broker_snapshot_source: "synthetic" as const,
+    alpaca_ws_continuity: "not_applicable" as const,
+    deployment_start_allowed: false,
+    daemon_mode: "paper",
+    adapter_id: "paper",
   };
 }
 
@@ -999,6 +1007,10 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     strategy_allowed: false,
     next_session_change_at: null,
     notes: connected ? ["Backend session truth unavailable"] : ["Daemon unreachable"],
+    // AP-09: deployment identity fields are absent when daemon session truth is
+    // unavailable.  Leave optional fields undefined rather than asserting stale
+    // values — the caller must not infer mode/adapter from unavailable state.
+    deployment_start_allowed: false,
   };
   const unavailableConfigFingerprint: ConfigFingerprintSummary = {
     config_hash: "unknown",
