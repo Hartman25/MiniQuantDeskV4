@@ -632,6 +632,62 @@ pub struct PortfolioFillsResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/risk/denials — canonical risk denial truth surface (Cluster 3)
+// ---------------------------------------------------------------------------
+
+/// One structured denial row from the risk gate.
+///
+/// Fields map 1:1 to the GUI `RiskDenialRow` type so the operator sees exact
+/// denial evidence without transformation.
+///
+/// The `id` field is a stable row identifier for keying the GUI table.
+/// When denials are eventually persisted to a DB audit log the `id` will be
+/// a UUIDv5 derived from the denial context.  For in-memory rows it is a
+/// formatted string combining sequence index and rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskDenialRow {
+    pub id: String,
+    pub at: String,
+    pub strategy_id: String,
+    pub symbol: String,
+    /// The risk rule that was violated, e.g. `"PositionLimitExceeded"`.
+    pub rule: String,
+    /// Human-readable denial message derived from `rule` + `evidence`.
+    pub message: String,
+    /// `"warning"` | `"critical"`.  Critical when the denial class is
+    /// terminal (e.g. `RiskEngineUnavailable`, `CapitalLimitExceeded`).
+    pub severity: String,
+}
+
+/// Response wrapper for `GET /api/v1/risk/denials`.
+///
+/// `truth_state` explicitly distinguishes two semantically different empty
+/// responses:
+///
+/// - `"active"` — execution loop is running; `denials` is authoritative.
+///   An empty `denials` array means the risk gate has not denied any order
+///   in this session — that is genuinely safe to render as "no denials."
+/// - `"no_snapshot"` — execution loop has not started or its snapshot has
+///   not been populated yet; denial truth is unavailable.  `denials` is
+///   always empty and **must not** be treated as authoritative zero.
+///
+/// The GUI IIFE in `api.ts` checks `truth_state` and returns the response
+/// as a failed probe (`ok: false`) when `truth_state === "no_snapshot"`,
+/// causing the endpoint to land in `missingEndpoints`.  The
+/// `isMissingPanelTruth` gate then fires and the risk panel blocks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskDenialsResponse {
+    /// `"active"` = execution loop running; `denials` is authoritative.
+    /// `"no_snapshot"` = loop not started / snapshot unavailable.
+    pub truth_state: String,
+    /// UTC timestamp of the execution snapshot, if one exists.
+    pub snapshot_at_utc: Option<String>,
+    /// Denial rows.  Authoritative when `truth_state == "active"`;
+    /// always empty when `truth_state == "no_snapshot"`.
+    pub denials: Vec<RiskDenialRow>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/diagnostics/snapshot (B4)
 // ---------------------------------------------------------------------------
 

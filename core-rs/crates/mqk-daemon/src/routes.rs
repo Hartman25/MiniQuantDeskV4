@@ -39,7 +39,7 @@ use crate::{
         OperatorTimelineRow, OpsActionRequest, PortfolioFillRow, PortfolioFillsResponse,
         PortfolioOpenOrderRow, PortfolioOpenOrdersResponse, PortfolioPositionRow,
         PortfolioPositionsResponse, PortfolioSummaryResponse, PreflightStatusResponse,
-        ReconcileSummaryResponse, RiskSummaryResponse, RuntimeErrorResponse,
+        ReconcileSummaryResponse, RiskDenialsResponse, RiskSummaryResponse, RuntimeErrorResponse,
         RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
         StrategySummaryRow, StrategySuppressionRow, SystemMetadataResponse, SystemStatusResponse,
         TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
@@ -148,6 +148,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/portfolio/orders/open", get(portfolio_open_orders))
         .route("/api/v1/portfolio/fills", get(portfolio_fills))
         .route("/api/v1/risk/summary", get(risk_summary))
+        .route("/api/v1/risk/denials", get(risk_denials))
         .route("/api/v1/reconcile/status", get(reconcile_status))
         .route("/api/v1/system/session", get(system_session))
         .route(
@@ -1619,6 +1620,61 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
     };
 
     (StatusCode::OK, Json(summary)).into_response()
+}
+
+/// GET /api/v1/risk/denials — canonical risk denial truth surface.
+///
+/// Returns a structured `RiskDenialsResponse` with one of three truth states:
+///
+/// - `truth_state: "no_snapshot"` — execution loop has not started; no snapshot
+///   exists.  Denial truth is entirely unavailable.  GUI IIFE emits ok:false →
+///   endpoint → missingEndpoints → risk panel blocks with `no_snapshot`.
+///
+/// - `truth_state: "not_wired"` — execution loop is running (snapshot present)
+///   but the denial accumulator has not been implemented yet.  There is no ring
+///   buffer, no persistent denial table, and no structured gate-rejection feed
+///   in `AppState`.  Returning `denials: []` here would falsely claim "zero
+///   denials" when the system is actively enforcing risk rules.  GUI IIFE emits
+///   ok:false → endpoint → missingEndpoints → risk panel stays fail-closed.
+///   This state must remain until a real denial source is wired and proven.
+///
+/// - `truth_state: "active"` — RESERVED for future use once a denial
+///   accumulator is wired into daemon state and proven authoritative.  Only
+///   then may `denials: []` be interpreted as genuinely zero denied orders.
+///
+/// `truth_state: "active"` is intentionally NOT returned by this handler until
+/// denial capture is implemented (see: RuntimeRiskGate rejection queue).
+pub(crate) async fn risk_denials(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let snap = st.execution_snapshot.read().await.clone();
+
+    let Some(_snapshot) = snap else {
+        // Execution loop has not started — denial truth is entirely absent.
+        return (
+            StatusCode::OK,
+            Json(RiskDenialsResponse {
+                truth_state: "no_snapshot".to_string(),
+                snapshot_at_utc: None,
+                denials: vec![],
+            }),
+        )
+            .into_response();
+    };
+
+    // Execution loop is running but the denial accumulator is not wired.
+    // AppState carries no denial ring buffer, rejection record, or gate-event
+    // feed.  Claiming "active" + [] would assert authoritative zero denials
+    // while risk rules are enforced but rejections are silently discarded.
+    // "not_wired" signals the GUI to remain fail-closed until denial capture
+    // is implemented.
+    (
+        StatusCode::OK,
+        Json(RiskDenialsResponse {
+            truth_state: "not_wired".to_string(),
+            snapshot_at_utc: None,
+            denials: vec![],
+        }),
+    )
+        .into_response()
 }
 
 pub(crate) async fn reconcile_status(State(st): State<Arc<AppState>>) -> impl IntoResponse {

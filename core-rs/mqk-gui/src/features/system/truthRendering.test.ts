@@ -323,6 +323,57 @@ test("ops panel returns null when canonical status resolves (status not in mockS
 // Proves that HTTP 503 from /api/v1/execution/orders (→ missingEndpoints) blocks
 // the execution panel even when execution_summary still resolves at HTTP 200.
 
+// --- risk denial truth gate (Cluster 3) ---
+// Proves that the risk panel gate is driven by /risk/denials (not /risk/summary).
+// /risk/summary always returns HTTP 200 so it never lands in missingEndpoints and
+// cannot drive no_snapshot.  /risk/denials IIFE returns ok: false when the execution
+// loop is not running (truth_state === "no_snapshot") → endpoint goes to missingEndpoints
+// → isMissingPanelTruth fires → risk panel blocks.
+
+test("no_snapshot fires for risk panel when risk/denials is missing in partial mode", () => {
+  // Simulates: execution loop not running → risk_denials IIFE returns ok:false →
+  // /api/v1/risk/denials in missingEndpoints.
+  // /api/v1/risk/summary is still in realEndpoints (HTTP 200, has_snapshot=false).
+  // With hint ["/risk/denials"] and every(), the check reduces to:
+  //   "is /risk/denials in missingEndpoints?" → yes → no_snapshot fires.
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "partial",
+        reachable: true,
+        realEndpoints: ["/api/v1/risk/summary"],
+        missingEndpoints: ["/api/v1/risk/denials"],
+        mockSections: ["riskDenials"],
+      },
+      panelSources: { risk: "mixed" } as Record<string, SourceAuthority> as SystemModel["panelSources"],
+    }),
+    "risk",
+  );
+  assert.equal(state, "no_snapshot");
+});
+
+test("no_snapshot fires for risk panel when truth is not_wired (loop running, denial source absent)", () => {
+  // Simulates: execution loop IS running but denial accumulator is not yet wired.
+  // risk_denials IIFE reads truth_state === "not_wired" → returns ok:false →
+  // /api/v1/risk/denials lands in missingEndpoints → isMissingPanelTruth fires.
+  // execution_snapshot present does NOT mean denial detail truth is available.
+  // The risk panel must stay fail-closed; an empty denial table must not render.
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "partial",
+        reachable: true,
+        realEndpoints: ["/api/v1/risk/summary"],
+        missingEndpoints: ["/api/v1/risk/denials"],
+        mockSections: ["riskDenials"],
+      },
+      panelSources: { risk: "mixed" } as Record<string, SourceAuthority> as SystemModel["panelSources"],
+    }),
+    "risk",
+  );
+  assert.equal(state, "no_snapshot", "not_wired denial truth must keep risk panel blocked with no_snapshot");
+});
+
 test("no_snapshot fires for execution panel when execution_orders is missing in partial mode", () => {
   // Simulates: daemon returns 503 from /api/v1/execution/orders (no execution loop running).
   // execution_summary is still in realEndpoints (HTTP 200, has_snapshot=false, zero counts).

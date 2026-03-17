@@ -46,10 +46,13 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: ["/trading/orders"],
     placeholder: ["executionSummary", "executionOrders"],
   },
-  // Risk summary is derived from the execution snapshot (runtime memory). Denials are DB-logged.
+  // Risk summary is derived from broker_snapshot (runtime memory).
+  // Risk denials are sourced from execution_snapshot (runtime memory, not DB-persisted).
+  // Both surfaces are runtime truth; the panel authority resolves to runtime_memory
+  // when both endpoints are in realEndpoints.
   risk: {
-    db: ["/risk/denials"],
-    runtime: ["/risk/summary", "/system/status"],
+    db: [],
+    runtime: ["/risk/summary", "/risk/denials", "/system/status"],
     broker: [],
     placeholder: ["riskSummary", "riskDenials"],
   },

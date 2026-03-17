@@ -144,6 +144,21 @@ interface PortfolioFillsResponse {
   rows: FillRow[];
 }
 
+// Canonical risk denial truth surface (Cluster 3).
+//
+// truth_state values:
+//   "no_snapshot"  — execution loop not running; denial truth entirely absent.
+//   "not_wired"    — execution loop running but denial accumulator not yet
+//                    implemented; returning [] would falsely claim zero denials.
+//   "active"       — RESERVED: denial accumulator is wired and authoritative;
+//                    [] then truly means zero denied orders this session.
+//                    Not returned by the daemon until denial capture is proven.
+interface RiskDenialsResponse {
+  truth_state: "active" | "no_snapshot" | "not_wired";
+  snapshot_at_utc: string | null;
+  denials: RiskDenialRow[];
+}
+
 interface LegacyIntegrityResponse {
   armed: boolean;
   active_run_id: string | null;
@@ -641,7 +656,29 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       return fetchJsonCandidate<LegacyTradingFillsResponse>("/v1/trading/fills");
     })(),
     fetchJsonCandidates<RiskSummary>(["/api/v1/risk/summary"]),
-    fetchJsonCandidates<RiskDenialRow[]>(["/api/v1/risk/denials"]),
+    // Risk denials: truth_state === "no_snapshot" means the execution loop is not
+    // running — denial truth is unavailable and must not render as "zero denials."
+    // The IIFE returns ok: false in that case so the endpoint lands in
+    // missingEndpoints and isMissingPanelTruth fires for the risk panel.
+    // No legacy fallback: there is no pre-canonical denial surface.
+    (async (): Promise<EndpointFetchResult<RiskDenialRow[]>> => {
+      const canonical = await fetchJsonCandidate<RiskDenialsResponse>("/api/v1/risk/denials");
+      if (!canonical.ok) {
+        // HTTP failure (404 = unmounted, network error).
+        return { ok: false, endpoint: canonical.endpoint, error: canonical.error ?? "fetch_failed" };
+      }
+      const data = canonical.data as RiskDenialsResponse;
+      if (data.truth_state === "no_snapshot" || data.truth_state === "not_wired") {
+        // "no_snapshot": execution loop not running — denial truth entirely absent.
+        // "not_wired":   execution loop running but denial accumulator not yet
+        //   implemented; [] would falsely claim authoritative zero denials.
+        // Both states are fail-closed: emit as failed probe so endpoint lands in
+        // missingEndpoints and isMissingPanelTruth fires → risk panel blocks.
+        return { ok: false, endpoint: canonical.endpoint, error: "no_denial_truth" };
+      }
+      // Only "active" (future: denial accumulator wired and proven) passes through.
+      return { ok: true, endpoint: canonical.endpoint, data: data.denials };
+    })(),
     fetchJsonCandidates<ReconcileSummary>(["/api/v1/reconcile/status"]),
     fetchJsonCandidates<ReconcileMismatchRow[]>(["/api/v1/reconcile/mismatches"]),
     fetchJsonCandidates<StrategyRow[]>(["/api/v1/strategy/summary"]),

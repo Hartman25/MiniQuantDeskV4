@@ -36,6 +36,11 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
 ### Risk and reconcile summaries
 
 - `/api/v1/risk/summary` — shape check (gross_exposure, net_exposure, concentration_pct, kill_switch_active)
+- `/api/v1/risk/denials` — structured wrapper (`truth_state`, `snapshot_at_utc`, `denials`):
+  - `truth_state: "no_snapshot"` + empty denials + null `snapshot_at_utc` when no execution snapshot (loop not running); GUI IIFE emits ok:false → endpoint in `missingEndpoints` → `isMissingPanelTruth` fires → risk panel blocks
+  - `truth_state: "not_wired"` + empty denials + null `snapshot_at_utc` when execution loop is running but no denial accumulator is implemented in `AppState`; GUI IIFE treats as failed probe → endpoint in `missingEndpoints` → risk panel stays fail-closed; empty denial table is NOT rendered as authoritative zero
+  - `truth_state: "active"` is intentionally NOT returned until a real denial accumulator (ring buffer or DB table) is wired and proven — reserved for future Endstate B
+  - Tests: `gui_contract_risk_denials_no_snapshot` (loop absent → `no_snapshot`) + `gui_contract_risk_denials_active_snapshot` (loop running → `not_wired`, GUI blocked)
 - `/api/v1/reconcile/status` — shape check (status, last_run_at, mismatched_positions, unmatched_broker_events)
 
 ### Strategy
@@ -85,7 +90,6 @@ Waivers are explicit so deferred coverage is visible, not silently ignored.
 
 - `/api/v1/oms/overview`
 - `/api/v1/metrics/dashboards`
-- `/api/v1/risk/denials`
 - `/api/v1/reconcile/mismatches`
 - `/api/v1/alerts/active`
 - `/api/v1/events/feed`

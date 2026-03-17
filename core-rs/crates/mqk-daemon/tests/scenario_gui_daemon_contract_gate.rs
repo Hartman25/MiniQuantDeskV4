@@ -1189,3 +1189,115 @@ async fn gui_contract_portfolio_fills_active_snapshot() {
         "strategy_id must be broker for broker-layer rows; got: {json}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cluster 3 — canonical risk denial surface (/api/v1/risk/denials)
+// ---------------------------------------------------------------------------
+//
+// Contract invariants proven here:
+//  1. Without an execution snapshot: HTTP 200, truth_state = "no_snapshot",
+//     denials = [], snapshot_at_utc = null.
+//     → GUI IIFE reads truth_state and emits ok:false → endpoint lands in
+//       missingEndpoints → isMissingPanelTruth fires → risk panel blocks.
+//  2. With an injected execution snapshot: HTTP 200, truth_state = "not_wired",
+//     denials = [], snapshot_at_utc = null.
+//     → Denial accumulator is not yet implemented in AppState; the execution
+//       loop running does not mean risk denial detail is available.  The daemon
+//       must not claim "active" (authoritative zero) when no denial source exists.
+//     → GUI IIFE reads truth_state="not_wired" and emits ok:false →
+//       endpoint → missingEndpoints → risk panel stays fail-closed.
+//
+// truth_state = "active" is reserved for when a real denial accumulator is
+// wired and proven; it is intentionally NOT returned by this handler yet.
+
+#[tokio::test]
+async fn gui_contract_risk_denials_no_snapshot() {
+    // Without an execution snapshot, /api/v1/risk/denials must return HTTP 200
+    // with truth_state = "no_snapshot" so the GUI knows denial truth is unavailable.
+    let router = make_router();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/denials")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/risk/denials must return HTTP 200"
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["truth_state"].as_str(),
+        Some("no_snapshot"),
+        "truth_state must be no_snapshot when execution_snapshot is absent; got: {json}"
+    );
+    assert!(
+        json["denials"].as_array().is_some_and(|v| v.is_empty()),
+        "denials must be empty when truth_state is no_snapshot; got: {json}"
+    );
+    assert!(
+        json["snapshot_at_utc"].is_null(),
+        "snapshot_at_utc must be null when truth_state is no_snapshot; got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_risk_denials_active_snapshot() {
+    // When an execution snapshot is injected, /api/v1/risk/denials must return
+    // HTTP 200 with truth_state = "not_wired".
+    // The execution loop running does not mean denial detail truth is available:
+    // AppState has no denial accumulator, ring buffer, or gate-rejection feed.
+    // truth_state = "not_wired" keeps the GUI fail-closed; it must NOT be "active"
+    // (which would falsely assert authoritative zero denials).
+    use chrono::DateTime;
+    use mqk_runtime::observability::{ExecutionSnapshot, PortfolioSnapshot};
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    // Inject a minimal execution snapshot: loop is running.
+    let snap = ExecutionSnapshot {
+        run_id: None,
+        active_orders: vec![],
+        pending_outbox: vec![],
+        recent_inbox_events: vec![],
+        portfolio: PortfolioSnapshot {
+            cash_micros: 0,
+            realized_pnl_micros: 0,
+            positions: vec![],
+        },
+        system_block_state: None,
+        snapshot_at_utc: DateTime::from_timestamp(0, 0).expect("unix epoch is valid"),
+    };
+    *st.execution_snapshot.write().await = Some(snap);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/denials")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/risk/denials must return HTTP 200 when execution snapshot is present"
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["truth_state"].as_str(),
+        Some("not_wired"),
+        "truth_state must be not_wired when execution_snapshot is present but no denial accumulator exists; got: {json}"
+    );
+    assert!(
+        json["denials"].as_array().is_some_and(|v| v.is_empty()),
+        "denials must be empty when not_wired; got: {json}"
+    );
+    assert!(
+        json["snapshot_at_utc"].is_null(),
+        "snapshot_at_utc must be null when truth_state is not_wired (no authoritative source); got: {json}"
+    );
+}
