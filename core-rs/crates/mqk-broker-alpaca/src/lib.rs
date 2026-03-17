@@ -48,12 +48,13 @@
 //! and are normalised through `normalize_trade_update`.
 pub mod inbound;
 pub mod normalize;
+pub mod snapshot;
 pub mod types;
 use crate::normalize::normalize_trade_update;
 use crate::types::{
-    AlpacaFetchCursor, AlpacaOrder, AlpacaOrderActivity, AlpacaOrderFull, AlpacaReplaceBody,
-    AlpacaReplaceResponse, AlpacaSubmitBody, AlpacaSubmitResponse, AlpacaTradeUpdate,
-    AlpacaTradeUpdatesResume,
+    AlpacaAccountRaw, AlpacaFetchCursor, AlpacaOpenOrderRaw, AlpacaOrder, AlpacaOrderActivity,
+    AlpacaOrderFull, AlpacaPositionRaw, AlpacaReplaceBody, AlpacaReplaceResponse, AlpacaSubmitBody,
+    AlpacaSubmitResponse, AlpacaTradeUpdate, AlpacaTradeUpdatesResume,
 };
 pub use inbound::{
     build_inbound_batch_from_ws_update, mark_gap_detected, parse_ws_message, AlpacaWsMessage,
@@ -64,6 +65,8 @@ use mqk_execution::{
     BrokerInvokeToken, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
     BrokerSubmitResponse, Side,
 };
+use mqk_schemas::BrokerSnapshot;
+pub use snapshot::{build_snapshot, normalize_account, normalize_open_order, normalize_position};
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -166,6 +169,47 @@ impl AlpacaBrokerAdapter {
     /// Fetch a single order by its Alpaca broker order UUID.
     fn fetch_order(&self, broker_order_id: &str) -> Result<AlpacaOrderFull, BrokerError> {
         self.get(&format!("/v2/orders/{broker_order_id}"))
+    }
+    // -----------------------------------------------------------------------
+    // AP-03: Broker snapshot fetch
+    // -----------------------------------------------------------------------
+    /// Fetch a point-in-time broker snapshot from Alpaca.
+    ///
+    /// Calls three REST endpoints in sequence and normalizes the responses into
+    /// the canonical [`BrokerSnapshot`] shape:
+    ///
+    /// | Endpoint                     | Canonical target      |
+    /// |------------------------------|-----------------------|
+    /// | `GET /v2/account`            | `BrokerAccount`       |
+    /// | `GET /v2/positions`          | `Vec<BrokerPosition>` |
+    /// | `GET /v2/orders?status=open` | `Vec<BrokerOrder>`    |
+    ///
+    /// `fills` is always empty.  Fill delivery is the responsibility of the
+    /// `fetch_events` activity-polling path; a point-in-time snapshot cannot
+    /// determine a "recent fills" window without additional context.
+    ///
+    /// `now_utc` is **caller-injected** so snapshot production is
+    /// deterministic and testable without a live connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(BrokerError)` if any endpoint call fails (transport,
+    /// auth, rate-limit, transient), or if any open order carries a
+    /// non-RFC-3339 `created_at` timestamp (fails closed).
+    pub fn fetch_broker_snapshot(
+        &self,
+        now_utc: chrono::DateTime<chrono::Utc>,
+    ) -> Result<BrokerSnapshot, BrokerError> {
+        let account_raw: AlpacaAccountRaw = self.get("/v2/account")?;
+        let positions_raw: Vec<AlpacaPositionRaw> = self.get("/v2/positions")?;
+        let orders_raw: Vec<AlpacaOpenOrderRaw> = self.get("/v2/orders?status=open")?;
+        let account = normalize_account(&account_raw);
+        let positions = positions_raw.iter().map(normalize_position).collect();
+        let orders = orders_raw
+            .iter()
+            .map(normalize_open_order)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(build_snapshot(now_utc, account, positions, orders))
     }
 }
 // ---------------------------------------------------------------------------

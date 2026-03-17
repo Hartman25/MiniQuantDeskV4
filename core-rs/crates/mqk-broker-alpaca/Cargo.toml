@@ -12,6 +12,7 @@ serde_json.workspace = true
 chrono.workspace = true
 
 mqk-execution = { path = "../mqk-execution" }
+mqk-schemas = { path = "../mqk-schemas" }
 
 # reqwest with blocking support is required: this crate IS the live HTTP adapter.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }

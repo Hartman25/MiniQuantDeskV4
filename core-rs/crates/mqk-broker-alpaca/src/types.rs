@@ -266,3 +266,64 @@ pub struct AlpacaOrderActivity {
     /// Ticker symbol.
     pub symbol: String,
 }
+// ---------------------------------------------------------------------------
+// Snapshot fetch wire types — AP-03
+// GET /v2/account, GET /v2/positions, GET /v2/orders?status=open
+// ---------------------------------------------------------------------------
+
+/// Raw Alpaca account response from `GET /v2/account`.
+///
+/// Used by `fetch_broker_snapshot` to populate the `BrokerAccount` field.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlpacaAccountRaw {
+    /// Account equity as a decimal string (e.g. `"10000.50"`).
+    pub equity: String,
+    /// Settled cash as a decimal string.
+    pub cash: String,
+    /// ISO 4217 currency code (e.g. `"USD"`).
+    pub currency: String,
+}
+
+/// Raw Alpaca position from `GET /v2/positions`.
+///
+/// Alpaca returns one row per held position. `qty` is positive for long,
+/// negative for short.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlpacaPositionRaw {
+    /// Ticker symbol.
+    pub symbol: String,
+    /// Signed position quantity as a decimal string.
+    pub qty: String,
+    /// Average entry price as a decimal string.
+    pub avg_entry_price: String,
+}
+
+/// Raw Alpaca order from `GET /v2/orders?status=open`.
+///
+/// The list endpoint returns the full order object. This type is distinct from
+/// `AlpacaOrderFull` in that it also includes `status` and `order_type`, which
+/// are required for the canonical `BrokerOrder` mapping.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlpacaOpenOrderRaw {
+    /// Alpaca-assigned broker order UUID.
+    pub id: String,
+    /// Caller-assigned client order ID.
+    pub client_order_id: String,
+    /// Ticker symbol.
+    pub symbol: String,
+    /// Order direction: `"buy"` or `"sell"`.
+    pub side: String,
+    /// Order type: `"market"`, `"limit"`, `"stop"`, `"stop_limit"`.
+    #[serde(rename = "type")]
+    pub order_type: String,
+    /// Current Alpaca order status (e.g. `"accepted"`, `"partially_filled"`).
+    pub status: String,
+    /// Total order quantity as a decimal string.
+    pub qty: String,
+    /// Limit price as a decimal string. `None` for non-limit orders.
+    pub limit_price: Option<String>,
+    /// Stop price as a decimal string. `None` for non-stop orders.
+    pub stop_price: Option<String>,
+    /// Order creation timestamp (ISO 8601 / RFC 3339).
+    pub created_at: String,
+}
