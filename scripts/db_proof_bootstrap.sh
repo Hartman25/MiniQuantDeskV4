@@ -13,10 +13,14 @@ Usage: bash scripts/db_proof_bootstrap.sh [--start-postgres]
 
 Proof harness for MiniQuantDesk V4.
 
-Runs two proof lanes:
-  1. External broker proof lane — Alpaca adapter pure in-memory tests (always runs,
-     no DB required).
-  2. DB-backed proof lane — full CI-10 mandatory matrix (requires MQK_DATABASE_URL).
+Runs two proof lanes in order:
+
+  1. AP series: external broker proof lane — pure in-memory Alpaca adapter tests.
+     Always runs. No MQK_DATABASE_URL required.
+
+  2. DB-backed proof lane — full CI-10 mandatory matrix plus the DB-backed
+     external broker runtime inbound scenario (BRK-08R RT path).
+     Requires MQK_DATABASE_URL.
 
 Options:
   --start-postgres   Start (or reuse) a local Docker Postgres 16 container
@@ -24,8 +28,9 @@ Options:
                      to postgres://mqk:mqk@127.0.0.1:5432/mqk_test
 
 Behavior:
-  - Validates that MQK_DATABASE_URL exists (or sets it when --start-postgres is used).
-  - Executes the same DB-backed proof lane used by CI.
+  - Pure in-memory Alpaca proof lane runs before any DB-URL check.
+  - DB-backed lane validates that MQK_DATABASE_URL exists (or sets it when
+    --start-postgres is used).
   - Fails closed on missing DB config or DB connection issues.
 USAGE
 }
@@ -46,6 +51,24 @@ if [[ ! -d "$CORE_RS_DIR" ]]; then
   echo "Expected Rust workspace at $CORE_RS_DIR" >&2
   exit 1
 fi
+
+cd "$CORE_RS_DIR"
+
+# ---------------------------------------------------------------------------
+# AP series: external broker proof lane — pure in-memory, no DB required.
+#
+# Runs BEFORE the MQK_DATABASE_URL gate so it executes unconditionally.
+# Covers: Alpaca event normalization (all 11 event strings, 8 BrokerEvent
+# variants), InboundBatch cursor contract, WS parse path, snapshot
+# normalization (AP-03), lifecycle variants, live adapter failure-mode
+# isolation.
+# ---------------------------------------------------------------------------
+echo "== AP series: external broker proof lane (Alpaca adapter, pure in-memory) =="
+cargo test -p mqk-broker-alpaca
+
+# ---------------------------------------------------------------------------
+# DB gate — everything below requires a live Postgres instance.
+# ---------------------------------------------------------------------------
 
 if [[ "$START_POSTGRES" -eq 1 ]]; then
   if ! command -v docker >/dev/null 2>&1; then
@@ -82,16 +105,6 @@ MSG
 fi
 
 echo "Using MQK_DATABASE_URL=$MQK_DATABASE_URL"
-
-cd "$CORE_RS_DIR"
-
-# AP series: external broker proof lane.
-# These are pure in-memory tests — no MQK_DATABASE_URL required.
-# Covers: Alpaca event normalization (all 11 event strings, 8 BrokerEvent variants),
-# InboundBatch cursor contract, WS parse path, snapshot normalization (AP-03),
-# lifecycle variants, and live adapter failure-mode isolation.
-echo "== AP series: external broker proof lane (Alpaca adapter, pure in-memory) =="
-cargo test -p mqk-broker-alpaca
 
 echo "== DB proof: migration manifest + bootstrap / replay =="
 cargo test -p mqk-db --test scenario_migration_manifest_matches_files -- --test-threads=1
@@ -148,7 +161,16 @@ cargo test -p mqk-db --features testkit --test scenario_db_check_constraints -- 
 cargo test -p mqk-db --test scenario_run_lifecycle_enforced -- --ignored --test-threads=1
 cargo test -p mqk-db --features testkit --test scenario_idempotency_constraints -- --ignored --test-threads=1
 
+# AP series: DB-backed external broker runtime inbound proof (BRK-08R RT path).
+# Proves the complete integrated inbound path:
+#   raw WS bytes → parse_ws_message → build_inbound_batch_from_ws_update
+#   → inbox_insert_deduped_with_identity → advance_broker_cursor
+# Covers RT-I1 through RT-I6, RT-G1 through RT-G4, RT-O1 (11 scenarios).
+echo "== AP series: external broker DB-backed runtime inbound (BRK-08R RT path) =="
+cargo test -p mqk-runtime --test scenario_alpaca_inbound_rt_brk08r -- --ignored --test-threads=1
+
 echo ""
 echo "All proof lanes passed:"
-echo "  External broker (AP series): Alpaca adapter pure in-memory tests."
-echo "  DB proof (CI-10): full mandatory proof matrix."
+echo "  AP series (pure in-memory): Alpaca adapter normalization, event mapping, inbound, snapshot."
+echo "  AP series (DB-backed):      runtime inbound ingest, cursor persistence (BRK-08R RT)."
+echo "  DB proof (CI-10):           full mandatory proof matrix."
