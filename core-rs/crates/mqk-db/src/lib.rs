@@ -151,6 +151,36 @@ pub async fn has_active_live_runs(pool: &PgPool) -> Result<bool> {
     Ok(count_active_live_runs(pool).await? > 0)
 }
 
+/// Count runs that started in the last 24 hours for the given engine and mode.
+///
+/// Uses the DB clock (`now() - interval '24 hours'`) to avoid pulling wall-clock
+/// time into library code.  Returns 0 when the `runs` table does not yet exist
+/// (pre-migration); callers must treat that as "table missing, count untrustworthy"
+/// if needed — the route layer maps this to `None` when `db` is absent entirely.
+pub async fn count_runs_in_last_24h(pool: &PgPool, engine_id: &str, mode: &str) -> Result<i64> {
+    let st = status(pool).await?;
+    if !st.has_runs_table {
+        return Ok(0);
+    }
+
+    let (n,): (i64,) = sqlx::query_as::<_, (i64,)>(
+        r#"
+        select count(*)::bigint
+        from runs
+        where engine_id = $1
+          and mode = $2
+          and started_at_utc > now() - interval '24 hours'
+        "#,
+    )
+    .bind(engine_id)
+    .bind(mode)
+    .fetch_one(pool)
+    .await
+    .context("count_runs_in_last_24h failed")?;
+
+    Ok(n)
+}
+
 /// Insert a new run row. (Status defaults to CREATED in schema/migration)
 pub async fn insert_run(pool: &PgPool, run: &NewRun) -> Result<()> {
     sqlx::query(

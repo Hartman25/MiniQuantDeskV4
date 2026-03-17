@@ -199,8 +199,14 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
                     .is_some_and(|v| !v.is_empty()),
                 "/api/v1/system/runtime-leadership generation_id must be non-empty"
             );
-            // No DB pool in test state → restart_count_24h must be 0.
-            assert_eq!(json["restart_count_24h"].as_u64(), Some(0));
+            // No DB pool in test state → restart_count_24h must be null (not a
+            // synthetic zero); the real count requires a DB query and is unavailable
+            // without a pool.  null is the honest signal.
+            assert!(
+                json["restart_count_24h"].is_null(),
+                "/api/v1/system/runtime-leadership restart_count_24h must be null when no DB pool is present; got: {}",
+                json["restart_count_24h"]
+            );
             // No run history in test state → last_restart_at must be null.
             assert_eq!(json["last_restart_at"], serde_json::Value::Null);
             // Reconcile status "unknown" in test state → "in_progress".

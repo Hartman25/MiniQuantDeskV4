@@ -13,7 +13,7 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
 - `/api/v1/system/metadata` — shape + semantic truth (build_version, api_version, broker_adapter, endpoint_status)
 - `/api/v1/system/session` — shape + semantic truth (daemon_mode, adapter_id, strategy_allowed)
 - `/api/v1/system/config-fingerprint` — shape + semantic truth (adapter_id, environment_profile, config_hash)
-- `/api/v1/system/runtime-leadership` — shape + semantic truth (leader_node="local", leader_lease_state, generation_id non-empty, restart_count_24h=0, post_restart_recovery_state, checkpoints empty in test state)
+- `/api/v1/system/runtime-leadership` — shape + semantic truth (leader_node="local", leader_lease_state, generation_id non-empty, `restart_count_24h` is `null` when no DB pool (not synthetic 0) / real DB-backed count when pool present, post_restart_recovery_state, checkpoints empty in test state)
 
 ### Execution and portfolio summaries
 

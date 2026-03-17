@@ -405,8 +405,10 @@ pub struct RuntimeLeadershipResponse {
     /// Unique identifier for the current runtime generation (run_id or
     /// synthetic fallback when no active run exists).
     pub generation_id: String,
-    /// Count of daemon restarts in the last 24 h (0 when DB is unavailable).
-    pub restart_count_24h: u32,
+    /// Count of run starts in the last 24 h, sourced from the `runs` table
+    /// (`started_at_utc > now() - interval '24 hours'`).
+    /// `null` when no DB pool is configured; a real authoritative count otherwise.
+    pub restart_count_24h: Option<u32>,
     /// UTC timestamp of the most recent run start, if known.
     pub last_restart_at: Option<String>,
     /// "complete" = reconcile confirmed clean post-restart;

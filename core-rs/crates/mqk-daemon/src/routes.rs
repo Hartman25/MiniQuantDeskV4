@@ -1273,7 +1273,18 @@ pub(crate) async fn system_runtime_leadership(
             leader_node,
             leader_lease_state,
             generation_id,
-            restart_count_24h: 0, // DB count query not yet wired; honest zero
+            restart_count_24h: if let Some(db) = st.db.as_ref() {
+                mqk_db::count_runs_in_last_24h(
+                    db,
+                    DAEMON_ENGINE_ID,
+                    st.deployment_mode().as_db_mode(),
+                )
+                .await
+                .ok()
+                .map(|n| n as u32)
+            } else {
+                None
+            },
             last_restart_at,
             post_restart_recovery_state,
             recovery_checkpoint,

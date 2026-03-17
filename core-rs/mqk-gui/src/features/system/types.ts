@@ -792,7 +792,8 @@ export interface RuntimeLeadershipSummary {
   leader_node: string;
   leader_lease_state: "held" | "contested" | "lost";
   generation_id: string;
-  restart_count_24h: number;
+  /** DB-backed count of run starts in last 24 h; null when daemon has no DB pool. */
+  restart_count_24h: number | null;
   last_restart_at: string | null;
   post_restart_recovery_state: "complete" | "in_progress" | "degraded";
   recovery_checkpoint: string;

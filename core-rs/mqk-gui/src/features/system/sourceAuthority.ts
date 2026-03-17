@@ -148,7 +148,8 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: [],
     placeholder: ["marketDataQuality"],
   },
-  // Runtime leadership is pure daemon runtime state — no DB query backing in current arch.
+  // Runtime leadership is primarily daemon runtime state.  restart_count_24h is
+  // DB-backed (runs table, started_at_utc > now()-24h) and returns null when DB is absent.
   runtime: {
     db: [],
     runtime: ["/system/runtime-leadership", "/system/status", "/system/preflight"],

@@ -21,7 +21,7 @@ export function RuntimeScreen({ model }: { model: SystemModel }) {
       <div className="summary-grid summary-grid-four">
         <StatCard title="Leader Node" value={runtime.leader_node} detail={`Lease ${runtime.leader_lease_state}`} tone={runtime.leader_lease_state === "held" ? "good" : "warn"} />
         <StatCard title="Generation" value={runtime.generation_id} detail="Active runtime generation" tone="neutral" />
-        <StatCard title="Restarts (24h)" value={formatNumber(runtime.restart_count_24h)} detail={`Last restart ${formatDateTime(runtime.last_restart_at)}`} tone={runtime.restart_count_24h === 0 ? "good" : "warn"} />
+        <StatCard title="Restarts (24h)" value={formatNumber(runtime.restart_count_24h)} detail={`Last restart ${formatDateTime(runtime.last_restart_at)}`} tone={runtime.restart_count_24h === null ? "neutral" : runtime.restart_count_24h === 0 ? "good" : "warn"} />
         <StatCard
           title="Recovery State"
           value={formatLabel(runtime.post_restart_recovery_state)}

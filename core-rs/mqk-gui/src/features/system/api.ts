@@ -1015,7 +1015,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     leader_node: "unknown",
     leader_lease_state: "lost",
     generation_id: "unknown",
-    restart_count_24h: 0,
+    restart_count_24h: null, // unavailable: daemon not reachable, no authoritative count
     last_restart_at: null,
     // Use "in_progress" not "degraded": "degraded" in panelTruthRenderState
     // triggers a system-wide degraded overlay on every panel.  The fallback
