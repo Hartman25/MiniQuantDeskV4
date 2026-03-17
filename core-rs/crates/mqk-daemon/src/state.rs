@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use chrono::Utc;
-use mqk_broker_alpaca::AlpacaBrokerAdapter;
+use mqk_broker_alpaca::{AlpacaBrokerAdapter, AlpacaConfig};
 use mqk_broker_paper::LockedPaperBroker;
 use mqk_execution::{
     oms::state_machine::{OmsEvent, OmsOrder, OrderState},
@@ -549,12 +549,13 @@ impl AlpacaWsContinuityState {
 /// only change required to wire a new broker into daemon execution.
 pub(crate) enum DaemonBroker {
     Paper(LockedPaperBroker),
-    /// AP-06: Alpaca v2 REST broker, active for `(Paper, Alpaca)` deployment.
+    /// AP-06/AP-07: Alpaca v2 REST broker.
     ///
     /// Credentials are read from `MQK_ALPACA_API_KEY_ID` /
     /// `MQK_ALPACA_API_SECRET_KEY` at `build_execution_orchestrator` time.
-    /// The adapter is constructed via `AlpacaBrokerAdapter::paper(...)`,
-    /// targeting `https://paper-api.alpaca.markets`.
+    /// Endpoint depends on deployment mode:
+    /// - `Paper` → `https://paper-api.alpaca.markets` (AP-06)
+    /// - `LiveShadow` → `https://api.alpaca.markets` (AP-07)
     Alpaca(AlpacaBrokerAdapter),
 }
 
@@ -613,27 +614,58 @@ impl BrokerAdapter for DaemonBroker {
     }
 }
 
-/// Construct the `DaemonBroker` variant for the given `BrokerKind`.
+/// Construct the `DaemonBroker` variant for the given `(BrokerKind, DeploymentMode)` pair.
 ///
 /// This is the **single construction seam** for broker adapters in the daemon.
 /// Nothing else in the daemon instantiates a concrete broker adapter directly;
 /// all paths go through this function so that adding/removing broker support
 /// only requires changing this one site.
 ///
+/// # Endpoint selection for Alpaca
+///
+/// The Alpaca adapter endpoint is determined by `deployment_mode`:
+///
+/// | Mode          | Endpoint                                  |
+/// |---------------|-------------------------------------------|
+/// | `Paper`       | `https://paper-api.alpaca.markets` (AP-06)|
+/// | `LiveShadow`  | `https://api.alpaca.markets`       (AP-07)|
+///
+/// `LiveCapital` is blocked by `deployment_mode_readiness` before this function
+/// is ever reached; a defensive arm is included for exhaustiveness.
+///
 /// # Fail-closed behavior
 ///
 /// - `Paper` — always succeeds (no external credentials required).
 /// - `Alpaca` — reads `MQK_ALPACA_API_KEY_ID` and `MQK_ALPACA_API_SECRET_KEY`
-///   from the environment.  Returns `Err` if either variable is absent or empty.
-///   Constructs `AlpacaBrokerAdapter::paper(...)` (paper-API endpoint) for
-///   `deployment_mode = Paper`.
+///   from the environment.  Returns `Err` if either variable is absent.
+///   Endpoint is chosen from `deployment_mode`; unknown modes fail closed.
 /// - `None` (unrecognised adapter string) — always returns `Err`.
 fn build_daemon_broker(
     broker_kind: Option<BrokerKind>,
+    deployment_mode: DeploymentMode,
 ) -> Result<DaemonBroker, RuntimeLifecycleError> {
     match broker_kind {
         Some(BrokerKind::Paper) => Ok(DaemonBroker::Paper(LockedPaperBroker::new())),
         Some(BrokerKind::Alpaca) => {
+            // Defensive mode check first — fail-closed for unsupported modes
+            // before any credential lookup so the error is always about the mode,
+            // not about missing credentials, when the mode itself is the problem.
+            // LiveCapital is guarded by deployment_mode_readiness but also here.
+            let base_url = match deployment_mode {
+                DeploymentMode::Paper => "https://paper-api.alpaca.markets".to_string(),
+                DeploymentMode::LiveShadow => "https://api.alpaca.markets".to_string(),
+                DeploymentMode::LiveCapital | DeploymentMode::Backtest => {
+                    return Err(RuntimeLifecycleError::service_unavailable(
+                        "runtime.start_refused.alpaca_mode_not_wired",
+                        format!(
+                            "broker 'alpaca' is not wired for deployment mode '{}'; \
+                             refusing start fail-closed",
+                            deployment_mode.as_api_label()
+                        ),
+                    ));
+                }
+            };
+            // Credentials read after mode is validated.
             let key_id = std::env::var(ALPACA_API_KEY_ID_ENV).map_err(|_| {
                 RuntimeLifecycleError::service_unavailable(
                     "runtime.start_refused.alpaca_creds_missing",
@@ -650,8 +682,12 @@ fn build_daemon_broker(
                     ),
                 )
             })?;
-            Ok(DaemonBroker::Alpaca(AlpacaBrokerAdapter::paper(
-                key_id, secret,
+            Ok(DaemonBroker::Alpaca(AlpacaBrokerAdapter::new(
+                AlpacaConfig {
+                    base_url,
+                    api_key_id: key_id,
+                    api_secret_key: secret,
+                },
             )))
         }
         None => Err(RuntimeLifecycleError::service_unavailable(
@@ -1746,7 +1782,10 @@ impl AppState {
         );
         *self.alpaca_ws_continuity.write().await = ws_continuity;
 
-        let daemon_broker = build_daemon_broker(self.runtime_selection.broker_kind)?;
+        let daemon_broker = build_daemon_broker(
+            self.runtime_selection.broker_kind,
+            self.runtime_selection.deployment_mode,
+        )?;
 
         let gateway = build_gateway(
             daemon_broker,
@@ -1986,18 +2025,21 @@ mod tests {
     }
 
     #[test]
-    fn runtime_selection_fail_closes_unproven_modes() {
+    fn runtime_selection_fail_closes_live_capital() {
+        // live-capital is unconditionally blocked; broker kind is irrelevant.
         let selection = runtime_selection_from_env_values(Some("live-capital"), Some("alpaca"));
         assert_eq!(selection.deployment_mode, DeploymentMode::LiveCapital);
-        // BrokerKind is parsed even when the mode is unproven.
+        // BrokerKind is parsed even when the mode is blocked.
         assert_eq!(selection.broker_kind, Some(BrokerKind::Alpaca));
         assert!(!selection.readiness.start_allowed);
+        // After AP-07, the live-capital blocker says "not yet enabled",
+        // not "unsupported/unproven".
         assert!(selection
             .readiness
             .blocker
             .as_deref()
             .unwrap_or("")
-            .contains("unsupported/unproven"));
+            .contains("live-capital"));
     }
 
     #[test]
@@ -2042,7 +2084,7 @@ mod tests {
 
     #[test]
     fn build_daemon_broker_paper_succeeds() {
-        let result = build_daemon_broker(Some(BrokerKind::Paper));
+        let result = build_daemon_broker(Some(BrokerKind::Paper), DeploymentMode::Paper);
         assert!(
             result.is_ok(),
             "Paper broker must construct successfully; got: {:?}",
@@ -2056,21 +2098,19 @@ mod tests {
     }
 
     #[test]
-    fn build_daemon_broker_alpaca_requires_credentials() {
-        // AP-06: Alpaca broker is wired but requires credentials from env vars.
-        // Without MQK_ALPACA_API_KEY_ID set this test verifies the correct
-        // fail-closed error.  If credentials happen to be present in the
-        // test environment the test is skipped (construction succeeds correctly).
+    fn build_daemon_broker_alpaca_paper_mode_requires_credentials() {
+        // AP-06: Alpaca+Paper broker requires credentials.
+        // Without env vars set, construction must fail with a clear message.
+        // If credentials happen to be present, the test just checks it succeeds.
         if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
-            // Credentials present — construction should succeed; skip failure check.
-            let result = build_daemon_broker(Some(BrokerKind::Alpaca));
+            let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::Paper);
             assert!(
                 result.is_ok(),
                 "Alpaca broker must succeed when credentials are present"
             );
             return;
         }
-        let result = build_daemon_broker(Some(BrokerKind::Alpaca));
+        let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::Paper);
         assert!(
             result.is_err(),
             "Alpaca broker must fail when credentials are absent"
@@ -2083,8 +2123,47 @@ mod tests {
     }
 
     #[test]
+    fn build_daemon_broker_alpaca_live_shadow_requires_credentials() {
+        // AP-07: Alpaca+LiveShadow also requires credentials.
+        if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
+            let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveShadow);
+            assert!(
+                result.is_ok(),
+                "Alpaca live-shadow broker must succeed when credentials are present"
+            );
+            return;
+        }
+        let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveShadow);
+        assert!(
+            result.is_err(),
+            "Alpaca live-shadow broker must fail when credentials are absent"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(ALPACA_API_KEY_ID_ENV),
+            "error must mention missing env var; got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn build_daemon_broker_alpaca_live_capital_is_fail_closed() {
+        // AP-07: live-capital is guarded by deployment_mode_readiness; but
+        // build_daemon_broker also rejects it defensively.
+        let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveCapital);
+        assert!(
+            result.is_err(),
+            "Alpaca+LiveCapital must be fail-closed in build_daemon_broker"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("live-capital"),
+            "error must mention live-capital; got: {err_msg}"
+        );
+    }
+
+    #[test]
     fn build_daemon_broker_unknown_is_fail_closed() {
-        let result = build_daemon_broker(None);
+        let result = build_daemon_broker(None, DeploymentMode::Paper);
         assert!(result.is_err(), "Unknown broker (None) must fail closed");
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -2120,17 +2199,15 @@ mod tests {
     }
 
     #[test]
-    fn ap06_live_shadow_alpaca_still_blocked() {
-        // live-shadow must remain unconditionally fail-closed for all broker kinds.
+    fn ap06_live_shadow_alpaca_was_blocked_now_allowed_by_ap07() {
+        // AP-06 originally blocked live-shadow+alpaca.
+        // AP-07 explicitly unlocks it — verify the readiness gate now allows it.
         let readiness =
             deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Alpaca));
         assert!(
-            !readiness.start_allowed,
-            "live-shadow+alpaca must remain fail-closed"
-        );
-        assert!(
-            readiness.blocker.is_some(),
-            "live-shadow+alpaca must carry a blocker message"
+            readiness.start_allowed,
+            "live-shadow+alpaca must be allowed after AP-07; got: {:?}",
+            readiness.blocker
         );
     }
 
@@ -2171,6 +2248,125 @@ mod tests {
             sel.readiness.start_allowed,
             "paper+alpaca RuntimeSelection must be startable; got: {:?}",
             sel.readiness.blocker
+        );
+    }
+
+    // ── AP-07 readiness gate tests ────────────────────────────────────────
+
+    #[test]
+    fn ap07_live_shadow_alpaca_readiness_is_allowed() {
+        // AP-07: live-shadow + Alpaca is the new supported combination.
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Alpaca));
+        assert!(
+            readiness.start_allowed,
+            "live-shadow+alpaca must be allowed after AP-07; got: {:?}",
+            readiness.blocker
+        );
+        assert!(readiness.blocker.is_none(), "no blocker expected");
+    }
+
+    #[test]
+    fn ap07_live_shadow_paper_is_explicitly_blocked() {
+        // live-shadow requires an external broker; paper adapter must be
+        // explicitly blocked with a clear, honest message.
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Paper));
+        assert!(
+            !readiness.start_allowed,
+            "live-shadow+paper must be blocked (no real external truth)"
+        );
+        let blocker = readiness
+            .blocker
+            .expect("live-shadow+paper must have a blocker");
+        assert!(
+            blocker.contains("external broker"),
+            "blocker must explain external broker requirement; got: {blocker}"
+        );
+    }
+
+    #[test]
+    fn ap07_live_shadow_unrecognised_adapter_is_blocked() {
+        // live-shadow with None broker_kind (unrecognised adapter string) must block.
+        let readiness = deployment_mode_readiness(DeploymentMode::LiveShadow, None);
+        assert!(
+            !readiness.start_allowed,
+            "live-shadow+unrecognised must be blocked"
+        );
+        assert!(readiness.blocker.is_some(), "must carry a blocker message");
+    }
+
+    #[test]
+    fn ap07_live_capital_alpaca_still_blocked() {
+        // live-capital must remain unconditionally blocked even after AP-07.
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Alpaca));
+        assert!(
+            !readiness.start_allowed,
+            "live-capital+alpaca must remain fail-closed after AP-07"
+        );
+        let blocker = readiness
+            .blocker
+            .expect("live-capital must carry a blocker message");
+        assert!(
+            blocker.contains("live-capital"),
+            "blocker must name live-capital; got: {blocker}"
+        );
+    }
+
+    #[test]
+    fn ap07_live_capital_paper_still_blocked() {
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Paper));
+        assert!(
+            !readiness.start_allowed,
+            "live-capital+paper must be blocked"
+        );
+    }
+
+    #[test]
+    fn ap07_paper_paper_and_paper_alpaca_unchanged() {
+        // Regression: AP-07 must not affect paper+paper or paper+alpaca.
+        let pp = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
+        assert!(pp.start_allowed, "paper+paper must remain allowed");
+
+        let pa = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
+        assert!(pa.start_allowed, "paper+alpaca must remain allowed");
+    }
+
+    #[test]
+    fn ap07_runtime_selection_live_shadow_alpaca_start_allowed() {
+        // End-to-end via runtime_selection_from_env_values.
+        let sel = runtime_selection_from_env_values(Some("live-shadow"), Some("alpaca"));
+        assert_eq!(sel.deployment_mode, DeploymentMode::LiveShadow);
+        assert_eq!(sel.broker_kind, Some(BrokerKind::Alpaca));
+        assert!(
+            sel.readiness.start_allowed,
+            "live-shadow+alpaca RuntimeSelection must be startable; got: {:?}",
+            sel.readiness.blocker
+        );
+    }
+
+    #[test]
+    fn ap07_calendar_spec_for_live_shadow_is_nyse_weekdays() {
+        // live-shadow uses the NYSE weekday calendar — not AlwaysOn.
+        // This is important for honest session truth in operator surfaces.
+        let state = AppState::new_for_test_with_mode(DeploymentMode::LiveShadow);
+        assert_eq!(
+            state.calendar_spec(),
+            mqk_integrity::CalendarSpec::NyseWeekdays,
+            "live-shadow must use NyseWeekdays calendar for honest session truth"
+        );
+    }
+
+    #[test]
+    fn ap07_live_shadow_alpaca_state_uses_external_snapshot_source() {
+        // live-shadow + alpaca must surface External snapshot source truth.
+        let state = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+        assert_eq!(
+            state.broker_snapshot_source(),
+            BrokerSnapshotTruthSource::External,
+            "live-shadow+alpaca must declare External snapshot source"
         );
     }
 
@@ -2378,15 +2574,20 @@ fn parse_deployment_mode(raw: Option<&str>) -> Option<DeploymentMode> {
 ///
 /// # Supported combinations
 ///
-///   Paper + Paper   →  allowed
-///   Paper + Alpaca  →  allowed (AP-06: broker truth from Alpaca paper endpoint)
+///   Paper + Paper        →  allowed (AP-02: in-process synthetic fills)
+///   Paper + Alpaca       →  allowed (AP-06: paper endpoint, no real capital)
+///   LiveShadow + Alpaca  →  allowed (AP-07: live endpoint, shadow policy)
 ///
 /// All other combinations remain fail-closed until explicitly wired and proven.
 ///
 /// # Fail-closed invariants
 ///
-/// - `LiveShadow` and `LiveCapital` are unconditionally blocked for all broker kinds.
-/// - Unrecognised adapter strings (`broker_kind = None`) are blocked.
+/// - `LiveCapital` is unconditionally blocked for all broker kinds.
+/// - `Backtest` is unconditionally blocked.
+/// - `LiveShadow + Paper` is explicitly blocked: shadow mode requires an
+///   external broker; the paper fill engine cannot provide real market truth.
+/// - `LiveShadow + None` is blocked: unrecognised adapter string.
+/// - Unrecognised adapter strings (`broker_kind = None`) are always blocked.
 /// - Enabling a new combination here MUST be accompanied by a matching
 ///   `build_daemon_broker` arm and a set of proven scenario tests.
 fn deployment_mode_readiness(
@@ -2401,36 +2602,76 @@ fn deployment_mode_readiness(
         },
         // ── Paper + Alpaca (AP-06) ────────────────────────────────────────
         //
-        // Deployment policy is paper (no real capital at risk) while broker
-        // truth and event continuity come from the Alpaca paper endpoint.
-        // Credentials are validated at `build_daemon_broker` time; readiness
-        // here signals only that the (mode, broker) pair is a known-good
-        // combination that may attempt start.
+        // Paper deployment policy; broker truth from Alpaca paper endpoint.
+        // Credentials are validated at `build_daemon_broker` time.
         (DeploymentMode::Paper, Some(BrokerKind::Alpaca)) => DeploymentReadiness {
             start_allowed: true,
             blocker: None,
         },
-        // Note: all BrokerKind variants are covered above; the None case below
-        // handles unrecognised adapter-id strings that did not parse to a BrokerKind.
-        // ── Paper mode with an unrecognised adapter-id string ─────────────
+        // ── Paper + unrecognised adapter ──────────────────────────────────
         (DeploymentMode::Paper, None) => DeploymentReadiness {
             start_allowed: false,
             blocker: Some(
-                "deployment mode 'paper' currently requires broker 'paper'; \
+                "deployment mode 'paper' requires broker 'paper' or 'alpaca'; \
                  set MQK_DAEMON_ADAPTER_ID to a recognised broker adapter"
                     .to_string(),
             ),
         },
-        // ── Unproven deployment modes (all broker kinds) ──────────────────
-        (
-            DeploymentMode::Backtest | DeploymentMode::LiveShadow | DeploymentMode::LiveCapital,
-            _,
-        ) => DeploymentReadiness {
+        // ── LiveShadow + Alpaca (AP-07) ───────────────────────────────────
+        //
+        // Shadow deployment policy; broker truth from Alpaca live endpoint.
+        // Provides real external market truth and continuity without capital
+        // authority.  This is NOT live-capital.  Credentials are validated
+        // at `build_daemon_broker` time.  Continuity, snapshot, and reconcile
+        // gates remain fully enforced — fail-closed on any truth gap.
+        (DeploymentMode::LiveShadow, Some(BrokerKind::Alpaca)) => DeploymentReadiness {
+            start_allowed: true,
+            blocker: None,
+        },
+        // ── LiveShadow + Paper: explicitly blocked ────────────────────────
+        //
+        // Shadow mode requires real external broker truth.  The paper fill
+        // engine is a synthetic in-process adapter; it cannot provide the
+        // real market state required for externally-backed shadow operation.
+        (DeploymentMode::LiveShadow, Some(BrokerKind::Paper)) => DeploymentReadiness {
             start_allowed: false,
-            blocker: Some(format!(
-                "deployment mode '{}' is unsupported/unproven in current daemon architecture; refusing start fail-closed",
-                mode.as_api_label()
-            )),
+            blocker: Some(
+                "deployment mode 'live-shadow' requires an external broker adapter; \
+                 the paper fill engine cannot provide real market truth for shadow mode — \
+                 set MQK_DAEMON_ADAPTER_ID=alpaca"
+                    .to_string(),
+            ),
+        },
+        // ── LiveShadow + unrecognised adapter ─────────────────────────────
+        (DeploymentMode::LiveShadow, None) => DeploymentReadiness {
+            start_allowed: false,
+            blocker: Some(
+                "deployment mode 'live-shadow' requires an external broker adapter; \
+                 set MQK_DAEMON_ADAPTER_ID=alpaca"
+                    .to_string(),
+            ),
+        },
+        // ── LiveCapital: unconditionally blocked ──────────────────────────
+        //
+        // Live-capital is not yet wired.  This arm must remain explicit and
+        // never be collapsed into a catch-all.  Enabling live-capital requires
+        // a dedicated patch with its own proven test suite.
+        (DeploymentMode::LiveCapital, _) => DeploymentReadiness {
+            start_allowed: false,
+            blocker: Some(
+                "deployment mode 'live-capital' is not yet enabled; \
+                 refusing start fail-closed"
+                    .to_string(),
+            ),
+        },
+        // ── Backtest: unconditionally blocked ─────────────────────────────
+        (DeploymentMode::Backtest, _) => DeploymentReadiness {
+            start_allowed: false,
+            blocker: Some(
+                "deployment mode 'backtest' is not yet supported in the daemon runtime; \
+                 refusing start fail-closed"
+                    .to_string(),
+            ),
         },
     }
 }

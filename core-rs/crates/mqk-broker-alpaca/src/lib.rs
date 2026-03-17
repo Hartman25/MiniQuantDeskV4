@@ -109,9 +109,24 @@ impl AlpacaBrokerAdapter {
         Self { cfg, client }
     }
     /// Convenience constructor for Alpaca paper trading.
+    ///
+    /// Targets `https://paper-api.alpaca.markets`.  Use for `(Paper, Alpaca)`
+    /// deployment mode only.  Do NOT use for live-shadow or live-capital.
     pub fn paper(api_key_id: String, api_secret_key: String) -> Self {
         Self::new(AlpacaConfig {
             base_url: "https://paper-api.alpaca.markets".to_string(),
+            api_key_id,
+            api_secret_key,
+        })
+    }
+
+    /// Convenience constructor for Alpaca live (real-market) connectivity.
+    ///
+    /// Targets `https://api.alpaca.markets`.  Use for `(LiveShadow, Alpaca)`
+    /// deployment mode.  Do NOT use for paper-only deployments.
+    pub fn live(api_key_id: String, api_secret_key: String) -> Self {
+        Self::new(AlpacaConfig {
+            base_url: "https://api.alpaca.markets".to_string(),
             api_key_id,
             api_secret_key,
         })
