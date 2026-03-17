@@ -3,6 +3,7 @@ import { withClassifiedPanelSources } from "./sourceAuthority";
 import type {
   AlertTriageRow,
   ArtifactRegistrySummary,
+  ArtifactRow,
   AuditActionRow,
   CausalityTrace,
   ConfigDiffRow,
@@ -24,6 +25,7 @@ import type {
   OperatorActionDefinition,
   OperatorActionReceipt,
   OperatorAlert,
+  OperatorTimelineCategory,
   OperatorTimelineEvent,
   PortfolioSummary,
   PositionRow,
@@ -203,6 +205,53 @@ interface DaemonActionCatalogEntry {
 interface DaemonActionCatalogResponse {
   canonical_route: string;
   actions: DaemonActionCatalogEntry[];
+}
+
+// Durable operator-history daemon wrapper types.
+// These three endpoints return {canonical_route, backend, rows} — not direct
+// arrays or GUI-typed objects.  The fetch/map layer below unwraps the wrapper
+// and maps daemon field names to GUI type field names.  Only fields provably
+// present in the daemon DB sources are populated; no values are fabricated.
+
+interface DaemonAuditActionRow {
+  audit_event_id: string;
+  ts_utc: string;
+  requested_action: string;
+  disposition: string;
+  run_id: string | null;
+  runtime_transition: string | null;
+  provenance_ref: string;
+}
+interface DaemonAuditActionsWrapper {
+  canonical_route: string;
+  backend: string;
+  rows: DaemonAuditActionRow[];
+}
+
+interface DaemonArtifactRow {
+  artifact_id: string;
+  artifact_type: string;
+  run_id: string;
+  created_at_utc: string;
+  provenance_ref: string;
+}
+interface DaemonArtifactsWrapper {
+  canonical_route: string;
+  backend: string;
+  rows: DaemonArtifactRow[];
+}
+
+interface DaemonTimelineRow {
+  ts_utc: string;
+  kind: string;
+  run_id: string | null;
+  detail: string;
+  provenance_ref: string;
+}
+interface DaemonOperatorTimelineWrapper {
+  canonical_route: string;
+  backend: string;
+  rows: DaemonTimelineRow[];
 }
 
 async function fetchJsonCandidate<T>(path: string): Promise<EndpointFetchResult<T>> {
@@ -717,7 +766,23 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     fetchJsonCandidates<StrategyRow[]>(["/api/v1/strategy/summary"]),
     fetchJsonCandidates<OperatorAlert[]>(["/api/v1/alerts/active"]),
     fetchJsonCandidates<FeedEvent[]>(["/api/v1/events/feed"]),
-    fetchJsonCandidates<AuditActionRow[]>(["/api/v1/audit/operator-actions"]),
+    // audit/operator-actions: daemon returns {canonical_route, backend, rows}.
+    // Unwrap the wrapper and map daemon field names to AuditActionRow GUI fields.
+    (async (): Promise<EndpointFetchResult<AuditActionRow[]>> => {
+      const r = await fetchJsonCandidate<DaemonAuditActionsWrapper>("/api/v1/audit/operator-actions");
+      if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      const rows: AuditActionRow[] = (r.data as DaemonAuditActionsWrapper).rows.map((row) => ({
+        audit_ref: row.audit_event_id,
+        at: row.ts_utc,
+        action_key: row.requested_action,
+        result_state: row.disposition,
+        // target_scope: use run_id when present (durable run reference), else provenance_ref.
+        target_scope: row.run_id ?? row.provenance_ref,
+        warnings: [],
+        // actor and environment are not available from audit_events per-row; omitted.
+      }));
+      return { ok: true, endpoint: r.endpoint, data: rows };
+    })(),
     fetchJsonCandidates<ServiceTopology>(["/api/v1/system/topology"]),
     fetchJsonCandidates<TransportSummary>(["/api/v1/execution/transport"]),
     fetchJsonCandidates<IncidentCase[]>(["/api/v1/incidents"]),
@@ -727,10 +792,63 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     fetchJsonCandidates<ConfigFingerprintSummary>(["/api/v1/system/config-fingerprint"]),
     fetchJsonCandidates<MarketDataQualitySummary>(["/api/v1/market-data/quality"]),
     fetchJsonCandidates<RuntimeLeadershipSummary>(["/api/v1/system/runtime-leadership"]),
-    fetchJsonCandidates<ArtifactRegistrySummary>(["/api/v1/audit/artifacts"]),
+    // audit/artifacts: daemon returns {canonical_route, backend, rows} where each
+    // row is one run from the runs table.  Map to ArtifactRegistrySummary.
+    (async (): Promise<EndpointFetchResult<ArtifactRegistrySummary>> => {
+      const r = await fetchJsonCandidate<DaemonArtifactsWrapper>("/api/v1/audit/artifacts");
+      if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      const wrapper = r.data as DaemonArtifactsWrapper;
+      const artifacts: ArtifactRow[] = wrapper.rows.map((row) => ({
+        artifact_id: row.artifact_id,
+        artifact_type: row.artifact_type as ArtifactRow["artifact_type"],
+        created_at: row.created_at_utc,
+        status: "ready" as const,
+        linked_order_id: null,
+        linked_incident_id: null,
+        linked_run_id: row.run_id,
+        // storage_path and note are not available from the runs-table artifact source.
+      }));
+      // last_updated_at: newest artifact created_at (rows are already desc by started_at_utc).
+      const lastUpdatedAt = artifacts.length > 0 ? artifacts[0].created_at : null;
+      const summary: ArtifactRegistrySummary = {
+        last_updated_at: lastUpdatedAt,
+        ready_count: artifacts.length,
+        pending_count: 0,
+        failed_count: 0,
+        artifacts,
+      };
+      return { ok: true, endpoint: r.endpoint, data: summary };
+    })(),
     fetchJsonCandidates<StrategySuppressionRow[]>(["/api/v1/strategy/suppressions"]),
     fetchJsonCandidates<ConfigDiffRow[]>(["/api/v1/system/config-diffs"]),
-    fetchJsonCandidates<OperatorTimelineEvent[]>(["/api/v1/ops/operator-timeline"]),
+    // ops/operator-timeline: daemon returns {canonical_route, backend, rows} where
+    // each row is a runtime lifecycle transition or operator action from runs +
+    // audit_events.  Map to OperatorTimelineEvent using only provable DB fields.
+    (async (): Promise<EndpointFetchResult<OperatorTimelineEvent[]>> => {
+      const r = await fetchJsonCandidate<DaemonOperatorTimelineWrapper>("/api/v1/ops/operator-timeline");
+      if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      const events: OperatorTimelineEvent[] = (r.data as DaemonOperatorTimelineWrapper).rows.map((row) => ({
+        // provenance_ref is the durable DB reference (e.g. "runs:{id}:started_at_utc"
+        // or "audit_events:{id}"); use as the stable event identity.
+        timeline_event_id: row.provenance_ref,
+        at: row.ts_utc,
+        // "runtime_transition" and "operator_action" are the two kinds emitted by the daemon.
+        category: row.kind as OperatorTimelineCategory,
+        // "info" is the correct baseline severity for lifecycle and operator-action events;
+        // no severity escalation data exists in the durable DB sources.
+        severity: "info" as const,
+        title: row.detail,
+        summary: row.detail,
+        // actor: not available in runs or audit_events per-row; omitted (optional field).
+        linked_incident_id: null,
+        linked_order_id: null,
+        linked_strategy_id: null,
+        linked_action_key: null,
+        linked_config_diff_id: null,
+        linked_runtime_generation_id: row.run_id ?? null,
+      }));
+      return { ok: true, endpoint: r.endpoint, data: events };
+    })(),
     // Canonical Action Catalog: daemon-authoritative action availability.
     fetchJsonCandidates<DaemonActionCatalogResponse>(["/api/v1/ops/catalog"]),
   ]);

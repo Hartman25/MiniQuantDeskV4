@@ -59,9 +59,10 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
 
 ### Audit and operator surfaces
 
-- `/api/v1/audit/operator-actions` — shape + backend identity (canonical_route, backend=postgres.audit_events, rows)
-- `/api/v1/audit/artifacts` — shape + backend identity
-- `/api/v1/ops/operator-timeline` — shape + backend identity
+- `/api/v1/audit/operator-actions` — wrapper shape + backend identity proven; GUI fetch/map layer (IIFE) unwraps `{canonical_route, backend=postgres.audit_events, rows}` and maps `audit_event_id→audit_ref`, `ts_utc→at`, `requested_action→action_key`, `disposition→result_state`; row-level field contracts require DB integration test
+- `/api/v1/audit/artifacts` — wrapper shape + backend identity proven; GUI fetch/map layer constructs `ArtifactRegistrySummary` from `{canonical_route, backend=postgres.runs, rows}` (one `run_config` artifact per run); row-level field contracts require DB integration test
+- `/api/v1/ops/operator-timeline` — wrapper shape + backend identity proven; GUI fetch/map layer maps `ts_utc→at`, `kind→category`, `detail→title+summary`, `provenance_ref→timeline_event_id`; row-level field contracts require DB integration test
+- Contract gate: `gui_contract_operator_history_endpoints_declare_correct_backends` (new in REC-02) proves wrapper shape, `canonical_route` self-identity, and exact backend sources in no-DB test state
 
 ### Operator action dispatcher and catalog
 

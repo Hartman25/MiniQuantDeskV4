@@ -1556,3 +1556,85 @@ async fn gui_contract_reconcile_mismatches_active_with_authoritative_diff_rows()
         "expected an authoritative filled_qty mismatch row for NVDA; got: {json}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cluster 5 — durable operator-history surfaces (audit + timeline)
+// ---------------------------------------------------------------------------
+//
+// Contract invariants proven here:
+//  1. Each endpoint returns HTTP 200 + {canonical_route, backend, rows} wrapper.
+//  2. canonical_route self-identifies the endpoint URI.
+//  3. backend identifies the exact Postgres table(s) used as the durable source.
+//  4. rows is an empty JSON array in no-DB test state.
+//
+// Row-level field contracts (audit_event_id, ts_utc, requested_action, etc.)
+// are enforced by DB-backed integration tests (scenario_alpaca_inbound_rt_brk08r
+// family and future operator-history DB scenarios) where real rows can be
+// inserted and asserted.
+//
+// This test proves that the GUI fetch/map layer can rely on the wrapper shape
+// to correctly unwrap rows[] without degrading to mock/placeholder authority.
+
+#[tokio::test]
+async fn gui_contract_operator_history_endpoints_declare_correct_backends() {
+    // Proves that the three durable operator-history surfaces:
+    //  - /api/v1/audit/operator-actions  → postgres.audit_events
+    //  - /api/v1/audit/artifacts          → postgres.runs
+    //  - /api/v1/ops/operator-timeline   → postgres.runs+postgres.audit_events
+    // all return HTTP 200 with the {canonical_route, backend, rows} wrapper
+    // and correctly self-identify their durable Postgres sources.
+    //
+    // The GUI mapping layer unwraps these wrappers (IIFE fetch pattern) so
+    // useArray/useObject receives correctly typed data and does NOT push
+    // these endpoints to usedMockSections when the daemon is reachable.
+    let router = make_router();
+
+    let cases: [(&str, &str); 3] = [
+        (
+            "/api/v1/audit/operator-actions",
+            "postgres.audit_events",
+        ),
+        (
+            "/api/v1/audit/artifacts",
+            "postgres.runs",
+        ),
+        (
+            "/api/v1/ops/operator-timeline",
+            "postgres.runs+postgres.audit_events",
+        ),
+    ];
+
+    for (uri, expected_backend) in cases {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (status, body) = call(router.clone(), req).await;
+        assert_eq!(status, StatusCode::OK, "{uri} must return 200");
+
+        let json = parse_json(body);
+
+        // Wrapper structure: canonical_route, backend, rows must all be present.
+        assert_eq!(
+            json["canonical_route"].as_str(),
+            Some(uri),
+            "{uri} must self-identify its canonical_route"
+        );
+        assert_eq!(
+            json["backend"].as_str(),
+            Some(expected_backend),
+            "{uri} must declare exact durable backend source"
+        );
+        assert!(
+            json["rows"].is_array(),
+            "{uri} rows must be a JSON array (empty in no-DB test state); got: {json}"
+        );
+        // No DB in test state → rows must be empty.
+        assert_eq!(
+            json["rows"].as_array().map(|v| v.is_empty()),
+            Some(true),
+            "{uri} rows must be empty when no DB pool is present; got: {json}"
+        );
+    }
+}

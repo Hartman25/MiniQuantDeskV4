@@ -4,7 +4,7 @@ export type HealthState = "ok" | "warning" | "critical" | "disconnected" | "unkn
 export type Severity = "info" | "warning" | "critical";
 export type ActionLevel = 0 | 1 | 2 | 3;
 export type OmsState = "open" | "partially_filled" | "filled" | "cancelled" | "rejected";
-export type OperatorTimelineCategory = "alert" | "operator_action" | "mode_transition" | "runtime_restart" | "config_change" | "incident" | "reconcile";
+export type OperatorTimelineCategory = "alert" | "operator_action" | "mode_transition" | "runtime_restart" | "config_change" | "incident" | "reconcile" | "runtime_transition";
 
 export type DataSourceState = "real" | "partial" | "mock" | "disconnected";
 
@@ -652,10 +652,14 @@ export interface StrategyRow {
 export interface AuditActionRow {
   audit_ref: string;
   at: string;
-  actor: string;
+  // actor and environment are not returned by the current daemon backend
+  // (audit_events table has no actor/mode column per row); omitted from
+  // the DB-backed mapping layer.  Fields are optional so the GUI renders
+  // only provably sourced data.
+  actor?: string;
   action_key: string;
-  environment: EnvironmentMode;
-  target_scope: string;
+  environment?: EnvironmentMode;
+  target_scope?: string;
   result_state: string;
   warnings: string[];
 }
@@ -849,14 +853,20 @@ export interface RuntimeLeadershipSummary {
 
 export interface ArtifactRow {
   artifact_id: string;
-  artifact_type: "run_bundle" | "trace_export" | "replay_export" | "reconcile_report" | "operator_receipt" | "incident_bundle";
+  // "run_config" is the artifact_type emitted by the daemon's audit/artifacts
+  // handler (one entry per run from the runs table).  Other types are planned
+  // for future artifact sources and are retained for forward compatibility.
+  artifact_type: "run_bundle" | "trace_export" | "replay_export" | "reconcile_report" | "operator_receipt" | "incident_bundle" | "run_config";
   created_at: string;
-  status: "ready" | "pending" | "failed";
+  status?: "ready" | "pending" | "failed";
   linked_order_id: string | null;
   linked_incident_id: string | null;
   linked_run_id: string | null;
-  storage_path: string;
-  note: string;
+  // storage_path and note are not returned by the current daemon artifact source
+  // (runs table has no file path or note column); optional until a durable
+  // artifact store is wired.
+  storage_path?: string;
+  note?: string;
 }
 
 export interface ArtifactRegistrySummary {
@@ -895,7 +905,10 @@ export interface OperatorTimelineEvent {
   severity: Severity;
   title: string;
   summary: string;
-  actor: string;
+  // actor is not returned by the daemon's durable sources (runs +
+  // audit_events tables have no per-row actor column); optional so the
+  // GUI mapping layer does not fabricate a value.
+  actor?: string;
   linked_incident_id: string | null;
   linked_order_id: string | null;
   linked_strategy_id: string | null;
