@@ -159,6 +159,13 @@ interface RiskDenialsResponse {
   denials: RiskDenialRow[];
 }
 
+
+interface ReconcileMismatchesResponse {
+  truth_state: "active" | "no_snapshot" | "stale";
+  snapshot_at_utc: string | null;
+  rows: ReconcileMismatchRow[];
+}
+
 interface LegacyIntegrityResponse {
   armed: boolean;
   active_run_id: string | null;
@@ -680,7 +687,17 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       return { ok: true, endpoint: canonical.endpoint, data: data.denials };
     })(),
     fetchJsonCandidates<ReconcileSummary>(["/api/v1/reconcile/status"]),
-    fetchJsonCandidates<ReconcileMismatchRow[]>(["/api/v1/reconcile/mismatches"]),
+    (async (): Promise<EndpointFetchResult<ReconcileMismatchRow[]>> => {
+      const canonical = await fetchJsonCandidate<ReconcileMismatchesResponse>("/api/v1/reconcile/mismatches");
+      if (!canonical.ok) {
+        return { ok: false, endpoint: canonical.endpoint, error: canonical.error ?? "fetch_failed" };
+      }
+      const data = canonical.data as ReconcileMismatchesResponse;
+      if (data.truth_state === "no_snapshot" || data.truth_state === "stale") {
+        return { ok: false, endpoint: canonical.endpoint, error: "no_reconcile_detail_truth" };
+      }
+      return { ok: true, endpoint: canonical.endpoint, data: data.rows };
+    })(),
     fetchJsonCandidates<StrategyRow[]>(["/api/v1/strategy/summary"]),
     fetchJsonCandidates<OperatorAlert[]>(["/api/v1/alerts/active"]),
     fetchJsonCandidates<FeedEvent[]>(["/api/v1/events/feed"]),

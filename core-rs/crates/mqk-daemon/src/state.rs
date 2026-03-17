@@ -488,6 +488,20 @@ impl AppState {
         self.reconcile_status.read().await.clone()
     }
 
+    pub async fn current_execution_snapshot(
+        &self,
+    ) -> Option<mqk_runtime::observability::ExecutionSnapshot> {
+        self.execution_snapshot.read().await.clone()
+    }
+
+    pub async fn current_broker_snapshot(&self) -> Option<mqk_schemas::BrokerSnapshot> {
+        self.broker_snapshot.read().await.clone()
+    }
+
+    pub async fn current_local_order_sides(&self) -> BTreeMap<String, mqk_reconcile::Side> {
+        self.local_order_sides.read().await.clone()
+    }
+
     pub async fn restart_truth_snapshot(
         &self,
     ) -> Result<RestartTruthSnapshot, RuntimeLifecycleError> {
@@ -1759,7 +1773,7 @@ fn reconcile_order_status_from_schema(raw: &str) -> mqk_reconcile::OrderStatus {
 
 /// DMON-05: like `reconcile_local_snapshot_from_runtime` but also includes
 /// active orders, using the side cache to supply the required `Side` field.
-fn reconcile_local_snapshot_from_runtime_with_sides(
+pub(crate) fn reconcile_local_snapshot_from_runtime_with_sides(
     snapshot: &mqk_runtime::observability::ExecutionSnapshot,
     sides: &BTreeMap<String, mqk_reconcile::Side>,
 ) -> mqk_reconcile::LocalSnapshot {
@@ -2028,7 +2042,7 @@ fn synthesize_broker_snapshot_from_execution(
     }
 }
 
-fn reconcile_broker_snapshot_from_schema(
+pub(crate) fn reconcile_broker_snapshot_from_schema(
     snapshot: &mqk_schemas::BrokerSnapshot,
 ) -> Result<mqk_reconcile::BrokerSnapshot, &'static str> {
     let fetched_at_ms = snapshot.captured_at_utc.timestamp_millis();

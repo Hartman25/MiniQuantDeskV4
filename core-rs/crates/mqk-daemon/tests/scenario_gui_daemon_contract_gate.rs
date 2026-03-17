@@ -43,7 +43,7 @@ fn json_str<'a>(json: &'a serde_json::Value, key: &str) -> &'a str {
 async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
     let router = make_router();
 
-    let cases: [(&str, &[&str]); 11] = [
+    let cases: [(&str, &[&str]); 12] = [
         (
             "/api/v1/system/status",
             &[
@@ -106,6 +106,10 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
                 "mismatched_positions",
                 "unmatched_broker_events",
             ],
+        ),
+        (
+            "/api/v1/reconcile/mismatches",
+            &["truth_state", "snapshot_at_utc", "rows"],
         ),
         (
             "/api/v1/audit/operator-actions",
@@ -1299,5 +1303,143 @@ async fn gui_contract_risk_denials_active_snapshot() {
     assert!(
         json["snapshot_at_utc"].is_null(),
         "snapshot_at_utc must be null when truth_state is not_wired (no authoritative source); got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_reconcile_mismatches_no_snapshot_without_authoritative_detail() {
+    let router = make_router();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/reconcile/mismatches")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/reconcile/mismatches must return HTTP 200"
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["truth_state"].as_str(),
+        Some("no_snapshot"),
+        "truth_state must be no_snapshot when reconcile detail truth is absent; got: {json}"
+    );
+    assert!(
+        json["rows"].as_array().is_some_and(|v| v.is_empty()),
+        "rows must be empty when truth_state is no_snapshot; got: {json}"
+    );
+    assert!(
+        json["snapshot_at_utc"].is_null(),
+        "snapshot_at_utc must be null when truth_state is no_snapshot; got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_reconcile_mismatches_active_with_authoritative_diff_rows() {
+    use chrono::DateTime;
+    use mqk_daemon::state::ReconcileStatusSnapshot;
+    use mqk_runtime::observability::{ExecutionSnapshot, OrderSnapshot, PortfolioSnapshot};
+    use mqk_schemas::{BrokerAccount, BrokerOrder, BrokerSnapshot};
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let execution_snapshot = ExecutionSnapshot {
+        run_id: None,
+        active_orders: vec![OrderSnapshot {
+            order_id: "OID-1".to_string(),
+            broker_order_id: Some("BRK-1".to_string()),
+            symbol: "NVDA".to_string(),
+            total_qty: 80,
+            filled_qty: 20,
+            status: "PartiallyFilled".to_string(),
+        }],
+        pending_outbox: vec![],
+        recent_inbox_events: vec![],
+        portfolio: PortfolioSnapshot {
+            cash_micros: 0,
+            realized_pnl_micros: 0,
+            positions: vec![],
+        },
+        system_block_state: None,
+        snapshot_at_utc: DateTime::from_timestamp(1_700_000_000, 0).expect("valid unix timestamp"),
+    };
+    *st.execution_snapshot.write().await = Some(execution_snapshot);
+    st.local_order_sides
+        .write()
+        .await
+        .insert("OID-1".to_string(), mqk_reconcile::Side::Buy);
+
+    let broker_snapshot = BrokerSnapshot {
+        captured_at_utc: DateTime::from_timestamp(1_700_000_030, 0).expect("valid timestamp"),
+        account: BrokerAccount {
+            equity: "100000.00".to_string(),
+            cash: "50000.00".to_string(),
+            currency: "USD".to_string(),
+        },
+        orders: vec![BrokerOrder {
+            broker_order_id: "BRK-1".to_string(),
+            client_order_id: "OID-1".to_string(),
+            symbol: "NVDA".to_string(),
+            side: "buy".to_string(),
+            r#type: "limit".to_string(),
+            status: "partially_filled".to_string(),
+            qty: "80".to_string(),
+            limit_price: Some("900.00".to_string()),
+            stop_price: None,
+            created_at_utc: DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+        }],
+        fills: vec![],
+        positions: vec![],
+    };
+    *st.broker_snapshot.write().await = Some(broker_snapshot);
+
+    st.publish_reconcile_snapshot(ReconcileStatusSnapshot {
+        status: "dirty".to_string(),
+        last_run_at: Some(
+            DateTime::from_timestamp(1_700_000_030, 0)
+                .expect("valid timestamp")
+                .to_rfc3339(),
+        ),
+        snapshot_watermark_ms: Some(1_700_000_030_000),
+        mismatched_positions: 0,
+        mismatched_orders: 1,
+        mismatched_fills: 0,
+        unmatched_broker_events: 0,
+        note: Some("order drift detected".to_string()),
+    })
+    .await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/reconcile/mismatches")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/reconcile/mismatches must return HTTP 200 when detail truth is active"
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["truth_state"].as_str(),
+        Some("active"),
+        "truth_state must be active when reconcile detail rows are authoritative; got: {json}"
+    );
+    let rows = json["rows"].as_array().expect("rows must be an array");
+    assert!(
+        rows.iter().any(|row| {
+            row["domain"].as_str() == Some("order")
+                && row["symbol"].as_str() == Some("NVDA")
+                && row["internal_value"].as_str() == Some("filled_qty=20")
+                && row["broker_value"].as_str() == Some("filled_qty=0")
+        }),
+        "expected an authoritative filled_qty mismatch row for NVDA; got: {json}"
     );
 }

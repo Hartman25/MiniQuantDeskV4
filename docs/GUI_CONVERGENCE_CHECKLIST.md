@@ -52,7 +52,7 @@ Last verified: 2026-03-16 (Hardening Series H-1 through H-9, PC-1 through PC-4 c
 - [ ] `/api/v1/ops/action` change-system-mode → 409 not_authoritative
 - [ ] `/api/v1/ops/change-mode` is not mounted (404)
 - [ ] `/api/v1/ops/catalog` → 200, 5 entries, state-correct enabled/disabled
-- [ ] `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — 7/7 pass
+- [ ] `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — all pass (current contract gate count)
 
 ## API authority validation (H-3 + PC-1 requirement)
 - [ ] `invokeOperatorAction` does NOT fall through to legacy on 400/403/409 from canonical
@@ -83,7 +83,7 @@ Last verified: 2026-03-16 (Hardening Series H-1 through H-9, PC-1 through PC-4 c
 
 ## Daemon contract gate (H-4 + H-9 + PC-4 requirement)
 - [ ] `cargo test -p mqk-daemon` — all pass, zero failures
-- [ ] `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — 7/7 pass
+- [ ] `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — all pass (current contract gate count)
 - [ ] `cargo clippy --workspace -- -D warnings` — zero errors
 - [ ] `gui_daemon_contract_waivers.md` reflects current enforced + deferred state
 - [ ] No mounted+tested routes remain in the waiver list

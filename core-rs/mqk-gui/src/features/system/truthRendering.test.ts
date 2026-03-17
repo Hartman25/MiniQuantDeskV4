@@ -75,20 +75,36 @@ test("renders no_snapshot when required panel endpoints are absent in partial mo
   assert.equal(state, "no_snapshot");
 });
 
-test("no_snapshot does not fire when reconcile/status resolves (real state)", () => {
+test("no_snapshot fires for reconcile when status resolves but mismatches are missing in partial mode", () => {
   const state = panelTruthRenderState(
     buildModel({
       dataSource: {
-        state: "real",
+        state: "partial",
         reachable: true,
         realEndpoints: ["/api/v1/reconcile/status"],
-        missingEndpoints: [],
-        mockSections: [],
+        missingEndpoints: ["/api/v1/reconcile/mismatches"],
+        mockSections: ["mismatches"],
       },
     }),
     "reconcile",
   );
-  assert.equal(state, null);
+  assert.equal(state, "no_snapshot");
+});
+
+test("no_snapshot fires for reconcile when mismatches resolve but status is missing in partial mode", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "partial",
+        reachable: true,
+        realEndpoints: ["/api/v1/reconcile/mismatches"],
+        missingEndpoints: ["/api/v1/reconcile/status"],
+        mockSections: ["reconcileSummary"],
+      },
+    }),
+    "reconcile",
+  );
+  assert.equal(state, "no_snapshot");
 });
 
 test("no_snapshot fires for portfolio panel when portfolio/positions is missing in partial mode", () => {

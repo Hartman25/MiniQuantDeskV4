@@ -295,6 +295,24 @@ pub struct ReconcileSummaryResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconcileMismatchRow {
+    pub id: String,
+    pub domain: String,
+    pub symbol: String,
+    pub internal_value: String,
+    pub broker_value: String,
+    pub status: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconcileMismatchesResponse {
+    pub truth_state: String,
+    pub snapshot_at_utc: Option<String>,
+    pub rows: Vec<ReconcileMismatchRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStateResponse {
     pub daemon_mode: String,
     pub adapter_id: String,

@@ -42,6 +42,11 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
   - `truth_state: "active"` is intentionally NOT returned until a real denial accumulator (ring buffer or DB table) is wired and proven — reserved for future Endstate B
   - Tests: `gui_contract_risk_denials_no_snapshot` (loop absent → `no_snapshot`) + `gui_contract_risk_denials_active_snapshot` (loop running → `not_wired`, GUI blocked)
 - `/api/v1/reconcile/status` — shape check (status, last_run_at, mismatched_positions, unmatched_broker_events)
+- `/api/v1/reconcile/mismatches` — structured wrapper (`truth_state`, `snapshot_at_utc`, `rows`):
+  - `truth_state: "no_snapshot"` + empty rows + null `snapshot_at_utc` when reconcile detail truth is not authoritative yet (no reconcile snapshot, no broker snapshot, or no execution snapshot)
+  - `truth_state: "stale"` + empty rows when summary/detail truth disagree or the reconcile watermark has gone stale; GUI IIFE treats this as failed probe so the Reconcile panel stays fail-closed
+  - `truth_state: "active"` + rows when the daemon can derive current reconcile diffs from the active execution snapshot plus broker snapshot and the result agrees with reconcile status
+  - Tests: `gui_contract_reconcile_mismatches_no_snapshot_without_authoritative_detail` + `gui_contract_reconcile_mismatches_active_with_authoritative_diff_rows`
 
 ### Strategy
 
@@ -90,7 +95,6 @@ Waivers are explicit so deferred coverage is visible, not silently ignored.
 
 - `/api/v1/oms/overview`
 - `/api/v1/metrics/dashboards`
-- `/api/v1/reconcile/mismatches`
 - `/api/v1/alerts/active`
 - `/api/v1/events/feed`
 - `/api/v1/system/topology`

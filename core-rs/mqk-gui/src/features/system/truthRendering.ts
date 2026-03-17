@@ -2,11 +2,15 @@ import type { CorePanelKey, SystemModel } from "./types.ts";
 
 export type TruthRenderState = "unimplemented" | "unavailable" | "stale" | "no_snapshot" | "degraded";
 
-// Maps a panel key to top-level probe path fragments that must ALL be absent
-// from dataSource.realEndpoints before no_snapshot fires.
+type PanelTruthRequirement = {
+  hints: string[];
+  missingMode?: "all" | "any";
+};
+
+// Maps a panel key to top-level probe path fragments required for operator truth.
 // Rules: top-level probes only — no per-order/per-id fragments;
 // paths must match what fetchOperatorModel() actually probes.
-const PANEL_TRUTH_ENDPOINTS: Partial<Record<CorePanelKey, string[]>> = {
+const PANEL_TRUTH_REQUIREMENTS: Partial<Record<CorePanelKey, PanelTruthRequirement>> = {
   // execution_orders (HTTP 503) is the definitive "no OMS truth" signal.
   // execution_summary can return HTTP 200 with has_snapshot=false and zero counts —
   // those zeros are honest (there are zero active orders because no loop is running).
@@ -14,56 +18,61 @@ const PANEL_TRUTH_ENDPOINTS: Partial<Record<CorePanelKey, string[]>> = {
   // The 503→missingEndpoints path resolves that ambiguity; only execution_orders being
   // absent should fire no_snapshot.  A single-item hint collapses every() to a simple
   // "is this endpoint missing?" check.
-  execution: ["/execution/orders"],
+  execution: { hints: ["/execution/orders"] },
   // risk_denials IIFE returns ok: false when truth_state === "no_snapshot"
   // (execution loop not running), landing /risk/denials in missingEndpoints.
   // /risk/summary always returns HTTP 200 (even has_snapshot=false), so it
   // never lands in missingEndpoints and cannot drive this gate.
   // A single-item hint collapses every() to a simple "is this endpoint missing?" check.
-  risk: ["/risk/denials"],
+  risk: { hints: ["/risk/denials"] },
   // Daemon mounts /reconcile/status — not /reconcile/summary.
-  reconcile: ["/reconcile/status", "/reconcile/mismatches"],
+  reconcile: { hints: ["/reconcile/status", "/reconcile/mismatches"], missingMode: "any" },
   // Portfolio row truth is gated on /portfolio/positions, not /portfolio/summary.
   // portfolio/summary returns HTTP 200 even when broker_snapshot is absent (has_snapshot:false),
   // so it never appears in missingEndpoints and cannot drive the no_snapshot gate.
   // The /portfolio/positions IIFE in api.ts returns ok:false when snapshot_state === "no_snapshot",
   // landing the endpoint in missingEndpoints and firing this gate.
   // Authoritative empty rows ("active" + []) are NOT caught here — only missing truth blocks.
-  portfolio: ["/portfolio/positions"],
+  portfolio: { hints: ["/portfolio/positions"] },
   // Strategy armed/health state is operator-critical runtime truth.
-  strategy: ["/strategy/summary"],
+  strategy: { hints: ["/strategy/summary"] },
   // Session state drives trading-window decisions.
-  session: ["/system/session"],
+  session: { hints: ["/system/session"] },
   // Config fingerprint is the runtime identity anchor.
-  config: ["/system/config-fingerprint"],
+  config: { hints: ["/system/config-fingerprint"] },
   // Runtime leadership tracks daemon generation and recovery state.
-  runtime: ["/system/runtime-leadership"],
+  runtime: { hints: ["/system/runtime-leadership"] },
   // Active alert feed is deferred but absence must not show silent zero to operator.
-  alerts: ["/alerts/active"],
+  alerts: { hints: ["/alerts/active"] },
   // Audit actions are DB truth; empty list on missing endpoint is misleading.
-  audit: ["/audit/operator-actions"],
+  audit: { hints: ["/audit/operator-actions"] },
   // Artifact registry is DB truth; false zero on missing endpoint must not pass.
-  artifacts: ["/audit/artifacts"],
+  artifacts: { hints: ["/audit/artifacts"] },
   // Operator timeline is the durable DB audit log; empty view is misleading.
-  operatorTimeline: ["/ops/operator-timeline"],
+  operatorTimeline: { hints: ["/ops/operator-timeline"] },
   // Transport queue depth is deferred; false zero masks stuck orders.
-  transport: ["/execution/transport"],
+  transport: { hints: ["/execution/transport"] },
   // Incident list is deferred; false zero hides open operator cases.
-  incidents: ["/incidents"],
+  incidents: { hints: ["/incidents"] },
   // Market data quality is deferred; false "good" health is dangerous during live trading.
-  marketData: ["/market-data/quality"],
+  marketData: { hints: ["/market-data/quality"] },
   // Topology is deferred; empty service map is misleading about system health.
-  topology: ["/system/topology"],
+  topology: { hints: ["/system/topology"] },
   // Metrics are deferred; empty charts must not look like real zeros.
-  metrics: ["/metrics/dashboards"],
+  metrics: { hints: ["/metrics/dashboards"] },
   // Ops is the mode-change and action surface; must not render on stale or disconnected truth.
-  ops: ["/system/status"],
+  ops: { hints: ["/system/status"] },
 };
 
 function isMissingPanelTruth(model: SystemModel, panel: CorePanelKey): boolean {
-  const requiredHints = PANEL_TRUTH_ENDPOINTS[panel];
-  if (!requiredHints || model.dataSource.state !== "partial") return false;
-  return requiredHints.every((hint) => model.dataSource.missingEndpoints.some((endpoint) => endpoint.includes(hint)));
+  const requirement = PANEL_TRUTH_REQUIREMENTS[panel];
+  if (!requirement || model.dataSource.state !== "partial") return false;
+
+  const missingChecks = requirement.hints.map((hint) => model.dataSource.missingEndpoints.some((endpoint) => endpoint.includes(hint)));
+  if (requirement.missingMode === "any") {
+    return missingChecks.some(Boolean);
+  }
+  return missingChecks.every(Boolean);
 }
 
 function hasStaleHeartbeat(model: SystemModel): boolean {

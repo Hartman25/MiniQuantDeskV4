@@ -279,3 +279,15 @@ TSC clean. 30/30 GUI tests pass.
 - Patch 1 is **GUI-1** only.
 - Backtest/Research tabs are placeholders until DAEMON-4+ are implemented.
 - Next most important is **GUI-2 (configurable daemon URL)** so you can target multiple machines cleanly.
+### REC-01: Reconcile mismatch detail route + fail-closed GUI detail gate
+**Status:** DONE
+**Files:**
+- `core-rs/mqk-gui/src/features/system/truthRendering.ts`
+- `core-rs/mqk-gui/src/features/system/truthRendering.test.ts`
+- `core-rs/mqk-gui/src/features/system/api.ts`
+- `core-rs/crates/mqk-daemon/src/api_types.rs`
+- `core-rs/crates/mqk-daemon/src/routes.rs`
+- `core-rs/crates/mqk-daemon/src/state.rs`
+- `core-rs/crates/mqk-daemon/tests/scenario_gui_daemon_contract_gate.rs`
+- `docs/ci/gui_daemon_contract_waivers.md`
+**What changed:** Reconcile now requires both summary and mismatch detail truth. The daemon mounts `GET /api/v1/reconcile/mismatches` as a typed truth surface with `truth_state`. GUI only treats the endpoint as present when `truth_state === "active"`; `no_snapshot` and `stale` keep the panel fail-closed so empty mismatch rows cannot masquerade as authoritative zero mismatches.
