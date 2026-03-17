@@ -269,6 +269,47 @@ impl DeploymentMode {
     }
 }
 
+/// Typed broker implementation selector — deliberately distinct from deployment policy.
+///
+/// `DeploymentMode` encodes *operating policy* (paper / live-shadow / live-capital).
+/// `BrokerKind` encodes *which broker implementation* satisfies that policy.
+/// The two are separate so the same policy can be satisfied by different adapters
+/// (e.g. `Paper` policy + `Alpaca` broker for a future live-shadow mode) without
+/// conflating mode selection with adapter construction.
+///
+/// Only `Paper` is currently wired into daemon execution.  `Alpaca` is defined so
+/// the daemon can parse and reject it with a typed, explicit error rather than a
+/// raw string comparison.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum BrokerKind {
+    /// In-process bar-driven paper fill engine (`LockedPaperBroker`).
+    Paper,
+    /// Alpaca v2 REST + WebSocket external broker (`AlpacaBrokerAdapter`).
+    /// Wiring into daemon execution is deferred to AP-02+.
+    Alpaca,
+}
+
+impl BrokerKind {
+    /// Canonical lowercase string for DB records, API responses, and logging.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Paper => "paper",
+            Self::Alpaca => "alpaca",
+        }
+    }
+
+    /// Parse from the `MQK_DAEMON_ADAPTER_ID` env-var string (case-insensitive).
+    /// Returns `None` for unrecognised values so callers can fail-closed explicitly
+    /// without resorting to raw string comparisons.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "paper" => Some(Self::Paper),
+            "alpaca" => Some(Self::Alpaca),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DeploymentReadiness {
     pub start_allowed: bool,
@@ -278,6 +319,13 @@ pub struct DeploymentReadiness {
 #[derive(Clone, Debug)]
 pub struct RuntimeSelection {
     pub deployment_mode: DeploymentMode,
+    /// Parsed broker implementation kind; `None` when the adapter-id string is
+    /// unrecognised (treated as fail-closed by `deployment_mode_readiness`).
+    /// Use this field for typed dispatch — do NOT use `adapter_id` for logic.
+    pub broker_kind: Option<BrokerKind>,
+    /// Raw adapter identifier string (e.g. `"paper"`, `"alpaca"`).
+    /// Used for DB run records, API responses, and operator-visible logging.
+    /// Does not drive broker construction; use `broker_kind` for typed dispatch.
     pub adapter_id: String,
     pub run_config_hash: String,
     pub readiness: DeploymentReadiness,
@@ -379,8 +427,11 @@ impl AppState {
     pub fn new_for_test_with_mode(mode: DeploymentMode) -> Self {
         let mut state = Self::new_inner(OperatorAuthMode::ExplicitDevNoToken, None);
         // Override runtime_selection and calendar_spec to use the specified mode.
+        // broker_kind is retained from the default Paper selection — the test helper
+        // overrides policy (mode) while keeping the adapter unchanged.
         state.runtime_selection = RuntimeSelection {
             deployment_mode: mode,
+            broker_kind: state.runtime_selection.broker_kind,
             adapter_id: state.runtime_selection.adapter_id.clone(),
             run_config_hash: state.runtime_selection.run_config_hash.clone(),
             readiness: state.runtime_selection.readiness.clone(),
@@ -1435,6 +1486,8 @@ mod tests {
     fn runtime_selection_defaults_to_paper_ready() {
         let selection = runtime_selection_from_env_values(None, None);
         assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
+        // broker_kind is the typed separation; adapter_id is the display string.
+        assert_eq!(selection.broker_kind, Some(BrokerKind::Paper));
         assert_eq!(selection.adapter_id, "paper");
         assert!(selection.readiness.start_allowed);
         assert!(selection.readiness.blocker.is_none());
@@ -1444,6 +1497,8 @@ mod tests {
     fn runtime_selection_fail_closes_unproven_modes() {
         let selection = runtime_selection_from_env_values(Some("live-capital"), Some("alpaca"));
         assert_eq!(selection.deployment_mode, DeploymentMode::LiveCapital);
+        // BrokerKind is parsed even when the mode is unproven.
+        assert_eq!(selection.broker_kind, Some(BrokerKind::Alpaca));
         assert!(!selection.readiness.start_allowed);
         assert!(selection
             .readiness
@@ -1455,16 +1510,40 @@ mod tests {
 
     #[test]
     fn runtime_selection_fail_closes_paper_with_nonpaper_adapter() {
+        // Paper policy + Alpaca broker: recognised combination, but not yet supported.
+        // Must fail-closed via typed dispatch, not string comparison.
         let selection = runtime_selection_from_env_values(Some("paper"), Some("alpaca"));
         assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
+        assert_eq!(selection.broker_kind, Some(BrokerKind::Alpaca));
         assert!(!selection.readiness.start_allowed);
         assert!(selection
             .readiness
             .blocker
             .as_deref()
             .unwrap_or("")
-            .contains("requires adapter 'paper'"));
+            .contains("requires broker 'paper'"));
     }
+
+    #[test]
+    fn unknown_broker_adapter_string_is_fail_closed() {
+        // Unrecognised adapter-id (not "paper" or "alpaca") must fail-closed.
+        // broker_kind is None; deployment_mode_readiness treats None as fail-closed.
+        let selection =
+            runtime_selection_from_env_values(Some("paper"), Some("interactive-brokers"));
+        assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
+        assert_eq!(
+            selection.broker_kind, None,
+            "unrecognised adapter yields None broker_kind"
+        );
+        assert_eq!(selection.adapter_id, "interactive-brokers");
+        assert!(!selection.readiness.start_allowed);
+        assert!(selection
+            .readiness
+            .blocker
+            .as_deref()
+            .is_some_and(|msg| !msg.is_empty()));
+    }
+
     #[test]
     fn reconcile_truth_gate_allows_only_ok_status() {
         let reconcile_status = Arc::new(RwLock::new(initial_reconcile_status()));
@@ -1617,10 +1696,16 @@ fn runtime_selection_from_env_values(
         .unwrap_or(DEFAULT_DAEMON_ADAPTER_ID)
         .to_ascii_lowercase();
 
-    let readiness = deployment_mode_readiness(deployment_mode, &adapter);
+    // Parse the adapter string into the typed BrokerKind.  Unknown strings yield
+    // None, which deployment_mode_readiness treats as fail-closed.  The raw
+    // adapter string is preserved for DB records and operator-visible responses.
+    let broker_kind = BrokerKind::parse(&adapter);
+
+    let readiness = deployment_mode_readiness(deployment_mode, broker_kind);
 
     RuntimeSelection {
         deployment_mode,
+        broker_kind,
         adapter_id: adapter,
         run_config_hash: format!(
             "{}-{}-{}-v1",
@@ -1655,29 +1740,56 @@ fn parse_deployment_mode(raw: Option<&str>) -> Option<DeploymentMode> {
     }
 }
 
-fn deployment_mode_readiness(mode: DeploymentMode, adapter_id: &str) -> DeploymentReadiness {
-    match mode {
-        DeploymentMode::Paper if adapter_id == "paper" => DeploymentReadiness {
+/// Evaluate whether the (policy, broker) combination may be started.
+///
+/// This is the single canonical gate that maps typed `(DeploymentMode, BrokerKind)`
+/// pairs to allowed/blocked states.  String comparisons are intentionally absent;
+/// all dispatch is through typed enums.
+///
+/// Supported combinations:
+///   Paper + Paper  →  allowed (current only)
+///
+/// All other combinations, including future Alpaca combinations, remain
+/// fail-closed until explicitly wired and proven in a later AP patch.
+fn deployment_mode_readiness(
+    mode: DeploymentMode,
+    broker_kind: Option<BrokerKind>,
+) -> DeploymentReadiness {
+    match (mode, broker_kind) {
+        // ── Only supported combination ────────────────────────────────────
+        (DeploymentMode::Paper, Some(BrokerKind::Paper)) => DeploymentReadiness {
             start_allowed: true,
             blocker: None,
         },
-        DeploymentMode::Paper => DeploymentReadiness {
+        // ── Paper mode with a recognised but unsupported broker ───────────
+        (DeploymentMode::Paper, Some(other_broker)) => DeploymentReadiness {
             start_allowed: false,
             blocker: Some(format!(
-                "deployment mode '{}' currently requires adapter 'paper'; got '{}'",
-                mode.as_api_label(),
-                adapter_id
+                "deployment mode 'paper' currently requires broker 'paper'; \
+                 got broker '{}' — combination not yet supported",
+                other_broker.as_str()
             )),
         },
-        DeploymentMode::Backtest | DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
-            DeploymentReadiness {
-                start_allowed: false,
-                blocker: Some(format!(
-                    "deployment mode '{}' is unsupported/unproven in current daemon architecture; refusing start fail-closed",
-                    mode.as_api_label()
-                )),
-            }
-        }
+        // ── Paper mode with an unrecognised adapter-id string ─────────────
+        (DeploymentMode::Paper, None) => DeploymentReadiness {
+            start_allowed: false,
+            blocker: Some(
+                "deployment mode 'paper' currently requires broker 'paper'; \
+                 set MQK_DAEMON_ADAPTER_ID to a recognised broker adapter"
+                    .to_string(),
+            ),
+        },
+        // ── Unproven deployment modes (all broker kinds) ──────────────────
+        (
+            DeploymentMode::Backtest | DeploymentMode::LiveShadow | DeploymentMode::LiveCapital,
+            _,
+        ) => DeploymentReadiness {
+            start_allowed: false,
+            blocker: Some(format!(
+                "deployment mode '{}' is unsupported/unproven in current daemon architecture; refusing start fail-closed",
+                mode.as_api_label()
+            )),
+        },
     }
 }
 
