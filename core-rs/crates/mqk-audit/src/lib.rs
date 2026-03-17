@@ -438,3 +438,30 @@ pub enum VerifyResult {
     /// The chain is broken at the given line.
     Broken { line: usize, reason: String },
 }
+
+/// Scan an audit JSONL string and return the 1-based line number of the first
+/// event whose `hash_self` field is `null` (unchained), or `None` if every
+/// non-blank event has a `hash_self` value.
+///
+/// Used by the artifact gate to enforce that promotion audit evidence was
+/// written with hash chaining enabled (`AuditWriter::new(path, true)`).
+///
+/// Returns `None` on empty / whitespace-only content — callers must separately
+/// reject empty logs (e.g. via [`verify_hash_chain_str`] returning
+/// `Valid { lines: 0 }`).
+///
+/// Returns `Err` only if a non-blank line cannot be parsed as an [`AuditEvent`].
+pub fn find_unchained_event_line(content: &str) -> Result<Option<usize>> {
+    for (i, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let ev: AuditEvent = serde_json::from_str(trimmed)
+            .with_context(|| format!("parse audit event at line {}", i + 1))?;
+        if ev.hash_self.is_none() {
+            return Ok(Some(i + 1));
+        }
+    }
+    Ok(None)
+}

@@ -11,7 +11,7 @@
 //! 3. Verify the audit log hash chain (`audit_jsonl` must have ≥ 1 event).
 
 use mqk_artifacts::RunManifest;
-use mqk_audit::{verify_hash_chain_str, VerifyResult};
+use mqk_audit::{find_unchained_event_line, verify_hash_chain_str, VerifyResult};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -30,6 +30,8 @@ pub enum LockError {
     AuditEmpty,
     /// The audit log hash chain is broken or unparseable.
     AuditChainBroken { line: usize, reason: String },
+    /// The audit log was written without hash chaining (`hash_self` is null).
+    AuditNotChained { line: usize },
 }
 
 impl std::fmt::Display for LockError {
@@ -42,6 +44,10 @@ impl std::fmt::Display for LockError {
             LockError::AuditChainBroken { line, reason } => {
                 write!(f, "audit hash chain broken at line {line}: {reason}")
             }
+            LockError::AuditNotChained { line } => write!(
+                f,
+                "audit event at line {line} has no hash_self (log written without chaining)"
+            ),
         }
     }
 }
@@ -127,6 +133,15 @@ pub fn lock_artifact_from_str(
         VerifyResult::Valid { lines } => {
             if lines == 0 {
                 return Err(LockError::AuditEmpty);
+            }
+            // Step 4: require every event to carry hash_self (chain must be active).
+            if let Some(bad_line) =
+                find_unchained_event_line(audit_jsonl).map_err(|e| LockError::AuditChainBroken {
+                    line: 0,
+                    reason: e.to_string(),
+                })?
+            {
+                return Err(LockError::AuditNotChained { line: bad_line });
             }
             Ok(ArtifactLock {
                 config_hash: manifest.config_hash,

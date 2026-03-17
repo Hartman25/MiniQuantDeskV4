@@ -387,16 +387,14 @@ fn new_for_testing_is_accepted_by_evaluator() {
 // Scenario 9: lock_artifact_from_str rejects non-chained audit
 // ---------------------------------------------------------------------------
 
-/// An audit log written WITHOUT hash chaining (hash_self = null) still
-/// satisfies the "not-Broken" check (hash_prev = null for first event, and
-/// events with null hash_self are not verified). Verify the lock succeeds.
+/// An audit log written WITHOUT hash chaining (hash_self = null on every event)
+/// must be rejected by `lock_artifact_from_str` with `LockError::AuditNotChained`.
 ///
-/// Note: the spec says audit logs MUST be hash-chained; but if hash_self is
-/// null on every event, `verify_hash_chain_str` returns Valid (no breakage),
-/// because non-chained events are not verified.  The gate therefore does not
-/// reject them.  This matches the existing `AuditWriter(hash_chain=false)` mode.
+/// Promotion evidence must be genuinely hash-chained.  An audit written with
+/// `AuditWriter::new(path, hash_chain=false)` does not satisfy this requirement
+/// and must not produce an `ArtifactLock`.
 #[test]
-fn non_chained_audit_lock_succeeds() {
+fn non_chained_audit_is_rejected() {
     let tmp = std::env::temp_dir().join(format!("mqk_b6_nonchain_{}.jsonl", std::process::id()));
     {
         let mut w = AuditWriter::new(&tmp, /*hash_chain=*/ false).unwrap();
@@ -411,10 +409,9 @@ fn non_chained_audit_lock_succeeds() {
     let audit = std::fs::read_to_string(&tmp).unwrap();
     let _ = std::fs::remove_file(&tmp);
 
-    // Non-chained audit passes the integrity check (no hashes to verify).
     let result = lock_artifact_from_str(&valid_manifest_json(), &audit);
     assert!(
-        result.is_ok(),
-        "non-chained audit (hash_self=null) must lock successfully; got: {result:?}"
+        matches!(result, Err(LockError::AuditNotChained { .. })),
+        "non-chained audit (hash_self=null) must be rejected with AuditNotChained; got: {result:?}"
     );
 }
