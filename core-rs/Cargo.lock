@@ -1831,6 +1831,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "mqk-audit",
+ "mqk-broker-alpaca",
  "mqk-broker-paper",
  "mqk-db",
  "mqk-execution",

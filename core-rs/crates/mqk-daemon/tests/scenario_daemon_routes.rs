@@ -1503,11 +1503,13 @@ async fn ap07_live_shadow_paper_adapter_is_blocked() {
     );
 }
 
-/// AP-07: live-capital + Alpaca remains fail-closed.
+/// AP-07 / AP-08: live-capital + paper adapter remains fail-closed.
 ///
-/// AP-07 must not accidentally unlock live-capital.
+/// `new_for_test_with_mode(LiveCapital)` uses the default paper adapter.
+/// `(LiveCapital, Paper)` is permanently blocked — capital requires an external
+/// broker adapter (Alpaca).  AP-07 and AP-08 do not change this.
 #[tokio::test]
-async fn ap07_live_capital_alpaca_remains_fail_closed() {
+async fn ap07_live_capital_paper_adapter_remains_fail_closed() {
     let st = Arc::new(state::AppState::new_for_test_with_mode(
         state::DeploymentMode::LiveCapital,
     ));
@@ -1521,14 +1523,16 @@ async fn ap07_live_capital_alpaca_remains_fail_closed() {
     assert_eq!(code, StatusCode::OK);
     let json = parse_json(body);
     assert_eq!(json["daemon_mode"], "LIVE-CAPITAL");
+    // Paper adapter is blocked for live-capital even after AP-08.
     assert_eq!(
         json["deployment_start_allowed"], false,
-        "live-capital must remain fail-closed after AP-07"
+        "live-capital+paper must remain fail-closed; adapter_id: {}",
+        json["adapter_id"].as_str().unwrap_or("?")
     );
     let blocker = json["deployment_blocker"].as_str().unwrap_or("");
     assert!(
         blocker.contains("live-capital"),
-        "live-capital blocker must name the mode; got: {blocker}"
+        "live-capital+paper blocker must name the mode; got: {blocker}"
     );
 }
 
@@ -1592,6 +1596,166 @@ async fn ap07_live_shadow_alpaca_surfaces_external_snapshot_source() {
     assert_eq!(
         json["alpaca_ws_continuity"], "cold_start_unproven",
         "live-shadow+alpaca without a cursor must report cold_start_unproven"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AP-08: live-capital + Alpaca integration tests
+// ---------------------------------------------------------------------------
+
+/// AP-08: live-capital + Alpaca is now the explicitly allowed capital combination.
+///
+/// Session endpoint must reflect deployment_start_allowed=true and adapter_id="alpaca".
+#[tokio::test]
+async fn ap08_live_capital_alpaca_readiness_is_allowed_in_session() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::LiveCapital,
+        state::BrokerKind::Alpaca,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(router, req).await;
+    assert_eq!(code, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["daemon_mode"], "LIVE-CAPITAL");
+    assert_eq!(json["adapter_id"], "alpaca");
+    assert_eq!(
+        json["deployment_start_allowed"], true,
+        "live-capital+alpaca must be start-allowed after AP-08; blocker: {}",
+        json["deployment_blocker"].as_str().unwrap_or("none")
+    );
+    assert!(
+        json["deployment_blocker"].is_null()
+            || json["deployment_blocker"].as_str().unwrap_or("") .is_empty(),
+        "no blocker expected for allowed pair; got: {}",
+        json["deployment_blocker"]
+    );
+}
+
+/// AP-08: live-capital + paper adapter is still explicitly blocked.
+///
+/// `(LiveCapital, Paper)` must remain fail-closed — capital requires external
+/// broker truth.  AP-08 must not accidentally allow the paper adapter for capital.
+#[tokio::test]
+async fn ap08_live_capital_paper_adapter_is_blocked() {
+    // new_for_test_with_mode uses default paper adapter.
+    let st = Arc::new(state::AppState::new_for_test_with_mode(
+        state::DeploymentMode::LiveCapital,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(router, req).await;
+    assert_eq!(code, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["daemon_mode"], "LIVE-CAPITAL");
+    assert_eq!(
+        json["deployment_start_allowed"], false,
+        "live-capital+paper must remain blocked after AP-08"
+    );
+    assert!(
+        json["deployment_blocker"]
+            .as_str()
+            .unwrap_or("")
+            .contains("live-capital"),
+        "blocker must name live-capital restriction"
+    );
+}
+
+/// AP-08: dev-no-token + live-capital + alpaca → POST /v1/run/start returns 403.
+///
+/// The capital token gate must fire even when readiness is allowed.
+/// ExplicitDevNoToken must be refused for capital execution runs.
+#[tokio::test]
+async fn ap08_live_capital_dev_no_token_refused() {
+    // new_for_test_with_mode_and_broker uses ExplicitDevNoToken by default.
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::LiveCapital,
+        state::BrokerKind::Alpaca,
+    ));
+    // Arm integrity so the gate stack reaches the token check.
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(router, req).await;
+    // 403 from the capital token gate.
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let json = parse_json(body);
+    assert_eq!(
+        json["fault_class"],
+        "runtime.start_refused.capital_requires_operator_token",
+        "capital token gate must fire for ExplicitDevNoToken; got fault_class: {}",
+        json["fault_class"]
+    );
+    assert_eq!(json["gate"], "operator_auth");
+}
+
+/// AP-08: live-capital with Alpaca broker uses NyseWeekdays calendar.
+///
+/// Capital mode operates on real exchange hours.  AlwaysOn must never be
+/// used for live-capital.
+#[tokio::test]
+async fn ap08_live_capital_uses_nyse_weekdays_calendar() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::LiveCapital,
+        state::BrokerKind::Alpaca,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/session")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(router, req).await;
+    assert_eq!(code, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(
+        json["calendar_spec_id"], "nyse_weekdays",
+        "live-capital must use NYSE weekday calendar, not always_on"
+    );
+}
+
+/// AP-08: live-capital with Alpaca surfaces External broker snapshot source.
+///
+/// Capital mode uses the same real Alpaca truth as shadow — snapshot source
+/// must be "external", never synthetic.
+#[tokio::test]
+async fn ap08_live_capital_surfaces_external_snapshot_source() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::LiveCapital,
+        state::BrokerKind::Alpaca,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (code, body) = call(router, req).await;
+    assert_eq!(code, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(
+        json["broker_snapshot_source"], "external",
+        "live-capital+alpaca must surface External snapshot source, not synthetic"
+    );
+    assert_eq!(
+        json["alpaca_ws_continuity"], "cold_start_unproven",
+        "live-capital+alpaca without a cursor must report cold_start_unproven"
     );
 }
 

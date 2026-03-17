@@ -549,13 +549,14 @@ impl AlpacaWsContinuityState {
 /// only change required to wire a new broker into daemon execution.
 pub(crate) enum DaemonBroker {
     Paper(LockedPaperBroker),
-    /// AP-06/AP-07: Alpaca v2 REST broker.
+    /// AP-06/AP-07/AP-08: Alpaca v2 REST broker.
     ///
     /// Credentials are read from `MQK_ALPACA_API_KEY_ID` /
     /// `MQK_ALPACA_API_SECRET_KEY` at `build_execution_orchestrator` time.
     /// Endpoint depends on deployment mode:
-    /// - `Paper` → `https://paper-api.alpaca.markets` (AP-06)
-    /// - `LiveShadow` → `https://api.alpaca.markets` (AP-07)
+    /// - `Paper`        → `https://paper-api.alpaca.markets` (AP-06)
+    /// - `LiveShadow`   → `https://api.alpaca.markets`       (AP-07)
+    /// - `LiveCapital`  → `https://api.alpaca.markets`       (AP-08)
     Alpaca(AlpacaBrokerAdapter),
 }
 
@@ -629,9 +630,9 @@ impl BrokerAdapter for DaemonBroker {
 /// |---------------|-------------------------------------------|
 /// | `Paper`       | `https://paper-api.alpaca.markets` (AP-06)|
 /// | `LiveShadow`  | `https://api.alpaca.markets`       (AP-07)|
+/// | `LiveCapital` | `https://api.alpaca.markets`       (AP-08)|
 ///
-/// `LiveCapital` is blocked by `deployment_mode_readiness` before this function
-/// is ever reached; a defensive arm is included for exhaustiveness.
+/// `Backtest` remains blocked — no Alpaca endpoint is defined for that mode.
 ///
 /// # Fail-closed behavior
 ///
@@ -650,11 +651,18 @@ fn build_daemon_broker(
             // Defensive mode check first — fail-closed for unsupported modes
             // before any credential lookup so the error is always about the mode,
             // not about missing credentials, when the mode itself is the problem.
-            // LiveCapital is guarded by deployment_mode_readiness but also here.
             let base_url = match deployment_mode {
+                // Paper → Alpaca paper-trading endpoint (AP-06).
                 DeploymentMode::Paper => "https://paper-api.alpaca.markets".to_string(),
-                DeploymentMode::LiveShadow => "https://api.alpaca.markets".to_string(),
-                DeploymentMode::LiveCapital | DeploymentMode::Backtest => {
+                // LiveShadow + LiveCapital → live endpoint (AP-07/AP-08).
+                // Both shadow and capital modes connect to real market events.
+                // The distinction between shadow and capital is a deployment
+                // policy enforced elsewhere; the broker endpoint is the same.
+                DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
+                    "https://api.alpaca.markets".to_string()
+                }
+                // Backtest is unconditionally blocked — no Alpaca endpoint exists.
+                DeploymentMode::Backtest => {
                     return Err(RuntimeLifecycleError::service_unavailable(
                         "runtime.start_refused.alpaca_mode_not_wired",
                         format!(
@@ -872,6 +880,39 @@ impl AppState {
         };
         state.calendar_spec = match mode {
             DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => CalendarSpec::NyseWeekdays,
+            DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
+        };
+        state
+    }
+
+    /// Create application state with explicit deployment mode AND broker kind for tests.
+    ///
+    /// This is the combined test helper for cases where both the mode and the broker
+    /// must differ from their defaults (e.g. `(LiveCapital, Alpaca)` for AP-08 tests).
+    /// Readiness, calendar spec, snapshot source, and WS continuity are all derived
+    /// from the supplied `(mode, kind)` pair — no silent carry-over from defaults.
+    ///
+    /// Named with `_for_test_` to signal intent; production code must derive both
+    /// values from environment via [`Self::new_with_db`].
+    pub fn new_for_test_with_mode_and_broker(mode: DeploymentMode, kind: BrokerKind) -> Self {
+        let mut state = Self::new_inner(OperatorAuthMode::ExplicitDevNoToken, None);
+        let readiness = deployment_mode_readiness(mode, Some(kind));
+        state.runtime_selection = RuntimeSelection {
+            deployment_mode: mode,
+            broker_kind: Some(kind),
+            adapter_id: kind.as_str().to_string(),
+            run_config_hash: state.runtime_selection.run_config_hash.clone(),
+            readiness,
+        };
+        state.broker_snapshot_source = BrokerSnapshotTruthSource::from_broker_kind(Some(kind));
+        state.alpaca_ws_continuity = Arc::new(RwLock::new(match kind {
+            BrokerKind::Alpaca => AlpacaWsContinuityState::ColdStartUnproven,
+            BrokerKind::Paper => AlpacaWsContinuityState::NotApplicable,
+        }));
+        state.calendar_spec = match mode {
+            DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
+                CalendarSpec::NyseWeekdays
+            }
             DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
         };
         state
@@ -1263,6 +1304,30 @@ impl AppState {
             ));
         }
 
+        // AP-08: Capital mode requires a real operator token.
+        //
+        // `ExplicitDevNoToken` is a dev/test bypass that must never be used to
+        // start a capital execution run.  `MissingTokenFailClosed` means no
+        // token is configured at all.  Only `TokenRequired` — a real operator
+        // credential — is accepted for live-capital mode.
+        //
+        // This check is intentionally placed after the integrity check so that
+        // the error sequence is:
+        //   1. deployment_mode_unproven  (readiness gate)
+        //   2. integrity_disarmed        (safety gate)
+        //   3. capital_requires_operator_token  (auth gate)
+        //   4. duplicate / DB checks
+        if self.deployment_mode() == DeploymentMode::LiveCapital
+            && !matches!(self.operator_auth, OperatorAuthMode::TokenRequired(_))
+        {
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.capital_requires_operator_token",
+                "operator_auth",
+                "live-capital mode requires a real operator token; \
+                 dev-no-token and missing-token modes are not permitted for capital execution",
+            ));
+        }
+
         if let Some(run_id) = self.active_owned_run_id().await {
             return Err(RuntimeLifecycleError::conflict(
                 "runtime.control_refusal.already_owned",
@@ -1343,6 +1408,36 @@ impl AppState {
         let mut orchestrator = self
             .build_execution_orchestrator(db.clone(), run_id)
             .await?;
+
+        // AP-08: Capital mode requires proven Alpaca WS continuity.
+        //
+        // `build_execution_orchestrator` loads the persisted cursor from the DB
+        // and writes the derived `AlpacaWsContinuityState` into `self.alpaca_ws_continuity`.
+        // For capital mode, `ColdStartUnproven` or `GapDetected` is insufficient:
+        // the operator must first run in live-shadow mode to establish a proven
+        // cursor, then transition to capital.
+        //
+        // This check runs after `build_execution_orchestrator` so that the cursor
+        // is always loaded from DB truth (not the in-memory default) before
+        // evaluating continuity.  If the check fails, the orchestrator's runtime
+        // leadership is released before returning.
+        if self.deployment_mode() == DeploymentMode::LiveCapital {
+            let continuity = self.alpaca_ws_continuity().await;
+            if !continuity.is_continuity_proven() {
+                let _ = orchestrator.release_runtime_leadership().await;
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.capital_ws_continuity_unproven",
+                    "alpaca_ws_continuity",
+                    format!(
+                        "live-capital requires proven Alpaca WS continuity before starting; \
+                         current continuity state: '{}' — \
+                         run in live-shadow mode to establish a proven cursor, \
+                         then transition to capital",
+                        continuity.as_status_str()
+                    ),
+                ));
+            }
+        }
 
         if let Err(err) = mqk_db::arm_run(&db, run_id).await {
             let _ = orchestrator.release_runtime_leadership().await;
@@ -2025,15 +2120,26 @@ mod tests {
     }
 
     #[test]
-    fn runtime_selection_fail_closes_live_capital() {
-        // live-capital is unconditionally blocked; broker kind is irrelevant.
+    fn runtime_selection_live_capital_alpaca_now_allowed() {
+        // AP-08: live-capital+alpaca is now the fully supported combination.
         let selection = runtime_selection_from_env_values(Some("live-capital"), Some("alpaca"));
         assert_eq!(selection.deployment_mode, DeploymentMode::LiveCapital);
-        // BrokerKind is parsed even when the mode is blocked.
         assert_eq!(selection.broker_kind, Some(BrokerKind::Alpaca));
+        assert!(
+            selection.readiness.start_allowed,
+            "live-capital+alpaca must be allowed after AP-08; got: {:?}",
+            selection.readiness.blocker
+        );
+        assert!(selection.readiness.blocker.is_none());
+    }
+
+    #[test]
+    fn runtime_selection_live_capital_paper_still_blocked() {
+        // live-capital+paper is explicitly blocked even after AP-08.
+        let selection = runtime_selection_from_env_values(Some("live-capital"), Some("paper"));
+        assert_eq!(selection.deployment_mode, DeploymentMode::LiveCapital);
+        assert_eq!(selection.broker_kind, Some(BrokerKind::Paper));
         assert!(!selection.readiness.start_allowed);
-        // After AP-07, the live-capital blocker says "not yet enabled",
-        // not "unsupported/unproven".
         assert!(selection
             .readiness
             .blocker
@@ -2146,18 +2252,27 @@ mod tests {
     }
 
     #[test]
-    fn build_daemon_broker_alpaca_live_capital_is_fail_closed() {
-        // AP-07: live-capital is guarded by deployment_mode_readiness; but
-        // build_daemon_broker also rejects it defensively.
+    fn build_daemon_broker_alpaca_live_capital_requires_credentials() {
+        // AP-08: live-capital+alpaca is wired; construction requires credentials.
+        // Without credentials it fails on the credential check (not the mode check).
+        if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
+            let result =
+                build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveCapital);
+            assert!(
+                result.is_ok(),
+                "Alpaca+LiveCapital must succeed when credentials are present"
+            );
+            return;
+        }
         let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveCapital);
         assert!(
             result.is_err(),
-            "Alpaca+LiveCapital must be fail-closed in build_daemon_broker"
+            "Alpaca+LiveCapital must fail when credentials are absent"
         );
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("live-capital"),
-            "error must mention live-capital; got: {err_msg}"
+            err_msg.contains(ALPACA_API_KEY_ID_ENV),
+            "error must mention missing env var; got: {err_msg}"
         );
     }
 
@@ -2212,17 +2327,21 @@ mod tests {
     }
 
     #[test]
-    fn ap06_live_capital_alpaca_still_blocked() {
-        // live-capital must remain unconditionally fail-closed.
+    fn ap06_live_capital_alpaca_was_blocked_now_allowed_by_ap08() {
+        // AP-06 originally blocked live-capital+alpaca.
+        // AP-08 explicitly unlocks it — verify the readiness gate now allows it
+        // and that no blocker message is returned.
         let readiness =
             deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Alpaca));
         assert!(
-            !readiness.start_allowed,
-            "live-capital+alpaca must remain fail-closed"
+            readiness.start_allowed,
+            "live-capital+alpaca must be allowed after AP-08; got: {:?}",
+            readiness.blocker
         );
         assert!(
-            readiness.blocker.is_some(),
-            "live-capital+alpaca must carry a blocker message"
+            readiness.blocker.is_none(),
+            "allowed combination must carry no blocker message; got: {:?}",
+            readiness.blocker
         );
     }
 
@@ -2297,20 +2416,21 @@ mod tests {
     }
 
     #[test]
-    fn ap07_live_capital_alpaca_still_blocked() {
-        // live-capital must remain unconditionally blocked even after AP-07.
+    fn ap07_live_capital_alpaca_was_blocked_now_allowed_by_ap08() {
+        // AP-07 kept live-capital+alpaca blocked; AP-08 now explicitly unlocks it.
+        // This test was previously an AP-07 regression guard; now it documents
+        // the AP-08 outcome: (LiveCapital, Alpaca) is an allowed combination.
         let readiness =
             deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Alpaca));
         assert!(
-            !readiness.start_allowed,
-            "live-capital+alpaca must remain fail-closed after AP-07"
+            readiness.start_allowed,
+            "live-capital+alpaca must be allowed after AP-08; got: {:?}",
+            readiness.blocker
         );
-        let blocker = readiness
-            .blocker
-            .expect("live-capital must carry a blocker message");
         assert!(
-            blocker.contains("live-capital"),
-            "blocker must name live-capital; got: {blocker}"
+            readiness.blocker.is_none(),
+            "allowed combination must carry no blocker; got: {:?}",
+            readiness.blocker
         );
     }
 
@@ -2368,6 +2488,133 @@ mod tests {
             BrokerSnapshotTruthSource::External,
             "live-shadow+alpaca must declare External snapshot source"
         );
+    }
+
+    // ── AP-08 readiness gate tests ────────────────────────────────────────
+
+    #[test]
+    fn ap08_live_capital_alpaca_readiness_is_allowed() {
+        // AP-08: (LiveCapital, Alpaca) is the explicitly supported capital combination.
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Alpaca));
+        assert!(
+            readiness.start_allowed,
+            "live-capital+alpaca must be allowed after AP-08; got: {:?}",
+            readiness.blocker
+        );
+        assert!(readiness.blocker.is_none(), "no blocker expected for allowed pair");
+    }
+
+    #[test]
+    fn ap08_live_capital_paper_is_explicitly_blocked() {
+        // Paper adapter is unconditionally blocked for live-capital: capital requires
+        // real external broker truth.  The message must name "live-capital".
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Paper));
+        assert!(
+            !readiness.start_allowed,
+            "live-capital+paper must remain fail-closed after AP-08"
+        );
+        let blocker = readiness
+            .blocker
+            .expect("live-capital+paper must carry a blocker message");
+        assert!(
+            blocker.contains("live-capital"),
+            "blocker must name the live-capital restriction; got: {blocker}"
+        );
+    }
+
+    #[test]
+    fn ap08_live_capital_unrecognised_adapter_is_blocked() {
+        // None broker_kind (unrecognised adapter string) is always blocked for
+        // live-capital — the mode requires a recognised external adapter.
+        let readiness = deployment_mode_readiness(DeploymentMode::LiveCapital, None);
+        assert!(
+            !readiness.start_allowed,
+            "live-capital+None must be blocked"
+        );
+        assert!(readiness.blocker.is_some(), "must carry a blocker message");
+    }
+
+    #[test]
+    fn ap08_runtime_selection_live_capital_alpaca_start_allowed() {
+        // End-to-end: runtime_selection_from_env_values with live-capital+alpaca
+        // must produce a RuntimeSelection with start_allowed=true.
+        let sel = runtime_selection_from_env_values(Some("live-capital"), Some("alpaca"));
+        assert_eq!(sel.deployment_mode, DeploymentMode::LiveCapital);
+        assert_eq!(sel.broker_kind, Some(BrokerKind::Alpaca));
+        assert!(
+            sel.readiness.start_allowed,
+            "live-capital+alpaca RuntimeSelection must be startable; got: {:?}",
+            sel.readiness.blocker
+        );
+        assert!(sel.readiness.blocker.is_none(), "no blocker expected");
+    }
+
+    #[test]
+    fn ap08_capital_dev_no_token_is_blocked_by_start_gate() {
+        // The AP-08 capital token gate must refuse start_execution_runtime when
+        // operator_auth is ExplicitDevNoToken.  This is enforced inside
+        // start_execution_runtime, not at the readiness layer, so we verify the
+        // gate logic directly via the auth mode predicate.
+        //
+        // The gate condition: deployment_mode == LiveCapital AND
+        //   !matches!(operator_auth, TokenRequired(_))
+        // should be true for ExplicitDevNoToken.
+        let mode = DeploymentMode::LiveCapital;
+        let auth = OperatorAuthMode::ExplicitDevNoToken;
+        let gate_fires =
+            mode == DeploymentMode::LiveCapital && !matches!(auth, OperatorAuthMode::TokenRequired(_));
+        assert!(gate_fires, "dev-no-token must trigger capital token gate");
+
+        // Positive: TokenRequired must NOT trigger the gate.
+        let auth_token = OperatorAuthMode::TokenRequired("real-token".to_string());
+        let gate_fires_for_token = mode == DeploymentMode::LiveCapital
+            && !matches!(auth_token, OperatorAuthMode::TokenRequired(_));
+        assert!(
+            !gate_fires_for_token,
+            "TokenRequired must not trigger capital token gate"
+        );
+
+        // MissingTokenFailClosed also triggers the gate.
+        let auth_missing = OperatorAuthMode::MissingTokenFailClosed;
+        let gate_fires_for_missing = mode == DeploymentMode::LiveCapital
+            && !matches!(auth_missing, OperatorAuthMode::TokenRequired(_));
+        assert!(
+            gate_fires_for_missing,
+            "MissingTokenFailClosed must also trigger capital token gate"
+        );
+    }
+
+    #[test]
+    fn ap08_calendar_spec_for_live_capital_is_nyse_weekdays() {
+        // live-capital must use the NYSE weekday calendar — same as live-shadow.
+        // Capital mode is never "always-on"; exchange hours must be honoured.
+        let state = AppState::new_for_test_with_mode(DeploymentMode::LiveCapital);
+        assert_eq!(
+            state.calendar_spec(),
+            mqk_integrity::CalendarSpec::NyseWeekdays,
+            "live-capital must use NyseWeekdays calendar for honest session truth"
+        );
+    }
+
+    #[test]
+    fn ap08_live_shadow_unchanged_after_ap08() {
+        // Regression: AP-08 must not regress live-shadow+alpaca.
+        let shadow_alpaca =
+            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Alpaca));
+        assert!(
+            shadow_alpaca.start_allowed,
+            "live-shadow+alpaca must remain allowed after AP-08"
+        );
+        assert!(shadow_alpaca.blocker.is_none(), "no blocker expected");
+
+        // Paper+Paper and Paper+Alpaca also unchanged.
+        let pp = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
+        assert!(pp.start_allowed, "paper+paper must remain allowed after AP-08");
+
+        let pa = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
+        assert!(pa.start_allowed, "paper+alpaca must remain allowed after AP-08");
     }
 
     #[test]
@@ -2577,12 +2824,14 @@ fn parse_deployment_mode(raw: Option<&str>) -> Option<DeploymentMode> {
 ///   Paper + Paper        →  allowed (AP-02: in-process synthetic fills)
 ///   Paper + Alpaca       →  allowed (AP-06: paper endpoint, no real capital)
 ///   LiveShadow + Alpaca  →  allowed (AP-07: live endpoint, shadow policy)
+///   LiveCapital + Alpaca →  allowed (AP-08: live endpoint, capital policy)
 ///
 /// All other combinations remain fail-closed until explicitly wired and proven.
 ///
 /// # Fail-closed invariants
 ///
-/// - `LiveCapital` is unconditionally blocked for all broker kinds.
+/// - `LiveCapital + Paper` is explicitly blocked: capital requires external broker.
+/// - `LiveCapital + None` is blocked: unrecognised adapter.
 /// - `Backtest` is unconditionally blocked.
 /// - `LiveShadow + Paper` is explicitly blocked: shadow mode requires an
 ///   external broker; the paper fill engine cannot provide real market truth.
@@ -2651,16 +2900,39 @@ fn deployment_mode_readiness(
                     .to_string(),
             ),
         },
-        // ── LiveCapital: unconditionally blocked ──────────────────────────
+        // ── LiveCapital + Alpaca (AP-08) ──────────────────────────────────
         //
-        // Live-capital is not yet wired.  This arm must remain explicit and
-        // never be collapsed into a catch-all.  Enabling live-capital requires
-        // a dedicated patch with its own proven test suite.
-        (DeploymentMode::LiveCapital, _) => DeploymentReadiness {
+        // Capital deployment policy; broker truth from Alpaca live endpoint.
+        // Provides real capital semantics with real external broker truth.
+        // Credentials validated at `build_daemon_broker` time.
+        //
+        // Additional runtime gates (dev-token check + WS continuity proven)
+        // are enforced in `start_execution_runtime` — these are stricter than
+        // live-shadow and cannot be encoded in the static readiness gate.
+        (DeploymentMode::LiveCapital, Some(BrokerKind::Alpaca)) => DeploymentReadiness {
+            start_allowed: true,
+            blocker: None,
+        },
+        // ── LiveCapital + Paper: explicitly blocked ───────────────────────
+        //
+        // Capital mode requires real external broker truth.  The paper fill
+        // engine is a synthetic in-process adapter; it cannot provide the
+        // real market state required for capital execution.
+        (DeploymentMode::LiveCapital, Some(BrokerKind::Paper)) => DeploymentReadiness {
             start_allowed: false,
             blocker: Some(
-                "deployment mode 'live-capital' is not yet enabled; \
-                 refusing start fail-closed"
+                "live-capital requires an external broker adapter; \
+                 the paper fill engine cannot provide real market truth for capital execution — \
+                 set MQK_DAEMON_ADAPTER_ID=alpaca"
+                    .to_string(),
+            ),
+        },
+        // ── LiveCapital + unrecognised adapter ────────────────────────────
+        (DeploymentMode::LiveCapital, None) => DeploymentReadiness {
+            start_allowed: false,
+            blocker: Some(
+                "live-capital requires an external broker adapter; \
+                 set MQK_DAEMON_ADAPTER_ID=alpaca"
                     .to_string(),
             ),
         },
