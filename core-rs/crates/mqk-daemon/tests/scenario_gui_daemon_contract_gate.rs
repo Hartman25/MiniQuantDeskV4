@@ -773,6 +773,7 @@ async fn gui_contract_execution_orders_200_array_with_injected_snapshot() {
             positions: vec![],
         },
         system_block_state: None,
+        recent_risk_denials: vec![],
         snapshot_at_utc: DateTime::from_timestamp(0, 0).expect("unix epoch is valid"),
     };
     *st.execution_snapshot.write().await = Some(snap);
@@ -1249,12 +1250,10 @@ async fn gui_contract_risk_denials_no_snapshot() {
 
 #[tokio::test]
 async fn gui_contract_risk_denials_active_snapshot() {
-    // When an execution snapshot is injected, /api/v1/risk/denials must return
-    // HTTP 200 with truth_state = "not_wired".
-    // The execution loop running does not mean denial detail truth is available:
-    // AppState has no denial accumulator, ring buffer, or gate-rejection feed.
-    // truth_state = "not_wired" keeps the GUI fail-closed; it must NOT be "active"
-    // (which would falsely assert authoritative zero denials).
+    // When an execution snapshot with an empty denial ring buffer is injected,
+    // /api/v1/risk/denials must return HTTP 200 with truth_state = "active" and
+    // denials = [].  This is authoritative: the execution loop is running and the
+    // risk gate has not denied any order.  The snapshot_at_utc must be non-null.
     use chrono::DateTime;
     use mqk_runtime::observability::{ExecutionSnapshot, PortfolioSnapshot};
 
@@ -1263,7 +1262,7 @@ async fn gui_contract_risk_denials_active_snapshot() {
     ));
     let router = routes::build_router(Arc::clone(&st));
 
-    // Inject a minimal execution snapshot: loop is running.
+    // Inject a minimal execution snapshot: loop is running, no denials.
     let snap = ExecutionSnapshot {
         run_id: None,
         active_orders: vec![],
@@ -1275,6 +1274,7 @@ async fn gui_contract_risk_denials_active_snapshot() {
             positions: vec![],
         },
         system_block_state: None,
+        recent_risk_denials: vec![],
         snapshot_at_utc: DateTime::from_timestamp(0, 0).expect("unix epoch is valid"),
     };
     *st.execution_snapshot.write().await = Some(snap);
@@ -1293,16 +1293,110 @@ async fn gui_contract_risk_denials_active_snapshot() {
     let json = parse_json(body);
     assert_eq!(
         json["truth_state"].as_str(),
-        Some("not_wired"),
-        "truth_state must be not_wired when execution_snapshot is present but no denial accumulator exists; got: {json}"
+        Some("active"),
+        "truth_state must be active when execution_snapshot is present; got: {json}"
     );
     assert!(
         json["denials"].as_array().is_some_and(|v| v.is_empty()),
-        "denials must be empty when not_wired; got: {json}"
+        "denials must be empty array when ring buffer is empty (authoritative zero denials); got: {json}"
     );
     assert!(
-        json["snapshot_at_utc"].is_null(),
-        "snapshot_at_utc must be null when truth_state is not_wired (no authoritative source); got: {json}"
+        !json["snapshot_at_utc"].is_null(),
+        "snapshot_at_utc must be non-null when truth_state is active; got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn gui_contract_risk_denials_real_row_appears() {
+    // Proves that a real denial record in recent_risk_denials propagates through
+    // the route as a correctly serialized denial row.
+    // This is the key semantic test: the route must not suppress or transform
+    // denial records; what the orchestrator captures must reach the GUI.
+    use chrono::DateTime;
+    use mqk_runtime::observability::{ExecutionSnapshot, PortfolioSnapshot, RiskDenialRecord};
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    // Inject a snapshot with one real denial record (as the orchestrator would
+    // produce when RiskGate::evaluate_gate() returns RiskDecision::Deny).
+    let denial_at = DateTime::from_timestamp(1_700_000_100, 0).expect("valid unix timestamp");
+    let snap = ExecutionSnapshot {
+        run_id: None,
+        active_orders: vec![],
+        pending_outbox: vec![],
+        recent_inbox_events: vec![],
+        portfolio: PortfolioSnapshot {
+            cash_micros: 0,
+            realized_pnl_micros: 0,
+            positions: vec![],
+        },
+        system_block_state: None,
+        recent_risk_denials: vec![RiskDenialRecord {
+            id: "1700000100000000:POSITION_LIMIT_EXCEEDED".to_string(),
+            denied_at_utc: denial_at,
+            rule: "POSITION_LIMIT_EXCEEDED".to_string(),
+            message: "Order denied — resulting position would exceed limit".to_string(),
+            symbol: Some("AAPL".to_string()),
+            requested_qty: Some(500),
+            limit: Some(200),
+            severity: "critical".to_string(),
+        }],
+        snapshot_at_utc: DateTime::from_timestamp(1_700_000_200, 0).expect("valid unix timestamp"),
+    };
+    *st.execution_snapshot.write().await = Some(snap);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/denials")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    assert_eq!(json["truth_state"].as_str(), Some("active"));
+    let rows = json["denials"]
+        .as_array()
+        .expect("denials must be an array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "one denial record must produce one denial row"
+    );
+
+    let row = &rows[0];
+    assert_eq!(
+        row["id"].as_str(),
+        Some("1700000100000000:POSITION_LIMIT_EXCEEDED"),
+        "row id must match the record id; got: {row}"
+    );
+    assert_eq!(
+        row["rule"].as_str(),
+        Some("POSITION_LIMIT_EXCEEDED"),
+        "row rule must match the record rule; got: {row}"
+    );
+    assert_eq!(
+        row["symbol"].as_str(),
+        Some("AAPL"),
+        "row symbol must match the record symbol; got: {row}"
+    );
+    assert_eq!(
+        row["severity"].as_str(),
+        Some("critical"),
+        "row severity must match the record severity; got: {row}"
+    );
+    assert!(
+        row["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("position")),
+        "row message must contain the human-readable denial reason; got: {row}"
+    );
+    assert!(
+        !row["at"].as_str().unwrap_or("").is_empty(),
+        "row at must be a non-empty RFC3339 timestamp; got: {row}"
     );
 }
 
@@ -1367,6 +1461,7 @@ async fn gui_contract_reconcile_mismatches_active_with_authoritative_diff_rows()
             positions: vec![],
         },
         system_block_state: None,
+        recent_risk_denials: vec![],
         snapshot_at_utc: DateTime::from_timestamp(1_700_000_000, 0).expect("valid unix timestamp"),
     };
     *st.execution_snapshot.write().await = Some(execution_snapshot);

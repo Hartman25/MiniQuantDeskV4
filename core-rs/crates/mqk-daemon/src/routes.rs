@@ -39,7 +39,7 @@ use crate::{
         OperatorTimelineRow, OpsActionRequest, PortfolioFillRow, PortfolioFillsResponse,
         PortfolioOpenOrderRow, PortfolioOpenOrdersResponse, PortfolioPositionRow,
         PortfolioPositionsResponse, PortfolioSummaryResponse, PreflightStatusResponse,
-        ReconcileMismatchRow, ReconcileMismatchesResponse, ReconcileSummaryResponse,
+        ReconcileMismatchRow, ReconcileMismatchesResponse, ReconcileSummaryResponse, RiskDenialRow,
         RiskDenialsResponse, RiskSummaryResponse, RuntimeErrorResponse,
         RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
         StrategySummaryRow, StrategySuppressionRow, SystemMetadataResponse, SystemStatusResponse,
@@ -1626,30 +1626,21 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
 
 /// GET /api/v1/risk/denials — canonical risk denial truth surface.
 ///
-/// Returns a structured `RiskDenialsResponse` with one of three truth states:
+/// Returns a structured `RiskDenialsResponse` with one of two truth states:
 ///
 /// - `truth_state: "no_snapshot"` — execution loop has not started; no snapshot
 ///   exists.  Denial truth is entirely unavailable.  GUI IIFE emits ok:false →
-///   endpoint → missingEndpoints → risk panel blocks with `no_snapshot`.
+///   endpoint → missingEndpoints → risk panel blocks.
 ///
-/// - `truth_state: "not_wired"` — execution loop is running (snapshot present)
-///   but the denial accumulator has not been implemented yet.  There is no ring
-///   buffer, no persistent denial table, and no structured gate-rejection feed
-///   in `AppState`.  Returning `denials: []` here would falsely claim "zero
-///   denials" when the system is actively enforcing risk rules.  GUI IIFE emits
-///   ok:false → endpoint → missingEndpoints → risk panel stays fail-closed.
-///   This state must remain until a real denial source is wired and proven.
-///
-/// - `truth_state: "active"` — RESERVED for future use once a denial
-///   accumulator is wired into daemon state and proven authoritative.  Only
-///   then may `denials: []` be interpreted as genuinely zero denied orders.
-///
-/// `truth_state: "active"` is intentionally NOT returned by this handler until
-/// denial capture is implemented (see: RuntimeRiskGate rejection queue).
+/// - `truth_state: "active"` — execution loop is running; `denials` is
+///   authoritative.  `denials: []` means the risk gate has genuinely not denied
+///   any order since the loop started.  Denial rows are populated from the
+///   orchestrator's bounded ring buffer (`ExecutionSnapshot::recent_risk_denials`)
+///   which is fed only by real `RiskGate::evaluate_gate()` denials during ticks.
 pub(crate) async fn risk_denials(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.execution_snapshot.read().await.clone();
 
-    let Some(_snapshot) = snap else {
+    let Some(snapshot) = snap else {
         // Execution loop has not started — denial truth is entirely absent.
         return (
             StatusCode::OK,
@@ -1662,18 +1653,30 @@ pub(crate) async fn risk_denials(State(st): State<Arc<AppState>>) -> impl IntoRe
             .into_response();
     };
 
-    // Execution loop is running but the denial accumulator is not wired.
-    // AppState carries no denial ring buffer, rejection record, or gate-event
-    // feed.  Claiming "active" + [] would assert authoritative zero denials
-    // while risk rules are enforced but rejections are silently discarded.
-    // "not_wired" signals the GUI to remain fail-closed until denial capture
-    // is implemented.
+    // Execution loop is running.  Map denial records from the orchestrator's
+    // ring buffer to API rows.  `strategy_id` is not available in the risk gate
+    // path (the gate sees the order, not the strategy); left empty rather than
+    // fabricated.
+    let denials = snapshot
+        .recent_risk_denials
+        .iter()
+        .map(|r| RiskDenialRow {
+            id: r.id.clone(),
+            at: r.denied_at_utc.to_rfc3339(),
+            strategy_id: String::new(),
+            symbol: r.symbol.clone().unwrap_or_default(),
+            rule: r.rule.clone(),
+            message: r.message.clone(),
+            severity: r.severity.clone(),
+        })
+        .collect();
+
     (
         StatusCode::OK,
         Json(RiskDenialsResponse {
-            truth_state: "not_wired".to_string(),
-            snapshot_at_utc: None,
-            denials: vec![],
+            truth_state: "active".to_string(),
+            snapshot_at_utc: Some(snapshot.snapshot_at_utc.to_rfc3339()),
+            denials,
         }),
     )
         .into_response()

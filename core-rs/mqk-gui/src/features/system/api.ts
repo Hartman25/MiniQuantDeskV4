@@ -148,11 +148,11 @@ interface PortfolioFillsResponse {
 //
 // truth_state values:
 //   "no_snapshot"  — execution loop not running; denial truth entirely absent.
-//   "not_wired"    — execution loop running but denial accumulator not yet
-//                    implemented; returning [] would falsely claim zero denials.
-//   "active"       — RESERVED: denial accumulator is wired and authoritative;
-//                    [] then truly means zero denied orders this session.
-//                    Not returned by the daemon until denial capture is proven.
+//                    GUI IIFE emits ok:false → endpoint in missingEndpoints → panel blocks.
+//   "active"       — execution loop running; denial accumulator wired and authoritative.
+//                    denials: [] truly means zero denials since loop start.
+//   "not_wired"    — defensive guard only; not returned by current daemon but handled
+//                    fail-closed in case of future partial-wiring edge cases.
 interface RiskDenialsResponse {
   truth_state: "active" | "no_snapshot" | "not_wired";
   snapshot_at_utc: string | null;

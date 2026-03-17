@@ -84,6 +84,35 @@ pub struct PortfolioSnapshot {
     pub positions: Vec<PositionSnapshot>,
 }
 
+/// One structured record of a risk gate denial captured during a tick.
+///
+/// Populated by the orchestrator when `RiskGate::evaluate_gate()` returns
+/// `RiskDecision::Deny`.  Fields map directly from `RiskDenial.reason` and
+/// `RiskDenial.evidence`; no values are inferred or fabricated.
+///
+/// `strategy_id` is not available from the risk gate path — the gate operates
+/// on the order itself, not on the strategy that generated it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskDenialRecord {
+    /// Stable display ID: `"{denied_at_utc_micros}:{rule_code}"`.
+    /// Unique for all practical purposes within a session.
+    pub id: String,
+    /// UTC timestamp when the denial was captured.
+    pub denied_at_utc: DateTime<Utc>,
+    /// Machine-readable rule code, e.g. `"POSITION_LIMIT_EXCEEDED"`.
+    pub rule: String,
+    /// Human-readable one-line message from `RiskReason::as_summary()`.
+    pub message: String,
+    /// Symbol from the order being submitted when the denial fired.
+    pub symbol: Option<String>,
+    /// Requested order quantity, if populated by the risk rule.
+    pub requested_qty: Option<i64>,
+    /// Configured limit that was breached, if populated by the risk rule.
+    pub limit: Option<i64>,
+    /// Always `"critical"` for risk gate denials (all variants block execution).
+    pub severity: String,
+}
+
 /// Structured description of why the system is currently blocked, if it is.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemBlockState {
@@ -113,6 +142,13 @@ pub struct ExecutionSnapshot {
     pub portfolio: PortfolioSnapshot,
     /// Present only when the system is in a blocked / halted state.
     pub system_block_state: Option<SystemBlockState>,
+    /// Risk gate denials captured during this session.
+    ///
+    /// Populated from the orchestrator's bounded ring buffer; empty only when
+    /// the risk gate has not denied any order since the execution loop started.
+    /// This is authoritative: `[]` means genuinely zero denials this session,
+    /// not "source not wired."  Overlaid by the orchestrator after DB snapshot.
+    pub recent_risk_denials: Vec<RiskDenialRecord>,
     /// UTC timestamp at which this snapshot was taken.
     pub snapshot_at_utc: DateTime<Utc>,
 }
@@ -297,6 +333,8 @@ pub async fn collect_db_snapshot(
             positions: vec![],
         },
         system_block_state,
+        // Overlaid by the caller with the orchestrator's denial ring buffer.
+        recent_risk_denials: vec![],
         snapshot_at_utc: now,
     })
 }

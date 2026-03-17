@@ -715,6 +715,7 @@ async fn api_execution_summary_derives_counts_from_execution_snapshot() {
                 positions: vec![],
             },
             system_block_state: None,
+            recent_risk_denials: vec![],
             snapshot_at_utc: chrono::Utc::now(),
         });
     }

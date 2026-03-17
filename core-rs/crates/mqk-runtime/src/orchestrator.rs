@@ -26,7 +26,7 @@ use mqk_reconcile::{
 };
 use sqlx::types::chrono;
 use sqlx::PgPool;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use uuid::Uuid;
 /// Production wall-clock time source.
 ///
@@ -39,6 +39,11 @@ impl TimeSource for WallClock {
     }
 }
 const RUNTIME_LEASE_TTL_SECS: i64 = 15;
+/// Maximum entries in the in-memory risk denial ring buffer.
+///
+/// Older entries are evicted when the cap is reached.  The buffer is
+/// bounded to prevent unbounded memory growth in long-running sessions.
+const DENIAL_RING_BUFFER_CAP: usize = 100;
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{
     BrokerAdapter, BrokerError, BrokerEvent, BrokerGateway, BrokerOrderMap, BrokerSubmitRequest,
@@ -112,6 +117,14 @@ where
     /// Surfaced through the B4 observability snapshot as `SystemBlockState`
     /// with `reason_code = denial.reason_code()`.
     last_risk_denial: Option<mqk_execution::RiskDenial>,
+    /// Bounded ring buffer of recent risk gate denial records.
+    ///
+    /// Capped at [`DENIAL_RING_BUFFER_CAP`] entries; oldest entry evicted when
+    /// cap is reached.  Populated at every `RiskGate::evaluate_gate()` denial.
+    /// Surfaced through the B4 observability snapshot as
+    /// `ExecutionSnapshot::recent_risk_denials`.  Empty only when the gate has
+    /// not denied any order since the execution loop started.
+    recent_denials: VecDeque<crate::observability::RiskDenialRecord>,
 }
 #[derive(Debug)]
 enum MonotonicReconcileError {
@@ -183,6 +196,7 @@ where
             runtime_lease_ttl_secs: RUNTIME_LEASE_TTL_SECS,
             reconcile_watermark: SnapshotWatermark::new(),
             last_risk_denial: None,
+            recent_denials: VecDeque::new(),
         }
     }
     /// Execute one orchestrator tick.
@@ -344,6 +358,31 @@ where
                             // diagnostics snapshot. The denial is stored in-memory
                             // and overlaid by snapshot() onto SystemBlockState.
                             self.last_risk_denial = Some(denial.clone());
+                            // Accumulate a structured denial record in the ring
+                            // buffer.  This is the authoritative denial truth
+                            // source for /api/v1/risk/denials.  `symbol` is taken
+                            // from the order being submitted (always present);
+                            // `requested_qty` / `limit` are taken from evidence
+                            // when the risk rule populates them.
+                            let denied_at = self.time_source.now_utc();
+                            let record = crate::observability::RiskDenialRecord {
+                                id: format!(
+                                    "{}:{}",
+                                    denied_at.timestamp_micros(),
+                                    denial.reason_code()
+                                ),
+                                denied_at_utc: denied_at,
+                                rule: denial.reason_code().to_string(),
+                                message: denial.reason_summary().to_string(),
+                                symbol: Some(symbol.clone()),
+                                requested_qty: denial.evidence.requested_qty,
+                                limit: denial.evidence.limit,
+                                severity: "critical".to_string(),
+                            };
+                            if self.recent_denials.len() >= DENIAL_RING_BUFFER_CAP {
+                                self.recent_denials.pop_front();
+                            }
+                            self.recent_denials.push_back(record);
                             mqk_db::persist_risk_block_state(
                                 &self.pool,
                                 true,
@@ -656,10 +695,15 @@ where
         let portfolio = crate::observability::build_portfolio_snapshot(&self.portfolio);
         // B2: extract before await so no borrow of self crosses the suspension point.
         let last_risk_denial = self.last_risk_denial.clone();
+        // Denial ring buffer: snapshot is a Vec so it is cheap to clone for the
+        // observer; the VecDeque is not moved.
+        let recent_denials: Vec<crate::observability::RiskDenialRecord> =
+            self.recent_denials.iter().cloned().collect();
         // `self` is no longer borrowed here - safe to `.await` without Sync.
         let mut snap = crate::observability::collect_db_snapshot(&pool, run_id, now).await?;
         snap.active_orders = active_orders;
         snap.portfolio = portfolio;
+        snap.recent_risk_denials = recent_denials;
         // B2: overlay risk denial if no higher-priority block state already exists.
         //
         // Priority (matches gateway evaluation order):

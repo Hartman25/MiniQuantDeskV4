@@ -228,6 +228,7 @@ async fn daemon_state() -> Arc<state::AppState> {
                 positions: vec![],
             },
             system_block_state: None,
+            recent_risk_denials: vec![],
             snapshot_at_utc: chrono::Utc::now(),
         });
     }

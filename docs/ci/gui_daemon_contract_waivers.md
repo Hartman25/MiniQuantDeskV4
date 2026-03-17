@@ -36,11 +36,11 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
 ### Risk and reconcile summaries
 
 - `/api/v1/risk/summary` — shape check (gross_exposure, net_exposure, concentration_pct, kill_switch_active)
-- `/api/v1/risk/denials` — structured wrapper (`truth_state`, `snapshot_at_utc`, `denials`):
+- `/api/v1/risk/denials` — structured wrapper (`truth_state`, `snapshot_at_utc`, `denials`); denial truth is now wired:
   - `truth_state: "no_snapshot"` + empty denials + null `snapshot_at_utc` when no execution snapshot (loop not running); GUI IIFE emits ok:false → endpoint in `missingEndpoints` → `isMissingPanelTruth` fires → risk panel blocks
-  - `truth_state: "not_wired"` + empty denials + null `snapshot_at_utc` when execution loop is running but no denial accumulator is implemented in `AppState`; GUI IIFE treats as failed probe → endpoint in `missingEndpoints` → risk panel stays fail-closed; empty denial table is NOT rendered as authoritative zero
-  - `truth_state: "active"` is intentionally NOT returned until a real denial accumulator (ring buffer or DB table) is wired and proven — reserved for future Endstate B
-  - Tests: `gui_contract_risk_denials_no_snapshot` (loop absent → `no_snapshot`) + `gui_contract_risk_denials_active_snapshot` (loop running → `not_wired`, GUI blocked)
+  - `truth_state: "active"` + authoritative `denials` array + non-null `snapshot_at_utc` when execution loop is running; rows are populated from the orchestrator's bounded denial ring buffer (`ExecutionSnapshot::recent_risk_denials`), fed only by real `RiskGate::evaluate_gate()` denials; `denials: []` truly means zero denials this session
+  - `"not_wired"` is no longer returned; kept as a defensive case in the GUI IIFE
+  - Tests: `gui_contract_risk_denials_no_snapshot` (loop absent → `no_snapshot`) + `gui_contract_risk_denials_active_snapshot` (loop running, empty buffer → `active` + empty rows + non-null timestamp) + `gui_contract_risk_denials_real_row_appears` (snapshot with one `RiskDenialRecord` → route serializes row with correct id/rule/symbol/severity/message/at)
 - `/api/v1/reconcile/status` — shape check (status, last_run_at, mismatched_positions, unmatched_broker_events)
 - `/api/v1/reconcile/mismatches` — structured wrapper (`truth_state`, `snapshot_at_utc`, `rows`):
   - `truth_state: "no_snapshot"` + empty rows + null `snapshot_at_utc` when reconcile detail truth is not authoritative yet (no reconcile snapshot, no broker snapshot, or no execution snapshot)
