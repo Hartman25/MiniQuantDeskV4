@@ -567,6 +567,101 @@ async fn md_ingest_provider_detects_1d_weekday_gaps() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Scenario 9 — multi-chunk bars sorted ascending before ingest: all accepted
+// ---------------------------------------------------------------------------
+
+/// Validates that bars collected from two separate provider fetch chunks and then
+/// sorted ascending by end_ts before ingest are all accepted without out-of-order
+/// rejections.
+///
+/// This proves the correctness of the chunk-fetch → sort → ingest pipeline used by
+/// `md ingest-provider`: the DB layer requires ascending per-symbol order, and the
+/// CLI sorts across chunk boundaries before calling this function.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
+async fn multi_chunk_bars_sorted_ascending_all_accepted() -> Result<()> {
+    let url = match std::env::var(mqk_db::ENV_DB_URL) {
+        Ok(v) => v,
+        Err(_) => {
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
+        }
+    };
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await?;
+
+    mqk_db::migrate(&pool).await?;
+
+    // Simulate two fetch chunks for symbol "CHK":
+    //   chunk 1 covers ts 1_000_000, 1_086_400, 1_172_800  (3 days)
+    //   chunk 2 covers ts 1_259_200, 1_345_600, 1_432_000  (3 more days)
+    // The chunks are concatenated and sorted ascending — exactly as the CLI does.
+    let mut chunk1 = vec![
+        bar("CHK", "1D", 1_000_000, "10", "11", "9", "10", 100, true),
+        bar("CHK", "1D", 1_086_400, "10", "12", "9", "11", 110, true),
+        bar("CHK", "1D", 1_172_800, "11", "13", "10", "12", 120, true),
+    ];
+    let chunk2 = vec![
+        bar("CHK", "1D", 1_259_200, "12", "14", "11", "13", 130, true),
+        bar("CHK", "1D", 1_345_600, "13", "15", "12", "14", 140, true),
+        bar("CHK", "1D", 1_432_000, "14", "16", "13", "15", 150, true),
+    ];
+    chunk1.extend(chunk2);
+
+    // Sort ascending by (symbol, end_ts) — the CLI does this after collecting all chunks.
+    chunk1.sort_by(|a, b| {
+        a.symbol
+            .cmp(&b.symbol)
+            .then_with(|| a.end_ts.cmp(&b.end_ts))
+    });
+
+    let ingest_id = Uuid::new_v4();
+    let res = mqk_db::ingest_provider_bars_to_md_bars(
+        &pool,
+        mqk_db::IngestProviderBarsArgs {
+            source: "mock_provider".to_string(),
+            timeframe: "1D".to_string(),
+            ingest_id,
+            bars: chunk1,
+        },
+    )
+    .await?;
+
+    // All 6 bars must be accepted — the sort eliminated any cross-chunk ordering issues.
+    assert_eq!(res.report.coverage.rows_read, 6, "6 bars submitted");
+    assert_eq!(
+        res.report.coverage.rows_ok, 6,
+        "all 6 bars must be accepted after ascending sort across chunk boundary"
+    );
+    assert_eq!(
+        res.report.coverage.rows_rejected, 0,
+        "no rejections expected"
+    );
+
+    let chk_stats = res
+        .report
+        .per_symbol_timeframe
+        .get("CHK|1D")
+        .expect("CHK|1D group missing from report");
+    assert_eq!(chk_stats.out_of_order, 0, "zero out-of-order after sort");
+    assert_eq!(chk_stats.duplicates_in_batch, 0, "no duplicates");
+    assert_eq!(chk_stats.ohlc_sanity_violations, 0);
+    assert_eq!(chk_stats.negative_or_invalid_volume, 0);
+
+    // Verify 6 rows exist in DB for CHK.
+    let (cnt,): (i64,) = sqlx::query_as(
+        "select count(*)::bigint from md_bars where symbol = 'CHK' and timeframe = '1D'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(cnt >= 6, "expected >=6 CHK md_bars rows, got {cnt}");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Scenario 8 — wrong timeframe rows are rejected
 // ---------------------------------------------------------------------------
 
