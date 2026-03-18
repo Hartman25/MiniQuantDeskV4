@@ -482,6 +482,13 @@ mod db_tests {
         Ok(())
     }
 
+    async fn cleanup_runtime_lease(pool: &PgPool) -> Result<()> {
+        sqlx::query("delete from runtime_leader_lease where id = 1")
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
     async fn seed_running_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
         mqk_db::insert_run(
             pool,
@@ -523,7 +530,7 @@ mod db_tests {
             None,
             FixedClock::new(Utc::now()),
             Box::new(mqk_reconcile::LocalSnapshot::empty),
-            Box::new(mqk_reconcile::BrokerSnapshot::empty),
+            Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
         )
     }
 
@@ -558,6 +565,7 @@ mod db_tests {
         let idem = "a3-b1-reject-ord-001";
 
         cleanup_run(&pool, run_id).await?;
+        cleanup_runtime_lease(&pool).await?;
         seed_running_run(&pool, run_id).await?;
 
         let created = mqk_db::outbox_enqueue(
@@ -591,6 +599,7 @@ mod db_tests {
         );
 
         cleanup_run(&pool, run_id).await?;
+        cleanup_runtime_lease(&pool).await?;
         Ok(())
     }
 
@@ -616,6 +625,7 @@ mod db_tests {
         let idem = "a3-b2-transport-ord-001";
 
         cleanup_run(&pool, run_id).await?;
+        cleanup_runtime_lease(&pool).await?;
         seed_running_run(&pool, run_id).await?;
 
         let created = mqk_db::outbox_enqueue(
@@ -643,6 +653,7 @@ mod db_tests {
         );
 
         cleanup_run(&pool, run_id).await?;
+        cleanup_runtime_lease(&pool).await?;
         Ok(())
     }
 
@@ -669,6 +680,7 @@ mod db_tests {
         let idem = "a3-b3-ambiguous-ord-001";
 
         cleanup_run(&pool, run_id).await?;
+        cleanup_runtime_lease(&pool).await?;
         sqlx::query("delete from sys_arm_state where sentinel_id = 1")
             .execute(&pool)
             .await?;
@@ -726,6 +738,7 @@ mod db_tests {
         );
 
         cleanup_run(&pool, run_id).await?;
+        cleanup_runtime_lease(&pool).await?;
         Ok(())
     }
 
@@ -749,6 +762,7 @@ mod db_tests {
         let idem = "a3-b4-auth-ord-001";
 
         cleanup_run(&pool, run_id).await?;
+        cleanup_runtime_lease(&pool).await?;
         sqlx::query("delete from sys_arm_state where sentinel_id = 1")
             .execute(&pool)
             .await?;
@@ -799,6 +813,7 @@ mod db_tests {
         );
 
         cleanup_run(&pool, run_id).await?;
+        cleanup_runtime_lease(&pool).await?;
         Ok(())
     }
 
@@ -817,6 +832,7 @@ mod db_tests {
         let run_id: Uuid = B5_RUN_ID.parse().unwrap();
         let idem = "a3-b5-delayed-ack-ord-001";
         cleanup_run(&pool, run_id).await?;
+        cleanup_runtime_lease(&pool).await?;
         sqlx::query("delete from sys_arm_state where sentinel_id = 1")
             .execute(&pool)
             .await?;
@@ -844,6 +860,7 @@ mod db_tests {
         assert!(matches!(run.status, mqk_db::RunStatus::Halted));
 
         cleanup_run(&pool, run_id).await?;
+        cleanup_runtime_lease(&pool).await?;
         Ok(())
     }
 
@@ -865,6 +882,7 @@ mod db_tests {
         let run_id_safe: Uuid = B2_RUN_ID.parse().unwrap();
         let idem_safe = "a3-b6-ratelimit-safe-ord-001";
         cleanup_run(&pool, run_id_safe).await?;
+        cleanup_runtime_lease(&pool).await?;
         seed_running_run(&pool, run_id_safe).await?;
         let created = mqk_db::outbox_enqueue(
             &pool,
@@ -925,11 +943,13 @@ mod db_tests {
             .expect_err("safe ratelimit returns submit error and resets row");
         let status_safe = outbox_status(&pool, idem_safe).await?;
         assert_eq!(status_safe.as_deref(), Some("PENDING"));
+        cleanup_runtime_lease(&pool).await?;
 
         // Unknown-delivery rate limit -> ambiguous + halt/disarm.
         let run_id_amb: Uuid = B6_RUN_ID.parse().unwrap();
         let idem_amb = "a3-b6-ratelimit-amb-ord-001";
         cleanup_run(&pool, run_id_amb).await?;
+        cleanup_runtime_lease(&pool).await?;
         sqlx::query("delete from sys_arm_state where sentinel_id = 1")
             .execute(&pool)
             .await?;
@@ -955,6 +975,7 @@ mod db_tests {
 
         cleanup_run(&pool, run_id_safe).await?;
         cleanup_run(&pool, run_id_amb).await?;
+        cleanup_runtime_lease(&pool).await?;
         Ok(())
     }
 }
