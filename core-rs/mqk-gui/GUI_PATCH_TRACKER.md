@@ -125,6 +125,31 @@ IIFE emits ok:false → "strategies" in mockSections → panel authority "placeh
 `panelTruthRenderState` returns "unimplemented" → StrategyScreen hard-blocks.
 Deferred until a real strategy-fleet source is wired.
 
+### D1-R: Determinism cleanup — production control/runtime paths
+**Status:** DONE
+**Files:** `routes/control.rs`, `routes.rs`, `orchestrator.rs` (test annotation),
+`state.rs` (`// allow:` annotations), `mqk-db/src/lib.rs` (`// allow:` annotations)
+**What changed:**
+- `Uuid::new_v4()` replaced with UUIDv5 in two operator audit-event paths:
+  `write_control_operator_audit_event` (emergency run_id + event_id) and
+  `write_operator_audit_event` (event_id). Both use deterministic key = `(run_id, event_type, ts_utc_micros)`.
+  Wall-clock boundary is isolated to a single `Utc::now()` read per call;
+  both the stored `ts_utc` and the derived `event_id` share that same read.
+- `orchestrator.rs:2821` `Uuid::new_v4()` annotated `// allow: test-only` — isolated
+  inside `#[cfg(test)]` helper, never on a production path.
+- `state.rs` three `timestamp_millis()` calls annotated `// allow: ops-metadata`:
+  SSE heartbeat ts (genuine real-time boundary) and two format-conversions from
+  stored fields (not wall-clock reads).
+- `mqk-db/src/lib.rs:1904` `timestamp_millis()` annotated `// allow: ops-metadata` —
+  parsing a stored event timestamp, not a wall-clock read.
+- `mqk-db/src/lib.rs:172` SQL `now()` in 24h restart-count query annotated
+  `-- allow: ops-metadata` — operator display only, not an enforcement path.
+- All six P0-1 guard violations resolved; guards now pass clean.
+**Still deferred:** All genuine real-time boundaries (initial heartbeat, halt/stop
+timestamps, SSE heartbeat, paper broker snapshot synthesis, deadman `now` injection)
+remain as real-time calls — these are correctly scoped as live-boundary-only uses
+and not semantic determinism violations.
+
 ### PC-1: Final truth-model hardening — operator-console endstate verification
 **Status:** DONE
 **Files:** `api.ts` (fallback authority audit, `executionOrders`/`executionSummary` propagation)
@@ -161,6 +186,40 @@ Comment documenting removal added to `api.ts`.
 with state-aware `enabled`/`disabled_reason` per entry. Fantasy action keys removed from type union.
 Catalog failure degrades ops panel truth authority and triggers truth gate. Contract gate: 7/7 pass.
 TSC clean. Landing-time GUI truth tests passed; current totals should be checked from the live repo, not inferred from this historical entry.
+
+### TI-1: Daemon test isolation / flake cleanup
+**Status:** DONE
+**Files:** `core-rs/crates/mqk-daemon/src/state.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_daemon_runtime_lifecycle.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_daemon_routes.rs`
+**What changed:**
+- `AppState::new_with_db_and_operator_auth(pool, operator_auth)` added to `state.rs`.
+  Lets DB-backed tests inject auth mode without touching the process environment.
+- `scenario_daemon_runtime_lifecycle.rs`: removed `static TEST_OPERATOR_TOKEN_INIT: Once`,
+  `fn ensure_test_operator_token()`, and the `std::env::set_var("MQK_OPERATOR_TOKEN", …)`
+  call they contained. All three `AppState::new_with_db(pool)` sites replaced with
+  `AppState::new_with_db_and_operator_auth(pool, TokenRequired("test-operator-token"))`.
+  `MQK_OPERATOR_TOKEN` is never written to the process environment by this file.
+- `scenario_daemon_routes.rs`: added `EnvGuard` RAII struct (private `key`/`prior`
+  fields; `absent(key)` constructor saves prior value and removes the var; `Drop` impl
+  restores prior value or removes the var if it was absent). Updated
+  `dev_snapshot_inject_refused_when_env_not_set` to open with
+  `let _guard = EnvGuard::absent("MQK_DEV_ALLOW_SNAPSHOT_INJECT");` — the test now
+  owns its own precondition and restores prior state on drop rather than relying on
+  ambient CI environment or coverage redistribution.
+**Defects fixed:**
+  1. `MQK_OPERATOR_TOKEN` set via `Once` guard in lifecycle tests leaked into later
+     tests in the same process (any test using `AppState::new_with_db()` would see
+     the leaked token and silently get `TokenRequired` instead of
+     `MissingTokenFailClosed`).
+  2. `dev_snapshot_inject_refused_when_env_not_set` relied on the ambient process
+     environment rather than explicitly controlling `MQK_DEV_ALLOW_SNAPSHOT_INJECT`.
+     A prior incomplete fix removed `remove_var` without adding save/restore, making
+     the test *more* environment-dependent. The `EnvGuard` closes this properly.
+**Still deferred:** DB-backed lifecycle tests (`#[ignore]`) require `MQK_DATABASE_URL`;
+they still use `Utc::now()` inside `broker_snapshot` / `execution_snapshot` fixture
+setup — these are legitimate real-time boundaries in test scaffolding, not determinism
+violations. No un-guarded env var mutations remain in any test file under the daemon crate.
 
 ---
 

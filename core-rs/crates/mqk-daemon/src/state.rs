@@ -829,6 +829,16 @@ impl AppState {
         Self::new_inner(operator_auth_mode_from_env(), Some(db))
     }
 
+    /// Create application state with a live DB pool and an explicit operator-auth mode.
+    ///
+    /// Prefer this over [`Self::new_with_db`] in tests so that auth mode is
+    /// injected directly rather than derived from the process environment.
+    /// Using this constructor eliminates the need for `std::env::set_var` calls
+    /// in test fixtures and the cross-test bleed they cause.
+    pub fn new_with_db_and_operator_auth(db: PgPool, operator_auth: OperatorAuthMode) -> Self {
+        Self::new_inner(operator_auth, Some(db))
+    }
+
     /// Create application state with an explicit broker kind for tests.
     ///
     /// Named with `_for_test_` to signal intent; production code must derive
@@ -2969,7 +2979,7 @@ pub fn spawn_heartbeat(bus: broadcast::Sender<BusMsg>, interval: Duration) {
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            let ts = Utc::now().timestamp_millis();
+            let ts = Utc::now().timestamp_millis(); // allow: ops-metadata — SSE heartbeat UI timestamp, not used in enforcement
             let _ = bus.send(BusMsg::Heartbeat { ts_millis: ts });
         }
     });
@@ -3318,7 +3328,7 @@ fn synthesize_broker_snapshot_from_execution(
 pub(crate) fn reconcile_broker_snapshot_from_schema(
     snapshot: &mqk_schemas::BrokerSnapshot,
 ) -> Result<mqk_reconcile::BrokerSnapshot, &'static str> {
-    let fetched_at_ms = snapshot.captured_at_utc.timestamp_millis();
+    let fetched_at_ms = snapshot.captured_at_utc.timestamp_millis(); // allow: ops-metadata — converting stored field to millis, not a wall-clock read
     if fetched_at_ms <= 0 {
         return Err("broker snapshot timestamp is invalid; refusing ambiguous broker truth");
     }
@@ -3369,7 +3379,8 @@ fn reconcile_unknown_status(note: impl Into<String>) -> ReconcileStatusSnapshot 
 }
 
 fn reconcile_last_run_at(fetched_at_ms: i64) -> Option<String> {
-    chrono::DateTime::<Utc>::from_timestamp_millis(fetched_at_ms).map(|ts| ts.to_rfc3339())
+    chrono::DateTime::<Utc>::from_timestamp_millis(fetched_at_ms) // allow: ops-metadata — stored millis → rfc3339, not a wall-clock read
+        .map(|ts| ts.to_rfc3339())
 }
 
 fn reconcile_counts(report: &mqk_reconcile::ReconcileReport) -> (usize, usize, usize, usize) {
