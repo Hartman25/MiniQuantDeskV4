@@ -322,7 +322,10 @@ async fn hostile_restart_with_poisoned_local_cache_still_reports_durable_halt_tr
         .await
         .expect("persist durable operator halt");
 
-    let st = Arc::new(state::AppState::new_with_db(pool));
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::TokenRequired(TEST_OPERATOR_TOKEN.to_string()),
+    ));
     {
         let mut status = st.status.write().await;
         status.state = "running".to_string();
