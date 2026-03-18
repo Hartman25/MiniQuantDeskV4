@@ -42,8 +42,7 @@ use crate::{
         RiskDenialsResponse, RiskSummaryResponse, RuntimeErrorResponse,
         RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
         StrategySummaryResponse, StrategySuppressionsResponse, SystemMetadataResponse,
-        SystemStatusResponse,
-        TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
+        SystemStatusResponse, TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
     state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot},
@@ -2331,13 +2330,26 @@ async fn write_operator_audit_event(
         return Ok(());
     };
 
-    let event_id = uuid::Uuid::new_v4();
+    // D1 — event_id is UUIDv5 derived from (run_id, event_type, ts_utc).
+    // Both ts_utc and event_id share the same wall-clock read so there is no
+    // independent drift between the stored timestamp and the event identifier.
+    let ts_utc = chrono::Utc::now();
+    let event_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk-daemon.ops-audit.v1|{}|{}|{}",
+            run_id,
+            event_type,
+            ts_utc.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+        )
+        .as_bytes(),
+    );
     mqk_db::insert_audit_event(
         db,
         &mqk_db::NewAuditEvent {
             event_id,
             run_id,
-            ts_utc: chrono::Utc::now(),
+            ts_utc,
             topic: "operator".to_string(),
             event_type: event_type.to_string(),
             payload: serde_json::json!({

@@ -59,6 +59,41 @@ fn parse_json(b: bytes::Bytes) -> serde_json::Value {
     serde_json::from_slice(&b).expect("body is not valid JSON")
 }
 
+/// Narrow RAII env-var guard: saves the prior value of `key`, removes it for
+/// the duration of the test, and restores the prior value on drop.
+///
+/// Requires `--test-threads=1` — concurrent env mutation across threads is
+/// unsound regardless of guards.
+struct EnvGuard {
+    key: &'static str,
+    prior: Option<String>,
+}
+
+impl EnvGuard {
+    /// Save and clear `key`.  The prior value (if any) is restored on drop.
+    fn absent(key: &'static str) -> Self {
+        let prior = std::env::var(key).ok();
+        // SAFETY: test-only, requires --test-threads=1.
+        #[allow(deprecated)]
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, prior }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        #[allow(deprecated)]
+        unsafe {
+            match &self.prior {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GET /v1/health
 // ---------------------------------------------------------------------------
@@ -588,8 +623,10 @@ async fn trading_snapshot_returns_null_by_default() {
 
 #[tokio::test]
 async fn dev_snapshot_inject_refused_when_env_not_set() {
-    std::env::remove_var("MQK_DEV_ALLOW_SNAPSHOT_INJECT");
-
+    // Explicitly clear MQK_DEV_ALLOW_SNAPSHOT_INJECT and restore prior state
+    // on drop — the test owns its own precondition rather than relying on
+    // ambient CI environment.  Requires --test-threads=1.
+    let _guard = EnvGuard::absent("MQK_DEV_ALLOW_SNAPSHOT_INJECT");
     let router = make_router();
     let snap = sample_snapshot();
     let body = serde_json::to_string(&snap).expect("serialize snapshot");

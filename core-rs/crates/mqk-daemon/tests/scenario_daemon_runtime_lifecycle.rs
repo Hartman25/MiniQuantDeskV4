@@ -4,7 +4,7 @@
 //! They prove that the daemon's run control routes are wired to a real owned
 //! execution loop instead of placeholder in-memory state mutations.
 
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{Request, StatusCode};
@@ -14,13 +14,6 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 const TEST_OPERATOR_TOKEN: &str = "test-operator-token";
-static TEST_OPERATOR_TOKEN_INIT: Once = Once::new();
-
-fn ensure_test_operator_token() {
-    TEST_OPERATOR_TOKEN_INIT.call_once(|| {
-        std::env::set_var("MQK_OPERATOR_TOKEN", TEST_OPERATOR_TOKEN);
-    });
-}
 
 fn authed(builder: axum::http::request::Builder) -> axum::http::request::Builder {
     builder.header("Authorization", format!("Bearer {TEST_OPERATOR_TOKEN}"))
@@ -199,8 +192,10 @@ async fn halt(st: &Arc<state::AppState>) -> serde_json::Value {
 }
 
 async fn daemon_state() -> Arc<state::AppState> {
-    ensure_test_operator_token();
-    let state = Arc::new(state::AppState::new_with_db(lifecycle_pool().await));
+    let state = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        lifecycle_pool().await,
+        state::OperatorAuthMode::TokenRequired(TEST_OPERATOR_TOKEN.to_string()),
+    ));
     {
         let mut broker = state.broker_snapshot.write().await;
         *broker = Some(mqk_schemas::BrokerSnapshot {
@@ -277,10 +272,12 @@ async fn control_restart_route_is_not_exposed_even_with_durable_runtime_conflict
     mqk_db::arm_run(&pool, run_id).await.expect("arm run");
     mqk_db::begin_run(&pool, run_id).await.expect("begin run");
 
-    // Ensure the operator token is set so auth succeeds and we can see whether
-    // the route itself returns 404 (not exposed) vs 401 (auth rejected first).
-    ensure_test_operator_token();
-    let st = Arc::new(state::AppState::new_with_db(pool));
+    // Pass auth mode explicitly so the route returns 404 (not exposed) rather
+    // than 401 (auth rejected first) — proving the route is absent, not gated.
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::TokenRequired(TEST_OPERATOR_TOKEN.to_string()),
+    ));
     let req = authed(Request::builder())
         .method("POST")
         .uri("/control/restart")
@@ -672,8 +669,10 @@ async fn restart_reconstructs_safe_runtime_status() {
     mqk_db::arm_run(&pool, run_id).await.expect("arm run");
     mqk_db::begin_run(&pool, run_id).await.expect("begin run");
 
-    ensure_test_operator_token();
-    let st = Arc::new(state::AppState::new_with_db(pool));
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::TokenRequired(TEST_OPERATOR_TOKEN.to_string()),
+    ));
     let current = status(&st).await;
     assert_eq!(current["state"], "unknown");
     assert_eq!(

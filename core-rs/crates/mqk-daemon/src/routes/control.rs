@@ -471,14 +471,33 @@ async fn write_control_operator_audit_event(
     {
         run.run_id
     } else {
-        let run_id = uuid::Uuid::new_v4();
+        // D1 — no active run exists; synthesize a durable anchor run for the
+        // audit event.  run_id is UUIDv5 derived from (engine, mode, config,
+        // node, wall-clock-micros) so it is deterministic given the same
+        // inputs at the same microsecond boundary.  The wall-clock read is
+        // isolated to this emergency path and used only to break potential
+        // same-microsecond collisions when a node restarts without leaving a
+        // durable run record.
+        let started_at_utc = chrono::Utc::now();
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            format!(
+                "mqk-daemon.emergency-run.v1|{}|{}|{}|{}|{}",
+                "mqk-daemon",
+                state.deployment_mode().as_db_mode(),
+                state.run_config_hash(),
+                state.node_id,
+                started_at_utc.timestamp_micros(),
+            )
+            .as_bytes(),
+        );
         mqk_db::insert_run(
             db,
             &mqk_db::NewRun {
                 run_id,
                 engine_id: "mqk-daemon".to_string(),
                 mode: state.deployment_mode().as_db_mode().to_string(),
-                started_at_utc: chrono::Utc::now(),
+                started_at_utc,
                 git_hash: "daemon-control-audit".to_string(),
                 config_hash: state.run_config_hash().to_string(),
                 config_json: json!({"source": "control.operator_action"}),
@@ -489,13 +508,26 @@ async fn write_control_operator_audit_event(
         run_id
     };
 
-    let event_id = uuid::Uuid::new_v4();
+    // D1 — event_id is UUIDv5 derived from (run_id, event_type, ts_utc).
+    // The wall-clock boundary is here and both ts_utc and event_id share it,
+    // so there is no second-independent clock drift between ID and timestamp.
+    let ts_utc = chrono::Utc::now();
+    let event_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk-daemon.control-audit.v1|{}|{}|{}",
+            run_id,
+            event_type,
+            ts_utc.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+        )
+        .as_bytes(),
+    );
     mqk_db::insert_audit_event(
         db,
         &mqk_db::NewAuditEvent {
             event_id,
             run_id,
-            ts_utc: chrono::Utc::now(),
+            ts_utc,
             topic: "operator".to_string(),
             event_type: event_type.to_string(),
             payload: serde_json::json!({

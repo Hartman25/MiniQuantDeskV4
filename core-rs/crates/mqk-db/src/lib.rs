@@ -169,7 +169,7 @@ pub async fn count_runs_in_last_24h(pool: &PgPool, engine_id: &str, mode: &str) 
         from runs
         where engine_id = $1
           and mode = $2
-          and started_at_utc > now() - interval '24 hours'
+          and started_at_utc > now() - interval '24 hours' -- allow: ops-metadata — 24h restart count for operator display, not an enforcement or capital-decision path
         "#,
     )
     .bind(engine_id)
@@ -1901,7 +1901,7 @@ pub async fn inbox_insert_deduped(
         .and_then(|v| v.as_str())
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc))
-        .or_else(|| DateTime::<Utc>::from_timestamp_millis(event_ts_ms))
+        .or_else(|| DateTime::<Utc>::from_timestamp_millis(event_ts_ms)) // allow: ops-metadata — parsing stored event millis, not a wall-clock read
         .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
 
     inbox_insert_deduped_with_identity(
