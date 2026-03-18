@@ -164,6 +164,12 @@
       "path": "0025_inbox_enriched_identity_columns.sql",
       "status": "applied",
       "intent": "Add missing enriched inbox identity columns used by current insert contract and backfill defaults for existing rows."
+    },
+    {
+      "id": "0026",
+      "path": "0026_risk_denial_events.sql",
+      "status": "applied",
+      "intent": "Add durable risk_denial_events table for persisted risk denial event history."
     }
   ]
 }
