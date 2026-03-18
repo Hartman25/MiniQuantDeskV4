@@ -276,10 +276,8 @@ impl HistoricalProvider for TwelveDataHistoricalProvider {
                 if http_status.as_u16() == 429 {
                     if retries_remaining > 0 {
                         retries_remaining -= 1;
-                        tokio::time::sleep(std::time::Duration::from_secs(
-                            self.retry_sleep_secs,
-                        ))
-                        .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(self.retry_sleep_secs))
+                            .await;
                         continue;
                     }
                     return Err(anyhow!(
@@ -302,10 +300,8 @@ impl HistoricalProvider for TwelveDataHistoricalProvider {
                 if b.is_rate_limit_error() {
                     if retries_remaining > 0 {
                         retries_remaining -= 1;
-                        tokio::time::sleep(std::time::Duration::from_secs(
-                            self.retry_sleep_secs,
-                        ))
-                        .await;
+                        tokio::time::sleep(std::time::Duration::from_secs(self.retry_sleep_secs))
+                            .await;
                         continue;
                     }
                     return Err(anyhow!(
@@ -821,9 +817,7 @@ mod tests {
         let resp = TwelveDataTimeSeriesResponse {
             status: Some("error".to_string()),
             code: Some(429),
-            message: Some(
-                "You have run out of API credits for the current minute.".to_string(),
-            ),
+            message: Some("You have run out of API credits for the current minute.".to_string()),
             values: None,
         };
         assert!(
@@ -891,16 +885,28 @@ mod tests {
         }
     }
 
+    // httpmock 0.7 `matches()` requires a fn pointer — closures that capture local
+    // variables cannot be coerced to fn pointers.  We use a module-level AtomicU32
+    // instead; a non-capturing closure that reads only a static IS coercible.
+    //
+    // One static per test that needs sequential mock behavior.  Reset at the start of
+    // each test so accumulated calls from previous runs do not interfere.
+    // Parallel execution risk: if two instances of the same test run simultaneously
+    // (unlikely in a single cargo test invocation), the counter may be shared, but the
+    // worst outcome is the 429 mock fires on both first calls — both tests still pass.
+    static RL_SUCC_CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
     /// One body-level 429 on the first attempt, success on the second.
     /// `fetch_bars` must return the bar from the successful response.
     #[tokio::test]
     async fn rate_limit_retry_succeeds_after_one_body_429() {
         use httpmock::prelude::*;
-        use std::sync::{Arc, Mutex};
+        use std::sync::atomic::Ordering;
+
+        // Reset counter for this test run.
+        RL_SUCC_CALL.store(0, Ordering::SeqCst);
 
         let server = MockServer::start();
-        let call_count = Arc::new(Mutex::new(0u32));
-        let call_count_clone = Arc::clone(&call_count);
 
         // Registered first → lower priority (httpmock is LIFO for tie-breaking).
         // Matches all requests; returns a good bar.
@@ -920,19 +926,13 @@ mod tests {
         });
 
         // Registered second → higher priority.
-        // Matches only the first call (counter guard); returns body-level 429.
+        // Non-capturing closure (reads only the static RL_SUCC_CALL) — coercible
+        // to fn ptr, which is what httpmock 0.7 requires for `matches()`.
+        // Matches only the first call; falls through to _mock_ok on subsequent calls.
         let _mock_rl = server.mock(|when, then| {
             when.method(GET)
                 .path("/time_series")
-                .matches(move |_req| {
-                    let mut c = call_count_clone.lock().unwrap();
-                    if *c < 1 {
-                        *c += 1;
-                        true
-                    } else {
-                        false
-                    }
-                });
+                .matches(|_req: &HttpMockRequest| RL_SUCC_CALL.fetch_add(1, Ordering::SeqCst) < 1);
             then.status(200).json_body(serde_json::json!({
                 "status": "error",
                 "code": 429,
@@ -946,7 +946,11 @@ mod tests {
             .fetch_bars(sample_request_for_retry())
             .await
             .unwrap();
-        assert_eq!(bars.len(), 1, "must return bar from successful retry attempt");
+        assert_eq!(
+            bars.len(),
+            1,
+            "must return bar from successful retry attempt"
+        );
         assert_eq!(bars[0].symbol, "AAPL");
     }
 
