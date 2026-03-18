@@ -31,9 +31,9 @@ use tracing::info;
 use crate::{
     api_types::{
         ActionCatalogEntry, ActionCatalogResponse, AuditArtifactRow, AuditArtifactsResponse,
-        ConfigDiffRow, ConfigFingerprintResponse, DiagnosticsSnapshotResponse, ExecutionOrderRow,
-        ExecutionSummaryResponse, FaultSignal, GateRefusedResponse, HealthResponse,
-        IntegrityResponse, OperatorActionAuditFields, OperatorActionAuditRow,
+        ConfigDiffsResponse, ConfigFingerprintResponse, DiagnosticsSnapshotResponse,
+        ExecutionOrderRow, ExecutionSummaryResponse, FaultSignal, GateRefusedResponse,
+        HealthResponse, IntegrityResponse, OperatorActionAuditFields, OperatorActionAuditRow,
         OperatorActionResponse, OperatorActionsAuditResponse, OperatorTimelineResponse,
         OperatorTimelineRow, OpsActionRequest, PortfolioFillRow, PortfolioFillsResponse,
         PortfolioOpenOrderRow, PortfolioOpenOrdersResponse, PortfolioPositionRow,
@@ -41,7 +41,8 @@ use crate::{
         ReconcileMismatchRow, ReconcileMismatchesResponse, ReconcileSummaryResponse, RiskDenialRow,
         RiskDenialsResponse, RiskSummaryResponse, RuntimeErrorResponse,
         RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
-        StrategySummaryRow, StrategySuppressionRow, SystemMetadataResponse, SystemStatusResponse,
+        StrategySummaryResponse, StrategySuppressionsResponse, SystemMetadataResponse,
+        SystemStatusResponse,
         TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
@@ -1986,43 +1987,54 @@ pub(crate) async fn system_config_fingerprint(
 }
 
 pub(crate) async fn system_config_diffs() -> impl IntoResponse {
-    (StatusCode::OK, Json::<Vec<ConfigDiffRow>>(Vec::new())).into_response()
-}
-
-pub(crate) async fn strategy_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
-    let status = match st.current_status_snapshot().await {
-        Ok(snapshot) => snapshot,
-        Err(err) => return runtime_error_response(err),
-    };
-
+    // Config-diff persistence is not yet implemented.  Return an explicit
+    // "not_wired" truth state so the GUI does not treat the empty rows as
+    // authoritative "zero diffs."  The GUI IIFE checks this field and emits
+    // ok:false, pushing "configDiffs" to usedMockSections and preventing the
+    // config panel from rendering a misleading empty diff table.
     (
         StatusCode::OK,
-        Json(vec![StrategySummaryRow {
-            strategy_id: "daemon_integrity_gate".to_string(),
-            enabled: true,
-            armed: status.integrity_armed,
-            health: if status.integrity_armed {
-                "ok".to_string()
-            } else {
-                "warning".to_string()
-            },
-            universe: "unknown".to_string(),
-            pending_intents: 0,
-            open_positions: 0,
-            today_pnl: 0.0,
-            drawdown_pct: 0.0,
-            regime: "unknown".to_string(),
-            throttle_state: "unknown".to_string(),
-            last_decision_time: None,
-        }]),
+        Json(ConfigDiffsResponse {
+            truth_state: "not_wired".to_string(),
+            rows: Vec::new(),
+        }),
+    )
+        .into_response()
+}
+
+pub(crate) async fn strategy_summary() -> impl IntoResponse {
+    // No real strategy-fleet registry is implemented yet.  The former
+    // synthetic `daemon_integrity_gate` surrogate row has been removed: it was
+    // daemon integrity state masquerading as a strategy-fleet row and gave the
+    // operator false confidence that a real strategy was running.
+    //
+    // Return an explicit "not_wired" truth state so the GUI IIFE emits ok:false,
+    // pushing "strategies" to usedMockSections, collapsing the strategy panel
+    // authority to "placeholder", and blocking the StrategyScreen with an
+    // "Unimplemented" notice rather than rendering a fake strategy row.
+    (
+        StatusCode::OK,
+        Json(StrategySummaryResponse {
+            truth_state: "not_wired".to_string(),
+            rows: Vec::new(),
+        }),
     )
         .into_response()
 }
 
 pub(crate) async fn strategy_suppressions() -> impl IntoResponse {
+    // Suppression persistence is not yet implemented.  Return an explicit
+    // "not_wired" truth state so the GUI does not treat the empty rows as
+    // authoritative "zero suppressions."  The GUI IIFE checks this field and
+    // emits ok:false, pushing "strategySuppressions" to usedMockSections and
+    // preventing the strategy panel from rendering a misleading empty
+    // suppressions table.
     (
         StatusCode::OK,
-        Json::<Vec<StrategySuppressionRow>>(Vec::new()),
+        Json(StrategySuppressionsResponse {
+            truth_state: "not_wired".to_string(),
+            rows: Vec::new(),
+        }),
     )
         .into_response()
 }

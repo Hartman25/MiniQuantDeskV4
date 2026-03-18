@@ -52,14 +52,25 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
   - `truth_state: "active"` + rows when the daemon can derive current reconcile diffs from the active execution snapshot plus broker snapshot and the result agrees with reconcile status
   - Tests: `gui_contract_reconcile_mismatches_no_snapshot_without_authoritative_detail` + `gui_contract_reconcile_mismatches_active_with_authoritative_diff_rows`
 
-### Strategy
+### Strategy — "not_wired" truth closure
 
-- `/api/v1/strategy/summary` — shape + semantic truth (strategy_id, armed, health fields)
-- `/api/v1/strategy/suppressions` — array shape; empty in test state (Vec<StrategySuppressionRow>)
+- `/api/v1/strategy/summary` — `StrategySummaryResponse` wrapper: `truth_state="not_wired"` + empty `rows`.
+  No real strategy-fleet registry exists. The former synthetic `daemon_integrity_gate` surrogate row
+  has been removed. GUI IIFE emits `ok:false` on `not_wired` → `"strategies"` in `mockSections` →
+  panel authority collapses to `"placeholder"` → `panelTruthRenderState` returns `"unimplemented"` →
+  StrategyScreen hard-blocks. Deferred until a real strategy source is wired.
+- `/api/v1/strategy/suppressions` — `StrategySuppressionsResponse` wrapper: `truth_state="not_wired"` + empty `rows`.
+  No durable suppression persistence exists. GUI IIFE emits `ok:false` on `not_wired` →
+  `"strategySuppressions"` in `mockSections` → section renders honest "not wired" notice, not empty table.
+- Contract gate: `gui_contract_not_wired_surfaces_declare_truth_state` proves wrapper shape +
+  `truth_state="not_wired"` + empty `rows` + absence of `daemon_integrity_gate` surrogate for all three
+  not-wired surfaces (`config-diffs`, `strategy/suppressions`, `strategy/summary`).
 
-### System config surfaces
+### System config surfaces — "not_wired" truth closure
 
-- `/api/v1/system/config-diffs` — array shape; empty in test state (Vec<ConfigDiffRow>)
+- `/api/v1/system/config-diffs` — `ConfigDiffsResponse` wrapper: `truth_state="not_wired"` + empty `rows`.
+  No durable config-diff persistence exists. GUI IIFE emits `ok:false` on `not_wired` →
+  `"configDiffs"` in `mockSections` → ConfigScreen renders honest "not wired" notice, not empty table.
 
 ### Audit and operator surfaces
 

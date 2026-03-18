@@ -24,17 +24,23 @@ export function ConfigScreen({ model }: { model: SystemModel }) {
       </div>
 
       <Panel title="Config diffs" subtitle="Recent config and runtime generation changes.">
-        <DataTable
-          rows={model.configDiffs}
-          rowKey={(row) => row.diff_id}
-          columns={[
-            { key: "when", title: "Changed At", render: (row) => formatDateTime(row.changed_at) },
-            { key: "domain", title: "Domain", render: (row) => row.changed_domain },
-            { key: "before", title: "Before", render: (row) => row.before_version },
-            { key: "after", title: "After", render: (row) => row.after_version },
-            { key: "summary", title: "Summary", render: (row) => row.summary },
-          ]}
-        />
+        {model.dataSource.mockSections.includes("configDiffs") ? (
+          <div className="unavailable-notice">
+            Config diff history is not yet wired to a durable source. No diff records are available.
+          </div>
+        ) : (
+          <DataTable
+            rows={model.configDiffs}
+            rowKey={(row) => row.diff_id}
+            columns={[
+              { key: "when", title: "Changed At", render: (row) => formatDateTime(row.changed_at) },
+              { key: "domain", title: "Domain", render: (row) => row.changed_domain },
+              { key: "before", title: "Before", render: (row) => row.before_version },
+              { key: "after", title: "After", render: (row) => row.after_version },
+              { key: "summary", title: "Summary", render: (row) => row.summary },
+            ]}
+          />
+        )}
       </Panel>
     </div>
   );

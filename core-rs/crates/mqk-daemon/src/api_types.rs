@@ -366,6 +366,20 @@ pub struct ConfigDiffRow {
     pub summary: String,
 }
 
+/// Response wrapper for `/api/v1/system/config-diffs`.
+///
+/// `truth_state`:
+/// - `"not_wired"` — no durable config-diff persistence is implemented yet;
+///   `rows` is always empty and **must not** be treated as authoritative zero.
+/// - `"active"` — reserved for when durable config-diff tracking is wired.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigDiffsResponse {
+    /// `"not_wired"` = no durable config-diff source exists; rows is empty and not authoritative.
+    pub truth_state: String,
+    /// Empty when `truth_state == "not_wired"`.  Authoritative when `truth_state == "active"`.
+    pub rows: Vec<ConfigDiffRow>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategySummaryRow {
     pub strategy_id: String,
@@ -382,6 +396,22 @@ pub struct StrategySummaryRow {
     pub last_decision_time: Option<String>,
 }
 
+/// Response wrapper for `/api/v1/strategy/summary`.
+///
+/// `truth_state`:
+/// - `"not_wired"` — no real strategy-fleet registry is implemented yet;
+///   `rows` is always empty and **must not** be treated as strategy truth.
+///   The former synthetic `daemon_integrity_gate` surrogate row has been
+///   removed; it was daemon-integrity state masquerading as a strategy row.
+/// - `"active"` — reserved for when a real strategy-fleet source is wired.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategySummaryResponse {
+    /// `"not_wired"` = no real strategy-fleet source exists; rows is empty and not authoritative.
+    pub truth_state: String,
+    /// Empty when `truth_state == "not_wired"`.  Authoritative when `truth_state == "active"`.
+    pub rows: Vec<StrategySummaryRow>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategySuppressionRow {
     pub suppression_id: String,
@@ -392,6 +422,20 @@ pub struct StrategySuppressionRow {
     pub started_at: String,
     pub cleared_at: Option<String>,
     pub note: String,
+}
+
+/// Response wrapper for `/api/v1/strategy/suppressions`.
+///
+/// `truth_state`:
+/// - `"not_wired"` — no durable suppression persistence is implemented yet;
+///   `rows` is always empty and **must not** be treated as authoritative zero.
+/// - `"active"` — reserved for when durable suppression tracking is wired.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategySuppressionsResponse {
+    /// `"not_wired"` = no durable suppression source exists; rows is empty and not authoritative.
+    pub truth_state: String,
+    /// Empty when `truth_state == "not_wired"`.  Authoritative when `truth_state == "active"`.
+    pub rows: Vec<StrategySuppressionRow>,
 }
 
 // ---------------------------------------------------------------------------

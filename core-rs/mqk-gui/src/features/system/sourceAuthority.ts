@@ -118,7 +118,15 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: [],
     placeholder: ["reconcileSummary", "mismatches"],
   },
-  // Strategy rows are runtime OMS state. Suppressions are DB-persisted records.
+  // Strategy summary and suppressions are both "not_wired": no real strategy-fleet
+  // registry or suppression persistence exists yet.  Both IIFEs return ok:false,
+  // so neither endpoint lands in realEndpoints.  "strategies" and
+  // "strategySuppressions" land in mockSections → hasPlaceholder=true, realCount=0
+  // → authority resolves to "placeholder" → panelTruthRenderState returns
+  // "unimplemented" and the StrategyScreen hard-blocks.
+  // The evidence hints are kept in their intended final-state form (db for
+  // suppressions, runtime for summary) so that when a real source is wired in a
+  // future patch, the authority classification requires no change here.
   strategy: {
     db: ["/strategy/suppressions"],
     runtime: ["/strategy/summary"],

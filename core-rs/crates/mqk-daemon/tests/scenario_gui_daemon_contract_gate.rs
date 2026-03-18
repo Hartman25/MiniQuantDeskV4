@@ -366,12 +366,35 @@ async fn gui_session_config_strategy_and_audit_surfaces_are_semantically_truthfu
         .unwrap();
     let (strategy_status, strategy_body) = call(router.clone(), strategy_req).await;
     assert_eq!(strategy_status, StatusCode::OK);
-    let strategy_rows = parse_json(strategy_body);
-    let rows = strategy_rows.as_array().expect("strategy summary array");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["strategy_id"], "daemon_integrity_gate");
-    assert_eq!(rows[0]["armed"], false);
-    assert_eq!(rows[0]["health"], "warning");
+    let strategy_json = parse_json(strategy_body);
+    // Strategy summary must be a wrapper with truth_state, NOT a bare array
+    // containing a synthetic daemon_integrity_gate row.  Real strategy-fleet
+    // truth is not yet wired; the route must be explicit about that so the GUI
+    // does not render a fake strategy row as authoritative fleet state.
+    assert!(
+        strategy_json.as_object().is_some(),
+        "/api/v1/strategy/summary must return a wrapper object, not a bare array; got: {strategy_json}"
+    );
+    assert_eq!(
+        strategy_json["truth_state"], "not_wired",
+        "strategy summary must declare truth_state=not_wired"
+    );
+    assert!(
+        strategy_json["rows"]
+            .as_array()
+            .map(|v| v.is_empty())
+            .unwrap_or(false),
+        "strategy summary rows must be empty when not_wired"
+    );
+    // Explicitly confirm the synthetic daemon_integrity_gate surrogate is absent.
+    assert!(
+        !strategy_json["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["strategy_id"] == "daemon_integrity_gate"),
+        "daemon_integrity_gate must not appear as a strategy row"
+    );
 
     let audit_req = Request::builder()
         .method("GET")
@@ -821,12 +844,15 @@ async fn gui_contract_execution_orders_200_array_with_injected_snapshot() {
 }
 
 #[tokio::test]
-async fn gui_contract_recently_promoted_array_surfaces_have_expected_shape() {
-    // These two routes were previously in the TEST-02 waiver list.  They are
-    // now mounted and return deterministic empty arrays in test state.
+async fn gui_contract_not_wired_surfaces_declare_truth_state() {
+    // config-diffs, strategy/suppressions, and strategy/summary are all
+    // "not_wired" surfaces: no durable backing exists yet.  Each must return
+    // a wrapper object with truth_state="not_wired" — NOT a bare array —
+    // so the GUI IIFEs can emit ok:false and prevent fake-zero / fake-row
+    // rendering in the Config, Strategy, and Ops panels.
     let router = make_router();
 
-    // /api/v1/system/config-diffs — Vec<ConfigDiffRow>
+    // /api/v1/system/config-diffs — ConfigDiffsResponse wrapper
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/system/config-diffs")
@@ -840,23 +866,28 @@ async fn gui_contract_recently_promoted_array_surfaces_have_expected_shape() {
     );
     let json = parse_json(body);
     assert!(
-        json.as_array().is_some(),
-        "/api/v1/system/config-diffs must return a JSON array; got: {json}"
+        json.as_object().is_some(),
+        "/api/v1/system/config-diffs must return a wrapper object, not a bare array; got: {json}"
     );
-    // No DB in test state → always empty.
     assert_eq!(
-        json.as_array().map(|v| v.is_empty()),
-        Some(true),
-        "/api/v1/system/config-diffs must be empty in test state"
+        json["truth_state"], "not_wired",
+        "/api/v1/system/config-diffs must declare truth_state=not_wired"
+    );
+    assert!(
+        json["rows"]
+            .as_array()
+            .map(|v| v.is_empty())
+            .unwrap_or(false),
+        "/api/v1/system/config-diffs rows must be empty when not_wired"
     );
 
-    // /api/v1/strategy/suppressions — Vec<StrategySuppressionRow>
+    // /api/v1/strategy/suppressions — StrategySuppressionsResponse wrapper
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/strategy/suppressions")
         .body(axum::body::Body::empty())
         .unwrap();
-    let (status, body) = call(router, req).await;
+    let (status, body) = call(router.clone(), req).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -864,14 +895,57 @@ async fn gui_contract_recently_promoted_array_surfaces_have_expected_shape() {
     );
     let json = parse_json(body);
     assert!(
-        json.as_array().is_some(),
-        "/api/v1/strategy/suppressions must return a JSON array; got: {json}"
+        json.as_object().is_some(),
+        "/api/v1/strategy/suppressions must return a wrapper object, not a bare array; got: {json}"
     );
-    // No active suppressions in test state → always empty.
     assert_eq!(
-        json.as_array().map(|v| v.is_empty()),
-        Some(true),
-        "/api/v1/strategy/suppressions must be empty in test state"
+        json["truth_state"], "not_wired",
+        "/api/v1/strategy/suppressions must declare truth_state=not_wired"
+    );
+    assert!(
+        json["rows"]
+            .as_array()
+            .map(|v| v.is_empty())
+            .unwrap_or(false),
+        "/api/v1/strategy/suppressions rows must be empty when not_wired"
+    );
+
+    // /api/v1/strategy/summary — StrategySummaryResponse wrapper
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/strategy/summary must return 200"
+    );
+    let json = parse_json(body);
+    assert!(
+        json.as_object().is_some(),
+        "/api/v1/strategy/summary must return a wrapper object, not a bare array; got: {json}"
+    );
+    assert_eq!(
+        json["truth_state"], "not_wired",
+        "/api/v1/strategy/summary must declare truth_state=not_wired"
+    );
+    assert!(
+        json["rows"]
+            .as_array()
+            .map(|v| v.is_empty())
+            .unwrap_or(false),
+        "/api/v1/strategy/summary rows must be empty when not_wired"
+    );
+    // Confirm the synthetic daemon_integrity_gate surrogate cannot sneak back in.
+    assert!(
+        !json["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["strategy_id"] == "daemon_integrity_gate"),
+        "daemon_integrity_gate must not appear as a strategy row"
     );
 }
 

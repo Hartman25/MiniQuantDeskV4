@@ -47,19 +47,25 @@ export function StrategyScreen({ model }: { model: SystemModel }) {
       </Panel>
 
       <Panel title="Strategy suppressions" subtitle="Active and historical suppressions affecting strategy output.">
-        <DataTable
-          rows={model.strategySuppressions}
-          rowKey={(row) => row.suppression_id}
-          columns={[
-            { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
-            { key: "state", title: "State", render: (row) => row.state },
-            { key: "domain", title: "Trigger Domain", render: (row) => row.trigger_domain },
-            { key: "reason", title: "Reason", render: (row) => row.trigger_reason },
-            { key: "started", title: "Started", render: (row) => formatDateTime(row.started_at) },
-            { key: "cleared", title: "Cleared", render: (row) => row.cleared_at ? formatDateTime(row.cleared_at) : "—" },
-            { key: "note", title: "Note", render: (row) => row.note },
-          ]}
-        />
+        {model.dataSource.mockSections.includes("strategySuppressions") ? (
+          <div className="unavailable-notice">
+            Strategy suppression history is not yet wired to a durable source. No suppression records are available.
+          </div>
+        ) : (
+          <DataTable
+            rows={model.strategySuppressions}
+            rowKey={(row) => row.suppression_id}
+            columns={[
+              { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
+              { key: "state", title: "State", render: (row) => row.state },
+              { key: "domain", title: "Trigger Domain", render: (row) => row.trigger_domain },
+              { key: "reason", title: "Reason", render: (row) => row.trigger_reason },
+              { key: "started", title: "Started", render: (row) => formatDateTime(row.started_at) },
+              { key: "cleared", title: "Cleared", render: (row) => row.cleared_at ? formatDateTime(row.cleared_at) : "—" },
+              { key: "note", title: "Note", render: (row) => row.note },
+            ]}
+          />
+        )}
       </Panel>
     </div>
   );

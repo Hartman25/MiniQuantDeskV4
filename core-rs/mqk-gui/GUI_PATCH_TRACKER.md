@@ -86,13 +86,44 @@ propagates degraded authority through `panelSources` → `panelTruthRenderState`
 hard-block. TSC clean.
 
 ### H-9: Contract gate burn-down — promoted 2 waivered routes
-**Status:** DONE
+**Status:** SUPERSEDED by REC-03/SS-01 below (truth-state wrappers replaced bare-array contract)
 **Files:** `scenario_gui_daemon_contract_gate.rs` (6th test added),
 `gui_daemon_contract_waivers.md` (2 entries promoted)
 **What changed:** `/api/v1/system/config-diffs` and `/api/v1/strategy/suppressions` moved
 from "Explicitly deferred" to enforced. New test
 `gui_contract_recently_promoted_array_surfaces_have_expected_shape` proves 200 + empty
 array in test state for both. Contract gate: 6/6 pass.
+
+### REC-03: Config / suppressions truth closure — fake-zero to explicit not_wired
+**Status:** DONE
+**Files:** `api_types.rs` (`ConfigDiffsResponse`, `StrategySuppressionsResponse` added),
+`routes.rs` (both handlers return wrapper with `truth_state="not_wired"`),
+`api.ts` (IIFEs for both surfaces; ok:false on not_wired),
+`ConfigScreen.tsx` (section-level "not wired" notice replaces empty DataTable),
+`StrategyScreen.tsx` (section-level "not wired" notice for suppressions panel)
+**What changed:** Both surfaces returned unconditional `HTTP 200 + []` — GUI `useArray`
+treated these as authoritative zero rows. Now return structured wrapper with
+`truth_state="not_wired"`. GUI IIFEs emit `ok:false` → sections render honest
+"not yet wired to a durable source" notice instead of empty tables.
+
+### SS-01: Strategy summary truth closure — synthetic daemon row removed
+**Status:** DONE
+**Files:** `api_types.rs` (`StrategySummaryResponse` added),
+`routes.rs` (`strategy_summary` handler rewritten: synthetic `daemon_integrity_gate` row removed),
+`api.ts` (IIFE for strategy/summary; ok:false on not_wired → "strategies" in mockSections),
+`sourceAuthority.ts` (comment updated to document not_wired authority collapse),
+`scenario_daemon_routes.rs` (`api_strategy_summary_declares_not_wired` replaces
+`api_strategy_summary_tracks_integrity_gate_truth`; config-diffs + suppressions assertions updated),
+`scenario_gui_daemon_contract_gate.rs` (strategy assertions in semantics test updated;
+`gui_contract_not_wired_surfaces_declare_truth_state` replaces
+`gui_contract_recently_promoted_array_surfaces_have_expected_shape`),
+`gui_daemon_contract_waivers.md` (strategy + config-diffs sections updated)
+**What changed:** `/api/v1/strategy/summary` returned a synthetic `daemon_integrity_gate`
+row reflecting daemon arm state — not a real strategy. GUI rendered it as a real strategy
+row. Route now returns `StrategySummaryResponse{truth_state:"not_wired", rows:[]}`. GUI
+IIFE emits ok:false → "strategies" in mockSections → panel authority "placeholder" →
+`panelTruthRenderState` returns "unimplemented" → StrategyScreen hard-blocks.
+Deferred until a real strategy-fleet source is wired.
 
 ### PC-1: Final truth-model hardening — operator-console endstate verification
 **Status:** DONE

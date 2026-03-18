@@ -918,39 +918,51 @@ async fn api_system_session_reports_truthful_mode_and_operator_auth() {
 }
 
 #[tokio::test]
-async fn api_strategy_summary_tracks_integrity_gate_truth() {
-    let st = Arc::new(state::AppState::new_with_operator_auth(
-        state::OperatorAuthMode::ExplicitDevNoToken,
-    ));
+async fn api_strategy_summary_declares_not_wired() {
+    // No real strategy-fleet registry exists in this repo.  The route must
+    // return an explicit "not_wired" truth-state wrapper — NOT a synthetic
+    // daemon_integrity_gate surrogate row that would masquerade as a strategy.
+    // The GUI IIFE checks truth_state and emits ok:false when "not_wired",
+    // preventing the StrategyScreen from rendering fake strategy rows.
+    let router = make_router();
 
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/strategy/summary")
         .body(axum::body::Body::empty())
         .unwrap();
-    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    let (status, body) = call(router, req).await;
     assert_eq!(status, StatusCode::OK);
-    let rows = parse_json(body);
-    assert_eq!(rows.as_array().unwrap().len(), 1);
-    assert_eq!(rows[0]["armed"], false);
-    assert_eq!(rows[0]["health"], "warning");
+    let json = parse_json(body);
 
-    let arm_req = Request::builder()
-        .method("POST")
-        .uri("/v1/integrity/arm")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let _ = call(routes::build_router(Arc::clone(&st)), arm_req).await;
-
-    let req2 = Request::builder()
-        .method("GET")
-        .uri("/api/v1/strategy/summary")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (_, body2) = call(routes::build_router(Arc::clone(&st)), req2).await;
-    let rows2 = parse_json(body2);
-    assert_eq!(rows2[0]["armed"], true);
-    assert_eq!(rows2[0]["health"], "ok");
+    // Must be a wrapper object — NOT a bare array.
+    assert!(
+        json.as_object().is_some(),
+        "/api/v1/strategy/summary must return a wrapper object, not a bare array; got: {json}"
+    );
+    assert_eq!(
+        json["truth_state"], "not_wired",
+        "strategy summary must declare truth_state=not_wired until a real fleet source is wired"
+    );
+    assert!(
+        json["rows"].as_array().is_some(),
+        "strategy summary wrapper must have a rows array field"
+    );
+    assert_eq!(
+        json["rows"].as_array().map(|v| v.is_empty()),
+        Some(true),
+        "strategy summary rows must be empty when not_wired"
+    );
+    // Confirm the synthetic daemon_integrity_gate row is gone — any row with
+    // that strategy_id would be surrogate truth, not real fleet truth.
+    assert!(
+        !json["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["strategy_id"] == "daemon_integrity_gate"),
+        "daemon_integrity_gate must not appear as a strategy row"
+    );
 }
 
 #[tokio::test]
@@ -979,8 +991,22 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
     let (diff_status, diff_body) = call(router.clone(), diff_req).await;
     assert_eq!(diff_status, StatusCode::OK);
     let diffs = parse_json(diff_body);
-    assert!(diffs.is_array());
-    assert_eq!(diffs.as_array().unwrap().len(), 0);
+    // Must be a wrapper — not a bare array.
+    assert!(
+        diffs.as_object().is_some(),
+        "config-diffs must return a wrapper object"
+    );
+    assert_eq!(
+        diffs["truth_state"], "not_wired",
+        "config-diffs must declare not_wired"
+    );
+    assert!(
+        diffs["rows"]
+            .as_array()
+            .map(|v| v.is_empty())
+            .unwrap_or(false),
+        "config-diffs rows must be empty"
+    );
 
     let suppressions_req = Request::builder()
         .method("GET")
@@ -990,8 +1016,22 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
     let (suppressions_status, suppressions_body) = call(router, suppressions_req).await;
     assert_eq!(suppressions_status, StatusCode::OK);
     let suppressions = parse_json(suppressions_body);
-    assert!(suppressions.is_array());
-    assert_eq!(suppressions.as_array().unwrap().len(), 0);
+    // Must be a wrapper — not a bare array.
+    assert!(
+        suppressions.as_object().is_some(),
+        "suppressions must return a wrapper object"
+    );
+    assert_eq!(
+        suppressions["truth_state"], "not_wired",
+        "suppressions must declare not_wired"
+    );
+    assert!(
+        suppressions["rows"]
+            .as_array()
+            .map(|v| v.is_empty())
+            .unwrap_or(false),
+        "suppressions rows must be empty"
+    );
 }
 
 #[tokio::test]

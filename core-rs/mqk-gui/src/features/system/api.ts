@@ -173,6 +173,33 @@ interface ReconcileMismatchesResponse {
   rows: ReconcileMismatchRow[];
 }
 
+// Config-diff truth wrapper.
+// "not_wired" = no durable config-diff persistence exists; rows is empty and not authoritative.
+// "active"    = reserved for when durable tracking is wired (not currently returned).
+interface ConfigDiffsWrapper {
+  truth_state: "not_wired" | "active";
+  rows: ConfigDiffRow[];
+}
+
+// Strategy suppression truth wrapper.
+// "not_wired" = no durable suppression persistence exists; rows is empty and not authoritative.
+// "active"    = reserved for when durable tracking is wired (not currently returned).
+interface StrategySuppressionsWrapper {
+  truth_state: "not_wired" | "active";
+  rows: StrategySuppressionRow[];
+}
+
+// Strategy summary truth wrapper.
+// "not_wired" = no real strategy-fleet registry exists; rows is empty and not authoritative.
+//   The former synthetic "daemon_integrity_gate" surrogate row has been removed at the
+//   daemon layer; this wrapper prevents any future bare-array regression from silently
+//   re-introducing fake strategy rows.
+// "active"    = reserved for when a real strategy-fleet source is wired.
+interface StrategySummaryWrapper {
+  truth_state: "not_wired" | "active";
+  rows: StrategyRow[];
+}
+
 interface LegacyIntegrityResponse {
   armed: boolean;
   active_run_id: string | null;
@@ -764,7 +791,20 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       }
       return { ok: true, endpoint: canonical.endpoint, data: data.rows };
     })(),
-    fetchJsonCandidates<StrategyRow[]>(["/api/v1/strategy/summary"]),
+    // strategy/summary: daemon returns a wrapper with truth_state.
+    // "not_wired" = no real strategy-fleet registry exists; the former synthetic
+    // "daemon_integrity_gate" surrogate row has been removed at the daemon layer.
+    // Emit ok:false so "strategies" lands in usedMockSections, collapsing the
+    // strategy panel authority to "placeholder" and blocking the StrategyScreen
+    // with an "Unimplemented" notice rather than a fake strategy row.
+    (async (): Promise<EndpointFetchResult<StrategyRow[]>> => {
+      const r = await fetchJsonCandidate<StrategySummaryWrapper>("/api/v1/strategy/summary");
+      if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      if ((r.data as StrategySummaryWrapper).truth_state === "not_wired") {
+        return { ok: false, endpoint: r.endpoint, error: "strategy_summary_not_wired" };
+      }
+      return { ok: true, endpoint: r.endpoint, data: (r.data as StrategySummaryWrapper).rows };
+    })(),
     fetchJsonCandidates<OperatorAlert[]>(["/api/v1/alerts/active"]),
     fetchJsonCandidates<FeedEvent[]>(["/api/v1/events/feed"]),
     // audit/operator-actions: daemon returns {canonical_route, backend, rows}.
@@ -820,8 +860,30 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       };
       return { ok: true, endpoint: r.endpoint, data: summary };
     })(),
-    fetchJsonCandidates<StrategySuppressionRow[]>(["/api/v1/strategy/suppressions"]),
-    fetchJsonCandidates<ConfigDiffRow[]>(["/api/v1/system/config-diffs"]),
+    // strategy/suppressions: daemon returns a wrapper with truth_state.
+    // "not_wired" = no durable suppression persistence; [] is not authoritative zero.
+    // Emit ok:false so "strategySuppressions" lands in usedMockSections and the
+    // strategy panel's suppressions section renders an honest unavailable notice.
+    (async (): Promise<EndpointFetchResult<StrategySuppressionRow[]>> => {
+      const r = await fetchJsonCandidate<StrategySuppressionsWrapper>("/api/v1/strategy/suppressions");
+      if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      if ((r.data as StrategySuppressionsWrapper).truth_state === "not_wired") {
+        return { ok: false, endpoint: r.endpoint, error: "suppressions_not_wired" };
+      }
+      return { ok: true, endpoint: r.endpoint, data: (r.data as StrategySuppressionsWrapper).rows };
+    })(),
+    // system/config-diffs: daemon returns a wrapper with truth_state.
+    // "not_wired" = no durable config-diff persistence; [] is not authoritative zero.
+    // Emit ok:false so "configDiffs" lands in usedMockSections and the config
+    // panel's diffs section renders an honest unavailable notice.
+    (async (): Promise<EndpointFetchResult<ConfigDiffRow[]>> => {
+      const r = await fetchJsonCandidate<ConfigDiffsWrapper>("/api/v1/system/config-diffs");
+      if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      if ((r.data as ConfigDiffsWrapper).truth_state === "not_wired") {
+        return { ok: false, endpoint: r.endpoint, error: "config_diffs_not_wired" };
+      }
+      return { ok: true, endpoint: r.endpoint, data: (r.data as ConfigDiffsWrapper).rows };
+    })(),
     // ops/operator-timeline: daemon returns {canonical_route, backend, rows} where
     // each row is a runtime lifecycle transition or operator action from runs +
     // audit_events.  Map to OperatorTimelineEvent using only provable DB fields.
