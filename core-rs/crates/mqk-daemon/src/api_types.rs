@@ -719,15 +719,17 @@ pub struct PortfolioFillsResponse {
 /// Fields map 1:1 to the GUI `RiskDenialRow` type so the operator sees exact
 /// denial evidence without transformation.
 ///
-/// The `id` field is a stable row identifier for keying the GUI table.
-/// When denials are eventually persisted to a DB audit log the `id` will be
-/// a UUIDv5 derived from the denial context.  For in-memory rows it is a
-/// formatted string combining sequence index and rule.
+/// `strategy_id` is `None` / `null` at all times: the risk gate operates on
+/// the order itself and has no access to which strategy generated it.  The
+/// field is optional in the type contract so that it is honest (`null` in
+/// JSON) rather than a placeholder empty string.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskDenialRow {
     pub id: String,
     pub at: String,
-    pub strategy_id: String,
+    /// Always `null` — strategy attribution is not available on the risk gate
+    /// path.  The gate sees the order, not the originating strategy.
+    pub strategy_id: Option<String>,
     pub symbol: String,
     /// The risk rule that was violated, e.g. `"PositionLimitExceeded"`.
     pub rule: String,
@@ -740,29 +742,44 @@ pub struct RiskDenialRow {
 
 /// Response wrapper for `GET /api/v1/risk/denials`.
 ///
-/// `truth_state` explicitly distinguishes two semantically different empty
-/// responses:
+/// `truth_state` explicitly distinguishes three semantically different
+/// response postures:
 ///
-/// - `"active"` — execution loop is running; `denials` is authoritative.
-///   An empty `denials` array means the risk gate has not denied any order
-///   in this session — that is genuinely safe to render as "no denials."
-/// - `"no_snapshot"` — execution loop has not started or its snapshot has
-///   not been populated yet; denial truth is unavailable.  `denials` is
-///   always empty and **must not** be treated as authoritative zero.
+/// - `"active"` — execution loop is running AND a DB pool is available.
+///   `denials` contains ONLY rows that are durably stored in
+///   `sys_risk_denial_events`.  Restart-safe.  An empty `denials` array
+///   means the risk gate has genuinely never denied any order in this
+///   deployment (not just the current session).
 ///
-/// The GUI IIFE in `api.ts` checks `truth_state` and returns the response
-/// as a failed probe (`ok: false`) when `truth_state === "no_snapshot"`,
-/// causing the endpoint to land in `missingEndpoints`.  The
-/// `isMissingPanelTruth` gate then fires and the risk panel blocks.
+/// - `"active_session_only"` — execution loop is running but NO DB pool is
+///   available.  `denials` is populated from the in-memory ring buffer only.
+///   NOT restart-safe: rows will be lost on daemon restart.  Returned only
+///   in DB-less test environments; production deployments always have a pool.
+///
+/// - `"durable_history"` — execution loop is not currently running but the
+///   DB has historical denial rows from a prior session.  `denials` is
+///   durably sourced; restart-safe.  The GUI passes this through as
+///   `ok: true` and renders the historical rows.
+///
+/// - `"no_snapshot"` — no durable rows exist and the loop is not running.
+///   `denials` is always empty and **must not** be treated as authoritative
+///   zero.  GUI IIFE emits `ok: false` → risk panel blocks.
+///
+/// The GUI IIFE blocks only on `"no_snapshot"` and `"not_wired"`.
+/// `"active"`, `"active_session_only"`, and `"durable_history"` all pass
+/// through as `ok: true`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskDenialsResponse {
-    /// `"active"` = execution loop running; `denials` is authoritative.
-    /// `"no_snapshot"` = loop not started / snapshot unavailable.
+    /// `"active"` = loop running + DB pool → durable rows only.
+    /// `"active_session_only"` = loop running + no DB pool → ring buffer only.
+    /// `"durable_history"` = loop not running, DB has historical rows.
+    /// `"no_snapshot"` = no DB rows and loop not running.
     pub truth_state: String,
-    /// UTC timestamp of the execution snapshot, if one exists.
+    /// UTC timestamp of the execution snapshot (present when loop is running).
     pub snapshot_at_utc: Option<String>,
-    /// Denial rows.  Authoritative when `truth_state == "active"`;
-    /// always empty when `truth_state == "no_snapshot"`.
+    /// Denial rows.  Restart-safe when `truth_state` is `"active"` or
+    /// `"durable_history"`.  Ephemeral when `"active_session_only"`.
+    /// Always empty when `"no_snapshot"`.
     pub denials: Vec<RiskDenialRow>,
 }
 

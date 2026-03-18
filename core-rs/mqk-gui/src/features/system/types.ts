@@ -629,7 +629,8 @@ export interface RiskSummary {
 export interface RiskDenialRow {
   id: string;
   at: string;
-  strategy_id: string;
+  /** Always null — strategy attribution is not available on the risk gate path. */
+  strategy_id: string | null;
   symbol: string;
   rule: string;
   message: string;

@@ -1289,20 +1289,21 @@ async fn gui_contract_portfolio_fills_active_snapshot() {
 // ---------------------------------------------------------------------------
 //
 // Contract invariants proven here:
-//  1. Without an execution snapshot: HTTP 200, truth_state = "no_snapshot",
-//     denials = [], snapshot_at_utc = null.
+//  1. Without an execution snapshot (no pool, no loop): HTTP 200,
+//     truth_state = "no_snapshot", denials = [], snapshot_at_utc = null.
 //     → GUI IIFE reads truth_state and emits ok:false → endpoint lands in
 //       missingEndpoints → isMissingPanelTruth fires → risk panel blocks.
-//  2. With an injected execution snapshot: HTTP 200, truth_state = "not_wired",
-//     denials = [], snapshot_at_utc = null.
-//     → Denial accumulator is not yet implemented in AppState; the execution
-//       loop running does not mean risk denial detail is available.  The daemon
-//       must not claim "active" (authoritative zero) when no denial source exists.
-//     → GUI IIFE reads truth_state="not_wired" and emits ok:false →
-//       endpoint → missingEndpoints → risk panel stays fail-closed.
-//
-// truth_state = "active" is reserved for when a real denial accumulator is
-// wired and proven; it is intentionally NOT returned by this handler yet.
+//  2. With an injected execution snapshot (no pool): HTTP 200,
+//     truth_state = "active_session_only", denials = [], snapshot_at_utc non-null.
+//     → No DB pool means ring-buffer only; NOT restart-safe.  Labeled honestly.
+//     → In production (pool always present) truth_state would be "active" (durable).
+//  3. With an injected execution snapshot and a denial record (no pool):
+//     HTTP 200, truth_state = "active_session_only", one denial row in denials.
+//     → Ring-buffer record propagates through the route; strategy_id = null.
+//  4. (DB-backed, see scenario_daemon_routes.rs) With a pool but no loop:
+//     truth_state = "durable_history" when DB has rows — restart-safe.
+//  5. (DB-backed, see scenario_daemon_routes.rs) With a pool + loop running:
+//     truth_state = "active"; only DB rows returned; ring buffer NOT merged.
 
 #[tokio::test]
 async fn gui_contract_risk_denials_no_snapshot() {
@@ -1339,10 +1340,12 @@ async fn gui_contract_risk_denials_no_snapshot() {
 
 #[tokio::test]
 async fn gui_contract_risk_denials_active_snapshot() {
-    // When an execution snapshot with an empty denial ring buffer is injected,
-    // /api/v1/risk/denials must return HTTP 200 with truth_state = "active" and
-    // denials = [].  This is authoritative: the execution loop is running and the
-    // risk gate has not denied any order.  The snapshot_at_utc must be non-null.
+    // When an execution snapshot is injected into a no-pool AppState,
+    // /api/v1/risk/denials must return HTTP 200 with truth_state =
+    // "active_session_only" — no DB pool means only ring-buffer rows are
+    // available, which are NOT restart-safe.  This is the explicit contract for
+    // no-pool environments (test/dev).  In production (pool always present)
+    // truth_state would be "active" (durable).
     use chrono::DateTime;
     use mqk_runtime::observability::{ExecutionSnapshot, PortfolioSnapshot};
 
@@ -1382,16 +1385,16 @@ async fn gui_contract_risk_denials_active_snapshot() {
     let json = parse_json(body);
     assert_eq!(
         json["truth_state"].as_str(),
-        Some("active"),
-        "truth_state must be active when execution_snapshot is present; got: {json}"
+        Some("active_session_only"),
+        "truth_state must be active_session_only (no pool) when execution_snapshot is present without a DB pool; got: {json}"
     );
     assert!(
         json["denials"].as_array().is_some_and(|v| v.is_empty()),
-        "denials must be empty array when ring buffer is empty (authoritative zero denials); got: {json}"
+        "denials must be empty array when ring buffer is empty; got: {json}"
     );
     assert!(
         !json["snapshot_at_utc"].is_null(),
-        "snapshot_at_utc must be non-null when truth_state is active; got: {json}"
+        "snapshot_at_utc must be non-null when execution loop is running; got: {json}"
     );
 }
 
@@ -1446,7 +1449,12 @@ async fn gui_contract_risk_denials_real_row_appears() {
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
 
-    assert_eq!(json["truth_state"].as_str(), Some("active"));
+    // No pool → ring buffer path → truth_state must be active_session_only.
+    assert_eq!(
+        json["truth_state"].as_str(),
+        Some("active_session_only"),
+        "truth_state must be active_session_only (no pool); got: {json}"
+    );
     let rows = json["denials"]
         .as_array()
         .expect("denials must be an array");
@@ -1486,6 +1494,11 @@ async fn gui_contract_risk_denials_real_row_appears() {
     assert!(
         !row["at"].as_str().unwrap_or("").is_empty(),
         "row at must be a non-empty RFC3339 timestamp; got: {row}"
+    );
+    // strategy_id must be null — not available on the risk gate path.
+    assert!(
+        row["strategy_id"].is_null(),
+        "strategy_id must be null for risk denial rows (not available on risk gate path); got: {row}"
     );
 }
 

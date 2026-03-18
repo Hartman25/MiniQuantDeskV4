@@ -37,9 +37,11 @@ export const FIELD_EVIDENCE_HINTS: Record<
     broker: ["/risk/summary"],
     placeholder: ["riskSummary"],
   },
-  // /risk/denials is sourced from ExecutionSnapshot::recent_risk_denials.
+  // /risk/denials is sourced from sys_risk_denial_events (durable DB table,
+  // migration 0026) when a DB pool is available.  Falls back to the in-memory
+  // ring buffer (truth_state = "active_session_only") in no-pool environments.
   riskDenials: {
-    db: [],
+    db: ["/risk/denials"],
     runtime: ["/risk/denials"],
     broker: [],
     placeholder: ["riskDenials"],

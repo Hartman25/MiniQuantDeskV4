@@ -65,7 +65,7 @@ export function RiskScreen({ model }: { model: SystemModel }) {
             rowKey={(row) => row.id}
             columns={[
               { key: "at", title: "At", render: (row) => formatDateTime(row.at) },
-              { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
+              { key: "strategy", title: "Strategy", render: (row) => row.strategy_id ?? "—" },
               { key: "symbol", title: "Symbol", render: (row) => row.symbol },
               { key: "rule", title: "Rule", render: (row) => row.rule },
               { key: "message", title: "Message", render: (row) => row.message },

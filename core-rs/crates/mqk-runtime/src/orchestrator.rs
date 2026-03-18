@@ -379,6 +379,31 @@ where
                                 limit: denial.evidence.limit,
                                 severity: "critical".to_string(),
                             };
+                            // RD-01: best-effort durable persist. A write
+                            // failure must never block or abort execution —
+                            // the ring buffer holds the record for the
+                            // current session; a failure only affects
+                            // post-restart history.
+                            if let Err(err) = mqk_db::persist_risk_denial_event(
+                                &self.pool,
+                                &mqk_db::RiskDenialEventRow {
+                                    id: record.id.clone(),
+                                    denied_at_utc: record.denied_at_utc,
+                                    rule: record.rule.clone(),
+                                    message: record.message.clone(),
+                                    symbol: record.symbol.clone(),
+                                    requested_qty: record.requested_qty,
+                                    limit_qty: record.limit,
+                                    severity: record.severity.clone(),
+                                },
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    "risk_denial_event_persist_failed id={} err={err}",
+                                    record.id
+                                );
+                            }
                             if self.recent_denials.len() >= DENIAL_RING_BUFFER_CAP {
                                 self.recent_denials.pop_front();
                             }

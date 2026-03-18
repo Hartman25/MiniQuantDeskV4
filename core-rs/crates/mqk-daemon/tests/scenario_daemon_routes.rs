@@ -2190,3 +2190,365 @@ async fn ctrl03_session_response_notes_carry_provenance() {
         "first note must be a session_truth provenance note; got: {note_str:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// RD-01: Durable risk-denial history — DB-backed persistence/reload tests
+//
+// These tests require MQK_DATABASE_URL and skip gracefully without it.
+// They prove that risk denials are durably stored and that the route
+// surfaces them across restarts (i.e. when no execution loop is running
+// but the DB has rows from a prior session).
+// ---------------------------------------------------------------------------
+
+/// Acquire a DB pool from MQK_DATABASE_URL.  Panics if the env var is absent.
+async fn denial_test_pool() -> sqlx::PgPool {
+    let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
+        panic!(
+            "DB tests require MQK_DATABASE_URL; run: \
+             MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
+             cargo test -p mqk-daemon risk_denial -- --include-ignored"
+        )
+    });
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("denial_test_pool: connect failed")
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn risk_denial_persist_and_reload_roundtrip() {
+    // Proves that persist_risk_denial_event writes a row that
+    // load_recent_risk_denial_events can read back with correct field values.
+    let pool = denial_test_pool().await;
+
+    let test_id = format!(
+        "test:persist_roundtrip:{}",
+        chrono::Utc::now().timestamp_micros()
+    );
+    let denied_at =
+        chrono::DateTime::from_timestamp(1_700_000_200, 0).expect("valid unix timestamp");
+
+    let row = mqk_db::RiskDenialEventRow {
+        id: test_id.clone(),
+        denied_at_utc: denied_at,
+        rule: "TEST_RULE_ROUNDTRIP".to_string(),
+        message: "test denial — persist and reload roundtrip".to_string(),
+        symbol: Some("TSLA".to_string()),
+        requested_qty: Some(50),
+        limit_qty: Some(25),
+        severity: "critical".to_string(),
+    };
+
+    // Write.
+    mqk_db::persist_risk_denial_event(&pool, &row)
+        .await
+        .expect("persist_risk_denial_event failed");
+
+    // Reload and find our row.
+    let rows = mqk_db::load_recent_risk_denial_events(&pool, 200)
+        .await
+        .expect("load_recent_risk_denial_events failed");
+
+    let found = rows.iter().find(|r| r.id == test_id);
+    assert!(
+        found.is_some(),
+        "persisted denial row must appear in load_recent_risk_denial_events; id={test_id}"
+    );
+    let found = found.unwrap();
+    assert_eq!(found.rule, "TEST_RULE_ROUNDTRIP");
+    assert_eq!(found.symbol.as_deref(), Some("TSLA"));
+    assert_eq!(found.requested_qty, Some(50));
+    assert_eq!(found.limit_qty, Some(25));
+    assert_eq!(found.severity, "critical");
+
+    // Idempotent re-insert must not error.
+    mqk_db::persist_risk_denial_event(&pool, &row)
+        .await
+        .expect("idempotent re-insert must not fail");
+
+    // Cleanup.
+    sqlx::query("delete from sys_risk_denial_events where id = $1")
+        .bind(&test_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup delete failed");
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn risk_denials_route_returns_durable_history_after_restart() {
+    // Proves that after a simulated restart (AppState with pool but no
+    // execution loop / snapshot), the /api/v1/risk/denials route returns
+    // truth_state = "durable_history" and surfaces the persisted row.
+    //
+    // This is the core restart-safety invariant: denial history must not be
+    // lost when the daemon restarts and the execution loop has not yet started.
+    let pool = denial_test_pool().await;
+
+    let test_id = format!(
+        "test:route_durable_history:{}",
+        chrono::Utc::now().timestamp_micros()
+    );
+    let denied_at =
+        chrono::DateTime::from_timestamp(1_700_000_300, 0).expect("valid unix timestamp");
+
+    // Insert a denial row directly — simulating a row written by a prior
+    // session's orchestrator.
+    mqk_db::persist_risk_denial_event(
+        &pool,
+        &mqk_db::RiskDenialEventRow {
+            id: test_id.clone(),
+            denied_at_utc: denied_at,
+            rule: "TEST_RULE_ROUTE_RELOAD".to_string(),
+            message: "test denial — route durable history after restart".to_string(),
+            symbol: Some("SPY".to_string()),
+            requested_qty: Some(10),
+            limit_qty: Some(5),
+            severity: "critical".to_string(),
+        },
+    )
+    .await
+    .expect("persist_risk_denial_event failed");
+
+    // Build AppState as if the daemon just restarted: pool available but no
+    // execution loop running (execution_snapshot is None).
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    // Confirm execution_snapshot is absent (no loop started).
+    assert!(
+        st.execution_snapshot.read().await.is_none(),
+        "execution_snapshot must be absent for the restart simulation to be valid"
+    );
+
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/denials")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/risk/denials must return HTTP 200 after restart"
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["truth_state"].as_str(),
+        Some("durable_history"),
+        "truth_state must be durable_history when DB has rows but loop is not running; got: {json}"
+    );
+    assert!(
+        json["snapshot_at_utc"].is_null(),
+        "snapshot_at_utc must be null when loop is not running; got: {json}"
+    );
+    let rows = json["denials"]
+        .as_array()
+        .expect("denials must be an array");
+    let found_row = rows
+        .iter()
+        .find(|r| r["id"].as_str() == Some(test_id.as_str()));
+    assert!(
+        found_row.is_some(),
+        "persisted denial row must appear in route response after restart; id={test_id}; got: {json}"
+    );
+    // strategy_id must be null — not available on the risk gate path.
+    assert!(
+        found_row.unwrap()["strategy_id"].is_null(),
+        "strategy_id must be null in durable_history rows; got: {json}"
+    );
+
+    // Cleanup.
+    sqlx::query("delete from sys_risk_denial_events where id = $1")
+        .bind(&test_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup delete failed");
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn risk_denials_route_active_with_pool_returns_only_db_rows() {
+    // Proves that when the execution loop IS running AND a pool is available,
+    // truth_state = "active" and only DB-persisted rows are returned.
+    // Ring-buffer-only rows (those whose DB persist failed) are NOT surfaced —
+    // that is the strict durable truth guarantee.
+    use chrono::DateTime;
+    use mqk_runtime::observability::{ExecutionSnapshot, PortfolioSnapshot};
+
+    let pool = denial_test_pool().await;
+
+    let test_id = format!("test:active_pool:{}", chrono::Utc::now().timestamp_micros());
+    let denied_at =
+        chrono::DateTime::from_timestamp(1_700_000_400, 0).expect("valid unix timestamp");
+
+    // Insert one denial row directly (simulating a successful orchestrator write).
+    mqk_db::persist_risk_denial_event(
+        &pool,
+        &mqk_db::RiskDenialEventRow {
+            id: test_id.clone(),
+            denied_at_utc: denied_at,
+            rule: "TEST_RULE_ACTIVE_POOL".to_string(),
+            message: "test denial — active pool DB-only path".to_string(),
+            symbol: Some("QQQ".to_string()),
+            requested_qty: Some(20),
+            limit_qty: Some(10),
+            severity: "critical".to_string(),
+        },
+    )
+    .await
+    .expect("persist_risk_denial_event failed");
+
+    // Build AppState with pool and inject a ring-buffer-only denial (one that
+    // was NOT written to DB) to prove it is excluded from the "active" response.
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let snap = ExecutionSnapshot {
+        run_id: None,
+        active_orders: vec![],
+        pending_outbox: vec![],
+        recent_inbox_events: vec![],
+        portfolio: PortfolioSnapshot {
+            cash_micros: 0,
+            realized_pnl_micros: 0,
+            positions: vec![],
+        },
+        system_block_state: None,
+        // One ring-buffer row with a unique id that is NOT in the DB.
+        recent_risk_denials: vec![mqk_runtime::observability::RiskDenialRecord {
+            id: "ring_buffer_only_row_never_in_db".to_string(),
+            denied_at_utc: DateTime::from_timestamp(1_700_000_500, 0)
+                .expect("valid unix timestamp"),
+            rule: "RING_BUFFER_ONLY".to_string(),
+            message: "this row exists only in the ring buffer, not in DB".to_string(),
+            symbol: Some("RING".to_string()),
+            requested_qty: None,
+            limit: None,
+            severity: "critical".to_string(),
+        }],
+        snapshot_at_utc: DateTime::from_timestamp(1_700_000_600, 0).expect("valid unix timestamp"),
+    };
+    *st.execution_snapshot.write().await = Some(snap);
+
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/denials")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    // With pool + loop running: truth_state must be "active" (durable).
+    assert_eq!(
+        json["truth_state"].as_str(),
+        Some("active"),
+        "truth_state must be active when pool is present and loop is running; got: {json}"
+    );
+    assert!(
+        !json["snapshot_at_utc"].is_null(),
+        "snapshot_at_utc must be non-null when loop is running; got: {json}"
+    );
+
+    let rows = json["denials"]
+        .as_array()
+        .expect("denials must be an array");
+
+    // DB row must appear.
+    let found_db = rows
+        .iter()
+        .any(|r| r["id"].as_str() == Some(test_id.as_str()));
+    assert!(
+        found_db,
+        "DB-persisted denial must appear in active route response; id={test_id}; got: {json}"
+    );
+
+    // Ring-buffer-only row must NOT appear (strict durable truth).
+    let found_ring = rows
+        .iter()
+        .any(|r| r["id"].as_str() == Some("ring_buffer_only_row_never_in_db"));
+    assert!(
+        !found_ring,
+        "ring-buffer-only row must NOT appear in active (durable) response; got: {json}"
+    );
+
+    // strategy_id must be null on every row.
+    for row in rows {
+        assert!(
+            row["strategy_id"].is_null(),
+            "strategy_id must be null in active rows; got: {row}"
+        );
+    }
+
+    // Cleanup.
+    sqlx::query("delete from sys_risk_denial_events where id = $1")
+        .bind(&test_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup delete failed");
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn risk_denials_route_no_snapshot_when_db_empty() {
+    // Proves that when no denial rows exist in the DB and the execution loop
+    // is not running, the route returns truth_state = "no_snapshot" (not
+    // "durable_history" with empty rows — that would be misleading).
+    //
+    // This test relies on the DB having no test-inserted rows for the
+    // "TEST_RULE_EMPTY_CHECK" rule. We clean up before and after.
+    let pool = denial_test_pool().await;
+
+    // Ensure no test rows exist.
+    sqlx::query("delete from sys_risk_denial_events where rule = 'TEST_RULE_EMPTY_CHECK'")
+        .execute(&pool)
+        .await
+        .expect("pre-test cleanup failed");
+
+    // Build AppState with pool but no execution loop.
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    // This test only proves "no_snapshot" when the *entire* table is empty.
+    // If other rows exist (from real runs), the route will return
+    // "durable_history" — which is correct behaviour.  Skip gracefully.
+    let existing = mqk_db::load_recent_risk_denial_events(&pool, 1)
+        .await
+        .expect("load check failed");
+    if !existing.is_empty() {
+        // Real denial history exists — test cannot prove empty-table path.
+        // This is acceptable: the DB has real rows, durable_history is correct.
+        return;
+    }
+
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/denials")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(
+        json["truth_state"].as_str(),
+        Some("no_snapshot"),
+        "truth_state must be no_snapshot when DB has no rows and loop is not running; got: {json}"
+    );
+    assert!(
+        json["denials"].as_array().is_some_and(|v| v.is_empty()),
+        "denials must be empty when truth_state is no_snapshot; got: {json}"
+    );
+}

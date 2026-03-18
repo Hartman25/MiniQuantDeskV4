@@ -149,14 +149,21 @@ interface PortfolioFillsResponse {
 // Canonical risk denial truth surface.
 //
 // truth_state values:
-//   "no_snapshot"  — execution loop not running; denial truth entirely absent.
-//                    GUI IIFE emits ok:false → endpoint in missingEndpoints → panel blocks.
-//   "active"       — execution loop running; denial accumulator wired and authoritative.
-//                    denials: [] truly means zero denials since loop start.
-//   "not_wired"    — defensive guard only; not returned by current daemon but handled
-//                    fail-closed in case of future partial-wiring edge cases.
+//   "no_snapshot"         — execution loop not running and no historical rows in DB;
+//                           denial truth entirely absent. GUI IIFE emits ok:false →
+//                           endpoint in missingEndpoints → panel blocks.
+//   "active"              — execution loop running AND DB pool available. denials contains
+//                           ONLY rows durably stored in sys_risk_denial_events. Restart-safe.
+//                           denials: [] means no denial has ever been recorded in this deployment.
+//   "active_session_only" — execution loop running but no DB pool (test environments only;
+//                           never returned in production). denials from in-memory ring buffer
+//                           only. NOT restart-safe.
+//   "durable_history"     — execution loop not running but DB has historical rows from a prior
+//                           session. denials is durably sourced. Restart-safe.
+//   "not_wired"           — defensive guard only; not returned by current daemon but handled
+//                           fail-closed in case of future partial-wiring edge cases.
 interface RiskDenialsResponse {
-  truth_state: "active" | "no_snapshot" | "not_wired";
+  truth_state: "active" | "active_session_only" | "no_snapshot" | "not_wired" | "durable_history";
   snapshot_at_utc: string | null;
   denials: RiskDenialRow[];
 }

@@ -1652,22 +1652,116 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
 
 /// GET /api/v1/risk/denials — canonical risk denial truth surface.
 ///
-/// Returns a structured `RiskDenialsResponse` with one of two truth states:
+/// # Truth-state contract
 ///
-/// - `truth_state: "no_snapshot"` — execution loop has not started; no snapshot
-///   exists.  Denial truth is entirely unavailable.  GUI IIFE emits ok:false →
-///   endpoint → missingEndpoints → risk panel blocks.
+/// - `"active"` — execution loop is running AND a DB pool is available.
+///   `denials` contains ONLY rows durably stored in `sys_risk_denial_events`.
+///   Restart-safe.  An empty `denials` array means the risk gate has
+///   genuinely never denied any order in this deployment.
 ///
-/// - `truth_state: "active"` — execution loop is running; `denials` is
-///   authoritative.  `denials: []` means the risk gate has genuinely not denied
-///   any order since the loop started.  Denial rows are populated from the
-///   orchestrator's bounded ring buffer (`ExecutionSnapshot::recent_risk_denials`)
-///   which is fed only by real `RiskGate::evaluate_gate()` denials during ticks.
+/// - `"active_session_only"` — execution loop is running but NO DB pool is
+///   available (test environments only).  `denials` is populated from the
+///   in-memory ring buffer.  NOT restart-safe.  Not returned in production.
+///
+/// - `"durable_history"` — execution loop is not running but the DB has
+///   historical rows from a prior session.  Restart-safe.
+///
+/// - `"no_snapshot"` — loop not running and no durable rows exist.  GUI IIFE
+///   emits ok:false → risk panel blocks.
+///
+/// # Strict durable truth
+///
+/// When a DB pool is available, the route returns ONLY rows from
+/// `sys_risk_denial_events`.  The in-memory ring buffer is NOT merged into
+/// durable-history responses.  A denial whose DB persist call failed will be
+/// absent from this response (the denial is still live in the ring buffer for
+/// diagnostic purposes, but is not surfaced as restart-safe history).
+///
+/// `strategy_id` is always `null` — the risk gate path does not carry
+/// strategy attribution.
 pub(crate) async fn risk_denials(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.execution_snapshot.read().await.clone();
 
+    // Helper: map a DB row to an API denial row.
+    // `strategy_id` is always None — not available on the risk gate path.
+    let db_to_api = |r: &mqk_db::RiskDenialEventRow| RiskDenialRow {
+        id: r.id.clone(),
+        at: r.denied_at_utc.to_rfc3339(),
+        strategy_id: None,
+        symbol: r.symbol.clone().unwrap_or_default(),
+        rule: r.rule.clone(),
+        message: r.message.clone(),
+        severity: r.severity.clone(),
+    };
+
+    // -----------------------------------------------------------------------
+    // Path A — DB pool is available.
+    // Only DB rows are surfaced.  Ring buffer is NOT merged.
+    // A denial that failed to persist to DB is excluded from this response.
+    // -----------------------------------------------------------------------
+    if let Some(pool) = st.db.as_ref() {
+        let db_rows = match mqk_db::load_recent_risk_denial_events(pool, 100).await {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!("load_recent_risk_denial_events failed: {err}");
+                // DB read failed — fall through to no_snapshot; do not
+                // present ring-buffer rows as durable history.
+                return (
+                    StatusCode::OK,
+                    Json(RiskDenialsResponse {
+                        truth_state: "no_snapshot".to_string(),
+                        snapshot_at_utc: None,
+                        denials: vec![],
+                    }),
+                )
+                    .into_response();
+            }
+        };
+
+        return if let Some(snapshot) = snap {
+            // Loop is running.  DB rows are the authoritative durable source.
+            let denials = db_rows.iter().map(db_to_api).collect();
+            (
+                StatusCode::OK,
+                Json(RiskDenialsResponse {
+                    truth_state: "active".to_string(),
+                    snapshot_at_utc: Some(snapshot.snapshot_at_utc.to_rfc3339()),
+                    denials,
+                }),
+            )
+                .into_response()
+        } else if db_rows.is_empty() {
+            // Loop not running, no rows in DB — truth entirely absent.
+            (
+                StatusCode::OK,
+                Json(RiskDenialsResponse {
+                    truth_state: "no_snapshot".to_string(),
+                    snapshot_at_utc: None,
+                    denials: vec![],
+                }),
+            )
+                .into_response()
+        } else {
+            // Loop not running, historical durable rows exist from a prior session.
+            let denials = db_rows.iter().map(db_to_api).collect();
+            (
+                StatusCode::OK,
+                Json(RiskDenialsResponse {
+                    truth_state: "durable_history".to_string(),
+                    snapshot_at_utc: None,
+                    denials,
+                }),
+            )
+                .into_response()
+        };
+    }
+
+    // -----------------------------------------------------------------------
+    // Path B — No DB pool (test environments only; never reached in production).
+    // Ring buffer only.  Explicitly labeled as session-only (not restart-safe).
+    // -----------------------------------------------------------------------
     let Some(snapshot) = snap else {
-        // Execution loop has not started — denial truth is entirely absent.
+        // No pool and no loop — denial truth is entirely absent.
         return (
             StatusCode::OK,
             Json(RiskDenialsResponse {
@@ -1679,28 +1773,24 @@ pub(crate) async fn risk_denials(State(st): State<Arc<AppState>>) -> impl IntoRe
             .into_response();
     };
 
-    // Execution loop is running.  Map denial records from the orchestrator's
-    // ring buffer to API rows.  `strategy_id` is not available in the risk gate
-    // path (the gate sees the order, not the strategy); left empty rather than
-    // fabricated.
+    // Loop running, no pool — ring buffer only.
     let denials = snapshot
         .recent_risk_denials
         .iter()
         .map(|r| RiskDenialRow {
             id: r.id.clone(),
             at: r.denied_at_utc.to_rfc3339(),
-            strategy_id: String::new(),
+            strategy_id: None,
             symbol: r.symbol.clone().unwrap_or_default(),
             rule: r.rule.clone(),
             message: r.message.clone(),
             severity: r.severity.clone(),
         })
         .collect();
-
     (
         StatusCode::OK,
         Json(RiskDenialsResponse {
-            truth_state: "active".to_string(),
+            truth_state: "active_session_only".to_string(),
             snapshot_at_utc: Some(snapshot.snapshot_at_utc.to_rfc3339()),
             denials,
         }),

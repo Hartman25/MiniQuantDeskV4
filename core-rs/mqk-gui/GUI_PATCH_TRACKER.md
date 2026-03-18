@@ -221,6 +221,42 @@ they still use `Utc::now()` inside `broker_snapshot` / `execution_snapshot` fixt
 setup — these are legitimate real-time boundaries in test scaffolding, not determinism
 violations. No un-guarded env var mutations remain in any test file under the daemon crate.
 
+### RD-01: Durable risk-denial history
+**Status:** DONE (corrected — strict durable truth, no overclaiming)
+**Files:**
+- `core-rs/crates/mqk-db/migrations/0026_risk_denial_events.sql` (NEW)
+- `core-rs/crates/mqk-db/src/lib.rs` (`RiskDenialEventRow`, `persist_risk_denial_event`, `load_recent_risk_denial_events`)
+- `core-rs/crates/mqk-runtime/Cargo.toml` (`tracing` dep added)
+- `core-rs/crates/mqk-runtime/src/orchestrator.rs` (best-effort durable persist before ring-buffer push)
+- `core-rs/crates/mqk-daemon/src/routes.rs` (`risk_denials` handler — strict Option A: DB rows only when pool available; ring buffer only under explicit `"active_session_only"` label)
+- `core-rs/crates/mqk-daemon/src/api_types.rs` (`RiskDenialRow.strategy_id: Option<String>`; `RiskDenialsResponse` docs for four truth states)
+- `core-rs/mqk-gui/src/features/system/api.ts` (`"active_session_only"` + `"durable_history"` added to `RiskDenialsResponse` union)
+- `core-rs/mqk-gui/src/features/system/types.ts` (`RiskDenialRow.strategy_id: string | null`)
+- `core-rs/mqk-gui/src/features/risk/RiskScreen.tsx` (`row.strategy_id ?? "—"`)
+- `core-rs/mqk-gui/src/features/system/sourceAuthority.ts` (`riskDenials.db` now lists `/risk/denials`)
+- `core-rs/mqk-gui/src/features/system/mockData.ts` (`MOCK_RISK_DENIALS` uses `strategy_id: null`)
+- `core-rs/crates/mqk-daemon/tests/scenario_gui_daemon_contract_gate.rs` (cluster 3 assertions updated; `"active"` → `"active_session_only"` for no-pool tests; `strategy_id: null` asserted)
+- `core-rs/crates/mqk-daemon/tests/scenario_daemon_routes.rs` (4 DB-backed tests: persist/reload roundtrip, restart-safe durable_history route, active-pool-DB-only route, empty-table no_snapshot)
+**What changed:**
+- **Strict durable truth (Option A):** When a DB pool is available, the route returns ONLY rows from `sys_risk_denial_events`. The ring buffer is NOT merged. A denial whose `persist_risk_denial_event` call failed is absent from the durable response (honest — the row is not durable). No overclaiming.
+- **`truth_state: "active"` is now fully durable:** pool available + loop running → DB rows only → restart-safe.
+- **`truth_state: "active_session_only"` added:** no pool (test environments only; never in production) + loop running → ring buffer only → NOT restart-safe. Explicitly labeled.
+- **`truth_state: "durable_history"`:** pool available + loop NOT running + DB has rows → historical durable rows, restart-safe.
+- **`truth_state: "no_snapshot"`:** no durable rows and loop not running.
+- **`strategy_id` is now `Option<String>` / `null`:** the risk gate path has no strategy attribution. The field is `null` in all real denial rows, never `""`. GUI renders `"—"` when null.
+- **`sourceAuthority.ts`** updated: `riskDenials.db` now lists `/risk/denials` (DB-backed when pool available).
+- **Mock data** updated: `MOCK_RISK_DENIALS` uses `strategy_id: null`.
+- **DB write timing:** `persist_risk_denial_event` is called BEFORE `recent_denials.push_back`. A write failure logs a warning and leaves the row out of DB (and out of the durable route response), but does not abort execution.
+**Durable source:** `sys_risk_denial_events` (PostgreSQL table, migration 0026).
+**Unavailable fields:** `strategy_id` — always `null`; not available on the risk gate path; not fabricated.
+**Verification run:**
+- `cargo fmt --all` — PASS
+- `cargo fmt --all -- --check` — PASS
+- `cargo test -p mqk-daemon --test scenario_daemon_routes -- --test-threads=1` — 57 pass, 4 ignored (DB; require `--include-ignored`)
+- `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate -- --test-threads=1` — 21/21 PASS
+- `cargo clippy -p mqk-daemon --all-targets -- -D warnings` — PASS (zero warnings)
+- DB-backed tests (`risk_denial_persist_and_reload_roundtrip`, `risk_denials_route_returns_durable_history_after_restart`, `risk_denials_route_active_with_pool_returns_only_db_rows`, `risk_denials_route_no_snapshot_when_db_empty`) — NOT RUN (`MQK_DATABASE_URL` not available in this session); require `--include-ignored`
+
 ---
 
 ## P0 — Foundation (make GUI a real workstation, keep current controls working)

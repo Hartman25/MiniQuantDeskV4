@@ -1726,6 +1726,97 @@ pub async fn load_risk_block_state(pool: &PgPool) -> Result<Option<RiskBlockStat
     }))
 }
 
+// ---------------------------------------------------------------------------
+// RD-01: Durable risk denial event history (sys_risk_denial_events)
+// ---------------------------------------------------------------------------
+
+/// One row from `sys_risk_denial_events`.
+#[derive(Debug, Clone)]
+pub struct RiskDenialEventRow {
+    /// Deterministic display ID: `"{denied_at_utc_micros}:{rule_code}"`.
+    /// Unique for all practical purposes within a deployment.
+    pub id: String,
+    /// UTC timestamp when the denial was captured.
+    pub denied_at_utc: DateTime<Utc>,
+    /// Machine-readable rule code, e.g. `"POSITION_LIMIT_EXCEEDED"`.
+    pub rule: String,
+    /// Human-readable one-line summary from `RiskReason::as_summary()`.
+    pub message: String,
+    /// Symbol from the denied order.
+    pub symbol: Option<String>,
+    /// Requested order quantity, if populated by the risk rule.
+    pub requested_qty: Option<i64>,
+    /// Configured limit that was breached, if populated by the risk rule.
+    pub limit_qty: Option<i64>,
+    /// Always `"critical"` for risk gate denials.
+    pub severity: String,
+}
+
+/// Persist a single risk denial event to `sys_risk_denial_events`.
+///
+/// Uses `ON CONFLICT (id) DO NOTHING` — idempotent.  Repeated inserts for
+/// the same deterministic `id` are silent no-ops, so best-effort writes from
+/// the orchestrator can never double-count a denial.
+pub async fn persist_risk_denial_event(pool: &PgPool, row: &RiskDenialEventRow) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into sys_risk_denial_events
+            (id, denied_at_utc, rule, message, symbol, requested_qty, limit_qty, severity)
+        values ($1, $2, $3, $4, $5, $6, $7, $8)
+        on conflict (id) do nothing
+        "#,
+    )
+    .bind(&row.id)
+    .bind(row.denied_at_utc)
+    .bind(&row.rule)
+    .bind(&row.message)
+    .bind(&row.symbol)
+    .bind(row.requested_qty)
+    .bind(row.limit_qty)
+    .bind(&row.severity)
+    .execute(pool)
+    .await
+    .context("persist_risk_denial_event failed")?;
+    Ok(())
+}
+
+/// Load the most recent `limit` risk denial events ordered newest-first.
+///
+/// Used by `GET /api/v1/risk/denials` to surface restart-safe denial history.
+/// Returns an empty `Vec` if no denials have been recorded yet.
+pub async fn load_recent_risk_denial_events(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<RiskDenialEventRow>> {
+    let rows = sqlx::query(
+        r#"
+        select id, denied_at_utc, rule, message, symbol, requested_qty, limit_qty, severity
+        from sys_risk_denial_events
+        order by denied_at_utc desc
+        limit $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("load_recent_risk_denial_events failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(RiskDenialEventRow {
+            id: r.try_get("id")?,
+            denied_at_utc: r.try_get("denied_at_utc")?,
+            rule: r.try_get("rule")?,
+            message: r.try_get("message")?,
+            symbol: r.try_get("symbol")?,
+            requested_qty: r.try_get("requested_qty")?,
+            limit_qty: r.try_get("limit_qty")?,
+            severity: r.try_get("severity")?,
+        });
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone)]
 pub struct ReconcileStatusState {
     pub status: String,

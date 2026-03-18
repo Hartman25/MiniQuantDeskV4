@@ -624,8 +624,9 @@ export const MOCK_RISK_SUMMARY: RiskSummary = {
 };
 
 export const MOCK_RISK_DENIALS: RiskDenialRow[] = [
-  { id: "RD-1", at: iso(22), strategy_id: "mean_revert", symbol: "TSLA", rule: "max_symbol_exposure", message: "Order denied due to symbol concentration threshold.", severity: "warning" },
-  { id: "RD-2", at: iso(41), strategy_id: "breakout_momo", symbol: "NVDA", rule: "opening_range_filter", message: "No entry after volatility guard trigger.", severity: "info" },
+  // strategy_id is null: the risk gate path does not carry strategy attribution.
+  { id: "RD-1", at: iso(22), strategy_id: null, symbol: "TSLA", rule: "max_symbol_exposure", message: "Order denied due to symbol concentration threshold.", severity: "warning" },
+  { id: "RD-2", at: iso(41), strategy_id: null, symbol: "NVDA", rule: "opening_range_filter", message: "No entry after volatility guard trigger.", severity: "info" },
 ];
 
 export const MOCK_RECONCILE_SUMMARY: ReconcileSummary = {
