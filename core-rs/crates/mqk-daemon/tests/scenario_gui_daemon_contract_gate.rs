@@ -362,6 +362,21 @@ async fn gui_session_config_strategy_and_audit_surfaces_are_semantically_truthfu
         "daemon-runtime-paper-ready-v1"
     );
     assert!(config["build_version"].is_string());
+    assert!(
+        config["risk_policy_version"].is_null(),
+        "risk policy version must be null when canonical config fingerprint truth is unavailable"
+    );
+    assert!(
+        config["strategy_bundle_version"].is_null(),
+        "strategy bundle version must be null when canonical config fingerprint truth is unavailable"
+    );
+    assert!(
+        config["runtime_generation_id"].is_null(),
+        "runtime generation id must be null when no authoritative runtime generation exists"
+    );
+    assert_ne!(config["risk_policy_version"], "unknown");
+    assert_ne!(config["strategy_bundle_version"], "unknown");
+    assert_ne!(config["runtime_generation_id"], "unknown");
 
     let strategy_req = Request::builder()
         .method("GET")

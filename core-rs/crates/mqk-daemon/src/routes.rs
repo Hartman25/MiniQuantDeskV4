@@ -2059,14 +2059,11 @@ pub(crate) async fn system_config_fingerprint(
                 .map(|run| run.config_hash.clone())
                 .unwrap_or_else(|| st.run_config_hash().to_string()),
             adapter_id: st.adapter_id().to_string(),
-            risk_policy_version: "unknown".to_string(),
-            strategy_bundle_version: "unknown".to_string(),
+            risk_policy_version: None,
+            strategy_bundle_version: None,
             build_version: st.build.version.to_string(),
             environment_profile: st.deployment_mode().as_api_label().to_string(),
-            runtime_generation_id: latest_run
-                .as_ref()
-                .map(|run| run.run_id.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
+            runtime_generation_id: latest_run.as_ref().map(|run| run.run_id.to_string()),
             last_restart_at: latest_run
                 .as_ref()
                 .map(|run| run.started_at_utc.to_rfc3339()),

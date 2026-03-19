@@ -1053,7 +1053,21 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
     let fp = parse_json(fp_body);
     assert_eq!(fp["config_hash"], "daemon-runtime-paper-ready-v1");
     assert_eq!(fp["adapter_id"], "paper");
-    assert_eq!(fp["runtime_generation_id"], "unknown");
+    assert!(
+        fp["risk_policy_version"].is_null(),
+        "risk_policy_version must be null when canonical config truth is unavailable"
+    );
+    assert!(
+        fp["strategy_bundle_version"].is_null(),
+        "strategy_bundle_version must be null when canonical config truth is unavailable"
+    );
+    assert!(
+        fp["runtime_generation_id"].is_null(),
+        "runtime_generation_id must be null when no authoritative runtime generation exists"
+    );
+    assert_ne!(fp["risk_policy_version"], "unknown");
+    assert_ne!(fp["strategy_bundle_version"], "unknown");
+    assert_ne!(fp["runtime_generation_id"], "unknown");
     assert_eq!(fp["environment_profile"], "paper");
     assert!(fp["last_restart_at"].is_null());
 

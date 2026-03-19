@@ -375,11 +375,11 @@ pub struct SessionStateResponse {
 pub struct ConfigFingerprintResponse {
     pub config_hash: String,
     pub adapter_id: String,
-    pub risk_policy_version: String,
-    pub strategy_bundle_version: String,
+    pub risk_policy_version: Option<String>,
+    pub strategy_bundle_version: Option<String>,
     pub build_version: String,
     pub environment_profile: String,
-    pub runtime_generation_id: String,
+    pub runtime_generation_id: Option<String>,
     pub last_restart_at: Option<String>,
 }
 
