@@ -7,10 +7,38 @@ $ErrorActionPreference = "Stop"
 
 $env:MQK_DATABASE_URL = "postgres://postgres:YourNewStrongPassword123!@127.0.0.1:5433/mqk_test"
 
+# ============================================================
+# Repo + environment bootstrap
+# ============================================================
+
 $RepoRoot = "C:\Users\Zacha\Desktop\MiniQuantDeskV4"
 $CoreRs   = Join-Path $RepoRoot "core-rs"
 $GuiDir   = Join-Path $CoreRs "mqk-gui"
 $GitBash  = "C:\Program Files\Git\bin\bash.exe"
+
+function Get-RedactedDbUrl {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Url
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        return "<not-set>"
+    }
+
+    # Redacts: postgres://user:password@host:port/db
+    if ($Url -match '^(postgres(?:ql)?://[^:/?#]+:)([^@/?#]+)(@.+)$') {
+        return ($matches[1] + '****' + $matches[3])
+    }
+
+    # Fallback if format is unusual; never print the raw value.
+    return "<redacted-unparseable-db-url>"
+}
+
+$DbUrl = $env:MQK_DATABASE_URL
+if ([string]::IsNullOrWhiteSpace($DbUrl)) {
+    throw "MQK_DATABASE_URL is not set"
+}
 
 Set-Location $RepoRoot
 
@@ -49,7 +77,7 @@ Write-Host ""
 Write-Host "Repo root: $RepoRoot" -ForegroundColor Yellow
 Write-Host "core-rs:   $CoreRs" -ForegroundColor Yellow
 Write-Host "GUI dir:   $GuiDir" -ForegroundColor Yellow
-Write-Host "Using MQK_DATABASE_URL=$($env:MQK_DATABASE_URL)" -ForegroundColor Green
+Write-Host ("Using MQK_DATABASE_URL={0}" -f (Get-RedactedDbUrl -Url $DbUrl)) -ForegroundColor Green
 
 Run-Step "Repo identity" {
     git status
