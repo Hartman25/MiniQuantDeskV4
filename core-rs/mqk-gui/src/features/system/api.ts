@@ -242,10 +242,10 @@ interface DaemonActionCatalogResponse {
 }
 
 // Durable operator-history daemon wrapper types.
-// These three endpoints return {canonical_route, backend, rows} — not direct
-// arrays or GUI-typed objects.  The fetch/map layer below unwraps the wrapper
-// and maps daemon field names to GUI type field names.  Only fields provably
-// present in the daemon DB sources are populated; no values are fabricated.
+// These three endpoints return {canonical_route, truth_state, backend, rows} —
+// not direct arrays or GUI-typed objects. The fetch/map layer below unwraps
+// the wrapper and maps daemon field names to GUI type field names. Only fields
+// provably present in the daemon DB sources are populated; no values are fabricated.
 
 interface DaemonAuditActionRow {
   audit_event_id: string;
@@ -256,8 +256,12 @@ interface DaemonAuditActionRow {
   runtime_transition: string | null;
   provenance_ref: string;
 }
+
+type DurableHistoryTruthState = "active" | "backend_unavailable";
+
 interface DaemonAuditActionsWrapper {
   canonical_route: string;
+  truth_state: DurableHistoryTruthState;
   backend: string;
   rows: DaemonAuditActionRow[];
 }
@@ -269,8 +273,10 @@ interface DaemonArtifactRow {
   created_at_utc: string;
   provenance_ref: string;
 }
+
 interface DaemonArtifactsWrapper {
   canonical_route: string;
+  truth_state: DurableHistoryTruthState;
   backend: string;
   rows: DaemonArtifactRow[];
 }
@@ -282,8 +288,10 @@ interface DaemonTimelineRow {
   detail: string;
   provenance_ref: string;
 }
+
 interface DaemonOperatorTimelineWrapper {
   canonical_route: string;
+  truth_state: DurableHistoryTruthState;
   backend: string;
   rows: DaemonTimelineRow[];
 }
@@ -814,12 +822,19 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     })(),
     fetchJsonCandidates<OperatorAlert[]>(["/api/v1/alerts/active"]),
     fetchJsonCandidates<FeedEvent[]>(["/api/v1/events/feed"]),
-    // audit/operator-actions: daemon returns {canonical_route, backend, rows}.
-    // Unwrap the wrapper and map daemon field names to AuditActionRow GUI fields.
+    // audit/operator-actions: daemon returns {canonical_route, truth_state, backend, rows}.
+    // "backend_unavailable" means durable operator-action history is unavailable and
+    // must fail closed rather than render as authoritative empty history.
     (async (): Promise<EndpointFetchResult<AuditActionRow[]>> => {
       const r = await fetchJsonCandidate<DaemonAuditActionsWrapper>("/api/v1/audit/operator-actions");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
-      const rows: AuditActionRow[] = (r.data as DaemonAuditActionsWrapper).rows.map((row) => ({
+
+      const wrapper = r.data as DaemonAuditActionsWrapper;
+      if (wrapper.truth_state !== "active") {
+        return { ok: false, endpoint: r.endpoint, error: "operator_history_backend_unavailable" };
+      }
+
+      const rows: AuditActionRow[] = wrapper.rows.map((row) => ({
         audit_ref: row.audit_event_id,
         at: row.ts_utc,
         action_key: row.requested_action,
@@ -840,12 +855,18 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     fetchJsonCandidates<ConfigFingerprintSummary>(["/api/v1/system/config-fingerprint"]),
     fetchJsonCandidates<MarketDataQualitySummary>(["/api/v1/market-data/quality"]),
     fetchJsonCandidates<RuntimeLeadershipSummary>(["/api/v1/system/runtime-leadership"]),
-    // audit/artifacts: daemon returns {canonical_route, backend, rows} where each
-    // row is one run from the runs table.  Map to ArtifactRegistrySummary.
+    // audit/artifacts: daemon returns {canonical_route, truth_state, backend, rows}
+    // where each row is one run from the runs table. "backend_unavailable" means
+    // durable artifact history is unavailable and must fail closed.
     (async (): Promise<EndpointFetchResult<ArtifactRegistrySummary>> => {
       const r = await fetchJsonCandidate<DaemonArtifactsWrapper>("/api/v1/audit/artifacts");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+
       const wrapper = r.data as DaemonArtifactsWrapper;
+      if (wrapper.truth_state !== "active") {
+        return { ok: false, endpoint: r.endpoint, error: "operator_artifact_backend_unavailable" };
+      }
+
       const artifacts: ArtifactRow[] = wrapper.rows.map((row) => ({
         artifact_id: row.artifact_id,
         artifact_type: row.artifact_type as ArtifactRow["artifact_type"],
@@ -856,6 +877,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
         linked_run_id: row.run_id,
         // storage_path and note are not available from the runs-table artifact source.
       }));
+
       // last_updated_at: newest artifact created_at (rows are already desc by started_at_utc).
       const lastUpdatedAt = artifacts.length > 0 ? artifacts[0].created_at : null;
       const summary: ArtifactRegistrySummary = {
@@ -891,13 +913,20 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       }
       return { ok: true, endpoint: r.endpoint, data: (r.data as ConfigDiffsWrapper).rows };
     })(),
-    // ops/operator-timeline: daemon returns {canonical_route, backend, rows} where
-    // each row is a runtime lifecycle transition or operator action from runs +
-    // audit_events.  Map to OperatorTimelineEvent using only provable DB fields.
+    // ops/operator-timeline: daemon returns {canonical_route, truth_state, backend, rows}
+    // where each row is a runtime lifecycle transition or operator action from runs +
+    // audit_events. "backend_unavailable" means durable operator timeline truth is
+    // unavailable and must fail closed.
     (async (): Promise<EndpointFetchResult<OperatorTimelineEvent[]>> => {
       const r = await fetchJsonCandidate<DaemonOperatorTimelineWrapper>("/api/v1/ops/operator-timeline");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
-      const events: OperatorTimelineEvent[] = (r.data as DaemonOperatorTimelineWrapper).rows.map((row) => ({
+
+      const wrapper = r.data as DaemonOperatorTimelineWrapper;
+      if (wrapper.truth_state !== "active") {
+        return { ok: false, endpoint: r.endpoint, error: "operator_timeline_backend_unavailable" };
+      }
+
+      const events: OperatorTimelineEvent[] = wrapper.rows.map((row) => ({
         // provenance_ref is the durable DB reference (e.g. "runs:{id}:started_at_utc"
         // or "audit_events:{id}"); use as the stable event identity.
         timeline_event_id: row.provenance_ref,
@@ -1016,14 +1045,29 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   //      execution panel → no_snapshot gate blocks the screen.
   if (!executionOrdersCanonical) usedMockSections.push("executionOrders");
 
+  const durableOperatorHistoryKeys = new Set(["auditActions", "artifactRegistry", "operatorTimeline"]);
+
   const useObject = <T,>(key: string, result: EndpointFetchResult<T>, fallback: T): T => {
     if (result.ok && result.data !== undefined) return result.data;
-    usedMockSections.push(key);
+
+    // Durable operator-history endpoints are mounted but can explicitly report
+    // backend_unavailable. That condition must surface through missingEndpoints
+    // as unavailable durable truth, not be relabeled as placeholder/mock wiring.
+    if (!durableOperatorHistoryKeys.has(key)) {
+      usedMockSections.push(key);
+    }
+
     return fallback;
   };
   const useArray = <T,>(key: string, result: EndpointFetchResult<T[]>, fallback: T[]): T[] => {
     if (result.ok && Array.isArray(result.data)) return result.data;
-    usedMockSections.push(key);
+
+    // Same rule as useObject above: missing durable operator history is a
+    // fail-closed truth gap, not a placeholder surface.
+    if (!durableOperatorHistoryKeys.has(key)) {
+      usedMockSections.push(key);
+    }
+
     return fallback;
   };
 

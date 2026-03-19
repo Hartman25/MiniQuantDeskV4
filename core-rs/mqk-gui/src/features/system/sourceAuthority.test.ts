@@ -100,14 +100,14 @@ test("portfolio panel remains broker_snapshot when only broker-backed portfolio 
   assert.equal(sources.portfolio, "broker_snapshot");
 });
 
-test("risk denials field remains runtime_memory", () => {
+test("risk denials field is mixed because the route can resolve from durable DB truth or runtime session truth", () => {
   const authority = classifyFieldSource(
     baseDataSource({ realEndpoints: ["/api/v1/risk/denials"] }),
     true,
     FIELD_EVIDENCE_HINTS.riskDenials,
   );
 
-  assert.equal(authority, "runtime_memory");
+  assert.equal(authority, "mixed");
 });
 
 test("reconcile mismatches field is mixed because detail rows are derived from runtime plus broker snapshots", () => {
