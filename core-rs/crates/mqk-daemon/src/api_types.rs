@@ -94,9 +94,18 @@ pub struct OperatorActionAuditRow {
     pub provenance_ref: String,
 }
 
+/// Response wrapper for `/api/v1/audit/operator-actions`.
+///
+/// `truth_state`:
+/// - `"active"` — durable operator-action history was queried from Postgres;
+///   `backend` names the exact source table and `rows` is authoritative.
+/// - `"backend_unavailable"` — no DB pool is configured, so durable history
+///   could not be queried; `backend` is `"unavailable"` and empty `rows`
+///   MUST NOT be treated as authoritative zero.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorActionsAuditResponse {
     pub canonical_route: String,
+    pub truth_state: String,
     pub backend: String,
     pub rows: Vec<OperatorActionAuditRow>,
 }
@@ -110,9 +119,18 @@ pub struct AuditArtifactRow {
     pub provenance_ref: String,
 }
 
+/// Response wrapper for `/api/v1/audit/artifacts`.
+///
+/// `truth_state`:
+/// - `"active"` — durable artifact history was queried from Postgres; `rows`
+///   is authoritative and `backend` names the exact source table.
+/// - `"backend_unavailable"` — no DB pool is configured, so durable history
+///   could not be queried; `backend` is `"unavailable"` and empty `rows`
+///   MUST NOT be treated as authoritative zero.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditArtifactsResponse {
     pub canonical_route: String,
+    pub truth_state: String,
     pub backend: String,
     pub rows: Vec<AuditArtifactRow>,
 }
@@ -126,9 +144,18 @@ pub struct OperatorTimelineRow {
     pub provenance_ref: String,
 }
 
+/// Response wrapper for `/api/v1/ops/operator-timeline`.
+///
+/// `truth_state`:
+/// - `"active"` — durable operator timeline history was queried from Postgres;
+///   `rows` is authoritative and `backend` names the exact source table set.
+/// - `"backend_unavailable"` — no DB pool is configured, so durable history
+///   could not be queried; `backend` is `"unavailable"` and empty `rows`
+///   MUST NOT be treated as authoritative zero.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorTimelineResponse {
     pub canonical_route: String,
+    pub truth_state: String,
     pub backend: String,
     pub rows: Vec<OperatorTimelineRow>,
 }

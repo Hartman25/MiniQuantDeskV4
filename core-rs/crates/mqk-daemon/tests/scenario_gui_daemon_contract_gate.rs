@@ -120,15 +120,15 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
         ),
         (
             "/api/v1/audit/operator-actions",
-            &["canonical_route", "backend", "rows"],
+            &["canonical_route", "truth_state", "backend", "rows"],
         ),
         (
             "/api/v1/audit/artifacts",
-            &["canonical_route", "backend", "rows"],
+            &["canonical_route", "truth_state", "backend", "rows"],
         ),
         (
             "/api/v1/ops/operator-timeline",
-            &["canonical_route", "backend", "rows"],
+            &["canonical_route", "truth_state", "backend", "rows"],
         ),
         (
             "/api/v1/system/runtime-leadership",
@@ -169,11 +169,15 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
                 Some(uri),
                 "{uri} must declare canonical route identity"
             );
-            assert!(
-                json["backend"]
-                    .as_str()
-                    .is_some_and(|v| v.contains("postgres")),
-                "{uri} must expose durable backend source"
+            assert_eq!(
+                json["truth_state"].as_str(),
+                Some("backend_unavailable"),
+                "{uri} must explicitly declare durable truth unavailable when no DB pool is present"
+            );
+            assert_eq!(
+                json["backend"].as_str(),
+                Some("unavailable"),
+                "{uri} must not claim a postgres durable backend when no DB pool is present"
             );
         }
 
@@ -405,7 +409,8 @@ async fn gui_session_config_strategy_and_audit_surfaces_are_semantically_truthfu
     assert_eq!(audit_status, StatusCode::OK);
     let audit = parse_json(audit_body);
     assert_eq!(audit["canonical_route"], "/api/v1/audit/operator-actions");
-    assert_eq!(audit["backend"], "postgres.audit_events");
+    assert_eq!(audit["truth_state"], "backend_unavailable");
+    assert_eq!(audit["backend"], "unavailable");
     assert!(audit["rows"].is_array());
 }
 
@@ -1660,29 +1665,19 @@ async fn gui_contract_reconcile_mismatches_active_with_authoritative_diff_rows()
 // to correctly unwrap rows[] without degrading to mock/placeholder authority.
 
 #[tokio::test]
-async fn gui_contract_operator_history_endpoints_declare_correct_backends() {
-    // Proves that the three durable operator-history surfaces:
-    //  - /api/v1/audit/operator-actions  → postgres.audit_events
-    //  - /api/v1/audit/artifacts          → postgres.runs
-    //  - /api/v1/ops/operator-timeline   → postgres.runs+postgres.audit_events
-    // all return HTTP 200 with the {canonical_route, backend, rows} wrapper
-    // and correctly self-identify their durable Postgres sources.
-    //
-    // The GUI mapping layer unwraps these wrappers (IIFE fetch pattern) so
-    // useArray/useObject receives correctly typed data and does NOT push
-    // these endpoints to usedMockSections when the daemon is reachable.
+async fn gui_contract_operator_history_endpoints_fail_closed_when_durable_backend_is_unavailable() {
+    // Proves that the three durable operator-history surfaces keep their
+    // wrapper shape but DO NOT claim postgres-backed truth when no DB pool is
+    // configured in test state.
     let router = make_router();
 
-    let cases: [(&str, &str); 3] = [
-        ("/api/v1/audit/operator-actions", "postgres.audit_events"),
-        ("/api/v1/audit/artifacts", "postgres.runs"),
-        (
-            "/api/v1/ops/operator-timeline",
-            "postgres.runs+postgres.audit_events",
-        ),
+    let cases: [&str; 3] = [
+        "/api/v1/audit/operator-actions",
+        "/api/v1/audit/artifacts",
+        "/api/v1/ops/operator-timeline",
     ];
 
-    for (uri, expected_backend) in cases {
+    for uri in cases {
         let req = Request::builder()
             .method("GET")
             .uri(uri)
@@ -1693,22 +1688,26 @@ async fn gui_contract_operator_history_endpoints_declare_correct_backends() {
 
         let json = parse_json(body);
 
-        // Wrapper structure: canonical_route, backend, rows must all be present.
+        // Wrapper structure remains stable for GUI fetch/mapping.
         assert_eq!(
             json["canonical_route"].as_str(),
             Some(uri),
             "{uri} must self-identify its canonical_route"
         );
         assert_eq!(
+            json["truth_state"].as_str(),
+            Some("backend_unavailable"),
+            "{uri} must explicitly declare durable truth unavailable when no DB pool is present"
+        );
+        assert_eq!(
             json["backend"].as_str(),
-            Some(expected_backend),
-            "{uri} must declare exact durable backend source"
+            Some("unavailable"),
+            "{uri} must not claim a postgres backend when durable truth is unavailable"
         );
         assert!(
             json["rows"].is_array(),
-            "{uri} rows must be a JSON array (empty in no-DB test state); got: {json}"
+            "{uri} rows must still be a JSON array; got: {json}"
         );
-        // No DB in test state → rows must be empty.
         assert_eq!(
             json["rows"].as_array().map(|v| v.is_empty()),
             Some(true),

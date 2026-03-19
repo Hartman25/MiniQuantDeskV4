@@ -2134,7 +2134,8 @@ pub(crate) async fn audit_operator_actions(State(st): State<Arc<AppState>>) -> R
             StatusCode::OK,
             Json(OperatorActionsAuditResponse {
                 canonical_route: "/api/v1/audit/operator-actions".to_string(),
-                backend: "postgres.audit_events".to_string(),
+                truth_state: "backend_unavailable".to_string(),
+                backend: "unavailable".to_string(),
                 rows: Vec::new(),
             }),
         )
@@ -2190,6 +2191,7 @@ pub(crate) async fn audit_operator_actions(State(st): State<Arc<AppState>>) -> R
         StatusCode::OK,
         Json(OperatorActionsAuditResponse {
             canonical_route: "/api/v1/audit/operator-actions".to_string(),
+            truth_state: "active".to_string(),
             backend: "postgres.audit_events".to_string(),
             rows,
         }),
@@ -2203,7 +2205,8 @@ pub(crate) async fn audit_artifacts(State(st): State<Arc<AppState>>) -> Response
             StatusCode::OK,
             Json(AuditArtifactsResponse {
                 canonical_route: "/api/v1/audit/artifacts".to_string(),
-                backend: "postgres.runs".to_string(),
+                truth_state: "backend_unavailable".to_string(),
+                backend: "unavailable".to_string(),
                 rows: Vec::new(),
             }),
         )
@@ -2254,6 +2257,7 @@ pub(crate) async fn audit_artifacts(State(st): State<Arc<AppState>>) -> Response
         StatusCode::OK,
         Json(AuditArtifactsResponse {
             canonical_route: "/api/v1/audit/artifacts".to_string(),
+            truth_state: "active".to_string(),
             backend: "postgres.runs".to_string(),
             rows,
         }),
@@ -2267,7 +2271,8 @@ pub(crate) async fn ops_operator_timeline(State(st): State<Arc<AppState>>) -> Re
             StatusCode::OK,
             Json(OperatorTimelineResponse {
                 canonical_route: "/api/v1/ops/operator-timeline".to_string(),
-                backend: "postgres.runs+postgres.audit_events".to_string(),
+                truth_state: "backend_unavailable".to_string(),
+                backend: "unavailable".to_string(),
                 rows: Vec::new(),
             }),
         )
@@ -2400,6 +2405,7 @@ pub(crate) async fn ops_operator_timeline(State(st): State<Arc<AppState>>) -> Re
         StatusCode::OK,
         Json(OperatorTimelineResponse {
             canonical_route: "/api/v1/ops/operator-timeline".to_string(),
+            truth_state: "active".to_string(),
             backend: "postgres.runs+postgres.audit_events".to_string(),
             rows,
         }),

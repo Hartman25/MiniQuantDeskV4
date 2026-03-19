@@ -2552,3 +2552,53 @@ async fn risk_denials_route_no_snapshot_when_db_empty() {
         "denials must be empty when truth_state is no_snapshot; got: {json}"
     );
 }
+
+#[tokio::test]
+async fn operator_history_routes_fail_closed_when_db_pool_is_absent() {
+    // Proves that the mounted operator-history endpoints do not fake durable
+    // postgres-backed emptiness when AppState has no DB pool.
+    let router = make_router();
+    let cases: [(&str, &str); 3] = [
+        (
+            "/api/v1/audit/operator-actions",
+            "/api/v1/audit/operator-actions",
+        ),
+        ("/api/v1/audit/artifacts", "/api/v1/audit/artifacts"),
+        (
+            "/api/v1/ops/operator-timeline",
+            "/api/v1/ops/operator-timeline",
+        ),
+    ];
+
+    for (uri, canonical_route) in cases {
+        let req = Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (status, body) = call(router.clone(), req).await;
+
+        assert_eq!(status, StatusCode::OK, "{uri} must return 200");
+
+        let json = parse_json(body);
+        assert_eq!(
+            json["canonical_route"].as_str(),
+            Some(canonical_route),
+            "{uri} must self-identify its canonical route"
+        );
+        assert_eq!(
+            json["truth_state"].as_str(),
+            Some("backend_unavailable"),
+            "{uri} must declare durable truth unavailable when no DB pool is present; got: {json}"
+        );
+        assert_eq!(
+            json["backend"].as_str(),
+            Some("unavailable"),
+            "{uri} must not claim a postgres backend without a DB pool; got: {json}"
+        );
+        assert!(
+            json["rows"].as_array().is_some_and(|rows| rows.is_empty()),
+            "{uri} rows must be an empty array when durable history is unavailable; got: {json}"
+        );
+    }
+}
