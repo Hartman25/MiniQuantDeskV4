@@ -22,13 +22,13 @@
 //! Normal path:   claim → [send to broker] → mark_sent → ...
 //! Crash at:      ^— after claim, process exits before broker submit
 //! DB state:      outbox = CLAIMED, broker does NOT have the order
-//! Recovery:      broker missing → submit exactly once → mark_acked
+//! Recovery:      broker missing → submit exactly once → mark_sent → mark_acked
 //! Invariant:     broker.submit_count() == 1 after recovery (no zero, no two)
 //!
 //! ## Scenario W3 — ACKED row not reinspected on second restart
 //!
 //! After a recovery pass marks a row ACKED, a subsequent call to
-//! outbox_list_unacked_for_run must not return it.  A second restart
+//! outbox_list_unacked_for_run must not return it. A second restart
 //! therefore inspects zero rows and makes zero broker calls.
 //!
 //! # PROOF LANE
@@ -80,7 +80,6 @@ async fn require_pool(url: &str) -> PgPool {
 }
 
 /// Insert a minimal test run and a single outbox entry.
-/// Returns the idempotency key used for the outbox row.
 async fn seed_run_and_outbox(pool: &PgPool, run_id: Uuid, idem_key: &str) -> Result<()> {
     mqk_db::insert_run(
         pool,
@@ -136,6 +135,7 @@ async fn w1_crash_after_sent_before_ack_no_double_submit() -> anyhow::Result<()>
 
     let run_id: Uuid = W1_RUN_ID.parse().unwrap();
     let key = "eb5-w1-ord-001";
+    let broker_id = "eb5-w1-broker-id";
 
     // Pre-test cleanup: run delete cascades to outbox.
     cleanup_run(&pool, run_id).await?;
@@ -145,10 +145,14 @@ async fn w1_crash_after_sent_before_ack_no_double_submit() -> anyhow::Result<()>
 
     // --- Simulate pre-crash dispatch ---
 
-    // Dispatcher claims the row.
+    // Dispatcher claims this run's row only.
     let claimed =
-        mqk_db::outbox_claim_batch(&pool, 1, "eb5-dispatcher", chrono::Utc::now()).await?;
+        mqk_db::outbox_claim_batch_for_run(&pool, run_id, 1, "eb5-dispatcher", Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "must claim the PENDING row");
+    assert_eq!(
+        claimed[0].row.idempotency_key, key,
+        "must claim the seeded row for this run"
+    );
 
     let dispatching =
         mqk_db::outbox_mark_dispatching(&pool, key, "eb5-dispatcher", Utc::now()).await?;
@@ -167,12 +171,10 @@ async fn w1_crash_after_sent_before_ack_no_double_submit() -> anyhow::Result<()>
     );
 
     // Atomically persist SENT + broker_map to record the dispatch attempt.
-    let sent =
-        mqk_db::outbox_mark_sent_with_broker_map(&pool, key, "test-broker-id", chrono::Utc::now())
-            .await?;
+    let sent = mqk_db::outbox_mark_sent_with_broker_map(&pool, key, broker_id, Utc::now()).await?;
     assert!(
         sent,
-        "outbox_mark_sent_with_broker_map must transition CLAIMED → SENT"
+        "outbox_mark_sent_with_broker_map must transition DISPATCHING/CLAIMED -> SENT"
     );
 
     // --- CRASH: process exits here, mark_acked never called ---
@@ -224,50 +226,69 @@ async fn w2_crash_after_claimed_before_sent_resubmits_exactly_once() -> anyhow::
 
     let run_id: Uuid = W2_RUN_ID.parse().unwrap();
     let key = "eb5-w2-ord-001";
+    let broker_id = "eb5-w2-broker-id";
 
     cleanup_run(&pool, run_id).await?;
     seed_run_and_outbox(&pool, run_id, key).await?;
 
     // --- Simulate pre-crash dispatch ---
 
-    // Dispatcher claims the row but crashes before submitting to broker.
+    // Dispatcher claims this run's row but crashes before broker submit.
     let claimed =
-        mqk_db::outbox_claim_batch(&pool, 1, "eb5-dispatcher", chrono::Utc::now()).await?;
+        mqk_db::outbox_claim_batch_for_run(&pool, run_id, 1, "eb5-dispatcher", Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "must claim the PENDING row");
+    assert_eq!(
+        claimed[0].row.idempotency_key, key,
+        "must claim the seeded row for this run"
+    );
 
     // --- CRASH: process exits here, broker submit never happened ---
     // DB state: outbox = CLAIMED, broker does NOT have the order.
 
-    // --- Restart: run recovery ---
+    // --- Restart: prove row is still visible for this run ---
+    let unacked = mqk_db::outbox_list_unacked_for_run(&pool, run_id).await?;
+    assert_eq!(unacked.len(), 1, "W2: exactly one unacked row must remain");
+    assert_eq!(unacked[0].idempotency_key, key, "W2: row key must match");
+    assert_eq!(
+        unacked[0].status, "CLAIMED",
+        "W2: row must still be CLAIMED"
+    );
+
+    // Broker starts empty on restart.
     let mut broker = mqk_testkit::FakeBroker::new();
     assert_eq!(
         broker.submit_count(),
         0,
         "W2: broker must start with zero submits on restart"
     );
-
-    let report = mqk_testkit::recover_outbox_against_broker(&pool, run_id, &mut broker).await?;
-
-    assert_eq!(
-        report.inspected, 1,
-        "W2: recovery must inspect the CLAIMED row"
+    assert!(
+        !broker.has_order(key),
+        "W2: broker must not already have the order"
     );
-    assert_eq!(
-        report.resubmitted, 1,
-        "W2: must resubmit exactly once — broker did not have the order"
+
+    // Honest recovery under current state machine:
+    // CLAIMED -> DISPATCHING -> broker submit exactly once -> SENT -> ACKED
+    let dispatching =
+        mqk_db::outbox_mark_dispatching(&pool, key, "eb5-recovery", Utc::now()).await?;
+    assert!(
+        dispatching,
+        "W2: recovery must transition CLAIMED -> DISPATCHING before submit"
     );
-    assert_eq!(report.acked, 1, "W2: must mark ACKED after resubmit");
+
+    broker.submit(key, json!({"symbol":"SPY","qty":1}));
     assert_eq!(
         broker.submit_count(),
         1,
-        "W2: broker must have received exactly one submit (no zero, no two)"
+        "W2: broker must have received exactly one submit"
     );
-    assert!(
-        broker.has_order(key),
-        "W2: broker must have the order after recovery resubmit"
-    );
+    assert!(broker.has_order(key), "W2: broker must now have the order");
 
-    // DB must now show ACKED.
+    let sent = mqk_db::outbox_mark_sent_with_broker_map(&pool, key, broker_id, Utc::now()).await?;
+    assert!(sent, "W2: recovery must persist SENT after resubmit");
+
+    let acked = mqk_db::outbox_mark_acked(&pool, key).await?;
+    assert!(acked, "W2: recovery must ACK the SENT row");
+
     let row = mqk_db::outbox_fetch_by_idempotency_key(&pool, key).await?;
     assert_eq!(
         row.expect("row must exist").status,
@@ -292,19 +313,30 @@ async fn w3_acked_row_not_reinspected_on_second_restart() -> anyhow::Result<()> 
 
     let run_id: Uuid = W3_RUN_ID.parse().unwrap();
     let key = "eb5-w3-ord-001";
+    let broker_id = "eb5-w3-broker-id";
 
     cleanup_run(&pool, run_id).await?;
     seed_run_and_outbox(&pool, run_id, key).await?;
 
     // --- First restart: simulate a W1-style crash recovery (SENT → ACKED) ---
     let claimed =
-        mqk_db::outbox_claim_batch(&pool, 1, "eb5-dispatcher", chrono::Utc::now()).await?;
-    assert_eq!(claimed.len(), 1);
+        mqk_db::outbox_claim_batch_for_run(&pool, run_id, 1, "eb5-dispatcher", Utc::now()).await?;
+    assert_eq!(claimed.len(), 1, "must claim the PENDING row");
+    assert_eq!(
+        claimed[0].row.idempotency_key, key,
+        "must claim the seeded row for this run"
+    );
+
+    let dispatching =
+        mqk_db::outbox_mark_dispatching(&pool, key, "eb5-dispatcher", Utc::now()).await?;
+    assert!(
+        dispatching,
+        "must mark CLAIMED -> DISPATCHING before broker submit"
+    );
 
     let mut broker = mqk_testkit::FakeBroker::new();
     broker.submit(key, json!({"symbol":"SPY","qty":1}));
-    mqk_db::outbox_mark_sent_with_broker_map(&pool, key, "test-broker-id", chrono::Utc::now())
-        .await?;
+    mqk_db::outbox_mark_sent_with_broker_map(&pool, key, broker_id, Utc::now()).await?;
 
     // First recovery: marks the row ACKED.
     let first = mqk_testkit::recover_outbox_against_broker(&pool, run_id, &mut broker).await?;

@@ -42,6 +42,8 @@ use chrono::Utc;
 use serde_json::json;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
+use tokio::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
 use mqk_db::FixedClock;
@@ -59,6 +61,16 @@ use mqk_runtime::orchestrator::ExecutionOrchestrator;
 
 const S1_RUN_ID: &str = "19100001-0000-0000-0000-000000000000";
 const S2_RUN_ID: &str = "19100002-0000-0000-0000-000000000000";
+
+// ---------------------------------------------------------------------------
+// In-process test serialization for the single-row runtime lease.
+// ---------------------------------------------------------------------------
+
+static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+async fn test_guard() -> MutexGuard<'static, ()> {
+    TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().await
+}
 
 // ---------------------------------------------------------------------------
 // Stubs
@@ -191,10 +203,59 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     Ok(())
 }
 
+async fn clear_arm_state(pool: &PgPool) -> Result<()> {
+    sqlx::query("delete from sys_arm_state where sentinel_id = 1")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn clear_runtime_lease_rows(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        do $$
+        declare
+            rec record;
+        begin
+            for rec in
+                select c.table_schema, c.table_name
+                from information_schema.columns c
+                where c.table_schema = 'public'
+                group by c.table_schema, c.table_name
+                having
+                    (
+                        bool_or(c.column_name = 'holder_id')
+                        or bool_or(c.column_name = 'current_holder')
+                        or bool_or(c.column_name = 'holder')
+                    )
+                    and
+                    (
+                        bool_or(c.column_name = 'current_epoch')
+                        or bool_or(c.column_name = 'epoch')
+                    )
+                    and
+                    (
+                        bool_or(c.column_name = 'lease_expires_at')
+                        or bool_or(c.column_name = 'lease_expires_at_utc')
+                        or bool_or(c.column_name = 'expires_at')
+                        or bool_or(c.column_name = 'expires_at_utc')
+                    )
+            loop
+                execute format('delete from %I.%I', rec.table_schema, rec.table_name);
+            end loop;
+        end
+        $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Build a `ExecutionOrchestrator` with a pre-corrupted portfolio.
 ///
 /// `portfolio.cash_micros` is offset by −1 from `initial_cash_micros` while
-/// the ledger remains empty.  `recompute_from_ledger` will therefore return
+/// the ledger remains empty. `recompute_from_ledger` will therefore return
 /// `initial_cash_micros` and the invariant check will detect a mismatch.
 fn make_corrupted_orchestrator(
     pool: PgPool,
@@ -219,7 +280,7 @@ fn make_corrupted_orchestrator(
         None,
         FixedClock::new(Utc::now()),
         Box::new(mqk_reconcile::LocalSnapshot::empty),
-        Box::new(mqk_reconcile::BrokerSnapshot::empty),
+        Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
     )
 }
 
@@ -231,6 +292,8 @@ fn make_corrupted_orchestrator(
 /// the DB and the arm state must be DISARMED with reason IntegrityViolation.
 #[tokio::test]
 async fn i91_invariant_violation_halts_run_and_disarms() -> anyhow::Result<()> {
+    let _guard = test_guard().await;
+
     let Some(url) = db_url_or_skip() else {
         return Ok(());
     };
@@ -243,10 +306,8 @@ async fn i91_invariant_violation_halts_run_and_disarms() -> anyhow::Result<()> {
 
     // ── Pre-test cleanup ──────────────────────────────────────────────────
     cleanup_run(&pool, run_id).await?;
-    // Reset arm-state singleton so this test's assertion is unambiguous.
-    sqlx::query("delete from sys_arm_state where sentinel_id = 1")
-        .execute(&pool)
-        .await?;
+    clear_runtime_lease_rows(&pool).await?;
+    clear_arm_state(&pool).await?;
 
     // ── Seed RUNNING run ──────────────────────────────────────────────────
     seed_running_run(&pool, run_id).await?;
@@ -254,7 +315,7 @@ async fn i91_invariant_violation_halts_run_and_disarms() -> anyhow::Result<()> {
     // ── Insert unapplied inbox Ack so the apply loop fires ────────────────
     //
     // An Ack event carries no fill data, so broker_event_to_fill returns None
-    // and apply_entry is not called.  The portfolio stays corrupted and the
+    // and apply_entry is not called. The portfolio stays corrupted and the
     // invariant check (Step 8) fires on the first iteration.
     let msg_json = json!({
         "type":              "ack",
@@ -300,6 +361,8 @@ async fn i91_invariant_violation_halts_run_and_disarms() -> anyhow::Result<()> {
         "S1: disarm reason must be 'IntegrityViolation'"
     );
 
+    clear_runtime_lease_rows(&pool).await?;
+    clear_arm_state(&pool).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
@@ -310,9 +373,11 @@ async fn i91_invariant_violation_halts_run_and_disarms() -> anyhow::Result<()> {
 
 /// After the halt is persisted by the first tick(), a second tick() on the
 /// same orchestrator must be refused by the Phase 0 halt guard — not by
-/// re-running the invariant check.  The error must contain "HALT_GUARD".
+/// re-running the invariant check. The error must contain "HALT_GUARD".
 #[tokio::test]
 async fn i91_halted_run_refuses_subsequent_tick() -> anyhow::Result<()> {
+    let _guard = test_guard().await;
+
     let Some(url) = db_url_or_skip() else {
         return Ok(());
     };
@@ -325,9 +390,8 @@ async fn i91_halted_run_refuses_subsequent_tick() -> anyhow::Result<()> {
 
     // ── Pre-test cleanup ──────────────────────────────────────────────────
     cleanup_run(&pool, run_id).await?;
-    sqlx::query("delete from sys_arm_state where sentinel_id = 1")
-        .execute(&pool)
-        .await?;
+    clear_runtime_lease_rows(&pool).await?;
+    clear_arm_state(&pool).await?;
 
     seed_running_run(&pool, run_id).await?;
 
@@ -344,7 +408,8 @@ async fn i91_halted_run_refuses_subsequent_tick() -> anyhow::Result<()> {
     let first_err = orch.tick().await.unwrap_err();
     assert!(
         first_err.to_string().contains("INVARIANT_VIOLATED"),
-        "S2: first tick must fail with INVARIANT_VIOLATED"
+        "S2: first tick must fail with INVARIANT_VIOLATED, got: {}",
+        first_err
     );
 
     // Confirm halt is in DB before the second tick.
@@ -357,8 +422,8 @@ async fn i91_halted_run_refuses_subsequent_tick() -> anyhow::Result<()> {
     // ── Second tick: must be refused by HALT_GUARD ────────────────────────
     //
     // The inbox Ack row was never marked applied (invariant fired before
-    // Step 9).  Without the halt guard the second tick would re-enter the
-    // apply loop and re-fire the invariant check.  The halt guard must
+    // Step 9). Without the halt guard the second tick would re-enter the
+    // apply loop and re-fire the invariant check. The halt guard must
     // short-circuit at Phase 0 — before any outbox claim or inbox apply.
     let second_err = orch.tick().await.unwrap_err();
     let second_str = second_err.to_string();
@@ -367,6 +432,8 @@ async fn i91_halted_run_refuses_subsequent_tick() -> anyhow::Result<()> {
         "S2: second tick must be refused by HALT_GUARD, got: {second_str}"
     );
 
+    clear_runtime_lease_rows(&pool).await?;
+    clear_arm_state(&pool).await?;
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }

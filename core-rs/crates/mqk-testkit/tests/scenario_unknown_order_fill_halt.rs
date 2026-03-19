@@ -237,7 +237,7 @@ fn make_clean_orch(
         None,
         FixedClock::new(Utc::now()),
         Box::new(mqk_reconcile::LocalSnapshot::empty),
-        Box::new(mqk_reconcile::BrokerSnapshot::empty),
+        Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
     )
 }
 
@@ -308,7 +308,7 @@ async fn c1_c2_unknown_fill_halts_disarms_and_refuses_restart() -> Result<()> {
         "internal_order_id": "cuf-ord-unknown",
         "broker_order_id":   null,
         "symbol":            "SPY",
-        "side":              "buy",
+        "side":              "Buy",
         "delta_qty":         100_i64,
         "price_micros":      100_000_000_i64,
         "fee_micros":        0_i64

@@ -60,8 +60,9 @@ async fn crash_between_claim_and_submit_surfaces_in_recovery() -> anyhow::Result
     .await?;
     assert!(created, "first enqueue must create the row");
 
-    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "dispatcher-A", Utc::now()).await?;
-    assert_eq!(claimed.len(), 1, "must claim exactly one row");
+    let claimed =
+        mqk_db::outbox_claim_batch_for_run(&pool, run_id, 1, "dispatcher-A", Utc::now()).await?;
+    assert_eq!(claimed.len(), 1, "must claim exactly one row for this run");
     assert_eq!(claimed[0].row.idempotency_key, intent_id);
     assert_eq!(claimed[0].row.status, "CLAIMED");
 

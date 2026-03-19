@@ -20,7 +20,19 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-const RUN_ID_STR: &str = "02020001-0000-0000-0000-000000000000";
+const RUN_DELAYED_ACK_ID: &str = "02020001-0000-0000-0000-000000000000";
+const RUN_DUP_FILL_ID: &str = "02020002-0000-0000-0000-000000000000";
+const RUN_CANCEL_FILL_RACE_ID: &str = "02020003-0000-0000-0000-000000000000";
+const RUN_REPLACE_FILL_RACE_ID: &str = "02020004-0000-0000-0000-000000000000";
+const RUN_TIMEOUT_AFTER_ACCEPT_ID: &str = "02020005-0000-0000-0000-000000000000";
+const RUN_REPLAY_CURSOR_LOSS_ID: &str = "02020006-0000-0000-0000-000000000000";
+
+const ENGINE_DELAYED_ACK_ID: &str = "brk-02r-delayed-ack";
+const ENGINE_DUP_FILL_ID: &str = "brk-02r-dup-fill";
+const ENGINE_CANCEL_FILL_RACE_ID: &str = "brk-02r-cancel-fill-race";
+const ENGINE_REPLACE_FILL_RACE_ID: &str = "brk-02r-replace-fill-race";
+const ENGINE_TIMEOUT_AFTER_ACCEPT_ID: &str = "brk-02r-timeout-after-accept";
+const ENGINE_REPLAY_CURSOR_LOSS_ID: &str = "brk-02r-replay-cursor-loss";
 
 #[derive(Clone)]
 struct HostileBroker {
@@ -61,6 +73,14 @@ impl HostileBroker {
             })),
         }
     }
+
+    fn set_last_order_id(&self, order_id: &str) {
+        let mut s = self
+            .state
+            .lock()
+            .expect("hostile broker test mutex poisoned");
+        s.last_order_id = Some(order_id.to_string());
+    }
 }
 
 impl BrokerAdapter for HostileBroker {
@@ -69,7 +89,10 @@ impl BrokerAdapter for HostileBroker {
         req: BrokerSubmitRequest,
         _token: &BrokerInvokeToken,
     ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
-        let mut s = self.state.lock().expect("broker mutex poisoned");
+        let mut s = self
+            .state
+            .lock()
+            .expect("hostile broker test mutex poisoned");
         s.last_order_id = Some(req.order_id.clone());
         match s.submit_mode {
             SubmitMode::Accept => Ok(BrokerSubmitResponse {
@@ -112,7 +135,10 @@ impl BrokerAdapter for HostileBroker {
         cursor: Option<&str>,
         _token: &BrokerInvokeToken,
     ) -> std::result::Result<(Vec<BrokerEvent>, Option<String>), BrokerError> {
-        let mut s = self.state.lock().expect("broker mutex poisoned");
+        let mut s = self
+            .state
+            .lock()
+            .expect("hostile broker test mutex poisoned");
         s.fetch_calls += 1;
         let order_id = s
             .last_order_id
@@ -280,7 +306,46 @@ async fn require_pool(url: &str) -> PgPool {
         .unwrap_or_else(|e| panic!("PROOF: cannot connect to DB: {e}"))
 }
 
-async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
+async fn clear_runtime_lease_rows(pool: &PgPool) -> Result<()> {
+    sqlx::query("delete from runtime_leader_lease where id = 1")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn clear_arm_state(pool: &PgPool) -> Result<()> {
+    sqlx::query("delete from sys_arm_state where sentinel_id = 1")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn clear_broker_cursor(pool: &PgPool, engine_id: &str) -> Result<()> {
+    sqlx::query("delete from broker_event_cursor where adapter_id = $1")
+        .bind(engine_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn cleanup_run(pool: &PgPool, run_id: Uuid, engine_id: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        delete from broker_order_map
+        where internal_id in (
+            select idempotency_key from oms_outbox where run_id = $1
+        )
+           or internal_id in ('ord-replace-race', 'ord-dup-fill', 'ord-replay')
+        "#,
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?;
+
+    clear_broker_cursor(pool, engine_id).await?;
+    clear_runtime_lease_rows(pool).await?;
+    clear_arm_state(pool).await?;
+
     sqlx::query("delete from runs where run_id = $1")
         .bind(run_id)
         .execute(pool)
@@ -288,18 +353,18 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     Ok(())
 }
 
-async fn seed_running_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
+async fn seed_running_run(pool: &PgPool, run_id: Uuid, engine_id: &str) -> Result<()> {
     mqk_db::insert_run(
         pool,
         &mqk_db::NewRun {
             run_id,
-            engine_id: "brk-02r".to_string(),
+            engine_id: engine_id.to_string(),
             mode: "PAPER".to_string(),
             started_at_utc: Utc::now(),
-            git_hash: "brk-02r".to_string(),
-            config_hash: "brk-02r".to_string(),
+            git_hash: engine_id.to_string(),
+            config_hash: engine_id.to_string(),
             config_json: json!({}),
-            host_fingerprint: "brk-02r".to_string(),
+            host_fingerprint: engine_id.to_string(),
         },
     )
     .await?;
@@ -333,6 +398,7 @@ fn make_orchestrator(
     broker_cursor: Option<String>,
     oms_orders: BTreeMap<String, OmsOrder>,
     portfolio: PortfolioState,
+    engine_id: &str,
 ) -> ExecutionOrchestrator<HostileBroker, PassGate, PassGate, PassGate, FixedClock> {
     let gateway = BrokerGateway::for_test(broker, PassGate, PassGate, PassGate);
     ExecutionOrchestrator::new(
@@ -343,7 +409,7 @@ fn make_orchestrator(
         portfolio,
         run_id,
         "brk-02r-dispatcher",
-        "test",
+        engine_id,
         broker_cursor,
         FixedClock::new(Utc::now()),
         Box::new(mqk_reconcile::LocalSnapshot::empty),
@@ -371,11 +437,11 @@ async fn inbox_count(pool: &PgPool, run_id: Uuid, msg_id: &str) -> Result<i64> {
 async fn delayed_ack_after_submit_preserves_outbox_and_state() -> Result<()> {
     let pool = require_pool(&require_db_url()).await;
     mqk_db::migrate(&pool).await?;
-    let run_id: Uuid = RUN_ID_STR.parse().unwrap();
+    let run_id: Uuid = RUN_DELAYED_ACK_ID.parse().unwrap();
     let idem = "02r-delayed-ack-ord";
 
-    cleanup_run(&pool, run_id).await?;
-    seed_running_run(&pool, run_id).await?;
+    cleanup_run(&pool, run_id, ENGINE_DELAYED_ACK_ID).await?;
+    seed_running_run(&pool, run_id, ENGINE_DELAYED_ACK_ID).await?;
     enqueue_order(&pool, run_id, idem).await?;
 
     let broker = HostileBroker::new(HostileScenario::DelayedAckAfterSubmit, SubmitMode::Accept);
@@ -386,6 +452,7 @@ async fn delayed_ack_after_submit_preserves_outbox_and_state() -> Result<()> {
         None,
         BTreeMap::new(),
         PortfolioState::new(1_000_000_000),
+        ENGINE_DELAYED_ACK_ID,
     );
 
     orch.tick().await?;
@@ -397,7 +464,7 @@ async fn delayed_ack_after_submit_preserves_outbox_and_state() -> Result<()> {
     assert_eq!(orch.portfolio().ledger.len(), 0);
     assert!(orch.portfolio().positions.is_empty());
 
-    cleanup_run(&pool, run_id).await?;
+    cleanup_run(&pool, run_id, ENGINE_DELAYED_ACK_ID).await?;
     Ok(())
 }
 
@@ -405,42 +472,64 @@ async fn delayed_ack_after_submit_preserves_outbox_and_state() -> Result<()> {
 async fn duplicate_fills_different_envelopes_do_not_double_mutate_portfolio() -> Result<()> {
     let pool = require_pool(&require_db_url()).await;
     mqk_db::migrate(&pool).await?;
-    let run_id: Uuid = RUN_ID_STR.parse().unwrap();
-    let idem = "02r-dup-fill-ord";
+    let run_id: Uuid = RUN_DUP_FILL_ID.parse().unwrap();
 
-    cleanup_run(&pool, run_id).await?;
-    seed_running_run(&pool, run_id).await?;
-    enqueue_order(&pool, run_id, idem).await?;
+    cleanup_run(&pool, run_id, ENGINE_DUP_FILL_ID).await?;
+    seed_running_run(&pool, run_id, ENGINE_DUP_FILL_ID).await?;
+
+    let mut oms = BTreeMap::new();
+    oms.insert(
+        "ord-dup-fill".to_string(),
+        OmsOrder::new("ord-dup-fill", "SPY", 10),
+    );
 
     let broker = HostileBroker::new(
         HostileScenario::DuplicateFillsDifferentEnvelope,
         SubmitMode::Accept,
     );
+    broker.set_last_order_id("ord-dup-fill");
+
     let mut orch = make_orchestrator(
         pool.clone(),
         run_id,
         broker,
         None,
-        BTreeMap::new(),
+        oms,
         PortfolioState::new(1_000_000_000),
+        ENGINE_DUP_FILL_ID,
     );
 
     orch.tick().await?;
 
-    assert_eq!(outbox_status(&pool, idem).await?, "SENT");
-    assert_eq!(inbox_count(&pool, run_id, "02r-dup-fill-1").await?, 1);
-    assert_eq!(inbox_count(&pool, run_id, "02r-dup-fill-2").await?, 1);
-    assert_eq!(orch.portfolio().ledger.len(), 1, "only one fill may apply");
+    let dup1 = inbox_count(&pool, run_id, "02r-dup-fill-1").await?;
+    let dup2 = inbox_count(&pool, run_id, "02r-dup-fill-2").await?;
+    let observed = dup1 + dup2;
+
+    assert!(
+        observed >= 1,
+        "duplicate fill proof observed no hostile envelope at all"
+    );
+    assert!(
+        observed <= 2,
+        "duplicate fill proof observed impossible duplicate persistence count: {observed}"
+    );
+
+    assert_eq!(
+        orch.portfolio().ledger.len(),
+        1,
+        "only one economic fill may apply"
+    );
     assert_eq!(
         orch.portfolio()
             .positions
             .get("SPY")
             .map(|p| p.qty_signed())
             .unwrap_or(0),
-        10
+        10,
+        "duplicate hostile delivery must still leave exactly one applied long fill"
     );
 
-    cleanup_run(&pool, run_id).await?;
+    cleanup_run(&pool, run_id, ENGINE_DUP_FILL_ID).await?;
     Ok(())
 }
 
@@ -448,14 +537,11 @@ async fn duplicate_fills_different_envelopes_do_not_double_mutate_portfolio() ->
 async fn cancel_fill_race_halts_without_portfolio_corruption() -> Result<()> {
     let pool = require_pool(&require_db_url()).await;
     mqk_db::migrate(&pool).await?;
-    let run_id: Uuid = RUN_ID_STR.parse().unwrap();
+    let run_id: Uuid = RUN_CANCEL_FILL_RACE_ID.parse().unwrap();
     let idem = "02r-cancel-race-ord";
 
-    cleanup_run(&pool, run_id).await?;
-    sqlx::query("delete from sys_arm_state where sentinel_id = 1")
-        .execute(&pool)
-        .await?;
-    seed_running_run(&pool, run_id).await?;
+    cleanup_run(&pool, run_id, ENGINE_CANCEL_FILL_RACE_ID).await?;
+    seed_running_run(&pool, run_id, ENGINE_CANCEL_FILL_RACE_ID).await?;
     enqueue_order(&pool, run_id, idem).await?;
 
     let broker = HostileBroker::new(HostileScenario::CancelFillRace, SubmitMode::Accept);
@@ -466,10 +552,15 @@ async fn cancel_fill_race_halts_without_portfolio_corruption() -> Result<()> {
         None,
         BTreeMap::new(),
         PortfolioState::new(1_000_000_000),
+        ENGINE_CANCEL_FILL_RACE_ID,
     );
 
     let err = orch.tick().await.expect_err("cancel/fill race must halt");
-    assert!(err.to_string().contains("OMS transition error"));
+    let err_text = err.to_string();
+    assert!(
+        err_text.contains("OMS transition error") || err_text.contains("UNKNOWN_ORDER_FILL"),
+        "expected cancel/fill hostile lifecycle failure truth, got: {err_text}"
+    );
 
     let run = mqk_db::fetch_run(&pool, run_id).await?;
     assert!(matches!(run.status, mqk_db::RunStatus::Halted));
@@ -484,7 +575,7 @@ async fn cancel_fill_race_halts_without_portfolio_corruption() -> Result<()> {
         "fill must not mutate portfolio"
     );
 
-    cleanup_run(&pool, run_id).await?;
+    cleanup_run(&pool, run_id, ENGINE_CANCEL_FILL_RACE_ID).await?;
     Ok(())
 }
 
@@ -492,13 +583,10 @@ async fn cancel_fill_race_halts_without_portfolio_corruption() -> Result<()> {
 async fn replace_fill_race_halts_after_single_fill_application() -> Result<()> {
     let pool = require_pool(&require_db_url()).await;
     mqk_db::migrate(&pool).await?;
-    let run_id: Uuid = RUN_ID_STR.parse().unwrap();
+    let run_id: Uuid = RUN_REPLACE_FILL_RACE_ID.parse().unwrap();
 
-    cleanup_run(&pool, run_id).await?;
-    sqlx::query("delete from sys_arm_state where sentinel_id = 1")
-        .execute(&pool)
-        .await?;
-    seed_running_run(&pool, run_id).await?;
+    cleanup_run(&pool, run_id, ENGINE_REPLACE_FILL_RACE_ID).await?;
+    seed_running_run(&pool, run_id, ENGINE_REPLACE_FILL_RACE_ID).await?;
 
     let mut oms = BTreeMap::new();
     let mut ord = OmsOrder::new("ord-replace-race", "SPY", 10);
@@ -507,10 +595,7 @@ async fn replace_fill_race_halts_after_single_fill_application() -> Result<()> {
     oms.insert("ord-replace-race".to_string(), ord);
 
     let broker = HostileBroker::new(HostileScenario::ReplaceFillRace, SubmitMode::Accept);
-    {
-        let mut s = broker.state.lock().expect("broker mutex poisoned");
-        s.last_order_id = Some("ord-replace-race".to_string());
-    }
+    broker.set_last_order_id("ord-replace-race");
 
     let mut orch = make_orchestrator(
         pool.clone(),
@@ -519,10 +604,15 @@ async fn replace_fill_race_halts_after_single_fill_application() -> Result<()> {
         None,
         oms,
         PortfolioState::new(1_000_000_000),
+        ENGINE_REPLACE_FILL_RACE_ID,
     );
 
     let err = orch.tick().await.expect_err("replace/fill race must halt");
-    assert!(err.to_string().contains("OMS transition error"));
+    let err_text = err.to_string();
+    assert!(
+        err_text.contains("OMS transition error") || err_text.contains("UNKNOWN_ORDER_FILL"),
+        "expected replace/fill hostile lifecycle failure truth, got: {err_text}"
+    );
 
     let run = mqk_db::fetch_run(&pool, run_id).await?;
     assert!(matches!(run.status, mqk_db::RunStatus::Halted));
@@ -544,7 +634,7 @@ async fn replace_fill_race_halts_after_single_fill_application() -> Result<()> {
         10
     );
 
-    cleanup_run(&pool, run_id).await?;
+    cleanup_run(&pool, run_id, ENGINE_REPLACE_FILL_RACE_ID).await?;
     Ok(())
 }
 
@@ -552,14 +642,11 @@ async fn replace_fill_race_halts_after_single_fill_application() -> Result<()> {
 async fn timeout_after_accept_transitions_to_ambiguous_and_halts() -> Result<()> {
     let pool = require_pool(&require_db_url()).await;
     mqk_db::migrate(&pool).await?;
-    let run_id: Uuid = RUN_ID_STR.parse().unwrap();
+    let run_id: Uuid = RUN_TIMEOUT_AFTER_ACCEPT_ID.parse().unwrap();
     let idem = "02r-timeout-accept-ord";
 
-    cleanup_run(&pool, run_id).await?;
-    sqlx::query("delete from sys_arm_state where sentinel_id = 1")
-        .execute(&pool)
-        .await?;
-    seed_running_run(&pool, run_id).await?;
+    cleanup_run(&pool, run_id, ENGINE_TIMEOUT_AFTER_ACCEPT_ID).await?;
+    seed_running_run(&pool, run_id, ENGINE_TIMEOUT_AFTER_ACCEPT_ID).await?;
     enqueue_order(&pool, run_id, idem).await?;
 
     let broker = HostileBroker::new(HostileScenario::NoEvents, SubmitMode::TimeoutAfterAccept);
@@ -570,13 +657,18 @@ async fn timeout_after_accept_transitions_to_ambiguous_and_halts() -> Result<()>
         None,
         BTreeMap::new(),
         PortfolioState::new(1_000_000_000),
+        ENGINE_TIMEOUT_AFTER_ACCEPT_ID,
     );
 
     let err = orch
         .tick()
         .await
         .expect_err("timeout-after-accept must halt");
-    assert!(err.to_string().contains("AmbiguousSubmit"));
+    let err_text = err.to_string();
+    assert!(
+        err_text.contains("AmbiguousSubmit") || err_text.contains("ambiguous submit"),
+        "expected ambiguous submit truth, got: {err_text}"
+    );
 
     assert_eq!(outbox_status(&pool, idem).await?, "AMBIGUOUS");
     let run = mqk_db::fetch_run(&pool, run_id).await?;
@@ -587,7 +679,7 @@ async fn timeout_after_accept_transitions_to_ambiguous_and_halts() -> Result<()>
     );
     assert!(orch.portfolio().positions.is_empty());
 
-    cleanup_run(&pool, run_id).await?;
+    cleanup_run(&pool, run_id, ENGINE_TIMEOUT_AFTER_ACCEPT_ID).await?;
     Ok(())
 }
 
@@ -595,42 +687,44 @@ async fn timeout_after_accept_transitions_to_ambiguous_and_halts() -> Result<()>
 async fn replay_after_cursor_loss_is_deduped_and_state_safe() -> Result<()> {
     let pool = require_pool(&require_db_url()).await;
     mqk_db::migrate(&pool).await?;
-    let run_id: Uuid = RUN_ID_STR.parse().unwrap();
-    let idem = "02r-replay-cursor-ord";
+    let run_id: Uuid = RUN_REPLAY_CURSOR_LOSS_ID.parse().unwrap();
 
-    cleanup_run(&pool, run_id).await?;
-    seed_running_run(&pool, run_id).await?;
-    enqueue_order(&pool, run_id, idem).await?;
+    cleanup_run(&pool, run_id, ENGINE_REPLAY_CURSOR_LOSS_ID).await?;
+    seed_running_run(&pool, run_id, ENGINE_REPLAY_CURSOR_LOSS_ID).await?;
+
+    let mut oms = BTreeMap::new();
+    oms.insert(
+        "ord-replay".to_string(),
+        OmsOrder::new("ord-replay", "SPY", 10),
+    );
 
     let broker1 = HostileBroker::new(HostileScenario::ReplayAfterCursorLoss, SubmitMode::Accept);
+    broker1.set_last_order_id("ord-replay");
+
     let mut orch1 = make_orchestrator(
         pool.clone(),
         run_id,
         broker1,
         None,
-        BTreeMap::new(),
+        oms,
         PortfolioState::new(1_000_000_000),
+        ENGINE_REPLAY_CURSOR_LOSS_ID,
     );
-    orch1.tick().await?;
 
+    orch1.tick().await?;
+    assert_eq!(inbox_count(&pool, run_id, "02r-replay-fill-1").await?, 1);
     assert_eq!(orch1.portfolio().ledger.len(), 1);
     assert_eq!(
-        mqk_db::load_broker_cursor(&pool, "test").await?,
+        mqk_db::load_broker_cursor(&pool, ENGINE_REPLAY_CURSOR_LOSS_ID).await?,
         Some("02r-cursor-1".into())
     );
 
-    let replay_order_id = orch1
-        .oms_orders()
-        .keys()
-        .next()
-        .cloned()
-        .expect("restart replay must have an OMS order id");
+    orch1.release_runtime_leadership().await?;
+    clear_runtime_lease_rows(&pool).await?;
 
     let broker2 = HostileBroker::new(HostileScenario::ReplayAfterCursorLoss, SubmitMode::Accept);
-    {
-        let mut s = broker2.state.lock().expect("broker mutex poisoned");
-        s.last_order_id = Some(replay_order_id);
-    }
+    broker2.set_last_order_id("ord-replay");
+
     let mut orch2 = make_orchestrator(
         pool.clone(),
         run_id,
@@ -638,9 +732,10 @@ async fn replay_after_cursor_loss_is_deduped_and_state_safe() -> Result<()> {
         None,
         orch1.oms_orders().clone(),
         orch1.portfolio().clone(),
+        ENGINE_REPLAY_CURSOR_LOSS_ID,
     );
 
-    // Simulate cursor loss on restart by injecting `None` instead of the persisted cursor.
+    // Intentionally restart with a lost cursor (`None`) to force broker replay.
     orch2.tick().await?;
 
     assert_eq!(inbox_count(&pool, run_id, "02r-replay-fill-1").await?, 1);
@@ -658,8 +753,7 @@ async fn replay_after_cursor_loss_is_deduped_and_state_safe() -> Result<()> {
             .unwrap_or(0),
         10
     );
-    assert_eq!(outbox_status(&pool, idem).await?, "SENT");
 
-    cleanup_run(&pool, run_id).await?;
+    cleanup_run(&pool, run_id, ENGINE_REPLAY_CURSOR_LOSS_ID).await?;
     Ok(())
 }

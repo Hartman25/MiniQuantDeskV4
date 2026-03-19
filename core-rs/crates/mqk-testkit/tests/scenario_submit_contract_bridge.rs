@@ -1,4 +1,4 @@
-//! Scenario: Submit contract bridge ΓÇö runtime -> execution -> broker
+//! Scenario: Submit contract bridge — runtime -> execution -> broker
 //!
 //! These tests prove that the submit contract survives crate boundaries:
 //! - runtime outbox JSON decoding/building
@@ -138,15 +138,40 @@ async fn seed_running_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     Ok(())
 }
 
+async fn clear_runtime_lease_rows(pool: &PgPool) -> Result<()> {
+    sqlx::query("delete from runtime_leader_lease where id = 1")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 async fn cleanup(pool: &PgPool, run_id: Uuid, adapter_id: &str) -> Result<()> {
+    // EB-4 / FK cleanup order:
+    // broker_order_map -> runs (runs cascades to oms_outbox)
+    sqlx::query(
+        r#"
+        delete from broker_order_map m
+        using oms_outbox o
+        where m.internal_id = o.idempotency_key
+          and o.run_id = $1
+        "#,
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?;
+
     sqlx::query("delete from broker_event_cursor where adapter_id = $1")
         .bind(adapter_id)
         .execute(pool)
         .await?;
+
+    clear_runtime_lease_rows(pool).await?;
+
     sqlx::query("delete from runs where run_id = $1")
         .bind(run_id)
         .execute(pool)
         .await?;
+
     Ok(())
 }
 

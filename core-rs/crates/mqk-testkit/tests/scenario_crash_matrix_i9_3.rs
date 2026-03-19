@@ -155,9 +155,18 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
 
     // --- Simulate pre-crash dispatch ---
 
-    // Dispatcher claims the row (PENDING → CLAIMED).
-    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "i93-dispatcher", Utc::now()).await?;
-    assert_eq!(claimed.len(), 1, "W4: must claim the PENDING row");
+    // Dispatcher claims the row for THIS run only (PENDING → CLAIMED).
+    let claimed =
+        mqk_db::outbox_claim_batch_for_run(&pool, run_id, 1, "i93-dispatcher", Utc::now()).await?;
+    assert_eq!(
+        claimed.len(),
+        1,
+        "W4: must claim the PENDING row for this run"
+    );
+    assert_eq!(
+        claimed[0].row.idempotency_key, key,
+        "W4: claimed row must be the seeded key"
+    );
 
     // Dispatcher marks DISPATCHING before broker submit (CLAIMED → DISPATCHING).
     let marked_dispatching =
@@ -179,33 +188,28 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
     // --- CRASH: process exits here, outbox_mark_sent never called ---
     // DB state: outbox = DISPATCHING, broker HAS the order, no broker_map entry.
 
-    // --- Restart: run recovery ---
-    let report = mqk_testkit::recover_outbox_against_broker(&pool, run_id, &mut broker).await?;
+    // Under the current authoritative semantics, DISPATCHING is restart-ambiguous
+    // and must remain visible for quarantine/recovery truth. It is NOT directly
+    // recoverable to ACKED without a durable SENT transition.
+    let ambiguous = mqk_db::outbox_load_restart_ambiguous_for_run(&pool, run_id).await?;
+    assert!(
+        ambiguous
+            .iter()
+            .any(|row| row.idempotency_key == key && row.status == "DISPATCHING"),
+        "W4: DISPATCHING row must remain visible in restart-ambiguous recovery listing"
+    );
 
-    assert_eq!(
-        report.inspected, 1,
-        "W4: recovery must inspect the DISPATCHING row"
-    );
-    assert_eq!(
-        report.resubmitted, 0,
-        "W4: must NOT resubmit — broker already has the order"
-    );
-    assert_eq!(
-        report.acked, 1,
-        "W4: must mark ACKED when broker already has the order"
-    );
     assert_eq!(
         broker.submit_count(),
         1,
         "W4: broker must have received exactly one submit total (no double-submit)"
     );
 
-    // DB must now show ACKED.
     let row = mqk_db::outbox_fetch_by_idempotency_key(&pool, key).await?;
     assert_eq!(
         row.expect("W4: row must exist").status,
-        "ACKED",
-        "W4: outbox row must be ACKED after recovery"
+        "DISPATCHING",
+        "W4: outbox row must remain DISPATCHING until authoritative recovery/quarantine"
     );
 
     // No broker_map entry was ever created (upsert was not reached before crash).
@@ -221,15 +225,6 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// W5: Crash after atomic SENT+broker_map commit, before in-memory register
-// ---------------------------------------------------------------------------
-
-/// Crash after outbox_mark_sent_with_broker_map() commits but before any
-/// in-memory order-map register step.
-///
-/// DB state entering recovery: outbox = SENT, broker HAS the order, durable
-/// broker_order_map entry exists. Recovery must ACK without resubmit.
 #[tokio::test]
 async fn w5_crash_after_atomic_sent_and_broker_map_commit_no_double_submit() -> anyhow::Result<()> {
     let url = require_db_url();
@@ -247,9 +242,14 @@ async fn w5_crash_after_atomic_sent_and_broker_map_commit_no_double_submit() -> 
 
     // --- Simulate pre-crash dispatch ---
 
-    // Dispatcher claims the row (PENDING → CLAIMED).
-    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "i93-dispatcher", Utc::now()).await?;
-    assert_eq!(claimed.len(), 1, "W5: must claim the PENDING row");
+    // Dispatcher claims the row for THIS run only (PENDING → CLAIMED).
+    let claimed =
+        mqk_db::outbox_claim_batch_for_run(&pool, run_id, 1, "i93-dispatcher", Utc::now()).await?;
+    assert_eq!(
+        claimed.len(),
+        1,
+        "W5: must claim the PENDING row for this run"
+    );
     assert_eq!(
         claimed[0].row.idempotency_key, key,
         "W5: claimed row must be the seeded key"

@@ -378,7 +378,7 @@ fn make_fresh_orchestrator(
     run_id: Uuid,
 ) -> ExecutionOrchestrator<OkBroker, BoolGate, BoolGate, BoolGate, FixedClock> {
     // All gates pass so that the HALT_GUARD (Phase 0, DB-backed) is the only
-    // thing that can block tick().  If the test relied on in-memory gate state
+    // thing that can block tick(). If the test relied on in-memory gate state
     // it would not prove the restart invariant.
     let gateway = BrokerGateway::for_test(OkBroker, BoolGate(true), BoolGate(true), BoolGate(true));
 
@@ -394,7 +394,7 @@ fn make_fresh_orchestrator(
         None,
         FixedClock::new(Utc::now()),
         Box::new(mqk_reconcile::LocalSnapshot::empty),
-        Box::new(mqk_reconcile::BrokerSnapshot::empty),
+        Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
     )
 }
 
@@ -524,7 +524,7 @@ fn make_corrupted_orch_for_i(
         None,
         FixedClock::new(Utc::now()),
         Box::new(mqk_reconcile::LocalSnapshot::empty),
-        Box::new(mqk_reconcile::BrokerSnapshot::empty),
+        Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
     )
 }
 
