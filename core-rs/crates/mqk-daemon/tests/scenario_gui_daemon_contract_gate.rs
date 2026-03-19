@@ -203,12 +203,12 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
             assert_eq!(json_str(&json, "leader_node"), "local");
             // No active run in test state → idle → lease is "lost".
             assert_eq!(json_str(&json, "leader_lease_state"), "lost");
-            // generation_id must be a non-empty string (synthetic fallback is fine).
+            // No active run and no DB-backed latest run in test state → generation_id
+            // must be null, not a fabricated placeholder like "paper-no-run".
             assert!(
+                json["generation_id"].is_null(),
+                "/api/v1/system/runtime-leadership generation_id must be null when authoritative runtime identity is unavailable; got: {}",
                 json["generation_id"]
-                    .as_str()
-                    .is_some_and(|v| !v.is_empty()),
-                "/api/v1/system/runtime-leadership generation_id must be non-empty"
             );
             // No DB pool in test state → restart_count_24h must be null (not a
             // synthetic zero); the real count requires a DB query and is unavailable

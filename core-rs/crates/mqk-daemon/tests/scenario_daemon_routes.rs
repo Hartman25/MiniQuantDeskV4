@@ -141,6 +141,43 @@ async fn status_returns_200_with_integrity_armed_field() {
     );
 }
 
+#[tokio::test]
+async fn runtime_leadership_route_reports_null_generation_without_authoritative_identity() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/runtime-leadership")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+    assert_eq!(json["leader_node"], "local");
+    assert_eq!(json["leader_lease_state"], "lost");
+    assert!(
+        json["generation_id"].is_null(),
+        "generation_id must be null when authoritative runtime identity is unavailable; got: {json}"
+    );
+    assert_ne!(json["generation_id"], "paper-no-run");
+    assert!(
+        json["restart_count_24h"].is_null(),
+        "restart_count_24h must be null without DB-backed run history; got: {json}"
+    );
+    assert!(
+        json["last_restart_at"].is_null(),
+        "last_restart_at must be null when no authoritative latest run exists; got: {json}"
+    );
+    assert_eq!(json["post_restart_recovery_state"], "in_progress");
+    assert_eq!(json["recovery_checkpoint"], "none");
+    assert_eq!(
+        json["checkpoints"].as_array().map(|rows| rows.is_empty()),
+        Some(true),
+        "checkpoints must be empty when no durable run history exists; got: {json}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // POST /v1/run/start
 // ---------------------------------------------------------------------------

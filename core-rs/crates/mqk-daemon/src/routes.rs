@@ -1229,12 +1229,12 @@ pub(crate) async fn system_runtime_leadership(
         None
     };
 
-    // Generation ID: active run → latest run → synthetic fallback.
+    // Generation ID: active run → latest run. When neither authoritative
+    // source exists, report null rather than fabricating a placeholder.
     let generation_id = status
         .active_run_id
         .map(|id| id.to_string())
-        .or_else(|| latest_run.as_ref().map(|r| r.run_id.to_string()))
-        .unwrap_or_else(|| format!("{}-no-run", st.adapter_id()));
+        .or_else(|| latest_run.as_ref().map(|r| r.run_id.to_string()));
 
     let last_restart_at = latest_run.as_ref().map(|r| r.started_at_utc.to_rfc3339());
 

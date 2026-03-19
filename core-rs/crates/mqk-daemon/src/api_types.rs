@@ -490,9 +490,10 @@ pub struct RuntimeLeadershipResponse {
     /// "held" = running and owns the lease; "contested" = unknown state;
     /// "lost" = idle or halted.
     pub leader_lease_state: String,
-    /// Unique identifier for the current runtime generation (run_id or
-    /// synthetic fallback when no active run exists).
-    pub generation_id: String,
+    /// Unique identifier for the current runtime generation when authoritative
+    /// runtime state exists. `null` when no active run or durable latest-run
+    /// record is available; the daemon must not fabricate a placeholder ID.
+    pub generation_id: Option<String>,
     /// Count of run starts in the last 24 h, sourced from the `runs` table
     /// (`started_at_utc > now() - interval '24 hours'`).
     /// `null` when no DB pool is configured; a real authoritative count otherwise.
