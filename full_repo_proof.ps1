@@ -12,7 +12,7 @@ function New-LaneRecord {
         [Parameter(Mandatory = $true)]
         [string]$Name,
         [Parameter(Mandatory = $true)]
-        [ValidateSet('PASS', 'FAIL', 'SKIP')]
+        [ValidateSet('PASSED', 'FAILED', 'IGNORED', 'SKIPPED')]
         [string]$Status,
         [Parameter(Mandatory = $true)]
         [bool]$Required,
@@ -94,6 +94,33 @@ function Invoke-NativeCommand {
     }
 }
 
+function Invoke-RepoBashScript {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BashExe,
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath
+    )
+
+    $resolvedRepoRoot = [System.IO.Path]::GetFullPath($RepoRoot)
+    $resolvedScriptPath = [System.IO.Path]::GetFullPath($ScriptPath)
+
+    if (-not $resolvedScriptPath.StartsWith($resolvedRepoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ("Script path is outside repo root: {0}" -f $resolvedScriptPath)
+    }
+
+    $relativePath = $resolvedScriptPath.Substring($resolvedRepoRoot.Length).TrimStart('\', '/')
+    if ([string]::IsNullOrWhiteSpace($relativePath)) {
+        throw ("Unable to derive repo-relative script path for: {0}" -f $resolvedScriptPath)
+    }
+
+    $bashRelativePath = './' + ($relativePath -replace '\\', '/')
+
+    Invoke-NativeCommand -FilePath $BashExe -Arguments @('--noprofile', '--norc', $bashRelativePath) -WorkingDirectory $resolvedRepoRoot
+}
+
 function Require-Path {
     param(
         [Parameter(Mandatory = $true)]
@@ -167,6 +194,100 @@ function Get-ExceptionNote {
     return $message
 }
 
+function Test-IsWindowsPlatform {
+    return ($env:OS -eq 'Windows_NT')
+}
+
+function Resolve-CompatibleRepoBash {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$GitExe
+    )
+
+    if (-not (Test-IsWindowsPlatform)) {
+        return (Require-Command -Name 'bash' -Purpose 'guard scripts and DB bootstrap helper')
+    }
+
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    $rejections = [System.Collections.Generic.List[string]]::new()
+    $seenCandidates = @{}
+
+    $gitPath = $GitExe
+    if (-not [string]::IsNullOrWhiteSpace($gitPath) -and (Test-Path -LiteralPath $gitPath)) {
+        $gitDir = Split-Path -Parent $gitPath
+        $gitRoot = Split-Path -Parent $gitDir
+        foreach ($candidate in @(
+            (Join-Path $gitRoot 'bin/bash.exe'),
+            (Join-Path $gitRoot 'usr/bin/bash.exe')
+        )) {
+            if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+                $candidates.Add($candidate)
+            }
+        }
+    }
+
+    foreach ($root in @($env:ProgramFiles, $env:ProgramW6432, ${env:ProgramFiles(x86)})) {
+        if (-not [string]::IsNullOrWhiteSpace($root)) {
+            $candidates.Add((Join-Path $root 'Git/bin/bash.exe'))
+            $candidates.Add((Join-Path $root 'Git/usr/bin/bash.exe'))
+        }
+    }
+
+    $pathBash = Get-CommandPath -Name 'bash'
+    if (-not [string]::IsNullOrWhiteSpace($pathBash)) {
+        $candidates.Add($pathBash)
+    }
+
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+
+        $candidateKey = $candidate.ToLowerInvariant()
+        if ($seenCandidates.ContainsKey($candidateKey)) {
+            continue
+        }
+        $seenCandidates[$candidateKey] = $true
+
+        if (-not (Test-Path -LiteralPath $candidate)) {
+            continue
+        }
+
+        $normalized = [System.IO.Path]::GetFullPath($candidate)
+        $lower = $normalized.ToLowerInvariant()
+
+        if ($lower -eq 'c:\windows\system32\bash.exe') {
+            $rejections.Add("Rejected incompatible WSL bash shim: $normalized")
+            continue
+        }
+
+        if ($lower -like '*\windows\system32\bash.exe') {
+            $rejections.Add("Rejected incompatible Windows system bash: $normalized")
+            continue
+        }
+
+        if (
+            $lower -like '*\git\bin\bash.exe' -or
+            $lower -like '*\git\usr\bin\bash.exe' -or
+            $lower -like '*\mingw*\bash.exe' -or
+            $lower -like '*\msys*\bash.exe'
+        ) {
+            return $normalized
+        }
+
+        $rejections.Add("Rejected non-Git/non-MSYS bash candidate: $normalized")
+    }
+
+    $reason = if ($rejections.Count -gt 0) {
+        $rejections -join '; '
+    }
+    else {
+        'No bash candidate was found.'
+    }
+
+    throw "Unable to resolve a Windows-compatible Git/MSYS bash for repo helper scripts. $reason"
+}
+
 $laneResults = [System.Collections.Generic.List[object]]::new()
 
 function Invoke-ProofLane {
@@ -181,7 +302,7 @@ function Invoke-ProofLane {
     )
 
     if ($SkipReason) {
-        $script:laneResults.Add((New-LaneRecord -Name $Name -Status 'SKIP' -Required $Required -ExitCode $null -DurationSeconds 0 -Note $SkipReason))
+        $script:laneResults.Add((New-LaneRecord -Name $Name -Status 'SKIPPED' -Required $Required -ExitCode $null -DurationSeconds 0 -Note $SkipReason))
         Write-Host ''
         Write-Host '============================================================' -ForegroundColor Yellow
         Write-Host "[SKIPPED] $Name" -ForegroundColor Yellow
@@ -206,13 +327,13 @@ function Invoke-ProofLane {
             $note = [string]$actionResult.Note
         }
 
-        $script:laneResults.Add((New-LaneRecord -Name $Name -Status 'PASS' -Required $Required -ExitCode 0 -DurationSeconds $stopwatch.Elapsed.TotalSeconds -Note $note))
+        $script:laneResults.Add((New-LaneRecord -Name $Name -Status 'PASSED' -Required $Required -ExitCode 0 -DurationSeconds $stopwatch.Elapsed.TotalSeconds -Note $note))
     }
     catch {
         $stopwatch.Stop()
         $exitCode = Get-ExceptionExitCode -ErrorRecord $_
         $note = Get-ExceptionNote -ErrorRecord $_
-        $script:laneResults.Add((New-LaneRecord -Name $Name -Status 'FAIL' -Required $Required -ExitCode $exitCode -DurationSeconds $stopwatch.Elapsed.TotalSeconds -Note $note))
+        $script:laneResults.Add((New-LaneRecord -Name $Name -Status 'FAILED' -Required $Required -ExitCode $exitCode -DurationSeconds $stopwatch.Elapsed.TotalSeconds -Note $note))
         Write-Host "[FAILED] $Name" -ForegroundColor Red
         Write-Host $note -ForegroundColor Red
     }
@@ -234,7 +355,6 @@ if ($gitFromPath) {
     }
 }
 
-
 if ([string]::IsNullOrWhiteSpace($repoRoot)) {
     $repoRoot = $scriptDir
 }
@@ -255,13 +375,28 @@ $treeClean = $false
 $untrackedFilesPresent = $false
 $dbRequired = ($ProofProfile -eq 'full')
 $dbAvailable = -not [string]::IsNullOrWhiteSpace($dbUrl)
-$canonicalBundleRequested = ($ProofProfile -eq 'full')
+$canonicalFullBundleRequested = ($ProofProfile -eq 'full')
 $workspaceState = 'candidate_workspace_state'
 $proofAuditProfile = switch ($ProofProfile) {
     'full' { 'full_db_backed_institutional_proof_audit' }
     'exploratory' { 'candidate_workspace_exploratory_proof' }
     default { 'local_non_db_proof_audit' }
 }
+
+$alwaysRequiredLaneNames = @(
+    'Repo identity + working tree truth',
+    'Rust fmt check (non-mutating)',
+    'Workspace clippy',
+    'Workspace tests',
+    'Daemon proof lanes',
+    'Runtime proof lane',
+    'Broker Alpaca proof lane',
+    'Market data proof lane',
+    'GUI typecheck + build',
+    'Ignored-proof guard',
+    'Unsafe-pattern guard'
+)
+
 $mandatoryDbLaneNames = @(
     'DB proof bootstrap / CI-10 mandatory matrix',
     'DB-backed mqk-db ignored lanes',
@@ -271,12 +406,19 @@ $mandatoryDbLaneNames = @(
     'Broker map FK proof'
 )
 
+$expectedRequiredLaneNames = @($alwaysRequiredLaneNames)
+if ($dbRequired) {
+    $expectedRequiredLaneNames += $mandatoryDbLaneNames
+}
+
+$nonDbSkipReason = if (-not $dbRequired) { 'Skipped in non-DB profile.' } else { $null }
+
 try {
     $script:GitExe = Require-Command -Name 'git' -Purpose 'repo identity and cleanliness checks'
     $script:CargoExe = Require-Command -Name 'cargo' -Purpose 'Rust proof lanes'
     $script:NpxExe = Require-Command -Name 'npx' -Purpose 'GUI typecheck lane'
     $script:NpmExe = Require-Command -Name 'npm' -Purpose 'GUI build lane'
-    $script:BashExe = Require-Command -Name 'bash' -Purpose 'guard scripts and DB bootstrap helper'
+    $script:BashExe = Resolve-CompatibleRepoBash -GitExe $script:GitExe
 
     Require-Path -PathToCheck $repoRoot -Label 'repo root'
     Require-Path -PathToCheck $coreRsDir -Label 'core-rs workspace'
@@ -302,7 +444,7 @@ try {
     Write-Host "GUI dir:        $guiDir" -ForegroundColor Yellow
     Write-Host "Readiness lock: $lockDoc" -ForegroundColor Yellow
     Write-Host "Scorecard:      $scorecardDoc" -ForegroundColor Yellow
-    Write-Host "bash:           $script:BashExe" -ForegroundColor Yellow
+    Write-Host "Repo shell:     $script:BashExe" -ForegroundColor Yellow
     Write-Host ("MQK_DATABASE_URL={0}" -f (Get-RedactedDbUrl -Url $dbUrl)) -ForegroundColor Green
 }
 catch {
@@ -336,9 +478,9 @@ Invoke-ProofLane -Name 'Repo identity + working tree truth' -Required $true -Act
         $statusLines = @([string]$statusOutput)
     }
 
-    $script:gitStatusShort = $statusLines | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ -ne '' }
+    $script:gitStatusShort = @($statusLines | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ -ne '' })
     $script:treeClean = ($script:gitStatusShort.Count -eq 0)
-    $script:untrackedFilesPresent = ($script:gitStatusShort | Where-Object { $_ -like '?? *' }).Count -gt 0
+    $script:untrackedFilesPresent = (@($script:gitStatusShort | Where-Object { $_ -match '^\?\?\s' }).Count -gt 0)
     $script:workspaceState = if ($script:treeClean) { 'committed_repo_state' } else { 'candidate_workspace_state' }
 
     Write-Host "Commit hash: $script:commitHash" -ForegroundColor Yellow
@@ -359,6 +501,8 @@ Invoke-ProofLane -Name 'Repo identity + working tree truth' -Required $true -Act
 
 Invoke-ProofLane -Name 'Rust fmt check (non-mutating)' -Required $true -Action {
     Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('fmt', '--manifest-path', $cargoManifest, '--all', '--', '--check') -WorkingDirectory $repoRoot
+    Write-Host 'cargo fmt --check passed.' -ForegroundColor Green
+    return (New-LaneNote -Note 'cargo fmt --check passed.')
 }
 
 Invoke-ProofLane -Name 'Workspace clippy' -Required $true -Action {
@@ -408,43 +552,118 @@ Invoke-ProofLane -Name 'GUI typecheck + build' -Required $true -Action {
 }
 
 Invoke-ProofLane -Name 'Ignored-proof guard' -Required $true -Action {
-    Invoke-NativeCommand -FilePath $script:BashExe -Arguments @($ignoredGuard) -WorkingDirectory $repoRoot
+    Invoke-RepoBashScript -BashExe $script:BashExe -RepoRoot $repoRoot -ScriptPath $ignoredGuard
+    Write-Host 'Ignored-proof guard passed.' -ForegroundColor Green
+    return (New-LaneNote -Note 'Ignored-proof guard passed.')
 }
 
 Invoke-ProofLane -Name 'Unsafe-pattern guard' -Required $true -Action {
-    Invoke-NativeCommand -FilePath $script:BashExe -Arguments @($unsafeGuard) -WorkingDirectory $repoRoot
+    Invoke-RepoBashScript -BashExe $script:BashExe -RepoRoot $repoRoot -ScriptPath $unsafeGuard
+    Write-Host 'Unsafe-pattern guard passed.' -ForegroundColor Green
+    return (New-LaneNote -Note 'Unsafe-pattern guard passed.')
 }
 
 Invoke-ProofLane -Name 'DB proof bootstrap / CI-10 mandatory matrix' -Required $dbRequired -Action {
-    Invoke-NativeCommand -FilePath $script:BashExe -Arguments @($dbBootstrap) -WorkingDirectory $repoRoot
-} -SkipReason $(if (-not $dbRequired) { 'Skipped in non-DB profile.' })
+    Invoke-RepoBashScript -BashExe $script:BashExe -RepoRoot $repoRoot -ScriptPath $dbBootstrap
+    Write-Host 'DB proof bootstrap / CI-10 mandatory matrix passed.' -ForegroundColor Green
+    return (New-LaneNote -Note 'DB proof bootstrap / CI-10 mandatory matrix passed.')
+} -SkipReason $nonDbSkipReason
 
 Invoke-ProofLane -Name 'DB-backed mqk-db ignored lanes' -Required $dbRequired -Action {
     Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-db', '--', '--include-ignored', '--test-threads=1') -WorkingDirectory $repoRoot
-} -SkipReason $(if (-not $dbRequired) { 'Skipped in non-DB profile.' })
+} -SkipReason $nonDbSkipReason
 
 Invoke-ProofLane -Name 'DB-backed daemon lifecycle ignored lane' -Required $dbRequired -Action {
     Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-daemon', '--test', 'scenario_daemon_runtime_lifecycle', '--', '--include-ignored', '--test-threads=1') -WorkingDirectory $repoRoot
-} -SkipReason $(if (-not $dbRequired) { 'Skipped in non-DB profile.' })
+} -SkipReason $nonDbSkipReason
 
 Invoke-ProofLane -Name 'DB-backed daemon routes ignored lane' -Required $dbRequired -Action {
     Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-daemon', '--test', 'scenario_daemon_routes', '--', '--include-ignored', '--test-threads=1') -WorkingDirectory $repoRoot
-} -SkipReason $(if (-not $dbRequired) { 'Skipped in non-DB profile.' })
+} -SkipReason $nonDbSkipReason
 
 Invoke-ProofLane -Name 'DB-backed market data ingest-provider ignored lane' -Required $dbRequired -Action {
     Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-db', '--test', 'scenario_md_ingest_provider', '--', '--include-ignored', '--test-threads=1') -WorkingDirectory $repoRoot
-} -SkipReason $(if (-not $dbRequired) { 'Skipped in non-DB profile.' })
+} -SkipReason $nonDbSkipReason
 
 Invoke-ProofLane -Name 'Broker map FK proof' -Required $dbRequired -Action {
     Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-db', '--test', 'scenario_broker_map_fk_enforced', '--', '--test-threads=1') -WorkingDirectory $repoRoot
-} -SkipReason $(if (-not $dbRequired) { 'Skipped in non-DB profile.' })
+} -SkipReason $nonDbSkipReason
 
-$requiredLaneResults = @($laneResults | Where-Object { $_.required })
-$failedRequiredLanes = @($requiredLaneResults | Where-Object { $_.status -eq 'FAIL' })
+$allLaneNames = @($laneResults | ForEach-Object { $_.lane_name })
+
+$passedLanes = @($laneResults | Where-Object { $_.status -eq 'PASSED' })
+$failedLanes = @($laneResults | Where-Object { $_.status -eq 'FAILED' })
+$ignoredLanes = @($laneResults | Where-Object { $_.status -eq 'IGNORED' })
+$skippedLanes = @($laneResults | Where-Object { $_.status -eq 'SKIPPED' })
+
+$requiredLaneResults = @($laneResults | Where-Object { $expectedRequiredLaneNames -contains $_.lane_name })
+$requiredLaneNamesPresent = @($requiredLaneResults | ForEach-Object { $_.lane_name })
+$missingRequiredLanes = @($expectedRequiredLaneNames | Where-Object { $requiredLaneNamesPresent -notcontains $_ })
+$requiredLaneResultsPresent = ($missingRequiredLanes.Count -eq 0 -and $requiredLaneResults.Count -eq $expectedRequiredLaneNames.Count)
+
+$failedRequiredLanes = @($requiredLaneResults | Where-Object { $_.status -eq 'FAILED' })
+$skippedRequiredLanes = @($requiredLaneResults | Where-Object { $_.status -eq 'SKIPPED' })
+
+$requiredLanesExecuted = ($requiredLaneResultsPresent -and $skippedRequiredLanes.Count -eq 0)
+$requiredLanesCompleted = ($requiredLaneResultsPresent -and $failedRequiredLanes.Count -eq 0 -and $skippedRequiredLanes.Count -eq 0)
+
 $mandatoryDbLaneResults = @($laneResults | Where-Object { $mandatoryDbLaneNames -contains $_.lane_name })
-$mandatoryDbLanesRan = ($dbRequired -and $mandatoryDbLaneResults.Count -eq $mandatoryDbLaneNames.Count -and ($mandatoryDbLaneResults | Where-Object { $_.status -eq 'SKIP' }).Count -eq 0)
-$canonicalFullBundleRan = ($canonicalBundleRequested -and ($requiredLaneResults | Where-Object { $_.status -eq 'SKIP' }).Count -eq 0)
-$institutionalReadyProofCompleted = ($ProofProfile -eq 'full' -and $treeClean -and $dbAvailable -and $canonicalFullBundleRan -and $failedRequiredLanes.Count -eq 0)
+$mandatoryDbLaneNamesPresent = @($mandatoryDbLaneResults | ForEach-Object { $_.lane_name })
+$missingMandatoryDbLanes = @()
+if ($dbRequired) {
+    $missingMandatoryDbLanes = @($mandatoryDbLaneNames | Where-Object { $mandatoryDbLaneNamesPresent -notcontains $_ })
+}
+
+$mandatoryDbResultsPresent = (
+    (-not $dbRequired) -or
+    ($missingMandatoryDbLanes.Count -eq 0 -and $mandatoryDbLaneResults.Count -eq $mandatoryDbLaneNames.Count)
+)
+
+$failedMandatoryDbLanes = @()
+$skippedMandatoryDbLanes = @()
+if ($dbRequired) {
+    $failedMandatoryDbLanes = @($mandatoryDbLaneResults | Where-Object { $_.status -eq 'FAILED' })
+    $skippedMandatoryDbLanes = @($mandatoryDbLaneResults | Where-Object { $_.status -eq 'SKIPPED' })
+}
+
+$mandatoryDbLanesExecuted = (
+    $dbRequired -and
+    $mandatoryDbResultsPresent -and
+    $skippedMandatoryDbLanes.Count -eq 0
+)
+
+$mandatoryDbLanesCompleted = (
+    $dbRequired -and
+    $mandatoryDbResultsPresent -and
+    $failedMandatoryDbLanes.Count -eq 0 -and
+    $skippedMandatoryDbLanes.Count -eq 0
+)
+
+$canonicalFullBundleExecuted = ($canonicalFullBundleRequested -and $requiredLanesExecuted)
+$canonicalFullBundleCompleted = ($canonicalFullBundleRequested -and $requiredLanesCompleted)
+
+$requiredCompletenessIssues = @()
+$requiredCompletenessIssues += $missingRequiredLanes
+$requiredCompletenessIssues += @($skippedRequiredLanes | ForEach-Object { $_.lane_name })
+$requiredCompletenessIssues += @($failedRequiredLanes | ForEach-Object { $_.lane_name })
+
+$hasRequiredExecutionFailure = ($requiredCompletenessIssues.Count -gt 0)
+
+$institutionalReadyProofCompleted = (
+    $ProofProfile -eq 'full' -and
+    $treeClean -and
+    $dbAvailable -and
+    $canonicalFullBundleCompleted -and
+    $mandatoryDbLanesCompleted -and
+    -not $hasRequiredExecutionFailure
+)
+
+$resultCounts = @(
+    [pscustomobject]@{ status = 'PASSED'; count = $passedLanes.Count },
+    [pscustomobject]@{ status = 'FAILED'; count = $failedLanes.Count },
+    [pscustomobject]@{ status = 'IGNORED'; count = $ignoredLanes.Count },
+    [pscustomobject]@{ status = 'SKIPPED'; count = $skippedLanes.Count }
+)
 
 $summary = [ordered]@{
     proof_profile                       = $ProofProfile
@@ -456,14 +675,25 @@ $summary = [ordered]@{
     untracked_files_present             = $untrackedFilesPresent
     db_required                         = $dbRequired
     db_available                        = $dbAvailable
-    canonical_full_bundle_ran           = $canonicalFullBundleRan
-    mandatory_db_lanes_ran              = $mandatoryDbLanesRan
+    canonical_full_bundle_requested     = $canonicalFullBundleRequested
+    canonical_full_bundle_executed      = $canonicalFullBundleExecuted
+    canonical_full_bundle_completed     = $canonicalFullBundleCompleted
+    required_lanes_executed             = $requiredLanesExecuted
+    required_lanes_completed            = $requiredLanesCompleted
+    missing_required_lanes              = @($missingRequiredLanes)
+    mandatory_db_lanes_executed         = $mandatoryDbLanesExecuted
+    mandatory_db_lanes_completed        = $mandatoryDbLanesCompleted
+    missing_mandatory_db_lanes          = @($missingMandatoryDbLanes)
     institutional_ready_proof_completed = $institutionalReadyProofCompleted
     readiness_lock_doc                  = 'docs/INSTITUTIONAL_READINESS_LOCK.md'
     scorecard_doc                       = 'docs/INSTITUTIONAL_SCORECARD.md'
+    passed_lanes                        = @($passedLanes | ForEach-Object { $_.lane_name })
+    failed_lanes                        = @($failedLanes | ForEach-Object { $_.lane_name })
+    ignored_lanes                       = @($ignoredLanes | ForEach-Object { $_.lane_name })
+    skipped_lanes                       = @($skippedLanes | ForEach-Object { $_.lane_name })
     failed_required_lanes               = @($failedRequiredLanes | ForEach-Object { $_.lane_name })
-    skipped_lanes                       = @($laneResults | Where-Object { $_.status -eq 'SKIP' } | ForEach-Object { $_.lane_name })
-    overall_result                      = if ($failedRequiredLanes.Count -gt 0) { 'failed' } else { 'passed' }
+    skipped_required_lanes              = @($skippedRequiredLanes | ForEach-Object { $_.lane_name })
+    overall_result                      = if ($hasRequiredExecutionFailure) { 'failed' } else { 'passed' }
     lane_results                        = @($laneResults)
 }
 
@@ -479,17 +709,47 @@ $laneResults |
 
 Write-Host ''
 Write-Host '============================================================' -ForegroundColor Green
-Write-Host 'MiniQuantDesk V4 failed required lanes' -ForegroundColor Green
+Write-Host 'MiniQuantDesk V4 lane result counts' -ForegroundColor Green
 Write-Host '============================================================' -ForegroundColor Green
-if ($failedRequiredLanes.Count -eq 0) {
-    Write-Host '<none>' -ForegroundColor Green
+$resultCounts |
+    Format-Table -AutoSize |
+    Out-String -Width 120 |
+    Write-Host
+
+Write-Host ''
+Write-Host '============================================================' -ForegroundColor Green
+Write-Host 'MiniQuantDesk V4 required lane completeness' -ForegroundColor Green
+Write-Host '============================================================' -ForegroundColor Green
+if ($missingRequiredLanes.Count -eq 0 -and $skippedRequiredLanes.Count -eq 0 -and $failedRequiredLanes.Count -eq 0) {
+    Write-Host '<complete>' -ForegroundColor Green
 }
 else {
-    $failedRequiredLanes |
-        Select-Object lane_name, exit_code, duration_seconds, note |
-        Format-Table -AutoSize |
-        Out-String -Width 240 |
-        Write-Host
+    if ($missingRequiredLanes.Count -gt 0) {
+        Write-Host 'Missing required lanes:' -ForegroundColor Red
+        $missingRequiredLanes |
+            ForEach-Object { [pscustomobject]@{ lane_name = $_ } } |
+            Format-Table -AutoSize |
+            Out-String -Width 180 |
+            Write-Host
+    }
+
+    if ($skippedRequiredLanes.Count -gt 0) {
+        Write-Host 'Skipped required lanes:' -ForegroundColor Yellow
+        $skippedRequiredLanes |
+            Select-Object lane_name, exit_code, duration_seconds, note |
+            Format-Table -AutoSize |
+            Out-String -Width 240 |
+            Write-Host
+    }
+
+    if ($failedRequiredLanes.Count -gt 0) {
+        Write-Host 'Failed required lanes:' -ForegroundColor Red
+        $failedRequiredLanes |
+            Select-Object lane_name, exit_code, duration_seconds, note |
+            Format-Table -AutoSize |
+            Out-String -Width 240 |
+            Write-Host
+    }
 }
 
 Write-Host ''
@@ -501,6 +761,15 @@ Write-Host (ConvertTo-Json $summary -Depth 6)
 if ($institutionalReadyProofCompleted) {
     Write-Host 'VERDICT: Full DB-backed canonical proof completed on a clean committed state.' -ForegroundColor Green
 }
+elseif ($ProofProfile -eq 'full' -and $missingRequiredLanes.Count -gt 0) {
+    Write-Host 'VERDICT: Full profile is invalid; one or more expected required lanes are missing from the harness result set.' -ForegroundColor Red
+}
+elseif ($ProofProfile -eq 'full' -and $skippedRequiredLanes.Count -gt 0) {
+    Write-Host 'VERDICT: Full profile is incomplete; one or more required lanes were skipped; institutional readiness is NOT established.' -ForegroundColor Red
+}
+elseif ($ProofProfile -eq 'full' -and $failedRequiredLanes.Count -gt 0) {
+    Write-Host 'VERDICT: Full profile was executed, but one or more required lanes failed; institutional readiness is NOT established.' -ForegroundColor Red
+}
 elseif ($ProofProfile -eq 'full') {
     Write-Host 'VERDICT: Full institutional-ready proof was NOT completed.' -ForegroundColor Red
 }
@@ -511,7 +780,7 @@ else {
     Write-Host 'VERDICT: Local non-DB proof only; DB-backed institutional readiness not established.' -ForegroundColor Yellow
 }
 
-if ($failedRequiredLanes.Count -gt 0) {
+if ($hasRequiredExecutionFailure) {
     exit 1
 }
 
