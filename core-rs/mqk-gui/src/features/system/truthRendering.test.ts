@@ -6,7 +6,7 @@ import { panelTruthRenderState } from "./truthRendering.ts";
 type MinimalModel = Pick<SystemModel, "connected" | "dataSource" | "panelSources" | "status" | "runtimeLeadership">;
 
 function buildModel(overrides: Partial<MinimalModel> = {}): SystemModel {
-  const base: MinimalModel = {
+  const base: MinimalModel & Pick<SystemModel, "strategySummaryTruth"> = {
     connected: true,
     dataSource: {
       state: "real",
@@ -34,6 +34,10 @@ function buildModel(overrides: Partial<MinimalModel> = {}): SystemModel {
     runtimeLeadership: {
       post_restart_recovery_state: "complete",
     } as SystemModel["runtimeLeadership"],
+    strategySummaryTruth: {
+      truth_state: "unknown",
+      backend: null,
+    },
   };
 
   return { ...base, ...overrides } as SystemModel;
@@ -535,4 +539,23 @@ test("AP-09: synthetic broker not affected by continuity gate (paper mode unaffe
     "execution",
   );
   assert.equal(state, null, "synthetic broker must never trigger external continuity gate");
+});
+
+
+test("strategy panel renders not_wired when daemon explicitly reports mounted-but-unwired summary truth", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      strategySummaryTruth: { truth_state: "not_wired", backend: "not_wired" },
+      dataSource: {
+        state: "real",
+        reachable: true,
+        realEndpoints: ["/api/v1/system/status", "/api/v1/strategy/summary"],
+        missingEndpoints: [],
+        mockSections: [],
+      },
+      panelSources: { strategy: "runtime_memory" } as Record<string, SourceAuthority> as SystemModel["panelSources"],
+    }),
+    "strategy",
+  );
+  assert.equal(state, "not_wired");
 });

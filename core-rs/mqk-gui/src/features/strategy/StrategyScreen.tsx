@@ -26,31 +26,41 @@ export function StrategyScreen({ model }: { model: SystemModel }) {
       </div>
 
       <Panel title="Strategy engines" subtitle="Monitor strategy runtime health without turning the GUI into manual trading software.">
-        <DataTable
-          rows={model.strategies}
-          rowKey={(row) => row.strategy_id}
-          columns={[
-            { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
-            { key: "enabled", title: "Enabled", render: (row) => (row.enabled ? "Yes" : "No") },
-            { key: "armed", title: "Armed", render: (row) => (row.armed ? "Yes" : "No") },
-            { key: "health", title: "Health", render: (row) => row.health },
-            { key: "universe", title: "Universe", render: (row) => row.universe },
-            { key: "intents", title: "Pending Intents", render: (row) => row.pending_intents },
-            { key: "positions", title: "Open Positions", render: (row) => row.open_positions },
-            { key: "pnl", title: "Today PnL", render: (row) => formatMoney(row.today_pnl) },
-            { key: "drawdown", title: "Drawdown", render: (row) => formatPercent(row.drawdown_pct) },
-            { key: "regime", title: "Regime", render: (row) => row.regime },
-            { key: "throttle", title: "Throttle", render: (row) => row.throttle_state },
-            { key: "last", title: "Last Decision", render: (row) => formatDateTime(row.last_decision_time) },
-          ]}
-        />
+        {model.strategies.length === 0 ? (
+          <div className="empty-state">No strategy summary rows reported.</div>
+        ) : (
+          <DataTable
+            rows={model.strategies}
+            rowKey={(row) => row.strategy_id}
+            columns={[
+              { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
+              { key: "enabled", title: "Enabled", render: (row) => (row.enabled ? "Yes" : "No") },
+              { key: "armed", title: "Armed", render: (row) => (row.armed ? "Yes" : "No") },
+              { key: "health", title: "Health", render: (row) => row.health },
+              { key: "universe", title: "Universe", render: (row) => row.universe },
+              { key: "intents", title: "Pending Intents", render: (row) => row.pending_intents },
+              { key: "positions", title: "Open Positions", render: (row) => row.open_positions },
+              { key: "pnl", title: "Today PnL", render: (row) => formatMoney(row.today_pnl) },
+              { key: "drawdown", title: "Drawdown", render: (row) => formatPercent(row.drawdown_pct) },
+              { key: "regime", title: "Regime", render: (row) => row.regime },
+              { key: "throttle", title: "Throttle", render: (row) => row.throttle_state },
+              { key: "last", title: "Last Decision", render: (row) => formatDateTime(row.last_decision_time) },
+            ]}
+          />
+        )}
       </Panel>
 
       <Panel title="Strategy suppressions" subtitle="Active and historical suppressions affecting strategy output.">
-        {model.dataSource.mockSections.includes("strategySuppressions") ? (
+        {model.strategySuppressionsTruth.truth_state === "not_wired" ? (
           <div className="unavailable-notice">
-            Strategy suppression history is not yet wired to a durable source. No suppression records are available.
+            Strategy suppression truth is mounted but not wired. Empty rows do not mean there are no suppressions.
           </div>
+        ) : model.strategySuppressionsTruth.truth_state !== "active" ? (
+          <div className="unavailable-notice">
+            Strategy suppression truth is currently unavailable. Do not treat the empty row set as authoritative.
+          </div>
+        ) : model.strategySuppressions.length === 0 ? (
+          <div className="empty-state">No strategy suppressions recorded.</div>
         ) : (
           <DataTable
             rows={model.strategySuppressions}

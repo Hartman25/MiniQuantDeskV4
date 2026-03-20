@@ -24,10 +24,16 @@ export function ConfigScreen({ model }: { model: SystemModel }) {
       </div>
 
       <Panel title="Config diffs" subtitle="Recent config and runtime generation changes.">
-        {model.dataSource.mockSections.includes("configDiffs") ? (
+        {model.configDiffsTruth.truth_state === "not_wired" ? (
           <div className="unavailable-notice">
-            Config diff history is not yet wired to a durable source. No diff records are available.
+            Config-diff truth is mounted but not wired. Empty rows do not mean there are no config diffs.
           </div>
+        ) : model.configDiffsTruth.truth_state !== "active" ? (
+          <div className="unavailable-notice">
+            Config-diff truth is currently unavailable. Do not treat the empty row set as authoritative.
+          </div>
+        ) : model.configDiffs.length === 0 ? (
+          <div className="empty-state">No config diffs recorded.</div>
         ) : (
           <DataTable
             rows={model.configDiffs}

@@ -15,6 +15,7 @@ import type {
   ExecutionSummary,
   ExecutionTimeline,
   ExecutionTrace,
+  ExplicitSurfaceTruth,
   FeedEvent,
   FillRow,
   IncidentCase,
@@ -185,6 +186,7 @@ interface ReconcileMismatchesResponse {
 // "active"    = reserved for when durable tracking is wired (not currently returned).
 interface ConfigDiffsWrapper {
   truth_state: "not_wired" | "active";
+  backend?: string | null;
   rows: ConfigDiffRow[];
 }
 
@@ -193,6 +195,7 @@ interface ConfigDiffsWrapper {
 // "active"    = reserved for when durable tracking is wired (not currently returned).
 interface StrategySuppressionsWrapper {
   truth_state: "not_wired" | "active";
+  backend?: string | null;
   rows: StrategySuppressionRow[];
 }
 
@@ -204,6 +207,7 @@ interface StrategySuppressionsWrapper {
 // "active"    = reserved for when a real strategy-fleet source is wired.
 interface StrategySummaryWrapper {
   truth_state: "not_wired" | "active";
+  backend?: string | null;
   rows: StrategyRow[];
 }
 
@@ -806,19 +810,12 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       }
       return { ok: true, endpoint: canonical.endpoint, data: data.rows };
     })(),
-    // strategy/summary: daemon returns a wrapper with truth_state.
-    // "not_wired" = no real strategy-fleet registry exists; the former synthetic
-    // "daemon_integrity_gate" surrogate row has been removed at the daemon layer.
-    // Emit ok:false so "strategies" lands in usedMockSections, collapsing the
-    // strategy panel authority to "placeholder" and blocking the StrategyScreen
-    // with an "Unimplemented" notice rather than a fake strategy row.
-    (async (): Promise<EndpointFetchResult<StrategyRow[]>> => {
+    // strategy/summary: preserve the daemon wrapper so the GUI can distinguish
+    // fail-closed "not_wired" truth from authoritative active-empty rows.
+    (async (): Promise<EndpointFetchResult<StrategySummaryWrapper>> => {
       const r = await fetchJsonCandidate<StrategySummaryWrapper>("/api/v1/strategy/summary");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
-      if ((r.data as StrategySummaryWrapper).truth_state === "not_wired") {
-        return { ok: false, endpoint: r.endpoint, error: "strategy_summary_not_wired" };
-      }
-      return { ok: true, endpoint: r.endpoint, data: (r.data as StrategySummaryWrapper).rows };
+      return { ok: true, endpoint: r.endpoint, data: r.data as StrategySummaryWrapper };
     })(),
     fetchJsonCandidates<OperatorAlert[]>(["/api/v1/alerts/active"]),
     fetchJsonCandidates<FeedEvent[]>(["/api/v1/events/feed"]),
@@ -889,29 +886,19 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       };
       return { ok: true, endpoint: r.endpoint, data: summary };
     })(),
-    // strategy/suppressions: daemon returns a wrapper with truth_state.
-    // "not_wired" = no durable suppression persistence; [] is not authoritative zero.
-    // Emit ok:false so "strategySuppressions" lands in usedMockSections and the
-    // strategy panel's suppressions section renders an honest unavailable notice.
-    (async (): Promise<EndpointFetchResult<StrategySuppressionRow[]>> => {
+    // strategy/suppressions: preserve the daemon wrapper so the GUI can render
+    // mounted-but-not-wired truth distinctly from authoritative active-empty rows.
+    (async (): Promise<EndpointFetchResult<StrategySuppressionsWrapper>> => {
       const r = await fetchJsonCandidate<StrategySuppressionsWrapper>("/api/v1/strategy/suppressions");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
-      if ((r.data as StrategySuppressionsWrapper).truth_state === "not_wired") {
-        return { ok: false, endpoint: r.endpoint, error: "suppressions_not_wired" };
-      }
-      return { ok: true, endpoint: r.endpoint, data: (r.data as StrategySuppressionsWrapper).rows };
+      return { ok: true, endpoint: r.endpoint, data: r.data as StrategySuppressionsWrapper };
     })(),
-    // system/config-diffs: daemon returns a wrapper with truth_state.
-    // "not_wired" = no durable config-diff persistence; [] is not authoritative zero.
-    // Emit ok:false so "configDiffs" lands in usedMockSections and the config
-    // panel's diffs section renders an honest unavailable notice.
-    (async (): Promise<EndpointFetchResult<ConfigDiffRow[]>> => {
+    // system/config-diffs: preserve the daemon wrapper so the GUI can render
+    // mounted-but-not-wired truth distinctly from authoritative active-empty rows.
+    (async (): Promise<EndpointFetchResult<ConfigDiffsWrapper>> => {
       const r = await fetchJsonCandidate<ConfigDiffsWrapper>("/api/v1/system/config-diffs");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
-      if ((r.data as ConfigDiffsWrapper).truth_state === "not_wired") {
-        return { ok: false, endpoint: r.endpoint, error: "config_diffs_not_wired" };
-      }
-      return { ok: true, endpoint: r.endpoint, data: (r.data as ConfigDiffsWrapper).rows };
+      return { ok: true, endpoint: r.endpoint, data: r.data as ConfigDiffsWrapper };
     })(),
     // ops/operator-timeline: daemon returns {canonical_route, truth_state, backend, rows}
     // where each row is a runtime lifecycle transition or operator action from runs +
@@ -1047,6 +1034,18 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
 
   const durableOperatorHistoryKeys = new Set(["auditActions", "artifactRegistry", "operatorTimeline"]);
 
+  const explicitSurfaceTruthOrUnknown = (
+    result: EndpointFetchResult<{ truth_state: "active" | "not_wired"; backend?: string | null }>,
+  ): ExplicitSurfaceTruth => {
+    if (!result.ok || result.data == null) {
+      return { truth_state: "unknown", backend: null };
+    }
+    return {
+      truth_state: result.data.truth_state,
+      backend: result.data.backend ?? null,
+    };
+  };
+
   const useObject = <T,>(key: string, result: EndpointFetchResult<T>, fallback: T): T => {
     if (result.ok && result.data !== undefined) return result.data;
 
@@ -1144,6 +1143,20 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     }
     return null;
   })();
+
+  const strategySummaryTruth = explicitSurfaceTruthOrUnknown(strategiesR as EndpointFetchResult<StrategySummaryWrapper>);
+  const strategySuppressionsTruth = explicitSurfaceTruthOrUnknown(strategySuppressionsR as EndpointFetchResult<StrategySuppressionsWrapper>);
+  const configDiffsTruth = explicitSurfaceTruthOrUnknown(configDiffsR as EndpointFetchResult<ConfigDiffsWrapper>);
+
+  const strategies = strategiesR.ok && strategiesR.data !== undefined
+    ? (strategiesR.data as StrategySummaryWrapper).rows
+    : [];
+  const strategySuppressions = strategySuppressionsR.ok && strategySuppressionsR.data !== undefined
+    ? (strategySuppressionsR.data as StrategySuppressionsWrapper).rows
+    : [];
+  const configDiffs = configDiffsR.ok && configDiffsR.data !== undefined
+    ? (configDiffsR.data as ConfigDiffsWrapper).rows
+    : [];
   // null means the endpoint was unreachable or returned an invalid shape.
   // An empty array is valid and means no actions are currently available (e.g., all halted).
   if (catalogResult === null) {
@@ -1321,7 +1334,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     riskDenials: useArray("riskDenials", riskDenialsR, []),
     reconcileSummary: useObject("reconcileSummary", reconcileSummaryR, unavailableReconcileSummary),
     mismatches: useArray("mismatches", mismatchesR, []),
-    strategies: useArray("strategies", strategiesR, []),
+    strategies,
     alerts: useArray("alerts", alertsR, []),
     feed: useArray("feed", feedR, []),
     auditActions: useArray("auditActions", auditActionsR, []),
@@ -1336,8 +1349,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     marketDataQuality: useObject("marketDataQuality", marketDataQualityR, unavailableMarketDataQuality),
     runtimeLeadership: useObject("runtimeLeadership", runtimeLeadershipR, unavailableRuntimeLeadership),
     artifactRegistry: useObject("artifactRegistry", artifactRegistryR, unavailableArtifactRegistry),
-    strategySuppressions: useArray("strategySuppressions", strategySuppressionsR, []),
-    configDiffs: useArray("configDiffs", configDiffsR, []),
+    strategySummaryTruth,
+    strategySuppressionsTruth,
+    configDiffsTruth,
+    strategySuppressions,
+    configDiffs,
     operatorTimeline: useArray("operatorTimeline", operatorTimelineR, []),
     // Daemon-authoritative Action Catalog from GET /api/v1/ops/catalog.
     // Resolved before dataSource so catalog failures reach dataSource.mockSections

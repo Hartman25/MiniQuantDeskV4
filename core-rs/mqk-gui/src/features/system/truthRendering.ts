@@ -1,6 +1,6 @@
 import type { CorePanelKey, SystemModel } from "./types.ts";
 
-export type TruthRenderState = "unimplemented" | "unavailable" | "stale" | "no_snapshot" | "degraded";
+export type TruthRenderState = "unimplemented" | "unavailable" | "stale" | "no_snapshot" | "degraded" | "not_wired";
 
 type PanelTruthRequirement = {
   hints: string[];
@@ -107,6 +107,7 @@ function hasStaleHeartbeat(model: SystemModel): boolean {
 
 export function panelTruthRenderState(model: SystemModel, panel: CorePanelKey): TruthRenderState | null {
   if (!model.connected || !model.dataSource.reachable || model.dataSource.state === "disconnected") return "unavailable";
+  if (panel === "strategy" && model.strategySummaryTruth?.truth_state === "not_wired") return "not_wired";
   if (model.panelSources[panel] === "placeholder" || model.dataSource.state === "mock") return "unimplemented";
   if (model.status.runtime_status === "degraded" || model.runtimeLeadership.post_restart_recovery_state === "degraded") return "degraded";
   if (hasStaleHeartbeat(model)) return "stale";
@@ -145,6 +146,11 @@ export function truthStateCopy(state: TruthRenderState): { title: string; detail
       return {
         title: "Degraded",
         detail: "Runtime recovery is degraded; treat this panel as partial truth until recovery is complete.",
+      };
+    case "not_wired":
+      return {
+        title: "Not wired",
+        detail: "This daemon truth surface is mounted but not wired. Empty rows are not authoritative and must not be read as a clean state.",
       };
   }
 }

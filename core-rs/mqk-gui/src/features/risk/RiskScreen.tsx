@@ -74,7 +74,15 @@ export function RiskScreen({ model }: { model: SystemModel }) {
         </Panel>
 
         <Panel title="Strategy suppressions" subtitle="Active trading blocks that matter right now.">
-          {activeSuppressions.length > 0 ? (
+          {model.strategySuppressionsTruth.truth_state === "not_wired" ? (
+            <div className="unavailable-notice">
+              Strategy suppression truth is mounted but not wired. Do not read this as no active suppressions.
+            </div>
+          ) : model.strategySuppressionsTruth.truth_state !== "active" ? (
+            <div className="unavailable-notice">
+              Strategy suppression truth is currently unavailable. Do not treat the empty row set as authoritative.
+            </div>
+          ) : activeSuppressions.length > 0 ? (
             <DataTable
               rows={activeSuppressions}
               rowKey={(row) => row.suppression_id}

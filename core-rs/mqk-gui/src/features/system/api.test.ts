@@ -1,5 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { ConfigScreen } from "../config/ConfigScreen.tsx";
+import { RiskScreen } from "../risk/RiskScreen.tsx";
+import { StrategyScreen } from "../strategy/StrategyScreen.tsx";
 import { fetchOperatorModel } from "./api.ts";
 import { panelTruthRenderState } from "./truthRendering.ts";
 import { DEFAULT_PREFLIGHT, DEFAULT_STATUS } from "./types.ts";
@@ -77,6 +82,196 @@ test("operator-history backend_unavailable stays fail-closed through fetch/model
     assert.equal(panelTruthRenderState(model, "audit"), "no_snapshot");
     assert.equal(panelTruthRenderState(model, "artifacts"), "no_snapshot");
     assert.equal(panelTruthRenderState(model, "operatorTimeline"), "no_snapshot");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test("explicit not_wired truth wrappers stay mounted and render honest GUI copy", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    switch (path) {
+      case "/api/v1/system/status":
+        return jsonResponse({
+          ...DEFAULT_STATUS,
+          runtime_status: "running",
+          daemon_reachable: true,
+          last_heartbeat: new Date().toISOString(),
+        });
+      case "/api/v1/system/preflight":
+        return jsonResponse({
+          ...DEFAULT_PREFLIGHT,
+          daemon_reachable: true,
+        });
+      case "/api/v1/system/config-fingerprint":
+        return jsonResponse({
+          config_hash: "cfg-123",
+          risk_policy_version: "risk-v1",
+          strategy_bundle_version: "bundle-v1",
+          build_version: "build-v1",
+          environment_profile: "paper",
+          runtime_generation_id: "gen-123",
+          last_restart_at: new Date().toISOString(),
+        });
+      case "/api/v1/system/runtime-leadership":
+        return jsonResponse({
+          leader_node: "daemon-a",
+          leader_lease_state: "held",
+          generation_id: "gen-123",
+          restart_count_24h: 0,
+          last_restart_at: new Date().toISOString(),
+          post_restart_recovery_state: "complete",
+          recovery_checkpoint: "ready",
+          checkpoints: [],
+        });
+      case "/api/v1/risk/summary":
+        return jsonResponse({
+          gross_exposure: 0,
+          net_exposure: 0,
+          concentration_pct: 0,
+          daily_pnl: 0,
+          drawdown_pct: 0,
+          loss_limit_utilization_pct: 0,
+          kill_switch_active: false,
+          active_breaches: 0,
+        });
+      case "/api/v1/risk/denials":
+        return jsonResponse({ truth_state: "active", snapshot_at_utc: new Date().toISOString(), denials: [] });
+      case "/api/v1/system/config-diffs":
+        return jsonResponse({ truth_state: "not_wired", backend: "not_wired", rows: [] });
+      case "/api/v1/strategy/suppressions":
+        return jsonResponse({ truth_state: "not_wired", backend: "not_wired", rows: [] });
+      case "/api/v1/strategy/summary":
+        return jsonResponse({ truth_state: "not_wired", backend: "not_wired", rows: [] });
+      default:
+        return notFoundResponse();
+    }
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    assert.equal(model.strategySummaryTruth.truth_state, "not_wired");
+    assert.equal(model.strategySuppressionsTruth.truth_state, "not_wired");
+    assert.equal(model.configDiffsTruth.truth_state, "not_wired");
+
+    assert.ok(model.dataSource.realEndpoints.includes("/api/v1/strategy/summary"));
+    assert.ok(model.dataSource.realEndpoints.includes("/api/v1/strategy/suppressions"));
+    assert.ok(model.dataSource.realEndpoints.includes("/api/v1/system/config-diffs"));
+
+    assert.ok(!model.dataSource.mockSections.includes("strategies"));
+    assert.ok(!model.dataSource.mockSections.includes("strategySuppressions"));
+    assert.ok(!model.dataSource.mockSections.includes("configDiffs"));
+
+    assert.equal(panelTruthRenderState(model, "strategy"), "not_wired");
+
+    const configHtml = renderToStaticMarkup(React.createElement(ConfigScreen, { model }));
+    const strategyHtml = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+    const riskHtml = renderToStaticMarkup(React.createElement(RiskScreen, { model }));
+
+    assert.match(configHtml, /Config-diff truth is mounted but not wired/i);
+    assert.doesNotMatch(configHtml, /No config diffs recorded/i);
+
+    assert.match(strategyHtml, /This daemon truth surface is mounted but not wired/i);
+    assert.doesNotMatch(strategyHtml, /Configured strategy engines/i);
+
+    assert.match(riskHtml, /Strategy suppression truth is mounted but not wired/i);
+    assert.doesNotMatch(riskHtml, /<div class="empty-state">No active suppressions\.<\/div>/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("authoritative active-empty truth stays distinct from not_wired wrappers", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    switch (path) {
+      case "/api/v1/system/status":
+        return jsonResponse({
+          ...DEFAULT_STATUS,
+          runtime_status: "running",
+          daemon_reachable: true,
+          last_heartbeat: new Date().toISOString(),
+        });
+      case "/api/v1/system/preflight":
+        return jsonResponse({
+          ...DEFAULT_PREFLIGHT,
+          daemon_reachable: true,
+        });
+      case "/api/v1/system/config-fingerprint":
+        return jsonResponse({
+          config_hash: "cfg-123",
+          risk_policy_version: "risk-v1",
+          strategy_bundle_version: "bundle-v1",
+          build_version: "build-v1",
+          environment_profile: "paper",
+          runtime_generation_id: "gen-123",
+          last_restart_at: new Date().toISOString(),
+        });
+      case "/api/v1/system/runtime-leadership":
+        return jsonResponse({
+          leader_node: "daemon-a",
+          leader_lease_state: "held",
+          generation_id: "gen-123",
+          restart_count_24h: 0,
+          last_restart_at: new Date().toISOString(),
+          post_restart_recovery_state: "complete",
+          recovery_checkpoint: "ready",
+          checkpoints: [],
+        });
+      case "/api/v1/risk/summary":
+        return jsonResponse({
+          gross_exposure: 0,
+          net_exposure: 0,
+          concentration_pct: 0,
+          daily_pnl: 0,
+          drawdown_pct: 0,
+          loss_limit_utilization_pct: 0,
+          kill_switch_active: false,
+          active_breaches: 0,
+        });
+      case "/api/v1/risk/denials":
+        return jsonResponse({ truth_state: "active", snapshot_at_utc: new Date().toISOString(), denials: [] });
+      case "/api/v1/system/config-diffs":
+        return jsonResponse({ truth_state: "active", backend: "sqlite", rows: [] });
+      case "/api/v1/strategy/suppressions":
+        return jsonResponse({ truth_state: "active", backend: "sqlite", rows: [] });
+      case "/api/v1/strategy/summary":
+        return jsonResponse({ truth_state: "active", backend: "runtime", rows: [] });
+      default:
+        return notFoundResponse();
+    }
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    assert.equal(model.strategySummaryTruth.truth_state, "active");
+    assert.equal(model.strategySuppressionsTruth.truth_state, "active");
+    assert.equal(model.configDiffsTruth.truth_state, "active");
+    assert.equal(panelTruthRenderState(model, "strategy"), null);
+
+    const configHtml = renderToStaticMarkup(React.createElement(ConfigScreen, { model }));
+    const strategyHtml = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+    const riskHtml = renderToStaticMarkup(React.createElement(RiskScreen, { model }));
+
+    assert.match(configHtml, /No config diffs recorded/i);
+    assert.doesNotMatch(configHtml, /not wired/i);
+
+    assert.match(strategyHtml, /No strategy summary rows reported/i);
+    assert.doesNotMatch(strategyHtml, /not wired/i);
+
+    assert.match(riskHtml, /No active suppressions/i);
+    assert.doesNotMatch(riskHtml, /not wired/i);
   } finally {
     globalThis.fetch = originalFetch;
   }

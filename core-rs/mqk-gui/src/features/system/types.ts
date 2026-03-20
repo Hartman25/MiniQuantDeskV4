@@ -10,6 +10,13 @@ export type DataSourceState = "real" | "partial" | "mock" | "disconnected";
 
 export type SourceAuthority = "db_truth" | "runtime_memory" | "broker_snapshot" | "placeholder" | "mixed" | "unknown";
 
+export type ExplicitSurfaceTruthState = "unknown" | "active" | "not_wired";
+
+export interface ExplicitSurfaceTruth {
+  truth_state: ExplicitSurfaceTruthState;
+  backend: string | null;
+}
+
 export const CORE_PANEL_KEYS = [
   "dashboard",
   "metrics",
@@ -1009,6 +1016,9 @@ export interface SystemModel {
   marketDataQuality: MarketDataQualitySummary;
   runtimeLeadership: RuntimeLeadershipSummary;
   artifactRegistry: ArtifactRegistrySummary;
+  strategySummaryTruth: ExplicitSurfaceTruth;
+  strategySuppressionsTruth: ExplicitSurfaceTruth;
+  configDiffsTruth: ExplicitSurfaceTruth;
   strategySuppressions: StrategySuppressionRow[];
   configDiffs: ConfigDiffRow[];
   operatorTimeline: OperatorTimelineEvent[];
