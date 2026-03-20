@@ -2133,12 +2133,18 @@ impl AppState {
     ///
     /// **Never call this outside of tests.**
     pub async fn inject_running_loop_for_test(&self, run_id: Uuid) {
-        let (stop_tx, _stop_rx) = watch::channel(ExecutionLoopCommand::Run);
-        let join_handle: JoinHandle<ExecutionLoopExit> = tokio::spawn(async {
-            // Sleep for a day — the test will complete long before this fires.
-            tokio::time::sleep(std::time::Duration::from_secs(86_400)).await;
-            ExecutionLoopExit { note: None }
+        let (stop_tx, mut stop_rx) = watch::channel(ExecutionLoopCommand::Run);
+        let join_handle: JoinHandle<ExecutionLoopExit> = tokio::spawn(async move {
+            tokio::select! {
+                _ = stop_rx.changed() => ExecutionLoopExit {
+                    note: Some("test loop stopped".to_string()),
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_secs(86_400)) => ExecutionLoopExit {
+                    note: None,
+                },
+            }
         });
+
         let handle = ExecutionLoopHandle {
             run_id,
             stop_tx,
@@ -2147,7 +2153,6 @@ impl AppState {
         let mut lock = self.execution_loop.lock().await;
         *lock = Some(handle);
     }
-}
 
 #[cfg(test)]
 mod tests {
