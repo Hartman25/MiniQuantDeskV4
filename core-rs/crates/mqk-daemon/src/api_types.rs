@@ -396,18 +396,19 @@ pub struct ConfigDiffRow {
 /// Response wrapper for `/api/v1/system/config-diffs`.
 ///
 /// `truth_state`:
-/// - `"not_wired"` — authoritative config-diff truth is not wired on this
-///   daemon; `backend` is `"not_wired"` and empty `rows` **must not** be
-///   treated as authoritative zero.
-/// - `"active"` — durable config-diff tracking has been wired and queried;
-///   `backend` names the exact authoritative source and `rows` is authoritative.
+/// - `"not_wired"` — the daemon does not have an authoritative comparison
+///   baseline available; `backend` is `"not_wired"` and empty `rows` **must
+///   not** be treated as authoritative zero.
+/// - `"active"` — the daemon compared current runtime-selection truth against
+///   the latest durable daemon run in `postgres.runs`; `backend` names the
+///   exact authoritative source and `rows` is authoritative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigDiffsResponse {
     /// Stable route identity for downstream callers and tests.
     pub canonical_route: String,
-    /// `"not_wired"` = no authoritative config-diff source exists yet.
+    /// `"not_wired"` = no authoritative comparison baseline is available.
     pub truth_state: String,
-    /// `"not_wired"` until a durable config-diff backend is wired.
+    /// `"not_wired"` until the daemon can compare against durable run truth.
     pub backend: String,
     /// Empty when `truth_state == "not_wired"`.  Authoritative when `truth_state == "active"`.
     pub rows: Vec<ConfigDiffRow>,

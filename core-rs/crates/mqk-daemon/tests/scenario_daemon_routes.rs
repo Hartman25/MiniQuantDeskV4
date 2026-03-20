@@ -2562,6 +2562,177 @@ async fn risk_denials_route_active_with_pool_returns_only_db_rows() {
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn config_diffs_route_active_returns_authoritative_empty_when_latest_run_matches_current() {
+    let pool = denial_test_pool().await;
+    let run_id = uuid::Uuid::new_v4();
+    let started_at = chrono::Utc::now() + chrono::Duration::days(3650);
+
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: started_at,
+            git_hash: "test-git".to_string(),
+            config_hash: "daemon-runtime-paper-ready-v1".to_string(),
+            config_json: serde_json::json!({
+                "runtime": "mqk-daemon",
+                "adapter": "paper",
+                "mode": "PAPER",
+            }),
+            host_fingerprint: "config-diff-test".to_string(),
+        },
+    )
+    .await
+    .expect("insert_run failed");
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/config-diffs")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active");
+    assert_eq!(json["backend"], "postgres.runs+daemon.runtime_selection");
+    assert!(
+        json["rows"].as_array().is_some_and(|rows| rows.is_empty()),
+        "rows must be authoritatively empty when the latest durable run matches current daemon truth; got: {json}"
+    );
+
+    sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup delete failed");
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn config_diffs_route_active_returns_authoritative_rows_when_latest_run_differs() {
+    let pool = denial_test_pool().await;
+    let run_id = uuid::Uuid::new_v4();
+    let started_at = chrono::Utc::now() + chrono::Duration::days(3651);
+
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "LIVE-SHADOW".to_string(),
+            started_at_utc: started_at,
+            git_hash: "test-git".to_string(),
+            config_hash: "daemon-runtime-live-shadow-ready-v1".to_string(),
+            config_json: serde_json::json!({
+                "runtime": "mqk-daemon",
+                "adapter": "alpaca",
+                "mode": "LIVE-SHADOW",
+            }),
+            host_fingerprint: "config-diff-test".to_string(),
+        },
+    )
+    .await
+    .expect("insert_run failed");
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/config-diffs")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active");
+    assert_eq!(json["backend"], "postgres.runs+daemon.runtime_selection");
+
+    let rows = json["rows"].as_array().expect("rows must be an array");
+    assert!(
+        rows.iter().any(|row| {
+            row["changed_domain"] == "config"
+                && row["before_version"] == "daemon-runtime-live-shadow-ready-v1"
+                && row["after_version"] == "daemon-runtime-paper-ready-v1"
+        }),
+        "config_hash diff row must be surfaced from durable run truth; got: {json}"
+    );
+    assert!(
+        rows.iter().any(|row| {
+            row["changed_domain"] == "runtime"
+                && row["before_version"] == "LIVE-SHADOW"
+                && row["after_version"] == "PAPER"
+        }),
+        "deployment-mode diff row must be surfaced from durable run truth; got: {json}"
+    );
+    assert!(
+        rows.iter().any(|row| {
+            row["changed_domain"] == "runtime"
+                && row["before_version"] == "alpaca"
+                && row["after_version"] == "paper"
+        }),
+        "adapter diff row must be surfaced from durable run truth; got: {json}"
+    );
+
+    sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup delete failed");
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn strategy_surfaces_remain_fail_closed_even_with_db_pool() {
+    let pool = denial_test_pool().await;
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let summary_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (summary_status, summary_body) = call(router.clone(), summary_req).await;
+    assert_eq!(summary_status, StatusCode::OK);
+    let summary = parse_json(summary_body);
+    assert_eq!(summary["truth_state"], "not_wired");
+    assert!(
+        summary["rows"].as_array().is_some_and(|rows| rows.is_empty()),
+        "strategy summary must remain fail-closed until a real authoritative fleet source exists; got: {summary}"
+    );
+
+    let suppressions_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/suppressions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (suppressions_status, suppressions_body) = call(router, suppressions_req).await;
+    assert_eq!(suppressions_status, StatusCode::OK);
+    let suppressions = parse_json(suppressions_body);
+    assert_eq!(suppressions["truth_state"], "not_wired");
+    assert!(
+        suppressions["rows"].as_array().is_some_and(|rows| rows.is_empty()),
+        "strategy suppressions must remain fail-closed until a real authoritative suppression source exists; got: {suppressions}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn risk_denials_route_no_snapshot_when_db_empty() {
     // Proves that when no denial rows exist in the DB and the execution loop
     // is not running, the route returns truth_state = "no_snapshot" (not
