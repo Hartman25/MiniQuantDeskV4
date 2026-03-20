@@ -2627,7 +2627,7 @@ async fn config_diffs_route_active_returns_authoritative_rows_when_latest_run_di
         &mqk_db::NewRun {
             run_id,
             engine_id: "mqk-daemon".to_string(),
-            mode: "LIVE-SHADOW".to_string(),
+            mode: "LIVE".to_string(),
             started_at_utc: started_at,
             git_hash: "test-git".to_string(),
             config_hash: "daemon-runtime-live-shadow-ready-v1".to_string(),
@@ -2671,7 +2671,7 @@ async fn config_diffs_route_active_returns_authoritative_rows_when_latest_run_di
     assert!(
         rows.iter().any(|row| {
             row["changed_domain"] == "runtime"
-                && row["before_version"] == "LIVE-SHADOW"
+                && row["before_version"] == "LIVE"
                 && row["after_version"] == "PAPER"
         }),
         "deployment-mode diff row must be surfaced from durable run truth; got: {json}"

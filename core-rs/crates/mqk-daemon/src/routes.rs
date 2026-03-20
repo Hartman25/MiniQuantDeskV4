@@ -2891,7 +2891,10 @@ pub(crate) async fn system_config_diffs(State(st): State<Arc<AppState>>) -> impl
         .into_response()
 }
 
-fn authoritative_config_diff_rows(st: &AppState, latest_run: &mqk_db::RunRow) -> Vec<ConfigDiffRow> {
+fn authoritative_config_diff_rows(
+    st: &AppState,
+    latest_run: &mqk_db::RunRow,
+) -> Vec<ConfigDiffRow> {
     let mut rows = Vec::new();
     let changed_at = latest_run.started_at_utc.to_rfc3339();
 
