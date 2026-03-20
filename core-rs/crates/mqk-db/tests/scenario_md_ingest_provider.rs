@@ -7,7 +7,52 @@
 // exercised with the same quality-report invariants.
 
 use anyhow::Result;
+use sqlx::PgPool;
 use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+async fn db_pool() -> Result<PgPool> {
+    match std::env::var(mqk_db::ENV_DB_URL) {
+        Ok(_) => mqk_db::testkit_db_pool().await,
+        Err(_) => {
+            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
+        }
+    }
+}
+
+async fn clear_symbol(pool: &PgPool, symbol: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        delete from md_bars
+        where timeframe = '1D'
+          and symbol = $1
+        "#,
+    )
+    .bind(symbol)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn count_symbol_rows(pool: &PgPool, symbol: &str) -> Result<i64> {
+    let (cnt,): (i64,) = sqlx::query_as(
+        r#"
+        select count(*)::bigint
+        from md_bars
+        where symbol = $1
+          and timeframe = '1D'
+        "#,
+    )
+    .bind(symbol)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(cnt)
+}
 
 // ---------------------------------------------------------------------------
 // Helper: build a ProviderBar with valid OHLCV fields
@@ -45,19 +90,7 @@ fn bar(
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_persists_bars_and_quality_report() -> Result<()> {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
-        }
-    };
-
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
-
-    mqk_db::migrate(&pool).await?;
+    let pool = db_pool().await?;
 
     // Two symbols, 1D timeframe, consecutive weekday dates.
     // These are the same timestamps as the CSV scenario so they coexist safely.
@@ -147,19 +180,7 @@ async fn md_ingest_provider_persists_bars_and_quality_report() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_detects_duplicates_in_batch() -> Result<()> {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
-        }
-    };
-
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
-
-    mqk_db::migrate(&pool).await?;
+    let pool = db_pool().await?;
 
     // Same (symbol, timeframe, end_ts) submitted twice.
     let bars = vec![
@@ -200,19 +221,7 @@ async fn md_ingest_provider_detects_duplicates_in_batch() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_detects_out_of_order() -> Result<()> {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
-        }
-    };
-
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
-
-    mqk_db::migrate(&pool).await?;
+    let pool = db_pool().await?;
 
     // Bars submitted in descending order.
     let bars = vec![
@@ -263,19 +272,7 @@ async fn md_ingest_provider_detects_out_of_order() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_rejects_ohlc_violations() -> Result<()> {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
-        }
-    };
-
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
-
-    mqk_db::migrate(&pool).await?;
+    let pool = db_pool().await?;
 
     // low (15) > high (12) — OHLC insane.
     let bars = vec![bar(
@@ -321,19 +318,7 @@ async fn md_ingest_provider_rejects_ohlc_violations() -> Result<()> {
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_idempotent_same_ingest_id() -> Result<()> {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
-        }
-    };
-
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
-
-    mqk_db::migrate(&pool).await?;
+    let pool = db_pool().await?;
 
     let ingest_id = Uuid::new_v4();
 
@@ -378,25 +363,329 @@ async fn md_ingest_provider_idempotent_same_ingest_id() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 6 — determinism: shuffled provider output yields same report stats
+// Scenario 6 — exact replay across distinct ingest_ids is canonical-idempotent
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
+async fn md_ingest_provider_replay_same_window_with_new_ingest_id_does_not_duplicate_history(
+) -> Result<()> {
+    let pool = db_pool().await?;
+    clear_symbol(&pool, "RERUN").await?;
+
+    let bars = vec![
+        bar(
+            "RERUN",
+            "1D",
+            1_708_041_600,
+            "10",
+            "12",
+            "9",
+            "11",
+            100,
+            true,
+        ),
+        bar(
+            "RERUN",
+            "1D",
+            1_708_300_800,
+            "11",
+            "13",
+            "10",
+            "12",
+            110,
+            true,
+        ),
+    ];
+
+    let first = mqk_db::ingest_provider_bars_to_md_bars(
+        &pool,
+        mqk_db::IngestProviderBarsArgs {
+            source: "mock_provider".to_string(),
+            timeframe: "1D".to_string(),
+            ingest_id: Uuid::new_v4(),
+            bars: bars.clone(),
+        },
+    )
+    .await?;
+    assert_eq!(first.report.coverage.rows_inserted, 2);
+    assert_eq!(first.report.coverage.rows_updated, 0);
+
+    let second_ingest_id = Uuid::new_v4();
+    let second = mqk_db::ingest_provider_bars_to_md_bars(
+        &pool,
+        mqk_db::IngestProviderBarsArgs {
+            source: "mock_provider".to_string(),
+            timeframe: "1D".to_string(),
+            ingest_id: second_ingest_id,
+            bars,
+        },
+    )
+    .await?;
+
+    assert_eq!(second.report.coverage.rows_read, 2);
+    assert_eq!(second.report.coverage.rows_ok, 2);
+    assert_eq!(second.report.coverage.rows_rejected, 0);
+    assert_eq!(
+        second.report.coverage.rows_inserted, 0,
+        "exact replay should not add canonical rows"
+    );
+    assert_eq!(
+        second.report.coverage.rows_updated, 2,
+        "exact replay should register as updates against existing history"
+    );
+
+    let cnt = count_symbol_rows(&pool, "RERUN").await?;
+    assert_eq!(
+        cnt, 2,
+        "exact replay must not duplicate canonical md_bars rows"
+    );
+
+    let (quality_rows,): (i64,) = sqlx::query_as(
+        r#"
+        select count(*)::bigint
+        from md_quality_reports
+        where ingest_id = $1 or ingest_id = $2
+        "#,
+    )
+    .bind(first.ingest_id)
+    .bind(second_ingest_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        quality_rows, 2,
+        "each replay run should persist its own report row"
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 7 — overlap replay updates existing bar and appends only new history
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
+async fn md_ingest_provider_overlap_rerun_updates_existing_bar_without_row_duplication(
+) -> Result<()> {
+    let pool = db_pool().await?;
+    clear_symbol(&pool, "SYNC").await?;
+
+    let first = mqk_db::ingest_provider_bars_to_md_bars(
+        &pool,
+        mqk_db::IngestProviderBarsArgs {
+            source: "mock_provider".to_string(),
+            timeframe: "1D".to_string(),
+            ingest_id: Uuid::new_v4(),
+            bars: vec![
+                bar(
+                    "SYNC",
+                    "1D",
+                    1_708_041_600,
+                    "10",
+                    "12",
+                    "9",
+                    "11",
+                    100,
+                    true,
+                ),
+                bar(
+                    "SYNC",
+                    "1D",
+                    1_708_300_800,
+                    "11",
+                    "13",
+                    "10",
+                    "12",
+                    110,
+                    true,
+                ),
+            ],
+        },
+    )
+    .await?;
+    assert_eq!(first.report.coverage.rows_inserted, 2);
+    assert_eq!(count_symbol_rows(&pool, "SYNC").await?, 2);
+
+    let second = mqk_db::ingest_provider_bars_to_md_bars(
+        &pool,
+        mqk_db::IngestProviderBarsArgs {
+            source: "mock_provider".to_string(),
+            timeframe: "1D".to_string(),
+            ingest_id: Uuid::new_v4(),
+            bars: vec![
+                // Overlap on the middle bar with corrected values.
+                bar(
+                    "SYNC",
+                    "1D",
+                    1_708_300_800,
+                    "21",
+                    "23",
+                    "20",
+                    "22",
+                    999,
+                    false,
+                ),
+                // New tail bar.
+                bar(
+                    "SYNC",
+                    "1D",
+                    1_708_646_400,
+                    "12",
+                    "14",
+                    "11",
+                    "13",
+                    120,
+                    true,
+                ),
+            ],
+        },
+    )
+    .await?;
+
+    assert_eq!(second.report.coverage.rows_read, 2);
+    assert_eq!(second.report.coverage.rows_ok, 2);
+    assert_eq!(second.report.coverage.rows_rejected, 0);
+    assert_eq!(
+        second.report.coverage.rows_inserted, 1,
+        "only the new tail bar should insert"
+    );
+    assert_eq!(
+        second.report.coverage.rows_updated, 1,
+        "overlap bar should update in place"
+    );
+
+    let cnt = count_symbol_rows(&pool, "SYNC").await?;
+    assert_eq!(
+        cnt, 3,
+        "overlap rerun must keep one row per canonical end_ts"
+    );
+
+    let updated_row: (i64, i64, i64, i64, i64, bool) = sqlx::query_as(
+        r#"
+        select open_micros, high_micros, low_micros, close_micros, volume, is_complete
+        from md_bars
+        where symbol = 'SYNC'
+          and timeframe = '1D'
+          and end_ts = $1
+        "#,
+    )
+    .bind(1_708_300_800_i64)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(updated_row.0, 21_000_000);
+    assert_eq!(updated_row.1, 23_000_000);
+    assert_eq!(updated_row.2, 20_000_000);
+    assert_eq!(updated_row.3, 22_000_000);
+    assert_eq!(updated_row.4, 999);
+    assert!(
+        !updated_row.5,
+        "overlap rerun should update is_complete truthfully"
+    );
+
+    let ordered_end_ts: Vec<i64> = sqlx::query_scalar(
+        r#"
+        select end_ts
+        from md_bars
+        where symbol = 'SYNC'
+          and timeframe = '1D'
+        order by end_ts asc
+        "#,
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        ordered_end_ts,
+        vec![1_708_041_600, 1_708_300_800, 1_708_646_400]
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 8 — no-data ingest persists truthful zero report and leaves history unchanged
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
+async fn md_ingest_provider_empty_batch_persists_zero_report_without_touching_history() -> Result<()>
+{
+    let pool = db_pool().await?;
+    clear_symbol(&pool, "EMPTY").await?;
+
+    mqk_db::ingest_provider_bars_to_md_bars(
+        &pool,
+        mqk_db::IngestProviderBarsArgs {
+            source: "mock_provider".to_string(),
+            timeframe: "1D".to_string(),
+            ingest_id: Uuid::new_v4(),
+            bars: vec![bar(
+                "EMPTY",
+                "1D",
+                1_708_041_600,
+                "10",
+                "12",
+                "9",
+                "11",
+                100,
+                true,
+            )],
+        },
+    )
+    .await?;
+
+    let before = count_symbol_rows(&pool, "EMPTY").await?;
+    assert_eq!(before, 1);
+
+    let empty_ingest_id = Uuid::new_v4();
+    let res = mqk_db::ingest_provider_bars_to_md_bars(
+        &pool,
+        mqk_db::IngestProviderBarsArgs {
+            source: "mock_provider".to_string(),
+            timeframe: "1D".to_string(),
+            ingest_id: empty_ingest_id,
+            bars: vec![],
+        },
+    )
+    .await?;
+
+    assert_eq!(res.report.coverage.rows_read, 0);
+    assert_eq!(res.report.coverage.rows_ok, 0);
+    assert_eq!(res.report.coverage.rows_rejected, 0);
+    assert_eq!(res.report.coverage.rows_inserted, 0);
+    assert_eq!(res.report.coverage.rows_updated, 0);
+    assert!(
+        res.report.per_symbol_timeframe.is_empty(),
+        "empty provider response must not fabricate symbol groups"
+    );
+
+    let after = count_symbol_rows(&pool, "EMPTY").await?;
+    assert_eq!(
+        after, before,
+        "empty provider response must not mutate canonical history"
+    );
+
+    let (exists,): (bool,) =
+        sqlx::query_as(r#"select exists(select 1 from md_quality_reports where ingest_id = $1)"#)
+            .bind(empty_ingest_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(
+        exists,
+        "empty provider response should still persist a truthful report row"
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 9 — determinism: shuffled provider output yields same report stats
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_deterministic_regardless_of_input_order() -> Result<()> {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
-        }
-    };
-
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
-
-    mqk_db::migrate(&pool).await?;
+    let pool = db_pool().await?;
 
     // Original order: ascending end_ts.
     let bars_asc = vec![
@@ -489,25 +778,13 @@ async fn md_ingest_provider_deterministic_regardless_of_input_order() -> Result<
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 7 — gap detection for 1D (weekday-only)
+// Scenario 10 — gap detection for 1D (weekday-only)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_detects_1d_weekday_gaps() -> Result<()> {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
-        }
-    };
-
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
-
-    mqk_db::migrate(&pool).await?;
+    let pool = db_pool().await?;
 
     // 2024-02-16 (Fri) -> 2024-02-19 (Mon): no weekday gap.
     // 2024-02-19 (Mon) -> 2024-02-23 (Fri): skip Tue, Wed, Thu = 3 gaps.
@@ -567,120 +844,13 @@ async fn md_ingest_provider_detects_1d_weekday_gaps() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 9 — multi-chunk bars sorted ascending before ingest: all accepted
-// ---------------------------------------------------------------------------
-
-/// Validates that bars collected from two separate provider fetch chunks and then
-/// sorted ascending by end_ts before ingest are all accepted without out-of-order
-/// rejections.
-///
-/// This proves the correctness of the chunk-fetch → sort → ingest pipeline used by
-/// `md ingest-provider`: the DB layer requires ascending per-symbol order, and the
-/// CLI sorts across chunk boundaries before calling this function.
-#[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
-async fn multi_chunk_bars_sorted_ascending_all_accepted() -> Result<()> {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
-        }
-    };
-
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
-
-    mqk_db::migrate(&pool).await?;
-
-    // Simulate two fetch chunks for symbol "CHK":
-    //   chunk 1 covers ts 1_000_000, 1_086_400, 1_172_800  (3 days)
-    //   chunk 2 covers ts 1_259_200, 1_345_600, 1_432_000  (3 more days)
-    // The chunks are concatenated and sorted ascending — exactly as the CLI does.
-    let mut chunk1 = vec![
-        bar("CHK", "1D", 1_000_000, "10", "11", "9", "10", 100, true),
-        bar("CHK", "1D", 1_086_400, "10", "12", "9", "11", 110, true),
-        bar("CHK", "1D", 1_172_800, "11", "13", "10", "12", 120, true),
-    ];
-    let chunk2 = vec![
-        bar("CHK", "1D", 1_259_200, "12", "14", "11", "13", 130, true),
-        bar("CHK", "1D", 1_345_600, "13", "15", "12", "14", 140, true),
-        bar("CHK", "1D", 1_432_000, "14", "16", "13", "15", 150, true),
-    ];
-    chunk1.extend(chunk2);
-
-    // Sort ascending by (symbol, end_ts) — the CLI does this after collecting all chunks.
-    chunk1.sort_by(|a, b| {
-        a.symbol
-            .cmp(&b.symbol)
-            .then_with(|| a.end_ts.cmp(&b.end_ts))
-    });
-
-    let ingest_id = Uuid::new_v4();
-    let res = mqk_db::ingest_provider_bars_to_md_bars(
-        &pool,
-        mqk_db::IngestProviderBarsArgs {
-            source: "mock_provider".to_string(),
-            timeframe: "1D".to_string(),
-            ingest_id,
-            bars: chunk1,
-        },
-    )
-    .await?;
-
-    // All 6 bars must be accepted — the sort eliminated any cross-chunk ordering issues.
-    assert_eq!(res.report.coverage.rows_read, 6, "6 bars submitted");
-    assert_eq!(
-        res.report.coverage.rows_ok, 6,
-        "all 6 bars must be accepted after ascending sort across chunk boundary"
-    );
-    assert_eq!(
-        res.report.coverage.rows_rejected, 0,
-        "no rejections expected"
-    );
-
-    let chk_stats = res
-        .report
-        .per_symbol_timeframe
-        .get("CHK|1D")
-        .expect("CHK|1D group missing from report");
-    assert_eq!(chk_stats.out_of_order, 0, "zero out-of-order after sort");
-    assert_eq!(chk_stats.duplicates_in_batch, 0, "no duplicates");
-    assert_eq!(chk_stats.ohlc_sanity_violations, 0);
-    assert_eq!(chk_stats.negative_or_invalid_volume, 0);
-
-    // Verify 6 rows exist in DB for CHK.
-    let (cnt,): (i64,) = sqlx::query_as(
-        "select count(*)::bigint from md_bars where symbol = 'CHK' and timeframe = '1D'",
-    )
-    .fetch_one(&pool)
-    .await?;
-    assert!(cnt >= 6, "expected >=6 CHK md_bars rows, got {cnt}");
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Scenario 8 — wrong timeframe rows are rejected
+// Scenario 11 — wrong timeframe rows are rejected
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
 async fn md_ingest_provider_rejects_wrong_timeframe() -> Result<()> {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) => v,
-        Err(_) => {
-            panic!("DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored");
-        }
-    };
-
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await?;
-
-    mqk_db::migrate(&pool).await?;
+    let pool = db_pool().await?;
 
     let bars = vec![
         bar("WTF", "1D", 1_708_041_600, "10", "12", "9", "11", 100, true), // matches
