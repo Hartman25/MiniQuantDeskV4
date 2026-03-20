@@ -396,13 +396,19 @@ pub struct ConfigDiffRow {
 /// Response wrapper for `/api/v1/system/config-diffs`.
 ///
 /// `truth_state`:
-/// - `"not_wired"` — no durable config-diff persistence is implemented yet;
-///   `rows` is always empty and **must not** be treated as authoritative zero.
-/// - `"active"` — reserved for when durable config-diff tracking is wired.
+/// - `"not_wired"` — authoritative config-diff truth is not wired on this
+///   daemon; `backend` is `"not_wired"` and empty `rows` **must not** be
+///   treated as authoritative zero.
+/// - `"active"` — durable config-diff tracking has been wired and queried;
+///   `backend` names the exact authoritative source and `rows` is authoritative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigDiffsResponse {
-    /// `"not_wired"` = no durable config-diff source exists; rows is empty and not authoritative.
+    /// Stable route identity for downstream callers and tests.
+    pub canonical_route: String,
+    /// `"not_wired"` = no authoritative config-diff source exists yet.
     pub truth_state: String,
+    /// `"not_wired"` until a durable config-diff backend is wired.
+    pub backend: String,
     /// Empty when `truth_state == "not_wired"`.  Authoritative when `truth_state == "active"`.
     pub rows: Vec<ConfigDiffRow>,
 }

@@ -549,6 +549,8 @@ Invoke-ProofLane -Name 'Market data proof lane' -Required $true -Action {
 Invoke-ProofLane -Name 'GUI typecheck + build' -Required $true -Action {
     Invoke-NativeCommand -FilePath $script:NpxExe -Arguments @('tsc', '--noEmit') -WorkingDirectory $guiDir
     Invoke-NativeCommand -FilePath $script:NpmExe -Arguments @('run', 'build') -WorkingDirectory $guiDir
+    Write-Host 'GUI typecheck + build' -ForegroundColor Green
+    return (New-LaneNote -Note 'GUI typecheck + build')
 }
 
 Invoke-ProofLane -Name 'Ignored-proof guard' -Required $true -Action {

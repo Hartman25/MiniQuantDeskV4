@@ -2777,15 +2777,15 @@ pub(crate) async fn system_config_fingerprint(
 }
 
 pub(crate) async fn system_config_diffs() -> impl IntoResponse {
-    // Config-diff persistence is not yet implemented.  Return an explicit
-    // "not_wired" truth state so the GUI does not treat the empty rows as
-    // authoritative "zero diffs."  The GUI IIFE checks this field and emits
-    // ok:false, pushing "configDiffs" to usedMockSections and preventing the
-    // config panel from rendering a misleading empty diff table.
+    // Authoritative config-diff truth is intentionally not wired yet.
+    // Return an explicit fail-closed wrapper so callers cannot confuse
+    // empty rows with authoritative "zero diffs" truth.
     (
         StatusCode::OK,
         Json(ConfigDiffsResponse {
+            canonical_route: "/api/v1/system/config-diffs".to_string(),
             truth_state: "not_wired".to_string(),
+            backend: "not_wired".to_string(),
             rows: Vec::new(),
         }),
     )

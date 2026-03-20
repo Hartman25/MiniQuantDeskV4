@@ -1085,15 +1085,27 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
         "config-diffs must return a wrapper object"
     );
     assert_eq!(
+        diffs["canonical_route"], "/api/v1/system/config-diffs",
+        "config-diffs must declare its canonical route"
+    );
+    assert_eq!(
         diffs["truth_state"], "not_wired",
-        "config-diffs must declare not_wired"
+        "config-diffs must declare not_wired when authoritative diff truth is unavailable"
+    );
+    assert_eq!(
+        diffs["backend"], "not_wired",
+        "config-diffs must explicitly declare that no authoritative backend is wired"
     );
     assert!(
         diffs["rows"]
             .as_array()
             .map(|v| v.is_empty())
             .unwrap_or(false),
-        "config-diffs rows must be empty"
+        "config-diffs rows must be empty when truth is not wired"
+    );
+    assert!(
+        diffs.as_object().and_then(|o| o.get("rows")).is_some(),
+        "config-diffs must keep a stable rows field even when not wired"
     );
 
     let suppressions_req = Request::builder()
