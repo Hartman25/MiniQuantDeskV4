@@ -2153,7 +2153,7 @@ impl AppState {
         let mut lock = self.execution_loop.lock().await;
         *lock = Some(handle);
     }
-
+}
 #[cfg(test)]
 mod tests {
     use super::*;

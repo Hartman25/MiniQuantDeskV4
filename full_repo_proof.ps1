@@ -1,173 +1,518 @@
-$ErrorActionPreference = "Stop"
+[CmdletBinding()]
+param(
+    [ValidateSet('local', 'full', 'exploratory')]
+    [string]$ProofProfile = 'local'
+)
 
-# ============================================================
-# MiniQuantDesk V4 — Full Repo Proof Script
-# Forced DB URL version
-# ============================================================
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
-$env:MQK_DATABASE_URL = "postgres://postgres:YourNewStrongPassword123!@127.0.0.1:5433/mqk_test"
-
-# ============================================================
-# Repo + environment bootstrap
-# ============================================================
-
-$RepoRoot = "C:\Users\Zacha\Desktop\MiniQuantDeskV4"
-$CoreRs   = Join-Path $RepoRoot "core-rs"
-$GuiDir   = Join-Path $CoreRs "mqk-gui"
-$GitBash  = "C:\Program Files\Git\bin\bash.exe"
-
-function Get-RedactedDbUrl {
+function New-LaneRecord {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Url
-    )
-
-    if ([string]::IsNullOrWhiteSpace($Url)) {
-        return "<not-set>"
-    }
-
-    # Redacts: postgres://user:password@host:port/db
-    if ($Url -match '^(postgres(?:ql)?://[^:/?#]+:)([^@/?#]+)(@.+)$') {
-        return ($matches[1] + '****' + $matches[3])
-    }
-
-    # Fallback if format is unusual; never print the raw value.
-    return "<redacted-unparseable-db-url>"
-}
-
-$DbUrl = $env:MQK_DATABASE_URL
-if ([string]::IsNullOrWhiteSpace($DbUrl)) {
-    throw "MQK_DATABASE_URL is not set"
-}
-
-Set-Location $RepoRoot
-
-function Run-Step {
-    param(
         [string]$Name,
-        [scriptblock]$Command
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('PASS', 'FAIL', 'SKIP')]
+        [string]$Status,
+        [Parameter(Mandatory = $true)]
+        [bool]$Required,
+        [Nullable[int]]$ExitCode = $null,
+        [double]$DurationSeconds = 0,
+        [string]$Note = ''
     )
 
-    Write-Host ""
-    Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host $Name -ForegroundColor Cyan
-    Write-Host "============================================================" -ForegroundColor Cyan
+    [pscustomobject]@{
+        lane_name        = $Name
+        status           = $Status
+        required         = $Required
+        exit_code        = $ExitCode
+        duration_seconds = [math]::Round($DurationSeconds, 2)
+        note             = $Note
+    }
+}
 
-    & $Command
+function New-LaneNote {
+    param(
+        [string]$Note = ''
+    )
 
-    if ($LASTEXITCODE -ne 0) {
-        throw ("Step failed with exit code {0}: {1}" -f $LASTEXITCODE, $Name)
+    [pscustomobject]@{
+        Note = $Note
+    }
+}
+
+function Get-CommandPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $command = Get-Command $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $command) {
+        return $null
+    }
+
+    if ($command.Source) {
+        return $command.Source
+    }
+
+    if ($command.Path) {
+        return $command.Path
+    }
+
+    return $command.Name
+}
+
+function Invoke-NativeCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [string[]]$Arguments = @(),
+        [string]$WorkingDirectory
+    )
+
+    if ($WorkingDirectory) {
+        Push-Location $WorkingDirectory
+    }
+
+    try {
+        & $FilePath @Arguments
+        $exitCode = $LASTEXITCODE
+        if ($null -eq $exitCode) {
+            $exitCode = 0
+        }
+
+        if ($exitCode -ne 0) {
+            $argText = if ($Arguments.Count -gt 0) { $Arguments -join ' ' } else { '' }
+            throw ("EXITCODE={0};Command failed: {1} {2}" -f $exitCode, $FilePath, $argText).Trim()
+        }
+    }
+    finally {
+        if ($WorkingDirectory) {
+            Pop-Location
+        }
     }
 }
 
 function Require-Path {
-    param([string]$PathToCheck, [string]$Label)
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathToCheck,
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
 
-    if (-not (Test-Path $PathToCheck)) {
+    if (-not (Test-Path -LiteralPath $PathToCheck)) {
         throw ("Missing required path for {0}: {1}" -f $Label, $PathToCheck)
     }
 }
 
-Require-Path $RepoRoot "repo root"
-Require-Path $CoreRs "core-rs"
-Require-Path $GuiDir "GUI dir"
-Require-Path $GitBash "Git Bash"
+function Require-Command {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$Purpose
+    )
 
-Write-Host ""
-Write-Host "Repo root: $RepoRoot" -ForegroundColor Yellow
-Write-Host "core-rs:   $CoreRs" -ForegroundColor Yellow
-Write-Host "GUI dir:   $GuiDir" -ForegroundColor Yellow
-Write-Host ("Using MQK_DATABASE_URL={0}" -f (Get-RedactedDbUrl -Url $DbUrl)) -ForegroundColor Green
+    $resolved = Get-CommandPath -Name $Name
+    if ([string]::IsNullOrWhiteSpace($resolved)) {
+        throw ("Required tool '{0}' was not found on PATH ({1})." -f $Name, $Purpose)
+    }
 
-Run-Step "Repo identity" {
-    git status
-    git rev-parse HEAD
+    return $resolved
 }
 
-Run-Step "Rust fmt" {
-    cargo fmt --manifest-path .\core-rs\Cargo.toml --all
-    cargo fmt --manifest-path .\core-rs\Cargo.toml --all --check
+function Get-RedactedDbUrl {
+    param(
+        [string]$Url
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        return '<not-set>'
+    }
+
+    if ($Url -match '^(postgres(?:ql)?://[^:/?#]+:)([^@/?#]+)(@.+)$') {
+        return ($matches[1] + '****' + $matches[3])
+    }
+
+    return '<redacted-unparseable-db-url>'
 }
 
-Run-Step "Workspace clippy" {
-    cargo clippy --manifest-path .\core-rs\Cargo.toml --workspace --all-targets -- -D warnings
+function Get-ExceptionExitCode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $message = $ErrorRecord.Exception.Message
+    if ($message -match '^EXITCODE=(\d+);(.*)$') {
+        return [int]$matches[1]
+    }
+
+    return 1
 }
 
-Run-Step "Workspace tests" {
-    cargo test --manifest-path .\core-rs\Cargo.toml --workspace -- --test-threads=1
+function Get-ExceptionNote {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $message = $ErrorRecord.Exception.Message
+    if ($message -match '^EXITCODE=\d+;(.*)$') {
+        return $matches[1].Trim()
+    }
+
+    return $message
 }
 
-Run-Step "Daemon proof lanes" {
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_daemon_routes -- --test-threads=1
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_gui_daemon_contract_gate -- --test-threads=1
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_snapshot_inject_release_gate -- --test-threads=1
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_token_auth_middleware -- --test-threads=1
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_daemon_boot_is_fail_closed -- --test-threads=1
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_daemon_deadman_blocks_dispatch -- --test-threads=1
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_reconcile_tick_disarms_on_drift -- --test-threads=1
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_daemon_runtime_lifecycle -- --test-threads=1
-}
+$laneResults = [System.Collections.Generic.List[object]]::new()
 
-Run-Step "Runtime proof lane" {
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-runtime -- --test-threads=1
-    cargo clippy --manifest-path .\core-rs\Cargo.toml -p mqk-runtime --all-targets -- -D warnings
-}
+function Invoke-ProofLane {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [bool]$Required,
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action,
+        [string]$SkipReason
+    )
 
-Run-Step "Broker Alpaca proof lane" {
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-broker-alpaca -- --test-threads=1
-    cargo clippy --manifest-path .\core-rs\Cargo.toml -p mqk-broker-alpaca --all-targets -- -D warnings
-}
+    if ($SkipReason) {
+        $script:laneResults.Add((New-LaneRecord -Name $Name -Status 'SKIP' -Required $Required -ExitCode $null -DurationSeconds 0 -Note $SkipReason))
+        Write-Host ''
+        Write-Host '============================================================' -ForegroundColor Yellow
+        Write-Host "[SKIPPED] $Name" -ForegroundColor Yellow
+        Write-Host '============================================================' -ForegroundColor Yellow
+        Write-Host $SkipReason -ForegroundColor Yellow
+        return
+    }
 
-Run-Step "Market data proof lane" {
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-md -- --test-threads=1
-    cargo clippy --manifest-path .\core-rs\Cargo.toml -p mqk-md --all-targets -- -D warnings
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-db --test scenario_md_ingest_provider -- --test-threads=1
-}
+    Write-Host ''
+    Write-Host '============================================================' -ForegroundColor Cyan
+    Write-Host $Name -ForegroundColor Cyan
+    Write-Host '============================================================' -ForegroundColor Cyan
 
-Run-Step "GUI typecheck + build" {
-    Push-Location $GuiDir
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
     try {
-        npx tsc --noEmit
-        npm run build
+        $actionResult = & $Action
+        $stopwatch.Stop()
+
+        $note = ''
+        if ($null -ne $actionResult -and $actionResult.PSObject.Properties['Note']) {
+            $note = [string]$actionResult.Note
+        }
+
+        $script:laneResults.Add((New-LaneRecord -Name $Name -Status 'PASS' -Required $Required -ExitCode 0 -DurationSeconds $stopwatch.Elapsed.TotalSeconds -Note $note))
     }
-    finally {
-        Pop-Location
+    catch {
+        $stopwatch.Stop()
+        $exitCode = Get-ExceptionExitCode -ErrorRecord $_
+        $note = Get-ExceptionNote -ErrorRecord $_
+        $script:laneResults.Add((New-LaneRecord -Name $Name -Status 'FAIL' -Required $Required -ExitCode $exitCode -DurationSeconds $stopwatch.Elapsed.TotalSeconds -Note $note))
+        Write-Host "[FAILED] $Name" -ForegroundColor Red
+        Write-Host $note -ForegroundColor Red
     }
 }
 
-Run-Step "Ignored-proof guard" {
-    & $GitBash ./scripts/guards/check_ignored_load_bearing_proofs.sh
+$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+$gitFromPath = Get-CommandPath -Name 'git'
+
+$repoRoot = $null
+if ($gitFromPath) {
+    try {
+        $repoRootCandidate = (& $gitFromPath -C $scriptDir rev-parse --show-toplevel 2>$null)
+        if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($repoRootCandidate)) {
+            $repoRoot = ($repoRootCandidate | Select-Object -First 1).Trim()
+        }
+    }
+    catch {
+        $repoRoot = $null
+    }
 }
 
-Run-Step "Unsafe-pattern guard" {
-    & $GitBash ./scripts/guards/check_unsafe_patterns.sh
+
+if ([string]::IsNullOrWhiteSpace($repoRoot)) {
+    $repoRoot = $scriptDir
 }
 
-Run-Step "DB proof bootstrap" {
-    & $GitBash ./scripts/db_proof_bootstrap.sh
+$coreRsDir = Join-Path $repoRoot 'core-rs'
+$guiDir = Join-Path $coreRsDir 'mqk-gui'
+$cargoManifest = Join-Path $coreRsDir 'Cargo.toml'
+$lockDoc = Join-Path $repoRoot 'docs/INSTITUTIONAL_READINESS_LOCK.md'
+$scorecardDoc = Join-Path $repoRoot 'docs/INSTITUTIONAL_SCORECARD.md'
+$ignoredGuard = Join-Path $repoRoot 'scripts/guards/check_ignored_load_bearing_proofs.sh'
+$unsafeGuard = Join-Path $repoRoot 'scripts/guards/check_unsafe_patterns.sh'
+$dbBootstrap = Join-Path $repoRoot 'scripts/db_proof_bootstrap.sh'
+$dbUrl = $env:MQK_DATABASE_URL
+
+$commitHash = '<unknown>'
+$gitStatusShort = @()
+$treeClean = $false
+$untrackedFilesPresent = $false
+$dbRequired = ($ProofProfile -eq 'full')
+$dbAvailable = -not [string]::IsNullOrWhiteSpace($dbUrl)
+$canonicalBundleRequested = ($ProofProfile -eq 'full')
+$workspaceState = 'candidate_workspace_state'
+$proofAuditProfile = switch ($ProofProfile) {
+    'full' { 'full_db_backed_institutional_proof_audit' }
+    'exploratory' { 'candidate_workspace_exploratory_proof' }
+    default { 'local_non_db_proof_audit' }
+}
+$mandatoryDbLaneNames = @(
+    'DB proof bootstrap / CI-10 mandatory matrix',
+    'DB-backed mqk-db ignored lanes',
+    'DB-backed daemon lifecycle ignored lane',
+    'DB-backed daemon routes ignored lane',
+    'DB-backed market data ingest-provider ignored lane',
+    'Broker map FK proof'
+)
+
+try {
+    $script:GitExe = Require-Command -Name 'git' -Purpose 'repo identity and cleanliness checks'
+    $script:CargoExe = Require-Command -Name 'cargo' -Purpose 'Rust proof lanes'
+    $script:NpxExe = Require-Command -Name 'npx' -Purpose 'GUI typecheck lane'
+    $script:NpmExe = Require-Command -Name 'npm' -Purpose 'GUI build lane'
+    $script:BashExe = Require-Command -Name 'bash' -Purpose 'guard scripts and DB bootstrap helper'
+
+    Require-Path -PathToCheck $repoRoot -Label 'repo root'
+    Require-Path -PathToCheck $coreRsDir -Label 'core-rs workspace'
+    Require-Path -PathToCheck $guiDir -Label 'GUI workspace'
+    Require-Path -PathToCheck $cargoManifest -Label 'Rust workspace manifest'
+    Require-Path -PathToCheck $lockDoc -Label 'institutional readiness lock'
+    Require-Path -PathToCheck $scorecardDoc -Label 'institutional scorecard'
+    Require-Path -PathToCheck $ignoredGuard -Label 'ignored-proof guard'
+    Require-Path -PathToCheck $unsafeGuard -Label 'unsafe-pattern guard'
+    Require-Path -PathToCheck $dbBootstrap -Label 'DB proof bootstrap helper'
+
+    if ($dbRequired -and [string]::IsNullOrWhiteSpace($dbUrl)) {
+        throw 'MQK_DATABASE_URL is not set. Full DB-backed institutional proof cannot proceed and will not be downgraded silently.'
+    }
+
+    Write-Host ''
+    Write-Host '============================================================' -ForegroundColor Green
+    Write-Host 'MiniQuantDesk V4 proof harness preflight' -ForegroundColor Green
+    Write-Host '============================================================' -ForegroundColor Green
+    Write-Host "Proof profile: $ProofProfile" -ForegroundColor Yellow
+    Write-Host "Repo root:      $repoRoot" -ForegroundColor Yellow
+    Write-Host "core-rs:        $coreRsDir" -ForegroundColor Yellow
+    Write-Host "GUI dir:        $guiDir" -ForegroundColor Yellow
+    Write-Host "Readiness lock: $lockDoc" -ForegroundColor Yellow
+    Write-Host "Scorecard:      $scorecardDoc" -ForegroundColor Yellow
+    Write-Host "bash:           $script:BashExe" -ForegroundColor Yellow
+    Write-Host ("MQK_DATABASE_URL={0}" -f (Get-RedactedDbUrl -Url $dbUrl)) -ForegroundColor Green
+}
+catch {
+    Write-Host ''
+    Write-Host '============================================================' -ForegroundColor Red
+    Write-Host 'MiniQuantDesk V4 proof harness preflight FAILED' -ForegroundColor Red
+    Write-Host '============================================================' -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    exit 1
 }
 
-Run-Step "DB-backed mqk-db ignored lanes" {
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-db -- --include-ignored --test-threads=1
+Invoke-ProofLane -Name 'Repo identity + working tree truth' -Required $true -Action {
+    $commitHashOutput = (& $script:GitExe -C $repoRoot rev-parse HEAD)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'EXITCODE=1;Unable to resolve git rev-parse HEAD.'
+    }
+    $script:commitHash = ($commitHashOutput | Select-Object -First 1).Trim()
+
+    $statusOutput = (& $script:GitExe -C $repoRoot status --short --untracked-files=all)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'EXITCODE=1;Unable to resolve git status --short --untracked-files=all.'
+    }
+
+    if ($null -eq $statusOutput) {
+        $statusLines = @()
+    }
+    elseif ($statusOutput -is [System.Array]) {
+        $statusLines = @($statusOutput)
+    }
+    else {
+        $statusLines = @([string]$statusOutput)
+    }
+
+    $script:gitStatusShort = $statusLines | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ -ne '' }
+    $script:treeClean = ($script:gitStatusShort.Count -eq 0)
+    $script:untrackedFilesPresent = ($script:gitStatusShort | Where-Object { $_ -like '?? *' }).Count -gt 0
+    $script:workspaceState = if ($script:treeClean) { 'committed_repo_state' } else { 'candidate_workspace_state' }
+
+    Write-Host "Commit hash: $script:commitHash" -ForegroundColor Yellow
+    Write-Host "Tree clean:  $script:treeClean" -ForegroundColor Yellow
+    Write-Host "Untracked:   $script:untrackedFilesPresent" -ForegroundColor Yellow
+    Write-Host 'git status --short --untracked-files=all:' -ForegroundColor Yellow
+    if ($script:gitStatusShort.Count -eq 0) {
+        Write-Host '  <clean>' -ForegroundColor Green
+    }
+    else {
+        foreach ($line in $script:gitStatusShort) {
+            Write-Host ("  {0}" -f $line) -ForegroundColor Yellow
+        }
+    }
+
+    return (New-LaneNote -Note ("commit={0}; tree_clean={1}; untracked={2}" -f $script:commitHash, $script:treeClean, $script:untrackedFilesPresent))
 }
 
-Run-Step "DB-backed daemon lifecycle ignored lane" {
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_daemon_runtime_lifecycle -- --include-ignored --test-threads=1
+Invoke-ProofLane -Name 'Rust fmt check (non-mutating)' -Required $true -Action {
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('fmt', '--manifest-path', $cargoManifest, '--all', '--', '--check') -WorkingDirectory $repoRoot
 }
 
-Run-Step "DB-backed daemon routes ignored lane" {
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_daemon_routes -- --include-ignored --test-threads=1
+Invoke-ProofLane -Name 'Workspace clippy' -Required $true -Action {
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('clippy', '--manifest-path', $cargoManifest, '--workspace', '--all-targets', '--', '-D', 'warnings') -WorkingDirectory $repoRoot
 }
 
-Run-Step "DB-backed market data ingest-provider ignored lane" {
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-db --test scenario_md_ingest_provider -- --include-ignored --test-threads=1
+Invoke-ProofLane -Name 'Workspace tests' -Required $true -Action {
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '--workspace', '--', '--test-threads=1') -WorkingDirectory $repoRoot
 }
 
-Run-Step "Broker map FK proof" {
-    cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-db --test scenario_broker_map_fk_enforced -- --test-threads=1
+Invoke-ProofLane -Name 'Daemon proof lanes' -Required $true -Action {
+    $daemonTests = @(
+        'scenario_daemon_routes',
+        'scenario_gui_daemon_contract_gate',
+        'scenario_snapshot_inject_release_gate',
+        'scenario_token_auth_middleware',
+        'scenario_daemon_boot_is_fail_closed',
+        'scenario_daemon_deadman_blocks_dispatch',
+        'scenario_reconcile_tick_disarms_on_drift',
+        'scenario_daemon_runtime_lifecycle'
+    )
+
+    foreach ($testName in $daemonTests) {
+        Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-daemon', '--test', $testName, '--', '--test-threads=1') -WorkingDirectory $repoRoot
+    }
 }
 
-Write-Host ""
-Write-Host "============================================================" -ForegroundColor Green
-Write-Host "FULL REPO PROOF COMPLETED SUCCESSFULLY" -ForegroundColor Green
-Write-Host "============================================================" -ForegroundColor Green
+Invoke-ProofLane -Name 'Runtime proof lane' -Required $true -Action {
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-runtime', '--', '--test-threads=1') -WorkingDirectory $repoRoot
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('clippy', '--manifest-path', $cargoManifest, '-p', 'mqk-runtime', '--all-targets', '--', '-D', 'warnings') -WorkingDirectory $repoRoot
+}
+
+Invoke-ProofLane -Name 'Broker Alpaca proof lane' -Required $true -Action {
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-broker-alpaca', '--', '--test-threads=1') -WorkingDirectory $repoRoot
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('clippy', '--manifest-path', $cargoManifest, '-p', 'mqk-broker-alpaca', '--all-targets', '--', '-D', 'warnings') -WorkingDirectory $repoRoot
+}
+
+Invoke-ProofLane -Name 'Market data proof lane' -Required $true -Action {
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-md', '--', '--test-threads=1') -WorkingDirectory $repoRoot
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('clippy', '--manifest-path', $cargoManifest, '-p', 'mqk-md', '--all-targets', '--', '-D', 'warnings') -WorkingDirectory $repoRoot
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-db', '--test', 'scenario_md_ingest_provider', '--', '--test-threads=1') -WorkingDirectory $repoRoot
+}
+
+Invoke-ProofLane -Name 'GUI typecheck + build' -Required $true -Action {
+    Invoke-NativeCommand -FilePath $script:NpxExe -Arguments @('tsc', '--noEmit') -WorkingDirectory $guiDir
+    Invoke-NativeCommand -FilePath $script:NpmExe -Arguments @('run', 'build') -WorkingDirectory $guiDir
+}
+
+Invoke-ProofLane -Name 'Ignored-proof guard' -Required $true -Action {
+    Invoke-NativeCommand -FilePath $script:BashExe -Arguments @($ignoredGuard) -WorkingDirectory $repoRoot
+}
+
+Invoke-ProofLane -Name 'Unsafe-pattern guard' -Required $true -Action {
+    Invoke-NativeCommand -FilePath $script:BashExe -Arguments @($unsafeGuard) -WorkingDirectory $repoRoot
+}
+
+Invoke-ProofLane -Name 'DB proof bootstrap / CI-10 mandatory matrix' -Required $dbRequired -Action {
+    Invoke-NativeCommand -FilePath $script:BashExe -Arguments @($dbBootstrap) -WorkingDirectory $repoRoot
+} -SkipReason $(if (-not $dbRequired) { 'Skipped in non-DB profile.' })
+
+Invoke-ProofLane -Name 'DB-backed mqk-db ignored lanes' -Required $dbRequired -Action {
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-db', '--', '--include-ignored', '--test-threads=1') -WorkingDirectory $repoRoot
+} -SkipReason $(if (-not $dbRequired) { 'Skipped in non-DB profile.' })
+
+Invoke-ProofLane -Name 'DB-backed daemon lifecycle ignored lane' -Required $dbRequired -Action {
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-daemon', '--test', 'scenario_daemon_runtime_lifecycle', '--', '--include-ignored', '--test-threads=1') -WorkingDirectory $repoRoot
+} -SkipReason $(if (-not $dbRequired) { 'Skipped in non-DB profile.' })
+
+Invoke-ProofLane -Name 'DB-backed daemon routes ignored lane' -Required $dbRequired -Action {
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-daemon', '--test', 'scenario_daemon_routes', '--', '--include-ignored', '--test-threads=1') -WorkingDirectory $repoRoot
+} -SkipReason $(if (-not $dbRequired) { 'Skipped in non-DB profile.' })
+
+Invoke-ProofLane -Name 'DB-backed market data ingest-provider ignored lane' -Required $dbRequired -Action {
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-db', '--test', 'scenario_md_ingest_provider', '--', '--include-ignored', '--test-threads=1') -WorkingDirectory $repoRoot
+} -SkipReason $(if (-not $dbRequired) { 'Skipped in non-DB profile.' })
+
+Invoke-ProofLane -Name 'Broker map FK proof' -Required $dbRequired -Action {
+    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-db', '--test', 'scenario_broker_map_fk_enforced', '--', '--test-threads=1') -WorkingDirectory $repoRoot
+} -SkipReason $(if (-not $dbRequired) { 'Skipped in non-DB profile.' })
+
+$requiredLaneResults = @($laneResults | Where-Object { $_.required })
+$failedRequiredLanes = @($requiredLaneResults | Where-Object { $_.status -eq 'FAIL' })
+$mandatoryDbLaneResults = @($laneResults | Where-Object { $mandatoryDbLaneNames -contains $_.lane_name })
+$mandatoryDbLanesRan = ($dbRequired -and $mandatoryDbLaneResults.Count -eq $mandatoryDbLaneNames.Count -and ($mandatoryDbLaneResults | Where-Object { $_.status -eq 'SKIP' }).Count -eq 0)
+$canonicalFullBundleRan = ($canonicalBundleRequested -and ($requiredLaneResults | Where-Object { $_.status -eq 'SKIP' }).Count -eq 0)
+$institutionalReadyProofCompleted = ($ProofProfile -eq 'full' -and $treeClean -and $dbAvailable -and $canonicalFullBundleRan -and $failedRequiredLanes.Count -eq 0)
+
+$summary = [ordered]@{
+    proof_profile                       = $ProofProfile
+    audit_profile                       = $proofAuditProfile
+    workspace_state                     = $workspaceState
+    repo_root                           = $repoRoot
+    commit_hash                         = $commitHash
+    tree_clean                          = $treeClean
+    untracked_files_present             = $untrackedFilesPresent
+    db_required                         = $dbRequired
+    db_available                        = $dbAvailable
+    canonical_full_bundle_ran           = $canonicalFullBundleRan
+    mandatory_db_lanes_ran              = $mandatoryDbLanesRan
+    institutional_ready_proof_completed = $institutionalReadyProofCompleted
+    readiness_lock_doc                  = 'docs/INSTITUTIONAL_READINESS_LOCK.md'
+    scorecard_doc                       = 'docs/INSTITUTIONAL_SCORECARD.md'
+    failed_required_lanes               = @($failedRequiredLanes | ForEach-Object { $_.lane_name })
+    skipped_lanes                       = @($laneResults | Where-Object { $_.status -eq 'SKIP' } | ForEach-Object { $_.lane_name })
+    overall_result                      = if ($failedRequiredLanes.Count -gt 0) { 'failed' } else { 'passed' }
+    lane_results                        = @($laneResults)
+}
+
+Write-Host ''
+Write-Host '============================================================' -ForegroundColor Green
+Write-Host 'MiniQuantDesk V4 proof lane summary table' -ForegroundColor Green
+Write-Host '============================================================' -ForegroundColor Green
+$laneResults |
+    Select-Object lane_name, status, required, exit_code, duration_seconds, note |
+    Format-Table -AutoSize |
+    Out-String -Width 240 |
+    Write-Host
+
+Write-Host ''
+Write-Host '============================================================' -ForegroundColor Green
+Write-Host 'MiniQuantDesk V4 failed required lanes' -ForegroundColor Green
+Write-Host '============================================================' -ForegroundColor Green
+if ($failedRequiredLanes.Count -eq 0) {
+    Write-Host '<none>' -ForegroundColor Green
+}
+else {
+    $failedRequiredLanes |
+        Select-Object lane_name, exit_code, duration_seconds, note |
+        Format-Table -AutoSize |
+        Out-String -Width 240 |
+        Write-Host
+}
+
+Write-Host ''
+Write-Host '============================================================' -ForegroundColor Green
+Write-Host 'MiniQuantDesk V4 proof summary' -ForegroundColor Green
+Write-Host '============================================================' -ForegroundColor Green
+Write-Host (ConvertTo-Json $summary -Depth 6)
+
+if ($institutionalReadyProofCompleted) {
+    Write-Host 'VERDICT: Full DB-backed canonical proof completed on a clean committed state.' -ForegroundColor Green
+}
+elseif ($ProofProfile -eq 'full') {
+    Write-Host 'VERDICT: Full institutional-ready proof was NOT completed.' -ForegroundColor Red
+}
+elseif ($ProofProfile -eq 'exploratory') {
+    Write-Host 'VERDICT: Exploratory proof only; not a canonical institutional-ready audit.' -ForegroundColor Yellow
+}
+else {
+    Write-Host 'VERDICT: Local non-DB proof only; DB-backed institutional readiness not established.' -ForegroundColor Yellow
+}
+
+if ($failedRequiredLanes.Count -gt 0) {
+    exit 1
+}
+
+exit 0
