@@ -1362,14 +1362,18 @@ pub async fn outbox_mark_sent_with_broker_map(
 /// Mark an outbox row as ACKED.
 /// Returns true if transitioned, false if not found.
 pub async fn outbox_mark_acked(pool: &PgPool, idempotency_key: &str) -> Result<bool> {
-    // Only SENT → ACKED is a valid transition.  Any other predecessor is an
-    // explicit protocol violation and must return Err, not a silent Ok(false).
+    // ACK closure is valid for both:
+    // - SENT → ACKED        (submit lifecycle after broker map persistence)
+    // - DISPATCHING → ACKED (non-submit actions like cancel that do not create
+    //                        a SENT/broker-map phase of their own)
+    // Any other predecessor is an explicit protocol violation and must return
+    // Err, not a silent Ok(false).
     let row: Option<(i64,)> = sqlx::query_as(
         r#"
         update oms_outbox
            set status = 'ACKED'
          where idempotency_key = $1
-           and status = 'SENT'
+           and status in ('SENT', 'DISPATCHING')
         returning outbox_id
         "#,
     )
@@ -1395,7 +1399,7 @@ pub async fn outbox_mark_acked(pool: &PgPool, idempotency_key: &str) -> Result<b
         Some((status,)) if status == "ACKED" => Ok(false), // already acked; idempotent
         Some((status,)) => Err(anyhow!(
             "outbox_mark_acked: invalid transition from {status} to ACKED \
-             (only SENT → ACKED is valid)"
+             (only SENT or DISPATCHING → ACKED is valid)"
         )),
         None => Ok(false), // row not found; caller can treat as no-op
     }

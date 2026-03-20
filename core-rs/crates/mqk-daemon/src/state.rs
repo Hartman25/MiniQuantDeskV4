@@ -43,6 +43,7 @@ const DAEMON_DEPLOYMENT_MODE_ENV: &str = "MQK_DAEMON_DEPLOYMENT_MODE";
 const DAEMON_ADAPTER_ID_ENV: &str = "MQK_DAEMON_ADAPTER_ID";
 const ALPACA_API_KEY_ID_ENV: &str = "MQK_ALPACA_API_KEY_ID";
 const ALPACA_API_SECRET_KEY_ENV: &str = "MQK_ALPACA_API_SECRET_KEY";
+const ALPACA_BASE_URL_OVERRIDE_ENV: &str = "MQK_ALPACA_BASE_URL";
 
 // ---------------------------------------------------------------------------
 // BusMsg — SSE event bus payload
@@ -632,6 +633,11 @@ impl BrokerAdapter for DaemonBroker {
 /// | `LiveShadow`  | `https://api.alpaca.markets`       (AP-07)|
 /// | `LiveCapital` | `https://api.alpaca.markets`       (AP-08)|
 ///
+/// `MQK_ALPACA_BASE_URL` is a **paper-proof-only** seam. It is honoured only
+/// for `(Alpaca, Paper)` so the DB-backed roundtrip proof can point the live
+/// adapter at a local mock server. `LiveShadow` and `LiveCapital` always use
+/// the canonical live Alpaca endpoint regardless of the override.
+///
 /// `Backtest` remains blocked — no Alpaca endpoint is defined for that mode.
 ///
 /// # Fail-closed behavior
@@ -641,6 +647,29 @@ impl BrokerAdapter for DaemonBroker {
 ///   from the environment.  Returns `Err` if either variable is absent.
 ///   Endpoint is chosen from `deployment_mode`; unknown modes fail closed.
 /// - `None` (unrecognised adapter string) — always returns `Err`.
+fn alpaca_base_url_for_mode(
+    deployment_mode: DeploymentMode,
+    paper_base_url_override: Option<&str>,
+) -> Result<String, RuntimeLifecycleError> {
+    match deployment_mode {
+        DeploymentMode::Paper => Ok(paper_base_url_override
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "https://paper-api.alpaca.markets".to_string())),
+        DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
+            Ok("https://api.alpaca.markets".to_string())
+        }
+        DeploymentMode::Backtest => Err(RuntimeLifecycleError::service_unavailable(
+            "runtime.start_refused.alpaca_mode_not_wired",
+            format!(
+                "broker 'alpaca' is not wired for deployment mode '{}'; refusing start fail-closed",
+                deployment_mode.as_api_label()
+            ),
+        )),
+    }
+}
+
 fn build_daemon_broker(
     broker_kind: Option<BrokerKind>,
     deployment_mode: DeploymentMode,
@@ -651,28 +680,9 @@ fn build_daemon_broker(
             // Defensive mode check first — fail-closed for unsupported modes
             // before any credential lookup so the error is always about the mode,
             // not about missing credentials, when the mode itself is the problem.
-            let base_url = match deployment_mode {
-                // Paper → Alpaca paper-trading endpoint (AP-06).
-                DeploymentMode::Paper => "https://paper-api.alpaca.markets".to_string(),
-                // LiveShadow + LiveCapital → live endpoint (AP-07/AP-08).
-                // Both shadow and capital modes connect to real market events.
-                // The distinction between shadow and capital is a deployment
-                // policy enforced elsewhere; the broker endpoint is the same.
-                DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
-                    "https://api.alpaca.markets".to_string()
-                }
-                // Backtest is unconditionally blocked — no Alpaca endpoint exists.
-                DeploymentMode::Backtest => {
-                    return Err(RuntimeLifecycleError::service_unavailable(
-                        "runtime.start_refused.alpaca_mode_not_wired",
-                        format!(
-                            "broker 'alpaca' is not wired for deployment mode '{}'; \
-                             refusing start fail-closed",
-                            deployment_mode.as_api_label()
-                        ),
-                    ));
-                }
-            };
+            let paper_base_url_override = std::env::var(ALPACA_BASE_URL_OVERRIDE_ENV).ok();
+            let base_url =
+                alpaca_base_url_for_mode(deployment_mode, paper_base_url_override.as_deref())?;
             // Credentials read after mode is validated.
             let key_id = std::env::var(ALPACA_API_KEY_ID_ENV).map_err(|_| {
                 RuntimeLifecycleError::service_unavailable(
@@ -2319,6 +2329,30 @@ mod tests {
             err_msg.contains("unrecognised"),
             "error must mention unrecognised; got: {err_msg}"
         );
+    }
+
+    #[test]
+    fn alpaca_paper_base_url_honors_override() {
+        let base_url =
+            alpaca_base_url_for_mode(DeploymentMode::Paper, Some(" http://127.0.0.1:18080 "))
+                .expect("paper mode must resolve alpaca base url");
+        assert_eq!(base_url, "http://127.0.0.1:18080");
+    }
+
+    #[test]
+    fn alpaca_live_shadow_base_url_ignores_override_and_uses_canonical_live() {
+        let base_url =
+            alpaca_base_url_for_mode(DeploymentMode::LiveShadow, Some("http://127.0.0.1:18080"))
+                .expect("live-shadow mode must resolve alpaca base url");
+        assert_eq!(base_url, "https://api.alpaca.markets");
+    }
+
+    #[test]
+    fn alpaca_live_capital_base_url_ignores_override_and_uses_canonical_live() {
+        let base_url =
+            alpaca_base_url_for_mode(DeploymentMode::LiveCapital, Some("http://127.0.0.1:18080"))
+                .expect("live-capital mode must resolve alpaca base url");
+        assert_eq!(base_url, "https://api.alpaca.markets");
     }
 
     // ── AP-06 readiness gate tests ────────────────────────────────────────

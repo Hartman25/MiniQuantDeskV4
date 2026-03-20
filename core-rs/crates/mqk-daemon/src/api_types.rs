@@ -615,6 +615,20 @@ pub struct ManualOrderSubmitResponse {
     pub blockers: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualOrderCancelRequest {
+    pub cancel_request_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualOrderCancelResponse {
+    pub accepted: bool,
+    pub disposition: String,
+    pub order_id: String,
+    pub active_run_id: Option<Uuid>,
+    pub blockers: Vec<String>,
+}
+
 /// One live order row sourced from the in-memory OMS runtime snapshot.
 ///
 /// Fields that are not present in the OMS snapshot are emitted as `null`:

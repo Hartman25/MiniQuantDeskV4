@@ -49,6 +49,12 @@ fn valid_order_request() -> serde_json::Value {
     })
 }
 
+fn cancel_request(cancel_request_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "cancel_request_id": cancel_request_id,
+    })
+}
+
 fn blockers_contain(json: &serde_json::Value, needle: &str) -> bool {
     json["blockers"]
         .as_array()
@@ -328,6 +334,563 @@ async fn post_manual_order(
         .unwrap();
     let (status, body) = call(db_router(Arc::clone(st)), req).await;
     (status, parse_json(body))
+}
+
+async fn post_manual_cancel(
+    st: &Arc<state::AppState>,
+    order_id: &str,
+    cancel_request_id: &str,
+) -> (StatusCode, serde_json::Value) {
+    let req = authed(Request::builder())
+        .method("POST")
+        .uri(format!("/api/v1/execution/orders/{order_id}/cancel"))
+        .header("content-type", "application/json")
+        .body(body_json(cancel_request(cancel_request_id)))
+        .unwrap();
+    let (status, body) = call(db_router(Arc::clone(st)), req).await;
+    (status, parse_json(body))
+}
+
+async fn seed_active_run(st: &Arc<state::AppState>, inject_local_owner: bool) -> Uuid {
+    let pool = st.db.as_ref().expect("db configured");
+    let run_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+
+    mqk_db::insert_run(
+        pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: now,
+            git_hash: "test-git-hash".to_string(),
+            config_hash: "test-config-hash".to_string(),
+            config_json: serde_json::json!({"source": "scenario_daemon_order_submit"}),
+            host_fingerprint: "test-host".to_string(),
+        },
+    )
+    .await
+    .expect("insert run");
+    mqk_db::arm_run(pool, run_id).await.expect("arm run");
+    mqk_db::begin_run(pool, run_id).await.expect("begin run");
+    mqk_db::heartbeat_run(pool, run_id, now)
+        .await
+        .expect("heartbeat run");
+
+    if inject_local_owner {
+        st.inject_running_loop_for_test(run_id).await;
+    }
+
+    {
+        let mut execution = st.execution_snapshot.write().await;
+        let snapshot = execution.as_mut().expect("execution snapshot seeded");
+        snapshot.run_id = Some(run_id);
+        snapshot.snapshot_at_utc = now;
+    }
+
+    run_id
+}
+
+async fn seed_cancelable_order(
+    st: &Arc<state::AppState>,
+    run_id: Uuid,
+    order_id: &str,
+    status: &str,
+) {
+    let pool = st.db.as_ref().expect("db configured");
+    let broker_order_id = format!("broker-{order_id}");
+    let now = chrono::Utc::now();
+
+    mqk_db::outbox_enqueue(
+        pool,
+        run_id,
+        order_id,
+        serde_json::json!({
+            "request_type": "submit",
+            "symbol": "AAPL",
+            "side": "buy",
+            "qty": 10,
+            "order_type": "market",
+            "time_in_force": "day",
+            "limit_price": null,
+        }),
+    )
+    .await
+    .expect("seed submit outbox row");
+    mqk_db::broker_map_upsert(pool, order_id, &broker_order_id)
+        .await
+        .expect("seed broker map");
+    sqlx::query(
+        "UPDATE oms_outbox SET status = 'SENT', sent_at_utc = $2 WHERE idempotency_key = $1",
+    )
+    .bind(order_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .expect("seed sent outbox row");
+
+    {
+        let mut execution = st.execution_snapshot.write().await;
+        let snapshot = execution.as_mut().expect("execution snapshot seeded");
+        snapshot.run_id = Some(run_id);
+        snapshot.snapshot_at_utc = now;
+        snapshot
+            .active_orders
+            .retain(|row| row.order_id != order_id);
+        snapshot
+            .active_orders
+            .push(mqk_runtime::observability::OrderSnapshot {
+                order_id: order_id.to_string(),
+                broker_order_id: Some(broker_order_id),
+                symbol: "AAPL".to_string(),
+                total_qty: 10,
+                filled_qty: if status == "PartiallyFilled" { 3 } else { 0 },
+                status: status.to_string(),
+            });
+    }
+}
+
+#[tokio::test]
+async fn manual_order_cancel_route_requires_operator_auth_when_token_mode_is_enabled() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::TokenRequired(TEST_OPERATOR_TOKEN.to_string()),
+    ));
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/execution/orders/live-order-001/cancel")
+        .header("content-type", "application/json")
+        .body(body_json(cancel_request("cancel-auth-check-001")))
+        .unwrap();
+
+    let (status, body) = call(routes::build_router(st), req).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let json = parse_json(body);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Bearer token"),
+        "expected operator auth refusal, got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn manual_order_cancel_without_db_fails_closed() {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/execution/orders/live-order-001/cancel")
+        .header("content-type", "application/json")
+        .body(body_json(cancel_request("cancel-no-db-001")))
+        .unwrap();
+
+    let (status, body) = call(make_router(), req).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+    let json = parse_json(body);
+    assert_eq!(json["accepted"], false);
+    assert_eq!(json["disposition"], "unavailable");
+    assert_eq!(json["order_id"], "live-order-001");
+    assert!(
+        blockers_contain(&json, "durable execution DB truth is unavailable"),
+        "expected DB-unavailable blocker, got: {json}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn manual_order_cancel_with_db_but_no_active_run_fails_closed() {
+    let st = daemon_state().await;
+    arm(&st).await;
+
+    let (status, json) =
+        post_manual_cancel(&st, "live-order-001", "cancel-no-active-run-001").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(json["accepted"], false);
+    assert_eq!(json["disposition"], "unavailable");
+    assert!(
+        blockers_contain(&json, "no active durable run"),
+        "expected no-active-run blocker, got: {json}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn manual_order_cancel_fails_closed_when_durable_arm_state_load_fails() {
+    let st = daemon_state().await;
+    arm(&st).await;
+
+    let pool = st.db.as_ref().expect("db configured").clone();
+    pool.close().await;
+
+    let (status, json) =
+        post_manual_cancel(&st, "live-order-001", "cancel-arm-load-fail-001").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json["accepted"], false);
+    assert_eq!(json["disposition"], "unavailable");
+    assert!(
+        blockers_contain(&json, "durable arm-state truth could not be loaded"),
+        "expected durable arm-state load failure blocker, got: {json}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn manual_order_cancel_refuses_when_durable_arm_state_is_disarmed() {
+    let st = daemon_state().await;
+    arm(&st).await;
+    let _run_id = seed_active_run(&st, true).await;
+
+    let pool = st.db.as_ref().expect("db configured");
+    mqk_db::persist_arm_state(pool, "DISARMED", Some("IntegrityViolation"))
+        .await
+        .expect("persist durable disarmed state");
+
+    let (status, json) = post_manual_cancel(&st, "live-order-001", "cancel-disarmed-001").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json["accepted"], false);
+    assert_eq!(json["disposition"], "rejected");
+    assert!(
+        blockers_contain(&json, "durable arm state is disarmed"),
+        "expected durable disarmed blocker, got: {json}"
+    );
+
+    st.stop_for_shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn manual_order_cancel_refuses_when_durable_arm_state_is_halted() {
+    let st = daemon_state().await;
+    arm(&st).await;
+    let _run_id = seed_active_run(&st, true).await;
+
+    let pool = st.db.as_ref().expect("db configured");
+    mqk_db::persist_arm_state(pool, "DISARMED", Some("OperatorHalt"))
+        .await
+        .expect("persist durable halted state");
+
+    let (status, json) = post_manual_cancel(&st, "live-order-001", "cancel-halted-001").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(json["accepted"], false);
+    assert_eq!(json["disposition"], "rejected");
+    assert!(
+        blockers_contain(&json, "durable arm state is halted"),
+        "expected durable halted blocker, got: {json}"
+    );
+
+    st.stop_for_shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn manual_order_cancel_refuses_when_runtime_is_not_accepting_actions() {
+    let st = daemon_state().await;
+    arm(&st).await;
+    let _run_id = seed_active_run(&st, false).await;
+
+    let (status, json) =
+        post_manual_cancel(&st, "live-order-001", "cancel-runtime-not-running-001").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(json["accepted"], false);
+    assert_eq!(json["disposition"], "unavailable");
+    assert!(
+        blockers_contain(&json, "is not accepting operator cancel actions"),
+        "expected runtime-not-accepting blocker, got: {json}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn manual_order_cancel_refuses_unknown_or_untargetable_order_id_honestly() {
+    let st = daemon_state().await;
+    arm(&st).await;
+    let _run_id = seed_active_run(&st, true).await;
+
+    let (status, json) =
+        post_manual_cancel(&st, "unknown-order-001", "cancel-unknown-target-001").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(json["accepted"], false);
+    assert_eq!(json["disposition"], "rejected");
+    assert!(
+        blockers_contain(&json, "unknown or not durably targetable"),
+        "expected untargetable-order blocker, got: {json}"
+    );
+
+    st.stop_for_shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn manual_order_cancel_enqueues_one_pending_outbox_row_for_known_target() {
+    let st = daemon_state().await;
+    arm(&st).await;
+    let run_id = seed_active_run(&st, true).await;
+    seed_cancelable_order(&st, run_id, "live-order-001", "Open").await;
+
+    let (status, json) = post_manual_cancel(&st, "live-order-001", "cancel-enqueue-001").await;
+    assert_eq!(status, StatusCode::OK, "cancel failed: {json}");
+    assert_eq!(json["accepted"], true);
+    assert_eq!(json["disposition"], "enqueued");
+    assert_eq!(json["order_id"], "live-order-001");
+    assert_eq!(json["active_run_id"], run_id.to_string());
+
+    let cancel_request_id = "cancel-enqueue-001";
+    let pool = st.db.as_ref().expect("db configured");
+    let row = mqk_db::outbox_fetch_by_idempotency_key(pool, cancel_request_id)
+        .await
+        .expect("fetch cancel outbox row")
+        .expect("cancel outbox row present");
+    assert_eq!(row.run_id, run_id);
+    assert_eq!(row.status, "PENDING");
+    assert_eq!(row.order_json["request_type"], "cancel");
+    assert_eq!(row.order_json["target_order_id"], "live-order-001");
+    assert_eq!(row.order_json["cancel_request_id"], "cancel-enqueue-001");
+
+    st.stop_for_shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn manual_order_cancel_duplicate_request_is_truthful_noop() {
+    let st = daemon_state().await;
+    arm(&st).await;
+    let run_id = seed_active_run(&st, true).await;
+    seed_cancelable_order(&st, run_id, "live-order-001", "Open").await;
+
+    let (first_status, first_json) =
+        post_manual_cancel(&st, "live-order-001", "cancel-duplicate-001").await;
+    assert_eq!(
+        first_status,
+        StatusCode::OK,
+        "first cancel failed: {first_json}"
+    );
+    assert_eq!(first_json["disposition"], "enqueued");
+
+    let (second_status, second_json) =
+        post_manual_cancel(&st, "live-order-001", "cancel-duplicate-001").await;
+    assert_eq!(
+        second_status,
+        StatusCode::OK,
+        "duplicate cancel failed: {second_json}"
+    );
+    assert_eq!(second_json["accepted"], false);
+    assert_eq!(second_json["disposition"], "duplicate");
+
+    let cancel_request_id = "cancel-duplicate-001";
+    let pool = st.db.as_ref().expect("db configured");
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM oms_outbox WHERE idempotency_key = $1")
+            .bind(cancel_request_id)
+            .fetch_one(pool)
+            .await
+            .expect("count cancel outbox rows");
+    assert_eq!(count, 1, "duplicate cancel must not create a second row");
+
+    st.stop_for_shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn manual_order_cancel_same_request_id_for_different_order_is_explicit_collision_refusal() {
+    let st = daemon_state().await;
+    arm(&st).await;
+    let run_id = seed_active_run(&st, true).await;
+    seed_cancelable_order(&st, run_id, "live-order-001", "Open").await;
+    seed_cancelable_order(&st, run_id, "live-order-002", "Open").await;
+
+    let (first_status, first_json) =
+        post_manual_cancel(&st, "live-order-001", "cancel-collision-001").await;
+    assert_eq!(
+        first_status,
+        StatusCode::OK,
+        "first cancel failed: {first_json}"
+    );
+    assert_eq!(first_json["accepted"], true);
+    assert_eq!(first_json["disposition"], "enqueued");
+
+    let (second_status, second_json) =
+        post_manual_cancel(&st, "live-order-002", "cancel-collision-001").await;
+    assert_eq!(
+        second_status,
+        StatusCode::CONFLICT,
+        "cross-order cancel-request collision must be refused honestly: {second_json}"
+    );
+    assert_eq!(second_json["accepted"], false);
+    assert_eq!(second_json["disposition"], "rejected");
+    assert_ne!(second_json["disposition"], "duplicate");
+    assert!(
+        blockers_contain(
+            &second_json,
+            "already bound to different order_id 'live-order-001'"
+        ),
+        "expected explicit cross-order collision blocker, got: {second_json}"
+    );
+    assert!(
+        blockers_contain(&second_json, "order_id 'live-order-002'"),
+        "expected blocker to mention refused current order target, got: {second_json}"
+    );
+
+    let pool = st.db.as_ref().expect("db configured");
+    let row = mqk_db::outbox_fetch_by_idempotency_key(pool, "cancel-collision-001")
+        .await
+        .expect("fetch collision row")
+        .expect("collision row present");
+    assert_eq!(row.run_id, run_id);
+    assert_eq!(row.order_json["request_type"], "cancel");
+    assert_eq!(row.order_json["target_order_id"], "live-order-001");
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM oms_outbox WHERE idempotency_key = $1")
+            .bind("cancel-collision-001")
+            .fetch_one(pool)
+            .await
+            .expect("count collision rows");
+    assert_eq!(
+        count, 1,
+        "cross-order collision must not create a second row"
+    );
+
+    st.stop_for_shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn manual_order_cancel_second_distinct_request_is_allowed_after_order_returns_to_live_state()
+{
+    let st = daemon_state().await;
+    arm(&st).await;
+    let run_id = seed_active_run(&st, true).await;
+    seed_cancelable_order(&st, run_id, "live-order-001", "Open").await;
+
+    let (first_status, first_json) =
+        post_manual_cancel(&st, "live-order-001", "cancel-attempt-001").await;
+    assert_eq!(
+        first_status,
+        StatusCode::OK,
+        "first cancel failed: {first_json}"
+    );
+    assert_eq!(first_json["accepted"], true);
+    assert_eq!(first_json["disposition"], "enqueued");
+
+    {
+        let mut execution = st.execution_snapshot.write().await;
+        let snapshot = execution.as_mut().expect("execution snapshot seeded");
+        let order = snapshot
+            .active_orders
+            .iter_mut()
+            .find(|row| row.order_id == "live-order-001")
+            .expect("seeded live order present");
+        order.status = "Open".to_string();
+    }
+
+    let (second_status, second_json) =
+        post_manual_cancel(&st, "live-order-001", "cancel-attempt-002").await;
+    assert_eq!(
+        second_status,
+        StatusCode::OK,
+        "second cancel after restored live state failed: {second_json}"
+    );
+    assert_eq!(second_json["accepted"], true);
+    assert_eq!(second_json["disposition"], "enqueued");
+
+    let pool = st.db.as_ref().expect("db configured");
+    let first_row = mqk_db::outbox_fetch_by_idempotency_key(pool, "cancel-attempt-001")
+        .await
+        .expect("fetch first cancel row")
+        .expect("first cancel row present");
+    let second_row = mqk_db::outbox_fetch_by_idempotency_key(pool, "cancel-attempt-002")
+        .await
+        .expect("fetch second cancel row")
+        .expect("second cancel row present");
+
+    assert_eq!(first_row.run_id, run_id);
+    assert_eq!(first_row.order_json["request_type"], "cancel");
+    assert_eq!(first_row.order_json["target_order_id"], "live-order-001");
+    assert_eq!(
+        first_row.order_json["cancel_request_id"],
+        "cancel-attempt-001"
+    );
+    assert_eq!(second_row.run_id, run_id);
+    assert_eq!(second_row.order_json["request_type"], "cancel");
+    assert_eq!(second_row.order_json["target_order_id"], "live-order-001");
+    assert_eq!(
+        second_row.order_json["cancel_request_id"],
+        "cancel-attempt-002"
+    );
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM oms_outbox WHERE idempotency_key IN ($1, $2)",
+    )
+    .bind("cancel-attempt-001")
+    .bind("cancel-attempt-002")
+    .fetch_one(pool)
+    .await
+    .expect("count distinct cancel attempts");
+    assert_eq!(
+        count, 2,
+        "distinct cancel request IDs must create distinct rows"
+    );
+
+    st.stop_for_shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn manual_order_cancel_reject_restored_live_state_is_not_blocked_by_first_request_id() {
+    let st = daemon_state().await;
+    arm(&st).await;
+    let run_id = seed_active_run(&st, true).await;
+    seed_cancelable_order(&st, run_id, "live-order-001", "Open").await;
+
+    let (first_status, first_json) =
+        post_manual_cancel(&st, "live-order-001", "cancel-reject-attempt-001").await;
+    assert_eq!(
+        first_status,
+        StatusCode::OK,
+        "first cancel failed: {first_json}"
+    );
+    assert_eq!(first_json["accepted"], true);
+    assert_eq!(first_json["disposition"], "enqueued");
+
+    {
+        let mut execution = st.execution_snapshot.write().await;
+        let snapshot = execution.as_mut().expect("execution snapshot seeded");
+        let order = snapshot
+            .active_orders
+            .iter_mut()
+            .find(|row| row.order_id == "live-order-001")
+            .expect("seeded live order present");
+        order.status = "CancelPending".to_string();
+        order.status = "Open".to_string();
+    }
+
+    let (second_status, second_json) =
+        post_manual_cancel(&st, "live-order-001", "cancel-reject-attempt-002").await;
+    assert_eq!(
+        second_status,
+        StatusCode::OK,
+        "cancel after restored live state failed: {second_json}"
+    );
+    assert_eq!(second_json["accepted"], true);
+    assert_eq!(second_json["disposition"], "enqueued");
+
+    let pool = st.db.as_ref().expect("db configured");
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM oms_outbox WHERE idempotency_key IN ($1, $2)",
+    )
+    .bind("cancel-reject-attempt-001")
+    .bind("cancel-reject-attempt-002")
+    .fetch_one(pool)
+    .await
+    .expect("count cancel-reject recovery rows");
+    assert_eq!(
+        count, 2,
+        "cancel-reject recovery must not be blocked by the first cancel request ID"
+    );
+
+    st.stop_for_shutdown().await;
 }
 
 #[tokio::test]

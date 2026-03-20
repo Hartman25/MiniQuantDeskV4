@@ -11,7 +11,7 @@ use std::{convert::Infallible, sync::Arc};
 use chrono::Utc;
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::Next,
     response::{
@@ -33,18 +33,18 @@ use crate::{
         ActionCatalogEntry, ActionCatalogResponse, AuditArtifactRow, AuditArtifactsResponse,
         ConfigDiffsResponse, ConfigFingerprintResponse, DiagnosticsSnapshotResponse,
         ExecutionOrderRow, ExecutionSummaryResponse, FaultSignal, GateRefusedResponse,
-        HealthResponse, IntegrityResponse, ManualOrderSubmitRequest, ManualOrderSubmitResponse,
-        OperatorActionAuditFields, OperatorActionAuditRow, OperatorActionResponse,
-        OperatorActionsAuditResponse, OperatorTimelineResponse, OperatorTimelineRow,
-        OpsActionRequest, PortfolioFillRow, PortfolioFillsResponse, PortfolioOpenOrderRow,
-        PortfolioOpenOrdersResponse, PortfolioPositionRow, PortfolioPositionsResponse,
-        PortfolioSummaryResponse, PreflightStatusResponse, ReconcileMismatchRow,
-        ReconcileMismatchesResponse, ReconcileSummaryResponse, RiskDenialRow, RiskDenialsResponse,
-        RiskSummaryResponse, RuntimeErrorResponse, RuntimeLeadershipCheckpointRow,
-        RuntimeLeadershipResponse, SessionStateResponse, StrategySummaryResponse,
-        StrategySuppressionsResponse, SystemMetadataResponse, SystemStatusResponse,
-        TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
-        TradingPositionsResponse, TradingSnapshotResponse,
+        HealthResponse, IntegrityResponse, ManualOrderCancelRequest, ManualOrderCancelResponse,
+        ManualOrderSubmitRequest, ManualOrderSubmitResponse, OperatorActionAuditFields,
+        OperatorActionAuditRow, OperatorActionResponse, OperatorActionsAuditResponse,
+        OperatorTimelineResponse, OperatorTimelineRow, OpsActionRequest, PortfolioFillRow,
+        PortfolioFillsResponse, PortfolioOpenOrderRow, PortfolioOpenOrdersResponse,
+        PortfolioPositionRow, PortfolioPositionsResponse, PortfolioSummaryResponse,
+        PreflightStatusResponse, ReconcileMismatchRow, ReconcileMismatchesResponse,
+        ReconcileSummaryResponse, RiskDenialRow, RiskDenialsResponse, RiskSummaryResponse,
+        RuntimeErrorResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
+        SessionStateResponse, StrategySummaryResponse, StrategySuppressionsResponse,
+        SystemMetadataResponse, SystemStatusResponse, TradingAccountResponse, TradingFillsResponse,
+        TradingOrdersResponse, TradingPositionsResponse, TradingSnapshotResponse,
     },
     state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot},
 };
@@ -187,6 +187,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/integrity/arm", post(integrity_arm))
         .route("/v1/integrity/disarm", post(integrity_disarm))
         .route("/api/v1/execution/orders", post(execution_order_submit))
+        .route(
+            "/api/v1/execution/orders/:order_id/cancel",
+            post(execution_order_cancel),
+        )
         // Canonical operator action dispatcher (GUI primary path).
         // Dispatches arm/disarm/start/stop/halt. Returns 409 for change-system-mode
         // (not authoritative: requires controlled restart). Returns 400 for unknown keys.
@@ -1574,6 +1578,335 @@ pub(crate) async fn execution_order_submit(
     }
 }
 
+pub(crate) async fn execution_order_cancel(
+    State(st): State<Arc<AppState>>,
+    Path(order_id): Path<String>,
+    Json(body): Json<ManualOrderCancelRequest>,
+) -> Response {
+    let order_id = order_id.trim().to_string();
+    if order_id.is_empty() {
+        return manual_order_cancel_response(
+            StatusCode::BAD_REQUEST,
+            false,
+            "rejected",
+            String::new(),
+            None,
+            vec!["order_id must not be blank".to_string()],
+        );
+    }
+
+    let cancel_request_id = match validate_manual_order_cancel(body) {
+        Ok(cancel_request_id) => cancel_request_id,
+        Err(blockers) => {
+            return manual_order_cancel_response(
+                StatusCode::BAD_REQUEST,
+                false,
+                "rejected",
+                order_id,
+                None,
+                blockers,
+            );
+        }
+    };
+
+    let _lifecycle = st.lifecycle_guard().await;
+
+    let Some(db) = st.db.as_ref() else {
+        return manual_order_cancel_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            false,
+            "unavailable",
+            order_id,
+            None,
+            vec!["durable execution DB truth is unavailable on this daemon".to_string()],
+        );
+    };
+
+    let (durable_arm_state, durable_arm_reason) = match mqk_db::load_arm_state(db).await {
+        Ok(Some((state, reason))) => (state, reason),
+        Ok(None) => {
+            return manual_order_cancel_response(
+                StatusCode::FORBIDDEN,
+                false,
+                "rejected",
+                order_id,
+                None,
+                vec![
+                    "execution order cancel refused: durable arm state is not armed; fresh systems default to disarmed until explicitly armed"
+                        .to_string(),
+                ],
+            );
+        }
+        Err(err) => {
+            return manual_order_cancel_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                "unavailable",
+                order_id,
+                None,
+                vec![format!(
+                    "execution order cancel unavailable: durable arm-state truth could not be loaded: {err}"
+                )],
+            );
+        }
+    };
+
+    if durable_arm_state != "ARMED" {
+        let blocker = match durable_arm_reason.as_deref() {
+            Some("OperatorHalt") => {
+                "execution order cancel refused: durable arm state is halted".to_string()
+            }
+            Some(reason) => {
+                format!("execution order cancel refused: durable arm state is disarmed ({reason})")
+            }
+            None => "execution order cancel refused: durable arm state is not armed".to_string(),
+        };
+        return manual_order_cancel_response(
+            StatusCode::FORBIDDEN,
+            false,
+            "rejected",
+            order_id,
+            None,
+            vec![blocker],
+        );
+    }
+
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return manual_order_cancel_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                "unavailable",
+                order_id,
+                None,
+                vec![err.to_string()],
+            );
+        }
+    };
+
+    let Some(active_run_id) = status.active_run_id else {
+        return manual_order_cancel_response(
+            StatusCode::CONFLICT,
+            false,
+            "unavailable",
+            order_id,
+            None,
+            vec!["execution order cancel refused: no active durable run is available".to_string()],
+        );
+    };
+
+    if status.state != "running" {
+        let mut blockers = vec![format!(
+            "execution order cancel refused: runtime state '{}' is not accepting operator cancel actions",
+            status.state
+        )];
+        if let Some(note) = status.notes {
+            blockers.push(note);
+        }
+        return manual_order_cancel_response(
+            StatusCode::CONFLICT,
+            false,
+            "unavailable",
+            order_id,
+            Some(active_run_id),
+            blockers,
+        );
+    }
+
+    let execution_snapshot = match st.execution_snapshot.read().await.clone() {
+        Some(snapshot) => snapshot,
+        None => {
+            return manual_order_cancel_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                "unavailable",
+                order_id,
+                Some(active_run_id),
+                vec![
+                    "execution order cancel unavailable: no execution snapshot is available"
+                        .to_string(),
+                ],
+            );
+        }
+    };
+
+    let broker_map = match mqk_db::broker_map_load(db).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            return manual_order_cancel_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                "unavailable",
+                order_id,
+                Some(active_run_id),
+                vec![format!(
+                    "execution order cancel unavailable: durable broker-order-map truth could not be loaded: {err}"
+                )],
+            );
+        }
+    };
+
+    if !broker_map
+        .iter()
+        .any(|(internal_id, _broker_id)| internal_id == &order_id)
+    {
+        return manual_order_cancel_response(
+            StatusCode::CONFLICT,
+            false,
+            "rejected",
+            order_id.clone(),
+            Some(active_run_id),
+            vec![format!(
+                "execution order cancel refused: order_id '{}' is unknown or not durably targetable",
+                order_id
+            )],
+        );
+    }
+
+    let Some(order) = execution_snapshot
+        .active_orders
+        .iter()
+        .find(|row| row.order_id == order_id)
+    else {
+        return manual_order_cancel_response(
+            StatusCode::CONFLICT,
+            false,
+            "rejected",
+            order_id.clone(),
+            Some(active_run_id),
+            vec![format!(
+                "execution order cancel refused: order_id '{}' is not present in the active execution snapshot",
+                order_id
+            )],
+        );
+    };
+
+    match order.status.as_str() {
+        "Open" | "PartiallyFilled" => {}
+        "CancelPending" => {
+            return manual_order_cancel_response(
+                StatusCode::OK,
+                false,
+                "duplicate",
+                order_id.clone(),
+                Some(active_run_id),
+                vec![format!(
+                    "execution order cancel for '{}' is already in flight",
+                    order_id
+                )],
+            );
+        }
+        other => {
+            return manual_order_cancel_response(
+                StatusCode::CONFLICT,
+                false,
+                "rejected",
+                order_id.clone(),
+                Some(active_run_id),
+                vec![format!(
+                    "execution order cancel refused: order_id '{}' is not cancelable from status '{}'",
+                    order_id, other
+                )],
+            );
+        }
+    }
+
+    let cancel_json = serde_json::json!({
+        "request_type": "cancel",
+        "cancel_request_id": cancel_request_id.clone(),
+        "target_order_id": order_id.clone(),
+    });
+
+    match mqk_db::outbox_enqueue(db, active_run_id, &cancel_request_id, cancel_json).await {
+        Ok(true) => manual_order_cancel_response(
+            StatusCode::OK,
+            true,
+            "enqueued",
+            order_id,
+            Some(active_run_id),
+            vec![],
+        ),
+        Ok(false) => match mqk_db::outbox_fetch_by_idempotency_key(db, &cancel_request_id).await {
+            Ok(Some(existing)) => {
+                let Some(existing_target_order_id) = existing
+                    .order_json
+                    .get("target_order_id")
+                    .and_then(|value| value.as_str())
+                else {
+                    return manual_order_cancel_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        false,
+                        "unavailable",
+                        order_id,
+                        Some(active_run_id),
+                        vec![format!(
+                            "execution order cancel unavailable: cancel_request_id '{}' collided with an existing outbox row that is missing durable target_order_id truth",
+                            cancel_request_id
+                        )],
+                    );
+                };
+
+                if existing_target_order_id == order_id.as_str() {
+                    manual_order_cancel_response(
+                        StatusCode::OK,
+                        false,
+                        "duplicate",
+                        order_id,
+                        Some(active_run_id),
+                        vec![format!(
+                            "cancel request '{}' already exists for order_id '{}'; no new outbox row was created",
+                            cancel_request_id, existing_target_order_id
+                        )],
+                    )
+                } else {
+                    manual_order_cancel_response(
+                        StatusCode::CONFLICT,
+                        false,
+                        "rejected",
+                        order_id.clone(),
+                        Some(active_run_id),
+                        vec![format!(
+                            "execution order cancel refused: cancel_request_id '{}' is already bound to different order_id '{}' and cannot be reused for order_id '{}'",
+                            cancel_request_id, existing_target_order_id, order_id
+                        )],
+                    )
+                }
+            }
+            Ok(None) => manual_order_cancel_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                "unavailable",
+                order_id,
+                Some(active_run_id),
+                vec![format!(
+                    "execution order cancel unavailable: cancel_request_id '{}' collided with an existing outbox key but the durable outbox row could not be loaded",
+                    cancel_request_id
+                )],
+            ),
+            Err(err) => manual_order_cancel_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                "unavailable",
+                order_id,
+                Some(active_run_id),
+                vec![format!(
+                    "execution order cancel unavailable: duplicate-target truth could not be loaded for cancel_request_id '{}': {}",
+                    cancel_request_id, err
+                )],
+            ),
+        },
+        Err(err) => manual_order_cancel_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            false,
+            "unavailable",
+            order_id,
+            Some(active_run_id),
+            vec![format!("outbox enqueue failed: {err}")],
+        ),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ValidatedManualOrderSubmit {
     client_request_id: String,
@@ -1731,6 +2064,42 @@ fn manual_order_submit_response(
             accepted,
             disposition: disposition.to_string(),
             client_request_id,
+            active_run_id,
+            blockers,
+        }),
+    )
+        .into_response()
+}
+
+fn validate_manual_order_cancel(body: ManualOrderCancelRequest) -> Result<String, Vec<String>> {
+    let cancel_request_id = body.cancel_request_id.trim().to_string();
+    let mut blockers = Vec::new();
+
+    if cancel_request_id.is_empty() {
+        blockers.push("cancel_request_id is required".to_string());
+    }
+
+    if blockers.is_empty() {
+        Ok(cancel_request_id)
+    } else {
+        Err(blockers)
+    }
+}
+
+fn manual_order_cancel_response(
+    status: StatusCode,
+    accepted: bool,
+    disposition: &str,
+    order_id: String,
+    active_run_id: Option<uuid::Uuid>,
+    blockers: Vec<String>,
+) -> Response {
+    (
+        status,
+        Json(ManualOrderCancelResponse {
+            accepted,
+            disposition: disposition.to_string(),
+            order_id,
             active_run_id,
             blockers,
         }),

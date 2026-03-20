@@ -207,7 +207,7 @@ where
     ///     outbox rows exist (Patch 2).
     /// 0c. Reconcile drift enforcement - refuse tick and persist HALT/DISARM
     ///     if local vs broker snapshots are dirty (Patch 4A).
-    /// 1. Submit pending outbox rows via the gateway.
+    /// 1. Dispatch claimed outbox rows via the gateway.
     /// 2. Fetch + ingest new broker events into oms_inbox.
     /// 3. Apply all unapplied inbox rows: OMS transition → portfolio apply →
     ///    capital invariant check (with halt+disarm persistence) → mark applied.
@@ -309,7 +309,7 @@ where
             }
         }
         // ------------------------------------------------------------------
-        // Phase 1: Claim and submit outbox rows.
+        // Phase 1: Claim and dispatch outbox rows.
         // ------------------------------------------------------------------
         self.refresh_or_acquire_runtime_leadership().await?;
         let claimed = mqk_db::outbox_claim_batch_for_run(
@@ -322,195 +322,16 @@ where
         .await?;
         for claimed_row in claimed {
             self.refresh_or_acquire_runtime_leadership().await?;
-            let order_id = claimed_row.row.idempotency_key.clone();
-            let claim = claimed_row.token;
-            // Build a submit request from the outbox order_json.
-            let req = build_submit_request(&claimed_row.row)?;
-            let symbol = req.symbol.clone();
-            let qty = req.quantity;
-            // Step 3a: RT-5 - write DISPATCHING before calling gateway.submit().
-            //
-            // Closes crash window W4: if the process crashes between here and
-            // outbox_mark_sent, the row stays DISPATCHING on restart.
-            // outbox_reset_stale_claims only resets CLAIMED rows, so the order
-            // is NOT silently requeued - preventing double-submit.
-            mqk_db::outbox_mark_dispatching(
-                &self.pool,
-                &order_id,
-                &self.dispatcher_id,
-                self.time_source.now_utc(),
-            )
-            .await?;
-            // Step 3b: submit via BrokerGateway - the ONLY submit path.
-            //
-            // A3: gateway.submit returns Result<_, SubmitError>.
-            // SubmitError is Send+Sync (all inner fields are String/u64),
-            // so no anyhow conversion is needed before the async dispatch.
-            let submit_result = self.gateway.submit(&claim, req);
-            let resp = match submit_result {
-                Ok(r) => r,
-                Err(e) => {
-                    // A3: per-class outbox row disposition.
-                    use mqk_execution::{GateRefusal, SubmitError};
-                    match &e {
-                        SubmitError::Gate(GateRefusal::RiskBlocked(denial)) => {
-                            // B2: capture the structured risk denial for the B4
-                            // diagnostics snapshot. The denial is stored in-memory
-                            // and overlaid by snapshot() onto SystemBlockState.
-                            self.last_risk_denial = Some(denial.clone());
-                            // Accumulate a structured denial record in the ring
-                            // buffer.  This is the authoritative denial truth
-                            // source for /api/v1/risk/denials.  `symbol` is taken
-                            // from the order being submitted (always present);
-                            // `requested_qty` / `limit` are taken from evidence
-                            // when the risk rule populates them.
-                            let denied_at = self.time_source.now_utc();
-                            let record = crate::observability::RiskDenialRecord {
-                                id: format!(
-                                    "{}:{}",
-                                    denied_at.timestamp_micros(),
-                                    denial.reason_code()
-                                ),
-                                denied_at_utc: denied_at,
-                                rule: denial.reason_code().to_string(),
-                                message: denial.reason_summary().to_string(),
-                                symbol: Some(symbol.clone()),
-                                requested_qty: denial.evidence.requested_qty,
-                                limit: denial.evidence.limit,
-                                severity: "critical".to_string(),
-                            };
-                            // RD-01: best-effort durable persist. A write
-                            // failure must never block or abort execution —
-                            // the ring buffer holds the record for the
-                            // current session; a failure only affects
-                            // post-restart history.
-                            if let Err(err) = mqk_db::persist_risk_denial_event(
-                                &self.pool,
-                                &mqk_db::RiskDenialEventRow {
-                                    id: record.id.clone(),
-                                    denied_at_utc: record.denied_at_utc,
-                                    rule: record.rule.clone(),
-                                    message: record.message.clone(),
-                                    symbol: record.symbol.clone(),
-                                    requested_qty: record.requested_qty,
-                                    limit_qty: record.limit,
-                                    severity: record.severity.clone(),
-                                },
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    "risk_denial_event_persist_failed id={} err={err}",
-                                    record.id
-                                );
-                            }
-                            if self.recent_denials.len() >= DENIAL_RING_BUFFER_CAP {
-                                self.recent_denials.pop_front();
-                            }
-                            self.recent_denials.push_back(record);
-                            mqk_db::persist_risk_block_state(
-                                &self.pool,
-                                true,
-                                Some(denial.reason_code()),
-                                self.time_source.now_utc(),
-                            )
-                            .await?;
-                            // Gate refused before touching the broker.
-                            // Row is DISPATCHING but request never left.
-                            // Mark FAILED; requires operator review.
-                            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
-                        }
-                        SubmitError::Gate(_) => {
-                            // Other gate refusals (IntegrityDisarmed, ReconcileNotClean)
-                            // - gate refused before touching the broker.
-                            // Row is DISPATCHING but request never left.
-                            // Mark FAILED; requires operator review.
-                            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
-                        }
-                        SubmitError::Broker(be) if be.requires_halt() => {
-                            let now = self.time_source.now_utc();
-                            if matches!(be, BrokerError::AmbiguousSubmit { .. }) {
-                                // A4: Transition DISPATCHING → AMBIGUOUS (explicit quarantine).
-                                // Row cannot re-enter dispatch without explicit operator/reconcile
-                                // release via outbox_reset_ambiguous_to_pending.
-                                let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
-                                // Halt+disarm - "AmbiguousSubmit" is now a valid DB reason
-                                // (migration 0020). Phase-0b quarantine blocks any restart.
-                                let _ = persist_halt_and_disarm(
-                                    &self.pool,
-                                    self.run_id,
-                                    now,
-                                    "AmbiguousSubmit",
-                                )
-                                .await;
-                            } else {
-                                // AuthSession: credentials revoked - mark FAILED + halt.
-                                // "AuthSession" is now a valid DB reason (migration 0020).
-                                let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
-                                let _ = persist_halt_and_disarm(
-                                    &self.pool,
-                                    self.run_id,
-                                    now,
-                                    "AuthSession",
-                                )
-                                .await;
-                            }
-                        }
-                        SubmitError::Broker(be) if be.is_safe_pre_send_retry() => {
-                            // Safe retry class: local non-delivery is proven.
-                            // Reset row to PENDING for re-dispatch on the next tick.
-                            let _ =
-                                mqk_db::outbox_reset_dispatching_to_pending(&self.pool, &order_id)
-                                    .await;
-                            eprintln!("WARN broker_submit_retryable order_id={order_id} error={e}");
-                        }
-                        SubmitError::Broker(be) if be.is_ambiguous_send_outcome() => {
-                            // Ambiguous transport/broker outcome - fail closed.
-                            let now = self.time_source.now_utc();
-                            let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
-                            let _ = persist_halt_and_disarm(
-                                &self.pool,
-                                self.run_id,
-                                now,
-                                "AmbiguousSubmit",
-                            )
-                            .await;
-                        }
-                        SubmitError::Broker(_) => {
-                            // Reject / Transient: mark FAILED, requires operator.
-                            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
-                            eprintln!(
-                                "WARN broker_submit_non_retryable order_id={order_id} error={e}"
-                            );
-                        }
-                    }
-                    return Err(anyhow!("{e}"));
+            match build_claimed_outbox_request(&claimed_row.row)? {
+                ClaimedOutboxRequest::Submit(req) => {
+                    self.dispatch_submit_claimed_outbox_row(claimed_row, req)
+                        .await?;
                 }
-            };
-            // Step 4: atomically persist broker order ID mapping + SENT status.
-            //
-            // Patch 3A:
-            // After broker submit succeeds, the DB must not be able to observe
-            // a durable SENT row without the corresponding durable
-            // internal_id -> broker_id mapping needed for restart recovery,
-            // reconcile, and cancel/replace targeting.
-            let sent = mqk_db::outbox_mark_sent_with_broker_map(
-                &self.pool,
-                &order_id,
-                &resp.broker_order_id,
-                self.time_source.now_utc(),
-            )
-            .await?;
-            if !sent {
-                return Err(anyhow!(
-                    "broker submit succeeded but outbox row {} could not transition to SENT with broker map persistence",
-                    order_id
-                ));
+                ClaimedOutboxRequest::Cancel { target_order_id } => {
+                    self.dispatch_cancel_claimed_outbox_row(claimed_row, target_order_id)
+                        .await?;
+                }
             }
-            // Register in-memory state only after DB durability succeeds.
-            self.order_map.register(&order_id, &resp.broker_order_id);
-            self.oms_orders
-                .insert(order_id.clone(), OmsOrder::new(&order_id, &symbol, qty));
         }
         // ------------------------------------------------------------------
         // Phase 2: Fetch broker events and ingest into oms_inbox.
@@ -697,17 +518,294 @@ where
     pub fn oms_orders(&self) -> &BTreeMap<String, OmsOrder> {
         &self.oms_orders
     }
+    /// Submit-path dispatcher for one claimed outbox row.
+    async fn dispatch_submit_claimed_outbox_row(
+        &mut self,
+        claimed_row: mqk_db::ClaimedOutboxRow,
+        req: BrokerSubmitRequest,
+    ) -> anyhow::Result<()> {
+        let order_id = claimed_row.row.idempotency_key.clone();
+        let claim = claimed_row.token;
+        let symbol = req.symbol.clone();
+        let qty = req.quantity;
+
+        // Step 3a: RT-5 - write DISPATCHING before calling gateway.submit().
+        //
+        // Closes crash window W4: if the process crashes between here and
+        // outbox_mark_sent, the row stays DISPATCHING on restart.
+        // outbox_reset_stale_claims only resets CLAIMED rows, so the order
+        // is NOT silently requeued - preventing double-submit.
+        mqk_db::outbox_mark_dispatching(
+            &self.pool,
+            &order_id,
+            &self.dispatcher_id,
+            self.time_source.now_utc(),
+        )
+        .await?;
+
+        // Step 3b: submit via BrokerGateway - the ONLY submit path.
+        //
+        // A3: gateway.submit returns Result<_, SubmitError>.
+        // SubmitError is Send+Sync (all inner fields are String/u64),
+        // so no anyhow conversion is needed before the async dispatch.
+        let submit_result = self.gateway.submit(&claim, req);
+        let resp = match submit_result {
+            Ok(r) => r,
+            Err(e) => {
+                // A3: per-class outbox row disposition.
+                use mqk_execution::{GateRefusal, SubmitError};
+                match &e {
+                    SubmitError::Gate(GateRefusal::RiskBlocked(denial)) => {
+                        self.capture_risk_denial(&symbol, denial).await?;
+                        let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                    }
+                    SubmitError::Gate(_) => {
+                        let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                    }
+                    SubmitError::Broker(be) if be.requires_halt() => {
+                        let now = self.time_source.now_utc();
+                        if matches!(be, BrokerError::AmbiguousSubmit { .. }) {
+                            let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
+                            let _ = persist_halt_and_disarm(
+                                &self.pool,
+                                self.run_id,
+                                now,
+                                "AmbiguousSubmit",
+                            )
+                            .await;
+                        } else {
+                            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                            let _ = persist_halt_and_disarm(
+                                &self.pool,
+                                self.run_id,
+                                now,
+                                "AuthSession",
+                            )
+                            .await;
+                        }
+                    }
+                    SubmitError::Broker(be) if be.is_safe_pre_send_retry() => {
+                        let _ = mqk_db::outbox_reset_dispatching_to_pending(&self.pool, &order_id)
+                            .await;
+                        eprintln!("WARN broker_submit_retryable order_id={order_id} error={e}");
+                    }
+                    SubmitError::Broker(be) if be.is_ambiguous_send_outcome() => {
+                        let now = self.time_source.now_utc();
+                        let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
+                        let _ = persist_halt_and_disarm(
+                            &self.pool,
+                            self.run_id,
+                            now,
+                            "AmbiguousSubmit",
+                        )
+                        .await;
+                    }
+                    SubmitError::Broker(_) => {
+                        let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
+                        eprintln!("WARN broker_submit_non_retryable order_id={order_id} error={e}");
+                    }
+                }
+                return Err(anyhow!("{e}"));
+            }
+        };
+
+        let sent = mqk_db::outbox_mark_sent_with_broker_map(
+            &self.pool,
+            &order_id,
+            &resp.broker_order_id,
+            self.time_source.now_utc(),
+        )
+        .await?;
+        if !sent {
+            return Err(anyhow!(
+                "broker submit succeeded but outbox row {} could not transition to SENT with broker map persistence",
+                order_id
+            ));
+        }
+
+        self.order_map.register(&order_id, &resp.broker_order_id);
+        self.oms_orders
+            .insert(order_id.clone(), OmsOrder::new(&order_id, &symbol, qty));
+        Ok(())
+    }
+
+    async fn dispatch_cancel_claimed_outbox_row(
+        &mut self,
+        claimed_row: mqk_db::ClaimedOutboxRow,
+        target_order_id: String,
+    ) -> anyhow::Result<()> {
+        let request_id = claimed_row.row.idempotency_key.clone();
+
+        mqk_db::outbox_mark_dispatching(
+            &self.pool,
+            &request_id,
+            &self.dispatcher_id,
+            self.time_source.now_utc(),
+        )
+        .await?;
+
+        let order = self.oms_orders.get_mut(&target_order_id).ok_or_else(|| {
+            anyhow!(
+                "cancel request {} refused: target order '{}' is not present in live OMS state",
+                request_id,
+                target_order_id
+            )
+        })?;
+        order
+            .apply(&OmsEvent::CancelRequest, Some(&request_id))
+            .map_err(|err| {
+                anyhow!(
+                    "cancel request {} refused: target order '{}' could not transition to CancelPending: {}",
+                    request_id,
+                    target_order_id,
+                    err
+                )
+            })?;
+
+        match self.gateway.cancel(&target_order_id, &self.order_map) {
+            Ok(_resp) => {
+                let acked = mqk_db::outbox_mark_acked(&self.pool, &request_id).await?;
+                if !acked {
+                    return Err(anyhow!(
+                        "broker cancel request succeeded but outbox row {} could not transition to ACKED",
+                        request_id
+                    ));
+                }
+                Ok(())
+            }
+            Err(err) => {
+                let CancelGatewayError {
+                    revert_local,
+                    err_text,
+                    class,
+                } = classify_cancel_gateway_error(err);
+
+                if revert_local {
+                    revert_local_cancel_request(
+                        &mut self.oms_orders,
+                        &target_order_id,
+                        &request_id,
+                    );
+                }
+
+                match class {
+                    CancelBrokerClass::HaltAmbiguous => {
+                        let now = self.time_source.now_utc();
+                        let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &request_id).await;
+                        let _ = persist_halt_and_disarm(
+                            &self.pool,
+                            self.run_id,
+                            now,
+                            "AmbiguousSubmit",
+                        )
+                        .await;
+                    }
+                    CancelBrokerClass::HaltAuth => {
+                        let now = self.time_source.now_utc();
+                        let _ = mqk_db::outbox_mark_failed(&self.pool, &request_id).await;
+                        let _ =
+                            persist_halt_and_disarm(&self.pool, self.run_id, now, "AuthSession")
+                                .await;
+                    }
+                    CancelBrokerClass::Retryable => {
+                        let _ =
+                            mqk_db::outbox_reset_dispatching_to_pending(&self.pool, &request_id)
+                                .await;
+                        eprintln!(
+                            "WARN broker_cancel_retryable request_id={request_id} target_order_id={target_order_id} error={}",
+                            err_text
+                        );
+                    }
+                    CancelBrokerClass::Ambiguous => {
+                        let now = self.time_source.now_utc();
+                        let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &request_id).await;
+                        let _ = persist_halt_and_disarm(
+                            &self.pool,
+                            self.run_id,
+                            now,
+                            "AmbiguousSubmit",
+                        )
+                        .await;
+                    }
+                    CancelBrokerClass::NonRetryable => {
+                        let _ = mqk_db::outbox_mark_failed(&self.pool, &request_id).await;
+                        eprintln!(
+                            "WARN broker_cancel_non_retryable request_id={request_id} target_order_id={target_order_id} error={}",
+                            err_text
+                        );
+                    }
+                    CancelBrokerClass::Unknown => {
+                        let _ = mqk_db::outbox_mark_failed(&self.pool, &request_id).await;
+                    }
+                }
+
+                Err(anyhow!(err_text))
+            }
+        }
+    }
+
+    async fn capture_risk_denial(
+        &mut self,
+        symbol: &str,
+        denial: &mqk_execution::RiskDenial,
+    ) -> anyhow::Result<()> {
+        self.last_risk_denial = Some(denial.clone());
+        let denied_at = self.time_source.now_utc();
+        let record = crate::observability::RiskDenialRecord {
+            id: format!("{}:{}", denied_at.timestamp_micros(), denial.reason_code()),
+            denied_at_utc: denied_at,
+            rule: denial.reason_code().to_string(),
+            message: denial.reason_summary().to_string(),
+            symbol: Some(symbol.to_string()),
+            requested_qty: denial.evidence.requested_qty,
+            limit: denial.evidence.limit,
+            severity: "critical".to_string(),
+        };
+        if let Err(err) = mqk_db::persist_risk_denial_event(
+            &self.pool,
+            &mqk_db::RiskDenialEventRow {
+                id: record.id.clone(),
+                denied_at_utc: record.denied_at_utc,
+                rule: record.rule.clone(),
+                message: record.message.clone(),
+                symbol: record.symbol.clone(),
+                requested_qty: record.requested_qty,
+                limit_qty: record.limit,
+                severity: record.severity.clone(),
+            },
+        )
+        .await
+        {
+            tracing::warn!(
+                "risk_denial_event_persist_failed id={} err={err}",
+                record.id
+            );
+        }
+        if self.recent_denials.len() >= DENIAL_RING_BUFFER_CAP {
+            self.recent_denials.pop_front();
+        }
+        self.recent_denials.push_back(record);
+        mqk_db::persist_risk_block_state(
+            &self.pool,
+            true,
+            Some(denial.reason_code()),
+            self.time_source.now_utc(),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// B4: Collect a read-only execution pipeline snapshot.
     ///
     /// Fetches outbox / inbox / run / arm state from the DB, then overlays the
-    /// in-memory OMS order map and portfolio.  Entirely read-only - does not
+    /// in-memory OMS order map and portfolio. Entirely read-only — does not
     /// modify any execution state or affect `tick()` semantics.
     ///
     /// Takes `&mut self` so that the spawned future is `Send` without
     /// requiring the gate/adapter type parameters to implement `Sync`.
     /// All in-memory data is extracted synchronously before the first `.await`.
     ///
-    /// The timestamp is sourced from `self.time_source` - no direct
+    /// The timestamp is sourced from `self.time_source` — no direct
     /// `Utc::now()` call ([T]-guard compliant).
     pub async fn snapshot(&mut self) -> anyhow::Result<crate::observability::ExecutionSnapshot> {
         // Extract everything needed from `self` synchronously, before any `.await`,
@@ -812,6 +910,125 @@ where
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+enum ClaimedOutboxRequest {
+    Submit(BrokerSubmitRequest),
+    Cancel { target_order_id: String },
+}
+
+fn build_claimed_outbox_request(row: &mqk_db::OutboxRow) -> anyhow::Result<ClaimedOutboxRequest> {
+    let request_type = row
+        .order_json
+        .get("request_type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+
+    match request_type.as_deref() {
+        None | Some("submit") => Ok(ClaimedOutboxRequest::Submit(build_submit_request(row)?)),
+        Some("cancel") => {
+            let target_order_id = row
+                .order_json
+                .get("target_order_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .ok_or_else(|| {
+                    anyhow!("invalid cancel payload: target_order_id missing or not a string")
+                })?;
+            if target_order_id.is_empty() {
+                return Err(anyhow!("invalid cancel payload: target_order_id blank"));
+            }
+            Ok(ClaimedOutboxRequest::Cancel {
+                target_order_id: target_order_id.to_string(),
+            })
+        }
+        Some(other) => Err(anyhow!(
+            "invalid outbox payload: unsupported request_type '{}'",
+            other
+        )),
+    }
+}
+
+enum CancelBrokerClass {
+    HaltAmbiguous,
+    HaltAuth,
+    Retryable,
+    Ambiguous,
+    NonRetryable,
+    Unknown,
+}
+
+struct CancelGatewayError {
+    revert_local: bool,
+    err_text: String,
+    class: CancelBrokerClass,
+}
+
+fn classify_cancel_gateway_error(err: Box<dyn std::error::Error>) -> CancelGatewayError {
+    let revert_local = should_revert_local_cancel_request(err.as_ref());
+    let err_text = err.to_string();
+    let class = match err.downcast_ref::<BrokerError>() {
+        Some(be) if be.requires_halt() => {
+            if matches!(be, BrokerError::AmbiguousSubmit { .. }) {
+                CancelBrokerClass::HaltAmbiguous
+            } else {
+                CancelBrokerClass::HaltAuth
+            }
+        }
+        Some(be) if be.is_safe_pre_send_retry() => CancelBrokerClass::Retryable,
+        Some(be) if be.is_ambiguous_send_outcome() => CancelBrokerClass::Ambiguous,
+        Some(_) => CancelBrokerClass::NonRetryable,
+        None => CancelBrokerClass::Unknown,
+    };
+    CancelGatewayError {
+        revert_local,
+        err_text,
+        class,
+    }
+}
+
+fn should_revert_local_cancel_request(err: &(dyn std::error::Error + 'static)) -> bool {
+    if err.downcast_ref::<mqk_execution::GateRefusal>().is_some() {
+        return true;
+    }
+    if err.downcast_ref::<mqk_execution::UnknownOrder>().is_some() {
+        return true;
+    }
+    if let Some(be) = err.downcast_ref::<BrokerError>() {
+        return be.is_safe_pre_send_retry()
+            || matches!(
+                be,
+                BrokerError::Reject { .. } | BrokerError::AuthSession { .. }
+            );
+    }
+    false
+}
+
+fn revert_local_cancel_request(
+    oms_orders: &mut BTreeMap<String, OmsOrder>,
+    target_order_id: &str,
+    request_id: &str,
+) {
+    let Some(order) = oms_orders.get_mut(target_order_id) else {
+        tracing::warn!(
+            "cancel_request_local_revert_missing_order request_id={} target_order_id={}",
+            request_id,
+            target_order_id
+        );
+        return;
+    };
+
+    let revert_event_id = format!("{}:local-revert", request_id);
+    if let Err(err) = order.apply(&OmsEvent::CancelReject, Some(&revert_event_id)) {
+        tracing::warn!(
+            "cancel_request_local_revert_failed request_id={} target_order_id={} err={}",
+            request_id,
+            target_order_id,
+            err
+        );
+    }
+}
+
 /// Build a `BrokerSubmitRequest` from a claimed outbox row.
 fn build_validated_submit_request(
     order_id: &str,

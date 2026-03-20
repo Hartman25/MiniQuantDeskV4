@@ -307,16 +307,16 @@ where
         &self,
         internal_id: &str,
         order_map: &BrokerOrderMap,
-    ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error + Send + Sync>> {
         self.enforce_gates()?;
         let broker_id = order_map.broker_id(internal_id).ok_or_else(|| {
             Box::new(UnknownOrder {
                 internal_id: internal_id.to_string(),
-            }) as Box<dyn std::error::Error>
+            }) as Box<dyn std::error::Error + Send + Sync>
         })?;
         self.router
             .route_cancel(broker_id)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
     /// Fetch new broker events since `cursor`.
     ///
@@ -347,12 +347,12 @@ where
         quantity: i64,
         limit_price: Option<i64>,
         time_in_force: String,
-    ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error>> {
+    ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error + Send + Sync>> {
         self.enforce_gates()?;
         let broker_id = order_map.broker_id(internal_id).ok_or_else(|| {
             Box::new(UnknownOrder {
                 internal_id: internal_id.to_string(),
-            }) as Box<dyn std::error::Error>
+            }) as Box<dyn std::error::Error + Send + Sync>
         })?;
         self.router
             .route_replace(BrokerReplaceRequest {
@@ -361,7 +361,7 @@ where
                 limit_price,
                 time_in_force,
             })
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 }
 // ---------------------------------------------------------------------------
