@@ -39,7 +39,7 @@ env:
 jobs:
 
   gui-contract:
-    name: "GUI Build + Daemon Contract Gate"
+    name: "GUI Truth Tests + Build + Daemon Contract Gate"
     runs-on: ubuntu-latest
 
     defaults:
@@ -57,10 +57,19 @@ jobs:
           cache: npm
           cache-dependency-path: core-rs/mqk-gui/package-lock.json
 
-      - name: GUI build gate (tsc + vite build)
+      - name: Install GUI dependencies
         run: |
           cd mqk-gui
           npm ci
+
+      - name: GUI truth tests (source authority + truth rendering + API wrappers)
+        run: |
+          cd mqk-gui
+          npm run test
+
+      - name: GUI build gate (tsc + vite build)
+        run: |
+          cd mqk-gui
           npm run build
 
       - name: Show explicit GUI/daemon contract waivers

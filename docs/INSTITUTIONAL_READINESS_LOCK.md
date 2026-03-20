@@ -87,7 +87,7 @@ All of these are green:
 
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- GUI typecheck and build lanes green
+- GUI typecheck, truth-test, and build lanes green
 - no dirty working tree required to pass proof lanes for the committed state being scored
 
 ### 2. Migration governance is clean
@@ -107,6 +107,7 @@ Environment-gated DB/integration lanes are allowed to be omitted **only if they 
 This includes:
 
 - promoted daemon truth lanes
+- promoted GUI truth-rendering/source-authority proof lane
 - promoted broker/adapter proof lanes
 - promoted DB proof lanes
 - promoted MD ingest/sync proof lanes

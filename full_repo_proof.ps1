@@ -392,7 +392,7 @@ $alwaysRequiredLaneNames = @(
     'Runtime proof lane',
     'Broker Alpaca proof lane',
     'Market data proof lane',
-    'GUI typecheck + build',
+    'GUI typecheck + truth tests + build',
     'Ignored-proof guard',
     'Unsafe-pattern guard'
 )
@@ -546,11 +546,12 @@ Invoke-ProofLane -Name 'Market data proof lane' -Required $true -Action {
     Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('test', '--manifest-path', $cargoManifest, '-p', 'mqk-db', '--test', 'scenario_md_ingest_provider', '--', '--test-threads=1') -WorkingDirectory $repoRoot
 }
 
-Invoke-ProofLane -Name 'GUI typecheck + build' -Required $true -Action {
+Invoke-ProofLane -Name 'GUI typecheck + truth tests + build' -Required $true -Action {
     Invoke-NativeCommand -FilePath $script:NpxExe -Arguments @('tsc', '--noEmit') -WorkingDirectory $guiDir
+    Invoke-NativeCommand -FilePath $script:NpmExe -Arguments @('run', 'test') -WorkingDirectory $guiDir
     Invoke-NativeCommand -FilePath $script:NpmExe -Arguments @('run', 'build') -WorkingDirectory $guiDir
-    Write-Host 'GUI typecheck + build' -ForegroundColor Green
-    return (New-LaneNote -Note 'GUI typecheck + build')
+    Write-Host 'GUI typecheck + truth tests + build passed.' -ForegroundColor Green
+    return (New-LaneNote -Note 'GUI truth tests executed via npm run test (sourceAuthority.test.ts, truthRendering.test.ts, api.test.ts); GUI typecheck + build passed.')
 }
 
 Invoke-ProofLane -Name 'Ignored-proof guard' -Required $true -Action {

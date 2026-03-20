@@ -73,7 +73,7 @@ For the current MiniQuantDesk V4 locked scope, the authoritative proof bundle is
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - workspace tests
-- GUI typecheck/build lanes
+- GUI typecheck/truth-test/build lanes
 - targeted daemon/runtime/broker/market-data proof lanes
 - safety guards
 - the current canonical full proof runner: `full_repo_proof.ps1`
