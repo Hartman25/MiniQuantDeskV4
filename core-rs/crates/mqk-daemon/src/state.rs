@@ -1694,6 +1694,10 @@ impl AppState {
         !self.integrity.read().await.is_execution_blocked()
     }
 
+    pub(crate) async fn lifecycle_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.lifecycle_op.lock().await
+    }
+
     fn db_pool(&self) -> Result<PgPool, RuntimeLifecycleError> {
         self.db.clone().ok_or_else(|| {
             RuntimeLifecycleError::service_unavailable(
@@ -1826,39 +1830,68 @@ impl AppState {
             *sides_lock = recovered_sides.clone();
         }
 
+        let daemon_broker = build_daemon_broker(
+            self.runtime_selection.broker_kind,
+            self.runtime_selection.deployment_mode,
+        )?;
+
         // AP-04: Broker snapshot seeding differs by truth source.
         //
         // Synthetic (paper): if no snapshot is loaded, synthesize one from recovered
-        //   OMS + portfolio truth.  The paper fill engine IS the broker, so local
+        //   OMS + portfolio truth. The paper fill engine IS the broker, so local
         //   state exactly equals broker truth.
         //
-        // External (Alpaca): do NOT synthesize.  Local OMS state does not equal
-        //   external broker truth.  If no snapshot is loaded, execution start is
-        //   refused with an explicit error so the operator knows a real snapshot fetch
-        //   is required first.  (Note: external broker execution is currently
-        //   fail-closed at build_daemon_broker; this guard establishes correct
-        //   semantics for when that restriction is lifted.)
-        let broker_seed = {
-            let broker_snapshot_guard = self.broker_snapshot.read().await;
-            if let Some(existing) = broker_snapshot_guard.clone() {
-                existing
-            } else if self.broker_snapshot_source == BrokerSnapshotTruthSource::Synthetic {
-                drop(broker_snapshot_guard);
+        // External (Alpaca): fetch a fresh real broker snapshot at runtime start.
+        //   This removes the current dependence on prior dev-only snapshot injection
+        //   and ensures the daemon starts from authoritative external broker truth.
+        let broker_seed = match self.broker_snapshot_source {
+            BrokerSnapshotTruthSource::Synthetic => {
+                let broker_snapshot_guard = self.broker_snapshot.read().await;
+                if let Some(existing) = broker_snapshot_guard.clone() {
+                    existing
+                } else {
+                    drop(broker_snapshot_guard);
+                    let now = Utc::now();
+                    let synth = synthesize_paper_broker_snapshot(
+                        &oms_orders,
+                        &recovered_sides,
+                        &portfolio,
+                        now,
+                    );
+                    *self.broker_snapshot.write().await = Some(synth.clone());
+                    synth
+                }
+            }
+            BrokerSnapshotTruthSource::External => {
                 let now = Utc::now();
-                let synth = synthesize_paper_broker_snapshot(
-                    &oms_orders,
-                    &recovered_sides,
-                    &portfolio,
-                    now,
-                );
-                *self.broker_snapshot.write().await = Some(synth.clone());
-                synth
-            } else {
-                return Err(RuntimeLifecycleError::service_unavailable(
-                    "runtime.start_refused.no_external_broker_snapshot",
-                    "external broker kind requires a real broker snapshot before execution; \
-                     call fetch_broker_snapshot first to populate broker truth",
-                ));
+                let fetched = match &daemon_broker {
+                    DaemonBroker::Alpaca(adapter) => {
+                        adapter.fetch_broker_snapshot(now).map_err(|err| match err {
+                            BrokerError::AuthSession { detail } => RuntimeLifecycleError::forbidden(
+                                "runtime.start_refused.alpaca_snapshot_auth",
+                                "broker_snapshot_fetch",
+                                format!(
+                                    "failed to fetch Alpaca broker snapshot before runtime start: {detail}"
+                                ),
+                            ),
+                            other => RuntimeLifecycleError::service_unavailable(
+                                "runtime.start_refused.alpaca_snapshot_unavailable",
+                                format!(
+                                    "failed to fetch Alpaca broker snapshot before runtime start: {other}"
+                                ),
+                            ),
+                        })?
+                    }
+                    _ => {
+                        return Err(RuntimeLifecycleError::service_unavailable(
+                            "runtime.start_refused.broker_snapshot_source_mismatch",
+                            "external broker snapshot source requires Alpaca broker adapter construction",
+                        ))
+                    }
+                };
+
+                *self.broker_snapshot.write().await = Some(fetched.clone());
+                fetched
             }
         };
 
@@ -1876,19 +1909,13 @@ impl AppState {
 
         // AP-05: Derive daemon-owned WS continuity truth from the persisted cursor.
         // This is the authoritative initialization path — continuity state comes from
-        // the durable DB cursor, not from an in-memory default.  `ColdStartUnproven`
-        // is the correct default when no cursor has been written yet (fresh system or
-        // first run), not a synthetic "healthy" value.
+        // the durable DB cursor, not from an in-memory default. `ColdStartUnproven`
+        // is the correct default when no cursor has been written yet.
         let ws_continuity = AlpacaWsContinuityState::from_cursor_json(
             self.runtime_selection.broker_kind,
             broker_cursor.as_deref(),
         );
         *self.alpaca_ws_continuity.write().await = ws_continuity;
-
-        let daemon_broker = build_daemon_broker(
-            self.runtime_selection.broker_kind,
-            self.runtime_selection.deployment_mode,
-        )?;
 
         let gateway = build_gateway(
             daemon_broker,

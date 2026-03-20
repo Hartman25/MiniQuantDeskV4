@@ -33,16 +33,17 @@ use crate::{
         ActionCatalogEntry, ActionCatalogResponse, AuditArtifactRow, AuditArtifactsResponse,
         ConfigDiffsResponse, ConfigFingerprintResponse, DiagnosticsSnapshotResponse,
         ExecutionOrderRow, ExecutionSummaryResponse, FaultSignal, GateRefusedResponse,
-        HealthResponse, IntegrityResponse, OperatorActionAuditFields, OperatorActionAuditRow,
-        OperatorActionResponse, OperatorActionsAuditResponse, OperatorTimelineResponse,
-        OperatorTimelineRow, OpsActionRequest, PortfolioFillRow, PortfolioFillsResponse,
-        PortfolioOpenOrderRow, PortfolioOpenOrdersResponse, PortfolioPositionRow,
-        PortfolioPositionsResponse, PortfolioSummaryResponse, PreflightStatusResponse,
-        ReconcileMismatchRow, ReconcileMismatchesResponse, ReconcileSummaryResponse, RiskDenialRow,
-        RiskDenialsResponse, RiskSummaryResponse, RuntimeErrorResponse,
-        RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
-        StrategySummaryResponse, StrategySuppressionsResponse, SystemMetadataResponse,
-        SystemStatusResponse, TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
+        HealthResponse, IntegrityResponse, ManualOrderSubmitRequest, ManualOrderSubmitResponse,
+        OperatorActionAuditFields, OperatorActionAuditRow, OperatorActionResponse,
+        OperatorActionsAuditResponse, OperatorTimelineResponse, OperatorTimelineRow,
+        OpsActionRequest, PortfolioFillRow, PortfolioFillsResponse, PortfolioOpenOrderRow,
+        PortfolioOpenOrdersResponse, PortfolioPositionRow, PortfolioPositionsResponse,
+        PortfolioSummaryResponse, PreflightStatusResponse, ReconcileMismatchRow,
+        ReconcileMismatchesResponse, ReconcileSummaryResponse, RiskDenialRow, RiskDenialsResponse,
+        RiskSummaryResponse, RuntimeErrorResponse, RuntimeLeadershipCheckpointRow,
+        RuntimeLeadershipResponse, SessionStateResponse, StrategySummaryResponse,
+        StrategySuppressionsResponse, SystemMetadataResponse, SystemStatusResponse,
+        TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
         TradingPositionsResponse, TradingSnapshotResponse,
     },
     state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot},
@@ -185,6 +186,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/run/halt", post(run_halt))
         .route("/v1/integrity/arm", post(integrity_arm))
         .route("/v1/integrity/disarm", post(integrity_disarm))
+        .route("/api/v1/execution/orders", post(execution_order_submit))
         // Canonical operator action dispatcher (GUI primary path).
         // Dispatches arm/disarm/start/stop/halt. Returns 409 for change-system-mode
         // (not authoritative: requires controlled restart). Returns 400 for unknown keys.
@@ -1401,6 +1403,339 @@ pub(crate) async fn execution_orders(State(st): State<Arc<AppState>>) -> impl In
         .collect();
 
     (StatusCode::OK, Json(rows)).into_response()
+}
+
+pub(crate) async fn execution_order_submit(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<ManualOrderSubmitRequest>,
+) -> Response {
+    let validated = match validate_manual_order_submit(body) {
+        Ok(validated) => validated,
+        Err((client_request_id, blockers)) => {
+            return manual_order_submit_response(
+                StatusCode::BAD_REQUEST,
+                false,
+                "rejected",
+                client_request_id,
+                None,
+                blockers,
+            );
+        }
+    };
+
+    let _lifecycle = st.lifecycle_guard().await;
+
+    let Some(db) = st.db.as_ref() else {
+        return manual_order_submit_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            false,
+            "unavailable",
+            validated.client_request_id,
+            None,
+            vec!["durable execution DB truth is unavailable on this daemon".to_string()],
+        );
+    };
+
+    let (durable_arm_state, durable_arm_reason) = match mqk_db::load_arm_state(db).await {
+        Ok(Some((state, reason))) => (state, reason),
+        Ok(None) => {
+            return manual_order_submit_response(
+                StatusCode::FORBIDDEN,
+                false,
+                "rejected",
+                validated.client_request_id,
+                None,
+                vec![
+                    "execution order submit refused: durable arm state is not armed; fresh systems default to disarmed until explicitly armed"
+                        .to_string(),
+                ],
+            );
+        }
+        Err(err) => {
+            return manual_order_submit_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                "unavailable",
+                validated.client_request_id,
+                None,
+                vec![format!(
+                    "execution order submit unavailable: durable arm-state truth could not be loaded: {err}"
+                )],
+            );
+        }
+    };
+
+    if durable_arm_state != "ARMED" {
+        let blocker = match durable_arm_reason.as_deref() {
+            Some("OperatorHalt") => {
+                "execution order submit refused: durable arm state is halted".to_string()
+            }
+            Some(reason) => {
+                format!("execution order submit refused: durable arm state is disarmed ({reason})")
+            }
+            None => "execution order submit refused: durable arm state is not armed".to_string(),
+        };
+        return manual_order_submit_response(
+            StatusCode::FORBIDDEN,
+            false,
+            "rejected",
+            validated.client_request_id,
+            None,
+            vec![blocker],
+        );
+    }
+
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return manual_order_submit_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                false,
+                "unavailable",
+                validated.client_request_id,
+                None,
+                vec![err.to_string()],
+            );
+        }
+    };
+
+    let Some(active_run_id) = status.active_run_id else {
+        return manual_order_submit_response(
+            StatusCode::CONFLICT,
+            false,
+            "unavailable",
+            validated.client_request_id,
+            None,
+            vec!["execution order submit refused: no active durable run is available".to_string()],
+        );
+    };
+
+    if status.state != "running" {
+        let mut blockers = vec![format!(
+            "execution order submit refused: runtime state '{}' is not accepting operator orders",
+            status.state
+        )];
+        if let Some(note) = status.notes {
+            blockers.push(note);
+        }
+        return manual_order_submit_response(
+            StatusCode::CONFLICT,
+            false,
+            "unavailable",
+            validated.client_request_id,
+            Some(active_run_id),
+            blockers,
+        );
+    }
+
+    let order_json = validated.order_json();
+    match mqk_db::outbox_enqueue(db, active_run_id, &validated.client_request_id, order_json).await
+    {
+        Ok(true) => manual_order_submit_response(
+            StatusCode::OK,
+            true,
+            "enqueued",
+            validated.client_request_id,
+            Some(active_run_id),
+            vec![],
+        ),
+        Ok(false) => {
+            let mut blockers = vec![format!(
+                "client_request_id '{}' already exists; no new outbox row was created",
+                validated.client_request_id
+            )];
+            if let Ok(Some(existing)) =
+                mqk_db::outbox_fetch_by_idempotency_key(db, &validated.client_request_id).await
+            {
+                if existing.run_id != active_run_id {
+                    blockers.push(format!(
+                        "existing order intent is already bound to durable run {}",
+                        existing.run_id
+                    ));
+                }
+            }
+            manual_order_submit_response(
+                StatusCode::OK,
+                false,
+                "duplicate",
+                validated.client_request_id,
+                Some(active_run_id),
+                blockers,
+            )
+        }
+        Err(err) => manual_order_submit_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            false,
+            "unavailable",
+            validated.client_request_id,
+            Some(active_run_id),
+            vec![format!("outbox enqueue failed: {err}")],
+        ),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedManualOrderSubmit {
+    client_request_id: String,
+    symbol: String,
+    side: String,
+    qty: i64,
+    order_type: String,
+    time_in_force: String,
+    limit_price: Option<i64>,
+}
+
+impl ValidatedManualOrderSubmit {
+    fn order_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "symbol": self.symbol,
+            "side": self.side,
+            "qty": self.qty,
+            "order_type": self.order_type,
+            "time_in_force": self.time_in_force,
+            "limit_price": self.limit_price,
+        })
+    }
+}
+
+fn validate_manual_order_submit(
+    body: ManualOrderSubmitRequest,
+) -> Result<ValidatedManualOrderSubmit, (String, Vec<String>)> {
+    let client_request_id = body.client_request_id.trim().to_string();
+    let mut blockers = Vec::new();
+
+    if client_request_id.is_empty() {
+        blockers.push("client_request_id is required".to_string());
+    }
+
+    let symbol = body.symbol.trim().to_string();
+    if symbol.is_empty() {
+        blockers.push("symbol must not be blank".to_string());
+    }
+
+    let side = body.side.trim().to_ascii_lowercase();
+    if !matches!(side.as_str(), "buy" | "sell") {
+        blockers.push("side must be one of: buy, sell".to_string());
+    }
+
+    let qty = match parse_integer_field("qty", &body.qty) {
+        Ok(value) => {
+            if value <= 0 {
+                blockers.push("qty must be positive".to_string());
+                None
+            } else if value > i32::MAX as i64 {
+                blockers.push("qty is out of range for broker request".to_string());
+                None
+            } else {
+                Some(value)
+            }
+        }
+        Err(err) => {
+            blockers.push(err);
+            None
+        }
+    };
+
+    let order_type = body
+        .order_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("market")
+        .to_ascii_lowercase();
+    if !matches!(order_type.as_str(), "market" | "limit") {
+        blockers.push("order_type must be one of: market, limit".to_string());
+    }
+
+    let time_in_force = body
+        .time_in_force
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("day")
+        .to_ascii_lowercase();
+    if !matches!(
+        time_in_force.as_str(),
+        "day" | "gtc" | "ioc" | "fok" | "opg" | "cls"
+    ) {
+        blockers.push("time_in_force must be one of: day, gtc, ioc, fok, opg, cls".to_string());
+    }
+
+    let limit_price = match body.limit_price.as_ref() {
+        Some(value) => match parse_integer_field("limit_price", value) {
+            Ok(parsed) => {
+                if parsed <= 0 {
+                    blockers.push("limit_price must be positive".to_string());
+                    None
+                } else {
+                    Some(parsed)
+                }
+            }
+            Err(err) => {
+                blockers.push(err);
+                None
+            }
+        },
+        None => None,
+    };
+
+    match order_type.as_str() {
+        "market" if body.limit_price.is_some() => {
+            blockers.push("market order must not carry limit_price".to_string());
+        }
+        "limit" if limit_price.is_none() => {
+            blockers.push("limit order must carry limit_price".to_string());
+        }
+        _ => {}
+    }
+
+    if !blockers.is_empty() {
+        return Err((client_request_id, blockers));
+    }
+
+    Ok(ValidatedManualOrderSubmit {
+        client_request_id,
+        symbol,
+        side,
+        qty: qty.expect("validated qty"),
+        order_type,
+        time_in_force,
+        limit_price,
+    })
+}
+
+fn parse_integer_field(name: &str, value: &serde_json::Value) -> Result<i64, String> {
+    match value {
+        serde_json::Value::Number(number) => number
+            .as_i64()
+            .ok_or_else(|| format!("{name} must be an integer without lossy conversion")),
+        serde_json::Value::String(raw) => raw
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| format!("{name} must be an integer without lossy conversion")),
+        _ => Err(format!("{name} must be an integer-compatible value")),
+    }
+}
+
+fn manual_order_submit_response(
+    status: StatusCode,
+    accepted: bool,
+    disposition: &str,
+    client_request_id: String,
+    active_run_id: Option<uuid::Uuid>,
+    blockers: Vec<String>,
+) -> Response {
+    (
+        status,
+        Json(ManualOrderSubmitResponse {
+            accepted,
+            disposition: disposition.to_string(),
+            client_request_id,
+            active_run_id,
+            blockers,
+        }),
+    )
+        .into_response()
 }
 
 pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {

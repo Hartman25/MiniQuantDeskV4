@@ -595,6 +595,26 @@ pub struct ActionCatalogResponse {
 // /api/v1/execution/orders — canonical OMS order surface
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualOrderSubmitRequest {
+    pub client_request_id: String,
+    pub symbol: String,
+    pub side: String,
+    pub qty: serde_json::Value,
+    pub order_type: Option<String>,
+    pub time_in_force: Option<String>,
+    pub limit_price: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualOrderSubmitResponse {
+    pub accepted: bool,
+    pub disposition: String,
+    pub client_request_id: String,
+    pub active_run_id: Option<Uuid>,
+    pub blockers: Vec<String>,
+}
+
 /// One live order row sourced from the in-memory OMS runtime snapshot.
 ///
 /// Fields that are not present in the OMS snapshot are emitted as `null`:
