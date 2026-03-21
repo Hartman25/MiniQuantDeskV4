@@ -1,3 +1,0 @@
-[console_scripts]
-mqk-exp-dist = mqk_research.exp_distributed.cli:main
-mqk-research = mqk_research.cli:main

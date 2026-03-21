@@ -104,7 +104,8 @@ cargo_tomls.txt
 MiniQuantDeskV4__SOURCE.zip
 MiniQuantDeskV4_repo.zip
 MiniQuantDeskV4_core-rs.zip
-
+research-py/src/*.egg-info/
+*.egg-info/
 # -----------------------------
 # OS / editor junk
 # -----------------------------
