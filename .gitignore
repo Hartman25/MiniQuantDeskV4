@@ -121,3 +121,5 @@ Thumbs.db
 # Office temp/lock files only
 # -----------------------------
 ~$*.docx
+/full_repo_proof_output.txt
+/.proof/

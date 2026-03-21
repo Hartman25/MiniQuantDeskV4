@@ -4,9 +4,6 @@ param(
     [string]$ProofProfile = 'local'
 )
 
-$ErrorActionPreference = 'Stop'
-Set-StrictMode -Version Latest
-
 function New-LaneRecord {
     param(
         [Parameter(Mandatory = $true)]
@@ -339,6 +336,18 @@ function Invoke-ProofLane {
     }
 }
 
+$proofDir = Join-Path $PSScriptRoot ".proof"
+New-Item -ItemType Directory -Force -Path $proofDir | Out-Null
+$proofLog = Join-Path $proofDir "full_repo_proof_output.txt"
+$scriptExitCode = 0
+$preflightFailureReported = $false
+
+Start-Transcript -Path $proofLog -Force
+
+try {
+    $ErrorActionPreference = 'Stop'
+    Set-StrictMode -Version Latest
+
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $gitFromPath = Get-CommandPath -Name 'git'
 
@@ -448,12 +457,13 @@ try {
     Write-Host ("MQK_DATABASE_URL={0}" -f (Get-RedactedDbUrl -Url $dbUrl)) -ForegroundColor Green
 }
 catch {
+    $preflightFailureReported = $true
     Write-Host ''
     Write-Host '============================================================' -ForegroundColor Red
     Write-Host 'MiniQuantDesk V4 proof harness preflight FAILED' -ForegroundColor Red
     Write-Host '============================================================' -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
-    exit 1
+    throw
 }
 
 Invoke-ProofLane -Name 'Repo identity + working tree truth' -Required $true -Action {
@@ -784,7 +794,27 @@ else {
 }
 
 if ($hasRequiredExecutionFailure) {
-    exit 1
+    $scriptExitCode = 1
+}
+}
+catch {
+    $scriptExitCode = 1
+
+    if (-not $preflightFailureReported) {
+        Write-Host ''
+        Write-Host ("FATAL: {0}" -f $_.Exception.Message) -ForegroundColor Red
+        if ($_.ScriptStackTrace) {
+            Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+        }
+    }
+}
+finally {
+    try {
+        Stop-Transcript | Out-Null
+    }
+    catch {
+        # do nothing
+    }
 }
 
-exit 0
+exit $scriptExitCode
