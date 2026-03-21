@@ -1,0 +1,42 @@
+name: exp_meanrev_v1
+
+engine:
+  engine_id: "EXP"
+  canonical: false
+  readiness_bearing: false
+  operator_visible: false
+  capital_authoritative: false
+  invocation: "explicit_local_only"
+
+strategy:
+  family: "mean_reversion"
+  description: "EXP-only sandbox mean-reversion engine with isolated local backtest flow."
+  params:
+    lookback: 20
+    zscore_entry: 1.8
+    zscore_exit: 0.3
+
+execution:
+  fees:
+    spread_bps: 4.0
+    slippage_bps: 7.0
+
+inputs:
+  sample_bars_csv: "sample_bars.csv"
+  asof_utc: "2026-01-02T09:30:00Z"
+  timeframe: "5m"
+  symbol: "SPY"
+
+outputs:
+  root_dir: "runs/EXP/exp_meanrev_v1"
+  write_manifest: true
+  write_signal_pack: true
+  write_trades: true
+  write_equity_curve: true
+  write_metrics: true
+
+notes:
+  - "EXP-only sandbox experiment."
+  - "Non-canonical and non-readiness-bearing."
+  - "Must not be treated as operator-authoritative."
+  - "No daemon, runtime, DB, or GUI wiring in this patch."
