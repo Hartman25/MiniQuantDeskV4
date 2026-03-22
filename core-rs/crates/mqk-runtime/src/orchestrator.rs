@@ -427,7 +427,7 @@ where
         let apply_queue = build_canonical_apply_queue(unapplied)?;
 
         // Phase 3b: apply in canonical order.
-        for (_inbox_id, msg_id, event) in apply_queue {
+        for (_inbox_id, msg_id, event, fill_received_at_utc) in apply_queue {
             self.refresh_or_acquire_runtime_leadership().await?;
             let internal_id = event.internal_order_id().to_string();
             // Steps 6+7: OMS context guard → portfolio apply (Section C).
@@ -498,6 +498,31 @@ where
             if apply_outcome.terminal_apply_succeeded {
                 mqk_db::broker_map_remove(&self.pool, &internal_id).await?;
                 remove_broker_mapping_from_memory(&mut self.order_map, &internal_id);
+            }
+            // TV-EXEC-01: best-effort fill-quality telemetry write.
+            // Only emitted for Fill/PartialFill events — no fabrication for
+            // non-fill events. Failure is non-fatal (logged and swallowed) so
+            // that telemetry errors cannot corrupt the primary execution path.
+            if let Some(telemetry_row) = build_fill_quality_row(
+                self.run_id,
+                &msg_id,
+                &event,
+                fill_received_at_utc,
+                &self.pool,
+                self.time_source.now_utc(),
+            )
+            .await
+            {
+                if let Err(e) =
+                    mqk_db::insert_fill_quality_telemetry(&self.pool, &telemetry_row).await
+                {
+                    tracing::warn!(
+                        run_id = %self.run_id,
+                        broker_message_id = %msg_id,
+                        error = %e,
+                        "TV-EXEC-01: fill_quality_telemetry write failed (non-fatal)"
+                    );
+                }
             }
             // Step 9: commit - mark the inbox row as applied.
             mqk_db::inbox_mark_applied(
@@ -1319,17 +1344,21 @@ fn broker_event_to_oms_event(event: &BrokerEvent) -> OmsEvent {
 ///
 /// Returns `None` for non-fill events (Ack, CancelAck, etc.).
 /// Degenerate fills with `delta_qty <= 0` are rejected.
+type ApplyQueueEntry = (i64, String, BrokerEvent, chrono::DateTime<chrono::Utc>);
+
 fn build_canonical_apply_queue(
     unapplied: Vec<mqk_db::InboxRow>,
-) -> anyhow::Result<Vec<(i64, String, BrokerEvent)>> {
-    let mut apply_queue: Vec<(i64, String, BrokerEvent)> = Vec::with_capacity(unapplied.len());
+) -> anyhow::Result<Vec<ApplyQueueEntry>> {
+    let mut apply_queue: Vec<ApplyQueueEntry> =
+        Vec::with_capacity(unapplied.len());
     for row in unapplied {
         let inbox_id = row.inbox_id;
         let msg_id = row.broker_message_id;
+        let received_at = row.received_at_utc;
         let event: BrokerEvent = serde_json::from_value(row.message_json)?;
-        apply_queue.push((inbox_id, msg_id, event));
+        apply_queue.push((inbox_id, msg_id, event, received_at));
     }
-    apply_queue.sort_by_key(|(inbox_id, _, _)| *inbox_id);
+    apply_queue.sort_by_key(|(inbox_id, _, _, _)| *inbox_id);
 
     for pair in apply_queue.windows(2) {
         if pair[0].0 == pair[1].0 {
@@ -1340,6 +1369,139 @@ fn build_canonical_apply_queue(
         }
     }
     Ok(apply_queue)
+}
+
+/// Build a `NewFillQualityTelemetry` row for a Fill or PartialFill event.
+///
+/// Returns `None` for all other event kinds — no fabrication for non-fill events.
+///
+/// Outbox lookup is best-effort: if the row is absent or the DB call fails,
+/// submit_ts_utc / reference_price / ordered_qty fall back to None / null.
+async fn build_fill_quality_row(
+    run_id: Uuid,
+    broker_message_id: &str,
+    event: &BrokerEvent,
+    fill_received_at_utc: chrono::DateTime<chrono::Utc>,
+    pool: &PgPool,
+    now_utc: chrono::DateTime<chrono::Utc>,
+) -> Option<mqk_db::NewFillQualityTelemetry> {
+    // Only emit telemetry for fill events.
+    let (internal_order_id, broker_order_id, broker_fill_id, symbol, side_str, fill_qty, fill_price_micros, fill_kind) =
+        match event {
+            BrokerEvent::Fill {
+                internal_order_id,
+                broker_order_id,
+                broker_fill_id,
+                symbol,
+                side,
+                delta_qty,
+                price_micros,
+                ..
+            } => (
+                internal_order_id.clone(),
+                broker_order_id.clone(),
+                broker_fill_id.clone(),
+                symbol.clone(),
+                side_to_str(side),
+                *delta_qty,
+                *price_micros,
+                "final_fill",
+            ),
+            BrokerEvent::PartialFill {
+                internal_order_id,
+                broker_order_id,
+                broker_fill_id,
+                symbol,
+                side,
+                delta_qty,
+                price_micros,
+                ..
+            } => (
+                internal_order_id.clone(),
+                broker_order_id.clone(),
+                broker_fill_id.clone(),
+                symbol.clone(),
+                side_to_str(side),
+                *delta_qty,
+                *price_micros,
+                "partial_fill",
+            ),
+            _ => return None,
+        };
+
+    // Skip degenerate fill events — same guard as broker_event_to_fill.
+    if fill_qty <= 0 {
+        return None;
+    }
+
+    // Best-effort outbox lookup to derive ordered_qty, reference_price, submit_ts.
+    let (ordered_qty, reference_price_micros, submit_ts_utc) =
+        match mqk_db::outbox_fetch_by_idempotency_key(pool, &internal_order_id).await {
+            Ok(Some(outbox)) => {
+                let ordered_qty = outbox
+                    .order_json
+                    .get("qty")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(fill_qty);
+                let reference_price_micros = outbox
+                    .order_json
+                    .get("limit_price")
+                    .and_then(|v| v.as_i64());
+                (ordered_qty, reference_price_micros, outbox.sent_at_utc)
+            }
+            _ => (fill_qty, None, None),
+        };
+
+    // Slippage in bps — only meaningful when a reference (limit) price exists.
+    // slippage = (fill_price - reference_price) / reference_price * 10_000
+    // For a buy: positive = paid more than limit (adverse); for sell: positive = received more.
+    let slippage_bps = reference_price_micros.and_then(|ref_price| {
+        if ref_price == 0 {
+            return None;
+        }
+        let diff = fill_price_micros - ref_price;
+        Some(diff * 10_000 / ref_price)
+    });
+
+    // Submit-to-fill latency in ms.
+    let submit_to_fill_ms = submit_ts_utc.map(|submit| {
+        (fill_received_at_utc - submit).num_milliseconds()
+    });
+
+    // Deterministic telemetry_id — idempotent on replay.
+    let telemetry_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        format!("mqk.fill-quality.v1|{}|{}", run_id, broker_message_id).as_bytes(),
+    );
+
+    Some(mqk_db::NewFillQualityTelemetry {
+        telemetry_id,
+        run_id,
+        internal_order_id,
+        broker_order_id,
+        broker_fill_id,
+        broker_message_id: broker_message_id.to_string(),
+        symbol,
+        side: side_str.to_string(),
+        ordered_qty,
+        fill_qty,
+        fill_price_micros,
+        reference_price_micros,
+        slippage_bps,
+        submit_ts_utc,
+        fill_received_at_utc,
+        submit_to_fill_ms,
+        fill_kind: fill_kind.to_string(),
+        provenance_ref: format!("oms_inbox:{}", broker_message_id),
+        created_at_utc: now_utc,
+    })
+}
+
+fn side_to_str(side: &mqk_execution::Side) -> &'static str {
+    match side {
+        mqk_execution::Side::Buy => "buy",
+        mqk_execution::Side::Sell => "sell",
+    }
 }
 
 fn broker_event_to_fill(event: &BrokerEvent) -> Option<Fill> {

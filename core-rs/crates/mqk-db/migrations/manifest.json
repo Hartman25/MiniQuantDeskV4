@@ -176,6 +176,12 @@
       "path": "0027_strategy_suppressions.sql",
       "status": "applied",
       "intent": "Add durable sys_strategy_suppressions table for restart-safe strategy suppression persistence (CC-02)."
+    },
+    {
+      "id": "0028",
+      "path": "0028_fill_quality_telemetry.sql",
+      "status": "applied",
+      "intent": "Add fill_quality_telemetry table for durable, per-fill execution quality telemetry (TV-EXEC-01): actual price, timing, slippage, and provenance per fill event."
     }
   ]
 }
