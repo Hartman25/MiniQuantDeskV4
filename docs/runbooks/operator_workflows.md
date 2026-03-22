@@ -197,12 +197,17 @@ a fresh reconcile and disarm/arm cycle before the next start.
 
 ### Step 1 — Halt the execution runtime
 
+**Option A — direct halt route:**
+
 ```
 POST /v1/run/halt
 Authorization: Bearer <MQK_OPERATOR_TOKEN>
 ```
 
-OR via the action dispatcher:
+Response type: `StatusSnapshot`.
+Expected: `state == "halted"`, `integrity_armed == false`.
+
+**Option B — action dispatcher:**
 
 ```
 POST /api/v1/ops/action
@@ -210,11 +215,23 @@ Authorization: Bearer <MQK_OPERATOR_TOKEN>
 {"action_key": "kill-switch"}
 ```
 
-Expected response: StatusSnapshot with `state == "halted"` and
-`integrity_armed == false`.
+Response type: `OperatorActionResponse` (not StatusSnapshot).
+Expected: `accepted == true`, `disposition == "applied"`.
+The `audit.durable_targets` field will list `"audit_events"` when DB is
+present, but the audit_events row is only written if a run was active at
+halt time (see Durable audit note below).
 
 503 means DB is not configured — halt requires DB authority to persist the
 halt record durably.
+
+**Durable audit note:**
+The primary durable halt record is written to `sys_arm_state`
+(reason: OperatorHalt).  A `run.halt` audit event in `audit_events`
+(visible via `GET /api/v1/audit/operator-actions`) is only written if an
+active run was present when halt was triggered.  After halt, the HALTED
+runtime transition is always visible in `GET /api/v1/ops/operator-timeline`
+as a `kind="runtime_transition"` row with `detail="HALTED"` (sourced from
+the `runs` table).
 
 ### Step 2 — Verify halted
 

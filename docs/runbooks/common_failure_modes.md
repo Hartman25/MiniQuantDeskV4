@@ -131,8 +131,15 @@ This means a halt was persisted durably.  The daemon will refuse to start
 until the operator explicitly re-arms.
 
 Before re-arming after a halt:
-1. Inspect `GET /control/status` for `deadman_reason`.
-2. Inspect `GET /api/v1/audit/operator-actions` for the halt audit record.
+1. Inspect `GET /control/status` for `deadman_reason` and `deadman_armed_state`.
+   This is the primary durable halt record (persisted in `sys_arm_state`).
+2. Inspect `GET /api/v1/ops/operator-timeline` for the HALTED runtime transition.
+   Look for `kind="runtime_transition"` with `detail="HALTED"` — this row is
+   always written (sourced from the `runs` table) regardless of whether a run
+   was active at halt time.
+   Note: `GET /api/v1/audit/operator-actions` may contain a `run.halt` event
+   only if a run was active when halt was triggered.  Do not rely on it as the
+   primary halt record.
 3. Verify positions are flat or in a known safe state.
 4. Reconcile: `GET /api/v1/reconcile/status` must be clean.
 5. Only then arm: `POST /v1/integrity/arm`.
