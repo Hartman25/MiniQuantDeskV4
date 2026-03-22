@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional
+import hashlib
 import json
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 
 # Stable interface contract version for Research output artifacts.
@@ -100,3 +102,405 @@ def validate_contract_version(version: str) -> None:
             f"Research contract version mismatch: expected={CONTRACT_VERSION} got={version}. "
             "Refusing to write artifacts."
         )
+
+
+# ---------------------------------------------------------------------------
+# TV-01: Promoted Artifact Contract
+#
+# A promoted artifact has ONE stable identity, ONE canonical manifest, and
+# ONE explicit layout rule.  Producer and consumer share this contract.
+# ---------------------------------------------------------------------------
+
+# Schema version for the promoted artifact manifest.
+# Bump to "promoted-v2" only with an explicit migration path — never silently
+# change field semantics under an existing version string.
+PROMOTED_ARTIFACT_CONTRACT_VERSION: str = "promoted-v1"
+
+# Required files for a signal_pack promoted artifact.
+# Any consumer must verify these exist before treating the artifact as valid.
+SIGNAL_PACK_REQUIRED_FILES: List[str] = [
+    "signals.csv",
+    "signal_pack.json",
+    "promoted_manifest.json",
+]
+
+
+@dataclass(frozen=True)
+class PromotedArtifactLineage:
+    """
+    Lineage captured at promotion time.
+
+    Links a promoted artifact back to its research-side origin so any consumer
+    can trace what produced it.  All IDs here are content-addressed — they are
+    derived from file content, not from wall-clock time or random values.
+    """
+    # Content-addressed ID of signal_pack.json (sha256_json of the full dict).
+    # This is also the artifact_id and the directory name.
+    signal_pack_id: str
+    # Schema version string from signal_pack.json (e.g. "signal_pack_v1").
+    signal_pack_schema_version: str
+    # dataset_id from signal_pack.json ids block, if present.
+    dataset_id: Optional[str]
+    # model_id from signal_pack.json ids block, if present.
+    model_id: Optional[str]
+    # Path from project_root to the research run dir that was promoted.
+    # Relative (posix) where possible; absolute fallback if run_dir is outside project_root.
+    source_dir: str
+
+
+@dataclass(frozen=True)
+class PromotedArtifactManifest:
+    """
+    Canonical manifest written to promoted/signal_packs/<artifact_id>/promoted_manifest.json.
+
+    This is the single authoritative contract that any consumer reads to understand:
+    - what artifact this is (artifact_id, artifact_type, schema_version)
+    - what stage produced it (stage, produced_by)
+    - where its files are (data_root, required_files, optional_files)
+    - where it came from (lineage)
+
+    Layout rule: given artifact_id, data lives at:
+        <project_root>/<data_root>/  ==  promoted/signal_packs/<artifact_id>/
+
+    The data_root field makes this rule explicit and portable — consumers never
+    need to reconstruct the path from scratch.
+
+    schema_version identifies the contract format.  Never change field semantics
+    without bumping to "promoted-v2" and writing an explicit migration path.
+
+    artifact_id is content-addressed (= sha256_json(signal_pack.json)) and
+    deterministic.  It is both the directory name and the canonical ID.
+    """
+    schema_version: str        # always PROMOTED_ARTIFACT_CONTRACT_VERSION
+    artifact_id: str           # content-addressed, deterministic; also the directory name
+    artifact_type: str         # "signal_pack"
+    stage: str                 # always "promoted"
+    produced_by: str           # always "research-py"
+    data_root: str             # posix-relative: promoted/signal_packs/<artifact_id>
+    required_files: List[str]  # files that MUST exist for a valid artifact
+    optional_files: List[str]  # files that MAY exist (empty until future additions)
+    lineage: PromotedArtifactLineage
+    produced_at_utc: str       # ISO-8601 UTC; informational only, not a key field
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_json(self, *, indent: int = 2) -> str:
+        return _json_dumps_deterministic(self.to_dict(), indent=indent)
+
+
+def derive_artifact_id(artifact_type: str, source_id: str) -> str:
+    """
+    Derive the canonical artifact_id from artifact_type and source content hash.
+
+    For signal_pack artifacts:
+        source_id = sha256_json(signal_pack_dict)  (the content-addressed ID of signal_pack.json)
+        artifact_id = derive_artifact_id("signal_pack", source_id) = source_id
+
+    The function is an identity for single-type IDs.  It exists to make the
+    derivation rule explicit rather than relying on the implicit convention that
+    "we just use sha256_json(sp)".  If the scheme ever changes (e.g. type-namespaced
+    IDs), update this function; all callers automatically update.
+
+    Returns: the full 64-char hex SHA256 of source_id (= source_id itself for
+    signal_pack, since source_id is already the authoritative content hash).
+    """
+    # Signal_pack artifact_id is the content hash of signal_pack.json.
+    # Encoding the type here ensures future multi-type namespacing works correctly
+    # while keeping backward compatibility: sha256({"artifact_type": "signal_pack",
+    # "source_id": <sp_sha256>}) is stable and distinct from any other type.
+    payload = json.dumps(
+        {"artifact_type": artifact_type, "source_id": source_id},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def read_promoted_manifest(manifest_path: Path) -> PromotedArtifactManifest:
+    """
+    Consumer reader: load and validate a promoted_manifest.json.
+
+    This is the canonical consumer entry point.  Any downstream stage
+    (backtest, execution-facing tooling, shadow pipeline) should use this
+    function rather than reading the JSON directly.
+
+    The caller locates the manifest at:
+        <project_root>/<data_root>/promoted_manifest.json
+    or equivalently:
+        promoted/signal_packs/<artifact_id>/promoted_manifest.json
+
+    Raises:
+        FileNotFoundError: manifest_path does not exist.
+        ValueError: schema_version or stage field does not match expected values.
+    Returns:
+        PromotedArtifactManifest with all fields populated and validated.
+    """
+    manifest_path = Path(manifest_path)
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"promoted_manifest.json not found: {manifest_path}")
+
+    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    sv = raw.get("schema_version")
+    if sv != PROMOTED_ARTIFACT_CONTRACT_VERSION:
+        raise ValueError(
+            f"promoted_manifest schema_version mismatch: "
+            f"expected={PROMOTED_ARTIFACT_CONTRACT_VERSION!r} got={sv!r}"
+        )
+
+    stage = raw.get("stage")
+    if stage != "promoted":
+        raise ValueError(f"promoted_manifest stage must be 'promoted', got {stage!r}")
+
+    lin = raw.get("lineage", {})
+    lineage = PromotedArtifactLineage(
+        signal_pack_id=lin["signal_pack_id"],
+        signal_pack_schema_version=lin["signal_pack_schema_version"],
+        dataset_id=lin.get("dataset_id"),
+        model_id=lin.get("model_id"),
+        source_dir=lin["source_dir"],
+    )
+
+    return PromotedArtifactManifest(
+        schema_version=raw["schema_version"],
+        artifact_id=raw["artifact_id"],
+        artifact_type=raw["artifact_type"],
+        stage=raw["stage"],
+        produced_by=raw["produced_by"],
+        data_root=raw["data_root"],
+        required_files=raw["required_files"],
+        optional_files=raw.get("optional_files", []),
+        lineage=lineage,
+        produced_at_utc=raw["produced_at_utc"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# TV-02: Deployability Gate Contract
+#
+# A candidate artifact can be evaluated deterministically for minimum
+# tradability and sample adequacy.  The gate result is explicit,
+# machine-readable, and keyed to the canonical artifact_id from TV-01.
+#
+# Passing this gate does NOT prove edge, profitability, or live trust.
+# It only confirms minimum viable tradability and sample adequacy criteria.
+# ---------------------------------------------------------------------------
+
+# Schema version for the deployability gate result.
+# Bump to "gate-v2" only with an explicit migration path.
+DEPLOYABILITY_GATE_CONTRACT_VERSION: str = "gate-v1"
+
+
+@dataclass(frozen=True)
+class DeployabilityCheck:
+    """
+    One explicit, named check in the deployability gate.
+
+    Every check exposes the observed value, the threshold applied, and the
+    pass/fail result so any consumer can audit the decision without re-running
+    the evaluator.
+    """
+    name: str        # stable check identifier (e.g. "min_trade_count")
+    passed: bool     # True if the check passed
+    value: float     # observed metric value
+    threshold: float # threshold applied to determine pass/fail
+    note: str        # why this check matters; human-readable
+
+
+@dataclass(frozen=True)
+class DeployabilityGateResult:
+    """
+    Output of the deployability gate for a candidate artifact.
+
+    Keyed to the canonical artifact_id from TV-01 so any downstream consumer
+    can unambiguously associate this gate result with its artifact.
+
+    All checks are explicit and deterministic — the same input metrics and
+    the same config always produce the same result.
+
+    passed=True means this artifact meets minimum tradability and sample
+    adequacy criteria for downstream consideration.
+    passed=True is NOT proof of edge, profitability, or live trust.
+    passed=False means at least one explicit minimum criterion failed.
+    """
+    schema_version: str                   # always DEPLOYABILITY_GATE_CONTRACT_VERSION
+    artifact_id: str                      # canonical artifact ID (TV-01)
+    passed: bool                          # True iff all checks pass
+    checks: List[DeployabilityCheck]      # per-check results; all checks always present
+    overall_reason: str                   # summary of why passed or failed
+    evaluated_at_utc: str                 # ISO-8601 UTC; informational only
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_json(self, *, indent: int = 2) -> str:
+        return _json_dumps_deterministic(self.to_dict(), indent=indent)
+
+
+def read_deployability_gate(gate_path: Path) -> DeployabilityGateResult:
+    """
+    Consumer reader: load and validate a deployability_gate.json.
+
+    Raises:
+        FileNotFoundError: gate_path does not exist.
+        ValueError: schema_version does not match DEPLOYABILITY_GATE_CONTRACT_VERSION.
+    Returns:
+        DeployabilityGateResult with all checks populated.
+    """
+    gate_path = Path(gate_path)
+    if not gate_path.exists():
+        raise FileNotFoundError(f"deployability_gate.json not found: {gate_path}")
+
+    raw = json.loads(gate_path.read_text(encoding="utf-8"))
+
+    sv = raw.get("schema_version")
+    if sv != DEPLOYABILITY_GATE_CONTRACT_VERSION:
+        raise ValueError(
+            f"deployability_gate schema_version mismatch: "
+            f"expected={DEPLOYABILITY_GATE_CONTRACT_VERSION!r} got={sv!r}"
+        )
+
+    checks = [
+        DeployabilityCheck(
+            name=c["name"],
+            passed=bool(c["passed"]),
+            value=float(c["value"]),
+            threshold=float(c["threshold"]),
+            note=c["note"],
+        )
+        for c in raw.get("checks", [])
+    ]
+
+    return DeployabilityGateResult(
+        schema_version=raw["schema_version"],
+        artifact_id=raw["artifact_id"],
+        passed=bool(raw["passed"]),
+        checks=checks,
+        overall_reason=raw["overall_reason"],
+        evaluated_at_utc=raw["evaluated_at_utc"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# TV-03: Parity Evidence Contract
+#
+# The parity evidence manifest chains the full audit trail:
+#   artifact_id (TV-01) → gate result (TV-02) → shadow evidence → comparison basis
+#
+# This artifact records what evidence exists for a candidate's shadow/live
+# parity.  It does NOT claim live trust.
+#
+# live_trust_complete=False is the required state from this patch.
+# It can only become True when LO-03 operator proof is complete.
+# ---------------------------------------------------------------------------
+
+# Schema version for the parity evidence manifest.
+# Bump to "parity-v2" only with an explicit migration path.
+PARITY_EVIDENCE_CONTRACT_VERSION: str = "parity-v1"
+
+
+@dataclass(frozen=True)
+class ShadowEvidenceRef:
+    """
+    Reference to shadow evaluation evidence for a candidate artifact.
+
+    Uses an explicit evidence_available flag rather than fabricating metrics.
+    All score fields are Optional — None means "not computed", never zero.
+
+    When evidence_available=False, all score fields will be None.
+    When evidence_available=True, score fields may still be None if the
+    specific metric was not computed in the shadow evaluation run.
+    """
+    shadow_label_run_id: Optional[str]   # ID from shadow_label_meta.json (ids.label_run_id)
+    labeled_rows: Optional[int]          # row count of labeled targets.csv
+    precision: Optional[float]           # classification precision, if computed
+    recall: Optional[float]              # classification recall, if computed
+    f1: Optional[float]                  # F1 score, if computed
+    evidence_available: bool             # True iff shadow evaluation was actually run
+    evidence_note: str                   # brief description of what evidence exists/is missing
+
+
+@dataclass(frozen=True)
+class ParityEvidenceManifest:
+    """
+    Canonical parity evidence manifest.
+
+    Written to promoted/signal_packs/<artifact_id>/parity_evidence.json.
+
+    Chain of custody:
+        artifact_id       (TV-01 — canonical artifact identity)
+        → gate_passed     (TV-02 — deployability gate result)
+        → shadow_evidence (TV-03 — shadow evaluation reference)
+        → comparison_basis (what live-facing assessment this is against)
+
+    HONESTY CONSTRAINT:
+        live_trust_complete=False is the only valid state written by this patch.
+        Setting it True requires LO-03 operator proof and is not permitted here.
+
+        This manifest records what evidence exists and makes trust gaps explicit.
+        It does NOT certify the strategy for live capital deployment.
+    """
+    schema_version: str                 # always PARITY_EVIDENCE_CONTRACT_VERSION
+    artifact_id: str                    # canonical artifact ID (TV-01)
+    gate_passed: bool                   # TV-02 result; False = did not clear deployability gate
+    gate_schema_version: str            # schema_version from the TV-02 gate result (audit linkage)
+    shadow_evidence: ShadowEvidenceRef  # TV-03 shadow evidence reference
+    comparison_basis: str               # live-facing comparison description (explicit, not vague)
+    live_trust_complete: bool           # ALWAYS False; set only by LO-03 operator proof
+    live_trust_gaps: List[str]          # explicit remaining gaps before live trust is complete
+    produced_at_utc: str                # ISO-8601 UTC; informational only
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_json(self, *, indent: int = 2) -> str:
+        return _json_dumps_deterministic(self.to_dict(), indent=indent)
+
+
+def read_parity_evidence(evidence_path: Path) -> ParityEvidenceManifest:
+    """
+    Consumer reader: load and validate a parity_evidence.json.
+
+    Raises:
+        FileNotFoundError: evidence_path does not exist.
+        ValueError: schema_version does not match PARITY_EVIDENCE_CONTRACT_VERSION.
+    Returns:
+        ParityEvidenceManifest with all fields populated.
+    """
+    evidence_path = Path(evidence_path)
+    if not evidence_path.exists():
+        raise FileNotFoundError(f"parity_evidence.json not found: {evidence_path}")
+
+    raw = json.loads(evidence_path.read_text(encoding="utf-8"))
+
+    sv = raw.get("schema_version")
+    if sv != PARITY_EVIDENCE_CONTRACT_VERSION:
+        raise ValueError(
+            f"parity_evidence schema_version mismatch: "
+            f"expected={PARITY_EVIDENCE_CONTRACT_VERSION!r} got={sv!r}"
+        )
+
+    se = raw.get("shadow_evidence", {})
+    shadow_evidence = ShadowEvidenceRef(
+        shadow_label_run_id=se.get("shadow_label_run_id"),
+        labeled_rows=se.get("labeled_rows"),
+        precision=se.get("precision"),
+        recall=se.get("recall"),
+        f1=se.get("f1"),
+        evidence_available=bool(se["evidence_available"]),
+        evidence_note=se["evidence_note"],
+    )
+
+    return ParityEvidenceManifest(
+        schema_version=raw["schema_version"],
+        artifact_id=raw["artifact_id"],
+        gate_passed=bool(raw["gate_passed"]),
+        gate_schema_version=raw["gate_schema_version"],
+        shadow_evidence=shadow_evidence,
+        comparison_basis=raw["comparison_basis"],
+        live_trust_complete=bool(raw["live_trust_complete"]),
+        live_trust_gaps=list(raw["live_trust_gaps"]),
+        produced_at_utc=raw["produced_at_utc"],
+    )
