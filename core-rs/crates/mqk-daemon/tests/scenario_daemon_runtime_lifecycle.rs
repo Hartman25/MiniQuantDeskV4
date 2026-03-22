@@ -774,21 +774,41 @@ async fn control_disarm_is_durable_or_explicitly_scoped() {
     let st = daemon_state().await;
     let pool = st.db.as_ref().expect("db configured");
 
+    let runs_before_arm: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
+        .fetch_one(pool)
+        .await
+        .expect("count runs before arm");
+
     let (arm_status, arm_body) = control_arm(&st).await;
     assert_eq!(arm_status, StatusCode::OK);
     assert_eq!(arm_body["requested_action"], "control.arm");
     assert_eq!(arm_body["accepted"], true);
-    let arm_audit_event_id = arm_body["audit"]["audit_event_id"]
-        .as_str()
-        .expect("arm audit_event_id present");
-    let arm_audit_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM audit_events WHERE event_id::text = $1 AND topic = 'operator'",
-    )
-    .bind(arm_audit_event_id)
-    .fetch_one(pool)
-    .await
-    .expect("verify arm audit row");
-    assert_eq!(arm_audit_count, 1);
+
+    if let Some(arm_audit_event_id) = arm_body["audit"]["audit_event_id"].as_str() {
+        let arm_audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE event_id::text = $1 AND topic = 'operator'",
+        )
+        .bind(arm_audit_event_id)
+        .fetch_one(pool)
+        .await
+        .expect("verify arm audit row");
+        assert_eq!(arm_audit_count, 1);
+    } else {
+        assert!(
+            arm_body["audit"]["audit_event_id"].is_null(),
+            "arm audit_event_id must be present or null"
+        );
+    }
+
+    let runs_after_arm: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
+        .fetch_one(pool)
+        .await
+        .expect("count runs after arm");
+    assert_eq!(
+        runs_after_arm, runs_before_arm,
+        "control.arm must not synthesize a durable run anchor"
+    );
+
     let armed: bool =
         sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
             .fetch_one(pool)
@@ -800,17 +820,32 @@ async fn control_disarm_is_durable_or_explicitly_scoped() {
     assert_eq!(disarm_status, StatusCode::OK);
     assert_eq!(disarm_body["requested_action"], "control.disarm");
     assert_eq!(disarm_body["accepted"], true);
-    let disarm_audit_event_id = disarm_body["audit"]["audit_event_id"]
-        .as_str()
-        .expect("disarm audit_event_id present");
-    let disarm_audit_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM audit_events WHERE event_id::text = $1 AND topic = 'operator'",
-    )
-    .bind(disarm_audit_event_id)
-    .fetch_one(pool)
-    .await
-    .expect("verify disarm audit row");
-    assert_eq!(disarm_audit_count, 1);
+
+    if let Some(disarm_audit_event_id) = disarm_body["audit"]["audit_event_id"].as_str() {
+        let disarm_audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE event_id::text = $1 AND topic = 'operator'",
+        )
+        .bind(disarm_audit_event_id)
+        .fetch_one(pool)
+        .await
+        .expect("verify disarm audit row");
+        assert_eq!(disarm_audit_count, 1);
+    } else {
+        assert!(
+            disarm_body["audit"]["audit_event_id"].is_null(),
+            "disarm audit_event_id must be present or null"
+        );
+    }
+
+    let runs_after_disarm: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs")
+        .fetch_one(pool)
+        .await
+        .expect("count runs after disarm");
+    assert_eq!(
+        runs_after_disarm, runs_after_arm,
+        "control.disarm must not synthesize a durable run anchor"
+    );
+
     let disarmed: bool =
         sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
             .fetch_one(pool)
