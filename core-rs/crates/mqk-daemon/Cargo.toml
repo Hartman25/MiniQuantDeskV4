@@ -47,6 +47,7 @@ mqk-execution = { path = "../mqk-execution" }
 mqk-broker-alpaca = { path = "../mqk-broker-alpaca" }
 mqk-broker-paper = { path = "../mqk-broker-paper" }
 mqk-portfolio = { path = "../mqk-portfolio" }
+reqwest.workspace = true
 
 [dev-dependencies]
 # Required for in-process Axum router testing via tower::ServiceExt::oneshot()

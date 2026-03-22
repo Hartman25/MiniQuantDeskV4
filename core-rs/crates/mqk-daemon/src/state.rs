@@ -4,30 +4,54 @@
 //! `State<Arc<AppState>>` from Axum; this module owns daemon-local runtime
 //! lifecycle control plus durable status reconstruction.
 
+mod broker;
+mod env;
+mod snapshot;
+mod types;
+
 use std::collections::BTreeMap;
-use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use chrono::Utc;
-use mqk_broker_alpaca::{AlpacaBrokerAdapter, AlpacaConfig};
-use mqk_broker_paper::LockedPaperBroker;
-use mqk_execution::{
-    oms::state_machine::{OmsEvent, OmsOrder, OrderState},
-    wiring::build_gateway,
-    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerEvent, BrokerInvokeToken,
-    BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
-    BrokerSubmitResponse, IntegrityGate, ReconcileGate,
-};
+use mqk_execution::{wiring::build_gateway, BrokerError, BrokerOrderMap};
 use mqk_integrity::{CalendarSpec, IntegrityState};
-use mqk_portfolio::{apply_entry, LedgerEntry, PortfolioState};
-use mqk_reconcile::{ReconcileDiff, SnapshotFreshness, SnapshotWatermark};
-use serde::{Deserialize, Serialize};
+use mqk_reconcile::SnapshotWatermark;
 use sqlx::PgPool;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+
+// Re-export everything that external code (routes, tests, etc.) needs.
+use crate::notify::DiscordNotifier;
+pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
+pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
+pub(crate) use snapshot::{
+    reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,
+};
+pub use types::{
+    AlpacaWsContinuityState, BrokerKind, BrokerSnapshotTruthSource, BuildInfo, BusMsg,
+    DeploymentMode, OperatorAuthMode, ReconcileStatusSnapshot, RestartTruthSnapshot,
+    RuntimeLifecycleError, StatusSnapshot, StrategyMarketDataSource,
+};
+pub(crate) use types::{ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHandle};
+// Internal (crate-visible) re-exports used across this module.
+#[cfg(test)]
+use broker::alpaca_base_url_for_mode;
+use broker::{build_daemon_broker, DaemonBroker};
+use env::{
+    deployment_mode_readiness, initial_reconcile_status, initial_ws_continuity_for_broker,
+    operator_auth_mode_from_env, runtime_selection_from_env,
+};
+#[cfg(test)]
+use env::{parse_deployment_mode, runtime_selection_from_env_values};
+use snapshot::{
+    outbox_json_side, preserve_fail_closed_reconcile_status, reconcile_status_from_report,
+    reconcile_status_from_stale, reconcile_unknown_status, recover_oms_and_portfolio,
+    synthesize_broker_snapshot_from_execution, synthesize_paper_broker_snapshot,
+};
+use types::{DaemonOrchestrator, ReconcileTruthGate, StateIntegrityGate};
 
 const DAEMON_ENGINE_ID: &str = "mqk-daemon";
 const DEFAULT_DAEMON_DEPLOYMENT_MODE: &str = "paper";
@@ -35,8 +59,7 @@ const DEFAULT_DAEMON_ADAPTER_ID: &str = "paper";
 const DAEMON_RUN_CONFIG_HASH_PREFIX: &str = "daemon-runtime";
 const EXECUTION_LOOP_INTERVAL: Duration = Duration::from_secs(1);
 const DEADMAN_TTL_SECONDS: i64 = 5;
-/// DMON-06: background reconcile tick interval.  30 s gives the execution loop
-/// sufficient time to populate execution_snapshot before the first tick fires.
+/// DMON-06: background reconcile tick interval.
 const RECONCILE_TICK_INTERVAL: Duration = Duration::from_secs(30);
 const DEV_ALLOW_NO_OPERATOR_TOKEN_ENV: &str = "MQK_DEV_ALLOW_NO_OPERATOR_TOKEN";
 const DAEMON_DEPLOYMENT_MODE_ENV: &str = "MQK_DAEMON_DEPLOYMENT_MODE";
@@ -44,721 +67,6 @@ const DAEMON_ADAPTER_ID_ENV: &str = "MQK_DAEMON_ADAPTER_ID";
 const ALPACA_API_KEY_ID_ENV: &str = "MQK_ALPACA_API_KEY_ID";
 const ALPACA_API_SECRET_KEY_ENV: &str = "MQK_ALPACA_API_SECRET_KEY";
 const ALPACA_BASE_URL_OVERRIDE_ENV: &str = "MQK_ALPACA_BASE_URL";
-
-// ---------------------------------------------------------------------------
-// BusMsg — SSE event bus payload
-// ---------------------------------------------------------------------------
-
-/// Messages broadcast over the internal event bus and surfaced as SSE events.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum BusMsg {
-    Heartbeat { ts_millis: i64 },
-    Status(StatusSnapshot),
-    LogLine { level: String, msg: String },
-}
-
-// ---------------------------------------------------------------------------
-// BuildInfo
-// ---------------------------------------------------------------------------
-
-/// Static build metadata included in health / status responses.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BuildInfo {
-    pub service: &'static str,
-    pub version: &'static str,
-}
-
-// ---------------------------------------------------------------------------
-// StatusSnapshot
-// ---------------------------------------------------------------------------
-
-/// Point-in-time snapshot of daemon state, returned by GET /v1/status and
-/// carried inside SSE `status` events.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StatusSnapshot {
-    pub daemon_uptime_secs: u64,
-    pub active_run_id: Option<Uuid>,
-    /// "idle" | "running" | "halted" | "unknown"
-    pub state: String,
-    pub notes: Option<String>,
-    /// Reflects `IntegrityState::is_execution_blocked()` negation: true = armed.
-    pub integrity_armed: bool,
-    /// Durable deadman truth for the current daemon run lifecycle.
-    pub deadman_status: String,
-    pub deadman_last_heartbeat_utc: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ReconcileStatusSnapshot {
-    pub status: String,
-    pub last_run_at: Option<String>,
-    pub snapshot_watermark_ms: Option<i64>,
-    pub mismatched_positions: usize,
-    pub mismatched_orders: usize,
-    pub mismatched_fills: usize,
-    pub unmatched_broker_events: usize,
-    pub note: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RestartTruthSnapshot {
-    pub local_owned_run_id: Option<Uuid>,
-    pub durable_active_run_id: Option<Uuid>,
-    pub durable_active_without_local_ownership: bool,
-}
-
-#[derive(Debug)]
-pub enum RuntimeLifecycleError {
-    ServiceUnavailable {
-        fault_class: &'static str,
-        message: String,
-    },
-    Forbidden {
-        fault_class: &'static str,
-        gate: String,
-        message: String,
-    },
-    Conflict {
-        fault_class: &'static str,
-        message: String,
-    },
-    Internal {
-        fault_class: &'static str,
-        message: String,
-    },
-}
-
-impl RuntimeLifecycleError {
-    fn service_unavailable(fault_class: &'static str, message: impl Into<String>) -> Self {
-        Self::ServiceUnavailable {
-            fault_class,
-            message: message.into(),
-        }
-    }
-
-    fn forbidden(
-        fault_class: &'static str,
-        gate: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
-        Self::Forbidden {
-            fault_class,
-            gate: gate.into(),
-            message: message.into(),
-        }
-    }
-
-    fn conflict(fault_class: &'static str, message: impl Into<String>) -> Self {
-        Self::Conflict {
-            fault_class,
-            message: message.into(),
-        }
-    }
-
-    fn internal(context: &'static str, err: impl fmt::Display) -> Self {
-        Self::Internal {
-            fault_class: context,
-            message: format!("{context}: {err}"),
-        }
-    }
-
-    pub fn fault_class(&self) -> &'static str {
-        match self {
-            Self::ServiceUnavailable { fault_class, .. }
-            | Self::Forbidden { fault_class, .. }
-            | Self::Conflict { fault_class, .. }
-            | Self::Internal { fault_class, .. } => fault_class,
-        }
-    }
-}
-
-impl fmt::Display for RuntimeLifecycleError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ServiceUnavailable { message, .. } => f.write_str(message),
-            Self::Forbidden { message, .. } => f.write_str(message),
-            Self::Conflict { message, .. } => f.write_str(message),
-            Self::Internal { message, .. } => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for RuntimeLifecycleError {}
-
-#[derive(Clone)]
-struct StateIntegrityGate {
-    integrity: Arc<RwLock<IntegrityState>>,
-}
-
-impl IntegrityGate for StateIntegrityGate {
-    fn is_armed(&self) -> bool {
-        self.integrity
-            .try_read()
-            .map(|guard| !guard.is_execution_blocked())
-            .unwrap_or(false)
-    }
-}
-
-#[derive(Clone)]
-struct ReconcileTruthGate {
-    reconcile_status: Arc<RwLock<ReconcileStatusSnapshot>>,
-}
-
-impl ReconcileGate for ReconcileTruthGate {
-    fn is_clean(&self) -> bool {
-        self.reconcile_status
-            .try_read()
-            .map(|snapshot| snapshot.status == "ok")
-            .unwrap_or(false)
-    }
-}
-
-/// Type alias for the daemon execution orchestrator.
-///
-/// The broker type parameter is `DaemonBroker` — the enum-based dispatch seam
-/// introduced in AP-02.  This alias is intentionally no longer paper-specific;
-/// any broker variant in `DaemonBroker` can be used here without changing this alias.
-type DaemonOrchestrator = mqk_runtime::orchestrator::ExecutionOrchestrator<
-    DaemonBroker,
-    StateIntegrityGate,
-    mqk_runtime::runtime_risk::RuntimeRiskGate,
-    ReconcileTruthGate,
-    mqk_runtime::orchestrator::WallClock,
->;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ExecutionLoopCommand {
-    Run,
-    Stop,
-}
-
-#[derive(Debug)]
-struct ExecutionLoopExit {
-    note: Option<String>,
-}
-
-#[derive(Debug)]
-struct ExecutionLoopHandle {
-    run_id: Uuid,
-    stop_tx: watch::Sender<ExecutionLoopCommand>,
-    join_handle: JoinHandle<ExecutionLoopExit>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum OperatorAuthMode {
-    TokenRequired(String),
-    ExplicitDevNoToken,
-    MissingTokenFailClosed,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum DeploymentMode {
-    Backtest,
-    Paper,
-    LiveShadow,
-    LiveCapital,
-}
-
-impl DeploymentMode {
-    pub fn as_db_mode(&self) -> &'static str {
-        match self {
-            Self::Backtest => "BACKTEST",
-            Self::Paper => "PAPER",
-            Self::LiveShadow => "LIVE-SHADOW",
-            Self::LiveCapital => "LIVE-CAPITAL",
-        }
-    }
-
-    pub fn as_api_label(&self) -> &'static str {
-        match self {
-            Self::Backtest => "backtest",
-            Self::Paper => "paper",
-            Self::LiveShadow => "live-shadow",
-            Self::LiveCapital => "live-capital",
-        }
-    }
-}
-
-/// Typed broker implementation selector — deliberately distinct from deployment policy.
-///
-/// `DeploymentMode` encodes *operating policy* (paper / live-shadow / live-capital).
-/// `BrokerKind` encodes *which broker implementation* satisfies that policy.
-/// The two are separate so the same policy can be satisfied by different adapters
-/// (e.g. `Paper` policy + `Alpaca` broker for a future live-shadow mode) without
-/// conflating mode selection with adapter construction.
-///
-/// Only `Paper` is currently wired into daemon execution.  `Alpaca` is defined so
-/// the daemon can parse and reject it with a typed, explicit error rather than a
-/// raw string comparison.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum BrokerKind {
-    /// In-process bar-driven paper fill engine (`LockedPaperBroker`).
-    Paper,
-    /// Alpaca v2 REST + WebSocket external broker (`AlpacaBrokerAdapter`).
-    /// Wired for `(Paper, Alpaca)` deployment mode (AP-06).
-    Alpaca,
-}
-
-impl BrokerKind {
-    /// Canonical lowercase string for DB records, API responses, and logging.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Paper => "paper",
-            Self::Alpaca => "alpaca",
-        }
-    }
-
-    /// Parse from the `MQK_DAEMON_ADAPTER_ID` env-var string (case-insensitive).
-    /// Returns `None` for unrecognised values so callers can fail-closed explicitly
-    /// without resorting to raw string comparisons.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "paper" => Some(Self::Paper),
-            "alpaca" => Some(Self::Alpaca),
-            _ => None,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AP-04: BrokerSnapshotTruthSource
-// ---------------------------------------------------------------------------
-
-/// Determines how the daemon populates `broker_snapshot`.
-///
-/// This is derived from `BrokerKind` at construction and stored explicitly so
-/// call sites never need to re-derive the policy from the adapter string.
-///
-/// `Synthetic` and `External` must never be confused:
-/// - Synthesizing from local OMS for an external broker produces incorrect truth.
-/// - Using an external fetch for paper would be wasteful and meaningless.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum BrokerSnapshotTruthSource {
-    /// Paper broker: snapshot is synthesized from local OMS + portfolio state.
-    ///
-    /// The paper fill engine IS the authoritative broker; local state exactly
-    /// equals broker truth.  Synthesis is correct and complete.
-    Synthetic,
-    /// Alpaca (external broker): snapshot must come from the AP-03 REST fetch.
-    ///
-    /// `AlpacaBrokerAdapter::fetch_broker_snapshot` is the only correct source.
-    /// Synthesizing from local OMS is prohibited — broker truth is held externally.
-    External,
-}
-
-impl BrokerSnapshotTruthSource {
-    /// Canonical lowercase string for API responses and logging.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Synthetic => "synthetic",
-            Self::External => "external",
-        }
-    }
-
-    /// Derive the snapshot truth source from a parsed broker kind.
-    ///
-    /// `None` (unrecognised adapter) maps to `Synthetic` as a conservative
-    /// default — execution for unknown adapters is already fail-closed in
-    /// `build_daemon_broker`, so this path is unreachable in practice.
-    fn from_broker_kind(kind: Option<BrokerKind>) -> Self {
-        match kind {
-            Some(BrokerKind::Alpaca) => Self::External,
-            Some(BrokerKind::Paper) | None => Self::Synthetic,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AP-04B: StrategyMarketDataSource
-// ---------------------------------------------------------------------------
-
-/// Strategy market-data source policy — where strategy signals get price data.
-///
-/// # Independence invariant
-///
-/// This policy is **completely independent** of `BrokerKind`.  Changing the
-/// broker adapter MUST NOT silently change the strategy market-data source.
-/// The two policies are separate concepts and must never be conflated.
-///
-/// Currently only `NotConfigured` is defined; additional variants will be added
-/// as specific data sources are integrated (e.g. Alpaca data feed, vendor feed).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum StrategyMarketDataSource {
-    /// No market-data subsystem is wired.  Strategy price feeds are not available.
-    ///
-    /// This is the explicit default for ALL current deployment modes, regardless
-    /// of broker kind.  It is not derived from adapter selection.
-    NotConfigured,
-}
-
-impl StrategyMarketDataSource {
-    /// Health string for `market_data_health` in API responses.
-    ///
-    /// Returns `"not_configured"` rather than `"unknown"` to signal that the
-    /// absence is intentional and checked, not merely unprobed.
-    pub fn as_health_str(&self) -> &'static str {
-        match self {
-            Self::NotConfigured => "not_configured",
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AP-05: AlpacaWsContinuityState
-// ---------------------------------------------------------------------------
-
-/// AP-05: Daemon-owned Alpaca websocket continuity truth.
-///
-/// Mirrors the WS-inbound cursor state from `AlpacaTradeUpdatesResume` at the
-/// daemon level so that operator/API surfaces reflect real continuity truth
-/// without parsing raw cursor JSON at every call site.
-///
-/// # Fail-closed rule
-///
-/// Only `Live` indicates proven continuity.  All other variants fail closed:
-/// callers must not synthesise healthy continuity from `ColdStartUnproven`,
-/// `GapDetected`, or `NotApplicable`.
-///
-/// # Lifecycle
-///
-/// - Initialized from the persisted `broker_event_cursor` at
-///   `build_execution_orchestrator` time.
-/// - Updated by the WS ingest path (AP-06+) via `update_ws_continuity`.
-/// - Always `NotApplicable` for non-Alpaca broker kinds (Paper, etc.).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub enum AlpacaWsContinuityState {
-    /// Broker kind is not Alpaca; websocket continuity does not apply to this
-    /// adapter.  The paper fill engine is always synchronous and never requires
-    /// a WS continuity path.
-    NotApplicable,
-    /// Alpaca broker selected; no cursor has been persisted yet (fresh system
-    /// or cursor row was never written).  Cannot prove what events were received.
-    /// Fail-closed: must not be treated as proven continuity.
-    ColdStartUnproven,
-    /// WS stream was live at the last cursor persist; last known message ID and
-    /// event timestamp are retained so the stream can resume from this position.
-    Live {
-        last_message_id: String,
-        last_event_at: String,
-    },
-    /// A continuity gap was detected (e.g. WS disconnect followed by reconnect
-    /// without replay of missed messages, or a sequence gap in received IDs).
-    /// The last known position is preserved for diagnostics only.
-    ///
-    /// Fail-closed: any consumer of this state must halt or refuse to proceed.
-    /// Healthy continuity MUST NOT be reported after a gap without explicit
-    /// operator-driven recovery.
-    GapDetected {
-        last_message_id: Option<String>,
-        last_event_at: Option<String>,
-        detail: String,
-    },
-}
-
-impl AlpacaWsContinuityState {
-    /// Canonical lowercase status string for API responses and logging.
-    ///
-    /// `"live"` is the only proven-continuity value.
-    /// `"cold_start_unproven"` and `"gap_detected"` are fail-closed states.
-    /// `"not_applicable"` means a non-Alpaca broker — continuity concept does not apply.
-    pub fn as_status_str(&self) -> &'static str {
-        match self {
-            Self::NotApplicable => "not_applicable",
-            Self::ColdStartUnproven => "cold_start_unproven",
-            Self::Live { .. } => "live",
-            Self::GapDetected { .. } => "gap_detected",
-        }
-    }
-
-    /// `true` only when WS continuity is explicitly proven (`Live`).
-    ///
-    /// All other states fail closed.  `GapDetected`, `ColdStartUnproven`, and
-    /// `NotApplicable` all return `false`.  Callers must not synthesise healthy
-    /// continuity from any of these states.
-    pub fn is_continuity_proven(&self) -> bool {
-        matches!(self, Self::Live { .. })
-    }
-
-    /// Derive continuity state from a raw persisted broker-cursor JSON string.
-    ///
-    /// The JSON shape is the serialized form of `AlpacaFetchCursor` /
-    /// `AlpacaTradeUpdatesResume` (tag field `"status"`, snake_case variants).
-    ///
-    /// # Behavior
-    ///
-    /// - Non-Alpaca `broker_kind` → `NotApplicable`.
-    /// - `cursor_json = None` (no row persisted) → `ColdStartUnproven`.
-    /// - Valid JSON with `trade_updates.status = "live"` → `Live`.
-    /// - Valid JSON with `trade_updates.status = "gap_detected"` → `GapDetected`.
-    /// - Any other status or invalid JSON → `GapDetected` (fail-closed).
-    ///   A corrupt cursor must be flagged, not silently treated as absent.
-    pub fn from_cursor_json(broker_kind: Option<BrokerKind>, cursor_json: Option<&str>) -> Self {
-        let Some(BrokerKind::Alpaca) = broker_kind else {
-            return Self::NotApplicable;
-        };
-        let Some(json) = cursor_json else {
-            return Self::ColdStartUnproven;
-        };
-        // Parse into AlpacaFetchCursor to get the fully-typed trade_updates variant.
-        match serde_json::from_str::<mqk_broker_alpaca::types::AlpacaFetchCursor>(json) {
-            Ok(cursor) => Self::from_fetch_cursor(&cursor),
-            Err(e) => Self::GapDetected {
-                last_message_id: None,
-                last_event_at: None,
-                detail: format!("broker cursor parse failed at daemon startup: {e}"),
-            },
-        }
-    }
-
-    fn from_fetch_cursor(cursor: &mqk_broker_alpaca::types::AlpacaFetchCursor) -> Self {
-        use mqk_broker_alpaca::types::AlpacaTradeUpdatesResume;
-        match &cursor.trade_updates {
-            AlpacaTradeUpdatesResume::ColdStartUnproven => Self::ColdStartUnproven,
-            AlpacaTradeUpdatesResume::Live {
-                last_message_id,
-                last_event_at,
-            } => Self::Live {
-                last_message_id: last_message_id.clone(),
-                last_event_at: last_event_at.clone(),
-            },
-            AlpacaTradeUpdatesResume::GapDetected {
-                last_message_id,
-                last_event_at,
-                detail,
-            } => Self::GapDetected {
-                last_message_id: last_message_id.clone(),
-                last_event_at: last_event_at.clone(),
-                detail: detail.clone(),
-            },
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// DaemonBroker — enum-dispatch seam (AP-02)
-// ---------------------------------------------------------------------------
-
-/// Broker dispatch seam for the daemon execution orchestrator.
-///
-/// Each variant wraps a concrete broker adapter.  The enum satisfies the
-/// `BrokerAdapter` type parameter of `DaemonOrchestrator`, making the
-/// orchestrator broker-agnostic at the type level.
-///
-/// `Paper` and `Alpaca` are constructable via `build_daemon_broker`.
-/// Adding a new variant here and extending `build_daemon_broker` is the
-/// only change required to wire a new broker into daemon execution.
-pub(crate) enum DaemonBroker {
-    Paper(LockedPaperBroker),
-    /// AP-06/AP-07/AP-08: Alpaca v2 REST broker.
-    ///
-    /// Credentials are read from `MQK_ALPACA_API_KEY_ID` /
-    /// `MQK_ALPACA_API_SECRET_KEY` at `build_execution_orchestrator` time.
-    /// Endpoint depends on deployment mode:
-    /// - `Paper`        → `https://paper-api.alpaca.markets` (AP-06)
-    /// - `LiveShadow`   → `https://api.alpaca.markets`       (AP-07)
-    /// - `LiveCapital`  → `https://api.alpaca.markets`       (AP-08)
-    Alpaca(AlpacaBrokerAdapter),
-}
-
-impl fmt::Debug for DaemonBroker {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Paper(_) => f.write_str("DaemonBroker::Paper"),
-            Self::Alpaca(_) => f.write_str("DaemonBroker::Alpaca"),
-        }
-    }
-}
-
-impl BrokerAdapter for DaemonBroker {
-    fn submit_order(
-        &self,
-        req: BrokerSubmitRequest,
-        token: &BrokerInvokeToken,
-    ) -> std::result::Result<BrokerSubmitResponse, BrokerError> {
-        match self {
-            Self::Paper(b) => b.submit_order(req, token),
-            Self::Alpaca(b) => b.submit_order(req, token),
-        }
-    }
-
-    fn cancel_order(
-        &self,
-        order_id: &str,
-        token: &BrokerInvokeToken,
-    ) -> std::result::Result<BrokerCancelResponse, BrokerError> {
-        match self {
-            Self::Paper(b) => b.cancel_order(order_id, token),
-            Self::Alpaca(b) => b.cancel_order(order_id, token),
-        }
-    }
-
-    fn replace_order(
-        &self,
-        req: BrokerReplaceRequest,
-        token: &BrokerInvokeToken,
-    ) -> std::result::Result<BrokerReplaceResponse, BrokerError> {
-        match self {
-            Self::Paper(b) => b.replace_order(req, token),
-            Self::Alpaca(b) => b.replace_order(req, token),
-        }
-    }
-
-    fn fetch_events(
-        &self,
-        cursor: Option<&str>,
-        token: &BrokerInvokeToken,
-    ) -> std::result::Result<(Vec<BrokerEvent>, Option<String>), BrokerError> {
-        match self {
-            Self::Paper(b) => b.fetch_events(cursor, token),
-            Self::Alpaca(b) => b.fetch_events(cursor, token),
-        }
-    }
-}
-
-/// Construct the `DaemonBroker` variant for the given `(BrokerKind, DeploymentMode)` pair.
-///
-/// This is the **single construction seam** for broker adapters in the daemon.
-/// Nothing else in the daemon instantiates a concrete broker adapter directly;
-/// all paths go through this function so that adding/removing broker support
-/// only requires changing this one site.
-///
-/// # Endpoint selection for Alpaca
-///
-/// The Alpaca adapter endpoint is determined by `deployment_mode`:
-///
-/// | Mode          | Endpoint                                  |
-/// |---------------|-------------------------------------------|
-/// | `Paper`       | `https://paper-api.alpaca.markets` (AP-06)|
-/// | `LiveShadow`  | `https://api.alpaca.markets`       (AP-07)|
-/// | `LiveCapital` | `https://api.alpaca.markets`       (AP-08)|
-///
-/// `MQK_ALPACA_BASE_URL` is a **paper-proof-only** seam. It is honoured only
-/// for `(Alpaca, Paper)` so the DB-backed roundtrip proof can point the live
-/// adapter at a local mock server. `LiveShadow` and `LiveCapital` always use
-/// the canonical live Alpaca endpoint regardless of the override.
-///
-/// `Backtest` remains blocked — no Alpaca endpoint is defined for that mode.
-///
-/// # Fail-closed behavior
-///
-/// - `Paper` — always succeeds (no external credentials required).
-/// - `Alpaca` — reads `MQK_ALPACA_API_KEY_ID` and `MQK_ALPACA_API_SECRET_KEY`
-///   from the environment.  Returns `Err` if either variable is absent.
-///   Endpoint is chosen from `deployment_mode`; unknown modes fail closed.
-/// - `None` (unrecognised adapter string) — always returns `Err`.
-fn alpaca_base_url_for_mode(
-    deployment_mode: DeploymentMode,
-    paper_base_url_override: Option<&str>,
-) -> Result<String, RuntimeLifecycleError> {
-    match deployment_mode {
-        DeploymentMode::Paper => Ok(paper_base_url_override
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| "https://paper-api.alpaca.markets".to_string())),
-        DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => {
-            Ok("https://api.alpaca.markets".to_string())
-        }
-        DeploymentMode::Backtest => Err(RuntimeLifecycleError::service_unavailable(
-            "runtime.start_refused.alpaca_mode_not_wired",
-            format!(
-                "broker 'alpaca' is not wired for deployment mode '{}'; refusing start fail-closed",
-                deployment_mode.as_api_label()
-            ),
-        )),
-    }
-}
-
-fn build_daemon_broker(
-    broker_kind: Option<BrokerKind>,
-    deployment_mode: DeploymentMode,
-) -> Result<DaemonBroker, RuntimeLifecycleError> {
-    match broker_kind {
-        Some(BrokerKind::Paper) => Ok(DaemonBroker::Paper(LockedPaperBroker::new())),
-        Some(BrokerKind::Alpaca) => {
-            // Defensive mode check first — fail-closed for unsupported modes
-            // before any credential lookup so the error is always about the mode,
-            // not about missing credentials, when the mode itself is the problem.
-            let paper_base_url_override = std::env::var(ALPACA_BASE_URL_OVERRIDE_ENV).ok();
-            let base_url =
-                alpaca_base_url_for_mode(deployment_mode, paper_base_url_override.as_deref())?;
-            // Credentials read after mode is validated.
-            let key_id = std::env::var(ALPACA_API_KEY_ID_ENV).map_err(|_| {
-                RuntimeLifecycleError::service_unavailable(
-                    "runtime.start_refused.alpaca_creds_missing",
-                    format!(
-                        "broker 'alpaca' requires {ALPACA_API_KEY_ID_ENV} environment variable"
-                    ),
-                )
-            })?;
-            let secret = std::env::var(ALPACA_API_SECRET_KEY_ENV).map_err(|_| {
-                RuntimeLifecycleError::service_unavailable(
-                    "runtime.start_refused.alpaca_creds_missing",
-                    format!(
-                        "broker 'alpaca' requires {ALPACA_API_SECRET_KEY_ENV} environment variable"
-                    ),
-                )
-            })?;
-            Ok(DaemonBroker::Alpaca(AlpacaBrokerAdapter::new(
-                AlpacaConfig {
-                    base_url,
-                    api_key_id: key_id,
-                    api_secret_key: secret,
-                },
-            )))
-        }
-        None => Err(RuntimeLifecycleError::service_unavailable(
-            "runtime.start_refused.broker_unrecognised",
-            "unrecognised broker adapter; cannot construct execution broker",
-        )),
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct DeploymentReadiness {
-    pub start_allowed: bool,
-    pub blocker: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct RuntimeSelection {
-    pub deployment_mode: DeploymentMode,
-    /// Parsed broker implementation kind; `None` when the adapter-id string is
-    /// unrecognised (treated as fail-closed by `deployment_mode_readiness`).
-    /// Use this field for typed dispatch — do NOT use `adapter_id` for logic.
-    pub broker_kind: Option<BrokerKind>,
-    /// Raw adapter identifier string (e.g. `"paper"`, `"alpaca"`).
-    /// Used for DB run records, API responses, and operator-visible logging.
-    /// Does not drive broker construction; use `broker_kind` for typed dispatch.
-    pub adapter_id: String,
-    pub run_config_hash: String,
-    pub readiness: DeploymentReadiness,
-}
-
-impl OperatorAuthMode {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::TokenRequired(_) => "token_required",
-            Self::ExplicitDevNoToken => "explicit_dev_no_token",
-            Self::MissingTokenFailClosed => "missing_token_fail_closed",
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// StrategyFleetEntry
-// ---------------------------------------------------------------------------
-
-/// A single strategy entry in the daemon's configured fleet.
-///
-/// Derived from `MQK_STRATEGY_IDS` at daemon construction.  Each entry is a
-/// minimal identity record — P&L, drawdown, and regime are NOT derived here;
-/// routes that need them will pull from the appropriate authoritative source.
-#[derive(Debug, Clone)]
-pub struct StrategyFleetEntry {
-    pub strategy_id: String,
-}
 
 // ---------------------------------------------------------------------------
 // AppState
@@ -775,8 +83,7 @@ pub struct AppState {
     pub db: Option<PgPool>,
     /// Stable identity for this daemon process.
     pub node_id: String,
-    /// Mutable status cache. Routes reconstruct truth from DB + owned loop and
-    /// only use this for notes / the last published status snapshot.
+    /// Mutable status cache.
     pub status: Arc<RwLock<StatusSnapshot>>,
     /// Integrity engine state (arm / disarm).
     pub integrity: Arc<RwLock<IntegrityState>>,
@@ -784,8 +91,7 @@ pub struct AppState {
     pub broker_snapshot: Arc<RwLock<Option<mqk_schemas::BrokerSnapshot>>>,
     /// Latest execution pipeline snapshot from the owned loop.
     pub execution_snapshot: Arc<RwLock<Option<mqk_runtime::observability::ExecutionSnapshot>>>,
-    /// Per-order side cache (order_id → reconcile Side) populated from outbox
-    /// order_json at bootstrap and refreshed every execution tick (DMON-05).
+    /// Per-order side cache (order_id → reconcile Side).
     pub local_order_sides: Arc<RwLock<BTreeMap<String, mqk_reconcile::Side>>>,
     /// Latest monotonic reconcile result known to the daemon.
     reconcile_status: Arc<RwLock<ReconcileStatusSnapshot>>,
@@ -795,32 +101,22 @@ pub struct AppState {
     runtime_selection: RuntimeSelection,
     /// The single daemon-owned execution loop handle, if any.
     execution_loop: Arc<Mutex<Option<ExecutionLoopHandle>>>,
-    /// Serializes start/stop/halt transitions so the daemon never spawns duplicates.
+    /// Serializes start/stop/halt transitions.
     lifecycle_op: Arc<Mutex<()>>,
-    /// Authoritative exchange calendar spec derived from deployment mode at construction.
-    /// `NyseWeekdays` for live-equity modes; `AlwaysOn` for paper/backtest.
+    /// Authoritative exchange calendar spec derived from deployment mode.
     calendar_spec: CalendarSpec,
     /// AP-04: How broker_snapshot is populated for this broker kind.
-    /// `Synthetic` = paper (local OMS synthesis); `External` = Alpaca (AP-03 REST fetch).
-    /// Derived from broker_kind at construction; must not be re-inferred at call sites.
     pub broker_snapshot_source: BrokerSnapshotTruthSource,
     /// AP-04B: Strategy market-data source policy.
-    /// INDEPENDENT of broker_kind — changing adapter must not change feed policy.
     pub strategy_market_data_source: StrategyMarketDataSource,
     /// AP-05: Daemon-owned Alpaca websocket continuity truth.
-    ///
-    /// Initialized from the persisted `broker_event_cursor` in the DB at
-    /// `build_execution_orchestrator` time.  Before that point (or when no DB is
-    /// configured), defaults to `ColdStartUnproven` for Alpaca and `NotApplicable`
-    /// for Paper.  Updated by the WS ingest path (AP-06+) via `update_ws_continuity`.
     alpaca_ws_continuity: Arc<RwLock<AlpacaWsContinuityState>>,
     /// CC-01: Configured strategy fleet.
-    ///
-    /// `None` when `MQK_STRATEGY_IDS` is not set — the strategy summary surface
-    /// returns `truth_state="not_wired"` so the GUI blocks rather than rendering
-    /// fake rows.  `Some(entries)` when the env var is set; entries may be empty
-    /// if the var is set to an empty string (zero-strategy fleet is authoritative).
     strategy_fleet: Arc<RwLock<Option<Vec<StrategyFleetEntry>>>>,
+    /// OPS-NOTIFY-01: Best-effort Discord webhook notifier.  No-op when
+    /// `DISCORD_WEBHOOK_URL` is unset.  Delivery failure does not affect
+    /// primary daemon control truth.
+    pub discord_notifier: DiscordNotifier,
 }
 
 impl Default for AppState {
@@ -830,23 +126,14 @@ impl Default for AppState {
 }
 
 impl AppState {
-    /// Create in-process application state for local development and tests.
-    ///
-    /// The real daemon startup path uses [`Self::new_with_db`], which resolves
-    /// environment-derived operator auth and now fails closed by default.
     pub fn new() -> Self {
         Self::new_inner(OperatorAuthMode::ExplicitDevNoToken, None)
     }
 
-    /// Create application state with an explicit operator-auth mode.
     pub fn new_with_operator_auth(operator_auth: OperatorAuthMode) -> Self {
         Self::new_inner(operator_auth, None)
     }
 
-    /// Create application state with an explicit operator token.
-    ///
-    /// `None` is an explicit dev/test opt-in to no-token operator access; it
-    /// does not represent the environment-derived production default.
     pub fn new_with_token(token: Option<String>) -> Self {
         let operator_auth = match token {
             Some(token) => OperatorAuthMode::TokenRequired(token),
@@ -855,27 +142,14 @@ impl AppState {
         Self::new_inner(operator_auth, None)
     }
 
-    /// Create application state with a live DB pool.
     pub fn new_with_db(db: PgPool) -> Self {
         Self::new_inner(operator_auth_mode_from_env(), Some(db))
     }
 
-    /// Create application state with a live DB pool and an explicit operator-auth mode.
-    ///
-    /// Prefer this over [`Self::new_with_db`] in tests so that auth mode is
-    /// injected directly rather than derived from the process environment.
-    /// Using this constructor eliminates the need for `std::env::set_var` calls
-    /// in test fixtures and the cross-test bleed they cause.
     pub fn new_with_db_and_operator_auth(db: PgPool, operator_auth: OperatorAuthMode) -> Self {
         Self::new_inner(operator_auth, Some(db))
     }
 
-    /// Create application state with an explicit broker kind for tests.
-    ///
-    /// Named with `_for_test_` to signal intent; production code must derive
-    /// the broker kind from environment via [`Self::new_with_db`].
-    ///
-    /// This avoids setting env vars in tests (which race under parallel execution).
     pub fn new_for_test_with_broker_kind(kind: BrokerKind) -> Self {
         let mut state = Self::new_inner(OperatorAuthMode::ExplicitDevNoToken, None);
         state.runtime_selection = RuntimeSelection {
@@ -885,11 +159,7 @@ impl AppState {
             run_config_hash: state.runtime_selection.run_config_hash.clone(),
             readiness: state.runtime_selection.readiness.clone(),
         };
-        // Re-derive snapshot source from the new broker kind so it stays consistent.
         state.broker_snapshot_source = BrokerSnapshotTruthSource::from_broker_kind(Some(kind));
-        // AP-05: Re-initialize WS continuity for the new broker kind.
-        // ColdStartUnproven for Alpaca (no DB cursor loaded in test context);
-        // NotApplicable for Paper (no WS continuity concept).
         state.alpaca_ws_continuity = Arc::new(RwLock::new(match kind {
             BrokerKind::Alpaca => AlpacaWsContinuityState::ColdStartUnproven,
             BrokerKind::Paper => AlpacaWsContinuityState::NotApplicable,
@@ -897,19 +167,8 @@ impl AppState {
         state
     }
 
-    /// Create application state with an explicit deployment mode for tests.
-    ///
-    /// Named with `_for_test_` to signal intent; production code must derive
-    /// the deployment mode from environment via [`Self::new_with_db`].
     pub fn new_for_test_with_mode(mode: DeploymentMode) -> Self {
         let mut state = Self::new_inner(OperatorAuthMode::ExplicitDevNoToken, None);
-        // Override runtime_selection and calendar_spec to use the specified mode.
-        // broker_kind is retained from the default Paper selection — the test helper
-        // overrides policy (mode) while keeping the adapter unchanged.
-        // Readiness is re-derived from the new (mode, broker_kind) pair so that
-        // tests that check `deployment_start_allowed` or `deployment_blocker` see
-        // the correct gate state for the given mode.  Retaining the old readiness
-        // would silently carry paper-mode's start_allowed=true into unproven modes.
         let broker_kind = state.runtime_selection.broker_kind;
         let readiness = deployment_mode_readiness(mode, broker_kind);
         state.runtime_selection = RuntimeSelection {
@@ -926,15 +185,6 @@ impl AppState {
         state
     }
 
-    /// Create application state with explicit deployment mode AND broker kind for tests.
-    ///
-    /// This is the combined test helper for cases where both the mode and the broker
-    /// must differ from their defaults (e.g. `(LiveCapital, Alpaca)` for AP-08 tests).
-    /// Readiness, calendar spec, snapshot source, and WS continuity are all derived
-    /// from the supplied `(mode, kind)` pair — no silent carry-over from defaults.
-    ///
-    /// Named with `_for_test_` to signal intent; production code must derive both
-    /// values from environment via [`Self::new_with_db`].
     pub fn new_for_test_with_mode_and_broker(mode: DeploymentMode, kind: BrokerKind) -> Self {
         let mut state = Self::new_inner(OperatorAuthMode::ExplicitDevNoToken, None);
         let readiness = deployment_mode_readiness(mode, Some(kind));
@@ -980,35 +230,18 @@ impl AppState {
 
         let runtime_selection = runtime_selection_from_env();
 
-        // Derive calendar spec from deployment mode.  Live-equity modes use
-        // the authoritative NYSE calendar; paper/backtest are always-on.
         let calendar_spec = match runtime_selection.deployment_mode {
             DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => CalendarSpec::NyseWeekdays,
             DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
         };
 
-        // AP-04: Broker snapshot truth source — derived from broker kind, NOT from
-        // deployment mode.  Changing mode does not change snapshot source policy.
         let broker_snapshot_source =
             BrokerSnapshotTruthSource::from_broker_kind(runtime_selection.broker_kind);
 
-        // AP-04B: Strategy market-data source is always NotConfigured at this point.
-        // It is explicitly NOT derived from broker_kind so that changing the adapter
-        // does not silently change the strategy feed policy.
         let strategy_market_data_source = StrategyMarketDataSource::NotConfigured;
 
-        // AP-05: WS continuity defaults to NotApplicable (paper) or ColdStartUnproven
-        // (Alpaca).  The real state is loaded from the persisted DB cursor in
-        // build_execution_orchestrator once a DB pool is available.
-        let initial_ws_continuity = match runtime_selection.broker_kind {
-            Some(BrokerKind::Alpaca) => AlpacaWsContinuityState::ColdStartUnproven,
-            _ => AlpacaWsContinuityState::NotApplicable,
-        };
+        let initial_ws_continuity = initial_ws_continuity_for_broker(runtime_selection.broker_kind);
 
-        // CC-01: Strategy fleet from MQK_STRATEGY_IDS env var.
-        // None = not configured → not_wired truth state.
-        // Some([]) = configured but empty → active with zero rows (authoritative empty fleet).
-        // Some([...]) = configured fleet entries → active with rows.
         let strategy_fleet = std::env::var("MQK_STRATEGY_IDS").ok().map(|ids| {
             ids.split(',')
                 .map(|s| s.trim())
@@ -1021,7 +254,7 @@ impl AppState {
 
         Self {
             bus,
-            node_id: default_node_id(build.service),
+            node_id: env::default_node_id(build.service),
             build,
             db,
             status: Arc::new(RwLock::new(initial_status)),
@@ -1039,6 +272,7 @@ impl AppState {
             strategy_market_data_source,
             alpaca_ws_continuity: Arc::new(RwLock::new(initial_ws_continuity)),
             strategy_fleet: Arc::new(RwLock::new(strategy_fleet)),
+            discord_notifier: DiscordNotifier::from_env(),
         }
     }
 
@@ -1054,69 +288,34 @@ impl AppState {
         self.runtime_selection.deployment_mode
     }
 
-    /// Authoritative exchange calendar spec for this deployment mode.
     pub fn calendar_spec(&self) -> CalendarSpec {
         self.calendar_spec
     }
 
-    /// AP-04: Broker snapshot truth source for this adapter kind.
-    ///
-    /// `Synthetic` = paper (local OMS synthesis on every execution tick).
-    /// `External` = Alpaca (must come from `fetch_broker_snapshot`; synthesis prohibited).
     pub fn broker_snapshot_source(&self) -> BrokerSnapshotTruthSource {
         self.broker_snapshot_source
     }
 
-    /// AP-04B: Strategy market-data source policy.
-    ///
-    /// Always returns `NotConfigured` until an explicit feed source is wired.
-    /// Independent of `broker_kind` — changing the adapter does not change feed policy.
     pub fn strategy_market_data_source(&self) -> StrategyMarketDataSource {
         self.strategy_market_data_source
     }
 
-    /// AP-05: Current daemon-owned Alpaca websocket continuity state.
-    ///
-    /// `NotApplicable` for non-Alpaca broker kinds (Paper, etc.).
-    /// For Alpaca: initialized from the persisted DB cursor at orchestrator
-    /// construction; updated by the WS ingest path (AP-06+) via `update_ws_continuity`.
-    ///
-    /// Only `Live` indicates proven continuity.  `ColdStartUnproven` and
-    /// `GapDetected` are both fail-closed states.
     pub async fn alpaca_ws_continuity(&self) -> AlpacaWsContinuityState {
         self.alpaca_ws_continuity.read().await.clone()
     }
 
-    /// AP-05: Update the daemon-owned WS continuity state.
-    ///
-    /// Must be called by the WS ingest path after every successful batch and
-    /// after any gap or disconnect detection.
-    ///
-    /// Silently no-ops when the current state is `NotApplicable` (Paper broker)
-    /// so a caller that does not check broker kind cannot accidentally corrupt
-    /// the continuity state for a non-Alpaca path.
     pub async fn update_ws_continuity(&self, new_state: AlpacaWsContinuityState) {
         let current = self.alpaca_ws_continuity.read().await.clone();
         if current == AlpacaWsContinuityState::NotApplicable {
-            // Paper broker: continuity concept does not apply.
             return;
         }
         *self.alpaca_ws_continuity.write().await = new_state;
     }
 
-    /// CC-01: Snapshot the current strategy fleet.
-    ///
-    /// Returns `None` when `MQK_STRATEGY_IDS` was not set at construction
-    /// (truth_state = "not_wired").  Returns `Some(entries)` when set (may be
-    /// an empty vec for an explicitly empty fleet).
     pub async fn strategy_fleet_snapshot(&self) -> Option<Vec<StrategyFleetEntry>> {
         self.strategy_fleet.read().await.clone()
     }
 
-    /// CC-01: Test helper — inject a strategy fleet without relying on env var.
-    ///
-    /// Named with `_for_test_` to signal intent; production code initializes
-    /// the fleet from `MQK_STRATEGY_IDS` at construction via [`Self::new_inner`].
     pub async fn set_strategy_fleet_for_test(&self, fleet: Option<Vec<StrategyFleetEntry>>) {
         *self.strategy_fleet.write().await = fleet;
     }
@@ -1375,19 +574,6 @@ impl AppState {
             ));
         }
 
-        // AP-08: Capital mode requires a real operator token.
-        //
-        // `ExplicitDevNoToken` is a dev/test bypass that must never be used to
-        // start a capital execution run.  `MissingTokenFailClosed` means no
-        // token is configured at all.  Only `TokenRequired` — a real operator
-        // credential — is accepted for live-capital mode.
-        //
-        // This check is intentionally placed after the integrity check so that
-        // the error sequence is:
-        //   1. deployment_mode_unproven  (readiness gate)
-        //   2. integrity_disarmed        (safety gate)
-        //   3. capital_requires_operator_token  (auth gate)
-        //   4. duplicate / DB checks
         if self.deployment_mode() == DeploymentMode::LiveCapital
             && !matches!(self.operator_auth, OperatorAuthMode::TokenRequired(_))
         {
@@ -1480,18 +666,6 @@ impl AppState {
             .build_execution_orchestrator(db.clone(), run_id)
             .await?;
 
-        // AP-08: Capital mode requires proven Alpaca WS continuity.
-        //
-        // `build_execution_orchestrator` loads the persisted cursor from the DB
-        // and writes the derived `AlpacaWsContinuityState` into `self.alpaca_ws_continuity`.
-        // For capital mode, `ColdStartUnproven` or `GapDetected` is insufficient:
-        // the operator must first run in live-shadow mode to establish a proven
-        // cursor, then transition to capital.
-        //
-        // This check runs after `build_execution_orchestrator` so that the cursor
-        // is always loaded from DB truth (not the in-memory default) before
-        // evaluating continuity.  If the check fails, the orchestrator's runtime
-        // leadership is released before returning.
         if self.deployment_mode() == DeploymentMode::LiveCapital {
             let continuity = self.alpaca_ws_continuity().await;
             if !continuity.is_continuity_proven() {
@@ -1543,9 +717,6 @@ impl AppState {
             ));
         }
 
-        // DMON-06: Pre-populate execution_snapshot from the initial orchestrator
-        // state (after the first tick) so the reconcile tick has a valid non-empty
-        // local snapshot on its first fire rather than falling back to empty.
         if let Ok(initial_snapshot) = orchestrator.snapshot().await {
             *self.execution_snapshot.write().await = Some(initial_snapshot);
         }
@@ -1562,9 +733,6 @@ impl AppState {
             *lock = Some(handle);
         }
 
-        // DMON-06: Spawn background reconcile tick so local order-drift results
-        // are published to AppState.reconcile_status and surfaced via the
-        // /api/v1/reconcile/status and /api/v1/system/status endpoints.
         {
             let snap_arc = Arc::clone(&self.execution_snapshot);
             let sides_arc = Arc::clone(&self.local_order_sides);
@@ -1798,76 +966,6 @@ impl AppState {
         ))
     }
 
-    /// DMON-03/04: Recover OMS order map, per-order side cache, and portfolio
-    /// from durable DB truth (outbox submitted rows + applied inbox events).
-    ///
-    /// The orchestrator's Phase 3 will separately process UNAPPLIED inbox rows
-    /// (crash window), so there is no double-apply risk.
-    async fn recover_oms_and_portfolio(
-        db: &PgPool,
-        run_id: Uuid,
-        initial_equity_micros: i64,
-    ) -> Result<
-        (
-            BTreeMap<String, OmsOrder>,
-            BTreeMap<String, mqk_reconcile::Side>,
-            PortfolioState,
-        ),
-        RuntimeLifecycleError,
-    > {
-        let submitted = mqk_db::outbox_load_submitted_for_run(db, run_id)
-            .await
-            .map_err(|err| RuntimeLifecycleError::internal("outbox_load_submitted_for_run", err))?;
-        let applied = mqk_db::inbox_load_all_applied_for_run(db, run_id)
-            .await
-            .map_err(|err| {
-                RuntimeLifecycleError::internal("inbox_load_all_applied_for_run", err)
-            })?;
-
-        // Build OMS orders and side map from submitted outbox rows.
-        let mut oms_orders: BTreeMap<String, OmsOrder> = BTreeMap::new();
-        let mut sides: BTreeMap<String, mqk_reconcile::Side> = BTreeMap::new();
-        for row in &submitted {
-            let Some(symbol) = outbox_json_symbol(&row.order_json) else {
-                continue;
-            };
-            let Some(qty) = outbox_json_qty(&row.order_json) else {
-                continue;
-            };
-            let side = outbox_json_side(&row.order_json);
-            let order_id = row.idempotency_key.clone();
-            sides.insert(order_id.clone(), side);
-            oms_orders.insert(order_id.clone(), OmsOrder::new(&order_id, symbol, qty));
-        }
-
-        // Reconstruct portfolio starting from initial equity.
-        let mut portfolio = PortfolioState::new(initial_equity_micros);
-
-        // Apply APPLIED inbox events to advance OMS state and portfolio.
-        for row in &applied {
-            let event: BrokerEvent = match serde_json::from_value(row.message_json.clone()) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let internal_id = event.internal_order_id().to_string();
-            let oms_event = broker_event_to_oms_event(&event);
-            if let Some(order) = oms_orders.get_mut(&internal_id) {
-                // Ignore transition errors; the orchestrator's Phase 3 will handle
-                // unapplied events in the crash window.
-                let _ = order.apply(&oms_event, Some(&row.broker_message_id));
-            }
-            if let Some(fill) = broker_event_to_portfolio_fill(&event) {
-                apply_entry(&mut portfolio, LedgerEntry::Fill(fill));
-            }
-        }
-
-        // Remove terminal orders from both maps.
-        oms_orders.retain(|_, o| !o.state.is_terminal());
-        sides.retain(|order_id, _| oms_orders.contains_key(order_id));
-
-        Ok((oms_orders, sides, portfolio))
-    }
-
     async fn build_execution_orchestrator(
         &self,
         db: PgPool,
@@ -1882,12 +980,9 @@ impl AppState {
             .and_then(|value| value.as_i64())
             .unwrap_or(0);
 
-        // DMON-03 + DMON-04: Recover OMS orders, side cache, and portfolio from
-        // durable DB truth (submitted outbox rows + applied inbox events).
         let (oms_orders, recovered_sides, portfolio) =
-            Self::recover_oms_and_portfolio(&db, run_id, initial_equity_micros).await?;
+            recover_oms_and_portfolio(&db, run_id, initial_equity_micros).await?;
 
-        // Seed the shared side cache so reconcile closures have side info immediately.
         {
             let mut sides_lock = self.local_order_sides.write().await;
             *sides_lock = recovered_sides.clone();
@@ -1898,15 +993,6 @@ impl AppState {
             self.runtime_selection.deployment_mode,
         )?;
 
-        // AP-04: Broker snapshot seeding differs by truth source.
-        //
-        // Synthetic (paper): if no snapshot is loaded, synthesize one from recovered
-        //   OMS + portfolio truth. The paper fill engine IS the broker, so local
-        //   state exactly equals broker truth.
-        //
-        // External (Alpaca): fetch a fresh real broker snapshot at runtime start.
-        //   This removes the current dependence on prior dev-only snapshot injection
-        //   and ensures the daemon starts from authoritative external broker truth.
         let broker_seed = match self.broker_snapshot_source {
             BrokerSnapshotTruthSource::Synthetic => {
                 let broker_snapshot_guard = self.broker_snapshot.read().await;
@@ -1930,13 +1016,15 @@ impl AppState {
                 let fetched = match &daemon_broker {
                     DaemonBroker::Alpaca(adapter) => {
                         adapter.fetch_broker_snapshot(now).map_err(|err| match err {
-                            BrokerError::AuthSession { detail } => RuntimeLifecycleError::forbidden(
-                                "runtime.start_refused.alpaca_snapshot_auth",
-                                "broker_snapshot_fetch",
-                                format!(
-                                    "failed to fetch Alpaca broker snapshot before runtime start: {detail}"
-                                ),
-                            ),
+                            BrokerError::AuthSession { detail } => {
+                                RuntimeLifecycleError::forbidden(
+                                    "runtime.start_refused.alpaca_snapshot_auth",
+                                    "broker_snapshot_fetch",
+                                    format!(
+                                        "failed to fetch Alpaca broker snapshot before runtime start: {detail}"
+                                    ),
+                                )
+                            }
                             other => RuntimeLifecycleError::service_unavailable(
                                 "runtime.start_refused.alpaca_snapshot_unavailable",
                                 format!(
@@ -1970,10 +1058,6 @@ impl AppState {
             .await
             .map_err(|err| RuntimeLifecycleError::internal("load_broker_cursor failed", err))?;
 
-        // AP-05: Derive daemon-owned WS continuity truth from the persisted cursor.
-        // This is the authoritative initialization path — continuity state comes from
-        // the durable DB cursor, not from an in-memory default. `ColdStartUnproven`
-        // is the correct default when no cursor has been written yet.
         let ws_continuity = AlpacaWsContinuityState::from_cursor_json(
             self.runtime_selection.broker_kind,
             broker_cursor.as_deref(),
@@ -2005,8 +1089,6 @@ impl AppState {
                 )
             })?;
 
-        // DMON-02: Allow absent execution_snapshot; use an empty local snapshot
-        // seed rather than refusing to start.
         let local_seed_reconcile = {
             let local_snapshot_guard = self.execution_snapshot.read().await;
             if let Some(snap) = local_snapshot_guard.clone() {
@@ -2017,8 +1099,6 @@ impl AppState {
             }
         };
 
-        // DMON-05: Closures read from the shared side cache so that each
-        // reconcile tick uses the current order-side mapping.
         let local_snapshots = Arc::clone(&self.execution_snapshot);
         let side_cache_for_local = Arc::clone(&self.local_order_sides);
         let local_snapshot_provider = move || {
@@ -2175,16 +1255,11 @@ impl AppState {
 }
 
 // ---------------------------------------------------------------------------
-// Test-only helpers (pub so integration tests in tests/ can reach them;
-// never called from production code paths).
+// Test-only helpers
 // ---------------------------------------------------------------------------
 
 impl AppState {
-    /// Inject a never-finishing fake execution loop so that
-    /// `current_status_snapshot()` returns `state == "running"` without
-    /// a real DB or orchestrator.  Used by PROD-02 route scenario tests.
-    ///
-    /// **Never call this outside of tests.**
+    /// Inject a never-finishing fake execution loop for tests.
     pub async fn inject_running_loop_for_test(&self, run_id: Uuid) {
         let (stop_tx, mut stop_rx) = watch::channel(ExecutionLoopCommand::Run);
         let join_handle: JoinHandle<ExecutionLoopExit> = tokio::spawn(async move {
@@ -2207,581 +1282,10 @@ impl AppState {
         *lock = Some(handle);
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn runtime_selection_defaults_to_paper_ready() {
-        let selection = runtime_selection_from_env_values(None, None);
-        assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
-        // broker_kind is the typed separation; adapter_id is the display string.
-        assert_eq!(selection.broker_kind, Some(BrokerKind::Paper));
-        assert_eq!(selection.adapter_id, "paper");
-        assert!(selection.readiness.start_allowed);
-        assert!(selection.readiness.blocker.is_none());
-    }
-
-    #[test]
-    fn runtime_selection_live_capital_alpaca_now_allowed() {
-        // AP-08: live-capital+alpaca is now the fully supported combination.
-        let selection = runtime_selection_from_env_values(Some("live-capital"), Some("alpaca"));
-        assert_eq!(selection.deployment_mode, DeploymentMode::LiveCapital);
-        assert_eq!(selection.broker_kind, Some(BrokerKind::Alpaca));
-        assert!(
-            selection.readiness.start_allowed,
-            "live-capital+alpaca must be allowed after AP-08; got: {:?}",
-            selection.readiness.blocker
-        );
-        assert!(selection.readiness.blocker.is_none());
-    }
-
-    #[test]
-    fn runtime_selection_live_capital_paper_still_blocked() {
-        // live-capital+paper is explicitly blocked even after AP-08.
-        let selection = runtime_selection_from_env_values(Some("live-capital"), Some("paper"));
-        assert_eq!(selection.deployment_mode, DeploymentMode::LiveCapital);
-        assert_eq!(selection.broker_kind, Some(BrokerKind::Paper));
-        assert!(!selection.readiness.start_allowed);
-        assert!(selection
-            .readiness
-            .blocker
-            .as_deref()
-            .unwrap_or("")
-            .contains("live-capital"));
-    }
-
-    #[test]
-    fn runtime_selection_paper_alpaca_is_now_allowed() {
-        // AP-06: paper+alpaca is an explicitly supported combination.
-        // The readiness gate must return start_allowed=true for this pair.
-        let selection = runtime_selection_from_env_values(Some("paper"), Some("alpaca"));
-        assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
-        assert_eq!(selection.broker_kind, Some(BrokerKind::Alpaca));
-        assert!(
-            selection.readiness.start_allowed,
-            "paper+alpaca must be allowed after AP-06; got blocker: {:?}",
-            selection.readiness.blocker
-        );
-        assert!(
-            selection.readiness.blocker.is_none(),
-            "no blocker expected for paper+alpaca"
-        );
-    }
-
-    #[test]
-    fn unknown_broker_adapter_string_is_fail_closed() {
-        // Unrecognised adapter-id (not "paper" or "alpaca") must fail-closed.
-        // broker_kind is None; deployment_mode_readiness treats None as fail-closed.
-        let selection =
-            runtime_selection_from_env_values(Some("paper"), Some("interactive-brokers"));
-        assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
-        assert_eq!(
-            selection.broker_kind, None,
-            "unrecognised adapter yields None broker_kind"
-        );
-        assert_eq!(selection.adapter_id, "interactive-brokers");
-        assert!(!selection.readiness.start_allowed);
-        assert!(selection
-            .readiness
-            .blocker
-            .as_deref()
-            .is_some_and(|msg| !msg.is_empty()));
-    }
-
-    // ── build_daemon_broker factory tests ────────────────────────────────
-
-    #[test]
-    fn build_daemon_broker_paper_succeeds() {
-        let result = build_daemon_broker(Some(BrokerKind::Paper), DeploymentMode::Paper);
-        assert!(
-            result.is_ok(),
-            "Paper broker must construct successfully; got: {:?}",
-            result.as_ref().err().map(|e| e.to_string())
-        );
-        // Confirm the variant is Paper.
-        assert!(
-            matches!(result.unwrap(), DaemonBroker::Paper(_)),
-            "expected DaemonBroker::Paper variant"
-        );
-    }
-
-    #[test]
-    fn build_daemon_broker_alpaca_paper_mode_requires_credentials() {
-        // AP-06: Alpaca+Paper broker requires credentials.
-        // Without env vars set, construction must fail with a clear message.
-        // If credentials happen to be present, the test just checks it succeeds.
-        if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
-            let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::Paper);
-            assert!(
-                result.is_ok(),
-                "Alpaca broker must succeed when credentials are present"
-            );
-            return;
-        }
-        let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::Paper);
-        assert!(
-            result.is_err(),
-            "Alpaca broker must fail when credentials are absent"
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains(ALPACA_API_KEY_ID_ENV),
-            "error must mention missing env var; got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn build_daemon_broker_alpaca_live_shadow_requires_credentials() {
-        // AP-07: Alpaca+LiveShadow also requires credentials.
-        if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
-            let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveShadow);
-            assert!(
-                result.is_ok(),
-                "Alpaca live-shadow broker must succeed when credentials are present"
-            );
-            return;
-        }
-        let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveShadow);
-        assert!(
-            result.is_err(),
-            "Alpaca live-shadow broker must fail when credentials are absent"
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains(ALPACA_API_KEY_ID_ENV),
-            "error must mention missing env var; got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn build_daemon_broker_alpaca_live_capital_requires_credentials() {
-        // AP-08: live-capital+alpaca is wired; construction requires credentials.
-        // Without credentials it fails on the credential check (not the mode check).
-        if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
-            let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveCapital);
-            assert!(
-                result.is_ok(),
-                "Alpaca+LiveCapital must succeed when credentials are present"
-            );
-            return;
-        }
-        let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveCapital);
-        assert!(
-            result.is_err(),
-            "Alpaca+LiveCapital must fail when credentials are absent"
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains(ALPACA_API_KEY_ID_ENV),
-            "error must mention missing env var; got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn build_daemon_broker_unknown_is_fail_closed() {
-        let result = build_daemon_broker(None, DeploymentMode::Paper);
-        assert!(result.is_err(), "Unknown broker (None) must fail closed");
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("unrecognised"),
-            "error must mention unrecognised; got: {err_msg}"
-        );
-    }
-
-    #[test]
-    fn alpaca_paper_base_url_honors_override() {
-        let base_url =
-            alpaca_base_url_for_mode(DeploymentMode::Paper, Some(" http://127.0.0.1:18080 "))
-                .expect("paper mode must resolve alpaca base url");
-        assert_eq!(base_url, "http://127.0.0.1:18080");
-    }
-
-    #[test]
-    fn alpaca_live_shadow_base_url_ignores_override_and_uses_canonical_live() {
-        let base_url =
-            alpaca_base_url_for_mode(DeploymentMode::LiveShadow, Some("http://127.0.0.1:18080"))
-                .expect("live-shadow mode must resolve alpaca base url");
-        assert_eq!(base_url, "https://api.alpaca.markets");
-    }
-
-    #[test]
-    fn alpaca_live_capital_base_url_ignores_override_and_uses_canonical_live() {
-        let base_url =
-            alpaca_base_url_for_mode(DeploymentMode::LiveCapital, Some("http://127.0.0.1:18080"))
-                .expect("live-capital mode must resolve alpaca base url");
-        assert_eq!(base_url, "https://api.alpaca.markets");
-    }
-
-    // ── AP-06 readiness gate tests ────────────────────────────────────────
-
-    #[test]
-    fn ap06_paper_alpaca_readiness_is_allowed() {
-        // Paper+Alpaca is the AP-06 addition: paper policy, external broker truth.
-        let readiness = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
-        assert!(
-            readiness.start_allowed,
-            "paper+alpaca must be allowed after AP-06; got: {:?}",
-            readiness.blocker
-        );
-        assert!(readiness.blocker.is_none(), "no blocker expected");
-    }
-
-    #[test]
-    fn ap06_paper_paper_unchanged() {
-        // Paper+Paper must remain allowed — AP-06 must not regress this.
-        let readiness = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
-        assert!(
-            readiness.start_allowed,
-            "paper+paper must remain allowed after AP-06; got: {:?}",
-            readiness.blocker
-        );
-        assert!(readiness.blocker.is_none(), "no blocker expected");
-    }
-
-    #[test]
-    fn ap06_live_shadow_alpaca_was_blocked_now_allowed_by_ap07() {
-        // AP-06 originally blocked live-shadow+alpaca.
-        // AP-07 explicitly unlocks it — verify the readiness gate now allows it.
-        let readiness =
-            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Alpaca));
-        assert!(
-            readiness.start_allowed,
-            "live-shadow+alpaca must be allowed after AP-07; got: {:?}",
-            readiness.blocker
-        );
-    }
-
-    #[test]
-    fn ap06_live_capital_alpaca_was_blocked_now_allowed_by_ap08() {
-        // AP-06 originally blocked live-capital+alpaca.
-        // AP-08 explicitly unlocks it — verify the readiness gate now allows it
-        // and that no blocker message is returned.
-        let readiness =
-            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Alpaca));
-        assert!(
-            readiness.start_allowed,
-            "live-capital+alpaca must be allowed after AP-08; got: {:?}",
-            readiness.blocker
-        );
-        assert!(
-            readiness.blocker.is_none(),
-            "allowed combination must carry no blocker message; got: {:?}",
-            readiness.blocker
-        );
-    }
-
-    #[test]
-    fn ap06_live_shadow_paper_still_blocked() {
-        // live-shadow must block regardless of broker kind — even Paper.
-        let readiness =
-            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Paper));
-        assert!(
-            !readiness.start_allowed,
-            "live-shadow+paper must remain fail-closed"
-        );
-    }
-
-    #[test]
-    fn ap06_runtime_selection_paper_alpaca_start_allowed() {
-        // End-to-end: runtime_selection_from_env_values with paper+alpaca
-        // must produce a RuntimeSelection with start_allowed=true.
-        let sel = runtime_selection_from_env_values(Some("paper"), Some("alpaca"));
-        assert_eq!(sel.deployment_mode, DeploymentMode::Paper);
-        assert_eq!(sel.broker_kind, Some(BrokerKind::Alpaca));
-        assert!(
-            sel.readiness.start_allowed,
-            "paper+alpaca RuntimeSelection must be startable; got: {:?}",
-            sel.readiness.blocker
-        );
-    }
-
-    // ── AP-07 readiness gate tests ────────────────────────────────────────
-
-    #[test]
-    fn ap07_live_shadow_alpaca_readiness_is_allowed() {
-        // AP-07: live-shadow + Alpaca is the new supported combination.
-        let readiness =
-            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Alpaca));
-        assert!(
-            readiness.start_allowed,
-            "live-shadow+alpaca must be allowed after AP-07; got: {:?}",
-            readiness.blocker
-        );
-        assert!(readiness.blocker.is_none(), "no blocker expected");
-    }
-
-    #[test]
-    fn ap07_live_shadow_paper_is_explicitly_blocked() {
-        // live-shadow requires an external broker; paper adapter must be
-        // explicitly blocked with a clear, honest message.
-        let readiness =
-            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Paper));
-        assert!(
-            !readiness.start_allowed,
-            "live-shadow+paper must be blocked (no real external truth)"
-        );
-        let blocker = readiness
-            .blocker
-            .expect("live-shadow+paper must have a blocker");
-        assert!(
-            blocker.contains("external broker"),
-            "blocker must explain external broker requirement; got: {blocker}"
-        );
-    }
-
-    #[test]
-    fn ap07_live_shadow_unrecognised_adapter_is_blocked() {
-        // live-shadow with None broker_kind (unrecognised adapter string) must block.
-        let readiness = deployment_mode_readiness(DeploymentMode::LiveShadow, None);
-        assert!(
-            !readiness.start_allowed,
-            "live-shadow+unrecognised must be blocked"
-        );
-        assert!(readiness.blocker.is_some(), "must carry a blocker message");
-    }
-
-    #[test]
-    fn ap07_live_capital_alpaca_was_blocked_now_allowed_by_ap08() {
-        // AP-07 kept live-capital+alpaca blocked; AP-08 now explicitly unlocks it.
-        // This test was previously an AP-07 regression guard; now it documents
-        // the AP-08 outcome: (LiveCapital, Alpaca) is an allowed combination.
-        let readiness =
-            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Alpaca));
-        assert!(
-            readiness.start_allowed,
-            "live-capital+alpaca must be allowed after AP-08; got: {:?}",
-            readiness.blocker
-        );
-        assert!(
-            readiness.blocker.is_none(),
-            "allowed combination must carry no blocker; got: {:?}",
-            readiness.blocker
-        );
-    }
-
-    #[test]
-    fn ap07_live_capital_paper_still_blocked() {
-        let readiness =
-            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Paper));
-        assert!(
-            !readiness.start_allowed,
-            "live-capital+paper must be blocked"
-        );
-    }
-
-    #[test]
-    fn ap07_paper_paper_and_paper_alpaca_unchanged() {
-        // Regression: AP-07 must not affect paper+paper or paper+alpaca.
-        let pp = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
-        assert!(pp.start_allowed, "paper+paper must remain allowed");
-
-        let pa = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
-        assert!(pa.start_allowed, "paper+alpaca must remain allowed");
-    }
-
-    #[test]
-    fn ap07_runtime_selection_live_shadow_alpaca_start_allowed() {
-        // End-to-end via runtime_selection_from_env_values.
-        let sel = runtime_selection_from_env_values(Some("live-shadow"), Some("alpaca"));
-        assert_eq!(sel.deployment_mode, DeploymentMode::LiveShadow);
-        assert_eq!(sel.broker_kind, Some(BrokerKind::Alpaca));
-        assert!(
-            sel.readiness.start_allowed,
-            "live-shadow+alpaca RuntimeSelection must be startable; got: {:?}",
-            sel.readiness.blocker
-        );
-    }
-
-    #[test]
-    fn ap07_calendar_spec_for_live_shadow_is_nyse_weekdays() {
-        // live-shadow uses the NYSE weekday calendar — not AlwaysOn.
-        // This is important for honest session truth in operator surfaces.
-        let state = AppState::new_for_test_with_mode(DeploymentMode::LiveShadow);
-        assert_eq!(
-            state.calendar_spec(),
-            mqk_integrity::CalendarSpec::NyseWeekdays,
-            "live-shadow must use NyseWeekdays calendar for honest session truth"
-        );
-    }
-
-    #[test]
-    fn ap07_live_shadow_alpaca_state_uses_external_snapshot_source() {
-        // live-shadow + alpaca must surface External snapshot source truth.
-        let state = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
-        assert_eq!(
-            state.broker_snapshot_source(),
-            BrokerSnapshotTruthSource::External,
-            "live-shadow+alpaca must declare External snapshot source"
-        );
-    }
-
-    // ── AP-08 readiness gate tests ────────────────────────────────────────
-
-    #[test]
-    fn ap08_live_capital_alpaca_readiness_is_allowed() {
-        // AP-08: (LiveCapital, Alpaca) is the explicitly supported capital combination.
-        let readiness =
-            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Alpaca));
-        assert!(
-            readiness.start_allowed,
-            "live-capital+alpaca must be allowed after AP-08; got: {:?}",
-            readiness.blocker
-        );
-        assert!(
-            readiness.blocker.is_none(),
-            "no blocker expected for allowed pair"
-        );
-    }
-
-    #[test]
-    fn ap08_live_capital_paper_is_explicitly_blocked() {
-        // Paper adapter is unconditionally blocked for live-capital: capital requires
-        // real external broker truth.  The message must name "live-capital".
-        let readiness =
-            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Paper));
-        assert!(
-            !readiness.start_allowed,
-            "live-capital+paper must remain fail-closed after AP-08"
-        );
-        let blocker = readiness
-            .blocker
-            .expect("live-capital+paper must carry a blocker message");
-        assert!(
-            blocker.contains("live-capital"),
-            "blocker must name the live-capital restriction; got: {blocker}"
-        );
-    }
-
-    #[test]
-    fn ap08_live_capital_unrecognised_adapter_is_blocked() {
-        // None broker_kind (unrecognised adapter string) is always blocked for
-        // live-capital — the mode requires a recognised external adapter.
-        let readiness = deployment_mode_readiness(DeploymentMode::LiveCapital, None);
-        assert!(
-            !readiness.start_allowed,
-            "live-capital+None must be blocked"
-        );
-        assert!(readiness.blocker.is_some(), "must carry a blocker message");
-    }
-
-    #[test]
-    fn ap08_runtime_selection_live_capital_alpaca_start_allowed() {
-        // End-to-end: runtime_selection_from_env_values with live-capital+alpaca
-        // must produce a RuntimeSelection with start_allowed=true.
-        let sel = runtime_selection_from_env_values(Some("live-capital"), Some("alpaca"));
-        assert_eq!(sel.deployment_mode, DeploymentMode::LiveCapital);
-        assert_eq!(sel.broker_kind, Some(BrokerKind::Alpaca));
-        assert!(
-            sel.readiness.start_allowed,
-            "live-capital+alpaca RuntimeSelection must be startable; got: {:?}",
-            sel.readiness.blocker
-        );
-        assert!(sel.readiness.blocker.is_none(), "no blocker expected");
-    }
-
-    #[test]
-    fn ap08_capital_dev_no_token_is_blocked_by_start_gate() {
-        // The AP-08 capital token gate must refuse start_execution_runtime when
-        // operator_auth is ExplicitDevNoToken.  This is enforced inside
-        // start_execution_runtime, not at the readiness layer, so we verify the
-        // gate logic directly via the auth mode predicate.
-        //
-        // The gate condition: deployment_mode == LiveCapital AND
-        //   !matches!(operator_auth, TokenRequired(_))
-        // should be true for ExplicitDevNoToken.
-        let mode = DeploymentMode::LiveCapital;
-        let auth = OperatorAuthMode::ExplicitDevNoToken;
-        let gate_fires = mode == DeploymentMode::LiveCapital
-            && !matches!(auth, OperatorAuthMode::TokenRequired(_));
-        assert!(gate_fires, "dev-no-token must trigger capital token gate");
-
-        // Positive: TokenRequired must NOT trigger the gate.
-        let auth_token = OperatorAuthMode::TokenRequired("real-token".to_string());
-        let gate_fires_for_token = mode == DeploymentMode::LiveCapital
-            && !matches!(auth_token, OperatorAuthMode::TokenRequired(_));
-        assert!(
-            !gate_fires_for_token,
-            "TokenRequired must not trigger capital token gate"
-        );
-
-        // MissingTokenFailClosed also triggers the gate.
-        let auth_missing = OperatorAuthMode::MissingTokenFailClosed;
-        let gate_fires_for_missing = mode == DeploymentMode::LiveCapital
-            && !matches!(auth_missing, OperatorAuthMode::TokenRequired(_));
-        assert!(
-            gate_fires_for_missing,
-            "MissingTokenFailClosed must also trigger capital token gate"
-        );
-    }
-
-    #[test]
-    fn ap08_calendar_spec_for_live_capital_is_nyse_weekdays() {
-        // live-capital must use the NYSE weekday calendar — same as live-shadow.
-        // Capital mode is never "always-on"; exchange hours must be honoured.
-        let state = AppState::new_for_test_with_mode(DeploymentMode::LiveCapital);
-        assert_eq!(
-            state.calendar_spec(),
-            mqk_integrity::CalendarSpec::NyseWeekdays,
-            "live-capital must use NyseWeekdays calendar for honest session truth"
-        );
-    }
-
-    #[test]
-    fn ap08_live_shadow_unchanged_after_ap08() {
-        // Regression: AP-08 must not regress live-shadow+alpaca.
-        let shadow_alpaca =
-            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Alpaca));
-        assert!(
-            shadow_alpaca.start_allowed,
-            "live-shadow+alpaca must remain allowed after AP-08"
-        );
-        assert!(shadow_alpaca.blocker.is_none(), "no blocker expected");
-
-        // Paper+Paper and Paper+Alpaca also unchanged.
-        let pp = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
-        assert!(
-            pp.start_allowed,
-            "paper+paper must remain allowed after AP-08"
-        );
-
-        let pa = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
-        assert!(
-            pa.start_allowed,
-            "paper+alpaca must remain allowed after AP-08"
-        );
-    }
-
-    #[test]
-    fn reconcile_truth_gate_allows_only_ok_status() {
-        let reconcile_status = Arc::new(RwLock::new(initial_reconcile_status()));
-        let gate = ReconcileTruthGate {
-            reconcile_status: Arc::clone(&reconcile_status),
-        };
-
-        assert!(!gate.is_clean(), "unknown reconcile must fail closed");
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        rt.block_on(async {
-            reconcile_status.write().await.status = "dirty".to_string();
-        });
-        assert!(!gate.is_clean(), "dirty reconcile must block dispatch");
-
-        rt.block_on(async {
-            reconcile_status.write().await.status = "stale".to_string();
-        });
-        assert!(!gate.is_clean(), "stale reconcile must block dispatch");
-
-        rt.block_on(async {
-            reconcile_status.write().await.status = "ok".to_string();
-        });
-        assert!(gate.is_clean(), "ok reconcile may allow dispatch");
-    }
-}
+// ---------------------------------------------------------------------------
+// DeadmanTruth (private impl block)
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 struct DeadmanTruth {
@@ -2846,806 +1350,8 @@ impl AppState {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// spawn_execution_loop
 // ---------------------------------------------------------------------------
-
-fn default_node_id(service: &str) -> String {
-    let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "UNKNOWN_HOST".to_string());
-    let user = std::env::var("USERNAME").unwrap_or_else(|_| "UNKNOWN_USER".to_string());
-    format!("{service}|{host}|{user}|pid={}", std::process::id())
-}
-
-pub fn operator_auth_mode_from_env_values(
-    operator_token: Option<&str>,
-    dev_allow_no_token: Option<&str>,
-) -> OperatorAuthMode {
-    if let Some(token) = operator_token
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-    {
-        return OperatorAuthMode::TokenRequired(token.to_string());
-    }
-
-    #[cfg(debug_assertions)]
-    {
-        if dev_allow_no_token
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-        {
-            return OperatorAuthMode::ExplicitDevNoToken;
-        }
-    }
-
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = dev_allow_no_token;
-    }
-
-    OperatorAuthMode::MissingTokenFailClosed
-}
-
-fn operator_auth_mode_from_env() -> OperatorAuthMode {
-    let operator_token = std::env::var("MQK_OPERATOR_TOKEN").ok();
-    let dev_allow_no_token = std::env::var(DEV_ALLOW_NO_OPERATOR_TOKEN_ENV).ok();
-    operator_auth_mode_from_env_values(operator_token.as_deref(), dev_allow_no_token.as_deref())
-}
-
-fn runtime_selection_from_env_values(
-    mode: Option<&str>,
-    adapter_id: Option<&str>,
-) -> RuntimeSelection {
-    let deployment_mode = parse_deployment_mode(mode).unwrap_or_else(|| {
-        parse_deployment_mode(Some(DEFAULT_DAEMON_DEPLOYMENT_MODE))
-            .expect("default deployment mode must be valid")
-    });
-    let adapter = adapter_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(DEFAULT_DAEMON_ADAPTER_ID)
-        .to_ascii_lowercase();
-
-    // Parse the adapter string into the typed BrokerKind.  Unknown strings yield
-    // None, which deployment_mode_readiness treats as fail-closed.  The raw
-    // adapter string is preserved for DB records and operator-visible responses.
-    let broker_kind = BrokerKind::parse(&adapter);
-
-    let readiness = deployment_mode_readiness(deployment_mode, broker_kind);
-
-    RuntimeSelection {
-        deployment_mode,
-        broker_kind,
-        adapter_id: adapter,
-        run_config_hash: format!(
-            "{}-{}-{}-v1",
-            DAEMON_RUN_CONFIG_HASH_PREFIX,
-            deployment_mode.as_api_label(),
-            if readiness.start_allowed {
-                "ready"
-            } else {
-                "blocked"
-            }
-        ),
-        readiness,
-    }
-}
-
-fn runtime_selection_from_env() -> RuntimeSelection {
-    let mode = std::env::var(DAEMON_DEPLOYMENT_MODE_ENV).ok();
-    let adapter_id = std::env::var(DAEMON_ADAPTER_ID_ENV).ok();
-    runtime_selection_from_env_values(mode.as_deref(), adapter_id.as_deref())
-}
-
-fn parse_deployment_mode(raw: Option<&str>) -> Option<DeploymentMode> {
-    let value = raw?.trim().to_ascii_lowercase();
-    match value.as_str() {
-        "paper" => Some(DeploymentMode::Paper),
-        "backtest" => Some(DeploymentMode::Backtest),
-        "live-shadow" | "live_shadow" | "liveshadow" => Some(DeploymentMode::LiveShadow),
-        "live-capital" | "live_capital" | "livecapital" | "live" => {
-            Some(DeploymentMode::LiveCapital)
-        }
-        _ => None,
-    }
-}
-
-/// Evaluate whether the (policy, broker) combination may be started.
-///
-/// This is the single canonical gate that maps typed `(DeploymentMode, BrokerKind)`
-/// pairs to allowed/blocked states.  String comparisons are intentionally absent;
-/// all dispatch is through typed enums.
-///
-/// # Supported combinations
-///
-///   Paper + Paper        →  allowed (AP-02: in-process synthetic fills)
-///   Paper + Alpaca       →  allowed (AP-06: paper endpoint, no real capital)
-///   LiveShadow + Alpaca  →  allowed (AP-07: live endpoint, shadow policy)
-///   LiveCapital + Alpaca →  allowed (AP-08: live endpoint, capital policy)
-///
-/// All other combinations remain fail-closed until explicitly wired and proven.
-///
-/// # Fail-closed invariants
-///
-/// - `LiveCapital + Paper` is explicitly blocked: capital requires external broker.
-/// - `LiveCapital + None` is blocked: unrecognised adapter.
-/// - `Backtest` is unconditionally blocked.
-/// - `LiveShadow + Paper` is explicitly blocked: shadow mode requires an
-///   external broker; the paper fill engine cannot provide real market truth.
-/// - `LiveShadow + None` is blocked: unrecognised adapter string.
-/// - Unrecognised adapter strings (`broker_kind = None`) are always blocked.
-/// - Enabling a new combination here MUST be accompanied by a matching
-///   `build_daemon_broker` arm and a set of proven scenario tests.
-fn deployment_mode_readiness(
-    mode: DeploymentMode,
-    broker_kind: Option<BrokerKind>,
-) -> DeploymentReadiness {
-    match (mode, broker_kind) {
-        // ── Paper + Paper ─────────────────────────────────────────────────
-        (DeploymentMode::Paper, Some(BrokerKind::Paper)) => DeploymentReadiness {
-            start_allowed: true,
-            blocker: None,
-        },
-        // ── Paper + Alpaca (AP-06) ────────────────────────────────────────
-        //
-        // Paper deployment policy; broker truth from Alpaca paper endpoint.
-        // Credentials are validated at `build_daemon_broker` time.
-        (DeploymentMode::Paper, Some(BrokerKind::Alpaca)) => DeploymentReadiness {
-            start_allowed: true,
-            blocker: None,
-        },
-        // ── Paper + unrecognised adapter ──────────────────────────────────
-        (DeploymentMode::Paper, None) => DeploymentReadiness {
-            start_allowed: false,
-            blocker: Some(
-                "deployment mode 'paper' requires broker 'paper' or 'alpaca'; \
-                 set MQK_DAEMON_ADAPTER_ID to a recognised broker adapter"
-                    .to_string(),
-            ),
-        },
-        // ── LiveShadow + Alpaca (AP-07) ───────────────────────────────────
-        //
-        // Shadow deployment policy; broker truth from Alpaca live endpoint.
-        // Provides real external market truth and continuity without capital
-        // authority.  This is NOT live-capital.  Credentials are validated
-        // at `build_daemon_broker` time.  Continuity, snapshot, and reconcile
-        // gates remain fully enforced — fail-closed on any truth gap.
-        (DeploymentMode::LiveShadow, Some(BrokerKind::Alpaca)) => DeploymentReadiness {
-            start_allowed: true,
-            blocker: None,
-        },
-        // ── LiveShadow + Paper: explicitly blocked ────────────────────────
-        //
-        // Shadow mode requires real external broker truth.  The paper fill
-        // engine is a synthetic in-process adapter; it cannot provide the
-        // real market state required for externally-backed shadow operation.
-        (DeploymentMode::LiveShadow, Some(BrokerKind::Paper)) => DeploymentReadiness {
-            start_allowed: false,
-            blocker: Some(
-                "deployment mode 'live-shadow' requires an external broker adapter; \
-                 the paper fill engine cannot provide real market truth for shadow mode — \
-                 set MQK_DAEMON_ADAPTER_ID=alpaca"
-                    .to_string(),
-            ),
-        },
-        // ── LiveShadow + unrecognised adapter ─────────────────────────────
-        (DeploymentMode::LiveShadow, None) => DeploymentReadiness {
-            start_allowed: false,
-            blocker: Some(
-                "deployment mode 'live-shadow' requires an external broker adapter; \
-                 set MQK_DAEMON_ADAPTER_ID=alpaca"
-                    .to_string(),
-            ),
-        },
-        // ── LiveCapital + Alpaca (AP-08) ──────────────────────────────────
-        //
-        // Capital deployment policy; broker truth from Alpaca live endpoint.
-        // Provides real capital semantics with real external broker truth.
-        // Credentials validated at `build_daemon_broker` time.
-        //
-        // Additional runtime gates (dev-token check + WS continuity proven)
-        // are enforced in `start_execution_runtime` — these are stricter than
-        // live-shadow and cannot be encoded in the static readiness gate.
-        (DeploymentMode::LiveCapital, Some(BrokerKind::Alpaca)) => DeploymentReadiness {
-            start_allowed: true,
-            blocker: None,
-        },
-        // ── LiveCapital + Paper: explicitly blocked ───────────────────────
-        //
-        // Capital mode requires real external broker truth.  The paper fill
-        // engine is a synthetic in-process adapter; it cannot provide the
-        // real market state required for capital execution.
-        (DeploymentMode::LiveCapital, Some(BrokerKind::Paper)) => DeploymentReadiness {
-            start_allowed: false,
-            blocker: Some(
-                "live-capital requires an external broker adapter; \
-                 the paper fill engine cannot provide real market truth for capital execution — \
-                 set MQK_DAEMON_ADAPTER_ID=alpaca"
-                    .to_string(),
-            ),
-        },
-        // ── LiveCapital + unrecognised adapter ────────────────────────────
-        (DeploymentMode::LiveCapital, None) => DeploymentReadiness {
-            start_allowed: false,
-            blocker: Some(
-                "live-capital requires an external broker adapter; \
-                 set MQK_DAEMON_ADAPTER_ID=alpaca"
-                    .to_string(),
-            ),
-        },
-        // ── Backtest: unconditionally blocked ─────────────────────────────
-        (DeploymentMode::Backtest, _) => DeploymentReadiness {
-            start_allowed: false,
-            blocker: Some(
-                "deployment mode 'backtest' is not yet supported in the daemon runtime; \
-                 refusing start fail-closed"
-                    .to_string(),
-            ),
-        },
-    }
-}
-
-/// Monotonically increasing uptime since first call (process lifetime).
-pub fn uptime_secs() -> u64 {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_secs()
-}
-
-/// Spawn a background task that emits a heartbeat SSE every `interval`.
-pub fn spawn_heartbeat(bus: broadcast::Sender<BusMsg>, interval: Duration) {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(interval);
-        loop {
-            ticker.tick().await;
-            let ts = Utc::now().timestamp_millis(); // allow: ops-metadata — SSE heartbeat UI timestamp, not used in enforcement
-            let _ = bus.send(BusMsg::Heartbeat { ts_millis: ts });
-        }
-    });
-}
-
-fn initial_reconcile_status() -> ReconcileStatusSnapshot {
-    ReconcileStatusSnapshot {
-        status: "unknown".to_string(),
-        last_run_at: None,
-        snapshot_watermark_ms: None,
-        mismatched_positions: 0,
-        mismatched_orders: 0,
-        mismatched_fills: 0,
-        unmatched_broker_events: 0,
-        note: Some(
-            "reconcile truth not yet proven; fail closed until a fresh broker snapshot is accepted"
-                .to_string(),
-        ),
-    }
-}
-
-fn parse_signed_qty(raw: &str) -> Option<i64> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(value) = trimmed.parse::<i64>() {
-        return Some(value);
-    }
-
-    let (sign, magnitude) = if let Some(rest) = trimmed.strip_prefix('-') {
-        (-1_i64, rest)
-    } else if let Some(rest) = trimmed.strip_prefix('+') {
-        (1_i64, rest)
-    } else {
-        (1_i64, trimmed)
-    };
-
-    let (whole, frac) = magnitude.split_once('.')?;
-    if frac.chars().any(|c| c != '0') {
-        return None;
-    }
-    let base = whole.parse::<i64>().ok()?;
-    Some(sign * base)
-}
-
-fn reconcile_side_from_schema(raw: &str) -> mqk_reconcile::Side {
-    if raw.eq_ignore_ascii_case("sell") {
-        mqk_reconcile::Side::Sell
-    } else {
-        mqk_reconcile::Side::Buy
-    }
-}
-
-fn reconcile_order_status_from_schema(raw: &str) -> mqk_reconcile::OrderStatus {
-    if raw.eq_ignore_ascii_case("new") {
-        mqk_reconcile::OrderStatus::New
-    } else if raw.eq_ignore_ascii_case("accepted") {
-        mqk_reconcile::OrderStatus::Accepted
-    } else if raw.eq_ignore_ascii_case("partially_filled")
-        || raw.eq_ignore_ascii_case("partial_fill")
-    {
-        mqk_reconcile::OrderStatus::PartiallyFilled
-    } else if raw.eq_ignore_ascii_case("filled") {
-        mqk_reconcile::OrderStatus::Filled
-    } else if raw.eq_ignore_ascii_case("canceled") || raw.eq_ignore_ascii_case("cancelled") {
-        mqk_reconcile::OrderStatus::Canceled
-    } else if raw.eq_ignore_ascii_case("rejected") {
-        mqk_reconcile::OrderStatus::Rejected
-    } else {
-        mqk_reconcile::OrderStatus::Unknown
-    }
-}
-
-/// DMON-05: like `reconcile_local_snapshot_from_runtime` but also includes
-/// active orders, using the side cache to supply the required `Side` field.
-pub(crate) fn reconcile_local_snapshot_from_runtime_with_sides(
-    snapshot: &mqk_runtime::observability::ExecutionSnapshot,
-    sides: &BTreeMap<String, mqk_reconcile::Side>,
-) -> mqk_reconcile::LocalSnapshot {
-    let positions = snapshot
-        .portfolio
-        .positions
-        .iter()
-        .map(|pos| (pos.symbol.clone(), pos.net_qty))
-        .collect();
-
-    let orders = snapshot
-        .active_orders
-        .iter()
-        .map(|order| {
-            let side = sides
-                .get(&order.order_id)
-                .cloned()
-                .unwrap_or(mqk_reconcile::Side::Buy);
-            let status = oms_execution_status_to_reconcile(&order.status);
-            let snap = mqk_reconcile::OrderSnapshot {
-                order_id: order.order_id.clone(),
-                symbol: order.symbol.clone(),
-                side,
-                qty: order.total_qty,
-                filled_qty: order.filled_qty,
-                status,
-            };
-            (order.order_id.clone(), snap)
-        })
-        .collect();
-
-    mqk_reconcile::LocalSnapshot { orders, positions }
-}
-
-fn oms_execution_status_to_reconcile(status: &str) -> mqk_reconcile::OrderStatus {
-    let raw = status.to_ascii_lowercase();
-    if raw == "filled" {
-        mqk_reconcile::OrderStatus::Filled
-    } else if raw == "canceled" || raw == "cancelled" {
-        mqk_reconcile::OrderStatus::Canceled
-    } else if raw == "rejected" {
-        mqk_reconcile::OrderStatus::Rejected
-    } else {
-        mqk_reconcile::OrderStatus::Unknown
-    }
-}
-
-fn outbox_json_symbol(json: &serde_json::Value) -> Option<String> {
-    json.get("symbol")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-}
-
-fn outbox_json_qty(json: &serde_json::Value) -> Option<i64> {
-    // Accept both "qty" and "quantity" keys; value must be positive.
-    let raw = json.get("qty").or_else(|| json.get("quantity"))?;
-    let n = raw.as_i64()?;
-    if n > 0 {
-        Some(n)
-    } else {
-        None
-    }
-}
-
-fn outbox_json_side(json: &serde_json::Value) -> mqk_reconcile::Side {
-    match json.get("side").and_then(|v| v.as_str()) {
-        Some(s) if s.eq_ignore_ascii_case("sell") => mqk_reconcile::Side::Sell,
-        _ => mqk_reconcile::Side::Buy,
-    }
-}
-
-fn broker_event_to_oms_event(event: &BrokerEvent) -> OmsEvent {
-    match event {
-        BrokerEvent::Ack { .. } => OmsEvent::Ack,
-        BrokerEvent::PartialFill { delta_qty, .. } => OmsEvent::PartialFill {
-            delta_qty: *delta_qty,
-        },
-        BrokerEvent::Fill { delta_qty, .. } => OmsEvent::Fill {
-            delta_qty: *delta_qty,
-        },
-        BrokerEvent::CancelAck { .. } => OmsEvent::CancelAck,
-        BrokerEvent::CancelReject { .. } => OmsEvent::CancelReject,
-        BrokerEvent::ReplaceAck { new_total_qty, .. } => OmsEvent::ReplaceAck {
-            new_total_qty: *new_total_qty,
-        },
-        BrokerEvent::ReplaceReject { .. } => OmsEvent::ReplaceReject,
-        BrokerEvent::Reject { .. } => OmsEvent::Reject,
-    }
-}
-
-fn broker_event_to_portfolio_fill(event: &BrokerEvent) -> Option<mqk_portfolio::Fill> {
-    match event {
-        BrokerEvent::Fill {
-            symbol,
-            side,
-            delta_qty,
-            price_micros,
-            fee_micros,
-            ..
-        }
-        | BrokerEvent::PartialFill {
-            symbol,
-            side,
-            delta_qty,
-            price_micros,
-            fee_micros,
-            ..
-        } => {
-            let portfolio_side = match side {
-                mqk_execution::types::Side::Buy => mqk_portfolio::Side::Buy,
-                mqk_execution::types::Side::Sell => mqk_portfolio::Side::Sell,
-            };
-            Some(mqk_portfolio::Fill {
-                symbol: symbol.clone(),
-                side: portfolio_side,
-                qty: *delta_qty,
-                price_micros: *price_micros,
-                fee_micros: *fee_micros,
-            })
-        }
-        _ => None,
-    }
-}
-
-fn oms_state_to_broker_status(state: &OrderState) -> &'static str {
-    match state {
-        OrderState::Open => "new",
-        OrderState::PartiallyFilled => "partially_filled",
-        OrderState::Filled => "filled",
-        OrderState::CancelPending => "pending_cancel",
-        OrderState::Cancelled => "canceled",
-        OrderState::ReplacePending => "pending_replace",
-        OrderState::Rejected => "rejected",
-    }
-}
-
-/// DMON-01: Synthesize a `BrokerSnapshot` from recovered OMS + portfolio truth.
-/// Used when no prior broker snapshot exists in memory (cold start / first tick).
-fn synthesize_paper_broker_snapshot(
-    oms_orders: &BTreeMap<String, OmsOrder>,
-    sides: &BTreeMap<String, mqk_reconcile::Side>,
-    portfolio: &PortfolioState,
-    now: chrono::DateTime<Utc>,
-) -> mqk_schemas::BrokerSnapshot {
-    let orders: Vec<mqk_schemas::BrokerOrder> = oms_orders
-        .values()
-        .map(|order| {
-            let side_str = sides
-                .get(&order.order_id)
-                .map(|s| match s {
-                    mqk_reconcile::Side::Buy => "buy",
-                    mqk_reconcile::Side::Sell => "sell",
-                })
-                .unwrap_or("buy");
-            mqk_schemas::BrokerOrder {
-                broker_order_id: order.order_id.clone(),
-                client_order_id: order.order_id.clone(),
-                symbol: order.symbol.clone(),
-                side: side_str.to_string(),
-                r#type: "market".to_string(),
-                status: oms_state_to_broker_status(&order.state).to_string(),
-                qty: order.total_qty.to_string(),
-                limit_price: None,
-                stop_price: None,
-                created_at_utc: now,
-            }
-        })
-        .collect();
-
-    let positions: Vec<mqk_schemas::BrokerPosition> = portfolio
-        .positions
-        .iter()
-        .filter_map(|(symbol, pos)| {
-            let net: i64 = pos.lots.iter().map(|l| l.qty_signed).sum();
-            if net == 0 {
-                None
-            } else {
-                Some(mqk_schemas::BrokerPosition {
-                    symbol: symbol.clone(),
-                    qty: net.to_string(),
-                    avg_price: "0".to_string(),
-                })
-            }
-        })
-        .collect();
-
-    let cash_whole = portfolio.cash_micros / 1_000_000;
-    let account = mqk_schemas::BrokerAccount {
-        equity: cash_whole.to_string(),
-        cash: cash_whole.to_string(),
-        currency: "USD".to_string(),
-    };
-
-    mqk_schemas::BrokerSnapshot {
-        captured_at_utc: now,
-        account,
-        orders,
-        fills: vec![],
-        positions,
-    }
-}
-
-/// DMON-05 (tick): Synthesize a paper-broker snapshot from the latest execution
-/// snapshot and side cache.  Called every execution tick to keep broker_snapshot
-/// in sync with the live OMS so the reconcile gate never sees local vs. broker
-/// drift in paper mode.
-fn synthesize_broker_snapshot_from_execution(
-    snapshot: &mqk_runtime::observability::ExecutionSnapshot,
-    sides: &BTreeMap<String, mqk_reconcile::Side>,
-    now: chrono::DateTime<Utc>,
-) -> mqk_schemas::BrokerSnapshot {
-    let orders: Vec<mqk_schemas::BrokerOrder> = snapshot
-        .active_orders
-        .iter()
-        .map(|order| {
-            let side_str = sides
-                .get(&order.order_id)
-                .map(|s| match s {
-                    mqk_reconcile::Side::Buy => "buy",
-                    mqk_reconcile::Side::Sell => "sell",
-                })
-                .unwrap_or("buy");
-            mqk_schemas::BrokerOrder {
-                broker_order_id: order
-                    .broker_order_id
-                    .clone()
-                    .unwrap_or_else(|| order.order_id.clone()),
-                client_order_id: order.order_id.clone(),
-                symbol: order.symbol.clone(),
-                side: side_str.to_string(),
-                r#type: "market".to_string(),
-                status: order.status.to_ascii_lowercase(),
-                qty: order.total_qty.to_string(),
-                limit_price: None,
-                stop_price: None,
-                created_at_utc: now,
-            }
-        })
-        .collect();
-
-    let positions: Vec<mqk_schemas::BrokerPosition> = snapshot
-        .portfolio
-        .positions
-        .iter()
-        .map(|pos| mqk_schemas::BrokerPosition {
-            symbol: pos.symbol.clone(),
-            qty: pos.net_qty.to_string(),
-            avg_price: "0".to_string(),
-        })
-        .collect();
-
-    let cash_whole = snapshot.portfolio.cash_micros / 1_000_000;
-    let account = mqk_schemas::BrokerAccount {
-        equity: cash_whole.to_string(),
-        cash: cash_whole.to_string(),
-        currency: "USD".to_string(),
-    };
-
-    mqk_schemas::BrokerSnapshot {
-        captured_at_utc: now,
-        account,
-        orders,
-        fills: vec![],
-        positions,
-    }
-}
-
-pub(crate) fn reconcile_broker_snapshot_from_schema(
-    snapshot: &mqk_schemas::BrokerSnapshot,
-) -> Result<mqk_reconcile::BrokerSnapshot, &'static str> {
-    let fetched_at_ms = snapshot.captured_at_utc.timestamp_millis(); // allow: ops-metadata — converting stored field to millis, not a wall-clock read
-    if fetched_at_ms <= 0 {
-        return Err("broker snapshot timestamp is invalid; refusing ambiguous broker truth");
-    }
-
-    let mut positions = BTreeMap::new();
-    for position in &snapshot.positions {
-        let qty = parse_signed_qty(&position.qty).ok_or(
-            "broker snapshot contains non-integer position qty; refusing ambiguous broker truth",
-        )?;
-        positions.insert(position.symbol.clone(), qty);
-    }
-
-    let mut orders = BTreeMap::new();
-    for order in &snapshot.orders {
-        let qty = parse_signed_qty(&order.qty).ok_or(
-            "broker snapshot contains non-integer order qty; refusing ambiguous broker truth",
-        )?;
-        let order_id = if order.client_order_id.trim().is_empty() {
-            order.broker_order_id.clone()
-        } else {
-            order.client_order_id.clone()
-        };
-        orders.insert(
-            order_id.clone(),
-            mqk_reconcile::OrderSnapshot::new(
-                order_id,
-                order.symbol.clone(),
-                reconcile_side_from_schema(&order.side),
-                qty,
-                0,
-                reconcile_order_status_from_schema(&order.status),
-            ),
-        );
-    }
-
-    Ok(mqk_reconcile::BrokerSnapshot {
-        orders,
-        positions,
-        fetched_at_ms,
-    })
-}
-
-fn reconcile_unknown_status(note: impl Into<String>) -> ReconcileStatusSnapshot {
-    ReconcileStatusSnapshot {
-        note: Some(note.into()),
-        ..initial_reconcile_status()
-    }
-}
-
-fn reconcile_last_run_at(fetched_at_ms: i64) -> Option<String> {
-    chrono::DateTime::<Utc>::from_timestamp_millis(fetched_at_ms) // allow: ops-metadata — stored millis → rfc3339, not a wall-clock read
-        .map(|ts| ts.to_rfc3339())
-}
-
-fn reconcile_counts(report: &mqk_reconcile::ReconcileReport) -> (usize, usize, usize, usize) {
-    let mut mismatched_positions = 0;
-    let mut mismatched_orders = 0;
-    let mut mismatched_fills = 0;
-    let mut unmatched_broker_events = 0;
-
-    for diff in &report.diffs {
-        match diff {
-            ReconcileDiff::PositionQtyMismatch { .. } => mismatched_positions += 1,
-            ReconcileDiff::OrderMismatch { .. }
-            | ReconcileDiff::LocalOrderMissingAtBroker { .. } => mismatched_orders += 1,
-            ReconcileDiff::UnknownOrder { .. } => {
-                mismatched_orders += 1;
-                unmatched_broker_events += 1;
-            }
-            ReconcileDiff::UnknownBrokerFill { .. } => {
-                mismatched_fills += 1;
-                unmatched_broker_events += 1;
-            }
-        }
-    }
-
-    (
-        mismatched_positions,
-        mismatched_orders,
-        mismatched_fills,
-        unmatched_broker_events,
-    )
-}
-
-fn reconcile_status_from_report(
-    report: &mqk_reconcile::ReconcileReport,
-    broker: &mqk_reconcile::BrokerSnapshot,
-    watermark: &SnapshotWatermark,
-) -> ReconcileStatusSnapshot {
-    let (mismatched_positions, mismatched_orders, mismatched_fills, unmatched_broker_events) =
-        reconcile_counts(report);
-
-    ReconcileStatusSnapshot {
-        status: if report.is_clean() {
-            "ok".to_string()
-        } else {
-            "dirty".to_string()
-        },
-        last_run_at: reconcile_last_run_at(broker.fetched_at_ms),
-        snapshot_watermark_ms: Some(watermark.last_accepted_ms()),
-        mismatched_positions,
-        mismatched_orders,
-        mismatched_fills,
-        unmatched_broker_events,
-        note: if report.is_clean() {
-            None
-        } else {
-            Some("monotonic reconcile detected drift; dispatch remains blocked".to_string())
-        },
-    }
-}
-
-fn reconcile_status_from_stale(
-    stale: &mqk_reconcile::StaleBrokerSnapshot,
-    watermark: &SnapshotWatermark,
-) -> ReconcileStatusSnapshot {
-    let (last_run_at, note) = match stale.freshness {
-        SnapshotFreshness::Stale {
-            watermark_ms,
-            got_ms,
-        } => (
-            reconcile_last_run_at(got_ms),
-            format!(
-                "stale broker snapshot rejected by reconcile watermark: watermark_ms={watermark_ms} got_ms={got_ms}"
-            ),
-        ),
-        SnapshotFreshness::NoTimestamp => (
-            None,
-            "broker snapshot has no timestamp; reconcile ordering is ambiguous and remains fail-closed"
-                .to_string(),
-        ),
-        SnapshotFreshness::Fresh => (
-            None,
-            "reconcile stale-state construction received a fresh snapshot unexpectedly"
-                .to_string(),
-        ),
-    };
-
-    ReconcileStatusSnapshot {
-        status: "stale".to_string(),
-        snapshot_watermark_ms: Some(watermark.last_accepted_ms()),
-        last_run_at,
-        mismatched_positions: 0,
-        mismatched_orders: 0,
-        mismatched_fills: 0,
-        unmatched_broker_events: 0,
-        note: Some(note),
-    }
-}
-
-fn preserve_fail_closed_reconcile_status(
-    previous: &ReconcileStatusSnapshot,
-    note: impl Into<String>,
-) -> ReconcileStatusSnapshot {
-    let mut preserved = previous.clone();
-    preserved.note = Some(note.into());
-    preserved
-}
-
-async fn publish_reconcile_failure(
-    state: &Arc<AppState>,
-    reconcile: ReconcileStatusSnapshot,
-    note: &str,
-) {
-    state.publish_reconcile_snapshot(reconcile).await;
-    {
-        let mut ig = state.integrity.write().await;
-        ig.disarmed = true;
-        ig.halted = true;
-    }
-
-    if let Some(db) = state.db.as_ref() {
-        let _ = mqk_db::persist_arm_state_canonical(
-            db,
-            mqk_db::ArmState::Disarmed,
-            Some(mqk_db::DisarmReason::ReconcileDrift),
-        )
-        .await;
-        let _ =
-            mqk_db::persist_risk_block_state(db, true, Some("RECONCILE_BLOCKED"), Utc::now()).await;
-    }
-
-    let active_run_id = state.status.read().await.active_run_id;
-    let snapshot = StatusSnapshot {
-        daemon_uptime_secs: uptime_secs(),
-        active_run_id,
-        state: "halted".to_string(),
-        notes: Some(note.to_string()),
-        integrity_armed: false,
-        deadman_status: "unknown".to_string(),
-        deadman_last_heartbeat_utc: None,
-    };
-    state.publish_status(snapshot).await;
-    let _ = state.bus.send(BusMsg::LogLine {
-        level: "ERROR".to_string(),
-        msg: note.to_string(),
-    });
-}
 
 fn spawn_execution_loop(
     state: Arc<AppState>,
@@ -3654,14 +1360,10 @@ fn spawn_execution_loop(
 ) -> ExecutionLoopHandle {
     let (stop_tx, mut stop_rx) = watch::channel(ExecutionLoopCommand::Run);
     let snapshot_cache = Arc::clone(&state.execution_snapshot);
-    // DMON-05: shared caches updated every tick so reconcile closures stay current.
     let broker_snapshot_cache = Arc::clone(&state.broker_snapshot);
     let side_cache = Arc::clone(&state.local_order_sides);
     let db = state.db.clone();
     let integrity = Arc::clone(&state.integrity);
-    // AP-04: Capture snapshot source so the tick loop can gate synthesis.
-    // For Synthetic (paper): synthesize broker snapshot from local OMS on every tick.
-    // For External (Alpaca): do NOT synthesize — broker truth comes from external fetch.
     let broker_snapshot_source = state.broker_snapshot_source();
 
     let join_handle = tokio::spawn(async move {
@@ -3723,12 +1425,6 @@ fn spawn_execution_loop(
 
                     if let Err(err) = orchestrator.tick().await {
                         tracing::error!("execution_loop_halt error={err}");
-                        // Safety net: durably halt the run so it cannot stay in a
-                        // zombie RUNNING state after the loop exits.  For cases
-                        // where tick() already called persist_halt_and_disarm
-                        // internally (reconcile drift, recovery quarantine, etc.),
-                        // halt_run is idempotent.  For generic DB errors it
-                        // prevents a run that is permanently Running with no loop.
                         if let Some(ref pool) = db {
                             let now = Utc::now();
                             let _ = mqk_db::halt_run(pool, run_id, now).await;
@@ -3747,11 +1443,6 @@ fn spawn_execution_loop(
 
                     if let Some(ref pool) = db {
                         let now = Utc::now();
-                        // Deadman pre-check: if the heartbeat is already stale, the
-                        // execution loop must not refresh it.  Sending a fresh heartbeat
-                        // for an expired run would mask the expiry from the status surface
-                        // and create a zombie loop. Exit and let the operator surface
-                        // detect + persist the expired state on the next status query.
                         if let Ok(true) =
                             mqk_db::deadman_expired(pool, run_id, DEADMAN_TTL_SECONDS, now).await
                         {
@@ -3793,8 +1484,6 @@ fn spawn_execution_loop(
 
                     match orchestrator.snapshot().await.context("snapshot failed") {
                         Ok(snapshot) => {
-                            // DMON-05: refresh side cache from outbox so reconcile
-                            // closures have current side info.
                             if let Some(ref pool) = db {
                                 if let Ok(outbox_rows) =
                                     mqk_db::outbox_list_unacked_for_run(pool, run_id).await
@@ -3807,13 +1496,6 @@ fn spawn_execution_loop(
                                         );
                                     }
                                 }
-                                // AP-04: Only synthesize broker snapshot for Synthetic source.
-                                // For paper, the fill engine IS the broker — local OMS truth
-                                // equals broker truth, so synthesis is correct.
-                                // For External (Alpaca), broker truth is held by the external
-                                // broker; synthesizing from local OMS would produce incorrect
-                                // data.  The broker snapshot must be populated by the AP-03
-                                // fetch path instead and must not be overwritten here.
                                 if broker_snapshot_source == BrokerSnapshotTruthSource::Synthetic {
                                     let sides_snapshot = side_cache.read().await.clone();
                                     let now = Utc::now();
@@ -3851,6 +1533,10 @@ fn spawn_execution_loop(
     }
 }
 
+// ---------------------------------------------------------------------------
+// spawn_reconcile_tick
+// ---------------------------------------------------------------------------
+
 /// Spawn a background task that periodically runs a reconcile tick (R3-1).
 pub fn spawn_reconcile_tick<L, B>(
     state: Arc<AppState>,
@@ -3862,10 +1548,6 @@ pub fn spawn_reconcile_tick<L, B>(
     B: Fn() -> Option<mqk_reconcile::BrokerSnapshot> + Send + 'static,
 {
     tokio::spawn(async move {
-        // Use interval_at so the first tick fires after one full `interval`
-        // rather than immediately.  This prevents the reconcile from writing
-        // DB state before execution_snapshot is populated and avoids polluting
-        // shared test DBs during short-lived lifecycle integration tests.
         let start = tokio::time::Instant::now() + interval;
         let mut ticker = tokio::time::interval_at(start, interval);
         let mut watermark = SnapshotWatermark::new();
@@ -3934,4 +1616,574 @@ pub fn spawn_reconcile_tick<L, B>(
             }
         }
     });
+}
+
+async fn publish_reconcile_failure(
+    state: &Arc<AppState>,
+    reconcile: ReconcileStatusSnapshot,
+    note: &str,
+) {
+    state.publish_reconcile_snapshot(reconcile).await;
+    {
+        let mut ig = state.integrity.write().await;
+        ig.disarmed = true;
+        ig.halted = true;
+    }
+
+    if let Some(db) = state.db.as_ref() {
+        let _ = mqk_db::persist_arm_state_canonical(
+            db,
+            mqk_db::ArmState::Disarmed,
+            Some(mqk_db::DisarmReason::ReconcileDrift),
+        )
+        .await;
+        let _ =
+            mqk_db::persist_risk_block_state(db, true, Some("RECONCILE_BLOCKED"), Utc::now()).await;
+    }
+
+    let active_run_id = state.status.read().await.active_run_id;
+    let snapshot = StatusSnapshot {
+        daemon_uptime_secs: uptime_secs(),
+        active_run_id,
+        state: "halted".to_string(),
+        notes: Some(note.to_string()),
+        integrity_armed: false,
+        deadman_status: "unknown".to_string(),
+        deadman_last_heartbeat_utc: None,
+    };
+    state.publish_status(snapshot).await;
+    let _ = state.bus.send(BusMsg::LogLine {
+        level: "ERROR".to_string(),
+        msg: note.to_string(),
+    });
+}
+
+// ---------------------------------------------------------------------------
+// OperatorAuthMode label impl (uses types from types.rs)
+// ---------------------------------------------------------------------------
+
+impl OperatorAuthMode {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::TokenRequired(_) => "token_required",
+            Self::ExplicitDevNoToken => "explicit_dev_no_token",
+            Self::MissingTokenFailClosed => "missing_token_fail_closed",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #[cfg(test)]
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mqk_execution::ReconcileGate;
+
+    #[test]
+    fn runtime_selection_defaults_to_paper_ready() {
+        let selection = runtime_selection_from_env_values(None, None);
+        assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
+        assert_eq!(selection.broker_kind, Some(BrokerKind::Paper));
+        assert_eq!(selection.adapter_id, "paper");
+        assert!(selection.readiness.start_allowed);
+        assert!(selection.readiness.blocker.is_none());
+    }
+
+    #[test]
+    fn runtime_selection_live_capital_alpaca_now_allowed() {
+        let selection = runtime_selection_from_env_values(Some("live-capital"), Some("alpaca"));
+        assert_eq!(selection.deployment_mode, DeploymentMode::LiveCapital);
+        assert_eq!(selection.broker_kind, Some(BrokerKind::Alpaca));
+        assert!(
+            selection.readiness.start_allowed,
+            "live-capital+alpaca must be allowed after AP-08; got: {:?}",
+            selection.readiness.blocker
+        );
+        assert!(selection.readiness.blocker.is_none());
+    }
+
+    #[test]
+    fn runtime_selection_live_capital_paper_still_blocked() {
+        let selection = runtime_selection_from_env_values(Some("live-capital"), Some("paper"));
+        assert_eq!(selection.deployment_mode, DeploymentMode::LiveCapital);
+        assert_eq!(selection.broker_kind, Some(BrokerKind::Paper));
+        assert!(!selection.readiness.start_allowed);
+        assert!(selection
+            .readiness
+            .blocker
+            .as_deref()
+            .unwrap_or("")
+            .contains("live-capital"));
+    }
+
+    #[test]
+    fn runtime_selection_paper_alpaca_is_now_allowed() {
+        let selection = runtime_selection_from_env_values(Some("paper"), Some("alpaca"));
+        assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
+        assert_eq!(selection.broker_kind, Some(BrokerKind::Alpaca));
+        assert!(
+            selection.readiness.start_allowed,
+            "paper+alpaca must be allowed after AP-06; got blocker: {:?}",
+            selection.readiness.blocker
+        );
+        assert!(
+            selection.readiness.blocker.is_none(),
+            "no blocker expected for paper+alpaca"
+        );
+    }
+
+    #[test]
+    fn unknown_broker_adapter_string_is_fail_closed() {
+        let selection =
+            runtime_selection_from_env_values(Some("paper"), Some("interactive-brokers"));
+        assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
+        assert_eq!(
+            selection.broker_kind, None,
+            "unrecognised adapter yields None broker_kind"
+        );
+        assert_eq!(selection.adapter_id, "interactive-brokers");
+        assert!(!selection.readiness.start_allowed);
+        assert!(selection
+            .readiness
+            .blocker
+            .as_deref()
+            .is_some_and(|msg| !msg.is_empty()));
+    }
+
+    #[test]
+    fn build_daemon_broker_paper_succeeds() {
+        let result = build_daemon_broker(Some(BrokerKind::Paper), DeploymentMode::Paper);
+        assert!(
+            result.is_ok(),
+            "Paper broker must construct successfully; got: {:?}",
+            result.as_ref().err().map(|e| e.to_string())
+        );
+        assert!(
+            matches!(result.unwrap(), DaemonBroker::Paper(_)),
+            "expected DaemonBroker::Paper variant"
+        );
+    }
+
+    #[test]
+    fn build_daemon_broker_alpaca_paper_mode_requires_credentials() {
+        if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
+            let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::Paper);
+            assert!(
+                result.is_ok(),
+                "Alpaca broker must succeed when credentials are present"
+            );
+            return;
+        }
+        let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::Paper);
+        assert!(
+            result.is_err(),
+            "Alpaca broker must fail when credentials are absent"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(ALPACA_API_KEY_ID_ENV),
+            "error must mention missing env var; got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn build_daemon_broker_alpaca_live_shadow_requires_credentials() {
+        if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
+            let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveShadow);
+            assert!(
+                result.is_ok(),
+                "Alpaca live-shadow broker must succeed when credentials are present"
+            );
+            return;
+        }
+        let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveShadow);
+        assert!(
+            result.is_err(),
+            "Alpaca live-shadow broker must fail when credentials are absent"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(ALPACA_API_KEY_ID_ENV),
+            "error must mention missing env var; got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn build_daemon_broker_alpaca_live_capital_requires_credentials() {
+        if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
+            let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveCapital);
+            assert!(
+                result.is_ok(),
+                "Alpaca+LiveCapital must succeed when credentials are present"
+            );
+            return;
+        }
+        let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveCapital);
+        assert!(
+            result.is_err(),
+            "Alpaca+LiveCapital must fail when credentials are absent"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains(ALPACA_API_KEY_ID_ENV),
+            "error must mention missing env var; got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn build_daemon_broker_unknown_is_fail_closed() {
+        let result = build_daemon_broker(None, DeploymentMode::Paper);
+        assert!(result.is_err(), "Unknown broker (None) must fail closed");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("unrecognised"),
+            "error must mention unrecognised; got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn alpaca_paper_base_url_honors_override() {
+        let base_url =
+            alpaca_base_url_for_mode(DeploymentMode::Paper, Some(" http://127.0.0.1:18080 "))
+                .expect("paper mode must resolve alpaca base url");
+        assert_eq!(base_url, "http://127.0.0.1:18080");
+    }
+
+    #[test]
+    fn alpaca_live_shadow_base_url_ignores_override_and_uses_canonical_live() {
+        let base_url =
+            alpaca_base_url_for_mode(DeploymentMode::LiveShadow, Some("http://127.0.0.1:18080"))
+                .expect("live-shadow mode must resolve alpaca base url");
+        assert_eq!(base_url, "https://api.alpaca.markets");
+    }
+
+    #[test]
+    fn alpaca_live_capital_base_url_ignores_override_and_uses_canonical_live() {
+        let base_url =
+            alpaca_base_url_for_mode(DeploymentMode::LiveCapital, Some("http://127.0.0.1:18080"))
+                .expect("live-capital mode must resolve alpaca base url");
+        assert_eq!(base_url, "https://api.alpaca.markets");
+    }
+
+    #[test]
+    fn ap06_paper_alpaca_readiness_is_allowed() {
+        let readiness = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
+        assert!(
+            readiness.start_allowed,
+            "paper+alpaca must be allowed after AP-06; got: {:?}",
+            readiness.blocker
+        );
+        assert!(readiness.blocker.is_none(), "no blocker expected");
+    }
+
+    #[test]
+    fn ap06_paper_paper_unchanged() {
+        let readiness = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
+        assert!(
+            readiness.start_allowed,
+            "paper+paper must remain allowed after AP-06; got: {:?}",
+            readiness.blocker
+        );
+        assert!(readiness.blocker.is_none(), "no blocker expected");
+    }
+
+    #[test]
+    fn ap06_live_shadow_alpaca_was_blocked_now_allowed_by_ap07() {
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Alpaca));
+        assert!(
+            readiness.start_allowed,
+            "live-shadow+alpaca must be allowed after AP-07; got: {:?}",
+            readiness.blocker
+        );
+    }
+
+    #[test]
+    fn ap06_live_capital_alpaca_was_blocked_now_allowed_by_ap08() {
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Alpaca));
+        assert!(
+            readiness.start_allowed,
+            "live-capital+alpaca must be allowed after AP-08; got: {:?}",
+            readiness.blocker
+        );
+        assert!(
+            readiness.blocker.is_none(),
+            "allowed combination must carry no blocker message; got: {:?}",
+            readiness.blocker
+        );
+    }
+
+    #[test]
+    fn ap06_live_shadow_paper_still_blocked() {
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Paper));
+        assert!(
+            !readiness.start_allowed,
+            "live-shadow+paper must remain fail-closed"
+        );
+    }
+
+    #[test]
+    fn ap06_runtime_selection_paper_alpaca_start_allowed() {
+        let sel = runtime_selection_from_env_values(Some("paper"), Some("alpaca"));
+        assert_eq!(sel.deployment_mode, DeploymentMode::Paper);
+        assert_eq!(sel.broker_kind, Some(BrokerKind::Alpaca));
+        assert!(
+            sel.readiness.start_allowed,
+            "paper+alpaca RuntimeSelection must be startable; got: {:?}",
+            sel.readiness.blocker
+        );
+    }
+
+    #[test]
+    fn ap07_live_shadow_alpaca_readiness_is_allowed() {
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Alpaca));
+        assert!(
+            readiness.start_allowed,
+            "live-shadow+alpaca must be allowed after AP-07; got: {:?}",
+            readiness.blocker
+        );
+        assert!(readiness.blocker.is_none(), "no blocker expected");
+    }
+
+    #[test]
+    fn ap07_live_shadow_paper_is_explicitly_blocked() {
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Paper));
+        assert!(
+            !readiness.start_allowed,
+            "live-shadow+paper must be blocked (no real external truth)"
+        );
+        let blocker = readiness
+            .blocker
+            .expect("live-shadow+paper must have a blocker");
+        assert!(
+            blocker.contains("external broker"),
+            "blocker must explain external broker requirement; got: {blocker}"
+        );
+    }
+
+    #[test]
+    fn ap07_live_shadow_unrecognised_adapter_is_blocked() {
+        let readiness = deployment_mode_readiness(DeploymentMode::LiveShadow, None);
+        assert!(
+            !readiness.start_allowed,
+            "live-shadow+unrecognised must be blocked"
+        );
+        assert!(readiness.blocker.is_some(), "must carry a blocker message");
+    }
+
+    #[test]
+    fn ap07_live_capital_alpaca_was_blocked_now_allowed_by_ap08() {
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Alpaca));
+        assert!(
+            readiness.start_allowed,
+            "live-capital+alpaca must be allowed after AP-08; got: {:?}",
+            readiness.blocker
+        );
+        assert!(
+            readiness.blocker.is_none(),
+            "allowed combination must carry no blocker; got: {:?}",
+            readiness.blocker
+        );
+    }
+
+    #[test]
+    fn ap07_live_capital_paper_still_blocked() {
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Paper));
+        assert!(
+            !readiness.start_allowed,
+            "live-capital+paper must be blocked"
+        );
+    }
+
+    #[test]
+    fn ap07_paper_paper_and_paper_alpaca_unchanged() {
+        let pp = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
+        assert!(pp.start_allowed, "paper+paper must remain allowed");
+
+        let pa = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
+        assert!(pa.start_allowed, "paper+alpaca must remain allowed");
+    }
+
+    #[test]
+    fn ap07_runtime_selection_live_shadow_alpaca_start_allowed() {
+        let sel = runtime_selection_from_env_values(Some("live-shadow"), Some("alpaca"));
+        assert_eq!(sel.deployment_mode, DeploymentMode::LiveShadow);
+        assert_eq!(sel.broker_kind, Some(BrokerKind::Alpaca));
+        assert!(
+            sel.readiness.start_allowed,
+            "live-shadow+alpaca RuntimeSelection must be startable; got: {:?}",
+            sel.readiness.blocker
+        );
+    }
+
+    #[test]
+    fn ap07_calendar_spec_for_live_shadow_is_nyse_weekdays() {
+        let state = AppState::new_for_test_with_mode(DeploymentMode::LiveShadow);
+        assert_eq!(
+            state.calendar_spec(),
+            mqk_integrity::CalendarSpec::NyseWeekdays,
+            "live-shadow must use NyseWeekdays calendar for honest session truth"
+        );
+    }
+
+    #[test]
+    fn ap07_live_shadow_alpaca_state_uses_external_snapshot_source() {
+        let state = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+        assert_eq!(
+            state.broker_snapshot_source(),
+            BrokerSnapshotTruthSource::External,
+            "live-shadow+alpaca must declare External snapshot source"
+        );
+    }
+
+    #[test]
+    fn ap08_live_capital_alpaca_readiness_is_allowed() {
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Alpaca));
+        assert!(
+            readiness.start_allowed,
+            "live-capital+alpaca must be allowed after AP-08; got: {:?}",
+            readiness.blocker
+        );
+        assert!(
+            readiness.blocker.is_none(),
+            "no blocker expected for allowed pair"
+        );
+    }
+
+    #[test]
+    fn ap08_live_capital_paper_is_explicitly_blocked() {
+        let readiness =
+            deployment_mode_readiness(DeploymentMode::LiveCapital, Some(BrokerKind::Paper));
+        assert!(
+            !readiness.start_allowed,
+            "live-capital+paper must remain fail-closed after AP-08"
+        );
+        let blocker = readiness
+            .blocker
+            .expect("live-capital+paper must carry a blocker message");
+        assert!(
+            blocker.contains("live-capital"),
+            "blocker must name the live-capital restriction; got: {blocker}"
+        );
+    }
+
+    #[test]
+    fn ap08_live_capital_unrecognised_adapter_is_blocked() {
+        let readiness = deployment_mode_readiness(DeploymentMode::LiveCapital, None);
+        assert!(
+            !readiness.start_allowed,
+            "live-capital+None must be blocked"
+        );
+        assert!(readiness.blocker.is_some(), "must carry a blocker message");
+    }
+
+    #[test]
+    fn ap08_runtime_selection_live_capital_alpaca_start_allowed() {
+        let sel = runtime_selection_from_env_values(Some("live-capital"), Some("alpaca"));
+        assert_eq!(sel.deployment_mode, DeploymentMode::LiveCapital);
+        assert_eq!(sel.broker_kind, Some(BrokerKind::Alpaca));
+        assert!(
+            sel.readiness.start_allowed,
+            "live-capital+alpaca RuntimeSelection must be startable; got: {:?}",
+            sel.readiness.blocker
+        );
+        assert!(sel.readiness.blocker.is_none(), "no blocker expected");
+    }
+
+    #[test]
+    fn ap08_capital_dev_no_token_is_blocked_by_start_gate() {
+        let mode = DeploymentMode::LiveCapital;
+        let auth = OperatorAuthMode::ExplicitDevNoToken;
+        let gate_fires = mode == DeploymentMode::LiveCapital
+            && !matches!(auth, OperatorAuthMode::TokenRequired(_));
+        assert!(gate_fires, "dev-no-token must trigger capital token gate");
+
+        let auth_token = OperatorAuthMode::TokenRequired("real-token".to_string());
+        let gate_fires_for_token = mode == DeploymentMode::LiveCapital
+            && !matches!(auth_token, OperatorAuthMode::TokenRequired(_));
+        assert!(
+            !gate_fires_for_token,
+            "TokenRequired must not trigger capital token gate"
+        );
+
+        let auth_missing = OperatorAuthMode::MissingTokenFailClosed;
+        let gate_fires_for_missing = mode == DeploymentMode::LiveCapital
+            && !matches!(auth_missing, OperatorAuthMode::TokenRequired(_));
+        assert!(
+            gate_fires_for_missing,
+            "MissingTokenFailClosed must also trigger capital token gate"
+        );
+    }
+
+    #[test]
+    fn ap08_calendar_spec_for_live_capital_is_nyse_weekdays() {
+        let state = AppState::new_for_test_with_mode(DeploymentMode::LiveCapital);
+        assert_eq!(
+            state.calendar_spec(),
+            mqk_integrity::CalendarSpec::NyseWeekdays,
+            "live-capital must use NyseWeekdays calendar for honest session truth"
+        );
+    }
+
+    #[test]
+    fn ap08_live_shadow_unchanged_after_ap08() {
+        let shadow_alpaca =
+            deployment_mode_readiness(DeploymentMode::LiveShadow, Some(BrokerKind::Alpaca));
+        assert!(
+            shadow_alpaca.start_allowed,
+            "live-shadow+alpaca must remain allowed after AP-08"
+        );
+        assert!(shadow_alpaca.blocker.is_none(), "no blocker expected");
+
+        let pp = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
+        assert!(
+            pp.start_allowed,
+            "paper+paper must remain allowed after AP-08"
+        );
+
+        let pa = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
+        assert!(
+            pa.start_allowed,
+            "paper+alpaca must remain allowed after AP-08"
+        );
+    }
+
+    #[test]
+    fn reconcile_truth_gate_allows_only_ok_status() {
+        let reconcile_status = Arc::new(RwLock::new(initial_reconcile_status()));
+        let gate = ReconcileTruthGate {
+            reconcile_status: Arc::clone(&reconcile_status),
+        };
+
+        assert!(!gate.is_clean(), "unknown reconcile must fail closed");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            reconcile_status.write().await.status = "dirty".to_string();
+        });
+        assert!(!gate.is_clean(), "dirty reconcile must block dispatch");
+
+        rt.block_on(async {
+            reconcile_status.write().await.status = "stale".to_string();
+        });
+        assert!(!gate.is_clean(), "stale reconcile must block dispatch");
+
+        rt.block_on(async {
+            reconcile_status.write().await.status = "ok".to_string();
+        });
+        assert!(gate.is_clean(), "ok reconcile may allow dispatch");
+    }
 }

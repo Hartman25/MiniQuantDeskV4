@@ -13,6 +13,7 @@ use serde::Serialize;
 
 use crate::{
     api_types::{OperatorActionAuditFields, OperatorActionResponse, RuntimeErrorResponse},
+    notify::OperatorNotifyPayload,
     state::{AppState, RestartTruthSnapshot, RuntimeLifecycleError},
 };
 
@@ -346,6 +347,17 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
                     .into_response();
             }
         };
+    state
+        .discord_notifier
+        .notify_operator_action(&OperatorNotifyPayload {
+            action_key: "control.arm".to_string(),
+            disposition: "applied".to_string(),
+            environment: Some(state.deployment_mode().as_api_label().to_string()),
+            ts_utc: Utc::now().to_rfc3339(),
+            provenance_ref: audit_event_id.map(|id| format!("audit_events:{}", id)),
+            run_id: None,
+        })
+        .await;
     (
         StatusCode::OK,
         Json(operator_action_response(

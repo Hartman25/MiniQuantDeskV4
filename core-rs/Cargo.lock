@@ -1841,6 +1841,7 @@ dependencies = [
  "mqk-runtime",
  "mqk-schemas",
  "mqk-testkit",
+ "reqwest",
  "serde",
  "serde_json",
  "sqlx",
