@@ -2744,8 +2744,10 @@ async fn strategy_surfaces_remain_fail_closed_even_with_db_pool() {
     let suppressions = parse_json(suppressions_body);
     // CC-02: suppressions now has a real durable source. With DB pool present
     // and an empty table, truth_state is "active" + empty rows (authoritative empty).
-    assert_eq!(suppressions["truth_state"], "active",
-        "suppressions with DB pool must return active truth (CC-02); got: {suppressions}");
+    assert_eq!(
+        suppressions["truth_state"], "active",
+        "suppressions with DB pool must return active truth (CC-02); got: {suppressions}"
+    );
     assert!(
         suppressions["rows"].as_array().is_some_and(|rows| rows.is_empty()),
         "strategy suppressions must return authoritative empty rows when DB table is empty; got: {suppressions}"
@@ -2895,14 +2897,29 @@ async fn cc01_strategy_summary_active_with_fleet() {
     let rows = json["rows"].as_array().expect("rows must be an array");
     assert_eq!(rows.len(), 2, "one row per fleet entry; got: {json}");
 
-    let ids: Vec<&str> = rows.iter().map(|r| r["strategy_id"].as_str().unwrap()).collect();
-    assert!(ids.contains(&"strat_alpha"), "strat_alpha row missing; got: {json}");
-    assert!(ids.contains(&"strat_beta"), "strat_beta row missing; got: {json}");
+    let ids: Vec<&str> = rows
+        .iter()
+        .map(|r| r["strategy_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&"strat_alpha"),
+        "strat_alpha row missing; got: {json}"
+    );
+    assert!(
+        ids.contains(&"strat_beta"),
+        "strat_beta row missing; got: {json}"
+    );
 
     // Honest null for fields with no authoritative source.
     for row in rows {
-        assert!(row["today_pnl"].is_null(), "today_pnl must be null; got: {row}");
-        assert!(row["drawdown_pct"].is_null(), "drawdown_pct must be null; got: {row}");
+        assert!(
+            row["today_pnl"].is_null(),
+            "today_pnl must be null; got: {row}"
+        );
+        assert!(
+            row["drawdown_pct"].is_null(),
+            "drawdown_pct must be null; got: {row}"
+        );
         assert!(row["regime"].is_null(), "regime must be null; got: {row}");
     }
 }
@@ -2972,8 +2989,10 @@ async fn cc02_strategy_suppressions_no_db_returns_no_db_state() {
     let (status, body) = call(router, req).await;
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
-    assert_eq!(json["truth_state"], "no_db",
-        "no DB pool → truth_state must be no_db, not not_wired; got: {json}");
+    assert_eq!(
+        json["truth_state"], "no_db",
+        "no DB pool → truth_state must be no_db, not not_wired; got: {json}"
+    );
     assert_eq!(json["canonical_route"], "/api/v1/strategy/suppressions");
     assert_eq!(json["backend"], "postgres.sys_strategy_suppressions");
     assert!(json["rows"].as_array().is_some_and(|r| r.is_empty()));
@@ -3003,10 +3022,14 @@ async fn cc02_strategy_suppressions_active_empty_when_no_rows() {
     let (status, body) = call(router, req).await;
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
-    assert_eq!(json["truth_state"], "active",
-        "DB present + empty table must return active (authoritative empty); got: {json}");
-    assert!(json["rows"].as_array().is_some_and(|r| r.is_empty()),
-        "empty table must yield empty rows; got: {json}");
+    assert_eq!(
+        json["truth_state"], "active",
+        "DB present + empty table must return active (authoritative empty); got: {json}"
+    );
+    assert!(
+        json["rows"].as_array().is_some_and(|r| r.is_empty()),
+        "empty table must yield empty rows; got: {json}"
+    );
 }
 
 #[tokio::test]
@@ -3053,8 +3076,10 @@ async fn cc02_strategy_suppressions_active_with_real_row() {
     let (status, body) = call(router, req).await;
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
-    assert_eq!(json["truth_state"], "active",
-        "DB present with row must return active truth; got: {json}");
+    assert_eq!(
+        json["truth_state"], "active",
+        "DB present with row must return active truth; got: {json}"
+    );
     let rows = json["rows"].as_array().expect("rows must be an array");
     let row = rows
         .iter()
@@ -3064,7 +3089,10 @@ async fn cc02_strategy_suppressions_active_with_real_row() {
     assert_eq!(row["state"], "active");
     assert_eq!(row["trigger_domain"], "operator");
     assert_eq!(row["trigger_reason"], "manual suppression for cc02 test");
-    assert!(row["cleared_at"].is_null(), "active suppression cleared_at must be null");
+    assert!(
+        row["cleared_at"].is_null(),
+        "active suppression cleared_at must be null"
+    );
 
     // Cleanup.
     sqlx::query("delete from sys_strategy_suppressions where suppression_id = $1")
@@ -3120,13 +3148,18 @@ async fn cc02_strategy_suppressions_durable_persistence() {
     let (status, body) = call(fresh_router, req).await;
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
-    assert_eq!(json["truth_state"], "active",
-        "fresh AppState must return active truth from durable DB; got: {json}");
+    assert_eq!(
+        json["truth_state"], "active",
+        "fresh AppState must return active truth from durable DB; got: {json}"
+    );
     let rows = json["rows"].as_array().expect("rows must be an array");
     let found = rows
         .iter()
         .any(|r| r["suppression_id"] == test_id.to_string() && r["strategy_id"] == "strat_beta");
-    assert!(found, "inserted row must survive to fresh AppState read; got rows: {rows:?}");
+    assert!(
+        found,
+        "inserted row must survive to fresh AppState read; got rows: {rows:?}"
+    );
 
     // Cleanup.
     sqlx::query("delete from sys_strategy_suppressions where suppression_id = $1")
@@ -3194,8 +3227,14 @@ async fn cc02_strategy_suppressions_clear_changes_state() {
         .iter()
         .find(|r| r["suppression_id"] == test_id.to_string())
         .expect("cleared row must still appear in route response");
-    assert_eq!(row["state"], "cleared", "suppression must be cleared; got: {row}");
-    assert!(!row["cleared_at"].is_null(), "cleared_at must be set; got: {row}");
+    assert_eq!(
+        row["state"], "cleared",
+        "suppression must be cleared; got: {row}"
+    );
+    assert!(
+        !row["cleared_at"].is_null(),
+        "cleared_at must be set; got: {row}"
+    );
 
     // Cleanup.
     sqlx::query("delete from sys_strategy_suppressions where suppression_id = $1")

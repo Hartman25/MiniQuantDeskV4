@@ -34,20 +34,19 @@ use crate::{
         ConfigDiffRow, ConfigDiffsResponse, ConfigFingerprintResponse, DiagnosticsSnapshotResponse,
         ExecutionOrderRow, ExecutionSummaryResponse, FaultSignal, GateRefusedResponse,
         HealthResponse, IntegrityResponse, ManualOrderCancelRequest, ManualOrderCancelResponse,
-        ManualOrderSubmitRequest, ManualOrderSubmitResponse, ModeChangeGuidanceResponse,
-        ModeChangeRestartTruth, OperatorActionAuditFields, OperatorActionAuditRow,
-        OperatorActionResponse, OperatorActionsAuditResponse, OperatorTimelineResponse,
-        MetricsDashboardResponse, OperatorTimelineRow, OmsOverviewResponse, OpsActionRequest,
-        PortfolioFillRow, PortfolioFillsResponse,
-        PortfolioOpenOrderRow, PortfolioOpenOrdersResponse, PortfolioPositionRow,
-        PortfolioPositionsResponse, PortfolioSummaryResponse, PreflightStatusResponse,
-        ReconcileMismatchRow, ReconcileMismatchesResponse, ReconcileSummaryResponse, RiskDenialRow,
-        RiskDenialsResponse, RiskSummaryResponse, RuntimeErrorResponse,
-        RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
-        StrategySuppressionRow, StrategySummaryResponse, StrategySummaryRow,
-        StrategySuppressionsResponse, SystemMetadataResponse, SystemStatusResponse,
-        TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
-        TradingPositionsResponse, TradingSnapshotResponse,
+        ManualOrderSubmitRequest, ManualOrderSubmitResponse, MetricsDashboardResponse,
+        ModeChangeGuidanceResponse, ModeChangeRestartTruth, OmsOverviewResponse,
+        OperatorActionAuditFields, OperatorActionAuditRow, OperatorActionResponse,
+        OperatorActionsAuditResponse, OperatorTimelineResponse, OperatorTimelineRow,
+        OpsActionRequest, PortfolioFillRow, PortfolioFillsResponse, PortfolioOpenOrderRow,
+        PortfolioOpenOrdersResponse, PortfolioPositionRow, PortfolioPositionsResponse,
+        PortfolioSummaryResponse, PreflightStatusResponse, ReconcileMismatchRow,
+        ReconcileMismatchesResponse, ReconcileSummaryResponse, RiskDenialRow, RiskDenialsResponse,
+        RiskSummaryResponse, RuntimeErrorResponse, RuntimeLeadershipCheckpointRow,
+        RuntimeLeadershipResponse, SessionStateResponse, StrategySummaryResponse,
+        StrategySummaryRow, StrategySuppressionRow, StrategySuppressionsResponse,
+        SystemMetadataResponse, SystemStatusResponse, TradingAccountResponse, TradingFillsResponse,
+        TradingOrdersResponse, TradingPositionsResponse, TradingSnapshotResponse,
     },
     state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot},
 };
@@ -175,7 +174,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // CC-03: Mode-change guidance — explicit controlled-restart workflow.
         // Returns the authoritative operator steps for a safe mode transition.
         // Also returned (with 409) from POST /api/v1/ops/action change-system-mode.
-        .route("/api/v1/ops/mode-change-guidance", get(ops_mode_change_guidance))
+        .route(
+            "/api/v1/ops/mode-change-guidance",
+            get(ops_mode_change_guidance),
+        )
         // CC-04: Canonical OMS overview — one surface for current trading state.
         // Composes runtime, account, portfolio, execution, and reconcile lanes
         // from mounted truth. All lanes use explicit truth_state semantics.
@@ -2960,8 +2962,7 @@ async fn build_mode_change_guidance(st: &AppState) -> ModeChangeGuidanceResponse
         Ok(snapshot) => Some(ModeChangeRestartTruth {
             local_owned_run_id: snapshot.local_owned_run_id,
             durable_active_run_id: snapshot.durable_active_run_id,
-            durable_active_without_local_ownership: snapshot
-                .durable_active_without_local_ownership,
+            durable_active_without_local_ownership: snapshot.durable_active_without_local_ownership,
         }),
         Err(_) => None,
     };
@@ -3005,15 +3006,11 @@ async fn build_mode_change_guidance(st: &AppState) -> ModeChangeGuidanceResponse
 /// Always returns 200 — this is a read-only guidance surface, not an action.
 /// The same payload (with 409) is returned by POST /api/v1/ops/action when
 /// `action_key == "change-system-mode"`.
-pub(crate) async fn ops_mode_change_guidance(
-    State(st): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub(crate) async fn ops_mode_change_guidance(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     (StatusCode::OK, Json(build_mode_change_guidance(&st).await)).into_response()
 }
 
-pub(crate) async fn strategy_summary(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub(crate) async fn strategy_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // CC-01: Fleet is sourced from MQK_STRATEGY_IDS at daemon construction.
     // None = not configured → not_wired so the GUI blocks rather than rendering
     // fake rows.  Some(entries) = fleet configured → active truth with rows
@@ -3067,9 +3064,7 @@ pub(crate) async fn strategy_summary(
     }
 }
 
-pub(crate) async fn strategy_suppressions(
-    State(st): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub(crate) async fn strategy_suppressions(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     // CC-02: Read suppressions from durable DB source.
     // No DB → "no_db" so the GUI blocks rather than rendering an empty table
     // as authoritative zero suppressions.

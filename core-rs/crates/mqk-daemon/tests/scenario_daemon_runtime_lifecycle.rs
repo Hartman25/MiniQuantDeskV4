@@ -895,7 +895,11 @@ async fn ir01_control_arm_no_run_no_synthetic_run_created() {
     // No arm() or start() — no real run exists in memory or in the DB.
 
     let (status, json) = control_arm(&st).await;
-    assert_eq!(status, StatusCode::OK, "control/arm must return 200: {json}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "control/arm must return 200: {json}"
+    );
 
     // audit_event_id must be null — no real run to anchor the audit event to.
     assert!(
@@ -974,10 +978,7 @@ async fn ir01_control_arm_with_real_run_writes_audit_event() {
 
     // Insert a real (not synthetic) run row so fetch_latest_run_for_engine
     // returns it and the audit event can be anchored to it.
-    let real_run_id = Uuid::new_v5(
-        &Uuid::NAMESPACE_DNS,
-        b"ir01-real-run-for-audit-event-test",
-    );
+    let real_run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"ir01-real-run-for-audit-event-test");
     mqk_db::insert_run(
         pool,
         &mqk_db::NewRun {
@@ -995,7 +996,11 @@ async fn ir01_control_arm_with_real_run_writes_audit_event() {
     .expect("insert real run");
 
     let (status, json) = control_arm(&st).await;
-    assert_eq!(status, StatusCode::OK, "control/arm must return 200: {json}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "control/arm must return 200: {json}"
+    );
 
     // audit_event_id must be non-null — a real run anchor was available.
     let event_id_str = json["audit"]["audit_event_id"]
@@ -1004,13 +1009,12 @@ async fn ir01_control_arm_with_real_run_writes_audit_event() {
     let event_id = Uuid::parse_str(event_id_str).expect("audit_event_id must be a valid UUID");
 
     // The audit_events row must exist in the DB.
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM audit_events WHERE event_id = $1)",
-    )
-    .bind(event_id)
-    .fetch_one(pool)
-    .await
-    .expect("check audit_events row");
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_events WHERE event_id = $1)")
+            .bind(event_id)
+            .fetch_one(pool)
+            .await
+            .expect("check audit_events row");
     assert!(
         exists,
         "audit_events row must exist for event_id {event_id}"

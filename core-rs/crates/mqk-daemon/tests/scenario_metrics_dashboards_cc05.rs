@@ -64,8 +64,7 @@ async fn cc05_01_dashboard_returns_200_with_required_fields() {
     let json = parse_json(body);
 
     assert_eq!(
-        json["canonical_route"],
-        "/api/v1/metrics/dashboards",
+        json["canonical_route"], "/api/v1/metrics/dashboards",
         "CC05-01: canonical_route must be /api/v1/metrics/dashboards"
     );
 
@@ -232,8 +231,7 @@ async fn cc05_04_dashboard_accessible_without_auth() {
 
     let json = parse_json(body);
     assert_eq!(
-        json["canonical_route"],
-        "/api/v1/metrics/dashboards",
+        json["canonical_route"], "/api/v1/metrics/dashboards",
         "CC05-04: canonical_route must be correct even without auth"
     );
 }

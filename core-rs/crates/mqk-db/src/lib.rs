@@ -2570,9 +2570,7 @@ pub async fn clear_strategy_suppression(
 /// Returns active and cleared suppressions.  The route layer can filter by
 /// state if needed; the full set is returned here for operator visibility.
 /// Returns an empty `Vec` if no suppressions have been recorded.
-pub async fn fetch_strategy_suppressions(
-    pool: &PgPool,
-) -> Result<Vec<StrategySuppressionRecord>> {
+pub async fn fetch_strategy_suppressions(pool: &PgPool) -> Result<Vec<StrategySuppressionRecord>> {
     let rows = sqlx::query(
         r#"
         select suppression_id, strategy_id, state, trigger_domain, trigger_reason,

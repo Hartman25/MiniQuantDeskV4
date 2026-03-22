@@ -60,8 +60,7 @@ async fn cc04_01_overview_returns_200_with_required_fields() {
 
     // canonical_route must be present and correct.
     assert_eq!(
-        json["canonical_route"],
-        "/api/v1/oms/overview",
+        json["canonical_route"], "/api/v1/oms/overview",
         "CC04-01: canonical_route must be /api/v1/oms/overview"
     );
 
@@ -238,8 +237,7 @@ async fn cc04_03_overview_accessible_without_auth() {
 
     let json = parse_json(body);
     assert_eq!(
-        json["canonical_route"],
-        "/api/v1/oms/overview",
+        json["canonical_route"], "/api/v1/oms/overview",
         "CC04-03: canonical_route must be correct even without auth"
     );
 }

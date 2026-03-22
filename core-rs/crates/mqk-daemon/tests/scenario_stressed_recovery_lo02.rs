@@ -275,8 +275,7 @@ async fn lo02_sr04_mode_change_guidance_is_non_empty_and_actionable() {
         "SR-04: GET guidance preconditions must be non-empty; got: {guidance_json}"
     );
     assert_eq!(
-        action_json["canonical_route"],
-        guidance_json["canonical_route"],
+        action_json["canonical_route"], guidance_json["canonical_route"],
         "SR-04: POST and GET must agree on canonical_route"
     );
 }
@@ -424,7 +423,11 @@ async fn lo02_sr08_arm_disarm_cycle_is_stable() {
         .body(axum::body::Body::empty())
         .unwrap();
     let (d1_status, d1_body) = call(routes::build_router(Arc::clone(&st)), disarm1_req).await;
-    assert_eq!(d1_status, StatusCode::OK, "SR-08: disarm on boot must be 200");
+    assert_eq!(
+        d1_status,
+        StatusCode::OK,
+        "SR-08: disarm on boot must be 200"
+    );
     assert_eq!(
         parse_json(d1_body)["armed"],
         false,
@@ -465,7 +468,11 @@ async fn lo02_sr08_arm_disarm_cycle_is_stable() {
         .body(axum::body::Body::empty())
         .unwrap();
     let (d2_status, d2_body) = call(routes::build_router(Arc::clone(&st)), disarm2_req).await;
-    assert_eq!(d2_status, StatusCode::OK, "SR-08: second disarm must be 200");
+    assert_eq!(
+        d2_status,
+        StatusCode::OK,
+        "SR-08: second disarm must be 200"
+    );
     assert_eq!(
         parse_json(d2_body)["armed"],
         false,

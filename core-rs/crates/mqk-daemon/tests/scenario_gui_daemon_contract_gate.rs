@@ -606,15 +606,18 @@ async fn gui_ops_action_endpoint_dispatches_correctly() {
     assert!(
         j["operator_next_steps"].as_array().is_some_and(|arr| {
             !arr.is_empty()
-                && arr
-                    .iter()
-                    .any(|v| v.as_str().is_some_and(|s| s.to_lowercase().contains("restart")))
+                && arr.iter().any(|v| {
+                    v.as_str()
+                        .is_some_and(|s| s.to_lowercase().contains("restart"))
+                })
         }),
         "change-system-mode operator_next_steps must be non-empty and mention restart: {j}"
     );
     // preconditions must be present and non-empty.
     assert!(
-        j["preconditions"].as_array().is_some_and(|arr| !arr.is_empty()),
+        j["preconditions"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty()),
         "change-system-mode preconditions must be non-empty: {j}"
     );
 
