@@ -1037,6 +1037,15 @@ async fn api_strategy_summary_declares_not_wired() {
             .any(|r| r["strategy_id"] == "daemon_integrity_gate"),
         "daemon_integrity_gate must not appear as a strategy row"
     );
+    // CC-01: wrapper must carry canonical_route and backend fields.
+    assert_eq!(
+        json["canonical_route"], "/api/v1/strategy/summary",
+        "strategy summary must carry canonical_route self-identity"
+    );
+    assert_eq!(
+        json["backend"], "daemon.strategy_fleet",
+        "strategy summary must identify its backend source"
+    );
 }
 
 #[tokio::test]
@@ -1116,21 +1125,30 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
     let (suppressions_status, suppressions_body) = call(router, suppressions_req).await;
     assert_eq!(suppressions_status, StatusCode::OK);
     let suppressions = parse_json(suppressions_body);
-    // Must be a wrapper — not a bare array.
+    // CC-02: suppressions now has a real durable source (postgres.sys_strategy_suppressions).
+    // Without DB pool: truth_state="no_db" (source unavailable, not permanently not_wired).
     assert!(
         suppressions.as_object().is_some(),
         "suppressions must return a wrapper object"
     );
     assert_eq!(
-        suppressions["truth_state"], "not_wired",
-        "suppressions must declare not_wired"
+        suppressions["truth_state"], "no_db",
+        "suppressions without DB pool must declare no_db (CC-02); got: {suppressions}"
+    );
+    assert_eq!(
+        suppressions["canonical_route"], "/api/v1/strategy/suppressions",
+        "suppressions must declare canonical_route self-identity"
+    );
+    assert_eq!(
+        suppressions["backend"], "postgres.sys_strategy_suppressions",
+        "suppressions must declare its durable backend source"
     );
     assert!(
         suppressions["rows"]
             .as_array()
             .map(|v| v.is_empty())
             .unwrap_or(false),
-        "suppressions rows must be empty"
+        "suppressions rows must be empty when no_db"
     );
 }
 
@@ -2724,10 +2742,13 @@ async fn strategy_surfaces_remain_fail_closed_even_with_db_pool() {
     let (suppressions_status, suppressions_body) = call(router, suppressions_req).await;
     assert_eq!(suppressions_status, StatusCode::OK);
     let suppressions = parse_json(suppressions_body);
-    assert_eq!(suppressions["truth_state"], "not_wired");
+    // CC-02: suppressions now has a real durable source. With DB pool present
+    // and an empty table, truth_state is "active" + empty rows (authoritative empty).
+    assert_eq!(suppressions["truth_state"], "active",
+        "suppressions with DB pool must return active truth (CC-02); got: {suppressions}");
     assert!(
         suppressions["rows"].as_array().is_some_and(|rows| rows.is_empty()),
-        "strategy suppressions must remain fail-closed until a real authoritative suppression source exists; got: {suppressions}"
+        "strategy suppressions must return authoritative empty rows when DB table is empty; got: {suppressions}"
     );
 }
 
@@ -2835,4 +2856,493 @@ async fn operator_history_routes_fail_closed_when_db_pool_is_absent() {
             "{uri} rows must be an empty array when durable history is unavailable; got: {json}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// CC-01: Strategy fleet active path
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cc01_strategy_summary_active_with_fleet() {
+    // When a fleet is injected, the route must return truth_state="active" and
+    // a row for each configured strategy with honest null for underivable fields.
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    st.set_strategy_fleet_for_test(Some(vec![
+        state::StrategyFleetEntry {
+            strategy_id: "strat_alpha".to_string(),
+        },
+        state::StrategyFleetEntry {
+            strategy_id: "strat_beta".to_string(),
+        },
+    ]))
+    .await;
+    let router = routes::build_router(Arc::clone(&st));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    assert_eq!(json["truth_state"], "active");
+    assert_eq!(json["canonical_route"], "/api/v1/strategy/summary");
+    assert_eq!(json["backend"], "daemon.strategy_fleet");
+    let rows = json["rows"].as_array().expect("rows must be an array");
+    assert_eq!(rows.len(), 2, "one row per fleet entry; got: {json}");
+
+    let ids: Vec<&str> = rows.iter().map(|r| r["strategy_id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"strat_alpha"), "strat_alpha row missing; got: {json}");
+    assert!(ids.contains(&"strat_beta"), "strat_beta row missing; got: {json}");
+
+    // Honest null for fields with no authoritative source.
+    for row in rows {
+        assert!(row["today_pnl"].is_null(), "today_pnl must be null; got: {row}");
+        assert!(row["drawdown_pct"].is_null(), "drawdown_pct must be null; got: {row}");
+        assert!(row["regime"].is_null(), "regime must be null; got: {row}");
+    }
+}
+
+#[tokio::test]
+async fn cc01_strategy_summary_active_empty_fleet() {
+    // MQK_STRATEGY_IDS="" (set but empty) → active with zero rows (authoritative empty).
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    st.set_strategy_fleet_for_test(Some(vec![])).await;
+    let router = routes::build_router(Arc::clone(&st));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    assert_eq!(
+        json["truth_state"], "active",
+        "empty fleet must be active (authoritative empty), not not_wired; got: {json}"
+    );
+    assert!(
+        json["rows"].as_array().is_some_and(|rows| rows.is_empty()),
+        "empty fleet rows must be []; got: {json}"
+    );
+}
+
+#[tokio::test]
+async fn cc01_strategy_summary_not_wired_without_fleet() {
+    // No fleet configured → not_wired.  This is the default make_router() case
+    // (MQK_STRATEGY_IDS not set in the test environment).
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "not_wired");
+    assert!(
+        json["rows"].as_array().is_some_and(|rows| rows.is_empty()),
+        "not_wired rows must be []; got: {json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CC-02: Durable strategy suppressions
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cc02_strategy_suppressions_no_db_returns_no_db_state() {
+    // Without a DB pool the route must return truth_state="no_db" (source
+    // unavailable), NOT "not_wired" (which would mean permanently unimplemented).
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/suppressions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "no_db",
+        "no DB pool → truth_state must be no_db, not not_wired; got: {json}");
+    assert_eq!(json["canonical_route"], "/api/v1/strategy/suppressions");
+    assert_eq!(json["backend"], "postgres.sys_strategy_suppressions");
+    assert!(json["rows"].as_array().is_some_and(|r| r.is_empty()));
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn cc02_strategy_suppressions_active_empty_when_no_rows() {
+    // With DB pool and empty table: truth_state="active" + empty rows (authoritative zero).
+    let pool = denial_test_pool().await;
+    // Ensure clean state.
+    sqlx::query("delete from sys_strategy_suppressions where strategy_id = 'cc02_empty_probe'")
+        .execute(&pool)
+        .await
+        .expect("pre-test cleanup failed");
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/suppressions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active",
+        "DB present + empty table must return active (authoritative empty); got: {json}");
+    assert!(json["rows"].as_array().is_some_and(|r| r.is_empty()),
+        "empty table must yield empty rows; got: {json}");
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn cc02_strategy_suppressions_active_with_real_row() {
+    // Insert a real suppression row; route must return it with correct field values.
+    let pool = denial_test_pool().await;
+    let test_id = uuid::Uuid::parse_str("00000000-cc02-0001-0000-000000000001").unwrap();
+
+    // Clean up before and after.
+    sqlx::query("delete from sys_strategy_suppressions where suppression_id = $1")
+        .bind(test_id)
+        .execute(&pool)
+        .await
+        .expect("pre-test cleanup failed");
+
+    let started = chrono::DateTime::parse_from_rfc3339("2025-01-15T09:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    mqk_db::insert_strategy_suppression(
+        &pool,
+        &mqk_db::InsertStrategySuppressionArgs {
+            suppression_id: test_id,
+            strategy_id: "strat_alpha".to_string(),
+            trigger_domain: "operator".to_string(),
+            trigger_reason: "manual suppression for cc02 test".to_string(),
+            started_at_utc: started,
+            note: "cc02 proof row".to_string(),
+        },
+    )
+    .await
+    .expect("insert_strategy_suppression failed");
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/suppressions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active",
+        "DB present with row must return active truth; got: {json}");
+    let rows = json["rows"].as_array().expect("rows must be an array");
+    let row = rows
+        .iter()
+        .find(|r| r["suppression_id"] == test_id.to_string())
+        .expect("inserted suppression row must appear in route response");
+    assert_eq!(row["strategy_id"], "strat_alpha");
+    assert_eq!(row["state"], "active");
+    assert_eq!(row["trigger_domain"], "operator");
+    assert_eq!(row["trigger_reason"], "manual suppression for cc02 test");
+    assert!(row["cleared_at"].is_null(), "active suppression cleared_at must be null");
+
+    // Cleanup.
+    sqlx::query("delete from sys_strategy_suppressions where suppression_id = $1")
+        .bind(test_id)
+        .execute(&pool)
+        .await
+        .expect("post-test cleanup failed");
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn cc02_strategy_suppressions_durable_persistence() {
+    // Proves that a row inserted in one AppState instance is visible through
+    // a fresh AppState (simulating restart / fresh daemon start).
+    let pool = denial_test_pool().await;
+    let test_id = uuid::Uuid::parse_str("00000000-cc02-0002-0000-000000000002").unwrap();
+
+    sqlx::query("delete from sys_strategy_suppressions where suppression_id = $1")
+        .bind(test_id)
+        .execute(&pool)
+        .await
+        .expect("pre-test cleanup failed");
+
+    let started = chrono::DateTime::parse_from_rfc3339("2025-02-01T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    // Insert via DB function (simulates a prior daemon session writing the row).
+    mqk_db::insert_strategy_suppression(
+        &pool,
+        &mqk_db::InsertStrategySuppressionArgs {
+            suppression_id: test_id,
+            strategy_id: "strat_beta".to_string(),
+            trigger_domain: "risk".to_string(),
+            trigger_reason: "drawdown threshold breached".to_string(),
+            started_at_utc: started,
+            note: "cc02 persistence proof".to_string(),
+        },
+    )
+    .await
+    .expect("insert_strategy_suppression failed");
+
+    // Fresh AppState — simulates a daemon restart reading from the same DB.
+    let fresh_st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let fresh_router = routes::build_router(Arc::clone(&fresh_st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/suppressions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(fresh_router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active",
+        "fresh AppState must return active truth from durable DB; got: {json}");
+    let rows = json["rows"].as_array().expect("rows must be an array");
+    let found = rows
+        .iter()
+        .any(|r| r["suppression_id"] == test_id.to_string() && r["strategy_id"] == "strat_beta");
+    assert!(found, "inserted row must survive to fresh AppState read; got rows: {rows:?}");
+
+    // Cleanup.
+    sqlx::query("delete from sys_strategy_suppressions where suppression_id = $1")
+        .bind(test_id)
+        .execute(&pool)
+        .await
+        .expect("post-test cleanup failed");
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn cc02_strategy_suppressions_clear_changes_state() {
+    // Insert a suppression, clear it, confirm state transitions in the route response.
+    let pool = denial_test_pool().await;
+    let test_id = uuid::Uuid::parse_str("00000000-cc02-0003-0000-000000000003").unwrap();
+
+    sqlx::query("delete from sys_strategy_suppressions where suppression_id = $1")
+        .bind(test_id)
+        .execute(&pool)
+        .await
+        .expect("pre-test cleanup failed");
+
+    let started = chrono::DateTime::parse_from_rfc3339("2025-03-01T08:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let cleared = chrono::DateTime::parse_from_rfc3339("2025-03-01T09:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    mqk_db::insert_strategy_suppression(
+        &pool,
+        &mqk_db::InsertStrategySuppressionArgs {
+            suppression_id: test_id,
+            strategy_id: "strat_gamma".to_string(),
+            trigger_domain: "integrity".to_string(),
+            trigger_reason: "integrity check failure".to_string(),
+            started_at_utc: started,
+            note: "cc02 clear proof".to_string(),
+        },
+    )
+    .await
+    .expect("insert failed");
+
+    let was_cleared = mqk_db::clear_strategy_suppression(&pool, test_id, cleared)
+        .await
+        .expect("clear_strategy_suppression failed");
+    assert!(was_cleared, "clear must return true for an active row");
+
+    // Read through route — cleared row must appear with state="cleared".
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/strategy/suppressions")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    let rows = json["rows"].as_array().expect("rows must be array");
+    let row = rows
+        .iter()
+        .find(|r| r["suppression_id"] == test_id.to_string())
+        .expect("cleared row must still appear in route response");
+    assert_eq!(row["state"], "cleared", "suppression must be cleared; got: {row}");
+    assert!(!row["cleared_at"].is_null(), "cleared_at must be set; got: {row}");
+
+    // Cleanup.
+    sqlx::query("delete from sys_strategy_suppressions where suppression_id = $1")
+        .bind(test_id)
+        .execute(&pool)
+        .await
+        .expect("post-test cleanup failed");
+}
+
+// ---------------------------------------------------------------------------
+// CC-03: Controlled mode-change workflow
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cc03_change_system_mode_returns_guidance_response() {
+    // POST /api/v1/ops/action change-system-mode must:
+    //   - return 409 CONFLICT (safe refusal preserved — no hot switching)
+    //   - return ModeChangeGuidanceResponse, not a dead-end error
+    //   - transition_permitted == false
+    //   - operator_next_steps is non-empty with explicit restart instructions
+    let router = make_router();
+
+    let body = serde_json::json!({"action_key": "change-system-mode"}).to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/ops/action")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    let (status, bytes) = call(router, req).await;
+    let j = parse_json(bytes);
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "change-system-mode must return 409: {j}"
+    );
+    assert_eq!(
+        j["transition_permitted"], false,
+        "transition_permitted must be false — no hot switching: {j}"
+    );
+    assert!(
+        j["operator_next_steps"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty()),
+        "operator_next_steps must be non-empty: {j}"
+    );
+    assert!(
+        j["preconditions"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty()),
+        "preconditions must be non-empty: {j}"
+    );
+    assert_eq!(
+        j["canonical_route"].as_str(),
+        Some("/api/v1/ops/mode-change-guidance"),
+        "canonical_route must point to the guidance endpoint: {j}"
+    );
+}
+
+#[tokio::test]
+async fn cc03_mode_change_guidance_get_returns_200() {
+    // GET /api/v1/ops/mode-change-guidance must:
+    //   - return 200 (read-only guidance surface, not an action)
+    //   - transition_permitted == false always
+    //   - preconditions and operator_next_steps are non-empty
+    //   - current_mode is non-empty
+    let router = make_router();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/ops/mode-change-guidance")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, bytes) = call(router, req).await;
+    let j = parse_json(bytes);
+
+    assert_eq!(status, StatusCode::OK, "guidance GET must return 200: {j}");
+    assert_eq!(
+        j["transition_permitted"], false,
+        "transition_permitted must be false: {j}"
+    );
+    assert!(
+        j["current_mode"].as_str().is_some_and(|m| !m.is_empty()),
+        "current_mode must be non-empty: {j}"
+    );
+    assert!(
+        j["preconditions"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty()),
+        "preconditions must be non-empty: {j}"
+    );
+    assert!(
+        j["operator_next_steps"]
+            .as_array()
+            .is_some_and(|arr| !arr.is_empty()),
+        "operator_next_steps must be non-empty: {j}"
+    );
+    assert_eq!(
+        j["canonical_route"].as_str(),
+        Some("/api/v1/ops/mode-change-guidance"),
+        "canonical_route must self-identify: {j}"
+    );
+}
+
+#[tokio::test]
+async fn cc03_mode_change_guidance_and_ops_action_agree() {
+    // GET /api/v1/ops/mode-change-guidance and POST /api/v1/ops/action change-system-mode
+    // must agree on: canonical_route, transition_permitted, current_mode.
+    // This proves both surfaces are backed by the same build_mode_change_guidance helper.
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let req_get = Request::builder()
+        .method("GET")
+        .uri("/api/v1/ops/mode-change-guidance")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (s_get, b_get) = call(router_get, req_get).await;
+    let j_get = parse_json(b_get);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let body = serde_json::json!({"action_key": "change-system-mode"}).to_string();
+    let req_post = Request::builder()
+        .method("POST")
+        .uri("/api/v1/ops/action")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    let (s_post, b_post) = call(router_post, req_post).await;
+    let j_post = parse_json(b_post);
+
+    assert_eq!(s_get, StatusCode::OK);
+    assert_eq!(s_post, StatusCode::CONFLICT);
+
+    assert_eq!(
+        j_get["canonical_route"], j_post["canonical_route"],
+        "canonical_route must agree between GET and POST: get={j_get} post={j_post}"
+    );
+    assert_eq!(
+        j_get["transition_permitted"], j_post["transition_permitted"],
+        "transition_permitted must agree: get={j_get} post={j_post}"
+    );
+    assert_eq!(
+        j_get["current_mode"], j_post["current_mode"],
+        "current_mode must agree: get={j_get} post={j_post}"
+    );
 }

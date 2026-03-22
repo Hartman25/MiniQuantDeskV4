@@ -34,17 +34,20 @@ use crate::{
         ConfigDiffRow, ConfigDiffsResponse, ConfigFingerprintResponse, DiagnosticsSnapshotResponse,
         ExecutionOrderRow, ExecutionSummaryResponse, FaultSignal, GateRefusedResponse,
         HealthResponse, IntegrityResponse, ManualOrderCancelRequest, ManualOrderCancelResponse,
-        ManualOrderSubmitRequest, ManualOrderSubmitResponse, OperatorActionAuditFields,
-        OperatorActionAuditRow, OperatorActionResponse, OperatorActionsAuditResponse,
-        OperatorTimelineResponse, OperatorTimelineRow, OpsActionRequest, PortfolioFillRow,
-        PortfolioFillsResponse, PortfolioOpenOrderRow, PortfolioOpenOrdersResponse,
-        PortfolioPositionRow, PortfolioPositionsResponse, PortfolioSummaryResponse,
-        PreflightStatusResponse, ReconcileMismatchRow, ReconcileMismatchesResponse,
-        ReconcileSummaryResponse, RiskDenialRow, RiskDenialsResponse, RiskSummaryResponse,
-        RuntimeErrorResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
-        SessionStateResponse, StrategySummaryResponse, StrategySuppressionsResponse,
-        SystemMetadataResponse, SystemStatusResponse, TradingAccountResponse, TradingFillsResponse,
-        TradingOrdersResponse, TradingPositionsResponse, TradingSnapshotResponse,
+        ManualOrderSubmitRequest, ManualOrderSubmitResponse, ModeChangeGuidanceResponse,
+        ModeChangeRestartTruth, OperatorActionAuditFields, OperatorActionAuditRow,
+        OperatorActionResponse, OperatorActionsAuditResponse, OperatorTimelineResponse,
+        MetricsDashboardResponse, OperatorTimelineRow, OmsOverviewResponse, OpsActionRequest,
+        PortfolioFillRow, PortfolioFillsResponse,
+        PortfolioOpenOrderRow, PortfolioOpenOrdersResponse, PortfolioPositionRow,
+        PortfolioPositionsResponse, PortfolioSummaryResponse, PreflightStatusResponse,
+        ReconcileMismatchRow, ReconcileMismatchesResponse, ReconcileSummaryResponse, RiskDenialRow,
+        RiskDenialsResponse, RiskSummaryResponse, RuntimeErrorResponse,
+        RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
+        StrategySuppressionRow, StrategySummaryResponse, StrategySummaryRow,
+        StrategySuppressionsResponse, SystemMetadataResponse, SystemStatusResponse,
+        TradingAccountResponse, TradingFillsResponse, TradingOrdersResponse,
+        TradingPositionsResponse, TradingSnapshotResponse,
     },
     state::{AppState, BusMsg, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot},
 };
@@ -169,6 +172,18 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Canonical Action Catalog: state-aware availability for all supported operator actions.
         // Read-only — no auth required.  Aligned with POST /api/v1/ops/action dispatcher.
         .route("/api/v1/ops/catalog", get(ops_catalog))
+        // CC-03: Mode-change guidance — explicit controlled-restart workflow.
+        // Returns the authoritative operator steps for a safe mode transition.
+        // Also returned (with 409) from POST /api/v1/ops/action change-system-mode.
+        .route("/api/v1/ops/mode-change-guidance", get(ops_mode_change_guidance))
+        // CC-04: Canonical OMS overview — one surface for current trading state.
+        // Composes runtime, account, portfolio, execution, and reconcile lanes
+        // from mounted truth. All lanes use explicit truth_state semantics.
+        .route("/api/v1/oms/overview", get(oms_overview))
+        // CC-05: Canonical metrics dashboard — one surface for performance/health KPIs.
+        // Composes portfolio, risk, execution, and reconcile summary panels from
+        // existing truth. All panels use explicit truth_state semantics.
+        .route("/api/v1/metrics/dashboards", get(metrics_dashboards))
         // DAEMON-1: trading read APIs (placeholder until broker wiring exists)
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
@@ -192,8 +207,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(execution_order_cancel),
         )
         // Canonical operator action dispatcher (GUI primary path).
-        // Dispatches arm/disarm/start/stop/halt. Returns 409 for change-system-mode
-        // (not authoritative: requires controlled restart). Returns 400 for unknown keys.
+        // Dispatches arm/disarm/start/stop/halt. Returns 409 + ModeChangeGuidanceResponse
+        // for change-system-mode (no hot switching; see GET /api/v1/ops/mode-change-guidance).
+        // Returns 400 for unknown keys.
         .route("/api/v1/ops/action", post(ops_action))
         // DAEMON-2: dev-only snapshot inject/clear
         .route("/v1/trading/snapshot", post(trading_snapshot_set))
@@ -399,7 +415,7 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
 /// - `start-system`                        → start execution runtime
 /// - `stop-system`                         → stop execution runtime
 /// - `kill-switch`                         → halt execution runtime
-/// - `change-system-mode`                  → 409: not authoritative (restart required)
+/// - `change-system-mode`                  → 409: ModeChangeGuidanceResponse with explicit restart workflow
 /// - anything else                         → 400: unknown action
 pub(crate) async fn ops_action(
     State(st): State<Arc<AppState>>,
@@ -608,33 +624,14 @@ pub(crate) async fn ops_action(
             Err(err) => runtime_error_response(err),
         },
 
-        "change-system-mode" => (
+        "change-system-mode" => {
             // Mode transitions require a controlled daemon restart with configuration reload.
-            // This cannot be done via API in the current architecture.
-            // The GUI disables mode-change buttons to prevent this from being called,
-            // but fail-close here as a defense-in-depth gate.
-            StatusCode::CONFLICT,
-            Json(OperatorActionResponse {
-                requested_action: "change-system-mode".to_string(),
-                accepted: false,
-                disposition: "not_authoritative".to_string(),
-                resulting_integrity_state: None,
-                resulting_desired_armed: None,
-                blockers: vec![
-                    "Mode transitions require a controlled daemon restart with configuration reload. \
-                     This is not authoritative via API in the current architecture.".to_string(),
-                ],
-                warnings: vec![],
-                environment: Some(st.deployment_mode().as_api_label().to_string()),
-                scope: Some("daemon_instance".to_string()),
-                audit: OperatorActionAuditFields {
-                    durable_db_write: false,
-                    durable_targets: vec![],
-                    audit_event_id: None,
-                },
-            }),
-        )
-            .into_response(),
+            // Hot switching is not supported. The GUI disables mode-change buttons, but we
+            // fail-close here as defense-in-depth. Return explicit operator guidance rather
+            // than a dead-end refusal.
+            let guidance = build_mode_change_guidance(&st).await;
+            (StatusCode::CONFLICT, Json(guidance)).into_response()
+        }
 
         _ => (
             StatusCode::BAD_REQUEST,
@@ -2949,38 +2946,185 @@ fn authoritative_config_diff_rows(
     rows
 }
 
-pub(crate) async fn strategy_summary() -> impl IntoResponse {
-    // No real strategy-fleet registry is implemented yet.  The former
-    // synthetic `daemon_integrity_gate` surrogate row has been removed: it was
-    // daemon integrity state masquerading as a strategy-fleet row and gave the
-    // operator false confidence that a real strategy was running.
-    //
-    // Return an explicit "not_wired" truth state so the GUI IIFE emits ok:false,
-    // pushing "strategies" to usedMockSections, collapsing the strategy panel
-    // authority to "placeholder", and blocking the StrategyScreen with an
-    // "Unimplemented" notice rather than rendering a fake strategy row.
-    (
-        StatusCode::OK,
-        Json(StrategySummaryResponse {
-            truth_state: "not_wired".to_string(),
-            rows: Vec::new(),
+// ---------------------------------------------------------------------------
+// CC-03: /api/v1/ops/mode-change-guidance — explicit controlled-restart workflow
+// ---------------------------------------------------------------------------
+
+/// Build a `ModeChangeGuidanceResponse` from the current daemon state.
+///
+/// Called by both `ops_mode_change_guidance` (GET) and the `change-system-mode`
+/// arm of `ops_action` (POST → 409) so the operator always gets the same
+/// authoritative guidance regardless of which surface they reach first.
+async fn build_mode_change_guidance(st: &AppState) -> ModeChangeGuidanceResponse {
+    let restart_truth = match st.restart_truth_snapshot().await {
+        Ok(snapshot) => Some(ModeChangeRestartTruth {
+            local_owned_run_id: snapshot.local_owned_run_id,
+            durable_active_run_id: snapshot.durable_active_run_id,
+            durable_active_without_local_ownership: snapshot
+                .durable_active_without_local_ownership,
         }),
-    )
-        .into_response()
+        Err(_) => None,
+    };
+
+    ModeChangeGuidanceResponse {
+        canonical_route: "/api/v1/ops/mode-change-guidance".to_string(),
+        current_mode: st.deployment_mode().as_api_label().to_string(),
+        transition_permitted: false,
+        transition_refused_reason:
+            "Mode transitions require a controlled daemon restart with configuration reload. \
+             Hot switching is not supported in the current architecture."
+                .to_string(),
+        preconditions: vec![
+            "The daemon must be disarmed before restart \
+             (POST /api/v1/ops/action {\"action_key\":\"disarm-execution\"})."
+                .to_string(),
+            "All open positions must be flat or explicitly acknowledged before shutdown."
+                .to_string(),
+            "All pending outbox orders must be drained or cancelled before shutdown."
+                .to_string(),
+            "The target deployment mode must be set in the daemon configuration file \
+             before restart."
+                .to_string(),
+        ],
+        operator_next_steps: vec![
+            "Step 1: POST /api/v1/ops/action {\"action_key\":\"disarm-execution\"} — disarm the daemon.".to_string(),
+            "Step 2: Verify no open positions or pending outbox orders remain.".to_string(),
+            "Step 3: Update the daemon configuration file with the target deployment mode.".to_string(),
+            "Step 4: Stop the daemon process (SIGTERM or service stop command).".to_string(),
+            "Step 5: Confirm the daemon exited cleanly (exit code 0; no active run remains in DB).".to_string(),
+            "Step 6: Restart the daemon with the updated configuration.".to_string(),
+            "Step 7: Verify GET /api/v1/health returns ok=true and confirm new mode via GET /api/v1/ops/mode-change-guidance.".to_string(),
+        ],
+        restart_truth,
+    }
 }
 
-pub(crate) async fn strategy_suppressions() -> impl IntoResponse {
-    // Suppression persistence is not yet implemented.  Return an explicit
-    // "not_wired" truth state so the GUI does not treat the empty rows as
-    // authoritative "zero suppressions."  The GUI IIFE checks this field and
-    // emits ok:false, pushing "strategySuppressions" to usedMockSections and
-    // preventing the strategy panel from rendering a misleading empty
-    // suppressions table.
+/// GET /api/v1/ops/mode-change-guidance
+///
+/// Returns the authoritative operator workflow for a controlled mode transition.
+/// Always returns 200 — this is a read-only guidance surface, not an action.
+/// The same payload (with 409) is returned by POST /api/v1/ops/action when
+/// `action_key == "change-system-mode"`.
+pub(crate) async fn ops_mode_change_guidance(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    (StatusCode::OK, Json(build_mode_change_guidance(&st).await)).into_response()
+}
+
+pub(crate) async fn strategy_summary(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    // CC-01: Fleet is sourced from MQK_STRATEGY_IDS at daemon construction.
+    // None = not configured → not_wired so the GUI blocks rather than rendering
+    // fake rows.  Some(entries) = fleet configured → active truth with rows
+    // derived from fleet identities and current daemon integrity state.
+    let fleet = state.strategy_fleet_snapshot().await;
+    match fleet {
+        None => {
+            // No MQK_STRATEGY_IDS configured — not_wired, GUI blocks.
+            (
+                StatusCode::OK,
+                Json(StrategySummaryResponse {
+                    canonical_route: "/api/v1/strategy/summary".to_string(),
+                    backend: "daemon.strategy_fleet".to_string(),
+                    truth_state: "not_wired".to_string(),
+                    rows: Vec::new(),
+                }),
+            )
+                .into_response()
+        }
+        Some(entries) => {
+            // Fleet configured — derive rows from entry identities and integrity state.
+            let armed = !state.integrity.read().await.is_execution_blocked();
+            let rows = entries
+                .into_iter()
+                .map(|e| StrategySummaryRow {
+                    strategy_id: e.strategy_id,
+                    enabled: true,
+                    armed,
+                    health: "ok".to_string(),
+                    universe: String::new(),
+                    pending_intents: 0,
+                    open_positions: 0,
+                    today_pnl: None,
+                    drawdown_pct: None,
+                    regime: None,
+                    throttle_state: "normal".to_string(),
+                    last_decision_time: None,
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(StrategySummaryResponse {
+                    canonical_route: "/api/v1/strategy/summary".to_string(),
+                    backend: "daemon.strategy_fleet".to_string(),
+                    truth_state: "active".to_string(),
+                    rows,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub(crate) async fn strategy_suppressions(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    // CC-02: Read suppressions from durable DB source.
+    // No DB → "no_db" so the GUI blocks rather than rendering an empty table
+    // as authoritative zero suppressions.
+    // DB present → "active" with real rows; empty rows mean no suppressions.
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(StrategySuppressionsResponse {
+                canonical_route: "/api/v1/strategy/suppressions".to_string(),
+                backend: "postgres.sys_strategy_suppressions".to_string(),
+                truth_state: "no_db".to_string(),
+                rows: Vec::new(),
+            }),
+        )
+            .into_response();
+    };
+
+    let records = match mqk_db::fetch_strategy_suppressions(db).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!("fetch_strategy_suppressions failed: {err}");
+            return (
+                StatusCode::OK,
+                Json(StrategySuppressionsResponse {
+                    canonical_route: "/api/v1/strategy/suppressions".to_string(),
+                    backend: "postgres.sys_strategy_suppressions".to_string(),
+                    truth_state: "no_db".to_string(),
+                    rows: Vec::new(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let rows = records
+        .into_iter()
+        .map(|r| StrategySuppressionRow {
+            suppression_id: r.suppression_id.to_string(),
+            strategy_id: r.strategy_id,
+            state: r.state,
+            trigger_domain: r.trigger_domain,
+            trigger_reason: r.trigger_reason,
+            started_at: r.started_at_utc.to_rfc3339(),
+            cleared_at: r.cleared_at_utc.map(|t| t.to_rfc3339()),
+            note: r.note,
+        })
+        .collect();
+
     (
         StatusCode::OK,
         Json(StrategySuppressionsResponse {
-            truth_state: "not_wired".to_string(),
-            rows: Vec::new(),
+            canonical_route: "/api/v1/strategy/suppressions".to_string(),
+            backend: "postgres.sys_strategy_suppressions".to_string(),
+            truth_state: "active".to_string(),
+            rows,
         }),
     )
         .into_response()
@@ -3564,4 +3708,278 @@ fn broadcast_to_sse(
             Err(_) => None, // lagged / closed
         }
     })
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/oms/overview (CC-04)
+// ---------------------------------------------------------------------------
+
+/// Canonical OMS overview — one surface for current trading state.
+///
+/// Composes the runtime, account, portfolio, execution, and reconcile lanes
+/// from mounted in-memory truth.  All lanes use explicit truth_state semantics:
+/// `"no_snapshot"` is never silently treated as authoritative zero.
+///
+/// No extra DB queries beyond what `current_status_snapshot` and
+/// `current_reconcile_snapshot` already perform.  This is a read-only view;
+/// no auth required.
+pub(crate) async fn oms_overview(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    // --- Runtime lane ---
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+    let integrity_armed = status.integrity_armed;
+    let kill_switch_active = status.state == "halted";
+
+    // --- Reconcile lane ---
+    let reconcile = st.current_reconcile_snapshot().await;
+    let reconcile_total_mismatches = reconcile.mismatched_positions
+        + reconcile.mismatched_orders
+        + reconcile.mismatched_fills
+        + reconcile.unmatched_broker_events;
+
+    // Fault signal count — derived from the same observable state as
+    // build_fault_signals without requiring an extra DB query.
+    let fault_signal_count = {
+        let mut count = 0usize;
+        if status.state == "unknown" {
+            count += 1;
+        }
+        if matches!(reconcile.status.as_str(), "dirty" | "stale" | "unavailable") {
+            count += 1;
+        }
+        if reconcile.status == "unknown" && status.state == "running" {
+            count += 1;
+        }
+        if kill_switch_active {
+            count += 1;
+        }
+        count
+    };
+
+    // --- Broker snapshot lane (account + portfolio) ---
+    let broker_snap = st.broker_snapshot.read().await.clone();
+    let (
+        account_snapshot_state,
+        account_equity,
+        account_cash,
+        portfolio_snapshot_state,
+        portfolio_snapshot_at_utc,
+        position_count,
+        open_order_count,
+        fill_count,
+    ) = match broker_snap {
+        None => (
+            "no_snapshot".to_string(),
+            None,
+            None,
+            "no_snapshot".to_string(),
+            None,
+            0usize,
+            0usize,
+            0usize,
+        ),
+        Some(snap) => {
+            let equity = snap.account.equity.parse::<f64>().ok();
+            let cash = snap.account.cash.parse::<f64>().ok();
+            let at = Some(snap.captured_at_utc.to_rfc3339());
+            (
+                "active".to_string(),
+                equity,
+                cash,
+                "active".to_string(),
+                at,
+                snap.positions.len(),
+                snap.orders.len(),
+                snap.fills.len(),
+            )
+        }
+    };
+
+    // --- Execution snapshot lane (OMS internal) ---
+    let exec_snap = st.execution_snapshot.read().await.clone();
+    let (execution_has_snapshot, execution_active_orders, execution_pending_orders) =
+        match exec_snap {
+            None => (false, 0usize, 0usize),
+            Some(snap) => {
+                let active = snap.active_orders.len();
+                let pending = snap
+                    .pending_outbox
+                    .iter()
+                    .filter(|o| o.status == "PENDING" || o.status == "CLAIMED")
+                    .count();
+                (true, active, pending)
+            }
+        };
+
+    (
+        StatusCode::OK,
+        Json(OmsOverviewResponse {
+            canonical_route: "/api/v1/oms/overview".to_string(),
+            runtime_status: runtime_status_from_state(&status.state).to_string(),
+            integrity_armed,
+            kill_switch_active,
+            daemon_mode: st.deployment_mode().as_api_label().to_string(),
+            fault_signal_count,
+            account_snapshot_state,
+            account_equity,
+            account_cash,
+            portfolio_snapshot_state,
+            portfolio_snapshot_at_utc,
+            position_count,
+            open_order_count,
+            fill_count,
+            execution_has_snapshot,
+            execution_active_orders,
+            execution_pending_orders,
+            reconcile_status: reconcile.status,
+            reconcile_last_run_at: reconcile.last_run_at,
+            reconcile_total_mismatches,
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/metrics/dashboards (CC-05)
+// ---------------------------------------------------------------------------
+
+/// Canonical metrics dashboard — one surface for performance and health KPIs.
+///
+/// Composes the portfolio, risk, execution, and reconcile summary panels from
+/// existing in-memory truth.  All panels use explicit truth_state semantics.
+///
+/// Fields that are not derivable from current sources (daily_pnl, drawdown_pct,
+/// loss_limit_utilization_pct) are always None — consistent with what the
+/// individual summary routes return.  No DB queries are performed beyond what
+/// `current_status_snapshot` and `current_reconcile_snapshot` already perform.
+///
+/// Route is read-only (public sub-router) — no auth required.
+pub(crate) async fn metrics_dashboards(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    // Runtime state is needed for kill_switch_active.
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+    let kill_switch_active = status.state == "halted";
+
+    // Reconcile panel — always available.
+    let reconcile = st.current_reconcile_snapshot().await;
+    let reconcile_total_mismatches = reconcile.mismatched_positions
+        + reconcile.mismatched_orders
+        + reconcile.mismatched_fills
+        + reconcile.unmatched_broker_events;
+
+    // Portfolio + risk panels — from broker_snapshot.
+    let broker_snap = st.broker_snapshot.read().await.clone();
+    let (
+        portfolio_snapshot_state,
+        account_equity,
+        long_market_value,
+        short_market_value,
+        cash,
+        buying_power,
+        risk_snapshot_state,
+        gross_exposure,
+        net_exposure,
+        concentration_pct,
+    ) = match broker_snap {
+        None => (
+            "no_snapshot".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "no_snapshot".to_string(),
+            None,
+            None,
+            None,
+        ),
+        Some(snap) => {
+            let equity = parse_decimal(&snap.account.equity);
+            let cash_val = parse_decimal(&snap.account.cash);
+            let (long_mv, short_mv, gross_exp, max_abs) = exposure_breakdown(&snap.positions);
+            let net_exp = snap
+                .positions
+                .iter()
+                .map(position_market_value)
+                .sum::<f64>();
+            let conc = if gross_exp > 0.0 {
+                (max_abs / gross_exp) * 100.0
+            } else {
+                0.0
+            };
+            (
+                "active".to_string(),
+                Some(equity),
+                Some(long_mv),
+                Some(short_mv),
+                Some(cash_val),
+                Some(cash_val), // buying_power = cash (no margin model yet)
+                "active".to_string(),
+                Some(gross_exp),
+                Some(net_exp),
+                Some(conc),
+            )
+        }
+    };
+
+    // Execution panel — from execution_snapshot.
+    let exec_snap = st.execution_snapshot.read().await.clone();
+    let (
+        execution_snapshot_state,
+        active_order_count,
+        pending_order_count,
+        dispatching_order_count,
+        reject_count_today,
+    ) = match exec_snap {
+        None => ("no_snapshot".to_string(), 0usize, 0usize, 0usize, 0usize),
+        Some(snap) => {
+            let active = snap.active_orders.len();
+            let pending = snap
+                .pending_outbox
+                .iter()
+                .filter(|o| o.status == "PENDING" || o.status == "CLAIMED")
+                .count();
+            let dispatching = snap
+                .pending_outbox
+                .iter()
+                .filter(|o| o.status == "DISPATCHING" || o.status == "SENT")
+                .count();
+            ("active".to_string(), active, pending, dispatching, 0)
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(MetricsDashboardResponse {
+            canonical_route: "/api/v1/metrics/dashboards".to_string(),
+            portfolio_snapshot_state,
+            account_equity,
+            long_market_value,
+            short_market_value,
+            cash,
+            daily_pnl: None,
+            buying_power,
+            risk_snapshot_state,
+            gross_exposure,
+            net_exposure,
+            concentration_pct,
+            drawdown_pct: None,
+            loss_limit_utilization_pct: None,
+            kill_switch_active,
+            active_breaches: usize::from(kill_switch_active),
+            execution_snapshot_state,
+            active_order_count,
+            pending_order_count,
+            dispatching_order_count,
+            reject_count_today,
+            reconcile_status: reconcile.status,
+            reconcile_last_run_at: reconcile.last_run_at,
+            reconcile_total_mismatches,
+        }),
+    )
+        .into_response()
 }

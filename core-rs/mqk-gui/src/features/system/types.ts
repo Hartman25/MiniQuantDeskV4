@@ -10,7 +10,7 @@ export type DataSourceState = "real" | "partial" | "mock" | "disconnected";
 
 export type SourceAuthority = "db_truth" | "runtime_memory" | "broker_snapshot" | "placeholder" | "mixed" | "unknown";
 
-export type ExplicitSurfaceTruthState = "unknown" | "active" | "not_wired";
+export type ExplicitSurfaceTruthState = "unknown" | "active" | "not_wired" | "no_db";
 
 export interface ExplicitSurfaceTruth {
   truth_state: ExplicitSurfaceTruthState;
@@ -662,9 +662,9 @@ export interface StrategyRow {
   universe: string;
   pending_intents: number;
   open_positions: number;
-  today_pnl: number;
-  drawdown_pct: number;
-  regime: string;
+  today_pnl: number | null;
+  drawdown_pct: number | null;
+  regime: string | null;
   throttle_state: string;
   last_decision_time: string | null;
 }

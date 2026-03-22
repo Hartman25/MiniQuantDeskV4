@@ -423,9 +423,12 @@ pub struct StrategySummaryRow {
     pub universe: String,
     pub pending_intents: usize,
     pub open_positions: usize,
-    pub today_pnl: f64,
-    pub drawdown_pct: f64,
-    pub regime: String,
+    /// `null` — no portfolio accounting is wired; honest null, not synthetic zero.
+    pub today_pnl: Option<f64>,
+    /// `null` — no drawdown tracking is wired; honest null, not synthetic zero.
+    pub drawdown_pct: Option<f64>,
+    /// `null` — no regime detector is wired; honest null, not synthetic string.
+    pub regime: Option<String>,
     pub throttle_state: String,
     pub last_decision_time: Option<String>,
 }
@@ -433,14 +436,19 @@ pub struct StrategySummaryRow {
 /// Response wrapper for `/api/v1/strategy/summary`.
 ///
 /// `truth_state`:
-/// - `"not_wired"` — no real strategy-fleet registry is implemented yet;
-///   `rows` is always empty and **must not** be treated as strategy truth.
+/// - `"not_wired"` — no strategy fleet is configured (`MQK_STRATEGY_IDS` not set);
+///   `rows` is empty and **must not** be treated as strategy truth.
 ///   The former synthetic `daemon_integrity_gate` surrogate row has been
 ///   removed; it was daemon-integrity state masquerading as a strategy row.
-/// - `"active"` — reserved for when a real strategy-fleet source is wired.
+/// - `"active"` — fleet is configured; `rows` reflects the authoritative fleet
+///   entries derived from `MQK_STRATEGY_IDS` and current daemon integrity state.
+///   `rows` may be empty if the fleet is configured but contains no entries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategySummaryResponse {
-    /// `"not_wired"` = no real strategy-fleet source exists; rows is empty and not authoritative.
+    pub canonical_route: String,
+    pub backend: String,
+    /// `"not_wired"` = fleet not configured; rows empty and not authoritative.
+    /// `"active"` = fleet configured; rows are authoritative (may be empty).
     pub truth_state: String,
     /// Empty when `truth_state == "not_wired"`.  Authoritative when `truth_state == "active"`.
     pub rows: Vec<StrategySummaryRow>,
@@ -461,14 +469,18 @@ pub struct StrategySuppressionRow {
 /// Response wrapper for `/api/v1/strategy/suppressions`.
 ///
 /// `truth_state`:
-/// - `"not_wired"` — no durable suppression persistence is implemented yet;
-///   `rows` is always empty and **must not** be treated as authoritative zero.
-/// - `"active"` — reserved for when durable suppression tracking is wired.
+/// - `"no_db"` — no DB pool configured; source unavailable; rows is empty and
+///   **must not** be treated as authoritative zero.
+/// - `"active"` — DB present; rows are authoritative.  Empty `rows` means
+///   no suppressions exist.  Non-empty rows are real durable records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategySuppressionsResponse {
-    /// `"not_wired"` = no durable suppression source exists; rows is empty and not authoritative.
+    pub canonical_route: String,
+    pub backend: String,
+    /// `"no_db"` = DB unavailable; rows empty and not authoritative.
+    /// `"active"` = DB present; rows authoritative (empty = no suppressions).
     pub truth_state: String,
-    /// Empty when `truth_state == "not_wired"`.  Authoritative when `truth_state == "active"`.
+    /// Empty when `truth_state == "no_db"`.  Authoritative when `truth_state == "active"`.
     pub rows: Vec<StrategySuppressionRow>,
 }
 
@@ -596,6 +608,46 @@ pub struct ActionCatalogResponse {
     /// (enabled/disabled_reason) is computed from the live daemon state at
     /// request time.
     pub actions: Vec<ActionCatalogEntry>,
+}
+
+// ---------------------------------------------------------------------------
+// /api/v1/ops/mode-change-guidance — controlled mode-transition workflow
+// ---------------------------------------------------------------------------
+
+/// Runtime state relevant to mode-transition safety decisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeChangeRestartTruth {
+    /// Run ID owned by this daemon instance at the time of the request, if any.
+    pub local_owned_run_id: Option<Uuid>,
+    /// Most recent durable active run ID from the DB, if any.
+    pub durable_active_run_id: Option<Uuid>,
+    /// True when a durable active run exists but is not owned by this instance.
+    pub durable_active_without_local_ownership: bool,
+}
+
+/// Response for GET /api/v1/ops/mode-change-guidance and for the
+/// `change-system-mode` arm of POST /api/v1/ops/action (409 CONFLICT).
+///
+/// Mode transitions are **never** authoritative via API — there is no hot
+/// switching.  This response provides the operator with an explicit,
+/// authoritative workflow for executing a controlled restart-driven mode
+/// change without guesswork.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeChangeGuidanceResponse {
+    /// Self-identifying route: "/api/v1/ops/mode-change-guidance".
+    pub canonical_route: String,
+    /// Current deployment mode label (e.g. "paper", "live", "backtest").
+    pub current_mode: String,
+    /// Always false — mode transitions require a controlled daemon restart.
+    pub transition_permitted: bool,
+    /// Authoritative reason why hot switching is refused.
+    pub transition_refused_reason: String,
+    /// Conditions that must be satisfied before the daemon can be safely restarted.
+    pub preconditions: Vec<String>,
+    /// Ordered explicit steps the operator must follow for a safe mode transition.
+    pub operator_next_steps: Vec<String>,
+    /// Restart truth from the daemon's run registry.  None when no DB connection.
+    pub restart_truth: Option<ModeChangeRestartTruth>,
 }
 
 // ---------------------------------------------------------------------------
@@ -859,4 +911,134 @@ pub struct RiskDenialsResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticsSnapshotResponse {
     pub snapshot: Option<ExecutionSnapshot>,
+}
+
+// ---------------------------------------------------------------------------
+// /api/v1/metrics/dashboards (CC-05)
+// ---------------------------------------------------------------------------
+
+/// Metrics dashboard composed from existing truthful summary surfaces.
+///
+/// Gives an operator one endpoint for current performance and health KPIs
+/// without hitting four separate summary routes.  All panels use explicit
+/// truth_state semantics — None is never a fabricated zero.
+///
+/// Fields that are not derivable from current sources (daily_pnl, drawdown_pct,
+/// loss_limit_utilization_pct) are always None.  This is intentional and honest:
+/// the underlying summary routes also return None for these fields because the
+/// data source does not exist yet.
+///
+/// # Panel truth states
+///
+/// - `portfolio_snapshot_state` / `risk_snapshot_state`: `"no_snapshot"` when
+///   `broker_snapshot` is absent; `"active"` when present.
+/// - `execution_snapshot_state`: `"no_snapshot"` when execution loop has not
+///   started; `"active"` when execution loop is running with a snapshot.
+/// - `reconcile_status`: always present (`"unknown"` before first reconcile tick).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsDashboardResponse {
+    /// Canonical route for this surface.
+    pub canonical_route: String,
+
+    // --- Portfolio panel (from broker_snapshot) ---
+    /// `"no_snapshot"` | `"active"`
+    pub portfolio_snapshot_state: String,
+    pub account_equity: Option<f64>,
+    pub long_market_value: Option<f64>,
+    pub short_market_value: Option<f64>,
+    pub cash: Option<f64>,
+    /// Not derivable from broker snapshot — always None in current sources.
+    pub daily_pnl: Option<f64>,
+    pub buying_power: Option<f64>,
+
+    // --- Risk panel (from broker_snapshot positions + runtime state) ---
+    /// `"no_snapshot"` | `"active"`
+    pub risk_snapshot_state: String,
+    pub gross_exposure: Option<f64>,
+    pub net_exposure: Option<f64>,
+    pub concentration_pct: Option<f64>,
+    /// Not derivable from broker snapshot — always None in current sources.
+    pub drawdown_pct: Option<f64>,
+    /// Not derivable without a loss-limit config — always None in current sources.
+    pub loss_limit_utilization_pct: Option<f64>,
+    pub kill_switch_active: bool,
+    pub active_breaches: usize,
+
+    // --- Execution panel (from execution_snapshot / OMS) ---
+    /// `"no_snapshot"` | `"active"`
+    pub execution_snapshot_state: String,
+    pub active_order_count: usize,
+    pub pending_order_count: usize,
+    pub dispatching_order_count: usize,
+    pub reject_count_today: usize,
+
+    // --- Reconcile panel ---
+    /// `"ok"` | `"unknown"` | `"dirty"` | `"stale"` | `"unavailable"`
+    pub reconcile_status: String,
+    pub reconcile_last_run_at: Option<String>,
+    /// Sum of all mismatch counts across positions, orders, fills, and broker events.
+    pub reconcile_total_mismatches: usize,
+}
+
+// ---------------------------------------------------------------------------
+// /api/v1/oms/overview (CC-04)
+// ---------------------------------------------------------------------------
+
+/// Single canonical OMS overview composed from mounted truth surfaces.
+///
+/// Gives an operator one endpoint to check current trading state without
+/// piecing together scattered surfaces.  All lanes use explicit truth_state
+/// semantics — absence of a snapshot is never silently treated as "zero".
+///
+/// # Lane semantics
+///
+/// - `runtime_*`: derived from StatusSnapshot — always present.
+/// - `account_snapshot_state` / `portfolio_snapshot_state`: `"no_snapshot"`
+///   when broker_snapshot is absent, `"active"` when present.
+/// - `execution_has_snapshot`: false when execution loop has never started.
+/// - `reconcile_*`: always present (defaults to `"unknown"` when unrun).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OmsOverviewResponse {
+    /// Canonical route for this surface.
+    pub canonical_route: String,
+
+    // --- Runtime lane ---
+    /// `"idle"` | `"running"` | `"halted"` | `"unknown"`
+    pub runtime_status: String,
+    pub integrity_armed: bool,
+    pub kill_switch_active: bool,
+    pub daemon_mode: String,
+    /// Count of active fault signals. Full detail at `GET /api/v1/system/status`.
+    pub fault_signal_count: usize,
+
+    // --- Account lane (from broker_snapshot) ---
+    /// `"no_snapshot"` | `"active"`
+    pub account_snapshot_state: String,
+    /// Account equity as parsed f64. None when snapshot absent or parse fails.
+    pub account_equity: Option<f64>,
+    /// Account cash as parsed f64. None when snapshot absent or parse fails.
+    pub account_cash: Option<f64>,
+
+    // --- Portfolio lane (from broker_snapshot) ---
+    /// `"no_snapshot"` | `"active"`
+    pub portfolio_snapshot_state: String,
+    /// UTC timestamp of broker snapshot capture. None when no snapshot.
+    pub portfolio_snapshot_at_utc: Option<String>,
+    pub position_count: usize,
+    pub open_order_count: usize,
+    pub fill_count: usize,
+
+    // --- Execution lane (from execution_snapshot / OMS) ---
+    /// false when execution loop has not started or no active run.
+    pub execution_has_snapshot: bool,
+    pub execution_active_orders: usize,
+    pub execution_pending_orders: usize,
+
+    // --- Reconcile lane ---
+    /// `"ok"` | `"unknown"` | `"dirty"` | `"stale"` | `"unavailable"`
+    pub reconcile_status: String,
+    pub reconcile_last_run_at: Option<String>,
+    /// Sum of mismatched_positions + mismatched_orders + mismatched_fills +
+    /// unmatched_broker_events.
+    pub reconcile_total_mismatches: usize,
 }

@@ -747,6 +747,20 @@ impl OperatorAuthMode {
 }
 
 // ---------------------------------------------------------------------------
+// StrategyFleetEntry
+// ---------------------------------------------------------------------------
+
+/// A single strategy entry in the daemon's configured fleet.
+///
+/// Derived from `MQK_STRATEGY_IDS` at daemon construction.  Each entry is a
+/// minimal identity record — P&L, drawdown, and regime are NOT derived here;
+/// routes that need them will pull from the appropriate authoritative source.
+#[derive(Debug, Clone)]
+pub struct StrategyFleetEntry {
+    pub strategy_id: String,
+}
+
+// ---------------------------------------------------------------------------
 // AppState
 // ---------------------------------------------------------------------------
 
@@ -800,6 +814,13 @@ pub struct AppState {
     /// configured), defaults to `ColdStartUnproven` for Alpaca and `NotApplicable`
     /// for Paper.  Updated by the WS ingest path (AP-06+) via `update_ws_continuity`.
     alpaca_ws_continuity: Arc<RwLock<AlpacaWsContinuityState>>,
+    /// CC-01: Configured strategy fleet.
+    ///
+    /// `None` when `MQK_STRATEGY_IDS` is not set — the strategy summary surface
+    /// returns `truth_state="not_wired"` so the GUI blocks rather than rendering
+    /// fake rows.  `Some(entries)` when the env var is set; entries may be empty
+    /// if the var is set to an empty string (zero-strategy fleet is authoritative).
+    strategy_fleet: Arc<RwLock<Option<Vec<StrategyFleetEntry>>>>,
 }
 
 impl Default for AppState {
@@ -984,6 +1005,20 @@ impl AppState {
             _ => AlpacaWsContinuityState::NotApplicable,
         };
 
+        // CC-01: Strategy fleet from MQK_STRATEGY_IDS env var.
+        // None = not configured → not_wired truth state.
+        // Some([]) = configured but empty → active with zero rows (authoritative empty fleet).
+        // Some([...]) = configured fleet entries → active with rows.
+        let strategy_fleet = std::env::var("MQK_STRATEGY_IDS").ok().map(|ids| {
+            ids.split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|id| StrategyFleetEntry {
+                    strategy_id: id.to_string(),
+                })
+                .collect::<Vec<_>>()
+        });
+
         Self {
             bus,
             node_id: default_node_id(build.service),
@@ -1003,6 +1038,7 @@ impl AppState {
             broker_snapshot_source,
             strategy_market_data_source,
             alpaca_ws_continuity: Arc::new(RwLock::new(initial_ws_continuity)),
+            strategy_fleet: Arc::new(RwLock::new(strategy_fleet)),
         }
     }
 
@@ -1066,6 +1102,23 @@ impl AppState {
             return;
         }
         *self.alpaca_ws_continuity.write().await = new_state;
+    }
+
+    /// CC-01: Snapshot the current strategy fleet.
+    ///
+    /// Returns `None` when `MQK_STRATEGY_IDS` was not set at construction
+    /// (truth_state = "not_wired").  Returns `Some(entries)` when set (may be
+    /// an empty vec for an explicitly empty fleet).
+    pub async fn strategy_fleet_snapshot(&self) -> Option<Vec<StrategyFleetEntry>> {
+        self.strategy_fleet.read().await.clone()
+    }
+
+    /// CC-01: Test helper — inject a strategy fleet without relying on env var.
+    ///
+    /// Named with `_for_test_` to signal intent; production code initializes
+    /// the fleet from `MQK_STRATEGY_IDS` at construction via [`Self::new_inner`].
+    pub async fn set_strategy_fleet_for_test(&self, fleet: Option<Vec<StrategyFleetEntry>>) {
+        *self.strategy_fleet.write().await = fleet;
     }
 
     pub fn adapter_id(&self) -> &str {

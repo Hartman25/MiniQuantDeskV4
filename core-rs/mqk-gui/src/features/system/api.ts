@@ -190,12 +190,14 @@ interface ConfigDiffsWrapper {
   rows: ConfigDiffRow[];
 }
 
-// Strategy suppression truth wrapper.
-// "not_wired" = no durable suppression persistence exists; rows is empty and not authoritative.
-// "active"    = reserved for when durable tracking is wired (not currently returned).
+// Strategy suppression truth wrapper (CC-02: now durable).
+// "no_db"  = DB pool not configured; rows is empty and not authoritative.
+//            GUI renders "unavailable" notice rather than "not wired" notice.
+// "active" = DB present; rows are authoritative (empty = no suppressions).
 interface StrategySuppressionsWrapper {
-  truth_state: "not_wired" | "active";
+  canonical_route?: string | null;
   backend?: string | null;
+  truth_state: "no_db" | "active";
   rows: StrategySuppressionRow[];
 }
 
@@ -206,8 +208,9 @@ interface StrategySuppressionsWrapper {
 //   re-introducing fake strategy rows.
 // "active"    = reserved for when a real strategy-fleet source is wired.
 interface StrategySummaryWrapper {
-  truth_state: "not_wired" | "active";
+  canonical_route?: string | null;
   backend?: string | null;
+  truth_state: "not_wired" | "active";
   rows: StrategyRow[];
 }
 
@@ -1035,7 +1038,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const durableOperatorHistoryKeys = new Set(["auditActions", "artifactRegistry", "operatorTimeline"]);
 
   const explicitSurfaceTruthOrUnknown = (
-    result: EndpointFetchResult<{ truth_state: "active" | "not_wired"; backend?: string | null }>,
+    result: EndpointFetchResult<{ truth_state: "active" | "not_wired" | "no_db"; backend?: string | null }>,
   ): ExplicitSurfaceTruth => {
     if (!result.ok || result.data == null) {
       return { truth_state: "unknown", backend: null };

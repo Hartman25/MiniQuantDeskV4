@@ -578,29 +578,44 @@ async fn gui_ops_action_endpoint_dispatches_correctly() {
         "disarm-execution disposition must be 'applied': {j}"
     );
 
-    // change-system-mode: must return 409 CONFLICT, accepted=false, disposition="not_authoritative".
-    // Route is not mounted on the daemon — mode transition requires a controlled restart.
+    // change-system-mode: must return 409 CONFLICT with ModeChangeGuidanceResponse.
+    // No hot switching. Response must be authoritative guidance, not a dead-end refusal.
     let (s, j) = post_action(router.clone(), "change-system-mode").await;
     assert_eq!(
         s,
         StatusCode::CONFLICT,
         "change-system-mode must return 409: {j}"
     );
+    // transition_permitted must be false — no hot switching ever.
     assert_eq!(
-        j["accepted"], false,
-        "change-system-mode accepted must be false: {j}"
+        j["transition_permitted"], false,
+        "change-system-mode transition_permitted must be false: {j}"
     );
+    // canonical_route must self-identify the guidance surface.
     assert_eq!(
-        j["disposition"].as_str(),
-        Some("not_authoritative"),
-        "change-system-mode disposition must be 'not_authoritative': {j}"
+        j["canonical_route"].as_str(),
+        Some("/api/v1/ops/mode-change-guidance"),
+        "change-system-mode canonical_route must be /api/v1/ops/mode-change-guidance: {j}"
     );
-    // blockers array must contain an entry explaining that a restart is required.
+    // current_mode must be non-empty — this is the authoritative state the operator sees.
     assert!(
-        j["blockers"].as_array().is_some_and(|arr| arr
-            .iter()
-            .any(|v| v.as_str().is_some_and(|s| s.contains("restart")))),
-        "change-system-mode blockers must mention restart: {j}"
+        j["current_mode"].as_str().is_some_and(|m| !m.is_empty()),
+        "change-system-mode current_mode must be non-empty: {j}"
+    );
+    // operator_next_steps must be a non-empty array mentioning restart — explicit workflow.
+    assert!(
+        j["operator_next_steps"].as_array().is_some_and(|arr| {
+            !arr.is_empty()
+                && arr
+                    .iter()
+                    .any(|v| v.as_str().is_some_and(|s| s.to_lowercase().contains("restart")))
+        }),
+        "change-system-mode operator_next_steps must be non-empty and mention restart: {j}"
+    );
+    // preconditions must be present and non-empty.
+    assert!(
+        j["preconditions"].as_array().is_some_and(|arr| !arr.is_empty()),
+        "change-system-mode preconditions must be non-empty: {j}"
     );
 
     // unknown key: must return 400 BAD_REQUEST, accepted=false.
@@ -865,11 +880,13 @@ async fn gui_contract_execution_orders_200_array_with_injected_snapshot() {
 
 #[tokio::test]
 async fn gui_contract_not_wired_surfaces_declare_truth_state() {
-    // config-diffs, strategy/suppressions, and strategy/summary are all
-    // "not_wired" surfaces: no durable backing exists yet.  Each must return
-    // a wrapper object with truth_state="not_wired" — NOT a bare array —
-    // so the GUI IIFEs can emit ok:false and prevent fake-zero / fake-row
-    // rendering in the Config, Strategy, and Ops panels.
+    // config-diffs and strategy/summary remain permanently "not_wired" because
+    // no durable backing exists for them yet.  strategy/suppressions is now
+    // durable (CC-02) and returns "no_db" when no DB pool is configured — it
+    // no longer returns "not_wired".
+    //
+    // Each must return a wrapper object — NOT a bare array — so the GUI IIFEs
+    // can emit ok:false and prevent fake-zero / fake-row rendering.
     let router = make_router();
 
     // /api/v1/system/config-diffs — ConfigDiffsResponse wrapper
@@ -901,7 +918,9 @@ async fn gui_contract_not_wired_surfaces_declare_truth_state() {
         "/api/v1/system/config-diffs rows must be empty when not_wired"
     );
 
-    // /api/v1/strategy/suppressions — StrategySuppressionsResponse wrapper
+    // /api/v1/strategy/suppressions — CC-02: durable surface.
+    // Without DB pool: returns truth_state="no_db" (source unavailable, not permanently not_wired).
+    // GUI renders "unavailable" notice rather than "not wired" notice.
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/strategy/suppressions")
@@ -919,15 +938,23 @@ async fn gui_contract_not_wired_surfaces_declare_truth_state() {
         "/api/v1/strategy/suppressions must return a wrapper object, not a bare array; got: {json}"
     );
     assert_eq!(
-        json["truth_state"], "not_wired",
-        "/api/v1/strategy/suppressions must declare truth_state=not_wired"
+        json["truth_state"], "no_db",
+        "/api/v1/strategy/suppressions must declare truth_state=no_db when no DB pool is configured"
+    );
+    assert_eq!(
+        json["canonical_route"], "/api/v1/strategy/suppressions",
+        "/api/v1/strategy/suppressions must carry canonical_route self-identity"
+    );
+    assert_eq!(
+        json["backend"], "postgres.sys_strategy_suppressions",
+        "/api/v1/strategy/suppressions must declare its backend source"
     );
     assert!(
         json["rows"]
             .as_array()
             .map(|v| v.is_empty())
             .unwrap_or(false),
-        "/api/v1/strategy/suppressions rows must be empty when not_wired"
+        "/api/v1/strategy/suppressions rows must be empty when no_db"
     );
 
     // /api/v1/strategy/summary — StrategySummaryResponse wrapper
