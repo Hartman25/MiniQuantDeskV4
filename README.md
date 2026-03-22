@@ -182,7 +182,7 @@ This repo has real institutional bones, but it is **not** yet a fully live-capit
 - default bind is loopback-only: `127.0.0.1:8899`
 - non-loopback bind requires explicit opt-in
 - privileged routes fail closed until `MQK_OPERATOR_TOKEN` is configured
-- current daemon architecture allows **paper** startup with the paper adapter and refuses unsupported/unproven deployment modes fail-closed
+- daemon now has typed support for paper (paper or Alpaca adapter), live-shadow (Alpaca adapter), and live-capital (Alpaca adapter); backtest is unconditionally refused fail-closed; live-shadow and live-capital have additional runtime gates enforced and operational trust for those modes is still partial — typed source support is not the same as proven safe live operation
 
 ## **Verification and CI**
 

@@ -139,10 +139,16 @@ cargo test -p mqk-db runtime_lease -- --ignored --test-threads=1
 echo "== CI-04: daemon deadman =="
 cargo test -p mqk-db --test scenario_deadman_enforces_halt -- --ignored --test-threads=1
 
-# CI-03 + CI-04 + CI-02: all daemon runtime lifecycle proofs in one binary
+# CI-03 + CI-04 + CI-02 + IR-01: all daemon runtime lifecycle proofs in one binary.
 # (cargo test accepts only one TESTNAME filter before --; run the whole file once
 #  with --ignored so every scenario_daemon_runtime_lifecycle proof is exercised)
-echo "== CI-04/CI-03/CI-02: daemon runtime lifecycle (deadman + halt + start/stop) =="
+#
+# IR-01 coverage: control-plane operator-audit durable-truth closure.
+#   ir01_control_arm_no_run_no_synthetic_run_created  — no synthetic run row on arm when no real run
+#   ir01_control_disarm_no_run_no_synthetic_run_created — same for disarm
+#   ir01_control_arm_with_real_run_writes_audit_event — real run anchor → audit event written correctly
+# These are the direct DB-backed proof of the previously disputed operator-audit durability path.
+echo "== CI-04/CI-03/CI-02 + IR-01: daemon runtime lifecycle (deadman + halt + start/stop + operator-audit truth) =="
 cargo test -p mqk-daemon --test scenario_daemon_runtime_lifecycle -- --ignored --test-threads=1
 
 # CI-11: market-data provider ingest + incremental sync proofs

@@ -63,14 +63,25 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
   No durable suppression persistence exists. GUI IIFE emits `ok:false` on `not_wired` →
   `"strategySuppressions"` in `mockSections` → section renders honest "not wired" notice, not empty table.
 - Contract gate: `gui_contract_not_wired_surfaces_declare_truth_state` proves wrapper shape +
-  `truth_state="not_wired"` + empty `rows` + absence of `daemon_integrity_gate` surrogate for all three
-  not-wired surfaces (`config-diffs`, `strategy/suppressions`, `strategy/summary`).
+  `truth_state="not_wired"` + empty `rows` + absence of `daemon_integrity_gate` surrogate for these
+  surfaces in the no-DB test state. `strategy/suppressions` and `strategy/summary` are permanently
+  `not_wired` — no real source is wired for either. `config-diffs` returns `not_wired` in the no-DB
+  test state used by this gate; it can return `active` truth when a latest durable run exists in DB
+  (see System config surfaces section below).
 
-### System config surfaces — "not_wired" truth closure
+### System config surfaces — conditional truth
 
-- `/api/v1/system/config-diffs` — `ConfigDiffsResponse` wrapper: `truth_state="not_wired"` + empty `rows`.
-  No durable config-diff persistence exists. GUI IIFE emits `ok:false` on `not_wired` →
-  `"configDiffs"` in `mockSections` → ConfigScreen renders honest "not wired" notice, not empty table.
+- `/api/v1/system/config-diffs` — `ConfigDiffsResponse` wrapper; truth state is conditional on DB
+  and run availability:
+  - `truth_state="not_wired"` + empty `rows` when no DB is configured OR no latest durable daemon
+    run exists. GUI IIFE emits `ok:false` on `not_wired` → `"configDiffs"` in `mockSections` →
+    ConfigScreen renders honest "not wired" notice, not empty table.
+  - `truth_state="active"` + config diff rows when a latest durable run exists in DB; backend is
+    `postgres.runs+daemon.runtime_selection`. Rows reflect diffs between the latest durable run's
+    config hash and the daemon's current runtime selection (adapter, mode, config hash, host).
+  - There is no separate config-diff persistence table. Diffs are computed live from the `runs`
+    table and current daemon state. The `not_wired` contract gate test exercises the no-DB path;
+    DB-backed active-truth path requires a live Postgres instance and a prior durable run row.
 
 ### Audit and operator surfaces
 
@@ -95,6 +106,39 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
 
 Note: `/api/v1/ops/change-mode` is intentionally NOT mounted. Mode transitions require a controlled restart with configuration reload. The GUI disables mode-change buttons and surfaces a panel notice. The `change-system-mode` action key through `/api/v1/ops/action` returns 409 as a defense-in-depth rejection.
 
+### Metrics dashboard surface (CC-05)
+
+- `/api/v1/metrics/dashboards` — `MetricsDashboardResponse` canonical metrics/KPI dashboard:
+  - Portfolio panel (`portfolio_snapshot_state`, `account_equity`, `long_market_value`,
+    `short_market_value`, `cash`, `buying_power`) from `broker_snapshot`; `"no_snapshot"` + null
+    values when absent. `daily_pnl` is always None — not derivable from current sources.
+  - Risk panel (`risk_snapshot_state`, `gross_exposure`, `net_exposure`, `concentration_pct`,
+    `kill_switch_active`, `active_breaches`) from `broker_snapshot` positions + runtime state.
+    `drawdown_pct` and `loss_limit_utilization_pct` always None — no source exists.
+  - Execution panel (`execution_snapshot_state`, `active_order_count`, `pending_order_count`,
+    `dispatching_order_count`, `reject_count_today`) from `execution_snapshot`; `"no_snapshot"`
+    when execution loop has not started.
+  - Reconcile panel (`reconcile_status`, `reconcile_last_run_at`, `reconcile_total_mismatches`)
+    always present; `"unknown"` before first reconcile tick.
+  - Route is read-only (public sub-router) — no auth required.
+  - Proof: `cargo test --test scenario_metrics_dashboards_cc05 -p mqk-daemon` (6 tests; CC05-01..CC05-06)
+
+### OMS overview surface (CC-04)
+
+- `/api/v1/oms/overview` — `OmsOverviewResponse` canonical overview composed from mounted truth:
+  - `runtime_status`, `integrity_armed`, `kill_switch_active`, `daemon_mode`, `fault_signal_count`
+    from StatusSnapshot (runtime lane — always present).
+  - `account_snapshot_state` / `account_equity` / `account_cash` from `broker_snapshot.account`;
+    `"no_snapshot"` + null values when no broker snapshot loaded (not fake zeros).
+  - `portfolio_snapshot_state` / `position_count` / `open_order_count` / `fill_count` from
+    `broker_snapshot` counts; `"no_snapshot"` when absent.
+  - `execution_has_snapshot` / `execution_active_orders` / `execution_pending_orders` from
+    `execution_snapshot` (OMS internal); `false` + zeros when execution loop has not started.
+  - `reconcile_status` / `reconcile_last_run_at` / `reconcile_total_mismatches` from reconcile
+    snapshot (always present; defaults to `"unknown"` before first reconcile tick).
+  - Route is read-only (public sub-router) — no auth required.
+  - Proof: `cargo test --test scenario_oms_overview_cc04 -p mqk-daemon` (5 tests; CC04-01..CC04-05)
+
 ### Legacy trading surfaces (DMON-04 contract)
 
 - `/v1/status` — shape check (state, active_run_id, integrity_armed)
@@ -109,8 +153,6 @@ Note: `/api/v1/ops/change-mode` is intentionally NOT mounted. Mode transitions r
 These endpoints are probed by the GUI but not yet authoritative daemon contract surfaces.
 Waivers are explicit so deferred coverage is visible, not silently ignored.
 
-- `/api/v1/oms/overview`
-- `/api/v1/metrics/dashboards`
 - `/api/v1/alerts/active`
 - `/api/v1/events/feed`
 - `/api/v1/system/topology`

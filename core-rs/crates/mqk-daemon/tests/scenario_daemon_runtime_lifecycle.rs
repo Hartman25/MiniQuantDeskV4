@@ -873,3 +873,158 @@ async fn durable_halted_run_is_reported_as_halted_by_operator_surfaces() {
 
     st.stop_for_shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// IR-01 proof tests — control operator-audit durable-truth closure
+// ---------------------------------------------------------------------------
+//
+// These tests directly prove that no synthetic run row is created when no real
+// run exists, and that operator action history remains honest in both states.
+
+/// IR-01-A: control/arm with no real run → 200 OK, audit_event_id null, no
+/// synthetic run row created in the runs table.
+///
+/// Before IR-01 the else branch in write_control_operator_audit_event would
+/// call insert_run with git_hash="daemon-control-audit", poisoning the runs
+/// table with a fake durable anchor.  After IR-01 that branch is gone and the
+/// function returns Ok(None), so the response carries audit_event_id:null.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn ir01_control_arm_no_run_no_synthetic_run_created() {
+    let st = daemon_state().await;
+    // No arm() or start() — no real run exists in memory or in the DB.
+
+    let (status, json) = control_arm(&st).await;
+    assert_eq!(status, StatusCode::OK, "control/arm must return 200: {json}");
+
+    // audit_event_id must be null — no real run to anchor the audit event to.
+    assert!(
+        json["audit"]["audit_event_id"].is_null(),
+        "audit_event_id must be null when no real run exists; got: {json}"
+    );
+
+    // No run rows of any kind must have been written.
+    let pool = st.db.as_ref().expect("db configured");
+    let run_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE engine_id = 'mqk-daemon'")
+            .fetch_one(pool)
+            .await
+            .expect("count runs");
+    assert_eq!(
+        run_count, 0,
+        "no synthetic run row must be created; found {run_count} rows"
+    );
+
+    // Primary writes (desired_armed, sys_arm_state) must still have happened.
+    let desired: bool =
+        sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
+            .fetch_one(pool)
+            .await
+            .expect("read desired_armed");
+    assert!(desired, "desired_armed must be true after control/arm");
+}
+
+/// IR-01-B: control/disarm with no real run → 200 OK, audit_event_id null, no
+/// synthetic run row created.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn ir01_control_disarm_no_run_no_synthetic_run_created() {
+    let st = daemon_state().await;
+
+    let (status, json) = control_disarm(&st).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "control/disarm must return 200: {json}"
+    );
+
+    assert!(
+        json["audit"]["audit_event_id"].is_null(),
+        "audit_event_id must be null when no real run exists; got: {json}"
+    );
+
+    let pool = st.db.as_ref().expect("db configured");
+    let run_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE engine_id = 'mqk-daemon'")
+            .fetch_one(pool)
+            .await
+            .expect("count runs");
+    assert_eq!(
+        run_count, 0,
+        "no synthetic run row must be created; found {run_count} rows"
+    );
+
+    let disarmed: bool =
+        sqlx::query_scalar("SELECT NOT desired_armed FROM runtime_control_state WHERE id = 1")
+            .fetch_one(pool)
+            .await
+            .expect("read desired_armed after disarm");
+    assert!(disarmed, "desired_armed must be false after control/disarm");
+}
+
+/// IR-01-C: control/arm with a real durable run present → 200 OK,
+/// audit_event_id is non-null, and the audit_events row exists in the DB.
+///
+/// Proves the happy path still works correctly after the IR-01 fix.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn ir01_control_arm_with_real_run_writes_audit_event() {
+    let st = daemon_state().await;
+    let pool = st.db.as_ref().expect("db configured");
+
+    // Insert a real (not synthetic) run row so fetch_latest_run_for_engine
+    // returns it and the audit event can be anchored to it.
+    let real_run_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        b"ir01-real-run-for-audit-event-test",
+    );
+    mqk_db::insert_run(
+        pool,
+        &mqk_db::NewRun {
+            run_id: real_run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: chrono::Utc::now(),
+            git_hash: "abc123".to_string(),
+            config_hash: "test-config-hash".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "test-node".to_string(),
+        },
+    )
+    .await
+    .expect("insert real run");
+
+    let (status, json) = control_arm(&st).await;
+    assert_eq!(status, StatusCode::OK, "control/arm must return 200: {json}");
+
+    // audit_event_id must be non-null — a real run anchor was available.
+    let event_id_str = json["audit"]["audit_event_id"]
+        .as_str()
+        .expect("audit_event_id must be a string when a real run exists");
+    let event_id = Uuid::parse_str(event_id_str).expect("audit_event_id must be a valid UUID");
+
+    // The audit_events row must exist in the DB.
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM audit_events WHERE event_id = $1)",
+    )
+    .bind(event_id)
+    .fetch_one(pool)
+    .await
+    .expect("check audit_events row");
+    assert!(
+        exists,
+        "audit_events row must exist for event_id {event_id}"
+    );
+
+    // Exactly one run row in the DB — the real one we inserted, not a second
+    // synthetic one.
+    let run_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE engine_id = 'mqk-daemon'")
+            .fetch_one(pool)
+            .await
+            .expect("count runs");
+    assert_eq!(
+        run_count, 1,
+        "exactly one run row must exist (the real one); found {run_count}"
+    );
+}

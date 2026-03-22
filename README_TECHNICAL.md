@@ -150,14 +150,26 @@ cargo build --workspace
 This matters because the technical README should not lie.
 
 ### **What the daemon supports today**
-- paper deployment with the `paper` adapter
 
-### **What the daemon currently refuses fail-closed**
-- `backtest`
-- `live-shadow`
-- `live-capital`
+Valid mode+adapter combinations with `deployment_start_allowed: true`:
 
-The current daemon selection path treats those modes as unsupported/unproven in the present architecture and refuses startup.
+- `paper` mode + `paper` adapter — synthetic fill engine, always-on calendar
+- `paper` mode + `alpaca` adapter — Alpaca paper endpoint, always-on calendar
+- `live-shadow` mode + `alpaca` adapter — Alpaca live endpoint, NYSE weekday calendar, no capital authority
+- `live-capital` mode + `alpaca` adapter — Alpaca live endpoint, NYSE weekday calendar, real capital semantics; additional runtime gates (dev-token check, WS continuity proven) are enforced at start beyond the static readiness check
+
+Typed support and `start_allowed: true` exist in source and are tested for all four combinations above.
+
+**Operational trust for live-shadow and live-capital is still partial.** Typed support in source is not the same as operational trust. Runbooks, recovery proof, and shadow-to-live parity evidence are not yet strong. The preflight currently reports `live_routing_disabled: true` as a hardcoded field regardless of mode. Do not treat typed support as proof of safe live operation.
+
+### **What the daemon unconditionally refuses**
+
+- `backtest` mode: not supported in the daemon runtime; refuses start fail-closed regardless of adapter
+
+### **What else fails closed**
+
+- `live-shadow` or `live-capital` with the `paper` adapter: refused (paper adapter cannot provide real external broker truth for these modes)
+- any mode with an unrecognised adapter ID: refused fail-closed
 
 ### **Default bind posture**
 - default bind: `127.0.0.1:8899`
@@ -465,7 +477,7 @@ Recommended discipline:
 Be honest about these:
 
 - the daemon/operator plane is improving, but not all GUI detail surfaces are fully authoritative yet
-- the daemon currently fail-closes unsupported/unproven deployment modes
+- the daemon now has typed support for paper (paper or Alpaca adapter), live-shadow (Alpaca adapter), and live-capital (Alpaca adapter); backtest is unconditionally refused; operational trust for live modes remains partial and is not yet strongly proven
 - the backtest system is strong, but still being hardened toward promotion-grade provenance and lifecycle realism
 - “scenario-tested” does **not** mean “safe for live capital by default”
 

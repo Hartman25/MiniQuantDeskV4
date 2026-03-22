@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use serde_json::json;
 
 use axum::{
     extract::State,
@@ -458,6 +457,9 @@ async fn write_control_operator_audit_event(
         return Ok(None);
     };
 
+    // IR-01: resolve run_id from real run only; no synthetic run creation.
+    // If no active run and no durable run exist, return Ok(None) so the caller
+    // represents the audit event as absent rather than anchored to a fake row.
     let run_id = if let Some(run_id) = state
         .current_status_snapshot()
         .await
@@ -471,41 +473,12 @@ async fn write_control_operator_audit_event(
     {
         run.run_id
     } else {
-        // D1 — no active run exists; synthesize a durable anchor run for the
-        // audit event.  run_id is UUIDv5 derived from (engine, mode, config,
-        // node, wall-clock-micros) so it is deterministic given the same
-        // inputs at the same microsecond boundary.  The wall-clock read is
-        // isolated to this emergency path and used only to break potential
-        // same-microsecond collisions when a node restarts without leaving a
-        // durable run record.
-        let started_at_utc = chrono::Utc::now();
-        let run_id = uuid::Uuid::new_v5(
-            &uuid::Uuid::NAMESPACE_DNS,
-            format!(
-                "mqk-daemon.emergency-run.v1|{}|{}|{}|{}|{}",
-                "mqk-daemon",
-                state.deployment_mode().as_db_mode(),
-                state.run_config_hash(),
-                state.node_id,
-                started_at_utc.timestamp_micros(),
-            )
-            .as_bytes(),
-        );
-        mqk_db::insert_run(
-            db,
-            &mqk_db::NewRun {
-                run_id,
-                engine_id: "mqk-daemon".to_string(),
-                mode: state.deployment_mode().as_db_mode().to_string(),
-                started_at_utc,
-                git_hash: "daemon-control-audit".to_string(),
-                config_hash: state.run_config_hash().to_string(),
-                config_json: json!({"source": "control.operator_action"}),
-                host_fingerprint: state.node_id.clone(),
-            },
-        )
-        .await?;
-        run_id
+        // IR-01: no real run anchor exists; refuse durable audit write.
+        // The arm/disarm primary writes already completed above; this path
+        // controls only the secondary audit-event row.  Returning None is
+        // honest: audit_event_id will be null in the response contract,
+        // signalling that no durable audit record was created.
+        return Ok(None);
     };
 
     // D1 — event_id is UUIDv5 derived from (run_id, event_type, ts_utc).
