@@ -170,6 +170,12 @@
       "path": "0026_risk_denial_events.sql",
       "status": "applied",
       "intent": "Add durable risk_denial_events table for persisted risk denial event history."
+    },
+    {
+      "id": "0027",
+      "path": "0027_strategy_suppressions.sql",
+      "status": "applied",
+      "intent": "Add durable sys_strategy_suppressions table for restart-safe strategy suppression persistence (CC-02)."
     }
   ]
 }
