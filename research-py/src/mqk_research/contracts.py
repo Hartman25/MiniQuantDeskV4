@@ -504,3 +504,166 @@ def read_parity_evidence(evidence_path: Path) -> ParityEvidenceManifest:
         live_trust_gaps=list(raw["live_trust_gaps"]),
         produced_at_utc=raw["produced_at_utc"],
     )
+
+
+# ---------------------------------------------------------------------------
+# TV-04: Portfolio allocation contracts
+#
+# Proves that multiple strategies cannot all assume ideal capital simultaneously.
+# Allocation is explicit, deterministic, and bounded by a capital budget.
+#
+# Schema version: allocation-v2
+#   Changed from allocation-v1:
+#   - StrategyAllocation gains adjustment_reasons: List[str] (multi-cause truth).
+#     rejection_reason is now reserved for status=="rejected" only.
+#   - PortfolioAllocationManifest gains unallocated_capital_micros: int (exact
+#     capital accounting: sum(allocated) + unallocated == total exactly).
+# ---------------------------------------------------------------------------
+
+PORTFOLIO_ALLOCATION_CONTRACT_VERSION: str = "allocation-v2"
+
+
+@dataclass
+class CapitalBudget:
+    """Hard limits on how capital is distributed across the strategy fleet."""
+
+    total_capital_micros: int
+    """Total deployable capital in micros (1 USD = 1_000_000 micros)."""
+
+    max_strategies: int
+    """Maximum number of strategies that may receive a non-zero allocation."""
+
+    max_single_strategy_fraction: float
+    """No single strategy may receive more than this fraction (0 < x <= 1.0)."""
+
+
+@dataclass
+class StrategyCandidate:
+    """A strategy that is requesting a capital allocation.
+
+    Consumed from TV-01 (artifact_id / signal_pack_id) and TV-02 (gate_passed).
+    """
+
+    artifact_id: str
+    """Stable artifact identity from TV-01 PromotedArtifactManifest."""
+
+    signal_pack_id: str
+    """Signal-pack identity from TV-01 PromotedArtifactLineage."""
+
+    gate_passed: bool
+    """Whether TV-02 deployability gate was satisfied for this artifact."""
+
+    requested_fraction: float
+    """Fraction of total capital this strategy requests (0 < x <= 1.0)."""
+
+
+@dataclass
+class StrategyAllocation:
+    """The outcome of the allocation process for one strategy candidate."""
+
+    artifact_id: str
+
+    status: str
+    """One of: 'allocated', 'budget_capped', 'rejected'."""
+
+    allocated_fraction: float
+    """Fraction of total capital actually allocated. 0.0 if rejected.
+    Derived from actual assigned micros:
+      allocated_fraction == allocated_capital_micros / budget.total_capital_micros
+    Never derived from a pre-truncation float; always consistent with micros."""
+
+    allocated_capital_micros: int
+    """Absolute capital in micros. 0 if rejected.  Source of truth for this
+    allocation row; allocated_fraction is derived from this value."""
+
+    rejection_reason: Optional[str]
+    """Set only when status == 'rejected'.  None for 'allocated' and 'budget_capped'.
+    Values: 'gate_failed', 'invalid_requested_fraction', 'max_strategies_reached'."""
+
+    adjustment_reasons: List[str] = field(default_factory=list)
+    """Set when status == 'budget_capped'; empty for 'allocated' and 'rejected'.
+    Contains one or both of:
+      'single_strategy_cap'  — capped by max_single_strategy_fraction.
+      'budget_contention'    — scaled down because total demand exceeded 1.0.
+    Both causes may appear simultaneously when the per-strategy cap fires AND the
+    scaled total still exceeds 1.0."""
+
+
+@dataclass
+class PortfolioAllocationManifest:
+    """Complete output of a portfolio allocation run.
+
+    schema_version == PORTFOLIO_ALLOCATION_CONTRACT_VERSION.
+
+    Invariants:
+    - total_allocated_fraction <= 1.0 always.
+    - sum(a.allocated_capital_micros for non-rejected a)
+      + unallocated_capital_micros == budget.total_capital_micros exactly.
+    - sum(a.allocated_capital_micros for non-rejected a) <= budget.total_capital_micros.
+    - allocations are sorted by artifact_id (canonical output order).
+    """
+
+    schema_version: str
+    budget: CapitalBudget
+    allocations: List[StrategyAllocation]
+    total_allocated_fraction: float
+    """Derived from actual assigned micros:
+      total_allocated_fraction == sum(non-rejected allocated_capital_micros)
+                                   / budget.total_capital_micros
+    Never derived from summing pre-truncation float fractions."""
+    allocated_count: int
+    rejected_count: int
+    unallocated_capital_micros: int
+    """Exact integer micros not assigned to any strategy.
+    Covers both by-design undeployed capital and integer-truncation shortfall.
+    Always >= 0.  Zero only when every micro is exactly allocated.
+    Invariant: sum(allocated_capital_micros) + unallocated_capital_micros
+               == budget.total_capital_micros exactly."""
+    selection_method: str
+    """Always 'gate_then_rank_by_requested_fraction'."""
+    produced_at_utc: str
+
+
+def read_portfolio_allocation(path: Path) -> "PortfolioAllocationManifest":
+    """Load and validate a PortfolioAllocationManifest from *path*."""
+    import json
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    sv = raw.get("schema_version", "")
+    if sv != PORTFOLIO_ALLOCATION_CONTRACT_VERSION:
+        raise ValueError(
+            f"portfolio_allocation schema_version mismatch: "
+            f"expected={PORTFOLIO_ALLOCATION_CONTRACT_VERSION!r} got={sv!r}"
+        )
+
+    b = raw["budget"]
+    budget = CapitalBudget(
+        total_capital_micros=int(b["total_capital_micros"]),
+        max_strategies=int(b["max_strategies"]),
+        max_single_strategy_fraction=float(b["max_single_strategy_fraction"]),
+    )
+
+    allocations = []
+    for a in raw.get("allocations", []):
+        allocations.append(
+            StrategyAllocation(
+                artifact_id=a["artifact_id"],
+                status=a["status"],
+                allocated_fraction=float(a["allocated_fraction"]),
+                allocated_capital_micros=int(a["allocated_capital_micros"]),
+                rejection_reason=a.get("rejection_reason"),
+                adjustment_reasons=list(a.get("adjustment_reasons", [])),
+            )
+        )
+
+    return PortfolioAllocationManifest(
+        schema_version=raw["schema_version"],
+        budget=budget,
+        allocations=allocations,
+        total_allocated_fraction=float(raw["total_allocated_fraction"]),
+        allocated_count=int(raw["allocated_count"]),
+        rejected_count=int(raw["rejected_count"]),
+        unallocated_capital_micros=int(raw["unallocated_capital_micros"]),
+        selection_method=raw["selection_method"],
+        produced_at_utc=raw["produced_at_utc"],
+    )
