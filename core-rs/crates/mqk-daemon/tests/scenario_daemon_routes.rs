@@ -2867,7 +2867,8 @@ async fn operator_history_routes_fail_closed_when_db_pool_is_absent() {
 #[tokio::test]
 async fn cc01_strategy_summary_active_with_fleet() {
     // When a fleet is injected, the route must return truth_state="active" and
-    // a row for each configured strategy with honest null for underivable fields.
+    // a row for each configured strategy.  Proves the complete row-level field
+    // contract: sourced fields have real values; unsupported fields are null.
     let st = Arc::new(state::AppState::new_with_operator_auth(
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
@@ -2891,9 +2892,12 @@ async fn cc01_strategy_summary_active_with_fleet() {
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
 
+    // Wrapper identity.
     assert_eq!(json["truth_state"], "active");
     assert_eq!(json["canonical_route"], "/api/v1/strategy/summary");
     assert_eq!(json["backend"], "daemon.strategy_fleet");
+
+    // Row count matches configured fleet.
     let rows = json["rows"].as_array().expect("rows must be an array");
     assert_eq!(rows.len(), 2, "one row per fleet entry; got: {json}");
 
@@ -2910,17 +2914,63 @@ async fn cc01_strategy_summary_active_with_fleet() {
         "strat_beta row missing; got: {json}"
     );
 
-    // Honest null for fields with no authoritative source.
+    // Row-level field contract: prove sourced fields and honest null for every
+    // unsupported field.  No fabricated constants ("ok", "normal", 0, "") allowed.
     for row in rows {
+        // Sourced: strategy_id is the fleet-configured identifier.
+        assert!(
+            row["strategy_id"].as_str().is_some_and(|s| !s.is_empty()),
+            "CC-01: strategy_id must be a non-empty string; got: {row}"
+        );
+        // Sourced: enabled reflects fleet membership (always true for fleet entries).
+        assert_eq!(
+            row["enabled"], true,
+            "CC-01: enabled must be true for fleet-configured strategies; got: {row}"
+        );
+        // Sourced: armed reflects current integrity arm state (boolean).
+        assert!(
+            row["armed"].is_boolean(),
+            "CC-01: armed must be a boolean derived from integrity state; got: {row}"
+        );
+
+        // Honest null for all fields with no current daemon source.
+        // These must NOT be fabricated as "ok", "normal", 0, or empty string.
+        assert!(
+            row["health_status"].is_null(),
+            "CC-01: health_status must be null (no health monitor wired); got: {row}"
+        );
+        assert!(
+            row["universe_size"].is_null(),
+            "CC-01: universe_size must be null (universe not tracked by daemon); got: {row}"
+        );
+        assert!(
+            row["pending_intents"].is_null(),
+            "CC-01: pending_intents must be null (intent pipeline not sourced); got: {row}"
+        );
+        assert!(
+            row["open_positions"].is_null(),
+            "CC-01: open_positions must be null (position counts not sourced); got: {row}"
+        );
         assert!(
             row["today_pnl"].is_null(),
-            "today_pnl must be null; got: {row}"
+            "CC-01: today_pnl must be null (no portfolio accounting wired); got: {row}"
         );
         assert!(
             row["drawdown_pct"].is_null(),
-            "drawdown_pct must be null; got: {row}"
+            "CC-01: drawdown_pct must be null (no drawdown tracking wired); got: {row}"
         );
-        assert!(row["regime"].is_null(), "regime must be null; got: {row}");
+        assert!(
+            row["regime"].is_null(),
+            "CC-01: regime must be null (no regime detector wired); got: {row}"
+        );
+        assert!(
+            row["throttle_state"].is_null(),
+            "CC-01: throttle_state must be null (no throttle controller wired); got: {row}"
+        );
+        assert!(
+            row["last_decision_time"].is_null(),
+            "CC-01: last_decision_time must be null (no decision engine wired); got: {row}"
+        );
     }
 }
 

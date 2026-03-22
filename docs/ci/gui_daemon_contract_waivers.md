@@ -52,22 +52,36 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
   - `truth_state: "active"` + rows when the daemon can derive current reconcile diffs from the active execution snapshot plus broker snapshot and the result agrees with reconcile status
   - Tests: `gui_contract_reconcile_mismatches_no_snapshot_without_authoritative_detail` + `gui_contract_reconcile_mismatches_active_with_authoritative_diff_rows`
 
-### Strategy — "not_wired" truth closure
+### Strategy truth surfaces (CC-01 and CC-02)
 
-- `/api/v1/strategy/summary` — `StrategySummaryResponse` wrapper: `truth_state="not_wired"` + empty `rows`.
-  No real strategy-fleet registry exists. The former synthetic `daemon_integrity_gate` surrogate row
-  has been removed. GUI IIFE emits `ok:false` on `not_wired` → `"strategies"` in `mockSections` →
-  panel authority collapses to `"placeholder"` → `panelTruthRenderState` returns `"unimplemented"` →
-  StrategyScreen hard-blocks. Deferred until a real strategy source is wired.
-- `/api/v1/strategy/suppressions` — `StrategySuppressionsResponse` wrapper: `truth_state="not_wired"` + empty `rows`.
-  No durable suppression persistence exists. GUI IIFE emits `ok:false` on `not_wired` →
-  `"strategySuppressions"` in `mockSections` → section renders honest "not wired" notice, not empty table.
-- Contract gate: `gui_contract_not_wired_surfaces_declare_truth_state` proves wrapper shape +
-  `truth_state="not_wired"` + empty `rows` + absence of `daemon_integrity_gate` surrogate for these
-  surfaces in the no-DB test state. `strategy/suppressions` and `strategy/summary` are permanently
-  `not_wired` — no real source is wired for either. `config-diffs` returns `not_wired` in the no-DB
-  test state used by this gate; it can return `active` truth when a latest durable run exists in DB
-  (see System config surfaces section below).
+- `/api/v1/strategy/summary` — `StrategySummaryResponse` wrapper; truth state is conditional on
+  whether `MQK_STRATEGY_IDS` is configured; backend is `daemon.strategy_fleet`:
+  - `truth_state="not_wired"` + empty `rows` when no strategy fleet is configured
+    (`MQK_STRATEGY_IDS` not set). GUI IIFE emits `ok:false` on `not_wired` → `"strategies"` in
+    `mockSections` → panel authority collapses to `"placeholder"` → StrategyScreen hard-blocks.
+  - `truth_state="active"` + rows when fleet is configured; `rows` may be empty if
+    `MQK_STRATEGY_IDS` contains no entries (authoritative empty — fleet is configured but vacant).
+  - The former synthetic `daemon_integrity_gate` surrogate row has been removed.
+  - CC-01 closed: conditional truth path is wired; `not_wired` is not a permanent state.
+
+- `/api/v1/strategy/suppressions` — `StrategySuppressionsResponse` wrapper; truth state is
+  conditional on DB pool availability; backend is `postgres.sys_strategy_suppressions`
+  (migration 0027):
+  - `truth_state="no_db"` + empty `rows` when no DB pool is configured. The source IS wired
+    (postgres); the pool is just unavailable. GUI renders an honest "unavailable" notice.
+    `"not_wired"` is not returned by this route.
+  - `truth_state="active"` + rows when DB pool is present; `rows` may be empty (authoritative
+    zero suppressions) or populated with real durable suppression records.
+  - CC-02 closed: durable suppression persistence exists; this is not a permanently not_wired surface.
+
+- Contract gate: `gui_contract_not_wired_surfaces_declare_truth_state` proves, in the no-fleet
+  no-DB test state:
+  - `strategy/suppressions` → `truth_state="no_db"` + `backend="postgres.sys_strategy_suppressions"`;
+    confirms the source is wired but the DB pool is unavailable (not permanently not_wired).
+  - `strategy/summary` → `truth_state="not_wired"` (no `MQK_STRATEGY_IDS` in test state);
+    the active-fleet path is not exercised by this no-fleet test state.
+  - `config-diffs` → `truth_state="not_wired"` in no-DB/no-run state (see System config surfaces
+    section below for the full conditional truth path including the `active` path).
 
 ### System config surfaces — conditional truth
 
@@ -105,6 +119,45 @@ Gate implementation: `cargo test -p mqk-daemon --test scenario_gui_daemon_contra
   - `change-system-mode` is absent (would return 409 from dispatcher)
 
 Note: `/api/v1/ops/change-mode` is intentionally NOT mounted. Mode transitions require a controlled restart with configuration reload. The GUI disables mode-change buttons and surfaces a panel notice. The `change-system-mode` action key through `/api/v1/ops/action` returns 409 as a defense-in-depth rejection.
+
+### Alert and event feed surfaces (CC-06)
+
+- `/api/v1/alerts/active` — `ActiveAlertsResponse` canonical active-alert surface:
+  - `truth_state="active"` always — computed from live in-memory daemon state at
+    request time; no DB required.  Empty `rows` means the daemon has no current
+    fault conditions (genuinely healthy state, not absence of source).
+  - Source: `build_fault_signals(StatusSnapshot, ReconcileStatusSnapshot, risk_blocked)`.
+    Produces one row per active fault signal.  No ack lifecycle, no persistent
+    alert IDs.  `alert_id` equals `class` (stable slug, not a UUIDv4).
+  - `backend="daemon.runtime_state"` — in-memory computation, not DB-backed.
+    Risk-blocked component uses a DB query but falls back to `false` without DB
+    (matching the behaviour of `GET /api/v1/system/status`).
+  - Row fields proven: `alert_id`, `severity`, `class`, `summary`, `detail`,
+    `source`.  `alert_count` must equal `rows.len()`.
+  - Proof: `gui_contract_alerts_active_wrapper_semantics` (contract gate) +
+    `cc06_01_alerts_active_clean_state_empty_rows` +
+    `cc06_02_alerts_active_dirty_reconcile_emits_critical_alert` (scenario file).
+  - CC-06 closed for alerts/active.
+
+- `/api/v1/events/feed` — `EventsFeedResponse` canonical recent-event feed:
+  - `truth_state="active"` + `backend="postgres.runs+postgres.audit_events"` when
+    DB pool is present; rows contain at most 50 recent events (runtime transitions
+    from `runs` table + operator actions from `audit_events`, sorted newest-first).
+  - `truth_state="backend_unavailable"` + `backend="unavailable"` + empty `rows`
+    when no DB pool.  Empty rows in this state must NOT be treated as authoritative
+    empty history.
+  - Row fields: `event_id`, `ts_utc`, `kind` (`"runtime_transition"` |
+    `"operator_action"`), `detail`, `run_id` (optional), `provenance_ref`.
+  - Same durable source as `operator-timeline` but capped at 50 rows (feed semantics).
+  - No fake historical backfill.  No synthetic rows.
+  - Proof: `gui_contract_events_feed_no_db_backend_unavailable` (contract gate) +
+    `cc06_03_events_feed_no_db_is_backend_unavailable` +
+    `cc06_04_events_feed_canonical_route_identity` +
+    `cc06_05_events_feed_db_backed_positive_path_real_rows` (DB-backed, #[ignore];
+    seeds deterministic `runs` + `audit_events` rows and validates exact field
+    mapping for both `runtime_transition` CREATED and `operator_action` kinds,
+    plus newest-first ordering).
+  - CC-06 closed for events/feed.
 
 ### Metrics dashboard surface (CC-05)
 
@@ -148,13 +201,35 @@ Note: `/api/v1/ops/change-mode` is intentionally NOT mounted. Mode transitions r
 - `/v1/trading/orders` — snapshot_state, snapshot_captured_at_utc, orders; no stale has_snapshot
 - `/v1/trading/fills` — snapshot_state, snapshot_captured_at_utc, fills; no stale has_snapshot
 
+### Discord outbound notification signal (OPS-NOTIFY-01 / OPS-NOTIFY-01B)
+
+- `DiscordNotifier` — best-effort outbound signal rail; NOT source of truth:
+  - Configured via `DISCORD_WEBHOOK_URL` env var; no-op when absent (fail-closed).
+  - Only fires on accepted, applied control actions — never from read-only GET routes.
+  - Delivery failure is swallowed (logged as `warn!`); primary daemon action result unchanged.
+  - Payload fields: `action_key`, `disposition`, `environment`, `ts_utc`, `provenance_ref`, `run_id`.
+  - `provenance_ref` is exact and durable (OPS-NOTIFY-01B):
+    - Run paths (run.start / run.stop / run.halt): `"audit_events:<uuid>"` when a durable row was
+      written; `null` when no DB or no run anchor (honest).
+    - Arm/disarm (control.arm / control.disarm): `"audit_events:<uuid>"` from `/control/arm`
+      (which calls `write_control_operator_audit_event` and threads the exact UUID); `"sys_arm_state"`
+      label for `integrity_arm` / `integrity_disarm` / `ops/action` arm paths (those write
+      `sys_arm_state`, not `audit_events`).
+  - Proof (in-process, no real Discord): `scenario_notify_ops01.rs` — N01..N05:
+    - N01: configured notifier fires; payload has correct `action_key`, `disposition`, `ts_utc`,
+      `content`; `provenance_ref` is null for arm-execution (no DB, no audit_events row).
+    - N02: missing config → no delivery, action result unchanged.
+    - N03: delivery failure (bad URL) → primary result unchanged (200/applied).
+    - N04: GET `/api/v1/alerts/active` does NOT fire the notifier.
+    - N05 (`#[ignore]`, DB-backed): POST `/control/arm` with seeded run anchor → `provenance_ref`
+      is `"audit_events:<uuid>"` matching the `audit_event_id` in the response; UUID exists in DB.
+  - CI command: `cargo test -p mqk-daemon --test scenario_notify_ops01`
+
 ## Explicitly deferred from TEST-02 gate
 
 These endpoints are probed by the GUI but not yet authoritative daemon contract surfaces.
 Waivers are explicit so deferred coverage is visible, not silently ignored.
 
-- `/api/v1/alerts/active`
-- `/api/v1/events/feed`
 - `/api/v1/system/topology`
 - `/api/v1/execution/transport`
 - `/api/v1/incidents`

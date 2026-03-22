@@ -1760,3 +1760,108 @@ async fn gui_contract_operator_history_endpoints_fail_closed_when_durable_backen
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// CC-06: alerts/active and events/feed contract gate
+// ---------------------------------------------------------------------------
+
+/// CC-06: alerts/active wrapper semantics.
+///
+/// In a clean daemon state (no DB, no active faults):
+/// - 200 OK
+/// - truth_state = "active" (always — computed from live in-memory state)
+/// - canonical_route = "/api/v1/alerts/active"
+/// - backend = "daemon.runtime_state"
+/// - alert_count is a non-negative integer
+/// - rows is a JSON array
+/// - alert_count == rows.len()
+#[tokio::test]
+async fn gui_contract_alerts_active_wrapper_semantics() {
+    let router = make_router();
+
+    let req = Request::builder()
+        .uri("/api/v1/alerts/active")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+
+    assert_eq!(
+        json_str(&json, "truth_state"),
+        "active",
+        "alerts/active truth_state must always be 'active'"
+    );
+    assert_eq!(
+        json_str(&json, "canonical_route"),
+        "/api/v1/alerts/active",
+        "canonical_route must self-identify"
+    );
+    assert_eq!(
+        json_str(&json, "backend"),
+        "daemon.runtime_state",
+        "backend must be 'daemon.runtime_state'"
+    );
+    let alert_count = json
+        .get("alert_count")
+        .and_then(|v| v.as_u64())
+        .expect("alert_count must be a non-negative integer");
+    let rows = json
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .expect("rows must be a JSON array");
+    assert_eq!(
+        alert_count as usize,
+        rows.len(),
+        "alert_count must equal rows.len()"
+    );
+}
+
+/// CC-06: events/feed no-DB path declares backend_unavailable explicitly.
+///
+/// When no DB pool is configured:
+/// - 200 OK
+/// - truth_state = "backend_unavailable"
+/// - canonical_route = "/api/v1/events/feed"
+/// - backend = "unavailable"
+/// - rows = [] (empty, must not be treated as authoritative empty history)
+#[tokio::test]
+async fn gui_contract_events_feed_no_db_backend_unavailable() {
+    let router = make_router(); // no DB pool
+
+    let req = Request::builder()
+        .uri("/api/v1/events/feed")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    let json = parse_json(body);
+
+    assert_eq!(
+        json_str(&json, "truth_state"),
+        "backend_unavailable",
+        "events/feed truth_state must be 'backend_unavailable' when no DB pool"
+    );
+    assert_eq!(
+        json_str(&json, "canonical_route"),
+        "/api/v1/events/feed",
+        "canonical_route must self-identify"
+    );
+    assert_eq!(
+        json_str(&json, "backend"),
+        "unavailable",
+        "backend must be 'unavailable' when no DB pool"
+    );
+    let rows = json
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .expect("rows must be a JSON array");
+    assert!(
+        rows.is_empty(),
+        "rows must be empty when no DB pool is present"
+    );
+}

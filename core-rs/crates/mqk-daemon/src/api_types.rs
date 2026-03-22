@@ -416,20 +416,29 @@ pub struct ConfigDiffsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategySummaryRow {
+    /// Sourced: strategy identifier from the configured fleet (`MQK_STRATEGY_IDS`).
     pub strategy_id: String,
+    /// Sourced: all fleet-configured strategies are treated as enabled.
+    /// Presence in the fleet implies enabled; per-strategy disable is not yet wired.
     pub enabled: bool,
+    /// Sourced: reflects the current daemon integrity arm state at response time.
     pub armed: bool,
-    pub health: String,
-    pub universe: String,
-    pub pending_intents: usize,
-    pub open_positions: usize,
+    /// `null` — no strategy health monitor is wired; honest null, not synthetic "ok".
+    pub health_status: Option<String>,
+    /// `null` — universe membership is not tracked by the daemon; honest null.
+    pub universe_size: Option<usize>,
+    /// `null` — intent pipeline metrics are not sourced from daemon state; honest null.
+    pub pending_intents: Option<usize>,
+    /// `null` — open position counts are not sourced from daemon state; honest null.
+    pub open_positions: Option<usize>,
     /// `null` — no portfolio accounting is wired; honest null, not synthetic zero.
     pub today_pnl: Option<f64>,
     /// `null` — no drawdown tracking is wired; honest null, not synthetic zero.
     pub drawdown_pct: Option<f64>,
     /// `null` — no regime detector is wired; honest null, not synthetic string.
     pub regime: Option<String>,
-    pub throttle_state: String,
+    /// `null` — no throttle controller is wired; honest null, not synthetic "normal".
+    pub throttle_state: Option<String>,
     pub last_decision_time: Option<String>,
 }
 
@@ -1041,4 +1050,164 @@ pub struct OmsOverviewResponse {
     /// Sum of mismatched_positions + mismatched_orders + mismatched_fills +
     /// unmatched_broker_events.
     pub reconcile_total_mismatches: usize,
+}
+
+// ---------------------------------------------------------------------------
+// /api/v1/alerts/active (CC-06)
+// ---------------------------------------------------------------------------
+
+/// One active alert row sourced from current daemon fault signals.
+///
+/// An active alert is a current fault signal computed from live daemon state.
+/// There is no persistent alert table, no alert lifecycle, and no ack state:
+/// alerts exist while their underlying condition is present and disappear when
+/// the condition is resolved.  `alert_id` is the fault signal class (a stable
+/// slug), not a UUIDv4 — there is no durable alert registry.
+///
+/// Source: `build_fault_signals(StatusSnapshot, ReconcileStatusSnapshot, risk_blocked)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveAlertRow {
+    /// Stable slug derived from the fault signal class.
+    /// Identical to `class` — no persistent lifecycle ID exists.
+    pub alert_id: String,
+    /// `"warning"` | `"critical"`
+    pub severity: String,
+    /// Structured fault class (e.g., `"runtime.halt.operator_or_safety"`).
+    pub class: String,
+    /// Human-readable description of the current condition.
+    pub summary: String,
+    /// Optional detail string when the fault signal carries extra context.
+    pub detail: Option<String>,
+    /// Where this alert was computed from.
+    /// Always `"daemon.runtime_state"` — in-memory computation, not DB-backed.
+    pub source: String,
+}
+
+/// Response wrapper for `GET /api/v1/alerts/active`.
+///
+/// `truth_state`:
+/// - `"active"` — always returned; the source is current in-memory daemon
+///   state and is always available.  `rows` may be empty (no current alerts)
+///   or populated with real fault-signal-backed alert rows.
+///   Empty `rows` means the daemon has no current active fault conditions.
+///   This is an authoritative "healthy" state, not an absence of source.
+///
+/// No ack/triage lifecycle exists.  Alerts do not persist beyond the lifetime
+/// of their underlying condition.  Do not rely on `alert_id` across restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveAlertsResponse {
+    /// Self-identifying canonical route.
+    pub canonical_route: String,
+    /// Always `"active"` — computed from live in-memory state at request time.
+    pub truth_state: String,
+    /// `"daemon.runtime_state"` — not DB-backed; computed from StatusSnapshot
+    /// and ReconcileStatusSnapshot at request time.
+    pub backend: String,
+    /// Count of currently active alerts.  Equals `rows.len()`.
+    pub alert_count: usize,
+    /// Active alert rows.  Empty means no current fault conditions.
+    pub rows: Vec<ActiveAlertRow>,
+}
+
+// ---------------------------------------------------------------------------
+// /api/v1/events/feed (CC-06)
+// ---------------------------------------------------------------------------
+
+/// One recent event row from the operator/runtime event feed.
+///
+/// Events are sourced from two durable DB tables:
+/// - `runs` — runtime lifecycle transitions (CREATED, ARMED, RUNNING,
+///   STOPPED, HALTED).
+/// - `audit_events` (topic=`'operator'`) — operator action events written
+///   by `write_operator_audit_event` / `write_control_operator_audit_event`.
+///
+/// `event_id` equals `provenance_ref` and encodes the exact DB source row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventFeedRow {
+    /// Provenance reference for this event.
+    /// Format: `"runs:{run_id}:{column}"` for runtime transitions,
+    /// `"audit_events:{event_id}"` for operator actions.
+    pub event_id: String,
+    /// RFC 3339 timestamp.
+    pub ts_utc: String,
+    /// `"runtime_transition"` | `"operator_action"`
+    pub kind: String,
+    /// Detail string (e.g., `"HALTED"`, `"control.arm"`).
+    pub detail: String,
+    /// Run ID associated with this event, if any.
+    pub run_id: Option<String>,
+    /// Stable provenance reference (equals `event_id`).
+    pub provenance_ref: String,
+}
+
+/// Response wrapper for `GET /api/v1/events/feed`.
+///
+/// `truth_state`:
+/// - `"active"` — DB pool is present; `rows` contains the most recent events
+///   from `runs` and `audit_events`; authoritative.  Empty `rows` means no
+///   durable events exist yet (daemon has not run or no operator actions taken).
+/// - `"backend_unavailable"` — no DB pool configured; `rows` is always empty
+///   and **must not** be treated as authoritative empty history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventsFeedResponse {
+    /// Self-identifying canonical route.
+    pub canonical_route: String,
+    /// `"active"` = DB present, rows are authoritative recent events.
+    /// `"backend_unavailable"` = no DB pool, rows empty, not authoritative.
+    pub truth_state: String,
+    /// `"postgres.runs+postgres.audit_events"` when active;
+    /// `"unavailable"` when no DB pool.
+    pub backend: String,
+    /// Recent events sorted newest-first.  At most 50 rows.
+    pub rows: Vec<EventFeedRow>,
+}
+
+// ---------------------------------------------------------------------------
+// TV-EXEC-01: Fill-quality telemetry response types
+// ---------------------------------------------------------------------------
+
+/// One row in the fill-quality telemetry response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FillQualityTelemetryRow {
+    pub telemetry_id: Uuid,
+    pub run_id: Uuid,
+    pub internal_order_id: String,
+    pub broker_order_id: Option<String>,
+    pub broker_fill_id: Option<String>,
+    pub broker_message_id: String,
+    pub symbol: String,
+    /// `"buy"` or `"sell"`
+    pub side: String,
+    pub ordered_qty: i64,
+    pub fill_qty: i64,
+    pub fill_price_micros: i64,
+    /// `None` for market orders.
+    pub reference_price_micros: Option<i64>,
+    /// `None` when reference_price_micros is absent.
+    pub slippage_bps: Option<i64>,
+    pub submit_ts_utc: Option<String>,
+    pub fill_received_at_utc: String,
+    pub submit_to_fill_ms: Option<i64>,
+    /// `"partial_fill"` or `"final_fill"`
+    pub fill_kind: String,
+    pub provenance_ref: String,
+    pub created_at_utc: String,
+}
+
+/// Response wrapper for `GET /api/v1/execution/fill-quality`.
+///
+/// `truth_state`:
+/// - `"active"` — DB pool and active run present; `rows` is authoritative.
+///   Empty `rows` means no fills have been recorded for this run.
+/// - `"no_active_run"` — daemon has a DB but no active run; `rows` is empty.
+/// - `"no_db"` — no DB pool configured; `rows` is empty and not authoritative.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FillQualityTelemetryResponse {
+    pub canonical_route: String,
+    /// See truth_state variants above.
+    pub truth_state: String,
+    /// `"postgres.fill_quality_telemetry"` when active; `"unavailable"` otherwise.
+    pub backend: String,
+    /// Most recent fills for the active run, newest-fill first. At most 100 rows.
+    pub rows: Vec<FillQualityTelemetryRow>,
 }
