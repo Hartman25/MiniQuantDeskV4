@@ -91,10 +91,11 @@ async fn run_start_returns_403_before_arm_in_explicit_dev_no_token_mode() {
 
 #[tokio::test]
 async fn run_start_requires_db_after_explicit_arm_in_explicit_dev_no_token_mode() {
-    // PT-TRUTH-01: default config is paper+paper (fail-closed). Use paper+alpaca so
-    // the deployment readiness gate passes and the DB gate is what blocks start.
+    // BRK-00R-04: paper+alpaca is now blocked by the WS continuity gate before
+    // reaching the DB gate.  Use live-shadow+alpaca (no WS continuity gate for
+    // live-shadow) so the DB gate is the first blocker after arm.
     let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
-        state::DeploymentMode::Paper,
+        state::DeploymentMode::LiveShadow,
         state::BrokerKind::Alpaca,
     ));
 

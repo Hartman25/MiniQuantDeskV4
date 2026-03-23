@@ -290,10 +290,11 @@ async fn lo02_sr04_mode_change_guidance_is_non_empty_and_actionable() {
 
 #[tokio::test]
 async fn lo02_sr05_start_without_db_returns_explicit_error() {
-    // PT-TRUTH-01: default paper+paper is fail-closed; use paper+alpaca so the
-    // DB gate (not deployment readiness) is what blocks after arm.
+    // BRK-00R-04: paper+alpaca is now blocked by the WS continuity gate before
+    // the DB gate.  Use live-shadow+alpaca (no WS continuity gate) to prove the
+    // DB-backed runtime requirement survives after arm.
     let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
-        state::DeploymentMode::Paper,
+        state::DeploymentMode::LiveShadow,
         state::BrokerKind::Alpaca,
     ));
 

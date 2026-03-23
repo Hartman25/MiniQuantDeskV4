@@ -147,10 +147,11 @@ async fn status_shows_not_armed_after_halt() {
 
 #[tokio::test]
 async fn run_start_requires_db_after_halt_then_arm() {
-    // PT-TRUTH-01: default paper+paper is fail-closed; use paper+alpaca so the
-    // DB gate (not deployment readiness) is what blocks after arm.
+    // BRK-00R-04: paper+alpaca is now blocked by the WS continuity gate before
+    // reaching the DB gate.  Use live-shadow+alpaca so the DB gate is what blocks
+    // after the halt-then-rearm sequence.
     let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
-        state::DeploymentMode::Paper,
+        state::DeploymentMode::LiveShadow,
         state::BrokerKind::Alpaca,
     ));
 

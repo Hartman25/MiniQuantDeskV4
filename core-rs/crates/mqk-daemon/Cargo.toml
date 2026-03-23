@@ -20,7 +20,7 @@ chrono.workspace = true
 dotenvy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["signal"] }
+tokio = { workspace = true, features = ["signal", "time"] }
 uuid.workspace = true
 
 axum.workspace = true
@@ -48,6 +48,8 @@ mqk-broker-alpaca = { path = "../mqk-broker-alpaca" }
 mqk-broker-paper = { path = "../mqk-broker-paper" }
 mqk-portfolio = { path = "../mqk-portfolio" }
 reqwest.workspace = true
+# BRK-00R-05: Alpaca paper WebSocket transport.
+tokio-tungstenite.workspace = true
 
 [dev-dependencies]
 # Required for in-process Axum router testing via tower::ServiceExt::oneshot()
