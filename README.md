@@ -1,7 +1,7 @@
 # MiniQuantDeskV4
 
 <p align="center">
-  <img src="assets\logo\Veritas Ledger.png" alt="MiniQuantDesk" width="520">
+  <img src="assets\logo\Veritas Ledger.png" alt="Veritas Ledger" width="520">
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 
 ## **Overview**
 
-MiniQuantDeskV4 is a structured quantitative trading system built around one principle:
+Veritas Ledger is a structured quantitative trading system built around one principle:
 
 > **Capital protection is a systems problem.**
 
