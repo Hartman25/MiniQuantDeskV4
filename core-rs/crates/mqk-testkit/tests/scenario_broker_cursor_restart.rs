@@ -24,10 +24,12 @@
 //!
 //! | Test | Invariants | DB? |
 //! |------|------------|-----|
-//! | `a1_paper_broker_cursor_filters_events` | A1 | No  |
-//! | `a2_orchestrator_advances_db_cursor`     | A2 | Yes |
-//! | `a3_orchestrator_resumes_from_cursor`    | A3 | Yes |
-//! | `a4_orchestrator_persists_fetch_error_cursor` | A4 | Yes |
+//! | `a1_paper_broker_cursor_filters_events`              | A1 | No  |
+//! | `a2_orchestrator_advances_db_cursor`                 | A2 | Yes |
+//! | `a3_orchestrator_resumes_from_cursor`                | A3 | Yes |
+//! | `a4_orchestrator_persists_fetch_error_cursor`        | A4 | Yes |
+//! | `a5_orchestrator_names_cold_start_continuity_failure` | A5 (BRK-00R-03) | Yes |
+//! | `a6_orchestrator_names_gap_continuity_failure`        | A6 (BRK-00R-03) | Yes |
 //!
 //! DB tests skip gracefully when `MQK_DATABASE_URL` is absent.
 //! If `MQK_DATABASE_URL` is set but unreachable, the proof lane must fail.
@@ -511,7 +513,10 @@ async fn a4_orchestrator_persists_fetch_error_cursor_state() -> Result<()> {
         Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
     );
     let err = orch.tick().await.expect_err("tick must fail closed");
-    assert!(err.to_string().contains("InboundContinuityUnproven"));
+    assert!(
+        err.to_string().contains("WS_CONTINUITY_UNPROVEN"),
+        "A4: expected WS_CONTINUITY_UNPROVEN in error; got: {err}"
+    );
     let stored = mqk_db::load_broker_cursor(&pool, A4_ADAPTER_ID).await?;
     assert_eq!(stored.as_deref(), Some(persisted_cursor.as_str()));
     {
@@ -521,5 +526,146 @@ async fn a4_orchestrator_persists_fetch_error_cursor_state() -> Result<()> {
     }
     cleanup_run(&pool, run_id).await?;
     cleanup_cursor(&pool, A4_ADAPTER_ID).await?;
+    cleanup_lease(&pool).await?;
+    Ok(())
+}
+// ---------------------------------------------------------------------------
+// A5/A6 - BRK-00R-03: orchestrator names runtime-owned continuity failure
+// ---------------------------------------------------------------------------
+/// Fixed run UUID for the A5 cold-start continuity naming test.
+const A5_RUN_ID: &str = "a5000005-0000-0000-0000-000000000000";
+const A5_ADAPTER_ID: &str = "a5-brk00r03-cold-start-proof";
+/// Fixed run UUID for the A6 gap continuity naming test.
+const A6_RUN_ID: &str = "a6000006-0000-0000-0000-000000000000";
+const A6_ADAPTER_ID: &str = "a6-brk00r03-gap-proof";
+/// A5 (BRK-00R-03): orchestrator names cold-start continuity failure via runtime-owned gate.
+///
+/// Proves the production path: when `InboundContinuityUnproven` is received with an
+/// Alpaca cold-start cursor, the orchestrator error is named `WS_CONTINUITY_UNPROVEN`
+/// and explicitly names `ColdStartUnproven`.  The runtime-owned seam
+/// (`check_alpaca_ws_continuity_from_opaque_cursor`) is what derives the state, not
+/// just the adapter error string.
+#[tokio::test]
+async fn a5_orchestrator_names_cold_start_continuity_failure() -> Result<()> {
+    let Some(url) = db_url_or_skip() else {
+        return Ok(());
+    };
+    let Some(pool) = try_pool_or_skip(&url).await? else {
+        return Ok(());
+    };
+    mqk_db::migrate(&pool).await?;
+    let run_id: Uuid = A5_RUN_ID.parse().expect("A5_RUN_ID must be a valid UUID");
+    cleanup_run(&pool, run_id).await?;
+    cleanup_cursor(&pool, A5_ADAPTER_ID).await?;
+    cleanup_lease(&pool).await?;
+    seed_running_run(&pool, run_id).await?;
+    // Alpaca cold-start cursor JSON (schema_version=1, trade_updates.status=cold_start_unproven).
+    let cold_cursor =
+        r#"{"schema_version":1,"trade_updates":{"status":"cold_start_unproven"}}"#.to_string();
+    let broker = FetchErrorCursorBroker {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        error: BrokerError::InboundContinuityUnproven {
+            detail: "cold start: ws continuity unproven".to_string(),
+            persist_cursor: Some(cold_cursor.clone()),
+        },
+    };
+    let gateway = BrokerGateway::for_test(broker, BoolGate(true), BoolGate(true), BoolGate(true));
+    let mut orch = ExecutionOrchestrator::new(
+        pool.clone(),
+        gateway,
+        BrokerOrderMap::new(),
+        BTreeMap::new(),
+        PortfolioState::new(1_000_000_000_i64),
+        run_id,
+        "a5-dispatcher",
+        A5_ADAPTER_ID,
+        None,
+        FixedClock::new(Utc::now()),
+        Box::new(mqk_reconcile::LocalSnapshot::empty),
+        Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
+    );
+    let err = orch
+        .tick()
+        .await
+        .expect_err("A5: tick must fail closed on cold-start continuity");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("WS_CONTINUITY_UNPROVEN"),
+        "A5: orchestrator must emit WS_CONTINUITY_UNPROVEN; got: {err_str}"
+    );
+    assert!(
+        err_str.contains("ColdStartUnproven"),
+        "A5: orchestrator must name ColdStartUnproven via runtime-owned gate; got: {err_str}"
+    );
+    // Cursor was persisted by the orchestrator from the adapter error.
+    let stored = mqk_db::load_broker_cursor(&pool, A5_ADAPTER_ID).await?;
+    assert_eq!(stored.as_deref(), Some(cold_cursor.as_str()));
+    cleanup_run(&pool, run_id).await?;
+    cleanup_cursor(&pool, A5_ADAPTER_ID).await?;
+    cleanup_lease(&pool).await?;
+    Ok(())
+}
+/// A6 (BRK-00R-03): orchestrator names gap continuity failure via runtime-owned gate.
+///
+/// Proves the production path: when `InboundContinuityUnproven` is received with an
+/// Alpaca gap-detected cursor, the orchestrator error is named `WS_CONTINUITY_UNPROVEN`
+/// and explicitly names `GapDetected`.
+#[tokio::test]
+async fn a6_orchestrator_names_gap_continuity_failure() -> Result<()> {
+    let Some(url) = db_url_or_skip() else {
+        return Ok(());
+    };
+    let Some(pool) = try_pool_or_skip(&url).await? else {
+        return Ok(());
+    };
+    mqk_db::migrate(&pool).await?;
+    let run_id: Uuid = A6_RUN_ID.parse().expect("A6_RUN_ID must be a valid UUID");
+    cleanup_run(&pool, run_id).await?;
+    cleanup_cursor(&pool, A6_ADAPTER_ID).await?;
+    cleanup_lease(&pool).await?;
+    seed_running_run(&pool, run_id).await?;
+    // Alpaca gap-detected cursor JSON.
+    let gap_cursor = r#"{"schema_version":1,"trade_updates":{"status":"gap_detected","last_message_id":"alpaca:order-1:new:2024-06-15T09:30:00Z","last_event_at":"2024-06-15T09:30:00.000000Z","detail":"ws disconnect a6"}}"#.to_string();
+    let broker = FetchErrorCursorBroker {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        error: BrokerError::InboundContinuityUnproven {
+            detail: "gap detected: ws continuity unproven".to_string(),
+            persist_cursor: Some(gap_cursor.clone()),
+        },
+    };
+    let gateway = BrokerGateway::for_test(broker, BoolGate(true), BoolGate(true), BoolGate(true));
+    let mut orch = ExecutionOrchestrator::new(
+        pool.clone(),
+        gateway,
+        BrokerOrderMap::new(),
+        BTreeMap::new(),
+        PortfolioState::new(1_000_000_000_i64),
+        run_id,
+        "a6-dispatcher",
+        A6_ADAPTER_ID,
+        None,
+        FixedClock::new(Utc::now()),
+        Box::new(mqk_reconcile::LocalSnapshot::empty),
+        Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
+    );
+    let err = orch
+        .tick()
+        .await
+        .expect_err("A6: tick must fail closed on gap continuity");
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("WS_CONTINUITY_UNPROVEN"),
+        "A6: orchestrator must emit WS_CONTINUITY_UNPROVEN; got: {err_str}"
+    );
+    assert!(
+        err_str.contains("GapDetected"),
+        "A6: orchestrator must name GapDetected via runtime-owned gate; got: {err_str}"
+    );
+    // Cursor was persisted by the orchestrator from the adapter error.
+    let stored = mqk_db::load_broker_cursor(&pool, A6_ADAPTER_ID).await?;
+    assert_eq!(stored.as_deref(), Some(gap_cursor.as_str()));
+    cleanup_run(&pool, run_id).await?;
+    cleanup_cursor(&pool, A6_ADAPTER_ID).await?;
+    cleanup_lease(&pool).await?;
     Ok(())
 }

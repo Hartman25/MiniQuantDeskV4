@@ -45,7 +45,7 @@
 //! seen — the system does not stall on replay.
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
-use mqk_broker_alpaca::types::AlpacaFetchCursor;
+use mqk_broker_alpaca::types::{AlpacaFetchCursor, AlpacaTradeUpdatesResume};
 use mqk_broker_alpaca::{
     build_inbound_batch_from_ws_update, mark_gap_detected, parse_ws_message, AlpacaWsMessage,
 };
@@ -73,6 +73,112 @@ pub enum WsIngestOutcome {
     /// authorization, listening, error, or unknown-type frame).  The cursor
     /// is unchanged and `advance_broker_cursor` was NOT called.
     NoActionableEvents,
+}
+// ---------------------------------------------------------------------------
+// WsLifecycleContinuity — runtime-owned continuity state seam (BRK-00R-01)
+// ---------------------------------------------------------------------------
+/// Runtime-owned representation of the Alpaca websocket inbound lifecycle continuity state.
+///
+/// This is the production-facing seam that runtime uses to determine whether the
+/// WS inbound lane is in a state where event processing is safe to proceed.
+///
+/// Derived from the persisted `AlpacaFetchCursor` via [`ws_continuity_from_cursor`].
+///
+/// # Fail-closed contract
+///
+/// Only [`WsLifecycleContinuity::Live`] is considered ready for event processing.
+/// [`ColdStartUnproven`] and [`GapDetected`] must not be treated as ready by runtime.
+/// Runtime code MUST call [`WsLifecycleContinuity::is_ready`] before proceeding with
+/// any WS-lane-dependent event processing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WsLifecycleContinuity {
+    /// The WS lane has proven continuity. Runtime may proceed with event processing.
+    Live {
+        last_message_id: String,
+        last_event_at: String,
+    },
+    /// The WS lane has not yet received its first trade-update event.
+    ///
+    /// This state arises on cold start when no WS event has been processed since
+    /// the cursor was initialized. Runtime MUST NOT treat this as ready.
+    ColdStartUnproven,
+    /// A continuity gap was detected (e.g., WS disconnect without full replay).
+    ///
+    /// Runtime MUST NOT treat this as ready. The gap must be resolved (by receiving
+    /// new WS events via `process_ws_inbound_batch`) before event processing resumes.
+    ///
+    /// `last_message_id` and `last_event_at` carry the last-known WS position before
+    /// the gap, when available.  Both are `None` when the gap arose from a cold-start
+    /// reconnect (no prior position was ever established).
+    GapDetected {
+        last_message_id: Option<String>,
+        last_event_at: Option<String>,
+        detail: String,
+    },
+}
+impl WsLifecycleContinuity {
+    /// Returns `true` only when the WS lane has proven continuity.
+    ///
+    /// Returns `false` for `ColdStartUnproven` and `GapDetected`.
+    /// Runtime MUST refuse to proceed with WS-lane-dependent event processing
+    /// when this returns `false`.
+    pub fn is_ready(&self) -> bool {
+        matches!(self, WsLifecycleContinuity::Live { .. })
+    }
+}
+/// Derive the runtime-owned [`WsLifecycleContinuity`] from a persisted Alpaca cursor.
+///
+/// This is the production-facing derivation function. Runtime calls this with the loaded
+/// `AlpacaFetchCursor` to determine whether the WS inbound lane is in a state where
+/// event processing is safe to proceed.
+///
+/// # Fail-closed mapping
+///
+/// | Cursor state                                  | Returns                                    |
+/// |-----------------------------------------------|--------------------------------------------|
+/// | `AlpacaTradeUpdatesResume::ColdStartUnproven` | `WsLifecycleContinuity::ColdStartUnproven` |
+/// | `AlpacaTradeUpdatesResume::GapDetected { .. }` | `WsLifecycleContinuity::GapDetected`      |
+/// | `AlpacaTradeUpdatesResume::Live { .. }`       | `WsLifecycleContinuity::Live`              |
+pub fn ws_continuity_from_cursor(cursor: &AlpacaFetchCursor) -> WsLifecycleContinuity {
+    match &cursor.trade_updates {
+        AlpacaTradeUpdatesResume::ColdStartUnproven => WsLifecycleContinuity::ColdStartUnproven,
+        AlpacaTradeUpdatesResume::GapDetected {
+            last_message_id,
+            last_event_at,
+            detail,
+        } => WsLifecycleContinuity::GapDetected {
+            last_message_id: last_message_id.clone(),
+            last_event_at: last_event_at.clone(),
+            detail: detail.clone(),
+        },
+        AlpacaTradeUpdatesResume::Live {
+            last_message_id,
+            last_event_at,
+        } => WsLifecycleContinuity::Live {
+            last_message_id: last_message_id.clone(),
+            last_event_at: last_event_at.clone(),
+        },
+    }
+}
+/// Attempt to derive [`WsLifecycleContinuity`] from an opaque broker cursor string.
+///
+/// Returns `Some(continuity)` if the string parses as an Alpaca `AlpacaFetchCursor` JSON.
+/// Returns `None` if the cursor is absent or does not parse as an Alpaca cursor
+/// (non-Alpaca adapters such as the paper broker use `None` or non-Alpaca-format
+/// cursor strings; those adapters must not be gated by this check).
+///
+/// # Production use (BRK-00R-03)
+///
+/// Called by `orchestrator::tick()` Phase 2 when the adapter returns
+/// `BrokerError::InboundContinuityUnproven`.  Allows the orchestrator to derive
+/// and name the runtime-owned continuity state independently of adapter internals,
+/// making runtime's continuity ownership explicit at the tick boundary.
+pub fn check_alpaca_ws_continuity_from_opaque_cursor(
+    cursor_json: Option<&str>,
+) -> Option<WsLifecycleContinuity> {
+    let json = cursor_json?;
+    let cursor: AlpacaFetchCursor = serde_json::from_str(json).ok()?;
+    Some(ws_continuity_from_cursor(&cursor))
 }
 // ---------------------------------------------------------------------------
 // process_ws_inbound_batch — BRK-01R / BRK-02R authoritative ingest path

@@ -364,6 +364,24 @@ where
                         .await?;
                     self.broker_cursor = Some(cursor);
                 }
+                // BRK-00R-03: when the adapter signals a continuity failure, derive
+                // the runtime-owned continuity state from the (now-updated) cursor
+                // and name the failure explicitly.  This is the orchestrator's own
+                // ownership of the continuity decision, independent of adapter
+                // internals.  For non-Alpaca adapters `check_alpaca_ws_continuity...`
+                // returns `None`, which is included in the error for transparency.
+                if matches!(err, BrokerError::InboundContinuityUnproven { .. }) {
+                    let continuity =
+                        crate::alpaca_inbound::check_alpaca_ws_continuity_from_opaque_cursor(
+                            self.broker_cursor.as_deref(),
+                        );
+                    return Err(anyhow!(
+                        "WS_CONTINUITY_UNPROVEN: tick refused by runtime-owned gate; \
+                         continuity={:?}; adapter_detail={}",
+                        continuity,
+                        err
+                    ));
+                }
                 return Err(anyhow!("fetch_events failed: {}", err));
             }
         };
