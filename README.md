@@ -1,5 +1,3 @@
-# MiniQuantDeskV4
-
 <p align="center">
   <img src="assets\logo\Veritas Ledger.png" alt="Veritas Ledger" width="520">
 </p>
