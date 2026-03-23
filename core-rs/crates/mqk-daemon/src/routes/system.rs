@@ -160,18 +160,17 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         _ => Some(true),
     };
 
-    let market_data_config_present: Option<bool> = None;
+    // PT-MD-01: strategy market-data is explicitly not configured in this build.
+    // StrategyMarketDataSource::NotConfigured is the only defined variant; derive
+    // the value from the actual policy rather than returning null, which would
+    // imply "not checked" when the honest answer is "checked and absent."
+    let market_data_config_present: Option<bool> =
+        Some(st.strategy_market_data_source().as_health_str() != "not_configured");
     let audit_writer_ready: Option<bool> = db_reachable;
 
     let mut warnings = Vec::new();
     if status.notes.is_some() {
         warnings.push("Daemon status contains notes; verify runtime state.".to_string());
-    }
-    if market_data_config_present.is_none() {
-        warnings.push(
-            "Market data config readiness is not probed at preflight; verify separately."
-                .to_string(),
-        );
     }
 
     let mut blockers = Vec::new();

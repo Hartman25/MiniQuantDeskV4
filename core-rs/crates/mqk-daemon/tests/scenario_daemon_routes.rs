@@ -184,10 +184,11 @@ async fn runtime_leadership_route_reports_null_generation_without_authoritative_
 
 #[tokio::test]
 async fn run_start_requires_db_backed_runtime_after_arm() {
-    // PT-TRUTH-01: default paper+paper is fail-closed; use paper+alpaca so
-    // the DB gate (not deployment readiness) is what blocks after arm.
+    // BRK-00R-04: paper+alpaca is now blocked by the WS continuity gate before the
+    // DB gate.  Use live-shadow+alpaca (no WS continuity gate) so the DB gate is
+    // the first blocker after arm.
     let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
-        state::DeploymentMode::Paper,
+        state::DeploymentMode::LiveShadow,
         state::BrokerKind::Alpaca,
     ));
 
@@ -469,10 +470,11 @@ async fn run_start_refused_403_when_integrity_disarmed() {
 
 #[tokio::test]
 async fn run_start_requires_db_after_rearm() {
-    // PT-TRUTH-01: default paper+paper is fail-closed; use paper+alpaca so
-    // the DB gate (not deployment readiness) is what blocks after rearm.
+    // BRK-00R-04: paper+alpaca is now blocked by the WS continuity gate before the
+    // DB gate.  Use live-shadow+alpaca (no WS continuity gate) so the DB gate is
+    // the first blocker after the disarm→rearm sequence.
     let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
-        state::DeploymentMode::Paper,
+        state::DeploymentMode::LiveShadow,
         state::BrokerKind::Alpaca,
     ));
 
@@ -739,7 +741,9 @@ async fn api_system_preflight_is_fail_closed_for_unproven_dependencies() {
     // Paper adapter reports broker_config_present=false (not null): the adapter is present
     // but is explicitly not the live broker. Null would mean "not checked".
     assert_eq!(json["broker_config_present"], false);
-    assert!(json["market_data_config_present"].is_null());
+    // PT-MD-01: market_data_config_present must be false (not null).
+    // StrategyMarketDataSource::NotConfigured → explicitly absent, not "unchecked".
+    assert_eq!(json["market_data_config_present"], false);
     assert!(json["audit_writer_ready"].is_null());
     assert_eq!(json["runtime_idle"], true);
     assert_eq!(json["execution_disarmed"], true);

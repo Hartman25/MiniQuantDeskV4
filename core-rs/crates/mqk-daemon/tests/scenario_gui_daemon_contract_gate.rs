@@ -302,11 +302,10 @@ async fn gui_system_status_and_preflight_surfaces_are_semantically_truthful() {
     assert_eq!(preflight["db_reachable"], serde_json::Value::Null);
     // Paper adapter → broker_config_present is Some(false) → JSON false, not null.
     assert_eq!(preflight["broker_config_present"], false);
-    // Market data config is genuinely unknown at this level → must stay null.
-    assert_eq!(
-        preflight["market_data_config_present"],
-        serde_json::Value::Null
-    );
+    // PT-MD-01: market_data_config_present must be false (not null).
+    // StrategyMarketDataSource has only NotConfigured; the value is known and
+    // explicitly absent, not "unchecked."  Null would imply "not probed."
+    assert_eq!(preflight["market_data_config_present"], false);
     // Audit writer proxies DB; no DB pool → null.
     assert_eq!(preflight["audit_writer_ready"], serde_json::Value::Null);
 
