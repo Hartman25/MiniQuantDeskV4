@@ -171,7 +171,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/execution/summary", get(execution_summary))
         .route("/api/v1/execution/orders", get(execution_orders))
-        .route("/api/v1/execution/fill-quality", get(execution_fill_quality))
+        .route(
+            "/api/v1/execution/fill-quality",
+            get(execution_fill_quality),
+        )
         .route("/api/v1/portfolio/summary", get(portfolio_summary))
         .route("/api/v1/portfolio/positions", get(portfolio_positions))
         .route("/api/v1/portfolio/orders/open", get(portfolio_open_orders))

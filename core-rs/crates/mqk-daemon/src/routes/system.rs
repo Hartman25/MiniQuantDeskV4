@@ -1,0 +1,580 @@
+//! System-level route handlers.
+//!
+//! Contains: health, status_handler, system_status, system_preflight,
+//! system_metadata, system_runtime_leadership, system_session,
+//! system_config_fingerprint, system_config_diffs, authoritative_config_diff_rows.
+
+use std::sync::Arc;
+
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
+use chrono::Utc;
+use sqlx::Row;
+
+use crate::api_types::{
+    ConfigDiffRow, ConfigDiffsResponse, ConfigFingerprintResponse, HealthResponse,
+    PreflightStatusResponse, RuntimeErrorResponse, RuntimeLeadershipCheckpointRow,
+    RuntimeLeadershipResponse, SessionStateResponse, SystemMetadataResponse, SystemStatusResponse,
+};
+use crate::state::AppState;
+
+use super::helpers::{
+    build_fault_signals, environment_and_live_routing_truth, runtime_error_response,
+    runtime_status_from_state,
+};
+
+const DAEMON_ENGINE_ID: &str = "mqk-daemon";
+
+// ---------------------------------------------------------------------------
+// GET /v1/health
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn health(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(HealthResponse {
+            ok: true,
+            service: st.build.service,
+            version: st.build.version,
+        }),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// GET /v1/status
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn status_handler(State(st): State<Arc<AppState>>) -> Response {
+    match st.current_status_snapshot().await {
+        Ok(snapshot) => (StatusCode::OK, Json(snapshot)).into_response(),
+        Err(err) => runtime_error_response(err),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/status
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+    let reconcile = st.current_reconcile_snapshot().await;
+    let snapshot_present = st.broker_snapshot.read().await.is_some();
+    let integrity_armed = status.integrity_armed;
+
+    let (risk_blocked, db_status) = if let Some(db) = st.db.as_ref() {
+        let risk_result = mqk_db::load_risk_block_state(db).await;
+        let db_ok = risk_result.is_ok();
+        let risk_blocked = risk_result.ok().flatten().is_some_and(|risk| risk.blocked);
+        let db_status = if db_ok { "ok" } else { "warning" }.to_string();
+        (risk_blocked, db_status)
+    } else {
+        (false, "unavailable".to_string())
+    };
+
+    let audit_writer_status = db_status.clone();
+
+    let runtime_status = runtime_status_from_state(&status.state).to_string();
+    let (environment, live_routing_enabled) =
+        environment_and_live_routing_truth(&st, &status).await;
+    let broker_status = if snapshot_present { "ok" } else { "warning" }.to_string();
+    let integrity_status = if integrity_armed { "ok" } else { "warning" }.to_string();
+    let reconcile_status = reconcile.status.clone();
+    let has_critical = matches!(reconcile_status.as_str(), "dirty" | "stale")
+        || (reconcile_status == "unknown" && runtime_status == "running");
+    let has_warning = broker_status != "ok"
+        || integrity_status != "ok"
+        || reconcile_status != "ok"
+        || db_status == "warning"
+        || status.notes.is_some()
+        || reconcile.note.is_some();
+
+    (
+        StatusCode::OK,
+        Json(SystemStatusResponse {
+            environment,
+            daemon_mode: st.deployment_mode().as_api_label().to_string(),
+            adapter_id: st.adapter_id().to_string(),
+            deployment_start_allowed: st.deployment_readiness().start_allowed,
+            deployment_blocker: st.deployment_readiness().blocker.clone(),
+            runtime_status,
+            broker_status,
+            broker_snapshot_source: st.broker_snapshot_source().as_str().to_string(),
+            alpaca_ws_continuity: st.alpaca_ws_continuity().await.as_status_str().to_string(),
+            db_status,
+            market_data_health: st.strategy_market_data_source().as_health_str().to_string(),
+            reconcile_status,
+            integrity_status,
+            audit_writer_status,
+            last_heartbeat: status.deadman_last_heartbeat_utc.clone(),
+            deadman_status: status.deadman_status.clone(),
+            loop_latency_ms: None,
+            active_account_id: None,
+            config_profile: None,
+            has_warning,
+            has_critical,
+            strategy_armed: integrity_armed,
+            execution_armed: integrity_armed,
+            live_routing_enabled,
+            kill_switch_active: status.state == "halted",
+            risk_halt_active: risk_blocked,
+            integrity_halt_active: !integrity_armed,
+            daemon_reachable: true,
+            fault_signals: build_fault_signals(&status, &reconcile, risk_blocked),
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/preflight
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+    let integrity_armed = {
+        let ig = st.integrity.read().await;
+        !ig.is_execution_blocked()
+    };
+
+    let strategy_disarmed = !integrity_armed;
+    let execution_disarmed = !integrity_armed;
+
+    let db_reachable: Option<bool> = if let Some(db) = st.db.as_ref() {
+        Some(sqlx::query("SELECT 1").execute(db).await.is_ok())
+    } else {
+        None
+    };
+
+    let broker_config_present: Option<bool> = match st.adapter_id() {
+        "" | "null" | "paper" => Some(false),
+        _ => Some(true),
+    };
+
+    let market_data_config_present: Option<bool> = None;
+    let audit_writer_ready: Option<bool> = db_reachable;
+
+    let mut warnings = Vec::new();
+    if status.notes.is_some() {
+        warnings.push("Daemon status contains notes; verify runtime state.".to_string());
+    }
+    if market_data_config_present.is_none() {
+        warnings.push(
+            "Market data config readiness is not probed at preflight; verify separately."
+                .to_string(),
+        );
+    }
+
+    let mut blockers = Vec::new();
+    if db_reachable == Some(false) {
+        blockers.push("Database is not reachable.".to_string());
+    }
+    if execution_disarmed {
+        blockers.push("Execution is disarmed at the integrity gate.".to_string());
+    }
+    if let Some(blocker) = st.deployment_readiness().blocker.clone() {
+        blockers.push(blocker);
+    }
+
+    (
+        StatusCode::OK,
+        Json(PreflightStatusResponse {
+            daemon_reachable: true,
+            daemon_mode: st.deployment_mode().as_api_label().to_string(),
+            adapter_id: st.adapter_id().to_string(),
+            deployment_start_allowed: st.deployment_readiness().start_allowed,
+            db_reachable,
+            broker_config_present,
+            market_data_config_present,
+            audit_writer_ready,
+            runtime_idle: Some(status.state != "running"),
+            strategy_disarmed,
+            execution_disarmed,
+            live_routing_disabled: true,
+            warnings,
+            blockers,
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/metadata
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn system_metadata(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let integrity_armed = {
+        let ig = st.integrity.read().await;
+        !ig.is_execution_blocked()
+    };
+    let endpoint_status = if integrity_armed { "ok" } else { "warning" }.to_string();
+
+    (
+        StatusCode::OK,
+        Json(SystemMetadataResponse {
+            build_version: st.build.version.to_string(),
+            api_version: "v1".to_string(),
+            broker_adapter: st.adapter_id().to_string(),
+            endpoint_status,
+            daemon_mode: st.deployment_mode().as_api_label().to_string(),
+            adapter_id: st.adapter_id().to_string(),
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/runtime-leadership
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn system_runtime_leadership(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+    let reconcile = st.current_reconcile_snapshot().await;
+
+    let leader_node = "local".to_string();
+    let leader_lease_state = match status.state.as_str() {
+        "running" => "held",
+        "unknown" => "contested",
+        _ => "lost",
+    }
+    .to_string();
+
+    let latest_run = if let Some(db) = st.db.as_ref() {
+        mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, st.deployment_mode().as_db_mode())
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
+    let generation_id = status
+        .active_run_id
+        .map(|id| id.to_string())
+        .or_else(|| latest_run.as_ref().map(|r| r.run_id.to_string()));
+
+    let last_restart_at = latest_run.as_ref().map(|r| r.started_at_utc.to_rfc3339());
+
+    let post_restart_recovery_state = match reconcile.status.as_str() {
+        "ok" => "complete",
+        "unknown" => "in_progress",
+        _ => "degraded",
+    }
+    .to_string();
+
+    let recovery_checkpoint = reconcile
+        .last_run_at
+        .as_deref()
+        .unwrap_or("none")
+        .to_string();
+
+    let mut checkpoints: Vec<RuntimeLeadershipCheckpointRow> = Vec::new();
+    if let Some(run) = &latest_run {
+        checkpoints.push(RuntimeLeadershipCheckpointRow {
+            checkpoint_id: run.run_id.to_string(),
+            checkpoint_type: "restart".to_string(),
+            timestamp: run.started_at_utc.to_rfc3339(),
+            generation_id: run.run_id.to_string(),
+            leader_node: leader_node.clone(),
+            status: "ok".to_string(),
+            note: format!(
+                "Run started; mode={}; adapter={}",
+                st.deployment_mode().as_api_label(),
+                st.adapter_id()
+            ),
+        });
+    }
+
+    (
+        StatusCode::OK,
+        Json(RuntimeLeadershipResponse {
+            leader_node,
+            leader_lease_state,
+            generation_id,
+            restart_count_24h: if let Some(db) = st.db.as_ref() {
+                mqk_db::count_runs_in_last_24h(
+                    db,
+                    DAEMON_ENGINE_ID,
+                    st.deployment_mode().as_db_mode(),
+                )
+                .await
+                .ok()
+                .map(|n| n as u32)
+            } else {
+                None
+            },
+            last_restart_at,
+            post_restart_recovery_state,
+            recovery_checkpoint,
+            checkpoints,
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/session
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = match st.current_status_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => return runtime_error_response(err),
+    };
+    let strategy_allowed = status.integrity_armed;
+    let execution_allowed =
+        strategy_allowed && status.state == "running" && status.active_run_id.is_some();
+
+    let calendar = st.calendar_spec();
+    let now_ts = Utc::now().timestamp(); // allow: operator-metadata wall-clock
+    (
+        StatusCode::OK,
+        Json(SessionStateResponse {
+            daemon_mode: st.deployment_mode().as_db_mode().to_string(),
+            adapter_id: st.adapter_id().to_string(),
+            deployment_start_allowed: st.deployment_readiness().start_allowed,
+            deployment_blocker: st.deployment_readiness().blocker.clone(),
+            operator_auth_mode: st.operator_auth_mode().label().to_string(),
+            strategy_allowed,
+            execution_allowed,
+            system_trading_window: if execution_allowed {
+                "enabled".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            market_session: calendar.classify_market_session(now_ts).to_string(),
+            exchange_calendar_state: calendar.classify_exchange_calendar(now_ts).to_string(),
+            calendar_spec_id: calendar.spec_id().to_string(),
+            notes: vec![calendar.session_truth_note().to_string()],
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/config-fingerprint
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn system_config_fingerprint(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let latest_run = if let Some(db) = st.db.as_ref() {
+        mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, st.deployment_mode().as_db_mode())
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
+    (
+        StatusCode::OK,
+        Json(ConfigFingerprintResponse {
+            config_hash: latest_run
+                .as_ref()
+                .map(|run| run.config_hash.clone())
+                .unwrap_or_else(|| st.run_config_hash().to_string()),
+            adapter_id: st.adapter_id().to_string(),
+            risk_policy_version: None,
+            strategy_bundle_version: None,
+            build_version: st.build.version.to_string(),
+            environment_profile: st.deployment_mode().as_api_label().to_string(),
+            runtime_generation_id: latest_run.as_ref().map(|run| run.run_id.to_string()),
+            last_restart_at: latest_run
+                .as_ref()
+                .map(|run| run.started_at_utc.to_rfc3339()),
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/config-diffs
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn system_config_diffs(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(ConfigDiffsResponse {
+                canonical_route: "/api/v1/system/config-diffs".to_string(),
+                truth_state: "not_wired".to_string(),
+                backend: "not_wired".to_string(),
+                rows: Vec::new(),
+            }),
+        )
+            .into_response();
+    };
+
+    let latest_run = match sqlx::query(
+        r#"
+        select
+          run_id,
+          engine_id,
+          mode,
+          started_at_utc,
+          git_hash,
+          config_hash,
+          config_json,
+          host_fingerprint,
+          status,
+          armed_at_utc,
+          running_at_utc,
+          stopped_at_utc,
+          halted_at_utc,
+          last_heartbeat_utc
+        from runs
+        where engine_id = $1
+        order by started_at_utc desc, run_id desc
+        limit 1
+        "#,
+    )
+    .bind(DAEMON_ENGINE_ID)
+    .fetch_optional(db)
+    .await
+    {
+        Ok(Some(row)) => {
+            let status = match mqk_db::RunStatus::parse(&row.get::<String, _>("status")) {
+                Ok(status) => status,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(RuntimeErrorResponse {
+                            error: format!("system/config-diffs status parse failed: {err}"),
+                            fault_class: "system.config_diffs.status_parse_failed".to_string(),
+                            gate: None,
+                        }),
+                    )
+                        .into_response();
+                }
+            };
+
+            Some(mqk_db::RunRow {
+                run_id: row.get("run_id"),
+                engine_id: row.get("engine_id"),
+                mode: row.get("mode"),
+                started_at_utc: row.get("started_at_utc"),
+                git_hash: row.get("git_hash"),
+                config_hash: row.get("config_hash"),
+                config_json: row.get("config_json"),
+                host_fingerprint: row.get("host_fingerprint"),
+                status,
+                armed_at_utc: row.get("armed_at_utc"),
+                running_at_utc: row.get("running_at_utc"),
+                stopped_at_utc: row.get("stopped_at_utc"),
+                halted_at_utc: row.get("halted_at_utc"),
+                last_heartbeat_utc: row.get("last_heartbeat_utc"),
+            })
+        }
+        Ok(None) => None,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RuntimeErrorResponse {
+                    error: format!("system/config-diffs query failed: {err}"),
+                    fault_class: "system.config_diffs.query_failed".to_string(),
+                    gate: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let Some(latest_run) = latest_run else {
+        return (
+            StatusCode::OK,
+            Json(ConfigDiffsResponse {
+                canonical_route: "/api/v1/system/config-diffs".to_string(),
+                truth_state: "not_wired".to_string(),
+                backend: "not_wired".to_string(),
+                rows: Vec::new(),
+            }),
+        )
+            .into_response();
+    };
+
+    let rows = authoritative_config_diff_rows(&st, &latest_run);
+
+    (
+        StatusCode::OK,
+        Json(ConfigDiffsResponse {
+            canonical_route: "/api/v1/system/config-diffs".to_string(),
+            truth_state: "active".to_string(),
+            backend: "postgres.runs+daemon.runtime_selection".to_string(),
+            rows,
+        }),
+    )
+        .into_response()
+}
+
+fn authoritative_config_diff_rows(
+    st: &AppState,
+    latest_run: &mqk_db::RunRow,
+) -> Vec<ConfigDiffRow> {
+    let mut rows = Vec::new();
+    let changed_at = latest_run.started_at_utc.to_rfc3339();
+
+    if latest_run.config_hash != st.run_config_hash() {
+        rows.push(ConfigDiffRow {
+            diff_id: format!("{}:config_hash", latest_run.run_id),
+            changed_at: changed_at.clone(),
+            changed_domain: "config".to_string(),
+            before_version: latest_run.config_hash.clone(),
+            after_version: st.run_config_hash().to_string(),
+            summary: format!(
+                "current daemon config_hash differs from latest durable run {}",
+                latest_run.run_id
+            ),
+        });
+    }
+
+    if latest_run.mode != st.deployment_mode().as_db_mode() {
+        rows.push(ConfigDiffRow {
+            diff_id: format!("{}:deployment_mode", latest_run.run_id),
+            changed_at: changed_at.clone(),
+            changed_domain: "runtime".to_string(),
+            before_version: latest_run.mode.clone(),
+            after_version: st.deployment_mode().as_db_mode().to_string(),
+            summary: format!(
+                "current daemon deployment mode differs from latest durable run {}",
+                latest_run.run_id
+            ),
+        });
+    }
+
+    if let Some(prior_adapter) = latest_run
+        .config_json
+        .get("adapter")
+        .and_then(|value| value.as_str())
+    {
+        if prior_adapter != st.adapter_id() {
+            rows.push(ConfigDiffRow {
+                diff_id: format!("{}:adapter", latest_run.run_id),
+                changed_at,
+                changed_domain: "runtime".to_string(),
+                before_version: prior_adapter.to_string(),
+                after_version: st.adapter_id().to_string(),
+                summary: format!(
+                    "current daemon adapter differs from latest durable run {}",
+                    latest_run.run_id
+                ),
+            });
+        }
+    }
+
+    rows
+}

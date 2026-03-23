@@ -124,8 +124,7 @@ async fn fq01_fill_event_produces_one_telemetry_row_with_exact_field_truth() {
         }
     };
 
-    let run_id =
-        Uuid::parse_str("ee010001-0000-4000-8000-000000000001").unwrap();
+    let run_id = Uuid::parse_str("ee010001-0000-4000-8000-000000000001").unwrap();
     seed_run(&pool, run_id).await;
 
     let broker_message_id = "fq01-fill-msg-1";
@@ -169,7 +168,10 @@ async fn fq01_fill_event_produces_one_telemetry_row_with_exact_field_truth() {
     assert_eq!(rows.len(), 1, "FQ-01: exactly one telemetry row must exist");
 
     let r = &rows[0];
-    assert_eq!(r.telemetry_id, telemetry_id, "FQ-01: telemetry_id must match");
+    assert_eq!(
+        r.telemetry_id, telemetry_id,
+        "FQ-01: telemetry_id must match"
+    );
     assert_eq!(r.run_id, run_id, "FQ-01: run_id must match");
     assert_eq!(r.symbol, "AAPL", "FQ-01: symbol must be AAPL");
     assert_eq!(r.side, "buy", "FQ-01: side must be buy");
@@ -178,7 +180,10 @@ async fn fq01_fill_event_produces_one_telemetry_row_with_exact_field_truth() {
         r.fill_price_micros, 150_500_000,
         "FQ-01: fill_price_micros must be exact"
     );
-    assert_eq!(r.fill_kind, "final_fill", "FQ-01: fill_kind must be final_fill");
+    assert_eq!(
+        r.fill_kind, "final_fill",
+        "FQ-01: fill_kind must be final_fill"
+    );
     assert_eq!(
         r.provenance_ref,
         format!("oms_inbox:{}", broker_message_id),
@@ -212,8 +217,7 @@ async fn fq02_limit_fill_carries_non_null_slippage_bps() {
         }
     };
 
-    let run_id =
-        Uuid::parse_str("ee010002-0000-4000-8000-000000000002").unwrap();
+    let run_id = Uuid::parse_str("ee010002-0000-4000-8000-000000000002").unwrap();
     seed_run(&pool, run_id).await;
 
     let broker_message_id = "fq02-fill-msg-1";
@@ -299,8 +303,7 @@ async fn fq03_market_fill_null_reference_and_null_slippage() {
         }
     };
 
-    let run_id =
-        Uuid::parse_str("ee010003-0000-4000-8000-000000000003").unwrap();
+    let run_id = Uuid::parse_str("ee010003-0000-4000-8000-000000000003").unwrap();
     seed_run(&pool, run_id).await;
 
     let broker_message_id = "fq03-fill-msg-1";
@@ -369,8 +372,7 @@ async fn fq04_no_fill_event_produces_zero_telemetry_rows() {
         }
     };
 
-    let run_id =
-        Uuid::parse_str("ee010004-0000-4000-8000-000000000004").unwrap();
+    let run_id = Uuid::parse_str("ee010004-0000-4000-8000-000000000004").unwrap();
     seed_run(&pool, run_id).await;
 
     // Do NOT insert any telemetry rows — simulate a run where only a cancel happened.
@@ -404,8 +406,7 @@ async fn fq05_read_surface_returns_active_truth_with_exact_rows() {
         }
     };
 
-    let run_id =
-        Uuid::parse_str("ee010005-0000-4000-8000-000000000005").unwrap();
+    let run_id = Uuid::parse_str("ee010005-0000-4000-8000-000000000005").unwrap();
     seed_run(&pool, run_id).await;
 
     let broker_message_id = "fq05-fill-msg-1";
@@ -461,7 +462,8 @@ async fn fq05_read_surface_returns_active_truth_with_exact_rows() {
 
     let (status, body_bytes) = call(router, req).await;
     assert_eq!(
-        status, 200,
+        status,
+        200,
         "FQ-05: route must return 200; body: {}",
         String::from_utf8_lossy(&body_bytes)
     );
@@ -478,8 +480,14 @@ async fn fq05_read_surface_returns_active_truth_with_exact_rows() {
         "FQ-05: backend must be postgres.fill_quality_telemetry"
     );
 
-    let rows = body["rows"].as_array().expect("FQ-05: rows must be an array");
-    assert_eq!(rows.len(), 1, "FQ-05: exactly one telemetry row in response");
+    let rows = body["rows"]
+        .as_array()
+        .expect("FQ-05: rows must be an array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "FQ-05: exactly one telemetry row in response"
+    );
 
     let row = &rows[0];
     assert_eq!(
