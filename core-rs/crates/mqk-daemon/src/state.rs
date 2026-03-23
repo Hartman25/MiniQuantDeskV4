@@ -40,12 +40,12 @@ pub(crate) use types::{ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHan
 #[cfg(test)]
 use broker::alpaca_base_url_for_mode;
 use broker::{build_daemon_broker, DaemonBroker};
+#[cfg(test)]
+use env::runtime_selection_from_env_values;
 use env::{
     deployment_mode_readiness, initial_reconcile_status, initial_ws_continuity_for_broker,
     operator_auth_mode_from_env, runtime_selection_from_env,
 };
-#[cfg(test)]
-use env::runtime_selection_from_env_values;
 use snapshot::{recover_oms_and_portfolio, synthesize_paper_broker_snapshot};
 use types::{DaemonOrchestrator, ReconcileTruthGate, StateIntegrityGate};
 

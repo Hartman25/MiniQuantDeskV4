@@ -290,8 +290,7 @@ async fn n05_control_arm_provenance_ref_matches_exact_durable_audit_events_uuid(
     };
 
     assert_eq!(
-        actual_prov,
-        expected_prov,
+        actual_prov, expected_prov,
         "N05: provenance_ref must be exact audit_events UUID reference; got: {actual_prov:?}"
     );
 
