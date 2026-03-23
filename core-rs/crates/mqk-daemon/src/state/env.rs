@@ -135,10 +135,24 @@ pub(crate) fn deployment_mode_readiness(
     broker_kind: Option<BrokerKind>,
 ) -> DeploymentReadiness {
     match (mode, broker_kind) {
-        // ── Paper + Paper ─────────────────────────────────────────────────
+        // ── Paper + Paper: fail-closed (PT-TRUTH-01) ─────────────────────
+        // LockedPaperBroker is a bar-driven in-process fill engine that requires
+        // an external on_bar() caller to produce fills.  No bar-feed / market-data
+        // source is wired in the daemon runtime (StrategyMarketDataSource::NotConfigured).
+        // Without a bar-feed, the paper broker accepts orders but never fills them.
+        // This path is not an honest paper trading route.
+        // The real paper trading route is Paper+Alpaca (MQK_DAEMON_ADAPTER_ID=alpaca),
+        // which routes through the Alpaca paper-trading endpoint (paper-api.alpaca.markets).
         (DeploymentMode::Paper, Some(BrokerKind::Paper)) => DeploymentReadiness {
-            start_allowed: true,
-            blocker: None,
+            start_allowed: false,
+            blocker: Some(
+                "deployment mode 'paper' with broker 'paper' is not an honest paper trading \
+                 path: the in-process fill engine (LockedPaperBroker) has no market-data \
+                 source wired in the daemon runtime and cannot produce real fills — \
+                 set MQK_DAEMON_ADAPTER_ID=alpaca to route through the Alpaca paper-trading \
+                 endpoint (paper-api.alpaca.markets)"
+                    .to_string(),
+            ),
         },
         // ── Paper + Alpaca (AP-06) ────────────────────────────────────────
         (DeploymentMode::Paper, Some(BrokerKind::Alpaca)) => DeploymentReadiness {

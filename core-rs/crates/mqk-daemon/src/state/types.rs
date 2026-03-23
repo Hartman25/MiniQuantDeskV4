@@ -399,24 +399,28 @@ impl AlpacaWsContinuityState {
     }
 
     pub(crate) fn from_fetch_cursor(cursor: &mqk_broker_alpaca::types::AlpacaFetchCursor) -> Self {
-        use mqk_broker_alpaca::types::AlpacaTradeUpdatesResume;
-        match &cursor.trade_updates {
-            AlpacaTradeUpdatesResume::ColdStartUnproven => Self::ColdStartUnproven,
-            AlpacaTradeUpdatesResume::Live {
+        // BRK-00R-02: delegate to the runtime-owned seam so continuity authority
+        // lives in mqk-runtime, not duplicated here.  The daemon converts the
+        // runtime-owned WsLifecycleContinuity to its own AlpacaWsContinuityState
+        // (adding NotApplicable for non-Alpaca paths, handled by from_cursor_json).
+        use mqk_runtime::alpaca_inbound::{ws_continuity_from_cursor, WsLifecycleContinuity};
+        match ws_continuity_from_cursor(cursor) {
+            WsLifecycleContinuity::ColdStartUnproven => Self::ColdStartUnproven,
+            WsLifecycleContinuity::Live {
                 last_message_id,
                 last_event_at,
             } => Self::Live {
-                last_message_id: last_message_id.clone(),
-                last_event_at: last_event_at.clone(),
+                last_message_id,
+                last_event_at,
             },
-            AlpacaTradeUpdatesResume::GapDetected {
+            WsLifecycleContinuity::GapDetected {
                 last_message_id,
                 last_event_at,
                 detail,
             } => Self::GapDetected {
-                last_message_id: last_message_id.clone(),
-                last_event_at: last_event_at.clone(),
-                detail: detail.clone(),
+                last_message_id,
+                last_event_at,
+                detail,
             },
         }
     }

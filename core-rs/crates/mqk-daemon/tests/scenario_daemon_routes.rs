@@ -184,8 +184,11 @@ async fn runtime_leadership_route_reports_null_generation_without_authoritative_
 
 #[tokio::test]
 async fn run_start_requires_db_backed_runtime_after_arm() {
-    let st = Arc::new(state::AppState::new_with_operator_auth(
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    // PT-TRUTH-01: default paper+paper is fail-closed; use paper+alpaca so
+    // the DB gate (not deployment readiness) is what blocks after arm.
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
     ));
 
     let arm_req = Request::builder()
@@ -421,8 +424,11 @@ async fn status_reflects_integrity_armed_flag() {
 
 #[tokio::test]
 async fn run_start_refused_403_when_integrity_disarmed() {
-    let st = Arc::new(state::AppState::new_with_operator_auth(
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    // PT-TRUTH-01: default paper+paper is fail-closed; use paper+alpaca so
+    // the integrity gate (not deployment readiness) is what blocks the start.
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
     ));
 
     // Disarm first.
@@ -463,8 +469,11 @@ async fn run_start_refused_403_when_integrity_disarmed() {
 
 #[tokio::test]
 async fn run_start_requires_db_after_rearm() {
-    let st = Arc::new(state::AppState::new_with_operator_auth(
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    // PT-TRUTH-01: default paper+paper is fail-closed; use paper+alpaca so
+    // the DB gate (not deployment readiness) is what blocks after rearm.
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
     ));
 
     let disarm_req = Request::builder()
@@ -974,8 +983,12 @@ async fn api_system_session_reports_truthful_mode_and_operator_auth() {
     let json = parse_json(body);
     assert_eq!(json["daemon_mode"], "PAPER");
     assert_eq!(json["adapter_id"], "paper");
-    assert_eq!(json["deployment_start_allowed"], true);
-    assert!(json["deployment_blocker"].is_null());
+    // PT-TRUTH-01: paper+paper default is now fail-closed.
+    assert_eq!(json["deployment_start_allowed"], false);
+    assert!(
+        !json["deployment_blocker"].is_null(),
+        "paper+paper must carry a deployment_blocker message"
+    );
     assert_eq!(json["operator_auth_mode"], "missing_token_fail_closed");
     assert_eq!(json["strategy_allowed"], false);
     assert_eq!(json["execution_allowed"], false);
@@ -1060,7 +1073,8 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
     let (fp_status, fp_body) = call(router.clone(), fp_req).await;
     assert_eq!(fp_status, StatusCode::OK);
     let fp = parse_json(fp_body);
-    assert_eq!(fp["config_hash"], "daemon-runtime-paper-ready-v1");
+    // PT-TRUTH-01: paper+paper default is now fail-closed; config_hash reflects "blocked".
+    assert_eq!(fp["config_hash"], "daemon-runtime-paper-blocked-v1");
     assert_eq!(fp["adapter_id"], "paper");
     assert!(
         fp["risk_policy_version"].is_null(),
@@ -1169,8 +1183,12 @@ async fn system_status_and_preflight_surface_mode_truth() {
     let status_json = parse_json(status_body);
     assert_eq!(status_json["daemon_mode"], "paper");
     assert_eq!(status_json["adapter_id"], "paper");
-    assert_eq!(status_json["deployment_start_allowed"], true);
-    assert!(status_json["deployment_blocker"].is_null());
+    // PT-TRUTH-01: paper+paper default is now fail-closed.
+    assert_eq!(status_json["deployment_start_allowed"], false);
+    assert!(
+        !status_json["deployment_blocker"].is_null(),
+        "paper+paper must carry a deployment_blocker message"
+    );
 
     let preflight_req = Request::builder()
         .method("GET")
@@ -1182,7 +1200,8 @@ async fn system_status_and_preflight_surface_mode_truth() {
     let preflight_json = parse_json(preflight_body);
     assert_eq!(preflight_json["daemon_mode"], "paper");
     assert_eq!(preflight_json["adapter_id"], "paper");
-    assert_eq!(preflight_json["deployment_start_allowed"], true);
+    // PT-TRUTH-01: paper+paper default is now fail-closed.
+    assert_eq!(preflight_json["deployment_start_allowed"], false);
 }
 
 // ---------------------------------------------------------------------------
@@ -1502,6 +1521,89 @@ fn ap05_from_cursor_json_derives_continuity_from_persisted_cursor() {
     assert!(
         !bad_state.is_continuity_proven(),
         "corrupt cursor must fail closed"
+    );
+}
+
+/// BRK-00R-02: daemon derivation uses runtime-owned seam; fail-closed for cold-start and gap.
+///
+/// Proves that the production path `build_execution_orchestrator → from_cursor_json →
+/// from_fetch_cursor → ws_continuity_from_cursor` now explicitly goes through the
+/// runtime-owned seam rather than a parallel daemon-local derivation.
+///
+/// The structural proof is:
+/// - `from_fetch_cursor` now delegates to `mqk_runtime::alpaca_inbound::ws_continuity_from_cursor`.
+/// - `from_cursor_json` calls `from_fetch_cursor` for parsed Alpaca cursors.
+/// - Cold-start and gap states both fail `is_continuity_proven()` through this path.
+/// - Live state passes. Full position metadata (`last_message_id`, `last_event_at`) is preserved.
+#[test]
+fn brk00r02_daemon_derivation_via_runtime_seam_is_fail_closed() {
+    use mqk_broker_alpaca::types::AlpacaFetchCursor;
+    use state::{AlpacaWsContinuityState, BrokerKind};
+
+    // Cold-start: runtime seam → ColdStartUnproven → not proven.
+    let cold = AlpacaFetchCursor::cold_start_unproven(None);
+    let cold_state = AlpacaWsContinuityState::from_cursor_json(
+        Some(BrokerKind::Alpaca),
+        Some(&serde_json::to_string(&cold).unwrap()),
+    );
+    assert!(
+        matches!(cold_state, AlpacaWsContinuityState::ColdStartUnproven),
+        "cold-start via runtime seam must yield ColdStartUnproven"
+    );
+    assert!(
+        !cold_state.is_continuity_proven(),
+        "cold-start must not be continuity-proven"
+    );
+
+    // Gap: runtime seam → GapDetected → not proven; position fields preserved.
+    let gap = AlpacaFetchCursor::gap_detected(
+        None,
+        Some("alpaca:order-1:new:2024-06-15T09:30:00Z".to_string()),
+        Some("2024-06-15T09:30:00.000000Z".to_string()),
+        "brk00r02 disconnect proof",
+    );
+    let gap_state = AlpacaWsContinuityState::from_cursor_json(
+        Some(BrokerKind::Alpaca),
+        Some(&serde_json::to_string(&gap).unwrap()),
+    );
+    assert!(
+        !gap_state.is_continuity_proven(),
+        "gap via runtime seam must not be continuity-proven"
+    );
+    match &gap_state {
+        AlpacaWsContinuityState::GapDetected {
+            last_message_id,
+            last_event_at,
+            detail,
+        } => {
+            assert_eq!(
+                last_message_id.as_deref(),
+                Some("alpaca:order-1:new:2024-06-15T09:30:00Z"),
+                "last_message_id must be preserved through runtime seam"
+            );
+            assert_eq!(
+                last_event_at.as_deref(),
+                Some("2024-06-15T09:30:00.000000Z"),
+                "last_event_at must be preserved through runtime seam"
+            );
+            assert_eq!(detail, "brk00r02 disconnect proof");
+        }
+        other => panic!("expected GapDetected, got {other:?}"),
+    }
+
+    // Live: runtime seam → Live → proven.
+    let live = AlpacaFetchCursor::live(
+        None,
+        "alpaca:order-1:fill:2024-06-15T09:31:00Z",
+        "2024-06-15T09:31:00.000000Z",
+    );
+    let live_state = AlpacaWsContinuityState::from_cursor_json(
+        Some(BrokerKind::Alpaca),
+        Some(&serde_json::to_string(&live).unwrap()),
+    );
+    assert!(
+        live_state.is_continuity_proven(),
+        "live via runtime seam must be continuity-proven"
     );
 }
 

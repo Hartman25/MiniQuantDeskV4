@@ -96,8 +96,11 @@ async fn lo03_p01_daemon_boots_disarmed_precondition_holds() {
 
 #[tokio::test]
 async fn lo03_p02_start_blocked_before_arm() {
-    let st = Arc::new(state::AppState::new_with_operator_auth(
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    // PT-TRUTH-01: default paper+paper is fail-closed; use paper+alpaca so the
+    // integrity gate (not deployment readiness) is what blocks the start.
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
     ));
     let router = routes::build_router(st);
 
@@ -129,8 +132,11 @@ async fn lo03_p02_start_blocked_before_arm() {
 
 #[tokio::test]
 async fn lo03_p03_start_blocked_without_db_authority() {
-    let st = Arc::new(state::AppState::new_with_operator_auth(
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    // PT-TRUTH-01: default paper+paper is fail-closed; use paper+alpaca so the
+    // DB gate (not deployment readiness) is what blocks after arm.
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
     ));
 
     // Arm the integrity gate.

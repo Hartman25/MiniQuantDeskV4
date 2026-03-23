@@ -62,8 +62,11 @@ async fn production_mode_without_token_refuses_startup_or_operator_access() {
 
 #[tokio::test]
 async fn run_start_returns_403_before_arm_in_explicit_dev_no_token_mode() {
-    let st = Arc::new(state::AppState::new_with_operator_auth(
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    // PT-TRUTH-01: default config is paper+paper (fail-closed). Use paper+alpaca so
+    // the deployment readiness gate passes and the integrity gate is what blocks start.
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
     ));
 
     let req = Request::builder()
@@ -88,8 +91,11 @@ async fn run_start_returns_403_before_arm_in_explicit_dev_no_token_mode() {
 
 #[tokio::test]
 async fn run_start_requires_db_after_explicit_arm_in_explicit_dev_no_token_mode() {
-    let st = Arc::new(state::AppState::new_with_operator_auth(
-        state::OperatorAuthMode::ExplicitDevNoToken,
+    // PT-TRUTH-01: default config is paper+paper (fail-closed). Use paper+alpaca so
+    // the deployment readiness gate passes and the DB gate is what blocks start.
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
     ));
 
     let arm_req = Request::builder()

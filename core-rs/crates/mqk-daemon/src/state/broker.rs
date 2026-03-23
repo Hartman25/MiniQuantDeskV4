@@ -13,7 +13,10 @@ use mqk_execution::{
 };
 
 use super::types::{BrokerKind, DeploymentMode, RuntimeLifecycleError};
-use super::{ALPACA_API_KEY_ID_ENV, ALPACA_API_SECRET_KEY_ENV, ALPACA_BASE_URL_OVERRIDE_ENV};
+use super::{
+    ALPACA_BASE_URL_PAPER_ENV, ALPACA_KEY_LIVE_ENV, ALPACA_KEY_PAPER_ENV,
+    ALPACA_SECRET_LIVE_ENV, ALPACA_SECRET_PAPER_ENV,
+};
 
 // ---------------------------------------------------------------------------
 // DaemonBroker — enum-dispatch seam (AP-02)
@@ -111,23 +114,29 @@ pub(crate) fn build_daemon_broker(
     match broker_kind {
         Some(BrokerKind::Paper) => Ok(DaemonBroker::Paper(LockedPaperBroker::new())),
         Some(BrokerKind::Alpaca) => {
-            let paper_base_url_override = std::env::var(ALPACA_BASE_URL_OVERRIDE_ENV).ok();
+            // ENV-TRUTH-01: credentials are mode-specific to match .env.local.example.
+            // Paper path: ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER (paper-api.alpaca.markets)
+            // Live path:  ALPACA_API_KEY_LIVE  / ALPACA_API_SECRET_LIVE  (api.alpaca.markets)
+            let (key_env, secret_env) = match deployment_mode {
+                DeploymentMode::Paper => (ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_PAPER_ENV),
+                _ => (ALPACA_KEY_LIVE_ENV, ALPACA_SECRET_LIVE_ENV),
+            };
+            let paper_base_url_override = match deployment_mode {
+                DeploymentMode::Paper => std::env::var(ALPACA_BASE_URL_PAPER_ENV).ok(),
+                _ => None,
+            };
             let base_url =
                 alpaca_base_url_for_mode(deployment_mode, paper_base_url_override.as_deref())?;
-            let key_id = std::env::var(ALPACA_API_KEY_ID_ENV).map_err(|_| {
+            let key_id = std::env::var(key_env).map_err(|_| {
                 RuntimeLifecycleError::service_unavailable(
                     "runtime.start_refused.alpaca_creds_missing",
-                    format!(
-                        "broker 'alpaca' requires {ALPACA_API_KEY_ID_ENV} environment variable"
-                    ),
+                    format!("broker 'alpaca' requires {key_env} environment variable"),
                 )
             })?;
-            let secret = std::env::var(ALPACA_API_SECRET_KEY_ENV).map_err(|_| {
+            let secret = std::env::var(secret_env).map_err(|_| {
                 RuntimeLifecycleError::service_unavailable(
                     "runtime.start_refused.alpaca_creds_missing",
-                    format!(
-                        "broker 'alpaca' requires {ALPACA_API_SECRET_KEY_ENV} environment variable"
-                    ),
+                    format!("broker 'alpaca' requires {secret_env} environment variable"),
                 )
             })?;
             Ok(DaemonBroker::Alpaca(AlpacaBrokerAdapter::new(

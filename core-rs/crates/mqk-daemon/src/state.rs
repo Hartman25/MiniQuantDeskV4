@@ -60,9 +60,13 @@ const RECONCILE_TICK_INTERVAL: Duration = Duration::from_secs(30);
 const DEV_ALLOW_NO_OPERATOR_TOKEN_ENV: &str = "MQK_DEV_ALLOW_NO_OPERATOR_TOKEN";
 const DAEMON_DEPLOYMENT_MODE_ENV: &str = "MQK_DAEMON_DEPLOYMENT_MODE";
 const DAEMON_ADAPTER_ID_ENV: &str = "MQK_DAEMON_ADAPTER_ID";
-const ALPACA_API_KEY_ID_ENV: &str = "MQK_ALPACA_API_KEY_ID";
-const ALPACA_API_SECRET_KEY_ENV: &str = "MQK_ALPACA_API_SECRET_KEY";
-const ALPACA_BASE_URL_OVERRIDE_ENV: &str = "MQK_ALPACA_BASE_URL";
+// ENV-TRUTH-01: canonical paper credentials matching .env.local.example / base.yaml
+const ALPACA_KEY_PAPER_ENV: &str = "ALPACA_API_KEY_PAPER";
+const ALPACA_SECRET_PAPER_ENV: &str = "ALPACA_API_SECRET_PAPER";
+const ALPACA_BASE_URL_PAPER_ENV: &str = "ALPACA_PAPER_BASE_URL";
+// ENV-TRUTH-01: canonical live credentials matching .env.local.example
+const ALPACA_KEY_LIVE_ENV: &str = "ALPACA_API_KEY_LIVE";
+const ALPACA_SECRET_LIVE_ENV: &str = "ALPACA_API_SECRET_LIVE";
 
 // ---------------------------------------------------------------------------
 // AppState
@@ -148,12 +152,16 @@ impl AppState {
 
     pub fn new_for_test_with_broker_kind(kind: BrokerKind) -> Self {
         let mut state = Self::new_inner(OperatorAuthMode::ExplicitDevNoToken, None);
+        // Recompute readiness for the requested broker kind so it reflects the
+        // actual (mode, broker) pair, not the stale default paper+paper readiness.
+        let readiness =
+            deployment_mode_readiness(state.runtime_selection.deployment_mode, Some(kind));
         state.runtime_selection = RuntimeSelection {
             deployment_mode: state.runtime_selection.deployment_mode,
             broker_kind: Some(kind),
             adapter_id: kind.as_str().to_string(),
             run_config_hash: state.runtime_selection.run_config_hash.clone(),
-            readiness: state.runtime_selection.readiness.clone(),
+            readiness,
         };
         state.broker_snapshot_source = BrokerSnapshotTruthSource::from_broker_kind(Some(kind));
         state.alpaca_ws_continuity = Arc::new(RwLock::new(match kind {
@@ -1355,13 +1363,26 @@ mod tests {
     use mqk_execution::ReconcileGate;
 
     #[test]
-    fn runtime_selection_defaults_to_paper_ready() {
+    fn runtime_selection_defaults_to_paper_paper_blocked() {
+        // PT-TRUTH-01: the default config (no env vars) resolves to paper+paper,
+        // which is fail-closed.  Operator must set MQK_DAEMON_ADAPTER_ID=alpaca.
         let selection = runtime_selection_from_env_values(None, None);
         assert_eq!(selection.deployment_mode, DeploymentMode::Paper);
         assert_eq!(selection.broker_kind, Some(BrokerKind::Paper));
         assert_eq!(selection.adapter_id, "paper");
-        assert!(selection.readiness.start_allowed);
-        assert!(selection.readiness.blocker.is_none());
+        assert!(
+            !selection.readiness.start_allowed,
+            "paper+paper default must be fail-closed after PT-TRUTH-01"
+        );
+        assert!(
+            selection
+                .readiness
+                .blocker
+                .as_deref()
+                .is_some_and(|msg| msg.contains("alpaca")),
+            "blocker must direct operator to alpaca; got: {:?}",
+            selection.readiness.blocker
+        );
     }
 
     #[test]
@@ -1441,7 +1462,8 @@ mod tests {
 
     #[test]
     fn build_daemon_broker_alpaca_paper_mode_requires_credentials() {
-        if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
+        // ENV-TRUTH-01: paper mode reads ALPACA_API_KEY_PAPER (canonical .env.local name)
+        if std::env::var(ALPACA_KEY_PAPER_ENV).is_ok() {
             let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::Paper);
             assert!(
                 result.is_ok(),
@@ -1456,14 +1478,15 @@ mod tests {
         );
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains(ALPACA_API_KEY_ID_ENV),
-            "error must mention missing env var; got: {err_msg}"
+            err_msg.contains(ALPACA_KEY_PAPER_ENV),
+            "error must mention canonical paper env var; got: {err_msg}"
         );
     }
 
     #[test]
     fn build_daemon_broker_alpaca_live_shadow_requires_credentials() {
-        if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
+        // ENV-TRUTH-01: live-shadow mode reads ALPACA_API_KEY_LIVE (canonical .env.local name)
+        if std::env::var(ALPACA_KEY_LIVE_ENV).is_ok() {
             let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveShadow);
             assert!(
                 result.is_ok(),
@@ -1478,14 +1501,15 @@ mod tests {
         );
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains(ALPACA_API_KEY_ID_ENV),
-            "error must mention missing env var; got: {err_msg}"
+            err_msg.contains(ALPACA_KEY_LIVE_ENV),
+            "error must mention canonical live env var; got: {err_msg}"
         );
     }
 
     #[test]
     fn build_daemon_broker_alpaca_live_capital_requires_credentials() {
-        if std::env::var(ALPACA_API_KEY_ID_ENV).is_ok() {
+        // ENV-TRUTH-01: live-capital mode reads ALPACA_API_KEY_LIVE (canonical .env.local name)
+        if std::env::var(ALPACA_KEY_LIVE_ENV).is_ok() {
             let result = build_daemon_broker(Some(BrokerKind::Alpaca), DeploymentMode::LiveCapital);
             assert!(
                 result.is_ok(),
@@ -1500,8 +1524,8 @@ mod tests {
         );
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains(ALPACA_API_KEY_ID_ENV),
-            "error must mention missing env var; got: {err_msg}"
+            err_msg.contains(ALPACA_KEY_LIVE_ENV),
+            "error must mention canonical live env var; got: {err_msg}"
         );
     }
 
@@ -1552,14 +1576,22 @@ mod tests {
     }
 
     #[test]
-    fn ap06_paper_paper_unchanged() {
+    fn pt_truth_01_paper_paper_is_fail_closed() {
+        // PT-TRUTH-01: paper+paper is not an honest paper trading path.
+        // LockedPaperBroker requires an external bar-feed (on_bar) that is not
+        // wired in the daemon runtime.  The real paper route is paper+alpaca.
         let readiness = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
         assert!(
-            readiness.start_allowed,
-            "paper+paper must remain allowed after AP-06; got: {:?}",
-            readiness.blocker
+            !readiness.start_allowed,
+            "paper+paper must be fail-closed after PT-TRUTH-01"
         );
-        assert!(readiness.blocker.is_none(), "no blocker expected");
+        let blocker = readiness
+            .blocker
+            .expect("paper+paper must carry a blocker message");
+        assert!(
+            blocker.contains("alpaca"),
+            "blocker must direct operator to alpaca broker; got: {blocker}"
+        );
     }
 
     #[test]
@@ -1677,12 +1709,12 @@ mod tests {
     }
 
     #[test]
-    fn ap07_paper_paper_and_paper_alpaca_unchanged() {
-        let pp = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
-        assert!(pp.start_allowed, "paper+paper must remain allowed");
-
+    fn ap07_paper_alpaca_remains_allowed() {
+        // PT-TRUTH-01: paper+paper is now fail-closed (see pt_truth_01_paper_paper_is_fail_closed).
+        // paper+alpaca is the honest paper trading route and must remain allowed.
         let pa = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
         assert!(pa.start_allowed, "paper+alpaca must remain allowed");
+        assert!(pa.blocker.is_none(), "paper+alpaca must carry no blocker");
     }
 
     #[test]
@@ -1817,12 +1849,8 @@ mod tests {
         );
         assert!(shadow_alpaca.blocker.is_none(), "no blocker expected");
 
-        let pp = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Paper));
-        assert!(
-            pp.start_allowed,
-            "paper+paper must remain allowed after AP-08"
-        );
-
+        // paper+paper is fail-closed after PT-TRUTH-01 (see pt_truth_01_paper_paper_is_fail_closed).
+        // paper+alpaca remains the honest paper route.
         let pa = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
         assert!(
             pa.start_allowed,

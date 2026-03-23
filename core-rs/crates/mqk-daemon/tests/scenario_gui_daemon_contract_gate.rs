@@ -266,8 +266,9 @@ async fn gui_system_status_and_preflight_surfaces_are_semantically_truthful() {
     assert_eq!(status["execution_armed"], false);
     assert_eq!(json_str(&status, "daemon_mode"), "paper");
     assert_eq!(json_str(&status, "adapter_id"), "paper");
-    assert_eq!(status["deployment_start_allowed"], true);
-    assert!(status["deployment_blocker"].is_null());
+    // PT-TRUTH-01: paper+paper default is fail-closed.
+    assert_eq!(status["deployment_start_allowed"], false);
+    assert!(!status["deployment_blocker"].is_null());
     // No DB pool in test state → db_status must be "unavailable" (not "unknown").
     // "unknown" = unchecked; "unavailable" = checked and confirmed no pool.
     assert_eq!(json_str(&status, "db_status"), "unavailable");
@@ -292,7 +293,8 @@ async fn gui_system_status_and_preflight_surfaces_are_semantically_truthful() {
     assert_eq!(preflight["daemon_reachable"], true);
     assert_eq!(json_str(&preflight, "daemon_mode"), "paper");
     assert_eq!(json_str(&preflight, "adapter_id"), "paper");
-    assert_eq!(preflight["deployment_start_allowed"], true);
+    // PT-TRUTH-01: paper+paper default is fail-closed.
+    assert_eq!(preflight["deployment_start_allowed"], false);
     assert_eq!(preflight["strategy_disarmed"], true);
     assert_eq!(preflight["execution_disarmed"], true);
     assert_eq!(preflight["live_routing_disabled"], true);
@@ -342,8 +344,9 @@ async fn gui_session_config_strategy_and_audit_surfaces_are_semantically_truthfu
     let session = parse_json(session_body);
     assert_eq!(json_str(&session, "daemon_mode"), "PAPER");
     assert_eq!(json_str(&session, "adapter_id"), "paper");
-    assert_eq!(session["deployment_start_allowed"], true);
-    assert!(session["deployment_blocker"].is_null());
+    // PT-TRUTH-01: paper+paper default is fail-closed.
+    assert_eq!(session["deployment_start_allowed"], false);
+    assert!(!session["deployment_blocker"].is_null());
     assert_eq!(session["strategy_allowed"], false);
     assert_eq!(session["execution_allowed"], false);
 
@@ -357,9 +360,10 @@ async fn gui_session_config_strategy_and_audit_surfaces_are_semantically_truthfu
     let config = parse_json(config_body);
     assert_eq!(json_str(&config, "adapter_id"), "paper");
     assert_eq!(json_str(&config, "environment_profile"), "paper");
+    // PT-TRUTH-01: paper+paper default is fail-closed; config_hash reflects "blocked".
     assert_eq!(
         json_str(&config, "config_hash"),
-        "daemon-runtime-paper-ready-v1"
+        "daemon-runtime-paper-blocked-v1"
     );
     assert!(config["build_version"].is_string());
     assert!(

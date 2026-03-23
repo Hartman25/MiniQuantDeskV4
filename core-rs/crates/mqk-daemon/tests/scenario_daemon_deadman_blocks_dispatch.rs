@@ -90,7 +90,12 @@ async fn halt_route_fails_closed_without_db_truth() {
 
 #[tokio::test]
 async fn run_start_returns_403_after_halt() {
-    let st = Arc::new(state::AppState::new());
+    // PT-TRUTH-01: default paper+paper is fail-closed; use paper+alpaca so the
+    // integrity gate (not deployment readiness) is what blocks the start.
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    ));
 
     force_halted(&st).await;
 
@@ -142,7 +147,12 @@ async fn status_shows_not_armed_after_halt() {
 
 #[tokio::test]
 async fn run_start_requires_db_after_halt_then_arm() {
-    let st = Arc::new(state::AppState::new());
+    // PT-TRUTH-01: default paper+paper is fail-closed; use paper+alpaca so the
+    // DB gate (not deployment readiness) is what blocks after arm.
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    ));
 
     force_halted(&st).await;
 
