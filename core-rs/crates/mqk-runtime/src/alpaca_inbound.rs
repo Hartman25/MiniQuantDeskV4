@@ -292,6 +292,66 @@ pub async fn process_ws_inbound_batch(
     })
 }
 // ---------------------------------------------------------------------------
+// advance_cursor_after_ws_establish — BRK-08R repair path
+// ---------------------------------------------------------------------------
+/// Advance the broker cursor to a WS-confirmed-live state after subscription
+/// re-establishment.
+///
+/// # When to call
+///
+/// Call when the WS session receives the "listening" confirmation frame, but
+/// only when `prev_cursor.trade_updates` is `GapDetected` or
+/// `ColdStartUnproven`.  If the cursor is already `Live` this is a no-op —
+/// the cursor is returned unchanged without writing to DB.
+///
+/// # What this does
+///
+/// Writes a new cursor to `broker_event_cursor` with:
+/// - `trade_updates = Live { last_message_id: "", last_event_at: "" }`
+///   (empty; will be filled on the first received WS trade-update event).
+/// - `rest_activity_after` preserved from `prev_cursor`.
+///   REST polling resumes from the last known fill-activity position, so any
+///   FILL or PARTIAL_FILL events from the gap window are recovered on the
+///   next orchestrator tick that calls `BrokerAdapter::fetch_events`.
+///
+/// # What this does NOT claim
+///
+/// - WS events from the gap window are NOT replayed (WS has no replay).
+/// - Ack, CancelAck, ReplaceAck, Reject events from the gap are NOT
+///   recoverable via REST activities and remain permanently missing.
+/// - REST recovery is not immediate; it happens on the next orchestrator tick.
+///
+/// Returns the repaired cursor that was persisted (or the unchanged `Live`
+/// cursor if no write was needed).
+pub async fn advance_cursor_after_ws_establish(
+    pool: &PgPool,
+    adapter_id: &str,
+    prev_cursor: &AlpacaFetchCursor,
+    now: DateTime<Utc>,
+) -> anyhow::Result<AlpacaFetchCursor> {
+    // Only repair non-Live states.  A Live cursor already carries correct
+    // continuity; overwriting it would discard last_message_id tracking.
+    match &prev_cursor.trade_updates {
+        AlpacaTradeUpdatesResume::Live { .. } => return Ok(prev_cursor.clone()),
+        AlpacaTradeUpdatesResume::ColdStartUnproven
+        | AlpacaTradeUpdatesResume::GapDetected { .. } => {}
+    }
+    // Preserve rest_activity_after so REST polling resumes from the last
+    // known fill-activity position.
+    let recovered = AlpacaFetchCursor::live(
+        prev_cursor.rest_activity_after.clone(),
+        "", // no WS events seen yet; will advance on first trade-update
+        "",
+    );
+    let cursor_json = serde_json::to_string(&recovered)
+        .context("advance_cursor_after_ws_establish: serialization failed")?;
+    mqk_db::advance_broker_cursor(pool, adapter_id, &cursor_json, now)
+        .await
+        .context("advance_cursor_after_ws_establish: advance_broker_cursor failed")?;
+    Ok(recovered)
+}
+
+// ---------------------------------------------------------------------------
 // persist_ws_gap_cursor — BRK-07R fail-closed path
 // ---------------------------------------------------------------------------
 /// Persist a `GapDetected` cursor when WS continuity cannot be proven.

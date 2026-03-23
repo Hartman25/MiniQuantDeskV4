@@ -70,7 +70,10 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use mqk_broker_alpaca::types::AlpacaFetchCursor;
 use mqk_broker_alpaca::{parse_ws_message, AlpacaWsMessage};
-use mqk_runtime::alpaca_inbound::{process_ws_inbound_batch, WsIngestOutcome};
+use mqk_runtime::alpaca_inbound::{
+    advance_cursor_after_ws_establish, persist_ws_gap_cursor, process_ws_inbound_batch,
+    WsIngestOutcome,
+};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -200,6 +203,32 @@ async fn alpaca_ws_loop(
                 detail: "alpaca_ws: transport reconnecting after disconnect".to_string(),
             })
             .await;
+
+        // BRK-08R: Persist GapDetected to DB so the DB cursor is honest about
+        // the gap.  Without this, DB state would remain at the last `Live`
+        // cursor and the orchestrator could proceed with REST polling as if
+        // no gap occurred.  We load the last known cursor (which may already
+        // carry last_message_id / rest_activity_after) and demote it.
+        if let Some(pool) = state.db.as_ref() {
+            let last_cursor = load_session_cursor_from_db(&state).await;
+            match persist_ws_gap_cursor(
+                pool,
+                state.adapter_id(),
+                &last_cursor,
+                "alpaca_ws: transport disconnect",
+                Utc::now(),
+            )
+            .await
+            {
+                Ok(_) => tracing::debug!("alpaca_ws: gap cursor persisted to DB (BRK-08R)"),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "alpaca_ws: failed to persist gap cursor to DB; \
+                     DB state may not reflect disconnect (BRK-08R)"
+                ),
+            }
+        }
+
         tokio::time::sleep(WS_RECONNECT_BACKOFF).await;
     }
 }
@@ -291,7 +320,35 @@ async fn alpaca_ws_session(
     // BRK-07R: Seed in-session cursor from last persisted position.
     // This anchors gap-detection to the prior session's last known WS event.
     // Does NOT recover missed events (WS does not replay the gap window).
-    let mut current_cursor = load_session_cursor_from_db(state).await;
+    let prev_cursor = load_session_cursor_from_db(state).await;
+
+    // BRK-08R: If the persisted cursor was GapDetected or ColdStartUnproven,
+    // repair it to Live now that subscription is confirmed.  `rest_activity_after`
+    // is preserved so the next orchestrator tick's REST poll resumes from the
+    // last known fill position and recovers FILL/PARTIAL_FILL events from the
+    // gap window.  Live cursors are returned unchanged.
+    let mut current_cursor = if let Some(pool) = state.db.as_ref() {
+        match advance_cursor_after_ws_establish(pool, state.adapter_id(), &prev_cursor, Utc::now())
+            .await
+        {
+            Ok(repaired) => {
+                tracing::info!(
+                    "alpaca_ws: repaired cursor to Live after WS re-establish; \
+                     REST poll will recover gap-window fills (BRK-08R)"
+                );
+                repaired
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "alpaca_ws: cursor repair failed; using prev cursor as-is (BRK-08R)"
+                );
+                prev_cursor
+            }
+        }
+    } else {
+        prev_cursor
+    };
 
     // ---------------------------------------------------------------------------
     // Receive loop
