@@ -1,14 +1,59 @@
-import { getDaemonUrl } from "../../config";
+// core-rs/mqk-gui/src/features/system/api.ts
+//
+// Public API surface for the system feature.
+//
+// This file owns:
+//   - fetchOperatorModel()   — main model assembly (all backend probes + assembly)
+//   - Order-detail fetches   — per-order timeline/trace/replay/chart/causality
+//
+// Exported helpers live in dedicated modules:
+//   - http.ts     — fetchJsonCandidate, fetchJsonCandidates, tryFetchJson, postJson
+//   - legacy.ts   — legacy protocol adapters, normalizers, mappers
+//   - actions.ts  — invokeOperatorAction
+
 import { withClassifiedPanelSources } from "./sourceAuthority";
+import {
+  fetchJsonCandidate,
+  fetchJsonCandidates,
+  tryFetchJson,
+  type EndpointFetchResult,
+} from "./http";
+import {
+  deriveDataSourceDetail,
+  deriveExecutionSummaryFromOrders,
+  mapDaemonCatalog,
+  mapLegacyPortfolioSummary,
+  mapLegacyPositionsResponse,
+  mapLegacyTradingFillsToRows,
+  mapLegacyTradingOrdersToExecutionOrders,
+  mapLegacyTradingOrdersToOpenOrders,
+  mapLegacyStatusToSystemStatus,
+  nowIso,
+  type ConfigDiffsWrapper,
+  type DaemonActionCatalogResponse,
+  type DaemonAuditActionsWrapper,
+  type DaemonArtifactsWrapper,
+  type DaemonOperatorTimelineWrapper,
+  type LegacyDaemonStatusSnapshot,
+  type LegacyTradingAccountResponse, // exported from legacy.ts
+  type LegacyTradingFillsResponse,
+  type LegacyTradingOrdersResponse,
+  type LegacyTradingPositionsResponse,
+  type PortfolioFillsResponse,
+  type PortfolioOpenOrdersResponse,
+  type PortfolioPositionsResponse,
+  type ReconcileMismatchesResponse,
+  type RiskDenialsResponse,
+  type StrategySummaryWrapper,
+  type StrategySuppressionsWrapper,
+} from "./legacy";
 import type {
   AlertTriageRow,
   ArtifactRegistrySummary,
   ArtifactRow,
   AuditActionRow,
   CausalityTrace,
-  ConfigDiffRow,
   ConfigFingerprintSummary,
-  DataSourceDetail,
   ExecutionChartModel,
   ExecutionOrderRow,
   ExecutionReplay,
@@ -17,19 +62,15 @@ import type {
   ExecutionTrace,
   ExplicitSurfaceTruth,
   FeedEvent,
-  FillRow,
   IncidentCase,
   MarketDataQualitySummary,
   MetadataSummary,
   OmsOverview,
-  OpenOrderRow,
   OperatorActionDefinition,
-  OperatorActionReceipt,
   OperatorAlert,
   OperatorTimelineCategory,
   OperatorTimelineEvent,
   PortfolioSummary,
-  PositionRow,
   PreflightStatus,
   ReconcileMismatchRow,
   ReconcileSummary,
@@ -39,8 +80,6 @@ import type {
   RuntimeLeadershipSummary,
   ServiceTopology,
   SessionStateSummary,
-  StrategyRow,
-  StrategySuppressionRow,
   SystemMetrics,
   SystemModel,
   SystemStatus,
@@ -48,662 +87,19 @@ import type {
 } from "./types";
 import { DEFAULT_PREFLIGHT, DEFAULT_STATUS } from "./types";
 
-interface EndpointFetchResult<T> {
-  ok: boolean;
-  endpoint: string;
-  data?: T;
-  error?: string;
-}
+export { invokeOperatorAction } from "./actions";
 
-interface EndpointPostResult<T> {
-  ok: boolean;
-  endpoint: string;
-  status?: number;
-  data?: T;
-  error?: string;
-}
-
-interface LegacyDaemonStatusSnapshot {
-  daemon_uptime_secs: number;
-  active_run_id: string | null;
-  state: string;
-  notes?: string | null;
-  integrity_armed: boolean;
-}
-
-interface LegacyTradingAccountResponse {
-  // has_snapshot removed: DMON-04 contract replaced it with snapshot_state + snapshot_captured_at_utc.
-  account: {
-    equity: string;
-    cash: string;
-    currency: string;
-  };
-}
-
-interface LegacyTradingPosition {
-  symbol: string;
-  qty: string;
-  avg_price: string;
-}
-
-interface LegacyTradingPositionsResponse {
-  // has_snapshot removed: DMON-04 contract.
-  positions: LegacyTradingPosition[];
-}
-
-interface LegacyTradingOrder {
-  broker_order_id: string;
-  client_order_id: string;
-  symbol: string;
-  side: string;
-  type: string;
-  status: string;
-  qty: string;
-  limit_price?: string | null;
-  stop_price?: string | null;
-  created_at_utc: string;
-}
-
-interface LegacyTradingOrdersResponse {
-  // has_snapshot removed: DMON-04 contract.
-  orders: LegacyTradingOrder[];
-}
-
-interface LegacyTradingFill {
-  broker_fill_id: string;
-  broker_order_id: string;
-  client_order_id: string;
-  symbol: string;
-  side: string;
-  qty: string;
-  price: string;
-  fee: string;
-  ts_utc: string;
-}
-
-interface LegacyTradingFillsResponse {
-  // has_snapshot removed: DMON-04 contract.
-  fills: LegacyTradingFill[];
-}
-
-// Canonical portfolio surfaces (Cluster 2).  snapshot_state discriminates
-// "active broker snapshot" from "no broker snapshot loaded" without HTTP
-// status string matching.  GUI checks the typed field, not an error string.
-interface PortfolioPositionsResponse {
-  snapshot_state: "active" | "no_snapshot";
-  captured_at_utc: string | null;
-  rows: PositionRow[];
-}
-
-interface PortfolioOpenOrdersResponse {
-  snapshot_state: "active" | "no_snapshot";
-  captured_at_utc: string | null;
-  rows: OpenOrderRow[];
-}
-
-interface PortfolioFillsResponse {
-  snapshot_state: "active" | "no_snapshot";
-  captured_at_utc: string | null;
-  rows: FillRow[];
-}
-
-// Canonical risk denial truth surface.
-//
-// truth_state values:
-//   "no_snapshot"         — execution loop not running and no historical rows in DB;
-//                           denial truth entirely absent. GUI IIFE emits ok:false →
-//                           endpoint in missingEndpoints → panel blocks.
-//   "active"              — execution loop running AND DB pool available. denials contains
-//                           ONLY rows durably stored in sys_risk_denial_events. Restart-safe.
-//                           denials: [] means no denial has ever been recorded in this deployment.
-//   "active_session_only" — execution loop running but no DB pool (test environments only;
-//                           never returned in production). denials from in-memory ring buffer
-//                           only. NOT restart-safe.
-//   "durable_history"     — execution loop not running but DB has historical rows from a prior
-//                           session. denials is durably sourced. Restart-safe.
-//   "not_wired"           — defensive guard only; not returned by current daemon but handled
-//                           fail-closed in case of future partial-wiring edge cases.
-interface RiskDenialsResponse {
-  truth_state: "active" | "active_session_only" | "no_snapshot" | "not_wired" | "durable_history";
-  snapshot_at_utc: string | null;
-  denials: RiskDenialRow[];
-}
-
-
-// Canonical reconcile mismatch detail surface.
-//
-// `rows` are live derived reconcile diffs, not durable mismatch-table records.
-// The daemon only exposes them when current execution snapshot + broker snapshot
-// detail truth is authoritative and consistent with reconcile status.
-interface ReconcileMismatchesResponse {
-  truth_state: "active" | "no_snapshot" | "stale";
-  snapshot_at_utc: string | null;
-  rows: ReconcileMismatchRow[];
-}
-
-// Config-diff truth wrapper.
-// "not_wired" = no durable config-diff persistence exists; rows is empty and not authoritative.
-// "active"    = reserved for when durable tracking is wired (not currently returned).
-interface ConfigDiffsWrapper {
-  truth_state: "not_wired" | "active";
-  backend?: string | null;
-  rows: ConfigDiffRow[];
-}
-
-// Strategy suppression truth wrapper (CC-02: now durable).
-// "no_db"  = DB pool not configured; rows is empty and not authoritative.
-//            GUI renders "unavailable" notice rather than "not wired" notice.
-// "active" = DB present; rows are authoritative (empty = no suppressions).
-interface StrategySuppressionsWrapper {
-  canonical_route?: string | null;
-  backend?: string | null;
-  truth_state: "no_db" | "active";
-  rows: StrategySuppressionRow[];
-}
-
-// Strategy summary truth wrapper.
-// "not_wired" = no real strategy-fleet registry exists; rows is empty and not authoritative.
-//   The former synthetic "daemon_integrity_gate" surrogate row has been removed at the
-//   daemon layer; this wrapper prevents any future bare-array regression from silently
-//   re-introducing fake strategy rows.
-// "active"    = reserved for when a real strategy-fleet source is wired.
-interface StrategySummaryWrapper {
-  canonical_route?: string | null;
-  backend?: string | null;
-  truth_state: "not_wired" | "active";
-  rows: StrategyRow[];
-}
-
-interface LegacyIntegrityResponse {
-  armed: boolean;
-  active_run_id: string | null;
-  state: string;
-}
-
-interface DaemonOperatorActionResponse {
-  requested_action: string;
-  accepted: boolean;
-  disposition: string;
-  warnings?: string[];
-  environment?: SystemStatus["environment"];
-  audit?: {
-    audit_event_id?: string | null;
-  };
-}
-
-// Matches the daemon's ActionCatalogEntry shape (snake_case from JSON).
-interface DaemonActionCatalogEntry {
-  action_key: string;
-  label: string;
-  level: number;
-  description: string;
-  requires_reason: boolean;
-  confirm_text: string;
-  enabled: boolean;
-  disabled_reason?: string | null;
-}
-
-interface DaemonActionCatalogResponse {
-  canonical_route: string;
-  actions: DaemonActionCatalogEntry[];
-}
-
-// Durable operator-history daemon wrapper types.
-// These three endpoints return {canonical_route, truth_state, backend, rows} —
-// not direct arrays or GUI-typed objects. The fetch/map layer below unwraps
-// the wrapper and maps daemon field names to GUI type field names. Only fields
-// provably present in the daemon DB sources are populated; no values are fabricated.
-
-interface DaemonAuditActionRow {
-  audit_event_id: string;
-  ts_utc: string;
-  requested_action: string;
-  disposition: string;
-  run_id: string | null;
-  runtime_transition: string | null;
-  provenance_ref: string;
-}
-
-type DurableHistoryTruthState = "active" | "backend_unavailable";
-
-interface DaemonAuditActionsWrapper {
-  canonical_route: string;
-  truth_state: DurableHistoryTruthState;
-  backend: string;
-  rows: DaemonAuditActionRow[];
-}
-
-interface DaemonArtifactRow {
-  artifact_id: string;
-  artifact_type: string;
-  run_id: string;
-  created_at_utc: string;
-  provenance_ref: string;
-}
-
-interface DaemonArtifactsWrapper {
-  canonical_route: string;
-  truth_state: DurableHistoryTruthState;
-  backend: string;
-  rows: DaemonArtifactRow[];
-}
-
-interface DaemonTimelineRow {
-  ts_utc: string;
-  kind: string;
-  run_id: string | null;
-  detail: string;
-  provenance_ref: string;
-}
-
-interface DaemonOperatorTimelineWrapper {
-  canonical_route: string;
-  truth_state: DurableHistoryTruthState;
-  backend: string;
-  rows: DaemonTimelineRow[];
-}
-
-async function fetchJsonCandidate<T>(path: string): Promise<EndpointFetchResult<T>> {
-  try {
-    const url = new URL(path, getDaemonUrl()).toString();
-    const response = await fetch(url, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-    });
-
-    if (!response.ok) {
-      return { ok: false, endpoint: path, error: `HTTP ${response.status}` };
-    }
-
-    return {
-      ok: true,
-      endpoint: path,
-      data: (await response.json()) as T,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      endpoint: path,
-      error: error instanceof Error ? error.message : "unknown error",
-    };
-  }
-}
-
-async function fetchJsonCandidates<T>(paths: string[]): Promise<EndpointFetchResult<T>> {
-  for (const path of paths) {
-    const result = await fetchJsonCandidate<T>(path);
-    if (result.ok) return result;
-  }
-  return {
-    ok: false,
-    endpoint: paths[0] ?? "unknown",
-    error: "all candidates failed",
-  };
-}
-
-async function tryFetchJson<T>(paths: string[]): Promise<T | null> {
-  const result = await fetchJsonCandidates<T>(paths);
-  return result.ok ? (result.data ?? null) : null;
-}
-
-async function postJson<T>(paths: string[], body: Record<string, unknown>): Promise<EndpointPostResult<T>> {
-  let lastFailure: EndpointPostResult<T> = {
-    ok: false,
-    endpoint: paths[0] ?? "unknown",
-    error: "all candidates failed",
-  };
-
-  for (const path of paths) {
-    try {
-      const url = new URL(path, getDaemonUrl()).toString();
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-      });
-
-      if (!response.ok) {
-        lastFailure = {
-          ok: false,
-          endpoint: path,
-          status: response.status,
-          error: `HTTP ${response.status}`,
-        };
-        continue;
-      }
-
-      const contentType = response.headers.get("content-type") ?? "";
-      const data = contentType.includes("application/json") ? ((await response.json()) as T) : undefined;
-
-      return {
-        ok: true,
-        endpoint: path,
-        status: response.status,
-        data,
-      };
-    } catch (error) {
-      lastFailure = {
-        ok: false,
-        endpoint: path,
-        error: error instanceof Error ? error.message : "unknown error",
-      };
-    }
-  }
-
-  return lastFailure;
-}
-
-function parseNumber(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-  return 0;
-}
-
-function parseIsoTimestamp(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
-
-function ageMsFromTimestamp(value: unknown): number {
-  const iso = parseIsoTimestamp(value);
-  if (!iso) return 0;
-  const timestamp = Date.parse(iso);
-  if (Number.isNaN(timestamp)) return 0;
-  return Math.max(0, Date.now() - timestamp);
-}
-
-function normalizeSide(side: unknown): "buy" | "sell" {
-  return String(side ?? "").toLowerCase() === "sell" ? "sell" : "buy";
-}
-
-function normalizeOrderType(orderType: unknown): "market" | "limit" | "stop" | "stop_limit" {
-  const normalized = String(orderType ?? "").toLowerCase().replace(/\s+/g, "_");
-  if (normalized === "limit") return "limit";
-  if (normalized === "stop") return "stop";
-  if (normalized === "stop_limit" || normalized === "stoplimit") return "stop_limit";
-  return "market";
-}
-
-function normalizeOrderStatus(status: unknown): string {
-  const normalized = String(status ?? "unknown").trim().toLowerCase().replace(/\s+/g, "_");
-  return normalized || "unknown";
-}
-
-function isTerminalOrderStatus(status: string): boolean {
-  return ["filled", "cancelled", "canceled", "rejected", "expired", "done_for_day"].includes(status);
-}
-
-function deriveExecutionStage(status: string): string {
-  if (status.includes("partial")) return "Partial Fill";
-  if (status.includes("fill")) return "Filled";
-  if (status.includes("cancel")) return "Cancelled";
-  if (status.includes("reject")) return "Rejected";
-  if (status.includes("pending") || status.includes("new") || status.includes("accepted")) return "Pending";
-  if (status.includes("submit")) return "Dispatching";
-  return "Broker Snapshot";
-}
-
-function mapLegacyStatusToSystemStatus(legacy: LegacyDaemonStatusSnapshot): SystemStatus {
-  const base = { ...DEFAULT_STATUS };
-  const state = String(legacy.state ?? "").toLowerCase();
-  const runtimeStatus: SystemStatus["runtime_status"] =
-    state.includes("halt")
-      ? "halted"
-      : state.includes("start")
-        ? "starting"
-        : state.includes("run")
-          ? "running"
-          : state.includes("degrad")
-            ? "degraded"
-            : state.includes("pause")
-              ? "paused"
-              : "idle";
-
-  return {
-    ...base,
-    runtime_status: runtimeStatus,
-    integrity_status: legacy.integrity_armed ? "ok" : "warning",
-    last_heartbeat: null,
-    active_account_id: null,
-    config_profile: null,
-    has_warning: base.has_warning || !legacy.integrity_armed || Boolean(legacy.notes),
-    strategy_armed: legacy.integrity_armed,
-    execution_armed: legacy.integrity_armed,
-    live_routing_enabled: false,
-    kill_switch_active: runtimeStatus === "halted",
-    risk_halt_active: false,
-    integrity_halt_active: !legacy.integrity_armed,
-    daemon_reachable: true,
-    // AP-09: Legacy daemon (/v1/status) does not send external-broker truth fields.
-    // Default to synthetic/not_applicable (paper-only assumption) so the external
-    // broker continuity gate in truthRendering does not fire on legacy status.
-    broker_snapshot_source: "synthetic" as const,
-    alpaca_ws_continuity: "not_applicable" as const,
-    deployment_start_allowed: false,
-    daemon_mode: "paper",
-    adapter_id: "paper",
-  };
-}
-
-function legacyActionPaths(actionKey: string): string[] {
-  switch (actionKey) {
-    case "start-system":
-      return ["/v1/run/start"];
-    case "stop-system":
-      return ["/v1/run/stop"];
-    case "kill-switch":
-      return ["/v1/run/halt"];
-    case "arm-execution":
-    case "arm-strategy":
-      return ["/control/arm", "/v1/integrity/arm"];
-    case "disarm-execution":
-    case "disarm-strategy":
-      return ["/control/disarm", "/v1/integrity/disarm"];
-    default:
-      return [];
-  }
-}
+// ---------------------------------------------------------------------------
+// Internal helpers (used only within fetchOperatorModel)
+// ---------------------------------------------------------------------------
 
 function objectOrFallback<T>(value: unknown, fallback: T): T {
   return value && typeof value === "object" ? (value as T) : fallback;
 }
 
-// Supported action keys the daemon can execute (matches ops_action dispatcher).
-const DAEMON_SUPPORTED_ACTION_KEYS = new Set([
-  "arm-execution",
-  "arm-strategy",
-  "disarm-execution",
-  "disarm-strategy",
-  "start-system",
-  "stop-system",
-  "kill-switch",
-]);
-
-function mapDaemonCatalog(response: DaemonActionCatalogResponse): OperatorActionDefinition[] {
-  return response.actions
-    .filter((entry) => DAEMON_SUPPORTED_ACTION_KEYS.has(entry.action_key))
-    .map((entry) => ({
-      action_key: entry.action_key as OperatorActionDefinition["action_key"],
-      label: entry.label,
-      level: Math.min(3, Math.max(0, entry.level)) as 0 | 1 | 2 | 3,
-      description: entry.description,
-      requiresReason: entry.requires_reason,
-      confirmText: entry.confirm_text,
-      enabled: entry.enabled,
-      disabledReason: entry.disabled_reason ?? undefined,
-      disabled: !entry.enabled,
-    }));
-}
-
-function mapLegacyPositionsResponse(response: LegacyTradingPositionsResponse | null): PositionRow[] | null {
-  if (!response) return null;
-  return response.positions.map((position) => {
-    const qty = parseNumber(position.qty);
-    const avgPrice = parseNumber(position.avg_price);
-    return {
-      symbol: position.symbol,
-      strategy_id: "broker_snapshot",
-      qty,
-      avg_price: avgPrice,
-      mark_price: avgPrice,
-      unrealized_pnl: 0,
-      realized_pnl_today: 0,
-      broker_qty: qty,
-      drift: false,
-    };
-  });
-}
-
-function mapLegacyPortfolioSummary(
-  accountResponse: LegacyTradingAccountResponse | null,
-): PortfolioSummary | null {
-  if (!accountResponse) return null;
-
-  const equity = parseNumber(accountResponse.account?.equity);
-  const cash = parseNumber(accountResponse.account?.cash);
-
-  return {
-    account_equity: equity,
-    cash,
-    long_market_value: 0,
-    short_market_value: 0,
-    daily_pnl: 0,
-    buying_power: cash,
-  };
-}
-
-function mapLegacyTradingOrdersToExecutionOrders(response: LegacyTradingOrdersResponse | null): ExecutionOrderRow[] | null {
-  if (!response) return null;
-
-  return response.orders.map((order) => {
-    const status = normalizeOrderStatus(order.status);
-    const ageMs = ageMsFromTimestamp(order.created_at_utc);
-    const hasCritical = status.includes("reject");
-    const hasWarning = !hasCritical && !isTerminalOrderStatus(status) && ageMs >= 300_000;
-
-    return {
-      internal_order_id: order.client_order_id || order.broker_order_id,
-      broker_order_id: order.broker_order_id || null,
-      symbol: order.symbol,
-      strategy_id: "broker_snapshot",
-      side: normalizeSide(order.side),
-      order_type: normalizeOrderType(order.type),
-      requested_qty: parseNumber(order.qty),
-      filled_qty: 0,
-      current_status: status,
-      current_stage: deriveExecutionStage(status),
-      age_ms: ageMs,
-      has_warning: hasWarning,
-      has_critical: hasCritical,
-      updated_at: parseIsoTimestamp(order.created_at_utc) ?? nowIso(),
-    };
-  });
-}
-
-function mapLegacyTradingOrdersToOpenOrders(response: LegacyTradingOrdersResponse | null): OpenOrderRow[] | null {
-  const rows = mapLegacyTradingOrdersToExecutionOrders(response);
-  if (!rows) return null;
-
-  return rows
-    .filter((order) => !isTerminalOrderStatus(order.current_status))
-    .map((order) => ({
-      internal_order_id: order.internal_order_id,
-      symbol: order.symbol,
-      strategy_id: order.strategy_id,
-      // Legacy path: side sourced from execution order row; fall back to "unknown" if absent.
-      side: order.side ?? "unknown",
-      status: order.current_status,
-      broker_order_id: order.broker_order_id,
-      requested_qty: order.requested_qty,
-      filled_qty: order.filled_qty,
-      entered_at: order.updated_at,
-    }));
-}
-
-function mapLegacyTradingFillsToRows(response: LegacyTradingFillsResponse | null): FillRow[] | null {
-  if (!response) return null;
-
-  return response.fills.map((fill) => ({
-    fill_id: fill.broker_fill_id,
-    internal_order_id: fill.client_order_id || fill.broker_order_id,
-    symbol: fill.symbol,
-    strategy_id: "broker_snapshot",
-    side: normalizeSide(fill.side),
-    qty: parseNumber(fill.qty),
-    price: parseNumber(fill.price),
-    broker_exec_id: fill.broker_fill_id,
-    applied: true,
-    at: parseIsoTimestamp(fill.ts_utc) ?? nowIso(),
-  }));
-}
-
-function deriveExecutionSummaryFromOrders(orders: ExecutionOrderRow[] | null): ExecutionSummary | null {
-  if (!orders) return null;
-
-  const activeOrders = orders.filter((order) => !isTerminalOrderStatus(order.current_status));
-  const pendingOrders = orders.filter((order) => {
-    const status = order.current_status;
-    return status.includes("new") || status.includes("pending") || status.includes("accepted");
-  });
-  const dispatchingOrders = orders.filter((order) => order.current_status.includes("submit") || order.current_stage === "Dispatching");
-  const rejectedOrders = orders.filter((order) => order.current_status.includes("reject"));
-  const stuckOrders = activeOrders.filter((order) => (order.age_ms ?? 0) >= 300_000);
-
-  return {
-    active_orders: activeOrders.length,
-    pending_orders: pendingOrders.length,
-    dispatching_orders: dispatchingOrders.length,
-    reject_count_today: rejectedOrders.length,
-    cancel_replace_count_today: 0,
-    avg_ack_latency_ms: null,
-    stuck_orders: stuckOrders.length,
-  };
-}
-
-function deriveDataSourceDetail(args: {
-  probeResults: EndpointFetchResult<unknown>[];
-  usedMockSections: string[];
-  daemonReachable: boolean;
-}): DataSourceDetail {
-  const realEndpoints = args.probeResults.filter((r) => r.ok).map((r) => r.endpoint);
-  const missingEndpoints = args.probeResults.filter((r) => !r.ok).map((r) => r.endpoint);
-
-  let state: DataSourceDetail["state"];
-  if (!args.daemonReachable && realEndpoints.length === 0) {
-    state = "disconnected";
-  } else if (realEndpoints.length === 0) {
-    state = "mock";
-  } else if (args.usedMockSections.length > 0 || missingEndpoints.length > 0) {
-    state = "partial";
-  } else {
-    state = "real";
-  }
-
-  return {
-    state,
-    reachable: args.daemonReachable,
-    realEndpoints,
-    missingEndpoints,
-    mockSections: args.usedMockSections,
-    message:
-      state === "disconnected"
-        ? "Daemon unreachable; GUI is not receiving live data."
-        : state === "mock"
-          ? "Connected, but no tracked backend truth endpoints resolved."
-          : state === "partial"
-            ? "Mixed resolved and unresolved backend truth across panels."
-            : "All tracked surfaces resolved from daemon endpoints.",
-  };
-}
+// ---------------------------------------------------------------------------
+// Main model assembly
+// ---------------------------------------------------------------------------
 
 export async function fetchOperatorModel(): Promise<SystemModel> {
   const statusProbe = await fetchJsonCandidates<SystemStatus | LegacyDaemonStatusSnapshot>(["/api/v1/system/status", "/v1/status"]);
@@ -1368,6 +764,10 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Order-detail fetches (per-order deep-dive surfaces)
+// ---------------------------------------------------------------------------
+
 export async function fetchExecutionTimeline(internalOrderId: string): Promise<ExecutionTimeline | null> {
   return tryFetchJson<ExecutionTimeline>([`/api/v1/execution/timeline/${internalOrderId}`]);
 }
@@ -1386,146 +786,6 @@ export async function fetchExecutionChart(internalOrderId: string): Promise<Exec
 
 export async function fetchCausalityTrace(internalOrderId: string): Promise<CausalityTrace | null> {
   return tryFetchJson<CausalityTrace>([`/api/v1/execution/causality/${internalOrderId}`]);
-}
-
-function mapLegacyOperatorActionResponse(
-  actionKey: string,
-  response: EndpointPostResult<unknown>,
-): OperatorActionReceipt | null {
-  if (!response.ok) return null;
-
-  const payload = response.data as
-    | Partial<OperatorActionReceipt & LegacyDaemonStatusSnapshot & LegacyIntegrityResponse>
-    | DaemonOperatorActionResponse
-    | undefined;
-  if (!payload || typeof payload !== "object") {
-    return {
-      ok: true,
-      action_key: actionKey,
-      environment: "paper",
-      live_routing_enabled: false,
-      result_state: "accepted",
-      warnings: ["Operator action completed but returned no JSON payload."],
-      audit_reference: null,
-      blocking_failures: [],
-    };
-  }
-
-  if ("requested_action" in payload || "disposition" in payload) {
-    const operatorPayload = payload as DaemonOperatorActionResponse;
-    return {
-      ok: operatorPayload.accepted ?? true,
-      action_key: operatorPayload.requested_action ?? actionKey,
-      environment: operatorPayload.environment ?? "paper",
-      live_routing_enabled: false,
-      result_state: operatorPayload.disposition ?? "accepted",
-      warnings: operatorPayload.warnings ?? [],
-      audit_reference: operatorPayload.audit?.audit_event_id ?? null,
-      blocking_failures: [],
-    };
-  }
-
-  if ("action_key" in payload || "result_state" in payload) {
-    return {
-      ok: payload.ok ?? true,
-      action_key: payload.action_key ?? actionKey,
-      environment: payload.environment ?? "paper",
-      live_routing_enabled: payload.live_routing_enabled ?? false,
-      result_state: payload.result_state ?? "accepted",
-      warnings: payload.warnings ?? [],
-      audit_reference: payload.audit_reference ?? null,
-      blocking_failures: payload.blocking_failures ?? [],
-    };
-  }
-
-  if ("armed" in payload || "active_run_id" in payload || "state" in payload) {
-    return {
-      ok: true,
-      action_key: actionKey,
-      environment: "paper",
-      live_routing_enabled: false,
-      result_state: String(payload.state ?? "accepted"),
-      warnings: [],
-      audit_reference: null,
-      blocking_failures: [],
-    };
-  }
-
-  return null;
-}
-
-function failedOperatorActionReceipt(
-  actionKey: string,
-  failure: EndpointPostResult<unknown>,
-  targetEnvironment: SystemStatus["environment"] = "paper",
-): OperatorActionReceipt {
-  const blockingFailures: string[] = [];
-  const warnings: string[] = [];
-  let resultState = "unavailable";
-
-  if (failure.status === 401) {
-    resultState = "unauthorized";
-    blockingFailures.push("Daemon refused operator action: valid Bearer token required.");
-  } else if (failure.status === 403) {
-    resultState = "refused";
-    blockingFailures.push("Daemon refused operator action at the gate.");
-  } else if (failure.status === 404) {
-    blockingFailures.push(`Operator action endpoint missing for ${actionKey}.`);
-  } else if (failure.error) {
-    blockingFailures.push(`Operator action failed: ${failure.error}`);
-  } else {
-    blockingFailures.push(`Operator action failed for ${actionKey}.`);
-  }
-
-  warnings.push(`Last attempted endpoint: ${failure.endpoint}`);
-
-  return {
-    ok: false,
-    action_key: actionKey,
-    environment: targetEnvironment,
-    live_routing_enabled: false,
-    result_state: resultState,
-    warnings,
-    audit_reference: null,
-    blocking_failures: blockingFailures,
-  };
-}
-
-export async function invokeOperatorAction(
-  actionKey: string,
-  params: Record<string, unknown>,
-): Promise<OperatorActionReceipt> {
-  // Try the canonical dispatcher first. A 400/403/409 from canonical is a
-  // definitive daemon decision and MUST NOT fall through to legacy paths.
-  // Only fall back to legacy when canonical was unreachable (network error,
-  // status === undefined) or explicitly absent (status === 404).
-  const canonicalResult = await postJson<Partial<OperatorActionReceipt> | LegacyDaemonStatusSnapshot | LegacyIntegrityResponse>(
-    ["/api/v1/ops/action"],
-    { action_key: actionKey, ...params },
-  );
-
-  const canonicalDefinitive = canonicalResult.ok || (canonicalResult.status !== undefined && canonicalResult.status !== 404);
-  if (canonicalDefinitive) {
-    const mapped = mapLegacyOperatorActionResponse(actionKey, canonicalResult);
-    if (mapped) return mapped;
-    return failedOperatorActionReceipt(actionKey, canonicalResult);
-  }
-
-  // Canonical was not found (404) or was unreachable (no status = network error).
-  // Fall back to legacy action paths for older daemon versions.
-  const legacyPaths = legacyActionPaths(actionKey);
-  if (legacyPaths.length === 0) {
-    return failedOperatorActionReceipt(actionKey, canonicalResult);
-  }
-
-  const legacyResult = await postJson<Partial<OperatorActionReceipt> | LegacyDaemonStatusSnapshot | LegacyIntegrityResponse>(
-    legacyPaths,
-    { action_key: actionKey, ...params },
-  );
-
-  const mapped = mapLegacyOperatorActionResponse(actionKey, legacyResult);
-  if (mapped) return mapped;
-  return failedOperatorActionReceipt(actionKey, legacyResult);
 }
 
 // requestSystemModeTransition was removed (H-7 / PC-1):
