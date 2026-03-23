@@ -125,6 +125,8 @@ docs/
 Rust is the authoritative execution and control layer.  
 Python research is optional and is intended to emit deterministic artifacts that the Rust spine can consume.
 
+Operationally, `MAIN` is the canonical engine. `EXP` exists as a research-side experimental sandbox and is not part of current readiness or operator-truth claims unless explicitly promoted.
+
 ## **What Works Today**
 
 ### **Market Data**
@@ -172,9 +174,8 @@ This repo has real institutional bones, but it is **not** yet a fully live-capit
 - deterministic paper path and backtest infrastructure
 
 **What is still intentionally fail-closed or under hardening**
-- live-shadow deployment
-- limited live-capital deployment
-- full daemon-level backtest deployment
+- live-shadow and live-capital daemon/runtime posture are typed and gate-checked, but operational trust and end-to-end recovery proof remain partial
+- daemon-level backtest deployment is intentionally refused fail-closed today
 - complete operator-truth coverage across all GUI detail surfaces
 - full live broker wiring proof through the daemon/runtime plane
 
@@ -189,9 +190,9 @@ This repo has real institutional bones, but it is **not** yet a fully live-capit
 The repo now has multiple verification lanes instead of one generic “cargo test and hope” story.
 
 **CI lanes**
-- **GUI contract gate** — GUI build plus authoritative daemon contract test
+- **GUI contract gate** — GUI truth tests, GUI build, plus authoritative daemon contract test
 - **Safety guards** — unsafe-pattern and migration-governance checks
-- **Rust lane** — `fmt`, `clippy`, and broad workspace tests
+- **Rust lane** — `fmt --check`, `clippy`, and broad workspace tests
 - **DB proof lane** — repo-native Postgres-backed safety proof harness
 
 **Local proof harness**
@@ -232,7 +233,7 @@ docker run --name mqk-postgres-proof `
 ### **5. Build and test the Rust workspace**
 ```powershell
 cd core-rs
-cargo fmt --all
+cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```

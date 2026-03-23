@@ -55,6 +55,8 @@ Use the root README for the high-level system story.
 - `scripts/` — repo-native helper and proof scripts
 - `docs/` — specs, checklists, runbooks, audits
 
+Operationally, `MAIN` is the canonical engine. `EXP` is a research-side experimental sandbox and should not be treated as current readiness or operator truth unless explicitly promoted.
+
 ## **Prerequisites**
 
 ### **Core Workspace**
@@ -122,7 +124,7 @@ All Rust commands below assume you are in `core-rs/`.
 
 ### **Formatting / Lint / Broad Test**
 ```powershell
-cargo fmt --all
+cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
@@ -132,10 +134,20 @@ cargo test --workspace
 cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate
 ```
 
-### **Focused Execution / Runtime / Paper Checks**
+### **GUI Local Truth Checks**
+From `core-rs/mqk-gui/`:
+
+```powershell
+npm ci
+npm run test
+npm run build
+```
+
+### **Focused Execution / Runtime / Broker Checks**
 ```powershell
 cargo test -p mqk-execution --features testkit
 cargo test -p mqk-broker-paper
+cargo test -p mqk-broker-alpaca
 cargo test -p mqk-runtime
 cargo test -p mqk-testkit
 ```
@@ -170,6 +182,11 @@ Typed support and `start_allowed: true` exist in source and are tested for all f
 
 - `live-shadow` or `live-capital` with the `paper` adapter: refused (paper adapter cannot provide real external broker truth for these modes)
 - any mode with an unrecognised adapter ID: refused fail-closed
+
+### **Important vocabulary mismatch**
+- daemon deployment labels use `paper`, `live-shadow`, `live-capital`, and `backtest`
+- `mqk run start` still uses the older config/run-row mode vocabulary: `BACKTEST | PAPER | LIVE`
+- do not assume CLI `LIVE` maps one-to-one to daemon `live-shadow` versus `live-capital`; they describe different layers
 
 ### **Default bind posture**
 - default bind: `127.0.0.1:8899`
@@ -362,6 +379,16 @@ cargo run -p mqk-cli -- run halt --run-id "<RUN_ID>" --reason "manual halt"
 cargo run -p mqk-cli -- run status --run-id "<RUN_ID>"
 ```
 
+### **Deadman Check**
+```powershell
+cargo run -p mqk-cli -- run deadman-check --run-id "<RUN_ID>" --ttl-seconds 60
+```
+
+### **Deadman Enforce**
+```powershell
+cargo run -p mqk-cli -- run deadman-enforce --run-id "<RUN_ID>" --ttl-seconds 60
+```
+
 Other lifecycle helpers exist:
 ```powershell
 cargo run -p mqk-cli -- run --help
@@ -445,6 +472,7 @@ This layer is intended to emit deterministic artifacts that the Rust backtest/ex
 The current GitHub Actions pipeline includes:
 
 - **GUI contract lane**
+  - GUI truth tests
   - GUI build
   - daemon/GUI contract gate
 
@@ -486,6 +514,9 @@ Be honest about these:
 Useful repo docs:
 - `docs/GUI_CONVERGENCE_CHECKLIST.md`
 - `docs/ci/gui_daemon_contract_waivers.md`
+- `docs/runbooks/operator_workflows.md`
+- `docs/runbooks/live_shadow_operational_proof.md`
+- `docs/runbooks/common_failure_modes.md`
 - `docs/specs/`
 - `docs/runbooks/`
 - `MiniQuantDesk_V4_90plus_Patch_Tracker.md`
