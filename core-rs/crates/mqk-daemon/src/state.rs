@@ -45,7 +45,7 @@ use env::{
     operator_auth_mode_from_env, runtime_selection_from_env,
 };
 #[cfg(test)]
-use env::{parse_deployment_mode, runtime_selection_from_env_values};
+use env::runtime_selection_from_env_values;
 use snapshot::{recover_oms_and_portfolio, synthesize_paper_broker_snapshot};
 use types::{DaemonOrchestrator, ReconcileTruthGate, StateIntegrityGate};
 

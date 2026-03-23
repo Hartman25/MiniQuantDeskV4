@@ -273,19 +273,27 @@ async fn n05_control_arm_provenance_ref_matches_exact_durable_audit_events_uuid(
     let count = sink.call_count.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(count, 1, "N05: webhook must be called exactly once");
 
-    let received = sink.received.lock().unwrap();
-    let payload = &received[0];
+    let expected_prov = format!("audit_events:{event_id_str}");
 
-    // provenance_ref must be "audit_events:<event_id_str>" — exact durable linkage.
-    let expected_prov = format!("audit_events:{}", event_id_str);
+    let actual_prov = {
+        let received = sink.received.lock().unwrap();
+        assert_eq!(
+            received.len(),
+            1,
+            "N05: exactly one payload must be received"
+        );
+
+        received[0]["provenance_ref"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    };
+
     assert_eq!(
-        payload["provenance_ref"].as_str().unwrap_or(""),
+        actual_prov,
         expected_prov,
-        "N05: provenance_ref must be exact audit_events UUID reference; got: {:?}",
-        payload["provenance_ref"]
+        "N05: provenance_ref must be exact audit_events UUID reference; got: {actual_prov:?}"
     );
-
-    drop(received);
 
     // Verify the UUID actually exists in the audit_events table.
     let event_uuid =
