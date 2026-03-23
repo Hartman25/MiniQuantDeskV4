@@ -1,7 +1,7 @@
 # MiniQuantDeskV4
 
 <p align="center">
-  <img src="assets/logo/miniquantdesk_banner_wide.png" alt="MiniQuantDesk" width="520">
+  <img src="assets\logo\Veritas Ledger.png" alt="MiniQuantDesk" width="520">
 </p>
 
 <p align="center">
