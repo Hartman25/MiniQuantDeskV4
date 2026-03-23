@@ -4,6 +4,7 @@
 //! `State<Arc<AppState>>` from Axum; this module owns daemon-local runtime
 //! lifecycle control plus durable status reconstruction.
 
+mod alpaca_ws_transport;
 mod broker;
 mod env;
 mod loop_runner;
@@ -25,6 +26,10 @@ use uuid::Uuid;
 // Re-export everything that external code (routes, tests, etc.) needs.
 use crate::notify::DiscordNotifier;
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
+pub use alpaca_ws_transport::{
+    build_ws_auth_message, build_ws_subscribe_message, spawn_alpaca_paper_ws_task,
+    ws_url_from_base_url,
+};
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
 pub use loop_runner::spawn_reconcile_tick;
 pub(crate) use snapshot::{
@@ -209,6 +214,81 @@ impl AppState {
             DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
         };
         state
+    }
+
+    /// Test constructor: Paper+Alpaca (or any mode/broker pair) with a real DB pool.
+    ///
+    /// Equivalent to `new_for_test_with_mode_and_broker` but wires the given DB pool
+    /// so `seed_ws_continuity_from_db` and other DB-backed paths can be exercised
+    /// in integration tests (BRK-07R).
+    pub fn new_for_test_with_db_mode_and_broker(
+        db: PgPool,
+        mode: DeploymentMode,
+        kind: BrokerKind,
+    ) -> Self {
+        let mut state = Self::new_for_test_with_mode_and_broker(mode, kind);
+        state.db = Some(db);
+        state
+    }
+
+    /// Test helper: override the adapter_id in the runtime selection.
+    ///
+    /// Used in DB-backed tests to give each test a unique adapter_id so they
+    /// can write to `broker_event_cursor` without clobbering each other when
+    /// running in parallel (BRK-07R).
+    pub fn set_adapter_id_for_test(&mut self, adapter_id: &str) {
+        self.runtime_selection.adapter_id = adapter_id.to_string();
+    }
+
+    /// BRK-07R: Seed WS continuity state from the last persisted broker cursor.
+    ///
+    /// Called at daemon boot (before the WS transport task starts) to give the
+    /// operator an honest view of the prior session's ending state:
+    ///
+    /// - **No cursor in DB** → `ColdStartUnproven` (unchanged).
+    /// - **Prior `Live` cursor** → demoted to `ColdStartUnproven`.  The WS must
+    ///   re-establish connectivity after restart; `Live` is not earned until
+    ///   the subscription is confirmed by the server.
+    /// - **Prior `GapDetected` cursor** → kept as `GapDetected` so the
+    ///   BRK-00R-04 gate immediately blocks start until the gap is resolved.
+    /// - **Cursor parse error** → `GapDetected` (fail-closed).
+    ///
+    /// No-ops when:
+    /// - Broker kind is not Alpaca (not on the WS ingest path).
+    /// - No DB pool is present.
+    pub async fn seed_ws_continuity_from_db(&self) {
+        if self.runtime_selection.broker_kind != Some(BrokerKind::Alpaca) {
+            return;
+        }
+        let Some(pool) = self.db.as_ref() else { return; };
+        let cursor_json = match mqk_db::load_broker_cursor(pool, self.adapter_id()).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "BRK-07R: failed to load broker cursor at daemon boot; \
+                     leaving ColdStartUnproven"
+                );
+                return;
+            }
+        };
+        // Derive continuity from the cursor JSON then demote Live → ColdStartUnproven.
+        // GapDetected is preserved so the BRK-00R-04 gate immediately reflects
+        // the prior gap.
+        let raw = AlpacaWsContinuityState::from_cursor_json(
+            self.runtime_selection.broker_kind,
+            cursor_json.as_deref(),
+        );
+        let boot_continuity = if matches!(raw, AlpacaWsContinuityState::Live { .. }) {
+            AlpacaWsContinuityState::ColdStartUnproven
+        } else {
+            raw
+        };
+        tracing::debug!(
+            continuity = ?boot_continuity,
+            "BRK-07R: seeded WS continuity from persisted broker cursor"
+        );
+        *self.alpaca_ws_continuity.write().await = boot_continuity;
     }
 
     fn new_inner(operator_auth: OperatorAuthMode, db: Option<PgPool>) -> Self {
@@ -594,6 +674,38 @@ impl AppState {
                 "runtime.control_refusal.already_owned",
                 format!("runtime already active under local ownership: {run_id}"),
             ));
+        }
+
+        // BRK-00R-04: paper+alpaca WS continuity start gate.
+        //
+        // The Alpaca paper path requires proven WS continuity before runtime start.
+        // ColdStartUnproven and GapDetected are not start-safe: no live WS cursor
+        // has been established, so event delivery ordering cannot be trusted.
+        //
+        // Placed before db_pool() so the check is:
+        //   - at the earliest honest enforcement point (continuity state is in-memory)
+        //   - in-process testable without a database
+        //   - before any DB resources or runtime lease are acquired
+        //
+        // Full WS transport implementation (subscribe/reconnect/cursor establishment)
+        // remains open; this patch only moves the failure forward from first tick.
+        if self.deployment_mode() == DeploymentMode::Paper
+            && self.runtime_selection.broker_kind == Some(BrokerKind::Alpaca)
+        {
+            let continuity = self.alpaca_ws_continuity().await;
+            if !continuity.is_continuity_proven() {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.paper_alpaca_ws_continuity_unproven",
+                    "alpaca_ws_continuity",
+                    format!(
+                        "paper+alpaca requires proven Alpaca WS continuity before starting; \
+                         current state: '{}' (WS_CONTINUITY_UNPROVEN) — the WS transport \
+                         must establish a live cursor before paper+alpaca can proceed; \
+                         full WS transport work remains open",
+                        continuity.as_status_str()
+                    ),
+                ));
+            }
         }
 
         let db = self.db_pool()?;

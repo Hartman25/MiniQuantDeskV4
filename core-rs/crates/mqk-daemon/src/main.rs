@@ -22,6 +22,12 @@ async fn main() -> anyhow::Result<()> {
         .context("mqk-daemon requires MQK_DATABASE_URL for real runtime lifecycle control")?;
 
     let shared = Arc::new(state::AppState::new_with_db(db));
+
+    // BRK-07R: Seed WS continuity from last persisted cursor before WS task
+    // starts.  If the prior session ended with GapDetected the BRK-00R-04 gate
+    // will immediately block start rather than starting as ColdStartUnproven.
+    shared.seed_ws_continuity_from_db().await;
+
     match shared.operator_auth_mode() {
         state::OperatorAuthMode::TokenRequired(_) => {
             info!(
@@ -37,6 +43,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     state::spawn_heartbeat(shared.bus.clone(), Duration::from_secs(1));
+
+    // BRK-00R-05: Spawn the Alpaca paper WS transport if configured for paper+alpaca.
+    // The handle is kept alive for the lifetime of the daemon.
+    let _alpaca_ws_handle = state::spawn_alpaca_paper_ws_task(Arc::clone(&shared));
 
     let app = routes::build_router(Arc::clone(&shared))
         .layer(
