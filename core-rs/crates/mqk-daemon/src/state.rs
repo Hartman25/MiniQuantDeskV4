@@ -708,6 +708,42 @@ impl AppState {
             }
         }
 
+        // BRK-09R: Reconcile truth start gate for broker-backed paper path.
+        //
+        // If the persisted reconcile status is "dirty" or "stale" — meaning the
+        // prior session ended with a known broker/local drift condition — refuse
+        // start until the operator has investigated and the reconcile state is
+        // cleared to "ok" (or the DB row is absent, meaning no prior evidence).
+        //
+        // "unknown" is the initial in-memory state at fresh boot (no prior run),
+        // and is allowed through: it carries no evidence of prior drift.
+        //
+        // Gate ordering: fires after the WS continuity gate so WS issues are
+        // surfaced first.  A dirty reconcile AND a non-live WS yields the WS gate
+        // as the named blocker; reconcile is only surfaced when WS is clean.
+        //
+        // current_reconcile_snapshot() reads from DB when available, falling back
+        // to in-memory; it does not require db_pool() to be non-None.
+        if self.deployment_mode() == DeploymentMode::Paper
+            && self.runtime_selection.broker_kind == Some(BrokerKind::Alpaca)
+        {
+            let reconcile = self.current_reconcile_snapshot().await;
+            if matches!(reconcile.status.as_str(), "dirty" | "stale") {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.reconcile_dirty",
+                    "reconcile_truth",
+                    format!(
+                        "paper+alpaca cannot start with dirty or stale reconcile truth; \
+                         current reconcile status: '{}'; the prior session's broker/local \
+                         drift must be investigated and the reconcile state must be cleared \
+                         before restarting; reconcile note: {}",
+                        reconcile.status,
+                        reconcile.note.as_deref().unwrap_or("none"),
+                    ),
+                ));
+            }
+        }
+
         let db = self.db_pool()?;
         if let Some(active) = mqk_db::fetch_active_run_for_engine(
             &db,
