@@ -329,6 +329,13 @@ impl BrokerSnapshotTruthSource {
 pub enum StrategyMarketDataSource {
     /// No market-data subsystem is wired. Strategy price feeds are not available.
     NotConfigured,
+    /// PT-DAY-01: External signal ingestion is wired for this deployment.
+    ///
+    /// Strategy signals may be posted via `POST /api/v1/strategy/signal` when
+    /// an active run is present, armed, and not suppressed.  The signal producer
+    /// is responsible for consuming real market data and computing the signal.
+    /// The daemon accepts and enqueues the signal for broker-backed execution.
+    ExternalSignalIngestion,
 }
 
 impl StrategyMarketDataSource {
@@ -336,6 +343,7 @@ impl StrategyMarketDataSource {
     pub fn as_health_str(&self) -> &'static str {
         match self {
             Self::NotConfigured => "not_configured",
+            Self::ExternalSignalIngestion => "signal_ingestion_ready",
         }
     }
 }

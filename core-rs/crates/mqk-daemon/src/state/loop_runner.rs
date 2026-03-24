@@ -46,6 +46,8 @@ pub(super) fn spawn_execution_loop(
     let db = state.db.clone();
     let integrity = Arc::clone(&state.integrity);
     let broker_snapshot_source = state.broker_snapshot_source();
+    // PT-AUTO-01: retained for ws_continuity_gap_requires_halt() check per tick.
+    let state_arc = Arc::clone(&state);
 
     let join_handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);
@@ -102,6 +104,41 @@ pub(super) fn spawn_execution_loop(
                                 };
                             }
                         }
+                    }
+
+                    // PT-AUTO-01: WS continuity gap self-halt.
+                    //
+                    // On the ExternalSignalIngestion (paper+alpaca) path a
+                    // GapDetected cursor means the broker event stream is
+                    // broken.  Continuing to dispatch orders without fill
+                    // tracking is unsound — the loop self-halts before the
+                    // next tick so no further orders are placed.
+                    if state_arc.ws_continuity_gap_requires_halt().await {
+                        tracing::error!(
+                            run_id = %run_id,
+                            "execution_loop_ws_gap_halt: \
+                             Alpaca WS continuity gap detected; halting execution loop"
+                        );
+                        if let Some(ref pool) = db {
+                            let now = Utc::now();
+                            let _ = mqk_db::halt_run(pool, run_id, now).await;
+                        }
+                        {
+                            let mut ig = integrity.write().await;
+                            ig.disarmed = true;
+                            ig.halted = true;
+                        }
+                        if let Err(release_err) =
+                            orchestrator.release_runtime_leadership().await
+                        {
+                            tracing::warn!("runtime_lease_release_failed error={release_err}");
+                        }
+                        return ExecutionLoopExit {
+                            note: Some(
+                                "execution loop halted: Alpaca WS continuity gap detected"
+                                    .to_string(),
+                            ),
+                        };
                     }
 
                     if let Err(err) = orchestrator.tick().await {

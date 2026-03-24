@@ -12,6 +12,7 @@ mod snapshot;
 mod types;
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,6 +56,16 @@ use snapshot::{recover_oms_and_portfolio, synthesize_paper_broker_snapshot};
 use types::{DaemonOrchestrator, ReconcileTruthGate, StateIntegrityGate};
 
 const DAEMON_ENGINE_ID: &str = "mqk-daemon";
+/// PT-AUTO-02: Maximum number of strategy signals accepted per execution run.
+///
+/// Provides a hard per-run intake bound on the paper+alpaca signal ingestion
+/// path.  After this many distinct signals are enqueued (Gate 7 Ok(true)),
+/// Gate 1d refuses further signals with 409/day_limit_reached until the next
+/// run start resets the counter.
+///
+/// 100 signals per run is conservative for a supervised paper session.  It is
+/// not an economics guarantee — it is a safety bound.
+const MAX_AUTONOMOUS_SIGNALS_PER_RUN: u32 = 100;
 const DEFAULT_DAEMON_DEPLOYMENT_MODE: &str = "paper";
 const DEFAULT_DAEMON_ADAPTER_ID: &str = "paper";
 const DAEMON_RUN_CONFIG_HASH_PREFIX: &str = "daemon-runtime";
@@ -116,12 +127,31 @@ pub struct AppState {
     pub strategy_market_data_source: StrategyMarketDataSource,
     /// AP-05: Daemon-owned Alpaca websocket continuity truth.
     alpaca_ws_continuity: Arc<RwLock<AlpacaWsContinuityState>>,
+    /// PT-DAY-03: Injectable wall-clock override for NYSE session gate.
+    ///
+    /// `None` in production — route reads `Utc::now().timestamp()` directly.
+    /// Set to a fixed timestamp in tests to make session-gate proof hermetic.
+    session_clock_override: Arc<RwLock<Option<i64>>>,
+    /// PT-DAY-04: Deduplication flag for WS continuity-gap operator escalation.
+    ///
+    /// `false` at boot and after each Live transition.  Set to `true` on the
+    /// first GapDetected signal refusal.  Prevents notification spam when the
+    /// gap persists across multiple signal POSTs — only the first refusal per
+    /// gap window emits a Discord notification.
+    gap_escalation_pending: Arc<AtomicBool>,
     /// CC-01: Configured strategy fleet.
     strategy_fleet: Arc<RwLock<Option<Vec<StrategyFleetEntry>>>>,
     /// OPS-NOTIFY-01: Best-effort Discord webhook notifier.  No-op when
     /// `DISCORD_WEBHOOK_URL` is unset.  Delivery failure does not affect
     /// primary daemon control truth.
     pub discord_notifier: DiscordNotifier,
+    /// PT-AUTO-02: Per-run autonomous signal intake counter.
+    ///
+    /// Incremented on every new outbox enqueue (Gate 7 Ok(true)).  Reset to 0
+    /// at the start of each new execution run in `start_execution_runtime`.
+    /// Gate 1d refuses further signals once this reaches
+    /// `MAX_AUTONOMOUS_SIGNALS_PER_RUN`.
+    day_signal_count: Arc<AtomicU32>,
 }
 
 impl Default for AppState {
@@ -173,6 +203,15 @@ impl AppState {
             BrokerKind::Alpaca => AlpacaWsContinuityState::ColdStartUnproven,
             BrokerKind::Paper => AlpacaWsContinuityState::NotApplicable,
         }));
+        // PT-DAY-01: recompute signal ingestion policy for the new (mode, broker) pair.
+        state.strategy_market_data_source =
+            if state.runtime_selection.deployment_mode == DeploymentMode::Paper
+                && kind == BrokerKind::Alpaca
+            {
+                StrategyMarketDataSource::ExternalSignalIngestion
+            } else {
+                StrategyMarketDataSource::NotConfigured
+            };
         state
     }
 
@@ -213,6 +252,13 @@ impl AppState {
             DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => CalendarSpec::NyseWeekdays,
             DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
         };
+        // PT-DAY-01: recompute signal ingestion policy for the explicit (mode, broker) pair.
+        state.strategy_market_data_source =
+            if mode == DeploymentMode::Paper && kind == BrokerKind::Alpaca {
+                StrategyMarketDataSource::ExternalSignalIngestion
+            } else {
+                StrategyMarketDataSource::NotConfigured
+            };
         state
     }
 
@@ -322,7 +368,18 @@ impl AppState {
         let broker_snapshot_source =
             BrokerSnapshotTruthSource::from_broker_kind(runtime_selection.broker_kind);
 
-        let strategy_market_data_source = StrategyMarketDataSource::NotConfigured;
+        // PT-DAY-01: ExternalSignalIngestion wired for the honest paper+alpaca path.
+        // Paper+alpaca is the only deployment where the signal ingestion route is
+        // configured — it is the canonical broker-backed paper execution path.
+        // All other modes remain NotConfigured until their own patch slices land.
+        let strategy_market_data_source =
+            if runtime_selection.deployment_mode == DeploymentMode::Paper
+                && runtime_selection.broker_kind == Some(BrokerKind::Alpaca)
+            {
+                StrategyMarketDataSource::ExternalSignalIngestion
+            } else {
+                StrategyMarketDataSource::NotConfigured
+            };
 
         let initial_ws_continuity = initial_ws_continuity_for_broker(runtime_selection.broker_kind);
 
@@ -355,8 +412,11 @@ impl AppState {
             broker_snapshot_source,
             strategy_market_data_source,
             alpaca_ws_continuity: Arc::new(RwLock::new(initial_ws_continuity)),
+            session_clock_override: Arc::new(RwLock::new(None)),
+            gap_escalation_pending: Arc::new(AtomicBool::new(false)),
             strategy_fleet: Arc::new(RwLock::new(strategy_fleet)),
             discord_notifier: DiscordNotifier::from_env(),
+            day_signal_count: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -393,7 +453,200 @@ impl AppState {
         if current == AlpacaWsContinuityState::NotApplicable {
             return;
         }
+        // PT-DAY-04: When WS continuity re-establishes Live, reset the gap
+        // escalation flag so the next gap window can fire a fresh notification.
+        if matches!(new_state, AlpacaWsContinuityState::Live { .. }) {
+            self.gap_escalation_pending.store(false, Ordering::SeqCst);
+        }
         *self.alpaca_ws_continuity.write().await = new_state;
+    }
+
+    /// PT-AUTO-01: Returns `true` when the execution loop should self-halt due
+    /// to a WS continuity gap on the broker-backed paper path.
+    ///
+    /// Policy:
+    /// - Only applies when `strategy_market_data_source` is
+    ///   `ExternalSignalIngestion` (paper+alpaca).  Other deployment modes are
+    ///   not on the WS ingest path and are not affected.
+    /// - `GapDetected` → `true`: fill tracking is broken; dispatching orders
+    ///   without fill confirmation is unsound.  The loop must self-halt.
+    /// - `ColdStartUnproven` → `false`: boot-time state expected before the
+    ///   first WS session confirms subscription.  Signals are blocked at the
+    ///   route layer (PT-DAY-02) but the execution loop itself is not yet
+    ///   running in that state so a mid-loop halt is not applicable.
+    /// - `Live` → `false`: WS continuity confirmed; normal operation.
+    /// - `NotApplicable` → `false`: non-Alpaca path; WS continuity does not
+    ///   apply to this deployment.
+    pub async fn ws_continuity_gap_requires_halt(&self) -> bool {
+        if self.strategy_market_data_source != StrategyMarketDataSource::ExternalSignalIngestion {
+            return false;
+        }
+        matches!(
+            *self.alpaca_ws_continuity.read().await,
+            AlpacaWsContinuityState::GapDetected { .. }
+        )
+    }
+
+    /// PT-AUTO-01B proof seam: constructs a minimal `DaemonOrchestrator` and
+    /// runs the real execution loop until it exits naturally, then returns the
+    /// loop exit note.
+    ///
+    /// Construction details:
+    /// - `DaemonBroker::Paper` — no Alpaca credentials required.
+    /// - Lazy `PgPool` — no real DB connection at construction time.
+    ///   `release_runtime_leadership()` will fail (no real DB) and is logged as
+    ///   `tracing::warn!` — that is expected and does not affect the proof.
+    /// - `AppState.db` must be `None` in the caller (as it is for all
+    ///   `new_for_test_with_*` constructors) so the deadman block is skipped
+    ///   each tick and PT-AUTO-01 fires unobstructed.
+    /// - `StateIntegrityGate` and `ReconcileTruthGate` are wired to `self`'s
+    ///   arcs so halt effects (ig.disarmed, ig.halted) are observable on the
+    ///   same AppState the caller inspects after the loop exits.
+    ///
+    /// Loop exit timing:
+    /// - GapDetected path (PT-AUTO-01): exits before `orchestrator.tick()`,
+    ///   within the first tick interval (~1 second).
+    /// - Live / non-gap path: exits when `orchestrator.tick()` Phase-0 hits
+    ///   the DB check on the lazy/disconnected pool (also ~1 second).
+    ///
+    /// Called only from PT-AUTO-01B proof tests.  Never called in production.
+    /// Not cfg-gated: follows the `_for_test` naming convention established by
+    /// `set_session_clock_ts_for_test` and `set_strategy_fleet_for_test`.
+    pub async fn run_loop_one_tick_for_test(
+        self: &Arc<Self>,
+        run_id: uuid::Uuid,
+    ) -> Option<String> {
+        use std::collections::BTreeMap;
+
+        use mqk_broker_paper::LockedPaperBroker;
+        use mqk_execution::BrokerOrderMap;
+        use mqk_portfolio::PortfolioState;
+        use mqk_reconcile::{BrokerSnapshot, LocalSnapshot};
+        use mqk_runtime::orchestrator::WallClock;
+        use mqk_runtime::runtime_risk::RuntimeRiskGate;
+
+        let integrity_gate = types::StateIntegrityGate {
+            integrity: Arc::clone(&self.integrity),
+        };
+        let reconcile_gate = types::ReconcileTruthGate {
+            reconcile_status: Arc::clone(&self.reconcile_status),
+        };
+        let risk_gate =
+            RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64, 0, 0);
+        let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
+        let gateway = mqk_execution::wiring::build_gateway(
+            daemon_broker,
+            integrity_gate,
+            risk_gate,
+            reconcile_gate,
+        );
+        // Lazy pool — constructed without connecting.  Only accessed by
+        // orchestrator.release_runtime_leadership() in the halt path; that call
+        // fails and is logged as tracing::warn! — expected and harmless.
+        let pool = sqlx::PgPool::connect_lazy("postgresql://127.0.0.1:5432/mqk_ptauto01b_stub")
+            .expect("connect_lazy URL parse must succeed");
+
+        let orchestrator = types::DaemonOrchestrator::new(
+            pool,
+            gateway,
+            BrokerOrderMap::new(),
+            BTreeMap::new(),
+            PortfolioState::new(1_000_000_000_i64),
+            run_id,
+            "ptauto01b-dispatcher",
+            "ptauto01b",
+            None,
+            WallClock,
+            Box::new(LocalSnapshot::empty),
+            Box::new(|| BrokerSnapshot::empty_at(0)),
+        );
+
+        // `self` is an Arc — clone it directly for spawn_execution_loop.
+        // The deadman block inside the loop checks `db` (from state.db), which
+        // is None for all new_for_test_with_* AppState constructors, so the
+        // deadman is skipped and PT-AUTO-01 fires clean on GapDetected.
+        let handle = loop_runner::spawn_execution_loop(Arc::clone(self), orchestrator, run_id);
+
+        // Await the loop exit.  Resolves as soon as the loop terminates.
+        match handle.join_handle.await {
+            Ok(exit) => exit.note,
+            Err(_) => Some("join error".to_string()),
+        }
+    }
+
+    /// PT-DAY-04: Attempt to claim the gap escalation for this gap window.
+    ///
+    /// Returns `true` on the first call after a gap begins (i.e., the caller
+    /// should fire an operator notification).  Returns `false` on all subsequent
+    /// calls until `update_ws_continuity(Live)` resets the flag.
+    ///
+    /// Uses an atomic swap so concurrent signal POSTs during the same gap window
+    /// are safe: exactly one caller receives `true`.
+    pub(crate) fn try_claim_gap_escalation(&self) -> bool {
+        // swap(true) → returns the old value.  If old value was false this is
+        // the first claim; return true (caller should notify).  If old value
+        // was already true, return false (already notified; caller should not).
+        !self.gap_escalation_pending.swap(true, Ordering::SeqCst)
+    }
+
+    /// PT-DAY-04: Returns `true` when a gap escalation has been claimed and not
+    /// yet cleared by a Live transition.  Used by proof tests.
+    pub fn gap_escalation_is_pending(&self) -> bool {
+        self.gap_escalation_pending.load(Ordering::SeqCst)
+    }
+
+    // ---------------------------------------------------------------------------
+    // PT-AUTO-02: Per-run autonomous signal intake bound
+    // ---------------------------------------------------------------------------
+
+    /// Returns the current per-run signal intake count.
+    pub fn day_signal_count(&self) -> u32 {
+        self.day_signal_count.load(Ordering::SeqCst)
+    }
+
+    /// Increment the per-run signal intake counter by one.
+    ///
+    /// Called from the strategy signal route on Gate 7 Ok(true) (new enqueue).
+    /// Not called for duplicates (Ok(false)) or Gate failures.
+    pub(crate) fn increment_day_signal_count(&self) {
+        self.day_signal_count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Returns `true` when the per-run signal count has reached
+    /// `MAX_AUTONOMOUS_SIGNALS_PER_RUN`.  Gate 1d refuses signals when true.
+    pub fn day_signal_limit_exceeded(&self) -> bool {
+        self.day_signal_count.load(Ordering::SeqCst) >= MAX_AUTONOMOUS_SIGNALS_PER_RUN
+    }
+
+    /// Test seam: set the day signal count to an arbitrary value.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    /// Used by PT-AUTO-02 proof tests to simulate a saturated counter without
+    /// submitting 100 real signals.
+    pub fn set_day_signal_count_for_test(&self, count: u32) {
+        self.day_signal_count.store(count, Ordering::SeqCst);
+    }
+
+    /// PT-DAY-03: Returns the current wall-clock Unix timestamp used by the
+    /// NYSE session gate in `strategy_signal`.
+    ///
+    /// Returns the injected override if one has been set (test-only seam);
+    /// otherwise returns `Utc::now().timestamp()`.  Not in the [T] guard scope
+    /// (that guard covers `mqk-db/src/` only).
+    pub(crate) async fn session_now_ts(&self) -> i64 {
+        if let Some(ts) = *self.session_clock_override.read().await {
+            return ts;
+        }
+        chrono::Utc::now().timestamp() // allow: session-gate wall-clock
+    }
+
+    /// PT-DAY-03 test seam: inject a fixed timestamp for the NYSE session gate.
+    ///
+    /// Call before routing a request to make session-gate proof tests hermetic.
+    /// Named `_for_test` to signal intent; never called in production code.
+    /// Follows the same pattern as `set_strategy_fleet_for_test`.
+    pub async fn set_session_clock_ts_for_test(&self, ts: i64) {
+        *self.session_clock_override.write().await = Some(ts);
     }
 
     pub async fn strategy_fleet_snapshot(&self) -> Option<Vec<StrategyFleetEntry>> {
@@ -872,6 +1125,10 @@ impl AppState {
         if let Ok(initial_snapshot) = orchestrator.snapshot().await {
             *self.execution_snapshot.write().await = Some(initial_snapshot);
         }
+
+        // PT-AUTO-02: reset per-run signal intake counter at each new start so
+        // the bound applies per execution run, not per daemon process lifetime.
+        self.day_signal_count.store(0, Ordering::SeqCst);
 
         let handle = loop_runner::spawn_execution_loop(Arc::clone(self), orchestrator, run_id);
         {

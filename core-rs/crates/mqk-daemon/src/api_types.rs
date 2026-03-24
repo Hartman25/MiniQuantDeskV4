@@ -248,6 +248,28 @@ pub struct SystemStatusResponse {
     pub integrity_halt_active: bool,
     pub daemon_reachable: bool,
     pub fault_signals: Vec<FaultSignal>,
+    /// PT-AUTO-03: Autonomous signal intake count for this execution run.
+    ///
+    /// `None` when `ExternalSignalIngestion` is not configured for this deployment
+    /// (i.e., not paper+alpaca).  Field is not applicable and carries no meaning.
+    ///
+    /// `Some(n)` for paper+alpaca: the number of distinct new outbox enqueues
+    /// (Gate 7 Ok(true)) accepted so far this run.  Resets to 0 at each run start.
+    /// When `autonomous_signal_limit_hit` is `Some(true)`, this value equals
+    /// `MAX_AUTONOMOUS_SIGNALS_PER_RUN` (100) and Gate 1d is blocking all further
+    /// signals until the next run start.
+    pub autonomous_signal_count: Option<u32>,
+    /// PT-AUTO-03: Whether the autonomous day signal intake limit has been reached.
+    ///
+    /// `None` when `ExternalSignalIngestion` is not configured (not applicable).
+    ///
+    /// `Some(true)` means Gate 1d is currently refusing all incoming signals with
+    /// `409/day_limit_reached`.  No further signals will be accepted until the next
+    /// `run/start` resets the counter.
+    ///
+    /// `Some(false)` means Gate 1d is not tripping; signal intake is still open
+    /// (subject to all other gates).
+    pub autonomous_signal_limit_hit: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -657,6 +679,49 @@ pub struct ModeChangeGuidanceResponse {
     pub operator_next_steps: Vec<String>,
     /// Restart truth from the daemon's run registry.  None when no DB connection.
     pub restart_truth: Option<ModeChangeRestartTruth>,
+}
+
+// ---------------------------------------------------------------------------
+// /api/v1/strategy/signal — PT-DAY-01: strategy-driven paper execution
+// ---------------------------------------------------------------------------
+
+/// Strategy signal submission request.
+///
+/// The caller (research-py or operator tooling) is responsible for computing
+/// the signal from real market data.  The daemon validates the signal against
+/// the current execution context and enqueues it for broker-backed dispatch.
+///
+/// `signal_id` is the caller-supplied idempotency key.  UUIDv5 derived from
+/// (strategy_id, signal_ts, symbol, side, qty) is recommended to guarantee
+/// deterministic deduplication across restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategySignalRequest {
+    /// Caller-supplied idempotency key; unique per signal intent.
+    pub signal_id: String,
+    /// Authoritative strategy identifier for attribution and suppression checks.
+    pub strategy_id: String,
+    pub symbol: String,
+    /// Order direction: "buy" or "sell".
+    pub side: String,
+    /// Positive integer quantity (number or string representation).
+    pub qty: serde_json::Value,
+    /// Order type: "market" (default) or "limit".
+    pub order_type: Option<String>,
+    /// Time-in-force: "day" (default), "gtc", "ioc", "fok", "opg", "cls".
+    pub time_in_force: Option<String>,
+    /// Limit price in integer micros (required for limit orders; absent for market).
+    pub limit_price: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategySignalResponse {
+    pub accepted: bool,
+    /// Disposition: "enqueued" | "duplicate" | "rejected" | "unavailable" | "suppressed".
+    pub disposition: String,
+    pub signal_id: String,
+    pub strategy_id: String,
+    pub active_run_id: Option<Uuid>,
+    pub blockers: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
