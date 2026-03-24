@@ -1251,8 +1251,8 @@ async fn ap04_paper_adapter_reports_synthetic_broker_snapshot_source() {
 }
 
 /// AP-04: Alpaca adapter kind must report external broker snapshot source.
-/// AP-04B: strategy market-data source remains NotConfigured — changing
-///          the adapter MUST NOT change the feed policy.
+/// PT-DAY-01: Paper+Alpaca now configures ExternalSignalIngestion — the
+///             signal ingestion route is wired for the honest paper path.
 ///
 /// Uses `new_for_test_with_broker_kind` (no env vars) to avoid race conditions
 /// when parallel tests also read MQK_DAEMON_ADAPTER_ID.
@@ -1267,11 +1267,12 @@ async fn ap04_alpaca_adapter_reports_external_broker_snapshot_source() {
         state::BrokerSnapshotTruthSource::External,
         "alpaca broker kind must map to External snapshot source"
     );
-    // AP-04B: strategy feed must NOT inherit broker kind.
+    // PT-DAY-01: Paper+Alpaca configures ExternalSignalIngestion — strategy signals
+    // are accepted via /api/v1/strategy/signal for broker-backed paper execution.
     assert_eq!(
         st.strategy_market_data_source(),
-        state::StrategyMarketDataSource::NotConfigured,
-        "strategy market-data source must be NotConfigured even when broker is alpaca"
+        state::StrategyMarketDataSource::ExternalSignalIngestion,
+        "paper+alpaca must configure ExternalSignalIngestion for strategy signal ingestion"
     );
 
     let router = routes::build_router(Arc::clone(&st));
@@ -1288,8 +1289,8 @@ async fn ap04_alpaca_adapter_reports_external_broker_snapshot_source() {
         "system/status must surface external source for alpaca adapter"
     );
     assert_eq!(
-        json["market_data_health"], "not_configured",
-        "market_data_health must stay not_configured when adapter changes to alpaca"
+        json["market_data_health"], "signal_ingestion_ready",
+        "market_data_health must be 'signal_ingestion_ready' for paper+alpaca (PT-DAY-01)"
     );
 }
 

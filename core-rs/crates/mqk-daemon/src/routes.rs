@@ -147,7 +147,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         risk_denials, risk_summary,
     };
     use reconcile::{reconcile_mismatches, reconcile_status};
-    use strategy::{strategy_summary, strategy_suppressions};
+    use strategy::{strategy_signal, strategy_summary, strategy_suppressions};
     use system::{
         health, status_handler, system_config_diffs, system_config_fingerprint, system_metadata,
         system_preflight, system_runtime_leadership, system_session, system_status,
@@ -226,6 +226,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(execution_order_cancel),
         )
         .route("/api/v1/ops/action", post(ops_action))
+        .route("/api/v1/strategy/signal", post(strategy_signal))
         .route("/v1/trading/snapshot", post(trading_snapshot_set))
         .route(
             "/v1/trading/snapshot",

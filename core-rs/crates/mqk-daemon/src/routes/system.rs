@@ -20,7 +20,7 @@ use crate::api_types::{
     PreflightStatusResponse, RuntimeErrorResponse, RuntimeLeadershipCheckpointRow,
     RuntimeLeadershipResponse, SessionStateResponse, SystemMetadataResponse, SystemStatusResponse,
 };
-use crate::state::AppState;
+use crate::state::{AppState, StrategyMarketDataSource};
 
 use super::helpers::{
     build_fault_signals, environment_and_live_routing_truth, runtime_error_response,
@@ -95,6 +95,22 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
         || status.notes.is_some()
         || reconcile.note.is_some();
 
+    // PT-AUTO-03: Surface autonomous signal intake state on the paper+alpaca path.
+    //
+    // Only populated when ExternalSignalIngestion is configured (paper+alpaca).
+    // For all other deployments these fields are None (not applicable).
+    // Values are derived directly from the enforced production state so the operator
+    // can see whether Gate 1d is currently blocking all further signals.
+    let (autonomous_signal_count, autonomous_signal_limit_hit) =
+        if st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion {
+            (
+                Some(st.day_signal_count()),
+                Some(st.day_signal_limit_exceeded()),
+            )
+        } else {
+            (None, None)
+        };
+
     (
         StatusCode::OK,
         Json(SystemStatusResponse {
@@ -127,6 +143,8 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             integrity_halt_active: !integrity_armed,
             daemon_reachable: true,
             fault_signals: build_fault_signals(&status, &reconcile, risk_blocked),
+            autonomous_signal_count,
+            autonomous_signal_limit_hit,
         }),
     )
         .into_response()
