@@ -1399,10 +1399,18 @@ impl AppState {
             *sides_lock = recovered_sides.clone();
         }
 
-        let daemon_broker = build_daemon_broker(
-            self.runtime_selection.broker_kind,
-            self.runtime_selection.deployment_mode,
-        )?;
+        // `AlpacaBrokerAdapter::new()` constructs a `reqwest::blocking::Client`
+        // which temporarily creates and drops an internal Tokio runtime.  Tokio
+        // 1.49 panics when any runtime is dropped inside an async context.
+        // `block_in_place` moves execution off the async context so the drop
+        // is safe.  Requires a multi-thread runtime (production and
+        // `#[tokio::test(flavor = "multi_thread")]` tests both satisfy this).
+        let daemon_broker = tokio::task::block_in_place(|| {
+            build_daemon_broker(
+                self.runtime_selection.broker_kind,
+                self.runtime_selection.deployment_mode,
+            )
+        })?;
 
         let broker_seed = match self.broker_snapshot_source {
             BrokerSnapshotTruthSource::Synthetic => {
@@ -1423,37 +1431,47 @@ impl AppState {
                 }
             }
             BrokerSnapshotTruthSource::External => {
-                let now = Utc::now();
-                let fetched = match &daemon_broker {
-                    DaemonBroker::Alpaca(adapter) => {
-                        adapter.fetch_broker_snapshot(now).map_err(|err| match err {
-                            BrokerError::AuthSession { detail } => {
-                                RuntimeLifecycleError::forbidden(
-                                    "runtime.start_refused.alpaca_snapshot_auth",
-                                    "broker_snapshot_fetch",
-                                    format!(
-                                        "failed to fetch Alpaca broker snapshot before runtime start: {detail}"
+                // If a snapshot is already present (pre-loaded by test
+                // scaffolding, or retained from a prior loop tick), use it
+                // directly and skip the blocking network fetch.  In a fresh
+                // production process `broker_snapshot` is always `None` here,
+                // so the fetch always runs in production.
+                let seeded = self.broker_snapshot.read().await.clone();
+                if let Some(existing) = seeded {
+                    existing
+                } else {
+                    let now = Utc::now();
+                    let fetched = tokio::task::block_in_place(|| {
+                        match &daemon_broker {
+                            DaemonBroker::Alpaca(adapter) => {
+                                adapter.fetch_broker_snapshot(now).map_err(|err| match err {
+                                    BrokerError::AuthSession { detail } => {
+                                        RuntimeLifecycleError::forbidden(
+                                            "runtime.start_refused.alpaca_snapshot_auth",
+                                            "broker_snapshot_fetch",
+                                            format!(
+                                                "failed to fetch Alpaca broker snapshot before runtime start: {detail}"
+                                            ),
+                                        )
+                                    }
+                                    other => RuntimeLifecycleError::service_unavailable(
+                                        "runtime.start_refused.alpaca_snapshot_unavailable",
+                                        format!(
+                                            "failed to fetch Alpaca broker snapshot before runtime start: {other}"
+                                        ),
                                     ),
-                                )
+                                })
                             }
-                            other => RuntimeLifecycleError::service_unavailable(
-                                "runtime.start_refused.alpaca_snapshot_unavailable",
-                                format!(
-                                    "failed to fetch Alpaca broker snapshot before runtime start: {other}"
-                                ),
-                            ),
-                        })?
-                    }
-                    _ => {
-                        return Err(RuntimeLifecycleError::service_unavailable(
-                            "runtime.start_refused.broker_snapshot_source_mismatch",
-                            "external broker snapshot source requires Alpaca broker adapter construction",
-                        ))
-                    }
-                };
+                            _ => Err(RuntimeLifecycleError::service_unavailable(
+                                "runtime.start_refused.broker_snapshot_source_mismatch",
+                                "external broker snapshot source requires Alpaca broker adapter construction",
+                            )),
+                        }
+                    })?;
 
-                *self.broker_snapshot.write().await = Some(fetched.clone());
-                fetched
+                    *self.broker_snapshot.write().await = Some(fetched.clone());
+                    fetched
+                }
             }
         };
 

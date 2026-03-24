@@ -9,11 +9,32 @@ use std::time::Duration;
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use mqk_broker_alpaca::{encode_fetch_cursor, types::AlpacaFetchCursor};
 use mqk_daemon::{routes, state};
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 const TEST_OPERATOR_TOKEN: &str = "test-operator-token";
+
+/// Spawn a minimal in-process HTTP server that satisfies the Alpaca paper REST
+/// surface needed by lifecycle tests.  Returns the `http://127.0.0.1:{port}`
+/// base URL to set as `ALPACA_PAPER_BASE_URL`.
+///
+/// Handled routes:
+/// - `GET /v2/account/activities` → `[]`  (fetch_events polling, always empty)
+async fn start_mock_alpaca_server() -> String {
+    let app = axum::Router::new().route(
+        "/v2/account/activities",
+        axum::routing::get(|| async { axum::Json(serde_json::json!([])) }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://127.0.0.1:{}", addr.port())
+}
 
 fn authed(builder: axum::http::request::Builder) -> axum::http::request::Builder {
     builder.header("Authorization", format!("Bearer {TEST_OPERATOR_TOKEN}"))
@@ -73,6 +94,11 @@ async fn lifecycle_pool() -> sqlx::PgPool {
         .execute(&pool)
         .await
         .expect("cleanup sys_reconcile_status_state");
+    // Clear any persisted broker cursor so daemon_state() seeds it fresh.
+    sqlx::query("DELETE FROM broker_event_cursor WHERE adapter_id = 'alpaca'")
+        .execute(&pool)
+        .await
+        .expect("cleanup broker_event_cursor");
 
     pool
 }
@@ -195,18 +221,38 @@ async fn daemon_state() -> Arc<state::AppState> {
     // PT-TRUTH-01 / ENV-TRUTH-01: DB-backed lifecycle tests that expect a real
     // start must use the honest broker-backed paper path and provide canonical
     // paper credentials. These ignored tests run serially (`--test-threads=1`).
+    //
+    // A minimal in-process mock HTTP server handles the Alpaca paper REST surface
+    // so tests do not require real Alpaca credentials. ALPACA_PAPER_BASE_URL
+    // overrides the paper endpoint URL used by build_daemon_broker.
+    let mock_url = start_mock_alpaca_server().await;
     #[allow(deprecated)]
     unsafe {
         std::env::set_var("MQK_DAEMON_DEPLOYMENT_MODE", "paper");
         std::env::set_var("MQK_DAEMON_ADAPTER_ID", "alpaca");
         std::env::set_var("ALPACA_API_KEY_PAPER", "test-paper-key");
         std::env::set_var("ALPACA_API_SECRET_PAPER", "test-paper-secret");
+        std::env::set_var("ALPACA_PAPER_BASE_URL", &mock_url);
     }
 
     let state = Arc::new(state::AppState::new_with_db_and_operator_auth(
         lifecycle_pool().await,
         state::OperatorAuthMode::TokenRequired(TEST_OPERATOR_TOKEN.to_string()),
     ));
+    // Persist a Live broker cursor to the DB so that build_execution_orchestrator
+    // loads Live continuity state from the cursor (not ColdStartUnproven from None).
+    // Without this, the cursor load in state.rs line ~1490 overwrites the in-memory
+    // Live state set below back to ColdStartUnproven, causing the initial tick to fail.
+    let live_cursor = AlpacaFetchCursor::live(None, "alpaca:test:start", "2026-01-01T00:00:00Z");
+    let cursor_json = encode_fetch_cursor(&live_cursor).expect("encode live cursor");
+    mqk_db::advance_broker_cursor(
+        state.db.as_ref().expect("db must be set"),
+        "alpaca",
+        &cursor_json,
+        chrono::Utc::now(),
+    )
+    .await
+    .expect("persist live broker cursor for lifecycle test");
     state
         .update_ws_continuity(state::AlpacaWsContinuityState::Live {
             last_message_id: "alpaca:test:start".to_string(),
@@ -247,7 +293,7 @@ async fn daemon_state() -> Arc<state::AppState> {
     state
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn start_spawns_real_execution_loop() {
     let st = daemon_state().await;
@@ -382,7 +428,7 @@ async fn hostile_restart_with_poisoned_local_cache_still_reports_durable_halt_tr
     st.stop_for_shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn duplicate_start_is_rejected() {
     let st = daemon_state().await;
@@ -407,7 +453,7 @@ async fn duplicate_start_is_rejected() {
     st.stop_for_shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn stop_terminates_active_loop() {
     let st = daemon_state().await;
@@ -425,7 +471,7 @@ async fn stop_terminates_active_loop() {
     assert!(matches!(run.status, mqk_db::RunStatus::Stopped));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn halt_disarms_or_halts_active_loop() {
     let st = daemon_state().await;
@@ -449,7 +495,7 @@ async fn halt_disarms_or_halts_active_loop() {
     assert_eq!(arm_state.0, "DISARMED");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn status_reflects_real_loop_ownership() {
     let st = daemon_state().await;
@@ -463,7 +509,7 @@ async fn status_reflects_real_loop_ownership() {
     st.stop_for_shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn runtime_loop_heartbeats_deadman_while_running() {
     let st = daemon_state().await;
@@ -483,7 +529,7 @@ async fn runtime_loop_heartbeats_deadman_while_running() {
     st.stop_for_shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn deadman_expiry_halts_and_disarms_runtime() {
     let st = daemon_state().await;
@@ -526,7 +572,7 @@ async fn deadman_expiry_halts_and_disarms_runtime() {
     assert_eq!(arm_state.1.as_deref(), Some("DeadmanExpired"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn runtime_refuses_to_continue_after_deadman_expiry() {
     let st = daemon_state().await;
@@ -561,7 +607,7 @@ async fn runtime_refuses_to_continue_after_deadman_expiry() {
     st.stop_for_shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn heartbeat_persistence_failure_fails_closed() {
     let st = daemon_state().await;
@@ -586,7 +632,7 @@ async fn heartbeat_persistence_failure_fails_closed() {
     st.stop_for_shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn status_surface_reports_deadman_truth() {
     let st = daemon_state().await;
@@ -637,7 +683,7 @@ async fn status_surface_reports_deadman_truth() {
     st.stop_for_shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn clean_shutdown_or_stop_does_not_look_like_deadman_healthy_forever() {
     let st = daemon_state().await;
@@ -755,7 +801,7 @@ async fn control_status_reflects_real_runtime_truth() {
     assert_eq!(body["run_owned_locally"], false);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn status_does_not_overstate_running_on_local_handle_without_durable_active_run() {
     let st = daemon_state().await;
@@ -888,7 +934,7 @@ async fn control_restart_route_is_not_exposed() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn durable_halted_run_is_reported_as_halted_by_operator_surfaces() {
     let st = daemon_state().await;

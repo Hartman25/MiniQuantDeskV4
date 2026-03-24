@@ -134,17 +134,46 @@ impl AlpacaBrokerAdapter {
     // -----------------------------------------------------------------------
     // Private HTTP helpers
     // -----------------------------------------------------------------------
+
+    /// Run a blocking closure, using `block_in_place` when called from within
+    /// a Tokio async context.
+    ///
+    /// `reqwest::blocking` internally creates and drops a temporary
+    /// `tokio::runtime::Runtime` on every network operation (`send()`,
+    /// `.json()`, `.text()`, …).  Tokio 1.49 panics when any runtime is
+    /// dropped from inside an async executor context.  Wrapping with
+    /// `block_in_place` suspends the current async task and runs the
+    /// blocking closure on the current OS thread outside the executor,
+    /// preventing the panic.
+    ///
+    /// Falls back to calling the closure directly when there is no Tokio
+    /// runtime (e.g. unit tests, stand-alone CLI tools).  Requires a
+    /// `multi_thread` Tokio runtime when called from async; panics on
+    /// `current_thread` — the same restriction as `block_in_place` itself.
+    fn blocking<F, T>(f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(f)
+        } else {
+            f()
+        }
+    }
+
     /// Perform an authenticated `GET` and deserialize the JSON response body.
     fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, BrokerError> {
         let url = format!("{}{}", self.cfg.base_url, path);
-        let resp = self
-            .client
-            .get(&url)
-            .header("APCA-API-KEY-ID", &self.cfg.api_key_id)
-            .header("APCA-API-SECRET-KEY", &self.cfg.api_secret_key)
-            .send()
-            .map_err(classify_transport_err)?;
-        parse_success_json(resp)
+        Self::blocking(|| {
+            let resp = self
+                .client
+                .get(&url)
+                .header("APCA-API-KEY-ID", &self.cfg.api_key_id)
+                .header("APCA-API-SECRET-KEY", &self.cfg.api_secret_key)
+                .send()
+                .map_err(classify_transport_err)?;
+            parse_success_json(resp)
+        })
     }
     /// Perform an authenticated `PATCH` with a JSON body; deserialize response.
     fn patch<B, T>(&self, path: &str, body: &B) -> Result<T, BrokerError>
@@ -153,33 +182,37 @@ impl AlpacaBrokerAdapter {
         T: serde::de::DeserializeOwned,
     {
         let url = format!("{}{}", self.cfg.base_url, path);
-        let resp = self
-            .client
-            .patch(&url)
-            .header("APCA-API-KEY-ID", &self.cfg.api_key_id)
-            .header("APCA-API-SECRET-KEY", &self.cfg.api_secret_key)
-            .json(body)
-            .send()
-            .map_err(classify_transport_err)?;
-        parse_success_json(resp)
+        Self::blocking(|| {
+            let resp = self
+                .client
+                .patch(&url)
+                .header("APCA-API-KEY-ID", &self.cfg.api_key_id)
+                .header("APCA-API-SECRET-KEY", &self.cfg.api_secret_key)
+                .json(body)
+                .send()
+                .map_err(classify_transport_err)?;
+            parse_success_json(resp)
+        })
     }
     /// Perform an authenticated `DELETE`; return Ok(()) on success.
     fn delete(&self, path: &str) -> Result<(), BrokerError> {
         let url = format!("{}{}", self.cfg.base_url, path);
-        let resp = self
-            .client
-            .delete(&url)
-            .header("APCA-API-KEY-ID", &self.cfg.api_key_id)
-            .header("APCA-API-SECRET-KEY", &self.cfg.api_secret_key)
-            .send()
-            .map_err(classify_transport_err)?;
-        let status = resp.status();
-        if status.is_success() {
-            Ok(())
-        } else {
-            let body = resp.text().unwrap_or_default();
-            Err(classify_http_status(status, &body))
-        }
+        Self::blocking(|| {
+            let resp = self
+                .client
+                .delete(&url)
+                .header("APCA-API-KEY-ID", &self.cfg.api_key_id)
+                .header("APCA-API-SECRET-KEY", &self.cfg.api_secret_key)
+                .send()
+                .map_err(classify_transport_err)?;
+            let status = resp.status();
+            if status.is_success() {
+                Ok(())
+            } else {
+                let body = resp.text().unwrap_or_default();
+                Err(classify_http_status(status, &body))
+            }
+        })
     }
     /// Fetch a single order by its Alpaca broker order UUID.
     fn fetch_order(&self, broker_order_id: &str) -> Result<AlpacaOrderFull, BrokerError> {
@@ -252,33 +285,35 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
     ) -> Result<BrokerSubmitResponse, BrokerError> {
         let body = build_submit_body(&req);
         let url = format!("{}/v2/orders", self.cfg.base_url);
-        let http_resp = self
-            .client
-            .post(&url)
-            .header("APCA-API-KEY-ID", &self.cfg.api_key_id)
-            .header("APCA-API-SECRET-KEY", &self.cfg.api_secret_key)
-            .json(&body)
-            .send()
-            .map_err(classify_transport_err_for_submit)?;
-        let status = http_resp.status();
-        if !status.is_success() {
-            let resp_body = http_resp.text().unwrap_or_default();
-            return Err(classify_http_status(status, &resp_body));
-        }
-        let alpaca: AlpacaSubmitResponse = http_resp.json().map_err(|e| {
-            // We got a 2xx but couldn't parse the body.  The order may be live.
-            BrokerError::AmbiguousSubmit {
-                detail: format!("submit: response parse error: {e}"),
+        Self::blocking(|| {
+            let http_resp = self
+                .client
+                .post(&url)
+                .header("APCA-API-KEY-ID", &self.cfg.api_key_id)
+                .header("APCA-API-SECRET-KEY", &self.cfg.api_secret_key)
+                .json(&body)
+                .send()
+                .map_err(classify_transport_err_for_submit)?;
+            let status = http_resp.status();
+            if !status.is_success() {
+                let resp_body = http_resp.text().unwrap_or_default();
+                return Err(classify_http_status(status, &resp_body));
             }
-        })?;
-        Ok(BrokerSubmitResponse {
-            broker_order_id: alpaca.id,
-            submitted_at: alpaca
-                .created_at
-                .as_deref()
-                .and_then(parse_iso_to_epoch_ms)
-                .unwrap_or(0),
-            status: "acknowledged".to_string(),
+            let alpaca: AlpacaSubmitResponse = http_resp.json().map_err(|e| {
+                // We got a 2xx but couldn't parse the body.  The order may be live.
+                BrokerError::AmbiguousSubmit {
+                    detail: format!("submit: response parse error: {e}"),
+                }
+            })?;
+            Ok(BrokerSubmitResponse {
+                broker_order_id: alpaca.id,
+                submitted_at: alpaca
+                    .created_at
+                    .as_deref()
+                    .and_then(parse_iso_to_epoch_ms)
+                    .unwrap_or(0),
+                status: "acknowledged".to_string(),
+            })
         })
     }
     /// Cancel an in-flight order by its authoritative Alpaca broker order UUID.

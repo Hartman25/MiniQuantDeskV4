@@ -16,6 +16,9 @@ mqk-schemas = { path = "../mqk-schemas" }
 
 # reqwest with blocking support is required: this crate IS the live HTTP adapter.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+# tokio is required for block_in_place to avoid Tokio 1.49 panic when
+# reqwest::blocking drops its internal runtime inside an async context.
+tokio = { workspace = true }
 
 [dev-dependencies]
 # Activates BrokerInvokeToken::for_test() for live adapter tests.
