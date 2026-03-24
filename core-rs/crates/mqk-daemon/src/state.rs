@@ -1713,6 +1713,50 @@ mod tests {
     }
 
     #[test]
+    fn env_truth_02_alpaca_live_base_url_env_var_is_not_authoritative() {
+        // ENV-TRUTH-02: `ALPACA_LIVE_BASE_URL` is NOT read by the daemon.
+        //
+        // The daemon hardcodes the live endpoint to `https://api.alpaca.markets`
+        // for all live modes (LiveShadow, LiveCapital).  Only the paper endpoint
+        // is overridable via `ALPACA_PAPER_BASE_URL` (read by `build_daemon_broker`
+        // as `ALPACA_BASE_URL_PAPER_ENV` for `DeploymentMode::Paper` only).
+        //
+        // An operator who sets `ALPACA_LIVE_BASE_URL` in their .env.local will
+        // have no effect on the daemon's live broker URL.  The .env.local.example
+        // entry for that var is explicitly commented out per ENV-TRUTH-02.
+        for (mode, label) in [
+            (DeploymentMode::LiveShadow, "live-shadow"),
+            (DeploymentMode::LiveCapital, "live-capital"),
+        ] {
+            // No override provided — must use hardcoded canonical URL.
+            let url_no_override = alpaca_base_url_for_mode(mode, None)
+                .unwrap_or_else(|_| panic!("{label} must resolve live URL"));
+            assert_eq!(
+                url_no_override, "https://api.alpaca.markets",
+                "ENV-TRUTH-02: {label} must use hardcoded live endpoint (no override)"
+            );
+
+            // Override provided — must be ignored (live URL is hardcoded).
+            let url_with_override =
+                alpaca_base_url_for_mode(mode, Some("https://some-other-url.example.com"))
+                    .unwrap_or_else(|_| panic!("{label} must resolve live URL"));
+            assert_eq!(
+                url_with_override, "https://api.alpaca.markets",
+                "ENV-TRUTH-02: {label} must ignore any override and use hardcoded live endpoint"
+            );
+        }
+
+        // Confirm the paper endpoint IS overridable (canonical behavior since ENV-TRUTH-01).
+        let paper_url_overridden =
+            alpaca_base_url_for_mode(DeploymentMode::Paper, Some("http://127.0.0.1:18080"))
+                .expect("paper mode must resolve alpaca base url");
+        assert_eq!(
+            paper_url_overridden, "http://127.0.0.1:18080",
+            "ENV-TRUTH-02: paper endpoint must still honor ALPACA_PAPER_BASE_URL override"
+        );
+    }
+
+    #[test]
     fn ap06_paper_alpaca_readiness_is_allowed() {
         let readiness = deployment_mode_readiness(DeploymentMode::Paper, Some(BrokerKind::Alpaca));
         assert!(

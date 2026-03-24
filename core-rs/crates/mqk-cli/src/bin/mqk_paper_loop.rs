@@ -1,3 +1,24 @@
+//! PT-TOOL-01: Testkit-only deterministic paper validation harness.
+//!
+//! **THIS BINARY IS NOT THE REAL DAEMON PAPER PATH.**
+//!
+//! This binary exists to run deterministic paper loops against a pre-seeded
+//! database for scenario validation and research harness use.  It uses the
+//! in-process `LockedPaperBroker` (synthetic fills, no Alpaca connectivity)
+//! and is gated behind `--features testkit`.
+//!
+//! The real broker-backed daemon paper path is `paper+alpaca`:
+//!   `MQK_DAEMON_DEPLOYMENT_MODE=paper MQK_DAEMON_ADAPTER_ID=alpaca`
+//!
+//! This binary uses synthetic fills from `LockedPaperBroker` and requires
+//! an external `on_bar()` caller to produce fills; without it, orders are
+//! accepted but never filled.  This is NOT an honest paper trading route.
+//!
+//! Usage (testkit/validation only):
+//! ```
+//! cargo run -p mqk-cli --features testkit --bin mqk_paper_loop -- \
+//!   --run-id <uuid> --ticks 10 --sleep-ms 1000 --initial-cash-usd 100000
+//! ```
 #![forbid(unsafe_code)]
 
 use std::time::Duration;
@@ -10,15 +31,15 @@ use mqk_portfolio::PortfolioState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Usage:
-    // cargo run -p mqk-cli --bin mqk_paper_loop -- --run-id <uuid> --ticks 10 --sleep-ms 1000 --initial-cash-usd 100000
     let args = Args::parse()?;
 
     let pool = mqk_db::connect_from_env().await?;
     let run = mqk_db::fetch_run(&pool, args.run_id).await?;
     let initial_equity_micros = args.initial_cash_usd * 1_000_000;
 
-    // Paper gateway via runtime wiring (NOT for_test).
+    // PT-TOOL-01: testkit gateway — LockedPaperBroker with real risk evaluation.
+    // PassGate bypasses integrity and reconcile gates (testkit harness, not daemon).
+    // Do NOT use this wiring in production; see file-level doc comment above.
     let gateway = mqk_runtime::wiring_paper::paper_gateway_for_testkit_validation(
         &run.config_json,
         initial_equity_micros,
