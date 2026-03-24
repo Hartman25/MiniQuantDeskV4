@@ -77,9 +77,11 @@ pub(super) fn spawn_execution_loop(
                                 if let Err(release_err) = orchestrator.release_runtime_leadership().await {
                                     tracing::warn!("runtime_lease_release_failed error={release_err}");
                                 }
-                                return ExecutionLoopExit {
+                                let exit = ExecutionLoopExit {
                                     note: Some("execution loop halted: deadman expired".to_string()),
                                 };
+                                drop_outside_async_context(orchestrator);
+                                return exit;
                             }
                             Ok(false) => {}
                             Err(err) => {
@@ -99,9 +101,11 @@ pub(super) fn spawn_execution_loop(
                                 if let Err(release_err) = orchestrator.release_runtime_leadership().await {
                                     tracing::warn!("runtime_lease_release_failed error={release_err}");
                                 }
-                                return ExecutionLoopExit {
+                                let exit = ExecutionLoopExit {
                                     note: Some(format!("execution loop halted: deadman check failed: {err}")),
                                 };
+                                drop_outside_async_context(orchestrator);
+                                return exit;
                             }
                         }
                     }
@@ -133,12 +137,14 @@ pub(super) fn spawn_execution_loop(
                         {
                             tracing::warn!("runtime_lease_release_failed error={release_err}");
                         }
-                        return ExecutionLoopExit {
+                        let exit = ExecutionLoopExit {
                             note: Some(
                                 "execution loop halted: Alpaca WS continuity gap detected"
                                     .to_string(),
                             ),
                         };
+                        drop_outside_async_context(orchestrator);
+                        return exit;
                     }
 
                     if let Err(err) = orchestrator.tick().await {
@@ -154,9 +160,11 @@ pub(super) fn spawn_execution_loop(
                         if let Err(release_err) = orchestrator.release_runtime_leadership().await {
                             tracing::warn!("runtime_lease_release_failed error={release_err}");
                         }
-                        return ExecutionLoopExit {
+                        let exit = ExecutionLoopExit {
                             note: Some(format!("execution loop halted: {err}")),
                         };
+                        drop_outside_async_context(orchestrator);
+                        return exit;
                     }
 
                     if let Some(ref pool) = db {
@@ -173,9 +181,11 @@ pub(super) fn spawn_execution_loop(
                             {
                                 tracing::warn!("runtime_lease_release_failed error={release_err}");
                             }
-                            return ExecutionLoopExit {
+                            let exit = ExecutionLoopExit {
                                 note: Some("execution loop exited: deadman expired".to_string()),
                             };
+                            drop_outside_async_context(orchestrator);
+                            return exit;
                         }
                         if let Err(err) = mqk_db::heartbeat_run(pool, run_id, now).await {
                             tracing::error!("execution_loop_heartbeat_failed error={err}");
@@ -194,9 +204,11 @@ pub(super) fn spawn_execution_loop(
                             if let Err(release_err) = orchestrator.release_runtime_leadership().await {
                                 tracing::warn!("runtime_lease_release_failed error={release_err}");
                             }
-                            return ExecutionLoopExit {
+                            let exit = ExecutionLoopExit {
                                 note: Some(format!("execution loop heartbeat failed: {err}")),
                             };
+                            drop_outside_async_context(orchestrator);
+                            return exit;
                         }
                     }
 
@@ -239,9 +251,11 @@ pub(super) fn spawn_execution_loop(
             tracing::warn!("runtime_lease_release_failed error={err}");
         }
 
-        ExecutionLoopExit {
+        let exit = ExecutionLoopExit {
             note: Some("execution loop stopped".to_string()),
-        }
+        };
+        drop_outside_async_context(orchestrator);
+        exit
     });
 
     ExecutionLoopHandle {
@@ -249,6 +263,25 @@ pub(super) fn spawn_execution_loop(
         stop_tx,
         join_handle,
     }
+}
+
+// ---------------------------------------------------------------------------
+// drop_outside_async_context
+// ---------------------------------------------------------------------------
+
+/// Move `val` onto a fresh OS thread for dropping.
+///
+/// `reqwest::blocking::Client` (embedded in `AlpacaBrokerAdapter`) holds an
+/// internal `tokio::runtime::Runtime`.  Dropping that runtime inside a Tokio
+/// task panics on schedulers where blocking is not allowed (including the
+/// `current_thread` scheduler used by `#[tokio::test]`).  This helper ensures
+/// the drop happens off the async executor so no Tokio context is active.
+///
+/// The thread is detached; callers must not rely on the drop completing before
+/// the current task continues.  For ordered shutdown, join the spawned handle
+/// if synchronisation is needed.
+fn drop_outside_async_context<T: Send + 'static>(val: T) {
+    std::thread::spawn(move || drop(val));
 }
 
 // ---------------------------------------------------------------------------

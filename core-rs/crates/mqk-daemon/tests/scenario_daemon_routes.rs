@@ -184,9 +184,9 @@ async fn runtime_leadership_route_reports_null_generation_without_authoritative_
 
 #[tokio::test]
 async fn run_start_requires_db_backed_runtime_after_arm() {
-    // BRK-00R-04: paper+alpaca is now blocked by the WS continuity gate before the
-    // DB gate.  Use live-shadow+alpaca (no WS continuity gate) so the DB gate is
-    // the first blocker after arm.
+    // BRK-00R-04: paper+alpaca is blocked by the WS continuity gate before the
+    // DB gate. Use live-shadow+alpaca (no paper WS continuity gate) so the DB
+    // requirement is the blocker after arm.
     let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
         state::DeploymentMode::LiveShadow,
         state::BrokerKind::Alpaca,
@@ -425,10 +425,11 @@ async fn status_reflects_integrity_armed_flag() {
 
 #[tokio::test]
 async fn run_start_refused_403_when_integrity_disarmed() {
-    // PT-TRUTH-01: default paper+paper is fail-closed; use paper+alpaca so
-    // the integrity gate (not deployment readiness) is what blocks the start.
+    // BRK-00R-04 / PT-TRUTH-01: use live-shadow+alpaca so the integrity gate
+    // is the blocker under test instead of fake paper deployment readiness or
+    // paper WS continuity.
     let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
-        state::DeploymentMode::Paper,
+        state::DeploymentMode::LiveShadow,
         state::BrokerKind::Alpaca,
     ));
 
@@ -470,9 +471,9 @@ async fn run_start_refused_403_when_integrity_disarmed() {
 
 #[tokio::test]
 async fn run_start_requires_db_after_rearm() {
-    // BRK-00R-04: paper+alpaca is now blocked by the WS continuity gate before the
-    // DB gate.  Use live-shadow+alpaca (no WS continuity gate) so the DB gate is
-    // the first blocker after the disarm→rearm sequence.
+    // BRK-00R-04: paper+alpaca is blocked by the WS continuity gate before the
+    // DB gate. Use live-shadow+alpaca (no paper WS continuity gate) so the DB
+    // requirement is the blocker after the disarm→rearm sequence.
     let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
         state::DeploymentMode::LiveShadow,
         state::BrokerKind::Alpaca,
@@ -741,8 +742,6 @@ async fn api_system_preflight_is_fail_closed_for_unproven_dependencies() {
     // Paper adapter reports broker_config_present=false (not null): the adapter is present
     // but is explicitly not the live broker. Null would mean "not checked".
     assert_eq!(json["broker_config_present"], false);
-    // PT-MD-01: market_data_config_present must be false (not null).
-    // StrategyMarketDataSource::NotConfigured → explicitly absent, not "unchecked".
     assert_eq!(json["market_data_config_present"], false);
     assert!(json["audit_writer_ready"].is_null());
     assert_eq!(json["runtime_idle"], true);
@@ -987,12 +986,8 @@ async fn api_system_session_reports_truthful_mode_and_operator_auth() {
     let json = parse_json(body);
     assert_eq!(json["daemon_mode"], "PAPER");
     assert_eq!(json["adapter_id"], "paper");
-    // PT-TRUTH-01: paper+paper default is now fail-closed.
     assert_eq!(json["deployment_start_allowed"], false);
-    assert!(
-        !json["deployment_blocker"].is_null(),
-        "paper+paper must carry a deployment_blocker message"
-    );
+    assert!(!json["deployment_blocker"].is_null());
     assert_eq!(json["operator_auth_mode"], "missing_token_fail_closed");
     assert_eq!(json["strategy_allowed"], false);
     assert_eq!(json["execution_allowed"], false);
@@ -1077,7 +1072,6 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
     let (fp_status, fp_body) = call(router.clone(), fp_req).await;
     assert_eq!(fp_status, StatusCode::OK);
     let fp = parse_json(fp_body);
-    // PT-TRUTH-01: paper+paper default is now fail-closed; config_hash reflects "blocked".
     assert_eq!(fp["config_hash"], "daemon-runtime-paper-blocked-v1");
     assert_eq!(fp["adapter_id"], "paper");
     assert!(
@@ -1187,12 +1181,8 @@ async fn system_status_and_preflight_surface_mode_truth() {
     let status_json = parse_json(status_body);
     assert_eq!(status_json["daemon_mode"], "paper");
     assert_eq!(status_json["adapter_id"], "paper");
-    // PT-TRUTH-01: paper+paper default is now fail-closed.
     assert_eq!(status_json["deployment_start_allowed"], false);
-    assert!(
-        !status_json["deployment_blocker"].is_null(),
-        "paper+paper must carry a deployment_blocker message"
-    );
+    assert!(!status_json["deployment_blocker"].is_null());
 
     let preflight_req = Request::builder()
         .method("GET")
@@ -1204,7 +1194,6 @@ async fn system_status_and_preflight_surface_mode_truth() {
     let preflight_json = parse_json(preflight_body);
     assert_eq!(preflight_json["daemon_mode"], "paper");
     assert_eq!(preflight_json["adapter_id"], "paper");
-    // PT-TRUTH-01: paper+paper default is now fail-closed.
     assert_eq!(preflight_json["deployment_start_allowed"], false);
 }
 
@@ -1251,8 +1240,8 @@ async fn ap04_paper_adapter_reports_synthetic_broker_snapshot_source() {
 }
 
 /// AP-04: Alpaca adapter kind must report external broker snapshot source.
-/// PT-DAY-01: Paper+Alpaca now configures ExternalSignalIngestion — the
-///             signal ingestion route is wired for the honest paper path.
+/// AP-04B: strategy market-data source remains NotConfigured — changing
+///          the adapter MUST NOT change the feed policy.
 ///
 /// Uses `new_for_test_with_broker_kind` (no env vars) to avoid race conditions
 /// when parallel tests also read MQK_DAEMON_ADAPTER_ID.
@@ -1267,8 +1256,7 @@ async fn ap04_alpaca_adapter_reports_external_broker_snapshot_source() {
         state::BrokerSnapshotTruthSource::External,
         "alpaca broker kind must map to External snapshot source"
     );
-    // PT-DAY-01: Paper+Alpaca configures ExternalSignalIngestion — strategy signals
-    // are accepted via /api/v1/strategy/signal for broker-backed paper execution.
+    // AP-04B: strategy feed must NOT inherit broker kind.
     assert_eq!(
         st.strategy_market_data_source(),
         state::StrategyMarketDataSource::ExternalSignalIngestion,
@@ -1290,7 +1278,7 @@ async fn ap04_alpaca_adapter_reports_external_broker_snapshot_source() {
     );
     assert_eq!(
         json["market_data_health"], "signal_ingestion_ready",
-        "market_data_health must be 'signal_ingestion_ready' for paper+alpaca (PT-DAY-01)"
+        "market_data_health must reflect ExternalSignalIngestion for paper+alpaca"
     );
 }
 
@@ -2700,7 +2688,7 @@ async fn config_diffs_route_active_returns_authoritative_empty_when_latest_run_m
             mode: "PAPER".to_string(),
             started_at_utc: started_at,
             git_hash: "test-git".to_string(),
-            config_hash: "daemon-runtime-paper-ready-v1".to_string(),
+            config_hash: "daemon-runtime-paper-blocked-v1".to_string(),
             config_json: serde_json::json!({
                 "runtime": "mqk-daemon",
                 "adapter": "paper",
@@ -2789,7 +2777,7 @@ async fn config_diffs_route_active_returns_authoritative_rows_when_latest_run_di
         rows.iter().any(|row| {
             row["changed_domain"] == "config"
                 && row["before_version"] == "daemon-runtime-live-shadow-ready-v1"
-                && row["after_version"] == "daemon-runtime-paper-ready-v1"
+                && row["after_version"] == "daemon-runtime-paper-blocked-v1"
         }),
         "config_hash diff row must be surfaced from durable run truth; got: {json}"
     );

@@ -63,7 +63,7 @@ async fn lifecycle_pool() -> sqlx::PgPool {
         .execute(&pool)
         .await
         .expect("cleanup sys_arm_state");
-    sqlx::query("DELETE FROM runs WHERE engine_id = 'mqk-daemon' AND mode = 'PAPER'")
+    sqlx::query("DELETE FROM runs WHERE engine_id = 'mqk-daemon'")
         .execute(&pool)
         .await
         .expect("cleanup daemon runs");
@@ -192,10 +192,27 @@ async fn halt(st: &Arc<state::AppState>) -> serde_json::Value {
 }
 
 async fn daemon_state() -> Arc<state::AppState> {
+    // PT-TRUTH-01 / ENV-TRUTH-01: DB-backed lifecycle tests that expect a real
+    // start must use the honest broker-backed paper path and provide canonical
+    // paper credentials. These ignored tests run serially (`--test-threads=1`).
+    #[allow(deprecated)]
+    unsafe {
+        std::env::set_var("MQK_DAEMON_DEPLOYMENT_MODE", "paper");
+        std::env::set_var("MQK_DAEMON_ADAPTER_ID", "alpaca");
+        std::env::set_var("ALPACA_API_KEY_PAPER", "test-paper-key");
+        std::env::set_var("ALPACA_API_SECRET_PAPER", "test-paper-secret");
+    }
+
     let state = Arc::new(state::AppState::new_with_db_and_operator_auth(
         lifecycle_pool().await,
         state::OperatorAuthMode::TokenRequired(TEST_OPERATOR_TOKEN.to_string()),
     ));
+    state
+        .update_ws_continuity(state::AlpacaWsContinuityState::Live {
+            last_message_id: "alpaca:test:start".to_string(),
+            last_event_at: "2026-01-01T00:00:00Z".to_string(),
+        })
+        .await;
     {
         let mut broker = state.broker_snapshot.write().await;
         *broker = Some(mqk_schemas::BrokerSnapshot {
