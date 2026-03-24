@@ -146,8 +146,11 @@ async fn brk07r_d03_gap_detected_cursor_preserved_at_boot() {
         .expect("D03: advance_broker_cursor failed");
 
     // Simulate restart: fresh AppState with same DB and same adapter_id.
-    let mut state_inner =
-        AppState::new_for_test_with_db_mode_and_broker(pool, DeploymentMode::Paper, BrokerKind::Alpaca);
+    let mut state_inner = AppState::new_for_test_with_db_mode_and_broker(
+        pool,
+        DeploymentMode::Paper,
+        BrokerKind::Alpaca,
+    );
     state_inner.set_adapter_id_for_test(adapter_id);
     let state = Arc::new(state_inner);
 
@@ -166,7 +169,10 @@ async fn brk07r_d03_gap_detected_cursor_preserved_at_boot() {
         matches!(cont, AlpacaWsContinuityState::GapDetected { .. }),
         "D03: GapDetected cursor must produce GapDetected continuity at boot; got: {cont:?}"
     );
-    if let AlpacaWsContinuityState::GapDetected { last_message_id, .. } = cont {
+    if let AlpacaWsContinuityState::GapDetected {
+        last_message_id, ..
+    } = cont
+    {
         assert_eq!(
             last_message_id.as_deref(),
             Some("alpaca:order-abc:filled:2026-01-01T00:00:00Z"),
@@ -197,8 +203,11 @@ async fn brk07r_d04_live_cursor_demoted_to_cold_start_at_boot() {
         .await
         .expect("D04: advance_broker_cursor failed");
 
-    let mut state_inner =
-        AppState::new_for_test_with_db_mode_and_broker(pool, DeploymentMode::Paper, BrokerKind::Alpaca);
+    let mut state_inner = AppState::new_for_test_with_db_mode_and_broker(
+        pool,
+        DeploymentMode::Paper,
+        BrokerKind::Alpaca,
+    );
     state_inner.set_adapter_id_for_test(adapter_id);
     let state = Arc::new(state_inner);
 
@@ -253,8 +262,11 @@ async fn brk07r_d06_gap_detected_from_db_blocks_start_gate() {
         .await
         .expect("D06: persist gap cursor");
 
-    let mut state_inner =
-        AppState::new_for_test_with_db_mode_and_broker(pool, DeploymentMode::Paper, BrokerKind::Alpaca);
+    let mut state_inner = AppState::new_for_test_with_db_mode_and_broker(
+        pool,
+        DeploymentMode::Paper,
+        BrokerKind::Alpaca,
+    );
     state_inner.set_adapter_id_for_test(adapter_id);
     let st = Arc::new(state_inner);
 

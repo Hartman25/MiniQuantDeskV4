@@ -86,8 +86,7 @@ async fn brk00r04_p01_cold_start_unproven_blocks_paper_alpaca_start() {
         "P01: gate must be alpaca_ws_continuity; got: {json}"
     );
     assert_eq!(
-        json["fault_class"],
-        "runtime.start_refused.paper_alpaca_ws_continuity_unproven",
+        json["fault_class"], "runtime.start_refused.paper_alpaca_ws_continuity_unproven",
         "P01: fault_class must identify paper+alpaca continuity refusal; got: {json}"
     );
     assert!(
@@ -148,8 +147,7 @@ async fn brk00r04_p02_gap_detected_blocks_paper_alpaca_start() {
         "P02: gate must be alpaca_ws_continuity; got: {json}"
     );
     assert_eq!(
-        json["fault_class"],
-        "runtime.start_refused.paper_alpaca_ws_continuity_unproven",
+        json["fault_class"], "runtime.start_refused.paper_alpaca_ws_continuity_unproven",
         "P02: fault_class must identify paper+alpaca continuity refusal; got: {json}"
     );
     assert!(

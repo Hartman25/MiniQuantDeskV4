@@ -169,7 +169,10 @@ pub fn spawn_alpaca_paper_ws_task(state: Arc<AppState>) -> Option<JoinHandle<()>
         .unwrap_or_else(|_| DEFAULT_PAPER_BASE_URL.to_string());
     let ws_url = ws_url_from_base_url(&base_url);
 
-    tracing::info!(ws_url, "alpaca_ws: spawning paper WS transport (BRK-00R-05)");
+    tracing::info!(
+        ws_url,
+        "alpaca_ws: spawning paper WS transport (BRK-00R-05)"
+    );
     Some(tokio::spawn(alpaca_ws_loop(state, ws_url, key, secret)))
 }
 
@@ -179,12 +182,7 @@ pub fn spawn_alpaca_paper_ws_task(state: Arc<AppState>) -> Option<JoinHandle<()>
 
 /// Outer loop: reconnect on disconnect with backoff, marking GapDetected each
 /// time before waiting.
-async fn alpaca_ws_loop(
-    state: Arc<AppState>,
-    ws_url: String,
-    key: String,
-    secret: String,
-) {
+async fn alpaca_ws_loop(state: Arc<AppState>, ws_url: String, key: String, secret: String) {
     loop {
         match alpaca_ws_session(&state, &ws_url, &key, &secret).await {
             Ok(()) => {
@@ -257,7 +255,11 @@ async fn alpaca_ws_session(
         Ok(Some(Ok(_))) => {}
         Ok(Some(Err(e))) => return Err(anyhow::anyhow!("alpaca_ws: connection error: {e}")),
         Ok(None) => return Err(anyhow::anyhow!("alpaca_ws: stream closed at welcome")),
-        Err(_) => return Err(anyhow::anyhow!("alpaca_ws: timeout waiting for welcome frame")),
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "alpaca_ws: timeout waiting for welcome frame"
+            ))
+        }
     }
 
     // Send authentication.
@@ -427,9 +429,7 @@ async fn load_session_cursor_from_db(state: &AppState) -> AlpacaFetchCursor {
     match mqk_db::load_broker_cursor(pool, state.adapter_id()).await {
         Ok(Some(json)) => match serde_json::from_str::<AlpacaFetchCursor>(&json) {
             Ok(cursor) => {
-                tracing::debug!(
-                    "alpaca_ws: seeded session cursor from DB (BRK-07R)"
-                );
+                tracing::debug!("alpaca_ws: seeded session cursor from DB (BRK-07R)");
                 cursor
             }
             Err(e) => {
@@ -509,9 +509,7 @@ mod tests {
             + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
@@ -577,7 +575,10 @@ mod tests {
         // state has no DB (new_for_test_with_mode_and_broker always uses db = None).
         let cursor = load_session_cursor_from_db(&state).await;
         assert!(
-            matches!(cursor.trade_updates, AlpacaTradeUpdatesResume::ColdStartUnproven),
+            matches!(
+                cursor.trade_updates,
+                AlpacaTradeUpdatesResume::ColdStartUnproven
+            ),
             "U1: no-DB path must return ColdStartUnproven; got: {:?}",
             cursor.trade_updates,
         );

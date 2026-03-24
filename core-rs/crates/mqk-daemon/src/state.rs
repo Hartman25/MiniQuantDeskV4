@@ -26,11 +26,11 @@ use uuid::Uuid;
 
 // Re-export everything that external code (routes, tests, etc.) needs.
 use crate::notify::DiscordNotifier;
-pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use alpaca_ws_transport::{
     build_ws_auth_message, build_ws_subscribe_message, spawn_alpaca_paper_ws_task,
     ws_url_from_base_url,
 };
+pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
 pub use loop_runner::spawn_reconcile_tick;
 pub(crate) use snapshot::{
@@ -204,14 +204,14 @@ impl AppState {
             BrokerKind::Paper => AlpacaWsContinuityState::NotApplicable,
         }));
         // PT-DAY-01: recompute signal ingestion policy for the new (mode, broker) pair.
-        state.strategy_market_data_source =
-            if state.runtime_selection.deployment_mode == DeploymentMode::Paper
-                && kind == BrokerKind::Alpaca
-            {
-                StrategyMarketDataSource::ExternalSignalIngestion
-            } else {
-                StrategyMarketDataSource::NotConfigured
-            };
+        state.strategy_market_data_source = if state.runtime_selection.deployment_mode
+            == DeploymentMode::Paper
+            && kind == BrokerKind::Alpaca
+        {
+            StrategyMarketDataSource::ExternalSignalIngestion
+        } else {
+            StrategyMarketDataSource::NotConfigured
+        };
         state
     }
 
@@ -306,7 +306,9 @@ impl AppState {
         if self.runtime_selection.broker_kind != Some(BrokerKind::Alpaca) {
             return;
         }
-        let Some(pool) = self.db.as_ref() else { return; };
+        let Some(pool) = self.db.as_ref() else {
+            return;
+        };
         let cursor_json = match mqk_db::load_broker_cursor(pool, self.adapter_id()).await {
             Ok(v) => v,
             Err(e) => {
@@ -372,14 +374,14 @@ impl AppState {
         // Paper+alpaca is the only deployment where the signal ingestion route is
         // configured — it is the canonical broker-backed paper execution path.
         // All other modes remain NotConfigured until their own patch slices land.
-        let strategy_market_data_source =
-            if runtime_selection.deployment_mode == DeploymentMode::Paper
-                && runtime_selection.broker_kind == Some(BrokerKind::Alpaca)
-            {
-                StrategyMarketDataSource::ExternalSignalIngestion
-            } else {
-                StrategyMarketDataSource::NotConfigured
-            };
+        let strategy_market_data_source = if runtime_selection.deployment_mode
+            == DeploymentMode::Paper
+            && runtime_selection.broker_kind == Some(BrokerKind::Alpaca)
+        {
+            StrategyMarketDataSource::ExternalSignalIngestion
+        } else {
+            StrategyMarketDataSource::NotConfigured
+        };
 
         let initial_ws_continuity = initial_ws_continuity_for_broker(runtime_selection.broker_kind);
 

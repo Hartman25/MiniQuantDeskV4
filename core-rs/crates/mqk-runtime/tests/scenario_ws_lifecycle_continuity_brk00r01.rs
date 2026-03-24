@@ -108,8 +108,7 @@ fn s5_production_seam_blocks_gap_and_preserves_detail() {
             detail,
         } => {
             assert_eq!(
-                detail,
-                "disconnect without replay: reconnect at 09:35",
+                detail, "disconnect without replay: reconnect at 09:35",
                 "gap detail must be preserved for operator diagnostics"
             );
             assert_eq!(

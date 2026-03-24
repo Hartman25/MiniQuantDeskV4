@@ -411,8 +411,7 @@ async fn brk00r06_e03_continuity_round_trip_is_fail_closed() {
         "E03 step2: gate must be alpaca_ws_continuity for GapDetected; got: {j2}"
     );
     assert_eq!(
-        j2["fault_class"],
-        "runtime.start_refused.paper_alpaca_ws_continuity_unproven",
+        j2["fault_class"], "runtime.start_refused.paper_alpaca_ws_continuity_unproven",
         "E03 step2: fault_class must identify paper+alpaca continuity refusal; got: {j2}"
     );
 
@@ -1722,13 +1721,13 @@ async fn ptauto03_e16a_system_status_surfaces_signal_count_healthy() {
         state::DeploymentMode::Paper,
         state::BrokerKind::Alpaca,
     ));
-    assert_eq!(
-        st.day_signal_count(),
-        0,
-        "E16a: count must be 0 at boot"
-    );
+    assert_eq!(st.day_signal_count(), 0, "E16a: count must be 0 at boot");
 
-    let (status, body) = call(routes::build_router(Arc::clone(&st)), get_system_status_req()).await;
+    let (status, body) = call(
+        routes::build_router(Arc::clone(&st)),
+        get_system_status_req(),
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -1759,7 +1758,11 @@ async fn ptauto03_e16b_system_status_surfaces_signal_count_at_limit() {
         "E16b: day_signal_limit_exceeded() must be true at count=100"
     );
 
-    let (status, body) = call(routes::build_router(Arc::clone(&st)), get_system_status_req()).await;
+    let (status, body) = call(
+        routes::build_router(Arc::clone(&st)),
+        get_system_status_req(),
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -1783,7 +1786,11 @@ async fn ptauto03_e16c_system_status_autonomous_fields_null_for_non_external_ing
     // Both autonomous fields must be null (not applicable, not cosmetically zeroed).
     let st = Arc::new(state::AppState::new());
 
-    let (status, body) = call(routes::build_router(Arc::clone(&st)), get_system_status_req()).await;
+    let (status, body) = call(
+        routes::build_router(Arc::clone(&st)),
+        get_system_status_req(),
+    )
+    .await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -1917,8 +1924,11 @@ async fn ptauto04_e17_phase2_consolidated_healthy_path_all_autonomous_controls_p
     );
 
     // ── Status surface: verify autonomous state correctly reflects healthy run ─
-    let (status_code, status_body_bytes) =
-        call(routes::build_router(Arc::clone(&st)), get_system_status_req()).await;
+    let (status_code, status_body_bytes) = call(
+        routes::build_router(Arc::clone(&st)),
+        get_system_status_req(),
+    )
+    .await;
     assert_eq!(
         status_code,
         StatusCode::OK,

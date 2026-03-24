@@ -31,10 +31,7 @@ use mqk_daemon::state;
 fn brk00r05_t01_ws_auth_message_is_canonical() {
     let msg = state::build_ws_auth_message("test-key-id", "test-secret");
     let v: serde_json::Value = serde_json::from_str(&msg).expect("T01: must be valid JSON");
-    assert_eq!(
-        v["action"], "auth",
-        "T01: action must be 'auth'; got: {v}"
-    );
+    assert_eq!(v["action"], "auth", "T01: action must be 'auth'; got: {v}");
     assert_eq!(
         v["key"], "test-key-id",
         "T01: key must be 'test-key-id'; got: {v}"

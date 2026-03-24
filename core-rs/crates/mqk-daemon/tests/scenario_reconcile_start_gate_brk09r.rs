@@ -44,7 +44,10 @@ use tower::ServiceExt;
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, serde_json::Value) {
+async fn call(
+    router: axum::Router,
+    req: Request<axum::body::Body>,
+) -> (StatusCode, serde_json::Value) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
     let status = resp.status();
     let bytes = resp
@@ -140,7 +143,8 @@ async fn brk09r_r01_dirty_reconcile_blocks_paper_alpaca_start() {
     let st = ready_state().await;
 
     // Set reconcile truth to "dirty" (evidence of prior broker/local drift).
-    st.publish_reconcile_snapshot(dirty_reconcile("brk09r-r01: simulated prior drift")).await;
+    st.publish_reconcile_snapshot(dirty_reconcile("brk09r-r01: simulated prior drift"))
+        .await;
 
     let (status, json) = call(routes::build_router(Arc::clone(&st)), try_start_req()).await;
 
@@ -168,7 +172,8 @@ async fn brk09r_r02_stale_reconcile_blocks_paper_alpaca_start() {
     let st = ready_state().await;
 
     // Set reconcile truth to "stale" (stale broker snapshot — not proven clean).
-    st.publish_reconcile_snapshot(stale_reconcile("brk09r-r02: stale broker snapshot")).await;
+    st.publish_reconcile_snapshot(stale_reconcile("brk09r-r02: stale broker snapshot"))
+        .await;
 
     let (status, json) = call(routes::build_router(Arc::clone(&st)), try_start_req()).await;
 
@@ -270,7 +275,8 @@ async fn brk09r_r05_ws_continuity_gate_fires_before_reconcile_gate() {
 
     // Leave WS continuity as ColdStartUnproven (Gate 3 fires).
     // Set reconcile to dirty (Gate 4 would fire if Gate 3 did not fire first).
-    st.publish_reconcile_snapshot(dirty_reconcile("brk09r-r05: dirty AND ws unproven")).await;
+    st.publish_reconcile_snapshot(dirty_reconcile("brk09r-r05: dirty AND ws unproven"))
+        .await;
 
     let (status, json) = call(routes::build_router(Arc::clone(&st)), try_start_req()).await;
 

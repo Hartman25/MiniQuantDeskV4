@@ -82,7 +82,10 @@ async fn brk08r_g02_gap_detected_cursor_structure() {
     );
 
     assert!(
-        matches!(gap.trade_updates, AlpacaTradeUpdatesResume::GapDetected { .. }),
+        matches!(
+            gap.trade_updates,
+            AlpacaTradeUpdatesResume::GapDetected { .. }
+        ),
         "G02: gap cursor must have GapDetected trade_updates"
     );
     assert_eq!(
@@ -118,7 +121,10 @@ async fn brk08r_g03_persist_gap_demotes_live_cursor_structure() {
     );
 
     assert!(
-        matches!(gap.trade_updates, AlpacaTradeUpdatesResume::GapDetected { .. }),
+        matches!(
+            gap.trade_updates,
+            AlpacaTradeUpdatesResume::GapDetected { .. }
+        ),
         "G03: gap_detected constructor produces GapDetected; got: {:?}",
         gap.trade_updates
     );
@@ -154,18 +160,16 @@ async fn brk08r_g04_advance_repairs_gap_detected_to_live_in_db() {
         .expect("G04: persist gap cursor");
 
     // Call the repair function.
-    let repaired = advance_cursor_after_ws_establish(
-        &pool,
-        adapter_id,
-        &gap,
-        chrono::Utc::now(),
-    )
-    .await
-    .expect("G04: advance_cursor_after_ws_establish failed");
+    let repaired = advance_cursor_after_ws_establish(&pool, adapter_id, &gap, chrono::Utc::now())
+        .await
+        .expect("G04: advance_cursor_after_ws_establish failed");
 
     // The returned cursor must be Live.
     assert!(
-        matches!(repaired.trade_updates, AlpacaTradeUpdatesResume::Live { .. }),
+        matches!(
+            repaired.trade_updates,
+            AlpacaTradeUpdatesResume::Live { .. }
+        ),
         "G04: repaired cursor must be Live; got: {:?}",
         repaired.trade_updates
     );
@@ -220,14 +224,9 @@ async fn brk08r_g05_advance_noop_for_already_live_cursor() {
         .expect("G05: persist live cursor");
 
     // Calling advance on an already-Live cursor must return Ok with the same cursor.
-    let result = advance_cursor_after_ws_establish(
-        &pool,
-        adapter_id,
-        &live,
-        chrono::Utc::now(),
-    )
-    .await
-    .expect("G05: advance_cursor_after_ws_establish failed");
+    let result = advance_cursor_after_ws_establish(&pool, adapter_id, &live, chrono::Utc::now())
+        .await
+        .expect("G05: advance_cursor_after_ws_establish failed");
 
     assert!(
         matches!(result.trade_updates, AlpacaTradeUpdatesResume::Live { .. }),
@@ -288,8 +287,7 @@ async fn brk08r_g06_persist_gap_cursor_demotes_live_in_db() {
         .await
         .expect("G06: load cursor")
         .expect("G06: cursor must exist");
-    let stored: AlpacaFetchCursor =
-        serde_json::from_str(&stored_json).expect("G06: parse stored");
+    let stored: AlpacaFetchCursor = serde_json::from_str(&stored_json).expect("G06: parse stored");
     assert!(
         matches!(
             stored.trade_updates,
