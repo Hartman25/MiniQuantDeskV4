@@ -182,6 +182,12 @@
       "path": "0028_fill_quality_telemetry.sql",
       "status": "applied",
       "intent": "Add fill_quality_telemetry table for durable, per-fill execution quality telemetry (TV-EXEC-01): actual price, timing, slippage, and provenance per fill event."
+    },
+    {
+      "id": "0029",
+      "path": "0029_strategy_registry.sql",
+      "status": "applied",
+      "intent": "Add sys_strategy_registry table as the authoritative durable registry of known strategies (CC-01A): canonical identity, display name, enabled state, kind, and timestamps."
     }
   ]
 }

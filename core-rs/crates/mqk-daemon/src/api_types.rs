@@ -438,11 +438,23 @@ pub struct ConfigDiffsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategySummaryRow {
-    /// Sourced: strategy identifier from the configured fleet (`MQK_STRATEGY_IDS`).
+    /// Sourced: canonical strategy identity from `sys_strategy_registry`.
     pub strategy_id: String,
-    /// Sourced: all fleet-configured strategies are treated as enabled.
-    /// Presence in the fleet implies enabled; per-strategy disable is not yet wired.
+    /// Sourced: human-readable display name from `sys_strategy_registry.display_name`.
+    /// CC-01C: surfaced from durable registry truth.
+    pub display_name: String,
+    /// Sourced: durable `enabled` flag from `sys_strategy_registry`.
+    /// `true` = registered + active; `false` = registered + inactive (known but disabled).
     pub enabled: bool,
+    /// Sourced: operator-assigned category from `sys_strategy_registry.kind`.
+    /// Empty string when unclassified.  CC-01C: surfaced from durable registry truth.
+    pub kind: String,
+    /// Sourced: RFC3339 timestamp when this strategy was first registered.
+    /// From `sys_strategy_registry.registered_at_utc`.  CC-01C: durable provenance.
+    pub registered_at: String,
+    /// Sourced: optional operator note from `sys_strategy_registry.note`.
+    /// Empty string when none was recorded.  CC-01C: surfaced from durable registry truth.
+    pub note: String,
     /// Sourced: reflects the current daemon integrity arm state at response time.
     pub armed: bool,
     /// `null` — no strategy health monitor is wired; honest null, not synthetic "ok".
@@ -466,22 +478,22 @@ pub struct StrategySummaryRow {
 
 /// Response wrapper for `/api/v1/strategy/summary`.
 ///
-/// `truth_state`:
-/// - `"not_wired"` — no strategy fleet is configured (`MQK_STRATEGY_IDS` not set);
-///   `rows` is empty and **must not** be treated as strategy truth.
-///   The former synthetic `daemon_integrity_gate` surrogate row has been
-///   removed; it was daemon-integrity state masquerading as a strategy row.
-/// - `"active"` — fleet is configured; `rows` reflects the authoritative fleet
-///   entries derived from `MQK_STRATEGY_IDS` and current daemon integrity state.
-///   `rows` may be empty if the fleet is configured but contains no entries.
+/// `truth_state` (CC-01B):
+/// - `"no_db"` — DB unavailable; `rows` is empty and **must not** be treated as
+///   authoritative.  Fail-closed: callers must not infer "no active strategies"
+///   from this state.
+/// - `"registry"` — reading from `postgres.sys_strategy_registry`; `rows` are
+///   authoritative.  Empty `rows` means no strategies have been registered
+///   (authoritative empty ≠ unavailable).  Each row carries the durable
+///   `enabled` flag: `true` = registered + active; `false` = registered + inactive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategySummaryResponse {
     pub canonical_route: String,
     pub backend: String,
-    /// `"not_wired"` = fleet not configured; rows empty and not authoritative.
-    /// `"active"` = fleet configured; rows are authoritative (may be empty).
+    /// `"no_db"` = DB unavailable; rows empty and not authoritative (fail closed).
+    /// `"registry"` = reading from postgres.sys_strategy_registry; rows authoritative.
     pub truth_state: String,
-    /// Empty when `truth_state == "not_wired"`.  Authoritative when `truth_state == "active"`.
+    /// Empty when `truth_state == "no_db"`.  Authoritative when `truth_state == "registry"`.
     pub rows: Vec<StrategySummaryRow>,
 }
 
