@@ -1005,11 +1005,10 @@ async fn api_system_session_reports_truthful_mode_and_operator_auth() {
 
 #[tokio::test]
 async fn api_strategy_summary_declares_not_wired() {
-    // No real strategy-fleet registry exists in this repo.  The route must
-    // return an explicit "not_wired" truth-state wrapper — NOT a synthetic
+    // CC-01B: The route now sources truth from postgres.sys_strategy_registry.
+    // When no DB pool is present the route must return truth_state="no_db"
+    // (fail-closed) — NOT the old "not_wired" placeholder, and NOT a synthetic
     // daemon_integrity_gate surrogate row that would masquerade as a strategy.
-    // The GUI IIFE checks truth_state and emits ok:false when "not_wired",
-    // preventing the StrategyScreen from rendering fake strategy rows.
     let router = make_router();
 
     let req = Request::builder()
@@ -1027,8 +1026,8 @@ async fn api_strategy_summary_declares_not_wired() {
         "/api/v1/strategy/summary must return a wrapper object, not a bare array; got: {json}"
     );
     assert_eq!(
-        json["truth_state"], "not_wired",
-        "strategy summary must declare truth_state=not_wired until a real fleet source is wired"
+        json["truth_state"], "no_db",
+        "CC-01B: no DB → truth_state must be 'no_db' (fail-closed); got: {json}"
     );
     assert!(
         json["rows"].as_array().is_some(),
@@ -1037,7 +1036,7 @@ async fn api_strategy_summary_declares_not_wired() {
     assert_eq!(
         json["rows"].as_array().map(|v| v.is_empty()),
         Some(true),
-        "strategy summary rows must be empty when not_wired"
+        "strategy summary rows must be empty when no_db"
     );
     // Confirm the synthetic daemon_integrity_gate row is gone — any row with
     // that strategy_id would be surrogate truth, not real fleet truth.
@@ -1049,14 +1048,14 @@ async fn api_strategy_summary_declares_not_wired() {
             .any(|r| r["strategy_id"] == "daemon_integrity_gate"),
         "daemon_integrity_gate must not appear as a strategy row"
     );
-    // CC-01: wrapper must carry canonical_route and backend fields.
+    // CC-01B: wrapper must carry canonical_route and backend fields.
     assert_eq!(
         json["canonical_route"], "/api/v1/strategy/summary",
         "strategy summary must carry canonical_route self-identity"
     );
     assert_eq!(
-        json["backend"], "daemon.strategy_fleet",
-        "strategy summary must identify its backend source"
+        json["backend"], "postgres.sys_strategy_registry",
+        "CC-01B: backend must be postgres.sys_strategy_registry"
     );
 }
 
@@ -2823,10 +2822,20 @@ async fn strategy_surfaces_remain_fail_closed_even_with_db_pool() {
     let (summary_status, summary_body) = call(router.clone(), summary_req).await;
     assert_eq!(summary_status, StatusCode::OK);
     let summary = parse_json(summary_body);
-    assert_eq!(summary["truth_state"], "not_wired");
+    // CC-01B: DB pool present → truth_state="registry" (authoritative from
+    // postgres.sys_strategy_registry).  Empty rows = no strategies registered,
+    // which is authoritative empty, not unavailable.
+    assert_eq!(
+        summary["truth_state"], "registry",
+        "CC-01B: DB pool present → truth_state must be 'registry'; got: {summary}"
+    );
+    assert_eq!(
+        summary["backend"], "postgres.sys_strategy_registry",
+        "CC-01B: backend must be postgres.sys_strategy_registry; got: {summary}"
+    );
     assert!(
         summary["rows"].as_array().is_some_and(|rows| rows.is_empty()),
-        "strategy summary must remain fail-closed until a real authoritative fleet source exists; got: {summary}"
+        "empty sys_strategy_registry → authoritative empty rows; got: {summary}"
     );
 
     let suppressions_req = Request::builder()
@@ -2961,12 +2970,20 @@ async fn operator_history_routes_fail_closed_when_db_pool_is_absent() {
 
 #[tokio::test]
 async fn cc01_strategy_summary_active_with_fleet() {
-    // When a fleet is injected, the route must return truth_state="active" and
-    // a row for each configured strategy.  Proves the complete row-level field
-    // contract: sourced fields have real values; unsupported fields are null.
+    // CC-01B: The summary route now sources truth from postgres.sys_strategy_registry,
+    // not from the in-memory strategy_fleet field.  Injecting a fleet via
+    // set_strategy_fleet_for_test has no effect on the route output.
+    //
+    // Without a DB pool the route returns truth_state="no_db" regardless of the
+    // in-memory fleet state.  This proves the route no longer depends on the
+    // placeholder fleet mechanism.
+    //
+    // Row-level field contract (enabled, armed, honest-null fields) is proven by
+    // the DB-backed tests in scenario_strategy_summary_registry.rs.
     let st = Arc::new(state::AppState::new_with_operator_auth(
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
+    // Inject an in-memory fleet — must have NO effect on route output after CC-01B.
     st.set_strategy_fleet_for_test(Some(vec![
         state::StrategyFleetEntry {
             strategy_id: "strat_alpha".to_string(),
@@ -2987,95 +3004,31 @@ async fn cc01_strategy_summary_active_with_fleet() {
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
 
-    // Wrapper identity.
-    assert_eq!(json["truth_state"], "active");
+    // CC-01B: no DB → fail-closed; in-memory fleet is not the source of truth.
+    assert_eq!(
+        json["truth_state"], "no_db",
+        "CC-01B: route must use DB registry, not in-memory fleet; \
+         no DB → no_db regardless of fleet injection; got: {json}"
+    );
     assert_eq!(json["canonical_route"], "/api/v1/strategy/summary");
-    assert_eq!(json["backend"], "daemon.strategy_fleet");
-
-    // Row count matches configured fleet.
-    let rows = json["rows"].as_array().expect("rows must be an array");
-    assert_eq!(rows.len(), 2, "one row per fleet entry; got: {json}");
-
-    let ids: Vec<&str> = rows
-        .iter()
-        .map(|r| r["strategy_id"].as_str().unwrap())
-        .collect();
+    assert_eq!(json["backend"], "postgres.sys_strategy_registry");
     assert!(
-        ids.contains(&"strat_alpha"),
-        "strat_alpha row missing; got: {json}"
+        json["rows"].as_array().is_some_and(|rows| rows.is_empty()),
+        "no_db → rows must be empty; got: {json}"
     );
-    assert!(
-        ids.contains(&"strat_beta"),
-        "strat_beta row missing; got: {json}"
-    );
-
-    // Row-level field contract: prove sourced fields and honest null for every
-    // unsupported field.  No fabricated constants ("ok", "normal", 0, "") allowed.
-    for row in rows {
-        // Sourced: strategy_id is the fleet-configured identifier.
-        assert!(
-            row["strategy_id"].as_str().is_some_and(|s| !s.is_empty()),
-            "CC-01: strategy_id must be a non-empty string; got: {row}"
-        );
-        // Sourced: enabled reflects fleet membership (always true for fleet entries).
-        assert_eq!(
-            row["enabled"], true,
-            "CC-01: enabled must be true for fleet-configured strategies; got: {row}"
-        );
-        // Sourced: armed reflects current integrity arm state (boolean).
-        assert!(
-            row["armed"].is_boolean(),
-            "CC-01: armed must be a boolean derived from integrity state; got: {row}"
-        );
-
-        // Honest null for all fields with no current daemon source.
-        // These must NOT be fabricated as "ok", "normal", 0, or empty string.
-        assert!(
-            row["health_status"].is_null(),
-            "CC-01: health_status must be null (no health monitor wired); got: {row}"
-        );
-        assert!(
-            row["universe_size"].is_null(),
-            "CC-01: universe_size must be null (universe not tracked by daemon); got: {row}"
-        );
-        assert!(
-            row["pending_intents"].is_null(),
-            "CC-01: pending_intents must be null (intent pipeline not sourced); got: {row}"
-        );
-        assert!(
-            row["open_positions"].is_null(),
-            "CC-01: open_positions must be null (position counts not sourced); got: {row}"
-        );
-        assert!(
-            row["today_pnl"].is_null(),
-            "CC-01: today_pnl must be null (no portfolio accounting wired); got: {row}"
-        );
-        assert!(
-            row["drawdown_pct"].is_null(),
-            "CC-01: drawdown_pct must be null (no drawdown tracking wired); got: {row}"
-        );
-        assert!(
-            row["regime"].is_null(),
-            "CC-01: regime must be null (no regime detector wired); got: {row}"
-        );
-        assert!(
-            row["throttle_state"].is_null(),
-            "CC-01: throttle_state must be null (no throttle controller wired); got: {row}"
-        );
-        assert!(
-            row["last_decision_time"].is_null(),
-            "CC-01: last_decision_time must be null (no decision engine wired); got: {row}"
-        );
-    }
 }
 
 #[tokio::test]
 async fn cc01_strategy_summary_active_empty_fleet() {
-    // MQK_STRATEGY_IDS="" (set but empty) → active with zero rows (authoritative empty).
+    // CC-01B: In-memory fleet injection is superseded; the route uses the DB registry.
+    // Injecting an empty in-memory fleet has no effect.  Without a DB pool the
+    // route returns truth_state="no_db" (fail-closed), not "active" or "not_wired".
+    // Authoritative empty ("registry" + empty rows) requires DB — proven in
+    // scenario_strategy_summary_registry.rs::summary_with_db_uses_registry_truth_state.
     let st = Arc::new(state::AppState::new_with_operator_auth(
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
-    st.set_strategy_fleet_for_test(Some(vec![])).await;
+    st.set_strategy_fleet_for_test(Some(vec![])).await; // no effect after CC-01B
     let router = routes::build_router(Arc::clone(&st));
 
     let req = Request::builder()
@@ -3088,19 +3041,20 @@ async fn cc01_strategy_summary_active_empty_fleet() {
     let json = parse_json(body);
 
     assert_eq!(
-        json["truth_state"], "active",
-        "empty fleet must be active (authoritative empty), not not_wired; got: {json}"
+        json["truth_state"], "no_db",
+        "CC-01B: no DB → no_db; empty in-memory fleet has no effect; got: {json}"
     );
     assert!(
         json["rows"].as_array().is_some_and(|rows| rows.is_empty()),
-        "empty fleet rows must be []; got: {json}"
+        "no_db rows must be []; got: {json}"
     );
 }
 
 #[tokio::test]
 async fn cc01_strategy_summary_not_wired_without_fleet() {
-    // No fleet configured → not_wired.  This is the default make_router() case
-    // (MQK_STRATEGY_IDS not set in the test environment).
+    // CC-01B: "not_wired" is gone.  No fleet + no DB → truth_state="no_db"
+    // (fail-closed).  The route no longer reads MQK_STRATEGY_IDS or the
+    // in-memory fleet; it reads postgres.sys_strategy_registry.
     let router = make_router();
     let req = Request::builder()
         .method("GET")
@@ -3110,10 +3064,13 @@ async fn cc01_strategy_summary_not_wired_without_fleet() {
     let (status, body) = call(router, req).await;
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
-    assert_eq!(json["truth_state"], "not_wired");
+    assert_eq!(
+        json["truth_state"], "no_db",
+        "CC-01B: no fleet + no DB → no_db (not not_wired); got: {json}"
+    );
     assert!(
         json["rows"].as_array().is_some_and(|rows| rows.is_empty()),
-        "not_wired rows must be []; got: {json}"
+        "no_db rows must be []; got: {json}"
     );
 }
 

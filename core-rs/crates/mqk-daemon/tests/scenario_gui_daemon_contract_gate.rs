@@ -397,16 +397,18 @@ async fn gui_session_config_strategy_and_audit_surfaces_are_semantically_truthfu
         strategy_json.as_object().is_some(),
         "/api/v1/strategy/summary must return a wrapper object, not a bare array; got: {strategy_json}"
     );
+    // CC-01B: route now sources truth from postgres.sys_strategy_registry.
+    // No DB pool → truth_state="no_db" (fail-closed), not "not_wired".
     assert_eq!(
-        strategy_json["truth_state"], "not_wired",
-        "strategy summary must declare truth_state=not_wired"
+        strategy_json["truth_state"], "no_db",
+        "CC-01B: strategy summary must declare truth_state=no_db when DB unavailable"
     );
     assert!(
         strategy_json["rows"]
             .as_array()
             .map(|v| v.is_empty())
             .unwrap_or(false),
-        "strategy summary rows must be empty when not_wired"
+        "strategy summary rows must be empty when no_db"
     );
     // Explicitly confirm the synthetic daemon_integrity_gate surrogate is absent.
     assert!(
@@ -886,10 +888,10 @@ async fn gui_contract_execution_orders_200_array_with_injected_snapshot() {
 
 #[tokio::test]
 async fn gui_contract_not_wired_surfaces_declare_truth_state() {
-    // config-diffs and strategy/summary remain permanently "not_wired" because
-    // no durable backing exists for them yet.  strategy/suppressions is now
-    // durable (CC-02) and returns "no_db" when no DB pool is configured — it
-    // no longer returns "not_wired".
+    // config-diffs remains "not_wired" (no durable backing yet).
+    // strategy/suppressions (CC-02) and strategy/summary (CC-01B) are now
+    // durable and return "no_db" when no DB pool is configured — neither
+    // returns "not_wired" any more.
     //
     // Each must return a wrapper object — NOT a bare array — so the GUI IIFEs
     // can emit ok:false and prevent fake-zero / fake-row rendering.
@@ -963,7 +965,8 @@ async fn gui_contract_not_wired_surfaces_declare_truth_state() {
         "/api/v1/strategy/suppressions rows must be empty when no_db"
     );
 
-    // /api/v1/strategy/summary — StrategySummaryResponse wrapper
+    // /api/v1/strategy/summary — CC-01B: durable surface (postgres.sys_strategy_registry).
+    // No DB pool → truth_state="no_db" (fail-closed), not "not_wired".
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/strategy/summary")
@@ -981,15 +984,19 @@ async fn gui_contract_not_wired_surfaces_declare_truth_state() {
         "/api/v1/strategy/summary must return a wrapper object, not a bare array; got: {json}"
     );
     assert_eq!(
-        json["truth_state"], "not_wired",
-        "/api/v1/strategy/summary must declare truth_state=not_wired"
+        json["truth_state"], "no_db",
+        "CC-01B: /api/v1/strategy/summary must declare truth_state=no_db when no DB pool is configured"
+    );
+    assert_eq!(
+        json["backend"], "postgres.sys_strategy_registry",
+        "CC-01B: /api/v1/strategy/summary must identify its backend source"
     );
     assert!(
         json["rows"]
             .as_array()
             .map(|v| v.is_empty())
             .unwrap_or(false),
-        "/api/v1/strategy/summary rows must be empty when not_wired"
+        "/api/v1/strategy/summary rows must be empty when no_db"
     );
     // Confirm the synthetic daemon_integrity_gate surrogate cannot sneak back in.
     assert!(

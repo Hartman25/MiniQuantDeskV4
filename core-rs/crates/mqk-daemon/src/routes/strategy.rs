@@ -25,49 +25,82 @@ use crate::state::{AlpacaWsContinuityState, AppState, StrategyMarketDataSource};
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn strategy_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let fleet = state.strategy_fleet_snapshot().await;
-    match fleet {
-        None => (
+    // CC-01B: Active-fleet truth is sourced from postgres.sys_strategy_registry.
+    // Fail closed: if the DB is unavailable we cannot distinguish "no strategies"
+    // from "registry unavailable", so we return "no_db" rather than a misleading
+    // authoritative-empty or "not_wired" response.
+    let Some(db) = state.db.as_ref() else {
+        return (
             StatusCode::OK,
             Json(StrategySummaryResponse {
                 canonical_route: "/api/v1/strategy/summary".to_string(),
-                backend: "daemon.strategy_fleet".to_string(),
-                truth_state: "not_wired".to_string(),
+                backend: "postgres.sys_strategy_registry".to_string(),
+                truth_state: "no_db".to_string(),
                 rows: Vec::new(),
             }),
         )
-            .into_response(),
-        Some(entries) => {
-            let armed = !state.integrity.read().await.is_execution_blocked();
-            let rows = entries
-                .into_iter()
-                .map(|e| StrategySummaryRow {
-                    strategy_id: e.strategy_id,
-                    enabled: true,
-                    armed,
-                    health_status: None,
-                    universe_size: None,
-                    pending_intents: None,
-                    open_positions: None,
-                    today_pnl: None,
-                    drawdown_pct: None,
-                    regime: None,
-                    throttle_state: None,
-                    last_decision_time: None,
-                })
-                .collect();
-            (
+            .into_response();
+    };
+
+    let registry = match mqk_db::fetch_strategy_registry(db).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!("fetch_strategy_registry failed: {err}");
+            return (
                 StatusCode::OK,
                 Json(StrategySummaryResponse {
                     canonical_route: "/api/v1/strategy/summary".to_string(),
-                    backend: "daemon.strategy_fleet".to_string(),
-                    truth_state: "active".to_string(),
-                    rows,
+                    backend: "postgres.sys_strategy_registry".to_string(),
+                    truth_state: "no_db".to_string(),
+                    rows: Vec::new(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
-    }
+    };
+
+    // Arm state is global (not per-strategy); read once for all rows.
+    let armed = !state.integrity.read().await.is_execution_blocked();
+
+    // Each registry row maps to one summary row.
+    // CC-01C: all non-null fields are sourced directly from sys_strategy_registry.
+    // `enabled` distinguishes registered+active from registered+inactive.
+    // `display_name`, `kind`, `registered_at`, `note` surface available registry truth.
+    // Operational metrics (health, pnl, positions, etc.) remain honest null —
+    // no durable source exists for them yet.
+    // Empty rows means no strategies are registered (authoritative empty ≠ unavailable).
+    let rows = registry
+        .into_iter()
+        .map(|r| StrategySummaryRow {
+            strategy_id: r.strategy_id,
+            display_name: r.display_name,
+            enabled: r.enabled,
+            kind: r.kind,
+            registered_at: r.registered_at_utc.to_rfc3339(),
+            note: r.note,
+            armed,
+            health_status: None,
+            universe_size: None,
+            pending_intents: None,
+            open_positions: None,
+            today_pnl: None,
+            drawdown_pct: None,
+            regime: None,
+            throttle_state: None,
+            last_decision_time: None,
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(StrategySummaryResponse {
+            canonical_route: "/api/v1/strategy/summary".to_string(),
+            backend: "postgres.sys_strategy_registry".to_string(),
+            truth_state: "registry".to_string(),
+            rows,
+        }),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
