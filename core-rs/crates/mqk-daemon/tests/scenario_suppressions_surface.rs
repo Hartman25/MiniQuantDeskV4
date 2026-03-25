@@ -38,8 +38,7 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use mqk_daemon::{
-    routes,
-    state,
+    routes, state,
     suppression::{clear_suppression, suppress_strategy, SuppressStrategyArgs},
 };
 use tower::ServiceExt;
@@ -245,8 +244,7 @@ async fn surface_active_suppression_reflects_write_seam() {
     assert!(
         write_out.suppressed,
         "suppress_strategy must succeed before surface check; disposition={:?}, blockers={:?}",
-        write_out.disposition,
-        write_out.blockers
+        write_out.disposition, write_out.blockers
     );
 
     let (status, json) = get_suppressions(Arc::clone(&st)).await;
@@ -257,11 +255,18 @@ async fn surface_active_suppression_reflects_write_seam() {
     );
 
     let rows = json["rows"].as_array().expect("rows must be array");
-    let row = find_row(rows, &sup_id)
-        .expect("written suppression must appear in mounted route surface");
+    let row =
+        find_row(rows, &sup_id).expect("written suppression must appear in mounted route surface");
 
-    assert_eq!(row["strategy_id"], sid.as_str(), "strategy_id must match canonical identity");
-    assert_eq!(row["state"], "active", "state must be 'active' before clearing");
+    assert_eq!(
+        row["strategy_id"],
+        sid.as_str(),
+        "strategy_id must match canonical identity"
+    );
+    assert_eq!(
+        row["state"], "active",
+        "state must be 'active' before clearing"
+    );
     assert_eq!(row["trigger_domain"], "operator");
     assert_eq!(row["trigger_reason"], "CC-02C surface proof");
     assert!(
@@ -320,8 +325,8 @@ async fn surface_cleared_suppression_reflects_lifecycle() {
     // Verify active state in surface before clearing.
     let (_, before_json) = get_suppressions(Arc::clone(&st)).await;
     let before_rows = before_json["rows"].as_array().expect("rows must be array");
-    let before_row = find_row(before_rows, &sup_id)
-        .expect("suppression must be visible before clear");
+    let before_row =
+        find_row(before_rows, &sup_id).expect("suppression must be visible before clear");
     assert_eq!(
         before_row["state"], "active",
         "state must be 'active' before clearing; got: {before_row}"
@@ -360,7 +365,8 @@ async fn surface_cleared_suppression_reflects_lifecycle() {
         "cleared_at must be non-null after clearing; got: {after_row}"
     );
     assert_eq!(
-        after_row["strategy_id"], sid.as_str(),
+        after_row["strategy_id"],
+        sid.as_str(),
         "strategy_id must remain aligned with canonical identity after lifecycle"
     );
 }

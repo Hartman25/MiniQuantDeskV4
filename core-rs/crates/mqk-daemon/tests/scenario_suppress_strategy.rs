@@ -23,11 +23,8 @@ use axum::http::Request;
 use chrono::Utc;
 use http_body_util::BodyExt;
 use mqk_daemon::{
-    routes,
-    state,
-    suppression::{
-        clear_suppression, suppress_strategy, SuppressStrategyArgs,
-    },
+    routes, state,
+    suppression::{clear_suppression, suppress_strategy, SuppressStrategyArgs},
 };
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -274,8 +271,7 @@ async fn suppress_registered_enabled_strategy_accepted() {
     assert!(
         out.suppressed,
         "registered+enabled strategy must be suppressible; disposition={:?}, blockers={:?}",
-        out.disposition,
-        out.blockers
+        out.disposition, out.blockers
     );
     assert_eq!(out.disposition, "suppressed");
     assert_eq!(out.suppression_id, sup_id);
@@ -318,8 +314,7 @@ async fn suppress_registered_disabled_strategy_accepted() {
     assert!(
         out.suppressed,
         "registered+disabled strategy must be suppressible; disposition={:?}, blockers={:?}",
-        out.disposition,
-        out.blockers
+        out.disposition, out.blockers
     );
     assert_eq!(out.disposition, "suppressed");
 }
@@ -355,7 +350,10 @@ async fn suppress_same_id_twice_is_idempotent() {
         .await
         .expect("fetch failed");
     let count = rows.iter().filter(|r| r.suppression_id == sup_id).count();
-    assert_eq!(count, 1, "exactly one suppression row must exist after two submits");
+    assert_eq!(
+        count, 1,
+        "exactly one suppression row must exist after two submits"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -380,7 +378,10 @@ async fn suppressed_strategy_visible_through_route_read_seam() {
 
     let sup_id = Uuid::new_v4();
     let out = suppress_strategy(&st, make_args(sup_id, &sid, "risk", "visible via route")).await;
-    assert_eq!(out.disposition, "suppressed", "suppression must succeed before route check");
+    assert_eq!(
+        out.disposition, "suppressed",
+        "suppression must succeed before route check"
+    );
 
     let json = suppressions_response(Arc::clone(&st)).await;
     assert_eq!(
@@ -426,8 +427,7 @@ async fn clear_active_suppression_transitions_to_cleared() {
     ));
 
     let sup_id = Uuid::new_v4();
-    suppress_strategy(&st, make_args(sup_id, &sid, "operator", "will be cleared"))
-        .await;
+    suppress_strategy(&st, make_args(sup_id, &sid, "operator", "will be cleared")).await;
 
     let cleared_at = Utc::now();
     let out = clear_suppression(&st, sup_id, cleared_at).await;
@@ -529,7 +529,10 @@ async fn cleared_suppression_visible_as_cleared_in_route() {
         .find(|r| r["suppression_id"].as_str() == Some(&sup_id.to_string()))
         .expect("cleared suppression must appear in route response");
 
-    assert_eq!(row["state"], "cleared", "state must be 'cleared' in route after clear");
+    assert_eq!(
+        row["state"], "cleared",
+        "state must be 'cleared' in route after clear"
+    );
     assert!(
         !row["cleared_at"].is_null(),
         "cleared_at must be non-null after clear"

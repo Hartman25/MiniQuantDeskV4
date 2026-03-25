@@ -291,7 +291,11 @@ async fn lo02c_rc02_gap_cursor_and_dirty_reconcile_ws_gate_fires_first_then_reco
     .await
     .expect("RC-02: advance_broker_cursor failed");
 
-    seed_dirty_reconcile_to_db(&pool, "lo02c-rc02: position mismatch concurrent with WS gap").await;
+    seed_dirty_reconcile_to_db(
+        &pool,
+        "lo02c-rc02: position mismatch concurrent with WS gap",
+    )
+    .await;
 
     // Fresh restart.
     let mut state_inner = AppState::new_for_test_with_db_mode_and_broker(

@@ -2834,7 +2834,9 @@ async fn strategy_surfaces_remain_fail_closed_even_with_db_pool() {
         "CC-01B: backend must be postgres.sys_strategy_registry; got: {summary}"
     );
     assert!(
-        summary["rows"].as_array().is_some_and(|rows| rows.is_empty()),
+        summary["rows"]
+            .as_array()
+            .is_some_and(|rows| rows.is_empty()),
         "empty sys_strategy_registry → authoritative empty rows; got: {summary}"
     );
 

@@ -41,7 +41,9 @@ use chrono::Utc;
 use http_body_util::BodyExt;
 use mqk_broker_alpaca::types::AlpacaFetchCursor;
 use mqk_daemon::routes;
-use mqk_daemon::state::{AlpacaWsContinuityState, AppState, BrokerKind, DeploymentMode, OperatorAuthMode};
+use mqk_daemon::state::{
+    AlpacaWsContinuityState, AppState, BrokerKind, DeploymentMode, OperatorAuthMode,
+};
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -274,9 +276,7 @@ async fn lo02b_sh04_live_shadow_gap_detected_surfaces_on_status() {
     ));
 
     st.update_ws_continuity(AlpacaWsContinuityState::GapDetected {
-        last_message_id: Some(
-            "alpaca:order-lo02b-sh04:filled:2026-01-10T12:00:00Z".to_string(),
-        ),
+        last_message_id: Some("alpaca:order-lo02b-sh04:filled:2026-01-10T12:00:00Z".to_string()),
         last_event_at: Some("2026-01-10T12:00:00Z".to_string()),
         detail: "lo02b-sh04: simulated gap seeded from prior session cursor".to_string(),
     })
@@ -321,9 +321,7 @@ async fn lo02b_sh05_live_shadow_gap_detected_reaches_db_gate_not_continuity_gate
     // Inject GapDetected — the unsafe state that blocks Paper+Alpaca and LiveCapital,
     // but must NOT block LiveShadow (the gap-repair path).
     st.update_ws_continuity(AlpacaWsContinuityState::GapDetected {
-        last_message_id: Some(
-            "alpaca:order-lo02b-sh05:canceled:2026-01-10T13:00:00Z".to_string(),
-        ),
+        last_message_id: Some("alpaca:order-lo02b-sh05:canceled:2026-01-10T13:00:00Z".to_string()),
         last_event_at: Some("2026-01-10T13:00:00Z".to_string()),
         detail: "lo02b-sh05: gap to be repaired by this live-shadow session".to_string(),
     })
@@ -389,7 +387,8 @@ async fn lo02b_sh06_live_capital_cold_start_refused_at_continuity_gate_before_db
     );
     // Override operator auth to bypass the capital token gate
     // (which requires TokenRequired; ExplicitDevNoToken would be blocked there first).
-    state_inner.operator_auth = OperatorAuthMode::TokenRequired("lo02b-sh06-test-token".to_string());
+    state_inner.operator_auth =
+        OperatorAuthMode::TokenRequired("lo02b-sh06-test-token".to_string());
     let st = Arc::new(state_inner);
 
     // Arm directly (integrity field manipulation) — TokenRequired auth blocks the

@@ -102,7 +102,10 @@ async fn suppression_insert_is_durable_and_readable() {
     assert_eq!(row.state, "active");
     assert_eq!(row.trigger_domain, "operator");
     assert_eq!(row.trigger_reason, "manual suppression for test");
-    assert!(row.cleared_at_utc.is_none(), "active suppression must have no cleared_at_utc");
+    assert!(
+        row.cleared_at_utc.is_none(),
+        "active suppression must have no cleared_at_utc"
+    );
 }
 
 /// CC-02A / DB-02: inserting same suppression_id twice is a silent no-op.
@@ -139,7 +142,11 @@ async fn suppression_insert_idempotent_on_duplicate_id() {
         .await
         .expect("fetch failed");
     let matching: Vec<_> = rows.iter().filter(|r| r.suppression_id == sup_id).collect();
-    assert_eq!(matching.len(), 1, "exactly one row must exist after duplicate insert");
+    assert_eq!(
+        matching.len(),
+        1,
+        "exactly one row must exist after duplicate insert"
+    );
     assert_eq!(
         matching[0].trigger_reason, "first insert",
         "first insert's data must be preserved"
@@ -158,15 +165,21 @@ async fn suppression_clear_transitions_to_cleared() {
     let sid = unique_sid("clr");
     let sup_id = Uuid::new_v4();
 
-    insert_strategy_suppression(&pool, &make_args(sup_id, &sid, "operator", "will be cleared"))
-        .await
-        .expect("insert failed");
+    insert_strategy_suppression(
+        &pool,
+        &make_args(sup_id, &sid, "operator", "will be cleared"),
+    )
+    .await
+    .expect("insert failed");
 
     let cleared_at = Utc::now();
     let was_cleared = clear_strategy_suppression(&pool, sup_id, cleared_at)
         .await
         .expect("clear_strategy_suppression failed");
-    assert!(was_cleared, "clear must return true for an active suppression");
+    assert!(
+        was_cleared,
+        "clear must return true for an active suppression"
+    );
 
     let rows = fetch_strategy_suppressions(&pool)
         .await

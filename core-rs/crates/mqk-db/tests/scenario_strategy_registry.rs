@@ -43,7 +43,10 @@ async fn test_pool() -> anyhow::Result<sqlx::PgPool> {
              cargo test -p mqk-db --test scenario_strategy_registry -- --include-ignored"
         ),
     };
-    let pool = PgPoolOptions::new().max_connections(2).connect(&url).await?;
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await?;
     mqk_db::migrate(&pool).await?;
     Ok(pool)
 }
@@ -88,7 +91,15 @@ async fn registry_insert_is_durable_and_queryable() -> anyhow::Result<()> {
 
     upsert_strategy_registry_entry(
         &pool,
-        &make_args(&id, "Durable Test Strategy", true, "external_signal", "", ts, ts),
+        &make_args(
+            &id,
+            "Durable Test Strategy",
+            true,
+            "external_signal",
+            "",
+            ts,
+            ts,
+        ),
     )
     .await?;
 
@@ -131,7 +142,15 @@ async fn registry_upsert_updates_mutable_fields_preserves_registered_at() -> any
     // Second upsert: mutate every field, supply a different registered_at.
     upsert_strategy_registry_entry(
         &pool,
-        &make_args(&id, "Updated Name", false, "external_signal", "operator note", t2, t2),
+        &make_args(
+            &id,
+            "Updated Name",
+            false,
+            "external_signal",
+            "operator note",
+            t2,
+            t2,
+        ),
     )
     .await?;
 
@@ -290,12 +309,28 @@ async fn active_fleet_enabled_flag_distinguishes_active_from_inactive() -> anyho
     // Register one active (enabled) and one inactive (disabled) strategy.
     upsert_strategy_registry_entry(
         &pool,
-        &make_args(&id_active, "Active Strategy", true, "external_signal", "", ts, ts),
+        &make_args(
+            &id_active,
+            "Active Strategy",
+            true,
+            "external_signal",
+            "",
+            ts,
+            ts,
+        ),
     )
     .await?;
     upsert_strategy_registry_entry(
         &pool,
-        &make_args(&id_inactive, "Inactive Strategy", false, "bar_driven", "", ts, ts),
+        &make_args(
+            &id_inactive,
+            "Inactive Strategy",
+            false,
+            "bar_driven",
+            "",
+            ts,
+            ts,
+        ),
     )
     .await?;
 
@@ -306,7 +341,11 @@ async fn active_fleet_enabled_flag_distinguishes_active_from_inactive() -> anyho
         .collect();
 
     // Both strategies must appear in the registry (enabled and disabled).
-    assert_eq!(ours.len(), 2, "both active and inactive strategies must be in registry");
+    assert_eq!(
+        ours.len(),
+        2,
+        "both active and inactive strategies must be in registry"
+    );
 
     // Derive the active fleet by filtering on enabled = true.
     let active: Vec<_> = ours.iter().filter(|r| r.enabled).collect();
@@ -349,7 +388,15 @@ async fn active_fleet_disable_keeps_strategy_in_registry() -> anyhow::Result<()>
     let ts2 = ts + chrono::Duration::seconds(10);
     upsert_strategy_registry_entry(
         &pool,
-        &make_args(&id, "Will Be Disabled", false, "external_signal", "", ts, ts2),
+        &make_args(
+            &id,
+            "Will Be Disabled",
+            false,
+            "external_signal",
+            "",
+            ts,
+            ts2,
+        ),
     )
     .await?;
 
@@ -360,7 +407,10 @@ async fn active_fleet_disable_keeps_strategy_in_registry() -> anyhow::Result<()>
     // Strategy is still registered — it is not removed from the registry.
     assert_eq!(after.strategy_id, id);
     // But it is now inactive (not in active fleet).
-    assert!(!after.enabled, "disabled strategy must have enabled = false");
+    assert!(
+        !after.enabled,
+        "disabled strategy must have enabled = false"
+    );
 
     Ok(())
 }

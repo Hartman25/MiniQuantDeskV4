@@ -115,9 +115,7 @@ fn outcome(
 // ---------------------------------------------------------------------------
 
 /// Returns `Err(blockers)` if any required field is invalid.
-fn validate_fields(
-    d: &InternalStrategyDecision,
-) -> Result<(), Vec<String>> {
+fn validate_fields(d: &InternalStrategyDecision) -> Result<(), Vec<String>> {
     let mut blockers = Vec::new();
 
     if d.decision_id.trim().is_empty() {
@@ -326,9 +324,11 @@ pub async fn submit_internal_strategy_decision(
                 &did,
                 &sid,
                 None,
-                vec!["internal decision refused: durable arm state is not armed; \
+                vec![
+                    "internal decision refused: durable arm state is not armed; \
                       fresh systems default to disarmed until explicitly armed"
-                    .to_string()],
+                        .to_string(),
+                ],
             );
         }
         Err(err) => {
@@ -392,7 +392,14 @@ pub async fn submit_internal_strategy_decision(
         if let Some(note) = status.notes {
             blockers.push(note);
         }
-        return outcome(false, "unavailable", &did, &sid, Some(active_run_id), blockers);
+        return outcome(
+            false,
+            "unavailable",
+            &did,
+            &sid,
+            Some(active_run_id),
+            blockers,
+        );
     }
 
     // Gate 7: enqueue to outbox (idempotent).
@@ -403,18 +410,16 @@ pub async fn submit_internal_strategy_decision(
             state.increment_day_signal_count();
             outcome(true, "accepted", &did, &sid, Some(active_run_id), vec![])
         }
-        Ok(false) => {
-            outcome(
-                false,
-                "duplicate",
-                &did,
-                &sid,
-                Some(active_run_id),
-                vec![format!(
-                    "decision_id '{did}' already exists in outbox; no new row was created"
-                )],
-            )
-        }
+        Ok(false) => outcome(
+            false,
+            "duplicate",
+            &did,
+            &sid,
+            Some(active_run_id),
+            vec![format!(
+                "decision_id '{did}' already exists in outbox; no new row was created"
+            )],
+        ),
         Err(err) => outcome(
             false,
             "unavailable",

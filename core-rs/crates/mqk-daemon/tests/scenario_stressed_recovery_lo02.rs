@@ -722,8 +722,7 @@ async fn lo02_sr10_orphaned_running_run_blocks_start_on_restart() {
     );
     let json = parse_json(start_body);
     assert_eq!(
-        json["fault_class"],
-        "runtime.truth_mismatch.durable_active_without_local_owner",
+        json["fault_class"], "runtime.truth_mismatch.durable_active_without_local_owner",
         "SR-10: fault_class must identify the orphaned-run conflict precisely; got: {json}"
     );
     assert!(
@@ -782,8 +781,7 @@ async fn lo02_sr11_active_suppression_survives_restart_and_blocks_decision_seam(
         suppress_out.suppressed,
         "SR-11: suppress_strategy must succeed before restart simulation; \
          disposition={}, blockers={:?}",
-        suppress_out.disposition,
-        suppress_out.blockers
+        suppress_out.disposition, suppress_out.blockers
     );
 
     // Session 2: fresh AppState (same DB) — simulates daemon restart.
@@ -813,17 +811,14 @@ async fn lo02_sr11_active_suppression_survives_restart_and_blocks_decision_seam(
         out.disposition, "suppressed",
         "SR-11: durable suppression from prior session must block the decision seam in fresh \
          AppState; disposition={}, blockers={:?}",
-        out.disposition,
-        out.blockers
+        out.disposition, out.blockers
     );
     assert!(
         !out.accepted,
         "SR-11: decision must not be accepted when strategy is suppressed; got: {out:?}"
     );
     assert!(
-        out.blockers
-            .iter()
-            .any(|b| b.contains("suppressed")),
+        out.blockers.iter().any(|b| b.contains("suppressed")),
         "SR-11: blocker message must mention suppression; got: {:?}",
         out.blockers
     );

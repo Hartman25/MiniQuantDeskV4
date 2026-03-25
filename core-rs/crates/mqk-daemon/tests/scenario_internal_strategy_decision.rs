@@ -579,19 +579,17 @@ async fn decision_suppression_blocks_before_outbox_enqueue() {
     ));
 
     let dec_id = unique_id("dec_blocked");
-    let out =
-        submit_internal_strategy_decision(&st, make_decision(&dec_id, &sid)).await;
+    let out = submit_internal_strategy_decision(&st, make_decision(&dec_id, &sid)).await;
 
     assert_eq!(out.disposition, "suppressed");
 
     // No outbox row must exist for this decision_id.
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM oms_outbox WHERE idempotency_key = $1",
-    )
-    .bind(&dec_id)
-    .fetch_one(&pool)
-    .await
-    .expect("count outbox");
+    let (count,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM oms_outbox WHERE idempotency_key = $1")
+            .bind(&dec_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count outbox");
     assert_eq!(
         count, 0,
         "suppression refusal must not create any outbox row; found {count} row(s)"
@@ -682,8 +680,7 @@ async fn decision_full_enqueue_path_accepted() {
     assert!(
         out.accepted,
         "all gates passed; decision must be accepted; disposition={:?}, blockers={:?}",
-        out.disposition,
-        out.blockers
+        out.disposition, out.blockers
     );
     assert_eq!(out.disposition, "accepted");
     assert_eq!(
@@ -753,7 +750,10 @@ async fn decision_duplicate_decision_id_returns_duplicate() {
 
     // Second submission with the same decision_id — must be duplicate.
     let second = submit_internal_strategy_decision(&st, make_decision(&dec_id, &sid)).await;
-    assert!(!second.accepted, "duplicate submission must not be accepted");
+    assert!(
+        !second.accepted,
+        "duplicate submission must not be accepted"
+    );
     assert_eq!(
         second.disposition, "duplicate",
         "second submission with same decision_id must return 'duplicate'"
@@ -767,14 +767,16 @@ async fn decision_duplicate_decision_id_returns_duplicate() {
     );
 
     // Exactly one row in the outbox.
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM oms_outbox WHERE idempotency_key = $1",
-    )
-    .bind(&dec_id)
-    .fetch_one(&pool)
-    .await
-    .expect("count outbox");
-    assert_eq!(count, 1, "duplicate submission must not create a second outbox row");
+    let (count,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM oms_outbox WHERE idempotency_key = $1")
+            .bind(&dec_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count outbox");
+    assert_eq!(
+        count, 1,
+        "duplicate submission must not create a second outbox row"
+    );
 
     cleanup_run(&pool, run_id).await;
 }

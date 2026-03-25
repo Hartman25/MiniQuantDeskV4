@@ -73,12 +73,7 @@ async fn make_db_pool() -> sqlx::PgPool {
 }
 
 /// Upsert a test registry entry with a caller-supplied enabled flag.
-async fn seed_registry(
-    pool: &sqlx::PgPool,
-    strategy_id: &str,
-    display_name: &str,
-    enabled: bool,
-) {
+async fn seed_registry(pool: &sqlx::PgPool, strategy_id: &str, display_name: &str, enabled: bool) {
     let ts = chrono::Utc::now();
     mqk_db::upsert_strategy_registry_entry(
         pool,
@@ -104,7 +99,9 @@ fn unique_id(prefix: &str) -> String {
 
 /// Find a row in the summary JSON by strategy_id.
 fn find_row<'a>(rows: &'a serde_json::Value, strategy_id: &str) -> Option<&'a serde_json::Value> {
-    rows.as_array()?.iter().find(|r| r["strategy_id"] == strategy_id)
+    rows.as_array()?
+        .iter()
+        .find(|r| r["strategy_id"] == strategy_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +134,10 @@ async fn summary_no_db_returns_fail_closed_no_db() {
         "backend must identify the intended source even when unavailable"
     );
     assert_eq!(
-        json["rows"].as_array().map(|a| a.len()).unwrap_or(usize::MAX),
+        json["rows"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(usize::MAX),
         0,
         "rows must be empty when DB is unavailable"
     );
@@ -194,7 +194,10 @@ async fn summary_with_db_uses_registry_truth_state() {
     // Empty rows is authoritative when DB is available — it means no strategies
     // are registered, not that the registry is unavailable.
     assert_eq!(
-        json["rows"].as_array().map(|a| a.len()).unwrap_or(usize::MAX),
+        json["rows"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(usize::MAX),
         0,
         "empty registry must produce empty rows (authoritative empty, not error)"
     );
@@ -387,10 +390,7 @@ async fn summary_row_fields_sourced_from_registry() -> anyhow::Result<()> {
         row["kind"], "external_signal",
         "kind must match registry value"
     );
-    assert_eq!(
-        row["enabled"], true,
-        "enabled must match registry value"
-    );
+    assert_eq!(row["enabled"], true, "enabled must match registry value");
     assert_eq!(
         row["note"], "operator-supplied note",
         "note must match registry value"
@@ -407,15 +407,36 @@ async fn summary_row_fields_sourced_from_registry() -> anyhow::Result<()> {
     );
 
     // Operational metrics remain honest null — no source exists yet.
-    assert!(row["health_status"].is_null(), "health_status must be honest null");
-    assert!(row["universe_size"].is_null(), "universe_size must be honest null");
-    assert!(row["pending_intents"].is_null(), "pending_intents must be honest null");
-    assert!(row["open_positions"].is_null(), "open_positions must be honest null");
+    assert!(
+        row["health_status"].is_null(),
+        "health_status must be honest null"
+    );
+    assert!(
+        row["universe_size"].is_null(),
+        "universe_size must be honest null"
+    );
+    assert!(
+        row["pending_intents"].is_null(),
+        "pending_intents must be honest null"
+    );
+    assert!(
+        row["open_positions"].is_null(),
+        "open_positions must be honest null"
+    );
     assert!(row["today_pnl"].is_null(), "today_pnl must be honest null");
-    assert!(row["drawdown_pct"].is_null(), "drawdown_pct must be honest null");
+    assert!(
+        row["drawdown_pct"].is_null(),
+        "drawdown_pct must be honest null"
+    );
     assert!(row["regime"].is_null(), "regime must be honest null");
-    assert!(row["throttle_state"].is_null(), "throttle_state must be honest null");
-    assert!(row["last_decision_time"].is_null(), "last_decision_time must be honest null");
+    assert!(
+        row["throttle_state"].is_null(),
+        "throttle_state must be honest null"
+    );
+    assert!(
+        row["last_decision_time"].is_null(),
+        "last_decision_time must be honest null"
+    );
 
     Ok(())
 }
