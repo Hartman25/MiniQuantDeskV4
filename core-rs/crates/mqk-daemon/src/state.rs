@@ -999,6 +999,34 @@ impl AppState {
             }
         }
 
+        // Live-capital WS continuity gate.
+        //
+        // Placed here — before db_pool() — so it is:
+        //   - in-process testable without a database or real broker credentials
+        //   - before any DB resources or run rows are acquired (prevents dangling
+        //     "Created" run rows on a continuity-refused start)
+        //   - symmetric with the Paper+Alpaca continuity gate above
+        //
+        // Previous position (after build_execution_orchestrator) required
+        // orchestrator.release_runtime_leadership() on failure and could leave
+        // a "Created" run row in the DB if the check failed after insert_run.
+        if self.deployment_mode() == DeploymentMode::LiveCapital {
+            let continuity = self.alpaca_ws_continuity().await;
+            if !continuity.is_continuity_proven() {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.capital_ws_continuity_unproven",
+                    "alpaca_ws_continuity",
+                    format!(
+                        "live-capital requires proven Alpaca WS continuity before starting; \
+                         current continuity state: '{}' — \
+                         run in live-shadow mode to establish a proven cursor, \
+                         then transition to capital",
+                        continuity.as_status_str()
+                    ),
+                ));
+            }
+        }
+
         let db = self.db_pool()?;
         if let Some(active) = mqk_db::fetch_active_run_for_engine(
             &db,
@@ -1072,24 +1100,6 @@ impl AppState {
         let mut orchestrator = self
             .build_execution_orchestrator(db.clone(), run_id)
             .await?;
-
-        if self.deployment_mode() == DeploymentMode::LiveCapital {
-            let continuity = self.alpaca_ws_continuity().await;
-            if !continuity.is_continuity_proven() {
-                let _ = orchestrator.release_runtime_leadership().await;
-                return Err(RuntimeLifecycleError::forbidden(
-                    "runtime.start_refused.capital_ws_continuity_unproven",
-                    "alpaca_ws_continuity",
-                    format!(
-                        "live-capital requires proven Alpaca WS continuity before starting; \
-                         current continuity state: '{}' — \
-                         run in live-shadow mode to establish a proven cursor, \
-                         then transition to capital",
-                        continuity.as_status_str()
-                    ),
-                ));
-            }
-        }
 
         if let Err(err) = mqk_db::arm_run(&db, run_id).await {
             let _ = orchestrator.release_runtime_leadership().await;
