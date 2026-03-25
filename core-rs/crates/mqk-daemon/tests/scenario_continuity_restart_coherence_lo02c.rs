@@ -89,9 +89,7 @@ async fn db_pool_or_skip() -> Option<sqlx::PgPool> {
 /// Connect, migrate, and clear the singleton reconcile state.
 /// Called at the start of each test to ensure a clean baseline.
 async fn setup_pool() -> Option<sqlx::PgPool> {
-    let Some(pool) = db_pool_or_skip().await else {
-        return None;
-    };
+    let pool = db_pool_or_skip().await?;
     mqk_db::migrate(&pool)
         .await
         .expect("LO-02C: migration failed");

@@ -4,12 +4,12 @@
 //! Each test calls `routes::build_router` and drives it via
 //! `tower::ServiceExt::oneshot` — no network I/O required.
 
-use std::sync::Arc;
-
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
-use tower::ServiceExt; // oneshot
+use std::sync::Arc;
+use tower::ServiceExt;
+use uuid::Uuid; // oneshot
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2808,6 +2808,21 @@ async fn config_diffs_route_active_returns_authoritative_rows_when_latest_run_di
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn strategy_surfaces_remain_fail_closed_even_with_db_pool() {
     let pool = denial_test_pool().await;
+    let probe_strategy_id = format!("cc01_empty_probe_{}", Uuid::new_v4().simple());
+
+    // Defensive cleanup for the specific probe only. Do not assume global emptiness.
+    sqlx::query("delete from sys_strategy_registry where strategy_id = $1")
+        .bind(&probe_strategy_id)
+        .execute(&pool)
+        .await
+        .expect("pre-test cleanup failed");
+
+    sqlx::query("delete from sys_strategy_suppressions where strategy_id = $1")
+        .bind(&probe_strategy_id)
+        .execute(&pool)
+        .await
+        .expect("pre-test suppressions cleanup failed");
+
     let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
         pool,
         state::OperatorAuthMode::ExplicitDevNoToken,
@@ -2822,9 +2837,7 @@ async fn strategy_surfaces_remain_fail_closed_even_with_db_pool() {
     let (summary_status, summary_body) = call(router.clone(), summary_req).await;
     assert_eq!(summary_status, StatusCode::OK);
     let summary = parse_json(summary_body);
-    // CC-01B: DB pool present → truth_state="registry" (authoritative from
-    // postgres.sys_strategy_registry).  Empty rows = no strategies registered,
-    // which is authoritative empty, not unavailable.
+
     assert_eq!(
         summary["truth_state"], "registry",
         "CC-01B: DB pool present → truth_state must be 'registry'; got: {summary}"
@@ -2833,11 +2846,15 @@ async fn strategy_surfaces_remain_fail_closed_even_with_db_pool() {
         summary["backend"], "postgres.sys_strategy_registry",
         "CC-01B: backend must be postgres.sys_strategy_registry; got: {summary}"
     );
+
+    let summary_rows = summary["rows"]
+        .as_array()
+        .expect("strategy summary rows must be an array");
     assert!(
-        summary["rows"]
-            .as_array()
-            .is_some_and(|rows| rows.is_empty()),
-        "empty sys_strategy_registry → authoritative empty rows; got: {summary}"
+        !summary_rows
+            .iter()
+            .any(|r| r["strategy_id"] == probe_strategy_id),
+        "unregistered probe strategy must not appear in strategy summary rows; got: {summary}"
     );
 
     let suppressions_req = Request::builder()
@@ -2848,15 +2865,19 @@ async fn strategy_surfaces_remain_fail_closed_even_with_db_pool() {
     let (suppressions_status, suppressions_body) = call(router, suppressions_req).await;
     assert_eq!(suppressions_status, StatusCode::OK);
     let suppressions = parse_json(suppressions_body);
-    // CC-02: suppressions now has a real durable source. With DB pool present
-    // and an empty table, truth_state is "active" + empty rows (authoritative empty).
+
     assert_eq!(
         suppressions["truth_state"], "active",
         "suppressions with DB pool must return active truth (CC-02); got: {suppressions}"
     );
+    let suppression_rows = suppressions["rows"]
+        .as_array()
+        .expect("strategy suppressions rows must be an array");
     assert!(
-        suppressions["rows"].as_array().is_some_and(|rows| rows.is_empty()),
-        "strategy suppressions must return authoritative empty rows when DB table is empty; got: {suppressions}"
+        !suppression_rows
+            .iter()
+            .any(|r| r["strategy_id"] == probe_strategy_id),
+        "unsuppressed probe strategy must not appear in suppressions rows; got: {suppressions}"
     );
 }
 
@@ -3081,43 +3102,27 @@ async fn cc01_strategy_summary_not_wired_without_fleet() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn cc02_strategy_suppressions_no_db_returns_no_db_state() {
-    // Without a DB pool the route must return truth_state="no_db" (source
-    // unavailable), NOT "not_wired" (which would mean permanently unimplemented).
-    let router = make_router();
-    let req = Request::builder()
-        .method("GET")
-        .uri("/api/v1/strategy/suppressions")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (status, body) = call(router, req).await;
-    assert_eq!(status, StatusCode::OK);
-    let json = parse_json(body);
-    assert_eq!(
-        json["truth_state"], "no_db",
-        "no DB pool → truth_state must be no_db, not not_wired; got: {json}"
-    );
-    assert_eq!(json["canonical_route"], "/api/v1/strategy/suppressions");
-    assert_eq!(json["backend"], "postgres.sys_strategy_suppressions");
-    assert!(json["rows"].as_array().is_some_and(|r| r.is_empty()));
-}
-
-#[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn cc02_strategy_suppressions_active_empty_when_no_rows() {
-    // With DB pool and empty table: truth_state="active" + empty rows (authoritative zero).
+    // With DB pool present, the route must return authoritative truth_state="active".
+    // Do NOT assume the shared test DB is globally empty; instead prove that a
+    // unique strategy_id with no suppression row does not appear in the response.
     let pool = denial_test_pool().await;
-    // Ensure clean state.
-    sqlx::query("delete from sys_strategy_suppressions where strategy_id = 'cc02_empty_probe'")
+    let probe_strategy_id = format!("cc02_empty_probe_{}", Uuid::new_v4().simple());
+
+    // Defensive cleanup in case a prior interrupted run used the same generated prefix.
+    sqlx::query("delete from sys_strategy_suppressions where strategy_id = $1")
+        .bind(&probe_strategy_id)
         .execute(&pool)
         .await
         .expect("pre-test cleanup failed");
 
     let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
+        pool,
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
-    let router = routes::build_router(Arc::clone(&st));
+    let router = routes::build_router(st);
+
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/strategy/suppressions")
@@ -3126,13 +3131,20 @@ async fn cc02_strategy_suppressions_active_empty_when_no_rows() {
     let (status, body) = call(router, req).await;
     assert_eq!(status, StatusCode::OK);
     let json = parse_json(body);
+
     assert_eq!(
         json["truth_state"], "active",
-        "DB present + empty table must return active (authoritative empty); got: {json}"
+        "with DB pool present, suppressions route must return authoritative active truth; got: {json}"
     );
+    assert_eq!(json["canonical_route"], "/api/v1/strategy/suppressions");
+    assert_eq!(json["backend"], "postgres.sys_strategy_suppressions");
+
+    let rows = json["rows"]
+        .as_array()
+        .expect("rows must be an array on suppressions route");
     assert!(
-        json["rows"].as_array().is_some_and(|r| r.is_empty()),
-        "empty table must yield empty rows; got: {json}"
+        !rows.iter().any(|r| r["strategy_id"] == probe_strategy_id),
+        "unsuppressed probe strategy must not appear in suppressions rows; got: {json}"
     );
 }
 

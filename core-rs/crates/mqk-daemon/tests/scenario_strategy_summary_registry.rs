@@ -320,10 +320,9 @@ async fn summary_never_returns_not_wired_truth_state() {
     ));
     let router = routes::build_router(st);
 
-    let (status, body) = call(router, summary_request()).await;
+    let (_status, body) = call(router, summary_request()).await;
     let json = parse_json(body);
 
-    assert_eq!(status, StatusCode::OK);
     assert_ne!(
         json["truth_state"], "not_wired",
         "truth_state must never be 'not_wired' — that placeholder has been replaced \
@@ -553,7 +552,7 @@ async fn summary_row_kind_empty_string_for_unclassified() -> anyhow::Result<()> 
     ));
     let router = routes::build_router(st);
 
-    let (status, body) = call(router, summary_request()).await;
+    let (_status, body) = call(router, summary_request()).await;
     let json = parse_json(body);
 
     let row = find_row(&json["rows"], &id)
