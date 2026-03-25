@@ -86,8 +86,27 @@ async fn db_pool_or_skip() -> Option<sqlx::PgPool> {
     )
 }
 
-/// Connect, migrate, and clear the singleton reconcile state.
-/// Called at the start of each test to ensure a clean baseline.
+/// Connect, migrate, and clear shared state for a clean test baseline.
+///
+/// Clears `sys_reconcile_status_state` so each RC test can seed its own
+/// dirty/ok state cleanly.
+///
+/// `runs` is intentionally NOT deleted here (LO-02D-F1).  All RC tests use
+/// `arm_in_memory` which bypasses the HTTP arm route entirely.  The HTTP arm
+/// route internally calls `current_status_snapshot()`, which calls
+/// `deadman_truth_for_run` on any RUNNING run it finds.  Since `arm_in_memory`
+/// never calls `current_status_snapshot()`, RUNNING orphans in the DB have no
+/// deadman side-effect on RC tests.  Deleting `runs` here would race with
+/// LO-02D's QR-03 (which inserts a PAPER RUNNING orphan and halts it after
+/// assertions).
+///
+/// # Cross-binary parallel constraint
+///
+/// LO-02D-F1: LO-02D no longer deletes `sys_reconcile_status_state`, so the
+/// reconcile-singleton race between LO-02C and LO-02D has been eliminated.
+/// LO-02D still deletes `sys_arm_state`; LO-02C does not write to it
+/// (`arm_in_memory` does not touch the DB).  LO-02C and LO-02D may run
+/// concurrently against the same DB.
 async fn setup_pool() -> Option<sqlx::PgPool> {
     let pool = db_pool_or_skip().await?;
     mqk_db::migrate(&pool)
@@ -117,14 +136,25 @@ async fn call(
     (status, json)
 }
 
-async fn arm_via_http(st: &Arc<AppState>) {
-    let req = Request::builder()
-        .method("POST")
-        .uri("/v1/integrity/arm")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (status, _) = call(routes::build_router(Arc::clone(st)), req).await;
-    assert_eq!(status, StatusCode::OK, "arm_via_http: must succeed");
+/// Arm the integrity gate without going through the HTTP arm route.
+///
+/// RC tests prove reconcile-gate and WS-continuity-gate behavior; the
+/// integrity arm is a required PRECONDITION, not the behavior under test.
+///
+/// We bypass the HTTP route (and its internal `current_status_snapshot()` call)
+/// intentionally: the `current_status_snapshot()` path calls
+/// `deadman_truth_for_run` on any RUNNING run it finds in the DB.  When other
+/// test binaries run concurrently they may leave RUNNING orphans in the DB.
+/// For a run with no heartbeat the deadman fires immediately, setting
+/// `integrity.disarmed = true` in-memory and poisoning the gate precondition.
+///
+/// Direct manipulation is safe here: the integrity HTTP route is proven by
+/// dedicated scenario_daemon_routes.rs tests.  This helper only needs to
+/// satisfy the start gate precondition.
+async fn arm_in_memory(st: &Arc<AppState>) {
+    let mut ig = st.integrity.write().await;
+    ig.disarmed = false;
+    ig.halted = false;
 }
 
 async fn start_req(st: &Arc<AppState>) -> (StatusCode, serde_json::Value) {
@@ -227,7 +257,7 @@ async fn lo02c_rc01_dirty_reconcile_in_db_auto_blocks_restart_without_in_memory_
     ));
 
     // Arm integrity gate.
-    arm_via_http(&st).await;
+    arm_in_memory(&st).await;
 
     // Establish Live WS so Gate 3 (WS continuity) passes — isolating Gate 4.
     inject_live_ws(&st).await;
@@ -315,7 +345,7 @@ async fn lo02c_rc02_gap_cursor_and_dirty_reconcile_ws_gate_fires_first_then_reco
         "RC-02: cursor seeding must produce GapDetected"
     );
 
-    arm_via_http(&st).await;
+    arm_in_memory(&st).await;
 
     // Step 1: WS gate fires first.
     let (status1, json1) = start_req(&st).await;
@@ -409,7 +439,7 @@ async fn lo02c_rc03_live_cursor_demoted_with_dirty_reconcile_ws_gate_fires_first
         "RC-03: Live cursor must be demoted to ColdStartUnproven"
     );
 
-    arm_via_http(&st).await;
+    arm_in_memory(&st).await;
 
     // Step 1: WS gate fires (ColdStartUnproven after demotion).
     let (status1, json1) = start_req(&st).await;
@@ -500,7 +530,7 @@ async fn lo02c_rc04_gap_cursor_with_ok_reconcile_only_ws_gate_fires() {
         "RC-04: GapDetected cursor must produce GapDetected continuity"
     );
 
-    arm_via_http(&st).await;
+    arm_in_memory(&st).await;
 
     // Start: WS gate fires; ok reconcile is NOT the blocker.
     let (status, json) = start_req(&st).await;
