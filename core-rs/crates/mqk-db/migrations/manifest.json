@@ -188,6 +188,18 @@
       "path": "0029_strategy_registry.sql",
       "status": "applied",
       "intent": "Add sys_strategy_registry table as the authoritative durable registry of known strategies (CC-01A): canonical identity, display name, enabled state, kind, and timestamps."
+    },
+    {
+      "id": "0030",
+      "path": "0030_runs_mode_live_shadow.sql",
+      "status": "applied",
+      "intent": "Expand runs.mode CHECK constraint to include 'live-shadow' alongside 'PAPER', 'LIVE', 'BACKTEST'."
+    },
+    {
+      "id": "0031",
+      "path": "0031_restart_intent.sql",
+      "status": "applied",
+      "intent": "Add sys_restart_intent multi-row log table for durable restart intent / restart provenance (CC-03B): mode transition verdict, initiated_by, lifecycle status, caller-injected timestamps."
     }
   ]
 }

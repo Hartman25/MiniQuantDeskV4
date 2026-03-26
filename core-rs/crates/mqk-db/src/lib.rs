@@ -67,6 +67,7 @@ pub mod audit;
 pub mod fill_quality;
 pub mod orders;
 pub mod reconcile_state;
+pub mod restart_intent;
 pub mod runs;
 pub mod strategy;
 
@@ -77,6 +78,7 @@ pub use audit::*;
 pub use fill_quality::*;
 pub use orders::*;
 pub use reconcile_state::*;
+pub use restart_intent::*;
 pub use runs::*;
 pub use strategy::*;
 

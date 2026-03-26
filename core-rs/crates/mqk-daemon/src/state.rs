@@ -703,6 +703,24 @@ impl AppState {
         self.local_order_sides.read().await.clone()
     }
 
+    /// CC-03B: Load the most recent pending restart intent for this daemon engine.
+    ///
+    /// Returns `None` in two honest cases:
+    /// - No DB pool configured on this daemon instance.
+    /// - DB is present but no pending restart intent row exists for this engine.
+    ///
+    /// `None` must not be interpreted as "no restart was ever intended" —
+    /// it only means no durable pending intent is recorded at this moment.
+    /// Callers must not synthesise a restart intent from transient state when
+    /// this returns `None`.
+    pub async fn load_pending_restart_intent(&self) -> Option<mqk_db::RestartIntentRow> {
+        let db = self.db.as_ref()?;
+        mqk_db::fetch_pending_restart_intent_for_engine(db, DAEMON_ENGINE_ID)
+            .await
+            .ok()
+            .flatten()
+    }
+
     pub async fn restart_truth_snapshot(
         &self,
     ) -> Result<RestartTruthSnapshot, RuntimeLifecycleError> {
