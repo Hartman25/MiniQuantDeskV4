@@ -107,9 +107,7 @@ async fn db_pool_or_skip() -> Option<sqlx::PgPool> {
 /// persistence because all KS tests are blocked before the reconcile gate
 /// (at the integrity gate in KS-01/KS-02/KS-04, or at the WS gate in KS-03).
 async fn setup_pool() -> Option<sqlx::PgPool> {
-    let Some(pool) = db_pool_or_skip().await else {
-        return None;
-    };
+    let pool = db_pool_or_skip().await?;
     mqk_db::migrate(&pool)
         .await
         .expect("LO-02E: migration failed");
@@ -251,8 +249,8 @@ async fn lo02e_ks01_halt_persists_disarmed_operator_halt_surfaces_on_fresh_resta
         .await
         .expect("KS-01: current_status_snapshot on fresh AppState must not error");
 
-    assert_eq!(
-        snapshot.integrity_armed, false,
+    assert!(
+        !snapshot.integrity_armed,
         "KS-01: fresh AppState must surface integrity_armed=false from DB \
          (sys_arm_state=DISARMED persisted by halt); \
          this is DB truth, not in-memory default — proves durable kill-switch persistence; \

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
-use tower::ServiceExt;
+use tower::util::ServiceExt;
 
 // ---------------------------------------------------------------------------
 // Helpers

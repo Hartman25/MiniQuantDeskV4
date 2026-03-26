@@ -24,7 +24,7 @@
 //! All tests are pure in-process; no DB or network required.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use axum::body::to_bytes;
 use axum::http::{Method, Request, StatusCode};
@@ -36,6 +36,7 @@ use mqk_daemon::{
     routes::build_router,
     state::{AppState, OperatorAuthMode},
 };
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 /// Serialises tests that mutate MQK_ARTIFACT_PATH so they do not race with
@@ -83,7 +84,7 @@ fn valid_promoted_manifest(artifact_id: &str) -> String {
 /// Serialised via `ENV_LOCK` to avoid races with AI-08.
 #[tokio::test]
 async fn ai_01_route_not_configured_when_no_env_var() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
 
     // Only assert not_configured if the env var is not set in this environment.
     if std::env::var(ENV_ARTIFACT_PATH).is_ok_and(|v| !v.trim().is_empty()) {
@@ -349,7 +350,7 @@ fn ai_07_none_path_is_not_configured_not_error() {
 /// Serialised via `ENV_LOCK` to avoid races with AI-01.
 #[tokio::test]
 async fn ai_08_route_accepted_when_valid_manifest() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
 
     let artifact_id = "tv01b_ai08_test_artifact";
     let contents = valid_promoted_manifest(artifact_id);
@@ -483,7 +484,7 @@ fn ai_09_unavailable_variant_is_fail_closed() {
 /// Serialised via `ENV_LOCK` to avoid races with AI-01 and AI-08.
 #[tokio::test]
 async fn ai_10_route_unavailable_when_force_flag_set() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
 
     // Activate the debug-only test seam.
     std::env::set_var(ENV_FORCE_UNAVAILABLE_FOR_TEST, "1");
