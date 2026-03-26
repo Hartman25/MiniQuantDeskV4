@@ -149,8 +149,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use reconcile::{reconcile_mismatches, reconcile_status};
     use strategy::{strategy_signal, strategy_summary, strategy_suppressions};
     use system::{
-        health, status_handler, system_config_diffs, system_config_fingerprint, system_metadata,
-        system_preflight, system_runtime_leadership, system_session, system_status,
+        health, status_handler, system_artifact_intake, system_config_diffs,
+        system_config_fingerprint, system_metadata, system_preflight, system_runtime_leadership,
+        system_session, system_status,
     };
     use trading::{
         diagnostics_snapshot, stream, trading_account, trading_fills, trading_orders,
@@ -206,6 +207,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/events/feed", get(events_feed))
         .route("/api/v1/oms/overview", get(oms_overview))
         .route("/api/v1/metrics/dashboards", get(metrics_dashboards))
+        .route(
+            "/api/v1/system/artifact-intake",
+            get(system_artifact_intake),
+        )
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
         .route("/v1/trading/orders", get(trading_orders))

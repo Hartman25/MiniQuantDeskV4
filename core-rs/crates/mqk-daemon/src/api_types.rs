@@ -668,6 +668,74 @@ pub struct ModeChangeRestartTruth {
     pub durable_active_without_local_ownership: bool,
 }
 
+// ---------------------------------------------------------------------------
+// CC-03C: Mounted controlled restart workflow truth
+// ---------------------------------------------------------------------------
+
+/// A single durable pending restart intent surfaced at the control-plane.
+///
+/// Sourced exclusively from `sys_restart_intent` (CC-03B).  Fields are
+/// intentionally the minimal operator-visible subset: full lifecycle fields
+/// (completed_at_utc) are not surfaced here because the mounted surface only
+/// shows the **pending** workflow state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingRestartIntentSnapshot {
+    /// UUID of the durable intent record.
+    pub intent_id: String,
+    /// Current deployment mode at the time the intent was created.
+    pub from_mode: String,
+    /// Intended target deployment mode.
+    pub to_mode: String,
+    /// CC-03A canonical transition verdict string stored in the DB.
+    /// One of: `"same_mode"`, `"admissible_with_restart"`, `"refused"`, `"fail_closed"`.
+    pub transition_verdict: String,
+    /// Who initiated this intent: `"operator"`, `"system"`, or `"recovery"`.
+    pub initiated_by: String,
+    /// RFC3339 UTC timestamp when the intent was initiated.
+    pub initiated_at_utc: String,
+    /// Optional operator note or provenance reference.  Empty string if none.
+    pub note: String,
+}
+
+/// CC-03C: Mounted restart workflow truth for the operator control surface.
+///
+/// Sourced from `sys_restart_intent` (CC-03B).  Always present in
+/// `ModeChangeGuidanceResponse`; truth state determines authority.
+///
+/// `truth_state` values:
+/// - `"active"` — DB was reachable, a pending restart intent was found;
+///   `pending_intent` is the authoritative durable record.
+/// - `"no_pending"` — DB was reachable, no pending intent exists; honest
+///   absence.  Must NOT be treated as "restart is safe to skip".
+/// - `"backend_unavailable"` — no DB pool is configured; restart workflow
+///   truth cannot be determined; fail-closed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestartWorkflowTruth {
+    /// Authority state for this restart workflow surface.
+    pub truth_state: String,
+    /// Pending restart intent, present only when `truth_state == "active"`.
+    pub pending_intent: Option<PendingRestartIntentSnapshot>,
+}
+
+/// CC-03A: Per-target canonical mode-transition verdict.
+///
+/// One entry per possible target [`crate::state::DeploymentMode`], derived
+/// exclusively from [`crate::mode_transition::evaluate_mode_transition`].
+/// Callers must treat this as read-only truth — not as a configuration surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeTransitionEntry {
+    /// Target mode label (e.g. `"live-shadow"`).
+    pub target_mode: String,
+    /// Canonical verdict: one of `"same_mode"`, `"admissible_with_restart"`,
+    /// `"refused"`, `"fail_closed"`.
+    pub verdict: String,
+    /// Human-readable explanation of the verdict.
+    pub reason: String,
+    /// Ordered operator preconditions.  Non-empty only when
+    /// `verdict == "admissible_with_restart"`.
+    pub preconditions: Vec<String>,
+}
+
 /// Response for GET /api/v1/ops/mode-change-guidance and for the
 /// `change-system-mode` arm of POST /api/v1/ops/action (409 CONFLICT).
 ///
@@ -691,6 +759,20 @@ pub struct ModeChangeGuidanceResponse {
     pub operator_next_steps: Vec<String>,
     /// Restart truth from the daemon's run registry.  None when no DB connection.
     pub restart_truth: Option<ModeChangeRestartTruth>,
+    /// CC-03A: Canonical transition verdicts for every possible target mode,
+    /// derived from [`crate::mode_transition::evaluate_mode_transition`].
+    ///
+    /// This field makes the mode-transition state machine observable at the
+    /// API surface and ensures `build_mode_change_guidance` derives its
+    /// transition semantics from the canonical seam rather than ad hoc logic.
+    pub transition_verdicts: Vec<ModeTransitionEntry>,
+    /// CC-03C: Durable restart workflow truth — the mounted, operator-visible
+    /// controlled restart workflow state sourced from `sys_restart_intent`.
+    ///
+    /// Always present.  `truth_state` determines authority:
+    /// `"active"` = pending intent found; `"no_pending"` = honest absence;
+    /// `"backend_unavailable"` = no DB, fail-closed.
+    pub restart_workflow: RestartWorkflowTruth,
 }
 
 // ---------------------------------------------------------------------------
@@ -1287,4 +1369,54 @@ pub struct FillQualityTelemetryResponse {
     pub backend: String,
     /// Most recent fills for the active run, newest-fill first. At most 100 rows.
     pub rows: Vec<FillQualityTelemetryRow>,
+}
+
+// ---------------------------------------------------------------------------
+// TV-01B: Runtime artifact intake contract
+// ---------------------------------------------------------------------------
+
+/// Response for `GET /api/v1/system/artifact-intake`.
+///
+/// Surfaces the runtime artifact intake truth for the operator: whether a
+/// promoted artifact has been configured, whether it is structurally valid,
+/// and its identity if accepted.
+///
+/// `truth_state` values:
+/// - `"not_configured"` — `MQK_ARTIFACT_PATH` is not set or empty; operator
+///   has not provided an artifact.  Must NOT be treated as "no artifact needed".
+/// - `"invalid"` — path is set but the file is unreadable, not valid JSON,
+///   has wrong `schema_version`, or is missing required fields.  Fail-closed.
+/// - `"accepted"` — the `promoted_manifest.json` is present and structurally
+///   valid.  This is intake acceptance only — it does not imply deployability
+///   or that any economic gate has been passed.
+/// - `"unavailable"` — the intake evaluator itself could not run (e.g.,
+///   unexpected evaluator failure).  Fail-closed: intake status is unknown.
+///
+/// This is the minimum honest runtime artifact intake contract (TV-01B).
+/// TV-01C will thread `artifact_id` into run-start provenance.
+/// TV-01D will prove the full promoted artifact → runtime consumption chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactIntakeResponse {
+    /// Self-identifying route.
+    pub canonical_route: String,
+    /// Intake outcome: `"not_configured"` | `"invalid"` | `"accepted"` | `"unavailable"`.
+    pub truth_state: String,
+    /// Content-addressed artifact identity.  Non-null only when
+    /// `truth_state == "accepted"`.
+    pub artifact_id: Option<String>,
+    /// Artifact type string (e.g. `"signal_pack"`).  Non-null only when
+    /// `truth_state == "accepted"`.
+    pub artifact_type: Option<String>,
+    /// Promotion stage (e.g. `"paper"`).  Non-null only when
+    /// `truth_state == "accepted"`.
+    pub stage: Option<String>,
+    /// Producing system identifier.  Non-null only when
+    /// `truth_state == "accepted"`.
+    pub produced_by: Option<String>,
+    /// Human-readable reason for `"invalid"` or `"unavailable"` outcomes.
+    /// Null for `"not_configured"` and `"accepted"`.  Callers must check
+    /// `truth_state` to distinguish the two failure modes.
+    pub invalid_reason: Option<String>,
+    /// Path that was evaluated.  Null when `truth_state == "not_configured"`.
+    pub evaluated_path: Option<String>,
 }

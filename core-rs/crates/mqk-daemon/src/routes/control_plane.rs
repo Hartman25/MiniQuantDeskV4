@@ -16,9 +16,12 @@ use tracing::info;
 
 use crate::api_types::{
     ActionCatalogEntry, ActionCatalogResponse, IntegrityResponse, ModeChangeGuidanceResponse,
-    ModeChangeRestartTruth, OperatorActionAuditFields, OperatorActionResponse, OpsActionRequest,
+    ModeChangeRestartTruth, ModeTransitionEntry, OperatorActionAuditFields, OperatorActionResponse,
+    OpsActionRequest, PendingRestartIntentSnapshot, RestartWorkflowTruth,
 };
+use crate::mode_transition::evaluate_mode_transition;
 use crate::notify::OperatorNotifyPayload;
+use crate::state::DeploymentMode;
 use crate::state::{AppState, BusMsg, RuntimeLifecycleError};
 
 use super::helpers::{runtime_error_response, write_operator_audit_event};
@@ -660,9 +663,65 @@ pub(crate) async fn build_mode_change_guidance(st: &AppState) -> ModeChangeGuida
         Err(_) => None,
     };
 
+    // CC-03A: Build the canonical transition verdict for every possible target
+    // mode from the current mode.  All semantics come from the canonical seam
+    // in `mode_transition::evaluate_mode_transition`; no route-local transition
+    // logic is permitted here.
+    let current_mode = st.deployment_mode();
+    let all_target_modes = [
+        DeploymentMode::Paper,
+        DeploymentMode::LiveShadow,
+        DeploymentMode::LiveCapital,
+        DeploymentMode::Backtest,
+    ];
+    let transition_verdicts: Vec<ModeTransitionEntry> = all_target_modes
+        .iter()
+        .map(|&target| {
+            let verdict = evaluate_mode_transition(current_mode, target);
+            ModeTransitionEntry {
+                target_mode: target.as_api_label().to_string(),
+                verdict: verdict.as_str().to_string(),
+                reason: verdict.reason().to_string(),
+                preconditions: verdict
+                    .preconditions()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            }
+        })
+        .collect();
+
+    // CC-03C: Mount durable restart workflow truth from sys_restart_intent
+    // (CC-03B).  Fail-closed when no DB is available.
+    let restart_workflow = if st.db.is_none() {
+        RestartWorkflowTruth {
+            truth_state: "backend_unavailable".to_string(),
+            pending_intent: None,
+        }
+    } else {
+        match st.load_pending_restart_intent().await {
+            Some(row) => RestartWorkflowTruth {
+                truth_state: "active".to_string(),
+                pending_intent: Some(PendingRestartIntentSnapshot {
+                    intent_id: row.intent_id.to_string(),
+                    from_mode: row.from_mode,
+                    to_mode: row.to_mode,
+                    transition_verdict: row.transition_verdict,
+                    initiated_by: row.initiated_by,
+                    initiated_at_utc: row.initiated_at_utc.to_rfc3339(),
+                    note: row.note,
+                }),
+            },
+            None => RestartWorkflowTruth {
+                truth_state: "no_pending".to_string(),
+                pending_intent: None,
+            },
+        }
+    };
+
     ModeChangeGuidanceResponse {
         canonical_route: "/api/v1/ops/mode-change-guidance".to_string(),
-        current_mode: st.deployment_mode().as_api_label().to_string(),
+        current_mode: current_mode.as_api_label().to_string(),
         transition_permitted: false,
         transition_refused_reason:
             "Mode transitions require a controlled daemon restart with configuration reload. \
@@ -690,6 +749,8 @@ pub(crate) async fn build_mode_change_guidance(st: &AppState) -> ModeChangeGuida
             "Step 7: Verify GET /api/v1/health returns ok=true and confirm new mode via GET /api/v1/ops/mode-change-guidance.".to_string(),
         ],
         restart_truth,
+        transition_verdicts,
+        restart_workflow,
     }
 }
 
