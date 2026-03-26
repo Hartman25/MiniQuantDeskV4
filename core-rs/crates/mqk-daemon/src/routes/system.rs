@@ -16,9 +16,12 @@ use chrono::Utc;
 use sqlx::Row;
 
 use crate::api_types::{
-    ConfigDiffRow, ConfigDiffsResponse, ConfigFingerprintResponse, HealthResponse,
-    PreflightStatusResponse, RuntimeErrorResponse, RuntimeLeadershipCheckpointRow,
+    ArtifactIntakeResponse, ConfigDiffRow, ConfigDiffsResponse, ConfigFingerprintResponse,
+    HealthResponse, PreflightStatusResponse, RuntimeErrorResponse, RuntimeLeadershipCheckpointRow,
     RuntimeLeadershipResponse, SessionStateResponse, SystemMetadataResponse, SystemStatusResponse,
+};
+use crate::artifact_intake::{
+    evaluate_artifact_intake_guarded, ArtifactIntakeOutcome, ENV_ARTIFACT_PATH,
 };
 use crate::state::{AppState, StrategyMarketDataSource};
 
@@ -594,4 +597,78 @@ fn authoritative_config_diff_rows(
     }
 
     rows
+}
+
+// ---------------------------------------------------------------------------
+// TV-01B: GET /api/v1/system/artifact-intake
+// ---------------------------------------------------------------------------
+
+/// TV-01B: Runtime artifact intake truth surface.
+///
+/// Reads `MQK_ARTIFACT_PATH` from the environment, validates the
+/// `promoted_manifest.json` it points to, and returns the honest intake
+/// outcome.  No AppState is needed — this is a pure file-based read.
+///
+/// The `State` parameter is accepted only to keep the handler signature
+/// consistent with other routes; it is not used in the intake evaluation.
+pub(crate) async fn system_artifact_intake(State(_st): State<Arc<AppState>>) -> impl IntoResponse {
+    let evaluated_path = std::env::var(ENV_ARTIFACT_PATH)
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+
+    // Use the panic-safe guarded entry point so unexpected evaluator failures
+    // surface as `Unavailable` rather than crashing the request handler.
+    let outcome = evaluate_artifact_intake_guarded();
+
+    let response = match outcome {
+        ArtifactIntakeOutcome::NotConfigured => ArtifactIntakeResponse {
+            canonical_route: "/api/v1/system/artifact-intake".to_string(),
+            truth_state: "not_configured".to_string(),
+            artifact_id: None,
+            artifact_type: None,
+            stage: None,
+            produced_by: None,
+            invalid_reason: None,
+            evaluated_path: None,
+        },
+        ArtifactIntakeOutcome::Invalid { reason } => ArtifactIntakeResponse {
+            canonical_route: "/api/v1/system/artifact-intake".to_string(),
+            truth_state: "invalid".to_string(),
+            artifact_id: None,
+            artifact_type: None,
+            stage: None,
+            produced_by: None,
+            invalid_reason: Some(reason),
+            evaluated_path: evaluated_path.clone(),
+        },
+        ArtifactIntakeOutcome::Accepted {
+            artifact_id,
+            artifact_type,
+            stage,
+            produced_by,
+        } => ArtifactIntakeResponse {
+            canonical_route: "/api/v1/system/artifact-intake".to_string(),
+            truth_state: "accepted".to_string(),
+            artifact_id: Some(artifact_id),
+            artifact_type: Some(artifact_type),
+            stage: Some(stage),
+            produced_by: Some(produced_by),
+            invalid_reason: None,
+            evaluated_path: evaluated_path.clone(),
+        },
+        ArtifactIntakeOutcome::Unavailable { reason } => ArtifactIntakeResponse {
+            canonical_route: "/api/v1/system/artifact-intake".to_string(),
+            truth_state: "unavailable".to_string(),
+            artifact_id: None,
+            artifact_type: None,
+            stage: None,
+            produced_by: None,
+            // `invalid_reason` carries the reason for both `invalid` and `unavailable`
+            // outcomes.  Callers must check `truth_state` to distinguish the two.
+            invalid_reason: Some(reason),
+            evaluated_path: evaluated_path.clone(),
+        },
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
 }
