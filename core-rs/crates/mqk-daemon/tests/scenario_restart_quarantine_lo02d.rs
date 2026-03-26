@@ -153,7 +153,6 @@ async fn db_pool_or_skip() -> Option<sqlx::PgPool> {
 /// This eliminates the cross-binary race with LO-02C, which seeds dirty reconcile
 /// state for its RC tests.
 async fn setup_pool() -> Option<sqlx::PgPool> {
-    let _serial = db_serialize().await;
     let pool = db_pool_or_skip().await?;
     mqk_db::migrate(&pool)
         .await
