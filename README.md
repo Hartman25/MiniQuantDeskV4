@@ -11,23 +11,23 @@
   <img src="https://img.shields.io/badge/Rust-stable-orange?logo=rust" />
   <img src="https://img.shields.io/badge/Mode-deterministic-purple" />
   <img src="https://img.shields.io/badge/Focus-risk%20%26%20reliability-blue" />
-  <img src="https://img.shields.io/badge/CI-gui%20%2B%20rust%20%2B%20db--proof-success" />
+  <img src="https://img.shields.io/badge/Status-strong%20partial%20platform-yellow" />
 </p>
 
 ## **Overview**
 
-Veritas Ledger is a structured quantitative trading system built around one principle:
+Veritas Ledger is a structured quantitative trading platform built around one principle:
 
 > **Capital protection is a systems problem.**
 
 This repository is not a signal toy and not a broker-click wrapper.  
-It is a deterministic execution spine designed to enforce discipline, explicit lifecycle control, durable state, and fail-closed behavior under adversarial assumptions.
+It is a deterministic execution spine designed to enforce explicit lifecycle control, durable state, fail-closed behavior, and truthful operator surfaces under adversarial assumptions.
 
 It is built for:
 
 - traders who want institutional structure instead of ad hoc scripts
 - developers building serious trading infrastructure
-- systematic workflows that need deterministic replay, bounded state transitions, and durable audit surfaces
+- systematic workflows that need deterministic replay, bounded state transitions, and durable auditability
 
 The system is engineered under hostile assumptions:
 
@@ -63,16 +63,6 @@ Portfolio Mutation + Reconcile
 ↓  
 Control Plane (CLI / Daemon / GUI)
 
-**Core properties**
-
-- deterministic event replay
-- worst-case ambiguity modeling
-- database-enforced lifecycle constraints
-- explicit OMS order-state control
-- engine-level capital isolation
-- reconcile gating before arming sensitive modes
-- loopback-by-default operator surface
-
 ## **Core Characteristics**
 
 | Property | Description |
@@ -81,7 +71,7 @@ Control Plane (CLI / Daemon / GUI)
 | **Risk-First** | Integrity and risk gates sit in front of the execution boundary. |
 | **Lifecycle Controlled** | Runs move through explicit status transitions instead of ad hoc process state. |
 | **OMS-Governed** | Order lifecycle transitions are constrained by the OMS state machine. |
-| **DB-Enforced Safety** | Durable outbox/inbox, run lifecycle, broker mapping, and lease/control truth live in Postgres. |
+| **DB-Enforced Safety** | Durable outbox/inbox, run lifecycle, broker mapping, and lease/control truth live in Postgres where the readiness standard requires it. |
 | **Scenario-Tested** | Reliability work is backed by adversarial scenario tests, not comments. |
 | **Operator-Aware** | Daemon + GUI are being hardened as truth surfaces rather than decorative dashboards. |
 
@@ -90,8 +80,6 @@ Control Plane (CLI / Daemon / GUI)
 ```text
 core-rs/
   crates/
-    mqk-isolation
-    mqk-schemas
     mqk-config
     mqk-db
     mqk-audit
@@ -127,36 +115,43 @@ Operationally, `MAIN` is the canonical engine. `EXP` exists as a research-side e
 
 ## **What Works Today**
 
-### **Market Data**
+### **Core platform**
+- deterministic Rust workspace with explicit execution boundaries
+- DB-backed lifecycle and execution-path safety model
+- repo-native DB proof harness
+- scenario-driven reliability validation
+- fail-closed operator posture where authority is missing
+
+### **Market data**
 - canonical `md_bars` ingest
 - CSV and provider ingestion paths
 - data quality reporting
-- stale/gap/incomplete-bar handling in the data path
+- stale / gap / incomplete-bar handling in the data path
 
-### **Backtesting**
+### **Backtesting and promotion**
 - deterministic replay
 - conservative fill modeling
-- scenario-driven validation
-- promotion-facing backtest infrastructure under active hardening
+- promotion-facing infrastructure exists
+- research-to-runtime artifact closure is improving, but is not fully complete yet
 
-### **Execution Core**
+### **Execution core**
 - explicit OMS order state machine
 - durable outbox submission flow
 - durable inbox event ingestion
 - idempotent broker-event handling
 - broker/internal order identity mapping
-- partial-fill-aware cancel/replace semantics
+- partial-fill-aware cancel / replace semantics
 
-### **Risk, Integrity, and Reconcile**
-- allocation/exposure boundary checks
+### **Risk, integrity, and reconcile**
+- allocation / exposure boundary checks
 - stale feed and disagreement controls
 - deadman-style enforcement paths
 - reconcile normalization and mismatch detection
 - arming preflight tied to durable truth
 
-### **Control Plane**
+### **Control plane**
 - CLI workflows for DB, market data, runs, and backtests
-- HTTP daemon with control/status surfaces
+- HTTP daemon with control and status surfaces
 - Vite/React GUI operator console
 - GUI/daemon contract gate in CI
 
@@ -168,24 +163,28 @@ This repo has real institutional bones, but it is **not** yet a fully live-capit
 - core DB-backed safety model
 - OMS and durable execution-path structure
 - repo-native DB proof lane
-- daemon/GUI contract gating
+- daemon / GUI contract gating
 - deterministic paper path and backtest infrastructure
+- restart / recovery posture is materially stronger than early scaffold state
 
-**What is still intentionally fail-closed or under hardening**
-- live-shadow and live-capital daemon/runtime posture are typed and gate-checked, but operational trust and end-to-end recovery proof remain partial
-- daemon-level backtest deployment is intentionally refused fail-closed today
-- complete operator-truth coverage across all GUI detail surfaces
-- full live broker wiring proof through the daemon/runtime plane
+**What is still partial or under hardening**
+- research → deployability → runtime artifact chain is not fully closed
+- shadow / live parity evidence is not fully surfaced and enforced
+- operator-history and audit surfaces are stronger, but not fully complete everywhere
+- live-shadow and live-capital typed support is not the same as proven safe live operation
+- portfolio and capital-allocation realism remain open work
 
 **Important current daemon posture**
 - default bind is loopback-only: `127.0.0.1:8899`
 - non-loopback bind requires explicit opt-in
 - privileged routes fail closed until `MQK_OPERATOR_TOKEN` is configured
-- daemon now has typed support for paper (paper or Alpaca adapter), live-shadow (Alpaca adapter), and live-capital (Alpaca adapter); backtest is unconditionally refused fail-closed; live-shadow and live-capital have additional runtime gates enforced and operational trust for those modes is still partial — typed source support is not the same as proven safe live operation
+- backtest deployment through the daemon is intentionally refused fail-closed
+- paper mode is the most credible operational path today
+- live-shadow and live-capital have additional runtime gates and should still be treated as partially trusted modes, not finished operational claims
 
 ## **Verification and CI**
 
-The repo now has multiple verification lanes instead of one generic “cargo test and hope” story.
+The repo uses multiple verification lanes instead of one generic “cargo test and hope” story.
 
 **CI lanes**
 - **GUI contract gate** — GUI truth tests, GUI build, plus authoritative daemon contract test
@@ -258,7 +257,7 @@ Open:
 
 > **Returns are a strategy problem. Blow-ups are a systems problem.**
 
-MiniQuantDeskV4 is engineered primarily to address the second.
+Veritas Ledger is engineered primarily to address the second.
 
 ## **Scope and Non-Goals**
 
@@ -267,7 +266,7 @@ MiniQuantDeskV4 is engineered primarily to address the second.
 - explicit lifecycle enforcement
 - durable execution-path truth
 - idempotent broker-event handling
-- operator/control-plane hardening
+- operator / control-plane hardening
 - scenario-based reliability validation
 
 **Not promised by this repo**
@@ -276,12 +275,8 @@ MiniQuantDeskV4 is engineered primarily to address the second.
 - exchange correctness
 - host-level security
 - secret-management hardening
-- safe live deployment without operator review and additional controls
+- safe live deployment without operator review, stronger parity evidence, and additional controls
 
 ## **Disclaimer**
 
-This repository is an engineering framework for systematic capital allocation research and operator-safe execution design.
-
-It is **not** financial advice.
-
-Do not deploy real capital without independent operational review, monitoring, governance controls, and a verified live-trading runbook.
+This repository is an engineering framework for systematic capital allocation research and operator-controlled execution. It is not investment advice and should not be treated as a promise of profitability or safe unattended live trading.
