@@ -37,12 +37,17 @@ pub(crate) use snapshot::{
     reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,
 };
 pub use types::{
-    AlpacaWsContinuityState, BrokerKind, BrokerSnapshotTruthSource, BuildInfo, BusMsg,
-    DeploymentMode, OperatorAuthMode, ReconcileStatusSnapshot, RestartTruthSnapshot,
-    RuntimeLifecycleError, StatusSnapshot, StrategyMarketDataSource,
+    AcceptedArtifactProvenance, AlpacaWsContinuityState, BrokerKind, BrokerSnapshotTruthSource,
+    BuildInfo, BusMsg, DeploymentMode, OperatorAuthMode, ReconcileStatusSnapshot,
+    RestartTruthSnapshot, RuntimeLifecycleError, StatusSnapshot, StrategyMarketDataSource,
 };
 pub(crate) use types::{ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHandle};
 // Internal (crate-visible) re-exports used across this module.
+use crate::artifact_intake::{
+    evaluate_artifact_deployability, evaluate_artifact_intake_guarded, ArtifactIntakeOutcome,
+    ENV_ARTIFACT_PATH,
+};
+use crate::capital_policy::{evaluate_capital_policy_from_env, CapitalPolicyOutcome};
 #[cfg(test)]
 use broker::alpaca_base_url_for_mode;
 use broker::{build_daemon_broker, DaemonBroker};
@@ -152,6 +157,12 @@ pub struct AppState {
     /// Gate 1d refuses further signals once this reaches
     /// `MAX_AUTONOMOUS_SIGNALS_PER_RUN`.
     day_signal_count: Arc<AtomicU32>,
+    /// TV-01C: Artifact provenance accepted at the most recent run start.
+    ///
+    /// Populated by `start_execution_runtime` when artifact intake evaluates to
+    /// `Accepted`.  Cleared on stop/halt.  `None` when no run is active, no
+    /// artifact was configured, or intake was not `Accepted` — all fail-closed.
+    accepted_artifact: Arc<RwLock<Option<AcceptedArtifactProvenance>>>,
 }
 
 impl Default for AppState {
@@ -419,6 +430,7 @@ impl AppState {
             strategy_fleet: Arc::new(RwLock::new(strategy_fleet)),
             discord_notifier: DiscordNotifier::from_env(),
             day_signal_count: Arc::new(AtomicU32::new(0)),
+            accepted_artifact: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -448,6 +460,23 @@ impl AppState {
 
     pub async fn alpaca_ws_continuity(&self) -> AlpacaWsContinuityState {
         self.alpaca_ws_continuity.read().await.clone()
+    }
+
+    /// TV-01C: Return the artifact provenance accepted at the most recent run start.
+    ///
+    /// `None` when no run is active, no artifact was configured, or intake was
+    /// not `Accepted`.  Always fail-closed — never synthesises positive provenance.
+    pub async fn accepted_artifact_provenance(&self) -> Option<AcceptedArtifactProvenance> {
+        self.accepted_artifact.read().await.clone()
+    }
+
+    /// TV-01C (test seam): directly set the accepted artifact provenance.
+    ///
+    /// Named `_for_test` to signal intent; not called in production code.
+    /// Allows TV-01D proof tests to exercise the control-plane surface without
+    /// requiring a full DB-backed run start.
+    pub async fn set_accepted_artifact_for_test(&self, a: Option<AcceptedArtifactProvenance>) {
+        *self.accepted_artifact.write().await = a;
     }
 
     pub async fn update_ws_continuity(&self, new_state: AlpacaWsContinuityState) {
@@ -1045,6 +1074,113 @@ impl AppState {
             }
         }
 
+        // TV-02C: Artifact deployability gate.
+        //
+        // If MQK_ARTIFACT_PATH is configured and intake is Accepted, the artifact
+        // must also pass the deployability gate (deployability_gate.json written by
+        // the Python TV-02 pipeline) before runtime start is allowed.
+        //
+        // Contract:
+        //   NotConfigured            → no artifact configured; gate not applicable; pass through.
+        //   Accepted + Deployable    → minimum criteria met; pass through.
+        //   Accepted + not Deployable→ fail-closed: block start with explicit reason.
+        //   Invalid / Unavailable   → artifact configured but intake failed; fail-closed.
+        //
+        // Placed before db_pool() so it is:
+        //   - in-process testable without a database
+        //   - before any DB resources or run rows are acquired (no dangling rows on refusal)
+        {
+            let intake = evaluate_artifact_intake_guarded();
+            match &intake {
+                ArtifactIntakeOutcome::NotConfigured => {
+                    // No artifact configured — deployability gate not applicable.
+                }
+                ArtifactIntakeOutcome::Accepted { artifact_id, .. } => {
+                    let raw = std::env::var(ENV_ARTIFACT_PATH).unwrap_or_default();
+                    let manifest_path = std::path::PathBuf::from(raw.trim());
+                    let deployability =
+                        evaluate_artifact_deployability(Some(&manifest_path), artifact_id);
+                    if !deployability.is_deployable() {
+                        return Err(RuntimeLifecycleError::forbidden(
+                            "runtime.start_refused.artifact_not_deployable",
+                            "artifact_deployability",
+                            format!(
+                                "configured artifact failed the deployability gate \
+                                 (truth_state='{}'): artifact_id='{}' was accepted for intake \
+                                 but did not pass minimum deployability/tradability criteria; \
+                                 run the TV-02 Python gate on this artifact to produce a \
+                                 deployability_gate.json that passes all checks",
+                                deployability.truth_state(),
+                                artifact_id,
+                            ),
+                        ));
+                    }
+                }
+                ArtifactIntakeOutcome::Invalid { reason } => {
+                    return Err(RuntimeLifecycleError::forbidden(
+                        "runtime.start_refused.artifact_intake_invalid",
+                        "artifact_intake",
+                        format!(
+                            "artifact intake failed; runtime cannot proceed with a configured \
+                             but invalid artifact: {reason}"
+                        ),
+                    ));
+                }
+                ArtifactIntakeOutcome::Unavailable { reason } => {
+                    return Err(RuntimeLifecycleError::forbidden(
+                        "runtime.start_refused.artifact_intake_unavailable",
+                        "artifact_intake",
+                        format!(
+                            "artifact intake evaluator failed; runtime cannot proceed when \
+                             artifact state is unknown: {reason}"
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // TV-04A: Capital allocation policy gate.
+        //
+        // If MQK_CAPITAL_POLICY_PATH is configured, the policy file must be
+        // valid and `enabled = true` before runtime start is allowed.
+        //
+        // Contract:
+        //   NotConfigured → no policy configured; gate not applicable; pass through.
+        //   Authorized    → policy valid and enabled; pass through.
+        //   Denied        → policy present but enabled=false; fail-closed.
+        //   PolicyInvalid → policy configured but structurally invalid; fail-closed.
+        //   Unavailable   → reserved; fail-closed.
+        //
+        // Placed before db_pool() so the check is:
+        //   - in-process testable without a database
+        //   - before any DB resources or run rows are acquired (no dangling rows)
+        //   - ordered after TV-02C (artifact deployability) so artifact refusals
+        //     are surfaced before capital policy refusals
+        {
+            let policy = evaluate_capital_policy_from_env();
+            if !policy.is_start_safe() {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.capital_policy_not_authorized",
+                    "capital_allocation_policy",
+                    format!(
+                        "capital allocation policy gate failed \
+                         (truth_state='{}'): {}",
+                        policy.truth_state(),
+                        match &policy {
+                            CapitalPolicyOutcome::Denied { reason } => reason.clone(),
+                            CapitalPolicyOutcome::PolicyInvalid { reason } => {
+                                format!("policy file is invalid: {reason}")
+                            }
+                            CapitalPolicyOutcome::Unavailable { reason } => {
+                                format!("policy evaluator unavailable: {reason}")
+                            }
+                            _ => "capital policy evaluation failed".to_string(),
+                        }
+                    ),
+                ));
+            }
+        }
+
         let db = self.db_pool()?;
         if let Some(active) = mqk_db::fetch_active_run_for_engine(
             &db,
@@ -1160,6 +1296,31 @@ impl AppState {
         // the bound applies per execution run, not per daemon process lifetime.
         self.day_signal_count.store(0, Ordering::SeqCst);
 
+        // TV-01C: capture artifact provenance at run start.
+        //
+        // Evaluate artifact intake at the moment of successful run start and
+        // store the provenance if Accepted.  Only `Accepted` carries positive
+        // provenance; all other outcomes leave `accepted_artifact` as `None`
+        // (fail-closed: absent/invalid/unavailable artifacts are not recorded
+        // as consumed).
+        {
+            let provenance = match evaluate_artifact_intake_guarded() {
+                ArtifactIntakeOutcome::Accepted {
+                    artifact_id,
+                    artifact_type,
+                    stage,
+                    produced_by,
+                } => Some(AcceptedArtifactProvenance {
+                    artifact_id,
+                    artifact_type,
+                    stage,
+                    produced_by,
+                }),
+                _ => None,
+            };
+            *self.accepted_artifact.write().await = provenance;
+        }
+
         let handle = loop_runner::spawn_execution_loop(Arc::clone(self), orchestrator, run_id);
         {
             let mut lock = self.execution_loop.lock().await;
@@ -1261,6 +1422,9 @@ impl AppState {
                 .map_err(|err| RuntimeLifecycleError::internal("stop_run failed", err))?;
         }
 
+        // TV-01C: clear artifact provenance on stop — no active run means no active artifact.
+        *self.accepted_artifact.write().await = None;
+
         let snapshot = self.current_status_snapshot().await?;
         Ok(snapshot)
     }
@@ -1320,6 +1484,9 @@ impl AppState {
         )
         .await
         .map_err(|err| RuntimeLifecycleError::internal("persist_arm_state failed", err))?;
+
+        // TV-01C: clear artifact provenance on halt — no active run means no active artifact.
+        *self.accepted_artifact.write().await = None;
 
         let snapshot = StatusSnapshot {
             daemon_uptime_secs: uptime_secs(),

@@ -33,6 +33,221 @@
 
 use std::path::Path;
 
+// ---------------------------------------------------------------------------
+// Deployability gate constants
+// ---------------------------------------------------------------------------
+
+/// The only accepted schema version for `deployability_gate.json`.
+/// Must match TV-02 Python output (`gate-v1`).
+const DEPLOYABILITY_GATE_SCHEMA_VERSION: &str = "gate-v1";
+
+// ---------------------------------------------------------------------------
+// ArtifactDeployabilityOutcome
+// ---------------------------------------------------------------------------
+
+/// Result of evaluating the TV-02 deployability gate for an accepted artifact.
+///
+/// Distinct from [`ArtifactIntakeOutcome`]: intake proves structural acceptance;
+/// deployability proves the artifact meets minimum tradability/sample criteria
+/// as evaluated by the Python TV-02 pipeline.
+///
+/// Only `Deployable` is start-safe at the runtime admission boundary.
+/// All other variants are fail-closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactDeployabilityOutcome {
+    /// No artifact path was configured.  Gate is not applicable.
+    ///
+    /// Callers must treat this as "gate not evaluated", not as permission to
+    /// start without a gate.
+    NotConfigured,
+
+    /// Artifact intake was `Accepted` but no `deployability_gate.json` was
+    /// found in the artifact directory.
+    ///
+    /// Absent gate ≠ deployable.  Always fail-closed.
+    GateAbsent,
+
+    /// Gate file was found but is structurally invalid: unreadable, not valid
+    /// JSON, wrong `schema_version`, missing required fields, or `artifact_id`
+    /// mismatch with the intake artifact.
+    ///
+    /// Always fail-closed.
+    GateInvalid {
+        /// Human-readable reason for the validation failure.
+        reason: String,
+    },
+
+    /// Gate file is valid but `passed = false`.
+    ///
+    /// The artifact did not meet the minimum tradability / sample adequacy
+    /// criteria evaluated by the TV-02 Python pipeline.
+    NotDeployable {
+        /// The `overall_reason` string from the gate file.
+        overall_reason: String,
+    },
+
+    /// Gate file is valid, `passed = true`, `artifact_id` verified against
+    /// the intake artifact.
+    ///
+    /// This is the only start-safe outcome.
+    Deployable {
+        /// The artifact identity that cleared the gate.
+        artifact_id: String,
+    },
+
+    /// The deployability evaluator itself could not be run.
+    ///
+    /// Always fail-closed: deployability status is unknown.
+    Unavailable {
+        /// Human-readable reason for the evaluation failure.
+        reason: String,
+    },
+}
+
+impl ArtifactDeployabilityOutcome {
+    /// Truth-state label for the control-plane surface.
+    pub fn truth_state(&self) -> &'static str {
+        match self {
+            Self::NotConfigured => "not_configured",
+            Self::GateAbsent => "gate_absent",
+            Self::GateInvalid { .. } => "gate_invalid",
+            Self::NotDeployable { .. } => "not_deployable",
+            Self::Deployable { .. } => "deployable",
+            Self::Unavailable { .. } => "unavailable",
+        }
+    }
+
+    /// Whether this outcome allows runtime start.
+    ///
+    /// Returns `true` only for `Deployable`.  All other variants are
+    /// fail-closed: they must block runtime start.
+    pub fn is_deployable(&self) -> bool {
+        matches!(self, Self::Deployable { .. })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pure deployability evaluator
+// ---------------------------------------------------------------------------
+
+/// Evaluate the TV-02 deployability gate for an accepted artifact.
+///
+/// Reads `deployability_gate.json` from the **parent directory** of
+/// `artifact_manifest_path`.  Pure: no env reads, no network, no DB.
+///
+/// # Parameters
+/// - `artifact_manifest_path`: path to `promoted_manifest.json`.  `None` →
+///   [`ArtifactDeployabilityOutcome::NotConfigured`].
+/// - `accepted_artifact_id`: the `artifact_id` returned by the intake seam.
+///   The gate file must carry the same value; a mismatch yields
+///   [`ArtifactDeployabilityOutcome::GateInvalid`].
+///
+/// # Validation contract
+/// 1. `artifact_manifest_path` must be `Some` and non-empty — otherwise `NotConfigured`.
+/// 2. Parent directory must be derivable — otherwise `GateInvalid`.
+/// 3. `deployability_gate.json` must exist in the parent directory — otherwise
+///    `GateAbsent` (absent gate ≠ deployable; fail-closed).
+/// 4. File must be valid JSON — otherwise `GateInvalid`.
+/// 5. `schema_version` must equal `"gate-v1"` — otherwise `GateInvalid`.
+/// 6. `artifact_id` must be present, non-empty, and match `accepted_artifact_id`
+///    — otherwise `GateInvalid`.
+/// 7. `passed` must be a boolean; `false` → `NotDeployable`.
+/// 8. `passed = true` → `Deployable`.
+pub fn evaluate_artifact_deployability(
+    artifact_manifest_path: Option<&Path>,
+    accepted_artifact_id: &str,
+) -> ArtifactDeployabilityOutcome {
+    let path = match artifact_manifest_path {
+        None => return ArtifactDeployabilityOutcome::NotConfigured,
+        Some(p) if p.as_os_str().is_empty() => return ArtifactDeployabilityOutcome::NotConfigured,
+        Some(p) => p,
+    };
+
+    let gate_path = match path.parent() {
+        Some(parent) => parent.join("deployability_gate.json"),
+        None => {
+            return ArtifactDeployabilityOutcome::GateInvalid {
+                reason: format!(
+                    "cannot derive parent directory of '{}'; \
+                     artifact_manifest_path must include a parent directory",
+                    path.display()
+                ),
+            }
+        }
+    };
+
+    let contents = match std::fs::read_to_string(&gate_path) {
+        Ok(s) => s,
+        Err(_) => return ArtifactDeployabilityOutcome::GateAbsent,
+    };
+
+    let j: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(v) => v,
+        Err(e) => {
+            return ArtifactDeployabilityOutcome::GateInvalid {
+                reason: format!("invalid JSON in '{}': {e}", gate_path.display()),
+            }
+        }
+    };
+
+    match j.get("schema_version").and_then(|v| v.as_str()) {
+        Some(sv) if sv == DEPLOYABILITY_GATE_SCHEMA_VERSION => {}
+        Some(other) => {
+            return ArtifactDeployabilityOutcome::GateInvalid {
+                reason: format!(
+                    "unsupported gate schema_version '{}'; expected '{}'",
+                    other, DEPLOYABILITY_GATE_SCHEMA_VERSION
+                ),
+            }
+        }
+        None => {
+            return ArtifactDeployabilityOutcome::GateInvalid {
+                reason: "gate file missing 'schema_version' field".to_string(),
+            }
+        }
+    }
+
+    let gate_artifact_id = match j.get("artifact_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.trim().is_empty() => id.to_string(),
+        _ => {
+            return ArtifactDeployabilityOutcome::GateInvalid {
+                reason: "gate file missing or empty 'artifact_id'".to_string(),
+            }
+        }
+    };
+
+    if gate_artifact_id != accepted_artifact_id {
+        return ArtifactDeployabilityOutcome::GateInvalid {
+            reason: format!(
+                "gate artifact_id '{}' does not match accepted intake artifact_id '{}'",
+                gate_artifact_id, accepted_artifact_id
+            ),
+        };
+    }
+
+    let passed = match j.get("passed").and_then(|v| v.as_bool()) {
+        Some(b) => b,
+        None => {
+            return ArtifactDeployabilityOutcome::GateInvalid {
+                reason: "gate file missing or non-boolean 'passed' field".to_string(),
+            }
+        }
+    };
+
+    if !passed {
+        let overall_reason = j
+            .get("overall_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("gate passed=false; no overall_reason provided")
+            .to_string();
+        return ArtifactDeployabilityOutcome::NotDeployable { overall_reason };
+    }
+
+    ArtifactDeployabilityOutcome::Deployable {
+        artifact_id: gate_artifact_id,
+    }
+}
+
 /// Env var the operator sets to the path of the `promoted_manifest.json` file.
 ///
 /// Example: `MQK_ARTIFACT_PATH=/home/user/promoted/signal_packs/<id>/promoted_manifest.json`

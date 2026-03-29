@@ -5,7 +5,7 @@
 //! ReconcileTruthGate, DaemonOrchestrator alias, ExecutionLoopCommand,
 //! ExecutionLoopExit, ExecutionLoopHandle, OperatorAuthMode, DeploymentMode,
 //! BrokerKind, BrokerSnapshotTruthSource, StrategyMarketDataSource,
-//! AlpacaWsContinuityState.
+//! AlpacaWsContinuityState, AcceptedArtifactProvenance.
 
 use std::fmt;
 use std::sync::Arc;
@@ -78,6 +78,29 @@ pub struct RestartTruthSnapshot {
     pub local_owned_run_id: Option<Uuid>,
     pub durable_active_run_id: Option<Uuid>,
     pub durable_active_without_local_ownership: bool,
+}
+
+// ---------------------------------------------------------------------------
+// AcceptedArtifactProvenance — TV-01C
+// ---------------------------------------------------------------------------
+
+/// Provenance of a promoted artifact that was accepted at `start_execution_runtime`.
+///
+/// Stored in `AppState::accepted_artifact` and surfaced via
+/// `GET /api/v1/system/run-artifact`.  Cleared on stop/halt.
+///
+/// `None` in AppState when no run is active, no artifact was configured, or
+/// the intake outcome was not `Accepted` — all fail-closed.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AcceptedArtifactProvenance {
+    /// Content-addressed artifact identity (sha256-derived).
+    pub artifact_id: String,
+    /// Artifact type string (e.g. `"signal_pack"`).
+    pub artifact_type: String,
+    /// Promotion stage the artifact was promoted to (e.g. `"paper"`).
+    pub stage: String,
+    /// Producing system identifier (e.g. `"research-py/promote.py"`).
+    pub produced_by: String,
 }
 
 #[derive(Debug)]

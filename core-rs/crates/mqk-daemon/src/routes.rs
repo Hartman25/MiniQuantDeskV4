@@ -150,8 +150,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use strategy::{strategy_signal, strategy_summary, strategy_suppressions};
     use system::{
         health, status_handler, system_artifact_intake, system_config_diffs,
-        system_config_fingerprint, system_metadata, system_preflight, system_runtime_leadership,
-        system_session, system_status,
+        system_config_fingerprint, system_metadata, system_preflight, system_run_artifact,
+        system_runtime_leadership, system_session, system_status,
     };
     use trading::{
         diagnostics_snapshot, stream, trading_account, trading_fills, trading_orders,
@@ -211,6 +211,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/system/artifact-intake",
             get(system_artifact_intake),
         )
+        .route("/api/v1/system/run-artifact", get(system_run_artifact))
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
         .route("/v1/trading/orders", get(trading_orders))

@@ -1420,3 +1420,34 @@ pub struct ArtifactIntakeResponse {
     /// Path that was evaluated.  Null when `truth_state == "not_configured"`.
     pub evaluated_path: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// /v1/system/run-artifact — TV-01C
+// ---------------------------------------------------------------------------
+
+/// TV-01C: Artifact provenance accepted at the most recent `start_execution_runtime`.
+///
+/// `truth_state` values:
+/// - `"active"` — an artifact was accepted at run start and the run is active;
+///   all identity fields are populated.
+/// - `"no_run"` — no run is active (daemon is idle/halted); artifact provenance
+///   is not surfaced.  All identity fields are null.  Fail-closed.
+///
+/// This is distinct from `ArtifactIntakeResponse` (`/api/v1/system/artifact-intake`),
+/// which evaluates the currently configured file on demand.  This route surfaces
+/// what was actually accepted and consumed when the run started.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunArtifactProvenanceResponse {
+    /// Self-identifying route.
+    pub canonical_route: String,
+    /// `"active"` | `"no_run"`.
+    pub truth_state: String,
+    /// Content-addressed artifact identity.  Non-null only when `truth_state == "active"`.
+    pub artifact_id: Option<String>,
+    /// Artifact type string.  Non-null only when `truth_state == "active"`.
+    pub artifact_type: Option<String>,
+    /// Promotion stage.  Non-null only when `truth_state == "active"`.
+    pub stage: Option<String>,
+    /// Producing system identifier.  Non-null only when `truth_state == "active"`.
+    pub produced_by: Option<String>,
+}

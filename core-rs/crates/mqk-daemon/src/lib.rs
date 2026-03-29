@@ -6,6 +6,7 @@
 pub mod api_types;
 pub mod artifact_intake;
 pub mod bind;
+pub mod capital_policy;
 pub mod cors;
 pub mod decision;
 pub mod dev_gate;

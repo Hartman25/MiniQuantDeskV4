@@ -10,7 +10,7 @@ use std::time::Duration;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_broker_alpaca::{encode_fetch_cursor, types::AlpacaFetchCursor};
-use mqk_daemon::{routes, state};
+use mqk_daemon::{artifact_intake::ENV_ARTIFACT_PATH, routes, state};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -1129,4 +1129,150 @@ async fn ir01_control_arm_with_real_run_writes_audit_event() {
         run_count, 1,
         "exactly one run row must exist (the real one); found {run_count}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// TV-01D-F1: start_execution_runtime consumes and surfaces artifact provenance
+//
+// This is the definitive TV-01D end-to-end proof.
+//
+// The TV-01C / TV-01D in-process tests (AP-01..AP-06) prove the identity chain
+// via the test seam (`set_accepted_artifact_for_test`).  That seam simulates
+// what `start_execution_runtime` does — but does not call it directly.
+//
+// This test proves the load-bearing claim: the real `start_execution_runtime`
+// code path calls `evaluate_artifact_intake_guarded()`, which reads
+// `MQK_ARTIFACT_PATH` from the environment, and writes the accepted provenance
+// into `AppState::accepted_artifact` — and that same provenance is what
+// `GET /api/v1/system/run-artifact` surfaces after a real start.
+//
+// Proof matrix:
+//   (1) A valid promoted manifest is set via MQK_ARTIFACT_PATH.
+//   (2) After real start_execution_runtime (all DB ops succeed), the route
+//       returns truth_state="active" with the exact artifact_id from the manifest.
+//   (3) After real stop_execution_runtime, the route returns truth_state="no_run"
+//       (provenance cleared by the real stop path, not a test seam).
+//   (4) All four provenance fields match the manifest exactly — no drift.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn tv01d_f1_start_execution_runtime_consumes_and_surfaces_artifact_provenance() {
+    let artifact_id = "tv01d-f1-e2e-real-start-path-abc999";
+
+    // Write a valid promoted_manifest.json to a temp file.
+    let manifest = format!(
+        r#"{{
+  "schema_version": "promoted-v1",
+  "artifact_id": "{artifact_id}",
+  "artifact_type": "signal_pack",
+  "stage": "paper",
+  "produced_by": "research-py/promote.py",
+  "data_root": "promoted/signal_packs/{artifact_id}"
+}}"#
+    );
+    let manifest_path =
+        std::env::temp_dir().join(format!("mqk_tv01d_f1_{}.json", std::process::id()));
+    std::fs::write(&manifest_path, &manifest).expect("TV-01D-F1: write manifest");
+
+    // Set MQK_ARTIFACT_PATH so evaluate_artifact_intake_guarded() inside
+    // start_execution_runtime finds and accepts the promoted manifest.
+    #[allow(deprecated)]
+    unsafe {
+        std::env::set_var(ENV_ARTIFACT_PATH, manifest_path.to_str().unwrap());
+    }
+
+    // daemon_state() sets up paper+alpaca with mock Alpaca server, live broker
+    // cursor, and broker/execution snapshots — the same setup used by all other
+    // DB-backed lifecycle tests.
+    let st = daemon_state().await;
+    arm(&st).await;
+
+    // Real start: start_execution_runtime runs all gates + DB operations +
+    // evaluate_artifact_intake_guarded() → writes provenance to accepted_artifact.
+    let started = start(&st).await;
+    assert!(
+        started["active_run_id"].is_string(),
+        "TV-01D-F1: start must return an active_run_id; got: {started}"
+    );
+
+    // (1) After real start: the route must surface the accepted artifact identity.
+    let router_after_start = make_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/run-artifact")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router_after_start, req).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "TV-01D-F1: run-artifact after real start must return 200"
+    );
+    let j = parse_json(body);
+
+    // (2) truth_state must be "active" — the real start path wrote provenance.
+    assert_eq!(
+        j["truth_state"], "active",
+        "TV-01D-F1: after real start with accepted artifact, truth_state must be \
+         'active' — proves start_execution_runtime wrote provenance; body: {j}"
+    );
+
+    // (3) All four provenance fields must match the promoted manifest exactly.
+    assert_eq!(
+        j["artifact_id"].as_str().unwrap_or(""),
+        artifact_id,
+        "TV-01D-F1: artifact_id must match the promoted manifest exactly; body: {j}"
+    );
+    assert_eq!(
+        j["artifact_type"].as_str().unwrap_or(""),
+        "signal_pack",
+        "TV-01D-F1: artifact_type must match; body: {j}"
+    );
+    assert_eq!(
+        j["stage"].as_str().unwrap_or(""),
+        "paper",
+        "TV-01D-F1: stage must match; body: {j}"
+    );
+    assert_eq!(
+        j["produced_by"].as_str().unwrap_or(""),
+        "research-py/promote.py",
+        "TV-01D-F1: produced_by must match; body: {j}"
+    );
+
+    // Real stop: stop_execution_runtime clears accepted_artifact.
+    stop(&st).await;
+
+    // (4) After real stop: provenance must be cleared — route returns "no_run".
+    let router_after_stop = make_router(Arc::clone(&st));
+    let req2 = Request::builder()
+        .method("GET")
+        .uri("/api/v1/system/run-artifact")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status2, body2) = call(router_after_stop, req2).await;
+    assert_eq!(
+        status2,
+        StatusCode::OK,
+        "TV-01D-F1: run-artifact after real stop must return 200"
+    );
+    let j2 = parse_json(body2);
+    assert_eq!(
+        j2["truth_state"], "no_run",
+        "TV-01D-F1: after real stop, truth_state must be 'no_run' — provenance \
+         cleared by stop_execution_runtime, not a test seam; body: {j2}"
+    );
+    assert!(
+        j2["artifact_id"].is_null(),
+        "TV-01D-F1: artifact_id must be null after real stop; body: {j2}"
+    );
+
+    // Cleanup: remove MQK_ARTIFACT_PATH so subsequent tests are not polluted.
+    #[allow(deprecated)]
+    unsafe {
+        std::env::remove_var(ENV_ARTIFACT_PATH);
+    }
+    let _ = std::fs::remove_file(&manifest_path);
+
+    st.stop_for_shutdown().await;
 }

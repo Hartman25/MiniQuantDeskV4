@@ -17,8 +17,9 @@ use sqlx::Row;
 
 use crate::api_types::{
     ArtifactIntakeResponse, ConfigDiffRow, ConfigDiffsResponse, ConfigFingerprintResponse,
-    HealthResponse, PreflightStatusResponse, RuntimeErrorResponse, RuntimeLeadershipCheckpointRow,
-    RuntimeLeadershipResponse, SessionStateResponse, SystemMetadataResponse, SystemStatusResponse,
+    HealthResponse, PreflightStatusResponse, RunArtifactProvenanceResponse, RuntimeErrorResponse,
+    RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
+    SystemMetadataResponse, SystemStatusResponse,
 };
 use crate::artifact_intake::{
     evaluate_artifact_intake_guarded, ArtifactIntakeOutcome, ENV_ARTIFACT_PATH,
@@ -670,5 +671,42 @@ pub(crate) async fn system_artifact_intake(State(_st): State<Arc<AppState>>) -> 
         },
     };
 
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// TV-01C: GET /api/v1/system/run-artifact
+// ---------------------------------------------------------------------------
+
+/// TV-01C: Run-artifact provenance truth surface.
+///
+/// Returns the artifact accepted at the most recent `start_execution_runtime`.
+/// `truth_state = "active"` with all identity fields when a run is active with
+/// an accepted artifact; `truth_state = "no_run"` with null fields otherwise.
+///
+/// Distinct from `/api/v1/system/artifact-intake`: that route re-evaluates the
+/// configured file on demand; this route surfaces what was actually accepted and
+/// consumed when the run started.  Fail-closed: never synthesises positive
+/// provenance when no run is active.
+pub(crate) async fn system_run_artifact(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let provenance = st.accepted_artifact_provenance().await;
+    let response = match provenance {
+        Some(p) => RunArtifactProvenanceResponse {
+            canonical_route: "/api/v1/system/run-artifact".to_string(),
+            truth_state: "active".to_string(),
+            artifact_id: Some(p.artifact_id),
+            artifact_type: Some(p.artifact_type),
+            stage: Some(p.stage),
+            produced_by: Some(p.produced_by),
+        },
+        None => RunArtifactProvenanceResponse {
+            canonical_route: "/api/v1/system/run-artifact".to_string(),
+            truth_state: "no_run".to_string(),
+            artifact_id: None,
+            artifact_type: None,
+            stage: None,
+            produced_by: None,
+        },
+    };
     (StatusCode::OK, Json(response)).into_response()
 }
