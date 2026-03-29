@@ -150,6 +150,26 @@ fn cleanup(dir: &PathBuf) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Build a minimal valid `parity_evidence.json` content (TV-03C gate requires
+/// this when an artifact path is configured).
+fn valid_parity_json(artifact_id: &str) -> String {
+    serde_json::json!({
+        "schema_version": "parity-v1",
+        "artifact_id": artifact_id,
+        "gate_passed": true,
+        "gate_schema_version": "gate-v1",
+        "shadow_evidence": {
+            "evidence_available": false,
+            "evidence_note": "No shadow evaluation run performed for this artifact"
+        },
+        "comparison_basis": "paper+alpaca supervised path",
+        "live_trust_complete": false,
+        "live_trust_gaps": [],
+        "produced_at_utc": "2026-03-01T00:00:00Z"
+    })
+    .to_string()
+}
+
 /// Build an armed LiveShadow+Alpaca AppState.
 ///
 /// LiveShadow+Alpaca:
@@ -243,6 +263,12 @@ async fn d02_accepted_deployable_passes_to_db_gate() {
     let artifact_id = "tv02-d02-deployable-artifact-abc123";
     let gate_contents = gate_json(artifact_id, true);
     let (manifest, dir) = write_artifact_dir("d02", artifact_id, Some(&gate_contents));
+    // TV-03C gate: parity evidence required when artifact path is configured.
+    std::fs::write(
+        dir.join("parity_evidence.json"),
+        valid_parity_json(artifact_id),
+    )
+    .expect("write parity file");
 
     std::env::set_var("MQK_ARTIFACT_PATH", manifest.to_str().unwrap());
     let st = armed_live_shadow_state().await;
