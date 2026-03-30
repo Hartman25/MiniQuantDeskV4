@@ -1193,3 +1193,66 @@ pub async fn broker_map_load(pool: &PgPool) -> Result<Vec<(String, String)>> {
     }
     Ok(out)
 }
+
+// ---------------------------------------------------------------------------
+// OPS-08 / EXEC-06: supervisor-grade outbox read for paper execution timeline
+// ---------------------------------------------------------------------------
+
+/// Supervisor-visible outbox row for `GET /api/v1/execution/outbox`.
+///
+/// Read-only.  No feature gate — supervision never modifies lifecycle state.
+#[derive(Debug, Clone)]
+pub struct OutboxSupervisorRow {
+    pub outbox_id: i64,
+    pub run_id: Uuid,
+    pub idempotency_key: String,
+    pub order_json: Value,
+    pub status: String,
+    pub created_at_utc: DateTime<Utc>,
+    pub claimed_at_utc: Option<DateTime<Utc>>,
+    pub dispatching_at_utc: Option<DateTime<Utc>>,
+    pub sent_at_utc: Option<DateTime<Utc>>,
+}
+
+/// Fetch outbox rows for a run for operator supervision.
+///
+/// Returns at most 200 rows, ordered newest-first (by `outbox_id DESC`).
+/// Read-only — no lifecycle state is modified.  No feature gate.
+///
+/// Called by `GET /api/v1/execution/outbox` to surface the authoritative
+/// paper execution timeline for the current run.
+pub async fn outbox_fetch_for_supervisor(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<Vec<OutboxSupervisorRow>> {
+    let rows = sqlx::query(
+        r#"
+        select outbox_id, run_id, idempotency_key, order_json, status,
+               created_at_utc, claimed_at_utc, dispatching_at_utc, sent_at_utc
+        from oms_outbox
+        where run_id = $1
+        order by outbox_id desc
+        limit 200
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .context("outbox_fetch_for_supervisor failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(OutboxSupervisorRow {
+            outbox_id: row.try_get("outbox_id")?,
+            run_id: row.try_get("run_id")?,
+            idempotency_key: row.try_get("idempotency_key")?,
+            order_json: row.try_get("order_json")?,
+            status: row.try_get("status")?,
+            created_at_utc: row.try_get("created_at_utc")?,
+            claimed_at_utc: row.try_get("claimed_at_utc")?,
+            dispatching_at_utc: row.try_get("dispatching_at_utc")?,
+            sent_at_utc: row.try_get("sent_at_utc")?,
+        });
+    }
+    Ok(out)
+}

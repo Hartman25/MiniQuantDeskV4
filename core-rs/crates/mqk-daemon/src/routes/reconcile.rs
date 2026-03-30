@@ -19,9 +19,21 @@ use crate::state::AppState;
 pub(crate) async fn reconcile_status(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let reconcile = st.current_reconcile_snapshot().await;
 
+    // RECON-06: disambiguate "unknown" (never-run) from an active result.
+    // "unknown" is the initial state set by initial_reconcile_status() — it
+    // means the reconcile loop has not yet completed a tick, NOT that an error
+    // occurred.  We surface this as truth_state="never_run" so operators can
+    // distinguish a fresh daemon from a daemon that has reconciled and found issues.
+    let truth_state = match reconcile.status.as_str() {
+        "unknown" => "never_run",
+        "stale" => "stale",
+        _ => "active",
+    };
+
     (
         StatusCode::OK,
         Json(ReconcileSummaryResponse {
+            truth_state: truth_state.to_string(),
             status: reconcile.status,
             last_run_at: reconcile.last_run_at,
             snapshot_watermark_ms: reconcile.snapshot_watermark_ms,
@@ -41,12 +53,15 @@ pub(crate) async fn reconcile_mismatches(State(st): State<Arc<AppState>>) -> imp
     let reconcile = st.current_reconcile_snapshot().await;
     match reconcile.status.as_str() {
         "unknown" => {
+            // RECON-06: "unknown" = never_run. Not a mismatch surface — operator
+            // must wait for the reconcile loop to complete a tick.
             return (
                 StatusCode::OK,
                 Json(ReconcileMismatchesResponse {
-                    truth_state: "no_snapshot".to_string(),
+                    truth_state: "never_run".to_string(),
                     snapshot_at_utc: None,
                     rows: vec![],
+                    review_workflow: None,
                 }),
             )
                 .into_response();
@@ -58,6 +73,7 @@ pub(crate) async fn reconcile_mismatches(State(st): State<Arc<AppState>>) -> imp
                     truth_state: "stale".to_string(),
                     snapshot_at_utc: reconcile.last_run_at,
                     rows: vec![],
+                    review_workflow: None,
                 }),
             )
                 .into_response();
@@ -72,6 +88,7 @@ pub(crate) async fn reconcile_mismatches(State(st): State<Arc<AppState>>) -> imp
                 truth_state: "no_snapshot".to_string(),
                 snapshot_at_utc: None,
                 rows: vec![],
+                review_workflow: None,
             }),
         )
             .into_response();
@@ -84,6 +101,7 @@ pub(crate) async fn reconcile_mismatches(State(st): State<Arc<AppState>>) -> imp
                 truth_state: "no_snapshot".to_string(),
                 snapshot_at_utc: None,
                 rows: vec![],
+                review_workflow: None,
             }),
         )
             .into_response();
@@ -99,6 +117,7 @@ pub(crate) async fn reconcile_mismatches(State(st): State<Arc<AppState>>) -> imp
                 truth_state: "no_snapshot".to_string(),
                 snapshot_at_utc: None,
                 rows: vec![],
+                review_workflow: None,
             }),
         )
             .into_response();
@@ -113,17 +132,41 @@ pub(crate) async fn reconcile_mismatches(State(st): State<Arc<AppState>>) -> imp
                 truth_state: "stale".to_string(),
                 snapshot_at_utc: Some(schema_snapshot.captured_at_utc.to_rfc3339()),
                 rows: vec![],
+                review_workflow: None,
             }),
         )
             .into_response();
     }
+
+    let rows = reconcile_diff_rows(&report, &local, &broker);
+    // RECON-06: review_workflow is Some only when mismatches are present and
+    // truth is active. The guidance is explicit about severity and action.
+    let review_workflow = if rows.is_empty() {
+        None
+    } else {
+        let has_critical = rows.iter().any(|r| r.status == "critical");
+        Some(if has_critical {
+            "Critical mismatches detected. Compare internal_value (local OMS) vs \
+             broker_value (broker snapshot) for each row. Position qty mismatches \
+             are critical: halt execution and reconcile manually before resuming. \
+             Use /v1/run/halt to stop the execution loop immediately."
+                .to_string()
+        } else {
+            "Warning mismatches detected. Compare internal_value (local OMS) vs \
+             broker_value (broker snapshot) for each row. Order field drift is \
+             warning-severity: investigate before the next execution cycle. \
+             Halt execution if drift is unexplained."
+                .to_string()
+        })
+    };
 
     (
         StatusCode::OK,
         Json(ReconcileMismatchesResponse {
             truth_state: "active".to_string(),
             snapshot_at_utc: Some(schema_snapshot.captured_at_utc.to_rfc3339()),
-            rows: reconcile_diff_rows(&report, &local, &broker),
+            rows,
+            review_workflow,
         }),
     )
         .into_response()

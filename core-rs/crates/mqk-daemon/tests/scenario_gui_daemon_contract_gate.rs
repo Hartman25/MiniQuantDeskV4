@@ -1578,18 +1578,22 @@ async fn gui_contract_reconcile_mismatches_no_snapshot_without_authoritative_det
         "/api/v1/reconcile/mismatches must return HTTP 200"
     );
     let json = parse_json(body);
+    // RECON-06: when the reconcile loop has never completed a tick, the
+    // truth_state is "never_run" (not "no_snapshot").  "never_run" unambiguously
+    // means the daemon started but reconcile has not yet run — it is distinct
+    // from "no_snapshot" (which means snapshots are missing but reconcile ran).
     assert_eq!(
         json["truth_state"].as_str(),
-        Some("no_snapshot"),
-        "truth_state must be no_snapshot when reconcile detail truth is absent; got: {json}"
+        Some("never_run"),
+        "truth_state must be never_run when reconcile has not yet completed a tick; got: {json}"
     );
     assert!(
         json["rows"].as_array().is_some_and(|v| v.is_empty()),
-        "rows must be empty when truth_state is no_snapshot; got: {json}"
+        "rows must be empty when truth_state is never_run; got: {json}"
     );
     assert!(
         json["snapshot_at_utc"].is_null(),
-        "snapshot_at_utc must be null when truth_state is no_snapshot; got: {json}"
+        "snapshot_at_utc must be null when truth_state is never_run; got: {json}"
     );
 }
 

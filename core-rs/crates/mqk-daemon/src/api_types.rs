@@ -320,6 +320,16 @@ pub struct ExecutionSummaryResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioSummaryResponse {
     pub has_snapshot: bool,
+    /// PORT-05: Machine-readable truth state for operator supervision.
+    ///
+    /// - `"no_snapshot"` — no broker snapshot is loaded; all financial fields are
+    ///   `null`.  Empty portfolio must NOT be inferred from this state.
+    /// - `"active"` — a broker snapshot is present; fields derive from it.
+    ///
+    /// **`session_boundary = "in_memory_only"`** — the broker snapshot is held
+    /// in-memory and reset on every daemon restart.  After a restart this surface
+    /// returns `"no_snapshot"` until a fresh snapshot is loaded.
+    pub truth_state: String,
     pub account_equity: Option<f64>,
     pub cash: Option<f64>,
     pub long_market_value: Option<f64>,
@@ -343,6 +353,15 @@ pub struct RiskSummaryResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReconcileSummaryResponse {
+    /// RECON-06: Machine-readable truth state disambiguating reconcile lifecycle.
+    ///
+    /// - `"never_run"` — the reconcile loop has not completed a tick since daemon
+    ///   start.  `status = "unknown"` in this state.  Not the same as an error.
+    /// - `"active"` — reconcile has completed at least one tick; `status` is
+    ///   authoritative (`"ok"` or a mismatch count summary).
+    /// - `"stale"` — the last reconcile result is too old to be considered
+    ///   authoritative; operator must trigger a fresh snapshot.
+    pub truth_state: String,
     pub status: String,
     pub last_run_at: Option<String>,
     pub snapshot_watermark_ms: Option<i64>,
@@ -368,6 +387,14 @@ pub struct ReconcileMismatchesResponse {
     pub truth_state: String,
     pub snapshot_at_utc: Option<String>,
     pub rows: Vec<ReconcileMismatchRow>,
+    /// RECON-06: Operator review guidance when mismatches are present.
+    ///
+    /// `None` when `rows` is empty (no review needed) or when truth_state is
+    /// not `"active"` (not authoritative).
+    ///
+    /// `Some(guidance)` when `rows` is non-empty and truth_state is `"active"`:
+    /// the guidance string explicitly names the required operator actions.
+    pub review_workflow: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -810,12 +837,31 @@ pub struct StrategySignalRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategySignalResponse {
     pub accepted: bool,
-    /// Disposition: "enqueued" | "duplicate" | "rejected" | "unavailable" | "suppressed".
+    /// Disposition: "enqueued" | "duplicate" | "rejected" | "unavailable" | "suppressed"
+    ///              | "budget_denied" | "sizing_denied" | "exposure_denied"
+    ///              | "exhaustion_denied" | "continuity_gap" | "outside_session"
+    ///              | "day_limit_reached".
     pub disposition: String,
     pub signal_id: String,
     pub strategy_id: String,
     pub active_run_id: Option<Uuid>,
     pub blockers: Vec<String>,
+    /// RTS-07: `true` when this submission placed a *new* execution intent in the
+    /// outbox (Gate 7 `Ok(true)`).
+    ///
+    /// When `true`: an outbox row was written and carries
+    /// `signal_source = "external_signal_ingestion"` as a provenance mark.
+    /// The orchestrator's next Phase 1 tick will claim and dispatch it to the
+    /// broker.  This is the only path that produces a pending execution intent.
+    ///
+    /// When `false`: no new outbox row was placed.  This covers gate failures,
+    /// duplicate submissions (`disposition = "duplicate"`), and validation errors.
+    /// The prior runtime state is unchanged.
+    ///
+    /// `#[serde(default)]` preserves backward compatibility: clients that do not
+    /// send or receive this field deserialise it as `false`.
+    #[serde(default)]
+    pub intent_placed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -933,11 +979,26 @@ pub struct PortfolioPositionRow {
 ///   empty when the account holds no positions).
 /// - `"no_snapshot"` — no broker snapshot is loaded; `rows` is always empty
 ///   and must NOT be treated as authoritative zero.
+///
+/// PORT-05: `snapshot_source` and `session_boundary` make restart-aware
+/// supervision explicit for operators.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioPositionsResponse {
     pub snapshot_state: String,
     pub captured_at_utc: Option<String>,
     pub rows: Vec<PortfolioPositionRow>,
+    /// PORT-05: How this snapshot was produced.
+    /// - `"synthetic"` — paper mode; derived from local OMS + portfolio engine.
+    /// - `"external"` — Alpaca REST fetch (external broker).
+    /// - `null` when `snapshot_state = "no_snapshot"`.
+    pub snapshot_source: Option<String>,
+    /// PORT-05: Persistence boundary for this surface.
+    ///
+    /// Always `"in_memory_only"`: the broker snapshot is held in-memory and is
+    /// reset on every daemon restart.  After a restart this surface returns
+    /// `"no_snapshot"` until a fresh snapshot is loaded.  No durable history
+    /// of positions is maintained by the daemon.
+    pub session_boundary: String,
 }
 
 /// One broker-layer open-order row.
@@ -960,11 +1021,19 @@ pub struct PortfolioOpenOrderRow {
 }
 
 /// Response wrapper for `/api/v1/portfolio/orders/open`.
+///
+/// PORT-05: `snapshot_source` and `session_boundary` make restart-aware
+/// supervision explicit for operators.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioOpenOrdersResponse {
     pub snapshot_state: String,
     pub captured_at_utc: Option<String>,
     pub rows: Vec<PortfolioOpenOrderRow>,
+    /// PORT-05: How this snapshot was produced. `null` when no snapshot.
+    /// `"synthetic"` (paper/local OMS) or `"external"` (Alpaca REST).
+    pub snapshot_source: Option<String>,
+    /// PORT-05: Always `"in_memory_only"` — lost on daemon restart.
+    pub session_boundary: String,
 }
 
 /// One broker-layer fill row.
@@ -992,11 +1061,19 @@ pub struct PortfolioFillRow {
 }
 
 /// Response wrapper for `/api/v1/portfolio/fills`.
+///
+/// PORT-05: `snapshot_source` and `session_boundary` make restart-aware
+/// supervision explicit for operators.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioFillsResponse {
     pub snapshot_state: String,
     pub captured_at_utc: Option<String>,
     pub rows: Vec<PortfolioFillRow>,
+    /// PORT-05: How this snapshot was produced. `null` when no snapshot.
+    /// `"synthetic"` (paper/local OMS) or `"external"` (Alpaca REST).
+    pub snapshot_source: Option<String>,
+    /// PORT-05: Always `"in_memory_only"` — lost on daemon restart.
+    pub session_boundary: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1504,4 +1581,171 @@ pub struct RunArtifactProvenanceResponse {
     pub stage: Option<String>,
     /// Producing system identifier.  Non-null only when `truth_state == "active"`.
     pub produced_by: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// JOUR-01: Paper trading journal and evidence surface
+// ---------------------------------------------------------------------------
+
+/// One durable signal-admission record from the journal.
+///
+/// Sourced from `audit_events` (topic=`'signal_ingestion'`, event_type=`'signal.admitted'`).
+/// Written by the strategy signal route at Gate 7 `Ok(true)`.
+///
+/// Fields are extracted from the `payload` JSON column.  Parsing failure
+/// for any field skips that row rather than emitting fabricated values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaperJournalAdmissionRow {
+    /// Audit event UUID (stable identifier for this admission record).
+    pub event_id: String,
+    /// RFC 3339 UTC timestamp when this signal was admitted.
+    pub ts_utc: String,
+    /// Caller-supplied signal idempotency key.
+    pub signal_id: String,
+    /// Originating strategy identifier.
+    pub strategy_id: String,
+    pub symbol: String,
+    /// `"buy"` or `"sell"`
+    pub side: String,
+    /// Ordered quantity.
+    pub qty: i64,
+    /// Run ID this admission belongs to.
+    pub run_id: String,
+    /// Stable DB provenance reference: `"audit_events:{event_id}"`.
+    pub provenance_ref: String,
+}
+
+/// Fill evidence lane of the paper journal.
+///
+/// `truth_state`:
+/// - `"active"` — DB + active run; `rows` is authoritative fill history.
+///   Empty `rows` = no fills yet recorded for this run.
+/// - `"no_active_run"` — DB present but no active run; rows empty; not authoritative.
+/// - `"no_db"` — no DB pool; rows empty; not authoritative.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaperJournalFillsLane {
+    pub truth_state: String,
+    pub backend: String,
+    pub rows: Vec<FillQualityTelemetryRow>,
+}
+
+/// Signal-admission history lane of the paper journal.
+///
+/// `truth_state`:
+/// - `"active"` — DB + active run; `rows` is the durable admitted-signal log.
+///   Empty `rows` = no signals admitted yet.
+/// - `"no_active_run"` — DB present but no active run; rows empty; not authoritative.
+/// - `"no_db"` — no DB pool; rows empty; not authoritative.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaperJournalAdmissionsLane {
+    pub truth_state: String,
+    /// `"postgres.audit_events[topic=signal_ingestion]"` when active.
+    /// `"unavailable"` otherwise.
+    pub backend: String,
+    pub rows: Vec<PaperJournalAdmissionRow>,
+}
+
+/// Response for `GET /api/v1/paper/journal`.
+///
+/// Unified paper-trading evidence surface for operator review.  Separates
+/// fill evidence (what executed) from signal-admission history (what was
+/// submitted and accepted into the outbox).
+///
+/// Both lanes carry independent `truth_state` values.  An operator can
+/// answer:
+/// - What fills were produced by this run? → `fills_lane`
+/// - What signals were admitted for dispatch? → `admissions_lane`
+///
+/// Neither lane fabricates history.  If a lane is unavailable its `rows`
+/// are empty and `truth_state` says so explicitly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaperJournalResponse {
+    /// Self-identifying canonical route.
+    pub canonical_route: String,
+    /// Active run ID when both lanes are `"active"`.  `None` otherwise.
+    pub run_id: Option<String>,
+    /// Fill evidence sourced from `postgres.fill_quality_telemetry`.
+    pub fills_lane: PaperJournalFillsLane,
+    /// Signal-admission history sourced from `postgres.audit_events`.
+    pub admissions_lane: PaperJournalAdmissionsLane,
+}
+
+// ---------------------------------------------------------------------------
+// /api/v1/execution/outbox — OPS-08 / EXEC-06: paper execution timeline
+// ---------------------------------------------------------------------------
+
+/// One row from the durable execution outbox for a run.
+///
+/// Fields extracted from `order_json` are `None` when the key is absent —
+/// never fabricated.  `lifecycle_stage` is a display-friendly derivation
+/// of `status` for operator readability.
+///
+/// Source: `postgres.oms_outbox` for the active run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionOutboxRow {
+    /// Idempotency key assigned at signal intake or manual submit.
+    pub idempotency_key: String,
+    /// Run ID this outbox row belongs to.
+    pub run_id: String,
+    /// Durable status: `"PENDING"` | `"CLAIMED"` | `"DISPATCHING"` |
+    /// `"SENT"` | `"ACKED"` | `"FAILED"` | `"AMBIGUOUS"`
+    pub status: String,
+    /// Display-friendly lifecycle stage derived from `status`.
+    /// `"queued"` | `"claimed"` | `"submitting"` | `"sent_to_broker"` |
+    /// `"acknowledged"` | `"failed"` | `"ambiguous"` | `"unknown"`
+    pub lifecycle_stage: String,
+    /// Symbol from `order_json["symbol"]`. `None` if absent.
+    pub symbol: Option<String>,
+    /// `"buy"` or `"sell"` from `order_json["side"]`. `None` if absent.
+    pub side: Option<String>,
+    /// Ordered qty from `order_json["qty"]`. `None` if absent.
+    pub qty: Option<i64>,
+    /// `"market"` or `"limit"` from `order_json["order_type"]`. `None` if absent.
+    pub order_type: Option<String>,
+    /// Originating strategy from `order_json["strategy_id"]`. `None` if absent
+    /// (e.g., manual operator submit has no strategy attribution).
+    pub strategy_id: Option<String>,
+    /// Provenance mark from `order_json["signal_source"]`.
+    /// `"external_signal_ingestion"` for strategy-driven intents; `None` for
+    /// manual operator submits.
+    pub signal_source: Option<String>,
+    /// UTC timestamp when this intent was enqueued (durable).
+    pub created_at_utc: String,
+    /// UTC timestamp when the orchestrator claimed this row for dispatch.
+    /// `None` if not yet claimed.
+    pub claimed_at_utc: Option<String>,
+    /// UTC timestamp when dispatch to broker began.
+    /// `None` if not yet dispatching.
+    pub dispatching_at_utc: Option<String>,
+    /// UTC timestamp when the broker confirmed receipt.
+    /// `None` if not yet sent.
+    pub sent_at_utc: Option<String>,
+}
+
+/// Response wrapper for `GET /api/v1/execution/outbox`.
+///
+/// Surfaces the authoritative durable execution intent timeline for the
+/// active run.  Operators can use this to understand what was submitted,
+/// what is in-flight, what succeeded, and what failed — without relying
+/// on ephemeral in-memory state.
+///
+/// `truth_state`:
+/// - `"active"` — DB pool and active run present; `rows` is the authoritative
+///   durable outbox for this run, ordered newest-first (at most 200 rows).
+///   Empty `rows` means no execution intents have been enqueued yet in this run.
+/// - `"no_active_run"` — DB pool present but no active run; `rows` is empty
+///   and must NOT be treated as authoritative zero history.
+/// - `"no_db"` — no DB pool configured; `rows` is empty and not authoritative.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionOutboxResponse {
+    /// Self-identifying canonical route.
+    pub canonical_route: String,
+    /// See truth_state variants above.
+    pub truth_state: String,
+    /// `"postgres.oms_outbox"` when active; `"unavailable"` otherwise.
+    pub backend: String,
+    /// Active run ID when `truth_state == "active"`. `None` otherwise.
+    pub run_id: Option<String>,
+    /// At most 200 rows, newest-first.  Authoritative only when `truth_state == "active"`.
+    pub rows: Vec<ExecutionOutboxRow>,
 }

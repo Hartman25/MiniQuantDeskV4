@@ -30,6 +30,7 @@ pub(crate) mod control_plane;
 pub(crate) mod execution;
 pub(crate) mod helpers;
 pub(crate) mod oms_metrics;
+pub(crate) mod paper_journal;
 pub(crate) mod portfolio;
 pub(crate) mod reconcile;
 pub(crate) mod strategy;
@@ -132,6 +133,7 @@ async fn token_auth_middleware(
 /// attaches them after this call so tests can use the bare router.
 pub fn build_router(state: Arc<AppState>) -> Router {
     use alerts_events::{alerts_active, events_feed};
+    use paper_journal::paper_journal;
     use audit_ops::{audit_artifacts, audit_operator_actions, ops_operator_timeline};
     use control_plane::{
         integrity_arm, integrity_disarm, ops_action, ops_catalog, ops_mode_change_guidance,
@@ -139,7 +141,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use execution::{
         execution_fill_quality, execution_order_cancel, execution_order_submit, execution_orders,
-        execution_summary,
+        execution_outbox, execution_summary,
     };
     use oms_metrics::{metrics_dashboards, oms_overview};
     use portfolio::{
@@ -172,6 +174,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/execution/summary", get(execution_summary))
         .route("/api/v1/execution/orders", get(execution_orders))
+        .route("/api/v1/execution/outbox", get(execution_outbox))
         .route(
             "/api/v1/execution/fill-quality",
             get(execution_fill_quality),
@@ -205,6 +208,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/alerts/active", get(alerts_active))
         .route("/api/v1/events/feed", get(events_feed))
+        .route("/api/v1/paper/journal", get(paper_journal))
         .route("/api/v1/oms/overview", get(oms_overview))
         .route("/api/v1/metrics/dashboards", get(metrics_dashboards))
         .route(

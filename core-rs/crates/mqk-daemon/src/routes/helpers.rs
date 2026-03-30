@@ -285,6 +285,80 @@ pub(crate) async fn write_operator_audit_event(
     Ok(Some(event_id))
 }
 
+// ---------------------------------------------------------------------------
+// write_signal_admission_event — JOUR-01
+// ---------------------------------------------------------------------------
+
+/// Write a durable signal-admission audit event at Gate 7 success.
+///
+/// Called by `strategy_signal` when Gate 7 enqueues a new outbox row
+/// (`Ok(true)`).  Creates a permanent record in `audit_events` with
+/// `topic='signal_ingestion'` so the journal and events feed can surface
+/// what signals were admitted for dispatch during a run.
+///
+/// # Non-fatal contract
+///
+/// If the DB write fails, the failure is logged at `warn` level and `None`
+/// is returned.  The caller's signal-admission response is **not** affected —
+/// the outbox write that Gate 7 performed is the authoritative admission; the
+/// audit event is a supervision artifact, not a gate.
+///
+/// # Idempotency
+///
+/// `event_id` is a UUIDv5 derived from `(run_id, signal_id, ts_utc_micros)`.
+/// Re-writes for the same signal within the same microsecond are idempotent
+/// (DB `ON CONFLICT DO NOTHING` in `insert_audit_event`).
+pub(crate) async fn write_signal_admission_event(
+    st: &Arc<AppState>,
+    run_id: uuid::Uuid,
+    signal_id: &str,
+    strategy_id: &str,
+    symbol: &str,
+    side: &str,
+    qty: i64,
+) -> Option<uuid::Uuid> {
+    let Some(db) = st.db.as_ref() else {
+        return None;
+    };
+    let ts_utc = chrono::Utc::now();
+    let event_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk-daemon.signal-admission.v1|{}|{}|{}",
+            run_id,
+            signal_id,
+            ts_utc.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+        )
+        .as_bytes(),
+    );
+    if let Err(err) = mqk_db::insert_audit_event(
+        db,
+        &mqk_db::NewAuditEvent {
+            event_id,
+            run_id,
+            ts_utc,
+            topic: "signal_ingestion".to_string(),
+            event_type: "signal.admitted".to_string(),
+            payload: serde_json::json!({
+                "signal_id": signal_id,
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "side": side,
+                "qty": qty,
+                "source": "mqk-daemon.routes.strategy_signal",
+            }),
+            hash_prev: None,
+            hash_self: None,
+        },
+    )
+    .await
+    {
+        tracing::warn!("write_signal_admission_event failed (non-fatal): {err}");
+        return None;
+    }
+    Some(event_id)
+}
+
 pub(crate) fn runtime_transition_for_action(action: &str) -> Option<String> {
     match action {
         "control.arm" => Some("ARMED".to_string()),

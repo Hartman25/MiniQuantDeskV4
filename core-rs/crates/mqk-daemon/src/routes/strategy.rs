@@ -17,8 +17,22 @@ use crate::api_types::{
 };
 use mqk_integrity::CalendarSpec;
 
-use crate::notify::OperatorNotifyPayload;
+use crate::notify::CriticalAlertPayload;
 use crate::state::{AlpacaWsContinuityState, AppState, StrategyMarketDataSource};
+use super::helpers::write_signal_admission_event;
+
+// ---------------------------------------------------------------------------
+// RTS-07: Outbox provenance mark
+// ---------------------------------------------------------------------------
+
+/// Provenance value written into every outbox row sourced from the strategy
+/// signal ingestion path.  Carried in `order_json["signal_source"]` and
+/// persisted in `oms_outbox.order_json`.
+///
+/// The orchestrator's Phase 1 dispatch does **not** filter on this field —
+/// all outbox rows are claimed and dispatched unconditionally.  The value is
+/// metadata for audit and tracing only.
+pub(crate) const OUTBOX_SIGNAL_SOURCE: &str = "external_signal_ingestion";
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/strategy/summary
@@ -422,26 +436,35 @@ pub(crate) async fn strategy_signal(
                  broker event delivery is unreliable until WS transport re-establishes Live: \
                  {detail}"
             );
-            // PT-DAY-04: Escalate on the first refusal per gap window.
+            // PT-DAY-04 / DIS-01: Escalate on the first refusal per gap window.
             //
             // try_claim_gap_escalation() is an atomic swap — exactly one caller
             // receives true even under concurrent signal POSTs.  Subsequent
             // refusals while the gap persists do not re-notify (already done).
             // The flag resets when continuity transitions back to Live.
+            //
+            // If update_ws_continuity already claimed the escalation at transport
+            // level (DIS-01 wire in state.rs), this path is a no-op for this gap
+            // window.  If the gap was seeded from a persisted cursor at boot
+            // (BRK-07R) without a new update_ws_continuity call, this is the
+            // first-escalation path.
             if st.try_claim_gap_escalation() {
                 let notifier = st.discord_notifier.clone();
                 let env = Some(st.deployment_mode().as_api_label().to_string());
-                let provenance = Some(format!("signal:{}", validated.signal_id));
+                let signal_detail = format!("signal_refused:{} | {detail}", validated.signal_id);
                 let ts = chrono::Utc::now().to_rfc3339(); // allow: ops-metadata escalation timestamp
                 tokio::spawn(async move {
                     notifier
-                        .notify_operator_action(&OperatorNotifyPayload {
-                            action_key: "strategy.signal_refused.continuity_gap".to_string(),
-                            disposition: "continuity_gap".to_string(),
+                        .notify_critical_alert(&CriticalAlertPayload {
+                            alert_class: "paper.ws_continuity.gap_detected".to_string(),
+                            severity: "critical".to_string(),
+                            summary: "Alpaca WS gap detected; signal refused — fill delivery \
+                                      unreliable until WS transport re-establishes Live."
+                                .to_string(),
+                            detail: Some(signal_detail),
                             environment: env,
-                            ts_utc: ts,
-                            provenance_ref: provenance,
                             run_id: None,
+                            ts_utc: ts,
                         })
                         .await;
                 });
@@ -672,6 +695,18 @@ pub(crate) async fn strategy_signal(
         Ok(true) => {
             // PT-AUTO-02: count only new enqueues; duplicates do not consume quota.
             st.increment_day_signal_count();
+            // JOUR-01: Write durable signal-admission audit event (best-effort, non-fatal).
+            // The outbox write above is authoritative; this creates a supervision record.
+            write_signal_admission_event(
+                &st,
+                active_run_id,
+                &validated.signal_id,
+                &validated.strategy_id,
+                &validated.symbol,
+                &validated.side,
+                validated.qty,
+            )
+            .await;
             signal_response(
                 StatusCode::OK,
                 true,
@@ -735,7 +770,7 @@ impl ValidatedStrategySignal {
             "time_in_force": self.time_in_force,
             "limit_price": self.limit_price,
             "strategy_id": self.strategy_id,
-            "signal_source": "external_signal_ingestion",
+            "signal_source": OUTBOX_SIGNAL_SOURCE,
         })
     }
 }
@@ -859,6 +894,16 @@ fn parse_signal_integer_field(name: &str, value: &serde_json::Value) -> Result<i
     }
 }
 
+/// RTS-07: Returns `true` when the disposition represents a *new* execution
+/// intent placed in the outbox (Gate 7 `Ok(true)`).
+///
+/// Only the `(accepted=true, disposition="enqueued")` pair qualifies.  All
+/// other outcomes — gate failures, duplicates, validation errors — leave the
+/// outbox and runtime state unchanged.
+fn is_intent_placed(accepted: bool, disposition: &str) -> bool {
+    accepted && disposition == "enqueued"
+}
+
 fn signal_response(
     status: StatusCode,
     accepted: bool,
@@ -868,6 +913,7 @@ fn signal_response(
     active_run_id: Option<uuid::Uuid>,
     blockers: Vec<String>,
 ) -> Response {
+    let intent_placed = is_intent_placed(accepted, disposition);
     (
         status,
         Json(StrategySignalResponse {
@@ -877,7 +923,53 @@ fn signal_response(
             strategy_id,
             active_run_id,
             blockers,
+            intent_placed,
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RTS-07 U01: `is_intent_placed` is true only for the new-enqueue outcome.
+    ///
+    /// Proves that the `intent_placed` field in `StrategySignalResponse` is
+    /// derived correctly for every outcome the signal route can produce.
+    ///
+    /// This is the authoritative unit proof for the strategy→intent binding:
+    /// Gate 7 `Ok(true)` is the *only* path that sets `intent_placed = true`.
+    #[test]
+    fn u01_is_intent_placed_true_only_on_new_enqueue() {
+        // Sole true case: Gate 7 Ok(true)
+        assert!(
+            is_intent_placed(true, "enqueued"),
+            "Gate-7 Ok(true) must yield intent_placed=true"
+        );
+
+        // Duplicate: outbox row already exists; no new intent placed.
+        assert!(
+            !is_intent_placed(false, "duplicate"),
+            "duplicate must not yield intent_placed=true"
+        );
+
+        // Gate failure cases
+        assert!(!is_intent_placed(false, "rejected"));
+        assert!(!is_intent_placed(false, "unavailable"));
+        assert!(!is_intent_placed(false, "suppressed"));
+        assert!(!is_intent_placed(false, "budget_denied"));
+        assert!(!is_intent_placed(false, "sizing_denied"));
+        assert!(!is_intent_placed(false, "exposure_denied"));
+        assert!(!is_intent_placed(false, "exhaustion_denied"));
+        assert!(!is_intent_placed(false, "continuity_gap"));
+        assert!(!is_intent_placed(false, "outside_session"));
+        assert!(!is_intent_placed(false, "day_limit_reached"));
+
+        // Defensive: accepted=true with any disposition other than "enqueued"
+        // must not yield intent_placed=true (no such case is produced today but
+        // the derivation must be robust).
+        assert!(!is_intent_placed(true, "duplicate"));
+        assert!(!is_intent_placed(true, "unavailable"));
+    }
 }

@@ -30,6 +30,7 @@ pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl I
 
         PortfolioSummaryResponse {
             has_snapshot: true,
+            truth_state: "active".to_string(),
             account_equity: Some(account_equity),
             cash: Some(cash),
             long_market_value: Some(long_market_value),
@@ -40,6 +41,7 @@ pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl I
     } else {
         PortfolioSummaryResponse {
             has_snapshot: false,
+            truth_state: "no_snapshot".to_string(),
             account_equity: None,
             cash: None,
             long_market_value: None,
@@ -58,6 +60,9 @@ pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl I
 
 pub(crate) async fn portfolio_positions(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
+    // PORT-05: session_boundary is always "in_memory_only" — broker_snapshot is
+    // held in-memory and lost on daemon restart regardless of broker kind.
+    let session_boundary = "in_memory_only".to_string();
     match snap {
         None => (
             StatusCode::OK,
@@ -65,6 +70,8 @@ pub(crate) async fn portfolio_positions(State(st): State<Arc<AppState>>) -> impl
                 snapshot_state: "no_snapshot".to_string(),
                 captured_at_utc: None,
                 rows: vec![],
+                snapshot_source: None,
+                session_boundary,
             }),
         )
             .into_response(),
@@ -95,6 +102,8 @@ pub(crate) async fn portfolio_positions(State(st): State<Arc<AppState>>) -> impl
                     snapshot_state: "active".to_string(),
                     captured_at_utc: Some(captured_at_utc),
                     rows,
+                    snapshot_source: Some(st.broker_snapshot_source.as_str().to_string()),
+                    session_boundary,
                 }),
             )
                 .into_response()
@@ -108,6 +117,7 @@ pub(crate) async fn portfolio_positions(State(st): State<Arc<AppState>>) -> impl
 
 pub(crate) async fn portfolio_open_orders(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
+    let session_boundary = "in_memory_only".to_string();
     match snap {
         None => (
             StatusCode::OK,
@@ -115,6 +125,8 @@ pub(crate) async fn portfolio_open_orders(State(st): State<Arc<AppState>>) -> im
                 snapshot_state: "no_snapshot".to_string(),
                 captured_at_utc: None,
                 rows: vec![],
+                snapshot_source: None,
+                session_boundary,
             }),
         )
             .into_response(),
@@ -143,6 +155,8 @@ pub(crate) async fn portfolio_open_orders(State(st): State<Arc<AppState>>) -> im
                     snapshot_state: "active".to_string(),
                     captured_at_utc: Some(captured_at_utc),
                     rows,
+                    snapshot_source: Some(st.broker_snapshot_source.as_str().to_string()),
+                    session_boundary,
                 }),
             )
                 .into_response()
@@ -156,6 +170,7 @@ pub(crate) async fn portfolio_open_orders(State(st): State<Arc<AppState>>) -> im
 
 pub(crate) async fn portfolio_fills(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
+    let session_boundary = "in_memory_only".to_string();
     match snap {
         None => (
             StatusCode::OK,
@@ -163,6 +178,8 @@ pub(crate) async fn portfolio_fills(State(st): State<Arc<AppState>>) -> impl Int
                 snapshot_state: "no_snapshot".to_string(),
                 captured_at_utc: None,
                 rows: vec![],
+                snapshot_source: None,
+                session_boundary,
             }),
         )
             .into_response(),
@@ -194,6 +211,8 @@ pub(crate) async fn portfolio_fills(State(st): State<Arc<AppState>>) -> impl Int
                     snapshot_state: "active".to_string(),
                     captured_at_utc: Some(captured_at_utc),
                     rows,
+                    snapshot_source: Some(st.broker_snapshot_source.as_str().to_string()),
+                    session_boundary,
                 }),
             )
                 .into_response()

@@ -112,7 +112,21 @@ pub(crate) fn build_daemon_broker(
     deployment_mode: DeploymentMode,
 ) -> Result<DaemonBroker, RuntimeLifecycleError> {
     match broker_kind {
-        Some(BrokerKind::Paper) => Ok(DaemonBroker::Paper(LockedPaperBroker::new())),
+        // BRK-10: LockedPaperBroker is not the canonical paper-trading execution path.
+        // It is a bar-driven in-process fill engine (testkit only).  No bar-feed is
+        // wired in the daemon runtime; orders would be accepted but never filled.
+        // The authoritative paper path is Paper+Alpaca (MQK_DAEMON_ADAPTER_ID=alpaca),
+        // which routes through paper-api.alpaca.markets.
+        // This arm is fail-closed so the daemon cannot accidentally construct a broker
+        // that looks live but silently drops all fills.
+        Some(BrokerKind::Paper) => Err(RuntimeLifecycleError::service_unavailable(
+            "runtime.start_refused.paper_broker_not_execution_path",
+            "broker 'paper' (LockedPaperBroker) is not the canonical paper-trading execution \
+             path: the in-process fill engine has no market-data source wired in the daemon \
+             runtime and cannot produce real fills — \
+             set MQK_DAEMON_ADAPTER_ID=alpaca to route through the Alpaca paper-trading \
+             endpoint (paper-api.alpaca.markets)",
+        )),
         Some(BrokerKind::Alpaca) => {
             // ENV-TRUTH-01: credentials are mode-specific to match .env.local.example.
             // Paper path: ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER (paper-api.alpaca.markets)

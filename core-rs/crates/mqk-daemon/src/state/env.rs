@@ -160,11 +160,15 @@ pub(crate) fn deployment_mode_readiness(
             blocker: None,
         },
         // ── Paper + unrecognised adapter ──────────────────────────────────
+        // BRK-10: do NOT suggest 'paper' here — LockedPaperBroker is not the
+        // canonical paper-trading execution path (no bar-feed, never fills).
+        // The only authoritative paper execution path is Paper+Alpaca.
         (DeploymentMode::Paper, None) => DeploymentReadiness {
             start_allowed: false,
             blocker: Some(
-                "deployment mode 'paper' requires broker 'paper' or 'alpaca'; \
-                 set MQK_DAEMON_ADAPTER_ID to a recognised broker adapter"
+                "deployment mode 'paper' requires MQK_DAEMON_ADAPTER_ID=alpaca; \
+                 the Alpaca paper-trading endpoint (paper-api.alpaca.markets) is the \
+                 only authoritative paper execution path"
                     .to_string(),
             ),
         },

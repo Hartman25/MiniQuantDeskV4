@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 // Re-export everything that external code (routes, tests, etc.) needs.
-use crate::notify::DiscordNotifier;
+use crate::notify::{CriticalAlertPayload, DiscordNotifier};
 pub use alpaca_ws_transport::{
     build_ws_auth_message, build_ws_subscribe_message, spawn_alpaca_paper_ws_task,
     ws_url_from_base_url,
@@ -492,6 +492,46 @@ impl AppState {
         // escalation flag so the next gap window can fire a fresh notification.
         if matches!(new_state, AlpacaWsContinuityState::Live { .. }) {
             self.gap_escalation_pending.store(false, Ordering::SeqCst);
+        }
+        // DIS-01: Emit a critical alert on the first GapDetected transition per
+        // gap window.  try_claim_gap_escalation() is an atomic swap — exactly one
+        // caller fires the notification even under concurrent WS/signal paths.
+        // The flag resets when continuity returns to Live (above).
+        //
+        // This fires at the transport level (WS disconnect detected) rather than
+        // waiting for the first signal refusal, giving the operator earlier notice.
+        // If the gap was loaded from a persisted cursor at boot (BRK-07R) and
+        // update_ws_continuity is not called in this session, strategy.rs claims
+        // the escalation on the first signal refusal instead.
+        if matches!(new_state, AlpacaWsContinuityState::GapDetected { .. })
+            && self.try_claim_gap_escalation()
+        {
+            let detail = if let AlpacaWsContinuityState::GapDetected { ref detail, .. } =
+                new_state
+            {
+                Some(detail.clone())
+            } else {
+                None
+            };
+            let notifier = self.discord_notifier.clone();
+            let env = Some(self.deployment_mode().as_api_label().to_string());
+            let run_id = self.locally_owned_run_id().await.map(|id| id.to_string());
+            let ts = Utc::now().to_rfc3339();
+            tokio::spawn(async move {
+                notifier
+                    .notify_critical_alert(&CriticalAlertPayload {
+                        alert_class: "paper.ws_continuity.gap_detected".to_string(),
+                        severity: "critical".to_string(),
+                        summary: "Alpaca WS gap detected; fill delivery unreliable, \
+                                  signal ingestion blocked until WS re-establishes Live."
+                            .to_string(),
+                        detail,
+                        environment: env,
+                        run_id,
+                        ts_utc: ts,
+                    })
+                    .await;
+            });
         }
         *self.alpaca_ws_continuity.write().await = new_state;
     }
@@ -2194,16 +2234,20 @@ mod tests {
     }
 
     #[test]
-    fn build_daemon_broker_paper_succeeds() {
+    fn build_daemon_broker_paper_is_not_execution_path() {
+        // BRK-10: LockedPaperBroker is not the canonical paper-trading execution path.
+        // build_daemon_broker must refuse to construct it — fail closed — so the daemon
+        // cannot accidentally route paper-mode execution through a broker that accepts
+        // orders but has no fill mechanism.  The authoritative path is Paper+Alpaca.
         let result = build_daemon_broker(Some(BrokerKind::Paper), DeploymentMode::Paper);
         assert!(
-            result.is_ok(),
-            "Paper broker must construct successfully; got: {:?}",
-            result.as_ref().err().map(|e| e.to_string())
+            result.is_err(),
+            "build_daemon_broker must refuse BrokerKind::Paper (not the canonical paper path)"
         );
+        let err = result.unwrap_err().to_string();
         assert!(
-            matches!(result.unwrap(), DaemonBroker::Paper(_)),
-            "expected DaemonBroker::Paper variant"
+            err.contains("alpaca"),
+            "error must direct operator to the alpaca adapter; got: {err}"
         );
     }
 

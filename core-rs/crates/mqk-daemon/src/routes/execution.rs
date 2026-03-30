@@ -15,9 +15,9 @@ use axum::{
 };
 
 use crate::api_types::{
-    ExecutionOrderRow, ExecutionSummaryResponse, FillQualityTelemetryResponse,
-    FillQualityTelemetryRow, ManualOrderCancelRequest, ManualOrderCancelResponse,
-    ManualOrderSubmitRequest, ManualOrderSubmitResponse,
+    ExecutionOrderRow, ExecutionOutboxResponse, ExecutionOutboxRow, ExecutionSummaryResponse,
+    FillQualityTelemetryResponse, FillQualityTelemetryRow, ManualOrderCancelRequest,
+    ManualOrderCancelResponse, ManualOrderSubmitRequest, ManualOrderSubmitResponse,
 };
 use crate::state::AppState;
 
@@ -42,13 +42,20 @@ pub(crate) async fn execution_summary(State(st): State<Arc<AppState>>) -> impl I
             .iter()
             .filter(|o| o.status == "DISPATCHING" || o.status == "SENT")
             .count();
+        // Derived from the current OMS snapshot: count of orders in "Rejected"
+        // state.  Not a durable all-day count — reflects the current snapshot.
+        let reject_count_today = snapshot
+            .active_orders
+            .iter()
+            .filter(|o| o.status == "Rejected")
+            .count();
 
         ExecutionSummaryResponse {
             has_snapshot: true,
             active_orders,
             pending_orders,
             dispatching_orders,
-            reject_count_today: 0,
+            reject_count_today,
             cancel_replace_count_today: None,
             avg_ack_latency_ms: None,
             stuck_orders: 0,
@@ -87,6 +94,9 @@ pub(crate) async fn execution_orders(State(st): State<Arc<AppState>>) -> impl In
             .into_response();
     };
 
+    // Snapshot the side cache once and release the lock before building rows.
+    let sides = st.local_order_sides.read().await.clone();
+
     let updated_at = snapshot.snapshot_at_utc.to_rfc3339();
     let rows: Vec<ExecutionOrderRow> = snapshot
         .active_orders
@@ -94,12 +104,19 @@ pub(crate) async fn execution_orders(State(st): State<Arc<AppState>>) -> impl In
         .map(|o| {
             let has_critical = o.status == "Rejected";
             let current_stage = oms_stage_label(&o.status).to_string();
+            // Derive side from the local side cache populated at signal intake /
+            // manual submit.  None when the order pre-dates the current run or
+            // the side was never recorded — honest null, not fabricated.
+            let side = sides.get(&o.order_id).map(|s| match s {
+                mqk_reconcile::Side::Buy => "buy".to_string(),
+                mqk_reconcile::Side::Sell => "sell".to_string(),
+            });
             ExecutionOrderRow {
                 internal_order_id: o.order_id.clone(),
                 broker_order_id: o.broker_order_id.clone(),
                 symbol: o.symbol.clone(),
                 strategy_id: None,
-                side: None,
+                side,
                 order_type: None,
                 requested_qty: o.total_qty,
                 filled_qty: o.filled_qty,
@@ -914,4 +931,170 @@ fn manual_order_cancel_response(
         }),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/execution/outbox — OPS-08 / EXEC-06: paper execution timeline
+// ---------------------------------------------------------------------------
+
+/// Map a durable outbox status string to a display-friendly lifecycle stage.
+///
+/// Pure function — no state, no I/O.  All unknown values map to `"unknown"`.
+fn lifecycle_stage_from_outbox_status(status: &str) -> &'static str {
+    match status {
+        "PENDING" => "queued",
+        "CLAIMED" => "claimed",
+        "DISPATCHING" => "submitting",
+        "SENT" => "sent_to_broker",
+        "ACKED" => "acknowledged",
+        "FAILED" => "failed",
+        "AMBIGUOUS" => "ambiguous",
+        _ => "unknown",
+    }
+}
+
+pub(crate) async fn execution_outbox(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    const CANONICAL: &str = "/api/v1/execution/outbox";
+
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(ExecutionOutboxResponse {
+                canonical_route: CANONICAL.to_string(),
+                truth_state: "no_db".to_string(),
+                backend: "unavailable".to_string(),
+                run_id: None,
+                rows: vec![],
+            }),
+        )
+            .into_response();
+    };
+
+    let active_run_id = match st.current_status_snapshot().await {
+        Ok(snap) => snap.active_run_id,
+        Err(_) => None,
+    };
+
+    let Some(run_id) = active_run_id else {
+        return (
+            StatusCode::OK,
+            Json(ExecutionOutboxResponse {
+                canonical_route: CANONICAL.to_string(),
+                truth_state: "no_active_run".to_string(),
+                backend: "unavailable".to_string(),
+                run_id: None,
+                rows: vec![],
+            }),
+        )
+            .into_response();
+    };
+
+    let db_rows = match mqk_db::outbox_fetch_for_supervisor(db, run_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "outbox_fetch_failed",
+                    "detail": e.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let api_rows: Vec<ExecutionOutboxRow> = db_rows
+        .into_iter()
+        .map(|r| {
+            let symbol = r
+                .order_json
+                .get("symbol")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let side = r
+                .order_json
+                .get("side")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let qty = r.order_json.get("qty").and_then(|v| v.as_i64());
+            let order_type = r
+                .order_json
+                .get("order_type")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let strategy_id = r
+                .order_json
+                .get("strategy_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let signal_source = r
+                .order_json
+                .get("signal_source")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let lifecycle_stage = lifecycle_stage_from_outbox_status(&r.status).to_string();
+
+            ExecutionOutboxRow {
+                idempotency_key: r.idempotency_key,
+                run_id: r.run_id.to_string(),
+                status: r.status,
+                lifecycle_stage,
+                symbol,
+                side,
+                qty,
+                order_type,
+                strategy_id,
+                signal_source,
+                created_at_utc: r.created_at_utc.to_rfc3339(),
+                claimed_at_utc: r.claimed_at_utc.map(|t| t.to_rfc3339()),
+                dispatching_at_utc: r.dispatching_at_utc.map(|t| t.to_rfc3339()),
+                sent_at_utc: r.sent_at_utc.map(|t| t.to_rfc3339()),
+            }
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(ExecutionOutboxResponse {
+            canonical_route: CANONICAL.to_string(),
+            truth_state: "active".to_string(),
+            backend: "postgres.oms_outbox".to_string(),
+            run_id: Some(run_id.to_string()),
+            rows: api_rows,
+        }),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lifecycle_stage_from_outbox_status;
+
+    // U01: every known outbox status maps to a non-"unknown" lifecycle stage.
+    #[test]
+    fn known_statuses_map_to_named_stages() {
+        let cases = [
+            ("PENDING", "queued"),
+            ("CLAIMED", "claimed"),
+            ("DISPATCHING", "submitting"),
+            ("SENT", "sent_to_broker"),
+            ("ACKED", "acknowledged"),
+            ("FAILED", "failed"),
+            ("AMBIGUOUS", "ambiguous"),
+        ];
+        for (status, expected_stage) in cases {
+            assert_eq!(
+                lifecycle_stage_from_outbox_status(status),
+                expected_stage,
+                "status={status}"
+            );
+        }
+    }
+
+    // U02: unknown / future statuses map to "unknown" and never panic.
+    #[test]
+    fn unknown_status_maps_to_unknown() {
+        assert_eq!(lifecycle_stage_from_outbox_status("MYSTERY"), "unknown");
+        assert_eq!(lifecycle_stage_from_outbox_status(""), "unknown");
+    }
 }

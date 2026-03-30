@@ -1,4 +1,4 @@
-//! Alert and event-feed route handlers (CC-06).
+//! Alert and event-feed route handlers (CC-06, OPS-09).
 //!
 //! Contains: alerts_active, events_feed.
 //!
@@ -10,6 +10,12 @@
 //! `StatusSnapshot` + `ReconcileStatusSnapshot` + DB-backed risk-block state
 //! (falls back to `false` when no DB, consistent with `system/status`).
 //!
+//! OPS-09 adds Alpaca WS continuity supervision signals:
+//! - `"paper.ws_continuity.cold_start_unproven"` (warning) when
+//!   `AlpacaWsContinuityState::ColdStartUnproven` — signal ingestion blocked.
+//! - `"paper.ws_continuity.gap_detected"` (critical) when
+//!   `AlpacaWsContinuityState::GapDetected` — fill delivery unreliable.
+//!
 //! `truth_state` is always `"active"`: the computation uses in-memory state
 //! that is always present.  Empty `rows` = genuinely no current fault
 //! conditions (healthy state, not absence of source).
@@ -17,8 +23,12 @@
 //! ## `/api/v1/events/feed`
 //!
 //! Source: `postgres.runs` (runtime lifecycle transitions) +
-//! `postgres.audit_events` (operator actions, topic=`'operator'`).
-//! Same source as `ops/operator-timeline` but limited to 50 most-recent rows.
+//! `postgres.audit_events` (operator actions, topic=`'operator'`) +
+//! `postgres.audit_events` (signal admissions, topic=`'signal_ingestion'`).
+//!
+//! JOUR-01/OPS-09 adds `kind="signal_admission"` rows sourced from
+//! `audit_events` with `topic='signal_ingestion'`.  These are written by the
+//! strategy-signal route at Gate 7 `Ok(true)`.
 //!
 //! `truth_state` = `"active"` when DB pool present;
 //! `"backend_unavailable"` when no DB pool.
@@ -36,7 +46,7 @@ use sqlx::Row;
 use crate::api_types::{
     ActiveAlertRow, ActiveAlertsResponse, EventFeedRow, EventsFeedResponse, RuntimeErrorResponse,
 };
-use crate::state::AppState;
+use crate::state::{AlpacaWsContinuityState, AppState};
 
 use super::helpers::{build_fault_signals, runtime_error_response};
 
@@ -65,7 +75,7 @@ pub(crate) async fn alerts_active(State(st): State<Arc<AppState>>) -> Response {
 
     let fault_signals = build_fault_signals(&status, &reconcile, risk_blocked);
 
-    let rows: Vec<ActiveAlertRow> = fault_signals
+    let mut rows: Vec<ActiveAlertRow> = fault_signals
         .into_iter()
         .map(|s| ActiveAlertRow {
             alert_id: s.class.clone(),
@@ -76,6 +86,42 @@ pub(crate) async fn alerts_active(State(st): State<Arc<AppState>>) -> Response {
             source: "daemon.runtime_state".to_string(),
         })
         .collect();
+
+    // OPS-09: Add Alpaca WS continuity supervision signals.
+    //
+    // ColdStartUnproven and GapDetected are both fail-closed states:
+    // signal ingestion is blocked and fill delivery is unreliable.
+    // Surface them as explicit active alerts so operators can react
+    // without having to cross-reference /api/v1/system/status.
+    let ws = st.alpaca_ws_continuity().await;
+    match &ws {
+        AlpacaWsContinuityState::ColdStartUnproven => {
+            rows.push(ActiveAlertRow {
+                alert_id: "paper.ws_continuity.cold_start_unproven".to_string(),
+                severity: "warning".to_string(),
+                class: "paper.ws_continuity.cold_start_unproven".to_string(),
+                summary: "Alpaca WS continuity unproven (cold start); signal ingestion \
+                          is blocked until WS transport establishes Live."
+                    .to_string(),
+                detail: None,
+                source: "daemon.runtime_state".to_string(),
+            });
+        }
+        AlpacaWsContinuityState::GapDetected { detail, .. } => {
+            rows.push(ActiveAlertRow {
+                alert_id: "paper.ws_continuity.gap_detected".to_string(),
+                severity: "critical".to_string(),
+                class: "paper.ws_continuity.gap_detected".to_string(),
+                summary: "Alpaca WS gap detected; fill delivery is unreliable and \
+                          signal ingestion is blocked until WS transport re-establishes Live."
+                    .to_string(),
+                detail: Some(detail.clone()),
+                source: "daemon.runtime_state".to_string(),
+            });
+        }
+        // NotApplicable (non-Alpaca) and Live (healthy) produce no additional signal.
+        AlpacaWsContinuityState::NotApplicable | AlpacaWsContinuityState::Live { .. } => {}
+    }
 
     let alert_count = rows.len();
 
@@ -236,6 +282,69 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
             ts_utc: ts_utc.to_rfc3339(),
             kind: "operator_action".to_string(),
             detail: event_type,
+            run_id: run_id.map(|id| id.to_string()),
+            provenance_ref: format!("audit_events:{}", event_id),
+        });
+    }
+
+    // --- JOUR-01/OPS-09: Signal-admission events ---
+    //
+    // Written by strategy_signal at Gate 7 Ok(true).  Surface them in the
+    // feed so operators can see signal intake alongside run transitions and
+    // operator actions in one newest-first timeline.
+    //
+    // detail encodes "signal.admitted:{strategy_id}:{symbol}:{side}" for
+    // quick scanning; the full payload lives in audit_events.
+    let signal_events = match sqlx::query(
+        r#"
+        select event_id, run_id, ts_utc, payload
+        from audit_events
+        where topic = 'signal_ingestion'
+          and event_type = 'signal.admitted'
+        order by ts_utc desc
+        limit 50
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(r) => r,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RuntimeErrorResponse {
+                    error: format!("events/feed signal-admission query failed: {err}"),
+                    fault_class: "events.feed.query_failed".to_string(),
+                    gate: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    for row in signal_events {
+        let event_id: uuid::Uuid = row.get("event_id");
+        let run_id: Option<uuid::Uuid> = row.get("run_id");
+        let ts_utc: chrono::DateTime<chrono::Utc> = row.get("ts_utc");
+        let payload: serde_json::Value = row.get("payload");
+
+        // Build a scannable detail string.  Fall back gracefully if fields absent.
+        let strategy_id = payload
+            .get("strategy_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let symbol = payload
+            .get("symbol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let side = payload.get("side").and_then(|v| v.as_str()).unwrap_or("?");
+        let detail = format!("signal.admitted:{strategy_id}:{symbol}:{side}");
+
+        rows.push(EventFeedRow {
+            event_id: format!("audit_events:{}", event_id),
+            ts_utc: ts_utc.to_rfc3339(),
+            kind: "signal_admission".to_string(),
+            detail,
             run_id: run_id.map(|id| id.to_string()),
             provenance_ref: format!("audit_events:{}", event_id),
         });
