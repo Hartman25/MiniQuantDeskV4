@@ -47,7 +47,11 @@ use crate::artifact_intake::{
     evaluate_artifact_deployability, evaluate_artifact_intake_guarded, ArtifactIntakeOutcome,
     ENV_ARTIFACT_PATH,
 };
-use crate::capital_policy::{evaluate_capital_policy_from_env, CapitalPolicyOutcome};
+use crate::capital_policy::{
+    evaluate_capital_policy_from_env, evaluate_deployment_economics_from_env,
+    CapitalPolicyOutcome, DeploymentEconomicsOutcome,
+};
+use crate::parity_evidence::{evaluate_parity_evidence_from_env, ParityEvidenceOutcome};
 #[cfg(test)]
 use broker::alpaca_base_url_for_mode;
 use broker::{build_daemon_broker, DaemonBroker};
@@ -1139,6 +1143,52 @@ impl AppState {
             }
         }
 
+        // TV-03C: Parity evidence gate.
+        //
+        // If MQK_ARTIFACT_PATH is configured, parity evidence for the artifact
+        // must exist in the same directory and be structurally valid before
+        // runtime start is allowed.
+        //
+        // Contract:
+        //   NotConfigured   → no artifact path configured; gate not applicable; pass through.
+        //   Present { .. }  → parity_evidence.json readable and valid; pass through.
+        //   Absent          → configured artifact has no parity evidence; fail-closed.
+        //   Invalid { .. }  → parity_evidence.json exists but is invalid; fail-closed.
+        //   Unavailable { .. } → evaluator failed; fail-closed.
+        //
+        // Placed after TV-02C (artifact deployability) and before TV-04A (capital policy)
+        // so the evidence chain is verified before capital authorization runs.
+        // Both TV-02C and TV-03C read MQK_ARTIFACT_PATH; absent path → NotConfigured on both.
+        {
+            let parity = evaluate_parity_evidence_from_env();
+            if !parity.is_start_safe() {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.parity_evidence_not_present",
+                    "parity_evidence",
+                    format!(
+                        "parity evidence gate failed \
+                         (truth_state='{}'): {}",
+                        parity.truth_state(),
+                        match &parity {
+                            ParityEvidenceOutcome::Absent => {
+                                "parity_evidence.json is absent in the artifact directory; \
+                                 run the Python TV-03 pipeline to produce parity evidence \
+                                 before starting the runtime"
+                                    .to_string()
+                            }
+                            ParityEvidenceOutcome::Invalid { reason } => {
+                                format!("parity_evidence.json is structurally invalid: {reason}")
+                            }
+                            ParityEvidenceOutcome::Unavailable { reason } => {
+                                format!("parity evidence evaluator failed: {reason}")
+                            }
+                            _ => "parity evidence evaluation failed".to_string(),
+                        }
+                    ),
+                ));
+            }
+        }
+
         // TV-04A: Capital allocation policy gate.
         //
         // If MQK_CAPITAL_POLICY_PATH is configured, the policy file must be
@@ -1175,6 +1225,51 @@ impl AppState {
                                 format!("policy evaluator unavailable: {reason}")
                             }
                             _ => "capital policy evaluation failed".to_string(),
+                        }
+                    ),
+                ));
+            }
+        }
+
+        // TV-04D: Deployment economics gate.
+        //
+        // An enabled capital policy must carry a valid `max_portfolio_notional_usd`
+        // before runtime start is allowed.  This gate is independent of TV-04A:
+        // TV-04A checks whether the policy is enabled; TV-04D checks whether the
+        // enabled policy specifies deployment economics bounds.
+        //
+        // Contract:
+        //   NotConfigured      → no policy configured; gate not applicable; pass through.
+        //   PolicyDisabled     → enabled=false; TV-04A already blocked; pass through.
+        //   EconomicsSpecified → policy enabled + valid portfolio cap; pass through.
+        //   EconomicsNotSpecified → policy enabled but no economics bound; fail-closed.
+        //   PolicyInvalid      → policy configured but structurally invalid; fail-closed.
+        //   Unavailable        → reserved; fail-closed.
+        //
+        // Placed immediately after TV-04A so that capital policy authorization
+        // is confirmed before the economics bound is checked.  Placed before
+        // db_pool() so the check is in-process testable without a database.
+        {
+            let economics = evaluate_deployment_economics_from_env();
+            if !economics.is_start_safe() {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.deployment_economics_not_specified",
+                    "deployment_economics",
+                    format!(
+                        "deployment economics gate failed \
+                         (truth_state='{}'): {}",
+                        economics.truth_state(),
+                        match &economics {
+                            DeploymentEconomicsOutcome::EconomicsNotSpecified { reason } => {
+                                reason.clone()
+                            }
+                            DeploymentEconomicsOutcome::PolicyInvalid { reason } => {
+                                format!("economics policy file is invalid: {reason}")
+                            }
+                            DeploymentEconomicsOutcome::Unavailable { reason } => {
+                                format!("economics evaluator unavailable: {reason}")
+                            }
+                            _ => "deployment economics evaluation failed".to_string(),
                         }
                     ),
                 ));

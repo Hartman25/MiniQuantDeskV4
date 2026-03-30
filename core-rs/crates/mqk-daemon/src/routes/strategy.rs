@@ -174,6 +174,8 @@ pub(crate) async fn strategy_suppressions(State(st): State<Arc<AppState>>) -> im
 //
 // Gate sequence (fail-closed):
 //   1.  signal_ingestion_configured — ExternalSignalIngestion must be wired
+//   1e. capital_budget              — per-strategy budget authorized (TV-04B)
+//   1f. position_sizing             — implied notional within broker/account cap (TV-04C)
 //   1b. alpaca_ws_continuity        — must be Live (PT-DAY-02)
 //   1c. nyse_session                — must be regular session (PT-DAY-03)
 //   1d. day_signal_limit            — per-run intake bound not exceeded (PT-AUTO-02)
@@ -218,6 +220,175 @@ pub(crate) async fn strategy_signal(
             None,
             vec!["strategy signal ingestion is not configured for this deployment".to_string()],
         );
+    }
+
+    // Gate 1e: capital allocation policy / per-strategy budget (TV-04B).
+    //
+    // If MQK_CAPITAL_POLICY_PATH is configured, the strategy must have an
+    // explicit budget entry with budget_authorized=true.
+    //
+    // Placed before Gate 1b (WS continuity) because budget denial is a
+    // pure filesystem check and is cheaper than the network-state check.
+    // Placing it early also means budget-denied signals never consume
+    // continuity or session-time checks.
+    //
+    // PolicyNotConfigured → no budget enforcement active; pass through.
+    // BudgetAuthorized    → strategy has explicit budget authorization; pass.
+    // BudgetDenied        → strategy is not capital-authorized; 403 fail-closed.
+    // PolicyInvalid       → policy configured but structurally invalid; 503.
+    {
+        use crate::capital_policy::evaluate_strategy_budget_from_env;
+        let budget = evaluate_strategy_budget_from_env(&validated.strategy_id);
+        if !budget.is_signal_safe() {
+            let (status, disposition, blocker) = match &budget {
+                crate::capital_policy::StrategyBudgetOutcome::BudgetDenied { reason } => (
+                    StatusCode::FORBIDDEN,
+                    "budget_denied",
+                    format!("strategy signal refused: {reason}"),
+                ),
+                crate::capital_policy::StrategyBudgetOutcome::PolicyInvalid { reason } => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "unavailable",
+                    format!(
+                        "strategy signal unavailable: capital allocation policy \
+                         is configured but invalid: {reason}"
+                    ),
+                ),
+                _ => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "unavailable",
+                    "strategy signal unavailable: capital policy evaluation failed".to_string(),
+                ),
+            };
+            return signal_response(
+                status,
+                false,
+                disposition,
+                validated.signal_id,
+                validated.strategy_id,
+                None,
+                vec![blocker],
+            );
+        }
+    }
+
+    // Gate 1f: position sizing realism under broker/account limits (TV-04C).
+    //
+    // Called after Gate 1e (budget authorized). Adds the explicit distinction:
+    // budget-authorized ≠ size-executable.
+    //
+    // The evaluator reads max_position_notional_usd from the strategy's policy
+    // entry.  For limit orders the implied notional (qty × limit_price) is
+    // checked against the cap.  For market orders (no price reference) the
+    // outcome is SizingUnverifiable — passed through honestly, not silently
+    // authorized.
+    //
+    // NotConfigured      → no sizing policy; pass through.
+    // NoSizingConstraint → entry has no notional cap; pass through.
+    // SizingAuthorized   → within cap; pass.
+    // SizingUnverifiable → market order; pass (honest, cannot deny the unmeasured).
+    // SizingDenied       → over cap; 403 sizing_denied.
+    // PolicyInvalid      → 503 unavailable.
+    {
+        use crate::capital_policy::evaluate_position_sizing_from_env;
+        let sizing = evaluate_position_sizing_from_env(
+            &validated.strategy_id,
+            validated.qty,
+            validated.limit_price,
+        );
+        if !sizing.is_signal_safe() {
+            let (status, disposition, blocker) = match &sizing {
+                crate::capital_policy::PositionSizingOutcome::SizingDenied { reason } => (
+                    StatusCode::FORBIDDEN,
+                    "sizing_denied",
+                    format!("strategy signal refused: {reason}"),
+                ),
+                crate::capital_policy::PositionSizingOutcome::PolicyInvalid { reason } => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "unavailable",
+                    format!(
+                        "strategy signal unavailable: position sizing evaluation found \
+                         invalid policy: {reason}"
+                    ),
+                ),
+                _ => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "unavailable",
+                    "strategy signal unavailable: position sizing evaluation failed".to_string(),
+                ),
+            };
+            return signal_response(
+                status,
+                false,
+                disposition,
+                validated.signal_id,
+                validated.strategy_id,
+                None,
+                vec![blocker],
+            );
+        }
+    }
+
+    // Gate 1g: portfolio risk — exposure and capital exhaustion (TV-04E).
+    //
+    // Called after Gate 1f (sizing authorized). Adds portfolio-level controls:
+    //   - Exposure: single-order notional as a fraction of the portfolio cap.
+    //   - Exhaustion: order notional vs. capital reserve floor.
+    //   - Drift: not measurable at signal time; RiskUnverifiable is a pass-through.
+    //
+    // Placed before Gate 1b (WS continuity) because portfolio risk is a pure
+    // filesystem check and cheaper than the network-state check.
+    //
+    // NotConfigured      → no policy; pass through.
+    // NoRiskConstraints  → entry has no risk fields; pass through.
+    // Authorized         → all checks passed.
+    // RiskUnverifiable   → market order / drift unverifiable; honest pass.
+    // ExposureDenied     → 403 exposure_denied.
+    // ExhaustionDenied   → 403 exhaustion_denied.
+    // PolicyInvalid      → 503 unavailable.
+    {
+        use crate::capital_policy::evaluate_portfolio_risk_from_env;
+        let risk = evaluate_portfolio_risk_from_env(
+            &validated.strategy_id,
+            validated.qty,
+            validated.limit_price,
+        );
+        if !risk.is_signal_safe() {
+            let (status, disposition, blocker) = match &risk {
+                crate::capital_policy::PortfolioRiskOutcome::ExposureDenied { reason } => (
+                    StatusCode::FORBIDDEN,
+                    "exposure_denied",
+                    format!("strategy signal refused: {reason}"),
+                ),
+                crate::capital_policy::PortfolioRiskOutcome::ExhaustionDenied { reason } => (
+                    StatusCode::FORBIDDEN,
+                    "exhaustion_denied",
+                    format!("strategy signal refused: {reason}"),
+                ),
+                crate::capital_policy::PortfolioRiskOutcome::PolicyInvalid { reason } => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "unavailable",
+                    format!(
+                        "strategy signal unavailable: portfolio risk evaluation found \
+                         invalid policy: {reason}"
+                    ),
+                ),
+                _ => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "unavailable",
+                    "strategy signal unavailable: portfolio risk evaluation failed".to_string(),
+                ),
+            };
+            return signal_response(
+                status,
+                false,
+                disposition,
+                validated.signal_id,
+                validated.strategy_id,
+                None,
+                vec![blocker],
+            );
+        }
     }
 
     // Gate 1b: WS continuity must be Live for Alpaca signal ingestion (PT-DAY-02).
