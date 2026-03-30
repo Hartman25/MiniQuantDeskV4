@@ -38,7 +38,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Mutex;
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -210,7 +212,7 @@ fn cleanup(dir: &PathBuf) {
 /// parity-not-configured error.
 #[tokio::test]
 async fn tc01_not_configured_passes_to_db_gate() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     std::env::remove_var("MQK_ARTIFACT_PATH");
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
 
@@ -236,7 +238,7 @@ async fn tc01_not_configured_passes_to_db_gate() {
 /// Absent evidence ≠ parity proven.  Fail-closed.
 #[tokio::test]
 async fn tc02_absent_parity_blocks_start() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let artifact_id = "tv03c-tc02-no-parity-artifact";
     // No parity_evidence.json written.
     let (manifest, dir) = write_artifact_dir("tc02", artifact_id, None);
@@ -278,7 +280,7 @@ async fn tc02_absent_parity_blocks_start() {
 /// Invalid evidence ≠ parity proven.  Fail-closed.
 #[tokio::test]
 async fn tc03_invalid_parity_blocks_start() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let artifact_id = "tv03c-tc03-bad-parity-schema";
     let bad_parity =
         r#"{"schema_version":"parity-v99","artifact_id":"x","live_trust_complete":false}"#;
@@ -316,7 +318,7 @@ async fn tc03_invalid_parity_blocks_start() {
 /// Present evidence is start-safe.
 #[tokio::test]
 async fn tc04_present_parity_passes_to_db_gate() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let artifact_id = "tv03c-tc04-present-parity";
     let parity = valid_parity_json(artifact_id);
     let (manifest, dir) = write_artifact_dir("tc04", artifact_id, Some(&parity));
@@ -352,7 +354,7 @@ async fn tc04_present_parity_passes_to_db_gate() {
 /// gate) — confirming gate ordering: TV-02C passes first, TV-03C blocks.
 #[tokio::test]
 async fn tc05_parity_gate_fires_after_artifact_gate() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let artifact_id = "tv03c-tc05-gate-ordering";
     let (manifest, dir) = write_artifact_dir("tc05", artifact_id, None);
 

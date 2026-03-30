@@ -116,9 +116,8 @@ async fn g01_arm_audit_field_present_no_db() {
         !audit.is_null(),
         "G-01: response must contain 'audit' field; body: {json}"
     );
-    assert_eq!(
-        audit["durable_db_write"].as_bool().unwrap_or(true),
-        false,
+    assert!(
+        !audit["durable_db_write"].as_bool().unwrap_or(true),
         "G-01: durable_db_write must be false without DB; body: {json}"
     );
 }
@@ -176,9 +175,8 @@ async fn g03_disarm_audit_field_present_no_db() {
         !audit.is_null(),
         "G-03: response must contain 'audit' field; body: {json}"
     );
-    assert_eq!(
-        audit["durable_db_write"].as_bool().unwrap_or(true),
-        false,
+    assert!(
+        !audit["durable_db_write"].as_bool().unwrap_or(true),
         "G-03: durable_db_write must be false without DB; body: {json}"
     );
 }

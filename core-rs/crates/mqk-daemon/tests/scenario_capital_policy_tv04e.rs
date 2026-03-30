@@ -65,7 +65,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Mutex;
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -267,7 +269,7 @@ async fn post_market_signal(
 /// Proves Gate 1g does not fire when no policy is configured.
 #[tokio::test]
 async fn e01_no_policy_risk_not_applicable_proceeds_to_ws_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
 
     let st = paper_alpaca_state();
@@ -299,7 +301,7 @@ async fn e01_no_policy_risk_not_applicable_proceeds_to_ws_gate() {
 /// Order: qty=10 × $100 = $1,000 implied notional → 2% < 5% cap → pass.
 #[tokio::test]
 async fn e02_limit_order_within_exposure_cap_proceeds_to_ws_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let strat = "strat-exposure-ok";
     // portfolio_cap=50000, max_position=5000, exposure_pct=0.05, reserve=2000
     let (path, dir) = write_policy_dir(
@@ -342,7 +344,7 @@ async fn e02_limit_order_within_exposure_cap_proceeds_to_ws_gate() {
 /// Key proof: budget-authorized + sizing-authorized + EXPOSURE DENIED.
 #[tokio::test]
 async fn e03_limit_order_over_exposure_cap_returns_403_exposure_denied() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let strat = "strat-exposure-breach";
     // portfolio_cap=50000, max_position=15000 (sizing allows), exposure_pct=0.05, reserve=2000
     let (path, dir) = write_policy_dir(
@@ -382,7 +384,7 @@ async fn e03_limit_order_over_exposure_cap_returns_403_exposure_denied() {
 /// Key proof: budget-authorized + sizing-authorized + EXHAUSTION DENIED.
 #[tokio::test]
 async fn e04_limit_order_over_exhaustion_reserve_returns_403_exhaustion_denied() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let strat = "strat-exhaustion-breach";
     // portfolio_cap=50000, max_position=15000 (sizing allows), exposure_pct=0.25 (allows 20%),
     // reserve=45000 → available=5000
@@ -422,7 +424,7 @@ async fn e04_limit_order_over_exhaustion_reserve_returns_403_exhaustion_denied()
 /// Proves Gate 1g does not fire when no risk fields are present in the entry.
 #[tokio::test]
 async fn e05_entry_without_risk_fields_proceeds_to_ws_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let strat = "strat-no-risk";
     let (path, dir) = write_policy_dir("e05", &policy_without_risk_fields(strat));
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);

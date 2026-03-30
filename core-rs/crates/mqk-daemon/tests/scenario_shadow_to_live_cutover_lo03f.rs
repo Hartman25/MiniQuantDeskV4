@@ -53,7 +53,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Mutex;
 
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
@@ -330,9 +332,8 @@ async fn f02_mode_change_guidance_from_live_shadow_shows_live_capital_fail_close
         "live-shadow",
         "F02: current_mode must be live-shadow"
     );
-    assert_eq!(
-        j["transition_permitted"].as_bool().unwrap_or(true),
-        false,
+    assert!(
+        !j["transition_permitted"].as_bool().unwrap_or(true),
         "F02: transition_permitted must always be false (no hot switching supported)"
     );
 
@@ -398,7 +399,7 @@ async fn f02_mode_change_guidance_from_live_shadow_shows_live_capital_fail_close
 ///   TV-03C parity → BLOCKED here (absent)
 #[tokio::test]
 async fn f03_live_capital_start_absent_parity_blocked_at_parity_gate() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let token = "lo03f-f03-token";
     let artifact_id = "lo03f-f03-no-parity";
 
@@ -459,7 +460,7 @@ async fn f03_live_capital_start_absent_parity_blocked_at_parity_gate() {
 /// Invalid evidence ≠ parity proven.  Fail-closed.
 #[tokio::test]
 async fn f04_live_capital_start_invalid_parity_blocked_at_parity_gate() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let token = "lo03f-f04-token";
     let artifact_id = "lo03f-f04-invalid-parity";
 
@@ -530,7 +531,7 @@ async fn f04_live_capital_start_invalid_parity_blocked_at_parity_gate() {
 /// all pass, and the test continues to prove the DB gate (503) is the final stop.
 #[tokio::test]
 async fn f05_live_capital_start_present_parity_proceeds_to_db_gate() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let token = "lo03f-f05-token";
     let artifact_id = "lo03f-f05-present-parity";
 

@@ -62,7 +62,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Mutex;
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -253,7 +255,7 @@ async fn post_signal(
 /// A01: No policy configured → gate not applicable → proceeds to DB gate (503).
 #[tokio::test]
 async fn a01_no_policy_configured_start_proceeds_to_db_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
 
     let st = armed_live_shadow_state().await;
@@ -271,7 +273,7 @@ async fn a01_no_policy_configured_start_proceeds_to_db_gate() {
 /// A02: Policy present and enabled=true → start proceeds to DB gate (503).
 #[tokio::test]
 async fn a02_policy_authorized_start_proceeds_to_db_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let (path, dir) = write_policy_dir("a02", &valid_policy("test-policy-a02", true));
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
 
@@ -293,7 +295,7 @@ async fn a02_policy_authorized_start_proceeds_to_db_gate() {
 /// A03: Policy present but enabled=false → 403 blocked at capital_allocation_policy gate.
 #[tokio::test]
 async fn a03_policy_disabled_blocks_start() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let (path, dir) = write_policy_dir("a03", &valid_policy("test-policy-a03", false));
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
 
@@ -319,7 +321,7 @@ async fn a03_policy_disabled_blocks_start() {
 /// A04: Policy file has invalid JSON → 403 blocked at capital_allocation_policy gate.
 #[tokio::test]
 async fn a04_policy_invalid_json_blocks_start() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let (path, dir) = write_policy_dir("a04", "{ NOT VALID JSON");
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
 
@@ -340,7 +342,7 @@ async fn a04_policy_invalid_json_blocks_start() {
 /// A05: Policy path configured but file is missing → 403 blocked at capital_allocation_policy gate.
 #[tokio::test]
 async fn a05_policy_file_missing_blocks_start() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let missing =
         std::env::temp_dir().join(format!("mqk_tv04_a05_missing_{}.json", std::process::id()));
     // Deliberately do NOT write the file.
@@ -470,7 +472,7 @@ fn a10_pure_missing_policy_id_yields_invalid() {
 /// Gate 1 DID pass (no "not configured" blocker), so we reached Gate 1b.
 #[tokio::test]
 async fn b01_no_policy_signal_proceeds_to_ws_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
 
     let st = paper_alpaca_state();
@@ -516,7 +518,7 @@ async fn b01_no_policy_signal_proceeds_to_ws_gate() {
 /// Proves budget-authorized strategies pass Gate 1e and reach Gate 1b.
 #[tokio::test]
 async fn b02_authorized_strategy_signal_proceeds_to_ws_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let strat = "strat-authorized";
     let (path, dir) = write_policy_dir(
         "b02",
@@ -564,7 +566,7 @@ async fn b02_authorized_strategy_signal_proceeds_to_ws_gate() {
 /// An absent budget entry is refused fail-closed.
 #[tokio::test]
 async fn b03_absent_strategy_entry_is_budget_denied() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     // Policy exists but has no entry for this strategy.
     let (path, dir) = write_policy_dir("b03", &valid_policy("policy-b03", true));
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
@@ -603,7 +605,7 @@ async fn b03_absent_strategy_entry_is_budget_denied() {
 /// B04: Policy present, strategy budget_authorized=false → 403 budget_denied.
 #[tokio::test]
 async fn b04_budget_authorized_false_is_budget_denied() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let strat = "strat-denied";
     let (path, dir) = write_policy_dir(
         "b04",
@@ -650,7 +652,7 @@ async fn b04_budget_authorized_false_is_budget_denied() {
 /// B05: Policy file configured but invalid → 503 unavailable (fail-closed).
 #[tokio::test]
 async fn b05_invalid_policy_file_is_unavailable() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let (path, dir) = write_policy_dir("b05", "NOT JSON AT ALL");
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
 
@@ -709,7 +711,7 @@ fn b07_pure_authorized_yields_budget_authorized() {
     let path = dir.join("policy.json");
     std::fs::write(
         &path,
-        &policy_with_strategy("p-b07", "strat-b07", true, None),
+        policy_with_strategy("p-b07", "strat-b07", true, None),
     )
     .unwrap();
 
@@ -742,7 +744,7 @@ fn b08_pure_denied_with_reason() {
     let path = dir.join("policy.json");
     std::fs::write(
         &path,
-        &policy_with_strategy(
+        policy_with_strategy(
             "p-b08",
             "strat-b08",
             false,

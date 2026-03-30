@@ -23,7 +23,9 @@
 
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Mutex;
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -111,7 +113,7 @@ fn valid_parity_evidence_json(artifact_id: &str) -> String {
 
 #[tokio::test]
 async fn pe01_not_configured_when_env_unset() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     std::env::remove_var("MQK_ARTIFACT_PATH");
 
     let (status, body) = call(routes::build_router(fresh_state()), get_parity_evidence()).await;
@@ -131,7 +133,7 @@ async fn pe01_not_configured_when_env_unset() {
 
 #[tokio::test]
 async fn pe02_absent_when_parity_file_missing() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let id = next_id();
 
     let dir = std::env::temp_dir().join(format!("mqk_tv03_pe02_{}_{id}", std::process::id()));
@@ -162,7 +164,7 @@ async fn pe02_absent_when_parity_file_missing() {
 
 #[tokio::test]
 async fn pe03_invalid_wrong_schema_version() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let id = next_id();
 
     let dir = std::env::temp_dir().join(format!("mqk_tv03_pe03_{}_{id}", std::process::id()));
@@ -198,7 +200,7 @@ async fn pe03_invalid_wrong_schema_version() {
 
 #[tokio::test]
 async fn pe04_present_live_trust_complete_false() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let id = next_id();
 
     let dir = std::env::temp_dir().join(format!("mqk_tv03_pe04_{}_{id}", std::process::id()));
@@ -237,7 +239,7 @@ async fn pe04_present_live_trust_complete_false() {
 
 #[tokio::test]
 async fn pe05_present_evidence_available_false_is_not_absent() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let id = next_id();
 
     let dir = std::env::temp_dir().join(format!("mqk_tv03_pe05_{}_{id}", std::process::id()));
@@ -270,7 +272,7 @@ async fn pe05_present_evidence_available_false_is_not_absent() {
 
 #[tokio::test]
 async fn pe06_canonical_route_always_present() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     std::env::remove_var("MQK_ARTIFACT_PATH");
 
     let (status, body) = call(routes::build_router(fresh_state()), get_parity_evidence()).await;

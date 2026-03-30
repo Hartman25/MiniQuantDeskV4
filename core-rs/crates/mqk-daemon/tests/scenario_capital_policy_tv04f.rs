@@ -50,11 +50,12 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -181,7 +182,6 @@ async fn armed_live_capital_state(token: &str) -> Arc<state::AppState> {
     st_inner.operator_auth = state::OperatorAuthMode::TokenRequired(token.to_string());
     let st = Arc::new(st_inner);
 
-    // Force WS continuity to Live so the live-capital WS continuity gate passes.
     st.update_ws_continuity(state::AlpacaWsContinuityState::Live {
         last_message_id: "tv04f-test-msg".to_string(),
         last_event_at: "2026-03-29T00:00:00Z".to_string(),
@@ -217,7 +217,7 @@ fn post_start(token: Option<&str>) -> Request<axum::body::Body> {
 /// LiveShadow is permissive: absent policy = gate not applicable.
 #[tokio::test]
 async fn f01_live_shadow_without_policy_proceeds_to_db_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
 
     let st = armed_live_shadow_state().await;
@@ -243,7 +243,7 @@ async fn f01_live_shadow_without_policy_proceeds_to_db_gate() {
 /// The TV-04F gate fires before TV-04A (which would have been a pass-through).
 #[tokio::test]
 async fn f02_live_capital_without_policy_blocked_at_tv04f_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
 
     let token = "tv04f-f02-token";
@@ -261,13 +261,11 @@ async fn f02_live_capital_without_policy_blocked_at_tv04f_gate() {
         "live_capital_policy_required",
         "F02: gate must be live_capital_policy_required; got: {j}"
     );
-    // Explicit: WS continuity gate passed (Live state was forced)
     assert_ne!(
         j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
         "alpaca_ws_continuity",
         "F02: WS continuity gate must have passed before TV-04F; got: {j}"
     );
-    // Explicit: operator_auth gate passed (TokenRequired set)
     assert_ne!(
         j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
         "operator_auth",
@@ -282,7 +280,7 @@ async fn f02_live_capital_without_policy_blocked_at_tv04f_gate() {
 /// and reaches the DB gate.
 #[tokio::test]
 async fn f03_live_capital_with_valid_policy_proceeds_to_db_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let (path, dir) = write_policy_dir("f03", &valid_policy("tv04f-f03-policy"));
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
 
@@ -300,19 +298,16 @@ async fn f03_live_capital_with_valid_policy_proceeds_to_db_gate() {
          all pre-DB gates (TV-04F + TV-04A + TV-04D) must pass; got: {status}"
     );
     let j = parse_json(body);
-    // 503 body identifies DB unavailability — all pre-DB gates passed.
     let error = j["error"].as_str().unwrap_or("");
     assert!(
         error.contains("runtime DB is not configured") || error.contains("DB"),
         "F03: 503 body must describe DB unavailability (all pre-DB gates passed); got: {j}"
     );
-    // TV-04F must not have fired.
     assert_ne!(
         j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
         "live_capital_policy_required",
         "F03: TV-04F gate must not fire when a valid policy is configured; got: {j}"
     );
-    // TV-04A must not have fired.
     assert_ne!(
         j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
         "capital_allocation_policy",
@@ -330,7 +325,7 @@ async fn f03_live_capital_with_valid_policy_proceeds_to_db_gate() {
 /// TV-04A handles validity once TV-04F confirms the policy exists.
 #[tokio::test]
 async fn f04_live_capital_disabled_policy_passes_tv04f_blocked_at_tv04a() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let (path, dir) = write_policy_dir("f04", &disabled_policy("tv04f-f04-disabled"));
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
 
@@ -353,7 +348,6 @@ async fn f04_live_capital_disabled_policy_passes_tv04f_blocked_at_tv04a() {
         "F04: gate must be capital_allocation_policy (TV-04A), not live_capital_policy_required \
          (TV-04F); disabled policy passes TV-04F (configured) but fails TV-04A; got: {j}"
     );
-    // TV-04F must NOT have fired — the policy was configured, so TV-04F passes.
     assert_ne!(
         j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
         "live_capital_policy_required",
@@ -373,16 +367,14 @@ async fn f04_live_capital_disabled_policy_passes_tv04f_blocked_at_tv04a() {
 /// different outcomes by design.
 #[tokio::test]
 async fn f05_semantic_separation_paper_safety_vs_live_capital_authorization() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
 
-    // LiveShadow without capital policy → 503 (permissive)
     let live_shadow_st = armed_live_shadow_state().await;
     let (shadow_status, shadow_body) =
         call(routes::build_router(live_shadow_st), post_start(None)).await;
     let shadow_j = parse_json(shadow_body);
 
-    // LiveCapital without capital policy → 403 (fail-closed)
     let token = "tv04f-f05-token";
     let live_capital_st = armed_live_capital_state(token).await;
     let (capital_status, capital_body) = call(
@@ -392,7 +384,6 @@ async fn f05_semantic_separation_paper_safety_vs_live_capital_authorization() {
     .await;
     let capital_j = parse_json(capital_body);
 
-    // LiveShadow is permissive: reaches DB gate.
     assert_eq!(
         shadow_status,
         StatusCode::SERVICE_UNAVAILABLE,
@@ -405,7 +396,6 @@ async fn f05_semantic_separation_paper_safety_vs_live_capital_authorization() {
         "F05 (shadow): TV-04F must not fire for LiveShadow; got: {shadow_j}"
     );
 
-    // LiveCapital is fail-closed: blocked at TV-04F.
     assert_eq!(
         capital_status,
         StatusCode::FORBIDDEN,
@@ -418,7 +408,6 @@ async fn f05_semantic_separation_paper_safety_vs_live_capital_authorization() {
         "F05 (capital): TV-04F gate must fire for LiveCapital without policy; got: {capital_j}"
     );
 
-    // Explicit semantic distinction: same absent policy, different outcomes by design.
     assert_ne!(
         shadow_status, capital_status,
         "F05: absent capital policy must produce DIFFERENT outcomes for LiveShadow vs \

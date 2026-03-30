@@ -45,7 +45,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -56,6 +56,7 @@ use mqk_daemon::{
     },
     routes, state,
 };
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -207,13 +208,12 @@ async fn post_start(st: Arc<state::AppState>) -> (StatusCode, serde_json::Value)
 /// Proves TV-04D does not fire when no policy is configured.
 #[tokio::test]
 async fn d01_no_policy_economics_not_applicable_proceeds_to_db_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
 
     let st = armed_live_shadow_state().await;
     let (status, json) = post_start(st).await;
 
-    // DB gate fires (no DB in test) → 503.
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{json}");
     let gate = json.get("gate").and_then(|v| v.as_str()).unwrap_or("");
     assert_ne!(
@@ -228,7 +228,7 @@ async fn d01_no_policy_economics_not_applicable_proceeds_to_db_gate() {
 /// Proves a fully-specified economics policy is not blocked by TV-04D.
 #[tokio::test]
 async fn d02_policy_with_economics_proceeds_to_db_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let (path, dir) = write_policy_dir("d02", &policy_with_economics("tv04d-d02"));
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
 
@@ -251,7 +251,7 @@ async fn d02_policy_with_economics_proceeds_to_db_gate() {
 /// Proves an enabled policy without a portfolio economics bound is refused.
 #[tokio::test]
 async fn d03_policy_without_economics_refused_at_start() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let (path, dir) = write_policy_dir("d03", &policy_without_economics("tv04d-d03"));
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
 
@@ -274,7 +274,7 @@ async fn d03_policy_without_economics_refused_at_start() {
 /// Proves a zero economics bound is treated as absent (not a valid bound).
 #[tokio::test]
 async fn d04_policy_with_zero_economics_refused_at_start() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let (path, dir) = write_policy_dir("d04", &policy_with_zero_economics("tv04d-d04"));
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
 
@@ -301,19 +301,17 @@ async fn d04_policy_with_zero_economics_refused_at_start() {
 /// imply deployment economics authorization.
 #[tokio::test]
 async fn d05_tv04a_passes_but_tv04d_fails_independent_gates() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let contents = policy_without_economics("tv04d-d05");
     let (path, dir) = write_policy_dir("d05", &contents);
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
 
-    // Confirm TV-04A would pass on this same policy file.
     let tv04a = evaluate_capital_policy(Some(&path));
     assert!(
         matches!(tv04a, CapitalPolicyOutcome::Authorized { .. }),
         "TV-04A must pass on enabled policy; got: {tv04a:?}"
     );
 
-    // Confirm TV-04D fails on the same file.
     let tv04d = evaluate_deployment_economics(Some(&path));
     assert!(
         matches!(
@@ -327,7 +325,6 @@ async fn d05_tv04a_passes_but_tv04d_fails_independent_gates() {
         "EconomicsNotSpecified must not be start-safe"
     );
 
-    // HTTP proof: start is refused at the economics gate (not the policy gate).
     let st = armed_live_shadow_state().await;
     let (status, json) = post_start(st).await;
 
@@ -347,7 +344,6 @@ async fn d05_tv04a_passes_but_tv04d_fails_independent_gates() {
 // TV-04D — Pure evaluator tests
 // ===========================================================================
 
-/// D06: None path → NotConfigured.
 #[test]
 fn d06_pure_none_path_returns_not_configured() {
     let outcome = evaluate_deployment_economics(None);
@@ -355,7 +351,6 @@ fn d06_pure_none_path_returns_not_configured() {
     assert!(outcome.is_start_safe());
 }
 
-/// D07: enabled=false → PolicyDisabled (is_start_safe=true; TV-04A handles refusal).
 #[test]
 fn d07_pure_disabled_policy_returns_policy_disabled() {
     let id = next_id();
@@ -378,7 +373,6 @@ fn d07_pure_disabled_policy_returns_policy_disabled() {
     );
 }
 
-/// D08: enabled=true + max_portfolio_notional_usd = 25000 → EconomicsSpecified.
 #[test]
 fn d08_pure_valid_economics_returns_economics_specified() {
     let id = next_id();
@@ -407,7 +401,6 @@ fn d08_pure_valid_economics_returns_economics_specified() {
     assert!(outcome.is_start_safe());
 }
 
-/// D09: enabled=true + max_portfolio_notional_usd absent → EconomicsNotSpecified.
 #[test]
 fn d09_pure_missing_economics_returns_economics_not_specified() {
     let id = next_id();
@@ -434,7 +427,6 @@ fn d09_pure_missing_economics_returns_economics_not_specified() {
     assert!(!outcome.is_start_safe());
 }
 
-/// D10: enabled=true + max_portfolio_notional_usd = 0 → EconomicsNotSpecified.
 #[test]
 fn d10_pure_zero_economics_returns_economics_not_specified() {
     let id = next_id();

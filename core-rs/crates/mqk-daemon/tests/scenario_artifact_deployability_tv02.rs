@@ -35,7 +35,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Mutex;
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -223,7 +225,7 @@ async fn post_start(st: Arc<state::AppState>) -> (StatusCode, serde_json::Value)
 /// deployability gate.
 #[tokio::test]
 async fn d01_no_artifact_configured_passes_to_db_gate() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     std::env::remove_var("MQK_ARTIFACT_PATH");
 
     let st = armed_live_shadow_state().await;
@@ -259,7 +261,7 @@ async fn d01_no_artifact_configured_passes_to_db_gate() {
 /// This is the happy-path proof: accepted + deployable → gate transparent.
 #[tokio::test]
 async fn d02_accepted_deployable_passes_to_db_gate() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let artifact_id = "tv02-d02-deployable-artifact-abc123";
     let gate_contents = gate_json(artifact_id, true);
     let (manifest, dir) = write_artifact_dir("d02", artifact_id, Some(&gate_contents));
@@ -299,7 +301,7 @@ async fn d02_accepted_deployable_passes_to_db_gate() {
 /// Absent gate ≠ deployable. Fail-closed.
 #[tokio::test]
 async fn d03_accepted_gate_absent_blocks_start() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let artifact_id = "tv02-d03-no-gate-artifact-xyz";
     let (manifest, dir) = write_artifact_dir("d03", artifact_id, None);
 
@@ -342,7 +344,7 @@ async fn d03_accepted_gate_absent_blocks_start() {
 /// criteria (min_trade_count etc.) cannot start runtime.
 #[tokio::test]
 async fn d04_accepted_gate_failed_blocks_start() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let artifact_id = "tv02-d04-failing-gate-artifact-qrs";
     let gate_contents = gate_json(artifact_id, false);
     let (manifest, dir) = write_artifact_dir("d04", artifact_id, Some(&gate_contents));
@@ -383,7 +385,7 @@ async fn d04_accepted_gate_failed_blocks_start() {
 /// start is refused at the deployability gate.  Gate validity is enforced.
 #[tokio::test]
 async fn d05_accepted_gate_invalid_schema_blocks_start() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let artifact_id = "tv02-d05-bad-schema-artifact-uvw";
     let bad_gate = format!(
         r#"{{"schema_version":"gate-v99","artifact_id":"{artifact_id}","passed":true,"checks":[],"overall_reason":"","evaluated_at_utc":"2026-01-01T00:00:00Z"}}"#
@@ -421,7 +423,7 @@ async fn d05_accepted_gate_invalid_schema_blocks_start() {
 /// artifact_id, start is refused.  Cross-validation is enforced.
 #[tokio::test]
 async fn d06_gate_artifact_id_mismatch_blocks_start() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let intake_artifact_id = "tv02-d06-intake-artifact-id";
     let gate_artifact_id = "tv02-d06-DIFFERENT-artifact-id";
 
@@ -463,7 +465,7 @@ async fn d06_gate_artifact_id_mismatch_blocks_start() {
 /// Configured-but-broken artifacts are fail-closed at the intake boundary.
 #[tokio::test]
 async fn d07_intake_invalid_blocks_start_at_intake_gate() {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock().lock().await;
     let path = std::env::temp_dir().join(format!(
         "mqk_tv02_d07_does_not_exist_{}_{}.json",
         std::process::id(),

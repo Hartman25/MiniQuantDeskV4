@@ -49,7 +49,9 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Mutex;
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -210,7 +212,7 @@ async fn post_limit_signal(
 /// Proves Gate 1f does not fire when no policy is configured.
 #[tokio::test]
 async fn c01_no_policy_sizing_not_applicable_proceeds_to_ws_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
 
     let st = paper_alpaca_state();
@@ -246,7 +248,7 @@ async fn c01_no_policy_sizing_not_applicable_proceeds_to_ws_gate() {
 /// Signal: qty=5 × limit_price=$100 → implied_notional=$500 ≤ $1000.
 #[tokio::test]
 async fn c02_limit_order_within_cap_proceeds_to_ws_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let strat = "strat-sizing-ok";
     // max = $1000; qty=5 × $100 = $500 → under cap
     let (path, dir) = write_policy_dir("c02", &policy_with_notional_cap(strat, 1000.0));
@@ -287,7 +289,7 @@ async fn c02_limit_order_within_cap_proceeds_to_ws_gate() {
 /// Signal: qty=5 × limit_price=$100 → implied_notional=$500 > $100.
 #[tokio::test]
 async fn c03_limit_order_over_cap_returns_403_sizing_denied() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let strat = "strat-over-cap";
     // max = $100; qty=5 × $100 = $500 → over cap
     let (path, dir) = write_policy_dir("c03", &policy_with_notional_cap(strat, 100.0));
@@ -332,7 +334,7 @@ async fn c03_limit_order_over_cap_returns_403_sizing_denied() {
 /// a denial.
 #[tokio::test]
 async fn c04_no_notional_cap_in_entry_proceeds_to_ws_gate() {
-    let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = env_lock().lock().await;
     let strat = "strat-no-cap";
     let (path, dir) = write_policy_dir("c04", &policy_with_no_notional_cap(strat));
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
@@ -393,7 +395,7 @@ fn c06_pure_limit_order_within_cap_yields_sizing_authorized() {
 
     // limit_price = $100.00 = 100_000_000 micros; qty=5 → notional=$500
     let outcome = evaluate_position_sizing(Some(&path), strat, 5, Some(100_000_000));
-    let _ = cleanup(&dir);
+    cleanup(&dir);
 
     match outcome {
         PositionSizingOutcome::SizingAuthorized {
@@ -425,7 +427,7 @@ fn c07_pure_limit_order_over_cap_yields_sizing_denied() {
     let (path, dir) = make_policy_file("c07", &policy_with_notional_cap(strat, 100.0));
 
     let outcome = evaluate_position_sizing(Some(&path), strat, 5, Some(100_000_000));
-    let _ = cleanup(&dir);
+    cleanup(&dir);
 
     match outcome {
         PositionSizingOutcome::SizingDenied { reason } => {
@@ -454,7 +456,7 @@ fn c08_pure_market_order_with_cap_yields_sizing_unverifiable() {
 
     // No limit_price → market order
     let outcome = evaluate_position_sizing(Some(&path), strat, 100, None);
-    let _ = cleanup(&dir);
+    cleanup(&dir);
 
     match outcome {
         PositionSizingOutcome::SizingUnverifiable { reason } => {
@@ -479,7 +481,7 @@ fn c09_pure_no_notional_cap_in_entry_yields_no_sizing_constraint() {
     let (path, dir) = make_policy_file("c09", &policy_with_no_notional_cap(strat));
 
     let outcome = evaluate_position_sizing(Some(&path), strat, 1_000_000, Some(100_000_000));
-    let _ = cleanup(&dir);
+    cleanup(&dir);
 
     assert_eq!(
         outcome,
@@ -504,7 +506,7 @@ fn c10_pure_budget_authorized_yet_sizing_denied_are_simultaneously_true() {
     let budget = evaluate_strategy_budget(Some(&path), strat);
     // limit_price = $50.00 = 50_000_000 micros; qty=10 → notional=$500 > $100
     let sizing = evaluate_position_sizing(Some(&path), strat, 10, Some(50_000_000));
-    let _ = cleanup(&dir);
+    cleanup(&dir);
 
     // Budget gate passes.
     assert!(
