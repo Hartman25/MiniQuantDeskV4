@@ -1150,8 +1150,7 @@ async fn tv01d_f1_start_execution_runtime_consumes_and_surfaces_artifact_provena
     });
     std::fs::write(
         artifact_dir.join("parity_evidence.json"),
-        serde_json::to_vec_pretty(&parity_evidence)
-            .expect("TV-01D-F1: serialize parity evidence"),
+        serde_json::to_vec_pretty(&parity_evidence).expect("TV-01D-F1: serialize parity evidence"),
     )
     .expect("TV-01D-F1: write parity evidence");
 
