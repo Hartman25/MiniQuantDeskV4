@@ -385,8 +385,11 @@ async fn f05_semantic_separation_paper_safety_vs_live_capital_authorization() {
     // LiveCapital without capital policy → 403 (fail-closed)
     let token = "tv04f-f05-token";
     let live_capital_st = armed_live_capital_state(token).await;
-    let (capital_status, capital_body) =
-        call(routes::build_router(live_capital_st), post_start(Some(token))).await;
+    let (capital_status, capital_body) = call(
+        routes::build_router(live_capital_st),
+        post_start(Some(token)),
+    )
+    .await;
     let capital_j = parse_json(capital_body);
 
     // LiveShadow is permissive: reaches DB gate.

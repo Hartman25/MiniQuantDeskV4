@@ -675,5 +675,8 @@ fn e12_pure_cross_gate_budget_and_sizing_authorized_but_exposure_denied() {
     // All three gates are independent: authorized at two levels ≠ safe at portfolio level.
     assert!(budget.is_signal_safe(), "budget must be signal-safe");
     assert!(sizing.is_signal_safe(), "sizing must be signal-safe");
-    assert!(!risk.is_signal_safe(), "risk must NOT be signal-safe (exposure denied)");
+    assert!(
+        !risk.is_signal_safe(),
+        "risk must NOT be signal-safe (exposure denied)"
+    );
 }

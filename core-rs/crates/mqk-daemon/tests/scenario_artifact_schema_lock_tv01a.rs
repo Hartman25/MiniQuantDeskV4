@@ -104,10 +104,19 @@ fn sl_01_minimal_manifest_with_only_required_fields_is_accepted() {
             stage,
             produced_by,
         } => {
-            assert_eq!(artifact_id, "sl01-artifact-abc123", "SL-01: artifact_id must match");
-            assert_eq!(artifact_type, "signal_pack", "SL-01: artifact_type must match");
+            assert_eq!(
+                artifact_id, "sl01-artifact-abc123",
+                "SL-01: artifact_id must match"
+            );
+            assert_eq!(
+                artifact_type, "signal_pack",
+                "SL-01: artifact_type must match"
+            );
             assert_eq!(stage, "paper", "SL-01: stage must match");
-            assert_eq!(produced_by, "research-py/promote.py", "SL-01: produced_by must match");
+            assert_eq!(
+                produced_by, "research-py/promote.py",
+                "SL-01: produced_by must match"
+            );
         }
         other => panic!("SL-01: minimal manifest must be Accepted; got: {other:?}"),
     }
@@ -143,7 +152,10 @@ fn sl_02_manifest_with_extra_fields_is_accepted() {
 
     match outcome {
         ArtifactIntakeOutcome::Accepted { artifact_id, .. } => {
-            assert_eq!(artifact_id, "sl02-artifact-xyz789", "SL-02: artifact_id must match");
+            assert_eq!(
+                artifact_id, "sl02-artifact-xyz789",
+                "SL-02: artifact_id must match"
+            );
         }
         other => panic!(
             "SL-02: manifest with extra fields must be Accepted (forward compat); got: {other:?}"
@@ -177,9 +189,7 @@ fn sl_03_absent_schema_version_key_is_invalid() {
                 "SL-03: reason must mention schema_version; got: '{reason}'"
             );
         }
-        other => panic!(
-            "SL-03: absent schema_version key must return Invalid; got: {other:?}"
-        ),
+        other => panic!("SL-03: absent schema_version key must return Invalid; got: {other:?}"),
     }
 }
 
@@ -209,9 +219,7 @@ fn sl_04_absent_artifact_id_key_is_invalid() {
                 "SL-04: reason must mention artifact_id; got: '{reason}'"
             );
         }
-        other => panic!(
-            "SL-04: absent artifact_id key must return Invalid; got: {other:?}"
-        ),
+        other => panic!("SL-04: absent artifact_id key must return Invalid; got: {other:?}"),
     }
 }
 
@@ -239,9 +247,7 @@ fn sl_05_absent_artifact_type_key_is_invalid() {
                 "SL-05: reason must mention artifact_type; got: '{reason}'"
             );
         }
-        other => panic!(
-            "SL-05: absent artifact_type key must return Invalid; got: {other:?}"
-        ),
+        other => panic!("SL-05: absent artifact_type key must return Invalid; got: {other:?}"),
     }
 }
 
@@ -269,9 +275,7 @@ fn sl_06_absent_produced_by_key_is_invalid() {
                 "SL-06: reason must mention produced_by; got: '{reason}'"
             );
         }
-        other => panic!(
-            "SL-06: absent produced_by key must return Invalid; got: {other:?}"
-        ),
+        other => panic!("SL-06: absent produced_by key must return Invalid; got: {other:?}"),
     }
 }
 

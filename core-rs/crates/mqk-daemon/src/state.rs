@@ -48,8 +48,8 @@ use crate::artifact_intake::{
     ENV_ARTIFACT_PATH,
 };
 use crate::capital_policy::{
-    evaluate_capital_policy_from_env, evaluate_deployment_economics_from_env,
-    CapitalPolicyOutcome, DeploymentEconomicsOutcome,
+    evaluate_capital_policy_from_env, evaluate_deployment_economics_from_env, CapitalPolicyOutcome,
+    DeploymentEconomicsOutcome,
 };
 use crate::parity_evidence::{evaluate_parity_evidence_from_env, ParityEvidenceOutcome};
 #[cfg(test)]

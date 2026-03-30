@@ -316,7 +316,10 @@ async fn d05_tv04a_passes_but_tv04d_fails_independent_gates() {
     // Confirm TV-04D fails on the same file.
     let tv04d = evaluate_deployment_economics(Some(&path));
     assert!(
-        matches!(tv04d, DeploymentEconomicsOutcome::EconomicsNotSpecified { .. }),
+        matches!(
+            tv04d,
+            DeploymentEconomicsOutcome::EconomicsNotSpecified { .. }
+        ),
         "TV-04D must fail on policy without max_portfolio_notional_usd; got: {tv04d:?}"
     );
     assert!(
@@ -421,7 +424,10 @@ fn d09_pure_missing_economics_returns_economics_not_specified() {
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(
-        matches!(outcome, DeploymentEconomicsOutcome::EconomicsNotSpecified { .. }),
+        matches!(
+            outcome,
+            DeploymentEconomicsOutcome::EconomicsNotSpecified { .. }
+        ),
         "must return EconomicsNotSpecified when max_portfolio_notional_usd is absent; \
          got: {outcome:?}"
     );
@@ -445,7 +451,10 @@ fn d10_pure_zero_economics_returns_economics_not_specified() {
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(
-        matches!(outcome, DeploymentEconomicsOutcome::EconomicsNotSpecified { .. }),
+        matches!(
+            outcome,
+            DeploymentEconomicsOutcome::EconomicsNotSpecified { .. }
+        ),
         "must return EconomicsNotSpecified when max_portfolio_notional_usd = 0; \
          got: {outcome:?}"
     );

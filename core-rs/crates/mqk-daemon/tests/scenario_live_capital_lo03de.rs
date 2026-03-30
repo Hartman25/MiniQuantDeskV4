@@ -242,7 +242,11 @@ async fn lo03d_d4_live_capital_armed_token_ws_unproven_blocked_at_ws_continuity_
         .body(axum::body::Body::empty())
         .unwrap();
     let (arm_status, _) = call(router, arm_req).await;
-    assert_eq!(arm_status, StatusCode::OK, "D4: arm must succeed with valid token");
+    assert_eq!(
+        arm_status,
+        StatusCode::OK,
+        "D4: arm must succeed with valid token"
+    );
 
     // Start must fail at the live-capital WS continuity gate.
     let start_req = Request::builder()
@@ -288,10 +292,8 @@ async fn lo03d_d4_live_capital_armed_token_ws_unproven_blocked_at_ws_continuity_
 async fn lo03d_d5_live_capital_full_pre_db_gate_chain_proven() {
     // TV-04F: live-capital requires an explicit capital policy.
     // Write a minimal valid policy so the TV-04F and TV-04A/D gates pass.
-    let policy_dir = std::env::temp_dir().join(format!(
-        "mqk_lo03d_d5_policy_{}",
-        std::process::id()
-    ));
+    let policy_dir =
+        std::env::temp_dir().join(format!("mqk_lo03d_d5_policy_{}", std::process::id()));
     std::fs::create_dir_all(&policy_dir).expect("D5: create policy dir");
     let policy_path = policy_dir.join("capital_allocation_policy.json");
     std::fs::write(
@@ -325,7 +327,11 @@ async fn lo03d_d5_live_capital_full_pre_db_gate_chain_proven() {
         .body(axum::body::Body::empty())
         .unwrap();
     let (arm_status, _) = call(router, arm_req).await;
-    assert_eq!(arm_status, StatusCode::OK, "D5: arm must succeed with valid token");
+    assert_eq!(
+        arm_status,
+        StatusCode::OK,
+        "D5: arm must succeed with valid token"
+    );
 
     // Start must reach the DB gate (503 — no DB configured).
     let start_req = Request::builder()
@@ -396,7 +402,11 @@ async fn lo03d_d6_preflight_live_capital_paper_is_fail_closed() {
         .body(axum::body::Body::empty())
         .unwrap();
     let (status, body) = call(router, req).await;
-    assert_eq!(status, StatusCode::OK, "D6: preflight must return 200; got: {status}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "D6: preflight must return 200; got: {status}"
+    );
 
     let j = json(body);
     assert_eq!(
@@ -408,18 +418,23 @@ async fn lo03d_d6_preflight_live_capital_paper_is_fail_closed() {
         serde_json::Value::Bool(false),
         "D6: deployment_start_allowed must be false for live-capital+paper; got: {j}"
     );
-    let blockers = j["blockers"].as_array().expect("D6: blockers must be an array");
+    let blockers = j["blockers"]
+        .as_array()
+        .expect("D6: blockers must be an array");
     assert!(
         !blockers.is_empty(),
         "D6: blockers must be non-empty for live-capital+paper — adapter mismatch must be explicit; got: {j}"
     );
     // The deployment blocker must identify the adapter requirement.
-    let has_adapter_blocker = blockers
-        .iter()
-        .any(|b| b.as_str().unwrap_or("").to_lowercase().contains("broker") ||
-                 b.as_str().unwrap_or("").to_lowercase().contains("adapter") ||
-                 b.as_str().unwrap_or("").to_lowercase().contains("alpaca") ||
-                 b.as_str().unwrap_or("").to_lowercase().contains("live-capital"));
+    let has_adapter_blocker = blockers.iter().any(|b| {
+        b.as_str().unwrap_or("").to_lowercase().contains("broker")
+            || b.as_str().unwrap_or("").to_lowercase().contains("adapter")
+            || b.as_str().unwrap_or("").to_lowercase().contains("alpaca")
+            || b.as_str()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains("live-capital")
+    });
     assert!(
         has_adapter_blocker,
         "D6: blockers must include a message about live-capital adapter requirement; got: {j}"
@@ -544,7 +559,11 @@ async fn lo03e_e3_halt_without_db_sets_in_memory_kill_switch() {
         .body(axum::body::Body::empty())
         .unwrap();
     let (halt_status, _) = call(routes::build_router(Arc::clone(&st)), halt_req).await;
-    assert_eq!(halt_status, StatusCode::SERVICE_UNAVAILABLE, "E3: halt must return 503 without DB");
+    assert_eq!(
+        halt_status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "E3: halt must return 503 without DB"
+    );
 
     // Despite 503, system/status must reflect the in-memory kill-switch state.
     let status_req = Request::builder()
@@ -553,7 +572,11 @@ async fn lo03e_e3_halt_without_db_sets_in_memory_kill_switch() {
         .body(axum::body::Body::empty())
         .unwrap();
     let (status_code, status_body) = call(routes::build_router(Arc::clone(&st)), status_req).await;
-    assert_eq!(status_code, StatusCode::OK, "E3: system/status must return 200");
+    assert_eq!(
+        status_code,
+        StatusCode::OK,
+        "E3: system/status must return 200"
+    );
 
     let j = json(status_body);
     assert_eq!(
@@ -609,10 +632,12 @@ async fn lo03e_e4_no_cut_risk_route_exists() {
             .uri(*path)
             .body(axum::body::Body::empty())
             .unwrap();
-        let router_clone = routes::build_router(Arc::new(state::AppState::new_for_test_with_mode_and_broker(
-            state::DeploymentMode::LiveCapital,
-            state::BrokerKind::Alpaca,
-        )));
+        let router_clone = routes::build_router(Arc::new(
+            state::AppState::new_for_test_with_mode_and_broker(
+                state::DeploymentMode::LiveCapital,
+                state::BrokerKind::Alpaca,
+            ),
+        ));
         let (status, _) = call(router_clone, req).await;
         assert_eq!(
             status,

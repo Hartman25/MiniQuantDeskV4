@@ -130,10 +130,7 @@ async fn lo03c_c2_mode_change_guidance_refuses_hot_switching_for_live_shadow() {
         "C2: transition_permitted must be false — hot switching is not supported; got: {j}"
     );
     assert!(
-        j["transition_refused_reason"]
-            .as_str()
-            .unwrap_or("")
-            .len() > 10,
+        j["transition_refused_reason"].as_str().unwrap_or("").len() > 10,
         "C2: transition_refused_reason must be a non-trivial explanation; got: {j}"
     );
 }
@@ -164,7 +161,11 @@ async fn lo03c_c3_restart_workflow_is_backend_unavailable_without_db() {
         .body(axum::body::Body::empty())
         .unwrap();
     let (status, body) = call(router, req).await;
-    assert_eq!(status, StatusCode::OK, "C3: mode-change-guidance must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "C3: mode-change-guidance must return 200"
+    );
 
     let j = json(body);
     let rw = &j["restart_workflow"];
@@ -216,7 +217,11 @@ async fn lo03c_c4_restart_truth_is_present_with_honest_null_fields_without_db() 
         .body(axum::body::Body::empty())
         .unwrap();
     let (status, body) = call(router, req).await;
-    assert_eq!(status, StatusCode::OK, "C4: mode-change-guidance must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "C4: mode-change-guidance must return 200"
+    );
 
     let j = json(body);
     // restart_truth must be present (not null) — the snapshot succeeds without DB.
@@ -274,7 +279,11 @@ async fn lo03c_c5_operator_next_steps_explicit_and_requires_disarm_first() {
         .body(axum::body::Body::empty())
         .unwrap();
     let (status, body) = call(router, req).await;
-    assert_eq!(status, StatusCode::OK, "C5: mode-change-guidance must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "C5: mode-change-guidance must return 200"
+    );
 
     let j = json(body);
     let steps = j["operator_next_steps"]
@@ -320,7 +329,11 @@ async fn lo03c_c6_live_shadow_to_live_capital_verdict_is_fail_closed() {
         .body(axum::body::Body::empty())
         .unwrap();
     let (status, body) = call(router, req).await;
-    assert_eq!(status, StatusCode::OK, "C6: mode-change-guidance must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "C6: mode-change-guidance must return 200"
+    );
 
     let j = json(body);
     let verdicts = j["transition_verdicts"]

@@ -211,8 +211,11 @@ fn write_artifact_dir(
     std::fs::create_dir_all(&dir).expect("create artifact dir");
     let manifest = dir.join("promoted_manifest.json");
     std::fs::write(&manifest, valid_manifest(artifact_id)).expect("write manifest");
-    std::fs::write(dir.join("deployability_gate.json"), gate_json_passed(artifact_id))
-        .expect("write gate file");
+    std::fs::write(
+        dir.join("deployability_gate.json"),
+        gate_json_passed(artifact_id),
+    )
+    .expect("write gate file");
     if let Some(parity) = parity_contents {
         std::fs::write(dir.join("parity_evidence.json"), parity).expect("write parity file");
     }
@@ -315,7 +318,11 @@ async fn f02_mode_change_guidance_from_live_shadow_shows_live_capital_fail_close
         .unwrap();
     let (status, body) = call(router, req).await;
 
-    assert_eq!(status, StatusCode::OK, "F02: mode-change-guidance must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "F02: mode-change-guidance must return 200"
+    );
     let j = json(body);
 
     assert_eq!(
@@ -401,11 +408,7 @@ async fn f03_live_capital_start_absent_parity_blocked_at_parity_gate() {
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
 
     let st = armed_live_capital_state(token).await;
-    let (status, body) = call(
-        routes::build_router(st),
-        post_start_with_token(token),
-    )
-    .await;
+    let (status, body) = call(routes::build_router(st), post_start_with_token(token)).await;
 
     std::env::remove_var("MQK_ARTIFACT_PATH");
     cleanup(&dir);
@@ -467,11 +470,7 @@ async fn f04_live_capital_start_invalid_parity_blocked_at_parity_gate() {
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
 
     let st = armed_live_capital_state(token).await;
-    let (status, body) = call(
-        routes::build_router(st),
-        post_start_with_token(token),
-    )
-    .await;
+    let (status, body) = call(routes::build_router(st), post_start_with_token(token)).await;
 
     std::env::remove_var("MQK_ARTIFACT_PATH");
     cleanup(&dir);
@@ -550,11 +549,7 @@ async fn f05_live_capital_start_present_parity_proceeds_to_db_gate() {
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &policy_path);
 
     let st = armed_live_capital_state(token).await;
-    let (status, body) = call(
-        routes::build_router(st),
-        post_start_with_token(token),
-    )
-    .await;
+    let (status, body) = call(routes::build_router(st), post_start_with_token(token)).await;
 
     std::env::remove_var("MQK_ARTIFACT_PATH");
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
