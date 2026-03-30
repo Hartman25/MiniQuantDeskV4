@@ -335,8 +335,6 @@ async fn control_restart_route_is_not_exposed_even_with_durable_runtime_conflict
     mqk_db::arm_run(&pool, run_id).await.expect("arm run");
     mqk_db::begin_run(&pool, run_id).await.expect("begin run");
 
-    // Pass auth mode explicitly so the route returns 404 (not exposed) rather
-    // than 401 (auth rejected first) — proving the route is absent, not gated.
     let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
         pool,
         state::OperatorAuthMode::TokenRequired(TEST_OPERATOR_TOKEN.to_string()),
@@ -539,13 +537,6 @@ async fn deadman_expiry_halts_and_disarms_runtime() {
         .expect("valid run uuid");
 
     let pool = st.db.as_ref().expect("db configured");
-    // Wait for tick 0 to complete (including heartbeat_run) before injecting the
-    // stale heartbeat.  Without this, the stale UPDATE races with the execution
-    // loop's initial tick: if tick 0's deadman SELECT resolves before the UPDATE
-    // commits, tick 0's heartbeat_run refreshes the heartbeat and every
-    // subsequent tick sees a fresh value (age ≈ 1 s < DEADMAN_TTL_SECONDS=5 s),
-    // so the deadman never fires.  800 ms >> worst-case tick-0 duration on
-    // a local DB, ensuring heartbeat_run has already written before we overwrite.
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     sqlx::query(
@@ -556,9 +547,6 @@ async fn deadman_expiry_halts_and_disarms_runtime() {
     .await
     .expect("force stale heartbeat");
 
-    // Tick 1 fires at ≈ 1 s from loop start (≈ 200 ms after the stale UPDATE
-    // above).  Its deadman check sees age ≈ 10 s > TTL=5 s and halts the run.
-    // Sleep 1 500 ms to give tick 1 time to detect and persist the halt.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let run = mqk_db::fetch_run(pool, run_id).await.expect("fetch run");
@@ -582,9 +570,6 @@ async fn runtime_refuses_to_continue_after_deadman_expiry() {
         .expect("valid run uuid");
 
     let pool = st.db.as_ref().expect("db configured");
-    // Same race-condition fix as deadman_expiry_halts_and_disarms_runtime: wait
-    // for tick 0 to finish heartbeat_run before injecting the stale value so
-    // tick 1's deadman check reliably detects it.
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     sqlx::query(
@@ -652,10 +637,6 @@ async fn status_surface_reports_deadman_truth() {
     assert_eq!(json["deadman_status"], "healthy");
 
     let pool = st.db.as_ref().expect("db configured");
-    // Wait for the execution loop's tick 0 to complete its heartbeat_run before
-    // injecting the stale value, matching the pattern from
-    // deadman_expiry_halts_and_disarms_runtime.  Without this, the stale UPDATE
-    // can race with tick 0's heartbeat_run.
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     sqlx::query(
@@ -665,9 +646,6 @@ async fn status_surface_reports_deadman_truth() {
     .execute(pool)
     .await
     .expect("force stale heartbeat");
-    // Sleep long enough for tick 1 (fires ≈1 s after tick 0) to detect the stale
-    // heartbeat and exit.  The deadman pre-check guarantees the loop cannot
-    // refresh a stale heartbeat, so this longer sleep is safe.
     tokio::time::sleep(Duration::from_millis(1500)).await;
 
     let req2 = authed(Request::builder())
@@ -979,18 +957,10 @@ async fn durable_halted_run_is_reported_as_halted_by_operator_surfaces() {
 // These tests directly prove that no synthetic run row is created when no real
 // run exists, and that operator action history remains honest in both states.
 
-/// IR-01-A: control/arm with no real run → 200 OK, audit_event_id null, no
-/// synthetic run row created in the runs table.
-///
-/// Before IR-01 the else branch in write_control_operator_audit_event would
-/// call insert_run with git_hash="daemon-control-audit", poisoning the runs
-/// table with a fake durable anchor.  After IR-01 that branch is gone and the
-/// function returns Ok(None), so the response carries audit_event_id:null.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn ir01_control_arm_no_run_no_synthetic_run_created() {
     let st = daemon_state().await;
-    // No arm() or start() — no real run exists in memory or in the DB.
 
     let (status, json) = control_arm(&st).await;
     assert_eq!(
@@ -999,13 +969,11 @@ async fn ir01_control_arm_no_run_no_synthetic_run_created() {
         "control/arm must return 200: {json}"
     );
 
-    // audit_event_id must be null — no real run to anchor the audit event to.
     assert!(
         json["audit"]["audit_event_id"].is_null(),
         "audit_event_id must be null when no real run exists; got: {json}"
     );
 
-    // No run rows of any kind must have been written.
     let pool = st.db.as_ref().expect("db configured");
     let run_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE engine_id = 'mqk-daemon'")
@@ -1017,7 +985,6 @@ async fn ir01_control_arm_no_run_no_synthetic_run_created() {
         "no synthetic run row must be created; found {run_count} rows"
     );
 
-    // Primary writes (desired_armed, sys_arm_state) must still have happened.
     let desired: bool =
         sqlx::query_scalar("SELECT desired_armed FROM runtime_control_state WHERE id = 1")
             .fetch_one(pool)
@@ -1026,8 +993,6 @@ async fn ir01_control_arm_no_run_no_synthetic_run_created() {
     assert!(desired, "desired_armed must be true after control/arm");
 }
 
-/// IR-01-B: control/disarm with no real run → 200 OK, audit_event_id null, no
-/// synthetic run row created.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn ir01_control_disarm_no_run_no_synthetic_run_created() {
@@ -1064,18 +1029,12 @@ async fn ir01_control_disarm_no_run_no_synthetic_run_created() {
     assert!(disarmed, "desired_armed must be false after control/disarm");
 }
 
-/// IR-01-C: control/arm with a real durable run present → 200 OK,
-/// audit_event_id is non-null, and the audit_events row exists in the DB.
-///
-/// Proves the happy path still works correctly after the IR-01 fix.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn ir01_control_arm_with_real_run_writes_audit_event() {
     let st = daemon_state().await;
     let pool = st.db.as_ref().expect("db configured");
 
-    // Insert a real (not synthetic) run row so fetch_latest_run_for_engine
-    // returns it and the audit event can be anchored to it.
     let real_run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"ir01-real-run-for-audit-event-test");
     mqk_db::insert_run(
         pool,
@@ -1100,13 +1059,11 @@ async fn ir01_control_arm_with_real_run_writes_audit_event() {
         "control/arm must return 200: {json}"
     );
 
-    // audit_event_id must be non-null — a real run anchor was available.
     let event_id_str = json["audit"]["audit_event_id"]
         .as_str()
         .expect("audit_event_id must be a string when a real run exists");
     let event_id = Uuid::parse_str(event_id_str).expect("audit_event_id must be a valid UUID");
 
-    // The audit_events row must exist in the DB.
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM audit_events WHERE event_id = $1)")
             .bind(event_id)
@@ -1118,8 +1075,6 @@ async fn ir01_control_arm_with_real_run_writes_audit_event() {
         "audit_events row must exist for event_id {event_id}"
     );
 
-    // Exactly one run row in the DB — the real one we inserted, not a second
-    // synthetic one.
     let run_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE engine_id = 'mqk-daemon'")
             .fetch_one(pool)
@@ -1133,26 +1088,6 @@ async fn ir01_control_arm_with_real_run_writes_audit_event() {
 
 // ---------------------------------------------------------------------------
 // TV-01D-F1: start_execution_runtime consumes and surfaces artifact provenance
-//
-// This is the definitive TV-01D end-to-end proof.
-//
-// The TV-01C / TV-01D in-process tests (AP-01..AP-06) prove the identity chain
-// via the test seam (`set_accepted_artifact_for_test`).  That seam simulates
-// what `start_execution_runtime` does — but does not call it directly.
-//
-// This test proves the load-bearing claim: the real `start_execution_runtime`
-// code path calls `evaluate_artifact_intake_guarded()`, which reads
-// `MQK_ARTIFACT_PATH` from the environment, and writes the accepted provenance
-// into `AppState::accepted_artifact` — and that same provenance is what
-// `GET /api/v1/system/run-artifact` surfaces after a real start.
-//
-// Proof matrix:
-//   (1) A valid promoted manifest is set via MQK_ARTIFACT_PATH.
-//   (2) After real start_execution_runtime (all DB ops succeed), the route
-//       returns truth_state="active" with the exact artifact_id from the manifest.
-//   (3) After real stop_execution_runtime, the route returns truth_state="no_run"
-//       (provenance cleared by the real stop path, not a test seam).
-//   (4) All four provenance fields match the manifest exactly — no drift.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1160,7 +1095,13 @@ async fn ir01_control_arm_with_real_run_writes_audit_event() {
 async fn tv01d_f1_start_execution_runtime_consumes_and_surfaces_artifact_provenance() {
     let artifact_id = "tv01d-f1-e2e-real-start-path-abc999";
 
-    // Write a valid promoted_manifest.json to a temp file.
+    let artifact_dir = std::env::temp_dir().join(format!(
+        "mqk_tv01d_f1_artifact_{}_{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&artifact_dir).expect("TV-01D-F1: create artifact dir");
+
     let manifest = format!(
         r#"{{
   "schema_version": "promoted-v1",
@@ -1171,32 +1112,63 @@ async fn tv01d_f1_start_execution_runtime_consumes_and_surfaces_artifact_provena
   "data_root": "promoted/signal_packs/{artifact_id}"
 }}"#
     );
-    let manifest_path =
-        std::env::temp_dir().join(format!("mqk_tv01d_f1_{}.json", std::process::id()));
+    let manifest_path = artifact_dir.join("promoted_manifest.json");
     std::fs::write(&manifest_path, &manifest).expect("TV-01D-F1: write manifest");
 
-    // Set MQK_ARTIFACT_PATH so evaluate_artifact_intake_guarded() inside
-    // start_execution_runtime finds and accepts the promoted manifest.
+    // gate-v1 canonical schema — must match what evaluate_artifact_deployability reads.
+    let deployability_gate = format!(
+        r#"{{
+  "schema_version": "gate-v1",
+  "artifact_id": "{artifact_id}",
+  "passed": true,
+  "checks": [],
+  "overall_reason": "All four deployability checks passed: trade count, sample window, daily turnover, and active day fraction are within bounds.",
+  "evaluated_at_utc": "2026-01-01T00:00:00Z"
+}}"#
+    );
+    std::fs::write(
+        artifact_dir.join("deployability_gate.json"),
+        &deployability_gate,
+    )
+    .expect("TV-01D-F1: write deployability gate");
+
+    // TV-03C gate fires after TV-02C when MQK_ARTIFACT_PATH is set.
+    // parity-v1 canonical schema — must satisfy evaluate_parity_evidence_from_env.
+    let parity_evidence = serde_json::json!({
+        "schema_version": "parity-v1",
+        "artifact_id": artifact_id,
+        "gate_passed": true,
+        "gate_schema_version": "gate-v1",
+        "shadow_evidence": {
+            "evidence_available": false,
+            "evidence_note": "No shadow evaluation run performed for this artifact"
+        },
+        "comparison_basis": "paper+alpaca supervised path",
+        "live_trust_complete": false,
+        "live_trust_gaps": [],
+        "produced_at_utc": "2026-03-01T00:00:00Z"
+    });
+    std::fs::write(
+        artifact_dir.join("parity_evidence.json"),
+        serde_json::to_vec_pretty(&parity_evidence)
+            .expect("TV-01D-F1: serialize parity evidence"),
+    )
+    .expect("TV-01D-F1: write parity evidence");
+
     #[allow(deprecated)]
     unsafe {
         std::env::set_var(ENV_ARTIFACT_PATH, manifest_path.to_str().unwrap());
     }
 
-    // daemon_state() sets up paper+alpaca with mock Alpaca server, live broker
-    // cursor, and broker/execution snapshots — the same setup used by all other
-    // DB-backed lifecycle tests.
     let st = daemon_state().await;
     arm(&st).await;
 
-    // Real start: start_execution_runtime runs all gates + DB operations +
-    // evaluate_artifact_intake_guarded() → writes provenance to accepted_artifact.
     let started = start(&st).await;
     assert!(
         started["active_run_id"].is_string(),
         "TV-01D-F1: start must return an active_run_id; got: {started}"
     );
 
-    // (1) After real start: the route must surface the accepted artifact identity.
     let router_after_start = make_router(Arc::clone(&st));
     let req = Request::builder()
         .method("GET")
@@ -1211,14 +1183,11 @@ async fn tv01d_f1_start_execution_runtime_consumes_and_surfaces_artifact_provena
     );
     let j = parse_json(body);
 
-    // (2) truth_state must be "active" — the real start path wrote provenance.
     assert_eq!(
         j["truth_state"], "active",
         "TV-01D-F1: after real start with accepted artifact, truth_state must be \
          'active' — proves start_execution_runtime wrote provenance; body: {j}"
     );
-
-    // (3) All four provenance fields must match the promoted manifest exactly.
     assert_eq!(
         j["artifact_id"].as_str().unwrap_or(""),
         artifact_id,
@@ -1240,10 +1209,8 @@ async fn tv01d_f1_start_execution_runtime_consumes_and_surfaces_artifact_provena
         "TV-01D-F1: produced_by must match; body: {j}"
     );
 
-    // Real stop: stop_execution_runtime clears accepted_artifact.
     stop(&st).await;
 
-    // (4) After real stop: provenance must be cleared — route returns "no_run".
     let router_after_stop = make_router(Arc::clone(&st));
     let req2 = Request::builder()
         .method("GET")
@@ -1267,12 +1234,11 @@ async fn tv01d_f1_start_execution_runtime_consumes_and_surfaces_artifact_provena
         "TV-01D-F1: artifact_id must be null after real stop; body: {j2}"
     );
 
-    // Cleanup: remove MQK_ARTIFACT_PATH so subsequent tests are not polluted.
     #[allow(deprecated)]
     unsafe {
         std::env::remove_var(ENV_ARTIFACT_PATH);
     }
-    let _ = std::fs::remove_file(&manifest_path);
+    let _ = std::fs::remove_dir_all(&artifact_dir);
 
     st.stop_for_shutdown().await;
 }
