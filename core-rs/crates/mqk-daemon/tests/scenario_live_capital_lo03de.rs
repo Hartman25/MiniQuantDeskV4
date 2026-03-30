@@ -286,6 +286,21 @@ async fn lo03d_d4_live_capital_armed_token_ws_unproven_blocked_at_ws_continuity_
 
 #[tokio::test]
 async fn lo03d_d5_live_capital_full_pre_db_gate_chain_proven() {
+    // TV-04F: live-capital requires an explicit capital policy.
+    // Write a minimal valid policy so the TV-04F and TV-04A/D gates pass.
+    let policy_dir = std::env::temp_dir().join(format!(
+        "mqk_lo03d_d5_policy_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&policy_dir).expect("D5: create policy dir");
+    let policy_path = policy_dir.join("capital_allocation_policy.json");
+    std::fs::write(
+        &policy_path,
+        r#"{"schema_version":"policy-v1","policy_id":"lo03d-d5-policy","enabled":true,"max_portfolio_notional_usd":25000,"per_strategy_budgets":[]}"#,
+    )
+    .expect("D5: write policy file");
+    std::env::set_var("MQK_CAPITAL_POLICY_PATH", &policy_path);
+
     let mut st_inner = state::AppState::new_for_test_with_mode_and_broker(
         state::DeploymentMode::LiveCapital,
         state::BrokerKind::Alpaca,
@@ -320,6 +335,10 @@ async fn lo03d_d5_live_capital_full_pre_db_gate_chain_proven() {
         .body(axum::body::Body::empty())
         .unwrap();
     let (status, body) = call(routes::build_router(Arc::clone(&st)), start_req).await;
+
+    std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
+    let _ = std::fs::remove_dir_all(&policy_dir);
+
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
@@ -345,6 +364,12 @@ async fn lo03d_d5_live_capital_full_pre_db_gate_chain_proven() {
         j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
         "operator_auth",
         "D5: operator_auth gate must have already passed (TokenRequired set); got: {j}"
+    );
+    // Not a TV-04F capital policy gate error.
+    assert_ne!(
+        j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
+        "live_capital_policy_required",
+        "D5: TV-04F capital policy gate must have passed (policy was configured); got: {j}"
     );
 }
 

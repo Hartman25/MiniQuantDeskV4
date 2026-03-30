@@ -12,6 +12,7 @@ pub mod decision;
 pub mod dev_gate;
 pub mod mode_transition;
 pub mod notify;
+pub mod parity_evidence;
 pub mod routes;
 pub mod state;
 pub mod suppression;

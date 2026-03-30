@@ -1189,6 +1189,38 @@ impl AppState {
             }
         }
 
+        // TV-04F: Live-capital requires an explicit capital allocation policy.
+        //
+        // Paper and LiveShadow modes are permissive: absent policy →
+        // NotConfigured → gate not applicable; callers pass through.  This is
+        // correct for simulation modes where capital policy enforcement is
+        // optional at the operator's discretion.
+        //
+        // LiveCapital is semantically distinct: real capital requires an
+        // explicit, operator-configured capital allocation policy before any
+        // live-capital execution is authorized.  NotConfigured in live-capital
+        // mode is fail-closed — the operator must explicitly configure and
+        // enable a policy.  This prevents silent conflation of paper-safe
+        // "no policy = no enforcement" with live-capital authorization.
+        //
+        // Gate ordering: placed after TV-03C (parity evidence) and before
+        // TV-04A (policy validity check).  TV-04A then validates the policy
+        // is enabled and structurally correct once TV-04F confirms it exists.
+        if self.deployment_mode() == DeploymentMode::LiveCapital {
+            let policy = evaluate_capital_policy_from_env();
+            if matches!(policy, CapitalPolicyOutcome::NotConfigured) {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.live_capital_requires_capital_policy",
+                    "live_capital_policy_required",
+                    "live-capital mode requires an explicit capital allocation policy; \
+                     set MQK_CAPITAL_POLICY_PATH to a valid capital_allocation_policy.json \
+                     before starting live-capital execution; paper and live-shadow modes \
+                     do not require a policy — this gate is live-capital-only and enforces \
+                     the semantic distinction between paper safety and live-capital authorization",
+                ));
+            }
+        }
+
         // TV-04A: Capital allocation policy gate.
         //
         // If MQK_CAPITAL_POLICY_PATH is configured, the policy file must be

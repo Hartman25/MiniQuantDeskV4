@@ -1422,6 +1422,60 @@ pub struct ArtifactIntakeResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/system/parity-evidence — TV-03A / TV-03B
+// ---------------------------------------------------------------------------
+
+/// TV-03A/TV-03B: Parity evidence manifest truth surface.
+///
+/// Reads `parity_evidence.json` (schema `parity-v1`) from the artifact
+/// directory configured via `MQK_ARTIFACT_PATH` and returns the honest
+/// parity-evidence state.  Written by the Python TV-03 pipeline.
+///
+/// `truth_state` values:
+/// - `"not_configured"` — no artifact path configured; parity evidence gate
+///   not applicable.
+/// - `"absent"` — artifact path set but `parity_evidence.json` not found in
+///   the artifact directory.  Absent evidence ≠ parity proven.
+/// - `"invalid"` — `parity_evidence.json` found but structurally invalid.
+/// - `"present"` — `parity_evidence.json` is valid and readable.
+///   `live_trust_complete` is surfaced honestly (always `false` in current
+///   builds).
+/// - `"unavailable"` — evaluator itself could not run.
+///
+/// The operator surface guarantees:
+/// - Absent, invalid, and unavailable are never conflated with "present".
+/// - `live_trust_complete=false` is surfaced explicitly, not hidden.
+/// - `evidence_available=false` is surfaced explicitly (no shadow run).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParityEvidenceResponse {
+    /// Self-identifying route.
+    pub canonical_route: String,
+    /// `"not_configured"` | `"absent"` | `"invalid"` | `"present"` | `"unavailable"`.
+    pub truth_state: String,
+    /// Canonical artifact identity from the evidence file.
+    /// Non-null only when `truth_state == "present"`.
+    pub artifact_id: Option<String>,
+    /// Whether the full parity proof chain is complete enough for live capital.
+    /// Always `false` in current builds.  Non-null only when `truth_state == "present"`.
+    pub live_trust_complete: Option<bool>,
+    /// Whether a shadow evaluation run was actually performed.
+    /// Non-null only when `truth_state == "present"`.
+    pub evidence_available: Option<bool>,
+    /// Human-readable description of what shadow evidence exists or is missing.
+    /// Non-null only when `truth_state == "present"`.
+    pub evidence_note: Option<String>,
+    /// ISO-8601 UTC string when this parity evidence was produced.
+    /// Non-null only when `truth_state == "present"`.
+    pub produced_at_utc: Option<String>,
+    /// Human-readable reason for invalid or unavailable states.
+    /// Non-null only when `truth_state` is `"invalid"` or `"unavailable"`.
+    pub invalid_reason: Option<String>,
+    /// Artifact directory path that was evaluated.
+    /// Non-null when `truth_state != "not_configured"`.
+    pub evaluated_path: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // /v1/system/run-artifact — TV-01C
 // ---------------------------------------------------------------------------
 

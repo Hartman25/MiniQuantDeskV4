@@ -522,8 +522,13 @@ async fn f04_live_capital_start_invalid_parity_blocked_at_parity_gate() {
 ///
 /// This proves:
 /// - The TV-03C parity gate passes when evidence is present (not doubly blocked).
+/// - The TV-04F live-capital policy gate passes when a policy is configured.
 /// - The 503 is the definitive signal that all pre-DB gates were satisfied.
 /// - No gate between the parity gate and db_pool() fabricates a new block.
+///
+/// Note: TV-04F (added) requires live-capital to have an explicit capital policy.
+/// A minimal valid policy is configured in this test so TV-04F + TV-04A + TV-04D
+/// all pass, and the test continues to prove the DB gate (503) is the final stop.
 #[tokio::test]
 async fn f05_live_capital_start_present_parity_proceeds_to_db_gate() {
     let _guard = env_lock().lock().unwrap();
@@ -533,7 +538,16 @@ async fn f05_live_capital_start_present_parity_proceeds_to_db_gate() {
     let parity = valid_parity_json(artifact_id);
     let (manifest, dir) = write_artifact_dir("f05", artifact_id, Some(&parity));
     std::env::set_var("MQK_ARTIFACT_PATH", manifest.to_str().unwrap());
-    std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
+
+    // TV-04F: live-capital requires an explicit capital policy.
+    // Write a minimal valid policy so TV-04F + TV-04A + TV-04D all pass.
+    let policy_path = dir.join("capital_allocation_policy.json");
+    std::fs::write(
+        &policy_path,
+        r#"{"schema_version":"policy-v1","policy_id":"lo03f-f05-policy","enabled":true,"max_portfolio_notional_usd":25000,"per_strategy_budgets":[]}"#,
+    )
+    .expect("F05: write capital policy file");
+    std::env::set_var("MQK_CAPITAL_POLICY_PATH", &policy_path);
 
     let st = armed_live_capital_state(token).await;
     let (status, body) = call(
@@ -543,6 +557,7 @@ async fn f05_live_capital_start_present_parity_proceeds_to_db_gate() {
     .await;
 
     std::env::remove_var("MQK_ARTIFACT_PATH");
+    std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
     cleanup(&dir);
 
     let j = json(body);

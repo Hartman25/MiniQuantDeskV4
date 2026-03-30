@@ -2,7 +2,8 @@
 //!
 //! Contains: health, status_handler, system_status, system_preflight,
 //! system_metadata, system_runtime_leadership, system_session,
-//! system_config_fingerprint, system_config_diffs, authoritative_config_diff_rows.
+//! system_config_fingerprint, system_config_diffs, authoritative_config_diff_rows,
+//! system_parity_evidence.
 
 use std::sync::Arc;
 
@@ -17,13 +18,14 @@ use sqlx::Row;
 
 use crate::api_types::{
     ArtifactIntakeResponse, ConfigDiffRow, ConfigDiffsResponse, ConfigFingerprintResponse,
-    HealthResponse, PreflightStatusResponse, RunArtifactProvenanceResponse, RuntimeErrorResponse,
-    RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
-    SystemMetadataResponse, SystemStatusResponse,
+    HealthResponse, ParityEvidenceResponse, PreflightStatusResponse, RunArtifactProvenanceResponse,
+    RuntimeErrorResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
+    SessionStateResponse, SystemMetadataResponse, SystemStatusResponse,
 };
 use crate::artifact_intake::{
     evaluate_artifact_intake_guarded, ArtifactIntakeOutcome, ENV_ARTIFACT_PATH,
 };
+use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::{AppState, StrategyMarketDataSource};
 
 use super::helpers::{
@@ -708,5 +710,105 @@ pub(crate) async fn system_run_artifact(State(st): State<Arc<AppState>>) -> impl
             produced_by: None,
         },
     };
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// TV-03B: GET /api/v1/system/parity-evidence
+// ---------------------------------------------------------------------------
+
+/// TV-03B: Parity evidence truth surface.
+///
+/// Reads `parity_evidence.json` (schema `parity-v1`) from the artifact
+/// directory configured via `MQK_ARTIFACT_PATH` and surfaces the honest
+/// parity-evidence state for the operator.
+///
+/// Distinct from `/api/v1/system/artifact-intake` (structural acceptance) and
+/// `/api/v1/system/artifact-deployability` (tradability gate): this route
+/// surfaces whether shadow/live parity evidence has been produced and what
+/// trust gaps remain.
+///
+/// Fail-closed: absent, invalid, and unavailable are never conflated with
+/// "present".  `live_trust_complete=false` is surfaced explicitly rather than
+/// hidden.
+pub(crate) async fn system_parity_evidence(State(_st): State<Arc<AppState>>) -> impl IntoResponse {
+    let evaluated_path = std::env::var(ENV_ARTIFACT_PATH)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|p| {
+            // Surface the artifact directory path, not the manifest file path,
+            // so the operator can navigate directly to the evidence directory.
+            std::path::PathBuf::from(p.trim())
+                .parent()
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or_else(|| p.trim().to_string())
+        });
+
+    let outcome = evaluate_parity_evidence_guarded();
+
+    let response = match outcome {
+        ParityEvidenceOutcome::NotConfigured => ParityEvidenceResponse {
+            canonical_route: "/api/v1/system/parity-evidence".to_string(),
+            truth_state: "not_configured".to_string(),
+            artifact_id: None,
+            live_trust_complete: None,
+            evidence_available: None,
+            evidence_note: None,
+            produced_at_utc: None,
+            invalid_reason: None,
+            evaluated_path: None,
+        },
+        ParityEvidenceOutcome::Absent => ParityEvidenceResponse {
+            canonical_route: "/api/v1/system/parity-evidence".to_string(),
+            truth_state: "absent".to_string(),
+            artifact_id: None,
+            live_trust_complete: None,
+            evidence_available: None,
+            evidence_note: None,
+            produced_at_utc: None,
+            invalid_reason: None,
+            evaluated_path: evaluated_path.clone(),
+        },
+        ParityEvidenceOutcome::Invalid { reason } => ParityEvidenceResponse {
+            canonical_route: "/api/v1/system/parity-evidence".to_string(),
+            truth_state: "invalid".to_string(),
+            artifact_id: None,
+            live_trust_complete: None,
+            evidence_available: None,
+            evidence_note: None,
+            produced_at_utc: None,
+            invalid_reason: Some(reason),
+            evaluated_path: evaluated_path.clone(),
+        },
+        ParityEvidenceOutcome::Present {
+            artifact_id,
+            live_trust_complete,
+            evidence_available,
+            evidence_note,
+            produced_at_utc,
+        } => ParityEvidenceResponse {
+            canonical_route: "/api/v1/system/parity-evidence".to_string(),
+            truth_state: "present".to_string(),
+            artifact_id: Some(artifact_id),
+            live_trust_complete: Some(live_trust_complete),
+            evidence_available: Some(evidence_available),
+            evidence_note: Some(evidence_note),
+            produced_at_utc: Some(produced_at_utc),
+            invalid_reason: None,
+            evaluated_path: evaluated_path.clone(),
+        },
+        ParityEvidenceOutcome::Unavailable { reason } => ParityEvidenceResponse {
+            canonical_route: "/api/v1/system/parity-evidence".to_string(),
+            truth_state: "unavailable".to_string(),
+            artifact_id: None,
+            live_trust_complete: None,
+            evidence_available: None,
+            evidence_note: None,
+            produced_at_utc: None,
+            invalid_reason: Some(reason),
+            evaluated_path: evaluated_path.clone(),
+        },
+    };
+
     (StatusCode::OK, Json(response)).into_response()
 }

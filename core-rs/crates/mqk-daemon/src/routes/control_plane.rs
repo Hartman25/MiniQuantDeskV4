@@ -149,17 +149,29 @@ pub(crate) async fn integrity_arm(State(st): State<Arc<AppState>>) -> impl IntoR
         msg: "integrity armed".to_string(),
     });
 
+    // LO-03G: Write durable operator audit event for arm action.
+    // Non-fatal: audit write failure does not block the arm.
+    let arm_audit_uuid =
+        write_operator_audit_event(&st, status.active_run_id, "control.arm", "ARMED")
+            .await
+            .ok()
+            .flatten();
+
     st.discord_notifier
         .notify_operator_action(&OperatorNotifyPayload {
             action_key: "control.arm".to_string(),
             disposition: "applied".to_string(),
             environment: Some(st.deployment_mode().as_api_label().to_string()),
             ts_utc: Utc::now().to_rfc3339(),
-            provenance_ref: if st.db.is_some() {
-                Some("sys_arm_state".to_string())
-            } else {
-                None
-            },
+            provenance_ref: arm_audit_uuid
+                .map(|id| format!("audit_events:{}", id))
+                .or_else(|| {
+                    if st.db.is_some() {
+                        Some("sys_arm_state".to_string())
+                    } else {
+                        None
+                    }
+                }),
             run_id: status.active_run_id.map(|id| id.to_string()),
         })
         .await;
@@ -211,17 +223,29 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
         msg: "integrity DISARMED".to_string(),
     });
 
+    // LO-03G: Write durable operator audit event for disarm action.
+    // Non-fatal: audit write failure does not block the disarm.
+    let disarm_audit_uuid =
+        write_operator_audit_event(&st, status.active_run_id, "control.disarm", "DISARMED")
+            .await
+            .ok()
+            .flatten();
+
     st.discord_notifier
         .notify_operator_action(&OperatorNotifyPayload {
             action_key: "control.disarm".to_string(),
             disposition: "applied".to_string(),
             environment: Some(st.deployment_mode().as_api_label().to_string()),
             ts_utc: Utc::now().to_rfc3339(),
-            provenance_ref: if st.db.is_some() {
-                Some("sys_arm_state".to_string())
-            } else {
-                None
-            },
+            provenance_ref: disarm_audit_uuid
+                .map(|id| format!("audit_events:{}", id))
+                .or_else(|| {
+                    if st.db.is_some() {
+                        Some("sys_arm_state".to_string())
+                    } else {
+                        None
+                    }
+                }),
             run_id: status.active_run_id.map(|id| id.to_string()),
         })
         .await;
@@ -269,6 +293,22 @@ pub(crate) async fn ops_action(
                 level: "INFO".to_string(),
                 msg: "ops/action: integrity armed".to_string(),
             });
+            // LO-03G: Write durable operator audit event for arm action.
+            // Non-fatal: audit write failure does not block the arm.
+            let arm_run_id = st.locally_owned_run_id().await;
+            let arm_audit_uuid =
+                write_operator_audit_event(&st, arm_run_id, "control.arm", "ARMED")
+                    .await
+                    .ok()
+                    .flatten();
+            let mut arm_durable_targets = if st.db.is_some() {
+                vec!["sys_arm_state".to_string()]
+            } else {
+                vec![]
+            };
+            if arm_audit_uuid.is_some() {
+                arm_durable_targets.push("audit_events".to_string());
+            }
             let response = OperatorActionResponse {
                 requested_action: "control.arm".to_string(),
                 accepted: true,
@@ -281,12 +321,8 @@ pub(crate) async fn ops_action(
                 scope: Some("daemon_instance".to_string()),
                 audit: OperatorActionAuditFields {
                     durable_db_write: st.db.is_some(),
-                    durable_targets: if st.db.is_some() {
-                        vec!["sys_arm_state".to_string()]
-                    } else {
-                        vec![]
-                    },
-                    audit_event_id: None,
+                    durable_targets: arm_durable_targets,
+                    audit_event_id: arm_audit_uuid.map(|id| id.to_string()),
                 },
             };
             st.discord_notifier
@@ -295,12 +331,16 @@ pub(crate) async fn ops_action(
                     disposition: "applied".to_string(),
                     environment: response.environment.clone(),
                     ts_utc: Utc::now().to_rfc3339(),
-                    provenance_ref: if st.db.is_some() {
-                        Some("sys_arm_state".to_string())
-                    } else {
-                        None
-                    },
-                    run_id: None,
+                    provenance_ref: arm_audit_uuid
+                        .map(|id| format!("audit_events:{}", id))
+                        .or_else(|| {
+                            if st.db.is_some() {
+                                Some("sys_arm_state".to_string())
+                            } else {
+                                None
+                            }
+                        }),
+                    run_id: arm_run_id.map(|id| id.to_string()),
                 })
                 .await;
             (StatusCode::OK, Json(response)).into_response()
@@ -330,6 +370,22 @@ pub(crate) async fn ops_action(
                 level: "WARN".to_string(),
                 msg: "ops/action: integrity DISARMED".to_string(),
             });
+            // LO-03G: Write durable operator audit event for disarm action.
+            // Non-fatal: audit write failure does not block the disarm.
+            let disarm_run_id = st.locally_owned_run_id().await;
+            let disarm_audit_uuid =
+                write_operator_audit_event(&st, disarm_run_id, "control.disarm", "DISARMED")
+                    .await
+                    .ok()
+                    .flatten();
+            let mut disarm_durable_targets = if st.db.is_some() {
+                vec!["sys_arm_state".to_string()]
+            } else {
+                vec![]
+            };
+            if disarm_audit_uuid.is_some() {
+                disarm_durable_targets.push("audit_events".to_string());
+            }
             let response = OperatorActionResponse {
                 requested_action: "control.disarm".to_string(),
                 accepted: true,
@@ -342,12 +398,8 @@ pub(crate) async fn ops_action(
                 scope: Some("daemon_instance".to_string()),
                 audit: OperatorActionAuditFields {
                     durable_db_write: st.db.is_some(),
-                    durable_targets: if st.db.is_some() {
-                        vec!["sys_arm_state".to_string()]
-                    } else {
-                        vec![]
-                    },
-                    audit_event_id: None,
+                    durable_targets: disarm_durable_targets,
+                    audit_event_id: disarm_audit_uuid.map(|id| id.to_string()),
                 },
             };
             st.discord_notifier
@@ -356,12 +408,16 @@ pub(crate) async fn ops_action(
                     disposition: "applied".to_string(),
                     environment: response.environment.clone(),
                     ts_utc: Utc::now().to_rfc3339(),
-                    provenance_ref: if st.db.is_some() {
-                        Some("sys_arm_state".to_string())
-                    } else {
-                        None
-                    },
-                    run_id: None,
+                    provenance_ref: disarm_audit_uuid
+                        .map(|id| format!("audit_events:{}", id))
+                        .or_else(|| {
+                            if st.db.is_some() {
+                                Some("sys_arm_state".to_string())
+                            } else {
+                                None
+                            }
+                        }),
+                    run_id: disarm_run_id.map(|id| id.to_string()),
                 })
                 .await;
             (StatusCode::OK, Json(response)).into_response()
