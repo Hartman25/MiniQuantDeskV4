@@ -21,6 +21,10 @@
 //! | AU-10 | Alert truth: alerts/active shows cold_start_unproven when WS=ColdStartUnproven |
 //! | AU-11 | Session controller disabled for non-paper-alpaca (Paper+Paper returns None)     |
 //! | AU-12 | Session controller disabled when env vars absent (no MQK_SESSION_START_HH_MM)  |
+//! | AU-13 | try_autonomous_arm: already armed → Ok idempotent (pure, no DB)               |
+//! | AU-14 | try_autonomous_arm: halted → refuses unconditionally (pure, no DB)             |
+//! | AU-15 | try_autonomous_arm: no DB → refuses (pure, no DB)                              |
+//! | AU-16 | try_autonomous_arm: DB=ARMED → advances integrity to armed (DB-backed)         |
 //!
 //! ## What is NOT claimed
 //!
@@ -540,4 +544,141 @@ fn au12_session_controller_disabled_when_env_vars_absent() {
         result2.is_none(),
         "AU-12: empty stop string must return None from parser"
     );
+}
+
+// ---------------------------------------------------------------------------
+// AU-13..AU-16 — AUTON-PAPER-01B: try_autonomous_arm gate proof
+// ---------------------------------------------------------------------------
+
+// AU-13: Already armed → try_autonomous_arm returns Ok without touching DB.
+//
+// In-memory integrity.disarmed=false means the gate returns Ok idempotently.
+// Proves the happy-path second-call is safe.
+#[tokio::test]
+async fn au13_already_armed_returns_ok_idempotent() {
+    let st = make_paper_alpaca();
+
+    // Force in-memory to armed (disarmed=false, halted=false).
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+
+    // No DB attached to `st` — if the gate checked DB it would refuse.
+    // The fact that it returns Ok proves the early-exit path is taken.
+    let result = st.try_autonomous_arm().await;
+    assert!(
+        result.is_ok(),
+        "AU-13: already armed must return Ok idempotently; got: {result:?}"
+    );
+
+    // Integrity must still be armed.
+    let ig = st.integrity.read().await;
+    assert!(!ig.disarmed, "AU-13: integrity.disarmed must remain false after idempotent arm");
+    assert!(!ig.halted, "AU-13: integrity.halted must remain false after idempotent arm");
+}
+
+// AU-14: integrity.halted=true → try_autonomous_arm refuses unconditionally.
+//
+// Operator halt wins even when DB state would allow auto-arm.
+#[tokio::test]
+async fn au14_halted_state_refuses_autonomous_arm() {
+    let st = make_paper_alpaca();
+
+    // Force in-memory to halted.
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = true;
+        ig.halted = true;
+    }
+
+    let result = st.try_autonomous_arm().await;
+    assert!(
+        result.is_err(),
+        "AU-14: halted state must refuse autonomous arm unconditionally"
+    );
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("operator halt"),
+        "AU-14: refusal message must mention operator halt; got: {msg:?}"
+    );
+
+    // Integrity must still be halted — arm must not have mutated it.
+    let ig = st.integrity.read().await;
+    assert!(ig.disarmed, "AU-14: integrity.disarmed must remain true after halt refusal");
+    assert!(ig.halted, "AU-14: integrity.halted must remain true after halt refusal");
+}
+
+// AU-15: No DB configured → try_autonomous_arm refuses.
+//
+// `AppState::new_for_test_with_broker_kind` has no DB pool; auto-arm cannot
+// verify prior session state and must refuse fail-closed.
+#[tokio::test]
+async fn au15_no_db_refuses_autonomous_arm() {
+    let st = make_paper_alpaca();
+    // Default boot state: disarmed=true, halted=false, no DB.
+
+    let result = st.try_autonomous_arm().await;
+    assert!(
+        result.is_err(),
+        "AU-15: no DB must refuse autonomous arm"
+    );
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("no DB"),
+        "AU-15: refusal message must mention missing DB; got: {msg:?}"
+    );
+}
+
+// AU-16 (DB-backed): DB=ARMED → auto-arm advances integrity to armed.
+//
+// Proves the daily-cycle: after a clean stop the DB remains ARMED; on the
+// next daemon boot (in-memory disarmed=true) try_autonomous_arm reads ARMED
+// from DB and restores the armed state without operator intervention.
+//
+// Skips silently when MQK_DATABASE_URL is not configured.
+#[tokio::test]
+async fn au16_db_armed_state_enables_autonomous_arm() {
+    let db_url = match std::env::var("MQK_DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            println!("AU-16: MQK_DATABASE_URL not set — skipping DB-backed arm proof");
+            return;
+        }
+    };
+
+    let db = sqlx::PgPool::connect(&db_url)
+        .await
+        .expect("AU-16: DB connect failed");
+
+    // Seed DB with ARMED state (simulates prior clean stop).
+    mqk_db::persist_arm_state_canonical(&db, mqk_db::ArmState::Armed, None)
+        .await
+        .expect("AU-16: seed persist_arm_state_canonical failed");
+
+    // Build AppState with DB; starts with in-memory disarmed=true (boot default).
+    let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
+        db,
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    ));
+    // Verify we start disarmed (fail-closed boot).
+    {
+        let ig = st.integrity.read().await;
+        assert!(ig.disarmed, "AU-16: must start disarmed at boot");
+        assert!(!ig.halted, "AU-16: must start not-halted at boot");
+    }
+
+    // Attempt autonomous arm — should succeed because DB=ARMED.
+    let result = st.try_autonomous_arm().await;
+    assert!(
+        result.is_ok(),
+        "AU-16: DB=ARMED must allow autonomous arm; got: {result:?}"
+    );
+
+    // In-memory integrity must now be armed.
+    let ig = st.integrity.read().await;
+    assert!(!ig.disarmed, "AU-16: integrity.disarmed must be false after autonomous arm");
+    assert!(!ig.halted, "AU-16: integrity.halted must be false after autonomous arm");
 }

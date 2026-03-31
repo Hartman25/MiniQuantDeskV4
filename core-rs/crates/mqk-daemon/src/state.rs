@@ -1673,6 +1673,97 @@ impl AppState {
         Ok(snapshot)
     }
 
+    /// AUTON-PAPER-01B: Pre-session autonomous arm seam.
+    ///
+    /// Attempts to advance in-memory integrity state from disarmed to armed by
+    /// reading the persisted arm state from the DB.  Called by the autonomous
+    /// session controller immediately before `start_execution_runtime` so the
+    /// daily session can start without a manual operator arm.
+    ///
+    /// # Gate rules (fail-closed ordering)
+    ///
+    /// 1. `integrity.halted == true` → refuse unconditionally (operator halt
+    ///    wins; not reversible by the controller).
+    /// 2. `integrity.disarmed == false` → already armed; return `Ok(())`.
+    /// 3. No DB configured → refuse (cannot verify prior session state).
+    /// 4. No DB row → refuse (first-time install; operator must arm once).
+    /// 5. DB state = `"ARMED"` → auto-arm: set `disarmed=false, halted=false`,
+    ///    re-persist `Armed`, return `Ok(())`.
+    /// 6. DB state = anything else (`"DISARMED"`) → refuse with stored reason.
+    ///
+    /// # Daily-cycle property
+    ///
+    /// `stop_execution_runtime` does NOT write `Disarmed` to the DB, so after a
+    /// clean daily stop the DB remains `ARMED`.  On the next daemon boot the
+    /// in-memory integrity state starts as `disarmed=true` (fail-closed), but
+    /// the DB row carries the prior `ARMED` state → auto-arm succeeds → the
+    /// session controller can start the next day without operator intervention.
+    ///
+    /// Only `halt_execution_runtime` writes `DISARMED` to the DB.  A halted
+    /// daemon therefore requires manual operator arm before the controller can
+    /// restart, which is the correct safety posture.
+    pub async fn try_autonomous_arm(&self) -> Result<(), String> {
+        // Gate 1: operator halt wins unconditionally.
+        // Gate 2: already armed is idempotent success.
+        {
+            let ig = self.integrity.read().await;
+            if ig.halted {
+                return Err(
+                    "operator halt asserted; autonomous arm refused (integrity.halted=true)"
+                        .to_string(),
+                );
+            }
+            if !ig.disarmed {
+                return Ok(());
+            }
+        }
+
+        // Gate 3: DB required to verify prior session state.
+        let db = match self.db.as_ref() {
+            Some(db) => db,
+            None => {
+                return Err(
+                    "no DB configured; autonomous arm requires persisted arm state".to_string(),
+                )
+            }
+        };
+
+        // Gate 4/5/6: load prior arm state from the singleton row.
+        let row = mqk_db::load_arm_state(db)
+            .await
+            .map_err(|err| format!("autonomous arm: load_arm_state failed: {err}"))?;
+
+        match row {
+            None => Err(
+                "no prior arm state in DB; operator must arm manually at least once \
+                 (first-time install or DB was wiped)"
+                    .to_string(),
+            ),
+            Some((ref state_str, _)) if state_str == "ARMED" => {
+                // Prior session ended cleanly (stop does not write DISARMED).
+                // Advance in-memory integrity to armed.
+                {
+                    let mut ig = self.integrity.write().await;
+                    ig.disarmed = false;
+                    ig.halted = false;
+                }
+                // Re-persist Armed so another daemon restart also sees ARMED.
+                mqk_db::persist_arm_state_canonical(db, mqk_db::ArmState::Armed, None)
+                    .await
+                    .map_err(|err| {
+                        format!("autonomous arm: persist_arm_state_canonical failed: {err}")
+                    })?;
+                Ok(())
+            }
+            Some((_, reason)) => {
+                let reason_str = reason.as_deref().unwrap_or("unknown");
+                Err(format!(
+                    "DB arm state is DISARMED (reason={reason_str}); autonomous arm refused"
+                ))
+            }
+        }
+    }
+
     pub async fn stop_for_shutdown(self: &Arc<Self>) {
         if let Some(handle) = self.take_execution_loop_for_shutdown().await {
             let run_id = handle.run_id;

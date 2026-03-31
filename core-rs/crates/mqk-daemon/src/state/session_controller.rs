@@ -264,6 +264,25 @@ async fn attempt_auto_start(
     locally_started: &mut bool,
 ) {
     let env = env_label(state);
+
+    // AUTON-PAPER-01B: Attempt autonomous arm before start.
+    //
+    // Auto-arm succeeds only when DB arm state = ARMED (clean prior stop).
+    // Refuses when: operator halted, no DB, no prior row (first-time install),
+    // or DB state = DISARMED for any reason.
+    //
+    // Logged at info — arm refusal is expected at first install (before the
+    // operator arms manually for the first time) and should not spam Discord.
+    // The start_refused Discord alert below fires when start itself is the
+    // blocker; arm refusal is a quieter pre-start condition.
+    if let Err(reason) = state.try_autonomous_arm().await {
+        info!(
+            reason = %reason,
+            "autonomous_session_controller: autonomous arm not possible on this tick; will retry"
+        );
+        return;
+    }
+
     match state.start_execution_runtime().await {
         Ok(snap) => {
             *locally_started = true;
