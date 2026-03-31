@@ -1093,10 +1093,13 @@ async fn ptday04_e11a_first_gap_refusal_claims_escalation() {
     })
     .await;
 
-    // Before any signal POST: escalation must not be pending.
+    // DIS-01: update_ws_continuity(GapDetected) now claims the escalation at the
+    // WS transport level (early operator notice), not waiting for the first signal
+    // POST.  The flag is therefore already true after calling update_ws_continuity.
     assert!(
-        !st.gap_escalation_is_pending(),
-        "E11a: escalation flag must be false before any signal refusal"
+        st.gap_escalation_is_pending(),
+        "E11a: escalation flag must be true immediately after update_ws_continuity(GapDetected) \
+         (claimed by transport path, DIS-01)"
     );
 
     let (code, body) = post_signal(&st, e10_signal_body("ptday04-e11a-001")).await;
@@ -1113,10 +1116,11 @@ async fn ptday04_e11a_first_gap_refusal_claims_escalation() {
         "E11a: disposition must be continuity_gap; got: {json}"
     );
 
-    // After first refusal: escalation must now be pending (claimed by this POST).
+    // After first signal refusal: flag remains true (already claimed by transport;
+    // signal POST does not re-claim it — dedup holds across both paths).
     assert!(
         st.gap_escalation_is_pending(),
-        "E11a: escalation flag must be true after first GapDetected refusal"
+        "E11a: escalation flag must remain true after signal refusal (dedup — already claimed)"
     );
 }
 

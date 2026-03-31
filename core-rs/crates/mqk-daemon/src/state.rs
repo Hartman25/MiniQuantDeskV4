@@ -8,6 +8,7 @@ mod alpaca_ws_transport;
 mod broker;
 mod env;
 mod loop_runner;
+mod session_controller;
 mod snapshot;
 mod types;
 
@@ -29,6 +30,10 @@ use crate::notify::{CriticalAlertPayload, DiscordNotifier};
 pub use alpaca_ws_transport::{
     build_ws_auth_message, build_ws_subscribe_message, spawn_alpaca_paper_ws_task,
     ws_url_from_base_url,
+};
+pub use session_controller::{
+    spawn_autonomous_session_controller, session_window_from_env, SessionWindow,
+    SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
 };
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};

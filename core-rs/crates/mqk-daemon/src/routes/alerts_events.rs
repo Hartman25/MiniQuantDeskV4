@@ -46,7 +46,7 @@ use sqlx::Row;
 use crate::api_types::{
     ActiveAlertRow, ActiveAlertsResponse, EventFeedRow, EventsFeedResponse, RuntimeErrorResponse,
 };
-use crate::state::{AlpacaWsContinuityState, AppState};
+use crate::state::{AlpacaWsContinuityState, AppState, StrategyMarketDataSource};
 
 use super::helpers::{build_fault_signals, runtime_error_response};
 
@@ -121,6 +121,29 @@ pub(crate) async fn alerts_active(State(st): State<Arc<AppState>>) -> Response {
         }
         // NotApplicable (non-Alpaca) and Live (healthy) produce no additional signal.
         AlpacaWsContinuityState::NotApplicable | AlpacaWsContinuityState::Live { .. } => {}
+    }
+
+    // AUTON-PAPER-01: Day signal limit alert.
+    //
+    // Surface an explicit active alert when the per-run autonomous signal
+    // intake limit has been reached (PT-AUTO-02).  Only on the Paper+Alpaca
+    // ExternalSignalIngestion path.  The alert fires whenever the counter is
+    // saturated: if a run is active, further signals are immediately refused
+    // by Gate 1d; if no run is active, the counter resets at the next run
+    // start.  Both states are worth surfacing to the operator.
+    if st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion
+        && st.day_signal_limit_exceeded()
+    {
+        rows.push(ActiveAlertRow {
+            alert_id: "autonomous.signal_limit.day_limit_reached".to_string(),
+            severity: "warning".to_string(),
+            class: "autonomous.signal_limit.day_limit_reached".to_string(),
+            summary: "Autonomous signal intake day limit reached; further signals are blocked \
+                      until the next run start resets the counter (PT-AUTO-02)."
+                .to_string(),
+            detail: None,
+            source: "daemon.runtime_state".to_string(),
+        });
     }
 
     let alert_count = rows.len();

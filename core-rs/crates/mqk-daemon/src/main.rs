@@ -48,6 +48,11 @@ async fn main() -> anyhow::Result<()> {
     // The handle is kept alive for the lifetime of the daemon.
     let _alpaca_ws_handle = state::spawn_alpaca_paper_ws_task(Arc::clone(&shared));
 
+    // AUTON-PAPER-01: Spawn the autonomous session controller for Paper+Alpaca.
+    // No-op for non-paper-alpaca deployments or when session env vars are absent.
+    let _session_controller_handle =
+        state::spawn_autonomous_session_controller(Arc::clone(&shared));
+
     let app = routes::build_router(Arc::clone(&shared))
         .layer(
             TraceLayer::new_for_http()
