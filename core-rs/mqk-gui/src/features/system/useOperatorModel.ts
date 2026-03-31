@@ -96,6 +96,9 @@ const FALLBACK_MODEL: SystemModel = {
   configDiffs: [],
   operatorTimeline: [],
   actionCatalog: [],
+  executionOutbox: { truth_state: "unavailable", run_id: null, rows: [] },
+  fillQualityTelemetry: { truth_state: "unavailable", rows: [] },
+  paperJournal: { run_id: null, fills_truth_state: "unavailable", fills: [], admissions_truth_state: "unavailable", admissions: [] },
   dataSource: {
     state: "disconnected",
     reachable: false,

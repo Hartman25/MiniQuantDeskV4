@@ -43,6 +43,18 @@ export type ScreenKey =
   | "artifacts"
   | "operatorTimeline";
 
+/**
+ * Which monitor this screen is designed to occupy.
+ *
+ * operator    — control window (monitor 1): decision surfaces, arm/disarm, portfolio, reconcile
+ * execution   — execution window (monitor 2): OMS state, traces, timeline drill-down
+ * diagnostics — oversight window (monitor 3): audit, forensics, incidents, alerts, supervision
+ *
+ * MONITOR_GROUPS exports the ordered placement zones so AppShell and DiagnosticsNav can
+ * derive defaults and nav lists from a single source of truth rather than hardcoded arrays.
+ */
+export type MonitorGroup = "operator" | "execution" | "diagnostics";
+
 export interface ScreenRenderContext {
   model: SystemModel;
   selectTimeline: (internalOrderId: string) => void;
@@ -53,110 +65,143 @@ export interface ScreenRenderContext {
 export interface ScreenDefinition {
   title: string;
   description: string;
+  /** Placement zone for three-monitor expansion. See MonitorGroup. */
+  monitorGroup: MonitorGroup;
   render: (ctx: ScreenRenderContext) => ReactElement;
 }
+
+/**
+ * Ordered placement zones for three-monitor expansion.
+ * diagnostics[0] is the default screen for the oversight (monitor 3) window.
+ * LeftCommandRail primary/secondary split is derived from operator vs diagnostics groups.
+ */
+export const MONITOR_GROUPS: Record<MonitorGroup, readonly ScreenKey[]> = {
+  operator:    ["dashboard", "ops", "portfolio", "reconcile", "strategy", "session", "config", "marketData", "settings"],
+  execution:   ["execution"],
+  diagnostics: ["audit", "incidents", "alerts", "operatorTimeline", "runtime", "metrics", "topology", "transport", "artifacts", "risk"],
+};
 
 export const SCREEN_REGISTRY: Record<ScreenKey, ScreenDefinition> = {
   dashboard: {
     title: "Dashboard",
     description: "Answer in seconds whether the system is alive, safe, and behaving correctly.",
+    monitorGroup: "operator",
     render: ({ model }) => <DashboardScreen model={model} />,
   },
-  metrics: {
-    title: "Metrics",
-    description: "Institution-style time-series dashboards for runtime, execution, fill quality, risk, and reconcile pressure.",
-    render: ({ model }) => <MetricsScreen model={model} />,
-  },
-  topology: {
-    title: "Topology",
-    description: "Dependency map for daemon, runtime, broker, data, reconcile, audit, strategy, and risk.",
-    render: ({ model }) => <TopologyScreen model={model} />,
-  },
-  transport: {
-    title: "Transport",
-    description: "Outbox/inbox transport supervision with claim age, lag, retries, and duplicates.",
-    render: ({ model }) => <TransportScreen model={model} />,
-  },
-  incidents: {
-    title: "Incidents",
-    description: "Case workspace for grouping alerts, orders, reconcile cases, and operator actions.",
-    render: ({ model }) => <IncidentsScreen model={model} />,
-  },
-  alerts: {
-    title: "Alerts",
-    description: "Alert triage board with ack/escalation workflow and incident linkage.",
-    render: ({ model }) => <AlertsScreen model={model} />,
-  },
-  operatorTimeline: {
-    title: "Operator Timeline",
-    description: "Chronological record of alerts, operator actions, restarts, config changes, and incidents.",
-    render: ({ model }) => <OperatorTimelineScreen model={model} />,
-  },
-  session: {
-    title: "Session",
-    description: "Market-state and trading-window visibility for safe operator context.",
-    render: ({ model }) => <SessionScreen model={model} />,
-  },
-  config: {
-    title: "Config",
-    description: "Build, policy, profile, and runtime fingerprint visibility.",
-    render: ({ model }) => <ConfigScreen model={model} />,
-  },
-  runtime: {
-    title: "Runtime",
-    description: "Leadership, restart boundaries, generation state, and recovery checkpoints.",
-    render: ({ model }) => <RuntimeScreen model={model} />,
-  },
-  marketData: {
-    title: "Market Data",
-    description: "Feed freshness, venue disagreement, and strategy-blocking data quality issues.",
-    render: ({ model }) => <MarketDataScreen model={model} />,
-  },
-  execution: {
-    title: "Execution",
-    description: "Primary operational debugging surface for OMS state, traces, replay, and timeline drill-down.",
-    render: ({ model, selectTimeline, timelineLoading }) => (
-      <ExecutionScreen model={model} onSelectTimeline={selectTimeline} timelineLoading={timelineLoading} />
-    ),
-  },
-  risk: {
-    title: "Risk",
-    description: "Make risk posture obvious and hard to ignore.",
-    render: ({ model }) => <RiskScreen model={model} />,
+  ops: {
+    title: "Operator Actions",
+    description: "Explicit action catalog with guarded and emergency controls.",
+    monitorGroup: "operator",
+    render: ({ model, runAction }) => <OpsScreen model={model} onRunAction={runAction} />,
   },
   portfolio: {
     title: "Portfolio",
     description: "Show what the system actually owns, what is working, and what recently changed.",
+    monitorGroup: "operator",
     render: ({ model }) => <PortfolioScreen model={model} />,
   },
   reconcile: {
     title: "Reconcile",
     description: "Prove or disprove that broker truth matches internal truth.",
+    monitorGroup: "operator",
     render: ({ model }) => <ReconcileScreen model={model} />,
   },
   strategy: {
     title: "Strategy",
     description: "Monitor strategy engines without turning the GUI into manual trading software.",
+    monitorGroup: "operator",
     render: ({ model }) => <StrategyScreen model={model} />,
   },
-  audit: {
-    title: "Logs / Audit",
-    description: "Structured event visibility, replay, and operator forensics.",
-    render: ({ model }) => <AuditScreen model={model} />,
+  session: {
+    title: "Session",
+    description: "Market-state and trading-window visibility for safe operator context.",
+    monitorGroup: "operator",
+    render: ({ model }) => <SessionScreen model={model} />,
   },
-  artifacts: {
-    title: "Artifacts",
-    description: "Trace, replay, incident, reconcile, and operator evidence bundles.",
-    render: ({ model }) => <ArtifactsScreen model={model} />,
+  config: {
+    title: "Config",
+    description: "Build, policy, profile, and runtime fingerprint visibility.",
+    monitorGroup: "operator",
+    render: ({ model }) => <ConfigScreen model={model} />,
   },
-  ops: {
-    title: "Operator Actions",
-    description: "Explicit action catalog with guarded and emergency controls.",
-    render: ({ model, runAction }) => <OpsScreen model={model} onRunAction={runAction} />,
+  marketData: {
+    title: "Market Data",
+    description: "Feed freshness, venue disagreement, and strategy-blocking data quality issues.",
+    monitorGroup: "operator",
+    render: ({ model }) => <MarketDataScreen model={model} />,
   },
   settings: {
     title: "Settings / Operations",
     description: "Low-frequency operational metadata and endpoint configuration.",
+    monitorGroup: "operator",
     render: ({ model }) => <SettingsScreen model={model} />,
+  },
+  execution: {
+    title: "Execution",
+    description: "Primary operational debugging surface for OMS state, traces, replay, and timeline drill-down.",
+    monitorGroup: "execution",
+    render: ({ model, selectTimeline, timelineLoading }) => (
+      <ExecutionScreen model={model} onSelectTimeline={selectTimeline} timelineLoading={timelineLoading} />
+    ),
+  },
+  audit: {
+    title: "Logs / Audit",
+    description: "Structured event visibility, replay, and operator forensics.",
+    monitorGroup: "diagnostics",
+    render: ({ model }) => <AuditScreen model={model} />,
+  },
+  incidents: {
+    title: "Incidents",
+    description: "Case workspace for grouping alerts, orders, reconcile cases, and operator actions.",
+    monitorGroup: "diagnostics",
+    render: ({ model }) => <IncidentsScreen model={model} />,
+  },
+  alerts: {
+    title: "Alerts",
+    description: "Alert triage board with ack/escalation workflow and incident linkage.",
+    monitorGroup: "diagnostics",
+    render: ({ model }) => <AlertsScreen model={model} />,
+  },
+  operatorTimeline: {
+    title: "Operator Timeline",
+    description: "Chronological record of alerts, operator actions, restarts, config changes, and incidents.",
+    monitorGroup: "diagnostics",
+    render: ({ model }) => <OperatorTimelineScreen model={model} />,
+  },
+  runtime: {
+    title: "Runtime",
+    description: "Leadership, restart boundaries, generation state, and recovery checkpoints.",
+    monitorGroup: "diagnostics",
+    render: ({ model }) => <RuntimeScreen model={model} />,
+  },
+  metrics: {
+    title: "Metrics",
+    description: "Institution-style time-series dashboards for runtime, execution, fill quality, risk, and reconcile pressure.",
+    monitorGroup: "diagnostics",
+    render: ({ model }) => <MetricsScreen model={model} />,
+  },
+  topology: {
+    title: "Topology",
+    description: "Dependency map for daemon, runtime, broker, data, reconcile, audit, strategy, and risk.",
+    monitorGroup: "diagnostics",
+    render: ({ model }) => <TopologyScreen model={model} />,
+  },
+  transport: {
+    title: "Transport",
+    description: "Outbox/inbox transport supervision with claim age, lag, retries, and duplicates.",
+    monitorGroup: "diagnostics",
+    render: ({ model }) => <TransportScreen model={model} />,
+  },
+  artifacts: {
+    title: "Artifacts",
+    description: "Trace, replay, incident, reconcile, and operator evidence bundles.",
+    monitorGroup: "diagnostics",
+    render: ({ model }) => <ArtifactsScreen model={model} />,
+  },
+  risk: {
+    title: "Risk",
+    description: "Make risk posture obvious and hard to ignore.",
+    monitorGroup: "diagnostics",
+    render: ({ model }) => <RiskScreen model={model} />,
   },
 };

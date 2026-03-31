@@ -21,7 +21,12 @@ import {
 import {
   deriveDataSourceDetail,
   deriveExecutionSummaryFromOrders,
+  mapActiveAlertsResponse,
   mapDaemonCatalog,
+  mapEventsFeedResponse,
+  mapExecutionOutboxWrapper,
+  mapFillQualityWrapper,
+  mapPaperJournalWrapper,
   mapLegacyPortfolioSummary,
   mapLegacyPositionsResponse,
   mapLegacyTradingFillsToRows,
@@ -29,16 +34,21 @@ import {
   mapLegacyTradingOrdersToOpenOrders,
   mapLegacyStatusToSystemStatus,
   nowIso,
+  type ActiveAlertsWrapper,
   type ConfigDiffsWrapper,
   type DaemonActionCatalogResponse,
   type DaemonAuditActionsWrapper,
   type DaemonArtifactsWrapper,
   type DaemonOperatorTimelineWrapper,
+  type EventsFeedWrapper,
+  type ExecutionOutboxWrapper,
+  type FillQualityWrapper,
   type LegacyDaemonStatusSnapshot,
   type LegacyTradingAccountResponse, // exported from legacy.ts
   type LegacyTradingFillsResponse,
   type LegacyTradingOrdersResponse,
   type LegacyTradingPositionsResponse,
+  type PaperJournalWrapper,
   type PortfolioFillsResponse,
   type PortfolioOpenOrdersResponse,
   type PortfolioPositionsResponse,
@@ -216,8 +226,40 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
       return { ok: true, endpoint: r.endpoint, data: r.data as StrategySummaryWrapper };
     })(),
-    fetchJsonCandidates<OperatorAlert[]>(["/api/v1/alerts/active"]),
-    fetchJsonCandidates<FeedEvent[]>(["/api/v1/events/feed"]),
+    // alerts/active: daemon returns ActiveAlertsResponse wrapper (not a bare array).
+    // truth_state is always "active" per spec; fail-closed defensively on any other value.
+    // Map ActiveAlertRow[] → OperatorAlert[] using canonical field names.
+    // Prior to this fix the fetch was typed as OperatorAlert[] (array), so Array.isArray()
+    // on the wrapper object always returned false → silent empty array (fake-healthy state).
+    (async (): Promise<EndpointFetchResult<OperatorAlert[]>> => {
+      const r = await fetchJsonCandidate<ActiveAlertsWrapper>("/api/v1/alerts/active");
+      if (!r.ok || r.data == null) {
+        return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      }
+      const wrapper = r.data as ActiveAlertsWrapper;
+      // Daemon spec: truth_state is always "active". Guard fail-closed anyway.
+      if (wrapper.truth_state !== "active") {
+        return { ok: false, endpoint: r.endpoint, error: "alerts_truth_unavailable" };
+      }
+      return { ok: true, endpoint: r.endpoint, data: mapActiveAlertsResponse(wrapper) };
+    })(),
+    // events/feed: daemon returns EventsFeedResponse wrapper (not a bare array).
+    // truth_state "backend_unavailable" = no DB pool → fail closed (empty feed must not
+    // render as authoritative "no events"). "active" → map EventFeedRow[] → FeedEvent[].
+    // Prior to this fix the fetch was typed as FeedEvent[] → silent empty feed always.
+    (async (): Promise<EndpointFetchResult<FeedEvent[]>> => {
+      const r = await fetchJsonCandidate<EventsFeedWrapper>("/api/v1/events/feed");
+      if (!r.ok || r.data == null) {
+        return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      }
+      const wrapper = r.data as EventsFeedWrapper;
+      if (wrapper.truth_state === "backend_unavailable") {
+        // No DB → empty rows not authoritative; fail closed so BottomEventRail shows
+        // honest unavailable state instead of empty-as-healthy.
+        return { ok: false, endpoint: r.endpoint, error: "feed_backend_unavailable" };
+      }
+      return { ok: true, endpoint: r.endpoint, data: mapEventsFeedResponse(wrapper) };
+    })(),
     // audit/operator-actions: daemon returns {canonical_route, truth_state, backend, rows}.
     // "backend_unavailable" means durable operator-action history is unavailable and
     // must fail closed rather than render as authoritative empty history.
@@ -336,6 +378,15 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     })(),
     // Canonical Action Catalog: daemon-authoritative action availability.
     fetchJsonCandidates<DaemonActionCatalogResponse>(["/api/v1/ops/catalog"]),
+    // GUI-OPS-02: Execution outbox — durable intent timeline for the active run.
+    // truth_state "active" = DB + active run, rows are authoritative.
+    // "no_active_run" / "no_db" = rows empty but not authoritative zero.
+    // Returns structured surface (not plain array) so screens can inspect truth_state.
+    fetchJsonCandidates<ExecutionOutboxWrapper>(["/api/v1/execution/outbox"]),
+    // GUI-OPS-02: Fill quality telemetry for the active run (TV-EXEC-01).
+    fetchJsonCandidates<FillQualityWrapper>(["/api/v1/execution/fill-quality"]),
+    // GUI-OPS-01: Paper journal — fills_lane + admissions_lane with independent truth_states.
+    fetchJsonCandidates<PaperJournalWrapper>(["/api/v1/paper/journal"]),
   ]);
 
   const [
@@ -370,6 +421,9 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     configDiffsR,
     operatorTimelineR,
     actionCatalogR,
+    outboxR,
+    fillQualityR,
+    paperJournalR,
   ] = probes;
 
   const daemonReachable = statusProbe.ok || healthProbe.ok || Boolean(legacyStatusFromProbe) || probes.some((p) => p.ok);
@@ -562,6 +616,13 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     usedMockSections.push("actionCatalog");
   }
   const resolvedActionCatalog: OperatorActionDefinition[] = catalogResult ?? [];
+
+  // GUI-OPS-02: Execution outbox / fill quality surfaces — via extracted mapper functions
+  // (see legacy.ts). Mappers handle truth_state canonicalization and null-safety.
+  const executionOutbox = mapExecutionOutboxWrapper(outboxR.ok && outboxR.data != null ? outboxR.data as ExecutionOutboxWrapper : null);
+  const fillQualityTelemetry = mapFillQualityWrapper(fillQualityR.ok && fillQualityR.data != null ? fillQualityR.data as FillQualityWrapper : null);
+  // GUI-OPS-01: Paper journal surface — dual-lane via extracted mapper.
+  const paperJournal = mapPaperJournalWrapper(paperJournalR.ok && paperJournalR.data != null ? paperJournalR.data as PaperJournalWrapper : null);
 
   const dataSource = deriveDataSourceDetail({
     probeResults: [statusProbe, healthProbe, ...probes],
@@ -758,6 +819,10 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     // Resolved before dataSource so catalog failures reach dataSource.mockSections
     // and degrade the ops panel truth authority correctly.
     actionCatalog: resolvedActionCatalog,
+    // GUI-OPS-02/01: New truthful surfaces.
+    executionOutbox,
+    fillQualityTelemetry,
+    paperJournal,
     dataSource,
     connected,
     lastUpdatedAt: nowIso(),

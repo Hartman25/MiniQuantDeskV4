@@ -71,6 +71,8 @@ export const MOCK_STATUS: SystemStatus = {
   deployment_start_allowed: false,
   daemon_mode: "paper",
   adapter_id: "paper",
+  autonomous_signal_count: null,
+  autonomous_signal_limit_hit: null,
 };
 
 export const MOCK_PREFLIGHT: PreflightStatus = {
@@ -889,6 +891,9 @@ export const MOCK_MODEL: SystemModel = {
   configDiffs: MOCK_CONFIG_DIFFS,
   operatorTimeline: MOCK_OPERATOR_TIMELINE,
   actionCatalog: MOCK_ACTION_CATALOG,
+  executionOutbox: { truth_state: "unavailable" as const, run_id: null, rows: [] },
+  fillQualityTelemetry: { truth_state: "unavailable" as const, rows: [] },
+  paperJournal: { run_id: null, fills_truth_state: "unavailable" as const, fills: [], admissions_truth_state: "unavailable" as const, admissions: [] },
   dataSource: {
     state: "mock",
     reachable: true,

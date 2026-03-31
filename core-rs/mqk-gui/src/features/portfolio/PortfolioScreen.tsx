@@ -3,8 +3,13 @@ import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatMoney } from "../../lib/format";
+import { paperJournalLaneNotice } from "../system/legacy";
 import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
+
+function formatMicros(micros: number): string {
+  return (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 });
+}
 
 export function PortfolioScreen({ model }: { model: SystemModel }) {
   const p = model.portfolioSummary;
@@ -87,6 +92,66 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
             <div><span>Recent fills</span><strong>{model.fills.length}</strong></div>
             <div><span>Mock sections</span><strong>{model.dataSource.mockSections.length}</strong></div>
           </div>
+        </Panel>
+      </div>
+
+      {/* GUI-OPS-01: Paper journal — durable fills + signal admissions evidence surface. */}
+      <div className="desk-panel-grid desk-panel-grid-secondary">
+        <Panel
+          title="Paper journal — fills"
+          subtitle={
+            model.paperJournal.fills_truth_state === "active"
+              ? `Run ${model.paperJournal.run_id ?? "unknown"} — postgres.fill_quality_telemetry`
+              : "Fill evidence (paper journal)"
+          }
+        >
+          {paperJournalLaneNotice(model.paperJournal.fills_truth_state) ? (
+            <div className="unavailable-notice">{paperJournalLaneNotice(model.paperJournal.fills_truth_state)}</div>
+          ) : model.paperJournal.fills.length === 0 ? (
+            <div className="empty-state">No fills recorded yet this run.</div>
+          ) : (
+            <DataTable
+              rows={model.paperJournal.fills}
+              rowKey={(row) => row.telemetry_id}
+              columns={[
+                { key: "symbol", title: "Symbol", render: (row) => row.symbol },
+                { key: "side", title: "Side", render: (row) => row.side },
+                { key: "kind", title: "Kind", render: (row) => row.fill_kind },
+                { key: "qty", title: "Fill/Ordered", render: (row) => `${row.fill_qty}/${row.ordered_qty}` },
+                { key: "price", title: "Fill Price", render: (row) => formatMicros(row.fill_price_micros) },
+                { key: "slippage", title: "Slippage", render: (row) => row.slippage_bps != null ? `${row.slippage_bps} bps` : "—" },
+                { key: "at", title: "Fill Received", render: (row) => formatDateTime(row.fill_received_at_utc) },
+              ]}
+            />
+          )}
+        </Panel>
+
+        <Panel
+          title="Paper journal — signal admissions"
+          subtitle={
+            model.paperJournal.admissions_truth_state === "active"
+              ? "postgres.audit_events[topic=signal_ingestion]"
+              : "Signal admission history (paper journal)"
+          }
+        >
+          {paperJournalLaneNotice(model.paperJournal.admissions_truth_state) ? (
+            <div className="unavailable-notice">{paperJournalLaneNotice(model.paperJournal.admissions_truth_state)}</div>
+          ) : model.paperJournal.admissions.length === 0 ? (
+            <div className="empty-state">No signals admitted yet this run.</div>
+          ) : (
+            <DataTable
+              rows={model.paperJournal.admissions}
+              rowKey={(row) => row.event_id}
+              columns={[
+                { key: "at", title: "At", render: (row) => formatDateTime(row.ts_utc) },
+                { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
+                { key: "symbol", title: "Symbol", render: (row) => row.symbol },
+                { key: "side", title: "Side", render: (row) => row.side },
+                { key: "qty", title: "Qty", render: (row) => String(row.qty) },
+                { key: "signal", title: "Signal ID", render: (row) => row.signal_id },
+              ]}
+            />
+          )}
         </Panel>
       </div>
     </div>

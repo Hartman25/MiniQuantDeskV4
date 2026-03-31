@@ -407,3 +407,68 @@ export interface ExecutionChartModel {
   overlays: ExecutionOverlayEvent[];
   reference_price: number | null;
 }
+
+// ---------------------------------------------------------------------------
+// GUI-OPS-02: Execution outbox surface (durable intent timeline)
+// ---------------------------------------------------------------------------
+
+/** One row from the durable execution outbox for a run. */
+export interface ExecutionOutboxRow {
+  idempotency_key: string;
+  run_id: string;
+  /** Durable status: "PENDING" | "CLAIMED" | "DISPATCHING" | "SENT" | "ACKED" | "FAILED" | "AMBIGUOUS" */
+  status: string;
+  /** Display-friendly lifecycle stage derived from status. */
+  lifecycle_stage: string;
+  symbol: string | null;
+  side: string | null;
+  qty: number | null;
+  order_type: string | null;
+  strategy_id: string | null;
+  /** "external_signal_ingestion" for strategy-driven; null for manual. */
+  signal_source: string | null;
+  created_at_utc: string;
+  claimed_at_utc: string | null;
+  dispatching_at_utc: string | null;
+  sent_at_utc: string | null;
+}
+
+export type ExecutionOutboxTruthState = "active" | "no_active_run" | "no_db" | "unavailable";
+
+/** Wrapper carrying the outbox truth state alongside rows. */
+export interface ExecutionOutboxSurface {
+  truth_state: ExecutionOutboxTruthState;
+  run_id: string | null;
+  rows: ExecutionOutboxRow[];
+}
+
+// ---------------------------------------------------------------------------
+// GUI-OPS-02: Fill quality telemetry surface (TV-EXEC-01)
+// ---------------------------------------------------------------------------
+
+/** One fill quality telemetry row. Prices are in integer micros (divide by 1_000_000 for dollars). */
+export interface FillQualityRow {
+  telemetry_id: string;
+  run_id: string;
+  internal_order_id: string;
+  broker_order_id: string | null;
+  symbol: string;
+  side: string;
+  ordered_qty: number;
+  fill_qty: number;
+  fill_price_micros: number;
+  reference_price_micros: number | null;
+  /** Slippage in basis points. Null when reference price is absent (market orders). */
+  slippage_bps: number | null;
+  fill_kind: string;
+  fill_received_at_utc: string;
+  submit_to_fill_ms: number | null;
+}
+
+export type FillQualityTruthState = "active" | "no_active_run" | "no_db" | "unavailable";
+
+/** Wrapper carrying fill quality truth state alongside rows. */
+export interface FillQualitySurface {
+  truth_state: FillQualityTruthState;
+  rows: FillQualityRow[];
+}

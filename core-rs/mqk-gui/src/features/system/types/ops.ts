@@ -126,6 +126,24 @@ export interface OperatorActionDefinition {
   disabled: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// GUI-OPS-01: Paper journal surface (JOUR-01)
+// ---------------------------------------------------------------------------
+
+/** One durable signal-admission record from the paper journal. */
+export interface PaperJournalAdmissionRow {
+  event_id: string;
+  ts_utc: string;
+  signal_id: string;
+  strategy_id: string;
+  symbol: string;
+  side: string;
+  qty: number;
+  run_id: string;
+}
+
+export type PaperJournalTruthState = "active" | "no_active_run" | "no_db" | "unavailable";
+
 export interface OperatorActionReceipt {
   ok: boolean;
   action_key: string;

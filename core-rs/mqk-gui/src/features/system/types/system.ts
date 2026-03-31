@@ -4,9 +4,9 @@
 // Also owns DEFAULT_STATUS and DEFAULT_PREFLIGHT constants.
 
 import type { DataSourceDetail, ExplicitSurfaceTruth, HealthState, PanelSourceMap, RuntimeStatus, EnvironmentMode } from "./core";
-import type { CausalityTrace, ExecutionChartModel, ExecutionOrderRow, ExecutionReplay, ExecutionSummary, ExecutionTimeline, ExecutionTrace, OmsOverview, ReconcileSummary } from "./execution";
+import type { CausalityTrace, ExecutionChartModel, ExecutionOrderRow, ExecutionOutboxSurface, ExecutionReplay, ExecutionSummary, ExecutionTimeline, ExecutionTrace, FillQualityRow, FillQualitySurface, OmsOverview, ReconcileSummary } from "./execution";
 import type { ArtifactRegistrySummary, ConfigFingerprintSummary, MarketDataQualitySummary, RuntimeLeadershipSummary, ServiceTopology, SessionStateSummary, SystemMetrics, TransportSummary } from "./infra";
-import type { AuditActionRow, AlertTriageRow, FeedEvent, IncidentCase, OperatorActionDefinition, OperatorAlert, OperatorTimelineEvent, ReplaceCancelChainRow } from "./ops";
+import type { AuditActionRow, AlertTriageRow, FeedEvent, IncidentCase, OperatorActionDefinition, OperatorAlert, OperatorTimelineEvent, PaperJournalAdmissionRow, PaperJournalTruthState, ReplaceCancelChainRow } from "./ops";
 import type { FillRow, OpenOrderRow, PortfolioSummary, PositionRow, ReconcileMismatchRow, RiskDenialRow, RiskSummary } from "./portfolio";
 import type { ConfigDiffRow, StrategyRow, StrategySuppressionRow } from "./strategy";
 
@@ -56,6 +56,16 @@ export interface SystemStatus {
   daemon_mode: string;
   /** Broker adapter identifier ("paper" | "alpaca"). */
   adapter_id: string;
+  /**
+   * PT-AUTO-03: Count of signals admitted (Gate 7 Ok(true)) this run.
+   * Null when ExternalSignalIngestion is not configured (not paper+alpaca).
+   */
+  autonomous_signal_count: number | null;
+  /**
+   * PT-AUTO-03: Whether the day signal intake limit has been hit.
+   * Null when not applicable. True means Gate 1d is blocking further signals.
+   */
+  autonomous_signal_limit_hit: boolean | null;
 }
 
 export interface PreflightStatus {
@@ -77,6 +87,20 @@ export interface MetadataSummary {
   api_version: string;
   broker_adapter: string;
   endpoint_status: HealthState;
+}
+
+// ---------------------------------------------------------------------------
+// GUI-OPS-01: Paper journal surface — cross-module composite type.
+// FillQualityRow (execution.ts) + PaperJournalAdmissionRow (ops.ts)
+// are combined here because system.ts is the only module that imports both.
+// ---------------------------------------------------------------------------
+
+export interface PaperJournalSurface {
+  run_id: string | null;
+  fills_truth_state: PaperJournalTruthState;
+  fills: FillQualityRow[];
+  admissions_truth_state: PaperJournalTruthState;
+  admissions: PaperJournalAdmissionRow[];
 }
 
 export interface SystemModel {
@@ -121,6 +145,12 @@ export interface SystemModel {
   configDiffs: ConfigDiffRow[];
   operatorTimeline: OperatorTimelineEvent[];
   actionCatalog: OperatorActionDefinition[];
+  /** GUI-OPS-02: Durable execution outbox — intent timeline for the active run. */
+  executionOutbox: ExecutionOutboxSurface;
+  /** GUI-OPS-02: Fill quality telemetry for the active run. */
+  fillQualityTelemetry: FillQualitySurface;
+  /** GUI-OPS-01: Paper journal — fills and signal admissions for the active run. */
+  paperJournal: PaperJournalSurface;
   dataSource: DataSourceDetail;
   panelSources: PanelSourceMap;
   connected: boolean;
@@ -159,6 +189,9 @@ export const DEFAULT_STATUS: SystemStatus = {
   deployment_start_allowed: false,
   daemon_mode: "paper",
   adapter_id: "paper",
+  // PT-AUTO-03: null = not applicable (not paper+alpaca); populated from daemon response.
+  autonomous_signal_count: null,
+  autonomous_signal_limit_hit: null,
 };
 
 export const DEFAULT_PREFLIGHT: PreflightStatus = {

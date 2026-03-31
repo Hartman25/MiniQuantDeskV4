@@ -5,6 +5,7 @@ import { StatCard } from "../../components/common/StatCard";
 import { TimelineStageStrip } from "../../components/common/TimelineStageStrip";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatDurationMs } from "../../lib/format";
+import { executionOutboxNotice, fillQualityNotice } from "../system/legacy";
 import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 import { CausalityTraceViewer } from "./components/CausalityTraceViewer";
@@ -14,6 +15,10 @@ import { ExecutionTraceViewer } from "./components/ExecutionTraceViewer";
 import { MetricStripChart } from "./components/MetricStripChart";
 import { OmsStateMachineVisualizer } from "./components/OmsStateMachineVisualizer";
 import { ReplaceCancelChainInspector } from "./components/ReplaceCancelChainInspector";
+
+function formatMicros(micros: number): string {
+  return (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 });
+}
 
 export function ExecutionScreen({
   model,
@@ -67,6 +72,40 @@ export function ExecutionScreen({
           tone={model.omsOverview.stuck_orders > 0 ? "bad" : "good"}
         />
       </div>
+
+      {/* GUI-OPS-02: Signal intake truth — paper+alpaca only. null fields = not applicable. */}
+      {model.status.autonomous_signal_count != null && (
+        <div className="summary-grid summary-grid-four">
+          <StatCard
+            title="Signals Admitted"
+            value={String(model.status.autonomous_signal_count)}
+            detail="Signals accepted into outbox this run"
+            tone={model.status.autonomous_signal_limit_hit ? "bad" : "neutral"}
+          />
+          <StatCard
+            title="Day Limit"
+            value={model.status.autonomous_signal_limit_hit ? "Hit" : "Open"}
+            detail="Signal intake gate (Gate 1d)"
+            tone={model.status.autonomous_signal_limit_hit ? "bad" : "good"}
+          />
+          <StatCard
+            title="Outbox Intents"
+            value={model.executionOutbox.truth_state === "active"
+              ? String(model.executionOutbox.rows.length)
+              : "—"}
+            detail="Durable intents this run"
+            tone="neutral"
+          />
+          <StatCard
+            title="Fill Records"
+            value={model.fillQualityTelemetry.truth_state === "active"
+              ? String(model.fillQualityTelemetry.rows.length)
+              : "—"}
+            detail="Fill quality telemetry this run"
+            tone="neutral"
+          />
+        </div>
+      )}
 
       <div className="metrics-grid desk-panel-row">
         {model.metrics.execution.series.map((series) => (
@@ -164,6 +203,69 @@ export function ExecutionScreen({
       </div>
 
       <OmsStateMachineVisualizer overview={model.omsOverview} />
+
+      {/* GUI-OPS-02: Durable execution outbox — operator intent timeline for active run. */}
+      <Panel
+        title="Execution outbox"
+        subtitle={
+          model.executionOutbox.truth_state === "active"
+            ? `Run ${model.executionOutbox.run_id ?? "unknown"} — durable intent history (postgres.oms_outbox)`
+            : "Durable execution intent timeline"
+        }
+      >
+        {executionOutboxNotice(model.executionOutbox) ? (
+          <div className="unavailable-notice">{executionOutboxNotice(model.executionOutbox)}</div>
+        ) : model.executionOutbox.rows.length === 0 ? (
+          <div className="empty-state">No intents enqueued yet this run.</div>
+        ) : (
+          <DataTable
+            rows={model.executionOutbox.rows}
+            rowKey={(row) => row.idempotency_key}
+            columns={[
+              { key: "stage", title: "Stage", render: (row) => row.lifecycle_stage },
+              { key: "symbol", title: "Symbol", render: (row) => row.symbol ?? "—" },
+              { key: "side", title: "Side", render: (row) => row.side ?? "—" },
+              { key: "qty", title: "Qty", render: (row) => row.qty != null ? String(row.qty) : "—" },
+              { key: "type", title: "Type", render: (row) => row.order_type ?? "—" },
+              { key: "strategy", title: "Strategy", render: (row) => row.strategy_id ?? "—" },
+              { key: "source", title: "Source", render: (row) => row.signal_source ?? "manual" },
+              { key: "created", title: "Created", render: (row) => formatDateTime(row.created_at_utc) },
+              { key: "sent", title: "Sent", render: (row) => formatDateTime(row.sent_at_utc) },
+            ]}
+          />
+        )}
+      </Panel>
+
+      {/* GUI-OPS-02: Fill quality telemetry — execution quality surface for active run. */}
+      <Panel
+        title="Fill quality telemetry"
+        subtitle={
+          model.fillQualityTelemetry.truth_state === "active"
+            ? "Durable fill evidence (postgres.fill_quality_telemetry)"
+            : "Fill quality diagnostics"
+        }
+      >
+        {fillQualityNotice(model.fillQualityTelemetry) ? (
+          <div className="unavailable-notice">{fillQualityNotice(model.fillQualityTelemetry)}</div>
+        ) : model.fillQualityTelemetry.rows.length === 0 ? (
+          <div className="empty-state">No fills recorded yet this run.</div>
+        ) : (
+          <DataTable
+            rows={model.fillQualityTelemetry.rows}
+            rowKey={(row) => row.telemetry_id}
+            columns={[
+              { key: "symbol", title: "Symbol", render: (row) => row.symbol },
+              { key: "side", title: "Side", render: (row) => row.side },
+              { key: "kind", title: "Kind", render: (row) => row.fill_kind },
+              { key: "qty", title: "Fill Qty", render: (row) => `${row.fill_qty}/${row.ordered_qty}` },
+              { key: "price", title: "Fill Price", render: (row) => formatMicros(row.fill_price_micros) },
+              { key: "slippage", title: "Slippage", render: (row) => row.slippage_bps != null ? `${row.slippage_bps} bps` : "—" },
+              { key: "latency", title: "Submit→Fill", render: (row) => formatDurationMs(row.submit_to_fill_ms) },
+              { key: "at", title: "Fill Received", render: (row) => formatDateTime(row.fill_received_at_utc) },
+            ]}
+          />
+        )}
+      </Panel>
 
       <Panel title="Lifecycle stage strip" compact>
         {timeline ? (

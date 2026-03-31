@@ -2,8 +2,14 @@ import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
+import { formatDateTime } from "../../lib/format";
 import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
+
+// The events feed is fail-closed: when backend_unavailable, api.ts places
+// /api/v1/events/feed in missingEndpoints and model.feed === [].
+// We check missingEndpoints to distinguish "genuinely empty" from "backend down".
+const FEED_ENDPOINT = "/api/v1/events/feed" as const;
 
 export function AlertsScreen({ model }: { model: SystemModel }) {
   const critical = model.alerts.filter((a) => a.severity === "critical").length;
@@ -52,6 +58,38 @@ export function AlertsScreen({ model }: { model: SystemModel }) {
             { key: "assigned", title: "Assigned", render: (row) => row.assigned_to ?? "—" },
           ]}
         />
+      </Panel>
+
+      {/* GUI-OPS-03: Events feed panel — explicit truth notice when backend unavailable.
+          feed is fail-closed: api.ts places endpoint in missingEndpoints on backend_unavailable,
+          so model.feed === [] even when daemon has recorded events. Operator must see this
+          distinction rather than "no events" appearing authoritative. */}
+      <Panel
+        title="System events feed"
+        subtitle={
+          model.dataSource.missingEndpoints.includes(FEED_ENDPOINT)
+            ? "backend_unavailable — event history not accessible"
+            : `postgres.runs + postgres.audit_events (${model.feed.length} events)`
+        }
+      >
+        {model.dataSource.missingEndpoints.includes(FEED_ENDPOINT) ? (
+          <div className="unavailable-notice">
+            Events feed backend unavailable. Empty feed is NOT authoritative — do not read as "no events".
+          </div>
+        ) : model.feed.length === 0 ? (
+          <div className="empty-state">No system events recorded yet.</div>
+        ) : (
+          <DataTable
+            rows={model.feed}
+            rowKey={(row) => row.id}
+            columns={[
+              { key: "at", title: "At", render: (row) => formatDateTime(row.at) },
+              { key: "source", title: "Source", render: (row) => row.source },
+              { key: "severity", title: "Severity", render: (row) => row.severity },
+              { key: "text", title: "Event", render: (row) => row.text },
+            ]}
+          />
+        )}
       </Panel>
     </div>
   );

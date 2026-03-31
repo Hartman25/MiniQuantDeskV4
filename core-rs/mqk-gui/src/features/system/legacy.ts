@@ -15,14 +15,21 @@ import type {
   ConfigDiffRow,
   DataSourceDetail,
   ExecutionOrderRow,
+  ExecutionOutboxSurface,
   ExecutionSummary,
+  FeedEvent,
+  FillQualitySurface,
   FillRow,
   OpenOrderRow,
   OperatorActionDefinition,
+  OperatorAlert,
+  PaperJournalSurface,
+  PaperJournalTruthState,
   PortfolioSummary,
   PositionRow,
   ReconcileMismatchRow,
   RiskDenialRow,
+  Severity,
   StrategyRow,
   StrategySuppressionRow,
   SystemStatus,
@@ -359,6 +366,8 @@ export function mapLegacyStatusToSystemStatus(legacy: LegacyDaemonStatusSnapshot
     deployment_start_allowed: false,
     daemon_mode: "paper",
     adapter_id: "paper",
+    autonomous_signal_count: null,
+    autonomous_signal_limit_hit: null,
   };
 }
 
@@ -573,4 +582,249 @@ export function deriveDataSourceDetail(args: {
             ? "Mixed resolved and unresolved backend truth across panels."
             : "All tracked surfaces resolved from daemon endpoints.",
   };
+}
+
+// ---------------------------------------------------------------------------
+// GUI-OPS-01/02/03: Canonical daemon response wrapper types + mappers
+// ---------------------------------------------------------------------------
+
+// Active alerts response wrapper (CC-06).
+// truth_state is always "active" — computed from live in-memory daemon state.
+// Rows are ActiveAlertRow objects, not OperatorAlert directly.
+export interface ActiveAlertsWrapper {
+  canonical_route: string;
+  truth_state: string;
+  backend: string;
+  alert_count: number;
+  rows: Array<{
+    alert_id: string;
+    severity: string;
+    class: string;
+    summary: string;
+    detail: string | null;
+    source: string;
+  }>;
+}
+
+// Events feed response wrapper (CC-06).
+// truth_state: "active" (DB present) | "backend_unavailable" (no DB pool).
+export interface EventsFeedWrapper {
+  canonical_route: string;
+  truth_state: string;
+  backend: string;
+  rows: Array<{
+    event_id: string;
+    ts_utc: string;
+    kind: string;
+    detail: string;
+    run_id: string | null;
+  }>;
+}
+
+// Execution outbox response wrapper (OPS-08 / EXEC-06).
+// truth_state: "active" | "no_active_run" | "no_db"
+export interface ExecutionOutboxWrapper {
+  canonical_route: string;
+  truth_state: string;
+  backend: string;
+  run_id: string | null;
+  rows: Array<{
+    idempotency_key: string;
+    run_id: string;
+    status: string;
+    lifecycle_stage: string;
+    symbol: string | null;
+    side: string | null;
+    qty: number | null;
+    order_type: string | null;
+    strategy_id: string | null;
+    signal_source: string | null;
+    created_at_utc: string;
+    claimed_at_utc: string | null;
+    dispatching_at_utc: string | null;
+    sent_at_utc: string | null;
+  }>;
+}
+
+// Fill quality telemetry response wrapper (TV-EXEC-01).
+// truth_state: "active" | "no_active_run" | "no_db"
+export interface FillQualityWrapper {
+  canonical_route: string;
+  truth_state: string;
+  backend: string;
+  rows: Array<{
+    telemetry_id: string;
+    run_id: string;
+    internal_order_id: string;
+    broker_order_id: string | null;
+    symbol: string;
+    side: string;
+    ordered_qty: number;
+    fill_qty: number;
+    fill_price_micros: number;
+    reference_price_micros: number | null;
+    slippage_bps: number | null;
+    fill_kind: string;
+    fill_received_at_utc: string;
+    submit_to_fill_ms: number | null;
+  }>;
+}
+
+// Paper journal response wrapper (JOUR-01).
+// Each lane has its own independent truth_state.
+export interface PaperJournalWrapper {
+  canonical_route: string;
+  run_id: string | null;
+  fills_lane: {
+    truth_state: string;
+    backend: string;
+    rows: FillQualityWrapper["rows"];
+  };
+  admissions_lane: {
+    truth_state: string;
+    backend: string;
+    rows: Array<{
+      event_id: string;
+      ts_utc: string;
+      signal_id: string;
+      strategy_id: string;
+      symbol: string;
+      side: string;
+      qty: number;
+      run_id: string;
+    }>;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// GUI-OPS-03: Active alerts → OperatorAlert mapper
+// Exported for testability.
+// ---------------------------------------------------------------------------
+
+function deriveAlertDomain(faultClass: string): OperatorAlert["domain"] {
+  const prefix = faultClass.split(".")[0] ?? "";
+  switch (prefix) {
+    case "risk": return "risk";
+    case "reconcile": return "reconcile";
+    case "execution": return "execution";
+    case "integrity": return "integrity";
+    case "portfolio": return "portfolio";
+    case "strategy": return "strategy";
+    case "oms": return "oms";
+    case "audit": return "audit";
+    case "metrics": return "metrics";
+    default: return "system";
+  }
+}
+
+export function mapActiveAlertsResponse(wrapper: ActiveAlertsWrapper): OperatorAlert[] {
+  return (wrapper.rows ?? []).map((row) => ({
+    id: row.alert_id,
+    severity: row.severity as Severity,
+    title: row.summary,
+    message: row.detail ?? row.summary,
+    domain: deriveAlertDomain(row.class),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// GUI-OPS-01: Events feed → FeedEvent mapper
+// Exported for testability.
+// ---------------------------------------------------------------------------
+
+export function mapEventsFeedResponse(wrapper: EventsFeedWrapper): FeedEvent[] {
+  return (wrapper.rows ?? []).map((row) => ({
+    id: row.event_id,
+    at: row.ts_utc,
+    severity: "info" as const,
+    source: row.kind,
+    text: row.detail,
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// GUI-OPS-02: Execution outbox wrapper → ExecutionOutboxSurface
+// Extracted from api.ts IIFE so the mapping + truth canonicalization can be
+// tested in isolation without React or the full model assembly.
+// ---------------------------------------------------------------------------
+
+const OUTBOX_VALID_STATES: ExecutionOutboxSurface["truth_state"][] = ["active", "no_active_run", "no_db"];
+
+export function mapExecutionOutboxWrapper(wrapper: ExecutionOutboxWrapper | null | undefined): ExecutionOutboxSurface {
+  if (wrapper == null) return { truth_state: "unavailable", run_id: null, rows: [] };
+  const ts = OUTBOX_VALID_STATES.includes(wrapper.truth_state as ExecutionOutboxSurface["truth_state"])
+    ? (wrapper.truth_state as ExecutionOutboxSurface["truth_state"])
+    : "unavailable";
+  return { truth_state: ts, run_id: wrapper.run_id ?? null, rows: wrapper.rows ?? [] };
+}
+
+// Returns a non-null notice string for every non-"active" state.
+// Exported so screens can render honest lane notices and tests can prove fail-closed rendering.
+export function executionOutboxNotice(surface: ExecutionOutboxSurface): string | null {
+  switch (surface.truth_state) {
+    case "active": return null;
+    case "no_active_run": return "No active run — outbox history is unavailable until execution starts.";
+    case "no_db": return "Outbox unavailable: no database pool configured. Do not treat empty rows as authoritative.";
+    case "unavailable": return "Outbox endpoint unavailable. Do not treat empty rows as authoritative.";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GUI-OPS-02: Fill quality telemetry wrapper → FillQualitySurface
+// ---------------------------------------------------------------------------
+
+const FQ_VALID_STATES: FillQualitySurface["truth_state"][] = ["active", "no_active_run", "no_db"];
+
+export function mapFillQualityWrapper(wrapper: FillQualityWrapper | null | undefined): FillQualitySurface {
+  if (wrapper == null) return { truth_state: "unavailable", rows: [] };
+  const ts = FQ_VALID_STATES.includes(wrapper.truth_state as FillQualitySurface["truth_state"])
+    ? (wrapper.truth_state as FillQualitySurface["truth_state"])
+    : "unavailable";
+  return { truth_state: ts, rows: wrapper.rows ?? [] };
+}
+
+export function fillQualityNotice(surface: FillQualitySurface): string | null {
+  switch (surface.truth_state) {
+    case "active": return null;
+    case "no_active_run": return "No active run — fill quality telemetry unavailable until execution starts.";
+    case "no_db": return "Fill quality unavailable: no database pool configured.";
+    case "unavailable": return "Fill quality endpoint unavailable.";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GUI-OPS-01: Paper journal wrapper → PaperJournalSurface
+// Dual-lane: fills_lane and admissions_lane each carry an independent truth_state.
+// ---------------------------------------------------------------------------
+
+const PJ_VALID_STATES: PaperJournalSurface["fills_truth_state"][] = ["active", "no_active_run", "no_db"];
+
+export function mapPaperJournalWrapper(wrapper: PaperJournalWrapper | null | undefined): PaperJournalSurface {
+  if (wrapper == null) {
+    return { run_id: null, fills_truth_state: "unavailable", fills: [], admissions_truth_state: "unavailable", admissions: [] };
+  }
+  const fts = PJ_VALID_STATES.includes(wrapper.fills_lane.truth_state as PaperJournalSurface["fills_truth_state"])
+    ? (wrapper.fills_lane.truth_state as PaperJournalSurface["fills_truth_state"])
+    : "unavailable";
+  const ats = PJ_VALID_STATES.includes(wrapper.admissions_lane.truth_state as PaperJournalSurface["admissions_truth_state"])
+    ? (wrapper.admissions_lane.truth_state as PaperJournalSurface["admissions_truth_state"])
+    : "unavailable";
+  return {
+    run_id: wrapper.run_id ?? null,
+    fills_truth_state: fts,
+    fills: wrapper.fills_lane.rows ?? [],
+    admissions_truth_state: ats,
+    admissions: wrapper.admissions_lane.rows ?? [],
+  };
+}
+
+// Used by PortfolioScreen to render honest per-lane notices.
+// Exported here so tests can prove fail-closed behaviour without importing the .tsx screen.
+export function paperJournalLaneNotice(truthState: PaperJournalTruthState): string | null {
+  switch (truthState) {
+    case "active": return null;
+    case "no_active_run": return "No active run — data unavailable until execution starts.";
+    case "no_db": return "Unavailable: no database pool configured. Do not treat empty rows as authoritative.";
+    case "unavailable": return "Endpoint unavailable.";
+  }
 }
