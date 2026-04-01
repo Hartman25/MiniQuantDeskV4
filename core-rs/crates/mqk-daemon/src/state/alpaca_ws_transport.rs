@@ -77,7 +77,7 @@ use mqk_runtime::alpaca_inbound::{
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use super::types::{AlpacaWsContinuityState, BrokerKind, DeploymentMode};
+use super::types::{AlpacaWsContinuityState, AutonomousRecoveryResumeSource, AutonomousSessionTruth, BrokerKind, DeploymentMode};
 use super::AppState;
 
 const DEFAULT_PAPER_BASE_URL: &str = "https://paper-api.alpaca.markets";
@@ -122,6 +122,18 @@ pub fn ws_url_from_base_url(base_url: &str) -> String {
         trimmed.to_string()
     };
     format!("{ws_base}/stream")
+}
+
+fn recovery_resume_source_from_cursor(cursor: &AlpacaFetchCursor) -> AutonomousRecoveryResumeSource {
+    match &cursor.trade_updates {
+        mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::ColdStartUnproven => {
+            AutonomousRecoveryResumeSource::ColdStart
+        }
+        mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::GapDetected { .. }
+        | mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::Live { .. } => {
+            AutonomousRecoveryResumeSource::PersistedCursor
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -307,50 +319,83 @@ async fn alpaca_ws_session(
             "alpaca_ws: subscription to trade_updates not confirmed by server"
         ));
     }
-    tracing::info!("alpaca_ws: subscribed to trade_updates; marking continuity Live");
-
-    // Subscription confirmed — the WS lane is live.
-    // No trade events have arrived yet; last_message_id / last_event_at are empty
-    // (correct: no orders in flight before the first run starts).
-    state
-        .update_ws_continuity(AlpacaWsContinuityState::Live {
-            last_message_id: String::new(),
-            last_event_at: String::new(),
-        })
-        .await;
+    tracing::info!("alpaca_ws: subscribed to trade_updates; evaluating continuity repair");
 
     // BRK-07R: Seed in-session cursor from last persisted position.
     // This anchors gap-detection to the prior session's last known WS event.
     // Does NOT recover missed events (WS does not replay the gap window).
     let prev_cursor = load_session_cursor_from_db(state).await;
+    let resume_source = recovery_resume_source_from_cursor(&prev_cursor);
+
+    if matches!(resume_source, AutonomousRecoveryResumeSource::PersistedCursor) {
+        state
+            .set_autonomous_session_truth(AutonomousSessionTruth::RecoveryRetrying {
+                resume_source: resume_source.clone(),
+                detail: "WS transport re-established after restart/disconnect; repairing continuity from the persisted broker cursor before autonomous paper start/resume is allowed".to_string(),
+            })
+            .await;
+    }
 
     // BRK-08R: If the persisted cursor was GapDetected or ColdStartUnproven,
-    // repair it to Live now that subscription is confirmed.  `rest_activity_after`
+    // repair it to Live now that subscription is confirmed. `rest_activity_after`
     // is preserved so the next orchestrator tick's REST poll resumes from the
     // last known fill position and recovers FILL/PARTIAL_FILL events from the
-    // gap window.  Live cursors are returned unchanged.
+    // gap window. Live cursors are returned unchanged.
     let mut current_cursor = if let Some(pool) = state.db.as_ref() {
         match advance_cursor_after_ws_establish(pool, state.adapter_id(), &prev_cursor, Utc::now())
             .await
         {
             Ok(repaired) => {
+                let restored_continuity = AlpacaWsContinuityState::from_fetch_cursor(&repaired);
+                state.update_ws_continuity(restored_continuity).await;
+                state
+                    .set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
+                        resume_source: resume_source.clone(),
+                        detail: match resume_source {
+                            AutonomousRecoveryResumeSource::PersistedCursor => "WS continuity restored from persisted broker cursor; REST catch-up remains anchored to the preserved cursor position".to_string(),
+                            AutonomousRecoveryResumeSource::ColdStart => "WS continuity established from a cold start; autonomous paper start may proceed once the remaining gates pass".to_string(),
+                        },
+                    })
+                    .await;
                 tracing::info!(
-                    "alpaca_ws: repaired cursor to Live after WS re-establish; \
-                     REST poll will recover gap-window fills (BRK-08R)"
+                    "alpaca_ws: repaired cursor to Live after WS re-establish;                      REST poll will recover gap-window fills (BRK-08R)"
                 );
                 repaired
             }
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "alpaca_ws: cursor repair failed; using prev cursor as-is (BRK-08R)"
-                );
-                prev_cursor
+                let detail = format!("alpaca_ws: cursor repair failed after subscribe confirmation: {e}");
+                state
+                    .set_autonomous_session_truth(AutonomousSessionTruth::RecoveryFailed {
+                        resume_source: resume_source.clone(),
+                        detail: detail.clone(),
+                    })
+                    .await;
+                state
+                    .update_ws_continuity(AlpacaWsContinuityState::GapDetected {
+                        last_message_id: None,
+                        last_event_at: None,
+                        detail: detail.clone(),
+                    })
+                    .await;
+                return Err(anyhow::anyhow!(detail));
             }
         }
     } else {
+        state
+            .update_ws_continuity(AlpacaWsContinuityState::Live {
+                last_message_id: String::new(),
+                last_event_at: String::new(),
+            })
+            .await;
+        state
+            .set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
+                resume_source: resume_source.clone(),
+                detail: "WS continuity established from a cold start; autonomous paper start may proceed once the remaining gates pass".to_string(),
+            })
+            .await;
         prev_cursor
     };
+
 
     // ---------------------------------------------------------------------------
     // Receive loop
@@ -490,7 +535,7 @@ mod tests {
     //! No network access required; all tests run fully in-process.
 
     use super::{alpaca_ws_loop, alpaca_ws_session};
-    use crate::state::{types::AlpacaWsContinuityState, AppState, BrokerKind, DeploymentMode};
+    use crate::state::{types::AlpacaWsContinuityState, AppState, AutonomousRecoveryResumeSource, AutonomousSessionTruth, BrokerKind, DeploymentMode};
     use futures_util::{SinkExt, StreamExt};
     use std::sync::Arc;
     use std::time::Duration;
@@ -560,6 +605,20 @@ mod tests {
             DeploymentMode::Paper,
             BrokerKind::Alpaca,
         ))
+    }
+
+    async fn db_pool_or_skip() -> Option<sqlx::PgPool> {
+        let url = match std::env::var("MQK_DATABASE_URL") {
+            Ok(v) => v,
+            Err(_) => return None,
+        };
+        Some(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&url)
+                .await
+                .expect("BRK00R05B DB test: failed to connect to MQK_DATABASE_URL"),
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -717,4 +776,89 @@ mod tests {
 
         task.abort();
     }
+
+
+    // -----------------------------------------------------------------------
+    // BRK00R05B-S5 — DB-backed restart repair restores continuity from persisted cursor
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn brk00r05b_s5_db_backed_restart_repair_sets_recovery_truth() {
+        let Some(pool) = db_pool_or_skip().await else {
+            eprintln!("S5: skipped (MQK_DATABASE_URL not set)");
+            return;
+        };
+        mqk_db::migrate(&pool).await.expect("S5: migration failed");
+        let adapter_id = "brk00r05b-s5-test";
+
+        let gap_cursor = AlpacaFetchCursor::gap_detected(
+            Some("rest-s5-anchor".to_string()),
+            Some("alpaca:order-s5:filled:2026-01-07T00:00:00Z".to_string()),
+            Some("2026-01-07T00:00:00Z".to_string()),
+            "s5 persisted gap",
+        );
+        let cursor_json = serde_json::to_string(&gap_cursor).expect("S5: serialize cursor");
+        mqk_db::advance_broker_cursor(&pool, adapter_id, &cursor_json, chrono::Utc::now())
+            .await
+            .expect("S5: persist gap cursor");
+
+        let url = start_mock_ws_server(|mut ws| async move {
+            ws.send(Message::Text(frame_connected())).await.unwrap();
+            let _ = ws.next().await;
+            ws.send(Message::Text(frame_authorized())).await.unwrap();
+            let _ = ws.next().await;
+            ws.send(Message::Text(frame_listening())).await.unwrap();
+            ws.send(Message::Close(None)).await.ok();
+        })
+        .await;
+
+        let mut state_inner = AppState::new_for_test_with_db_mode_and_broker(
+            pool,
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        );
+        state_inner.set_adapter_id_for_test(adapter_id);
+        let state = Arc::new(state_inner);
+
+        let result = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
+        assert!(result.is_ok(), "S5: session must succeed; got: {result:?}");
+
+        let cont = state.alpaca_ws_continuity().await;
+        assert!(
+            matches!(cont, AlpacaWsContinuityState::Live { .. }),
+            "S5: continuity must be Live after restart repair; got: {cont:?}"
+        );
+        let truth = state.autonomous_session_truth().await;
+        assert!(
+            matches!(
+                truth,
+                AutonomousSessionTruth::RecoverySucceeded {
+                    resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+                    ..
+                }
+            ),
+            "S5: recovery truth must record persisted-cursor success; got: {truth:?}"
+        );
+
+        let stored_json = mqk_db::load_broker_cursor(state.db.as_ref().unwrap(), adapter_id)
+            .await
+            .expect("S5: load cursor")
+            .expect("S5: stored cursor must exist");
+        let stored: AlpacaFetchCursor =
+            serde_json::from_str(&stored_json).expect("S5: parse stored cursor");
+        assert!(
+            matches!(
+                stored.trade_updates,
+                mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::Live { .. }
+            ),
+            "S5: stored cursor must be Live after repair; got: {:?}",
+            stored.trade_updates
+        );
+        assert_eq!(
+            stored.rest_activity_after.as_deref(),
+            Some("rest-s5-anchor"),
+            "S5: rest_activity_after must remain anchored for REST catch-up"
+        );
+    }
+
 }

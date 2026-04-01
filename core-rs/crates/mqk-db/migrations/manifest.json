@@ -200,6 +200,12 @@
       "path": "0031_restart_intent.sql",
       "status": "applied",
       "intent": "Add sys_restart_intent multi-row log table for durable restart intent / restart provenance (CC-03B): mode transition verdict, initiated_by, lifecycle status, caller-injected timestamps."
+    },
+    {
+      "id": "0032",
+      "path": "0032_autonomous_session_events.sql",
+      "status": "applied",
+      "intent": "Add sys_autonomous_session_events table for durable autonomous paper supervisor history/evidence (AUTON-PAPER-02): restart-safe recovery attempts/results, refusals, stop outcomes, and operator-reviewable soak evidence."
     }
   ]
 }

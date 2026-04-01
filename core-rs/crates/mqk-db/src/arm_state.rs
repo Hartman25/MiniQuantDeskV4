@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Arm state persistence — Patch L7
@@ -241,6 +242,79 @@ pub async fn load_recent_risk_denial_events(
             requested_qty: r.try_get("requested_qty")?,
             limit_qty: r.try_get("limit_qty")?,
             severity: r.try_get("severity")?,
+        });
+    }
+    Ok(out)
+}
+
+
+// ---------------------------------------------------------------------------
+// AUTON-PAPER-02: Durable autonomous-session supervisor history
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct AutonomousSessionEventRow {
+    pub id: String,
+    pub ts_utc: DateTime<Utc>,
+    pub event_type: String,
+    pub resume_source: Option<String>,
+    pub detail: String,
+    pub run_id: Option<Uuid>,
+    pub source: String,
+}
+
+pub async fn persist_autonomous_session_event(
+    pool: &PgPool,
+    row: &AutonomousSessionEventRow,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into sys_autonomous_session_events
+            (id, ts_utc, event_type, resume_source, detail, run_id, source)
+        values ($1, $2, $3, $4, $5, $6, $7)
+        on conflict (id) do nothing
+        "#,
+    )
+    .bind(&row.id)
+    .bind(row.ts_utc)
+    .bind(&row.event_type)
+    .bind(&row.resume_source)
+    .bind(&row.detail)
+    .bind(row.run_id)
+    .bind(&row.source)
+    .execute(pool)
+    .await
+    .context("persist_autonomous_session_event failed")?;
+    Ok(())
+}
+
+pub async fn load_recent_autonomous_session_events(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<AutonomousSessionEventRow>> {
+    let rows = sqlx::query(
+        r#"
+        select id, ts_utc, event_type, resume_source, detail, run_id, source
+        from sys_autonomous_session_events
+        order by ts_utc desc
+        limit $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("load_recent_autonomous_session_events failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(AutonomousSessionEventRow {
+            id: r.try_get("id")?,
+            ts_utc: r.try_get("ts_utc")?,
+            event_type: r.try_get("event_type")?,
+            resume_source: r.try_get("resume_source")?,
+            detail: r.try_get("detail")?,
+            run_id: r.try_get("run_id")?,
+            source: r.try_get("source")?,
         });
     }
     Ok(out)

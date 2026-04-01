@@ -395,6 +395,51 @@ pub enum AlpacaWsContinuityState {
     },
 }
 
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum AutonomousRecoveryResumeSource {
+    ColdStart,
+    PersistedCursor,
+}
+
+impl AutonomousRecoveryResumeSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ColdStart => "cold_start",
+            Self::PersistedCursor => "persisted_cursor",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum AutonomousSessionTruth {
+    Clear,
+    StartRefused {
+        detail: String,
+    },
+    RecoveryRetrying {
+        resume_source: AutonomousRecoveryResumeSource,
+        detail: String,
+    },
+    RecoverySucceeded {
+        resume_source: AutonomousRecoveryResumeSource,
+        detail: String,
+    },
+    RecoveryFailed {
+        resume_source: AutonomousRecoveryResumeSource,
+        detail: String,
+    },
+    RunEndedUnexpectedly {
+        detail: String,
+    },
+    StopFailed {
+        detail: String,
+    },
+    StoppedAtBoundary {
+        detail: String,
+    },
+}
+
 impl AlpacaWsContinuityState {
     /// Canonical lowercase status string for API responses and logging.
     pub fn as_status_str(&self) -> &'static str {

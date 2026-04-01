@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use mqk_broker_alpaca::types::AlpacaFetchCursor;
 use mqk_execution::{wiring::build_gateway, BrokerError, BrokerOrderMap};
 use mqk_integrity::{CalendarSpec, IntegrityState};
 use sqlx::PgPool;
@@ -32,8 +33,10 @@ pub use alpaca_ws_transport::{
     ws_url_from_base_url,
 };
 pub use session_controller::{
-    spawn_autonomous_session_controller, session_window_from_env, SessionWindow,
-    SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
+    autonomous_session_schedule_from_env, run_session_controller_tick,
+    spawn_autonomous_session_controller, session_window_from_env,
+    AutonomousSessionSchedule, SessionWindow, SESSION_START_HH_MM_ENV,
+    SESSION_STOP_HH_MM_ENV,
 };
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
@@ -42,9 +45,10 @@ pub(crate) use snapshot::{
     reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,
 };
 pub use types::{
-    AcceptedArtifactProvenance, AlpacaWsContinuityState, BrokerKind, BrokerSnapshotTruthSource,
-    BuildInfo, BusMsg, DeploymentMode, OperatorAuthMode, ReconcileStatusSnapshot,
-    RestartTruthSnapshot, RuntimeLifecycleError, StatusSnapshot, StrategyMarketDataSource,
+    AcceptedArtifactProvenance, AlpacaWsContinuityState, AutonomousRecoveryResumeSource,
+    AutonomousSessionTruth, BrokerKind, BrokerSnapshotTruthSource, BuildInfo, BusMsg,
+    DeploymentMode, OperatorAuthMode, ReconcileStatusSnapshot, RestartTruthSnapshot,
+    RuntimeLifecycleError, StatusSnapshot, StrategyMarketDataSource,
 };
 pub(crate) use types::{ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHandle};
 // Internal (crate-visible) re-exports used across this module.
@@ -172,6 +176,12 @@ pub struct AppState {
     /// `Accepted`.  Cleared on stop/halt.  `None` when no run is active, no
     /// artifact was configured, or intake was not `Accepted` — all fail-closed.
     accepted_artifact: Arc<RwLock<Option<AcceptedArtifactProvenance>>>,
+    /// AUTON-PAPER-02: current autonomous supervisory/recovery truth.
+    ///
+    /// Daemon-local only: this is current condition truth for operator surfaces,
+    /// not durable history.  Cleared/overwritten as the controller and WS
+    /// transport observe new facts.
+    autonomous_session_truth: Arc<RwLock<AutonomousSessionTruth>>,
 }
 
 impl Default for AppState {
@@ -350,13 +360,37 @@ impl AppState {
         let boot_continuity = if matches!(raw, AlpacaWsContinuityState::Live { .. }) {
             AlpacaWsContinuityState::ColdStartUnproven
         } else {
-            raw
+            raw.clone()
         };
         tracing::debug!(
             continuity = ?boot_continuity,
             "BRK-07R: seeded WS continuity from persisted broker cursor"
         );
-        *self.alpaca_ws_continuity.write().await = boot_continuity;
+        *self.alpaca_ws_continuity.write().await = boot_continuity.clone();
+
+        if cursor_json.is_some() {
+            match raw {
+                AlpacaWsContinuityState::Live { .. } => {
+                    self
+                        .set_autonomous_session_truth(AutonomousSessionTruth::RecoveryRetrying {
+                            resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+                            detail: "daemon restart loaded a persisted live Alpaca cursor; WS continuity must re-establish before autonomous paper start is allowed".to_string(),
+                        })
+                        .await;
+                }
+                AlpacaWsContinuityState::GapDetected { ref detail, .. } => {
+                    self
+                        .set_autonomous_session_truth(AutonomousSessionTruth::RecoveryRetrying {
+                            resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+                            detail: format!(
+                                "daemon restart resumed from persisted broker cursor with an unresolved continuity gap: {detail}"
+                            ),
+                        })
+                        .await;
+                }
+                AlpacaWsContinuityState::ColdStartUnproven | AlpacaWsContinuityState::NotApplicable => {}
+            }
+        }
     }
 
     fn new_inner(operator_auth: OperatorAuthMode, db: Option<PgPool>) -> Self {
@@ -440,6 +474,7 @@ impl AppState {
             discord_notifier: DiscordNotifier::from_env(),
             day_signal_count: Arc::new(AtomicU32::new(0)),
             accepted_artifact: Arc::new(RwLock::new(None)),
+            autonomous_session_truth: Arc::new(RwLock::new(AutonomousSessionTruth::Clear)),
         }
     }
 
@@ -469,6 +504,162 @@ impl AppState {
 
     pub async fn alpaca_ws_continuity(&self) -> AlpacaWsContinuityState {
         self.alpaca_ws_continuity.read().await.clone()
+    }
+
+    pub async fn autonomous_session_truth(&self) -> AutonomousSessionTruth {
+        self.autonomous_session_truth.read().await.clone()
+    }
+
+    pub async fn set_autonomous_session_truth(&self, truth: AutonomousSessionTruth) {
+        let current = self.autonomous_session_truth.read().await.clone();
+        if current == truth {
+            return;
+        }
+        *self.autonomous_session_truth.write().await = truth.clone();
+        self.persist_autonomous_session_truth_event(&truth).await;
+    }
+
+    pub async fn clear_autonomous_session_truth(&self) {
+        *self.autonomous_session_truth.write().await = AutonomousSessionTruth::Clear;
+    }
+
+    /// AUTON-PAPER-03 proof seam: repair WS continuity from the current
+    /// persisted Alpaca broker cursor using the same backend cursor-repair
+    /// contract as the WS transport, without requiring a real network session.
+    ///
+    /// Narrow scope only:
+    /// - valid only for Paper+Alpaca
+    /// - requires a configured DB
+    /// - loads the persisted cursor for the current `adapter_id`
+    /// - runs `advance_cursor_after_ws_establish(...)`
+    /// - updates continuity + autonomous supervisory truth honestly
+    ///
+    /// This does not fake WS replay and does not bypass the persisted cursor /
+    /// REST catch-up recovery model.
+    pub async fn repair_ws_continuity_from_persisted_cursor_for_test(
+        &self,
+    ) -> Result<AlpacaFetchCursor, RuntimeLifecycleError> {
+        if self.deployment_mode() != DeploymentMode::Paper
+            || self.runtime_selection.broker_kind != Some(BrokerKind::Alpaca)
+        {
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.test_refused.not_paper_alpaca",
+                "deployment_mode",
+                "repair_ws_continuity_from_persisted_cursor_for_test is only valid on Paper+Alpaca",
+            ));
+        }
+
+        let db = self.db_pool()?;
+        let cursor_json = mqk_db::load_broker_cursor(&db, self.adapter_id())
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("load_broker_cursor failed", err))?;
+        let prev_cursor = match cursor_json {
+            Some(json) => serde_json::from_str::<AlpacaFetchCursor>(&json)
+                .map_err(|err| RuntimeLifecycleError::internal("broker cursor parse failed", err))?,
+            None => AlpacaFetchCursor::cold_start_unproven(None),
+        };
+
+        let resume_source = match &prev_cursor.trade_updates {
+            mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::ColdStartUnproven => {
+                AutonomousRecoveryResumeSource::ColdStart
+            }
+            mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::GapDetected { .. }
+            | mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::Live { .. } => {
+                AutonomousRecoveryResumeSource::PersistedCursor
+            }
+        };
+
+        if matches!(resume_source, AutonomousRecoveryResumeSource::PersistedCursor) {
+            self
+                .set_autonomous_session_truth(AutonomousSessionTruth::RecoveryRetrying {
+                    resume_source: resume_source.clone(),
+                    detail: "repairing WS continuity from persisted broker cursor truth"
+                        .to_string(),
+                })
+                .await;
+        }
+
+        match mqk_runtime::alpaca_inbound::advance_cursor_after_ws_establish(
+            &db,
+            self.adapter_id(),
+            &prev_cursor,
+            Utc::now(),
+        )
+        .await
+        {
+            Ok(repaired) => {
+                self.update_ws_continuity(AlpacaWsContinuityState::from_fetch_cursor(&repaired))
+                    .await;
+                self
+                    .set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
+                        resume_source: resume_source.clone(),
+                        detail: match resume_source {
+                            AutonomousRecoveryResumeSource::PersistedCursor => {
+                                "WS continuity restored from persisted broker cursor truth"
+                                    .to_string()
+                            }
+                            AutonomousRecoveryResumeSource::ColdStart => {
+                                "WS continuity established from cold-start cursor truth"
+                                    .to_string()
+                            }
+                        },
+                    })
+                    .await;
+                Ok(repaired)
+            }
+            Err(err) => {
+                let detail = format!(
+                    "failed to repair WS continuity from persisted broker cursor: {err}"
+                );
+                self
+                    .set_autonomous_session_truth(AutonomousSessionTruth::RecoveryFailed {
+                        resume_source,
+                        detail: detail.clone(),
+                    })
+                    .await;
+                self.update_ws_continuity(AlpacaWsContinuityState::GapDetected {
+                    last_message_id: None,
+                    last_event_at: None,
+                    detail: detail.clone(),
+                })
+                .await;
+                Err(RuntimeLifecycleError::service_unavailable(
+                    "runtime.recovery_refused.cursor_repair_failed",
+                    detail,
+                ))
+            }
+        }
+    }
+
+    async fn persist_autonomous_session_truth_event(&self, truth: &AutonomousSessionTruth) {
+        let Some(db) = self.db.as_ref() else {
+            return;
+        };
+        let Some((event_type, resume_source, detail)) = autonomous_truth_event_parts(truth) else {
+            return;
+        };
+        let ts_utc = Utc::now();
+        let run_id = self.locally_owned_run_id().await;
+        let id = format!(
+            "{}:{}:{}",
+            ts_utc.timestamp_micros(),
+            event_type,
+            run_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_string())
+        );
+        let row = mqk_db::AutonomousSessionEventRow {
+            id,
+            ts_utc,
+            event_type: event_type.to_string(),
+            resume_source,
+            detail,
+            run_id,
+            source: "mqk-daemon.state".to_string(),
+        };
+        if let Err(err) = mqk_db::persist_autonomous_session_event(db, &row).await {
+            tracing::warn!(error = %err, "persist_autonomous_session_event failed (non-fatal)");
+        }
     }
 
     /// TV-01C: Return the artifact provenance accepted at the most recent run start.
@@ -2167,6 +2358,149 @@ impl AppState {
         };
         let mut lock = self.execution_loop.lock().await;
         *lock = Some(handle);
+    }
+
+    /// AUTON-PAPER-03B proof seam: establish a coherent DB-backed active run
+    /// with local ownership for autonomous paper lifecycle tests.
+    ///
+    /// This is intentionally test-only and narrow. It uses the daemon's real DB
+    /// run tables plus a locally owned injected loop so proof tests can exercise
+    /// restart/gap/recovery truth on one connected lifecycle without requiring a
+    /// live broker network session.
+    pub async fn establish_db_backed_active_run_for_test(
+        &self,
+        run_id: Uuid,
+    ) -> Result<(), RuntimeLifecycleError> {
+        let db = self.db_pool()?;
+        mqk_db::insert_run(
+            &db,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: DAEMON_ENGINE_ID.to_string(),
+                mode: self.deployment_mode().as_db_mode().to_string(),
+                started_at_utc: Utc::now(),
+                git_hash: "TEST".to_string(),
+                config_hash: self.run_config_hash().to_string(),
+                config_json: serde_json::json!({
+                    "runtime": "mqk-daemon",
+                    "adapter": self.adapter_id(),
+                    "mode": self.deployment_mode().as_db_mode(),
+                    "proof": "AUTON-PAPER-03B",
+                }),
+                host_fingerprint: self.node_id.clone(),
+            },
+        )
+        .await
+        .map_err(|err| RuntimeLifecycleError::internal("test insert_run failed", err))?;
+        mqk_db::arm_run(&db, run_id)
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("test arm_run failed", err))?;
+        mqk_db::begin_run(&db, run_id)
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("test begin_run failed", err))?;
+        mqk_db::heartbeat_run(&db, run_id, Utc::now())
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("test heartbeat_run failed", err))?;
+        self.inject_running_loop_for_test(run_id).await;
+        self.publish_status(StatusSnapshot {
+            daemon_uptime_secs: uptime_secs(),
+            active_run_id: Some(run_id),
+            state: "running".to_string(),
+            notes: Some("test-established DB-backed active run".to_string()),
+            integrity_armed: self.integrity_armed().await,
+            deadman_status: "healthy".to_string(),
+            deadman_last_heartbeat_utc: Some(Utc::now().to_rfc3339()),
+        })
+        .await;
+        Ok(())
+    }
+
+    /// AUTON-PAPER-03B proof seam: apply the daemon's fail-closed continuity-gap
+    /// halt consequences against the currently owned DB-backed run.
+    pub async fn gap_halt_owned_runtime_for_test(
+        &self,
+    ) -> Result<Option<String>, RuntimeLifecycleError> {
+        if !self.ws_continuity_gap_requires_halt().await {
+            return Ok(None);
+        }
+        let handle = self.take_execution_loop_for_control().await?;
+        let Some(handle) = handle else {
+            return Ok(None);
+        };
+        let run_id = handle.run_id;
+        let _ = handle.stop_tx.send(ExecutionLoopCommand::Stop);
+        let _ = handle
+            .join_handle
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("test gap-halt join failed", err))?;
+
+        {
+            let mut integrity = self.integrity.write().await;
+            integrity.disarmed = true;
+            integrity.halted = true;
+        }
+
+        let db = self.db_pool()?;
+        mqk_db::halt_run(&db, run_id, Utc::now())
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("test gap-halt halt_run failed", err))?;
+
+        let note = "paper+alpaca WS continuity gap detected; runtime self-halted".to_string();
+        self.publish_status(StatusSnapshot {
+            daemon_uptime_secs: uptime_secs(),
+            active_run_id: Some(run_id),
+            state: "halted".to_string(),
+            notes: Some(note.clone()),
+            integrity_armed: false,
+            deadman_status: "expired".to_string(),
+            deadman_last_heartbeat_utc: None,
+        })
+        .await;
+        Ok(Some(note))
+    }
+}
+
+fn autonomous_truth_event_parts(
+    truth: &AutonomousSessionTruth,
+) -> Option<(&'static str, Option<String>, String)> {
+    match truth {
+        AutonomousSessionTruth::Clear => None,
+        AutonomousSessionTruth::StartRefused { detail } => {
+            Some(("start_refused", None, detail.clone()))
+        }
+        AutonomousSessionTruth::RecoveryRetrying {
+            resume_source,
+            detail,
+        } => Some((
+            "recovery_retrying",
+            Some(resume_source.as_str().to_string()),
+            detail.clone(),
+        )),
+        AutonomousSessionTruth::RecoverySucceeded {
+            resume_source,
+            detail,
+        } => Some((
+            "recovery_succeeded",
+            Some(resume_source.as_str().to_string()),
+            detail.clone(),
+        )),
+        AutonomousSessionTruth::RecoveryFailed {
+            resume_source,
+            detail,
+        } => Some((
+            "recovery_failed",
+            Some(resume_source.as_str().to_string()),
+            detail.clone(),
+        )),
+        AutonomousSessionTruth::RunEndedUnexpectedly { detail } => {
+            Some(("run_ended_unexpectedly", None, detail.clone()))
+        }
+        AutonomousSessionTruth::StopFailed { detail } => {
+            Some(("stop_failed", None, detail.clone()))
+        }
+        AutonomousSessionTruth::StoppedAtBoundary { detail } => {
+            Some(("stopped_at_boundary", None, detail.clone()))
+        }
     }
 }
 

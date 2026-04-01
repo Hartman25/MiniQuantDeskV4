@@ -17,32 +17,41 @@
 //! | AU-06 | Gap→halt path: GapDetected → loop self-halts (PT-AUTO-01) → run gone           |
 //! | AU-07 | Restart with persisted cursor truth: after gap, WS→Live → start gates pass     |
 //! | AU-08 | Alert truth: alerts/active shows gap_detected alert when WS=GapDetected        |
-//! | AU-09 | Alert truth: alerts/active shows day_limit_reached when limit hit + running     |
+//! | AU-09 | Alert truth: alerts/active shows day_limit_reached when limit hit + running    |
 //! | AU-10 | Alert truth: alerts/active shows cold_start_unproven when WS=ColdStartUnproven |
-//! | AU-11 | Session controller disabled for non-paper-alpaca (Paper+Paper returns None)     |
-//! | AU-12 | Session controller disabled when env vars absent (no MQK_SESSION_START_HH_MM)  |
-//! | AU-13 | try_autonomous_arm: already armed → Ok idempotent (pure, no DB)               |
+//! | AU-10B | Alert truth: alerts/active shows recovery_succeeded while current              |
+//! | AU-10C | DB-backed restart seed from persisted gap remains blocked and visible         |
+//! | AU-10D | Clean idle return clears stale informational autonomous alerts               |
+//! | AU-10E | DB-backed autonomous supervisor history is durable and visible in events/feed |
+//! | AU-10F | DB-backed end-to-end autonomous recovery round-trip uses persisted cursor truth and resumes honestly |
+//! | AU-11 | Session controller disabled for non-paper-alpaca (Paper+Paper returns None)    |
+//! | AU-12 | Default schedule falls back to NYSE regular-session truth when env vars absent |
+//! | AU-13 | try_autonomous_arm: already armed → Ok idempotent (pure, no DB)                |
 //! | AU-14 | try_autonomous_arm: halted → refuses unconditionally (pure, no DB)             |
 //! | AU-15 | try_autonomous_arm: no DB → refuses (pure, no DB)                              |
 //! | AU-16 | try_autonomous_arm: DB=ARMED → advances integrity to armed (DB-backed)         |
+//!
+//! ## Acceptance contract
+//!
+//! - Code/proof closure from this file can mark autonomous paper trading backend-complete enough for an operator-run soak.
+//! - A real full-day paper soak is still pending and must be reviewed separately from these proofs.
 //!
 //! ## What is NOT claimed
 //!
 //! - Wall-clock soak (no real 24h test)
 //! - Broker HTTP connectivity (pure in-process)
-//! - DB-backed recovery round-trip (requires MQK_DATABASE_URL; proven by BRK-07R)
 //! - REST catch-up fill count (REST polling proven by A5/alpaca_live_adapter_a5)
 //! - Auto-stop via real time passage (proven by session window unit tests SW-05..SW-09)
 //!
-//! All tests are pure in-process.  No `MQK_DATABASE_URL` required.
-
 use std::sync::Arc;
 
 use axum::http::{Request, StatusCode};
+use chrono::TimeZone;
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
 use state::{
-    AlpacaWsContinuityState, BrokerKind, DeploymentMode, SessionWindow,
+    AlpacaWsContinuityState, AutonomousRecoveryResumeSource, AutonomousSessionSchedule,
+    AutonomousSessionTruth, BrokerKind, DeploymentMode, SessionWindow,
     SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
 };
 use tower::ServiceExt;
@@ -71,6 +80,20 @@ fn make_paper_alpaca() -> Arc<state::AppState> {
     Arc::new(state::AppState::new_for_test_with_broker_kind(
         BrokerKind::Alpaca,
     ))
+}
+
+async fn db_pool_or_skip() -> Option<sqlx::PgPool> {
+    let url = match std::env::var("MQK_DATABASE_URL") {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    Some(
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("AUTON-01 DB test: failed to connect to MQK_DATABASE_URL"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +127,7 @@ fn au01_session_window_parser_contract() {
 }
 
 // ---------------------------------------------------------------------------
-// AU-02 — spawn_autonomous_session_controller only activates for Paper+Alpaca
+// AU-02 — autonomous controller only activates for the Paper+Alpaca deployment seam
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -122,13 +145,13 @@ async fn au02_session_controller_only_for_paper_alpaca() {
         "paper+paper must have NotConfigured source → controller would return None"
     );
 
-    // Paper+Alpaca: ExternalSignalIngestion wired → controller would activate
-    // (actual spawn requires env vars, which we don't set in tests)
+    // Paper+Alpaca: ExternalSignalIngestion wired → controller can activate.
+    // With the final patch, absent env vars fall back to NYSE regular-session truth.
     let st_alpaca = make_paper_alpaca();
     assert_eq!(
         st_alpaca.strategy_market_data_source(),
         state::StrategyMarketDataSource::ExternalSignalIngestion,
-        "paper+alpaca must have ExternalSignalIngestion → controller would activate when env set"
+        "paper+alpaca must have ExternalSignalIngestion → controller can activate on the NYSE regular-session seam"
     );
 
     // LiveShadow: deployment_mode != Paper → controller disabled
@@ -494,6 +517,517 @@ async fn au10_alert_cold_start_unproven_when_ws_unproven() {
 }
 
 // ---------------------------------------------------------------------------
+// AU-10B — Alert truth: autonomous recovery succeeded is operator-visible
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn au10b_alert_recovery_succeeded_visible_when_truth_set() {
+    let st = make_paper_alpaca();
+    st.set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
+        resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+        detail: "test recovery succeeded from persisted cursor".to_string(),
+    })
+    .await;
+
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/alerts/active")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let j = parse_json(body);
+
+    let rows = j["rows"].as_array().expect("rows must be array");
+    let classes: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r["class"].as_str())
+        .collect();
+
+    assert!(
+        classes.contains(&"autonomous.session.recovery_succeeded"),
+        "AU-10B: alerts/active must include autonomous.session.recovery_succeeded; got classes: {classes:?}"
+    );
+}
+
+
+// ---------------------------------------------------------------------------
+// AU-10D — Clean out-of-session idle return clears stale informational alerts
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn au10d_clean_idle_return_clears_stale_informational_autonomous_alerts() {
+    let st = make_paper_alpaca();
+    let window = AutonomousSessionSchedule::FixedUtcWindow(SessionWindow::parse("14:30", "21:00").expect("AU-10D: window must parse"));
+    let idle_after_session = chrono::Utc
+        .with_ymd_and_hms(2026, 3, 30, 22, 0, 0)
+        .unwrap();
+    let mut locally_started = false;
+
+    st.set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
+        resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+        detail: "recovery succeeded earlier in the day".to_string(),
+    })
+    .await;
+    state::run_session_controller_tick(&st, window, &mut locally_started, idle_after_session).await;
+
+    st.set_autonomous_session_truth(AutonomousSessionTruth::StoppedAtBoundary {
+        detail: "run stopped at session boundary".to_string(),
+    })
+    .await;
+    state::run_session_controller_tick(&st, window, &mut locally_started, idle_after_session).await;
+
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/alerts/active")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let j = parse_json(body);
+
+    let rows = j["rows"].as_array().expect("rows must be array");
+    let classes: Vec<&str> = rows.iter().filter_map(|r| r["class"].as_str()).collect();
+
+    assert!(
+        !classes.contains(&"autonomous.session.recovery_succeeded"),
+        "AU-10D: clean idle return must clear stale autonomous.session.recovery_succeeded; got classes: {classes:?}"
+    );
+    assert!(
+        !classes.contains(&"autonomous.session.stopped_at_boundary"),
+        "AU-10D: clean idle return must clear stale autonomous.session.stopped_at_boundary; got classes: {classes:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AU-10C — DB-backed restart seed: persisted gap remains blocked and visible
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn au10c_restart_seed_from_persisted_gap_is_blocked_and_visible() {
+    let Some(pool) = db_pool_or_skip().await else {
+        eprintln!("AU-10C: skipped (MQK_DATABASE_URL not set)");
+        return;
+    };
+    mqk_db::migrate(&pool)
+        .await
+        .expect("AU-10C: migration failed");
+
+    let adapter_id = "auton01-au10c-gap";
+    let gap_cursor = mqk_broker_alpaca::types::AlpacaFetchCursor::gap_detected(
+        Some("rest-au10c".to_string()),
+        Some("alpaca:order-au10c:filled:2026-01-01T00:00:00Z".to_string()),
+        Some("2026-01-01T00:00:00Z".to_string()),
+        "au10c persisted gap",
+    );
+    let cursor_json = serde_json::to_string(&gap_cursor).expect("AU-10C: serialize cursor");
+    mqk_db::advance_broker_cursor(&pool, adapter_id, &cursor_json, chrono::Utc::now())
+        .await
+        .expect("AU-10C: persist cursor");
+
+    let mut st_inner = state::AppState::new_for_test_with_db_mode_and_broker(
+        pool,
+        DeploymentMode::Paper,
+        BrokerKind::Alpaca,
+    );
+    st_inner.set_adapter_id_for_test(adapter_id);
+    let st = Arc::new(st_inner);
+
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+
+    st.seed_ws_continuity_from_db().await;
+
+    let continuity = st.alpaca_ws_continuity().await;
+    assert!(
+        matches!(continuity, AlpacaWsContinuityState::GapDetected { .. }),
+        "AU-10C: restart from persisted gap must remain GapDetected; got: {continuity:?}"
+    );
+    let truth = st.autonomous_session_truth().await;
+    assert!(
+        matches!(
+            truth,
+            AutonomousSessionTruth::RecoveryRetrying {
+                resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+                ..
+            }
+        ),
+        "AU-10C: restart from persisted gap must surface RecoveryRetrying from persisted cursor; got: {truth:?}"
+    );
+
+    let router = routes::build_router(Arc::clone(&st));
+    let start_req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (start_status, start_body) = call(router.clone(), start_req).await;
+    let start_json = parse_json(start_body);
+    assert_eq!(start_status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        start_json["gate"].as_str(),
+        Some("alpaca_ws_continuity"),
+        "AU-10C: persisted-gap restart must remain blocked at alpaca_ws_continuity; got: {start_json}"
+    );
+
+    let alerts_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/alerts/active")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (alerts_status, alerts_body) = call(router, alerts_req).await;
+    assert_eq!(alerts_status, StatusCode::OK);
+    let alerts_json = parse_json(alerts_body);
+    let classes: Vec<&str> = alerts_json["rows"]
+        .as_array()
+        .expect("rows must be array")
+        .iter()
+        .filter_map(|r| r["class"].as_str())
+        .collect();
+    assert!(
+        classes.contains(&"paper.ws_continuity.gap_detected"),
+        "AU-10C: alerts must include paper.ws_continuity.gap_detected; got classes: {classes:?}"
+    );
+    assert!(
+        classes.contains(&"autonomous.session.recovery_retrying"),
+        "AU-10C: alerts must include autonomous.session.recovery_retrying; got classes: {classes:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AU-10E — DB-backed autonomous supervisor history is durable and visible in
+//          /api/v1/events/feed across restart-seeded recovery truth changes.
+//
+// Proves the narrow durable-evidence contract needed before the operator's
+// real soak:
+// 1. persisted broker cursor truth is loaded on restart,
+// 2. autonomous recovery retrying truth is recorded durably,
+// 3. recovery success truth is recorded durably,
+// 4. /api/v1/events/feed surfaces those rows from durable storage.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn au10e_db_backed_autonomous_history_is_durable_and_visible_in_events_feed() {
+    let Some(pool) = db_pool_or_skip().await else {
+        eprintln!("AU-10E: skipped (MQK_DATABASE_URL not set)");
+        return;
+    };
+    mqk_db::migrate(&pool)
+        .await
+        .expect("AU-10E: migration failed");
+
+    let adapter_id = "auton01-au10e-history";
+    let gap_cursor = mqk_broker_alpaca::types::AlpacaFetchCursor::gap_detected(
+        Some("rest-au10e".to_string()),
+        Some("alpaca:order-au10e:filled:2026-01-01T00:00:00Z".to_string()),
+        Some("2026-01-01T00:00:00Z".to_string()),
+        "au10e persisted gap",
+    );
+    let cursor_json = serde_json::to_string(&gap_cursor).expect("AU-10E: serialize cursor");
+    mqk_db::advance_broker_cursor(&pool, adapter_id, &cursor_json, chrono::Utc::now())
+        .await
+        .expect("AU-10E: persist cursor");
+
+    let mut st_inner = state::AppState::new_for_test_with_db_mode_and_broker(
+        pool,
+        DeploymentMode::Paper,
+        BrokerKind::Alpaca,
+    );
+    st_inner.set_adapter_id_for_test(adapter_id);
+    let st = Arc::new(st_inner);
+
+    st.seed_ws_continuity_from_db().await;
+    st.set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
+        resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+        detail: "au10e recovery succeeded after restart-seeded retry".to_string(),
+    })
+    .await;
+
+    let router = routes::build_router(Arc::clone(&st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/events/feed")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let j = parse_json(body);
+
+    let rows = j["rows"].as_array().expect("rows must be array");
+    let autonomous_details: Vec<&str> = rows
+        .iter()
+        .filter(|r| r["kind"].as_str() == Some("autonomous_session"))
+        .filter_map(|r| r["detail"].as_str())
+        .collect();
+
+    assert!(
+        autonomous_details
+            .iter()
+            .any(|d| *d == "recovery_retrying:persisted_cursor"),
+        "AU-10E: durable events/feed must include recovery_retrying:persisted_cursor; got: {autonomous_details:?}"
+    );
+    assert!(
+        autonomous_details
+            .iter()
+            .any(|d| *d == "recovery_succeeded:persisted_cursor"),
+        "AU-10E: durable events/feed must include recovery_succeeded:persisted_cursor; got: {autonomous_details:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AU-10F — DB-backed autonomous recovery round-trip proof
+//
+// Exercises one connected DB-backed lifecycle using the daemon's real durable
+// state plus a narrow test-only active-run seam:
+// 1. DB=ARMED restores autonomous arm readiness,
+// 2. a DB-backed active run is established with local ownership,
+// 3. a continuity gap self-halts that owned lifecycle fail-closed,
+// 4. restart seeds continuity from the persisted broker cursor,
+// 5. recovery advances through the real cursor-repair backend seam,
+// 6. alerts + durable autonomous history reflect retrying/succeeded truth,
+// 7. resumed state is no longer blocked at WS continuity.
+//
+// This proves one coherent backend lifecycle without claiming a real broker
+// network start or a wall-clock soak.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn au10f_db_backed_autonomous_recovery_round_trip_is_honest() {
+    let Some(pool) = db_pool_or_skip().await else {
+        eprintln!("AU-10F: skipped (MQK_DATABASE_URL not set)");
+        return;
+    };
+    mqk_db::migrate(&pool)
+        .await
+        .expect("AU-10F: migration failed");
+
+    let adapter_id = "auton01-au10f-roundtrip";
+    mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None)
+        .await
+        .expect("AU-10F: seed arm state failed");
+
+    let mut st_inner = state::AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        DeploymentMode::Paper,
+        BrokerKind::Alpaca,
+    );
+    st_inner.set_adapter_id_for_test(adapter_id);
+    let st = Arc::new(st_inner);
+
+    st.try_autonomous_arm()
+        .await
+        .expect("AU-10F: DB=ARMED must allow autonomous arm");
+
+    st.update_ws_continuity(AlpacaWsContinuityState::Live {
+        last_message_id: "alpaca:order-au10f:accepted:2026-01-01T00:00:00Z".to_string(),
+        last_event_at: "2026-01-01T00:00:00Z".to_string(),
+    })
+    .await;
+
+    let run_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_DNS,
+        b"auton01.au10f.connected_db_backed_lifecycle",
+    );
+    st.establish_db_backed_active_run_for_test(run_id)
+        .await
+        .expect("AU-10F: DB-backed active run must be established");
+
+    let start_truth = st
+        .current_status_snapshot()
+        .await
+        .expect("AU-10F: status snapshot after DB-backed active run");
+    assert_eq!(start_truth.active_run_id, Some(run_id));
+    assert_eq!(start_truth.state, "running");
+    let restart_truth = st
+        .restart_truth_snapshot()
+        .await
+        .expect("AU-10F: restart truth snapshot after DB-backed active run");
+    assert_eq!(restart_truth.local_owned_run_id, Some(run_id));
+    assert_eq!(restart_truth.durable_active_run_id, Some(run_id));
+    assert!(
+        !restart_truth.durable_active_without_local_ownership,
+        "AU-10F step1: active run must have coherent local ownership truth"
+    );
+
+    st.update_ws_continuity(AlpacaWsContinuityState::GapDetected {
+        last_message_id: Some("alpaca:order-au10f:fill:2026-01-01T00:05:00Z".to_string()),
+        last_event_at: Some("2026-01-01T00:05:00Z".to_string()),
+        detail: "AU-10F injected continuity gap".to_string(),
+    })
+    .await;
+    let halt_note = st
+        .gap_halt_owned_runtime_for_test()
+        .await
+        .expect("AU-10F: gap halt helper must run")
+        .expect("AU-10F: gap halt must produce a note");
+    assert!(
+        halt_note.contains("gap") || halt_note.contains("continuity"),
+        "AU-10F step2: gap halt note must mention gap/continuity; got: {halt_note:?}"
+    );
+    {
+        let ig = st.integrity.read().await;
+        assert!(ig.halted, "AU-10F step2: integrity must be halted after gap self-halt");
+        assert!(ig.disarmed, "AU-10F step2: integrity must be disarmed after gap self-halt");
+    }
+    let halted_truth = st
+        .current_status_snapshot()
+        .await
+        .expect("AU-10F: halted status snapshot");
+    assert_eq!(halted_truth.state, "halted");
+    let halted_run = mqk_db::fetch_run(st.db.as_ref().unwrap(), run_id)
+        .await
+        .expect("AU-10F: fetch halted run");
+    assert!(matches!(halted_run.status, mqk_db::RunStatus::Halted));
+
+    let gap_cursor = mqk_broker_alpaca::types::AlpacaFetchCursor::gap_detected(
+        Some("rest-au10f".to_string()),
+        Some("alpaca:order-au10f:fill:2026-01-01T00:05:00Z".to_string()),
+        Some("2026-01-01T00:05:00Z".to_string()),
+        "AU-10F persisted gap cursor",
+    );
+    let gap_cursor_json = serde_json::to_string(&gap_cursor).expect("AU-10F: serialize gap cursor");
+    mqk_db::advance_broker_cursor(&pool, adapter_id, &gap_cursor_json, chrono::Utc::now())
+        .await
+        .expect("AU-10F: persist gap cursor");
+
+    let mut restarted_inner = state::AppState::new_for_test_with_db_mode_and_broker(
+        pool,
+        DeploymentMode::Paper,
+        BrokerKind::Alpaca,
+    );
+    restarted_inner.set_adapter_id_for_test(adapter_id);
+    let restarted = Arc::new(restarted_inner);
+    restarted.seed_ws_continuity_from_db().await;
+
+    assert!(
+        matches!(
+            restarted.alpaca_ws_continuity().await,
+            AlpacaWsContinuityState::GapDetected { .. }
+        ),
+        "AU-10F step3: restart must seed unresolved persisted gap truth"
+    );
+    assert!(
+        matches!(
+            restarted.autonomous_session_truth().await,
+            AutonomousSessionTruth::RecoveryRetrying {
+                resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+                ..
+            }
+        ),
+        "AU-10F step3: restart must surface RecoveryRetrying from persisted cursor"
+    );
+
+    let recovered_cursor = restarted
+        .repair_ws_continuity_from_persisted_cursor_for_test()
+        .await
+        .expect("AU-10F: cursor repair must succeed through the backend seam");
+    assert!(
+        matches!(
+            recovered_cursor.trade_updates,
+            mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::Live { .. }
+        ),
+        "AU-10F step4: repaired cursor must be Live; got: {:?}",
+        recovered_cursor.trade_updates
+    );
+    assert!(
+        matches!(
+            restarted.alpaca_ws_continuity().await,
+            AlpacaWsContinuityState::Live { .. }
+        ),
+        "AU-10F step4: repaired continuity must be Live"
+    );
+    assert!(
+        matches!(
+            restarted.autonomous_session_truth().await,
+            AutonomousSessionTruth::RecoverySucceeded {
+                resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+                ..
+            }
+        ),
+        "AU-10F step4: repaired continuity must surface RecoverySucceeded from persisted cursor"
+    );
+
+    let restarted_router = routes::build_router(Arc::clone(&restarted));
+    let alerts_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/alerts/active")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (alerts_status, alerts_body) = call(restarted_router.clone(), alerts_req).await;
+    assert_eq!(alerts_status, StatusCode::OK);
+    let alerts_json = parse_json(alerts_body);
+    let alert_classes: Vec<&str> = alerts_json["rows"]
+        .as_array()
+        .expect("rows must be array")
+        .iter()
+        .filter_map(|r| r["class"].as_str())
+        .collect();
+    assert!(
+        alert_classes.contains(&"autonomous.session.recovery_succeeded"),
+        "AU-10F step5: alerts must include autonomous.session.recovery_succeeded while current; got classes: {alert_classes:?}"
+    );
+
+    let feed_req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/events/feed")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (feed_status, feed_body) = call(restarted_router.clone(), feed_req).await;
+    assert_eq!(feed_status, StatusCode::OK);
+    let feed_json = parse_json(feed_body);
+    let autonomous_details: Vec<&str> = feed_json["rows"]
+        .as_array()
+        .expect("rows must be array")
+        .iter()
+        .filter(|r| r["kind"].as_str() == Some("autonomous_session"))
+        .filter_map(|r| r["detail"].as_str())
+        .collect();
+    assert!(
+        autonomous_details
+            .iter()
+            .any(|d| *d == "recovery_retrying:persisted_cursor"),
+        "AU-10F step5: durable history must include recovery_retrying:persisted_cursor; got: {autonomous_details:?}"
+    );
+    assert!(
+        autonomous_details
+            .iter()
+            .any(|d| *d == "recovery_succeeded:persisted_cursor"),
+        "AU-10F step5: durable history must include recovery_succeeded:persisted_cursor; got: {autonomous_details:?}"
+    );
+
+    mqk_db::persist_arm_state_canonical(restarted.db.as_ref().unwrap(), mqk_db::ArmState::Armed, None)
+        .await
+        .expect("AU-10F: re-seed arm state on restarted daemon");
+    restarted
+        .try_autonomous_arm()
+        .await
+        .expect("AU-10F: restarted daemon must auto-arm from DB=ARMED");
+    let resumed_start_req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (resumed_status, resumed_body) = call(restarted_router, resumed_start_req).await;
+    let resumed_json = parse_json(resumed_body);
+    assert_ne!(
+        resumed_json["gate"].as_str(),
+        Some("alpaca_ws_continuity"),
+        "AU-10F step6: resumed state must no longer be blocked at WS continuity; got: {resumed_json}"
+    );
+    assert!(
+        resumed_status == StatusCode::SERVICE_UNAVAILABLE
+            || resumed_status == StatusCode::FORBIDDEN
+            || resumed_status == StatusCode::CONFLICT,
+        "AU-10F step6: resumed start must advance past the WS continuity gate; status={resumed_status} body={resumed_json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // AU-11 — Session controller disabled for non-paper-alpaca (Paper+Paper)
 // ---------------------------------------------------------------------------
 
@@ -518,31 +1052,17 @@ async fn au11_session_controller_disabled_for_paper_paper() {
 }
 
 // ---------------------------------------------------------------------------
-// AU-12 — Session controller disabled when env vars absent
-//
-// session_window_from_env() returns None when MQK_SESSION_START_HH_MM is
-// absent.  We verify this directly (no env vars set in test environment).
+// AU-12 — Default schedule falls back to NYSE regular-session truth when env vars absent
 // ---------------------------------------------------------------------------
 
 #[test]
-fn au12_session_controller_disabled_when_env_vars_absent() {
-    // Ensure neither env var is set for this assertion.
-    // In CI neither is set; in local dev they may or may not be.
-    // We clear them temporarily and verify the parser returns None.
-    let _start = std::env::var(SESSION_START_HH_MM_ENV);
-    let _stop = std::env::var(SESSION_STOP_HH_MM_ENV);
-
-    // Call parse directly with None (simulating absent env var).
-    let result = SessionWindow::parse("", "21:00");
-    assert!(
-        result.is_none(),
-        "AU-12: empty start string must return None from parser"
-    );
-
-    let result2 = SessionWindow::parse("14:30", "");
-    assert!(
-        result2.is_none(),
-        "AU-12: empty stop string must return None from parser"
+fn au12_default_schedule_is_nyse_when_env_vars_absent() {
+    std::env::remove_var(SESSION_START_HH_MM_ENV);
+    std::env::remove_var(SESSION_STOP_HH_MM_ENV);
+    assert_eq!(
+        state::autonomous_session_schedule_from_env(),
+        AutonomousSessionSchedule::NyseRegularSession,
+        "AU-12: absent env vars must fall back to NYSE regular-session truth"
     );
 }
 

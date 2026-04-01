@@ -46,7 +46,7 @@ use sqlx::Row;
 use crate::api_types::{
     ActiveAlertRow, ActiveAlertsResponse, EventFeedRow, EventsFeedResponse, RuntimeErrorResponse,
 };
-use crate::state::{AlpacaWsContinuityState, AppState, StrategyMarketDataSource};
+use crate::state::{AlpacaWsContinuityState, AppState, AutonomousSessionTruth, StrategyMarketDataSource};
 
 use super::helpers::{build_fault_signals, runtime_error_response};
 
@@ -121,6 +121,75 @@ pub(crate) async fn alerts_active(State(st): State<Arc<AppState>>) -> Response {
         }
         // NotApplicable (non-Alpaca) and Live (healthy) produce no additional signal.
         AlpacaWsContinuityState::NotApplicable | AlpacaWsContinuityState::Live { .. } => {}
+    }
+
+    match st.autonomous_session_truth().await {
+        AutonomousSessionTruth::Clear => {}
+        AutonomousSessionTruth::StartRefused { detail } => rows.push(ActiveAlertRow {
+            alert_id: "autonomous.session.start_refused".to_string(),
+            severity: "warning".to_string(),
+            class: "autonomous.session.start_refused".to_string(),
+            summary: "Autonomous paper session start is currently refused by backend gates; controller will retry when conditions change.".to_string(),
+            detail: Some(detail),
+            source: "daemon.autonomous_session".to_string(),
+        }),
+        AutonomousSessionTruth::RecoveryRetrying { resume_source, detail } => rows.push(ActiveAlertRow {
+            alert_id: "autonomous.session.recovery_retrying".to_string(),
+            severity: "warning".to_string(),
+            class: "autonomous.session.recovery_retrying".to_string(),
+            summary: format!(
+                "Autonomous paper recovery is retrying via {} truth; start remains fail-closed until WS continuity is restored.",
+                resume_source.as_str()
+            ),
+            detail: Some(detail),
+            source: "daemon.autonomous_session".to_string(),
+        }),
+        AutonomousSessionTruth::RecoverySucceeded { resume_source, detail } => rows.push(ActiveAlertRow {
+            alert_id: "autonomous.session.recovery_succeeded".to_string(),
+            severity: "info".to_string(),
+            class: "autonomous.session.recovery_succeeded".to_string(),
+            summary: format!(
+                "Autonomous paper recovery restored continuity using {} truth.",
+                resume_source.as_str()
+            ),
+            detail: Some(detail),
+            source: "daemon.autonomous_session".to_string(),
+        }),
+        AutonomousSessionTruth::RecoveryFailed { resume_source, detail } => rows.push(ActiveAlertRow {
+            alert_id: "autonomous.session.recovery_failed".to_string(),
+            severity: "critical".to_string(),
+            class: "autonomous.session.recovery_failed".to_string(),
+            summary: format!(
+                "Autonomous paper recovery failed while resuming from {} truth; start remains blocked until continuity is proven again.",
+                resume_source.as_str()
+            ),
+            detail: Some(detail),
+            source: "daemon.autonomous_session".to_string(),
+        }),
+        AutonomousSessionTruth::RunEndedUnexpectedly { detail } => rows.push(ActiveAlertRow {
+            alert_id: "autonomous.session.run_ended_unexpectedly".to_string(),
+            severity: "warning".to_string(),
+            class: "autonomous.session.run_ended_unexpectedly".to_string(),
+            summary: "Autonomous paper run ended unexpectedly during the session window; controller retry logic is active.".to_string(),
+            detail: Some(detail),
+            source: "daemon.autonomous_session".to_string(),
+        }),
+        AutonomousSessionTruth::StopFailed { detail } => rows.push(ActiveAlertRow {
+            alert_id: "autonomous.session.stop_failed".to_string(),
+            severity: "warning".to_string(),
+            class: "autonomous.session.stop_failed".to_string(),
+            summary: "Autonomous paper stop at the session boundary failed; controller will retry while remaining fail-closed.".to_string(),
+            detail: Some(detail),
+            source: "daemon.autonomous_session".to_string(),
+        }),
+        AutonomousSessionTruth::StoppedAtBoundary { detail } => rows.push(ActiveAlertRow {
+            alert_id: "autonomous.session.stopped_at_boundary".to_string(),
+            severity: "info".to_string(),
+            class: "autonomous.session.stopped_at_boundary".to_string(),
+            summary: "Autonomous paper run stopped at the configured session boundary.".to_string(),
+            detail: Some(detail),
+            source: "daemon.autonomous_session".to_string(),
+        }),
     }
 
     // AUTON-PAPER-01: Day signal limit alert.
@@ -373,6 +442,37 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
         });
     }
 
+    // --- AUTON-PAPER-02: durable autonomous-session supervisor history ---
+    let autonomous_events = match mqk_db::load_recent_autonomous_session_events(db, 50).await {
+        Ok(r) => r,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RuntimeErrorResponse {
+                    error: format!("events/feed autonomous-session query failed: {err}"),
+                    fault_class: "events.feed.query_failed".to_string(),
+                    gate: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    for row in autonomous_events {
+        let detail = match row.resume_source.as_deref() {
+            Some(src) => format!("{}:{}", row.event_type, src),
+            None => row.event_type.clone(),
+        };
+        rows.push(EventFeedRow {
+            event_id: format!("sys_autonomous_session_events:{}", row.id),
+            ts_utc: row.ts_utc.to_rfc3339(),
+            kind: "autonomous_session".to_string(),
+            detail,
+            run_id: row.run_id.map(|id| id.to_string()),
+            provenance_ref: format!("sys_autonomous_session_events:{}", row.id),
+        });
+    }
+
     // Sort newest-first and cap at 50 rows.
     rows.sort_by(|a, b| b.ts_utc.cmp(&a.ts_utc));
     rows.truncate(50);
@@ -382,7 +482,7 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
         Json(EventsFeedResponse {
             canonical_route: "/api/v1/events/feed".to_string(),
             truth_state: "active".to_string(),
-            backend: "postgres.runs+postgres.audit_events".to_string(),
+            backend: "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events".to_string(),
             rows,
         }),
     )
