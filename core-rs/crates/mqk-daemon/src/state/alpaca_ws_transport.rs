@@ -77,7 +77,10 @@ use mqk_runtime::alpaca_inbound::{
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use super::types::{AlpacaWsContinuityState, AutonomousRecoveryResumeSource, AutonomousSessionTruth, BrokerKind, DeploymentMode};
+use super::types::{
+    AlpacaWsContinuityState, AutonomousRecoveryResumeSource, AutonomousSessionTruth, BrokerKind,
+    DeploymentMode,
+};
 use super::AppState;
 
 const DEFAULT_PAPER_BASE_URL: &str = "https://paper-api.alpaca.markets";
@@ -124,7 +127,9 @@ pub fn ws_url_from_base_url(base_url: &str) -> String {
     format!("{ws_base}/stream")
 }
 
-fn recovery_resume_source_from_cursor(cursor: &AlpacaFetchCursor) -> AutonomousRecoveryResumeSource {
+fn recovery_resume_source_from_cursor(
+    cursor: &AlpacaFetchCursor,
+) -> AutonomousRecoveryResumeSource {
     match &cursor.trade_updates {
         mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::ColdStartUnproven => {
             AutonomousRecoveryResumeSource::ColdStart
@@ -327,7 +332,10 @@ async fn alpaca_ws_session(
     let prev_cursor = load_session_cursor_from_db(state).await;
     let resume_source = recovery_resume_source_from_cursor(&prev_cursor);
 
-    if matches!(resume_source, AutonomousRecoveryResumeSource::PersistedCursor) {
+    if matches!(
+        resume_source,
+        AutonomousRecoveryResumeSource::PersistedCursor
+    ) {
         state
             .set_autonomous_session_truth(AutonomousSessionTruth::RecoveryRetrying {
                 resume_source: resume_source.clone(),
@@ -363,7 +371,8 @@ async fn alpaca_ws_session(
                 repaired
             }
             Err(e) => {
-                let detail = format!("alpaca_ws: cursor repair failed after subscribe confirmation: {e}");
+                let detail =
+                    format!("alpaca_ws: cursor repair failed after subscribe confirmation: {e}");
                 state
                     .set_autonomous_session_truth(AutonomousSessionTruth::RecoveryFailed {
                         resume_source: resume_source.clone(),
@@ -395,7 +404,6 @@ async fn alpaca_ws_session(
             .await;
         prev_cursor
     };
-
 
     // ---------------------------------------------------------------------------
     // Receive loop
@@ -535,7 +543,10 @@ mod tests {
     //! No network access required; all tests run fully in-process.
 
     use super::{alpaca_ws_loop, alpaca_ws_session};
-    use crate::state::{types::AlpacaWsContinuityState, AppState, AutonomousRecoveryResumeSource, AutonomousSessionTruth, BrokerKind, DeploymentMode};
+    use crate::state::{
+        types::AlpacaWsContinuityState, AppState, AutonomousRecoveryResumeSource,
+        AutonomousSessionTruth, BrokerKind, DeploymentMode,
+    };
     use futures_util::{SinkExt, StreamExt};
     use std::sync::Arc;
     use std::time::Duration;
@@ -777,7 +788,6 @@ mod tests {
         task.abort();
     }
 
-
     // -----------------------------------------------------------------------
     // BRK00R05B-S5 — DB-backed restart repair restores continuity from persisted cursor
     // -----------------------------------------------------------------------
@@ -860,5 +870,4 @@ mod tests {
             "S5: rest_activity_after must remain anchored for REST catch-up"
         );
     }
-
 }

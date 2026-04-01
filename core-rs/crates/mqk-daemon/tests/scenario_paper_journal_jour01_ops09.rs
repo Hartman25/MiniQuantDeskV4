@@ -69,7 +69,9 @@ fn get(path: &str) -> Request<axum::body::Body> {
 
 /// Build a paper+alpaca AppState with no DB.
 fn paper_alpaca_state() -> Arc<state::AppState> {
-    Arc::new(state::AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca))
+    Arc::new(state::AppState::new_for_test_with_broker_kind(
+        BrokerKind::Alpaca,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +89,11 @@ async fn j01_paper_journal_returns_no_db_without_db() {
     let (status, body) = call(router, get("/api/v1/paper/journal")).await;
     let json = parse_json(body);
 
-    assert_eq!(status, StatusCode::OK, "paper/journal must return 200 in no_db state");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "paper/journal must return 200 in no_db state"
+    );
 
     assert_eq!(
         json["fills_lane"]["truth_state"].as_str().unwrap(),
@@ -118,23 +124,47 @@ async fn j02_paper_journal_schema_is_canonical() {
     assert_eq!(status, StatusCode::OK);
 
     // Top-level fields
-    assert!(json.get("canonical_route").is_some(), "canonical_route must be present");
-    assert!(json.get("run_id").is_some(), "run_id must be present (null is allowed)");
-    assert!(json.get("fills_lane").is_some(), "fills_lane must be present");
-    assert!(json.get("admissions_lane").is_some(), "admissions_lane must be present");
+    assert!(
+        json.get("canonical_route").is_some(),
+        "canonical_route must be present"
+    );
+    assert!(
+        json.get("run_id").is_some(),
+        "run_id must be present (null is allowed)"
+    );
+    assert!(
+        json.get("fills_lane").is_some(),
+        "fills_lane must be present"
+    );
+    assert!(
+        json.get("admissions_lane").is_some(),
+        "admissions_lane must be present"
+    );
 
     assert_eq!(
         json["canonical_route"].as_str().unwrap(),
         "/api/v1/paper/journal",
         "canonical_route must self-identify"
     );
-    assert!(json["run_id"].is_null(), "run_id must be null in no_db state");
+    assert!(
+        json["run_id"].is_null(),
+        "run_id must be null in no_db state"
+    );
 
     // fills_lane schema
     let fills = &json["fills_lane"];
-    assert!(fills.get("truth_state").is_some(), "fills_lane.truth_state must be present");
-    assert!(fills.get("backend").is_some(), "fills_lane.backend must be present");
-    assert!(fills.get("rows").is_some(), "fills_lane.rows must be present");
+    assert!(
+        fills.get("truth_state").is_some(),
+        "fills_lane.truth_state must be present"
+    );
+    assert!(
+        fills.get("backend").is_some(),
+        "fills_lane.backend must be present"
+    );
+    assert!(
+        fills.get("rows").is_some(),
+        "fills_lane.rows must be present"
+    );
     assert!(
         fills["rows"].as_array().unwrap().is_empty(),
         "fills_lane.rows must be empty in no_db state"
@@ -147,9 +177,18 @@ async fn j02_paper_journal_schema_is_canonical() {
 
     // admissions_lane schema
     let admissions = &json["admissions_lane"];
-    assert!(admissions.get("truth_state").is_some(), "admissions_lane.truth_state must be present");
-    assert!(admissions.get("backend").is_some(), "admissions_lane.backend must be present");
-    assert!(admissions.get("rows").is_some(), "admissions_lane.rows must be present");
+    assert!(
+        admissions.get("truth_state").is_some(),
+        "admissions_lane.truth_state must be present"
+    );
+    assert!(
+        admissions.get("backend").is_some(),
+        "admissions_lane.backend must be present"
+    );
+    assert!(
+        admissions.get("rows").is_some(),
+        "admissions_lane.rows must be present"
+    );
     assert!(
         admissions["rows"].as_array().unwrap().is_empty(),
         "admissions_lane.rows must be empty in no_db state"
@@ -195,7 +234,10 @@ async fn j03_paper_journal_no_db_both_lanes_unavailable() {
         admissions_ts == "no_db" || admissions_ts == "no_active_run",
         "admissions_lane truth_state must be no_db or no_active_run in no-pool state; got: {admissions_ts}"
     );
-    assert_eq!(fills_ts, admissions_ts, "both lanes must have the same truth_state");
+    assert_eq!(
+        fills_ts, admissions_ts,
+        "both lanes must have the same truth_state"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +250,8 @@ async fn j03_paper_journal_no_db_both_lanes_unavailable() {
 #[tokio::test]
 async fn j04_alerts_active_cold_start_unproven_emits_warning() {
     let st = paper_alpaca_state();
-    st.update_ws_continuity(AlpacaWsContinuityState::ColdStartUnproven).await;
+    st.update_ws_continuity(AlpacaWsContinuityState::ColdStartUnproven)
+        .await;
 
     let router = routes::build_router(Arc::clone(&st));
     let (status, body) = call(router, get("/api/v1/alerts/active")).await;
@@ -218,9 +261,9 @@ async fn j04_alerts_active_cold_start_unproven_emits_warning() {
     assert_eq!(json["truth_state"].as_str().unwrap(), "active");
 
     let rows = json["rows"].as_array().expect("rows must be a JSON array");
-    let ws_alert = rows.iter().find(|r| {
-        r["class"].as_str().unwrap_or("") == "paper.ws_continuity.cold_start_unproven"
-    });
+    let ws_alert = rows
+        .iter()
+        .find(|r| r["class"].as_str().unwrap_or("") == "paper.ws_continuity.cold_start_unproven");
 
     assert!(
         ws_alert.is_some(),
@@ -284,10 +327,7 @@ async fn j05_alerts_active_gap_detected_emits_critical() {
         "critical",
         "gap_detected alert must be severity=critical"
     );
-    assert_eq!(
-        alert["source"].as_str().unwrap(),
-        "daemon.runtime_state",
-    );
+    assert_eq!(alert["source"].as_str().unwrap(), "daemon.runtime_state",);
     // detail must carry the gap's detail string
     let detail = alert["detail"].as_str().unwrap_or("");
     assert!(
@@ -427,7 +467,10 @@ async fn j09_events_feed_schema_is_correct_after_ops09() {
 
     // No DB: backend_unavailable with empty rows.
     assert_eq!(json["truth_state"].as_str().unwrap(), "backend_unavailable");
-    assert_eq!(json["canonical_route"].as_str().unwrap(), "/api/v1/events/feed");
+    assert_eq!(
+        json["canonical_route"].as_str().unwrap(),
+        "/api/v1/events/feed"
+    );
     assert_eq!(json["backend"].as_str().unwrap(), "unavailable");
     assert!(
         json["rows"].as_array().unwrap().is_empty(),
@@ -532,10 +575,15 @@ async fn j10_existing_clean_state_contract_preserved_after_ops09() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["truth_state"].as_str().unwrap(), "active");
-    assert_eq!(json["canonical_route"].as_str().unwrap(), "/api/v1/alerts/active");
+    assert_eq!(
+        json["canonical_route"].as_str().unwrap(),
+        "/api/v1/alerts/active"
+    );
     assert_eq!(json["backend"].as_str().unwrap(), "daemon.runtime_state");
 
-    let alert_count = json["alert_count"].as_u64().expect("alert_count must be numeric");
+    let alert_count = json["alert_count"]
+        .as_u64()
+        .expect("alert_count must be numeric");
     let rows = json["rows"].as_array().expect("rows must be an array");
 
     assert_eq!(alert_count, 0, "clean state must produce zero alerts");

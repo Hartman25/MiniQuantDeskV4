@@ -79,7 +79,11 @@ async fn os01_outbox_returns_no_db_without_db() {
     let (status, body) = call(router, get("/api/v1/execution/outbox")).await;
     let json = parse_json(body);
 
-    assert_eq!(status, StatusCode::OK, "outbox must respond 200 in no_db state");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "outbox must respond 200 in no_db state"
+    );
     assert_eq!(
         json["truth_state"].as_str().unwrap(),
         "no_db",
@@ -114,10 +118,7 @@ async fn os02_outbox_response_schema_is_canonical() {
         json.get("backend").is_some(),
         "backend field must be present"
     );
-    assert!(
-        json.get("rows").is_some(),
-        "rows field must be present"
-    );
+    assert!(json.get("rows").is_some(), "rows field must be present");
     // run_id is present in the schema (may be null in no_db state).
     assert!(
         json.get("run_id").is_some(),

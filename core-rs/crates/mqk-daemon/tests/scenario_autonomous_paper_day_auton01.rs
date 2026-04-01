@@ -51,8 +51,8 @@ use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
 use state::{
     AlpacaWsContinuityState, AutonomousRecoveryResumeSource, AutonomousSessionSchedule,
-    AutonomousSessionTruth, BrokerKind, DeploymentMode, SessionWindow,
-    SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
+    AutonomousSessionTruth, BrokerKind, DeploymentMode, SessionWindow, SESSION_START_HH_MM_ENV,
+    SESSION_STOP_HH_MM_ENV,
 };
 use tower::ServiceExt;
 
@@ -110,15 +110,27 @@ fn au01_session_window_parser_contract() {
     assert_eq!(w.stop_mm, 0);
 
     // start == stop: rejected (zero-duration)
-    assert!(SessionWindow::parse("14:30", "14:30").is_none(), "zero-duration must be rejected");
+    assert!(
+        SessionWindow::parse("14:30", "14:30").is_none(),
+        "zero-duration must be rejected"
+    );
 
     // start > stop: rejected
-    assert!(SessionWindow::parse("21:00", "14:30").is_none(), "inverted window must be rejected");
+    assert!(
+        SessionWindow::parse("21:00", "14:30").is_none(),
+        "inverted window must be rejected"
+    );
 
     // Invalid format
     assert!(SessionWindow::parse("bad", "21:00").is_none());
-    assert!(SessionWindow::parse("25:00", "21:00").is_none(), "hour > 23 must be rejected");
-    assert!(SessionWindow::parse("14:60", "21:00").is_none(), "minute > 59 must be rejected");
+    assert!(
+        SessionWindow::parse("25:00", "21:00").is_none(),
+        "hour > 23 must be rejected"
+    );
+    assert!(
+        SessionWindow::parse("14:60", "21:00").is_none(),
+        "minute > 59 must be rejected"
+    );
 
     // Edge: midnight valid
     let w2 = SessionWindow::parse("00:00", "23:59").expect("midnight window must parse");
@@ -306,10 +318,7 @@ async fn au06_gap_detected_triggers_execution_loop_self_halt() {
     })
     .await;
 
-    let run_id = uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_DNS,
-        b"auton01.au06.gap_halt",
-    );
+    let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"auton01.au06.gap_halt");
 
     // run_loop_one_tick_for_test exercises the real spawn_execution_loop path
     // and returns the exit note when the loop terminates.
@@ -323,8 +332,14 @@ async fn au06_gap_detected_triggers_execution_loop_self_halt() {
 
     // After the halt, integrity must be disarmed and halted.
     let ig = st.integrity.read().await;
-    assert!(ig.halted, "AU-06: integrity must be halted after WS gap self-halt");
-    assert!(ig.disarmed, "AU-06: integrity must be disarmed after WS gap self-halt");
+    assert!(
+        ig.halted,
+        "AU-06: integrity must be halted after WS gap self-halt"
+    );
+    assert!(
+        ig.disarmed,
+        "AU-06: integrity must be disarmed after WS gap self-halt"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -438,10 +453,7 @@ async fn au08_alert_gap_detected_when_ws_gap() {
     let j = parse_json(body);
 
     let rows = j["rows"].as_array().expect("rows must be array");
-    let classes: Vec<&str> = rows
-        .iter()
-        .filter_map(|r| r["class"].as_str())
-        .collect();
+    let classes: Vec<&str> = rows.iter().filter_map(|r| r["class"].as_str()).collect();
 
     assert!(
         classes.contains(&"paper.ws_continuity.gap_detected"),
@@ -472,10 +484,7 @@ async fn au09_alert_day_limit_reached_when_limit_hit_and_running() {
     let j = parse_json(body);
 
     let rows = j["rows"].as_array().expect("rows must be array");
-    let classes: Vec<&str> = rows
-        .iter()
-        .filter_map(|r| r["class"].as_str())
-        .collect();
+    let classes: Vec<&str> = rows.iter().filter_map(|r| r["class"].as_str()).collect();
 
     assert!(
         classes.contains(&"autonomous.signal_limit.day_limit_reached"),
@@ -504,10 +513,7 @@ async fn au10_alert_cold_start_unproven_when_ws_unproven() {
     let j = parse_json(body);
 
     let rows = j["rows"].as_array().expect("rows must be array");
-    let classes: Vec<&str> = rows
-        .iter()
-        .filter_map(|r| r["class"].as_str())
-        .collect();
+    let classes: Vec<&str> = rows.iter().filter_map(|r| r["class"].as_str()).collect();
 
     assert!(
         classes.contains(&"paper.ws_continuity.cold_start_unproven"),
@@ -540,17 +546,13 @@ async fn au10b_alert_recovery_succeeded_visible_when_truth_set() {
     let j = parse_json(body);
 
     let rows = j["rows"].as_array().expect("rows must be array");
-    let classes: Vec<&str> = rows
-        .iter()
-        .filter_map(|r| r["class"].as_str())
-        .collect();
+    let classes: Vec<&str> = rows.iter().filter_map(|r| r["class"].as_str()).collect();
 
     assert!(
         classes.contains(&"autonomous.session.recovery_succeeded"),
         "AU-10B: alerts/active must include autonomous.session.recovery_succeeded; got classes: {classes:?}"
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // AU-10D — Clean out-of-session idle return clears stale informational alerts
@@ -559,10 +561,10 @@ async fn au10b_alert_recovery_succeeded_visible_when_truth_set() {
 #[tokio::test]
 async fn au10d_clean_idle_return_clears_stale_informational_autonomous_alerts() {
     let st = make_paper_alpaca();
-    let window = AutonomousSessionSchedule::FixedUtcWindow(SessionWindow::parse("14:30", "21:00").expect("AU-10D: window must parse"));
-    let idle_after_session = chrono::Utc
-        .with_ymd_and_hms(2026, 3, 30, 22, 0, 0)
-        .unwrap();
+    let window = AutonomousSessionSchedule::FixedUtcWindow(
+        SessionWindow::parse("14:30", "21:00").expect("AU-10D: window must parse"),
+    );
+    let idle_after_session = chrono::Utc.with_ymd_and_hms(2026, 3, 30, 22, 0, 0).unwrap();
     let mut locally_started = false;
 
     st.set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
@@ -871,8 +873,14 @@ async fn au10f_db_backed_autonomous_recovery_round_trip_is_honest() {
     );
     {
         let ig = st.integrity.read().await;
-        assert!(ig.halted, "AU-10F step2: integrity must be halted after gap self-halt");
-        assert!(ig.disarmed, "AU-10F step2: integrity must be disarmed after gap self-halt");
+        assert!(
+            ig.halted,
+            "AU-10F step2: integrity must be halted after gap self-halt"
+        );
+        assert!(
+            ig.disarmed,
+            "AU-10F step2: integrity must be disarmed after gap self-halt"
+        );
     }
     let halted_truth = st
         .current_status_snapshot()
@@ -1000,9 +1008,13 @@ async fn au10f_db_backed_autonomous_recovery_round_trip_is_honest() {
         "AU-10F step5: durable history must include recovery_succeeded:persisted_cursor; got: {autonomous_details:?}"
     );
 
-    mqk_db::persist_arm_state_canonical(restarted.db.as_ref().unwrap(), mqk_db::ArmState::Armed, None)
-        .await
-        .expect("AU-10F: re-seed arm state on restarted daemon");
+    mqk_db::persist_arm_state_canonical(
+        restarted.db.as_ref().unwrap(),
+        mqk_db::ArmState::Armed,
+        None,
+    )
+    .await
+    .expect("AU-10F: re-seed arm state on restarted daemon");
     restarted
         .try_autonomous_arm()
         .await
@@ -1095,8 +1107,14 @@ async fn au13_already_armed_returns_ok_idempotent() {
 
     // Integrity must still be armed.
     let ig = st.integrity.read().await;
-    assert!(!ig.disarmed, "AU-13: integrity.disarmed must remain false after idempotent arm");
-    assert!(!ig.halted, "AU-13: integrity.halted must remain false after idempotent arm");
+    assert!(
+        !ig.disarmed,
+        "AU-13: integrity.disarmed must remain false after idempotent arm"
+    );
+    assert!(
+        !ig.halted,
+        "AU-13: integrity.halted must remain false after idempotent arm"
+    );
 }
 
 // AU-14: integrity.halted=true → try_autonomous_arm refuses unconditionally.
@@ -1126,8 +1144,14 @@ async fn au14_halted_state_refuses_autonomous_arm() {
 
     // Integrity must still be halted — arm must not have mutated it.
     let ig = st.integrity.read().await;
-    assert!(ig.disarmed, "AU-14: integrity.disarmed must remain true after halt refusal");
-    assert!(ig.halted, "AU-14: integrity.halted must remain true after halt refusal");
+    assert!(
+        ig.disarmed,
+        "AU-14: integrity.disarmed must remain true after halt refusal"
+    );
+    assert!(
+        ig.halted,
+        "AU-14: integrity.halted must remain true after halt refusal"
+    );
 }
 
 // AU-15: No DB configured → try_autonomous_arm refuses.
@@ -1140,10 +1164,7 @@ async fn au15_no_db_refuses_autonomous_arm() {
     // Default boot state: disarmed=true, halted=false, no DB.
 
     let result = st.try_autonomous_arm().await;
-    assert!(
-        result.is_err(),
-        "AU-15: no DB must refuse autonomous arm"
-    );
+    assert!(result.is_err(), "AU-15: no DB must refuse autonomous arm");
     let msg = result.unwrap_err();
     assert!(
         msg.contains("no DB"),
@@ -1199,6 +1220,12 @@ async fn au16_db_armed_state_enables_autonomous_arm() {
 
     // In-memory integrity must now be armed.
     let ig = st.integrity.read().await;
-    assert!(!ig.disarmed, "AU-16: integrity.disarmed must be false after autonomous arm");
-    assert!(!ig.halted, "AU-16: integrity.halted must be false after autonomous arm");
+    assert!(
+        !ig.disarmed,
+        "AU-16: integrity.disarmed must be false after autonomous arm"
+    );
+    assert!(
+        !ig.halted,
+        "AU-16: integrity.halted must be false after autonomous arm"
+    );
 }

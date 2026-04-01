@@ -32,15 +32,14 @@ pub use alpaca_ws_transport::{
     build_ws_auth_message, build_ws_subscribe_message, spawn_alpaca_paper_ws_task,
     ws_url_from_base_url,
 };
-pub use session_controller::{
-    autonomous_session_schedule_from_env, run_session_controller_tick,
-    spawn_autonomous_session_controller, session_window_from_env,
-    AutonomousSessionSchedule, SessionWindow, SESSION_START_HH_MM_ENV,
-    SESSION_STOP_HH_MM_ENV,
-};
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
 pub use loop_runner::spawn_reconcile_tick;
+pub use session_controller::{
+    autonomous_session_schedule_from_env, run_session_controller_tick, session_window_from_env,
+    spawn_autonomous_session_controller, AutonomousSessionSchedule, SessionWindow,
+    SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
+};
 pub(crate) use snapshot::{
     reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,
 };
@@ -388,7 +387,8 @@ impl AppState {
                         })
                         .await;
                 }
-                AlpacaWsContinuityState::ColdStartUnproven | AlpacaWsContinuityState::NotApplicable => {}
+                AlpacaWsContinuityState::ColdStartUnproven
+                | AlpacaWsContinuityState::NotApplicable => {}
             }
         }
     }
@@ -554,8 +554,9 @@ impl AppState {
             .await
             .map_err(|err| RuntimeLifecycleError::internal("load_broker_cursor failed", err))?;
         let prev_cursor = match cursor_json {
-            Some(json) => serde_json::from_str::<AlpacaFetchCursor>(&json)
-                .map_err(|err| RuntimeLifecycleError::internal("broker cursor parse failed", err))?,
+            Some(json) => serde_json::from_str::<AlpacaFetchCursor>(&json).map_err(|err| {
+                RuntimeLifecycleError::internal("broker cursor parse failed", err)
+            })?,
             None => AlpacaFetchCursor::cold_start_unproven(None),
         };
 
@@ -569,14 +570,15 @@ impl AppState {
             }
         };
 
-        if matches!(resume_source, AutonomousRecoveryResumeSource::PersistedCursor) {
-            self
-                .set_autonomous_session_truth(AutonomousSessionTruth::RecoveryRetrying {
-                    resume_source: resume_source.clone(),
-                    detail: "repairing WS continuity from persisted broker cursor truth"
-                        .to_string(),
-                })
-                .await;
+        if matches!(
+            resume_source,
+            AutonomousRecoveryResumeSource::PersistedCursor
+        ) {
+            self.set_autonomous_session_truth(AutonomousSessionTruth::RecoveryRetrying {
+                resume_source: resume_source.clone(),
+                detail: "repairing WS continuity from persisted broker cursor truth".to_string(),
+            })
+            .await;
         }
 
         match mqk_runtime::alpaca_inbound::advance_cursor_after_ws_establish(
@@ -590,33 +592,28 @@ impl AppState {
             Ok(repaired) => {
                 self.update_ws_continuity(AlpacaWsContinuityState::from_fetch_cursor(&repaired))
                     .await;
-                self
-                    .set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
-                        resume_source: resume_source.clone(),
-                        detail: match resume_source {
-                            AutonomousRecoveryResumeSource::PersistedCursor => {
-                                "WS continuity restored from persisted broker cursor truth"
-                                    .to_string()
-                            }
-                            AutonomousRecoveryResumeSource::ColdStart => {
-                                "WS continuity established from cold-start cursor truth"
-                                    .to_string()
-                            }
-                        },
-                    })
-                    .await;
+                self.set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
+                    resume_source: resume_source.clone(),
+                    detail: match resume_source {
+                        AutonomousRecoveryResumeSource::PersistedCursor => {
+                            "WS continuity restored from persisted broker cursor truth".to_string()
+                        }
+                        AutonomousRecoveryResumeSource::ColdStart => {
+                            "WS continuity established from cold-start cursor truth".to_string()
+                        }
+                    },
+                })
+                .await;
                 Ok(repaired)
             }
             Err(err) => {
-                let detail = format!(
-                    "failed to repair WS continuity from persisted broker cursor: {err}"
-                );
-                self
-                    .set_autonomous_session_truth(AutonomousSessionTruth::RecoveryFailed {
-                        resume_source,
-                        detail: detail.clone(),
-                    })
-                    .await;
+                let detail =
+                    format!("failed to repair WS continuity from persisted broker cursor: {err}");
+                self.set_autonomous_session_truth(AutonomousSessionTruth::RecoveryFailed {
+                    resume_source,
+                    detail: detail.clone(),
+                })
+                .await;
                 self.update_ws_continuity(AlpacaWsContinuityState::GapDetected {
                     last_message_id: None,
                     last_event_at: None,
@@ -702,8 +699,7 @@ impl AppState {
         if matches!(new_state, AlpacaWsContinuityState::GapDetected { .. })
             && self.try_claim_gap_escalation()
         {
-            let detail = if let AlpacaWsContinuityState::GapDetected { ref detail, .. } =
-                new_state
+            let detail = if let AlpacaWsContinuityState::GapDetected { ref detail, .. } = new_state
             {
                 Some(detail.clone())
             } else {

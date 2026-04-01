@@ -247,7 +247,6 @@ pub async fn load_recent_risk_denial_events(
     Ok(out)
 }
 
-
 // ---------------------------------------------------------------------------
 // AUTON-PAPER-02: Durable autonomous-session supervisor history
 // ---------------------------------------------------------------------------

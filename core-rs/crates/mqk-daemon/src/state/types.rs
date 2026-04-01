@@ -395,7 +395,6 @@ pub enum AlpacaWsContinuityState {
     },
 }
 
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum AutonomousRecoveryResumeSource {
     ColdStart,

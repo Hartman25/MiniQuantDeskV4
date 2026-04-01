@@ -74,7 +74,9 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{
     routes,
-    state::{AlpacaWsContinuityState, AppState, BrokerKind, DeploymentMode, ReconcileStatusSnapshot},
+    state::{
+        AlpacaWsContinuityState, AppState, BrokerKind, DeploymentMode, ReconcileStatusSnapshot,
+    },
 };
 use tower::ServiceExt;
 
@@ -82,7 +84,10 @@ use tower::ServiceExt;
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, serde_json::Value) {
+async fn call(
+    router: axum::Router,
+    req: Request<axum::body::Body>,
+) -> (StatusCode, serde_json::Value) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
     let status = resp.status();
     let bytes = resp
@@ -177,7 +182,11 @@ async fn aligned_state() -> Arc<AppState> {
 
     // Arm integrity gate (pure in-memory — no DB required).
     let (arm_status, _) = call(routes::build_router(Arc::clone(&st)), arm_req()).await;
-    assert_eq!(arm_status, StatusCode::OK, "aligned_state: arm must succeed");
+    assert_eq!(
+        arm_status,
+        StatusCode::OK,
+        "aligned_state: arm must succeed"
+    );
 
     // Establish Live WS continuity.
     st.update_ws_continuity(live_ws()).await;
@@ -313,11 +322,7 @@ async fn r04_gate1b_cold_start_unproven_intent_placed_false() {
     // from Gate 1 (ingestion_not_configured) and Gate 2 (db_unavailable).
     let blockers = json["blockers"]
         .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-        })
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
         .unwrap_or_default();
     let has_cold_start_blocker = blockers
         .iter()
@@ -415,8 +420,7 @@ async fn g01_aligned_state_satisfies_both_start_and_signal_chains() {
     let router = routes::build_router(Arc::clone(&st));
 
     // ── Start chain: all pre-DB gates pass → DB gate fires (503) ──────────
-    let (start_status, start_json) =
-        call(routes::build_router(Arc::clone(&st)), start_req()).await;
+    let (start_status, start_json) = call(routes::build_router(Arc::clone(&st)), start_req()).await;
 
     assert_eq!(
         start_status,
@@ -456,11 +460,7 @@ async fn g01_aligned_state_satisfies_both_start_and_signal_chains() {
     // all have passed.
     let sig_blockers = sig_json["blockers"]
         .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-        })
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
         .unwrap_or_default();
 
     let gate1_msg = "strategy signal ingestion is not configured for this deployment";
@@ -523,8 +523,7 @@ async fn g02_ws_gap_blocks_both_start_and_signal() {
     .await;
 
     // ── Start chain: WS gate fires (Gate 3) ───────────────────────────────
-    let (start_status, start_json) =
-        call(routes::build_router(Arc::clone(&st)), start_req()).await;
+    let (start_status, start_json) = call(routes::build_router(Arc::clone(&st)), start_req()).await;
 
     assert_eq!(
         start_status,
@@ -599,8 +598,7 @@ async fn g03_reconcile_dirty_blocks_start_not_signal_admission() {
     .await;
 
     // ── Start chain: reconcile gate fires (Gate 4) ────────────────────────
-    let (start_status, start_json) =
-        call(routes::build_router(Arc::clone(&st)), start_req()).await;
+    let (start_status, start_json) = call(routes::build_router(Arc::clone(&st)), start_req()).await;
 
     assert_eq!(
         start_status,
@@ -644,11 +642,7 @@ async fn g03_reconcile_dirty_blocks_start_not_signal_admission() {
     // message.  This proves reconcile truth is NOT checked in signal admission.
     let sig_blockers = sig_json["blockers"]
         .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-        })
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
         .unwrap_or_default();
 
     let has_db_blocker = sig_blockers

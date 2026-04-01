@@ -133,7 +133,6 @@ async fn token_auth_middleware(
 /// attaches them after this call so tests can use the bare router.
 pub fn build_router(state: Arc<AppState>) -> Router {
     use alerts_events::{alerts_active, events_feed};
-    use paper_journal::paper_journal;
     use audit_ops::{audit_artifacts, audit_operator_actions, ops_operator_timeline};
     use control_plane::{
         integrity_arm, integrity_disarm, ops_action, ops_catalog, ops_mode_change_guidance,
@@ -144,6 +143,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         execution_outbox, execution_summary,
     };
     use oms_metrics::{metrics_dashboards, oms_overview};
+    use paper_journal::paper_journal;
     use portfolio::{
         portfolio_fills, portfolio_open_orders, portfolio_positions, portfolio_summary,
         risk_denials, risk_summary,

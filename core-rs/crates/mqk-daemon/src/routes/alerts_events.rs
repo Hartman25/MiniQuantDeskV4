@@ -46,7 +46,9 @@ use sqlx::Row;
 use crate::api_types::{
     ActiveAlertRow, ActiveAlertsResponse, EventFeedRow, EventsFeedResponse, RuntimeErrorResponse,
 };
-use crate::state::{AlpacaWsContinuityState, AppState, AutonomousSessionTruth, StrategyMarketDataSource};
+use crate::state::{
+    AlpacaWsContinuityState, AppState, AutonomousSessionTruth, StrategyMarketDataSource,
+};
 
 use super::helpers::{build_fault_signals, runtime_error_response};
 
@@ -482,7 +484,8 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
         Json(EventsFeedResponse {
             canonical_route: "/api/v1/events/feed".to_string(),
             truth_state: "active".to_string(),
-            backend: "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events".to_string(),
+            backend: "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events"
+                .to_string(),
             rows,
         }),
     )

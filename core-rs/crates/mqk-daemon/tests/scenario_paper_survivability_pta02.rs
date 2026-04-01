@@ -335,7 +335,11 @@ async fn s06_restart_simulation_reinjected_snapshot_recovers_correctly() {
         "positions must recover to active after post-restart snapshot load"
     );
     let rows = json["rows"].as_array().unwrap();
-    assert_eq!(rows.len(), 1, "positions rows must reflect re-injected snapshot");
+    assert_eq!(
+        rows.len(),
+        1,
+        "positions rows must reflect re-injected snapshot"
+    );
     assert_eq!(
         rows[0]["symbol"].as_str().unwrap(),
         "SPY",
@@ -451,7 +455,9 @@ async fn s10_reconcile_status_truth_state_from_closed_set() {
     let (_, body) = call(router, get("/api/v1/reconcile/status")).await;
     let json = parse_json(body);
 
-    let truth_state = json["truth_state"].as_str().expect("truth_state must be a string");
+    let truth_state = json["truth_state"]
+        .as_str()
+        .expect("truth_state must be a string");
     assert!(
         allowed.contains(&truth_state),
         "reconcile/status truth_state '{truth_state}' is not in the allowed set {allowed:?}"
@@ -604,8 +610,7 @@ async fn s15_all_portfolio_surfaces_agree_on_session_boundary() {
     let first = &boundaries[0].1;
     for (path, boundary) in &boundaries {
         assert_eq!(
-            boundary,
-            first,
+            boundary, first,
             "session_boundary must be consistent across all portfolio surfaces; \
              {path} reports {boundary:?} but {} reports {first:?}",
             boundaries[0].0
@@ -614,8 +619,7 @@ async fn s15_all_portfolio_surfaces_agree_on_session_boundary() {
 
     // And the agreed value must be "in_memory_only"
     assert_eq!(
-        first,
-        "in_memory_only",
+        first, "in_memory_only",
         "all portfolio surfaces must agree on session_boundary=in_memory_only"
     );
 }

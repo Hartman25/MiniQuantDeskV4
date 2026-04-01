@@ -239,7 +239,10 @@ async fn attempt_auto_start(
         Ok(snap) => {
             *locally_started = true;
             let current_truth = state.autonomous_session_truth().await;
-            if !matches!(current_truth, AutonomousSessionTruth::RecoverySucceeded { .. }) {
+            if !matches!(
+                current_truth,
+                AutonomousSessionTruth::RecoverySucceeded { .. }
+            ) {
                 state.clear_autonomous_session_truth().await;
             }
             let run_id = snap.active_run_id.map(|id| id.to_string());
@@ -269,7 +272,9 @@ async fn attempt_auto_start(
                 .notify_critical_alert(&CriticalAlertPayload {
                     alert_class: "autonomous.session.start_refused".to_string(),
                     severity: "warning".to_string(),
-                    summary: "Autonomous paper session start refused; will retry on next poll tick.".to_string(),
+                    summary:
+                        "Autonomous paper session start refused; will retry on next poll tick."
+                            .to_string(),
                     detail: Some(detail),
                     environment: env,
                     run_id: None,
@@ -439,12 +444,12 @@ mod tests {
             .await;
 
         let in_session = AutonomousSessionSchedule::NyseRegularSession
-            .is_in_session(
-                &state,
-                Utc.with_ymd_and_hms(2026, 3, 30, 14, 0, 0).unwrap(),
-            )
+            .is_in_session(&state, Utc.with_ymd_and_hms(2026, 3, 30, 14, 0, 0).unwrap())
             .await;
-        assert!(in_session, "NYSE regular weekday session must be in-session");
+        assert!(
+            in_session,
+            "NYSE regular weekday session must be in-session"
+        );
     }
 
     #[tokio::test]
@@ -462,10 +467,7 @@ mod tests {
             .await;
 
         let in_session = AutonomousSessionSchedule::NyseRegularSession
-            .is_in_session(
-                &state,
-                Utc.with_ymd_and_hms(2026, 3, 30, 13, 0, 0).unwrap(),
-            )
+            .is_in_session(&state, Utc.with_ymd_and_hms(2026, 3, 30, 13, 0, 0).unwrap())
             .await;
         assert!(!in_session, "NYSE premarket must remain out-of-session");
     }
@@ -485,10 +487,7 @@ mod tests {
             .await;
 
         let in_session = AutonomousSessionSchedule::NyseRegularSession
-            .is_in_session(
-                &state,
-                Utc.with_ymd_and_hms(2026, 3, 30, 21, 0, 0).unwrap(),
-            )
+            .is_in_session(&state, Utc.with_ymd_and_hms(2026, 3, 30, 21, 0, 0).unwrap())
             .await;
         assert!(!in_session, "NYSE after-hours must remain out-of-session");
     }
@@ -508,10 +507,7 @@ mod tests {
             .await;
 
         let in_session = AutonomousSessionSchedule::NyseRegularSession
-            .is_in_session(
-                &state,
-                Utc.with_ymd_and_hms(2026, 3, 28, 15, 0, 0).unwrap(),
-            )
+            .is_in_session(&state, Utc.with_ymd_and_hms(2026, 3, 28, 15, 0, 0).unwrap())
             .await;
         assert!(!in_session, "NYSE weekend must remain out-of-session");
     }
@@ -532,10 +528,7 @@ mod tests {
             .await;
 
         let in_session = AutonomousSessionSchedule::NyseRegularSession
-            .is_in_session(
-                &state,
-                Utc.with_ymd_and_hms(2026, 7, 3, 14, 0, 0).unwrap(),
-            )
+            .is_in_session(&state, Utc.with_ymd_and_hms(2026, 7, 3, 14, 0, 0).unwrap())
             .await;
         assert!(!in_session, "NYSE holiday must remain out-of-session");
         assert_eq!(

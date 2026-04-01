@@ -21,11 +21,11 @@
 //!
 //! No real Discord webhook is contacted.
 
+use std::sync::Arc;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc as StdArc, Mutex as StdMutex,
 };
-use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -262,8 +262,7 @@ async fn d03_notify_run_status_fires_on_ops_action_start_system_when_successful(
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
         let received = sink.received.lock().unwrap();
-        let run_started: Vec<Value> =
-            payloads_with_field(&received, "event", "run.started");
+        let run_started: Vec<Value> = payloads_with_field(&received, "event", "run.started");
         assert!(
             !run_started.is_empty(),
             "D03: run-status event=run.started must be received on 200; \
