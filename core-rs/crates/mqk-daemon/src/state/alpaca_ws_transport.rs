@@ -548,11 +548,11 @@ mod tests {
         AutonomousSessionTruth, BrokerKind, DeploymentMode,
     };
     use futures_util::{SinkExt, StreamExt};
+    use mqk_broker_alpaca::types::AlpacaFetchCursor;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio_tungstenite::tungstenite::Message;
-    use mqk_broker_alpaca::types::AlpacaFetchCursor;
-    
+
     // -----------------------------------------------------------------------
     // Mock server infrastructure
     // -----------------------------------------------------------------------
