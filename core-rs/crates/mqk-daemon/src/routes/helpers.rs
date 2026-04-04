@@ -317,9 +317,7 @@ pub(crate) async fn write_signal_admission_event(
     side: &str,
     qty: i64,
 ) -> Option<uuid::Uuid> {
-    let Some(db) = st.db.as_ref() else {
-        return None;
-    };
+    let db = st.db.as_ref()?;
     let ts_utc = chrono::Utc::now();
     let event_id = uuid::Uuid::new_v5(
         &uuid::Uuid::NAMESPACE_DNS,

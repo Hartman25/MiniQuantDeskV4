@@ -551,7 +551,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio_tungstenite::tungstenite::Message;
-
+    use mqk_broker_alpaca::types::AlpacaFetchCursor;
+    
     // -----------------------------------------------------------------------
     // Mock server infrastructure
     // -----------------------------------------------------------------------

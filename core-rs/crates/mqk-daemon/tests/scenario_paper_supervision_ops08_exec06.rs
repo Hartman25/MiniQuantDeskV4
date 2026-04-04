@@ -176,11 +176,10 @@ async fn os04_summary_reject_count_today_present_without_snapshot() {
         json.get("reject_count_today").is_some(),
         "reject_count_today field must be present in summary response"
     );
-    assert_eq!(
-        json["has_snapshot"].as_bool().unwrap(),
-        false,
-        "has_snapshot must be false when no execution loop has started"
-    );
+    assert!(
+    !json["has_snapshot"].as_bool().unwrap(),
+    "has_snapshot must be false when no execution loop has started"
+);
     // With no snapshot, reject_count_today is 0 — correct, not synthetic.
     // When a snapshot exists with rejected orders it is non-zero (unit-tested
     // in execution.rs U01/U02).

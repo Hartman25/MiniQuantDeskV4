@@ -768,16 +768,12 @@ async fn au10e_db_backed_autonomous_history_is_durable_and_visible_in_events_fee
         .collect();
 
     assert!(
-        autonomous_details
-            .iter()
-            .any(|d| *d == "recovery_retrying:persisted_cursor"),
-        "AU-10E: durable events/feed must include recovery_retrying:persisted_cursor; got: {autonomous_details:?}"
+        autonomous_details.contains(&"recovery_retrying:persisted_cursor"),
+        "events feed must include durable autonomous recovery retrying row"
     );
     assert!(
-        autonomous_details
-            .iter()
-            .any(|d| *d == "recovery_succeeded:persisted_cursor"),
-        "AU-10E: durable events/feed must include recovery_succeeded:persisted_cursor; got: {autonomous_details:?}"
+        autonomous_details.contains(&"recovery_succeeded:persisted_cursor"),
+        "events feed must include durable autonomous recovery succeeded row"
     );
 }
 
@@ -996,16 +992,12 @@ async fn au10f_db_backed_autonomous_recovery_round_trip_is_honest() {
         .filter_map(|r| r["detail"].as_str())
         .collect();
     assert!(
-        autonomous_details
-            .iter()
-            .any(|d| *d == "recovery_retrying:persisted_cursor"),
-        "AU-10F step5: durable history must include recovery_retrying:persisted_cursor; got: {autonomous_details:?}"
+        autonomous_details.contains(&"recovery_retrying:persisted_cursor"),
+        "AU-10F: durable events feed must include recovery_retrying row"
     );
     assert!(
-        autonomous_details
-            .iter()
-            .any(|d| *d == "recovery_succeeded:persisted_cursor"),
-        "AU-10F step5: durable history must include recovery_succeeded:persisted_cursor; got: {autonomous_details:?}"
+        autonomous_details.contains(&"recovery_succeeded:persisted_cursor"),
+        "AU-10F: durable events feed must include recovery_succeeded row"
     );
 
     mqk_db::persist_arm_state_canonical(

@@ -541,9 +541,8 @@ async fn s13_portfolio_summary_truth_state_no_snapshot_on_fresh_daemon() {
         "portfolio/summary truth_state must be no_snapshot on fresh daemon; got: {json}"
     );
     // has_snapshot must also be false (backward compat field)
-    assert_eq!(
-        json["has_snapshot"].as_bool().unwrap(),
-        false,
+    assert!(
+        !json["has_snapshot"].as_bool().unwrap(),
         "has_snapshot must be false on fresh daemon"
     );
 }
@@ -567,9 +566,8 @@ async fn s14_portfolio_summary_truth_state_active_when_snapshot_present() {
         "active",
         "portfolio/summary truth_state must be active when snapshot is present; got: {json}"
     );
-    assert_eq!(
+    assert!(
         json["has_snapshot"].as_bool().unwrap(),
-        true,
         "has_snapshot must be true when snapshot is present"
     );
     // Financial fields must be populated
