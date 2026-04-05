@@ -1,7 +1,15 @@
 [CmdletBinding()]
 param(
     [ValidateSet('local', 'full', 'exploratory')]
-    [string]$ProofProfile = 'local'
+    [string]$ProofProfile = 'local',
+    # HARNESS-01: Windows low-memory profile.
+    # Reproduces the proven Windows low-memory posture:
+    #   CARGO_BUILD_JOBS=1, CARGO_INCREMENTAL=0, RUSTFLAGS=-C debuginfo=0
+    # Each env var is set only if not already explicitly overridden by the caller.
+    # Use on memory-sensitive Windows hosts where linker/codegen parallelism triggers OOM.
+    # All proof-lane test invocations already use --test-threads=1.
+    # Compatible with any -ProofProfile value.
+    [switch]$LowMemory
 )
 
 function New-LaneRecord {
@@ -384,6 +392,9 @@ $treeClean = $false
 $untrackedFilesPresent = $false
 $dbRequired = ($ProofProfile -eq 'full')
 $dbAvailable = -not [string]::IsNullOrWhiteSpace($dbUrl)
+$lowMemoryBuildJobs = $null
+$lowMemoryCargoIncremental = $null
+$lowMemoryRustflags = $null
 $canonicalFullBundleRequested = ($ProofProfile -eq 'full')
 $workspaceState = 'candidate_workspace_state'
 $proofAuditProfile = switch ($ProofProfile) {
@@ -464,6 +475,37 @@ catch {
     Write-Host '============================================================' -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
     throw
+}
+
+# HARNESS-01: Windows low-memory profile activation.
+# Must run after preflight (so $script:CargoExe etc. are resolved) and before any lane.
+# Reproduces the exact proven Windows low-memory posture:
+#   CARGO_BUILD_JOBS=1  (serial build/link — proven to avoid linker OOM)
+#   CARGO_INCREMENTAL=0 (disable incremental compilation — reduces peak memory)
+#   RUSTFLAGS=-C debuginfo=0 (suppress debug symbols — large memory reduction)
+# Each env var is set only if not already explicitly overridden by the caller.
+if ($LowMemory) {
+    if (-not $env:CARGO_BUILD_JOBS) {
+        $env:CARGO_BUILD_JOBS = '1'
+    }
+    if (-not $env:CARGO_INCREMENTAL) {
+        $env:CARGO_INCREMENTAL = '0'
+    }
+    if (-not $env:RUSTFLAGS) {
+        $env:RUSTFLAGS = '-C debuginfo=0'
+    }
+    $script:lowMemoryBuildJobs = $env:CARGO_BUILD_JOBS
+    $script:lowMemoryCargoIncremental = $env:CARGO_INCREMENTAL
+    $script:lowMemoryRustflags = $env:RUSTFLAGS
+    Write-Host ''
+    Write-Host '============================================================' -ForegroundColor Magenta
+    Write-Host '*** LOW-MEMORY PROFILE ACTIVE (HARNESS-01) ***' -ForegroundColor Magenta
+    Write-Host "CARGO_BUILD_JOBS=$script:lowMemoryBuildJobs  (serial build/link — proven Windows posture)" -ForegroundColor Magenta
+    Write-Host "CARGO_INCREMENTAL=$script:lowMemoryCargoIncremental  (incremental compilation disabled)" -ForegroundColor Magenta
+    Write-Host "RUSTFLAGS=$script:lowMemoryRustflags  (debug symbols suppressed)" -ForegroundColor Magenta
+    Write-Host 'All test lanes use --test-threads=1 (already canonical in this harness).' -ForegroundColor Magenta
+    Write-Host 'Use this profile on Windows hosts where linker/codegen parallelism causes OOM.' -ForegroundColor Magenta
+    Write-Host '============================================================' -ForegroundColor Magenta
 }
 
 Invoke-ProofLane -Name 'Repo identity + working tree truth' -Required $true -Action {
@@ -686,6 +728,10 @@ $summary = [ordered]@{
     commit_hash                         = $commitHash
     tree_clean                          = $treeClean
     untracked_files_present             = $untrackedFilesPresent
+    low_memory_profile                  = $LowMemory.IsPresent
+    low_memory_build_jobs               = $script:lowMemoryBuildJobs
+    low_memory_cargo_incremental        = $script:lowMemoryCargoIncremental
+    low_memory_rustflags                = $script:lowMemoryRustflags
     db_required                         = $dbRequired
     db_available                        = $dbAvailable
     canonical_full_bundle_requested     = $canonicalFullBundleRequested

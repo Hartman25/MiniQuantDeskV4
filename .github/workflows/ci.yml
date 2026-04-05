@@ -1,14 +1,16 @@
 # =============================================================================
 # MiniQuantDesk V4 - CI Pipeline
 # P0-1: Patch Discipline + CI Gate
+# CI-PLATFORM-01: Windows platform lane
 # =============================================================================
 #
-# Three jobs run on every push and pull request:
+# Jobs run on every push and pull request:
+#
+#   gui-contract - GUI truth tests, build gate, and daemon/GUI contract gate.
 #
 #   guards    - Deterministic pattern guard (check_unsafe_patterns.sh).
 #               Fails if Uuid::new_v4() appears in production src/, or if
 #               Utc::now() appears in mqk-db/src/ (enforcement scope).
-#               Expected to FAIL until D1-1, D1-2, D1-3 are applied.
 #
 #   rust      - Format check, Clippy (deny warnings), and cargo test.
 #               Uses an ephemeral Postgres service so the broad workspace test
@@ -17,6 +19,13 @@
 #   db-proof  - Foundational Postgres-backed proof lane. Provisions a fresh
 #               Postgres service, runs migrations from scratch, and executes a
 #               narrow set of DB-backed safety proofs on every merge.
+#
+#   windows   - CI-PLATFORM-01: fmt + clippy + workspace tests on windows-latest.
+#               Proves the build is clean on the real operator platform class.
+#               No DB lanes (no Postgres service on windows-latest runners).
+#               CARGO_BUILD_JOBS=1 + CARGO_INCREMENTAL=0 + RUSTFLAGS=-C debuginfo=0
+#               + --test-threads=1 reproduces the proven local -LowMemory posture
+#               (HARNESS-01).
 #
 # Rust workspace root: ./core-rs
 # =============================================================================
@@ -196,3 +205,57 @@ jobs:
 
       - name: Run repo-native DB proof harness
         run: bash ../scripts/db_proof_bootstrap.sh
+
+  windows:
+    name: "Windows Platform (no-DB lanes) [CI-PLATFORM-01]"
+    runs-on: windows-latest
+    # CI-PLATFORM-01: Windows-class platform validation.
+    #
+    # Proves: cargo fmt, clippy (deny warnings), and workspace tests compile and pass
+    #         on the same OS class as the real operator environment.
+    # Does NOT prove: DB-backed lanes. GitHub Actions windows-latest runners do not
+    #         expose Docker service containers, so Postgres is unavailable here.
+    #         DB-backed proof is covered by the ubuntu db-proof job on every push.
+    # Memory posture: CARGO_BUILD_JOBS=1 + CARGO_INCREMENTAL=0 + RUSTFLAGS=-C debuginfo=0
+    #         reproduces the proven local -LowMemory posture (HARNESS-01) exactly.
+    # Test parallelism: --test-threads=1 matches the canonical harness posture.
+
+    env:
+      CARGO_BUILD_JOBS: 1
+      CARGO_INCREMENTAL: 0
+      RUSTFLAGS: -C debuginfo=0
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+
+    defaults:
+      run:
+        working-directory: ./core-rs
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            core-rs\target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('core-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace (no-DB, --test-threads=1)
+        run: cargo test --workspace -- --test-threads=1

@@ -58,6 +58,9 @@ futures-util = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 
 # SQLx pinned here so crates can use `workspace = true` without duplicating versions.
+# DEP-GOV-01: sqlx-postgres 0.7.4 triggers a never-type-fallback future-incompatibility
+# warning (hard error in Rust 2024 edition). Fix = upgrade to sqlx 0.8. Deferred due to
+# semver-major API audit scope. See: docs/ci/dependency_governance.md
 sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "macros", "chrono", "uuid", "json"] }
 chrono-tz = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

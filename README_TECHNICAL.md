@@ -91,8 +91,32 @@ docker exec mqk-postgres-proof pg_isready -U mqk -d mqk_test
 docker exec mqk-postgres-proof psql -U mqk -d mqk_test -c "select current_user, current_database();"
 ```
 
-### **Repo-Native DB Proof Harness**
-From repo root:
+### **Canonical Local Proof Harness (full_repo_proof.ps1)**
+
+`full_repo_proof.ps1` at repo root is the authoritative local proof runner.
+It runs all required proof lanes in sequence and produces a structured JSON summary.
+
+```powershell
+# Non-DB local proof (fmt + clippy + workspace tests + daemon/runtime/broker/GUI lanes + guards):
+.\full_repo_proof.ps1 -ProofProfile local
+
+# Low-memory Windows profile — reproduces the proven Windows posture:
+#   CARGO_BUILD_JOBS=1, CARGO_INCREMENTAL=0, RUSTFLAGS=-C debuginfo=0
+# (each set only if not already overridden); all test lanes use --test-threads=1:
+.\full_repo_proof.ps1 -ProofProfile local -LowMemory
+
+# Full DB-backed institutional proof (requires MQK_DATABASE_URL pointing at a live Postgres):
+.\full_repo_proof.ps1 -ProofProfile full
+```
+
+The transcript is saved to `.proof/full_repo_proof_output.txt`. When `-LowMemory` is active
+the transcript header prints `*** LOW-MEMORY PROFILE ACTIVE (HARNESS-01) ***` so the
+proof posture is unambiguous.
+
+### **Repo-Native DB Proof Bootstrap (underlying shell harness)**
+
+`scripts/db_proof_bootstrap.sh` is the DB proof shell script invoked by `full_repo_proof.ps1`
+and by CI `db-proof`. You can run it directly if needed:
 
 ```powershell
 & "C:\Program Files\Git\bin\bash.exe" -lc 'export MQK_DATABASE_URL="postgres://mqk:mqk@127.0.0.1:55432/mqk_test"; export DATABASE_URL="$MQK_DATABASE_URL"; ./scripts/db_proof_bootstrap.sh 2>&1 | tee db-proof.log'
@@ -108,15 +132,17 @@ What this proves:
 - arm-preflight and DB constraint behavior
 - market-data provider ingest and incremental sync DB behavior
 
-This is the same proof lane CI uses in the `db-proof` job.
+This is the same proof lane CI uses in the `db-proof` job. Prefer running it via
+`full_repo_proof.ps1 -ProofProfile full` so the full lane set runs together.
 
-### **Fallback Local DB Helpers**
+### **Local DB Helpers**
 Also present in `scripts/`:
-- `reset-mqk-testdb.ps1`
-- `psql-local.ps1`
-- `test-db.ps1`
+- `reset-mqk-testdb.ps1` — reset the local proof DB
+- `psql-local.ps1` — interactive psql shortcut
 
-Those are useful helpers, but the authoritative proof harness is `db_proof_bootstrap.sh`.
+**Deprecated scripts** (`test-all.ps1`, `test-db.ps1`, `ci_gate.ps1`) are stale wrappers
+that do not cover the full canonical proof lane set. Each file contains a deprecation
+warning pointing to `full_repo_proof.ps1`. Do not use them for operator validation.
 
 ## **Core Verification Commands**
 
@@ -165,12 +191,13 @@ This matters because the technical README should not lie.
 
 Valid mode+adapter combinations with `deployment_start_allowed: true`:
 
-- `paper` mode + `paper` adapter — synthetic fill engine, always-on calendar
-- `paper` mode + `alpaca` adapter — Alpaca paper endpoint, always-on calendar
+- `paper` mode + `alpaca` adapter — Alpaca paper endpoint, NYSE weekday/session calendar (AUTON-CALENDAR-01); canonical honest paper path
 - `live-shadow` mode + `alpaca` adapter — Alpaca live endpoint, NYSE weekday calendar, no capital authority
 - `live-capital` mode + `alpaca` adapter — Alpaca live endpoint, NYSE weekday calendar, real capital semantics; additional runtime gates (dev-token check, WS continuity proven) are enforced at start beyond the static readiness check
 
-Typed support and `start_allowed: true` exist in source and are tested for all four combinations above.
+`paper` mode + `paper` adapter is **fail-closed** (`start_allowed: false`); the paper+paper combination is refused at the deployment-readiness gate (PT-TRUTH-01). It is not a valid start combination.
+
+Typed support and `start_allowed: true` exist in source and are tested for all three combinations above.
 
 **Operational trust for live-shadow and live-capital is still partial.** Typed support in source is not the same as operational trust. Runbooks, recovery proof, and shadow-to-live parity evidence are not yet strong. The preflight currently reports `live_routing_disabled: true` as a hardcoded field regardless of mode. Do not treat typed support as proof of safe live operation.
 
@@ -471,23 +498,31 @@ This layer is intended to emit deterministic artifacts that the Rust backtest/ex
 
 The current GitHub Actions pipeline includes:
 
-- **GUI contract lane**
+- **GUI contract lane** (`ubuntu-latest`)
   - GUI truth tests
   - GUI build
   - daemon/GUI contract gate
 
-- **Safety guards**
+- **Safety guards** (`ubuntu-latest`)
   - unsafe-pattern checks
   - migration-governance checks
   - ignored-proof hygiene checks
 
-- **Rust lane**
+- **Rust lane** (`ubuntu-latest`, with Postgres service)
   - `cargo fmt --check`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace`
 
-- **DB proof lane**
-  - repo-native Postgres proof harness
+- **DB proof lane** (`ubuntu-latest`, with Postgres service)
+  - repo-native Postgres proof harness (`scripts/db_proof_bootstrap.sh`)
+
+- **Windows platform lane** (`windows-latest`, no DB) — CI-PLATFORM-01
+  - `cargo fmt --check`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace -- --test-threads=1`
+  - `CARGO_BUILD_JOBS=1` + `CARGO_INCREMENTAL=0` + `RUSTFLAGS=-C debuginfo=0` reproduces the proven local `-LowMemory` posture (HARNESS-01) exactly
+  - Proves the Rust build is clean on the actual operator OS class
+  - No DB lanes: Postgres service containers are not available on `windows-latest`
 
 ## **Development Discipline**
 
@@ -514,6 +549,7 @@ Be honest about these:
 Useful repo docs:
 - `docs/GUI_CONVERGENCE_CHECKLIST.md`
 - `docs/ci/gui_daemon_contract_waivers.md`
+- `docs/ci/dependency_governance.md`
 - `docs/runbooks/operator_workflows.md`
 - `docs/runbooks/live_shadow_operational_proof.md`
 - `docs/runbooks/common_failure_modes.md`
