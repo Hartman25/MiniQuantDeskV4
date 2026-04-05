@@ -4,6 +4,7 @@
 // No business logic lives here — pure transport concerns only.
 
 import { getDaemonUrl } from "../../config";
+import { getDesktopOperatorToken, isDesktopShell } from "../../desktop/bootstrap";
 
 export interface EndpointFetchResult<T> {
   ok: boolean;
@@ -63,22 +64,43 @@ export async function tryFetchJson<T>(paths: string[]): Promise<T | null> {
   return result.ok ? (result.data ?? null) : null;
 }
 
-export async function postJson<T>(paths: string[], body: Record<string, unknown>): Promise<EndpointPostResult<T>> {
+export async function postJson<T>(
+  paths: string[],
+  body: Record<string, unknown>,
+  options?: { privileged?: boolean },
+): Promise<EndpointPostResult<T>> {
   let lastFailure: EndpointPostResult<T> = {
     ok: false,
     endpoint: paths[0] ?? "unknown",
     error: "all candidates failed",
   };
 
+  const privileged = options?.privileged === true;
+  const desktopOperatorToken = getDesktopOperatorToken();
+
+  if (privileged && isDesktopShell() && !desktopOperatorToken) {
+    return {
+      ok: false,
+      endpoint: paths[0] ?? "unknown",
+      error: "desktop operator token missing",
+    };
+  }
+
   for (const path of paths) {
     try {
       const url = new URL(path, getDaemonUrl()).toString();
+      const headers: Record<string, string> = {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      };
+
+      if (privileged && desktopOperatorToken) {
+        headers.Authorization = `Bearer ${desktopOperatorToken}`;
+      }
+
       const response = await fetch(url, {
         method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
+        headers,
         body: JSON.stringify(body),
       });
 

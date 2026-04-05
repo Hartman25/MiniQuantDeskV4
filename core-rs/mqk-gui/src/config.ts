@@ -1,8 +1,11 @@
 // GUI-2: Daemon URL configuration
 // Priority order:
-// 1) localStorage override (operator-selected)
-// 2) Vite env var (VITE_MQK_DAEMON_URL)
-// 3) default localhost
+// 1) desktop-shell verified daemon URL (Tauri launcher)
+// 2) localStorage override (browser/operator-selected)
+// 3) Vite env var (VITE_MQK_DAEMON_URL)
+// 4) default localhost
+
+import { getDesktopDaemonUrl } from "./desktop/bootstrap";
 
 const LS_KEY = "mqk.daemon_url";
 
@@ -11,6 +14,9 @@ export function defaultDaemonUrl(): string {
 }
 
 export function getDaemonUrl(): string {
+  const desktop = getDesktopDaemonUrl();
+  if (desktop) return normalizeUrl(desktop);
+
   const saved = getSavedDaemonUrl();
   if (saved) return saved;
 

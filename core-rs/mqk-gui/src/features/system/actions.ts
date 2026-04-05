@@ -1,8 +1,11 @@
 // core-rs/mqk-gui/src/features/system/actions.ts
 //
-// Operator action dispatch: canonical → legacy fallback chain.
-// Exports invokeOperatorAction and the two helper functions it depends on.
+// Operator action dispatch: canonical-first, with browser/dev-only legacy fallback.
+// Desktop shell is authoritative-only: privileged actions MUST use the canonical
+// dispatcher with operator token auth and MUST fail closed when that route is
+// unavailable.
 
+import { isDesktopShell } from "../../desktop/bootstrap";
 import { postJson, type EndpointPostResult } from "./http";
 import { legacyActionPaths } from "./legacy";
 import type { OperatorActionReceipt, SystemStatus } from "./types";
@@ -147,6 +150,20 @@ function failedOperatorActionReceipt(
   };
 }
 
+function failedDesktopCanonicalOperatorActionReceipt(
+  actionKey: string,
+  failure: EndpointPostResult<unknown>,
+): OperatorActionReceipt {
+  const receipt = failedOperatorActionReceipt(actionKey, failure);
+  return {
+    ...receipt,
+    blocking_failures: [
+      ...receipt.blocking_failures,
+      "Desktop shell requires canonical /api/v1/ops/action authority; legacy fallback is disabled.",
+    ],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Public: invoke an operator action
 // ---------------------------------------------------------------------------
@@ -155,33 +172,39 @@ export async function invokeOperatorAction(
   actionKey: string,
   params: Record<string, unknown>,
 ): Promise<OperatorActionReceipt> {
-  // Try the canonical dispatcher first. A 400/403/409 from canonical is a
-  // definitive daemon decision and MUST NOT fall through to legacy paths.
-  // Only fall back to legacy when canonical was unreachable (network error,
-  // status === undefined) or explicitly absent (status === 404).
-  const canonicalResult = await postJson<Partial<OperatorActionReceipt> | LegacyDaemonStatusSnapshot | LegacyIntegrityResponse>(
-    ["/api/v1/ops/action"],
-    { action_key: actionKey, ...params },
-  );
+  const canonicalResult = await postJson<
+    Partial<OperatorActionReceipt> | LegacyDaemonStatusSnapshot | LegacyIntegrityResponse
+  >(["/api/v1/ops/action"], { action_key: actionKey, ...params }, { privileged: true });
 
-  const canonicalDefinitive = canonicalResult.ok || (canonicalResult.status !== undefined && canonicalResult.status !== 404);
+  const canonicalDefinitive =
+    canonicalResult.ok || (canonicalResult.status !== undefined && canonicalResult.status !== 404);
   if (canonicalDefinitive) {
     const mapped = mapLegacyOperatorActionResponse(actionKey, canonicalResult);
     if (mapped) return mapped;
     return failedOperatorActionReceipt(actionKey, canonicalResult);
   }
 
-  // Canonical was not found (404) or was unreachable (no status = network error).
-  // Fall back to legacy action paths for older daemon versions.
+  // Desktop shell is the authoritative local operator path. Do not silently
+  // downgrade privileged actions to legacy endpoints if the canonical route is
+  // missing or unreachable.
+  if (isDesktopShell()) {
+    return failedDesktopCanonicalOperatorActionReceipt(actionKey, {
+      ...canonicalResult,
+      error:
+        canonicalResult.error ??
+        "canonical /api/v1/ops/action is unavailable in desktop-shell mode",
+    });
+  }
+
+  // Browser/dev compatibility path for older daemon versions only.
   const legacyPaths = legacyActionPaths(actionKey);
   if (legacyPaths.length === 0) {
     return failedOperatorActionReceipt(actionKey, canonicalResult);
   }
 
-  const legacyResult = await postJson<Partial<OperatorActionReceipt> | LegacyDaemonStatusSnapshot | LegacyIntegrityResponse>(
-    legacyPaths,
-    { action_key: actionKey, ...params },
-  );
+  const legacyResult = await postJson<
+    Partial<OperatorActionReceipt> | LegacyDaemonStatusSnapshot | LegacyIntegrityResponse
+  >(legacyPaths, { action_key: actionKey, ...params });
 
   const mapped = mapLegacyOperatorActionResponse(actionKey, legacyResult);
   if (mapped) return mapped;
