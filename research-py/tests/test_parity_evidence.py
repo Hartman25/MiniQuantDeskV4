@@ -152,7 +152,10 @@ class TestBuildParityEvidence(unittest.TestCase):
             self.assertIn(gap, manifest.live_trust_gaps, f"Default gap missing: {gap!r}")
 
     def test_additional_trust_gaps_appended(self) -> None:
-        """additional_trust_gaps are appended to defaults, not replacing them."""
+        """additional_trust_gaps are appended to defaults, not replacing them.
+
+        Pass backtest_run_id so the count is predictable (no auto-added provenance gap).
+        """
         gate = _make_gate_result()
         shadow = _make_shadow_ref()
         extra = ["My project-specific gap #1."]
@@ -161,13 +164,14 @@ class TestBuildParityEvidence(unittest.TestCase):
             gate_result=gate,
             shadow_evidence=shadow,
             comparison_basis="Test basis.",
+            backtest_run_id="00000000-0000-0000-0000-000000000001",  # suppress provenance gap
             additional_trust_gaps=extra,
             produced_at_utc=_TS,
         )
         for gap in _DEFAULT_LIVE_TRUST_GAPS:
             self.assertIn(gap, manifest.live_trust_gaps)
         self.assertIn(extra[0], manifest.live_trust_gaps)
-        # default gaps still there — not replaced
+        # default gaps still there — not replaced; exact count is defaults + extra
         self.assertEqual(len(manifest.live_trust_gaps), len(_DEFAULT_LIVE_TRUST_GAPS) + len(extra))
 
     def test_artifact_id_matches_gate_result(self) -> None:

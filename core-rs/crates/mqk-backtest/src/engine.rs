@@ -33,8 +33,8 @@ use mqk_strategy::{
 };
 
 use crate::types::{
-    derive_run_id, BacktestBar, BacktestConfig, BacktestFill, BacktestOrder, BacktestOrderSide,
-    BacktestReport, OrderStatus,
+    derive_input_data_hash, derive_run_id, BacktestBar, BacktestConfig, BacktestFill,
+    BacktestOrder, BacktestOrderSide, BacktestReport, OrderStatus,
 };
 
 /// Backtest error variants.
@@ -211,6 +211,10 @@ impl BacktestEngine {
     /// Run the backtest on a sequence of bars.
     pub fn run(&mut self, bars: &[BacktestBar]) -> Result<BacktestReport, BacktestError> {
         self.validate_stress_profile()?;
+
+        // BKT-PROV-01: hash the full bar sequence before processing any bars so the
+        // run identity encodes the actual input data, not just strategy + config.
+        let input_data_hash = derive_input_data_hash(bars);
 
         for bar in bars {
             if self.halted {
@@ -504,15 +508,16 @@ impl BacktestEngine {
             self.equity_curve.push((bar.end_ts, equity));
         }
 
-        // BKT-05P: strategy identity — derive from spec if registered.
+        // BKT-PROV-01: strategy identity — derive from spec if registered.
         let strategy_name = self.host.spec().map(|s| s.name.clone()).unwrap_or_default();
         let config_id = self.config.config_id();
-        let run_id = derive_run_id(&strategy_name, &config_id);
+        let run_id = derive_run_id(&strategy_name, &config_id, &input_data_hash);
 
         Ok(BacktestReport {
             strategy_name,
             run_id,
             config_id,
+            input_data_hash,
             halted: self.halted,
             halt_reason: self.halt_reason.clone(),
             equity_curve: self.equity_curve.clone(),

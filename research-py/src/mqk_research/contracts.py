@@ -392,8 +392,9 @@ def read_deployability_gate(gate_path: Path) -> DeployabilityGateResult:
 # This artifact records what evidence exists for a candidate's shadow/live
 # parity.  It does NOT claim live trust.
 #
-# live_trust_complete=False is the required state from this patch.
-# It can only become True when LO-03 operator proof is complete.
+# live_trust_complete=False is hardcoded in current builds; no mechanism exists
+# to set it True.  It remains False until a future proof patch closes the live
+# parity chain.
 # ---------------------------------------------------------------------------
 
 # Schema version for the parity evidence manifest.

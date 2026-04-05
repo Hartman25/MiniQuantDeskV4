@@ -28,6 +28,12 @@ const BACKTEST_CONFIG_NS: Uuid = Uuid::from_bytes([
     0x6d, 0x71, 0x6b, 0x5f, 0x62, 0x6b, 0x74, 0x5f, 0x63, 0x66, 0x67, 0x5f, 0x5f, 0x6e, 0x73, 0x30,
 ]);
 
+/// Namespace for MQK backtest input-data identity hashes.
+/// Bytes: "mqk_bkt_input_ns" (ASCII, 16 bytes exactly).
+const BACKTEST_INPUT_NS: Uuid = Uuid::from_bytes([
+    0x6d, 0x71, 0x6b, 0x5f, 0x62, 0x6b, 0x74, 0x5f, 0x69, 0x6e, 0x70, 0x75, 0x74, 0x5f, 0x6e, 0x73,
+]);
+
 // ---------------------------------------------------------------------------
 // BacktestFill — Fill with per-fill provenance
 // ---------------------------------------------------------------------------
@@ -558,27 +564,63 @@ const BACKTEST_RUN_NS: Uuid = Uuid::from_bytes([
     0x6d, 0x71, 0x6b, 0x5f, 0x62, 0x6b, 0x74, 0x5f, 0x72, 0x75, 0x6e, 0x5f, 0x5f, 0x6e, 0x73, 0x30,
 ]);
 
+/// Derive a deterministic hash over the input bar sequence.
+///
+/// BKT-PROV-01: closes the input-data identity gap by producing a UUIDv5 that
+/// encodes every field of every bar in the sequence.  Two runs with different bar
+/// data (different prices, timestamps, symbols, volumes, or completeness flags)
+/// produce different hashes; identical bar sequences always produce the same hash.
+///
+/// The canonical form is `"mqk-bkt.input.v1|{bar0}|{bar1}|..."` where each bar
+/// is rendered as `"{symbol}:{end_ts}:{open}:{high}:{low}:{close}:{volume}:{is_complete}:{day_id}:{reject_window_id}"`.
+/// The `v1|` prefix allows future schema bumps without ambiguity.
+///
+/// Returns the hyphenated UUID string (e.g. `"xxxxxxxx-xxxx-5xxx-yxxx-xxxxxxxxxxxx"`).
+/// For empty bar sequences the hash is the UUIDv5 of `"mqk-bkt.input.v1|"` (stable,
+/// non-nil — empty input is a valid deterministic identity).
+pub fn derive_input_data_hash(bars: &[BacktestBar]) -> String {
+    let parts: Vec<String> = bars
+        .iter()
+        .map(|b| {
+            format!(
+                "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                b.symbol,
+                b.end_ts,
+                b.open_micros,
+                b.high_micros,
+                b.low_micros,
+                b.close_micros,
+                b.volume,
+                b.is_complete as u8,
+                b.day_id,
+                b.reject_window_id,
+            )
+        })
+        .collect();
+    let versioned = format!("mqk-bkt.input.v1|{}", parts.join("|"));
+    Uuid::new_v5(&BACKTEST_INPUT_NS, versioned.as_bytes()).to_string()
+}
+
 /// Derive a deterministic backtest run ID.
 ///
-/// BKT-05P: run identity is a UUIDv5 over `"mqk-bkt.run.v1|{strategy_name}|{config_id}"`.
-/// The `config_id` encodes every [`BacktestConfig`] parameter, so this ID is unique per
-/// (strategy × full config).
+/// BKT-PROV-01: run identity is a UUIDv5 over
+/// `"mqk-bkt.run.v2|{strategy_name}|{config_id}|{input_data_hash}"`.
+/// All three inputs must be provided:
+/// - `strategy_name`: from [`StrategySpec::name`] (empty string if no strategy registered)
+/// - `config_id`: UUIDv5 over all [`BacktestConfig`] parameters
+/// - `input_data_hash`: from [`derive_input_data_hash`] — encodes the full bar sequence
 ///
-/// # Input-data identity limitation
+/// This ID is unique per (strategy × full config × input bar data).  Replays over
+/// identical inputs always produce the same `run_id`.  Any change to strategy name,
+/// any config parameter, or any bar field produces a different `run_id`.
 ///
-/// **The input bar data is NOT incorporated into this ID.**
-/// Two runs with different bar data but the same strategy name and config will produce
-/// the **same** `run_id`. This is a known provenance gap: full input-data identity
-/// (a hash of the bar sequence) has not yet been wired into the identity chain.
+/// # Format note
 ///
-/// Until that gap is closed, callers must not rely on `run_id` alone to distinguish
-/// runs that differ only in input data. When writing artifact manifests, include the
-/// data source, date range, and symbol list alongside `run_id` in the manifest so
-/// the artifact set is unambiguously identified even without a bar-sequence hash.
-///
-/// Tracking: `BacktestReport.input_data_hash` will carry this value when implemented.
-pub fn derive_run_id(strategy_name: &str, config_id: &Uuid) -> Uuid {
-    let data = format!("mqk-bkt.run.v1|{}|{}", strategy_name, config_id);
+/// The `v2` prefix distinguishes IDs produced after BKT-PROV-01 (which incorporates
+/// bar data) from pre-BKT-PROV-01 `v1` IDs (strategy + config only).  Old and new
+/// IDs are mutually incomparable by construction.
+pub fn derive_run_id(strategy_name: &str, config_id: &Uuid, input_data_hash: &str) -> Uuid {
+    let data = format!("mqk-bkt.run.v2|{}|{}|{}", strategy_name, config_id, input_data_hash);
     Uuid::new_v5(&BACKTEST_RUN_NS, data.as_bytes())
 }
 
@@ -592,18 +634,25 @@ pub struct BacktestReport {
     /// BKT-05P: Name of the strategy that drove this run.
     /// Populated from `StrategySpec::name`; empty string if no strategy was registered.
     pub strategy_name: String,
-    /// BKT-05P: Deterministic run identity UUID.
+    /// BKT-PROV-01: Deterministic run identity UUID.
     ///
-    /// Derived via `derive_run_id(strategy_name, config_id)`. Stable across replays that
-    /// use the same strategy, same config, **and same input bar data**.
-    ///
-    /// **Input-data identity gap**: bar data is NOT hashed into this ID. Two runs with
-    /// different bar sequences but the same strategy + config produce the same `run_id`.
-    /// See [`derive_run_id`] for the full limitation note.
+    /// Derived via `derive_run_id(strategy_name, config_id, input_data_hash)`.
+    /// Encodes strategy name, every config parameter, **and** the full input bar sequence.
+    /// Stable across replays that use the same strategy, same config, and same input bars.
+    /// Any change to bar data, config, or strategy name produces a different `run_id`.
     pub run_id: Uuid,
     /// Deterministic config identity UUID (UUIDv5 over canonical config string).
     /// Suitable as the `config_hash` in artifact manifests.
     pub config_id: Uuid,
+    /// BKT-PROV-01: Deterministic input-data identity hash.
+    ///
+    /// A UUID-formatted string derived by [`derive_input_data_hash`] over the full bar
+    /// sequence passed to [`BacktestEngine::run`].  Different bar sequences produce
+    /// different hashes; identical sequences always produce the same hash.
+    ///
+    /// Consumers can use this to verify that two artifacts were produced from the same
+    /// underlying market data, independent of strategy or config identity.
+    pub input_data_hash: String,
     /// Whether the backtest halted early.
     pub halted: bool,
     /// Reason for halt (if any).

@@ -1,4 +1,4 @@
-//! BKT-05P: Strategy identity proof.
+//! BKT-05P / BKT-PROV-01: Strategy identity and input-data provenance proof.
 //!
 //! Proves that `BacktestReport` carries correct strategy identity fields:
 //!
@@ -8,8 +8,18 @@
 //! - I4: Different strategy names produce different `run_id` values
 //! - I5: Same strategy name + different config → different `run_id`
 //! - I6: No strategy registered → `strategy_name` is empty string
+//!
+//! BKT-PROV-01 additions (input-data provenance):
+//!
+//! - I7: `derive_run_id` pure function — stable and sensitive to all inputs
+//! - I8 (CLOSED): Different bars → different `run_id` (gap closed by BKT-PROV-01)
+//! - I9: `report.input_data_hash` is non-empty
+//! - I10: Different bar sequences → different `input_data_hash`
 
-use mqk_backtest::{derive_run_id, BacktestBar, BacktestConfig, BacktestEngine, CommissionModel};
+use mqk_backtest::{
+    derive_input_data_hash, derive_run_id, BacktestBar, BacktestConfig, BacktestEngine,
+    CommissionModel,
+};
 use mqk_execution::{StrategyOutput, TargetPosition};
 use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
 use uuid::Uuid;
@@ -158,15 +168,16 @@ fn no_strategy_produces_empty_name() {
 }
 
 // ---------------------------------------------------------------------------
-// I7: derive_run_id pure function — stable and sensitive
+// I7: derive_run_id pure function — stable and sensitive to all three inputs
 // ---------------------------------------------------------------------------
 
 #[test]
 fn derive_run_id_is_stable() {
     let cfg = BacktestConfig::test_defaults();
     let config_id = cfg.config_id();
-    let id1 = derive_run_id("strat_a", &config_id);
-    let id2 = derive_run_id("strat_a", &config_id);
+    let hash = derive_input_data_hash(&[bar(1_700_000_060)]);
+    let id1 = derive_run_id("strat_a", &config_id, &hash);
+    let id2 = derive_run_id("strat_a", &config_id, &hash);
     assert_eq!(id1, id2, "derive_run_id must be stable for same inputs");
     assert_ne!(id1, Uuid::nil(), "derive_run_id must not be nil");
 }
@@ -175,34 +186,47 @@ fn derive_run_id_is_stable() {
 fn derive_run_id_differs_on_strategy_name() {
     let cfg = BacktestConfig::test_defaults();
     let config_id = cfg.config_id();
-    let id_a = derive_run_id("strat_a", &config_id);
-    let id_b = derive_run_id("strat_b", &config_id);
+    let hash = derive_input_data_hash(&[bar(1_700_000_060)]);
+    let id_a = derive_run_id("strat_a", &config_id, &hash);
+    let id_b = derive_run_id("strat_b", &config_id, &hash);
     assert_ne!(
         id_a, id_b,
         "different strategy names must yield different run_ids"
     );
 }
 
+#[test]
+fn derive_run_id_differs_on_input_data_hash() {
+    let cfg = BacktestConfig::test_defaults();
+    let config_id = cfg.config_id();
+    let hash_a = derive_input_data_hash(&[bar(1_700_000_060)]);
+    let mut b = bar(1_700_000_060);
+    b.close_micros = 999_000_000;
+    let hash_b = derive_input_data_hash(&[b]);
+    let id_a = derive_run_id("same_strat", &config_id, &hash_a);
+    let id_b = derive_run_id("same_strat", &config_id, &hash_b);
+    assert_ne!(
+        id_a, id_b,
+        "different input_data_hash values must yield different run_ids"
+    );
+}
+
 // ---------------------------------------------------------------------------
-// I8: Input-data identity gap — same strategy+config, different bars → same run_id
+// I8: BKT-PROV-01 closed — same strategy+config, different bars → different run_id
 // ---------------------------------------------------------------------------
 
-/// Explicitly proves the documented limitation: `run_id` does NOT encode bar
-/// data.  Two runs with the same strategy name and config but different bar
-/// sequences produce the **same** `run_id`.
+/// Proves the BKT-PROV-01 closure: `run_id` NOW encodes bar data via `input_data_hash`.
+/// Two runs with the same strategy name and config but different bar sequences must
+/// produce different `run_id` values.
 ///
-/// This test exists to make the gap observable and prevent it from being
-/// silently "fixed" without updating all downstream callers that depend on
-/// the current stable-key semantics.  If bar-data hashing is ever added,
-/// this test must be updated alongside the `derive_run_id` doc comment and
-/// `BacktestReport::run_id` field doc, and the `input_data_hash` tracking
-/// ticket closed.
+/// This test replaces the former I8 gap-proof (which asserted run_ids were equal).
+/// The gap is closed; any regression that makes run_ids equal again for different bar
+/// data would indicate that `derive_input_data_hash` or `derive_run_id` was broken.
 #[test]
-fn run_id_does_not_encode_input_bar_data() {
+fn run_id_encodes_input_bar_data() {
     let cfg = BacktestConfig::test_defaults();
 
-    // Two bar sequences that differ in price — different data, same identity inputs.
-    let bars_a = vec![bar(1_700_000_060)]; // price 100_000_000 micros
+    let bars_a = vec![bar(1_700_000_060)];
     let bars_b = {
         let mut b = bar(1_700_000_060);
         b.close_micros = 120_000_000; // different close price
@@ -221,16 +245,81 @@ fn run_id_does_not_encode_input_bar_data() {
         .unwrap();
     let r_b = engine_b.run(&bars_b).unwrap();
 
-    // Sanity: the two runs DID see different data (equity diverged).
+    // Sanity: different bar data produced different equity curves.
     assert_ne!(
         r_a.equity_curve, r_b.equity_curve,
         "equity curves must differ when bar prices differ — confirms different input data"
     );
 
-    // The provenance gap: run_id is identical despite different bar data.
-    assert_eq!(
-        r_a.run_id, r_b.run_id,
-        "KNOWN LIMITATION: run_id is identical for runs that differ only in bar data; \
-         bar-data hashing has not been wired into derive_run_id"
+    // BKT-PROV-01: input_data_hash encodes bar content — must differ.
+    assert_ne!(
+        r_a.input_data_hash, r_b.input_data_hash,
+        "input_data_hash must differ for different bar sequences"
     );
+
+    // BKT-PROV-01: run_id now incorporates input_data_hash — must also differ.
+    assert_ne!(
+        r_a.run_id, r_b.run_id,
+        "run_id must differ when input bar data differs (BKT-PROV-01 closed)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// I9: report.input_data_hash is non-empty and non-nil
+// ---------------------------------------------------------------------------
+
+#[test]
+fn report_carries_non_empty_input_data_hash() {
+    let report = run_with_name("my_scalper_v1");
+    assert!(
+        !report.input_data_hash.is_empty(),
+        "input_data_hash must not be empty"
+    );
+    assert_ne!(
+        report.input_data_hash,
+        "00000000-0000-0000-0000-000000000000",
+        "input_data_hash must not be the nil UUID string"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// I10: Different bar sequences → different input_data_hash (pure function proof)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn different_bars_produce_different_input_data_hash() {
+    let bar_a = bar(1_700_000_060);
+    let mut bar_b = bar(1_700_000_060);
+    bar_b.close_micros = 120_000_000;
+
+    let hash_a = derive_input_data_hash(&[bar_a]);
+    let hash_b = derive_input_data_hash(&[bar_b]);
+    assert_ne!(
+        hash_a, hash_b,
+        "different bar prices must produce different input_data_hash"
+    );
+}
+
+#[test]
+fn same_bars_produce_same_input_data_hash() {
+    let bars = vec![bar(1_700_000_060), bar(1_700_000_120)];
+    let hash_1 = derive_input_data_hash(&bars);
+    let hash_2 = derive_input_data_hash(&bars);
+    assert_eq!(
+        hash_1, hash_2,
+        "identical bar sequences must produce the same input_data_hash"
+    );
+}
+
+#[test]
+fn empty_bars_produce_stable_non_nil_input_data_hash() {
+    let hash = derive_input_data_hash(&[]);
+    assert!(!hash.is_empty(), "empty bar sequence must still produce a hash");
+    assert_ne!(
+        hash,
+        "00000000-0000-0000-0000-000000000000",
+        "empty bar sequence hash must not be nil"
+    );
+    // Stable across calls.
+    assert_eq!(hash, derive_input_data_hash(&[]), "must be stable");
 }
