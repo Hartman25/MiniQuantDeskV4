@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mqk_backtest::{derive_run_id, BacktestConfig, BacktestReport};
+use mqk_backtest::{derive_input_data_hash, derive_run_id, BacktestConfig, BacktestReport};
 use mqk_promotion::{evaluate_promotion, PromotionConfig, PromotionInput};
 
 /// Synthetic equity curve that clearly violates at least 2 thresholds:
@@ -15,7 +15,8 @@ fn fails_when_below_multiple_thresholds() {
     // Flat equity for 2 days — no growth, no drawdown.
     // Real provenance so this test fails on METRICS, not on provenance gates.
     let config_id = BacktestConfig::test_defaults().config_id();
-    let run_id = derive_run_id("flat_equity_strategy_v1", &config_id);
+    let input_data_hash = derive_input_data_hash(&[]);
+    let run_id = derive_run_id("flat_equity_strategy_v1", &config_id, &input_data_hash);
     let report = BacktestReport {
         halted: false,
         halt_reason: None,
@@ -23,6 +24,7 @@ fn fails_when_below_multiple_thresholds() {
         strategy_name: "flat_equity_strategy_v1".to_string(),
         run_id,
         config_id,
+        input_data_hash,
         orders: vec![],
         fills: vec![],
         last_prices: BTreeMap::new(),
@@ -75,7 +77,8 @@ fn fails_with_large_drawdown() {
     // Equity drops from 1M to 600K (40% drawdown), then recovers to 800K.
     // Real provenance so this test fails on METRICS (MDD), not on provenance gates.
     let config_id = BacktestConfig::test_defaults().config_id();
-    let run_id = derive_run_id("large_drawdown_strategy_v1", &config_id);
+    let input_data_hash = derive_input_data_hash(&[]);
+    let run_id = derive_run_id("large_drawdown_strategy_v1", &config_id, &input_data_hash);
     let report = BacktestReport {
         halted: false,
         halt_reason: None,
@@ -88,6 +91,7 @@ fn fails_with_large_drawdown() {
         strategy_name: "large_drawdown_strategy_v1".to_string(),
         run_id,
         config_id,
+        input_data_hash,
         orders: vec![],
         fills: vec![],
         last_prices: BTreeMap::new(),

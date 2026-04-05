@@ -10,7 +10,9 @@
 
 use std::collections::BTreeMap;
 
-use mqk_backtest::{derive_run_id, BacktestConfig, BacktestFill, BacktestReport};
+use mqk_backtest::{
+    derive_input_data_hash, derive_run_id, BacktestConfig, BacktestFill, BacktestReport,
+};
 use mqk_portfolio::{Fill, Side};
 
 fn bf(inner: Fill) -> BacktestFill {
@@ -65,7 +67,12 @@ fn lenient_config() -> PromotionConfig {
 
 fn good_report() -> BacktestReport {
     let config_id = BacktestConfig::test_defaults().config_id();
-    let run_id = derive_run_id("stress_suite_test_strategy_v1", &config_id);
+    let input_data_hash = derive_input_data_hash(&[]);
+    let run_id = derive_run_id(
+        "stress_suite_test_strategy_v1",
+        &config_id,
+        &input_data_hash,
+    );
     BacktestReport {
         halted: false,
         halt_reason: None,
@@ -73,6 +80,7 @@ fn good_report() -> BacktestReport {
         strategy_name: "stress_suite_test_strategy_v1".to_string(),
         run_id,
         config_id,
+        input_data_hash,
         orders: vec![],
         fills: good_fills(),
         last_prices: BTreeMap::new(),
@@ -233,7 +241,8 @@ fn partial_fills_profit_factor_computed_correctly() {
 
     let day = 86_400i64;
     let config_id = BacktestConfig::test_defaults().config_id();
-    let run_id = derive_run_id("partial_fills_pf_strategy_v1", &config_id);
+    let input_data_hash = derive_input_data_hash(&[]);
+    let run_id = derive_run_id("partial_fills_pf_strategy_v1", &config_id, &input_data_hash);
     let report = BacktestReport {
         halted: false,
         halt_reason: None,
@@ -241,6 +250,7 @@ fn partial_fills_profit_factor_computed_correctly() {
         strategy_name: "partial_fills_pf_strategy_v1".to_string(),
         run_id,
         config_id,
+        input_data_hash,
         orders: vec![],
         fills,
         last_prices: BTreeMap::new(),
@@ -300,7 +310,12 @@ fn cancel_after_partial_fill_no_phantom_pnl() {
 
     let day = 86_400i64;
     let config_id = BacktestConfig::test_defaults().config_id();
-    let run_id = derive_run_id("cancel_partial_fill_strategy_v1", &config_id);
+    let input_data_hash = derive_input_data_hash(&[]);
+    let run_id = derive_run_id(
+        "cancel_partial_fill_strategy_v1",
+        &config_id,
+        &input_data_hash,
+    );
     let report = BacktestReport {
         halted: false,
         halt_reason: None,
@@ -308,6 +323,7 @@ fn cancel_after_partial_fill_no_phantom_pnl() {
         strategy_name: "cancel_partial_fill_strategy_v1".to_string(),
         run_id,
         config_id,
+        input_data_hash,
         orders: vec![],
         fills,
         last_prices: BTreeMap::new(),

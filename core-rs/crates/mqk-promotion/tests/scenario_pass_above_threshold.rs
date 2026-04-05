@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use mqk_backtest::{derive_run_id, BacktestConfig, BacktestFill, BacktestReport};
+use mqk_backtest::{
+    derive_input_data_hash, derive_run_id, BacktestConfig, BacktestFill, BacktestReport,
+};
 use mqk_portfolio::{Fill, Side};
 
 fn bf(inner: Fill) -> BacktestFill {
@@ -50,8 +52,14 @@ fn passes_all_thresholds() {
     ];
 
     // Use real provenance: non-nil run_id derived from a named strategy + config identity.
+    // input_data_hash for empty bars — deterministic, non-nil, test-appropriate.
     let config_id = BacktestConfig::test_defaults().config_id();
-    let run_id = derive_run_id("passes_all_thresholds_strategy", &config_id);
+    let input_data_hash = derive_input_data_hash(&[]);
+    let run_id = derive_run_id(
+        "passes_all_thresholds_strategy",
+        &config_id,
+        &input_data_hash,
+    );
     let report = BacktestReport {
         halted: false,
         halt_reason: None,
@@ -59,6 +67,7 @@ fn passes_all_thresholds() {
         strategy_name: "passes_all_thresholds_strategy".to_string(),
         run_id,
         config_id,
+        input_data_hash,
         orders: vec![],
         fills,
         last_prices: BTreeMap::new(),

@@ -261,7 +261,8 @@ pub fn write_backtest_report(run_dir: &Path, report: &mqk_backtest::BacktestRepo
 mod tests {
     use super::*;
     use mqk_backtest::{
-        BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport, OrderStatus,
+        derive_input_data_hash, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport,
+        OrderStatus,
     };
     use mqk_portfolio::{Fill, Side};
     use std::collections::BTreeMap;
@@ -274,6 +275,7 @@ mod tests {
             strategy_name: "test_strategy".to_string(),
             run_id: Uuid::new_v5(&Uuid::from_bytes([2u8; 16]), b"run"),
             config_id: Uuid::new_v5(&Uuid::from_bytes([3u8; 16]), b"cfg"),
+            input_data_hash: derive_input_data_hash(&[]),
             halted: false,
             halt_reason: None,
             equity_curve: vec![(1_000, 1_000_000_000), (2_000, 1_010_000_000)],

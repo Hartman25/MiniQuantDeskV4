@@ -9,7 +9,9 @@
 
 use std::collections::BTreeMap;
 
-use mqk_backtest::{derive_run_id, BacktestConfig, BacktestFill, BacktestReport};
+use mqk_backtest::{
+    derive_input_data_hash, derive_run_id, BacktestConfig, BacktestFill, BacktestReport,
+};
 use mqk_portfolio::{Fill, Side};
 
 fn bf(inner: Fill) -> BacktestFill {
@@ -39,11 +41,13 @@ fn make_report_with_provenance(
     halt_reason: Option<String>,
 ) -> BacktestReport {
     let config_id = BacktestConfig::test_defaults().config_id();
-    let run_id = derive_run_id(strategy_name, &config_id);
+    let input_data_hash = derive_input_data_hash(&[]);
+    let run_id = derive_run_id(strategy_name, &config_id, &input_data_hash);
     BacktestReport {
         strategy_name: strategy_name.to_string(),
         run_id,
         config_id,
+        input_data_hash,
         halted,
         halt_reason,
         equity_curve,
