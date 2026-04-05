@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/Rust-stable-orange?logo=rust" />
   <img src="https://img.shields.io/badge/Mode-deterministic-purple" />
   <img src="https://img.shields.io/badge/Focus-risk%20%26%20reliability-blue" />
-  <img src="https://img.shields.io/badge/Status-strong%20partial%20platform-yellow" />
+  <img src="https://img.shields.io/badge/Status-paper%20path%20strong%20%7C%20live%20partial-yellow" />
 </p>
 
 ## **Overview**
@@ -148,12 +148,15 @@ Operationally, `MAIN` is the canonical engine. `EXP` exists as a research-side e
 - deadman-style enforcement paths
 - reconcile normalization and mismatch detection
 - arming preflight tied to durable truth
+- session-aware autonomous paper gating for the canonical Paper + Alpaca path
 
 ### **Control plane**
 - CLI workflows for DB, market data, runs, and backtests
-- HTTP daemon with control and status surfaces
-- Vite/React GUI operator console
-- GUI/daemon contract gate in CI
+- HTTP daemon with control, readiness, status, and audit/event surfaces
+- canonical Paper + Alpaca autonomous paper path with truthful readiness, session control, WS continuity gating, and durable supervisor-history surfacing
+- persisted restart-intent control workflow for mode changes (no hot-switch fiction)
+- Vite/React GUI operator console with GUI/daemon contract gate in CI
+- optional Windows desktop bootstrap scripts exist, but browser GUI + daemon remains the primary documented path
 
 ## **Current Operational Status**
 
@@ -162,41 +165,45 @@ This repo has real institutional bones, but it is **not** yet a fully live-capit
 **What is strong right now**
 - core DB-backed safety model
 - OMS and durable execution-path structure
-- repo-native DB proof lane
-- daemon / GUI contract gating
-- deterministic paper path and backtest infrastructure
+- repo-native DB proof lane plus authoritative `full_repo_proof.ps1` local runner
+- truthful daemon / GUI contract gating, including route-contract drift checks
+- canonical Paper + Alpaca autonomous paper path with readiness truth, session-window truth, WS continuity gating, durable autonomous-session history, and a one-day soak harness
 - restart / recovery posture is materially stronger than early scaffold state
+- Windows proof posture is materially stronger via low-memory proof mode and Windows CI parity
 
 **What is still partial or under hardening**
 - research → deployability → runtime artifact chain is not fully closed
 - shadow / live parity evidence is not fully surfaced and enforced
-- operator-history and audit surfaces are stronger, but not fully complete everywhere
 - live-shadow and live-capital typed support is not the same as proven safe live operation
 - portfolio and capital-allocation realism remain open work
+- some deeper GUI detail surfaces remain intentionally deferred or unmounted rather than faked
 
 **Important current daemon posture**
 - default bind is loopback-only: `127.0.0.1:8899`
 - non-loopback bind requires explicit opt-in
 - privileged routes fail closed until `MQK_OPERATOR_TOKEN` is configured
 - backtest deployment through the daemon is intentionally refused fail-closed
-- paper mode is the most credible operational path today
+- the most credible operational path today is **Paper + Alpaca**, not paper+paper
 - live-shadow and live-capital have additional runtime gates and should still be treated as partially trusted modes, not finished operational claims
 
 ## **Verification and CI**
 
 The repo uses multiple verification lanes instead of one generic “cargo test and hope” story.
 
+**Authoritative local proof runner**
+- `full_repo_proof.ps1` is the canonical local proof entry point
+- `-ProofProfile local` runs the non-DB local lane set
+- `-ProofProfile full` runs the DB-backed institutional proof path
+- `-LowMemory` reproduces the proven Windows low-memory posture for local proof execution
+
 **CI lanes**
-- **GUI contract gate** — GUI truth tests, GUI build, plus authoritative daemon contract test
-- **Safety guards** — unsafe-pattern and migration-governance checks
+- **GUI contract gate** — GUI truth tests, GUI build, plus authoritative daemon contract tests
+- **Safety guards** — unsafe-pattern, migration-governance, and ignored-proof hygiene checks
 - **Rust lane** — `fmt --check`, `clippy`, and broad workspace tests
 - **DB proof lane** — repo-native Postgres-backed safety proof harness
+- **Windows lane** — low-memory Windows build/test parity for the real operator OS class
 
-**Local proof harness**
-- `scripts/db_proof_bootstrap.sh`
-- `scripts/db_proof_bootstrap.sh --start-postgres`
-
-That DB lane is the load-bearing proof path for migrations, inbox/outbox durability, restart quarantine, lease/deadman, and arming constraints.
+That DB lane remains the load-bearing proof path for migrations, inbox/outbox durability, restart quarantine, lease/deadman, and arming constraints.
 
 ## **Quick Start**
 
@@ -227,18 +234,25 @@ docker run --name mqk-postgres-proof `
 & "C:\Program Files\Git\bin\bash.exe" -lc 'export MQK_DATABASE_URL="postgres://mqk:mqk@127.0.0.1:55432/mqk_test"; export DATABASE_URL="$MQK_DATABASE_URL"; ./scripts/db_proof_bootstrap.sh'
 ```
 
-### **5. Build and test the Rust workspace**
+### **5. Run the authoritative local proof runner**
 ```powershell
-cd core-rs
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+# Non-DB local proof
+.\full_repo_proof.ps1 -ProofProfile local
+
+# Full DB-backed proof
+$env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
+.\full_repo_proof.ps1 -ProofProfile full
 ```
 
 ### **6. Run the daemon**
 ```powershell
 cd core-rs
 $env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
+$env:MQK_OPERATOR_TOKEN = "dev-local-operator-token"
+$env:MQK_DAEMON_DEPLOYMENT_MODE = "paper"
+$env:MQK_DAEMON_ADAPTER_ID = "alpaca"
+$env:ALPACA_API_KEY_PAPER = "<your-paper-key>"
+$env:ALPACA_API_SECRET_PAPER = "<your-paper-secret>"
 cargo run -p mqk-daemon
 ```
 
