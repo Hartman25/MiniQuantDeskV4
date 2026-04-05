@@ -27,8 +27,8 @@ use crate::artifact_intake::{
 };
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::{
-    AppState, AutonomousSessionTruth, DeploymentMode, StrategyMarketDataSource,
-    autonomous_session_schedule_from_env,
+    autonomous_session_schedule_from_env, AppState, AutonomousSessionTruth, DeploymentMode,
+    StrategyMarketDataSource,
 };
 
 use super::helpers::{
@@ -203,59 +203,70 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
     let is_paper_alpaca = st.deployment_mode() == DeploymentMode::Paper
         && st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion;
 
-    let (ws_continuity_ready, reconcile_ready, autonomous_arm_state, autonomous_blockers, session_in_window) =
-        if is_paper_alpaca {
-            let ws_continuity = st.alpaca_ws_continuity().await;
-            let ws_ready = ws_continuity.is_continuity_proven();
+    let (
+        ws_continuity_ready,
+        reconcile_ready,
+        autonomous_arm_state,
+        autonomous_blockers,
+        session_in_window,
+    ) = if is_paper_alpaca {
+        let ws_continuity = st.alpaca_ws_continuity().await;
+        let ws_ready = ws_continuity.is_continuity_proven();
 
-            let reconcile = st.current_reconcile_snapshot().await;
-            let rec_ready = !matches!(reconcile.status.as_str(), "dirty" | "stale");
+        let reconcile = st.current_reconcile_snapshot().await;
+        let rec_ready = !matches!(reconcile.status.as_str(), "dirty" | "stale");
 
-            let arm_state = if integrity_halted {
-                "halted".to_string()
-            } else if integrity_disarmed {
-                "arm_pending".to_string()
-            } else {
-                "armed".to_string()
-            };
-
-            let schedule = autonomous_session_schedule_from_env();
-            let in_window = schedule.is_in_session(&st, Utc::now()).await;
-
-            let mut auto_blockers = Vec::new();
-            if !ws_ready {
-                auto_blockers.push(format!(
-                    "WS continuity not proven (current: '{}'); paper+alpaca requires \
-                     WS continuity=live before starting (BRK-00R-04)",
-                    ws_continuity.as_status_str()
-                ));
-            }
-            if !rec_ready {
-                auto_blockers.push(format!(
-                    "reconcile status is '{}'; paper+alpaca cannot start with dirty or stale \
-                     reconcile truth (BRK-09R)",
-                    reconcile.status
-                ));
-            }
-            if integrity_halted {
-                auto_blockers.push(
-                    "integrity arm state is 'halted'; operator must arm manually before \
-                     autonomous start is permitted"
-                        .to_string(),
-                );
-            }
-            if !in_window {
-                auto_blockers.push(
-                    "current time is outside the autonomous session window; the session \
-                     controller will not attempt a start until the window opens"
-                        .to_string(),
-                );
-            }
-
-            (Some(ws_ready), Some(rec_ready), arm_state, auto_blockers, Some(in_window))
+        let arm_state = if integrity_halted {
+            "halted".to_string()
+        } else if integrity_disarmed {
+            "arm_pending".to_string()
         } else {
-            (None, None, "not_applicable".to_string(), Vec::new(), None)
+            "armed".to_string()
         };
+
+        let schedule = autonomous_session_schedule_from_env();
+        let in_window = schedule.is_in_session(&st, Utc::now()).await;
+
+        let mut auto_blockers = Vec::new();
+        if !ws_ready {
+            auto_blockers.push(format!(
+                "WS continuity not proven (current: '{}'); paper+alpaca requires \
+                     WS continuity=live before starting (BRK-00R-04)",
+                ws_continuity.as_status_str()
+            ));
+        }
+        if !rec_ready {
+            auto_blockers.push(format!(
+                "reconcile status is '{}'; paper+alpaca cannot start with dirty or stale \
+                     reconcile truth (BRK-09R)",
+                reconcile.status
+            ));
+        }
+        if integrity_halted {
+            auto_blockers.push(
+                "integrity arm state is 'halted'; operator must arm manually before \
+                     autonomous start is permitted"
+                    .to_string(),
+            );
+        }
+        if !in_window {
+            auto_blockers.push(
+                "current time is outside the autonomous session window; the session \
+                     controller will not attempt a start until the window opens"
+                    .to_string(),
+            );
+        }
+
+        (
+            Some(ws_ready),
+            Some(rec_ready),
+            arm_state,
+            auto_blockers,
+            Some(in_window),
+        )
+    } else {
+        (None, None, "not_applicable".to_string(), Vec::new(), None)
+    };
 
     let mut warnings = Vec::new();
     if status.notes.is_some() {
@@ -303,7 +314,8 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
             session_in_window,
         }),
     )
-        .into_response()}
+        .into_response()
+}
 
 // ---------------------------------------------------------------------------
 // AUTON-TRUTH-01: GET /api/v1/autonomous/readiness

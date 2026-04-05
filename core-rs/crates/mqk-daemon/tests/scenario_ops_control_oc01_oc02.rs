@@ -76,7 +76,10 @@ async fn cleanup_daemon_intents(pool: &sqlx::PgPool) {
 }
 
 /// POST /api/v1/ops/action with a JSON body; return (status, parsed body).
-async fn post_action(router: axum::Router, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+async fn post_action(
+    router: axum::Router,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method(Method::POST)
         .uri("/api/v1/ops/action")
@@ -581,7 +584,9 @@ async fn oc_10_request_mode_change_admissible_persists_intent_in_db() {
     );
 
     // Verify the intent is actually in the DB.
-    let intent_id_str = pi["intent_id"].as_str().expect("intent_id must be a string");
+    let intent_id_str = pi["intent_id"]
+        .as_str()
+        .expect("intent_id must be a string");
     let pending = mqk_db::fetch_pending_restart_intent_for_engine(&pool, ENGINE_ID)
         .await
         .expect("fetch_pending must not error")
@@ -610,10 +615,7 @@ async fn oc_11_cancel_mode_transition_cancels_pending_intent() {
     cleanup_daemon_intents(&pool).await;
 
     // Seed a pending intent directly.
-    let intent_id = uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_DNS,
-        b"oc11-test-intent",
-    );
+    let intent_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"oc11-test-intent");
     mqk_db::insert_restart_intent(
         &pool,
         &mqk_db::NewRestartIntent {

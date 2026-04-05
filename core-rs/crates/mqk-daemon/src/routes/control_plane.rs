@@ -694,12 +694,10 @@ pub(crate) async fn ops_action(
                         disposition: "missing_target_mode".to_string(),
                         resulting_integrity_state: None,
                         resulting_desired_armed: None,
-                        blockers: vec![
-                            "target_mode is required for request-mode-change \
+                        blockers: vec!["target_mode is required for request-mode-change \
                              (e.g. \"live-shadow\"); see GET /api/v1/ops/mode-change-guidance \
                              for available transitions."
-                                .to_string(),
-                        ],
+                            .to_string()],
                         warnings: vec![],
                         environment: Some(st.deployment_mode().as_api_label().to_string()),
                         scope: Some("daemon_instance".to_string()),
@@ -789,10 +787,7 @@ pub(crate) async fn ops_action(
                             DAEMON_ENGINE_ID,
                             current.as_api_label(),
                             target.as_api_label(),
-                            ts_utc.to_rfc3339_opts(
-                                chrono::SecondsFormat::Micros,
-                                true
-                            ),
+                            ts_utc.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
                         )
                         .as_bytes(),
                     );
@@ -846,11 +841,9 @@ pub(crate) async fn ops_action(
                             resulting_integrity_state: None,
                             resulting_desired_armed: None,
                             blockers: vec![],
-                            warnings: vec![
-                                "Mode change requires a controlled daemon restart. \
+                            warnings: vec!["Mode change requires a controlled daemon restart. \
                                  See GET /api/v1/ops/mode-change-guidance for preconditions."
-                                    .to_string(),
-                            ],
+                                .to_string()],
                             environment: Some(current.as_api_label().to_string()),
                             scope: Some("daemon_instance".to_string()),
                             audit: OperatorActionAuditFields {
@@ -864,29 +857,28 @@ pub(crate) async fn ops_action(
                         .into_response()
                 }
 
-                ModeTransitionVerdict::Refused { .. } | ModeTransitionVerdict::FailClosed { .. } => {
-                    (
-                        StatusCode::CONFLICT,
-                        Json(OperatorActionResponse {
-                            requested_action: "request-mode-change".to_string(),
-                            accepted: false,
-                            disposition: format!("blocked_{}", verdict.as_str()),
-                            resulting_integrity_state: None,
-                            resulting_desired_armed: None,
-                            blockers: vec![verdict.reason().to_string()],
-                            warnings: vec![],
-                            environment: Some(current.as_api_label().to_string()),
-                            scope: Some("daemon_instance".to_string()),
-                            audit: OperatorActionAuditFields {
-                                durable_db_write: false,
-                                durable_targets: vec![],
-                                audit_event_id: None,
-                            },
-                            pending_restart_intent: None,
-                        }),
-                    )
-                        .into_response()
-                }
+                ModeTransitionVerdict::Refused { .. }
+                | ModeTransitionVerdict::FailClosed { .. } => (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "request-mode-change".to_string(),
+                        accepted: false,
+                        disposition: format!("blocked_{}", verdict.as_str()),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![verdict.reason().to_string()],
+                        warnings: vec![],
+                        environment: Some(current.as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response(),
             }
         }
 

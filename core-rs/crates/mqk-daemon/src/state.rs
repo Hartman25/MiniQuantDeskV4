@@ -289,7 +289,8 @@ impl AppState {
             run_config_hash: state.runtime_selection.run_config_hash.clone(),
             readiness,
         };
-        state.calendar_spec = calendar_spec_for_deployment(mode, state.runtime_selection.broker_kind);
+        state.calendar_spec =
+            calendar_spec_for_deployment(mode, state.runtime_selection.broker_kind);
         state
     }
 
@@ -444,8 +445,10 @@ impl AppState {
 
         let runtime_selection = runtime_selection_from_env();
 
-        let calendar_spec =
-            calendar_spec_for_deployment(runtime_selection.deployment_mode, runtime_selection.broker_kind);
+        let calendar_spec = calendar_spec_for_deployment(
+            runtime_selection.deployment_mode,
+            runtime_selection.broker_kind,
+        );
 
         let broker_snapshot_source =
             BrokerSnapshotTruthSource::from_broker_kind(runtime_selection.broker_kind);

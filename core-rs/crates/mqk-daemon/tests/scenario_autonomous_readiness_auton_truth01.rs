@@ -39,12 +39,16 @@ use uuid::Uuid;
 
 /// Monday 2026-03-30 14:00:00 UTC = 10:00:00 ET (DST) — NYSE regular session.
 fn nyse_regular_session_ts() -> i64 {
-    Utc.with_ymd_and_hms(2026, 3, 30, 14, 0, 0).unwrap().timestamp()
+    Utc.with_ymd_and_hms(2026, 3, 30, 14, 0, 0)
+        .unwrap()
+        .timestamp()
 }
 
 /// Monday 2026-03-30 13:00:00 UTC = 09:00:00 ET (DST) — NYSE premarket.
 fn nyse_premarket_ts() -> i64 {
-    Utc.with_ymd_and_hms(2026, 3, 30, 13, 0, 0).unwrap().timestamp()
+    Utc.with_ymd_and_hms(2026, 3, 30, 13, 0, 0)
+        .unwrap()
+        .timestamp()
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +117,10 @@ async fn ar01_non_paper_alpaca_returns_not_applicable() {
             "canonical_path must be false for non-paper+alpaca"
         );
         assert!(
-            v["blockers"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+            v["blockers"]
+                .as_array()
+                .map(|a| !a.is_empty())
+                .unwrap_or(false),
             "blockers must be non-empty explaining why not_applicable"
         );
     }
@@ -187,10 +194,7 @@ async fn ar03_gap_detected_blocks_ws_continuity() {
     let blockers = v["blockers"].as_array().expect("blockers must be array");
     assert!(!blockers.is_empty());
     assert!(
-        blockers[0]
-            .as_str()
-            .unwrap_or("")
-            .contains("gap_detected"),
+        blockers[0].as_str().unwrap_or("").contains("gap_detected"),
         "blocker must mention gap_detected"
     );
 }
@@ -216,7 +220,8 @@ async fn ar04_live_armed_clean_reconcile_overall_ready() {
     }
     // Inject session clock to NYSE regular session (Monday 2026-03-30 14:00 UTC = 10:00 ET).
     // Required so that session_in_window = true regardless of wall-clock at test run time.
-    st.set_session_clock_ts_for_test(nyse_regular_session_ts()).await;
+    st.set_session_clock_ts_for_test(nyse_regular_session_ts())
+        .await;
     // Reconcile defaults to "unknown" which is not dirty/stale → reconcile_ready = true.
 
     let router = routes::build_router(st);
@@ -236,12 +241,21 @@ async fn ar04_live_armed_clean_reconcile_overall_ready() {
     assert_eq!(v["arm_state"], "armed");
     assert_eq!(v["arm_ready"], true);
     assert_eq!(v["signal_ingestion_configured"], true);
-    assert_eq!(v["session_in_window"], true, "session clock injected to regular session");
+    assert_eq!(
+        v["session_in_window"], true,
+        "session clock injected to regular session"
+    );
     assert_eq!(v["session_window_state"], "in_window");
-    assert_eq!(v["runtime_start_allowed"], true, "no active run → runtime_start_allowed");
+    assert_eq!(
+        v["runtime_start_allowed"], true,
+        "no active run → runtime_start_allowed"
+    );
     assert_eq!(v["overall_ready"], true);
     let blockers = v["blockers"].as_array().expect("blockers must be array");
-    assert!(blockers.is_empty(), "no blockers expected when overall_ready");
+    assert!(
+        blockers.is_empty(),
+        "no blockers expected when overall_ready"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -459,7 +473,10 @@ async fn ar09_applicable_only_for_paper_alpaca() {
             .unwrap(),
     )
     .await;
-    assert_eq!(parse_json(pp_body)["autonomous_readiness_applicable"], false);
+    assert_eq!(
+        parse_json(pp_body)["autonomous_readiness_applicable"],
+        false
+    );
 
     // LiveShadow: applicable = false.
     let (_, ls_body) = call(
@@ -470,7 +487,10 @@ async fn ar09_applicable_only_for_paper_alpaca() {
             .unwrap(),
     )
     .await;
-    assert_eq!(parse_json(ls_body)["autonomous_readiness_applicable"], false);
+    assert_eq!(
+        parse_json(ls_body)["autonomous_readiness_applicable"],
+        false
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -589,7 +609,8 @@ async fn ar12_regular_session_clock_in_window() {
         ig.halted = false;
     }
     // Inject session clock to regular session: Monday 2026-03-30 14:00 UTC = 10:00 ET.
-    st.set_session_clock_ts_for_test(nyse_regular_session_ts()).await;
+    st.set_session_clock_ts_for_test(nyse_regular_session_ts())
+        .await;
 
     let router = routes::build_router(st);
     let req = Request::builder()

@@ -39,12 +39,16 @@ use tower::ServiceExt;
 
 /// Saturday 2026-03-28 15:00:00 UTC — outside NYSE session.
 fn saturday_ts() -> i64 {
-    Utc.with_ymd_and_hms(2026, 3, 28, 15, 0, 0).unwrap().timestamp()
+    Utc.with_ymd_and_hms(2026, 3, 28, 15, 0, 0)
+        .unwrap()
+        .timestamp()
 }
 
 /// Monday 2026-03-30 14:00:00 UTC = 10:00:00 ET — NYSE regular session.
 fn regular_session_ts() -> i64 {
-    Utc.with_ymd_and_hms(2026, 3, 30, 14, 0, 0).unwrap().timestamp()
+    Utc.with_ymd_and_hms(2026, 3, 30, 14, 0, 0)
+        .unwrap()
+        .timestamp()
 }
 
 // ---------------------------------------------------------------------------

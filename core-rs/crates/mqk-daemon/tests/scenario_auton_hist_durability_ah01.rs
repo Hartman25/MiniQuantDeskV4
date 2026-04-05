@@ -34,11 +34,8 @@ use state::{AlpacaWsContinuityState, AutonomousSessionTruth, BrokerKind};
 use tower::ServiceExt;
 
 async fn ah04_test_pool() -> sqlx::PgPool {
-    let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
-        panic!(
-            "AH-04 requires MQK_DATABASE_URL; run with --include-ignored"
-        )
-    });
+    let url = std::env::var(mqk_db::ENV_DB_URL)
+        .unwrap_or_else(|_| panic!("AH-04 requires MQK_DATABASE_URL; run with --include-ignored"));
     sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(&url)
@@ -181,7 +178,10 @@ async fn ah03_degraded_flag_is_sticky() {
         detail: "ah03_first".to_string(),
     })
     .await;
-    assert!(st.autonomous_history_degraded(), "must be true after first transition");
+    assert!(
+        st.autonomous_history_degraded(),
+        "must be true after first transition"
+    );
 
     // Trigger a second (different) truth transition.
     st.set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
