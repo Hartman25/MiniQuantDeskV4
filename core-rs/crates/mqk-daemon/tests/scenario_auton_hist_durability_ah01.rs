@@ -121,7 +121,7 @@ async fn ah02_readiness_surface_reflects_degraded_flag() {
     })
     .await;
 
-    let router = routes::build_router(st.clone().into());
+    let router = routes::build_router(st.clone());
 
     // --- Check A: flag not yet set → autonomous_history_degraded = false ---
     let req_a = Request::builder()

@@ -480,9 +480,9 @@ catch {
 # HARNESS-01: Windows low-memory profile activation.
 # Must run after preflight (so $script:CargoExe etc. are resolved) and before any lane.
 # Reproduces the exact proven Windows low-memory posture:
-#   CARGO_BUILD_JOBS=1  (serial build/link — proven to avoid linker OOM)
-#   CARGO_INCREMENTAL=0 (disable incremental compilation — reduces peak memory)
-#   RUSTFLAGS=-C debuginfo=0 (suppress debug symbols — large memory reduction)
+#   CARGO_BUILD_JOBS=1  (serial build/link - proven to avoid linker OOM)
+#   CARGO_INCREMENTAL=0 (disable incremental compilation - reduces peak memory)
+#   RUSTFLAGS=-C debuginfo=0 (suppress debug symbols - large memory reduction)
 # Each env var is set only if not already explicitly overridden by the caller.
 if ($LowMemory) {
     if (-not $env:CARGO_BUILD_JOBS) {
@@ -494,15 +494,17 @@ if ($LowMemory) {
     if (-not $env:RUSTFLAGS) {
         $env:RUSTFLAGS = '-C debuginfo=0'
     }
+
     $script:lowMemoryBuildJobs = $env:CARGO_BUILD_JOBS
     $script:lowMemoryCargoIncremental = $env:CARGO_INCREMENTAL
     $script:lowMemoryRustflags = $env:RUSTFLAGS
+
     Write-Host ''
     Write-Host '============================================================' -ForegroundColor Magenta
     Write-Host '*** LOW-MEMORY PROFILE ACTIVE (HARNESS-01) ***' -ForegroundColor Magenta
-    Write-Host "CARGO_BUILD_JOBS=$script:lowMemoryBuildJobs  (serial build/link — proven Windows posture)" -ForegroundColor Magenta
-    Write-Host "CARGO_INCREMENTAL=$script:lowMemoryCargoIncremental  (incremental compilation disabled)" -ForegroundColor Magenta
-    Write-Host "RUSTFLAGS=$script:lowMemoryRustflags  (debug symbols suppressed)" -ForegroundColor Magenta
+    Write-Host ('CARGO_BUILD_JOBS={0}  (serial build/link - proven Windows posture)' -f $script:lowMemoryBuildJobs) -ForegroundColor Magenta
+    Write-Host ('CARGO_INCREMENTAL={0}  (incremental compilation disabled)' -f $script:lowMemoryCargoIncremental) -ForegroundColor Magenta
+    Write-Host ('RUSTFLAGS={0}  (debug symbols suppressed)' -f $script:lowMemoryRustflags) -ForegroundColor Magenta
     Write-Host 'All test lanes use --test-threads=1 (already canonical in this harness).' -ForegroundColor Magenta
     Write-Host 'Use this profile on Windows hosts where linker/codegen parallelism causes OOM.' -ForegroundColor Magenta
     Write-Host '============================================================' -ForegroundColor Magenta
