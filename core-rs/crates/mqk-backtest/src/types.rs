@@ -620,7 +620,10 @@ pub fn derive_input_data_hash(bars: &[BacktestBar]) -> String {
 /// bar data) from pre-BKT-PROV-01 `v1` IDs (strategy + config only).  Old and new
 /// IDs are mutually incomparable by construction.
 pub fn derive_run_id(strategy_name: &str, config_id: &Uuid, input_data_hash: &str) -> Uuid {
-    let data = format!("mqk-bkt.run.v2|{}|{}|{}", strategy_name, config_id, input_data_hash);
+    let data = format!(
+        "mqk-bkt.run.v2|{}|{}|{}",
+        strategy_name, config_id, input_data_hash
+    );
     Uuid::new_v5(&BACKTEST_RUN_NS, data.as_bytes())
 }
 

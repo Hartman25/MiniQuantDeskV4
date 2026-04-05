@@ -276,8 +276,7 @@ fn report_carries_non_empty_input_data_hash() {
         "input_data_hash must not be empty"
     );
     assert_ne!(
-        report.input_data_hash,
-        "00000000-0000-0000-0000-000000000000",
+        report.input_data_hash, "00000000-0000-0000-0000-000000000000",
         "input_data_hash must not be the nil UUID string"
     );
 }
@@ -314,10 +313,12 @@ fn same_bars_produce_same_input_data_hash() {
 #[test]
 fn empty_bars_produce_stable_non_nil_input_data_hash() {
     let hash = derive_input_data_hash(&[]);
-    assert!(!hash.is_empty(), "empty bar sequence must still produce a hash");
+    assert!(
+        !hash.is_empty(),
+        "empty bar sequence must still produce a hash"
+    );
     assert_ne!(
-        hash,
-        "00000000-0000-0000-0000-000000000000",
+        hash, "00000000-0000-0000-0000-000000000000",
         "empty bar sequence hash must not be nil"
     );
     // Stable across calls.

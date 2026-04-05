@@ -131,7 +131,8 @@ fn lt02_fail_closed_reason_is_explicit_current_build_ceiling() {
 #[test]
 fn lt03_both_upward_paths_share_same_fail_closed_reason() {
     let v_paper = evaluate_mode_transition(DeploymentMode::Paper, DeploymentMode::LiveCapital);
-    let v_shadow = evaluate_mode_transition(DeploymentMode::LiveShadow, DeploymentMode::LiveCapital);
+    let v_shadow =
+        evaluate_mode_transition(DeploymentMode::LiveShadow, DeploymentMode::LiveCapital);
 
     assert_eq!(
         v_paper.as_str(),
@@ -228,7 +229,11 @@ fn lt04_present_parity_with_live_trust_false_is_start_safe_at_enforcement_gate()
     );
 
     // Confirm live_trust_complete is surfaced honestly as false (not hidden or fabricated).
-    if let ParityEvidenceOutcome::Present { live_trust_complete, .. } = &outcome {
+    if let ParityEvidenceOutcome::Present {
+        live_trust_complete,
+        ..
+    } = &outcome
+    {
         assert!(
             !live_trust_complete,
             "LT-04: live_trust_complete must be honestly surfaced as false; got: true"
