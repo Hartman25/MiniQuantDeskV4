@@ -81,6 +81,10 @@ pub struct OperatorActionResponse {
     pub scope: Option<String>,
     /// Auditability metadata that this daemon can currently prove.
     pub audit: OperatorActionAuditFields,
+    /// Durable restart intent snapshot.  Present only when `action_key` is
+    /// "request-mode-change" and the transition is `admissible_with_restart`
+    /// (disposition = "pending_restart").  Null in all other cases.
+    pub pending_restart_intent: Option<PendingRestartIntentSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,6 +307,108 @@ pub struct PreflightStatusResponse {
     pub live_routing_disabled: bool,
     pub warnings: Vec<String>,
     pub blockers: Vec<String>,
+    // AUTON-TRUTH-02: Autonomous-paper readiness fields.
+    //
+    // Populated only for the canonical Paper+Alpaca deployment.
+    // All fields are `None` / empty for other deployments — they carry no
+    // meaning and must not be interpreted as pass/fail on non-paper+alpaca.
+    /// True only for Paper+Alpaca. Determines whether the fields below apply.
+    pub autonomous_readiness_applicable: bool,
+    /// WS continuity proven: `Some(true)` only when `alpaca_ws_continuity == "live"`.
+    /// `None` when not paper+alpaca.
+    pub ws_continuity_ready: Option<bool>,
+    /// Reconcile not dirty/stale: `Some(true)` when reconcile is neither "dirty" nor "stale".
+    /// `None` when not paper+alpaca.
+    pub reconcile_ready: Option<bool>,
+    /// Autonomous arm state: `"armed"` | `"arm_pending"` | `"halted"` | `"not_applicable"`.
+    ///
+    /// - `"armed"` — in-memory integrity is armed; start can proceed.
+    /// - `"arm_pending"` — disarmed in memory but not halted; the session
+    ///   controller will call `try_autonomous_arm` (DB-ARMED → advances to armed).
+    /// - `"halted"` — operator halt asserted; requires manual operator arm.
+    /// - `"not_applicable"` — not paper+alpaca.
+    pub autonomous_arm_state: String,
+    /// Exact autonomous-paper blockers derived from the same gate order as
+    /// `start_execution_runtime`.  Empty when not paper+alpaca or when all
+    /// checks pass.  These are operator-actionable reasons why the next
+    /// autonomous start attempt will refuse.
+    pub autonomous_blockers: Vec<String>,
+    /// Whether the current wall-clock time is inside the autonomous session window.
+    /// `Some(true)` = in window, `Some(false)` = outside window.
+    /// `None` when not paper+alpaca.
+    pub session_in_window: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// AUTON-TRUTH-01: GET /api/v1/autonomous/readiness
+// ---------------------------------------------------------------------------
+
+/// Autonomous-paper readiness truth surface.
+///
+/// Surfaces the real gate state that governs whether the session controller
+/// can start an execution run on the canonical Paper+Alpaca path.  All field
+/// values are derived directly from live daemon state; nothing is synthesised.
+///
+/// `truth_state`:
+/// - `"active"` — deployment is Paper+Alpaca; all fields are authoritative.
+/// - `"not_applicable"` — deployment is not Paper+Alpaca; autonomous readiness
+///   does not apply.  All boolean fields are `false`; `blockers` contains
+///   a single explanatory entry.
+///
+/// `overall_ready` is the conjunction of all individual readiness flags.  Only
+/// `true` when every gate that `start_execution_runtime` enforces would pass
+/// right now.  `false` does NOT mean the system is broken — it means at least
+/// one gate would refuse start in its current state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutonomousPaperReadinessResponse {
+    pub canonical_route: String,
+    /// `"active"` for paper+alpaca; `"not_applicable"` otherwise.
+    pub truth_state: String,
+    /// True when deployment is Paper+Alpaca (the canonical autonomous path).
+    pub canonical_path: bool,
+    /// Alpaca WS continuity: `"live"` | `"cold_start_unproven"` | `"gap_detected"` | `"not_applicable"`.
+    pub ws_continuity: String,
+    /// True only when `ws_continuity == "live"` (BRK-00R-04 gate).
+    pub ws_continuity_ready: bool,
+    /// Reconcile status: `"ok"` | `"dirty"` | `"stale"` | `"unknown"`.
+    pub reconcile_status: String,
+    /// True when reconcile is not `"dirty"` or `"stale"` (BRK-09R gate).
+    pub reconcile_ready: bool,
+    /// Autonomous supervisory state from `AppState::autonomous_session_truth()`.
+    /// `"clear"` | `"start_refused"` | `"recovery_retrying"` | `"recovery_succeeded"`
+    /// | `"recovery_failed"` | `"run_ended_unexpectedly"` | `"stop_failed"`
+    /// | `"stopped_at_boundary"` | `"not_applicable"`.
+    pub autonomous_session_state: String,
+    /// Human-readable detail from the current autonomous supervisory truth, if any.
+    pub autonomous_session_detail: Option<String>,
+    /// Integrity arm state as known in-memory.
+    /// `"armed"` | `"arm_pending"` | `"halted"` | `"not_applicable"`.
+    pub arm_state: String,
+    /// True when in-memory integrity is armed (`arm_state == "armed"`).
+    pub arm_ready: bool,
+    /// True when `ExternalSignalIngestion` is configured (always true for paper+alpaca).
+    pub signal_ingestion_configured: bool,
+    /// True when the current wall-clock time is inside the configured autonomous session
+    /// window (NYSE regular session hours or the fixed UTC window from env vars).
+    /// False when outside the window — the session controller will not attempt a start.
+    pub session_in_window: bool,
+    /// Human-readable session-window state: `"in_window"` | `"outside_window"`.
+    pub session_window_state: String,
+    /// True when no locally-owned execution run is active (`locally_owned_run_id()` returns
+    /// `None`).  False means a run is already active; start would return 409 Conflict.
+    pub runtime_start_allowed: bool,
+    /// Exact reasons why an autonomous start would be refused right now, in gate order.
+    /// Empty when all checks pass.
+    pub blockers: Vec<String>,
+    /// True only when every readiness gate would pass: ws_continuity_ready &&
+    /// reconcile_ready && arm_ready && signal_ingestion_configured &&
+    /// session_in_window && runtime_start_allowed.
+    pub overall_ready: bool,
+    /// AUTON-HIST-01: True when at least one autonomous session event could not
+    /// be persisted (no DB configured or DB write failure).  Sticky — never
+    /// cleared in-session.  When true, `/api/v1/events/feed` autonomous-session
+    /// history is incomplete or absent.  Operator must restart with a working DB.
+    pub autonomous_history_degraded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -631,10 +737,15 @@ pub struct SystemMetadataResponse {
 pub struct OpsActionRequest {
     /// Canonical action key: "arm-execution", "arm-strategy", "disarm-execution",
     /// "disarm-strategy", "start-system", "stop-system", "kill-switch",
-    /// "change-system-mode" (returns 409 — not yet authoritative).
+    /// "request-mode-change" (persists restart intent when admissible),
+    /// "cancel-mode-transition" (cancels a pending restart intent),
+    /// "change-system-mode" (returns 409 — guidance only, preserved for compat).
     pub action_key: String,
     /// Optional reason string for audit trail. Not required by the dispatcher.
     pub reason: Option<String>,
+    /// Required for "request-mode-change": target deployment mode label.
+    /// One of: "paper", "live-shadow", "live-capital", "backtest".
+    pub target_mode: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1351,22 +1462,27 @@ pub struct ActiveAlertsResponse {
 
 /// One recent event row from the operator/runtime event feed.
 ///
-/// Events are sourced from two durable DB tables:
+/// Events are sourced from three durable DB tables:
 /// - `runs` — runtime lifecycle transitions (CREATED, ARMED, RUNNING,
 ///   STOPPED, HALTED).
 /// - `audit_events` (topic=`'operator'`) — operator action events written
 ///   by `write_operator_audit_event` / `write_control_operator_audit_event`.
+/// - `audit_events` (topic=`'signal_ingestion'`) — signal admission events
+///   written by the strategy-signal route at Gate 7 `Ok(true)`.
+/// - `sys_autonomous_session_events` — autonomous supervisor history events
+///   written by `set_autonomous_session_truth` (AUTON-PAPER-02).
 ///
 /// `event_id` equals `provenance_ref` and encodes the exact DB source row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventFeedRow {
     /// Provenance reference for this event.
     /// Format: `"runs:{run_id}:{column}"` for runtime transitions,
-    /// `"audit_events:{event_id}"` for operator actions.
+    /// `"audit_events:{event_id}"` for operator and signal-admission actions,
+    /// `"sys_autonomous_session_events:{id}"` for autonomous supervisor events.
     pub event_id: String,
     /// RFC 3339 timestamp.
     pub ts_utc: String,
-    /// `"runtime_transition"` | `"operator_action"`
+    /// `"runtime_transition"` | `"operator_action"` | `"signal_admission"` | `"autonomous_session"`
     pub kind: String,
     /// Detail string (e.g., `"HALTED"`, `"control.arm"`).
     pub detail: String,
@@ -1380,8 +1496,8 @@ pub struct EventFeedRow {
 ///
 /// `truth_state`:
 /// - `"active"` — DB pool is present; `rows` contains the most recent events
-///   from `runs` and `audit_events`; authoritative.  Empty `rows` means no
-///   durable events exist yet (daemon has not run or no operator actions taken).
+///   from `runs`, `audit_events`, and `sys_autonomous_session_events`;
+///   authoritative.  Empty `rows` means no durable events exist yet.
 /// - `"backend_unavailable"` — no DB pool configured; `rows` is always empty
 ///   and **must not** be treated as authoritative empty history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1391,7 +1507,7 @@ pub struct EventsFeedResponse {
     /// `"active"` = DB present, rows are authoritative recent events.
     /// `"backend_unavailable"` = no DB pool, rows empty, not authoritative.
     pub truth_state: String,
-    /// `"postgres.runs+postgres.audit_events"` when active;
+    /// `"postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events"` when active;
     /// `"unavailable"` when no DB pool.
     pub backend: String,
     /// Recent events sorted newest-first.  At most 50 rows.

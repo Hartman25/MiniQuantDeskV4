@@ -24,11 +24,16 @@
 //!
 //! Source: `postgres.runs` (runtime lifecycle transitions) +
 //! `postgres.audit_events` (operator actions, topic=`'operator'`) +
-//! `postgres.audit_events` (signal admissions, topic=`'signal_ingestion'`).
+//! `postgres.audit_events` (signal admissions, topic=`'signal_ingestion'`) +
+//! `postgres.sys_autonomous_session_events` (autonomous supervisor history,
+//! AUTON-PAPER-02).
 //!
 //! JOUR-01/OPS-09 adds `kind="signal_admission"` rows sourced from
 //! `audit_events` with `topic='signal_ingestion'`.  These are written by the
 //! strategy-signal route at Gate 7 `Ok(true)`.
+//!
+//! AUTON-PAPER-02 adds `kind="autonomous_session"` rows sourced from
+//! `sys_autonomous_session_events`.  Written by `set_autonomous_session_truth`.
 //!
 //! `truth_state` = `"active"` when DB pool present;
 //! `"backend_unavailable"` when no DB pool.

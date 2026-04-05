@@ -17,16 +17,19 @@ use chrono::Utc;
 use sqlx::Row;
 
 use crate::api_types::{
-    ArtifactIntakeResponse, ConfigDiffRow, ConfigDiffsResponse, ConfigFingerprintResponse,
-    HealthResponse, ParityEvidenceResponse, PreflightStatusResponse, RunArtifactProvenanceResponse,
-    RuntimeErrorResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
-    SessionStateResponse, SystemMetadataResponse, SystemStatusResponse,
+    ArtifactIntakeResponse, AutonomousPaperReadinessResponse, ConfigDiffRow, ConfigDiffsResponse,
+    ConfigFingerprintResponse, HealthResponse, ParityEvidenceResponse, PreflightStatusResponse,
+    RunArtifactProvenanceResponse, RuntimeErrorResponse, RuntimeLeadershipCheckpointRow,
+    RuntimeLeadershipResponse, SessionStateResponse, SystemMetadataResponse, SystemStatusResponse,
 };
 use crate::artifact_intake::{
     evaluate_artifact_intake_guarded, ArtifactIntakeOutcome, ENV_ARTIFACT_PATH,
 };
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
-use crate::state::{AppState, StrategyMarketDataSource};
+use crate::state::{
+    AppState, AutonomousSessionTruth, DeploymentMode, StrategyMarketDataSource,
+    autonomous_session_schedule_from_env,
+};
 
 use super::helpers::{
     build_fault_signals, environment_and_live_routing_truth, runtime_error_response,
@@ -165,9 +168,9 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         Ok(snapshot) => snapshot,
         Err(err) => return runtime_error_response(err),
     };
-    let integrity_armed = {
+    let (integrity_armed, integrity_halted, integrity_disarmed) = {
         let ig = st.integrity.read().await;
-        !ig.is_execution_blocked()
+        (!ig.is_execution_blocked(), ig.halted, ig.disarmed)
     };
 
     let strategy_disarmed = !integrity_armed;
@@ -192,6 +195,68 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         Some(st.strategy_market_data_source().as_health_str() != "not_configured");
     let audit_writer_ready: Option<bool> = db_reachable;
 
+    // AUTON-TRUTH-02: Autonomous-paper readiness fields for Paper+Alpaca.
+    //
+    // Populated by re-using the same gate logic that start_execution_runtime
+    // enforces, so this surface can never appear green while a real start
+    // would refuse.  None/empty for non-paper+alpaca deployments.
+    let is_paper_alpaca = st.deployment_mode() == DeploymentMode::Paper
+        && st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion;
+
+    let (ws_continuity_ready, reconcile_ready, autonomous_arm_state, autonomous_blockers, session_in_window) =
+        if is_paper_alpaca {
+            let ws_continuity = st.alpaca_ws_continuity().await;
+            let ws_ready = ws_continuity.is_continuity_proven();
+
+            let reconcile = st.current_reconcile_snapshot().await;
+            let rec_ready = !matches!(reconcile.status.as_str(), "dirty" | "stale");
+
+            let arm_state = if integrity_halted {
+                "halted".to_string()
+            } else if integrity_disarmed {
+                "arm_pending".to_string()
+            } else {
+                "armed".to_string()
+            };
+
+            let schedule = autonomous_session_schedule_from_env();
+            let in_window = schedule.is_in_session(&st, Utc::now()).await;
+
+            let mut auto_blockers = Vec::new();
+            if !ws_ready {
+                auto_blockers.push(format!(
+                    "WS continuity not proven (current: '{}'); paper+alpaca requires \
+                     WS continuity=live before starting (BRK-00R-04)",
+                    ws_continuity.as_status_str()
+                ));
+            }
+            if !rec_ready {
+                auto_blockers.push(format!(
+                    "reconcile status is '{}'; paper+alpaca cannot start with dirty or stale \
+                     reconcile truth (BRK-09R)",
+                    reconcile.status
+                ));
+            }
+            if integrity_halted {
+                auto_blockers.push(
+                    "integrity arm state is 'halted'; operator must arm manually before \
+                     autonomous start is permitted"
+                        .to_string(),
+                );
+            }
+            if !in_window {
+                auto_blockers.push(
+                    "current time is outside the autonomous session window; the session \
+                     controller will not attempt a start until the window opens"
+                        .to_string(),
+                );
+            }
+
+            (Some(ws_ready), Some(rec_ready), arm_state, auto_blockers, Some(in_window))
+        } else {
+            (None, None, "not_applicable".to_string(), Vec::new(), None)
+        };
+
     let mut warnings = Vec::new();
     if status.notes.is_some() {
         warnings.push("Daemon status contains notes; verify runtime state.".to_string());
@@ -206,6 +271,11 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
     }
     if let Some(blocker) = st.deployment_readiness().blocker.clone() {
         blockers.push(blocker);
+    }
+    // Surface autonomous blockers in the main blockers list so the GUI
+    // preflight gate shows them as first-class startup blockers.
+    for b in &autonomous_blockers {
+        blockers.push(b.clone());
     }
 
     (
@@ -225,6 +295,217 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
             live_routing_disabled: true,
             warnings,
             blockers,
+            autonomous_readiness_applicable: is_paper_alpaca,
+            ws_continuity_ready,
+            reconcile_ready,
+            autonomous_arm_state,
+            autonomous_blockers,
+            session_in_window,
+        }),
+    )
+        .into_response()}
+
+// ---------------------------------------------------------------------------
+// AUTON-TRUTH-01: GET /api/v1/autonomous/readiness
+// ---------------------------------------------------------------------------
+
+/// Converts `AutonomousSessionTruth` to a (state_str, detail) pair for API surfaces.
+fn autonomous_session_truth_to_api(truth: &AutonomousSessionTruth) -> (String, Option<String>) {
+    match truth {
+        AutonomousSessionTruth::Clear => ("clear".to_string(), None),
+        AutonomousSessionTruth::StartRefused { detail } => {
+            ("start_refused".to_string(), Some(detail.clone()))
+        }
+        AutonomousSessionTruth::RecoveryRetrying { detail, .. } => {
+            ("recovery_retrying".to_string(), Some(detail.clone()))
+        }
+        AutonomousSessionTruth::RecoverySucceeded { detail, .. } => {
+            ("recovery_succeeded".to_string(), Some(detail.clone()))
+        }
+        AutonomousSessionTruth::RecoveryFailed { detail, .. } => {
+            ("recovery_failed".to_string(), Some(detail.clone()))
+        }
+        AutonomousSessionTruth::RunEndedUnexpectedly { detail } => {
+            ("run_ended_unexpectedly".to_string(), Some(detail.clone()))
+        }
+        AutonomousSessionTruth::StopFailed { detail } => {
+            ("stop_failed".to_string(), Some(detail.clone()))
+        }
+        AutonomousSessionTruth::StoppedAtBoundary { detail } => {
+            ("stopped_at_boundary".to_string(), Some(detail.clone()))
+        }
+    }
+}
+
+/// AUTON-TRUTH-01: Autonomous-paper readiness truth surface.
+///
+/// Surfaces the live gate state that governs whether the session controller
+/// can start an execution run.  All values are derived from in-memory daemon
+/// state; no DB queries are issued.  Returns `truth_state = "not_applicable"`
+/// for non-paper+alpaca deployments.
+pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let is_paper_alpaca = st.deployment_mode() == DeploymentMode::Paper
+        && st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion;
+
+    if !is_paper_alpaca {
+        return (
+            StatusCode::OK,
+            Json(AutonomousPaperReadinessResponse {
+                canonical_route: "/api/v1/autonomous/readiness".to_string(),
+                truth_state: "not_applicable".to_string(),
+                canonical_path: false,
+                ws_continuity: st.alpaca_ws_continuity().await.as_status_str().to_string(),
+                ws_continuity_ready: false,
+                reconcile_status: "not_applicable".to_string(),
+                reconcile_ready: false,
+                autonomous_session_state: "not_applicable".to_string(),
+                autonomous_session_detail: None,
+                arm_state: "not_applicable".to_string(),
+                arm_ready: false,
+                signal_ingestion_configured: false,
+                session_in_window: false,
+                session_window_state: "not_applicable".to_string(),
+                runtime_start_allowed: false,
+                blockers: vec![
+                    "deployment is not paper+alpaca; autonomous readiness only applies to \
+                     the canonical Paper+Alpaca path"
+                        .to_string(),
+                ],
+                overall_ready: false,
+                autonomous_history_degraded: false,
+            }),
+        )
+            .into_response();
+    }
+
+    // Gather live gate state from AppState in the same order that
+    // start_execution_runtime enforces its gates.
+
+    let ws_continuity = st.alpaca_ws_continuity().await;
+    let ws_continuity_str = ws_continuity.as_status_str().to_string();
+    let ws_continuity_ready = ws_continuity.is_continuity_proven();
+
+    let reconcile = st.current_reconcile_snapshot().await;
+    let reconcile_status_str = reconcile.status.clone();
+    let reconcile_ready = !matches!(reconcile_status_str.as_str(), "dirty" | "stale");
+
+    let autonomous_truth = st.autonomous_session_truth().await;
+    let (autonomous_state_str, autonomous_detail) =
+        autonomous_session_truth_to_api(&autonomous_truth);
+
+    let (arm_state, arm_ready) = {
+        let ig = st.integrity.read().await;
+        if ig.halted {
+            ("halted".to_string(), false)
+        } else if ig.disarmed {
+            // In-memory disarmed but not halted.  The session controller calls
+            // try_autonomous_arm which checks the DB; if the prior session ended
+            // cleanly (DB=ARMED), it will advance to armed automatically.
+            // Surface as "arm_pending" — not yet armed, but may self-heal on the
+            // next controller tick without operator intervention.
+            ("arm_pending".to_string(), false)
+        } else {
+            ("armed".to_string(), true)
+        }
+    };
+
+    let signal_ingestion_configured =
+        st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion;
+
+    // Session-window truth: derive from the configured schedule.
+    let schedule = autonomous_session_schedule_from_env();
+    let session_in_window = schedule.is_in_session(&st, Utc::now()).await;
+    let session_window_state = if session_in_window {
+        "in_window".to_string()
+    } else {
+        "outside_window".to_string()
+    };
+
+    // Runtime-start truth: a locally-owned run blocks start (409 Conflict).
+    let runtime_start_allowed = st.locally_owned_run_id().await.is_none();
+
+    // Build blockers in gate order matching start_execution_runtime.
+    let mut blockers = Vec::new();
+    if !ws_continuity_ready {
+        blockers.push(format!(
+            "WS continuity not proven (current: '{}'); paper+alpaca requires \
+             WS continuity=live before starting (BRK-00R-04)",
+            ws_continuity_str
+        ));
+    }
+    if !reconcile_ready {
+        blockers.push(format!(
+            "reconcile status is '{}'; paper+alpaca cannot start with dirty or stale \
+             reconcile truth (BRK-09R)",
+            reconcile_status_str
+        ));
+    }
+    if !arm_ready {
+        match arm_state.as_str() {
+            "halted" => blockers.push(
+                "integrity arm state is 'halted'; operator must arm manually before \
+                 autonomous start is permitted"
+                    .to_string(),
+            ),
+            "arm_pending" => blockers.push(
+                "integrity is disarmed in memory; the session controller will call \
+                 try_autonomous_arm on the next tick (DB-ARMED → auto-advances to armed)"
+                    .to_string(),
+            ),
+            _ => {}
+        }
+    }
+    if !signal_ingestion_configured {
+        blockers.push(
+            "ExternalSignalIngestion is not configured; signal ingestion path is absent"
+                .to_string(),
+        );
+    }
+    if !session_in_window {
+        blockers.push(
+            "current time is outside the autonomous session window; the session controller \
+             will not attempt a start until the window opens"
+                .to_string(),
+        );
+    }
+    if !runtime_start_allowed {
+        blockers.push(
+            "a locally-owned execution run is already active; start would return 409 Conflict \
+             — the session controller will not attempt a new start"
+                .to_string(),
+        );
+    }
+
+    let overall_ready = ws_continuity_ready
+        && reconcile_ready
+        && arm_ready
+        && signal_ingestion_configured
+        && session_in_window
+        && runtime_start_allowed;
+
+    let autonomous_history_degraded = st.autonomous_history_degraded();
+
+    (
+        StatusCode::OK,
+        Json(AutonomousPaperReadinessResponse {
+            canonical_route: "/api/v1/autonomous/readiness".to_string(),
+            truth_state: "active".to_string(),
+            canonical_path: true,
+            ws_continuity: ws_continuity_str,
+            ws_continuity_ready,
+            reconcile_status: reconcile_status_str,
+            reconcile_ready,
+            autonomous_session_state: autonomous_state_str,
+            autonomous_session_detail: autonomous_detail,
+            arm_state,
+            arm_ready,
+            signal_ingestion_configured,
+            session_in_window,
+            session_window_state,
+            runtime_start_allowed,
+            blockers,
+            overall_ready,
+            autonomous_history_degraded,
         }),
     )
         .into_response()
@@ -363,7 +644,10 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
         strategy_allowed && status.state == "running" && status.active_run_id.is_some();
 
     let calendar = st.calendar_spec();
-    let now_ts = Utc::now().timestamp(); // allow: operator-metadata wall-clock
+    // AUTON-CALENDAR-01: use session_now_ts() so test-injected clocks propagate to
+    // this display surface.  In production the override is None and it falls through
+    // to Utc::now().timestamp() — identical behavior, but now hermetically testable.
+    let now_ts = st.session_now_ts().await;
     (
         StatusCode::OK,
         Json(SessionStateResponse {

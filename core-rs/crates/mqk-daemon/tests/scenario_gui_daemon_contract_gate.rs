@@ -643,13 +643,15 @@ async fn gui_ops_action_endpoint_dispatches_correctly() {
 async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
     // Proves that /api/v1/ops/catalog:
     // 1. Returns 200 with the canonical_route self-identifier.
-    // 2. Returns exactly the 5 supported action keys — no fantasy keys.
+    // 2. Returns exactly the 7 supported action keys — no fantasy keys.
     // 3. Does NOT include change-system-mode (returns 409 from dispatcher).
     // 4. Each entry has all required fields.
     // 5. Availability is state-correct: disarmed test state means
     //    arm-execution=enabled, disarm-execution=disabled,
     //    start-system=enabled (idle), stop-system=disabled (not running),
-    //    kill-switch=enabled (not halted).
+    //    kill-switch=enabled (not halted),
+    //    request-mode-change=enabled (not halted),
+    //    cancel-mode-transition=disabled (no DB → no pending intent).
     let router = make_router();
 
     let req = Request::builder()
@@ -676,11 +678,11 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         .as_array()
         .expect("/api/v1/ops/catalog must have an 'actions' array");
 
-    // Exactly 5 entries.
+    // Exactly 7 entries (OPS-CONTROL-02: request-mode-change + cancel-mode-transition added).
     assert_eq!(
         actions.len(),
-        5,
-        "catalog must have exactly 5 entries; got: {actions:?}"
+        7,
+        "catalog must have exactly 7 entries; got: {actions:?}"
     );
 
     // Collect action_key values.
@@ -689,13 +691,15 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         .filter_map(|a| a["action_key"].as_str())
         .collect();
 
-    // The 5 supported keys must be present.
+    // All 7 supported keys must be present.
     for expected_key in &[
         "arm-execution",
         "disarm-execution",
         "start-system",
         "stop-system",
         "kill-switch",
+        "request-mode-change",
+        "cancel-mode-transition",
     ] {
         assert!(
             keys.contains(expected_key),
@@ -774,6 +778,24 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         by_key("kill-switch")["enabled"],
         true,
         "kill-switch must be enabled in non-halted test state"
+    );
+
+    // OPS-CONTROL-02: Not halted → request-mode-change must be enabled.
+    assert_eq!(
+        by_key("request-mode-change")["enabled"],
+        true,
+        "request-mode-change must be enabled when not halted"
+    );
+
+    // OPS-CONTROL-02: No DB → cancel-mode-transition must be disabled.
+    assert_eq!(
+        by_key("cancel-mode-transition")["enabled"],
+        false,
+        "cancel-mode-transition must be disabled when no DB (no pending intent possible)"
+    );
+    assert!(
+        by_key("cancel-mode-transition")["disabled_reason"].is_string(),
+        "cancel-mode-transition must have a disabled_reason when no pending intent"
     );
 }
 

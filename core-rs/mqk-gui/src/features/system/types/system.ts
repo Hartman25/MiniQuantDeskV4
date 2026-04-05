@@ -80,6 +80,23 @@ export interface PreflightStatus {
   live_routing_disabled: boolean;
   warnings: string[];
   blockers: string[];
+  // AUTON-TRUTH-02: Autonomous-paper readiness fields.
+  // Populated only for Paper+Alpaca. Absent/false for all other deployments.
+  /** True only for Paper+Alpaca; controls whether the autonomous checks below apply. */
+  autonomous_readiness_applicable?: boolean;
+  /** WS continuity proven: true only when alpaca_ws_continuity == "live". Null when not paper+alpaca. */
+  ws_continuity_ready?: boolean | null;
+  /** Reconcile not dirty/stale. Null when not paper+alpaca. */
+  reconcile_ready?: boolean | null;
+  /**
+   * Autonomous arm state: "armed" | "arm_pending" | "halted" | "not_applicable".
+   * "arm_pending" = disarmed in memory but not halted; controller will auto-arm from DB.
+   */
+  autonomous_arm_state?: string;
+  /** Exact autonomous-paper blockers in gate order. Empty when not applicable or all checks pass. */
+  autonomous_blockers?: string[];
+  /** Whether the current wall-clock is inside the autonomous session window. Null when not paper+alpaca. */
+  session_in_window?: boolean | null;
 }
 
 export interface MetadataSummary {
@@ -206,4 +223,11 @@ export const DEFAULT_PREFLIGHT: PreflightStatus = {
   live_routing_disabled: true,
   warnings: [],
   blockers: ["Daemon unreachable"],
+  // AUTON-TRUTH-02: autonomous fields absent by default (daemon unreachable).
+  autonomous_readiness_applicable: false,
+  ws_continuity_ready: null,
+  reconcile_ready: null,
+  autonomous_arm_state: "not_applicable",
+  autonomous_blockers: [],
+  session_in_window: null,
 };

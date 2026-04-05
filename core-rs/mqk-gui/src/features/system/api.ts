@@ -107,6 +107,16 @@ function objectOrFallback<T>(value: unknown, fallback: T): T {
   return value && typeof value === "object" ? (value as T) : fallback;
 }
 
+// Synthetic not-mounted result: the route is known to not be implemented on
+// the daemon yet. Returning ok:false preserves the usedMockSections push so
+// panel authority still degrades correctly — but eliminates the failed HTTP
+// request (404) that would fire on every model refresh cycle.
+// GUI-CONTRACT-01/GUI-CONTRACT-03: replaces live fetchJsonCandidates calls for
+// the 6 deferred routes listed in gui_daemon_contract_waivers.md.
+function notProbed<T>(route: string): EndpointFetchResult<T> {
+  return { ok: false, endpoint: route, error: "not_mounted" };
+}
+
 // ---------------------------------------------------------------------------
 // Main model assembly
 // ---------------------------------------------------------------------------
@@ -284,14 +294,18 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       }));
       return { ok: true, endpoint: r.endpoint, data: rows };
     })(),
-    fetchJsonCandidates<ServiceTopology>(["/api/v1/system/topology"]),
-    fetchJsonCandidates<TransportSummary>(["/api/v1/execution/transport"]),
-    fetchJsonCandidates<IncidentCase[]>(["/api/v1/incidents"]),
-    fetchJsonCandidates<ReplaceCancelChainRow[]>(["/api/v1/execution/replace-cancel-chains"]),
-    fetchJsonCandidates<AlertTriageRow[]>(["/api/v1/alerts/triage"]),
+    // GUI-CONTRACT-01: these 6 routes are not yet mounted on the daemon.
+    // notProbed() returns ok:false so useObject/useArray still push the key
+    // into usedMockSections and panel authority degrades correctly — but no
+    // HTTP request fires. Deferred list: gui_daemon_contract_waivers.md §resolved.
+    Promise.resolve(notProbed<ServiceTopology>("/api/v1/system/topology")),
+    Promise.resolve(notProbed<TransportSummary>("/api/v1/execution/transport")),
+    Promise.resolve(notProbed<IncidentCase[]>("/api/v1/incidents")),
+    Promise.resolve(notProbed<ReplaceCancelChainRow[]>("/api/v1/execution/replace-cancel-chains")),
+    Promise.resolve(notProbed<AlertTriageRow[]>("/api/v1/alerts/triage")),
     fetchJsonCandidates<SessionStateSummary>(["/api/v1/system/session"]),
     fetchJsonCandidates<ConfigFingerprintSummary>(["/api/v1/system/config-fingerprint"]),
-    fetchJsonCandidates<MarketDataQualitySummary>(["/api/v1/market-data/quality"]),
+    Promise.resolve(notProbed<MarketDataQualitySummary>("/api/v1/market-data/quality")),
     fetchJsonCandidates<RuntimeLeadershipSummary>(["/api/v1/system/runtime-leadership"]),
     // audit/artifacts: daemon returns {canonical_route, truth_state, backend, rows}
     // where each row is one run from the runs table. "backend_unavailable" means
@@ -459,16 +473,18 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       ? []  // No-snapshot signal: return empty rather than misleading legacy broker orders.
       : mapLegacyTradingOrdersToExecutionOrders(legacyOrdersResponse) ?? [];
 
-  const firstOrderId = executionOrders[0]?.internal_order_id;
-  const [selectedTimeline, executionTrace, executionReplay, executionChart, causalityTrace] = firstOrderId
-    ? await Promise.all([
-        tryFetchJson<ExecutionTimeline>([`/api/v1/execution/timeline/${firstOrderId}`]),
-        tryFetchJson<ExecutionTrace>([`/api/v1/execution/trace/${firstOrderId}`]),
-        tryFetchJson<ExecutionReplay>([`/api/v1/execution/replay/${firstOrderId}`]),
-        tryFetchJson<ExecutionChartModel>([`/api/v1/execution/chart/${firstOrderId}`]),
-        tryFetchJson<CausalityTrace>([`/api/v1/execution/causality/${firstOrderId}`]),
-      ])
-    : [null, null, null, null, null];
+  // GUI-CONTRACT-02: per-order detail endpoints are not yet mounted on the
+  // daemon. They are not probed in the batch model assembly to avoid 404
+  // noise on every refresh cycle and to stop polluting usedMockSections
+  // whenever any order exists (which degraded execution panel authority
+  // regardless of whether the detail views were in use).
+  // Dedicated exported functions (fetchExecutionTimeline etc.) remain
+  // available for screen-level calls when these routes are eventually mounted.
+  const selectedTimeline: ExecutionTimeline | null = null;
+  const executionTrace: ExecutionTrace | null = null;
+  const executionReplay: ExecutionReplay | null = null;
+  const executionChart: ExecutionChartModel | null = null;
+  const causalityTrace: CausalityTrace | null = null;
 
   const usedMockSections: string[] = [];
 
@@ -579,11 +595,10 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       : null;
   if (!metadata) usedMockSections.push("metadata");
 
-  if (!selectedTimeline) usedMockSections.push("selectedTimeline");
-  if (!executionTrace) usedMockSections.push("executionTrace");
-  if (!executionReplay) usedMockSections.push("executionReplay");
-  if (!executionChart) usedMockSections.push("executionChart");
-  if (!causalityTrace) usedMockSections.push("causalityTrace");
+  // GUI-CONTRACT-02: selectedTimeline/executionTrace/executionReplay/
+  // executionChart/causalityTrace are always null in the batch model (not
+  // probed — see above). They are NOT added to usedMockSections because
+  // their absence should not degrade core execution panel authority.
 
   // Resolve action catalog BEFORE dataSource computation so a catalog endpoint failure
   // is visible in dataSource.mockSections and properly degrades the ops panel authority.

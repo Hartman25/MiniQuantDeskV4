@@ -72,7 +72,7 @@ use env::{
 use snapshot::{recover_oms_and_portfolio, synthesize_paper_broker_snapshot};
 use types::{DaemonOrchestrator, ReconcileTruthGate, StateIntegrityGate};
 
-const DAEMON_ENGINE_ID: &str = "mqk-daemon";
+pub(crate) const DAEMON_ENGINE_ID: &str = "mqk-daemon";
 /// PT-AUTO-02: Maximum number of strategy signals accepted per execution run.
 ///
 /// Provides a hard per-run intake bound on the paper+alpaca signal ingestion
@@ -181,11 +181,42 @@ pub struct AppState {
     /// not durable history.  Cleared/overwritten as the controller and WS
     /// transport observe new facts.
     autonomous_session_truth: Arc<RwLock<AutonomousSessionTruth>>,
+    /// AUTON-HIST-01: sticky flag set when autonomous session event persistence
+    /// fails or is not possible (no DB configured).
+    ///
+    /// Once set, it is never cleared in-session — the operator must restart the
+    /// daemon with a working DB to recover durable history.  Surfaced in
+    /// `/api/v1/autonomous/readiness` as `autonomous_history_degraded`.
+    autonomous_history_degraded: Arc<AtomicBool>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// AUTON-CALENDAR-01: Derive the authoritative CalendarSpec for a (mode, broker_kind) pair.
+///
+/// Paper+Alpaca uses `NyseWeekdays` — the broker is NYSE-backed via Alpaca and the
+/// autonomous session controller already enforces NYSE regular-session boundaries.
+/// Using `AlwaysOn` for this pair makes the `/api/v1/system/session` display lie:
+/// it reports `market_session="regular"` on weekends and holidays while the controller
+/// is correctly blocking all starts.  Giving Paper+Alpaca its honest calendar closes
+/// the display/gate disagreement.
+///
+/// Paper+Paper (in-process fill engine) and Backtest keep `AlwaysOn` — those paths
+/// run on synthetic time and are not bound to exchange hours.
+fn calendar_spec_for_deployment(
+    mode: DeploymentMode,
+    broker_kind: Option<BrokerKind>,
+) -> CalendarSpec {
+    match mode {
+        DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => CalendarSpec::NyseWeekdays,
+        DeploymentMode::Paper if broker_kind == Some(BrokerKind::Alpaca) => {
+            CalendarSpec::NyseWeekdays
+        }
+        _ => CalendarSpec::AlwaysOn,
     }
 }
 
@@ -241,6 +272,9 @@ impl AppState {
         } else {
             StrategyMarketDataSource::NotConfigured
         };
+        // AUTON-CALENDAR-01: Paper+Alpaca is NYSE-backed; give it the honest calendar.
+        state.calendar_spec =
+            calendar_spec_for_deployment(state.runtime_selection.deployment_mode, Some(kind));
         state
     }
 
@@ -255,10 +289,7 @@ impl AppState {
             run_config_hash: state.runtime_selection.run_config_hash.clone(),
             readiness,
         };
-        state.calendar_spec = match mode {
-            DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => CalendarSpec::NyseWeekdays,
-            DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
-        };
+        state.calendar_spec = calendar_spec_for_deployment(mode, state.runtime_selection.broker_kind);
         state
     }
 
@@ -277,10 +308,7 @@ impl AppState {
             BrokerKind::Alpaca => AlpacaWsContinuityState::ColdStartUnproven,
             BrokerKind::Paper => AlpacaWsContinuityState::NotApplicable,
         }));
-        state.calendar_spec = match mode {
-            DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => CalendarSpec::NyseWeekdays,
-            DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
-        };
+        state.calendar_spec = calendar_spec_for_deployment(mode, Some(kind));
         // PT-DAY-01: recompute signal ingestion policy for the explicit (mode, broker) pair.
         state.strategy_market_data_source =
             if mode == DeploymentMode::Paper && kind == BrokerKind::Alpaca {
@@ -416,10 +444,8 @@ impl AppState {
 
         let runtime_selection = runtime_selection_from_env();
 
-        let calendar_spec = match runtime_selection.deployment_mode {
-            DeploymentMode::LiveShadow | DeploymentMode::LiveCapital => CalendarSpec::NyseWeekdays,
-            DeploymentMode::Paper | DeploymentMode::Backtest => CalendarSpec::AlwaysOn,
-        };
+        let calendar_spec =
+            calendar_spec_for_deployment(runtime_selection.deployment_mode, runtime_selection.broker_kind);
 
         let broker_snapshot_source =
             BrokerSnapshotTruthSource::from_broker_kind(runtime_selection.broker_kind);
@@ -475,6 +501,7 @@ impl AppState {
             day_signal_count: Arc::new(AtomicU32::new(0)),
             accepted_artifact: Arc::new(RwLock::new(None)),
             autonomous_session_truth: Arc::new(RwLock::new(AutonomousSessionTruth::Clear)),
+            autonomous_history_degraded: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -629,7 +656,13 @@ impl AppState {
     }
 
     async fn persist_autonomous_session_truth_event(&self, truth: &AutonomousSessionTruth) {
+        // AUTON-HIST-01: no DB means events are permanently lost for this
+        // session.  Mark degraded so the operator can see it in the readiness
+        // surface rather than silently losing history.
         let Some(db) = self.db.as_ref() else {
+            self.autonomous_history_degraded
+                .store(true, Ordering::SeqCst);
+            tracing::warn!("persist_autonomous_session_truth_event: no DB configured; autonomous supervisor history will not be persisted (autonomous_history_degraded=true)");
             return;
         };
         let Some((event_type, resume_source, detail)) = autonomous_truth_event_parts(truth) else {
@@ -654,9 +687,20 @@ impl AppState {
             run_id,
             source: "mqk-daemon.state".to_string(),
         };
+        // AUTON-HIST-01: DB write failure is non-fatal to execution but must be
+        // operator-visible.  Mark degraded so the readiness surface reflects the
+        // true persistence state.
         if let Err(err) = mqk_db::persist_autonomous_session_event(db, &row).await {
-            tracing::warn!(error = %err, "persist_autonomous_session_event failed (non-fatal)");
+            self.autonomous_history_degraded
+                .store(true, Ordering::SeqCst);
+            tracing::warn!(error = %err, "persist_autonomous_session_event failed; autonomous_history_degraded=true");
         }
+    }
+
+    /// AUTON-HIST-01: True when at least one autonomous session event could not
+    /// be persisted (no DB or DB write failure).  Sticky — not reset in-session.
+    pub fn autonomous_history_degraded(&self) -> bool {
+        self.autonomous_history_degraded.load(Ordering::SeqCst)
     }
 
     /// TV-01C: Return the artifact provenance accepted at the most recent run start.

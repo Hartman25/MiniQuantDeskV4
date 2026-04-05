@@ -151,7 +151,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use reconcile::{reconcile_mismatches, reconcile_status};
     use strategy::{strategy_signal, strategy_summary, strategy_suppressions};
     use system::{
-        health, status_handler, system_artifact_intake, system_config_diffs,
+        autonomous_readiness, health, status_handler, system_artifact_intake, system_config_diffs,
         system_config_fingerprint, system_metadata, system_parity_evidence, system_preflight,
         system_run_artifact, system_runtime_leadership, system_session, system_status,
     };
@@ -220,6 +220,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/system/parity-evidence",
             get(system_parity_evidence),
         )
+        .route("/api/v1/autonomous/readiness", get(autonomous_readiness))
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
         .route("/v1/trading/orders", get(trading_orders))

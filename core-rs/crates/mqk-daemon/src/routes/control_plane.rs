@@ -19,10 +19,10 @@ use crate::api_types::{
     ModeChangeRestartTruth, ModeTransitionEntry, OperatorActionAuditFields, OperatorActionResponse,
     OpsActionRequest, PendingRestartIntentSnapshot, RestartWorkflowTruth,
 };
-use crate::mode_transition::evaluate_mode_transition;
+use crate::mode_transition::{evaluate_mode_transition, ModeTransitionVerdict};
 use crate::notify::{CriticalAlertPayload, OperatorNotifyPayload, RunStatusPayload};
 use crate::state::DeploymentMode;
-use crate::state::{AppState, BusMsg, RuntimeLifecycleError};
+use crate::state::{AppState, BusMsg, RuntimeLifecycleError, DAEMON_ENGINE_ID};
 
 use super::helpers::{runtime_error_response, write_operator_audit_event};
 
@@ -313,6 +313,24 @@ pub(crate) async fn integrity_disarm(State(st): State<Arc<AppState>>) -> impl In
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Parse a deployment-mode API label string to a typed [`DeploymentMode`].
+///
+/// Returns `None` for any unrecognised string so the caller can return a
+/// structured 400 rather than panicking.
+fn parse_deployment_mode(s: &str) -> Option<DeploymentMode> {
+    match s {
+        "paper" => Some(DeploymentMode::Paper),
+        "live-shadow" => Some(DeploymentMode::LiveShadow),
+        "live-capital" => Some(DeploymentMode::LiveCapital),
+        "backtest" => Some(DeploymentMode::Backtest),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/v1/ops/action
 // ---------------------------------------------------------------------------
 
@@ -375,6 +393,7 @@ pub(crate) async fn ops_action(
                     durable_targets: arm_durable_targets,
                     audit_event_id: arm_audit_uuid.map(|id| id.to_string()),
                 },
+                pending_restart_intent: None,
             };
             st.discord_notifier
                 .notify_operator_action(&OperatorNotifyPayload {
@@ -452,6 +471,7 @@ pub(crate) async fn ops_action(
                     durable_targets: disarm_durable_targets,
                     audit_event_id: disarm_audit_uuid.map(|id| id.to_string()),
                 },
+                pending_restart_intent: None,
             };
             st.discord_notifier
                 .notify_operator_action(&OperatorNotifyPayload {
@@ -504,6 +524,7 @@ pub(crate) async fn ops_action(
                         },
                         audit_event_id: None,
                     },
+                    pending_restart_intent: None,
                 };
                 let ts = Utc::now().to_rfc3339();
                 let run_id_str = snapshot.active_run_id.map(|id| id.to_string());
@@ -559,6 +580,7 @@ pub(crate) async fn ops_action(
                         },
                         audit_event_id: None,
                     },
+                    pending_restart_intent: None,
                 };
                 let ts = Utc::now().to_rfc3339();
                 let run_id_str = snapshot.active_run_id.map(|id| id.to_string());
@@ -614,6 +636,7 @@ pub(crate) async fn ops_action(
                         },
                         audit_event_id: None,
                     },
+                    pending_restart_intent: None,
                 };
                 let ts = Utc::now().to_rfc3339();
                 let run_id_str = snapshot.active_run_id.map(|id| id.to_string());
@@ -655,6 +678,313 @@ pub(crate) async fn ops_action(
             Err(err) => runtime_error_response(err),
         },
 
+        // OPS-CONTROL-01: Persisted restart-intent workflow.
+        //
+        // Evaluates the requested (current → target) mode transition via the
+        // canonical seam.  Persists a durable restart intent to sys_restart_intent
+        // when the transition is admissible_with_restart.  Returns 409 for refused
+        // and fail_closed verdicts — no intent is written.
+        "request-mode-change" => {
+            let Some(target_str) = body.target_mode.as_deref() else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(OperatorActionResponse {
+                        requested_action: "request-mode-change".to_string(),
+                        accepted: false,
+                        disposition: "missing_target_mode".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![
+                            "target_mode is required for request-mode-change \
+                             (e.g. \"live-shadow\"); see GET /api/v1/ops/mode-change-guidance \
+                             for available transitions."
+                                .to_string(),
+                        ],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            };
+
+            let Some(target) = parse_deployment_mode(target_str) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(OperatorActionResponse {
+                        requested_action: "request-mode-change".to_string(),
+                        accepted: false,
+                        disposition: "invalid_target_mode".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "Unknown target_mode '{}'; valid values: \
+                             paper, live-shadow, live-capital, backtest.",
+                            target_str
+                        )],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            };
+
+            let current = st.deployment_mode();
+            let verdict = evaluate_mode_transition(current, target);
+
+            match &verdict {
+                ModeTransitionVerdict::SameMode => (
+                    StatusCode::OK,
+                    Json(OperatorActionResponse {
+                        requested_action: "request-mode-change".to_string(),
+                        accepted: true,
+                        disposition: "no_op".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![],
+                        warnings: vec![format!(
+                            "Current mode is already '{}'; no transition is needed.",
+                            current.as_api_label()
+                        )],
+                        environment: Some(current.as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response(),
+
+                ModeTransitionVerdict::AdmissibleWithRestart { .. } => {
+                    let Some(db) = st.db.as_ref() else {
+                        return runtime_error_response(RuntimeLifecycleError::ServiceUnavailable {
+                            fault_class: "ops.action.request_mode_change.no_db",
+                            message: "DB is required to persist restart intent durably; \
+                                      request-mode-change is not accepted without a DB connection."
+                                .to_string(),
+                        });
+                    };
+
+                    let ts_utc = chrono::Utc::now();
+                    let intent_id = uuid::Uuid::new_v5(
+                        &uuid::Uuid::NAMESPACE_DNS,
+                        format!(
+                            "mqk-daemon.restart-intent.v1|{}|{}|{}|{}",
+                            DAEMON_ENGINE_ID,
+                            current.as_api_label(),
+                            target.as_api_label(),
+                            ts_utc.to_rfc3339_opts(
+                                chrono::SecondsFormat::Micros,
+                                true
+                            ),
+                        )
+                        .as_bytes(),
+                    );
+
+                    let note = body.reason.clone().unwrap_or_default();
+
+                    if let Err(err) = mqk_db::insert_restart_intent(
+                        db,
+                        &mqk_db::NewRestartIntent {
+                            intent_id,
+                            engine_id: DAEMON_ENGINE_ID.to_string(),
+                            from_mode: current.as_api_label().to_string(),
+                            to_mode: target.as_api_label().to_string(),
+                            transition_verdict: verdict.as_str().to_string(),
+                            initiated_by: "operator".to_string(),
+                            initiated_at_utc: ts_utc,
+                            note: note.clone(),
+                        },
+                    )
+                    .await
+                    {
+                        return runtime_error_response(RuntimeLifecycleError::Internal {
+                            fault_class: "ops.action.request_mode_change.insert",
+                            message: format!("Failed to persist restart intent: {err}"),
+                        });
+                    }
+
+                    info!(
+                        intent_id = %intent_id,
+                        from = current.as_api_label(),
+                        to = target.as_api_label(),
+                        "ops/action request-mode-change: restart intent persisted"
+                    );
+
+                    let intent_snapshot = PendingRestartIntentSnapshot {
+                        intent_id: intent_id.to_string(),
+                        from_mode: current.as_api_label().to_string(),
+                        to_mode: target.as_api_label().to_string(),
+                        transition_verdict: verdict.as_str().to_string(),
+                        initiated_by: "operator".to_string(),
+                        initiated_at_utc: ts_utc.to_rfc3339(),
+                        note,
+                    };
+
+                    (
+                        StatusCode::OK,
+                        Json(OperatorActionResponse {
+                            requested_action: "request-mode-change".to_string(),
+                            accepted: true,
+                            disposition: "pending_restart".to_string(),
+                            resulting_integrity_state: None,
+                            resulting_desired_armed: None,
+                            blockers: vec![],
+                            warnings: vec![
+                                "Mode change requires a controlled daemon restart. \
+                                 See GET /api/v1/ops/mode-change-guidance for preconditions."
+                                    .to_string(),
+                            ],
+                            environment: Some(current.as_api_label().to_string()),
+                            scope: Some("daemon_instance".to_string()),
+                            audit: OperatorActionAuditFields {
+                                durable_db_write: true,
+                                durable_targets: vec!["sys_restart_intent".to_string()],
+                                audit_event_id: Some(intent_id.to_string()),
+                            },
+                            pending_restart_intent: Some(intent_snapshot),
+                        }),
+                    )
+                        .into_response()
+                }
+
+                ModeTransitionVerdict::Refused { .. } | ModeTransitionVerdict::FailClosed { .. } => {
+                    (
+                        StatusCode::CONFLICT,
+                        Json(OperatorActionResponse {
+                            requested_action: "request-mode-change".to_string(),
+                            accepted: false,
+                            disposition: format!("blocked_{}", verdict.as_str()),
+                            resulting_integrity_state: None,
+                            resulting_desired_armed: None,
+                            blockers: vec![verdict.reason().to_string()],
+                            warnings: vec![],
+                            environment: Some(current.as_api_label().to_string()),
+                            scope: Some("daemon_instance".to_string()),
+                            audit: OperatorActionAuditFields {
+                                durable_db_write: false,
+                                durable_targets: vec![],
+                                audit_event_id: None,
+                            },
+                            pending_restart_intent: None,
+                        }),
+                    )
+                        .into_response()
+                }
+            }
+        }
+
+        // OPS-CONTROL-01: Cancel a pending restart intent.
+        //
+        // Transitions the most recent pending sys_restart_intent record for this
+        // engine to "cancelled".  Fails closed when no DB is available or when
+        // no pending intent exists.
+        "cancel-mode-transition" => {
+            let Some(db) = st.db.as_ref() else {
+                return runtime_error_response(RuntimeLifecycleError::ServiceUnavailable {
+                    fault_class: "ops.action.cancel_mode_transition.no_db",
+                    message: "DB is required to manage restart intents; \
+                              cancel-mode-transition is not accepted without a DB connection."
+                        .to_string(),
+                });
+            };
+
+            match mqk_db::fetch_pending_restart_intent_for_engine(db, DAEMON_ENGINE_ID).await {
+                Err(err) => runtime_error_response(RuntimeLifecycleError::Internal {
+                    fault_class: "ops.action.cancel_mode_transition.fetch",
+                    message: format!("Failed to fetch pending restart intent: {err}"),
+                }),
+
+                Ok(None) => (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "cancel-mode-transition".to_string(),
+                        accepted: false,
+                        disposition: "no_pending_intent".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![
+                            "No pending mode-transition intent found; nothing to cancel."
+                                .to_string(),
+                        ],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response(),
+
+                Ok(Some(intent)) => {
+                    let cancel_ts = chrono::Utc::now();
+                    match mqk_db::update_restart_intent_status(
+                        db,
+                        intent.intent_id,
+                        "cancelled",
+                        cancel_ts,
+                    )
+                    .await
+                    {
+                        Err(err) => runtime_error_response(RuntimeLifecycleError::Internal {
+                            fault_class: "ops.action.cancel_mode_transition.update",
+                            message: format!("Failed to cancel restart intent: {err}"),
+                        }),
+
+                        Ok(_) => {
+                            info!(
+                                intent_id = %intent.intent_id,
+                                "ops/action cancel-mode-transition: intent cancelled"
+                            );
+                            (
+                                StatusCode::OK,
+                                Json(OperatorActionResponse {
+                                    requested_action: "cancel-mode-transition".to_string(),
+                                    accepted: true,
+                                    disposition: "intent_cancelled".to_string(),
+                                    resulting_integrity_state: None,
+                                    resulting_desired_armed: None,
+                                    blockers: vec![],
+                                    warnings: vec![],
+                                    environment: Some(
+                                        st.deployment_mode().as_api_label().to_string(),
+                                    ),
+                                    scope: Some("daemon_instance".to_string()),
+                                    audit: OperatorActionAuditFields {
+                                        durable_db_write: true,
+                                        durable_targets: vec!["sys_restart_intent".to_string()],
+                                        audit_event_id: None,
+                                    },
+                                    pending_restart_intent: None,
+                                }),
+                            )
+                                .into_response()
+                        }
+                    }
+                }
+            }
+        }
+
         "change-system-mode" => {
             let guidance = build_mode_change_guidance(&st).await;
             (StatusCode::CONFLICT, Json(guidance)).into_response()
@@ -670,7 +1000,8 @@ pub(crate) async fn ops_action(
                 resulting_desired_armed: None,
                 blockers: vec![format!(
                     "Unknown action_key '{}'; accepted keys: arm-execution, arm-strategy, \
-                     disarm-execution, disarm-strategy, start-system, stop-system, kill-switch",
+                     disarm-execution, disarm-strategy, start-system, stop-system, kill-switch, \
+                     request-mode-change, cancel-mode-transition",
                     body.action_key
                 )],
                 warnings: vec![],
@@ -681,6 +1012,7 @@ pub(crate) async fn ops_action(
                     durable_targets: vec![],
                     audit_event_id: None,
                 },
+                pending_restart_intent: None,
             }),
         )
             .into_response(),
@@ -706,6 +1038,18 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
     let halted = is_halted_integrity || state_str == "halted";
     let running = state_str == "running";
     let idle = state_str == "idle";
+
+    // OPS-CONTROL-02: Check for a pending restart intent so the
+    // cancel-mode-transition catalog entry can reflect real availability.
+    let has_pending_intent = if let Some(db) = st.db.as_ref() {
+        mqk_db::fetch_pending_restart_intent_for_engine(db, DAEMON_ENGINE_ID)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+    } else {
+        false
+    };
 
     let actions = vec![
         ActionCatalogEntry {
@@ -790,6 +1134,53 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             enabled: !halted,
             disabled_reason: if halted {
                 Some("System is already halted.".to_string())
+            } else {
+                None
+            },
+        },
+        // OPS-CONTROL-02: Mode-transition workflow actions.
+        ActionCatalogEntry {
+            action_key: "request-mode-change".to_string(),
+            label: "Request Mode Change".to_string(),
+            level: 2,
+            description: "Persist a restart intent for an admissible deployment-mode transition. \
+                           Requires target_mode in the request body. Check \
+                           GET /api/v1/ops/mode-change-guidance for available transitions and \
+                           preconditions before submitting."
+                .to_string(),
+            requires_reason: false,
+            confirm_text: "Confirm: persist mode-change restart intent".to_string(),
+            enabled: !halted,
+            disabled_reason: if halted {
+                Some(
+                    "Cannot request a mode change while the system is halted. \
+                     Halt must be cleared before a restart intent can be persisted."
+                        .to_string(),
+                )
+            } else {
+                None
+            },
+        },
+        ActionCatalogEntry {
+            action_key: "cancel-mode-transition".to_string(),
+            label: "Cancel Mode Transition".to_string(),
+            level: 2,
+            description: "Cancel the current pending mode-transition restart intent. \
+                           Removes the durable intent from sys_restart_intent so the \
+                           operator can start fresh or proceed without a pending transition."
+                .to_string(),
+            requires_reason: false,
+            confirm_text: "Confirm: cancel pending mode-transition intent".to_string(),
+            enabled: has_pending_intent,
+            disabled_reason: if !has_pending_intent {
+                if st.db.is_none() {
+                    Some(
+                        "Backend unavailable; cannot query for pending mode-transition intent."
+                            .to_string(),
+                    )
+                } else {
+                    Some("No pending mode-transition intent to cancel.".to_string())
+                }
             } else {
                 None
             },

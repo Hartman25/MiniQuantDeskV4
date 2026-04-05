@@ -225,14 +225,52 @@ Note: `/api/v1/ops/change-mode` is intentionally NOT mounted. Mode transitions r
       is `"audit_events:<uuid>"` matching the `audit_event_id` in the response; UUID exists in DB.
   - CI command: `cargo test -p mqk-daemon --test scenario_notify_ops01`
 
-## Explicitly deferred from TEST-02 gate
+## Routes resolved by GUI-CONTRACT-01/02/03 (Batch 6)
 
-These endpoints are probed by the GUI but not yet authoritative daemon contract surfaces.
-Waivers are explicit so deferred coverage is visible, not silently ignored.
+These 11 routes were previously in the deferred list but are now resolved. They are
+no longer probed by the GUI's `fetchOperatorModel` batch. The GUI uses `notProbed()`
+stubs for the 6 static surfaces and simply sets the 5 per-order detail fields to null
+(no HTTP request). Panel authority still degrades correctly for the 6 static surfaces
+because `notProbed()` returns `ok: false`, causing `useObject`/`useArray` to push the
+key into `usedMockSections` as before — but without the 404 HTTP request.
 
-- `/api/v1/system/topology`
-- `/api/v1/execution/transport`
-- `/api/v1/incidents`
-- `/api/v1/execution/replace-cancel-chains`
-- `/api/v1/alerts/triage`
-- `/api/v1/market-data/quality`
+### Static surfaces — not yet mounted (notProbed stubs in api.ts)
+
+| Route                                     | Resolution                                      |
+|-------------------------------------------|-------------------------------------------------|
+| `/api/v1/system/topology`                 | No backend source. notProbed() stub. |
+| `/api/v1/execution/transport`             | No backend source. notProbed() stub. |
+| `/api/v1/incidents`                       | No incident system. notProbed() stub. |
+| `/api/v1/execution/replace-cancel-chains` | No ready source. notProbed() stub.   |
+| `/api/v1/alerts/triage`                   | No triage system. notProbed() stub.  |
+| `/api/v1/market-data/quality`             | PT-MD-01 open. notProbed() stub.     |
+
+When any of these routes is eventually mounted on the daemon:
+1. Replace `Promise.resolve(notProbed<X>(route))` with `fetchJsonCandidates<X>([route])` in `api.ts`.
+2. Move the route from `NOT_MOUNTED` to `GUI_PROBE_MANIFEST` in `scenario_route_contract_rt01.rs`.
+3. Add shape + semantic proof to `scenario_gui_daemon_contract_gate.rs`.
+4. Update this document.
+
+### Per-order detail surfaces — not mounted (static null in api.ts)
+
+These five routes are not probed in the batch model assembly. They are always `null`
+in the `SystemModel`. Dedicated exported functions (`fetchExecutionTimeline`, etc.)
+remain for screen-level calls when these routes are eventually mounted.
+
+- `/api/v1/execution/timeline/{order_id}`
+- `/api/v1/execution/trace/{order_id}`
+- `/api/v1/execution/replay/{order_id}`
+- `/api/v1/execution/chart/{order_id}`
+- `/api/v1/execution/causality/{order_id}`
+
+### ROUTE-TRUTH-01 CI gate
+
+`scenario_route_contract_rt01.rs` provides the regression lock:
+
+- `rt01_all_gui_probed_routes_are_mounted` — every route in `GUI_PROBE_MANIFEST` must
+  return non-404 from the daemon. Fails CI if a mounted route is removed without
+  updating the GUI or if a new GUI probe is added without mounting the daemon route.
+
+- `rt01_known_not_mounted_routes_stay_404_until_explicitly_promoted` — every route
+  in `NOT_MOUNTED` must still return 404. Fails CI if a previously-deferred route is
+  mounted without completing the promotion checklist above.
