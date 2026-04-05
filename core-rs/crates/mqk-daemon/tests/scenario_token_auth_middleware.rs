@@ -181,3 +181,121 @@ async fn control_surface_has_no_detached_shadow_mount() {
     let (shadow_status, _shadow_body) = call(router, shadow).await;
     assert_eq!(shadow_status, StatusCode::NOT_FOUND);
 }
+
+// ---------------------------------------------------------------------------
+// AUTH-OPS-01: focused fail-closed auth proofs
+// ---------------------------------------------------------------------------
+
+/// A valid Bearer token allows passage through the auth middleware on
+/// privileged routes (the route handler itself then responds, not the auth
+/// layer).
+#[tokio::test]
+async fn correct_token_passes_privileged_route() {
+    let router = make_router(state::OperatorAuthMode::TokenRequired(
+        "correct-secret".to_string(),
+    ));
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/stop")
+        .header("Authorization", "Bearer correct-secret")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, _body) = call(router, req).await;
+
+    // Auth passes; the route handler responds — must not be 401 or 503.
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "correct token must not be rejected by auth middleware"
+    );
+    assert_ne!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "correct token must not be blocked by missing-token gate"
+    );
+}
+
+/// A raw token value sent without the "Bearer " prefix is malformed and must
+/// be rejected — the daemon does not strip or guess the scheme.
+#[tokio::test]
+async fn malformed_header_no_bearer_prefix_is_rejected() {
+    let router = make_router(state::OperatorAuthMode::TokenRequired(
+        "my-secret".to_string(),
+    ));
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/stop")
+        // Missing "Bearer " scheme prefix — raw token only
+        .header("Authorization", "my-secret")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "token without Bearer prefix must be rejected"
+    );
+    assert_eq!(parse_json(body)["gate"], "operator_token");
+}
+
+/// An empty value after "Bearer " (whitespace-only) must be rejected; the
+/// middleware strips the prefix and compares the remainder, so an empty
+/// remainder never matches a configured token.
+#[tokio::test]
+async fn empty_bearer_value_is_rejected() {
+    let router = make_router(state::OperatorAuthMode::TokenRequired(
+        "real-secret".to_string(),
+    ));
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/integrity/arm")
+        .header("Authorization", "Bearer ")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let (status, body) = call(router, req).await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "empty Bearer value must be rejected"
+    );
+    assert_eq!(parse_json(body)["gate"], "operator_token");
+}
+
+/// The auth middleware covers BOTH the legacy /v1/ namespace and the
+/// /api/v1/ operator routes (ops/action, strategy/signal).
+/// MissingTokenFailClosed must produce 503 on all of them.
+#[tokio::test]
+async fn api_v1_operator_routes_fail_closed_without_token() {
+    let router = make_router(state::OperatorAuthMode::MissingTokenFailClosed);
+
+    for uri in &["/api/v1/ops/action", "/api/v1/strategy/signal"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri(*uri)
+            .body(axum::body::Body::empty())
+            .unwrap();
+
+        let (status, body) = call(router.clone(), req).await;
+
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api/v1 operator route {} must fail closed under MissingTokenFailClosed",
+            uri
+        );
+        assert_eq!(
+            parse_json(body)["gate"],
+            "operator_auth_config",
+            "route {} must report operator_auth_config gate",
+            uri
+        );
+    }
+}
