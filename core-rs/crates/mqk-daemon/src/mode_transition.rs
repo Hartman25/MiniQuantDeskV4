@@ -204,14 +204,19 @@ pub fn evaluate_mode_transition(from: DeploymentMode, to: DeploymentMode) -> Mod
 
         // ── Upward transitions to LiveCapital: fail-closed ─────────────────
         //
-        // LiveCapital execution is fail-closed until the parity proof chain is
-        // architecturally complete.  TV-03 explicitly sets live_trust_complete=false.
-        // This verdict must be updated when TV-01D closes the end-to-end proof.
+        // LiveCapital execution is fail-closed in current builds.  The TV-03 Python
+        // pipeline hardcodes live_trust_complete=false: no shadow execution cycle has
+        // been completed and no live parity proof exists.  This is a current-build
+        // ceiling — no operator action can lift this verdict.  It will become
+        // AdmissibleWithRestart when a future proof patch explicitly changes this arm
+        // and closes the live parity chain with a corresponding proof test.
         (Paper, LiveCapital) | (LiveShadow, LiveCapital) => FailClosed {
-            reason: "LiveCapital execution is fail-closed: the end-to-end artifact → \
-                     runtime consumption proof (TV-01D) is not yet complete and \
-                     live_trust_complete=false in TV-03. This verdict will change to \
-                     AdmissibleWithRestart once the proof chain is closed.",
+            reason: "LiveCapital execution is fail-closed in current builds: \
+                     live_trust_complete=false is hardcoded in the TV-03 parity \
+                     pipeline (no shadow execution cycle has been completed; no live \
+                     parity proof exists). This is a current-build ceiling — no \
+                     operator action can lift this verdict without an explicit proof \
+                     patch.",
         },
 
         // ── Backtest: structurally refused in all directions ───────────────

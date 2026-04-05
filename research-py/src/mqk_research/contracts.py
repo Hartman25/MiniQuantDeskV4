@@ -437,7 +437,7 @@ class ParityEvidenceManifest:
 
     HONESTY CONSTRAINT:
         live_trust_complete=False is the only valid state written by this patch.
-        Setting it True requires LO-03 operator proof and is not permitted here.
+        No mechanism exists to set it True in current builds.
 
         This manifest records what evidence exists and makes trust gaps explicit.
         It does NOT certify the strategy for live capital deployment.
@@ -448,9 +448,14 @@ class ParityEvidenceManifest:
     gate_schema_version: str            # schema_version from the TV-02 gate result (audit linkage)
     shadow_evidence: ShadowEvidenceRef  # TV-03 shadow evidence reference
     comparison_basis: str               # live-facing comparison description (explicit, not vague)
-    live_trust_complete: bool           # ALWAYS False; set only by LO-03 operator proof
+    live_trust_complete: bool           # ALWAYS False in current builds; no mechanism to lift
     live_trust_gaps: List[str]          # explicit remaining gaps before live trust is complete
     produced_at_utc: str                # ISO-8601 UTC; informational only
+    # BKT-PROV-02: backtest run provenance (optional; absence adds an explicit trust gap).
+    # backtest_run_id is the run_id from BacktestReport (UUIDv5 over strategy+config+bars).
+    # backtest_input_data_hash is the input_data_hash from BacktestReport (bar sequence hash).
+    backtest_run_id: Optional[str] = None
+    backtest_input_data_hash: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -503,6 +508,8 @@ def read_parity_evidence(evidence_path: Path) -> ParityEvidenceManifest:
         live_trust_complete=bool(raw["live_trust_complete"]),
         live_trust_gaps=list(raw["live_trust_gaps"]),
         produced_at_utc=raw["produced_at_utc"],
+        backtest_run_id=raw.get("backtest_run_id"),
+        backtest_input_data_hash=raw.get("backtest_input_data_hash"),
     )
 
 

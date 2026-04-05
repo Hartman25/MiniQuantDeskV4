@@ -43,6 +43,8 @@ def build_parity_evidence(
     gate_result: DeployabilityGateResult,
     shadow_evidence: ShadowEvidenceRef,
     comparison_basis: str,
+    backtest_run_id: Optional[str] = None,
+    backtest_input_data_hash: Optional[str] = None,
     additional_trust_gaps: Optional[List[str]] = None,
     produced_at_utc: Optional[str] = None,
 ) -> ParityEvidenceManifest:
@@ -63,6 +65,15 @@ def build_parity_evidence(
     comparison_basis:
         Explicit description of what live-facing assessment this manifest
         is assessed against.  Must be non-empty.
+    backtest_run_id:
+        BKT-PROV-02 — run_id from BacktestReport (UUIDv5 string encoding strategy
+        + config + input bar sequence).  When None, an explicit trust gap is added
+        to live_trust_gaps so the incomplete provenance chain is visible.
+    backtest_input_data_hash:
+        BKT-PROV-02 — input_data_hash from BacktestReport (bar sequence hash).
+        Consumers can use this to verify the parity evaluation used a specific
+        bar dataset.  When None and backtest_run_id is also None, no extra gap
+        is added (the single gap for missing backtest_run_id covers both).
     additional_trust_gaps:
         Optional list of project-specific trust gaps to append to the
         default gaps.  Do not use to suppress default gaps.
@@ -94,6 +105,15 @@ def build_parity_evidence(
     if additional_trust_gaps:
         trust_gaps.extend(additional_trust_gaps)
 
+    # BKT-PROV-02: if no backtest run identity is provided, the input bar data
+    # provenance chain is incomplete.  Make this explicit in the trust gaps so
+    # consumers see the limitation rather than silently inheriting it.
+    if backtest_run_id is None:
+        trust_gaps.append(
+            "Backtest run identity (backtest_run_id) not provided; "
+            "input bar data provenance is unverifiable for this parity manifest"
+        )
+
     return ParityEvidenceManifest(
         schema_version=PARITY_EVIDENCE_CONTRACT_VERSION,
         artifact_id=artifact_id,
@@ -101,9 +121,11 @@ def build_parity_evidence(
         gate_schema_version=gate_result.schema_version,
         shadow_evidence=shadow_evidence,
         comparison_basis=comparison_basis,
-        live_trust_complete=False,   # ALWAYS False; set only by LO-03 operator proof
+        live_trust_complete=False,   # ALWAYS False in current builds; no mechanism to set True
         live_trust_gaps=trust_gaps,
         produced_at_utc=ts,
+        backtest_run_id=backtest_run_id,
+        backtest_input_data_hash=backtest_input_data_hash,
     )
 
 
