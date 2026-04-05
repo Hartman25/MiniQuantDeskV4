@@ -413,17 +413,21 @@ def _enforce_data_sufficiency(
         )
 
 
-def _earnings_flags_optional(engine, symbols, asof_utc, days_ahead: int = 14) -> pd.DataFrame:
-    def _stub() -> pd.DataFrame:
-        syms = sorted({s.strip().upper() for s in (symbols or []) if s and s.strip()})
-        return pd.DataFrame(
-            {"symbol": syms, "earnings_within_14d": [False] * len(syms)},
-            columns=["symbol", "earnings_within_14d"],
-        )
+def _earnings_flags_optional(engine, symbols, asof_utc, days_ahead: int = 14) -> Optional[pd.DataFrame]:
+    """
+    Returns a DataFrame with columns [symbol, earnings_within_14d] when authoritative
+    corporate_events data is available and queryable, or None when it is not.
 
+    None means "earnings data unavailable" — the caller (run_phase1_equity) passes None
+    to build_universe_swing_v1, which sets stubbed_earnings=True and records the gap
+    in the manifest. Returning None is NOT the same as "no earnings events found".
+
+    A non-None return from a successful empty query (table present, correct schema,
+    query succeeded, zero rows) means earnings were genuinely checked and none were found.
+    """
     syms = sorted({s.strip().upper() for s in (symbols or []) if s and s.strip()})
     if not syms:
-        return _stub()
+        return None
 
     asof_ts = pd.Timestamp(asof_utc)
     if asof_ts.tz is None:
@@ -435,7 +439,8 @@ def _earnings_flags_optional(engine, symbols, asof_utc, days_ahead: int = 14) ->
     with engine.connect() as cxn:
         reg = cxn.execute(text("select to_regclass('public.corporate_events')")).scalar()
         if reg is None:
-            return _stub()
+            # Table absent — earnings data unavailable.
+            return None
 
         cols = cxn.execute(
             text(
@@ -467,12 +472,14 @@ def _earnings_flags_optional(engine, symbols, asof_utc, days_ahead: int = 14) ->
     ts_col = next((c for c in ts_candidates if c in colnames), None)
 
     if symbol_col is None or event_type_col is None or ts_col is None:
-        return _stub()
+        # Unrecognized schema — earnings data unavailable.
+        return None
 
     ts_dtype = (col_types.get(ts_col) or "").lower()
     acceptable_markers = ("timestamp", "date", "time zone", "time")
     if not any(k in ts_dtype for k in acceptable_markers):
-        return _stub()
+        # Timestamp column has unexpected type — earnings data unavailable.
+        return None
 
     if "date" in ts_dtype and "timestamp" not in ts_dtype:
         ts_expr = f"({ts_col}::timestamp at time zone 'UTC')"
@@ -501,11 +508,10 @@ def _earnings_flags_optional(engine, symbols, asof_utc, days_ahead: int = 14) ->
                 },
             )
         except Exception:
-            return _stub()
+            # Query failed — earnings data unavailable.
+            return None
 
-    if df.empty:
-        return _stub()
-
+    # Query succeeded (df may be empty = genuinely no events found; that is real data).
     df["symbol"] = df["symbol"].astype(str).str.upper()
     flagged = set(df["symbol"].unique().tolist())
 
@@ -547,13 +553,6 @@ def _write_manifest_contract(manifest_path: Path, man: contracts.ResearchManifes
     if manifest_path.exists():
         raise RuntimeError(f"Refusing to overwrite existing manifest: {manifest_path}")
     manifest_path.write_text(man.to_json(indent=2) + "\n", encoding="utf-8")
-
-
-def _write_intent_contract(intent_path: Path, intent: contracts.ResearchIntent) -> None:
-    contracts.validate_contract_version(intent.contract_version)
-    if intent_path.exists():
-        raise RuntimeError(f"Refusing to overwrite existing intent: {intent_path}")
-    intent_path.write_text(intent.to_json(indent=2) + "\n", encoding="utf-8")
 
 
 def run_phase1_equity(policy_path: Path, asof_utc: pd.Timestamp, pg_url: str, out_root: Path, symbols_csv: str) -> Path:
@@ -683,89 +682,6 @@ def run_phase1_equity(policy_path: Path, asof_utc: pd.Timestamp, pg_url: str, ou
     return run_dir
 
 
-def run_phase2_stub(policy_path: Path, asof_utc: pd.Timestamp, out_root: Path, symbols_csv: str) -> Path:
-    """
-    Phase 2 stub runner:
-      - writes an intent artifact + manifest
-      - does NOT touch Postgres
-      - does NOT compute features/universe/targets
-    """
-    policy = _load_policy(policy_path)
-    policy_name = str(policy["policy_name"])
-    policy_sha = sha256_file(policy_path)
-    asset_class = str(policy.get("asset_class", "EQUITY")).upper()
-
-    symbols = [s.strip().upper() for s in symbols_csv.split(",") if s.strip()]
-    symbols = sorted(set(symbols))
-    if not symbols:
-        raise ValueError("--symbols must be non-empty (comma-separated)")
-
-    params = {"symbols": symbols, "asset_class": asset_class}
-    run_id = stable_run_id(policy_name, asof_utc.isoformat(), params)
-
-    run_dir = out_root / run_id
-
-    expected_manifest = {
-        "schema_version": "1",
-        "contract_version": contracts.CONTRACT_VERSION,
-        "policy_sha256": policy_sha,
-        "policy_name": policy_name,
-        "asof_utc": asof_utc.isoformat(),
-        "params": params,
-        "md_bars.symbols": None,
-        "md_bars.timeframe": None,
-        "md_bars.start_utc": None,
-        "md_bars.end_utc": None,
-        "asset_class": asset_class,
-        "pipeline": "PHASE2_STUB",
-    }
-    if _try_reuse_existing_run(run_dir, expected_manifest):
-        return run_dir
-    if (run_dir / "manifest.json").exists():
-        raise RuntimeError(f"Run directory already exists but does not match requested inputs: {run_dir}")
-
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    intent_path = run_dir / "intent.json"
-    manifest_path = run_dir / "manifest.json"
-
-    intent = contracts.ResearchIntent(
-        schema_version="1",
-        contract_version=contracts.CONTRACT_VERSION,
-        run_id=run_id,
-        asof_utc=asof_utc.isoformat(),
-        policy_name=policy_name,
-        asset_class=asset_class,
-        symbols=symbols,
-        pipeline="PHASE2_STUB",
-        notes=[
-            "PHASE2_STUB: This run intentionally emits only an intent artifact.",
-            "No Postgres schema/adapters/pipeline for this asset class yet.",
-        ],
-    )
-    _write_intent_contract(intent_path, intent)
-
-    outputs = {"intent_json": file_record(intent_path)}
-    inputs = {"intent": {"asset_class": asset_class, "pipeline": "PHASE2_STUB"}, "optional": {"pg_used": False}}
-
-    man = contracts.ResearchManifest(
-        schema_version="1",
-        contract_version=contracts.CONTRACT_VERSION,
-        run_id=run_id,
-        asof_utc=asof_utc.isoformat(),
-        policy_name=policy_name,
-        policy_path=str(policy_path),
-        policy_sha256=policy_sha,
-        params=params,
-        inputs=inputs,
-        outputs=outputs,
-        notes=[f"PHASE2_STUB: asset_class={asset_class}. Intent-only artifact emitted."],
-    )
-    _write_manifest_contract(manifest_path, man)
-
-    return run_dir
-
-
 def main(argv: Optional[list[str]] = None) -> None:
     p = argparse.ArgumentParser(
         prog="mqk-research",
@@ -785,7 +701,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     sub.add_parser("features", parents=[common], help="Phase 1: compute features (also emits universe/targets for determinism)")
     sub.add_parser("universe", parents=[common], help="Phase 1: build universe (also computes features/targets)")
     sub.add_parser("targets", parents=[common], help="Phase 1: build targets (also computes features/universe)")
-    sub.add_parser("run", parents=[common], help="Run based on policy asset_class (EQUITY Phase1, others Phase2 stub)")
+    sub.add_parser("run", parents=[common], help="Run based on policy asset_class (EQUITY only; OPTIONS/FUTURES not supported)")
 
     args = p.parse_args(argv)
 
@@ -808,14 +724,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     asset_class = str(policy.get("asset_class", "EQUITY")).upper()
 
     if asset_class in ("OPTIONS", "FUTURES"):
-        run_dir = run_phase2_stub(
-            policy_path=policy_path,
-            asof_utc=asof_utc,
-            out_root=out_root,
-            symbols_csv=args.symbols,
+        raise RuntimeError(
+            f"Asset class {asset_class!r} is not supported by this research pipeline.\n"
+            "OPTIONS and FUTURES require a Postgres options/futures schema and data ingestion\n"
+            "infrastructure that do not exist in this codebase. Only EQUITY (asset_class=EQUITY)\n"
+            "is supported. Use a policy with asset_class: EQUITY."
         )
-        print(str(run_dir))
-        return
 
     if not pg_url:
         raise RuntimeError(

@@ -10,8 +10,11 @@ import pandas as pd
 @dataclass(frozen=True)
 class OptionsChainQuery:
     """
-    Phase 2 stub. Future: query option chains/greeks/IV from Postgres tables.
-    Determinism rule: all queries must be ASOF-scoped and come only from Postgres.
+    NOT SUPPORTED. Options data requires a Postgres options schema (chains, greeks, IV)
+    and an ingestion pipeline that do not exist in this codebase.
+
+    Determinism rule (for when this is eventually implemented): all queries must be
+    ASOF-scoped and sourced exclusively from Postgres — no live API calls at research time.
     """
     symbol: str
     asof_utc: pd.Timestamp
@@ -20,12 +23,21 @@ class OptionsChainQuery:
 
 def load_options_chain_pg(*, query: OptionsChainQuery) -> pd.DataFrame:
     """
-    Stub adapter. Must be implemented after Postgres options schema exists.
+    NOT SUPPORTED. Raises NotImplementedError unconditionally.
+
+    Prerequisites before this can be implemented:
+      1. Postgres options schema (option_chains / greeks / IV surface tables)
+      2. Options data ingestion pipeline
+      3. ASOF-scoped query contract defined and migration applied
+
+    Do not call this function. The CLI refuses OPTIONS asset_class at the routing
+    boundary before this adapter is reached.
     """
     asof = pd.to_datetime(query.asof_utc, utc=True).to_pydatetime().astimezone(timezone.utc)
-    raise RuntimeError(
-        "Options adapter not implemented (Phase 2 stub).\n"
+    raise NotImplementedError(
+        "Options pipeline is not supported.\n"
         f"  symbol={query.symbol}\n"
         f"  asof_utc={asof.isoformat()}\n"
-        "Next: define Postgres options schema + ingestion, then implement adapter."
+        "Required: Postgres options schema + ingestion pipeline (neither exists). "
+        "The research CLI refuses OPTIONS asset_class before reaching this adapter."
     )
