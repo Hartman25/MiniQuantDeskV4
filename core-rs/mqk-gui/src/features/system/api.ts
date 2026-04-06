@@ -40,6 +40,7 @@ import {
   type DaemonAuditActionsWrapper,
   type DaemonArtifactsWrapper,
   type DaemonOperatorTimelineWrapper,
+  type DaemonOrderTimelineResponse,
   type EventsFeedWrapper,
   type ExecutionOutboxWrapper,
   type FillQualityWrapper,
@@ -68,8 +69,9 @@ import type {
   ExecutionOrderRow,
   ExecutionReplay,
   ExecutionSummary,
-  ExecutionTimeline,
   ExecutionTrace,
+  OrderTimelineSurface,
+  OrderTimelineTruthState,
   ExplicitSurfaceTruth,
   FeedEvent,
   IncidentCase,
@@ -294,18 +296,19 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       }));
       return { ok: true, endpoint: r.endpoint, data: rows };
     })(),
-    // GUI-CONTRACT-01: these 6 routes are not yet mounted on the daemon.
+    // GUI-CONTRACT-01: these 4 routes are not yet mounted on the daemon.
     // notProbed() returns ok:false so useObject/useArray still push the key
     // into usedMockSections and panel authority degrades correctly — but no
     // HTTP request fires. Deferred list: gui_daemon_contract_waivers.md §resolved.
+    // A2: /execution/transport and /market-data/quality graduated from this list.
     Promise.resolve(notProbed<ServiceTopology>("/api/v1/system/topology")),
-    Promise.resolve(notProbed<TransportSummary>("/api/v1/execution/transport")),
+    fetchJsonCandidates<TransportSummary>(["/api/v1/execution/transport"]),
     Promise.resolve(notProbed<IncidentCase[]>("/api/v1/incidents")),
     Promise.resolve(notProbed<ReplaceCancelChainRow[]>("/api/v1/execution/replace-cancel-chains")),
     Promise.resolve(notProbed<AlertTriageRow[]>("/api/v1/alerts/triage")),
     fetchJsonCandidates<SessionStateSummary>(["/api/v1/system/session"]),
     fetchJsonCandidates<ConfigFingerprintSummary>(["/api/v1/system/config-fingerprint"]),
-    Promise.resolve(notProbed<MarketDataQualitySummary>("/api/v1/market-data/quality")),
+    fetchJsonCandidates<MarketDataQualitySummary>(["/api/v1/market-data/quality"]),
     fetchJsonCandidates<RuntimeLeadershipSummary>(["/api/v1/system/runtime-leadership"]),
     // audit/artifacts: daemon returns {canonical_route, truth_state, backend, rows}
     // where each row is one run from the runs table. "backend_unavailable" means
@@ -480,7 +483,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   // regardless of whether the detail views were in use).
   // Dedicated exported functions (fetchExecutionTimeline etc.) remain
   // available for screen-level calls when these routes are eventually mounted.
-  const selectedTimeline: ExecutionTimeline | null = null;
+  const selectedTimeline: OrderTimelineSurface | null = null;
   const executionTrace: ExecutionTrace | null = null;
   const executionReplay: ExecutionReplay | null = null;
   const executionChart: ExecutionChartModel | null = null;
@@ -848,8 +851,38 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
 // Order-detail fetches (per-order deep-dive surfaces)
 // ---------------------------------------------------------------------------
 
-export async function fetchExecutionTimeline(internalOrderId: string): Promise<ExecutionTimeline | null> {
-  return tryFetchJson<ExecutionTimeline>([`/api/v1/execution/timeline/${internalOrderId}`]);
+// A5A: fetch per-order execution timeline from the canonical daemon route.
+// Returns null for unavailable truth states (no_db) so callers can fall through
+// to the existing "Select an order" placeholder without rendering stale data.
+export async function fetchExecutionTimeline(internalOrderId: string): Promise<OrderTimelineSurface | null> {
+  const r = await fetchJsonCandidate<DaemonOrderTimelineResponse>(
+    `/api/v1/execution/orders/${internalOrderId}/timeline`,
+  );
+  if (!r.ok || r.data == null) return null;
+  const d = r.data;
+  // no_db: DB not available — treat as not-mounted, don't surface partial truth.
+  if (d.truth_state === "no_db") return null;
+  const VALID_STATES: OrderTimelineTruthState[] = ["active", "no_fills_yet", "no_order"];
+  const truth_state: OrderTimelineTruthState = VALID_STATES.includes(
+    d.truth_state as OrderTimelineTruthState,
+  )
+    ? (d.truth_state as OrderTimelineTruthState)
+    : "no_order";
+  return {
+    canonical_route: d.canonical_route,
+    truth_state,
+    backend: d.backend,
+    internal_order_id: d.order_id,
+    broker_order_id: d.broker_order_id ?? null,
+    symbol: d.symbol ?? null,
+    strategy_id: null,
+    requested_qty: d.requested_qty ?? null,
+    filled_qty: d.filled_qty ?? null,
+    current_status: d.current_status ?? null,
+    current_stage: d.current_stage ?? null,
+    last_updated_at: d.last_event_at ?? null,
+    rows: d.rows ?? [],
+  };
 }
 
 export async function fetchExecutionTrace(internalOrderId: string): Promise<ExecutionTrace | null> {

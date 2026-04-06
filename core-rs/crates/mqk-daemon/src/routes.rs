@@ -22,6 +22,7 @@
 //! |                  | ops_operator_timeline                                 |
 //! | `oms_metrics`    | oms_overview, metrics_dashboards                      |
 //! | `trading`        | /v1/trading/*, diagnostics_snapshot, stream           |
+//! | `transport_quality` | execution_transport, market_data_quality           |
 
 pub(crate) mod alerts_events;
 pub(crate) mod audit_ops;
@@ -36,6 +37,7 @@ pub(crate) mod reconcile;
 pub(crate) mod strategy;
 pub(crate) mod system;
 pub(crate) mod trading;
+pub(crate) mod transport_quality;
 
 use std::sync::Arc;
 
@@ -139,8 +141,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         run_halt, run_start, run_stop,
     };
     use execution::{
-        execution_fill_quality, execution_order_cancel, execution_order_submit, execution_orders,
-        execution_outbox, execution_summary,
+        execution_fill_quality, execution_order_cancel, execution_order_submit,
+        execution_order_timeline, execution_orders, execution_outbox, execution_summary,
     };
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
@@ -159,6 +161,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         diagnostics_snapshot, stream, trading_account, trading_fills, trading_orders,
         trading_positions, trading_snapshot, trading_snapshot_clear, trading_snapshot_set,
     };
+    use transport_quality::{execution_transport, market_data_quality};
 
     // --- Public (unauthenticated) routes — read-only telemetry & data. ---
     let public = Router::new()
@@ -178,6 +181,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/execution/fill-quality",
             get(execution_fill_quality),
+        )
+        .route(
+            "/api/v1/execution/orders/:order_id/timeline",
+            get(execution_order_timeline),
         )
         .route("/api/v1/portfolio/summary", get(portfolio_summary))
         .route("/api/v1/portfolio/positions", get(portfolio_positions))
@@ -221,6 +228,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(system_parity_evidence),
         )
         .route("/api/v1/autonomous/readiness", get(autonomous_readiness))
+        .route(
+            "/api/v1/execution/transport",
+            get(execution_transport),
+        )
+        .route("/api/v1/market-data/quality", get(market_data_quality))
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
         .route("/v1/trading/orders", get(trading_orders))

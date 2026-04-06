@@ -5,6 +5,7 @@
 
 use mqk_runtime::observability::ExecutionSnapshot;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -1864,4 +1865,185 @@ pub struct ExecutionOutboxResponse {
     pub run_id: Option<String>,
     /// At most 200 rows, newest-first.  Authoritative only when `truth_state == "active"`.
     pub rows: Vec<ExecutionOutboxRow>,
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/execution/orders/:order_id/timeline (Batch A5A)
+// ---------------------------------------------------------------------------
+
+/// One fill event row in the per-order execution timeline.
+///
+/// Source: `postgres.fill_quality_telemetry` for the active run.
+/// Only fill events are represented; pre-fill outbox lifecycle events are not
+/// joined to `internal_order_id` in the current schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderTimelineRow {
+    /// Stable event identifier derived from `telemetry_id`.
+    pub event_id: String,
+    /// RFC 3339 timestamp when this fill event was received.
+    pub ts_utc: String,
+    /// Event kind: `"partial_fill"` | `"final_fill"`.
+    pub stage: String,
+    /// Data provenance: always `"fill_quality_telemetry"`.
+    pub source: String,
+    /// Human-readable summary (e.g. `"qty=50 @ $150.250000 (partial_fill)"`).
+    pub detail: Option<String>,
+    pub fill_qty: Option<i64>,
+    pub fill_price_micros: Option<i64>,
+    pub slippage_bps: Option<i64>,
+    /// Always `"oms_inbox:{broker_message_id}"` from the fill row.
+    pub provenance_ref: Option<String>,
+}
+
+/// Response wrapper for `GET /api/v1/execution/orders/:order_id/timeline`.
+///
+/// # Truth states
+///
+/// - `"active"` — DB + active run + at least one fill row found; `rows` is
+///   authoritative and `backend` names the exact source table.
+/// - `"no_fills_yet"` — DB + active run available, order is visible in the OMS
+///   execution snapshot, but no fill rows exist yet; `rows` is empty.
+/// - `"no_order"` — `order_id` was not found in any current authoritative source
+///   (no active run, no snapshot, or no fill history).  `rows` is empty.
+/// - `"no_db"` — no DB pool configured; `rows` is empty and not authoritative.
+///
+/// # Sources
+///
+/// - `symbol`, `requested_qty`, `filled_qty`, `current_status`, `current_stage`
+///   — from the in-memory execution snapshot (ephemeral; not durable across restart).
+/// - `rows` — from `postgres.fill_quality_telemetry` (durable, per active run).
+///
+/// # Honest limits
+///
+/// Timeline rows represent fill events only.  Pre-fill outbox lifecycle events
+/// (queued/claimed/dispatching/sent) are not yet linked to `internal_order_id`
+/// and are therefore absent from this surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderTimelineResponse {
+    /// Self-identifying canonical route including the resolved `order_id`.
+    pub canonical_route: String,
+    pub truth_state: String,
+    /// `"postgres.fill_quality_telemetry"` | `"unavailable"`.
+    pub backend: String,
+    pub order_id: String,
+    /// `null` until the broker submit is confirmed.
+    pub broker_order_id: Option<String>,
+    /// From execution snapshot. `null` when snapshot is absent.
+    pub symbol: Option<String>,
+    /// From execution snapshot. `null` when snapshot is absent.
+    pub requested_qty: Option<i64>,
+    /// From execution snapshot. `null` when snapshot is absent.
+    pub filled_qty: Option<i64>,
+    /// Canonical OMS status from execution snapshot. `null` when snapshot is absent.
+    pub current_status: Option<String>,
+    /// Display-friendly stage derived from `current_status`. `null` when `current_status` is absent.
+    pub current_stage: Option<String>,
+    /// RFC 3339 timestamp of the most recent fill event. `null` when no fills have been received.
+    pub last_event_at: Option<String>,
+    /// Fill events for this order, oldest-first. At most 50 rows.
+    /// Authoritative only when `truth_state == "active"`.
+    pub rows: Vec<OrderTimelineRow>,
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/execution/transport (Batch A2)
+// ---------------------------------------------------------------------------
+
+/// One outbox or inbox transport lane summary row.
+///
+/// Shape matches the GUI `TransportQueueRow` interface so it can be consumed
+/// without mapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransportQueueRow {
+    /// "outbox" | "inbox"
+    pub queue_id: String,
+    /// "outbox" | "inbox"
+    pub direction: String,
+    /// "idle" | "active" | "retrying" | "pending" | "applied"
+    pub status: String,
+    pub depth: usize,
+    /// Age of oldest item in this lane, in milliseconds.
+    pub oldest_age_ms: u64,
+    pub retry_count: usize,
+    pub duplicate_events: usize,
+    pub orphaned_claims: usize,
+    pub lag_ms: Option<u64>,
+    pub last_activity_at: Option<String>,
+    pub notes: String,
+}
+
+/// Response for `GET /api/v1/execution/transport`.
+///
+/// Shape matches the GUI `TransportSummary` interface (extra fields are
+/// ignored by the GUI JSON consumer).
+///
+/// `truth_state`:
+/// - `"active"` — an execution snapshot is present; all counts are authoritative.
+/// - `"no_snapshot"` — no execution snapshot (run not started or daemon freshly
+///   booted); all counts are zero and must NOT be read as authoritative-zero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionTransportResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    /// Total non-ACKED outbox rows in the current snapshot.
+    pub outbox_depth: usize,
+    /// Total recent inbox event rows in the current snapshot.
+    pub inbox_depth: usize,
+    /// Age of the oldest CLAIMED outbox row in milliseconds; 0 if none.
+    pub max_claim_age_ms: u64,
+    /// Count of FAILED + AMBIGUOUS outbox rows (proxy for dispatch retries).
+    pub dispatch_retries: usize,
+    /// Count of CLAIMED rows stale > 30 s (proxy for orphaned claims).
+    pub orphaned_claims: usize,
+    /// Always 0 — duplicate detection is not derivable from the in-memory snapshot.
+    pub duplicate_inbox_events: usize,
+    /// Per-lane queue summaries: [outbox, inbox] when snapshot is present, [] otherwise.
+    pub queues: Vec<TransportQueueRow>,
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/market-data/quality (Batch A2)
+// ---------------------------------------------------------------------------
+
+/// Response for `GET /api/v1/market-data/quality`.
+///
+/// Shape matches the GUI `MarketDataQualitySummary` interface (extra fields
+/// `canonical_route`, `truth_state`, `market_data_source`, `ws_continuity`
+/// are ignored by the GUI JSON consumer).
+///
+/// `truth_state` is always `"active"` — this route derives from daemon in-memory
+/// state which is always available.  Use `overall_health` to distinguish
+/// configured vs not-configured states.
+///
+/// `overall_health`:
+/// - `"ok"` — ExternalSignalIngestion + WS Live (stream confirmed healthy).
+/// - `"warning"` — ExternalSignalIngestion + WS ColdStartUnproven or NotApplicable
+///   (configured but continuity not yet proven).
+/// - `"critical"` — ExternalSignalIngestion + WS GapDetected (active data gap).
+/// - `"not_configured"` — no market-data source is wired
+///   (`StrategyMarketDataSource::NotConfigured`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketDataQualityResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    /// "ok" | "warning" | "critical" | "not_configured" — maps to GUI `HealthState`.
+    pub overall_health: String,
+    /// Always 0 — freshness SLA is not tracked in current implementation.
+    pub freshness_sla_ms: u64,
+    /// Always 0 — stale symbol count is not tracked.
+    pub stale_symbol_count: usize,
+    /// Always 0 — missing bar count is not tracked.
+    pub missing_bar_count: usize,
+    /// Always 0 — venue disagreement is not tracked.
+    pub venue_disagreement_count: usize,
+    /// Always 0 — strategy blocks are not tracked here.
+    pub strategy_blocks: usize,
+    /// Always empty — no per-venue breakdown is available from in-memory state.
+    pub venues: Vec<JsonValue>,
+    /// Always empty — no per-issue tracking is available from in-memory state.
+    pub issues: Vec<JsonValue>,
+    /// "not_configured" | "signal_ingestion_ready" — raw source label.
+    pub market_data_source: String,
+    /// "not_applicable" | "cold_start_unproven" | "live" | "gap_detected".
+    pub ws_continuity: String,
 }

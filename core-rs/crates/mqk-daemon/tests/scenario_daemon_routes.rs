@@ -5,6 +5,7 @@
 //! `tower::ServiceExt::oneshot` — no network I/O required.
 
 use axum::http::{Request, StatusCode};
+use chrono::Utc;
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
 use std::sync::Arc;
@@ -3500,4 +3501,221 @@ async fn cc03_mode_change_guidance_and_ops_action_agree() {
         j_get["current_mode"], j_post["current_mode"],
         "current_mode must agree: get={j_get} post={j_post}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A2: GET /api/v1/execution/transport
+// ---------------------------------------------------------------------------
+
+/// A2-T01: No execution snapshot → 200 with truth_state="no_snapshot", all zeros.
+#[tokio::test]
+async fn a2_t01_transport_no_snapshot_returns_zero_depths() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/execution/transport")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "no_snapshot");
+    assert_eq!(json["canonical_route"], "/api/v1/execution/transport");
+    assert_eq!(json["outbox_depth"], 0);
+    assert_eq!(json["inbox_depth"], 0);
+    assert_eq!(json["max_claim_age_ms"], 0);
+    assert_eq!(json["dispatch_retries"], 0);
+    assert_eq!(json["orphaned_claims"], 0);
+    assert_eq!(json["duplicate_inbox_events"], 0);
+    assert!(json["queues"].is_array());
+    assert_eq!(json["queues"].as_array().unwrap().len(), 0);
+}
+
+/// A2-T02: Injected execution snapshot → 200 with truth_state="active" and correct
+/// outbox/inbox depths; queues array contains two rows (outbox, inbox).
+#[tokio::test]
+async fn a2_t02_transport_with_snapshot_returns_active_and_depths() {
+    use mqk_runtime::observability::{
+        ExecutionSnapshot, InboxEventSnapshot, OutboxSnapshot, PortfolioSnapshot,
+    };
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    let now = Utc::now();
+    let snapshot = ExecutionSnapshot {
+        run_id: Some(Uuid::new_v4()),
+        active_orders: vec![],
+        pending_outbox: vec![
+            OutboxSnapshot {
+                outbox_id: 1,
+                idempotency_key: "k1".to_string(),
+                status: "PENDING".to_string(),
+                created_at_utc: now,
+                sent_at_utc: None,
+                claimed_at_utc: None,
+                dispatching_at_utc: None,
+            },
+            OutboxSnapshot {
+                outbox_id: 2,
+                idempotency_key: "k2".to_string(),
+                status: "FAILED".to_string(),
+                created_at_utc: now,
+                sent_at_utc: None,
+                claimed_at_utc: None,
+                dispatching_at_utc: None,
+            },
+        ],
+        recent_inbox_events: vec![InboxEventSnapshot {
+            broker_message_id: "m1".to_string(),
+            event_type: "fill".to_string(),
+            received_at_utc: now,
+            applied: false,
+            applied_at_utc: None,
+        }],
+        portfolio: PortfolioSnapshot {
+            cash_micros: 0,
+            realized_pnl_micros: 0,
+            positions: vec![],
+        },
+        system_block_state: None,
+        recent_risk_denials: vec![],
+        snapshot_at_utc: now,
+    };
+
+    *st.execution_snapshot.write().await = Some(snapshot);
+
+    let router = routes::build_router(st);
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/execution/transport")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active");
+    assert_eq!(json["outbox_depth"], 2);
+    assert_eq!(json["inbox_depth"], 1);
+    assert_eq!(json["dispatch_retries"], 1, "FAILED row counts as retry");
+    let queues = json["queues"].as_array().unwrap();
+    assert_eq!(queues.len(), 2);
+    assert_eq!(queues[0]["queue_id"], "outbox");
+    assert_eq!(queues[0]["direction"], "outbox");
+    assert_eq!(queues[0]["depth"], 2);
+    assert_eq!(queues[1]["queue_id"], "inbox");
+    assert_eq!(queues[1]["direction"], "inbox");
+    assert_eq!(queues[1]["depth"], 1);
+}
+
+// ---------------------------------------------------------------------------
+// A2: GET /api/v1/market-data/quality
+// ---------------------------------------------------------------------------
+
+/// A2-M01: Default paper+paper config → 200 with overall_health="not_configured".
+#[tokio::test]
+async fn a2_m01_market_data_quality_paper_paper_not_configured() {
+    let router = make_router();
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/market-data/quality")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active");
+    assert_eq!(json["canonical_route"], "/api/v1/market-data/quality");
+    assert_eq!(json["overall_health"], "not_configured");
+    assert_eq!(json["market_data_source"], "not_configured");
+    assert_eq!(json["ws_continuity"], "not_applicable");
+    assert_eq!(json["freshness_sla_ms"], 0);
+    assert_eq!(json["stale_symbol_count"], 0);
+    assert!(json["venues"].is_array());
+    assert_eq!(json["venues"].as_array().unwrap().len(), 0);
+    assert!(json["issues"].is_array());
+    assert_eq!(json["issues"].as_array().unwrap().len(), 0);
+}
+
+/// A2-M02: Paper+Alpaca config with WS cold_start_unproven →
+/// overall_health="warning" (not yet proven safe, NOT green).
+#[tokio::test]
+async fn a2_m02_market_data_quality_cold_start_is_warning() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    ));
+    let router = routes::build_router(st);
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/market-data/quality")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active");
+    assert_eq!(json["overall_health"], "warning");
+    assert_eq!(json["market_data_source"], "signal_ingestion_ready");
+    assert_eq!(json["ws_continuity"], "cold_start_unproven");
+}
+
+/// A2-M03: Paper+Alpaca config with WS Live → overall_health="ok".
+#[tokio::test]
+async fn a2_m03_market_data_quality_live_is_ok() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    ));
+    st.update_ws_continuity(state::AlpacaWsContinuityState::Live {
+        last_message_id: "msg-1".to_string(),
+        last_event_at: "2026-01-01T10:00:00Z".to_string(),
+    })
+    .await;
+    let router = routes::build_router(st);
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/market-data/quality")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["overall_health"], "ok");
+    assert_eq!(json["ws_continuity"], "live");
+}
+
+/// A2-M04: Paper+Alpaca config with WS GapDetected → overall_health="critical"
+/// (not "ok" — the core fix for the honesty gap).
+#[tokio::test]
+async fn a2_m04_market_data_quality_gap_detected_is_critical() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    ));
+    // Advance to Live first (required by update_ws_continuity guard), then gap.
+    st.update_ws_continuity(state::AlpacaWsContinuityState::Live {
+        last_message_id: "msg-1".to_string(),
+        last_event_at: "2026-01-01T10:00:00Z".to_string(),
+    })
+    .await;
+    st.update_ws_continuity(state::AlpacaWsContinuityState::GapDetected {
+        last_message_id: Some("msg-1".to_string()),
+        last_event_at: Some("2026-01-01T10:00:00Z".to_string()),
+        detail: "test gap".to_string(),
+    })
+    .await;
+    let router = routes::build_router(st);
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/market-data/quality")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["overall_health"], "critical");
+    assert_ne!(json["overall_health"], "ok");
+    assert_eq!(json["ws_continuity"], "gap_detected");
 }
