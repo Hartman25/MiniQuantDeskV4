@@ -79,9 +79,12 @@
 //! - Gap event recovery.  Events that arrive during a WS disconnect must be
 //!   recovered via `BrokerAdapter::fetch_events` on the next run restart.
 //!   That flow is not yet wired for the paper path.
-//! - Persisted WS cursor resume on reconnect.  The transport starts
-//!   `ColdStartUnproven` after reconnect and re-establishes `Live` via
-//!   handshake.  DB-seeded cursor resume after reconnect is not yet wired.
+//! - Gap event recovery on reconnect.  The transport starts `ColdStartUnproven`
+//!   after reconnect and re-establishes `Live` via handshake.  The in-session
+//!   cursor is seeded from the last persisted broker cursor at each session
+//!   start (BRK-07R), anchoring gap-detection to the prior position.  Events
+//!   that arrived during the disconnect are NOT automatically recovered; REST
+//!   gap recovery via `BrokerAdapter::fetch_events` on run restart is open.
 //! - Broad alert coverage.  Only the continuity-gap fault class has Discord
 //!   escalation.  Session-boundary and day-limit escalation are future work.
 //! - Signal-limit fault signal in `build_fault_signals` / `alerts_active`.

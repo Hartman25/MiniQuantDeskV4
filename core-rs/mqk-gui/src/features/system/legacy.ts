@@ -185,12 +185,11 @@ export interface StrategySuppressionsWrapper {
   rows: StrategySuppressionRow[];
 }
 
-// Strategy summary truth wrapper.
-// "not_wired" = no real strategy-fleet registry exists; rows is empty and not authoritative.
-//   The former synthetic "daemon_integrity_gate" surrogate row has been removed at the
-//   daemon layer; this wrapper prevents any future bare-array regression from silently
-//   re-introducing fake strategy rows.
-// "active"    = reserved for when a real strategy-fleet source is wired.
+// Strategy summary truth wrapper (CC-01: now conditional on MQK_STRATEGY_IDS fleet config).
+// "not_wired" = no strategy fleet configured (MQK_STRATEGY_IDS not set); rows is empty and
+//   not authoritative.  This is a configuration-absent state, not a permanently unimplemented
+//   surface.  The former synthetic "daemon_integrity_gate" surrogate row has been removed.
+// "active"    = fleet is configured; rows are authoritative (may be empty if fleet is vacant).
 export interface StrategySummaryWrapper {
   canonical_route?: string | null;
   backend?: string | null;
@@ -618,6 +617,33 @@ export interface EventsFeedWrapper {
     kind: string;
     detail: string;
     run_id: string | null;
+  }>;
+}
+
+// Per-order execution timeline response wrapper (A5A).
+// truth_state: "active" | "no_fills_yet" | "no_order" | "no_db"
+export interface DaemonOrderTimelineResponse {
+  canonical_route: string;
+  truth_state: string;
+  backend: string;
+  order_id: string;
+  broker_order_id: string | null;
+  symbol: string | null;
+  requested_qty: number | null;
+  filled_qty: number | null;
+  current_status: string | null;
+  current_stage: string | null;
+  last_event_at: string | null;
+  rows: Array<{
+    event_id: string;
+    ts_utc: string;
+    stage: string;
+    source: string;
+    detail: string | null;
+    fill_qty: number | null;
+    fill_price_micros: number | null;
+    slippage_bps: number | null;
+    provenance_ref: string | null;
   }>;
 }
 

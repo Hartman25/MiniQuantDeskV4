@@ -120,15 +120,15 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: [],
     placeholder: ["reconcileSummary", "mismatches"],
   },
-  // Strategy summary and suppressions are both "not_wired": no real strategy-fleet
-  // registry or suppression persistence exists yet.  Both IIFEs return ok:false,
-  // so neither endpoint lands in realEndpoints.  "strategies" and
-  // "strategySuppressions" land in mockSections → hasPlaceholder=true, realCount=0
-  // → authority resolves to "placeholder" → panelTruthRenderState returns
-  // "unimplemented" and the StrategyScreen hard-blocks.
-  // The evidence hints are kept in their intended final-state form (db for
-  // suppressions, runtime for summary) so that when a real source is wired in a
-  // future patch, the authority classification requires no change here.
+  // Strategy summary truth is conditional on MQK_STRATEGY_IDS fleet configuration:
+  //   "not_wired" + empty rows when no fleet is configured → IIFE emits ok:false →
+  //   "strategies" in mockSections → authority = "placeholder" → StrategyScreen hard-blocks.
+  //   "active" + rows when fleet is configured (CC-01).
+  // Suppression truth is conditional on DB pool availability (CC-02):
+  //   "no_db" + empty rows when no DB pool → IIFE emits ok:false →
+  //   "strategySuppressions" in mockSections → hasPlaceholder=true.
+  //   "active" + durable rows when DB pool is present (postgres.sys_strategy_suppressions).
+  // Evidence hints are aligned to actual source authority: db for suppressions, runtime for summary.
   strategy: {
     db: ["/strategy/suppressions"],
     runtime: ["/strategy/summary"],
