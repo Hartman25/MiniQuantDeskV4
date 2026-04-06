@@ -472,3 +472,63 @@ export interface FillQualitySurface {
   truth_state: FillQualityTruthState;
   rows: FillQualityRow[];
 }
+
+// ---------------------------------------------------------------------------
+// A5A: per-order execution timeline (GET /api/v1/execution/orders/:id/timeline)
+// ---------------------------------------------------------------------------
+
+/** One fill event in the per-order execution timeline. */
+export interface OrderTimelineRow {
+  event_id: string;
+  ts_utc: string;
+  /** "partial_fill" | "final_fill" */
+  stage: string;
+  /** "fill_quality_telemetry" */
+  source: string;
+  detail: string | null;
+  fill_qty: number | null;
+  fill_price_micros: number | null;
+  slippage_bps: number | null;
+  provenance_ref: string | null;
+}
+
+export type OrderTimelineTruthState = "active" | "no_fills_yet" | "no_order" | "no_db";
+
+/**
+ * Per-order execution timeline surface backed by `postgres.fill_quality_telemetry`.
+ *
+ * truth_state semantics:
+ * - "active"       — at least one fill row found; `rows` is authoritative.
+ * - "no_fills_yet" — order visible in OMS snapshot but no fills yet; `rows` empty.
+ * - "no_order"     — order_id unknown to any current source; `rows` empty.
+ * - "no_db"        — no DB pool; `rows` empty and not authoritative.
+ *
+ * Fields sourced from the in-memory execution snapshot (`symbol`, `requested_qty`,
+ * `filled_qty`, `current_status`, `current_stage`) are nullable because the snapshot
+ * is ephemeral and absent across daemon restarts.
+ *
+ * Honest limit: only fill events are represented. Pre-fill outbox lifecycle events
+ * (queued/claimed/dispatching/sent) are not yet linked to internal_order_id.
+ */
+export interface OrderTimelineSurface {
+  canonical_route: string;
+  truth_state: OrderTimelineTruthState;
+  backend: string;
+  internal_order_id: string;
+  broker_order_id: string | null;
+  /** null when execution snapshot is absent. */
+  symbol: string | null;
+  /** Always null — OMS has no per-order strategy attribution. */
+  strategy_id: string | null;
+  /** null when execution snapshot is absent. */
+  requested_qty: number | null;
+  /** null when execution snapshot is absent. */
+  filled_qty: number | null;
+  /** null when execution snapshot is absent. */
+  current_status: string | null;
+  /** Derived from current_status by the daemon. null when current_status is absent. */
+  current_stage: string | null;
+  /** RFC 3339 timestamp of the most recent fill event. null when no fills yet. */
+  last_updated_at: string | null;
+  rows: OrderTimelineRow[];
+}

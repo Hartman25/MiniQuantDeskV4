@@ -177,12 +177,12 @@ export function ExecutionScreen({
               <div className="metric-list compact-list">
                 <div><span>Internal order</span><strong>{timeline.internal_order_id}</strong></div>
                 <div><span>Broker order</span><strong>{timeline.broker_order_id ?? "—"}</strong></div>
-                <div><span>Symbol</span><strong>{timeline.symbol}</strong></div>
+                <div><span>Symbol</span><strong>{timeline.symbol ?? "—"}</strong></div>
                 <div><span>Strategy</span><strong>{timeline.strategy_id ?? "—"}</strong></div>
-                <div><span>Status</span><strong>{timeline.current_status}</strong></div>
-                <div><span>Stage</span><strong>{timeline.current_stage}</strong></div>
-                <div><span>Qty</span><strong>{timeline.filled_qty}/{timeline.requested_qty}</strong></div>
-                <div><span>Updated</span><strong>{formatDateTime(timeline.last_updated_at)}</strong></div>
+                <div><span>Status</span><strong>{timeline.current_status ?? "—"}</strong></div>
+                <div><span>Stage</span><strong>{timeline.current_stage ?? "—"}</strong></div>
+                <div><span>Qty</span><strong>{timeline.filled_qty ?? 0}/{timeline.requested_qty ?? 0}</strong></div>
+                <div><span>Updated</span><strong>{timeline.last_updated_at ? formatDateTime(timeline.last_updated_at) : "—"}</strong></div>
               </div>
             ) : (
               <div className="empty-state">Select an order to inspect execution detail.</div>
@@ -269,7 +269,7 @@ export function ExecutionScreen({
 
       <Panel title="Lifecycle stage strip" compact>
         {timeline ? (
-          <TimelineStageStrip stages={timeline.stages} />
+          <TimelineStageStrip stages={[]} />
         ) : (
           <div className="empty-state">Select an order to view lifecycle stages.</div>
         )}

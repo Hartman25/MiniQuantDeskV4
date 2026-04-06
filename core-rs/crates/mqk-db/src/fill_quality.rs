@@ -115,6 +115,62 @@ pub async fn insert_fill_quality_telemetry(
     Ok(())
 }
 
+/// Load fill-quality rows for a specific order in a run, oldest-fill first.
+///
+/// Returns at most 50 rows in ascending `fill_received_at_utc` order so callers
+/// see the chronological fill sequence for a per-order timeline.
+pub async fn fetch_fill_quality_telemetry_for_order(
+    pool: &PgPool,
+    run_id: Uuid,
+    internal_order_id: &str,
+) -> Result<Vec<FillQualityRow>> {
+    let rows = sqlx::query(
+        r#"
+        select telemetry_id, run_id, internal_order_id, broker_order_id, broker_fill_id,
+               broker_message_id, symbol, side, ordered_qty, fill_qty,
+               fill_price_micros, reference_price_micros, slippage_bps,
+               submit_ts_utc, fill_received_at_utc, submit_to_fill_ms,
+               fill_kind, provenance_ref, created_at_utc
+        from fill_quality_telemetry
+        where run_id = $1
+          and internal_order_id = $2
+        order by fill_received_at_utc asc
+        limit 50
+        "#,
+    )
+    .bind(run_id)
+    .bind(internal_order_id)
+    .fetch_all(pool)
+    .await
+    .context("fetch_fill_quality_telemetry_for_order failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(FillQualityRow {
+            telemetry_id: r.try_get("telemetry_id")?,
+            run_id: r.try_get("run_id")?,
+            internal_order_id: r.try_get("internal_order_id")?,
+            broker_order_id: r.try_get("broker_order_id")?,
+            broker_fill_id: r.try_get("broker_fill_id")?,
+            broker_message_id: r.try_get("broker_message_id")?,
+            symbol: r.try_get("symbol")?,
+            side: r.try_get("side")?,
+            ordered_qty: r.try_get("ordered_qty")?,
+            fill_qty: r.try_get("fill_qty")?,
+            fill_price_micros: r.try_get("fill_price_micros")?,
+            reference_price_micros: r.try_get("reference_price_micros")?,
+            slippage_bps: r.try_get("slippage_bps")?,
+            submit_ts_utc: r.try_get("submit_ts_utc")?,
+            fill_received_at_utc: r.try_get("fill_received_at_utc")?,
+            submit_to_fill_ms: r.try_get("submit_to_fill_ms")?,
+            fill_kind: r.try_get("fill_kind")?,
+            provenance_ref: r.try_get("provenance_ref")?,
+            created_at_utc: r.try_get("created_at_utc")?,
+        });
+    }
+    Ok(out)
+}
+
 /// Load the most recent `limit` fill-quality rows for a run, newest-fill first.
 pub async fn fetch_fill_quality_telemetry_recent(
     pool: &PgPool,
