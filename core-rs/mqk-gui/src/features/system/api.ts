@@ -852,17 +852,15 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
 // ---------------------------------------------------------------------------
 
 // A5A: fetch per-order execution timeline from the canonical daemon route.
-// Returns null for unavailable truth states (no_db) so callers can fall through
-// to the existing "Select an order" placeholder without rendering stale data.
+// Returns null only on network/fetch failure. no_db is preserved as a typed
+// surface so the screen can render an explicit unavailable-truth notice.
 export async function fetchExecutionTimeline(internalOrderId: string): Promise<OrderTimelineSurface | null> {
   const r = await fetchJsonCandidate<DaemonOrderTimelineResponse>(
     `/api/v1/execution/orders/${internalOrderId}/timeline`,
   );
   if (!r.ok || r.data == null) return null;
   const d = r.data;
-  // no_db: DB not available — treat as not-mounted, don't surface partial truth.
-  if (d.truth_state === "no_db") return null;
-  const VALID_STATES: OrderTimelineTruthState[] = ["active", "no_fills_yet", "no_order"];
+  const VALID_STATES: OrderTimelineTruthState[] = ["active", "no_fills_yet", "no_order", "no_db"];
   const truth_state: OrderTimelineTruthState = VALID_STATES.includes(
     d.truth_state as OrderTimelineTruthState,
   )

@@ -5,7 +5,7 @@ import { StatCard } from "../../components/common/StatCard";
 import { TimelineStageStrip } from "../../components/common/TimelineStageStrip";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime, formatDurationMs } from "../../lib/format";
-import { executionOutboxNotice, fillQualityNotice } from "../system/legacy";
+import { executionOutboxNotice, fillQualityNotice, orderTimelineNotice } from "../system/legacy";
 import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 import { CausalityTraceViewer } from "./components/CausalityTraceViewer";
@@ -173,7 +173,9 @@ export function ExecutionScreen({
 
         <div className="execution-side-stack">
           <Panel title="Selected order summary" compact>
-            {timeline ? (
+            {timeline && orderTimelineNotice(timeline) ? (
+              <div className="unavailable-notice">{orderTimelineNotice(timeline)}</div>
+            ) : timeline ? (
               <div className="metric-list compact-list">
                 <div><span>Internal order</span><strong>{timeline.internal_order_id}</strong></div>
                 <div><span>Broker order</span><strong>{timeline.broker_order_id ?? "—"}</strong></div>
@@ -191,7 +193,7 @@ export function ExecutionScreen({
 
           <Panel title="Timeline status" compact>
             <div className="metric-list compact-list">
-              <div><span>Selection</span><strong>{timeline ? "Loaded" : "None"}</strong></div>
+              <div><span>Selection</span><strong>{timeline ? timeline.truth_state : "None"}</strong></div>
               <div><span>Timeline load</span><strong>{timelineLoading ? "Loading" : "Ready"}</strong></div>
               <div><span>Replay frames</span><strong>{model.executionReplay?.frames.length ?? 0}</strong></div>
               <div><span>Trace events</span><strong>{model.executionTrace?.timeline.length ?? 0}</strong></div>
@@ -268,7 +270,7 @@ export function ExecutionScreen({
       </Panel>
 
       <Panel title="Lifecycle stage strip" compact>
-        {timeline ? (
+        {timeline && timeline.truth_state !== "no_db" ? (
           <TimelineStageStrip stages={[]} />
         ) : (
           <div className="empty-state">Select an order to view lifecycle stages.</div>

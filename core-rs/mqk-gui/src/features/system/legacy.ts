@@ -34,6 +34,7 @@ import type {
   StrategySuppressionRow,
   SystemStatus,
 } from "./types";
+import type { OrderTimelineSurface } from "./types/execution";
 
 // ---------------------------------------------------------------------------
 // Legacy daemon API shapes
@@ -815,6 +816,22 @@ export function fillQualityNotice(surface: FillQualitySurface): string | null {
     case "no_active_run": return "No active run — fill quality telemetry unavailable until execution starts.";
     case "no_db": return "Fill quality unavailable: no database pool configured.";
     case "unavailable": return "Fill quality endpoint unavailable.";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A5A: per-order execution timeline notice
+// Returns a non-null notice string for every non-"active" state that carries
+// unavailable or ambiguous truth. "no_fills_yet" and "no_order" are meaningful
+// loaded states; "no_db" is an explicit unavailable-truth condition.
+// ---------------------------------------------------------------------------
+
+export function orderTimelineNotice(surface: OrderTimelineSurface): string | null {
+  switch (surface.truth_state) {
+    case "active": return null;
+    case "no_fills_yet": return null;
+    case "no_order": return null;
+    case "no_db": return "Timeline unavailable: no database pool configured. Do not treat empty rows as authoritative.";
   }
 }
 
