@@ -28,6 +28,8 @@ mqk-reconcile = { path = "../mqk-reconcile" }
 mqk-broker-alpaca = { path = "../mqk-broker-alpaca" }
 mqk-broker-paper = { path = "../mqk-broker-paper" }
 mqk-risk = { path = "../mqk-risk" }
+# B1A: native strategy runtime bootstrap seam.
+mqk-strategy = { path = "../mqk-strategy" }
 
 [features]
 # Patch 1: test-only wiring helpers (e.g., PassGate paper gateway).

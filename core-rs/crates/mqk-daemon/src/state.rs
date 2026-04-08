@@ -60,6 +60,7 @@ use crate::capital_policy::{
     DeploymentEconomicsOutcome,
 };
 use crate::parity_evidence::{evaluate_parity_evidence_from_env, ParityEvidenceOutcome};
+use mqk_runtime::native_strategy::{build_daemon_plugin_registry, NativeStrategyBootstrap};
 #[cfg(test)]
 use broker::alpaca_base_url_for_mode;
 use broker::{build_daemon_broker, DaemonBroker};
@@ -188,12 +189,44 @@ pub struct AppState {
     /// daemon with a working DB to recover durable history.  Surfaced in
     /// `/api/v1/autonomous/readiness` as `autonomous_history_degraded`.
     autonomous_history_degraded: Arc<AtomicBool>,
+    /// B1A: Native strategy runtime bootstrap for the current execution run.
+    ///
+    /// `None` when no run is active.  Set at run-start to the bootstrap outcome
+    /// (Dormant / Active / Failed).  Cleared on stop/halt alongside
+    /// `accepted_artifact`.  Active bootstrap holds the strategy host in shadow
+    /// mode; bar ingestion is not yet wired (B1A constraint).
+    native_strategy_bootstrap: Arc<Mutex<Option<NativeStrategyBootstrap>>>,
+    /// B1B: Pending strategy bar input deposited by the signal route for the
+    /// execution loop to consume on its next tick.
+    ///
+    /// `None` when no bar is pending (normal state between signals).
+    /// Overwritten by each new deposit (single slot: new bar supersedes any
+    /// unconsumed prior bar).  Consumed atomically (set to `None`) by
+    /// `tick_strategy_dispatch`.
+    pending_strategy_bar_input: Arc<Mutex<Option<StrategyBarInput>>>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// B1B: Raw bar input parameters for one native strategy `on_bar` dispatch.
+///
+/// Deposited by the signal route (ExternalSignalIngestion path) into
+/// `AppState::pending_strategy_bar_input` after Gate 6 passes.
+/// Consumed on the next execution loop tick by `AppState::tick_strategy_dispatch`.
+///
+/// Overwrite policy: a new deposit supersedes any prior unconsumed bar.
+/// The `day_signal_limit` gate (Gate 1d) bounds the deposit rate so
+/// supersession is rare in practice.
+#[derive(Debug)]
+pub struct StrategyBarInput {
+    pub now_tick: u64,
+    pub end_ts: i64,
+    pub limit_price: Option<i64>,
+    pub qty: i64,
 }
 
 /// AUTON-CALENDAR-01: Derive the authoritative CalendarSpec for a (mode, broker_kind) pair.
@@ -505,6 +538,8 @@ impl AppState {
             accepted_artifact: Arc::new(RwLock::new(None)),
             autonomous_session_truth: Arc::new(RwLock::new(AutonomousSessionTruth::Clear)),
             autonomous_history_degraded: Arc::new(AtomicBool::new(false)),
+            native_strategy_bootstrap: Arc::new(Mutex::new(None)),
+            pending_strategy_bar_input: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -969,6 +1004,88 @@ impl AppState {
 
     pub async fn set_strategy_fleet_for_test(&self, fleet: Option<Vec<StrategyFleetEntry>>) {
         *self.strategy_fleet.write().await = fleet;
+    }
+
+    /// B1A test seam: read the current native strategy bootstrap truth state.
+    ///
+    /// Returns `None` if no bootstrap is stored (no active run).
+    /// Returns `Some("dormant" | "active" | "failed")` when a run is active.
+    /// Named `_for_test` to signal intent; never called in production code.
+    pub async fn native_strategy_bootstrap_truth_state_for_test(&self) -> Option<&'static str> {
+        self.native_strategy_bootstrap
+            .lock()
+            .await
+            .as_ref()
+            .map(|b| b.truth_state())
+    }
+
+    /// B1B test seam: inject a pre-built bootstrap for testing dispatch logic.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    pub async fn set_native_strategy_bootstrap_for_test(
+        &self,
+        bootstrap: Option<NativeStrategyBootstrap>,
+    ) {
+        *self.native_strategy_bootstrap.lock().await = bootstrap;
+    }
+
+    /// B1B: Invoke the native strategy `on_bar` callback from raw bar parameters.
+    ///
+    /// Fail-closed: no bootstrap stored (no active run) → `None`, no callback.
+    /// Fail-closed: bootstrap is Dormant or Failed → `None`, no callback.
+    /// Returns `Some(StrategyBarResult)` when the bootstrap is Active and the
+    /// dispatch succeeds.
+    ///
+    /// Called by `tick_strategy_dispatch` (canonical loop path) and kept `pub`
+    /// as a secondary test-seam.  Production `on_bar` dispatch flows through
+    /// `tick_strategy_dispatch` (runtime-owned); direct callers are test-only.
+    ///
+    /// The result carries shadow-mode intents (B1B constraint: shadow mode until
+    /// the decision submission bridge is wired in B1C).
+    pub async fn invoke_native_strategy_on_bar_from_signal(
+        &self,
+        now_tick: u64,
+        end_ts: i64,
+        limit_price: Option<i64>,
+        qty: i64,
+    ) -> Option<mqk_strategy::StrategyBarResult> {
+        self.native_strategy_bootstrap
+            .lock()
+            .await
+            .as_mut()?
+            .invoke_on_bar_from_signal(now_tick, end_ts, limit_price, qty)
+    }
+
+    /// B1B: Deposit a bar input for the execution loop to consume on its next tick.
+    ///
+    /// Called by the signal route (ExternalSignalIngestion path) after Gate 6.
+    /// The execution loop's `tick_strategy_dispatch` is the canonical consumer —
+    /// `on_bar` fires in the loop's tick context, not in the HTTP handler.
+    ///
+    /// Overwrite policy: a new deposit supersedes any prior unconsumed bar.
+    pub async fn deposit_strategy_bar_input(&self, input: StrategyBarInput) {
+        *self.pending_strategy_bar_input.lock().await = Some(input);
+    }
+
+    /// B1B: Execution loop dispatch seam — take pending bar input and invoke `on_bar`.
+    ///
+    /// Called exclusively by the execution loop on each tick.  The loop is the
+    /// canonical runtime-owned `on_bar` dispatch owner.
+    ///
+    /// Returns `Some(StrategyBarResult)` when a bar was pending AND the bootstrap
+    /// is Active.  Returns `None` on most ticks (no pending bar), and when the
+    /// bootstrap is absent / Dormant / Failed — all fail-closed.
+    ///
+    /// The result carries shadow-mode intents in B1B; B1C wires it to the outbox.
+    pub async fn tick_strategy_dispatch(&self) -> Option<mqk_strategy::StrategyBarResult> {
+        let bar = self.pending_strategy_bar_input.lock().await.take()?;
+        self.invoke_native_strategy_on_bar_from_signal(
+            bar.now_tick,
+            bar.end_ts,
+            bar.limit_price,
+            bar.qty,
+        )
+        .await
     }
 
     pub fn adapter_id(&self) -> &str {
@@ -1587,7 +1704,102 @@ impl AppState {
             }
         }
 
+        // B1A: Native strategy bootstrap gate.
+        //
+        // Evaluate the native strategy bootstrap from fleet truth (MQK_STRATEGY_IDS)
+        // and the daemon plugin registry before acquiring any DB resources.
+        //
+        // Contract:
+        //   Dormant (fleet absent/empty) → pass through.
+        //   Active (fleet entry + registry match) → pass through; bootstrap stored.
+        //   Failed (fleet entry present, not in registry) → fail-closed.
+        //
+        // Placed before db_pool() so it is:
+        //   - in-process testable without a database
+        //   - before any DB resources or run rows are acquired (no dangling rows)
+        //   - ordered after all deployment/capital/policy gates (last pre-DB gate)
+        //
+        // The bootstrap is kept as a local binding and stored in AppState only
+        // after a fully successful run start so the field is never left populated
+        // by a failed start attempt.
+        let native_strategy_bootstrap = {
+            let fleet_ids = self.strategy_fleet_snapshot().await.map(|entries| {
+                entries.into_iter().map(|e| e.strategy_id).collect::<Vec<_>>()
+            });
+            let registry = build_daemon_plugin_registry();
+            let bootstrap = NativeStrategyBootstrap::bootstrap(fleet_ids.as_deref(), &registry);
+            if bootstrap.is_failed() {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.native_strategy_bootstrap_failed",
+                    "native_strategy_bootstrap",
+                    format!(
+                        "native strategy bootstrap failed (truth_state='{}'): {}; \
+                         ensure the strategy named in MQK_STRATEGY_IDS is registered \
+                         in the daemon plugin registry before starting; \
+                         operators must not set MQK_STRATEGY_IDS until the target \
+                         strategy engine is wired into the registry",
+                        bootstrap.truth_state(),
+                        bootstrap.failure_reason().unwrap_or("unknown"),
+                    ),
+                ));
+            }
+            bootstrap
+        };
+
         let db = self.db_pool()?;
+
+        // B2A: DB strategy registry gate.
+        //
+        // When a native strategy is Active (plugin bootstrap passed), the strategy
+        // must also be present AND enabled in the durable sys_strategy_registry.
+        // This is the final activation authority: plugin presence is necessary but
+        // not sufficient — registry truth is authoritative.
+        //
+        // Contract:
+        //   Dormant bootstrap    → skip (no fleet configured; allowed).
+        //   Active + enabled     → pass through.
+        //   Active + disabled    → fail-closed (403, gate=strategy_registry).
+        //   Active + missing     → fail-closed (403, gate=strategy_registry).
+        //   Active + DB error    → fail-closed (503, gate=strategy_registry).
+        //
+        // Placed immediately after db_pool() so the gate runs once, before any
+        // run rows are created or leadership is acquired.
+        if let Some(strategy_id) = native_strategy_bootstrap.active_strategy_id() {
+            match mqk_db::fetch_strategy_registry_entry(&db, strategy_id).await {
+                Ok(Some(record)) if record.enabled => {
+                    // Registered and enabled — pass through.
+                }
+                Ok(Some(_record)) => {
+                    return Err(RuntimeLifecycleError::forbidden(
+                        "runtime.start_refused.strategy_registry_disabled",
+                        "strategy_registry",
+                        format!(
+                            "native strategy '{strategy_id}' is registered but disabled \
+                             in the strategy registry; enable the strategy in \
+                             sys_strategy_registry before starting",
+                        ),
+                    ));
+                }
+                Ok(None) => {
+                    return Err(RuntimeLifecycleError::forbidden(
+                        "runtime.start_refused.strategy_registry_missing",
+                        "strategy_registry",
+                        format!(
+                            "native strategy '{strategy_id}' is not registered in \
+                             the strategy registry; insert an enabled row in \
+                             sys_strategy_registry before starting",
+                        ),
+                    ));
+                }
+                Err(err) => {
+                    return Err(RuntimeLifecycleError::internal(
+                        "start strategy_registry lookup failed",
+                        err,
+                    ));
+                }
+            }
+        }
+
         if let Some(active) = mqk_db::fetch_active_run_for_engine(
             &db,
             DAEMON_ENGINE_ID,
@@ -1727,6 +1939,11 @@ impl AppState {
             *self.accepted_artifact.write().await = provenance;
         }
 
+        // B1A: store native strategy bootstrap for the active run.
+        // Placed after all DB operations and the initial tick succeed so the
+        // field is only populated when the run is fully live.
+        *self.native_strategy_bootstrap.lock().await = Some(native_strategy_bootstrap);
+
         let handle = loop_runner::spawn_execution_loop(Arc::clone(self), orchestrator, run_id);
         {
             let mut lock = self.execution_loop.lock().await;
@@ -1830,6 +2047,8 @@ impl AppState {
 
         // TV-01C: clear artifact provenance on stop — no active run means no active artifact.
         *self.accepted_artifact.write().await = None;
+        // B1A: clear native strategy bootstrap on stop — host is not active without a run.
+        *self.native_strategy_bootstrap.lock().await = None;
 
         let snapshot = self.current_status_snapshot().await?;
         Ok(snapshot)
@@ -1893,6 +2112,8 @@ impl AppState {
 
         // TV-01C: clear artifact provenance on halt — no active run means no active artifact.
         *self.accepted_artifact.write().await = None;
+        // B1A: clear native strategy bootstrap on halt — host is not active without a run.
+        *self.native_strategy_bootstrap.lock().await = None;
 
         let snapshot = StatusSnapshot {
             daemon_uptime_secs: uptime_secs(),
