@@ -4,7 +4,7 @@
 // Also owns DEFAULT_STATUS and DEFAULT_PREFLIGHT constants.
 
 import type { DataSourceDetail, ExplicitSurfaceTruth, HealthState, PanelSourceMap, RuntimeStatus, EnvironmentMode } from "./core";
-import type { CausalityTrace, ExecutionChartModel, ExecutionOrderRow, ExecutionOutboxSurface, ExecutionReplay, ExecutionSummary, ExecutionTrace, FillQualityRow, FillQualitySurface, OmsOverview, OrderTimelineSurface, ReconcileSummary } from "./execution";
+import type { ExecutionOrderRow, ExecutionOutboxSurface, ExecutionSummary, FillQualityRow, FillQualitySurface, OmsOverview, OrderCausalityResponse, OrderChartResponse, OrderReplayResponse, OrderTimelineSurface, OrderTraceResponse, ReconcileSummary } from "./execution";
 import type { ArtifactRegistrySummary, ConfigFingerprintSummary, MarketDataQualitySummary, RuntimeLeadershipSummary, ServiceTopology, SessionStateSummary, SystemMetrics, TransportSummary } from "./infra";
 import type { AuditActionRow, AlertTriageRow, FeedEvent, IncidentCase, OperatorActionDefinition, OperatorAlert, OperatorTimelineEvent, PaperJournalAdmissionRow, PaperJournalTruthState, ReplaceCancelChainRow } from "./ops";
 import type { FillRow, OpenOrderRow, PortfolioSummary, PositionRow, ReconcileMismatchRow, RiskDenialRow, RiskSummary } from "./portfolio";
@@ -129,10 +129,10 @@ export interface SystemModel {
   executionOrders: ExecutionOrderRow[];
   selectedTimeline: OrderTimelineSurface | null;
   omsOverview: OmsOverview;
-  executionTrace: ExecutionTrace | null;
-  causalityTrace: CausalityTrace | null;
-  executionReplay: ExecutionReplay | null;
-  executionChart: ExecutionChartModel | null;
+  executionTrace: OrderTraceResponse | null;
+  causalityTrace: OrderCausalityResponse | null;
+  executionReplay: OrderReplayResponse | null;
+  executionChart: OrderChartResponse | null;
   metrics: SystemMetrics;
   portfolioSummary: PortfolioSummary;
   positions: PositionRow[];

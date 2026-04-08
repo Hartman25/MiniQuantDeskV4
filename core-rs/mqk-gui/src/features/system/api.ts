@@ -63,14 +63,14 @@ import type {
   ArtifactRegistrySummary,
   ArtifactRow,
   AuditActionRow,
-  CausalityTrace,
   ConfigFingerprintSummary,
-  ExecutionChartModel,
   ExecutionOrderRow,
-  ExecutionReplay,
   ExecutionSummary,
-  ExecutionTrace,
+  OrderCausalityResponse,
+  OrderChartResponse,
+  OrderReplayResponse,
   OrderTimelineSurface,
+  OrderTraceResponse,
   OrderTimelineTruthState,
   ExplicitSurfaceTruth,
   FeedEvent,
@@ -484,10 +484,10 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   // Dedicated exported functions (fetchExecutionTimeline etc.) remain
   // available for screen-level calls when these routes are eventually mounted.
   const selectedTimeline: OrderTimelineSurface | null = null;
-  const executionTrace: ExecutionTrace | null = null;
-  const executionReplay: ExecutionReplay | null = null;
-  const executionChart: ExecutionChartModel | null = null;
-  const causalityTrace: CausalityTrace | null = null;
+  const executionTrace: OrderTraceResponse | null = null;
+  const executionReplay: OrderReplayResponse | null = null;
+  const executionChart: OrderChartResponse | null = null;
+  const causalityTrace: OrderCausalityResponse | null = null;
 
   const usedMockSections: string[] = [];
 
@@ -883,20 +883,20 @@ export async function fetchExecutionTimeline(internalOrderId: string): Promise<O
   };
 }
 
-export async function fetchExecutionTrace(internalOrderId: string): Promise<ExecutionTrace | null> {
-  return tryFetchJson<ExecutionTrace>([`/api/v1/execution/trace/${internalOrderId}`]);
+export async function fetchExecutionTrace(internalOrderId: string): Promise<OrderTraceResponse | null> {
+  return tryFetchJson<OrderTraceResponse>([`/api/v1/execution/orders/${internalOrderId}/trace`]);
 }
 
-export async function fetchExecutionReplay(internalOrderId: string): Promise<ExecutionReplay | null> {
-  return tryFetchJson<ExecutionReplay>([`/api/v1/execution/replay/${internalOrderId}`]);
+export async function fetchExecutionReplay(internalOrderId: string): Promise<OrderReplayResponse | null> {
+  return tryFetchJson<OrderReplayResponse>([`/api/v1/execution/orders/${internalOrderId}/replay`]);
 }
 
-export async function fetchExecutionChart(internalOrderId: string): Promise<ExecutionChartModel | null> {
-  return tryFetchJson<ExecutionChartModel>([`/api/v1/execution/chart/${internalOrderId}`]);
+export async function fetchExecutionChart(internalOrderId: string): Promise<OrderChartResponse | null> {
+  return tryFetchJson<OrderChartResponse>([`/api/v1/execution/orders/${internalOrderId}/chart`]);
 }
 
-export async function fetchCausalityTrace(internalOrderId: string): Promise<CausalityTrace | null> {
-  return tryFetchJson<CausalityTrace>([`/api/v1/execution/causality/${internalOrderId}`]);
+export async function fetchCausalityTrace(internalOrderId: string): Promise<OrderCausalityResponse | null> {
+  return tryFetchJson<OrderCausalityResponse>([`/api/v1/execution/orders/${internalOrderId}/causality`]);
 }
 
 // requestSystemModeTransition was removed (H-7 / PC-1):

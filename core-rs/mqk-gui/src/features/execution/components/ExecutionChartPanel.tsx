@@ -1,21 +1,19 @@
 import { Panel } from "../../../components/common/Panel";
-import { formatDateTime, formatMoney } from "../../../lib/format";
-import type { ExecutionChartModel, ExecutionReplay, ExecutionTrace } from "../../system/types";
+import { formatDateTime } from "../../../lib/format";
+import type { OrderChartResponse, OrderReplayResponse, OrderTraceResponse } from "../../system/types";
 
-const overlayLabelByKind: Record<string, string> = {
-  signal: "Signal",
-  intent: "Intent",
-  risk_pass: "Risk",
-  order_sent: "Sent",
-  broker_ack: "ACK",
-  partial_fill: "Partial",
-  fill: "Fill",
-  replace: "Replace",
-  cancel: "Cancel",
-  reconcile: "Recon",
-  portfolio: "Port",
-  expected_price: "Ref",
-};
+function chartUnavailableNotice(chart: OrderChartResponse): string | null {
+  switch (chart.truth_state) {
+    case "no_bars":
+      return chart.comment;
+    case "no_order":
+      return "Order not found in any current authoritative source. Select an active order to render the execution chart.";
+    case "no_db":
+      return "No database connection — chart unavailable.";
+    default:
+      return null;
+  }
+}
 
 export function ExecutionChartPanel({
   chart,
@@ -24,40 +22,60 @@ export function ExecutionChartPanel({
   selectedFrameIndex,
   onSelectFrame,
 }: {
-  chart: ExecutionChartModel | null;
-  replay: ExecutionReplay | null;
-  trace: ExecutionTrace | null;
+  chart: OrderChartResponse | null;
+  replay: OrderReplayResponse | null;
+  trace: OrderTraceResponse | null;
   selectedFrameIndex: number;
   onSelectFrame: (index: number) => void;
 }) {
-  if (!chart || chart.bars.length === 0) {
+  if (!chart) {
     return <Panel title="Execution chart"><div className="empty-state">Select an order to render price plus execution overlays.</div></Panel>;
   }
 
+  const notice = chartUnavailableNotice(chart);
+
+  // When bars are absent (current always-true case), show the truth notice.
+  const bars = chart.bars ?? [];
+  if (notice || bars.length === 0) {
+    return (
+      <Panel title="Execution chart" subtitle={chart.symbol ? `${chart.symbol} · ${chart.order_id}` : chart.order_id}>
+        <div className="unavailable-notice">{notice ?? "No bar data available."}</div>
+        <div className="timeline-meta-grid">
+          <div><span>Truth state</span><strong>{chart.truth_state}</strong></div>
+          <div><span>Backend</span><strong>{chart.backend}</strong></div>
+          <div><span>Order ID</span><strong>{chart.order_id}</strong></div>
+          {chart.symbol ? <div><span>Symbol</span><strong>{chart.symbol}</strong></div> : null}
+        </div>
+      </Panel>
+    );
+  }
+
+  // Future: render bars when truth_state === "active" and bars.length > 0.
+  const overlays = chart.overlays ?? [];
   const width = 960;
   const height = 320;
   const padding = { top: 20, right: 18, bottom: 38, left: 18 };
-  const highs = chart.bars.map((bar) => bar.high);
-  const lows = chart.bars.map((bar) => bar.low);
+  const highs = bars.map((bar) => bar.high);
+  const lows = bars.map((bar) => bar.low);
   const minPrice = Math.min(...lows);
   const maxPrice = Math.max(...highs);
   const priceRange = Math.max(maxPrice - minPrice, 0.01);
   const innerWidth = width - padding.left - padding.right;
   const innerHeight = height - padding.top - padding.bottom;
-  const step = innerWidth / Math.max(chart.bars.length, 1);
+  const step = innerWidth / Math.max(bars.length, 1);
 
   const xForIndex = (index: number) => padding.left + step * index + step / 2;
   const yForPrice = (price: number) => padding.top + ((maxPrice - price) / priceRange) * innerHeight;
-  const indexByTs = new Map(chart.bars.map((bar, index) => [bar.ts, index]));
+  const indexByTs = new Map(bars.map((bar, index) => [bar.ts, index]));
 
   const activeFrame = replay?.frames[selectedFrameIndex] ?? null;
   const linkedOverlayIds = new Set(
-    chart.overlays
+    overlays
       .filter((overlay) => activeFrame && overlay.linked_frame_id === activeFrame.frame_id)
       .map((overlay) => overlay.overlay_id),
   );
 
-  const fillPathPoints = chart.overlays
+  const fillPathPoints = overlays
     .filter((overlay) => overlay.kind === "partial_fill" || overlay.kind === "fill")
     .map((overlay) => {
       const idx = indexByTs.get(overlay.ts);
@@ -66,16 +84,22 @@ export function ExecutionChartPanel({
     .filter(Boolean)
     .join(" ");
 
+  const overlayLabelByKind: Record<string, string> = {
+    signal: "Signal", intent: "Intent", risk_pass: "Risk", order_sent: "Sent",
+    broker_ack: "ACK", partial_fill: "Partial", fill: "Fill", replace: "Replace",
+    cancel: "Cancel", reconcile: "Recon", portfolio: "Port", expected_price: "Ref",
+  };
+
   return (
     <Panel
       title="Execution chart"
-      subtitle={`${chart.symbol} · ${chart.timeframe} · price with signal, dispatch, ACK, fill, reconcile, and portfolio overlays`}
+      subtitle={`${chart.symbol ?? chart.order_id} · ${chart.timeframe ?? "1m"} · price with execution overlays`}
     >
       <div className="chart-topbar">
-        <div className="chart-topbar-item"><span>Reference</span><strong>{formatMoney(chart.reference_price)}</strong></div>
+        <div className="chart-topbar-item"><span>Reference</span><strong>{chart.reference_price != null ? `$${chart.reference_price.toFixed(2)}` : "—"}</strong></div>
         <div className="chart-topbar-item"><span>Replay frame</span><strong>{activeFrame ? `${selectedFrameIndex + 1} / ${replay?.frames.length ?? 0}` : "—"}</strong></div>
         <div className="chart-topbar-item"><span>Active event</span><strong>{activeFrame?.event_type ?? "—"}</strong></div>
-        <div className="chart-topbar-item"><span>Trace state</span><strong>{trace?.current_execution_state ?? "—"}</strong></div>
+        <div className="chart-topbar-item"><span>Trace state</span><strong>{trace?.current_status ?? "—"}</strong></div>
       </div>
 
       <div className="execution-chart-wrap">
@@ -97,7 +121,7 @@ export function ExecutionChartPanel({
             <line x1={padding.left} x2={width - padding.right} y1={yForPrice(chart.reference_price)} y2={yForPrice(chart.reference_price)} className="chart-reference-line" />
           ) : null}
 
-          {chart.bars.map((bar, index) => {
+          {bars.map((bar, index) => {
             const x = xForIndex(index);
             const wickTop = yForPrice(bar.high);
             const wickBottom = yForPrice(bar.low);
@@ -117,7 +141,7 @@ export function ExecutionChartPanel({
 
           {fillPathPoints ? <polyline points={fillPathPoints} className="chart-fill-path" /> : null}
 
-          {chart.overlays.map((overlay) => {
+          {overlays.map((overlay) => {
             const idx = indexByTs.get(overlay.ts);
             if (idx == null) return null;
             const x = xForIndex(idx);

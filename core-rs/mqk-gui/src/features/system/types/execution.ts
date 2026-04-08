@@ -338,6 +338,53 @@ export interface ExecutionTrace {
   fills: TraceFillRow[];
 }
 
+// ---------------------------------------------------------------------------
+// GET /api/v1/execution/orders/:order_id/trace (Batch A5B)
+// ---------------------------------------------------------------------------
+
+/** One fill event row from fill_quality_telemetry. */
+export interface OrderTraceRow {
+  event_id: string;
+  ts_utc: string;
+  /** "partial_fill" | "final_fill" */
+  stage: string;
+  source: string;
+  detail: string | null;
+  fill_qty: number | null;
+  fill_price_micros: number | null;
+  slippage_bps: number | null;
+  submit_ts_utc: string | null;
+  submit_to_fill_ms: number | null;
+  side: string | null;
+  provenance_ref: string | null;
+}
+
+/**
+ * Response wrapper for GET /api/v1/execution/orders/:order_id/trace.
+ *
+ * truth_state:
+ *   "active"       — DB available, at least one fill row; rows are authoritative.
+ *   "no_fills_yet" — DB available, order visible, no fills yet; rows is empty.
+ *   "no_order"     — order_id not found in any authoritative source; rows is empty.
+ *   "no_db"        — no DB pool configured; rows is empty and not authoritative.
+ */
+export interface OrderTraceResponse {
+  canonical_route: string;
+  truth_state: "active" | "no_fills_yet" | "no_order" | "no_db";
+  backend: string;
+  order_id: string;
+  broker_order_id: string | null;
+  symbol: string | null;
+  requested_qty: number | null;
+  filled_qty: number | null;
+  current_status: string | null;
+  current_stage: string | null;
+  outbox_status: string | null;
+  outbox_lifecycle_stage: string | null;
+  last_event_at: string | null;
+  rows: OrderTraceRow[];
+}
+
 export interface ReplayFrame {
   frame_id: string;
   timestamp: string;
@@ -363,6 +410,83 @@ export interface ExecutionReplay {
   title: string;
   current_frame_index: number;
   frames: ReplayFrame[];
+}
+
+// ---------------------------------------------------------------------------
+// A5C: per-order execution replay (GET /api/v1/execution/orders/:id/replay)
+// ---------------------------------------------------------------------------
+
+/**
+ * One frame in the per-order execution replay.
+ *
+ * Each frame is derived from a single durable fill event in fill_quality_telemetry.
+ * Fields with no joinable durable source (risk_state, reconcile_state) are "unknown".
+ * oms_state and queue_status reflect current request-time snapshot, not per-frame history.
+ */
+export interface OrderReplayFrame {
+  frame_id: string;
+  timestamp: string;
+  /** Always "execution" */
+  subsystem: string;
+  /** "partial_fill" | "final_fill" */
+  event_type: string;
+  /** e.g. "fill_qty=N fill_price=X.XXXXXX (partial_fill)" */
+  state_delta: string;
+  /** "oms_inbox:{broker_message_id}" */
+  message_digest: string;
+  /** OMS status at request time. "unknown" when snapshot absent. */
+  order_execution_state: string;
+  /** OMS status at request time. "unknown" when snapshot absent. */
+  oms_state: string;
+  /** Running cumulative fill qty up to and including this frame. */
+  filled_qty: number;
+  /** requested_qty - filled_qty. null when snapshot absent. */
+  open_qty: number | null;
+  /** Always "unknown" — not joinable from current sources. */
+  risk_state: string;
+  /** Always "unknown" — not joinable from current sources. */
+  reconcile_state: string;
+  /** Outbox status from in-memory window. "unknown" when absent. */
+  queue_status: string;
+  /** Empty — anomaly detection not available from fill sources. */
+  anomaly_tags: string[];
+  /** ["final_fill"] for the terminal fill frame; otherwise empty. */
+  boundary_tags: string[];
+}
+
+export type OrderReplayTruthState = "active" | "no_fills_yet" | "no_order" | "no_db";
+
+/**
+ * Response wrapper for GET /api/v1/execution/orders/:order_id/replay.
+ *
+ * truth_state semantics:
+ * - "active"       — DB available, at least one fill row; frames are authoritative.
+ * - "no_fills_yet" — DB available, order visible in OMS snapshot, no fills yet; frames empty.
+ * - "no_order"     — order_id not found in any current authoritative source; frames empty.
+ * - "no_db"        — no DB pool configured; frames empty and not authoritative.
+ *
+ * Honest limits:
+ * - Frames represent fill events only. Pre-fill outbox lifecycle, broker ACK, and
+ *   cancel/replace events are not joinable by internal_order_id and are absent.
+ * - risk_state and reconcile_state per frame are always "unknown".
+ * - oms_state and queue_status reflect current request-time state, not per-frame history.
+ */
+export interface OrderReplayResponse {
+  canonical_route: string;
+  truth_state: OrderReplayTruthState;
+  backend: string;
+  order_id: string;
+  /** Equals order_id for single-order scope. */
+  replay_id: string;
+  /** Always "single_order" for this route. */
+  replay_scope: string;
+  /** Always "fill_quality_telemetry". */
+  source: string;
+  title: string;
+  /** Index of the most recent (last) frame. 0 when no frames. */
+  current_frame_index: number;
+  /** Fill event frames, oldest-first. At most 50 rows. */
+  frames: OrderReplayFrame[];
 }
 
 export interface ExecutionChartBar {
@@ -399,6 +523,7 @@ export interface ExecutionOverlayEvent {
   linked_frame_id: string | null;
 }
 
+/** @deprecated Internal type kept for mock compatibility. Use OrderChartResponse for the live route. */
 export interface ExecutionChartModel {
   order_id: string;
   symbol: string;
@@ -406,6 +531,112 @@ export interface ExecutionChartModel {
   bars: ExecutionChartBar[];
   overlays: ExecutionOverlayEvent[];
   reference_price: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// A5D: per-order execution chart (GET /api/v1/execution/orders/:id/chart)
+// ---------------------------------------------------------------------------
+
+export type OrderChartTruthState = "active" | "no_bars" | "no_order" | "no_db";
+
+/**
+ * Response wrapper for GET /api/v1/execution/orders/:order_id/chart.
+ *
+ * truth_state semantics:
+ * - "active"   — bar data available (not yet implemented; reserved for future).
+ * - "no_bars"  — order is visible but no per-order chart/candle source is wired.
+ * - "no_order" — order_id not found in any current authoritative source.
+ * - "no_db"    — no DB pool; identity probe not performed.
+ *
+ * Honest limits:
+ * - bars and overlays are always empty in the current implementation.
+ * - No OHLCV, signal, fill, or execution overlays are available without a
+ *   per-order chart source.
+ * - Consumers must gate on truth_state before rendering bars.
+ */
+export interface OrderChartResponse {
+  canonical_route: string;
+  truth_state: OrderChartTruthState;
+  backend: string;
+  order_id: string;
+  /** null when OMS snapshot is absent. */
+  symbol: string | null;
+  /** Operator-readable explanation of the truth state. */
+  comment: string;
+  /** Always empty until a chart source is wired. */
+  bars?: ExecutionChartBar[];
+  /** Always empty until a chart source is wired. */
+  overlays?: ExecutionOverlayEvent[];
+  reference_price?: number | null;
+  timeframe?: "1m" | "5m" | "15m" | "1h" | null;
+}
+
+// ---------------------------------------------------------------------------
+// A5E: per-order causality trace (GET /api/v1/execution/orders/:id/causality)
+// ---------------------------------------------------------------------------
+
+export type OrderCausalityTruthState = "partial" | "no_fills_yet" | "no_order" | "no_db";
+
+/**
+ * One causality node derived from a single fill event in fill_quality_telemetry.
+ *
+ * node_type is always "execution_fill".  Upstream lanes (signal, intent, risk,
+ * broker_ack, reconcile, portfolio) are not representable here.
+ */
+export interface OrderCausalityCausalNode {
+  /** Deterministic key: "execution_fill_{telemetry_id}" */
+  node_key: string;
+  /** Always "execution_fill" */
+  node_type: string;
+  /** e.g. "partial_fill NVDA" */
+  title: string;
+  /** Always "ok" — fills from telemetry are confirmed events. */
+  status: string;
+  /** Always "execution" */
+  subsystem: string;
+  /** broker_fill_id if present. */
+  linked_id: string | null;
+  /** fill_received_at_utc as RFC 3339. */
+  timestamp: string | null;
+  /** Milliseconds since previous node. null for first node. */
+  elapsed_from_prev_ms: number | null;
+  /** Always empty — anomaly detection not available for fill telemetry nodes. */
+  anomaly_tags: string[];
+  /** e.g. "fill_qty=20 fill_price=944.200000 (partial_fill)" */
+  summary: string;
+}
+
+/**
+ * Response wrapper for GET /api/v1/execution/orders/:order_id/causality.
+ *
+ * truth_state semantics:
+ * - "partial"      — fills exist; execution-fill lane is proven; other lanes are not.
+ * - "no_fills_yet" — order visible, no fills yet; nodes empty.
+ * - "no_order"     — order not found; nodes empty.
+ * - "no_db"        — no DB pool; nodes empty and not authoritative.
+ *
+ * "partial" (not "active") is intentional: only the execution-fill lane is proven.
+ *
+ * Honest limits:
+ * - Signal, intent, broker ACK, risk, portfolio, and reconcile lanes are always
+ *   in unproven_lanes — they are not joinable to internal_order_id.
+ * - Consumers must NOT interpret empty unproven_lanes as "passed" or "clean."
+ */
+export interface OrderCausalityResponse {
+  canonical_route: string;
+  truth_state: OrderCausalityTruthState;
+  backend: string;
+  order_id: string;
+  /** null when OMS snapshot is absent. */
+  symbol: string | null;
+  /** Lanes with proof: ["execution_fill"] when partial; [] otherwise. */
+  proven_lanes: string[];
+  /** Always lists: signal, intent, broker_ack, risk, reconcile, portfolio. */
+  unproven_lanes: string[];
+  /** Fill-derived causality nodes, oldest-first. Empty when truth_state != "partial". */
+  nodes: OrderCausalityCausalNode[];
+  /** Operator-readable explanation of what is and is not proven. */
+  comment: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -196,7 +196,7 @@ export function ExecutionScreen({
               <div><span>Selection</span><strong>{timeline ? timeline.truth_state : "None"}</strong></div>
               <div><span>Timeline load</span><strong>{timelineLoading ? "Loading" : "Ready"}</strong></div>
               <div><span>Replay frames</span><strong>{model.executionReplay?.frames.length ?? 0}</strong></div>
-              <div><span>Trace events</span><strong>{model.executionTrace?.timeline.length ?? 0}</strong></div>
+              <div><span>Trace events</span><strong>{model.executionTrace?.rows.length ?? 0}</strong></div>
             </div>
           </Panel>
 

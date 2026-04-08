@@ -1,92 +1,82 @@
 import { DataTable } from "../../../components/common/DataTable";
 import { Panel } from "../../../components/common/Panel";
-import { formatDateTime, formatDurationMs, formatMoney } from "../../../lib/format";
-import type { ExecutionTrace } from "../../system/types";
+import { formatDateTime, formatDurationMs } from "../../../lib/format";
+import type { OrderTraceResponse } from "../../system/types";
 
-export function ExecutionTraceViewer({ trace }: { trace: ExecutionTrace | null }) {
+function traceUnavailableNotice(trace: OrderTraceResponse): string | null {
+  switch (trace.truth_state) {
+    case "no_db":
+      return "No database connection — trace unavailable. Connect a DB to view fill telemetry.";
+    case "no_order":
+      return "Order not found in any current authoritative source. It may have been from a prior run or has not been submitted yet.";
+    case "no_fills_yet":
+      return "Order is visible in the OMS snapshot but no fill events have been received yet.";
+    default:
+      return null;
+  }
+}
+
+export function ExecutionTraceViewer({ trace }: { trace: OrderTraceResponse | null }) {
   if (!trace) {
-    return <Panel title="Execution trace viewer"><div className="empty-state">Select an order to inspect a full transport and broker trace.</div></Panel>;
+    return (
+      <Panel title="Execution trace viewer">
+        <div className="empty-state">Select an order to inspect fill telemetry and execution trace.</div>
+      </Panel>
+    );
   }
 
+  const notice = traceUnavailableNotice(trace);
+
   return (
-    <Panel title="Execution trace viewer" subtitle={`${trace.symbol} · ${trace.strategy_id} · ${trace.internal_order_id}`}>
+    <Panel
+      title="Execution trace viewer"
+      subtitle={
+        trace.symbol && trace.order_id
+          ? `${trace.symbol} · ${trace.order_id}`
+          : trace.order_id
+      }
+    >
+      {notice && (
+        <div className="unavailable-notice">{notice}</div>
+      )}
+
       <div className="timeline-meta-grid">
+        <div><span>Truth state</span><strong>{trace.truth_state}</strong></div>
+        <div><span>Order ID</span><strong>{trace.order_id}</strong></div>
         <div><span>Broker order</span><strong>{trace.broker_order_id ?? "—"}</strong></div>
-        <div><span>OMS state</span><strong>{trace.current_oms_state}</strong></div>
-        <div><span>Execution state</span><strong>{trace.current_execution_state}</strong></div>
-        <div><span>Submit time</span><strong>{formatDateTime(trace.submit_time)}</strong></div>
-        <div><span>Replay</span><strong>{trace.replay_available ? "Available" : "Unavailable"}</strong></div>
-        <div><span>Outbox</span><strong>{trace.correlation.outbox_id ?? "—"}</strong></div>
+        <div><span>OMS status</span><strong>{trace.current_status ?? "—"}</strong></div>
+        <div><span>Stage</span><strong>{trace.current_stage ?? "—"}</strong></div>
+        <div><span>Outbox</span><strong>{trace.outbox_status ?? "—"} {trace.outbox_lifecycle_stage ? `(${trace.outbox_lifecycle_stage})` : ""}</strong></div>
+        <div><span>Requested qty</span><strong>{trace.requested_qty ?? "—"}</strong></div>
+        <div><span>Filled qty</span><strong>{trace.filled_qty ?? "—"}</strong></div>
+        <div><span>Last event</span><strong>{trace.last_event_at ? formatDateTime(trace.last_event_at) : "—"}</strong></div>
+        <div><span>Backend</span><strong>{trace.backend}</strong></div>
       </div>
 
-      <div className="two-column-grid">
-        <Panel title="Correlation IDs" compact>
-          <div className="metric-list compact-list">
-            <div><span>Claim token</span><strong>{trace.correlation.claim_token ?? "—"}</strong></div>
-            <div><span>Dispatch attempt</span><strong>{trace.correlation.dispatch_attempt_id ?? "—"}</strong></div>
-            <div><span>Inbox IDs</span><strong>{trace.correlation.inbox_ids.join(", ") || "—"}</strong></div>
-            <div><span>Fill IDs</span><strong>{trace.correlation.fill_ids.join(", ") || "—"}</strong></div>
-            <div><span>Reconcile case</span><strong>{trace.correlation.reconcile_case_id ?? "—"}</strong></div>
-            <div><span>Audit chain</span><strong>{trace.correlation.audit_chain_id ?? "—"}</strong></div>
+      <Panel title="Fill events" compact>
+        {trace.rows.length === 0 ? (
+          <div className="empty-state">
+            {trace.truth_state === "no_fills_yet"
+              ? "No fill events yet — order is pending execution."
+              : "No fill events."}
           </div>
-        </Panel>
-        <Panel title="State ladder" compact>
+        ) : (
           <DataTable
-            rows={trace.state_ladder}
-            rowKey={(row) => row.key}
+            rows={trace.rows}
+            rowKey={(row) => row.event_id}
             columns={[
-              { key: "at", title: "At", render: (row) => formatDateTime(row.at) },
-              { key: "oms", title: "OMS", render: (row) => row.oms_state },
-              { key: "exec", title: "Execution", render: (row) => row.execution_state },
-              { key: "broker", title: "Broker", render: (row) => row.broker_state },
-              { key: "reconcile", title: "Reconcile", render: (row) => row.reconcile_state },
+              { key: "ts_utc", title: "Timestamp", render: (row) => formatDateTime(row.ts_utc) },
+              { key: "stage", title: "Stage", render: (row) => row.stage },
+              { key: "side", title: "Side", render: (row) => row.side ?? "—" },
+              { key: "fill_qty", title: "Fill Qty", render: (row) => row.fill_qty ?? "—" },
+              { key: "fill_price_micros", title: "Price (µ$)", render: (row) => row.fill_price_micros ?? "—" },
+              { key: "slippage_bps", title: "Slippage bps", render: (row) => row.slippage_bps ?? "—" },
+              { key: "submit_to_fill_ms", title: "Submit→Fill", render: (row) => row.submit_to_fill_ms != null ? formatDurationMs(row.submit_to_fill_ms) : "—" },
+              { key: "detail", title: "Detail", render: (row) => row.detail ?? "—" },
             ]}
           />
-        </Panel>
-      </div>
-
-      <Panel title="Trace timeline" compact>
-        <DataTable
-          rows={trace.timeline}
-          rowKey={(row) => row.trace_event_id}
-          columns={[
-            { key: "timestamp", title: "Timestamp", render: (row) => formatDateTime(row.timestamp) },
-            { key: "subsystem", title: "Subsystem", render: (row) => row.subsystem },
-            { key: "event_type", title: "Event", render: (row) => row.event_type },
-            { key: "transition", title: "State", render: (row) => `${row.before_state} → ${row.after_state}` },
-            { key: "latency", title: "Δ", render: (row) => formatDurationMs(row.latency_since_prev_ms) },
-            { key: "summary", title: "Summary", render: (row) => row.summary },
-          ]}
-        />
+        )}
       </Panel>
-
-      <div className="two-column-grid">
-        <Panel title="Broker messages" compact>
-          <DataTable
-            rows={trace.broker_messages}
-            rowKey={(row) => row.message_id}
-            columns={[
-              { key: "timestamp", title: "At", render: (row) => formatDateTime(row.timestamp) },
-              { key: "direction", title: "Dir", render: (row) => row.direction },
-              { key: "type", title: "Type", render: (row) => row.message_type },
-              { key: "summary", title: "Normalized", render: (row) => row.normalized_summary },
-            ]}
-          />
-        </Panel>
-        <Panel title="Fills / economics" compact>
-          <DataTable
-            rows={trace.fills}
-            rowKey={(row) => row.fill_id}
-            columns={[
-              { key: "timestamp", title: "At", render: (row) => formatDateTime(row.timestamp) },
-              { key: "qty", title: "Qty", render: (row) => row.qty },
-              { key: "price", title: "Price", render: (row) => formatMoney(row.price) },
-              { key: "avg", title: "Avg Fill", render: (row) => formatMoney(row.average_fill_price) },
-              { key: "fees", title: "Fees", render: (row) => formatMoney(row.fee_actual) },
-            ]}
-          />
-        </Panel>
-      </div>
     </Panel>
   );
 }
