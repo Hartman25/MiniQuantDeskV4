@@ -43,6 +43,8 @@ mqk-audit = { path = "../mqk-audit" }
 mqk-schemas = { path = "../mqk-schemas" }
 mqk-reconcile = { path = "../mqk-reconcile" }
 mqk-runtime = { path = "../mqk-runtime" }
+# B1B: strategy types needed for invoke_native_strategy_on_bar_from_signal return type.
+mqk-strategy = { path = "../mqk-strategy" }
 mqk-execution = { path = "../mqk-execution" }
 mqk-broker-alpaca = { path = "../mqk-broker-alpaca" }
 mqk-broker-paper = { path = "../mqk-broker-paper" }

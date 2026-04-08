@@ -9,6 +9,7 @@
 //! `publish_reconcile_failure` — shared helper: persists disarm state and
 //! broadcasts a halted status snapshot.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -241,6 +242,78 @@ pub(super) fn spawn_execution_loop(
                         }
                         Err(err) => {
                             tracing::warn!("execution_snapshot_refresh_failed error={err}");
+                        }
+                    }
+
+                    // B1C: Dispatch pending strategy bar input and submit Live-intent
+                    // decisions through the canonical internal admission seam.
+                    //
+                    // The execution loop is the canonical runtime-owned `on_bar`
+                    // dispatch owner.  The signal route only deposits bar input;
+                    // on_bar fires here, in the loop's tick context, after the
+                    // orchestrator tick and snapshot are settled.
+                    //
+                    // TargetPosition.qty is a target portfolio state; order qty
+                    // is the delta against current holdings (from the execution
+                    // snapshot built above).  If no snapshot is available yet
+                    // (rare: first-tick snapshot failure), decisions are skipped
+                    // this tick rather than assuming a flat position — fail-closed.
+                    //
+                    // Returns None on most ticks (no pending bar) and when no
+                    // active bootstrap exists — both are fail-closed, not errors.
+                    // Shadow-mode results produce no decisions (fail-closed).
+                    if let Some(bar_result) = state_arc.tick_strategy_dispatch().await {
+                        let now_micros = Utc::now().timestamp_micros(); // allow: loop-context wall-clock for decision_id
+                        // Derive current position truth from the execution snapshot
+                        // settled above.  Symbols absent from the map are flat (qty=0).
+                        let current_positions: Option<BTreeMap<String, i64>> = {
+                            let snap = snapshot_cache.read().await;
+                            snap.as_ref().map(|s| {
+                                s.portfolio
+                                    .positions
+                                    .iter()
+                                    .map(|p| (p.symbol.clone(), p.net_qty))
+                                    .collect()
+                            })
+                        };
+                        let Some(current_positions) = current_positions else {
+                            tracing::warn!(
+                                run_id = %run_id,
+                                "b1c_skip_no_snapshot: execution snapshot absent; \
+                                 native strategy decisions skipped this tick"
+                            );
+                            continue;
+                        };
+                        let decisions = crate::decision::bar_result_to_decisions(
+                            &bar_result,
+                            run_id,
+                            now_micros,
+                            &current_positions,
+                        );
+                        for decision in decisions {
+                            let did = decision.decision_id.clone();
+                            let sid = decision.strategy_id.clone();
+                            let outcome = crate::decision::submit_internal_strategy_decision(
+                                &state_arc,
+                                decision,
+                            )
+                            .await;
+                            if outcome.accepted {
+                                tracing::info!(
+                                    run_id = %run_id,
+                                    decision_id = %did,
+                                    strategy_id = %sid,
+                                    "b1c_native_decision_accepted"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    run_id = %run_id,
+                                    decision_id = %did,
+                                    strategy_id = %sid,
+                                    disposition = %outcome.disposition,
+                                    "b1c_native_decision_not_accepted"
+                                );
+                            }
                         }
                     }
                 }

@@ -23,6 +23,7 @@
 //! The function is intentionally narrow: it does not schedule, allocate, or
 //! reason about alpha.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -180,6 +181,108 @@ fn build_order_json(d: &InternalStrategyDecision) -> serde_json::Value {
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// B1C: StrategyBarResult → InternalStrategyDecision translation
+// ---------------------------------------------------------------------------
+
+/// B1C: Translate a `StrategyBarResult` from the execution loop into a list of
+/// `InternalStrategyDecision`s ready for submission through
+/// [`submit_internal_strategy_decision`].
+///
+/// # Semantics: target position → order delta
+///
+/// `TargetPosition.qty` is a **signed target portfolio state**, not an
+/// incremental order size.  The order qty is the delta between the target and
+/// the current held position:
+///
+/// ```text
+/// delta = target.qty - current_positions[symbol]   (0 if symbol absent = flat)
+/// delta > 0  →  buy  abs(delta) shares
+/// delta < 0  →  sell abs(delta) shares
+/// delta == 0 →  skip (already at target; no order)
+/// ```
+///
+/// Callers must pass an authoritative `current_positions` map derived from the
+/// most recent execution snapshot.  A symbol absent from the map is treated as
+/// flat (qty = 0) — correct for symbols with no open position.
+///
+/// # Fail-closed rules
+///
+/// - `result.intents.should_execute()` is `false` (shadow mode) → returns empty.
+/// - `result.intents.output.targets` is empty → returns empty (no-op bar).
+/// - Delta == 0 for a target → skipped (already at target; no order needed).
+///
+/// # Output fields
+///
+/// | Source                | Decision field      | Value                    |
+/// |-----------------------|---------------------|--------------------------|
+/// | `target.symbol`       | `symbol`            | as-is                    |
+/// | `delta > 0`           | `side`              | `"buy"`                  |
+/// | `delta < 0`           | `side`              | `"sell"`                 |
+/// | `abs(delta)`          | `qty`               | positive share count     |
+/// | —                     | `order_type`        | `"market"`               |
+/// | —                     | `time_in_force`     | `"day"`                  |
+/// | —                     | `limit_price`       | `None`                   |
+///
+/// `decision_id` is a UUIDv5 derived from
+/// `"{run_id}:{strategy_id}:{symbol}:{side}:{qty}:{now_micros}"` where `qty`
+/// is the absolute delta — idempotent across crash-restart within the same
+/// microsecond window.
+///
+/// This function is pure (no IO, no state mutation) and exported for test
+/// isolation.
+pub fn bar_result_to_decisions(
+    result: &mqk_strategy::StrategyBarResult,
+    run_id: Uuid,
+    now_micros: i64,
+    current_positions: &BTreeMap<String, i64>,
+) -> Vec<InternalStrategyDecision> {
+    if !result.intents.should_execute() {
+        return vec![];
+    }
+    let strategy_id = result.spec.name.clone();
+    result
+        .intents
+        .output
+        .targets
+        .iter()
+        .filter_map(|t| {
+            // Delta-to-target: TargetPosition.qty is a target portfolio state,
+            // not an incremental order size.  Symbols absent from the map are
+            // treated as flat (current = 0).
+            let current = current_positions.get(&t.symbol).copied().unwrap_or(0);
+            let delta = t.qty - current;
+            if delta == 0 {
+                return None; // already at target; no order needed
+            }
+            let (side, qty) = if delta > 0 {
+                ("buy".to_string(), delta)
+            } else {
+                ("sell".to_string(), -delta)
+            };
+            let decision_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_DNS,
+                format!(
+                    "{run_id}:{strategy_id}:{symbol}:{side}:{qty}:{now_micros}",
+                    symbol = t.symbol
+                )
+                .as_bytes(),
+            )
+            .to_string();
+            Some(InternalStrategyDecision {
+                decision_id,
+                strategy_id: strategy_id.clone(),
+                symbol: t.symbol.clone(),
+                side,
+                qty,
+                order_type: "market".to_string(),
+                time_in_force: "day".to_string(),
+                limit_price: None,
+            })
+        })
+        .collect()
+}
 
 /// Validate an internally-originated strategy decision against the canonical
 /// registry and enqueue it to the durable outbox path.

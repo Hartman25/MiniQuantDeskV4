@@ -19,7 +19,7 @@ use mqk_integrity::CalendarSpec;
 
 use super::helpers::write_signal_admission_event;
 use crate::notify::CriticalAlertPayload;
-use crate::state::{AlpacaWsContinuityState, AppState, StrategyMarketDataSource};
+use crate::state::{AlpacaWsContinuityState, AppState, StrategyBarInput, StrategyMarketDataSource};
 
 // ---------------------------------------------------------------------------
 // RTS-07: Outbox provenance mark
@@ -687,6 +687,29 @@ pub(crate) async fn strategy_signal(
                 )],
             );
         }
+    }
+
+    // B1B: Deposit bar input for the execution loop to dispatch on the next tick.
+    //
+    // The execution loop is the canonical runtime-owned on_bar dispatch path.
+    // This route DEPOSITS the input only; it does NOT directly call on_bar.
+    // `AppState::tick_strategy_dispatch` (called from loop_runner.rs) is the
+    // authoritative dispatch seam — on_bar fires in the execution loop's tick
+    // context, not in this HTTP handler.
+    //
+    // Fail-closed: if no active bootstrap exists at dispatch time, the loop's
+    // tick_strategy_dispatch returns None and no callback is made.
+    // B1C will consume the result from tick_strategy_dispatch.
+    {
+        let now_tick = st.day_signal_count() as u64;
+        let end_ts = st.session_now_ts().await;
+        st.deposit_strategy_bar_input(StrategyBarInput {
+            now_tick,
+            end_ts,
+            limit_price: validated.limit_price,
+            qty: validated.qty,
+        })
+        .await;
     }
 
     // Gate 7: enqueue to outbox (idempotent).
