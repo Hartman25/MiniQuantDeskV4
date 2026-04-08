@@ -141,8 +141,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         run_halt, run_start, run_stop,
     };
     use execution::{
-        execution_fill_quality, execution_order_cancel, execution_order_submit,
-        execution_order_timeline, execution_orders, execution_outbox, execution_summary,
+        execution_fill_quality, execution_order_cancel, execution_order_causality,
+        execution_order_chart, execution_order_replay, execution_order_submit,
+        execution_order_timeline, execution_order_trace, execution_orders, execution_outbox,
+        execution_summary,
     };
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
@@ -185,6 +187,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/execution/orders/:order_id/timeline",
             get(execution_order_timeline),
+        )
+        .route(
+            "/api/v1/execution/orders/:order_id/trace",
+            get(execution_order_trace),
+        )
+        .route(
+            "/api/v1/execution/orders/:order_id/replay",
+            get(execution_order_replay),
+        )
+        .route(
+            "/api/v1/execution/orders/:order_id/chart",
+            get(execution_order_chart),
+        )
+        .route(
+            "/api/v1/execution/orders/:order_id/causality",
+            get(execution_order_causality),
         )
         .route("/api/v1/portfolio/summary", get(portfolio_summary))
         .route("/api/v1/portfolio/positions", get(portfolio_positions))
