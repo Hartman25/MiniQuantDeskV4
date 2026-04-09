@@ -134,7 +134,7 @@ async fn token_auth_middleware(
 /// Middleware layers (CORS, tracing) are **not** applied here; `main.rs`
 /// attaches them after this call so tests can use the bare router.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    use alerts_events::{alerts_active, events_feed};
+    use alerts_events::{alerts_active, alerts_triage, events_feed, incidents};
     use audit_ops::{audit_artifacts, audit_operator_actions, ops_operator_timeline};
     use control_plane::{
         integrity_arm, integrity_disarm, ops_action, ops_catalog, ops_mode_change_guidance,
@@ -144,7 +144,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         execution_fill_quality, execution_order_cancel, execution_order_causality,
         execution_order_chart, execution_order_replay, execution_order_submit,
         execution_order_timeline, execution_order_trace, execution_orders, execution_outbox,
-        execution_summary,
+        execution_protection_status, execution_replace_cancel_chains, execution_summary,
     };
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
@@ -158,6 +158,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         autonomous_readiness, health, status_handler, system_artifact_intake, system_config_diffs,
         system_config_fingerprint, system_metadata, system_parity_evidence, system_preflight,
         system_run_artifact, system_runtime_leadership, system_session, system_status,
+        system_topology,
     };
     use trading::{
         diagnostics_snapshot, stream, trading_account, trading_fills, trading_orders,
@@ -212,6 +213,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/risk/denials", get(risk_denials))
         .route("/api/v1/reconcile/status", get(reconcile_status))
         .route("/api/v1/reconcile/mismatches", get(reconcile_mismatches))
+        .route("/api/v1/system/topology", get(system_topology))
         .route("/api/v1/system/session", get(system_session))
         .route(
             "/api/v1/system/config-fingerprint",
@@ -232,6 +234,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(ops_mode_change_guidance),
         )
         .route("/api/v1/alerts/active", get(alerts_active))
+        .route("/api/v1/alerts/triage", get(alerts_triage))
+        .route("/api/v1/incidents", get(incidents))
         .route("/api/v1/events/feed", get(events_feed))
         .route("/api/v1/paper/journal", get(paper_journal))
         .route("/api/v1/oms/overview", get(oms_overview))
@@ -246,6 +250,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(system_parity_evidence),
         )
         .route("/api/v1/autonomous/readiness", get(autonomous_readiness))
+        .route(
+            "/api/v1/execution/replace-cancel-chains",
+            get(execution_replace_cancel_chains),
+        )
+        .route(
+            "/api/v1/execution/protection-status",
+            get(execution_protection_status),
+        )
         .route(
             "/api/v1/execution/transport",
             get(execution_transport),

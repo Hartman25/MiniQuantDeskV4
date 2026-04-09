@@ -1877,3 +1877,86 @@ mod tests {
         assert_eq!(lifecycle_stage_from_outbox_status(""), "unknown");
     }
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/execution/replace-cancel-chains (A4)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/execution/protection-status (B4)
+// ---------------------------------------------------------------------------
+
+/// Protective stop / bracket order status surface — explicitly not wired.
+///
+/// B4 closure: stop and bracket orders are NOT supported on the canonical
+/// paper+alpaca execution path.  This route returns an honest `"not_wired"`
+/// contract rather than a 404 or a fabricated "protected" status, so operator
+/// tooling and runbooks can explicitly distinguish "protection absent" from
+/// "route unavailable".
+///
+/// # Why this matters
+///
+/// The submit validator explicitly rejects `order_type = "stop"` (and
+/// `"trailing_stop"`).  No OCO / OTOCO bracket types are passed through the
+/// Alpaca broker adapter.  The `KillSwitchType::MissingProtectiveStop`
+/// kill-switch policy is defined in the risk config but cannot be
+/// operator-satisfied until stop order wiring is implemented (B5+).
+///
+/// Operators relying on this surface will see `truth_state = "not_wired"` until
+/// a future patch promotes it to `"broker_backed"` with proof tests.
+pub(crate) async fn execution_protection_status(
+    _: State<Arc<AppState>>,
+) -> impl IntoResponse {
+    use crate::api_types::ProtectionStatusResponse;
+
+    (
+        StatusCode::OK,
+        Json(ProtectionStatusResponse {
+            canonical_route: "/api/v1/execution/protection-status".to_string(),
+            truth_state: "not_wired".to_string(),
+            stop_order_wiring: "not_supported".to_string(),
+            bracket_order_wiring: "not_supported".to_string(),
+            note: "Protective stop and bracket orders are not supported on the current \
+                   paper+alpaca canonical execution path.  Submit validation explicitly \
+                   rejects order_type=\"stop\".  No OCO / OTOCO bracket types are wired \
+                   to the Alpaca broker adapter.  The KillSwitchType::MissingProtectiveStop \
+                   kill-switch policy is defined in the risk config but cannot be satisfied \
+                   until stop order wiring is implemented (B5+).  This surface transitions to \
+                   truth_state=\"broker_backed\" only when a future patch proves end-to-end \
+                   broker stop / bracket order submission."
+                .to_string(),
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/execution/replace-cancel-chains (A4)
+// ---------------------------------------------------------------------------
+
+/// Replace/cancel chain surface — mounted but not wired.
+///
+/// No chain-lineage provenance exists in the current OMS implementation.
+/// Returns an explicit `"not_wired"` wrapper rather than 404 so the GUI can
+/// surface honest unavailable truth instead of treating the missing route as
+/// a backend error.
+pub(crate) async fn execution_replace_cancel_chains(
+    _: State<Arc<AppState>>,
+) -> impl IntoResponse {
+    use crate::api_types::ReplaceCancelChainsResponse;
+
+    (
+        StatusCode::OK,
+        Json(ReplaceCancelChainsResponse {
+            canonical_route: "/api/v1/execution/replace-cancel-chains".to_string(),
+            truth_state: "not_wired".to_string(),
+            backend: "none".to_string(),
+            note: "No replace/cancel chain lineage is tracked in the current OMS. \
+                   Empty chains must not be interpreted as absence of historical \
+                   replace or cancel operations."
+                .to_string(),
+            chains: vec![],
+        }),
+    )
+        .into_response()
+}

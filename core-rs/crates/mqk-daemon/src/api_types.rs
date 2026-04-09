@@ -275,6 +275,51 @@ pub struct SystemStatusResponse {
     /// `Some(false)` means Gate 1d is not tripping; signal intake is still open
     /// (subject to all other gates).
     pub autonomous_signal_limit_hit: Option<bool>,
+    /// B8: Canonical asset-class scope for this execution path.
+    ///
+    /// Always `"equity_only"` on the current canonical path.  Only US equities
+    /// (stocks and ETFs) are supported.  Options, futures, crypto, and FX are
+    /// not wired into the execution, portfolio, risk, or broker adapter paths.
+    ///
+    /// Operators and strategy authors must not assume support for any other
+    /// asset class.  Signal admission will explicitly reject signals carrying
+    /// `asset_class` values other than `"equity"` or absent (equity implied).
+    pub asset_class_scope: String,
+
+    // -----------------------------------------------------------------------
+    // C1: Live-trust truth surface
+    // -----------------------------------------------------------------------
+
+    /// C1: Parity evidence state for the configured artifact.
+    ///
+    /// Derived by evaluating `parity_evidence.json` via the same evaluator used
+    /// by the `/api/v1/system/parity-evidence` route.  Surfaced here so
+    /// operators can observe live-trust state on the primary status surface
+    /// without navigating to a secondary endpoint.
+    ///
+    /// Values:
+    /// - `"not_configured"` — `MQK_ARTIFACT_PATH` absent or empty; gate not applicable.
+    /// - `"absent"` — artifact path set but `parity_evidence.json` not found.
+    ///   Absent evidence ≠ parity proven.
+    /// - `"invalid"` — `parity_evidence.json` found but structurally invalid.
+    /// - `"incomplete"` — evidence present but `live_trust_complete=false`.
+    ///   All current builds produce this value.  Live-capital is not trusted.
+    /// - `"complete"` — `live_trust_complete=true`.  Not reachable in current
+    ///   builds.  Explicit ceiling — no operator action can advance this
+    ///   without a proof patch that replaces the TV-03 pipeline claim.
+    /// - `"unavailable"` — the evaluator itself could not run (panic-safe wrapper).
+    pub parity_evidence_state: String,
+
+    /// C1: Whether the live-trust chain is complete enough for live-capital execution.
+    ///
+    /// Non-null only when `parity_evidence_state == "incomplete"` or `"complete"`.
+    /// Always `false` in current builds — the TV-03 parity pipeline explicitly
+    /// writes `live_trust_complete=false` and the daemon never fabricates a
+    /// positive trust claim.
+    ///
+    /// `null` when parity evidence is absent, invalid, not configured, or the
+    /// evaluator is unavailable.  Null is not a positive trust claim.
+    pub live_trust_complete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -591,22 +636,49 @@ pub struct StrategySummaryRow {
     pub note: String,
     /// Sourced: reflects the current daemon integrity arm state at response time.
     pub armed: bool,
+    /// B2B: Cross-referenced admission state from fleet config × DB registry.
+    ///
+    /// - `"runnable"` — in configured fleet + registry present + `enabled=true`.
+    ///   This strategy can be activated at runtime start.
+    /// - `"blocked_disabled"` — in configured fleet + registry present but
+    ///   `enabled=false`.  B2A gate will refuse start until re-enabled.
+    /// - `"blocked_not_registered"` — in configured fleet but no registry row
+    ///   exists.  Daemon was configured for this strategy but it was never
+    ///   registered in `sys_strategy_registry`.
+    /// - `"not_configured"` — in registry but NOT in the daemon's configured
+    ///   fleet (`MQK_STRATEGY_IDS`).  This daemon will not activate it.
+    /// - `"no_fleet_configured"` — in registry; `MQK_STRATEGY_IDS` is not set
+    ///   so no strategy is admitted for runtime execution by this daemon.
+    pub admission_state: String,
     /// `null` — no strategy health monitor is wired; honest null, not synthetic "ok".
     pub health_status: Option<String>,
     /// `null` — universe membership is not tracked by the daemon; honest null.
     pub universe_size: Option<usize>,
-    /// `null` — intent pipeline metrics are not sourced from daemon state; honest null.
+    /// `null` — per-strategy outbox query not wired; honest null, not synthetic zero.
     pub pending_intents: Option<usize>,
-    /// `null` — open position counts are not sourced from daemon state; honest null.
+    /// `null` — strategy-level position attribution not wired; honest null.
     pub open_positions: Option<usize>,
-    /// `null` — no portfolio accounting is wired; honest null, not synthetic zero.
+    /// `null` — no strategy-level portfolio accounting wired; honest null, not synthetic zero.
     pub today_pnl: Option<f64>,
-    /// `null` — no drawdown tracking is wired; honest null, not synthetic zero.
+    /// `null` — no strategy-level drawdown tracking wired; honest null, not synthetic zero.
     pub drawdown_pct: Option<f64>,
-    /// `null` — no regime detector is wired; honest null, not synthetic string.
+    /// `null` — no regime detector wired; honest null, not synthetic string.
     pub regime: Option<String>,
-    /// `null` — no throttle controller is wired; honest null, not synthetic "normal".
+    /// B3: Wired for the single active fleet strategy; `null` for all others.
+    ///
+    /// Values when wired:
+    /// - `"open"` — within the per-run autonomous signal limit.
+    /// - `"day_limit_reached"` — per-run autonomous signal limit exceeded;
+    ///   no further signals accepted until next run start.
+    ///
+    /// `null` when this strategy is not the daemon's single-strategy fleet
+    /// target, or when the fleet is not configured.
     pub throttle_state: Option<String>,
+    /// B3: RFC3339 timestamp of the last `deposit_strategy_bar_input` call.
+    ///
+    /// Wired for the single active fleet strategy; `null` otherwise.
+    /// `null` also when no bar input has been deposited in this daemon
+    /// process lifetime (no signal has been accepted and dispatched yet).
     pub last_decision_time: Option<String>,
 }
 
@@ -619,7 +691,16 @@ pub struct StrategySummaryRow {
 /// - `"registry"` — reading from `postgres.sys_strategy_registry`; `rows` are
 ///   authoritative.  Empty `rows` means no strategies have been registered
 ///   (authoritative empty ≠ unavailable).  Each row carries the durable
-///   `enabled` flag: `true` = registered + active; `false` = registered + inactive.
+///   `enabled` flag and B2B `admission_state`.
+///
+/// `runtime_execution_mode` (B2B):
+/// - `"single_strategy"` — fleet configured with exactly one strategy ID.
+/// - `"fleet_not_configured"` — `MQK_STRATEGY_IDS` not set or empty; daemon
+///   operates in Dormant bootstrap mode.
+/// - `"fleet"` — fleet configured with two or more strategies (informational;
+///   runtime execution remains single-strategy at this revision).
+/// - `"unknown"` — DB unavailable; fleet truth may be partially derivable from
+///   env but runtime truth is not confirmable without DB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategySummaryResponse {
     pub canonical_route: String,
@@ -627,7 +708,16 @@ pub struct StrategySummaryResponse {
     /// `"no_db"` = DB unavailable; rows empty and not authoritative (fail closed).
     /// `"registry"` = reading from postgres.sys_strategy_registry; rows authoritative.
     pub truth_state: String,
+    /// B2B: Execution mode label for the configured fleet.
+    /// `"single_strategy"` | `"fleet_not_configured"` | `"fleet"` | `"unknown"`.
+    pub runtime_execution_mode: String,
+    /// B2B: Number of strategies in the daemon's configured fleet (`MQK_STRATEGY_IDS`).
+    /// `null` when `truth_state == "no_db"` (cannot confirm).
+    /// `0` when fleet is configured but empty.
+    pub configured_fleet_size: Option<usize>,
     /// Empty when `truth_state == "no_db"`.  Authoritative when `truth_state == "registry"`.
+    /// Includes synthetic rows for fleet entries with no registry record
+    /// (`admission_state == "blocked_not_registered"`).
     pub rows: Vec<StrategySummaryRow>,
 }
 
@@ -944,6 +1034,19 @@ pub struct StrategySignalRequest {
     pub time_in_force: Option<String>,
     /// Limit price in integer micros (required for limit orders; absent for market).
     pub limit_price: Option<serde_json::Value>,
+    /// B8: Explicit asset class for this signal.
+    ///
+    /// Optional.  When absent, `"equity"` is implied (backward compatible).
+    /// Only `"equity"` is accepted.  Supplying any other value (e.g. `"option"`,
+    /// `"future"`, `"crypto"`, `"fx"`) will cause Gate 0 to reject the signal
+    /// with an explicit `"unsupported_asset_class"` blocker.
+    ///
+    /// This field exists to make the asset-class boundary machine-checkable.
+    /// Strategy authors can include it for explicit documentation of intent;
+    /// the daemon validates it to ensure unsupported asset classes cannot
+    /// accidentally reach the outbox.
+    #[serde(default)]
+    pub asset_class: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1335,6 +1438,21 @@ pub struct MetricsDashboardResponse {
     pub reconcile_last_run_at: Option<String>,
     /// Sum of all mismatch counts across positions, orders, fills, and broker events.
     pub reconcile_total_mismatches: usize,
+
+    // --- Event risk panel (B7) ---
+    /// B7: Whether corporate-actions / earnings screening is active on the
+    /// current execution path.
+    ///
+    /// `"not_wired"` — the daemon has no connection to a corporate-actions or
+    /// earnings calendar feed.  No pre-event position flattening, no ex-dividend
+    /// price-adjustment ingestion, and no earnings blackout gate are present on
+    /// the paper+alpaca canonical path.  The backtest engine has an explicit
+    /// `CorporateActionPolicy` (fail-closed for forbidden periods), but that
+    /// policy does not extend to live or paper execution.
+    ///
+    /// This field exists so the risk panel can never be mistaken for an
+    /// environment with active corporate-actions protection.
+    pub corp_actions_screening: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1398,6 +1516,65 @@ pub struct OmsOverviewResponse {
     /// Sum of mismatched_positions + mismatched_orders + mismatched_fills +
     /// unmatched_broker_events.
     pub reconcile_total_mismatches: usize,
+
+    // --- Protection lane (B4) ---
+    /// B4: Whether protective stop / bracket order wiring is supported on the
+    /// current execution path.
+    ///
+    /// `"not_supported"` — the canonical paper+alpaca path does not submit stop
+    /// or bracket orders to the broker.  Submit validation explicitly rejects
+    /// `order_type = "stop"`.  This field exists so operators cannot mistake an
+    /// empty order book for a protected execution environment.
+    pub stop_order_wiring: String,
+
+    // --- Event risk lane (B7) ---
+    /// B7: Whether corporate-actions / earnings screening is active on the
+    /// current execution path.
+    ///
+    /// `"not_wired"` — no corp-actions or earnings calendar feed is connected.
+    /// No pre-event position flattening, ex-dividend price adjustment, or
+    /// earnings blackout gate exists on the paper+alpaca canonical path.
+    /// The backtest engine has an explicit `CorporateActionPolicy` but it does
+    /// not extend to live or paper execution.  This field exists so operators
+    /// cannot mistake a running system for one with active event-risk screening.
+    pub corp_actions_screening: String,
+}
+
+// ---------------------------------------------------------------------------
+// /api/v1/execution/protection-status (B4)
+// ---------------------------------------------------------------------------
+
+/// Honest protection-status contract for the canonical paper+alpaca execution path.
+///
+/// B4 closure: stop and bracket order wiring is NOT supported in the current
+/// system.  This type surfaces that gap explicitly so operator tooling and
+/// runbooks cannot mistake the current system for a protected execution
+/// environment.
+///
+/// # Truth semantics
+///
+/// - `truth_state = "not_wired"` — no broker-backed stop or bracket orders.
+/// - `stop_order_wiring = "not_supported"` — submit validator explicitly rejects
+///   `order_type = "stop"`.
+/// - `bracket_order_wiring = "not_supported"` — no OCO / OTOCO bracket types
+///   are passed to the Alpaca broker adapter.
+///
+/// When full broker-backed protective exits are implemented (B5+), these fields
+/// will transition to `"wired"` and `"broker_backed"` respectively.  Until then
+/// this response is the canonical source of truth for protection capability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtectionStatusResponse {
+    pub canonical_route: String,
+    /// `"not_wired"` — broker-backed stop / bracket orders are not implemented.
+    pub truth_state: String,
+    /// `"not_supported"` — stop `order_type` is explicitly rejected by the submit
+    /// validator.  No stop orders can reach the broker on the current path.
+    pub stop_order_wiring: String,
+    /// `"not_supported"` — no OCO / OTOCO bracket order types are wired to the
+    /// Alpaca broker adapter.  No child legs are submitted alongside parent orders.
+    pub bracket_order_wiring: String,
+    /// Honest note for operator tooling and runbooks.
+    pub note: String,
 }
 
 // ---------------------------------------------------------------------------

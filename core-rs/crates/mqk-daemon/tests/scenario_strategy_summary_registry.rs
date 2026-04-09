@@ -533,6 +533,189 @@ async fn summary_no_row_synthesized_for_unregistered_strategy() -> anyhow::Resul
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// B2B S01-S04: admission_state cross-reference (DB-backed)
+//
+// These tests prove the fleet × registry authority model against a real
+// postgres registry.  Each test seeds the registry and/or sets the fleet,
+// then asserts the correct admission_state on the row.
+//
+// S01: fleet contains id + registry enabled   → "runnable"
+// S02: fleet contains id + registry disabled  → "blocked_disabled"
+// S03: fleet contains id + no registry row    → "blocked_not_registered" (synthetic row)
+// S04: registry row present + not in fleet    → "not_configured"
+// ---------------------------------------------------------------------------
+
+/// B2B-S01 (DB): fleet configured + registry enabled → admission_state="runnable".
+///
+/// Both the configured fleet and the DB registry agree — the strategy is
+/// authorised and enabled.  Only under this joint agreement can admission_state
+/// be "runnable".
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn b2b_s01_configured_enabled_admission_state_runnable() {
+    let pool = make_db_pool().await;
+    let id = unique_id("b2b_s01");
+
+    seed_registry(&pool, &id, "S01 Strategy", true).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    // Fleet contains exactly this id.
+    st.set_strategy_fleet_for_test(Some(vec![state::StrategyFleetEntry {
+        strategy_id: id.clone(),
+    }]))
+    .await;
+
+    let router = routes::build_router(st);
+    let (status, body) = call(router, summary_request()).await;
+    let json = parse_json(body);
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["truth_state"], "registry");
+
+    let row = find_row(&json["rows"], &id)
+        .unwrap_or_else(|| panic!("strategy '{id}' must appear in summary rows"));
+    assert_eq!(
+        row["admission_state"], "runnable",
+        "S01: fleet+enabled must yield admission_state='runnable'"
+    );
+    assert_eq!(row["enabled"], true);
+}
+
+/// B2B-S02 (DB): fleet configured + registry disabled → admission_state="blocked_disabled".
+///
+/// The operator configured the strategy in the fleet, but the DB registry has
+/// it disabled.  Registry is the final authority; admission is blocked.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn b2b_s02_configured_disabled_admission_state_blocked_disabled() {
+    let pool = make_db_pool().await;
+    let id = unique_id("b2b_s02");
+
+    seed_registry(&pool, &id, "S02 Strategy", false).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    st.set_strategy_fleet_for_test(Some(vec![state::StrategyFleetEntry {
+        strategy_id: id.clone(),
+    }]))
+    .await;
+
+    let router = routes::build_router(st);
+    let (status, body) = call(router, summary_request()).await;
+    let json = parse_json(body);
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["truth_state"], "registry");
+
+    let row = find_row(&json["rows"], &id)
+        .unwrap_or_else(|| panic!("strategy '{id}' must appear in summary rows"));
+    assert_eq!(
+        row["admission_state"], "blocked_disabled",
+        "S02: fleet+disabled must yield admission_state='blocked_disabled'"
+    );
+    assert_eq!(row["enabled"], false);
+}
+
+/// B2B-S03 (DB): fleet configured + no registry row → synthetic row with
+/// admission_state="blocked_not_registered".
+///
+/// The operator put the strategy in MQK_STRATEGY_IDS but never registered it
+/// in sys_strategy_registry.  This is a control-truth disagreement.  The route
+/// emits a synthetic row so callers can surface the misconfiguration explicitly
+/// rather than silently ignoring the missing registration.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn b2b_s03_configured_no_registry_row_admission_blocked_not_registered() {
+    let pool = make_db_pool().await;
+    let id = unique_id("b2b_s03");
+
+    // Intentionally do NOT insert a registry row for this id.
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    st.set_strategy_fleet_for_test(Some(vec![state::StrategyFleetEntry {
+        strategy_id: id.clone(),
+    }]))
+    .await;
+
+    let router = routes::build_router(st);
+    let (status, body) = call(router, summary_request()).await;
+    let json = parse_json(body);
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["truth_state"], "registry");
+
+    // A synthetic row must be emitted for the unregistered fleet entry.
+    let row = find_row(&json["rows"], &id)
+        .unwrap_or_else(|| panic!("synthetic row for '{id}' must appear in summary rows"));
+    assert_eq!(
+        row["admission_state"], "blocked_not_registered",
+        "S03: fleet entry with no registry row must yield admission_state='blocked_not_registered'"
+    );
+    // Synthetic rows have no registry-sourced fields.
+    assert_eq!(row["enabled"], false);
+    assert_eq!(row["display_name"], "");
+}
+
+/// B2B-S04 (DB): registry row present + not in fleet → admission_state="not_configured".
+///
+/// The strategy exists in sys_strategy_registry but the operator has NOT
+/// included it in MQK_STRATEGY_IDS.  It appears in the summary (sourced from
+/// the registry) but with admission_state="not_configured" — it is known to
+/// the daemon but not requested for execution.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn b2b_s04_registry_row_not_in_fleet_is_not_configured() {
+    let pool = make_db_pool().await;
+    let id_in_fleet = unique_id("b2b_s04_fleet");
+    let id_not_in_fleet = unique_id("b2b_s04_nonflt");
+
+    // Both registered; only one is in the fleet.
+    seed_registry(&pool, &id_in_fleet, "Fleet Strategy", true).await;
+    seed_registry(&pool, &id_not_in_fleet, "Non-Fleet Strategy", true).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    // Fleet only contains id_in_fleet.
+    st.set_strategy_fleet_for_test(Some(vec![state::StrategyFleetEntry {
+        strategy_id: id_in_fleet.clone(),
+    }]))
+    .await;
+
+    let router = routes::build_router(st);
+    let (status, body) = call(router, summary_request()).await;
+    let json = parse_json(body);
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["truth_state"], "registry");
+
+    let fleet_row = find_row(&json["rows"], &id_in_fleet)
+        .unwrap_or_else(|| panic!("fleet strategy '{id_in_fleet}' must appear in rows"));
+    let non_fleet_row = find_row(&json["rows"], &id_not_in_fleet)
+        .unwrap_or_else(|| panic!("non-fleet strategy '{id_not_in_fleet}' must appear in rows"));
+
+    // Fleet member that is registered and enabled → runnable.
+    assert_eq!(
+        fleet_row["admission_state"], "runnable",
+        "S04: fleet+registered+enabled must be runnable"
+    );
+    // Registry row not in fleet → not_configured (not "runnable", not "blocked_disabled").
+    assert_eq!(
+        non_fleet_row["admission_state"], "not_configured",
+        "S04: registry row not in fleet must yield admission_state='not_configured'"
+    );
+}
+
 /// CC-01C / proof 4: kind is empty string (not null) for unclassified strategies.
 ///
 /// sys_strategy_registry.kind defaults to ''.  The API must surface this as an
