@@ -35,18 +35,30 @@ function Get-CommandPath {
 function Invoke-ExternalCommand {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
-        [Parameter(Mandatory = $true)][string[]]$Arguments,
-        [Parameter(Mandatory = $true)][string]$WorkingDirectory
+        [string[]]$Arguments = @(),
+        [string]$WorkingDirectory = (Get-Location).Path,
+        [switch]$AllowFailure
     )
+
+    $argText = if ($Arguments -and $Arguments.Count -gt 0) {
+        $Arguments -join ' '
+    } else {
+        ''
+    }
+
+    if ([string]::IsNullOrWhiteSpace($argText)) {
+        Write-LauncherStep "$FilePath"
+    } else {
+        Write-LauncherStep "$FilePath $argText"
+    }
 
     Push-Location $WorkingDirectory
     try {
         & $FilePath @Arguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "Command failed with exit code $LASTEXITCODE: $FilePath $($Arguments -join ' ')"
+        if (-not $AllowFailure -and $LASTEXITCODE -ne 0) {
+            throw ("Command failed with exit code {0}: {1} {2}" -f $LASTEXITCODE, $FilePath, $argText)
         }
-    }
-    finally {
+    } finally {
         Pop-Location
     }
 }
@@ -67,11 +79,7 @@ function Resolve-GuiBinary {
 
     $candidates = @(
         (Join-Path $RepoRoot 'core-rs\target\release\mqk-gui.exe'),
-        (Join-Path $RepoRoot 'core-rs\target\release\Veritas Ledger.exe'),
-        (Join-Path $RepoRoot 'core-rs\target\release\MiniQuantDesk.exe'),
-        (Join-Path $RepoRoot 'core-rs\mqk-gui\src-tauri\target\release\mqk-gui.exe'),
-        (Join-Path $RepoRoot 'core-rs\mqk-gui\src-tauri\target\release\Veritas Ledger.exe'),
-        (Join-Path $RepoRoot 'core-rs\mqk-gui\src-tauri\target\release\MiniQuantDesk.exe')
+        (Join-Path $RepoRoot 'core-rs\mqk-gui\src-tauri\target\release\mqk-gui.exe')
     )
 
     foreach ($candidate in $candidates) {
@@ -136,8 +144,8 @@ function Ensure-GuiBinary {
     Ensure-NodeModules -GuiRoot $guiRoot
 
     $npm = Get-CommandPath 'npm.cmd'
-    Write-LauncherStep 'Building desktop GUI bundle (npm run tauri build)'
-    Invoke-ExternalCommand -FilePath $npm -Arguments @('run', 'tauri', 'build') -WorkingDirectory $guiRoot
+    Write-LauncherStep 'Building desktop GUI executable (npm run tauri build -- --no-bundle)'
+    Invoke-ExternalCommand -FilePath $npm -Arguments @('run', 'tauri', 'build', '--', '--no-bundle') -WorkingDirectory $guiRoot
 
     $built = Resolve-GuiBinary -RepoRoot $RepoRoot
     if (-not $built) {
@@ -200,14 +208,26 @@ function Parse-DotEnvLine {
 function Import-DotEnvIfPresent {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][System.Collections.Generic.HashSet[string]]$ImportedNames
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()]$ImportedNames
     )
 
     if (-not (Test-Path $Path)) {
         return
     }
 
+    if ($null -eq $ImportedNames) {
+        throw "ImportedNames cannot be null."
+    }
+
     foreach ($line in Get-Content -Path $Path) {
+        if ($null -eq $line) {
+            continue
+        }
+
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
         $entry = Parse-DotEnvLine -Line $line
         if ($null -eq $entry) {
             continue
@@ -309,10 +329,11 @@ function Invoke-JsonRequest {
     )
 
     $params = @{
-        Uri = $Url
-        Method = $Method
-        TimeoutSec = 2
-        ErrorAction = 'Stop'
+        Uri             = $Url
+        Method          = $Method
+        TimeoutSec      = 2
+        ErrorAction     = 'Stop'
+        UseBasicParsing = $true   # required for Windows PowerShell 5.1 (avoids IE COM dependency)
     }
 
     if ($null -ne $Headers) {
@@ -558,7 +579,9 @@ function Get-TradeReadinessReasons {
 function Get-BackendProbe {
     param(
         [Parameter(Mandatory = $true)][string]$BaseUrl,
-        [Parameter(Mandatory = $true)][string]$OperatorToken
+        [Parameter(Mandatory = $true)][string]$OperatorToken,
+        [ValidateSet('Observe', 'TradeReady')]
+        [string]$Mode = 'Observe'
     )
 
     $result = [ordered]@{
@@ -689,43 +712,56 @@ function Get-BackendProbe {
         return [pscustomobject]$result
     }
 
-    try {
-        # There is no auth-protected read-only route mounted for operator auth proof.
-        # This non-mutating probe calls the canonical dispatcher with an impossible
-        # action_key; 400 + unknown_action + accepted=false proves Bearer auth worked
-        # without changing runtime state.
-        $authProbe = Invoke-JsonRequest `
-            -Method 'POST' `
-            -Url ($BaseUrl.TrimEnd('/') + '/api/v1/ops/action') `
-            -Headers @{ Authorization = "Bearer $OperatorToken" } `
-            -Body @{ action_key = '__veritas_launcher_auth_probe__' }
+    if ($Mode -eq 'TradeReady') {
+        # TradeReady mode requires a live Bearer auth round-trip before attaching.
+        # Observe/Attach mode is strictly idle-only and must not POST to operator routes.
+        # This probe calls the canonical dispatcher with an impossible action_key;
+        # 400 + unknown_action + accepted=false proves Bearer auth worked without
+        # changing runtime state.
+        try {
+            $authProbe = Invoke-JsonRequest `
+                -Method 'POST' `
+                -Url ($BaseUrl.TrimEnd('/') + '/api/v1/ops/action') `
+                -Headers @{ Authorization = "Bearer $OperatorToken" } `
+                -Body @{ action_key = '__veritas_launcher_auth_probe__' }
 
-        $result.AuthProbeStatus = $authProbe.StatusCode
-        $result.AuthProbeDisposition = $authProbe.Json.disposition
-        if ($authProbe.StatusCode -ne 400 -or $authProbe.Json.disposition -ne 'unknown_action' -or $authProbe.Json.accepted -ne $false) {
-            $result.FailureReason = "unexpected auth probe response (status=$($authProbe.StatusCode), disposition=$($authProbe.Json.disposition), accepted=$($authProbe.Json.accepted))"
-            return [pscustomobject]$result
+            $result.AuthProbeStatus = $authProbe.StatusCode
+            $result.AuthProbeDisposition = $authProbe.Json.disposition
+            if ($authProbe.StatusCode -ne 400 -or $authProbe.Json.disposition -ne 'unknown_action' -or $authProbe.Json.accepted -ne $false) {
+                $result.FailureReason = "unexpected auth probe response (status=$($authProbe.StatusCode), disposition=$($authProbe.Json.disposition), accepted=$($authProbe.Json.accepted))"
+                return [pscustomobject]$result
+            }
         }
-    }
-    catch {
-        $details = Get-HttpFailureDetails -ErrorRecord $_
-        $result.AuthProbeStatus = $details.StatusCode
-        if ($details.Json -and $details.Json.disposition) {
-            $result.AuthProbeDisposition = $details.Json.disposition
+        catch {
+            $details = Get-HttpFailureDetails -ErrorRecord $_
+            $result.AuthProbeStatus = $details.StatusCode
+            if ($details.Json -and $details.Json.disposition) {
+                $result.AuthProbeDisposition = $details.Json.disposition
+            }
+            # PowerShell 5.1: Invoke-WebRequest throws on ALL non-2xx responses,
+            # including 400.  400 + unknown_action + accepted=false is the expected
+            # contract response proving Bearer auth worked without mutating state.
+            # Treat it as success here and fall through to IdentityVerified.
+            if ($details.StatusCode -eq 400 -and $details.Json.disposition -eq 'unknown_action' -and $details.Json.accepted -eq $false) {
+                # Expected auth probe response — do not set FailureReason.
+            }
+            elseif ($details.StatusCode -eq 401) {
+                $result.FailureReason = 'operator token was rejected by the daemon'
+                return [pscustomobject]$result
+            }
+            elseif ($details.StatusCode -eq 503) {
+                $result.FailureReason = 'daemon operator routes are fail-closed because operator auth is not fully configured'
+                return [pscustomobject]$result
+            }
+            elseif ($details.StatusCode -ne $null) {
+                $result.FailureReason = "auth probe failed with HTTP $($details.StatusCode)"
+                return [pscustomobject]$result
+            }
+            else {
+                $result.FailureReason = "auth probe failed: $($details.Message)"
+                return [pscustomobject]$result
+            }
         }
-        if ($details.StatusCode -eq 401) {
-            $result.FailureReason = 'operator token was rejected by the daemon'
-        }
-        elseif ($details.StatusCode -eq 503) {
-            $result.FailureReason = 'daemon operator routes are fail-closed because operator auth is not fully configured'
-        }
-        elseif ($details.StatusCode -ne $null) {
-            $result.FailureReason = "auth probe failed with HTTP $($details.StatusCode)"
-        }
-        else {
-            $result.FailureReason = "auth probe failed: $($details.Message)"
-        }
-        return [pscustomobject]$result
     }
 
     $result.IdentityVerified = $true
@@ -740,13 +776,15 @@ function Wait-ForBackendState {
         [Parameter(Mandatory = $true)][string]$BaseUrl,
         [Parameter(Mandatory = $true)][string]$OperatorToken,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
-        [Parameter(Mandatory = $true)][bool]$RequireTradeReady
+        [Parameter(Mandatory = $true)][bool]$RequireTradeReady,
+        [ValidateSet('Observe', 'TradeReady')]
+        [string]$Mode = 'Observe'
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $lastProbe = $null
     while ((Get-Date) -lt $deadline) {
-        $lastProbe = Get-BackendProbe -BaseUrl $BaseUrl -OperatorToken $OperatorToken
+        $lastProbe = Get-BackendProbe -BaseUrl $BaseUrl -OperatorToken $OperatorToken -Mode $Mode
         if ($lastProbe.IdentityVerified -and ((-not $RequireTradeReady) -or $lastProbe.TradeReady)) {
             return $lastProbe
         }
@@ -803,7 +841,7 @@ function Start-DaemonIfNeeded {
     )
 
     $requireTradeReady = $LauncherMode -eq 'TradeReady'
-    $existingProbe = Get-BackendProbe -BaseUrl $BaseUrl -OperatorToken $OperatorToken
+    $existingProbe = Get-BackendProbe -BaseUrl $BaseUrl -OperatorToken $OperatorToken -Mode $LauncherMode
     if ($existingProbe.IdentityVerified) {
         if ($requireTradeReady -and -not $existingProbe.TradeReady) {
             throw "Verified canonical backend is not trade-ready. $(Join-Reasons -Reasons $existingProbe.TradeReadinessReasons)"
@@ -846,7 +884,7 @@ function Start-DaemonIfNeeded {
 
     $probe = $null
     try {
-        $probe = Wait-ForBackendState -BaseUrl $BaseUrl -OperatorToken $OperatorToken -TimeoutSeconds 30 -RequireTradeReady:$requireTradeReady
+        $probe = Wait-ForBackendState -BaseUrl $BaseUrl -OperatorToken $OperatorToken -TimeoutSeconds 30 -RequireTradeReady:$requireTradeReady -Mode $LauncherMode
         if (-not $probe.IdentityVerified) {
             throw "daemon did not reach verified canonical identity. $($probe.FailureReason)"
         }
