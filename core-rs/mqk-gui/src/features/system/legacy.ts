@@ -186,15 +186,20 @@ export interface StrategySuppressionsWrapper {
   rows: StrategySuppressionRow[];
 }
 
-// Strategy summary truth wrapper (CC-01: now conditional on MQK_STRATEGY_IDS fleet config).
-// "not_wired" = no strategy fleet configured (MQK_STRATEGY_IDS not set); rows is empty and
-//   not authoritative.  This is a configuration-absent state, not a permanently unimplemented
-//   surface.  The former synthetic "daemon_integrity_gate" surrogate row has been removed.
-// "active"    = fleet is configured; rows are authoritative (may be empty if fleet is vacant).
+// Strategy summary truth wrapper (B2B: fleet × registry cross-reference).
+// "no_db"     = DB unavailable; rows is empty and not authoritative (fail closed).
+// "registry"  = DB present; rows are authoritative.  Includes synthetic rows for
+//               fleet entries with no registry record (admission_state="blocked_not_registered").
+// Legacy values retained for forward-compat guard in case of old daemon:
+// "not_wired" | "active" — treated as stale; GUI falls back to fail-closed.
 export interface StrategySummaryWrapper {
   canonical_route?: string | null;
   backend?: string | null;
-  truth_state: "not_wired" | "active";
+  truth_state: "no_db" | "registry" | "not_wired" | "active";
+  /** B2B: "single_strategy" | "fleet_not_configured" | "fleet" | "unknown" */
+  runtime_execution_mode?: string | null;
+  /** B2B: number of configured fleet entries; null when truth_state == "no_db" */
+  configured_fleet_size?: number | null;
   rows: StrategyRow[];
 }
 
@@ -368,6 +373,10 @@ export function mapLegacyStatusToSystemStatus(legacy: LegacyDaemonStatusSnapshot
     adapter_id: "paper",
     autonomous_signal_count: null,
     autonomous_signal_limit_hit: null,
+    asset_class_scope: "equity_only",
+    // C1: legacy path has no parity evidence; default to not_configured.
+    parity_evidence_state: "not_configured",
+    live_trust_complete: null,
   };
 }
 
@@ -859,6 +868,63 @@ export function mapPaperJournalWrapper(wrapper: PaperJournalWrapper | null | und
     admissions_truth_state: ats,
     admissions: wrapper.admissions_lane.rows ?? [],
   };
+}
+
+// ---------------------------------------------------------------------------
+// A3/A4 daemon wrapper types
+// ---------------------------------------------------------------------------
+
+// System topology wrapper (A3).
+// truth_state is always "active" — derived from daemon in-memory state.
+export interface SystemTopologyWrapper {
+  canonical_route: string;
+  truth_state: string;
+  backend: string;
+  updated_at: string;
+  services: unknown[];
+}
+
+// Incidents wrapper (A3).
+// truth_state is always "not_wired" — no incident manager implemented.
+export interface IncidentsWrapper {
+  canonical_route: string;
+  truth_state: string;
+  backend: string;
+  note: string;
+  rows: unknown[];
+}
+
+// Replace/cancel chains wrapper (A4).
+// truth_state is always "not_wired" — no chain lineage tracked.
+export interface ReplaceCancelChainsWrapper {
+  canonical_route: string;
+  truth_state: string;
+  backend: string;
+  note: string;
+  chains: unknown[];
+}
+
+// Alert triage wrapper (A4).
+// truth_state is always "alerts_no_triage" — source is real, lifecycle is not.
+export interface AlertTriageWrapper {
+  canonical_route: string;
+  truth_state: string;
+  backend: string;
+  triage_note: string;
+  rows: AlertTriageWrapperRow[];
+}
+
+export interface AlertTriageWrapperRow {
+  alert_id: string;
+  severity: string;
+  status: string;
+  title: string;
+  domain: string;
+  linked_incident_id: string | null;
+  linked_order_id: string | null;
+  linked_strategy_id: string | null;
+  created_at: string;
+  assigned_to: string | null;
 }
 
 // Used by PortfolioScreen to render honest per-lane notices.

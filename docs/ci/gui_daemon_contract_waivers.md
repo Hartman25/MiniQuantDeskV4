@@ -234,22 +234,19 @@ stubs for the 6 static surfaces and simply sets the 5 per-order detail fields to
 because `notProbed()` returns `ok: false`, causing `useObject`/`useArray` to push the
 key into `usedMockSections` as before — but without the 404 HTTP request.
 
-### Static surfaces — not yet mounted (notProbed stubs in api.ts)
+### Static surfaces — all graduated (Batch A2 + A3/A4)
 
-| Route                                     | Resolution                                      |
-|-------------------------------------------|-------------------------------------------------|
-| `/api/v1/system/topology`                 | No backend source. notProbed() stub. |
-| `/api/v1/execution/transport`             | No backend source. notProbed() stub. |
-| `/api/v1/incidents`                       | No incident system. notProbed() stub. |
-| `/api/v1/execution/replace-cancel-chains` | No ready source. notProbed() stub.   |
-| `/api/v1/alerts/triage`                   | No triage system. notProbed() stub.  |
-| `/api/v1/market-data/quality`             | PT-MD-01 open. notProbed() stub.     |
+All previously-deferred static surfaces are now mounted on the daemon and wired
+in the GUI. `NOT_MOUNTED` is empty. `notProbed()` stubs removed.
 
-When any of these routes is eventually mounted on the daemon:
-1. Replace `Promise.resolve(notProbed<X>(route))` with `fetchJsonCandidates<X>([route])` in `api.ts`.
-2. Move the route from `NOT_MOUNTED` to `GUI_PROBE_MANIFEST` in `scenario_route_contract_rt01.rs`.
-3. Add shape + semantic proof to `scenario_gui_daemon_contract_gate.rs`.
-4. Update this document.
+| Route                                     | Batch | truth_state / notes                          |
+|-------------------------------------------|-------|----------------------------------------------|
+| `/api/v1/execution/transport`             | A2    | `"active"` / `"no_snapshot"` — in-memory    |
+| `/api/v1/market-data/quality`             | A2    | `"active"` — in-memory WS + source state    |
+| `/api/v1/system/topology`                 | A3    | `"active"` — 5 local service nodes          |
+| `/api/v1/incidents`                       | A3    | `"not_wired"` — no incident manager         |
+| `/api/v1/execution/replace-cancel-chains` | A4    | `"not_wired"` — no chain lineage tracking   |
+| `/api/v1/alerts/triage`                   | A4    | `"alerts_no_triage"` — source real, lifecycle not |
 
 ### Per-order detail surfaces — not mounted (static null in api.ts)
 

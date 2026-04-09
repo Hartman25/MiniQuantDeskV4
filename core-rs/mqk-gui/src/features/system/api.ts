@@ -57,6 +57,10 @@ import {
   type RiskDenialsResponse,
   type StrategySummaryWrapper,
   type StrategySuppressionsWrapper,
+  type SystemTopologyWrapper,
+  type IncidentsWrapper,
+  type ReplaceCancelChainsWrapper,
+  type AlertTriageWrapper,
 } from "./legacy";
 import type {
   AlertTriageRow,
@@ -107,16 +111,6 @@ export { invokeOperatorAction } from "./actions";
 
 function objectOrFallback<T>(value: unknown, fallback: T): T {
   return value && typeof value === "object" ? (value as T) : fallback;
-}
-
-// Synthetic not-mounted result: the route is known to not be implemented on
-// the daemon yet. Returning ok:false preserves the usedMockSections push so
-// panel authority still degrades correctly — but eliminates the failed HTTP
-// request (404) that would fire on every model refresh cycle.
-// GUI-CONTRACT-01/GUI-CONTRACT-03: replaces live fetchJsonCandidates calls for
-// the 6 deferred routes listed in gui_daemon_contract_waivers.md.
-function notProbed<T>(route: string): EndpointFetchResult<T> {
-  return { ok: false, endpoint: route, error: "not_mounted" };
 }
 
 // ---------------------------------------------------------------------------
@@ -231,12 +225,21 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       }
       return { ok: true, endpoint: canonical.endpoint, data: data.rows };
     })(),
-    // strategy/summary: preserve the daemon wrapper so the GUI can distinguish
-    // fail-closed "not_wired" truth from authoritative active-empty rows.
+    // strategy/summary: "not_wired" is passed through ok:true so truthRendering.ts
+    // can surface it as an explicit not_wired render state (feature mounted, not wired).
+    // "no_db" = DB unavailable → fail-closed: emit as ok:false so the endpoint lands
+    // in missingEndpoints, isMissingPanelTruth fires, and the strategy panel blocks
+    // with no_snapshot instead of rendering an empty row set as authoritative.
     (async (): Promise<EndpointFetchResult<StrategySummaryWrapper>> => {
       const r = await fetchJsonCandidate<StrategySummaryWrapper>("/api/v1/strategy/summary");
       if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
-      return { ok: true, endpoint: r.endpoint, data: r.data as StrategySummaryWrapper };
+      const wrapper = r.data as StrategySummaryWrapper;
+      if (wrapper.truth_state === "no_db") {
+        // DB unavailable → fail-closed: endpoint lands in missingEndpoints so
+        // isMissingPanelTruth fires and the strategy panel blocks with no_snapshot.
+        return { ok: false, endpoint: r.endpoint, error: "strategy_registry_unavailable" };
+      }
+      return { ok: true, endpoint: r.endpoint, data: wrapper };
     })(),
     // alerts/active: daemon returns ActiveAlertsResponse wrapper (not a bare array).
     // truth_state is always "active" per spec; fail-closed defensively on any other value.
@@ -296,16 +299,54 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       }));
       return { ok: true, endpoint: r.endpoint, data: rows };
     })(),
-    // GUI-CONTRACT-01: these 4 routes are not yet mounted on the daemon.
-    // notProbed() returns ok:false so useObject/useArray still push the key
-    // into usedMockSections and panel authority degrades correctly — but no
-    // HTTP request fires. Deferred list: gui_daemon_contract_waivers.md §resolved.
-    // A2: /execution/transport and /market-data/quality graduated from this list.
-    Promise.resolve(notProbed<ServiceTopology>("/api/v1/system/topology")),
+    // A3: system/topology — mounted; truth_state always "active" (in-memory derivation).
+    // Preserve wrapper so screens can inspect truth_state and services array.
+    (async (): Promise<EndpointFetchResult<ServiceTopology>> => {
+      const r = await fetchJsonCandidate<SystemTopologyWrapper>("/api/v1/system/topology");
+      if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      const w = r.data as SystemTopologyWrapper;
+      if (w.truth_state !== "active") return { ok: false, endpoint: r.endpoint, error: "topology_unavailable" };
+      return { ok: true, endpoint: r.endpoint, data: { updated_at: w.updated_at, services: w.services as ServiceTopology["services"] } };
+    })(),
     fetchJsonCandidates<TransportSummary>(["/api/v1/execution/transport"]),
-    Promise.resolve(notProbed<IncidentCase[]>("/api/v1/incidents")),
-    Promise.resolve(notProbed<ReplaceCancelChainRow[]>("/api/v1/execution/replace-cancel-chains")),
-    Promise.resolve(notProbed<AlertTriageRow[]>("/api/v1/alerts/triage")),
+    // A3: incidents — mounted; truth_state always "not_wired" (no incident manager).
+    // Returns ok:false so "incidents" lands in usedMockSections (honest degraded authority).
+    (async (): Promise<EndpointFetchResult<IncidentCase[]>> => {
+      const r = await fetchJsonCandidate<IncidentsWrapper>("/api/v1/incidents");
+      if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      const w = r.data as IncidentsWrapper;
+      // "not_wired" = mounted but feature absent; must not render as authoritative empty.
+      if (w.truth_state === "not_wired") return { ok: false, endpoint: r.endpoint, error: "incidents_not_wired" };
+      return { ok: true, endpoint: r.endpoint, data: [] };
+    })(),
+    // A4: replace/cancel chains — mounted; truth_state always "not_wired" (no lineage tracking).
+    (async (): Promise<EndpointFetchResult<ReplaceCancelChainRow[]>> => {
+      const r = await fetchJsonCandidate<ReplaceCancelChainsWrapper>("/api/v1/execution/replace-cancel-chains");
+      if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      const w = r.data as ReplaceCancelChainsWrapper;
+      if (w.truth_state === "not_wired") return { ok: false, endpoint: r.endpoint, error: "replace_cancel_chains_not_wired" };
+      return { ok: true, endpoint: r.endpoint, data: [] };
+    })(),
+    // A4: alerts/triage — mounted; truth_state "alerts_no_triage" (source real, lifecycle not).
+    // Map daemon triage rows → AlertTriageRow[]. Passes ok:true because the alert source is real.
+    (async (): Promise<EndpointFetchResult<AlertTriageRow[]>> => {
+      const r = await fetchJsonCandidate<AlertTriageWrapper>("/api/v1/alerts/triage");
+      if (!r.ok || r.data == null) return { ok: false, endpoint: r.endpoint, error: r.error ?? "fetch_failed" };
+      const w = r.data as AlertTriageWrapper;
+      const rows: AlertTriageRow[] = (w.rows ?? []).map((row) => ({
+        alert_id: row.alert_id,
+        severity: row.severity as AlertTriageRow["severity"],
+        status: row.status as AlertTriageRow["status"],
+        title: row.title,
+        domain: row.domain,
+        linked_incident_id: row.linked_incident_id,
+        linked_order_id: row.linked_order_id,
+        linked_strategy_id: row.linked_strategy_id,
+        created_at: row.created_at,
+        assigned_to: row.assigned_to,
+      }));
+      return { ok: true, endpoint: r.endpoint, data: rows };
+    })(),
     fetchJsonCandidates<SessionStateSummary>(["/api/v1/system/session"]),
     fetchJsonCandidates<ConfigFingerprintSummary>(["/api/v1/system/config-fingerprint"]),
     fetchJsonCandidates<MarketDataQualitySummary>(["/api/v1/market-data/quality"]),
@@ -507,13 +548,13 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const durableOperatorHistoryKeys = new Set(["auditActions", "artifactRegistry", "operatorTimeline"]);
 
   const explicitSurfaceTruthOrUnknown = (
-    result: EndpointFetchResult<{ truth_state: "active" | "not_wired" | "no_db"; backend?: string | null }>,
+    result: EndpointFetchResult<{ truth_state: "active" | "not_wired" | "no_db" | "registry"; backend?: string | null }>,
   ): ExplicitSurfaceTruth => {
     if (!result.ok || result.data == null) {
       return { truth_state: "unknown", backend: null };
     }
-    return {
-      truth_state: result.data.truth_state,
+      return {
+      truth_state: result.data.truth_state === "registry" ? "active" : result.data.truth_state,
       backend: result.data.backend ?? null,
     };
   };
@@ -619,9 +660,15 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const strategySuppressionsTruth = explicitSurfaceTruthOrUnknown(strategySuppressionsR as EndpointFetchResult<StrategySuppressionsWrapper>);
   const configDiffsTruth = explicitSurfaceTruthOrUnknown(configDiffsR as EndpointFetchResult<ConfigDiffsWrapper>);
 
-  const strategies = strategiesR.ok && strategiesR.data !== undefined
-    ? (strategiesR.data as StrategySummaryWrapper).rows
-    : [];
+  // B2B: fail closed on "no_db" truth state — do not treat empty rows as authoritative.
+  // "registry" = authoritative; rows may include synthetic "blocked_not_registered" entries.
+  // Legacy "active" accepted; "not_wired" / "no_db" → empty (fail closed).
+  const strategies = (() => {
+    if (!strategiesR.ok || strategiesR.data == null) return [];
+    const wrapper = strategiesR.data as StrategySummaryWrapper;
+    if (wrapper.truth_state === "no_db" || wrapper.truth_state === "not_wired") return [];
+    return wrapper.rows;
+  })();
   const strategySuppressions = strategySuppressionsR.ok && strategySuppressionsR.data !== undefined
     ? (strategySuppressionsR.data as StrategySuppressionsWrapper).rows
     : [];

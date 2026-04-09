@@ -276,3 +276,75 @@ test("authoritative active-empty truth stays distinct from not_wired wrappers", 
     globalThis.fetch = originalFetch;
   }
 });
+
+test("strategy summary no_db fails closed: endpoint in missingEndpoints and panel blocks with no_snapshot", async () => {
+  // B2B-GUI-01: When the daemon returns truth_state="no_db" for /strategy/summary,
+  // the GUI must treat the probe as failed (ok:false) so:
+  //   1. The endpoint lands in missingEndpoints (not realEndpoints).
+  //   2. isMissingPanelTruth fires for the strategy panel.
+  //   3. panelTruthRenderState returns "no_snapshot" (not null).
+  //   4. StrategyScreen renders a TruthStateNotice — not "No strategy summary rows reported."
+  //
+  // This proves "no_db" is never treated as authoritative active-empty truth.
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    switch (path) {
+      case "/api/v1/system/status":
+        return jsonResponse({
+          ...DEFAULT_STATUS,
+          runtime_status: "running",
+          daemon_reachable: true,
+          last_heartbeat: new Date().toISOString(),
+        });
+      case "/api/v1/system/preflight":
+        return jsonResponse({ ...DEFAULT_PREFLIGHT, daemon_reachable: true });
+      case "/api/v1/strategy/summary":
+        // Daemon reports DB unavailable — registry truth absent.
+        return jsonResponse({
+          canonical_route: "/api/v1/strategy/summary",
+          truth_state: "no_db",
+          backend: "postgres.sys_strategy_registry",
+          runtime_execution_mode: "single_strategy",
+          configured_fleet_size: 1,
+          rows: [],
+        });
+      default:
+        return notFoundResponse();
+    }
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    // Probe must be fail-closed: endpoint in missingEndpoints, not realEndpoints.
+    assert.ok(
+      model.dataSource.missingEndpoints.some((e) => e.includes("/strategy/summary")),
+      "no_db: /strategy/summary must land in missingEndpoints",
+    );
+    assert.ok(
+      !model.dataSource.realEndpoints.includes("/api/v1/strategy/summary"),
+      "no_db: /strategy/summary must NOT be in realEndpoints",
+    );
+
+    // Strategy panel must block with no_snapshot — not render.
+    assert.equal(
+      panelTruthRenderState(model, "strategy"),
+      "no_snapshot",
+      "no_db: panelTruthRenderState must return no_snapshot for strategy panel",
+    );
+
+    // Screen must render TruthStateNotice, not the empty rows fallback copy.
+    const strategyHtml = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+    assert.doesNotMatch(
+      strategyHtml,
+      /No strategy summary rows reported/i,
+      "no_db: empty-rows copy must not appear when registry truth is absent",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

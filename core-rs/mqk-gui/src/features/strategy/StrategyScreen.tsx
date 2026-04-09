@@ -8,7 +8,9 @@ import type { SystemModel } from "../system/types";
 
 export function StrategyScreen({ model }: { model: SystemModel }) {
   const armed = model.strategies.filter((s) => s.armed).length;
-  const throttled = model.strategies.filter((s) => s.throttle_state !== "normal").length;
+  // B3: "open" means within limit (not throttled); "day_limit_reached" means throttled.
+  // null means not wired for this strategy — treat as unknown, not throttled.
+  const throttled = model.strategies.filter((s) => s.throttle_state === "day_limit_reached").length;
   const unhealthy = model.strategies.filter((s) => s.health !== "ok").length;
   const truthState = panelTruthRenderState(model, "strategy");
 

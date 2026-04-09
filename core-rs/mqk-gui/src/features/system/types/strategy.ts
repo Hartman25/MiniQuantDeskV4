@@ -8,6 +8,8 @@ export interface StrategyRow {
   strategy_id: string;
   enabled: boolean;
   armed: boolean;
+  /** B2B: "runnable" | "blocked_disabled" | "blocked_not_registered" | "not_configured" | "no_fleet_configured" */
+  admission_state: string;
   health: HealthState;
   universe: string;
   pending_intents: number;
@@ -15,7 +17,8 @@ export interface StrategyRow {
   today_pnl: number | null;
   drawdown_pct: number | null;
   regime: string | null;
-  throttle_state: string;
+  /** B3: "open" | "day_limit_reached" | null (null = not wired for this strategy) */
+  throttle_state: string | null;
   last_decision_time: string | null;
 }
 

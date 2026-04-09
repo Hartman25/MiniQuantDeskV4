@@ -496,3 +496,145 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
     )
         .into_response()
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/incidents (A3)
+// ---------------------------------------------------------------------------
+
+/// Incident surface — mounted but not wired.
+///
+/// No durable incident manager exists.  Returns an explicit `"not_wired"`
+/// wrapper rather than 404 so the GUI can surface honest unavailable truth
+/// instead of treating the missing route as a backend error.
+pub(crate) async fn incidents(_: State<Arc<AppState>>) -> impl IntoResponse {
+    use crate::api_types::IncidentsResponse;
+
+    (
+        StatusCode::OK,
+        Json(IncidentsResponse {
+            canonical_route: "/api/v1/incidents".to_string(),
+            truth_state: "not_wired".to_string(),
+            backend: "none".to_string(),
+            note: "No incident manager is implemented. \
+                   Empty rows must not be interpreted as absence of historical incidents."
+                .to_string(),
+            rows: vec![],
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/alerts/triage (A4)
+// ---------------------------------------------------------------------------
+
+/// Alert triage surface — active alerts with honest `"alerts_no_triage"` state.
+///
+/// Rows are sourced from the same in-memory fault-signal computation as
+/// `/api/v1/alerts/active`.  `status` is always `"unacked"` because no
+/// triage workflow (ack/escalate/assign) is implemented or backed.
+pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
+    use crate::api_types::{AlertTriageAlertRow, AlertTriageResponse};
+
+    let status_snap = match st.current_status_snapshot().await {
+        Ok(s) => s,
+        Err(err) => return runtime_error_response(err),
+    };
+    let reconcile = st.current_reconcile_snapshot().await;
+
+    let risk_blocked = if let Some(db) = st.db.as_ref() {
+        mqk_db::load_risk_block_state(db)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.blocked)
+    } else {
+        false
+    };
+
+    let fault_signals = build_fault_signals(&status_snap, &reconcile, risk_blocked);
+    let now_utc = chrono::Utc::now().to_rfc3339();
+
+    // WS continuity signals — same as alerts/active
+    let ws = st.alpaca_ws_continuity().await;
+    let mut extra_signals: Vec<(&str, &str, &str, String)> = Vec::new();
+    let ws_cold_summary;
+    let ws_gap_summary;
+    match &ws {
+        AlpacaWsContinuityState::ColdStartUnproven => {
+            ws_cold_summary = "Alpaca WS continuity unproven (cold start); signal ingestion blocked.".to_string();
+            extra_signals.push(("paper.ws_continuity.cold_start_unproven", "warning", "execution", ws_cold_summary.clone()));
+        }
+        AlpacaWsContinuityState::GapDetected { detail, .. } => {
+            ws_gap_summary = format!("Alpaca WS gap detected: {detail}");
+            extra_signals.push(("paper.ws_continuity.gap_detected", "critical", "execution", ws_gap_summary.clone()));
+        }
+        _ => {}
+    }
+
+    let mut rows: Vec<AlertTriageAlertRow> = fault_signals
+        .into_iter()
+        .map(|s| {
+            let domain = domain_from_class(&s.class);
+            AlertTriageAlertRow {
+                alert_id: s.class.clone(),
+                severity: s.severity,
+                status: "unacked".to_string(),
+                title: s.summary,
+                domain: domain.to_string(),
+                linked_incident_id: None,
+                linked_order_id: None,
+                linked_strategy_id: None,
+                created_at: now_utc.clone(),
+                assigned_to: None,
+            }
+        })
+        .collect();
+
+    for (alert_id, severity, domain, title) in extra_signals {
+        rows.push(AlertTriageAlertRow {
+            alert_id: alert_id.to_string(),
+            severity: severity.to_string(),
+            status: "unacked".to_string(),
+            title,
+            domain: domain.to_string(),
+            linked_incident_id: None,
+            linked_order_id: None,
+            linked_strategy_id: None,
+            created_at: now_utc.clone(),
+            assigned_to: None,
+        });
+    }
+
+    (
+        StatusCode::OK,
+        Json(AlertTriageResponse {
+            canonical_route: "/api/v1/alerts/triage".to_string(),
+            truth_state: "alerts_no_triage".to_string(),
+            backend: "daemon.runtime_state".to_string(),
+            triage_note: "Alert source is real (same as /api/v1/alerts/active). \
+                          Triage lifecycle (ack/escalate/assign) is not implemented; \
+                          all rows carry status=unacked."
+                .to_string(),
+            rows,
+        }),
+    )
+        .into_response()
+}
+
+/// Map a fault-signal class string to a coarse domain label for triage rows.
+fn domain_from_class(class: &str) -> &'static str {
+    if class.starts_with("reconcile") {
+        "reconcile"
+    } else if class.starts_with("risk") {
+        "risk"
+    } else if class.starts_with("paper.ws") || class.starts_with("broker") {
+        "execution"
+    } else if class.starts_with("autonomous") {
+        "system"
+    } else if class.starts_with("market_data") {
+        "system"
+    } else {
+        "system"
+    }
+}

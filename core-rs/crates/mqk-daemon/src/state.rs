@@ -13,7 +13,7 @@ mod snapshot;
 mod types;
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -204,6 +204,12 @@ pub struct AppState {
     /// unconsumed prior bar).  Consumed atomically (set to `None`) by
     /// `tick_strategy_dispatch`.
     pending_strategy_bar_input: Arc<Mutex<Option<StrategyBarInput>>>,
+    /// B3: Unix-second timestamp of the last `deposit_strategy_bar_input` call.
+    ///
+    /// Set to `input.end_ts` on every deposit; never cleared on stop/restart.
+    /// Zero means no bar input has been deposited in this daemon process lifetime.
+    /// Read by `/api/v1/strategy/summary` to surface honest `last_decision_time`.
+    last_bar_input_ts: Arc<AtomicI64>,
 }
 
 impl Default for AppState {
@@ -540,6 +546,7 @@ impl AppState {
             autonomous_history_degraded: Arc::new(AtomicBool::new(false)),
             native_strategy_bootstrap: Arc::new(Mutex::new(None)),
             pending_strategy_bar_input: Arc::new(Mutex::new(None)),
+            last_bar_input_ts: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -1063,8 +1070,19 @@ impl AppState {
     /// `on_bar` fires in the loop's tick context, not in the HTTP handler.
     ///
     /// Overwrite policy: a new deposit supersedes any prior unconsumed bar.
+    /// B3: Also captures `input.end_ts` in `last_bar_input_ts` for telemetry.
     pub async fn deposit_strategy_bar_input(&self, input: StrategyBarInput) {
+        self.last_bar_input_ts.store(input.end_ts, Ordering::SeqCst);
         *self.pending_strategy_bar_input.lock().await = Some(input);
+    }
+
+    /// B3: Returns the Unix-seconds timestamp of the last bar input deposit.
+    ///
+    /// Zero when no bar input has been deposited in this daemon process lifetime.
+    /// Not cleared on run stop/start — reflects the last deposit ever made.
+    /// Read by `/api/v1/strategy/summary` to surface honest `last_decision_time`.
+    pub fn last_bar_input_ts(&self) -> i64 {
+        self.last_bar_input_ts.load(Ordering::SeqCst)
     }
 
     /// B1B: Execution loop dispatch seam — take pending bar input and invoke `on_bar`.

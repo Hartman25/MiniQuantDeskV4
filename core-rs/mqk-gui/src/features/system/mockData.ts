@@ -73,6 +73,10 @@ export const MOCK_STATUS: SystemStatus = {
   adapter_id: "paper",
   autonomous_signal_count: null,
   autonomous_signal_limit_hit: null,
+  asset_class_scope: "equity_only",
+  // C1: mock shows not_configured (no artifact path in dev/paper context).
+  parity_evidence_state: "not_configured",
+  live_trust_complete: null,
 };
 
 export const MOCK_PREFLIGHT: PreflightStatus = {
@@ -498,9 +502,9 @@ export const MOCK_MISMATCHES: ReconcileMismatchRow[] = [
 ];
 
 export const MOCK_STRATEGIES: StrategyRow[] = [
-  { strategy_id: "breakout_momo", enabled: true, armed: true, health: "ok", universe: "large-cap momentum", pending_intents: 1, open_positions: 1, today_pnl: 801.1, drawdown_pct: 0.8, regime: "trend", throttle_state: "normal", last_decision_time: iso(8) },
-  { strategy_id: "pullback_core", enabled: true, armed: true, health: "ok", universe: "semis", pending_intents: 0, open_positions: 1, today_pnl: 1120.3, drawdown_pct: 0.4, regime: "mean reversion", throttle_state: "normal", last_decision_time: iso(4) },
-  { strategy_id: "mean_revert", enabled: true, armed: true, health: "warning", universe: "broad tech", pending_intents: 1, open_positions: 1, today_pnl: -81.2, drawdown_pct: 1.9, regime: "chop", throttle_state: "throttled", last_decision_time: iso(12) },
+  { strategy_id: "breakout_momo", enabled: true, armed: true, admission_state: "admitted", health: "ok", universe: "large-cap momentum", pending_intents: 1, open_positions: 1, today_pnl: 801.1, drawdown_pct: 0.8, regime: "trend", throttle_state: "normal", last_decision_time: iso(8) },
+  { strategy_id: "pullback_core", enabled: true, armed: true, admission_state: "admitted", health: "ok", universe: "semis", pending_intents: 0, open_positions: 1, today_pnl: 1120.3, drawdown_pct: 0.4, regime: "mean reversion", throttle_state: "normal", last_decision_time: iso(4) },
+  { strategy_id: "mean_revert", enabled: true, armed: true, admission_state: "admitted", health: "warning", universe: "broad tech", pending_intents: 1, open_positions: 1, today_pnl: -81.2, drawdown_pct: 1.9, regime: "chop", throttle_state: "throttled", last_decision_time: iso(12) },
 ];
 
 export const MOCK_AUDIT_ACTIONS: AuditActionRow[] = [
