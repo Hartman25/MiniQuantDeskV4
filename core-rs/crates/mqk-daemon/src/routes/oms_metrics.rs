@@ -125,6 +125,17 @@ pub(crate) async fn oms_overview(State(st): State<Arc<AppState>>) -> impl IntoRe
             reconcile_status: reconcile.status,
             reconcile_last_run_at: reconcile.last_run_at,
             reconcile_total_mismatches,
+            // B4: Protective stop / bracket order wiring is not supported on the
+            // current paper+alpaca path.  This field surfaces the gap explicitly
+            // so the OMS overview never implies false protection coverage.
+            stop_order_wiring: "not_supported".to_string(),
+            // B7: Corporate-actions / earnings screening is not wired on the
+            // current paper+alpaca execution path.  No earnings calendar feed,
+            // no pre-event position flattening, and no ex-dividend price-
+            // adjustment ingestion exist.  This field makes the absence explicit
+            // so the OMS overview cannot be mistaken for an event-risk-aware
+            // execution environment.
+            corp_actions_screening: "not_wired".to_string(),
         }),
     )
         .into_response()
@@ -253,6 +264,11 @@ pub(crate) async fn metrics_dashboards(State(st): State<Arc<AppState>>) -> impl 
             reconcile_status: reconcile.status,
             reconcile_last_run_at: reconcile.last_run_at,
             reconcile_total_mismatches,
+            // B7: Corporate-actions / earnings screening is not wired.  No
+            // corp-actions calendar feed, pre-event flattening, or earnings
+            // blackout gate exists on the paper+alpaca canonical path.  Surfaced
+            // here so the risk panel cannot be mistaken for event-risk-aware.
+            corp_actions_screening: "not_wired".to_string(),
         }),
     )
         .into_response()
