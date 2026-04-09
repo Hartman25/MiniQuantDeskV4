@@ -8,14 +8,15 @@
 //! # Gate sequence
 //!
 //! ```text
-//! 0. field_validation     — decision_id / strategy_id / symbol / side / qty
-//! 1. day_signal_limit     — PT-AUTO-02: per-run intake bound not exceeded
-//! 2. db_present           — no DB → unavailable
-//! 3. registry_check       — strategy must be registered AND enabled
-//! 4. suppression_check    — strategy must not be actively suppressed (per-strategy targeted query)
-//! 5. arm_state            — durable arm state must be ARMED
-//! 6. active_run           — active run must exist and be in "running" state
-//! 7. outbox_enqueue       — durable idempotent write (signal_source = "internal_strategy_decision")
+//! 0.  field_validation     — decision_id / strategy_id / symbol / side / qty
+//! 1.  day_signal_limit     — PT-AUTO-02: per-run intake bound not exceeded
+//! 1e. capital_budget       — B6/TV-04B: per-strategy budget authorized (same gate as external signal path)
+//! 2.  db_present           — no DB → unavailable
+//! 3.  registry_check       — strategy must be registered AND enabled
+//! 4.  suppression_check    — strategy must not be actively suppressed (per-strategy targeted query)
+//! 5.  arm_state            — durable arm state must be ARMED
+//! 6.  active_run           — active run must exist and be in "running" state
+//! 7.  outbox_enqueue       — durable idempotent write (signal_source = "internal_strategy_decision")
 //! ```
 //!
 //! This is a library function, not an HTTP handler.  Callers receive a
@@ -78,6 +79,8 @@ pub struct InternalDecisionOutcome {
     /// | `"unavailable"`    | transient system state (no DB, arm-state I/O, run)   |
     /// | `"suppressed"`     | strategy is actively suppressed                      |
     /// | `"day_limit_reached"` | PT-AUTO-02 per-run intake bound exceeded          |
+    /// | `"budget_denied"`  | B6/TV-04B: capital policy present but strategy not budget-authorized |
+    /// | `"policy_invalid"` | B6/TV-04B: capital policy configured but structurally invalid        |
     pub disposition: String,
     /// Echoed from [`InternalStrategyDecision::decision_id`].
     pub decision_id: String,
@@ -199,7 +202,7 @@ fn build_order_json(d: &InternalStrategyDecision) -> serde_json::Value {
 /// ```text
 /// delta = target.qty - current_positions[symbol]   (0 if symbol absent = flat)
 /// delta > 0  →  buy  abs(delta) shares
-/// delta < 0  →  sell abs(delta) shares
+/// delta < 0  →  sell abs(delta) shares  (only if holdings cover the sell; see B5 guard)
 /// delta == 0 →  skip (already at target; no order)
 /// ```
 ///
@@ -212,6 +215,22 @@ fn build_order_json(d: &InternalStrategyDecision) -> serde_json::Value {
 /// - `result.intents.should_execute()` is `false` (shadow mode) → returns empty.
 /// - `result.intents.output.targets` is empty → returns empty (no-op bar).
 /// - Delta == 0 for a target → skipped (already at target; no order needed).
+/// - **B5 short-sale guard**: `delta < 0` AND `current <= 0` → skipped (no long
+///   position to sell against; would open a short, which the native strategy
+///   runtime does not support).
+/// - **B5 short-sale guard**: `delta < 0` AND `abs(delta) > current` → skipped
+///   (sell would exceed existing long holdings, driving the position net-short;
+///   not supported by this runtime).
+///
+/// # B5 rationale
+///
+/// The native strategy runtime tracks portfolio positions but does not manage
+/// short-position lifecycle (margin, borrow, cover semantics).  A sell decision
+/// that would result in a net-short position is silently dropped here rather
+/// than forwarded to the broker where it would either be rejected (causing
+/// visible broker error) or filled (resulting in a short position the runtime
+/// cannot safely manage).  Fail-closed: skip the unsupported intent rather than
+/// propagate it.
 ///
 /// # Output fields
 ///
@@ -259,7 +278,24 @@ pub fn bar_result_to_decisions(
             let (side, qty) = if delta > 0 {
                 ("buy".to_string(), delta)
             } else {
-                ("sell".to_string(), -delta)
+                // delta < 0: sell direction.
+                //
+                // B5 short-sale guard: the native strategy runtime does not support
+                // short selling.  A sell that would open or extend a short position
+                // is silently dropped here rather than forwarded to the broker.
+                //
+                // Two rejection cases:
+                //   (a) current <= 0 — no long position to sell against (flat or
+                //       already short); any sell would open/deepen a short.
+                //   (b) abs(delta) > current — sell exceeds long holdings; the
+                //       excess would drive the position net-short.
+                //
+                // Fail-closed: return None so the broker never sees the intent.
+                let qty_to_sell = -delta; // positive by construction (delta < 0)
+                if current <= 0 || qty_to_sell > current {
+                    return None;
+                }
+                ("sell".to_string(), qty_to_sell)
             };
             let decision_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_DNS,
@@ -321,6 +357,46 @@ pub async fn submit_internal_strategy_decision(
                 state.day_signal_count()
             )],
         );
+    }
+
+    // Gate 1e: B6 — TV-04B per-strategy capital budget authorization.
+    //
+    // Applies the same capital budget gate that the external signal path
+    // (POST /api/v1/strategy/signal Gate 1e) enforces.  Without this gate,
+    // a strategy can be budget-denied for external signals yet still have its
+    // internally-generated bar decisions reach the durable outbox.
+    //
+    // Placed before Gate 2 (DB) because budget denial is a pure filesystem
+    // check — cheaper than DB operations, and budget-denied decisions must
+    // never consume DB quota or advance the day signal counter.
+    //
+    // PolicyNotConfigured → no budget enforcement active; pass through.
+    // BudgetAuthorized    → explicit strategy budget authorization; pass.
+    // BudgetDenied        → strategy not capital-authorized; fail-closed.
+    // PolicyInvalid       → policy configured but structurally invalid; fail-closed.
+    {
+        use crate::capital_policy::{evaluate_strategy_budget_from_env, StrategyBudgetOutcome};
+        let budget = evaluate_strategy_budget_from_env(&sid);
+        if !budget.is_signal_safe() {
+            let (disposition, blocker) = match &budget {
+                StrategyBudgetOutcome::BudgetDenied { reason } => (
+                    "budget_denied",
+                    format!("internal decision refused: {reason}"),
+                ),
+                StrategyBudgetOutcome::PolicyInvalid { reason } => (
+                    "policy_invalid",
+                    format!(
+                        "internal decision unavailable: capital allocation policy \
+                         is configured but invalid: {reason}"
+                    ),
+                ),
+                _ => (
+                    "unavailable",
+                    "internal decision unavailable: capital policy evaluation failed".to_string(),
+                ),
+            };
+            return outcome(false, disposition, &did, &sid, None, vec![blocker]);
+        }
     }
 
     // Gate 2: DB must be present.

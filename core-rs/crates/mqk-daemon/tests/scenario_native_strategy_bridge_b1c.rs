@@ -19,8 +19,8 @@
 //! | C01 | Shadow intent (`should_execute=false`)                       | `bar_result_to_decisions` → empty (fail-closed)             |
 //! | C02 | Empty targets (Live intent)                                  | `bar_result_to_decisions` → empty                           |
 //! | C03 | Live, buy target, flat position                              | side="buy", qty=target (delta from flat), market/day        |
-//! | C04 | Live, sell target, flat position                             | side="sell", qty=abs(target) (delta from flat)              |
-//! | C05 | Zero-qty target from flat mixed with non-zero                | delta=0 skipped; non-zero included                          |
+//! | C04 | Live, sell target w/ long position (B5: must hold shares)   | side="sell", qty=abs(delta); B5 guard passes                |
+//! | C05 | Zero-delta skipped; buy included; short-from-flat blocked    | MSFT buy passes; TSLA short-from-flat blocked (B5)          |
 //! | C06 | Live intent → submit_internal_strategy_decision called       | disposition≠"rejected" (seam reached, DB gate fires)        |
 //! | C07 | decision_id is deterministic UUIDv5                          | same inputs → same decision_id                              |
 //! | C08 | Multi-target result, all flat → one decision per non-zero    | correct count                                               |
@@ -163,55 +163,77 @@ fn b1c_c03_live_buy_target_correct_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// C04 — Live intent, sell target (qty < 0) → side="sell", qty=abs
+// C04 — Live intent, sell target with long position → side="sell", correct qty
 // ---------------------------------------------------------------------------
 
-/// C04: Live intent with a negative-qty target → sell decision with abs qty.
+/// C04: Live intent targeting a lower qty than current long → sell decision.
 ///
-/// Proves translation for the sell direction:
+/// Proves translation for the sell direction when there is a long position to
+/// sell against (B5 guard passes):
 /// - `side = "sell"`
-/// - `qty = -target.qty` (absolute value; decision qty must be positive)
+/// - `qty = abs(delta)` (positive; decision qty must always be positive)
+///
+/// Note: B5 hardening means a sell from a flat position (no long holdings) is
+/// blocked by the short-sale guard.  This test uses an existing long position
+/// so the sell is valid (reducing a long, not opening a short).
 #[test]
 fn b1c_c04_live_sell_target_correct_fields() {
-    // Flat position: target=-8, current=0 → delta=-8 → sell 8.
-    let result = live_result(vec![TargetPosition::new("TSLA", -8)]);
-    let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
+    // Long 8 TSLA: target=0 (flat), current=8 → delta=-8 → sell 8 to close long.
+    // B5 guard: current(8) > 0 and qty_to_sell(8) <= current(8) → passes.
+    let result = live_result(vec![TargetPosition::new("TSLA", 0)]);
+    let decisions =
+        bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("TSLA", 8));
 
     assert_eq!(decisions.len(), 1, "C04: one target → one decision");
     let d = &decisions[0];
 
     assert_eq!(d.symbol, "TSLA", "C04: symbol from target");
-    assert_eq!(d.side, "sell", "C04: negative qty → sell");
-    assert_eq!(d.qty, 8, "C04: qty is absolute value of target.qty");
+    assert_eq!(d.side, "sell", "C04: negative delta → sell");
+    assert_eq!(d.qty, 8, "C04: qty = current holdings (close long)");
+    assert_eq!(d.order_type, "market", "C04: target positions → market order");
+    assert_eq!(d.time_in_force, "day", "C04: time_in_force = day");
+    assert!(d.limit_price.is_none(), "C04: no limit price for market orders");
 }
 
 // ---------------------------------------------------------------------------
 // C05 — Zero-qty target skipped; non-zero included
 // ---------------------------------------------------------------------------
 
-/// C05: Zero-qty target is skipped; non-zero targets are included.
+/// C05: Zero-delta targets are skipped; buy targets are included; short-from-flat
+/// targets are blocked by the B5 short-sale guard.
 ///
-/// Proves that qty=0 targets (no-op position) do not produce decisions.
-/// Only non-zero targets advance to admission.
+/// Proves three distinct filter paths in one bar:
+/// - AAPL/GOOG: target==current (delta=0) → skipped (already at target)
+/// - MSFT: target > current (delta > 0) → buy decision included
+/// - TSLA: target < current==0 (would short from flat) → blocked by B5 guard
+///
+/// Before B5: TSLA would have produced a sell decision.
+/// After B5: TSLA is silently dropped; only MSFT survives.
 #[test]
 fn b1c_c05_zero_qty_target_skipped() {
-    // All from flat. AAPL/GOOG target=0, delta=0 → skip. MSFT/TSLA non-zero delta.
+    // From flat position map.
+    // AAPL/GOOG: target=0, current=0 → delta=0 → skip (no-op).
+    // MSFT:      target=+5, current=0 → delta=+5 → buy 5 (valid).
+    // TSLA:      target=-3, current=0 → delta=-3 → sell from flat → B5 guard blocks.
     let result = live_result(vec![
-        TargetPosition::new("AAPL", 0),   // target=0, flat → delta=0, skip
-        TargetPosition::new("MSFT", 5),   // target=+5, flat → delta=+5, include
-        TargetPosition::new("GOOG", 0),   // target=0, flat → delta=0, skip
-        TargetPosition::new("TSLA", -3),  // target=-3, flat → delta=-3, include
+        TargetPosition::new("AAPL", 0),   // delta=0, skip
+        TargetPosition::new("MSFT", 5),   // delta=+5, buy → include
+        TargetPosition::new("GOOG", 0),   // delta=0, skip
+        TargetPosition::new("TSLA", -3),  // delta=-3, flat → B5 short-sale guard blocks
     ]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
 
     assert_eq!(
         decisions.len(),
-        2,
-        "C05: two non-zero targets → two decisions; zero-qty targets must be skipped"
+        1,
+        "C05: only MSFT survives; AAPL/GOOG are delta=0; TSLA short-from-flat is blocked by B5 guard"
     );
     let syms: Vec<&str> = decisions.iter().map(|d| d.symbol.as_str()).collect();
-    assert!(syms.contains(&"MSFT"), "C05: MSFT (qty=5) must be included");
-    assert!(syms.contains(&"TSLA"), "C05: TSLA (qty=-3) must be included");
+    assert!(syms.contains(&"MSFT"), "C05: MSFT (buy from flat) must be included");
+    assert!(
+        !syms.contains(&"TSLA"),
+        "C05: TSLA (short from flat) must be blocked by B5 short-sale guard"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -284,19 +306,28 @@ fn b1c_c07_decision_id_is_deterministic() {
 /// Proves the translation iterates all targets individually.  Each target
 /// becomes exactly one `InternalStrategyDecision` submitted through its own
 /// independent seam call.
+///
+/// B5 note: sell targets must have long holdings to sell against.  MSFT uses a
+/// position map entry (current=5) so the sell is valid (reducing long, not short).
 #[test]
 fn b1c_c08_multi_target_produces_one_decision_each() {
+    // AAPL: buy from flat (target=+5, current=0) → buy 5
+    // MSFT: partial reduce long (target=0, current=5) → sell 5 (B5 guard: 5 <= 5, passes)
+    // GOOG: buy from flat (target=+1, current=0) → buy 1
+    let mut positions = BTreeMap::new();
+    positions.insert("MSFT".to_string(), 5i64);
+
     let result = live_result(vec![
         TargetPosition::new("AAPL", 5),
-        TargetPosition::new("MSFT", -3),
+        TargetPosition::new("MSFT", 0),  // close long; B5 guard passes (sell 5 == current 5)
         TargetPosition::new("GOOG", 1),
     ]);
-    let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
+    let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &positions);
 
     assert_eq!(
         decisions.len(),
         3,
-        "C08: three non-zero targets → three decisions"
+        "C08: three non-zero-delta targets → three decisions"
     );
     // All carry the same strategy_id from spec.name.
     for d in &decisions {
