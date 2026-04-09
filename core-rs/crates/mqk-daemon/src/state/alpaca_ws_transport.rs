@@ -266,27 +266,23 @@ async fn alpaca_ws_session(
     let (mut ws_stream, _) = connect_async(ws_url)
         .await
         .map_err(|e| anyhow::anyhow!("alpaca_ws: connect failed: {e}"))?;
+    // Alpaca TRADING stream (/stream) does NOT send a pre-auth welcome frame.
+    // Waiting for one would always time out — that is a market-data stream
+    // assumption that does not apply to the trading endpoint.
+    // Auth must be sent immediately after the WS handshake completes.
+    tracing::info!("alpaca_ws: websocket connected (transport-up); sending auth immediately");
 
-    // Alpaca sends a connected-welcome frame on open.  Drain it before sending auth.
-    match tokio::time::timeout(WS_HANDSHAKE_TIMEOUT, ws_stream.next()).await {
-        Ok(Some(Ok(_))) => {}
-        Ok(Some(Err(e))) => return Err(anyhow::anyhow!("alpaca_ws: connection error: {e}")),
-        Ok(None) => return Err(anyhow::anyhow!("alpaca_ws: stream closed at welcome")),
-        Err(_) => {
-            return Err(anyhow::anyhow!(
-                "alpaca_ws: timeout waiting for welcome frame"
-            ))
-        }
-    }
-
-    // Send authentication.
+    // Send authentication immediately — auth is the first message the client sends.
+    tracing::debug!("alpaca_ws: sending auth");
     ws_stream
         .send(Message::Text(build_ws_auth_message(key, secret)))
         .await
         .map_err(|e| anyhow::anyhow!("alpaca_ws: auth send failed: {e}"))?;
+    tracing::debug!("alpaca_ws: auth sent; waiting for authorization response");
 
-    // Receive auth response and check for "authorized" status.
-    let auth_bytes = recv_text_frame_timeout(&mut ws_stream, WS_HANDSHAKE_TIMEOUT, "auth").await?;
+    // Authorization response is the first control-plane message from the server.
+    let auth_bytes =
+        recv_text_frame_timeout(&mut ws_stream, WS_HANDSHAKE_TIMEOUT, "auth ack").await?;
     let auth_msgs = parse_ws_message(&auth_bytes)
         .map_err(|e| anyhow::anyhow!("alpaca_ws: auth response parse failed: {e}"))?;
     let authorized = auth_msgs
@@ -299,19 +295,21 @@ async fn alpaca_ws_session(
             super::ALPACA_SECRET_PAPER_ENV,
         ));
     }
-    tracing::info!("alpaca_ws: authenticated");
+    tracing::info!("alpaca_ws: auth acknowledged (authorized); sending listen(trade_updates)");
 
-    // Subscribe to trade_updates.
+    // Subscribe to trade_updates only after successful auth.
+    tracing::debug!("alpaca_ws: sending listen(trade_updates)");
     ws_stream
         .send(Message::Text(build_ws_subscribe_message()))
         .await
         .map_err(|e| anyhow::anyhow!("alpaca_ws: subscribe send failed: {e}"))?;
+    tracing::debug!("alpaca_ws: listen sent; waiting for listen acknowledgement");
 
-    // Receive listening confirmation.
+    // Listening acknowledgement confirms subscription readiness.
     let listen_bytes =
-        recv_text_frame_timeout(&mut ws_stream, WS_HANDSHAKE_TIMEOUT, "subscribe").await?;
+        recv_text_frame_timeout(&mut ws_stream, WS_HANDSHAKE_TIMEOUT, "listen ack").await?;
     let listen_msgs = parse_ws_message(&listen_bytes)
-        .map_err(|e| anyhow::anyhow!("alpaca_ws: subscribe response parse failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("alpaca_ws: listen response parse failed: {e}"))?;
     let listening = listen_msgs.iter().any(|m| {
         matches!(
             m,
@@ -321,10 +319,12 @@ async fn alpaca_ws_session(
     });
     if !listening {
         return Err(anyhow::anyhow!(
-            "alpaca_ws: subscription to trade_updates not confirmed by server"
+            "alpaca_ws: listen ack not confirmed for trade_updates by server"
         ));
     }
-    tracing::info!("alpaca_ws: subscribed to trade_updates; evaluating continuity repair");
+    tracing::info!(
+        "alpaca_ws: listen acknowledged; subscription ready; evaluating continuity promotion"
+    );
 
     // BRK-07R: Seed in-session cursor from last persisted position.
     // This anchors gap-detection to the prior session's last known WS event.
@@ -580,9 +580,11 @@ mod tests {
     // Canonical Alpaca WS wire frames
     // -----------------------------------------------------------------------
 
-    fn frame_connected() -> String {
-        r#"[{"T":"success","msg":"connected"}]"#.to_string()
-    }
+    // NOTE: frame_connected() is intentionally absent.  The Alpaca TRADING
+    // stream (/stream) does NOT send a pre-auth connected frame.  Mock servers
+    // in these tests must NOT send one — doing so would cause the production
+    // code to treat it as the auth ack and fail the authorization check.
+
     fn frame_authorized() -> String {
         r#"[{"T":"authorization","status":"authorized","action":"authenticate"}]"#.to_string()
     }
@@ -662,7 +664,7 @@ mod tests {
     #[tokio::test]
     async fn brk00r05b_s1_session_happy_path_marks_continuity_live() {
         let url = start_mock_ws_server(|mut ws| async move {
-            ws.send(Message::Text(frame_connected())).await.unwrap();
+            // Trading stream: no welcome frame — server waits for auth first.
             let _ = ws.next().await; // consume auth message
             ws.send(Message::Text(frame_authorized())).await.unwrap();
             let _ = ws.next().await; // consume subscribe message
@@ -691,7 +693,7 @@ mod tests {
     #[tokio::test]
     async fn brk00r05b_s2_session_auth_rejected_returns_err_and_continuity_unproven() {
         let url = start_mock_ws_server(|mut ws| async move {
-            ws.send(Message::Text(frame_connected())).await.unwrap();
+            // Trading stream: no welcome frame.
             let _ = ws.next().await; // consume auth message
             ws.send(Message::Text(
                 r#"[{"T":"authorization","status":"rejected","action":"authenticate"}]"#
@@ -722,7 +724,7 @@ mod tests {
     #[tokio::test]
     async fn brk00r05b_s3_trade_update_received_dispatched_through_production_path() {
         let url = start_mock_ws_server(|mut ws| async move {
-            ws.send(Message::Text(frame_connected())).await.unwrap();
+            // Trading stream: no welcome frame.
             let _ = ws.next().await;
             ws.send(Message::Text(frame_authorized())).await.unwrap();
             let _ = ws.next().await;
@@ -758,7 +760,7 @@ mod tests {
         // Server completes a full happy-path session then closes cleanly.
         // The loop marks GapDetected before waiting for the 5-second backoff.
         let url = start_mock_ws_server(|mut ws| async move {
-            ws.send(Message::Text(frame_connected())).await.unwrap();
+            // Trading stream: no welcome frame.
             let _ = ws.next().await;
             ws.send(Message::Text(frame_authorized())).await.unwrap();
             let _ = ws.next().await;
@@ -814,7 +816,7 @@ mod tests {
             .expect("S5: persist gap cursor");
 
         let url = start_mock_ws_server(|mut ws| async move {
-            ws.send(Message::Text(frame_connected())).await.unwrap();
+            // Trading stream: no welcome frame.
             let _ = ws.next().await;
             ws.send(Message::Text(frame_authorized())).await.unwrap();
             let _ = ws.next().await;
@@ -869,6 +871,439 @@ mod tests {
             stored.rest_activity_after.as_deref(),
             Some("rest-s5-anchor"),
             "S5: rest_activity_after must remain anchored for REST catch-up"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // v1 format helpers — match the real Alpaca /stream wire format
+    //
+    // The Alpaca paper trading stream at wss://paper-api.alpaca.markets/stream
+    // sends v1-format JSON objects (not arrays).  These helpers produce that
+    // exact wire format.  Tests using these helpers prove that the fixed
+    // parse_ws_message handles v1 objects correctly end-to-end.
+    // -----------------------------------------------------------------------
+
+    fn frame_authorized_v1() -> String {
+        r#"{"stream":"authorization","data":{"action":"authenticate","status":"authorized"}}"#
+            .to_string()
+    }
+    fn frame_unauthorized_v1() -> String {
+        r#"{"stream":"authorization","data":{"action":"authenticate","status":"unauthorized"}}"#
+            .to_string()
+    }
+    fn frame_listening_v1() -> String {
+        r#"{"stream":"listening","data":{"streams":["trade_updates"]}}"#.to_string()
+    }
+    fn frame_trade_update_new_v1() -> String {
+        serde_json::json!({
+            "stream": "trade_updates",
+            "data": {
+                "event": "new",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "order": {
+                    "id": "brk-order-v1-001",
+                    "client_order_id": "test-order-v1-001",
+                    "symbol": "AAPL",
+                    "side": "buy",
+                    "qty": "10",
+                    "filled_qty": "0"
+                }
+            }
+        })
+        .to_string()
+    }
+
+    // -----------------------------------------------------------------------
+    // NT-V1-1 — v1 format happy path: auth ack + listen ack → continuity Live
+    //
+    // This is the critical test for the real Alpaca paper trading stream.
+    // The mock server sends v1 JSON objects (not v2 arrays).  parse_ws_message
+    // must handle v1 format and the session must reach Live continuity.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn trading_stream_ntv1_1_v1_format_happy_path_reaches_live() {
+        let url = start_mock_ws_server(|mut ws| async move {
+            // Trading stream: server waits for auth first (no welcome frame).
+            let _ = ws.next().await; // consume auth
+            // Send v1-format authorization object (not v2 array).
+            ws.send(Message::Text(frame_authorized_v1())).await.unwrap();
+            let _ = ws.next().await; // consume listen
+            // Send v1-format listening object.
+            ws.send(Message::Text(frame_listening_v1())).await.unwrap();
+            ws.send(Message::Close(None)).await.ok();
+        })
+        .await;
+
+        let state = paper_alpaca_state();
+        let result = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
+        assert!(
+            result.is_ok(),
+            "NT-V1-1: v1 format session must succeed on happy path; got: {result:?}"
+        );
+        let cont = state.alpaca_ws_continuity().await;
+        assert!(
+            cont.is_continuity_proven(),
+            "NT-V1-1: continuity must be Live after v1 auth+subscribe; got: {cont:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // NT-V1-2 — auth payload is emitted before any server response
+    //
+    // The mock server receives the auth message as the FIRST frame, confirms
+    // its action field, then sends the v1 auth ack.  Proves auth is always
+    // the first outbound message the client sends after connecting.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn trading_stream_ntv1_2_auth_payload_emitted_on_connect() {
+        use tokio::sync::oneshot;
+
+        let (tx, rx) = oneshot::channel::<String>();
+        let url = start_mock_ws_server(|mut ws| async move {
+            // The very first frame from the client must be an auth message.
+            let auth_frame = ws.next().await.unwrap().unwrap();
+            let auth_text = match auth_frame {
+                Message::Text(t) => t,
+                other => panic!("NT-V1-2: expected text frame for auth; got: {other:?}"),
+            };
+            let _ = tx.send(auth_text.clone());
+            // Complete handshake so session exits cleanly.
+            ws.send(Message::Text(frame_authorized_v1())).await.unwrap();
+            let _ = ws.next().await; // consume listen
+            ws.send(Message::Text(frame_listening_v1())).await.unwrap();
+            ws.send(Message::Close(None)).await.ok();
+        })
+        .await;
+
+        let state = paper_alpaca_state();
+        let _ = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
+
+        let auth_text = rx.await.expect("NT-V1-2: mock server must receive auth message");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&auth_text).expect("NT-V1-2: auth payload must be valid JSON");
+        // Verify the auth payload carries the expected fields.
+        assert!(
+            parsed.get("action").is_some(),
+            "NT-V1-2: auth payload must contain 'action' field; got: {auth_text}"
+        );
+        assert!(
+            parsed.get("key").is_some() || parsed.get("data").is_some(),
+            "NT-V1-2: auth payload must carry credentials ('key' or 'data'); got: {auth_text}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // NT-V1-3 — v1 auth rejection → session returns Err, continuity stays cold
+    //
+    // Proves that v1-format "unauthorized" responses are parsed correctly and
+    // cause the session to fail closed, not silently proceed.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn trading_stream_ntv1_3_v1_auth_rejected_fails_closed() {
+        let url = start_mock_ws_server(|mut ws| async move {
+            let _ = ws.next().await; // consume auth
+            // Send v1-format unauthorized response.
+            ws.send(Message::Text(frame_unauthorized_v1()))
+                .await
+                .unwrap();
+            // Close — session must return Err before reaching listen stage.
+        })
+        .await;
+
+        let state = paper_alpaca_state();
+        let result = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
+        assert!(
+            result.is_err(),
+            "NT-V1-3: session must return Err on v1 auth rejection; got: {result:?}"
+        );
+        let cont = state.alpaca_ws_continuity().await;
+        assert!(
+            !cont.is_continuity_proven(),
+            "NT-V1-3: continuity must stay cold after v1 auth rejection; got: {cont:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // NT-V1-4 — listen sent only after v1 auth ack, not before
+    //
+    // Mock server verifies ordering: auth message arrives first, then only
+    // after the v1 auth ack is dispatched does the listen message arrive.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn trading_stream_ntv1_4_listen_sent_only_after_auth_ack() {
+        use tokio::sync::oneshot;
+
+        let (tx, rx) = oneshot::channel::<(String, String)>();
+        let url = start_mock_ws_server(|mut ws| async move {
+            // First message from client must be auth.
+            let first = ws.next().await.unwrap().unwrap();
+            let first_text = match first {
+                Message::Text(t) => t,
+                other => panic!("NT-V1-4: expected text for first frame; got: {other:?}"),
+            };
+            // Send v1 auth ack.
+            ws.send(Message::Text(frame_authorized_v1())).await.unwrap();
+            // Second message from client must be the listen/subscribe.
+            let second = ws.next().await.unwrap().unwrap();
+            let second_text = match second {
+                Message::Text(t) => t,
+                other => panic!("NT-V1-4: expected text for second frame; got: {other:?}"),
+            };
+            let _ = tx.send((first_text, second_text));
+            ws.send(Message::Text(frame_listening_v1())).await.unwrap();
+            ws.send(Message::Close(None)).await.ok();
+        })
+        .await;
+
+        let state = paper_alpaca_state();
+        let _ = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
+
+        let (first_text, second_text) =
+            rx.await.expect("NT-V1-4: mock server must receive both messages");
+        let first_val: serde_json::Value =
+            serde_json::from_str(&first_text).expect("NT-V1-4: first frame must be JSON");
+        let second_val: serde_json::Value =
+            serde_json::from_str(&second_text).expect("NT-V1-4: second frame must be JSON");
+        let first_action = first_val.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let second_action = second_val.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        // First message: some auth action (auth or authenticate)
+        assert!(
+            first_action == "auth" || first_action == "authenticate",
+            "NT-V1-4: first client message must be auth; action={first_action:?}"
+        );
+        // Second message: listen/subscribe
+        assert!(
+            second_action == "listen",
+            "NT-V1-4: second client message must be listen; action={second_action:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // NT-V1-5 — v1 listen ack is the proof point; auth ack alone stays cold
+    //
+    // Proves continuity is NOT promoted to Live at the v1 auth-ack stage.
+    // If auth succeeds but listen ack is never received, session errors and
+    // continuity stays unproven.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn trading_stream_ntv1_5_listen_ack_is_proof_point_not_auth_ack() {
+        let url = start_mock_ws_server(|mut ws| async move {
+            let _ = ws.next().await; // consume auth
+            ws.send(Message::Text(frame_authorized_v1())).await.unwrap();
+            let _ = ws.next().await; // consume listen — drop without listen ack
+            ws.send(Message::Close(None)).await.ok();
+        })
+        .await;
+
+        let state = paper_alpaca_state();
+        let result = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
+        assert!(
+            result.is_err(),
+            "NT-V1-5: session must Err when v1 listen ack is absent (continuity proof point)"
+        );
+        let cont = state.alpaca_ws_continuity().await;
+        assert!(
+            !cont.is_continuity_proven(),
+            "NT-V1-5: continuity must NOT be Live before v1 listen ack; got: {cont:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // NT-V1-6 — v1 trade_updates frame is parsed without crashing (no run)
+    //
+    // During a live run, frames arrive in v1 format.  Proves that v1
+    // trade_updates objects are parsed by the same path that handles v2 arrays.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn trading_stream_ntv1_6_v1_trade_update_frame_parsed_no_crash() {
+        let url = start_mock_ws_server(|mut ws| async move {
+            let _ = ws.next().await; // consume auth
+            ws.send(Message::Text(frame_authorized_v1())).await.unwrap();
+            let _ = ws.next().await; // consume listen
+            ws.send(Message::Text(frame_listening_v1())).await.unwrap();
+            // Send a v1-format trade update; session has no active run so no DB write.
+            ws.send(Message::Text(frame_trade_update_new_v1()))
+                .await
+                .unwrap();
+            ws.send(Message::Close(None)).await.ok();
+        })
+        .await;
+
+        let state = paper_alpaca_state();
+        let result = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
+        assert!(
+            result.is_ok(),
+            "NT-V1-6: session must survive v1 trade-update with no active run; got: {result:?}"
+        );
+        let cont = state.alpaca_ws_continuity().await;
+        assert!(
+            cont.is_continuity_proven(),
+            "NT-V1-6: continuity must remain Live after v1 trade-update frame; got: {cont:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // NT-V1-7 — parse_ws_message unit: v1 object → Authorization variant
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trading_stream_ntv1_7_parse_ws_message_v1_authorization_object() {
+        let raw = br#"{"stream":"authorization","data":{"action":"authenticate","status":"authorized"}}"#;
+        let msgs = mqk_broker_alpaca::parse_ws_message(raw)
+            .expect("NT-V1-7: must parse v1 authorization object");
+        assert_eq!(msgs.len(), 1, "NT-V1-7: must produce exactly one message");
+        assert!(
+            matches!(
+                &msgs[0],
+                mqk_broker_alpaca::AlpacaWsMessage::Authorization { status }
+                    if status == "authorized"
+            ),
+            "NT-V1-7: must decode to Authorization{{authorized}}; got: {:?}",
+            msgs[0]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // NT-V1-8 — parse_ws_message unit: v1 listening object → Listening variant
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trading_stream_ntv1_8_parse_ws_message_v1_listening_object() {
+        let raw = br#"{"stream":"listening","data":{"streams":["trade_updates"]}}"#;
+        let msgs = mqk_broker_alpaca::parse_ws_message(raw)
+            .expect("NT-V1-8: must parse v1 listening object");
+        assert_eq!(msgs.len(), 1, "NT-V1-8: must produce exactly one message");
+        assert!(
+            matches!(
+                &msgs[0],
+                mqk_broker_alpaca::AlpacaWsMessage::Listening { streams }
+                    if streams.iter().any(|s| s == "trade_updates")
+            ),
+            "NT-V1-8: must decode to Listening{{trade_updates}}; got: {:?}",
+            msgs[0]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // NT-V1-9 — parse_ws_message unit: v1 unauthorized → Authorization{{rejected}}
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trading_stream_ntv1_9_parse_ws_message_v1_unauthorized_object() {
+        let raw = br#"{"stream":"authorization","data":{"action":"authenticate","status":"unauthorized"}}"#;
+        let msgs = mqk_broker_alpaca::parse_ws_message(raw)
+            .expect("NT-V1-9: must parse v1 unauthorized object");
+        assert_eq!(msgs.len(), 1, "NT-V1-9: must produce exactly one message");
+        assert!(
+            matches!(
+                &msgs[0],
+                mqk_broker_alpaca::AlpacaWsMessage::Authorization { status }
+                    if status == "unauthorized"
+            ),
+            "NT-V1-9: must decode to Authorization{{unauthorized}}; got: {:?}",
+            msgs[0]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // NT-1 — Trading stream contract: no welcome frame; auth is first msg sent
+    //
+    // Proves the corrected Alpaca trading-stream handshake:
+    //   connect → send auth → receive authorized → send listen → receive listening
+    // The mock server does NOT send any frame before receiving auth, which is
+    // the real /stream contract.  If the production code were still waiting for
+    // a welcome frame this test would hang until timeout then fail.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn trading_stream_nt1_no_welcome_frame_auth_is_first_client_message() {
+        let url = start_mock_ws_server(|mut ws| async move {
+            // Server waits for auth as the very first message — no welcome frame.
+            let _ = ws.next().await; // consume auth
+            ws.send(Message::Text(frame_authorized())).await.unwrap();
+            let _ = ws.next().await; // consume listen
+            ws.send(Message::Text(frame_listening())).await.unwrap();
+            ws.send(Message::Close(None)).await.ok();
+        })
+        .await;
+
+        let state = paper_alpaca_state();
+        let result = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
+        assert!(
+            result.is_ok(),
+            "NT-1: session must succeed when auth is the first client message (no welcome frame); got: {result:?}"
+        );
+        let cont = state.alpaca_ws_continuity().await;
+        assert!(
+            cont.is_continuity_proven(),
+            "NT-1: continuity must be Live after corrected handshake; got: {cont:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // NT-2 — Fail-closed: stream drops before auth ack
+    //
+    // Proves that if the server accepts the auth message but then drops the
+    // connection without sending an authorization response, the session returns
+    // Err and continuity stays unproven.  This covers the fail-closed contract
+    // for the auth ack stage (timeout and disconnect both leave continuity cold).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn trading_stream_nt2_stream_drop_before_auth_ack_is_fail_closed() {
+        let url = start_mock_ws_server(|mut ws| async move {
+            let _ = ws.next().await; // consume auth — then drop without responding
+            ws.send(Message::Close(None)).await.ok();
+        })
+        .await;
+
+        let state = paper_alpaca_state();
+        let result = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
+        assert!(
+            result.is_err(),
+            "NT-2: session must return Err when auth ack is never received (fail-closed)"
+        );
+        let cont = state.alpaca_ws_continuity().await;
+        assert!(
+            !cont.is_continuity_proven(),
+            "NT-2: continuity must remain unproven when auth ack is absent; got: {cont:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // NT-3 — Fail-closed: auth ok but stream drops before listen ack
+    //
+    // Proves that continuity is NOT promoted to Live at the auth-ack stage.
+    // Even after a successful authorization, if the listen acknowledgement is
+    // never received the session errors and continuity stays cold.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn trading_stream_nt3_continuity_not_promoted_at_auth_only_at_listen_ack() {
+        let url = start_mock_ws_server(|mut ws| async move {
+            let _ = ws.next().await; // consume auth
+            ws.send(Message::Text(frame_authorized())).await.unwrap();
+            let _ = ws.next().await; // consume listen — then drop without listen ack
+            ws.send(Message::Close(None)).await.ok();
+        })
+        .await;
+
+        let state = paper_alpaca_state();
+        let result = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
+        assert!(
+            result.is_err(),
+            "NT-3: session must return Err when listen ack is never received"
+        );
+        let cont = state.alpaca_ws_continuity().await;
+        assert!(
+            !cont.is_continuity_proven(),
+            "NT-3: continuity must NOT be promoted to Live before listen ack is confirmed; got: {cont:?}"
         );
     }
 }

@@ -144,7 +144,28 @@ impl std::fmt::Display for WsParseError {
 impl std::error::Error for WsParseError {}
 /// Parse raw websocket bytes into a list of typed `AlpacaWsMessage` values.
 ///
-/// Alpaca's stream sends JSON arrays; each element is decoded independently.
+/// Handles both wire formats sent by Alpaca WebSocket endpoints:
+///
+/// - **v2 array format** (market-data and newer endpoints): JSON arrays where
+///   each element carries a `"T"` discriminant field.
+///   ```text
+///   [{"T":"authorization","status":"authorized","action":"authenticate"}]
+///   [{"T":"listening","streams":["trade_updates"]}]
+///   [{"T":"trade_updates","data":{...}}]
+///   ```
+///
+/// - **v1 object format** (paper/live trading stream at `/stream`): a single
+///   JSON object with a `"stream"` discriminant and a nested `"data"` field.
+///   ```text
+///   {"stream":"authorization","data":{"action":"authenticate","status":"authorized"}}
+///   {"stream":"listening","data":{"streams":["trade_updates"]}}
+///   {"stream":"trade_updates","data":{...}}
+///   ```
+///
+/// v1 objects are normalized to the same internal element shape as v2 array
+/// elements before per-element decoding, so the rest of the pipeline is
+/// format-agnostic.
+///
 /// An element whose `T` field is not recognized becomes `Unknown`.  An
 /// element whose `T` is `"trade_updates"` but whose `data` field fails to
 /// deserialize as `AlpacaTradeUpdate` is also returned as `Unknown` (the
@@ -156,12 +177,25 @@ impl std::error::Error for WsParseError {}
 ///
 /// # Errors
 ///
-/// Returns `WsParseError::JsonError` only if the top-level bytes are not a
-/// valid JSON array (structural parse failure).  Per-element decode errors are
-/// represented as `Unknown` variants, not as errors.
+/// Returns `WsParseError::JsonError` only if the top-level bytes are not
+/// valid JSON or are neither an array nor an object.  Per-element decode
+/// errors are represented as `Unknown` variants, not as errors.
 pub fn parse_ws_message(raw: &[u8]) -> Result<Vec<AlpacaWsMessage>, WsParseError> {
-    let items: Vec<serde_json::Value> =
+    let value: serde_json::Value =
         serde_json::from_slice(raw).map_err(|e| WsParseError::JsonError(e.to_string()))?;
+    let items: Vec<serde_json::Value> = match value {
+        serde_json::Value::Array(arr) => arr,
+        obj @ serde_json::Value::Object(_) => {
+            // v1 trading stream: single JSON object with "stream" discriminant.
+            // Normalize to the element shape that per-item decode expects.
+            vec![v1_trading_obj_to_element(obj)]
+        }
+        _ => {
+            return Err(WsParseError::JsonError(
+                "expected JSON array or object at top level".to_string(),
+            ));
+        }
+    };
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let msg_type_opt = item.get("T").and_then(|v| v.as_str());
@@ -215,6 +249,57 @@ pub fn parse_ws_message(raw: &[u8]) -> Result<Vec<AlpacaWsMessage>, WsParseError
     }
     Ok(out)
 }
+/// Normalize one Alpaca v1 trading-stream object to the per-element shape that
+/// the `parse_ws_message` decode logic expects (`"T"` discriminant, flat fields).
+///
+/// v1 format:  `{"stream": "<type>", "data": { ...fields... }}`
+/// normalized: `{"T": "<type>", ...data fields hoisted to top level or kept
+///               under "data" depending on the variant...}`
+///
+/// This is a pure structural conversion — no semantic changes.
+fn v1_trading_obj_to_element(obj: serde_json::Value) -> serde_json::Value {
+    let stream = obj.get("stream").and_then(|v| v.as_str());
+    let data = obj.get("data");
+    match stream {
+        None => {
+            // No "stream" field → treat as protocol ping (same as no "T" in v2).
+            serde_json::json!({})
+        }
+        Some("authorization") => {
+            let status = data
+                .and_then(|d| d.get("status"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let action = data
+                .and_then(|d| d.get("action"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            serde_json::json!({"T": "authorization", "status": status, "action": action})
+        }
+        Some("listening") => {
+            let streams = data
+                .and_then(|d| d.get("streams"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Array(vec![]));
+            serde_json::json!({"T": "listening", "streams": streams})
+        }
+        Some("trade_updates") => {
+            let data_val = data.cloned().unwrap_or(serde_json::Value::Null);
+            serde_json::json!({"T": "trade_updates", "data": data_val})
+        }
+        Some("error") => {
+            let code = data.and_then(|d| d.get("code")).and_then(|v| v.as_i64()).unwrap_or(0);
+            let msg = data
+                .and_then(|d| d.get("msg"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            serde_json::json!({"T": "error", "code": code, "msg": msg})
+        }
+        Some(other) => serde_json::json!({"T": other}),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // build_inbound_batch_from_ws_update — BRK-01R
 // ---------------------------------------------------------------------------

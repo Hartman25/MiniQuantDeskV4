@@ -112,9 +112,18 @@ const GUI_PROBE_MANIFEST: &[&str] = &[
     "/api/v1/ops/operator-timeline",
     "/api/v1/ops/catalog",
     "/api/v1/ops/mode-change-guidance",
-    // --- Alerts and events ---
+    // --- Alerts and events (A3/A4 graduated from notProbed) ---
     "/api/v1/alerts/active",
+    "/api/v1/alerts/triage",
     "/api/v1/events/feed",
+    "/api/v1/incidents",
+    // --- System topology (A3 graduated from notProbed) ---
+    "/api/v1/system/topology",
+    // --- Execution replace/cancel chains (A4 graduated from notProbed) ---
+    "/api/v1/execution/replace-cancel-chains",
+    // --- A2: transport + market-data quality (mounted; graduating from NOT_MOUNTED) ---
+    "/api/v1/execution/transport",
+    "/api/v1/market-data/quality",
     // --- Paper journal ---
     "/api/v1/paper/journal",
     // --- Autonomous readiness ---
@@ -160,14 +169,10 @@ async fn rt01_all_gui_probed_routes_are_mounted() {
 async fn rt01_known_not_mounted_routes_stay_404_until_explicitly_promoted() {
     let router = make_router();
 
-    const NOT_MOUNTED: &[&str] = &[
-        "/api/v1/system/topology",
-        "/api/v1/execution/transport",
-        "/api/v1/incidents",
-        "/api/v1/execution/replace-cancel-chains",
-        "/api/v1/alerts/triage",
-        "/api/v1/market-data/quality",
-    ];
+    // A3/A4: system/topology, incidents, replace-cancel-chains, alerts/triage graduated.
+    // A2: execution/transport, market-data/quality graduated.
+    // NOT_MOUNTED is now empty — all previously-deferred GUI probe routes are mounted.
+    const NOT_MOUNTED: &[&str] = &[];
 
     for &uri in NOT_MOUNTED {
         let status = call_status(router.clone(), uri).await;
