@@ -204,6 +204,7 @@ function Invoke-JsonPost {
 
         $status = $null
         $bodyText = $null
+        $parsedBody = $null
 
         if ($_.Exception.Response) {
             try {
@@ -216,11 +217,26 @@ function Invoke-JsonPost {
             } catch {}
         }
 
-        Write-Host "HTTP POST failed: $status $bodyText" -ForegroundColor Yellow
+        if (-not [string]::IsNullOrWhiteSpace($bodyText)) {
+            try {
+                $parsedBody = $bodyText | ConvertFrom-Json -Depth 20
+            } catch {
+                $parsedBody = $null
+            }
+        }
+
+        Write-Host "HTTP POST failed: $status" -ForegroundColor Yellow
+        if ($parsedBody -ne $null) {
+            Write-Host ($parsedBody | ConvertTo-Json -Depth 20) -ForegroundColor Yellow
+        } elseif (-not [string]::IsNullOrWhiteSpace($bodyText)) {
+            Write-Host $bodyText -ForegroundColor Yellow
+        }
+
         return [pscustomobject]@{
-            __error = $true
-            status  = $status
-            body    = $bodyText
+            __error    = $true
+            status     = $status
+            body       = $bodyText
+            parsedBody = $parsedBody
         }
     }
 }
@@ -284,6 +300,7 @@ if (-not $SkipDotEnvLoad) {
         Write-Host 'No .env.local found; using existing process environment only.' -ForegroundColor Yellow
     }
 }
+
 $dbUrl = "postgres://{0}:{1}@localhost:{2}/{3}" -f $DbUser, $DbPassword, $PostgresHostPort, $DbName
 $healthUri = "http://$DaemonAddr/v1/health"
 $statusUri = "http://$DaemonAddr/v1/status"
@@ -420,7 +437,23 @@ $startFailed = $startResp.PSObject.Properties.Name.Contains('__error')
 
 if ($startFailed) {
     Write-Host "Run start was refused by the daemon control plane." -ForegroundColor Yellow
-    Write-Host "This is only acceptable when the refusal is truthful (for example WS continuity not yet proven)." -ForegroundColor Yellow
+
+    if ($startResp.PSObject.Properties.Name.Contains('status')) {
+        Write-Host ("Start refusal HTTP status: {0}" -f $startResp.status) -ForegroundColor Yellow
+    }
+
+    if ($startResp.PSObject.Properties.Name.Contains('parsedBody') -and $null -ne $startResp.parsedBody) {
+        Write-Host "Start refusal body (parsed):" -ForegroundColor Yellow
+        Write-Host ($startResp.parsedBody | ConvertTo-Json -Depth 20) -ForegroundColor Yellow
+    } elseif ($startResp.PSObject.Properties.Name.Contains('body') -and -not [string]::IsNullOrWhiteSpace($startResp.body)) {
+        Write-Host "Start refusal body (raw):" -ForegroundColor Yellow
+        Write-Host $startResp.body -ForegroundColor Yellow
+    }
+
+    Write-Host "Immediate post-refusal autonomous readiness snapshot:" -ForegroundColor Yellow
+    Invoke-JsonGet -Uri $autonomousUri -AllowFailure | Out-Null
+
+    Write-Host "This is only acceptable when the refusal is truthful (for example outside session window, WS continuity not yet proven, or another real gate)." -ForegroundColor Yellow
     if (-not $AllowStartRefusal) {
         throw "Daemon run start failed. Re-run with -AllowStartRefusal only if you are intentionally auditing truthful fail-closed behavior."
     }
@@ -483,6 +516,7 @@ Invoke-JsonGet -Uri $statusUri -AllowFailure | Out-Null
 Write-Step "Reality-test summary"
 Write-Host "Run ID: $runId"
 Write-Host "Daemon log: $daemonLog"
+Write-Host "Daemon err log: $daemonErrLog"
 Write-Host "DB URL: $dbUrl"
 Write-Host "Canonical path: paper+alpaca via daemon control plane"
 Write-Host "Strategy fleet: $StrategyId"
@@ -491,7 +525,8 @@ Write-Host "`nManual follow-up checks:" -ForegroundColor Cyan
 Write-Host "1. Open daemon log and inspect WS continuity establishment, crash, restart, and lease behavior."
 Write-Host "2. Verify /api/v1/autonomous/readiness stayed truthful before and after crash/restart."
 Write-Host "3. Verify no synthetic success was reported if run/start was refused."
-Write-Host "4. If a run did start, verify post-restart runtime truth, not just HTTP liveness."
+Write-Host "4. If run/start was refused, inspect the printed refusal body and the immediate post-refusal readiness snapshot."
+Write-Host "5. If a run did start, verify post-restart runtime truth, not just HTTP liveness."
 
 if (-not $KeepRepo) {
     Write-Host "`nRepo kept at: $RepoRoot" -ForegroundColor DarkYellow
