@@ -121,6 +121,40 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             (None, None)
         };
 
+    // C1: Live-trust truth surface.
+    //
+    // Evaluate parity evidence using the same evaluator as the dedicated
+    // /api/v1/system/parity-evidence route.  Surface the result on the primary
+    // status surface so operators cannot observe deployment_start_allowed=true
+    // on a live-shadow or live-capital deployment without also seeing that
+    // live_trust_complete=false in all current builds.
+    //
+    // live_trust_complete is non-null only when evidence is Present (incomplete
+    // or complete).  null elsewhere is not a positive trust claim.
+    let parity_outcome = evaluate_parity_evidence_guarded();
+    let parity_evidence_state = match &parity_outcome {
+        ParityEvidenceOutcome::NotConfigured => "not_configured",
+        ParityEvidenceOutcome::Absent => "absent",
+        ParityEvidenceOutcome::Invalid { .. } => "invalid",
+        ParityEvidenceOutcome::Present {
+            live_trust_complete: true,
+            ..
+        } => "complete",
+        ParityEvidenceOutcome::Present {
+            live_trust_complete: false,
+            ..
+        } => "incomplete",
+        ParityEvidenceOutcome::Unavailable { .. } => "unavailable",
+    }
+    .to_string();
+    let live_trust_complete = match &parity_outcome {
+        ParityEvidenceOutcome::Present {
+            live_trust_complete,
+            ..
+        } => Some(*live_trust_complete),
+        _ => None,
+    };
+
     (
         StatusCode::OK,
         Json(SystemStatusResponse {
@@ -155,6 +189,18 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             fault_signals: build_fault_signals(&status, &reconcile, risk_blocked),
             autonomous_signal_count,
             autonomous_signal_limit_hit,
+            // B8: Canonical asset-class scope.  Hardcoded constant — not derived
+            // from runtime state.  Only equities are wired end-to-end on the
+            // current canonical path; this field makes that boundary explicit and
+            // machine-readable so operators and strategy tooling cannot mistake
+            // the absence of non-equity support for active capability.
+            asset_class_scope: "equity_only".to_string(),
+            // C1: Live-trust surface.  Derived from parity evidence evaluator.
+            // parity_evidence_state distinguishes "incomplete" (evidence present
+            // but live_trust_complete=false) from "complete" (trust proven) so
+            // operators see the explicit trust ceiling on the primary surface.
+            parity_evidence_state,
+            live_trust_complete,
         }),
     )
         .into_response()
@@ -1108,4 +1154,144 @@ pub(crate) async fn system_parity_evidence(State(_st): State<Arc<AppState>>) -> 
     };
 
     (StatusCode::OK, Json(response)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/topology (A3)
+// ---------------------------------------------------------------------------
+
+/// Surface honest local-daemon service topology.
+///
+/// Derived entirely from daemon in-memory state — no DB query, no broker call.
+/// `truth_state` is always `"active"`.  Represents single-process local truth
+/// only; no cluster or distributed topology is claimed.
+pub(crate) async fn system_topology(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let has_db = st.db.is_some();
+    let exec_snap_present = st.execution_snapshot.read().await.is_some();
+    let ws = st.alpaca_ws_continuity().await;
+    let source = st.strategy_market_data_source();
+    let now_utc = Utc::now().to_rfc3339();
+
+    let mut services: Vec<SystemTopologyServiceRow> = Vec::new();
+
+    // daemon.runtime
+    services.push(SystemTopologyServiceRow {
+        service_key: "daemon.runtime".to_string(),
+        label: "MQK Daemon".to_string(),
+        layer: "runtime".to_string(),
+        health: "ok".to_string(),
+        role: "Execution orchestrator; owns all execution gates and state transitions".to_string(),
+        dependency_keys: vec![],
+        failure_impact: "Total execution halt; all gates fail closed".to_string(),
+        last_heartbeat: Some(now_utc.clone()),
+        latency_ms: None,
+        notes: format!("build={}", st.build.version),
+    });
+
+    // postgres
+    let db_health = if has_db { "ok" } else { "not_configured" };
+    services.push(SystemTopologyServiceRow {
+        service_key: "postgres".to_string(),
+        label: "PostgreSQL".to_string(),
+        layer: "data".to_string(),
+        health: db_health.to_string(),
+        role: "Durable state: runs, outbox, broker_order_map, audit_events".to_string(),
+        dependency_keys: vec!["daemon.runtime".to_string()],
+        failure_impact: "No durable run state; DB-backed gates fail closed (503)".to_string(),
+        last_heartbeat: None,
+        latency_ms: None,
+        notes: if has_db {
+            "pool configured".to_string()
+        } else {
+            "no pool — DB-backed routes return 503 or not_wired".to_string()
+        },
+    });
+
+    // execution_loop
+    let exec_health = if exec_snap_present { "ok" } else { "not_started" };
+    services.push(SystemTopologyServiceRow {
+        service_key: "execution_loop".to_string(),
+        label: "Execution Loop".to_string(),
+        layer: "execution".to_string(),
+        health: exec_health.to_string(),
+        role: "Tick-driven OMS; claims outbox, dispatches to broker, applies inbox fills"
+            .to_string(),
+        dependency_keys: vec!["daemon.runtime".to_string(), "postgres".to_string()],
+        failure_impact: "No order dispatch; fills and outbox processing halted".to_string(),
+        last_heartbeat: None,
+        latency_ms: None,
+        notes: if exec_snap_present {
+            "snapshot present".to_string()
+        } else {
+            "no active run; start execution loop to activate".to_string()
+        },
+    });
+
+    // broker.adapter
+    let (broker_health, broker_notes) = match &ws {
+        AlpacaWsContinuityState::Live { .. } => (
+            "ok",
+            "WS continuity: live".to_string(),
+        ),
+        AlpacaWsContinuityState::ColdStartUnproven => (
+            "warning",
+            "WS continuity: cold_start_unproven; signal ingestion blocked".to_string(),
+        ),
+        AlpacaWsContinuityState::GapDetected { detail, .. } => (
+            "critical",
+            format!("WS continuity: gap_detected — {detail}"),
+        ),
+        AlpacaWsContinuityState::NotApplicable => (
+            "unknown",
+            "broker adapter not wired (paper or null adapter)".to_string(),
+        ),
+    };
+    services.push(SystemTopologyServiceRow {
+        service_key: "broker.adapter".to_string(),
+        label: "Broker Adapter".to_string(),
+        layer: "broker".to_string(),
+        health: broker_health.to_string(),
+        role: "Translates OMS intents to broker API calls; normalises fill events".to_string(),
+        dependency_keys: vec!["daemon.runtime".to_string()],
+        failure_impact: "No order submission or fill delivery to the OMS inbox".to_string(),
+        last_heartbeat: None,
+        latency_ms: None,
+        notes: broker_notes,
+    });
+
+    // strategy.data_source
+    let (md_health, md_notes) = match source {
+        StrategyMarketDataSource::NotConfigured => (
+            "not_configured",
+            "no market-data source wired; strategy signals cannot be admitted".to_string(),
+        ),
+        StrategyMarketDataSource::ExternalSignalIngestion => (
+            "ok",
+            "signal_ingestion_ready; POST /api/v1/strategy/signal admits signals".to_string(),
+        ),
+    };
+    services.push(SystemTopologyServiceRow {
+        service_key: "strategy.data_source".to_string(),
+        label: "Strategy Market-Data Source".to_string(),
+        layer: "strategy".to_string(),
+        health: md_health.to_string(),
+        role: "Market-data ingestion path driving strategy signal computation".to_string(),
+        dependency_keys: vec!["daemon.runtime".to_string()],
+        failure_impact: "No strategy signals admitted; execution loop remains idle".to_string(),
+        last_heartbeat: None,
+        latency_ms: None,
+        notes: md_notes,
+    });
+
+    (
+        StatusCode::OK,
+        Json(SystemTopologyResponse {
+            canonical_route: "/api/v1/system/topology".to_string(),
+            truth_state: "active".to_string(),
+            backend: "daemon.runtime_state".to_string(),
+            updated_at: now_utc,
+            services,
+        }),
+    )
+        .into_response()
 }

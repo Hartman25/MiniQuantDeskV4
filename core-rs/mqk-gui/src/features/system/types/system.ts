@@ -66,6 +66,26 @@ export interface SystemStatus {
    * Null when not applicable. True means Gate 1d is blocking further signals.
    */
   autonomous_signal_limit_hit: boolean | null;
+  /**
+   * B8: Canonical asset-class scope for this execution path.
+   * Always "equity_only". Options, futures, crypto, and FX are not wired.
+   * Strategy signals carrying a non-equity asset_class are rejected at Gate 0.
+   */
+  asset_class_scope: string;
+  /**
+   * C1: Parity evidence state derived from parity_evidence.json evaluation.
+   * "not_configured" | "absent" | "invalid" | "incomplete" | "complete" | "unavailable".
+   * "incomplete" means evidence is present but live_trust_complete=false (all current builds).
+   * "complete" is unreachable in current builds — explicit ceiling.
+   * Null is never a positive trust claim.
+   */
+  parity_evidence_state: string;
+  /**
+   * C1: Whether live-trust is complete enough for live-capital execution.
+   * Non-null only when parity_evidence_state is "incomplete" or "complete".
+   * Always false in current builds. Null elsewhere is not a positive trust claim.
+   */
+  live_trust_complete: boolean | null;
 }
 
 export interface PreflightStatus {
@@ -209,6 +229,11 @@ export const DEFAULT_STATUS: SystemStatus = {
   // PT-AUTO-03: null = not applicable (not paper+alpaca); populated from daemon response.
   autonomous_signal_count: null,
   autonomous_signal_limit_hit: null,
+  // B8: fail-closed default; daemon always returns "equity_only".
+  asset_class_scope: "equity_only",
+  // C1: fail-closed defaults. "not_configured" when daemon is unreachable; null trust.
+  parity_evidence_state: "not_configured",
+  live_trust_complete: null,
 };
 
 export const DEFAULT_PREFLIGHT: PreflightStatus = {
