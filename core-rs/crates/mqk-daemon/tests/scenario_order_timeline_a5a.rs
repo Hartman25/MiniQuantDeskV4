@@ -62,7 +62,10 @@ async fn tl01_route_mounted_returns_200_with_wrapper() {
     assert_eq!(status, StatusCode::OK, "should always return 200");
     let v = parse_json(body);
     // Wrapper shape contract
-    assert!(v.get("canonical_route").is_some(), "canonical_route field required");
+    assert!(
+        v.get("canonical_route").is_some(),
+        "canonical_route field required"
+    );
     assert!(v.get("truth_state").is_some(), "truth_state field required");
     assert!(v.get("backend").is_some(), "backend field required");
     assert!(v.get("order_id").is_some(), "order_id field required");
@@ -83,7 +86,9 @@ async fn tl02_canonical_route_includes_order_id() {
         .unwrap();
     let (_, body) = call(router, req).await;
     let v = parse_json(body);
-    let route = v["canonical_route"].as_str().expect("canonical_route is a string");
+    let route = v["canonical_route"]
+        .as_str()
+        .expect("canonical_route is a string");
     assert!(
         route.contains("my-order-xyz"),
         "canonical_route must include the resolved order_id; got: {route}"
@@ -115,7 +120,10 @@ async fn tl03_no_db_truth_state_without_db_pool() {
         "backend must be unavailable when no_db"
     );
     let rows = v["rows"].as_array().expect("rows is array");
-    assert!(rows.is_empty(), "rows must be empty when truth_state is no_db");
+    assert!(
+        rows.is_empty(),
+        "rows must be empty when truth_state is no_db"
+    );
 }
 
 // ---------------------------------------------------------------------------

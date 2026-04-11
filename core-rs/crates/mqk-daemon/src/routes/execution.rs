@@ -1102,7 +1102,9 @@ pub(crate) async fn execution_order_timeline(
             .cloned()
     });
 
-    let broker_order_id = order_in_snapshot.as_ref().and_then(|o| o.broker_order_id.clone());
+    let broker_order_id = order_in_snapshot
+        .as_ref()
+        .and_then(|o| o.broker_order_id.clone());
     let symbol = order_in_snapshot.as_ref().map(|o| o.symbol.clone());
     let requested_qty = order_in_snapshot.as_ref().map(|o| o.total_qty);
     let filled_qty = order_in_snapshot.as_ref().map(|o| o.filled_qty);
@@ -1177,7 +1179,9 @@ pub(crate) async fn execution_order_timeline(
         };
 
     // Step 5: Map fill rows to timeline rows (oldest-first is already provided by the DB query).
-    let last_event_at = fill_rows.last().map(|r| r.fill_received_at_utc.to_rfc3339());
+    let last_event_at = fill_rows
+        .last()
+        .map(|r| r.fill_received_at_utc.to_rfc3339());
 
     let rows: Vec<OrderTimelineRow> = fill_rows
         .into_iter()
@@ -1270,7 +1274,9 @@ pub(crate) async fn execution_order_trace(
             .cloned()
     });
 
-    let broker_order_id = order_in_snapshot.as_ref().and_then(|o| o.broker_order_id.clone());
+    let broker_order_id = order_in_snapshot
+        .as_ref()
+        .and_then(|o| o.broker_order_id.clone());
     let symbol = order_in_snapshot.as_ref().map(|o| o.symbol.clone());
     let requested_qty = order_in_snapshot.as_ref().map(|o| o.total_qty);
     let filled_qty = order_in_snapshot.as_ref().map(|o| o.filled_qty);
@@ -1362,7 +1368,9 @@ pub(crate) async fn execution_order_trace(
         };
 
     // Step 5: Map fill rows to trace rows (oldest-first provided by DB query).
-    let last_event_at = fill_rows.last().map(|r| r.fill_received_at_utc.to_rfc3339());
+    let last_event_at = fill_rows
+        .last()
+        .map(|r| r.fill_received_at_utc.to_rfc3339());
 
     let rows: Vec<OrderTraceRow> = fill_rows
         .into_iter()
@@ -1683,8 +1691,14 @@ pub(crate) async fn execution_order_chart(
 // ---------------------------------------------------------------------------
 
 /// Lanes that are always unproven at this tier.
-const UNPROVEN_CAUSALITY_LANES: &[&str] =
-    &["signal", "intent", "broker_ack", "risk", "reconcile", "portfolio"];
+const UNPROVEN_CAUSALITY_LANES: &[&str] = &[
+    "signal",
+    "intent",
+    "broker_ack",
+    "risk",
+    "reconcile",
+    "portfolio",
+];
 
 pub(crate) async fn execution_order_causality(
     State(st): State<Arc<AppState>>,
@@ -1784,7 +1798,7 @@ pub(crate) async fn execution_order_causality(
         fill_rows
             .iter()
             .map(|r| {
-                let ts_ms = r.fill_received_at_utc.timestamp_millis();
+                let ts_ms = r.fill_received_at_utc.timestamp_millis(); // allow: ops-metadata
                 let elapsed = prev_ts_ms.map(|prev| ts_ms - prev);
                 prev_ts_ms = Some(ts_ms);
                 OrderCausalityCausalNode {
@@ -1816,11 +1830,7 @@ pub(crate) async fn execution_order_causality(
             vec!["execution_fill".to_string()],
         )
     } else if order_in_snapshot.is_some() {
-        (
-            "no_fills_yet",
-            "postgres.fill_quality_telemetry",
-            vec![],
-        )
+        ("no_fills_yet", "postgres.fill_quality_telemetry", vec![])
     } else {
         ("no_order", "unavailable", vec![])
     };
@@ -1840,6 +1850,85 @@ pub(crate) async fn execution_order_causality(
                 are joinable by internal_order_id. Signal, intent, broker ACK, risk, \
                 portfolio, and reconcile lanes are not linked in the current schema."
                 .to_string(),
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/execution/replace-cancel-chains (A4)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/execution/protection-status (B4)
+// ---------------------------------------------------------------------------
+
+/// Protective stop / bracket order status surface — explicitly not wired.
+///
+/// B4 closure: stop and bracket orders are NOT supported on the canonical
+/// paper+alpaca execution path.  This route returns an honest `"not_wired"`
+/// contract rather than a 404 or a fabricated "protected" status, so operator
+/// tooling and runbooks can explicitly distinguish "protection absent" from
+/// "route unavailable".
+///
+/// # Why this matters
+///
+/// The submit validator explicitly rejects `order_type = "stop"` (and
+/// `"trailing_stop"`).  No OCO / OTOCO bracket types are passed through the
+/// Alpaca broker adapter.  The `KillSwitchType::MissingProtectiveStop`
+/// kill-switch policy is defined in the risk config but cannot be
+/// operator-satisfied until stop order wiring is implemented (B5+).
+///
+/// Operators relying on this surface will see `truth_state = "not_wired"` until
+/// a future patch promotes it to `"broker_backed"` with proof tests.
+pub(crate) async fn execution_protection_status(_: State<Arc<AppState>>) -> impl IntoResponse {
+    use crate::api_types::ProtectionStatusResponse;
+
+    (
+        StatusCode::OK,
+        Json(ProtectionStatusResponse {
+            canonical_route: "/api/v1/execution/protection-status".to_string(),
+            truth_state: "not_wired".to_string(),
+            stop_order_wiring: "not_supported".to_string(),
+            bracket_order_wiring: "not_supported".to_string(),
+            note: "Protective stop and bracket orders are not supported on the current \
+                   paper+alpaca canonical execution path.  Submit validation explicitly \
+                   rejects order_type=\"stop\".  No OCO / OTOCO bracket types are wired \
+                   to the Alpaca broker adapter.  The KillSwitchType::MissingProtectiveStop \
+                   kill-switch policy is defined in the risk config but cannot be satisfied \
+                   until stop order wiring is implemented (B5+).  This surface transitions to \
+                   truth_state=\"broker_backed\" only when a future patch proves end-to-end \
+                   broker stop / bracket order submission."
+                .to_string(),
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/execution/replace-cancel-chains (A4)
+// ---------------------------------------------------------------------------
+
+/// Replace/cancel chain surface — mounted but not wired.
+///
+/// No chain-lineage provenance exists in the current OMS implementation.
+/// Returns an explicit `"not_wired"` wrapper rather than 404 so the GUI can
+/// surface honest unavailable truth instead of treating the missing route as
+/// a backend error.
+pub(crate) async fn execution_replace_cancel_chains(_: State<Arc<AppState>>) -> impl IntoResponse {
+    use crate::api_types::ReplaceCancelChainsResponse;
+
+    (
+        StatusCode::OK,
+        Json(ReplaceCancelChainsResponse {
+            canonical_route: "/api/v1/execution/replace-cancel-chains".to_string(),
+            truth_state: "not_wired".to_string(),
+            backend: "none".to_string(),
+            note: "No replace/cancel chain lineage is tracked in the current OMS. \
+                   Empty chains must not be interpreted as absence of historical \
+                   replace or cancel operations."
+                .to_string(),
+            chains: vec![],
         }),
     )
         .into_response()
@@ -1876,87 +1965,4 @@ mod tests {
         assert_eq!(lifecycle_stage_from_outbox_status("MYSTERY"), "unknown");
         assert_eq!(lifecycle_stage_from_outbox_status(""), "unknown");
     }
-}
-
-// ---------------------------------------------------------------------------
-// GET /api/v1/execution/replace-cancel-chains (A4)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// GET /api/v1/execution/protection-status (B4)
-// ---------------------------------------------------------------------------
-
-/// Protective stop / bracket order status surface — explicitly not wired.
-///
-/// B4 closure: stop and bracket orders are NOT supported on the canonical
-/// paper+alpaca execution path.  This route returns an honest `"not_wired"`
-/// contract rather than a 404 or a fabricated "protected" status, so operator
-/// tooling and runbooks can explicitly distinguish "protection absent" from
-/// "route unavailable".
-///
-/// # Why this matters
-///
-/// The submit validator explicitly rejects `order_type = "stop"` (and
-/// `"trailing_stop"`).  No OCO / OTOCO bracket types are passed through the
-/// Alpaca broker adapter.  The `KillSwitchType::MissingProtectiveStop`
-/// kill-switch policy is defined in the risk config but cannot be
-/// operator-satisfied until stop order wiring is implemented (B5+).
-///
-/// Operators relying on this surface will see `truth_state = "not_wired"` until
-/// a future patch promotes it to `"broker_backed"` with proof tests.
-pub(crate) async fn execution_protection_status(
-    _: State<Arc<AppState>>,
-) -> impl IntoResponse {
-    use crate::api_types::ProtectionStatusResponse;
-
-    (
-        StatusCode::OK,
-        Json(ProtectionStatusResponse {
-            canonical_route: "/api/v1/execution/protection-status".to_string(),
-            truth_state: "not_wired".to_string(),
-            stop_order_wiring: "not_supported".to_string(),
-            bracket_order_wiring: "not_supported".to_string(),
-            note: "Protective stop and bracket orders are not supported on the current \
-                   paper+alpaca canonical execution path.  Submit validation explicitly \
-                   rejects order_type=\"stop\".  No OCO / OTOCO bracket types are wired \
-                   to the Alpaca broker adapter.  The KillSwitchType::MissingProtectiveStop \
-                   kill-switch policy is defined in the risk config but cannot be satisfied \
-                   until stop order wiring is implemented (B5+).  This surface transitions to \
-                   truth_state=\"broker_backed\" only when a future patch proves end-to-end \
-                   broker stop / bracket order submission."
-                .to_string(),
-        }),
-    )
-        .into_response()
-}
-
-// ---------------------------------------------------------------------------
-// GET /api/v1/execution/replace-cancel-chains (A4)
-// ---------------------------------------------------------------------------
-
-/// Replace/cancel chain surface — mounted but not wired.
-///
-/// No chain-lineage provenance exists in the current OMS implementation.
-/// Returns an explicit `"not_wired"` wrapper rather than 404 so the GUI can
-/// surface honest unavailable truth instead of treating the missing route as
-/// a backend error.
-pub(crate) async fn execution_replace_cancel_chains(
-    _: State<Arc<AppState>>,
-) -> impl IntoResponse {
-    use crate::api_types::ReplaceCancelChainsResponse;
-
-    (
-        StatusCode::OK,
-        Json(ReplaceCancelChainsResponse {
-            canonical_route: "/api/v1/execution/replace-cancel-chains".to_string(),
-            truth_state: "not_wired".to_string(),
-            backend: "none".to_string(),
-            note: "No replace/cancel chain lineage is tracked in the current OMS. \
-                   Empty chains must not be interpreted as absence of historical \
-                   replace or cancel operations."
-                .to_string(),
-            chains: vec![],
-        }),
-    )
-        .into_response()
 }

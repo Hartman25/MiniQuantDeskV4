@@ -87,7 +87,10 @@ async fn rp01_route_mounted_returns_200_with_wrapper() {
         "current_frame_index",
         "frames",
     ] {
-        assert!(v.get(field).is_some(), "wrapper must contain field '{field}'");
+        assert!(
+            v.get(field).is_some(),
+            "wrapper must contain field '{field}'"
+        );
     }
     assert!(v["frames"].is_array(), "frames must be an array");
 }
@@ -105,7 +108,9 @@ async fn rp02_canonical_route_includes_order_id() {
         .unwrap();
     let (_, body) = call(router, req).await;
     let v = parse_json(body);
-    let route = v["canonical_route"].as_str().expect("canonical_route is a string");
+    let route = v["canonical_route"]
+        .as_str()
+        .expect("canonical_route is a string");
     assert!(
         route.contains("my-order-xyz"),
         "canonical_route must include the resolved order_id; got: {route}"
@@ -141,7 +146,10 @@ async fn rp03_no_db_truth_state_without_db_pool() {
         "backend must be unavailable when no_db"
     );
     let frames = v["frames"].as_array().expect("frames is array");
-    assert!(frames.is_empty(), "frames must be empty when truth_state is no_db");
+    assert!(
+        frames.is_empty(),
+        "frames must be empty when truth_state is no_db"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -204,9 +212,18 @@ async fn rp06_replay_is_sibling_of_trace_and_timeline() {
     let order_id = "sibling-order-001";
 
     let routes_to_check = [
-        (format!("/api/v1/execution/orders/{order_id}/timeline"), "timeline"),
-        (format!("/api/v1/execution/orders/{order_id}/trace"), "trace"),
-        (format!("/api/v1/execution/orders/{order_id}/replay"), "replay"),
+        (
+            format!("/api/v1/execution/orders/{order_id}/timeline"),
+            "timeline",
+        ),
+        (
+            format!("/api/v1/execution/orders/{order_id}/trace"),
+            "trace",
+        ),
+        (
+            format!("/api/v1/execution/orders/{order_id}/replay"),
+            "replay",
+        ),
     ];
 
     for (uri, expected_suffix) in &routes_to_check {

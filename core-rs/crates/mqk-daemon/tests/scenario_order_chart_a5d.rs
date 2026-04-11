@@ -66,8 +66,17 @@ async fn ch01_route_mounted_returns_200_with_wrapper() {
     let (status, body) = call(router, req).await;
     assert_eq!(status, StatusCode::OK, "should always return 200");
     let v = parse_json(body);
-    for field in &["canonical_route", "truth_state", "backend", "order_id", "comment"] {
-        assert!(v.get(field).is_some(), "wrapper must contain field '{field}'");
+    for field in &[
+        "canonical_route",
+        "truth_state",
+        "backend",
+        "order_id",
+        "comment",
+    ] {
+        assert!(
+            v.get(field).is_some(),
+            "wrapper must contain field '{field}'"
+        );
     }
 }
 
@@ -84,7 +93,9 @@ async fn ch02_canonical_route_includes_order_id_and_suffix() {
         .unwrap();
     let (_, body) = call(router, req).await;
     let v = parse_json(body);
-    let route = v["canonical_route"].as_str().expect("canonical_route is a string");
+    let route = v["canonical_route"]
+        .as_str()
+        .expect("canonical_route is a string");
     assert!(
         route.contains("my-chart-order"),
         "canonical_route must include the order_id; got: {route}"
@@ -156,7 +167,10 @@ async fn ch05_chart_is_sibling_of_replay_trace_timeline() {
             format!("/api/v1/execution/orders/{order_id}/timeline"),
             "timeline",
         ),
-        (format!("/api/v1/execution/orders/{order_id}/trace"), "trace"),
+        (
+            format!("/api/v1/execution/orders/{order_id}/trace"),
+            "trace",
+        ),
         (
             format!("/api/v1/execution/orders/{order_id}/replay"),
             "replay",
@@ -218,5 +232,8 @@ async fn ch07_comment_is_non_empty() {
     let (_, body) = call(router, req).await;
     let v = parse_json(body);
     let comment = v["comment"].as_str().unwrap_or("");
-    assert!(!comment.is_empty(), "comment must be non-empty for operator clarity");
+    assert!(
+        !comment.is_empty(),
+        "comment must be non-empty for operator clarity"
+    );
 }

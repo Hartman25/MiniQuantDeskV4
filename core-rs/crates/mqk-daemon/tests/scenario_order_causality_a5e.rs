@@ -84,11 +84,20 @@ async fn ca01_route_mounted_returns_200_with_wrapper() {
         "nodes",
         "comment",
     ] {
-        assert!(v.get(field).is_some(), "wrapper must contain field '{field}'");
+        assert!(
+            v.get(field).is_some(),
+            "wrapper must contain field '{field}'"
+        );
     }
     assert!(v["nodes"].is_array(), "nodes must be an array");
-    assert!(v["proven_lanes"].is_array(), "proven_lanes must be an array");
-    assert!(v["unproven_lanes"].is_array(), "unproven_lanes must be an array");
+    assert!(
+        v["proven_lanes"].is_array(),
+        "proven_lanes must be an array"
+    );
+    assert!(
+        v["unproven_lanes"].is_array(),
+        "unproven_lanes must be an array"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +113,9 @@ async fn ca02_canonical_route_includes_order_id_and_suffix() {
         .unwrap();
     let (_, body) = call(router, req).await;
     let v = parse_json(body);
-    let route = v["canonical_route"].as_str().expect("canonical_route is a string");
+    let route = v["canonical_route"]
+        .as_str()
+        .expect("canonical_route is a string");
     assert!(
         route.contains("my-causal-order"),
         "canonical_route must include the order_id; got: {route}"
@@ -140,7 +151,10 @@ async fn ca03_no_db_truth_state_without_db_pool() {
         "backend must be unavailable when no_db"
     );
     let nodes = v["nodes"].as_array().expect("nodes is array");
-    assert!(nodes.is_empty(), "nodes must be empty when truth_state is no_db");
+    assert!(
+        nodes.is_empty(),
+        "nodes must be empty when truth_state is no_db"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -156,12 +170,18 @@ async fn ca04_unproven_lanes_always_present() {
         .unwrap();
     let (_, body) = call(router, req).await;
     let v = parse_json(body);
-    let unproven = v["unproven_lanes"].as_array().expect("unproven_lanes is array");
-    let unproven_strs: Vec<&str> = unproven
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    for expected in &["signal", "intent", "broker_ack", "risk", "reconcile", "portfolio"] {
+    let unproven = v["unproven_lanes"]
+        .as_array()
+        .expect("unproven_lanes is array");
+    let unproven_strs: Vec<&str> = unproven.iter().filter_map(|v| v.as_str()).collect();
+    for expected in &[
+        "signal",
+        "intent",
+        "broker_ack",
+        "risk",
+        "reconcile",
+        "portfolio",
+    ] {
         assert!(
             unproven_strs.contains(expected),
             "unproven_lanes must include '{expected}'; got: {unproven_strs:?}"
@@ -262,6 +282,12 @@ async fn ca08_no_db_truth_state_is_not_active_or_partial() {
     let (_, body) = call(router, req).await;
     let v = parse_json(body);
     let ts = v["truth_state"].as_str().unwrap_or("");
-    assert_ne!(ts, "active", "causality never reports truth_state=active; it is always partial or narrower");
-    assert_ne!(ts, "partial", "without DB partial causality is impossible; must be no_db");
+    assert_ne!(
+        ts, "active",
+        "causality never reports truth_state=active; it is always partial or narrower"
+    );
+    assert_ne!(
+        ts, "partial",
+        "without DB partial causality is impossible; must be no_db"
+    );
 }
