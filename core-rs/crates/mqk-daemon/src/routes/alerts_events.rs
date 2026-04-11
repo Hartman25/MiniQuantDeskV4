@@ -562,12 +562,23 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
     let ws_gap_summary;
     match &ws {
         AlpacaWsContinuityState::ColdStartUnproven => {
-            ws_cold_summary = "Alpaca WS continuity unproven (cold start); signal ingestion blocked.".to_string();
-            extra_signals.push(("paper.ws_continuity.cold_start_unproven", "warning", "execution", ws_cold_summary.clone()));
+            ws_cold_summary =
+                "Alpaca WS continuity unproven (cold start); signal ingestion blocked.".to_string();
+            extra_signals.push((
+                "paper.ws_continuity.cold_start_unproven",
+                "warning",
+                "execution",
+                ws_cold_summary.clone(),
+            ));
         }
         AlpacaWsContinuityState::GapDetected { detail, .. } => {
             ws_gap_summary = format!("Alpaca WS gap detected: {detail}");
-            extra_signals.push(("paper.ws_continuity.gap_detected", "critical", "execution", ws_gap_summary.clone()));
+            extra_signals.push((
+                "paper.ws_continuity.gap_detected",
+                "critical",
+                "execution",
+                ws_gap_summary.clone(),
+            ));
         }
         _ => {}
     }
@@ -630,10 +641,6 @@ fn domain_from_class(class: &str) -> &'static str {
         "risk"
     } else if class.starts_with("paper.ws") || class.starts_with("broker") {
         "execution"
-    } else if class.starts_with("autonomous") {
-        "system"
-    } else if class.starts_with("market_data") {
-        "system"
     } else {
         "system"
     }

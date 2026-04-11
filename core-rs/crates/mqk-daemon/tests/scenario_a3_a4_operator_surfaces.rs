@@ -49,8 +49,7 @@ async fn get(router: axum::Router, path: &str) -> (StatusCode, serde_json::Value
         .await
         .expect("body collect")
         .to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&body).expect("body must be valid JSON");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body must be valid JSON");
     (status, json)
 }
 
@@ -128,10 +127,7 @@ async fn a3_04_incidents_not_wired_empty_rows() {
     let (status, json) = get(make_router(), "/api/v1/incidents").await;
     assert_eq!(status, StatusCode::OK, "expected 200: {json}");
     assert_eq!(str_field(&json, "truth_state"), "not_wired");
-    assert_eq!(
-        str_field(&json, "canonical_route"),
-        "/api/v1/incidents"
-    );
+    assert_eq!(str_field(&json, "canonical_route"), "/api/v1/incidents");
     let rows = json
         .get("rows")
         .and_then(|v| v.as_array())
@@ -156,11 +152,7 @@ async fn a3_05_incidents_note_non_empty() {
 
 #[tokio::test]
 async fn a4_01_replace_cancel_chains_not_wired_empty() {
-    let (status, json) = get(
-        make_router(),
-        "/api/v1/execution/replace-cancel-chains",
-    )
-    .await;
+    let (status, json) = get(make_router(), "/api/v1/execution/replace-cancel-chains").await;
     assert_eq!(status, StatusCode::OK, "expected 200: {json}");
     assert_eq!(str_field(&json, "truth_state"), "not_wired");
     assert_eq!(
@@ -180,11 +172,7 @@ async fn a4_01_replace_cancel_chains_not_wired_empty() {
 
 #[tokio::test]
 async fn a4_02_replace_cancel_chains_note_non_empty() {
-    let (_, json) = get(
-        make_router(),
-        "/api/v1/execution/replace-cancel-chains",
-    )
-    .await;
+    let (_, json) = get(make_router(), "/api/v1/execution/replace-cancel-chains").await;
     let note = str_field(&json, "note");
     assert!(!note.is_empty(), "note must be non-empty operator guidance");
 }
@@ -198,10 +186,7 @@ async fn a4_03_alerts_triage_200_alerts_no_triage() {
     let (status, json) = get(make_router(), "/api/v1/alerts/triage").await;
     assert_eq!(status, StatusCode::OK, "expected 200: {json}");
     assert_eq!(str_field(&json, "truth_state"), "alerts_no_triage");
-    assert_eq!(
-        str_field(&json, "canonical_route"),
-        "/api/v1/alerts/triage"
-    );
+    assert_eq!(str_field(&json, "canonical_route"), "/api/v1/alerts/triage");
     // rows must be an array (may be empty in clean state)
     json.get("rows")
         .and_then(|v| v.as_array())
@@ -216,7 +201,10 @@ async fn a4_03_alerts_triage_200_alerts_no_triage() {
 async fn a4_04_alerts_triage_note_non_empty() {
     let (_, json) = get(make_router(), "/api/v1/alerts/triage").await;
     let note = str_field(&json, "triage_note");
-    assert!(!note.is_empty(), "triage_note must be non-empty operator guidance");
+    assert!(
+        !note.is_empty(),
+        "triage_note must be non-empty operator guidance"
+    );
 }
 
 // ---------------------------------------------------------------------------
