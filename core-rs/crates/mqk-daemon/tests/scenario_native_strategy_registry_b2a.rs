@@ -344,8 +344,7 @@ async fn b2a_n03_registry_disabled_refused_at_registry_gate() {
         "N03: gate must be strategy_registry (B2A); got: {json}"
     );
     assert_eq!(
-        json["fault_class"],
-        "runtime.start_refused.strategy_registry_disabled",
+        json["fault_class"], "runtime.start_refused.strategy_registry_disabled",
         "N03: fault_class must identify disabled registry; got: {json}"
     );
     assert!(
@@ -419,8 +418,7 @@ async fn b2a_n04_registry_absent_refused_at_registry_gate() {
         "N04: gate must be strategy_registry (B2A); got: {json}"
     );
     assert_eq!(
-        json["fault_class"],
-        "runtime.start_refused.strategy_registry_missing",
+        json["fault_class"], "runtime.start_refused.strategy_registry_missing",
         "N04: fault_class must identify missing registry row; got: {json}"
     );
     assert!(

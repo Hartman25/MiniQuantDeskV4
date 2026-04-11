@@ -119,9 +119,15 @@ async fn b2b_s06_no_db_returns_fail_closed() {
     let json = parse(body);
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["truth_state"], "no_db", "S06: must be fail-closed no_db");
     assert_eq!(
-        json["rows"].as_array().map(|a| a.len()).unwrap_or(usize::MAX),
+        json["truth_state"], "no_db",
+        "S06: must be fail-closed no_db"
+    );
+    assert_eq!(
+        json["rows"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(usize::MAX),
         0,
         "S06: rows must be empty when DB unavailable"
     );
@@ -252,7 +258,10 @@ async fn b2b_s03_no_db_no_synthetic_rows_emitted() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["truth_state"], "no_db");
     assert_eq!(
-        json["rows"].as_array().map(|a| a.len()).unwrap_or(usize::MAX),
+        json["rows"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(usize::MAX),
         0,
         "S03 no-DB: must not emit synthetic rows when registry is unreachable"
     );
@@ -456,8 +465,7 @@ fn b2b_pure01_admission_state_derivation_is_correct() {
         }
     }
 
-    let fleet_with_a: Option<HashSet<String>> =
-        Some(["strat_a".to_string()].into_iter().collect());
+    let fleet_with_a: Option<HashSet<String>> = Some(["strat_a".to_string()].into_iter().collect());
     let no_fleet: Option<HashSet<String>> = None;
 
     // configured + enabled → runnable

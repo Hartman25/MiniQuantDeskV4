@@ -289,7 +289,6 @@ pub struct SystemStatusResponse {
     // -----------------------------------------------------------------------
     // C1: Live-trust truth surface
     // -----------------------------------------------------------------------
-
     /// C1: Parity evidence state for the configured artifact.
     ///
     /// Derived by evaluating `parity_evidence.json` via the same evaluator used
@@ -383,6 +382,33 @@ pub struct PreflightStatusResponse {
     /// `Some(true)` = in window, `Some(false)` = outside window.
     /// `None` when not paper+alpaca.
     pub session_in_window: Option<bool>,
+    // C2: Live-trust truth on the preflight surface.
+    //
+    // Mirrors the same two fields added to `SystemStatusResponse` by C1.
+    // Preflight is the primary pre-start operator checklist; an operator who
+    // consults preflight without also reading `/api/v1/system/status` must
+    // still see the explicit live-trust ceiling so that
+    // `deployment_start_allowed=true` on a live-shadow or live-capital
+    // deployment cannot be mistaken for live-trust being established.
+    //
+    // Values are derived from the same `evaluate_parity_evidence_guarded()`
+    // call used by C1 and the dedicated parity-evidence route.
+    //
+    /// Machine-readable parity evidence state.
+    ///
+    /// `"not_configured"` | `"absent"` | `"invalid"` |
+    /// `"incomplete"` | `"complete"` | `"unavailable"`
+    ///
+    /// Always present (structural field).  `"not_configured"` is the honest
+    /// ceiling when no artifact path is set; `"incomplete"` means evidence
+    /// exists but `live_trust_complete=false` in this build.
+    pub parity_evidence_state: String,
+    /// Explicit live-trust boolean derived from parity evidence.
+    ///
+    /// `Some(false)` when evidence is present but incomplete (current builds).
+    /// `None` for every non-Present outcome — null is never a positive trust
+    /// claim on this surface.
+    pub live_trust_complete: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -570,6 +596,23 @@ pub struct SessionStateResponse {
     pub calendar_spec_id: String,
     /// Operator-facing notes describing the authority basis of session truth.
     pub notes: Vec<String>,
+    /// C4: Current parity-evidence state on this surface.
+    ///
+    /// Same values as C1/C2/C3: `"not_configured"` | `"absent"` | `"invalid"` |
+    /// `"incomplete"` | `"complete"` | `"unavailable"`.
+    ///
+    /// `"not_configured"` means `MQK_ARTIFACT_PATH` is unset — not a positive
+    /// trust claim.  `"incomplete"` means evidence is present but
+    /// `live_trust_complete=false` in the current build.
+    pub parity_evidence_state: String,
+    /// C4: Whether live-trust is complete in the current build.
+    ///
+    /// `null` when parity evidence is not present (not_configured / absent /
+    /// invalid / unavailable).  `false` in all current builds where the TV-03
+    /// parity pipeline has not completed a shadow evaluation cycle.
+    ///
+    /// `null` is never a positive trust claim.
+    pub live_trust_complete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1002,6 +1045,45 @@ pub struct ModeChangeGuidanceResponse {
     /// `"active"` = pending intent found; `"no_pending"` = honest absence;
     /// `"backend_unavailable"` = no DB, fail-closed.
     pub restart_workflow: RestartWorkflowTruth,
+    // C3: Current parity evidence state on the mode-change-guidance surface.
+    //
+    // Before C3 an operator consulting mode-change-guidance to plan a transition
+    // to LiveShadow or LiveCapital could see that those transitions require
+    // parity evidence (in transition_verdicts preconditions) without seeing the
+    // *current* state of that evidence on this deployment.  They would have to
+    // consult a second surface (/api/v1/system/status or
+    // /api/v1/system/parity-evidence) to learn whether evidence is absent,
+    // present but incomplete, or complete.  An operator who only consulted this
+    // surface could mistake "admissible_with_restart + precondition to provide
+    // evidence" for "evidence is missing and I need to produce it" when in
+    // reality evidence already exists and live_trust_complete=false is the
+    // current-build ceiling — a structural gap, not a missing file.
+    //
+    // C3 surfaces both fields directly on this response so operators planning
+    // a mode transition see the full constraint picture in one place.
+    //
+    // Values are derived from the same `evaluate_parity_evidence_guarded()`
+    // call used by C1 (status), C2 (preflight), and the dedicated
+    // parity-evidence route.  The four surfaces stay in sync.
+    /// Machine-readable parity evidence state.
+    ///
+    /// `"not_configured"` | `"absent"` | `"invalid"` |
+    /// `"incomplete"` | `"complete"` | `"unavailable"`
+    ///
+    /// Always present (structural field).  Allows operators to see the current
+    /// state of the evidence precondition listed in `transition_verdicts`
+    /// without consulting a separate surface.
+    pub parity_evidence_state: String,
+    /// Explicit live-trust ceiling derived from parity evidence.
+    ///
+    /// `Some(false)` when evidence is present but incomplete (current builds).
+    /// `None` for every non-Present outcome — null is never a positive trust
+    /// claim on this surface.
+    ///
+    /// An operator who sees `live-shadow: admissible_with_restart` alongside
+    /// `live_trust_complete: false` knows the ceiling is a structural proof gap
+    /// in the current build, not a missing artifact.
+    pub live_trust_complete: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------

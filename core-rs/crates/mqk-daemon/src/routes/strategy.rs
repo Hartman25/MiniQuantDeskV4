@@ -57,7 +57,7 @@ fn execution_mode_label(fleet_size: Option<usize>) -> &'static str {
 /// Authority model:
 /// - Fleet (MQK_STRATEGY_IDS) is the *requested* set.
 /// - DB registry is the *final authority* on whether activation is allowed.
-/// Both must agree for a strategy to be "runnable".
+///   Both must agree for a strategy to be "runnable".
 fn admission_state_for_registry_row(
     fleet_ids: &Option<std::collections::HashSet<String>>,
     strategy_id: &str,
@@ -86,8 +86,7 @@ pub(crate) async fn strategy_summary(State(state): State<Arc<AppState>>) -> impl
     // Fleet snapshot is available without DB (env-var derived at boot).
     let fleet_snapshot = state.strategy_fleet_snapshot().await;
     let configured_fleet_size = fleet_snapshot.as_ref().map(|f| f.len());
-    let runtime_execution_mode =
-        execution_mode_label(configured_fleet_size).to_string();
+    let runtime_execution_mode = execution_mode_label(configured_fleet_size).to_string();
 
     let Some(db) = state.db.as_ref() else {
         return (
@@ -127,10 +126,9 @@ pub(crate) async fn strategy_summary(State(state): State<Arc<AppState>>) -> impl
     let armed = !state.integrity.read().await.is_execution_blocked();
 
     // B2B: Fleet membership set for admission cross-reference.
-    let fleet_id_set: Option<std::collections::HashSet<String>> =
-        fleet_snapshot.as_ref().map(|entries| {
-            entries.iter().map(|e| e.strategy_id.clone()).collect()
-        });
+    let fleet_id_set: Option<std::collections::HashSet<String>> = fleet_snapshot
+        .as_ref()
+        .map(|entries| entries.iter().map(|e| e.strategy_id.clone()).collect());
 
     // B3: In-memory telemetry seam.
     //
@@ -164,8 +162,7 @@ pub(crate) async fn strategy_summary(State(state): State<Arc<AppState>>) -> impl
     for r in &registry {
         let admission_state =
             admission_state_for_registry_row(&fleet_id_set, &r.strategy_id, r.enabled);
-        let is_single_target =
-            single_fleet_id.as_deref() == Some(r.strategy_id.as_str());
+        let is_single_target = single_fleet_id.as_deref() == Some(r.strategy_id.as_str());
 
         let (throttle_state, row_last_decision) = if is_single_target {
             (

@@ -258,10 +258,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/execution/protection-status",
             get(execution_protection_status),
         )
-        .route(
-            "/api/v1/execution/transport",
-            get(execution_transport),
-        )
+        .route("/api/v1/execution/transport", get(execution_transport))
         .route("/api/v1/market-data/quality", get(market_data_quality))
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
