@@ -30,131 +30,138 @@ use crate::state::{AlpacaWsContinuityState, AppState, StrategyMarketDataSource};
 pub(crate) async fn execution_transport(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.execution_snapshot.read().await.clone();
 
-    let (truth_state, outbox_depth, inbox_depth, max_claim_age_ms, dispatch_retries, orphaned_claims, queues) =
-        match snap {
-            None => (
-                "no_snapshot".to_string(),
-                0usize,
-                0usize,
-                0u64,
-                0usize,
-                0usize,
-                Vec::new(),
-            ),
-            Some(snapshot) => {
-                let now = Utc::now();
+    let (
+        truth_state,
+        outbox_depth,
+        inbox_depth,
+        max_claim_age_ms,
+        dispatch_retries,
+        orphaned_claims,
+        queues,
+    ) = match snap {
+        None => (
+            "no_snapshot".to_string(),
+            0usize,
+            0usize,
+            0u64,
+            0usize,
+            0usize,
+            Vec::new(),
+        ),
+        Some(snapshot) => {
+            let now = Utc::now();
 
-                let outbox_depth = snapshot.pending_outbox.len();
-                let inbox_depth = snapshot.recent_inbox_events.len();
+            let outbox_depth = snapshot.pending_outbox.len();
+            let inbox_depth = snapshot.recent_inbox_events.len();
 
-                let dispatch_retries = snapshot
-                    .pending_outbox
-                    .iter()
-                    .filter(|o| o.status == "FAILED" || o.status == "AMBIGUOUS")
-                    .count();
+            let dispatch_retries = snapshot
+                .pending_outbox
+                .iter()
+                .filter(|o| o.status == "FAILED" || o.status == "AMBIGUOUS")
+                .count();
 
-                // Age of the oldest CLAIMED row (held by the orchestrator but not yet
-                // dispatched to the broker).  Long claim ages indicate a stalled dispatch loop.
-                let max_claim_age_ms = snapshot
-                    .pending_outbox
-                    .iter()
-                    .filter(|o| o.status == "CLAIMED")
-                    .filter_map(|o| {
-                        o.claimed_at_utc
-                            .map(|t| (now - t).num_milliseconds().max(0) as u64)
-                    })
-                    .max()
-                    .unwrap_or(0);
+            // Age of the oldest CLAIMED row (held by the orchestrator but not yet
+            // dispatched to the broker).  Long claim ages indicate a stalled dispatch loop.
+            let max_claim_age_ms = snapshot
+                .pending_outbox
+                .iter()
+                .filter(|o| o.status == "CLAIMED")
+                .filter_map(|o| {
+                    o.claimed_at_utc
+                        .map(|t| (now - t).num_milliseconds().max(0) as u64)
+                })
+                .max()
+                .unwrap_or(0);
 
-                // CLAIMED rows stale > 30 s without progressing to DISPATCHING/SENT.
-                let orphaned_claims = snapshot
-                    .pending_outbox
-                    .iter()
-                    .filter(|o| o.status == "CLAIMED")
-                    .filter(|o| {
-                        o.claimed_at_utc
-                            .map(|t| (now - t).num_seconds() > 30)
-                            .unwrap_or(false)
-                    })
-                    .count();
+            // CLAIMED rows stale > 30 s without progressing to DISPATCHING/SENT.
+            let orphaned_claims = snapshot
+                .pending_outbox
+                .iter()
+                .filter(|o| o.status == "CLAIMED")
+                .filter(|o| {
+                    o.claimed_at_utc
+                        .map(|t| (now - t).num_seconds() > 30)
+                        .unwrap_or(false)
+                })
+                .count();
 
-                let outbox_oldest_age_ms = snapshot
-                    .pending_outbox
-                    .iter()
-                    .map(|o| (now - o.created_at_utc).num_milliseconds().max(0) as u64)
-                    .max()
-                    .unwrap_or(0);
+            let outbox_oldest_age_ms = snapshot
+                .pending_outbox
+                .iter()
+                .map(|o| (now - o.created_at_utc).num_milliseconds().max(0) as u64)
+                .max()
+                .unwrap_or(0);
 
-                let inbox_oldest_unapplied_age_ms = snapshot
-                    .recent_inbox_events
-                    .iter()
-                    .filter(|e| !e.applied)
-                    .map(|e| (now - e.received_at_utc).num_milliseconds().max(0) as u64)
-                    .max()
-                    .unwrap_or(0);
+            let inbox_oldest_unapplied_age_ms = snapshot
+                .recent_inbox_events
+                .iter()
+                .filter(|e| !e.applied)
+                .map(|e| (now - e.received_at_utc).num_milliseconds().max(0) as u64)
+                .max()
+                .unwrap_or(0);
 
-                let unapplied_inbox = snapshot
-                    .recent_inbox_events
-                    .iter()
-                    .filter(|e| !e.applied)
-                    .count();
+            let unapplied_inbox = snapshot
+                .recent_inbox_events
+                .iter()
+                .filter(|e| !e.applied)
+                .count();
 
-                let outbox_status = if outbox_depth == 0 {
-                    "idle"
-                } else if dispatch_retries > 0 {
-                    "retrying"
-                } else {
-                    "active"
-                };
+            let outbox_status = if outbox_depth == 0 {
+                "idle"
+            } else if dispatch_retries > 0 {
+                "retrying"
+            } else {
+                "active"
+            };
 
-                let inbox_status = if inbox_depth == 0 {
-                    "idle"
-                } else if unapplied_inbox > 0 {
-                    "pending"
-                } else {
-                    "applied"
-                };
+            let inbox_status = if inbox_depth == 0 {
+                "idle"
+            } else if unapplied_inbox > 0 {
+                "pending"
+            } else {
+                "applied"
+            };
 
-                let queues = vec![
-                    TransportQueueRow {
-                        queue_id: "outbox".to_string(),
-                        direction: "outbox".to_string(),
-                        status: outbox_status.to_string(),
-                        depth: outbox_depth,
-                        oldest_age_ms: outbox_oldest_age_ms,
-                        retry_count: dispatch_retries,
-                        duplicate_events: 0,
-                        orphaned_claims,
-                        lag_ms: None,
-                        last_activity_at: None,
-                        notes: String::new(),
-                    },
-                    TransportQueueRow {
-                        queue_id: "inbox".to_string(),
-                        direction: "inbox".to_string(),
-                        status: inbox_status.to_string(),
-                        depth: inbox_depth,
-                        oldest_age_ms: inbox_oldest_unapplied_age_ms,
-                        retry_count: 0,
-                        duplicate_events: 0,
-                        orphaned_claims: 0,
-                        lag_ms: None,
-                        last_activity_at: None,
-                        notes: String::new(),
-                    },
-                ];
-
-                (
-                    "active".to_string(),
-                    outbox_depth,
-                    inbox_depth,
-                    max_claim_age_ms,
-                    dispatch_retries,
+            let queues = vec![
+                TransportQueueRow {
+                    queue_id: "outbox".to_string(),
+                    direction: "outbox".to_string(),
+                    status: outbox_status.to_string(),
+                    depth: outbox_depth,
+                    oldest_age_ms: outbox_oldest_age_ms,
+                    retry_count: dispatch_retries,
+                    duplicate_events: 0,
                     orphaned_claims,
-                    queues,
-                )
-            }
-        };
+                    lag_ms: None,
+                    last_activity_at: None,
+                    notes: String::new(),
+                },
+                TransportQueueRow {
+                    queue_id: "inbox".to_string(),
+                    direction: "inbox".to_string(),
+                    status: inbox_status.to_string(),
+                    depth: inbox_depth,
+                    oldest_age_ms: inbox_oldest_unapplied_age_ms,
+                    retry_count: 0,
+                    duplicate_events: 0,
+                    orphaned_claims: 0,
+                    lag_ms: None,
+                    last_activity_at: None,
+                    notes: String::new(),
+                },
+            ];
+
+            (
+                "active".to_string(),
+                outbox_depth,
+                inbox_depth,
+                max_claim_age_ms,
+                dispatch_retries,
+                orphaned_claims,
+                queues,
+            )
+        }
+    };
 
     (
         StatusCode::OK,

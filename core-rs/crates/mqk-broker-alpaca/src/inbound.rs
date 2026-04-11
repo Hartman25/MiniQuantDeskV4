@@ -288,7 +288,10 @@ fn v1_trading_obj_to_element(obj: serde_json::Value) -> serde_json::Value {
             serde_json::json!({"T": "trade_updates", "data": data_val})
         }
         Some("error") => {
-            let code = data.and_then(|d| d.get("code")).and_then(|v| v.as_i64()).unwrap_or(0);
+            let code = data
+                .and_then(|d| d.get("code"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
             let msg = data
                 .and_then(|d| d.get("msg"))
                 .and_then(|v| v.as_str())

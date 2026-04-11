@@ -926,10 +926,10 @@ mod tests {
         let url = start_mock_ws_server(|mut ws| async move {
             // Trading stream: server waits for auth first (no welcome frame).
             let _ = ws.next().await; // consume auth
-            // Send v1-format authorization object (not v2 array).
+                                     // Send v1-format authorization object (not v2 array).
             ws.send(Message::Text(frame_authorized_v1())).await.unwrap();
             let _ = ws.next().await; // consume listen
-            // Send v1-format listening object.
+                                     // Send v1-format listening object.
             ws.send(Message::Text(frame_listening_v1())).await.unwrap();
             ws.send(Message::Close(None)).await.ok();
         })
@@ -980,7 +980,9 @@ mod tests {
         let state = paper_alpaca_state();
         let _ = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
 
-        let auth_text = rx.await.expect("NT-V1-2: mock server must receive auth message");
+        let auth_text = rx
+            .await
+            .expect("NT-V1-2: mock server must receive auth message");
         let parsed: serde_json::Value =
             serde_json::from_str(&auth_text).expect("NT-V1-2: auth payload must be valid JSON");
         // Verify the auth payload carries the expected fields.
@@ -1005,7 +1007,7 @@ mod tests {
     async fn trading_stream_ntv1_3_v1_auth_rejected_fails_closed() {
         let url = start_mock_ws_server(|mut ws| async move {
             let _ = ws.next().await; // consume auth
-            // Send v1-format unauthorized response.
+                                     // Send v1-format unauthorized response.
             ws.send(Message::Text(frame_unauthorized_v1()))
                 .await
                 .unwrap();
@@ -1062,14 +1064,21 @@ mod tests {
         let state = paper_alpaca_state();
         let _ = alpaca_ws_session(&state, &url, "test-key", "test-secret").await;
 
-        let (first_text, second_text) =
-            rx.await.expect("NT-V1-4: mock server must receive both messages");
+        let (first_text, second_text) = rx
+            .await
+            .expect("NT-V1-4: mock server must receive both messages");
         let first_val: serde_json::Value =
             serde_json::from_str(&first_text).expect("NT-V1-4: first frame must be JSON");
         let second_val: serde_json::Value =
             serde_json::from_str(&second_text).expect("NT-V1-4: second frame must be JSON");
-        let first_action = first_val.get("action").and_then(|v| v.as_str()).unwrap_or("");
-        let second_action = second_val.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let first_action = first_val
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let second_action = second_val
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         // First message: some auth action (auth or authenticate)
         assert!(
             first_action == "auth" || first_action == "authenticate",
@@ -1154,7 +1163,8 @@ mod tests {
 
     #[test]
     fn trading_stream_ntv1_7_parse_ws_message_v1_authorization_object() {
-        let raw = br#"{"stream":"authorization","data":{"action":"authenticate","status":"authorized"}}"#;
+        let raw =
+            br#"{"stream":"authorization","data":{"action":"authenticate","status":"authorized"}}"#;
         let msgs = mqk_broker_alpaca::parse_ws_message(raw)
             .expect("NT-V1-7: must parse v1 authorization object");
         assert_eq!(msgs.len(), 1, "NT-V1-7: must produce exactly one message");

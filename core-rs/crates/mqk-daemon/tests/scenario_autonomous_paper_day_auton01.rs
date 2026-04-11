@@ -831,6 +831,12 @@ async fn au10f_db_backed_autonomous_recovery_round_trip_is_honest() {
         &uuid::Uuid::NAMESPACE_DNS,
         b"auton01.au10f.connected_db_backed_lifecycle",
     );
+    // Pre-test cleanup: remove any stale row from a prior run so the insert is idempotent.
+    sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .expect("AU-10F: pre-test run cleanup failed");
     st.establish_db_backed_active_run_for_test(run_id)
         .await
         .expect("AU-10F: DB-backed active run must be established");
