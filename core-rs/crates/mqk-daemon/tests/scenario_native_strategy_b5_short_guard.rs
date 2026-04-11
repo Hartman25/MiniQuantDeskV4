@@ -41,8 +41,9 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use mqk_daemon::decision::bar_result_to_decisions;
-use mqk_strategy::{IntentMode, StrategyBarResult, StrategyIntents, StrategyOutput, StrategySpec,
-    TargetPosition};
+use mqk_strategy::{
+    IntentMode, StrategyBarResult, StrategyIntents, StrategyOutput, StrategySpec, TargetPosition,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -143,7 +144,11 @@ fn b5_s03_close_long_exactly_is_allowed() {
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("GOOG", 7));
 
-    assert_eq!(decisions.len(), 1, "S03: close-long target → one sell decision");
+    assert_eq!(
+        decisions.len(),
+        1,
+        "S03: close-long target → one sell decision"
+    );
     let d = &decisions[0];
     assert_eq!(d.side, "sell", "S03: negative delta → sell");
     assert_eq!(d.qty, 7, "S03: sell qty = current holdings (7)");
@@ -164,10 +169,17 @@ fn b5_s04_partial_reduce_long_is_allowed() {
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("NVDA", 10));
 
-    assert_eq!(decisions.len(), 1, "S04: partial reduce → one sell decision");
+    assert_eq!(
+        decisions.len(),
+        1,
+        "S04: partial reduce → one sell decision"
+    );
     let d = &decisions[0];
     assert_eq!(d.side, "sell", "S04: negative delta → sell");
-    assert_eq!(d.qty, 6, "S04: sell qty = delta = current(10) - target(4) = 6");
+    assert_eq!(
+        d.qty, 6,
+        "S04: sell qty = delta = current(10) - target(4) = 6"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +220,11 @@ fn b5_s06_sell_exactly_at_holdings_boundary_is_allowed() {
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("AMD", 3));
 
-    assert_eq!(decisions.len(), 1, "S06: sell exactly at holdings boundary → one decision");
+    assert_eq!(
+        decisions.len(),
+        1,
+        "S06: sell exactly at holdings boundary → one decision"
+    );
     let d = &decisions[0];
     assert_eq!(d.side, "sell", "S06: negative delta → sell");
     assert_eq!(d.qty, 3, "S06: qty = current holdings (boundary)");
@@ -230,9 +246,9 @@ fn b5_s07_mixed_bar_guard_is_selective() {
     positions.insert("AAPL".to_string(), 10i64);
 
     let result = live_result(vec![
-        TargetPosition::new("AAPL", 0),   // close long: target=0, current=10 → sell 10 → VALID
-        TargetPosition::new("TSLA", -5),  // short from flat: target=-5, current=0 → BLOCKED
-        TargetPosition::new("MSFT", 8),   // buy from flat: target=+8, current=0 → VALID
+        TargetPosition::new("AAPL", 0), // close long: target=0, current=10 → sell 10 → VALID
+        TargetPosition::new("TSLA", -5), // short from flat: target=-5, current=0 → BLOCKED
+        TargetPosition::new("MSFT", 8), // buy from flat: target=+8, current=0 → VALID
     ]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &positions);
 
@@ -250,7 +266,10 @@ fn b5_s07_mixed_bar_guard_is_selective() {
     let syms: Vec<&str> = decisions.iter().map(|d| d.symbol.as_str()).collect();
     assert!(syms.contains(&"AAPL"), "S07: AAPL close-long must pass");
     assert!(syms.contains(&"MSFT"), "S07: MSFT buy must pass");
-    assert!(!syms.contains(&"TSLA"), "S07: TSLA short-from-flat must be blocked");
+    assert!(
+        !syms.contains(&"TSLA"),
+        "S07: TSLA short-from-flat must be blocked"
+    );
 
     // Confirm the AAPL sell is correct.
     let aapl = decisions.iter().find(|d| d.symbol == "AAPL").unwrap();
