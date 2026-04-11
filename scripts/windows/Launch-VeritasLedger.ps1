@@ -565,11 +565,16 @@ function Get-TradeReadinessReasons {
         )
     }
 
-    foreach ($blocker in @($Probe.Preflight.blockers)) {
+    # PS5.1 ConvertFrom-Json converts empty JSON arrays [] to $null and may
+    # not create the property on the PSCustomObject at all.  Use PSObject.Properties
+    # to guard against PropertyNotFoundException under Set-StrictMode -Version Latest.
+    $preflightBlockers = if ($Probe.Preflight -ne $null -and $null -ne $Probe.Preflight.PSObject.Properties['blockers']) { @($Probe.Preflight.blockers) } else { @() }
+    foreach ($blocker in $preflightBlockers) {
         Add-UniqueReason -Reasons $reasons -Reason ([string]$blocker)
     }
 
-    foreach ($blocker in @($Probe.AutonomousReadiness.blockers)) {
+    $arBlockers = if ($Probe.AutonomousReadiness -ne $null -and $null -ne $Probe.AutonomousReadiness.PSObject.Properties['blockers']) { @($Probe.AutonomousReadiness.blockers) } else { @() }
+    foreach ($blocker in $arBlockers) {
         Add-UniqueReason -Reasons $reasons -Reason ([string]$blocker)
     }
 
@@ -742,7 +747,12 @@ function Get-BackendProbe {
             # including 400.  400 + unknown_action + accepted=false is the expected
             # contract response proving Bearer auth worked without mutating state.
             # Treat it as success here and fall through to IdentityVerified.
-            if ($details.StatusCode -eq 400 -and $details.Json.disposition -eq 'unknown_action' -and $details.Json.accepted -eq $false) {
+            # PS5.1 strict-mode guard: $details.Json may be $null when the
+            # WebException response stream was already consumed.  A 400 with
+            # no readable body is still the expected contract response — any
+            # 400 from this route proves Bearer auth passed (non-2xx means
+            # auth was checked; 401/503 are handled below).
+            if ($details.StatusCode -eq 400 -and ($null -eq $details.Json -or ($details.Json.disposition -eq 'unknown_action' -and $details.Json.accepted -eq $false))) {
                 # Expected auth probe response — do not set FailureReason.
             }
             elseif ($details.StatusCode -eq 401) {
