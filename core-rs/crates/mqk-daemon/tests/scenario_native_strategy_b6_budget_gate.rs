@@ -41,7 +41,7 @@ use std::sync::{Arc, OnceLock};
 
 use tokio::sync::Mutex;
 
-use mqk_daemon::decision::{InternalStrategyDecision, submit_internal_strategy_decision};
+use mqk_daemon::decision::{submit_internal_strategy_decision, InternalStrategyDecision};
 use mqk_daemon::state::{self, AppState};
 
 // ---------------------------------------------------------------------------
@@ -276,7 +276,10 @@ async fn b6_g05_invalid_policy_file_blocks_with_policy_invalid() {
         "G05: invalid policy JSON → Gate 1e must fire 'policy_invalid'; got: {:?} blockers={:?}",
         outcome.disposition, outcome.blockers
     );
-    assert!(!outcome.accepted, "G05: policy_invalid must not be accepted");
+    assert!(
+        !outcome.accepted,
+        "G05: policy_invalid must not be accepted"
+    );
     assert!(
         !outcome.blockers.is_empty(),
         "G05: policy_invalid must carry a blocker message"
