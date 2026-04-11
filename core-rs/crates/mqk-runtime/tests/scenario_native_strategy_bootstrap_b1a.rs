@@ -33,7 +33,12 @@ fn stub_registry(name: &'static str, tf: i64) -> PluginRegistry {
     let mut reg = PluginRegistry::new();
     reg.register(
         StrategyMeta::new(name, "1.0.0", tf, "test stub"),
-        move || Box::new(StubStrategy { name, timeframe_secs: tf }) as Box<dyn mqk_strategy::Strategy>,
+        move || {
+            Box::new(StubStrategy {
+                name,
+                timeframe_secs: tf,
+            }) as Box<dyn mqk_strategy::Strategy>
+        },
     )
     .expect("stub_registry: register must succeed");
     reg
@@ -99,11 +104,23 @@ fn b1a_04_fleet_with_empty_registry_fails_closed() {
     let reg = PluginRegistry::new();
     let ids = vec!["some_strategy".to_string()];
     let b = NativeStrategyBootstrap::bootstrap(Some(&ids), &reg);
-    assert!(b.is_failed(), "expected Failed: fleet configured but registry empty");
-    assert!(!b.is_dormant(), "must NOT be dormant — fleet was configured");
-    assert!(!b.is_active(), "must NOT be active — no real strategy found in registry");
+    assert!(
+        b.is_failed(),
+        "expected Failed: fleet configured but registry empty"
+    );
+    assert!(
+        !b.is_dormant(),
+        "must NOT be dormant — fleet was configured"
+    );
+    assert!(
+        !b.is_active(),
+        "must NOT be active — no real strategy found in registry"
+    );
     assert_eq!(b.truth_state(), "failed");
-    assert!(b.failure_reason().is_some(), "failure_reason must be populated");
+    assert!(
+        b.failure_reason().is_some(),
+        "failure_reason must be populated"
+    );
 }
 
 /// B1A-05: fleet names a strategy not in registry (other entries exist) → Failed.
@@ -112,8 +129,14 @@ fn b1a_05_fleet_with_wrong_registry_entry_fails_closed() {
     let reg = stub_registry("other_strat", 60);
     let ids = vec!["desired_strat".to_string()];
     let b = NativeStrategyBootstrap::bootstrap(Some(&ids), &reg);
-    assert!(b.is_failed(), "expected Failed: strategy ID not found in registry");
-    assert!(!b.is_active(), "must not produce an active host for the wrong strategy");
+    assert!(
+        b.is_failed(),
+        "expected Failed: strategy ID not found in registry"
+    );
+    assert!(
+        !b.is_active(),
+        "must not produce an active host for the wrong strategy"
+    );
     let reason = b.failure_reason().expect("failure_reason must be present");
     assert!(
         reason.contains("desired_strat"),
@@ -135,7 +158,11 @@ fn b1a_06_only_first_fleet_entry_consumed() {
     assert_eq!(b.active_strategy_id(), Some("first"));
 }
 
-/// B1A-07: Active host is initialised in shadow mode (bar ingestion not yet wired).
+/// B1A-07 / B1C: Active host is initialised with ShadowMode::Off after B1C.
+///
+/// B1A/B1B held the host in ShadowMode::On until bar ingestion was wired.
+/// B1C lifted that constraint: the host now boots with ShadowMode::Off so
+/// the execution loop can submit live decisions through the 7-gate seam.
 #[test]
 fn b1a_07_active_host_is_in_shadow_mode() {
     let reg = stub_registry("shad_strat", 300);
@@ -147,8 +174,8 @@ fn b1a_07_active_host_is_in_shadow_mode() {
             assert_eq!(strategy_id, "shad_strat");
             assert_eq!(
                 host.shadow_mode(),
-                mqk_strategy::ShadowMode::On,
-                "B1A: host must start in shadow mode until bar ingestion is wired"
+                mqk_strategy::ShadowMode::Off,
+                "B1C: host must boot with shadow mode Off so decisions reach the execution seam"
             );
         }
         _ => panic!("expected Active outcome; got {}", b.truth_state()),

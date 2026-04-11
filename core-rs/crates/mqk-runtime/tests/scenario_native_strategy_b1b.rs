@@ -21,7 +21,9 @@
 //! the correct conservative behavior from the strategy engine, not our gate.
 
 use mqk_runtime::native_strategy::{build_signal_context, NativeStrategyBootstrap};
-use mqk_strategy::{IntentMode, PluginRegistry, StrategyContext, StrategyMeta, StrategyOutput, StrategySpec};
+use mqk_strategy::{
+    IntentMode, PluginRegistry, StrategyContext, StrategyMeta, StrategyOutput, StrategySpec,
+};
 
 // ---------------------------------------------------------------------------
 // Minimal inline stub strategy — not a production strategy.
@@ -45,7 +47,12 @@ fn stub_registry(name: &'static str, tf: i64) -> PluginRegistry {
     let mut reg = PluginRegistry::new();
     reg.register(
         StrategyMeta::new(name, "1.0.0", tf, "B1B test stub"),
-        move || Box::new(StubStrategy { name, timeframe_secs: tf }) as Box<dyn mqk_strategy::Strategy>,
+        move || {
+            Box::new(StubStrategy {
+                name,
+                timeframe_secs: tf,
+            }) as Box<dyn mqk_strategy::Strategy>
+        },
     )
     .expect("stub_registry: register must succeed");
     reg
@@ -71,10 +78,10 @@ fn b1b_01_active_bootstrap_limit_signal_invokes_callback() {
     assert!(b.is_active(), "precondition: bootstrap must be active");
 
     let result = b.invoke_on_bar_from_signal(
-        1,                  // now_tick
-        1_700_000_000,      // end_ts
-        Some(150_000_000),  // limit_price in micros
-        10,                 // qty
+        1,                 // now_tick
+        1_700_000_000,     // end_ts
+        Some(150_000_000), // limit_price in micros
+        10,                // qty
     );
 
     assert!(
@@ -204,7 +211,11 @@ fn b1b_06_build_signal_context_pure_fn_correctness() {
 
     assert_eq!(ctx.timeframe_secs, 300);
     assert_eq!(ctx.now_tick, 42);
-    assert_eq!(ctx.recent.len(), 1, "single-bar window: no fabricated history");
+    assert_eq!(
+        ctx.recent.len(),
+        1,
+        "single-bar window: no fabricated history"
+    );
 
     let bar = ctx.recent.last().expect("window must have one bar");
     assert_eq!(bar.end_ts, 1_700_000_000);

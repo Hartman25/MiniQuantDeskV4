@@ -44,8 +44,10 @@
 //! - bar / market-data ingestion loop (multi-bar history)
 //! - multi-strategy fleet execution
 
-use mqk_strategy::{BarStub, PluginRegistry, RecentBarsWindow, ShadowMode, StrategyBarResult,
-    StrategyContext, StrategyHost};
+use mqk_strategy::{
+    BarStub, PluginRegistry, RecentBarsWindow, ShadowMode, StrategyBarResult, StrategyContext,
+    StrategyHost,
+};
 
 // ---------------------------------------------------------------------------
 // Bootstrap outcome
@@ -60,9 +62,8 @@ pub enum NativeStrategyBootstrapOutcome {
     /// Exactly one strategy was selected from the fleet and successfully
     /// instantiated from the plugin registry.
     ///
-    /// The host is held in shadow mode: bar ingestion is not yet wired (B1A
-    /// constraint). Shadow mode is set on the host until the bar ingestion
-    /// bridge is connected in a subsequent patch.
+    /// B1C: the host boots with [`ShadowMode::Off`] so the execution loop can
+    /// submit live decisions through the canonical 7-gate seam.
     Active {
         host: StrategyHost,
         strategy_id: String,
@@ -71,10 +72,7 @@ pub enum NativeStrategyBootstrapOutcome {
     /// A fleet entry is present but the named strategy is not registered in
     /// the plugin registry. Fail-closed: the daemon must not start with an
     /// unresolvable strategy configuration.
-    Failed {
-        strategy_id: String,
-        reason: String,
-    },
+    Failed { strategy_id: String, reason: String },
 }
 
 /// Native strategy runtime bootstrap handle for one execution run.
@@ -204,8 +202,7 @@ impl NativeStrategyBootstrap {
         match &mut self.outcome {
             NativeStrategyBootstrapOutcome::Active { host, .. } => {
                 let timeframe_secs = host.spec().ok()?.timeframe_secs;
-                let ctx =
-                    build_signal_context(timeframe_secs, now_tick, end_ts, limit_price, qty);
+                let ctx = build_signal_context(timeframe_secs, now_tick, end_ts, limit_price, qty);
                 host.on_bar(&ctx).ok()
             }
             _ => None,
@@ -243,12 +240,7 @@ pub fn build_signal_context(
     limit_price: Option<i64>,
     qty: i64,
 ) -> StrategyContext {
-    let bar = BarStub::new(
-        end_ts,
-        limit_price.is_some(),
-        limit_price.unwrap_or(0),
-        qty,
-    );
+    let bar = BarStub::new(end_ts, limit_price.is_some(), limit_price.unwrap_or(0), qty);
     let recent = RecentBarsWindow::new(1, vec![bar]);
     StrategyContext::new(timeframe_secs, now_tick, recent)
 }

@@ -38,8 +38,9 @@ use uuid::Uuid;
 
 use mqk_daemon::decision::{bar_result_to_decisions, submit_internal_strategy_decision};
 use mqk_daemon::state::{self, AppState};
-use mqk_strategy::{IntentMode, StrategyBarResult, StrategyIntents, StrategyOutput, StrategySpec,
-    TargetPosition};
+use mqk_strategy::{
+    IntentMode, StrategyBarResult, StrategyIntents, StrategyOutput, StrategySpec, TargetPosition,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -152,14 +153,26 @@ fn b1c_c03_live_buy_target_correct_fields() {
     assert_eq!(decisions.len(), 1, "C03: one target → one decision");
     let d = &decisions[0];
 
-    assert_eq!(d.strategy_id, "test_strategy", "C03: strategy_id from spec.name");
+    assert_eq!(
+        d.strategy_id, "test_strategy",
+        "C03: strategy_id from spec.name"
+    );
     assert_eq!(d.symbol, "AAPL", "C03: symbol from target");
     assert_eq!(d.side, "buy", "C03: positive qty → buy");
     assert_eq!(d.qty, 15, "C03: qty unchanged for buy");
-    assert_eq!(d.order_type, "market", "C03: target positions → market order");
+    assert_eq!(
+        d.order_type, "market",
+        "C03: target positions → market order"
+    );
     assert_eq!(d.time_in_force, "day", "C03: time_in_force = day");
-    assert!(d.limit_price.is_none(), "C03: no limit price for market orders");
-    assert!(!d.decision_id.is_empty(), "C03: decision_id must not be blank");
+    assert!(
+        d.limit_price.is_none(),
+        "C03: no limit price for market orders"
+    );
+    assert!(
+        !d.decision_id.is_empty(),
+        "C03: decision_id must not be blank"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -190,9 +203,15 @@ fn b1c_c04_live_sell_target_correct_fields() {
     assert_eq!(d.symbol, "TSLA", "C04: symbol from target");
     assert_eq!(d.side, "sell", "C04: negative delta → sell");
     assert_eq!(d.qty, 8, "C04: qty = current holdings (close long)");
-    assert_eq!(d.order_type, "market", "C04: target positions → market order");
+    assert_eq!(
+        d.order_type, "market",
+        "C04: target positions → market order"
+    );
     assert_eq!(d.time_in_force, "day", "C04: time_in_force = day");
-    assert!(d.limit_price.is_none(), "C04: no limit price for market orders");
+    assert!(
+        d.limit_price.is_none(),
+        "C04: no limit price for market orders"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -216,10 +235,10 @@ fn b1c_c05_zero_qty_target_skipped() {
     // MSFT:      target=+5, current=0 → delta=+5 → buy 5 (valid).
     // TSLA:      target=-3, current=0 → delta=-3 → sell from flat → B5 guard blocks.
     let result = live_result(vec![
-        TargetPosition::new("AAPL", 0),   // delta=0, skip
-        TargetPosition::new("MSFT", 5),   // delta=+5, buy → include
-        TargetPosition::new("GOOG", 0),   // delta=0, skip
-        TargetPosition::new("TSLA", -3),  // delta=-3, flat → B5 short-sale guard blocks
+        TargetPosition::new("AAPL", 0),  // delta=0, skip
+        TargetPosition::new("MSFT", 5),  // delta=+5, buy → include
+        TargetPosition::new("GOOG", 0),  // delta=0, skip
+        TargetPosition::new("TSLA", -3), // delta=-3, flat → B5 short-sale guard blocks
     ]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
 
@@ -229,7 +248,10 @@ fn b1c_c05_zero_qty_target_skipped() {
         "C05: only MSFT survives; AAPL/GOOG are delta=0; TSLA short-from-flat is blocked by B5 guard"
     );
     let syms: Vec<&str> = decisions.iter().map(|d| d.symbol.as_str()).collect();
-    assert!(syms.contains(&"MSFT"), "C05: MSFT (buy from flat) must be included");
+    assert!(
+        syms.contains(&"MSFT"),
+        "C05: MSFT (buy from flat) must be included"
+    );
     assert!(
         !syms.contains(&"TSLA"),
         "C05: TSLA (short from flat) must be blocked by B5 short-sale guard"
@@ -256,7 +278,11 @@ async fn b1c_c06_live_intent_reaches_canonical_seam() {
 
     let result = live_result(vec![TargetPosition::new("AAPL", 10)]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &flat());
-    assert_eq!(decisions.len(), 1, "C06 precondition: one target → one decision");
+    assert_eq!(
+        decisions.len(),
+        1,
+        "C06 precondition: one target → one decision"
+    );
 
     let decision = decisions.into_iter().next().unwrap();
     let outcome = submit_internal_strategy_decision(&st, decision).await;
@@ -319,7 +345,7 @@ fn b1c_c08_multi_target_produces_one_decision_each() {
 
     let result = live_result(vec![
         TargetPosition::new("AAPL", 5),
-        TargetPosition::new("MSFT", 0),  // close long; B5 guard passes (sell 5 == current 5)
+        TargetPosition::new("MSFT", 0), // close long; B5 guard passes (sell 5 == current 5)
         TargetPosition::new("GOOG", 1),
     ]);
     let decisions = bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &positions);
@@ -331,8 +357,14 @@ fn b1c_c08_multi_target_produces_one_decision_each() {
     );
     // All carry the same strategy_id from spec.name.
     for d in &decisions {
-        assert_eq!(d.strategy_id, "test_strategy", "C08: strategy_id from spec.name");
-        assert_eq!(d.order_type, "market", "C08: all decisions are market orders");
+        assert_eq!(
+            d.strategy_id, "test_strategy",
+            "C08: strategy_id from spec.name"
+        );
+        assert_eq!(
+            d.order_type, "market",
+            "C08: all decisions are market orders"
+        );
     }
 }
 
@@ -373,7 +405,10 @@ fn b1c_c10_already_at_target_produces_no_decision() {
     assert!(
         decisions.is_empty(),
         "C10: target == current → delta=0 → no decision; got: {:?}",
-        decisions.iter().map(|d| (&d.symbol, &d.side, d.qty)).collect::<Vec<_>>()
+        decisions
+            .iter()
+            .map(|d| (&d.symbol, &d.side, d.qty))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -387,7 +422,11 @@ fn b1c_c11_close_long_position() {
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("AAPL", 10));
 
-    assert_eq!(decisions.len(), 1, "C11: close-position target → one sell decision");
+    assert_eq!(
+        decisions.len(),
+        1,
+        "C11: close-position target → one sell decision"
+    );
     let d = &decisions[0];
     assert_eq!(d.side, "sell", "C11: delta=-10 → sell");
     assert_eq!(d.qty, 10, "C11: sell qty = current holdings");
@@ -402,7 +441,11 @@ fn b1c_c12_short_cover_and_go_long() {
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("TSLA", -3));
 
-    assert_eq!(decisions.len(), 1, "C12: one reversal target → one decision");
+    assert_eq!(
+        decisions.len(),
+        1,
+        "C12: one reversal target → one decision"
+    );
     let d = &decisions[0];
     assert_eq!(d.side, "buy", "C12: delta=+8 → buy");
     assert_eq!(d.qty, 8, "C12: qty = target(+5) - current(-3) = 8");
@@ -418,7 +461,11 @@ fn b1c_c13_close_short_position() {
     let decisions =
         bar_result_to_decisions(&result, fixed_run_id(), FIXED_NOW_MICROS, &pos("NVDA", -7));
 
-    assert_eq!(decisions.len(), 1, "C13: close-short target → one buy decision");
+    assert_eq!(
+        decisions.len(),
+        1,
+        "C13: close-short target → one buy decision"
+    );
     let d = &decisions[0];
     assert_eq!(d.side, "buy", "C13: delta=+7 → buy to close short");
     assert_eq!(d.qty, 7, "C13: qty = abs(delta) = 7");
@@ -475,13 +522,9 @@ async fn b1c_c14_loop_path_creates_durable_outbox_row() {
 
     // Build AppState with DB and arm state.
     let st = Arc::new(state::AppState::new_with_db(pool.clone()));
-    mqk_db::persist_arm_state_canonical(
-        &pool,
-        mqk_db::ArmState::Armed,
-        None,
-    )
-    .await
-    .expect("C14: arm state");
+    mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None)
+        .await
+        .expect("C14: arm state");
 
     // Seed an active run.
     let run_id = Uuid::new_v4();
@@ -502,15 +545,23 @@ async fn b1c_c14_loop_path_creates_durable_outbox_row() {
     .await
     .expect("C14: insert_run");
     mqk_db::arm_run(&pool, run_id).await.expect("C14: arm_run");
-    mqk_db::begin_run(&pool, run_id).await.expect("C14: begin_run");
-    mqk_db::heartbeat_run(&pool, run_id, now).await.expect("C14: heartbeat_run");
+    mqk_db::begin_run(&pool, run_id)
+        .await
+        .expect("C14: begin_run");
+    mqk_db::heartbeat_run(&pool, run_id, now)
+        .await
+        .expect("C14: heartbeat_run");
     st.inject_running_loop_for_test(run_id).await;
 
     // --- Exercise the loop-owned translation path ---
     // Flat current position: target=+10, current=0 → delta=+10 → buy 10.
     let result = live_result(vec![TargetPosition::new("AAPL", 10)]);
     let decisions = bar_result_to_decisions(&result, run_id, FIXED_NOW_MICROS, &flat());
-    assert_eq!(decisions.len(), 1, "C14 precondition: one target → one decision");
+    assert_eq!(
+        decisions.len(),
+        1,
+        "C14 precondition: one target → one decision"
+    );
 
     let decision = decisions.into_iter().next().unwrap();
     let decision_id = decision.decision_id.clone();
@@ -520,10 +571,12 @@ async fn b1c_c14_loop_path_creates_durable_outbox_row() {
     assert!(
         outcome.accepted,
         "C14: loop-path decision must be accepted; disposition={:?}, blockers={:?}",
-        outcome.disposition,
-        outcome.blockers
+        outcome.disposition, outcome.blockers
     );
-    assert_eq!(outcome.disposition, "accepted", "C14: disposition must be 'accepted'");
+    assert_eq!(
+        outcome.disposition, "accepted",
+        "C14: disposition must be 'accepted'"
+    );
 
     // Verify the outbox row carries the correct signal_source.
     let rows = sqlx::query_as::<_, (serde_json::Value,)>(
@@ -535,7 +588,11 @@ async fn b1c_c14_loop_path_creates_durable_outbox_row() {
     .await
     .expect("C14: query outbox");
 
-    assert_eq!(rows.len(), 1, "C14: exactly one outbox row for this decision_id");
+    assert_eq!(
+        rows.len(),
+        1,
+        "C14: exactly one outbox row for this decision_id"
+    );
     let order_json = &rows[0].0;
     assert_eq!(
         order_json["signal_source"], "internal_strategy_decision",

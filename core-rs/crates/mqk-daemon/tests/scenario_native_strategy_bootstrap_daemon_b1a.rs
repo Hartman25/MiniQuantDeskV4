@@ -156,8 +156,7 @@ async fn b1a_l02_unknown_strategy_fleet_refused_fail_closed() {
         "L02: gate must be native_strategy_bootstrap; got: {json}"
     );
     assert_eq!(
-        json["fault_class"],
-        "runtime.start_refused.native_strategy_bootstrap_failed",
+        json["fault_class"], "runtime.start_refused.native_strategy_bootstrap_failed",
         "L02: fault_class must identify bootstrap failure; got: {json}"
     );
     // The error must name the unregistered strategy.
@@ -282,8 +281,7 @@ async fn b1a_l04_start_with_registered_strategy_stores_active_bootstrap() {
         .uri("/v1/run/start")
         .body(axum::body::Body::empty())
         .unwrap();
-    let (start_status, start_body) =
-        call(routes::build_router(Arc::clone(&st)), start_req).await;
+    let (start_status, start_body) = call(routes::build_router(Arc::clone(&st)), start_req).await;
     assert_eq!(
         start_status,
         StatusCode::OK,
@@ -358,8 +356,7 @@ async fn b1a_l05_stop_clears_native_strategy_bootstrap() {
         .uri("/v1/run/start")
         .body(axum::body::Body::empty())
         .unwrap();
-    let (start_status, start_body) =
-        call(routes::build_router(Arc::clone(&st)), start_req).await;
+    let (start_status, start_body) = call(routes::build_router(Arc::clone(&st)), start_req).await;
     assert_eq!(
         start_status,
         StatusCode::OK,
@@ -372,7 +369,10 @@ async fn b1a_l05_stop_clears_native_strategy_bootstrap() {
         .native_strategy_bootstrap_truth_state_for_test()
         .await
         .expect("L05: bootstrap must be Some after start");
-    assert_eq!(before_stop, "active", "L05: bootstrap must be active after start");
+    assert_eq!(
+        before_stop, "active",
+        "L05: bootstrap must be active after start"
+    );
 
     // Stop.
     let stop_req = Request::builder()
@@ -447,8 +447,7 @@ async fn b1a_l06_halt_clears_native_strategy_bootstrap() {
         .uri("/v1/run/start")
         .body(axum::body::Body::empty())
         .unwrap();
-    let (start_status, start_body) =
-        call(routes::build_router(Arc::clone(&st)), start_req).await;
+    let (start_status, start_body) = call(routes::build_router(Arc::clone(&st)), start_req).await;
     assert_eq!(
         start_status,
         StatusCode::OK,
@@ -461,7 +460,10 @@ async fn b1a_l06_halt_clears_native_strategy_bootstrap() {
         .native_strategy_bootstrap_truth_state_for_test()
         .await
         .expect("L06: bootstrap must be Some after start");
-    assert_eq!(before_halt, "active", "L06: bootstrap must be active after start");
+    assert_eq!(
+        before_halt, "active",
+        "L06: bootstrap must be active after start"
+    );
 
     // Halt.
     let halt_req = Request::builder()

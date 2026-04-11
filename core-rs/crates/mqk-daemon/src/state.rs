@@ -60,7 +60,6 @@ use crate::capital_policy::{
     DeploymentEconomicsOutcome,
 };
 use crate::parity_evidence::{evaluate_parity_evidence_from_env, ParityEvidenceOutcome};
-use mqk_runtime::native_strategy::{build_daemon_plugin_registry, NativeStrategyBootstrap};
 #[cfg(test)]
 use broker::alpaca_base_url_for_mode;
 use broker::{build_daemon_broker, DaemonBroker};
@@ -70,6 +69,7 @@ use env::{
     deployment_mode_readiness, initial_reconcile_status, initial_ws_continuity_for_broker,
     operator_auth_mode_from_env, runtime_selection_from_env,
 };
+use mqk_runtime::native_strategy::{build_daemon_plugin_registry, NativeStrategyBootstrap};
 use snapshot::{recover_oms_and_portfolio, synthesize_paper_broker_snapshot};
 use types::{DaemonOrchestrator, ReconcileTruthGate, StateIntegrityGate};
 
@@ -1742,7 +1742,10 @@ impl AppState {
         // by a failed start attempt.
         let native_strategy_bootstrap = {
             let fleet_ids = self.strategy_fleet_snapshot().await.map(|entries| {
-                entries.into_iter().map(|e| e.strategy_id).collect::<Vec<_>>()
+                entries
+                    .into_iter()
+                    .map(|e| e.strategy_id)
+                    .collect::<Vec<_>>()
             });
             let registry = build_daemon_plugin_registry();
             let bootstrap = NativeStrategyBootstrap::bootstrap(fleet_ids.as_deref(), &registry);
