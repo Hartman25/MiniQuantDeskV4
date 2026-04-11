@@ -192,7 +192,11 @@ async fn b7_e04_b4_stop_order_wiring_unaffected_by_b7() {
     let router = routes::build_router(st);
 
     let (status, body) = call(router, oms_overview_req()).await;
-    assert_eq!(status, StatusCode::OK, "B7-E04: oms/overview must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "B7-E04: oms/overview must return 200"
+    );
 
     let json = parse_json(body);
 
