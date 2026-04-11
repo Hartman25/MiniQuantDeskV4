@@ -25,17 +25,17 @@
 //! `--test-threads=1`.
 //!
 //! - C1-01: no `MQK_ARTIFACT_PATH` → `parity_evidence_state: "not_configured"`,
-//!          `live_trust_complete: null`; explicit ceiling, no false trust.
+//!   `live_trust_complete: null`; explicit ceiling, no false trust.
 //! - C1-02: `MQK_ARTIFACT_PATH` points to non-existent path → `"absent"`,
-//!          `live_trust_complete: null`; absent evidence ≠ parity proven.
+//!   `live_trust_complete: null`; absent evidence ≠ parity proven.
 //! - C1-03: valid `parity_evidence.json` with `live_trust_complete=false` →
-//!          `"incomplete"`, `live_trust_complete: false`; explicit honest signal.
+//!   `"incomplete"`, `live_trust_complete: false`; explicit honest signal.
 //! - C1-04: `live_trust_complete` is null for every non-Present state —
-//!          null is never a false positive; states "not_configured", "absent",
-//!          "invalid" all produce `live_trust_complete: null`.
+//!   null is never a false positive; states "not_configured", "absent",
+//!   "invalid" all produce `live_trust_complete: null`.
 //! - C1-05: parity_evidence_state present in status independently of deployment
-//!          mode — paper+paper path returns "not_configured" (no artifact); the
-//!          field is always populated regardless of deployment mode.
+//!   mode — paper+paper path returns "not_configured" (no artifact); the
+//!   field is always populated regardless of deployment mode.
 
 use std::io::Write as _;
 use std::sync::Arc;

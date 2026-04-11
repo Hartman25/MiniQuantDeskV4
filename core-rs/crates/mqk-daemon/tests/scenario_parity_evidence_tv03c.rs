@@ -376,3 +376,53 @@ async fn tc05_parity_gate_fires_after_artifact_gate() {
         "TC-05: gate must be 'parity_evidence' not artifact gate; body: {json}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// TC-06: mismatched parity artifact_id → 403 gate=parity_evidence
+// ---------------------------------------------------------------------------
+
+/// TV-03C / TC-06: When artifact intake succeeds, the deployability gate
+/// passes, and `parity_evidence.json` is structurally valid, but the
+/// `artifact_id` inside `parity_evidence.json` does not match the accepted
+/// intake artifact_id, start is refused at the parity evidence gate.
+///
+/// This proves that the artifact-associated evidence chain cannot be satisfied
+/// by parity evidence produced for a different artifact.  The TV-03C gate
+/// cross-validates artifact identity — mirroring the TV-02C deployability gate
+/// cross-validation — so a stale or misrouted `parity_evidence.json` cannot
+/// stand in for the currently configured artifact's evidence.
+#[tokio::test]
+async fn tc06_mismatched_parity_artifact_id_blocks_start() {
+    let _guard = env_lock().lock().await;
+    let intake_artifact_id = "tv03c-tc06-real-artifact";
+    let wrong_artifact_id = "tv03c-tc06-different-artifact";
+    // Write parity evidence stamped with a DIFFERENT artifact_id than the manifest.
+    let parity_for_wrong_artifact = valid_parity_json(wrong_artifact_id);
+    let (manifest, dir) =
+        write_artifact_dir("tc06", intake_artifact_id, Some(&parity_for_wrong_artifact));
+
+    std::env::set_var("MQK_ARTIFACT_PATH", manifest.to_str().unwrap());
+    std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
+    let st = armed_live_shadow_state().await;
+    let (status, body) = call(routes::build_router(st), post_start()).await;
+
+    std::env::remove_var("MQK_ARTIFACT_PATH");
+    cleanup(&dir);
+
+    let json = parse_json(body);
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "TC-06: mismatched parity artifact_id must return 403; body: {json}"
+    );
+    assert_eq!(
+        json["gate"].as_str().unwrap_or(""),
+        "parity_evidence",
+        "TC-06: gate must be 'parity_evidence' for artifact_id mismatch; body: {json}"
+    );
+    let error_msg = json["error"].as_str().unwrap_or("");
+    assert!(
+        error_msg.contains("does not match") || error_msg.contains("mismatch"),
+        "TC-06: error message must describe the artifact_id mismatch; got: {error_msg}"
+    );
+}

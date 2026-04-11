@@ -1492,6 +1492,18 @@ impl AppState {
             }
         }
 
+        // TV-01 / TV-02C: Evaluate artifact intake exactly once.
+        //
+        // Hoisted here so the same evaluation result is used for:
+        //   - TV-02C deployability gate (below)
+        //   - TV-01C provenance capture at successful run start (further below)
+        //
+        // Evaluating twice would create a TOCTOU window: a file swap or env-var
+        // mutation between the gate check and the provenance capture could let
+        // a different artifact identity pass the gate while a different one is
+        // recorded as the run's provenance.  Single evaluation closes that gap.
+        let artifact_intake = evaluate_artifact_intake_guarded();
+
         // TV-02C: Artifact deployability gate.
         //
         // If MQK_ARTIFACT_PATH is configured and intake is Accepted, the artifact
@@ -1508,8 +1520,7 @@ impl AppState {
         //   - in-process testable without a database
         //   - before any DB resources or run rows are acquired (no dangling rows on refusal)
         {
-            let intake = evaluate_artifact_intake_guarded();
-            match &intake {
+            match &artifact_intake {
                 ArtifactIntakeOutcome::NotConfigured => {
                     // No artifact configured — deployability gate not applicable.
                 }
@@ -1573,8 +1584,42 @@ impl AppState {
         // Placed after TV-02C (artifact deployability) and before TV-04A (capital policy)
         // so the evidence chain is verified before capital authorization runs.
         // Both TV-02C and TV-03C read MQK_ARTIFACT_PATH; absent path → NotConfigured on both.
+        //
+        // Cross-validation: when both intake and parity evidence are resolved, the
+        // artifact_id embedded in parity_evidence.json must match the accepted intake
+        // artifact_id.  This mirrors the TV-02C deployability gate cross-validation and
+        // closes the artifact-associated evidence chain: parity evidence produced for a
+        // different artifact must not satisfy this gate.  `artifact_intake` is the same
+        // evaluation result used for TV-02C above (TOCTOU-safe, evaluated once).
         {
             let parity = evaluate_parity_evidence_from_env();
+            // Artifact identity cross-validation: Present evidence for a different
+            // artifact is not evidence for this artifact.
+            if let (
+                ArtifactIntakeOutcome::Accepted {
+                    artifact_id: ref accepted_id,
+                    ..
+                },
+                ParityEvidenceOutcome::Present {
+                    artifact_id: ref parity_id,
+                    ..
+                },
+            ) = (&artifact_intake, &parity)
+            {
+                if parity_id != accepted_id {
+                    return Err(RuntimeLifecycleError::forbidden(
+                        "runtime.start_refused.parity_evidence_artifact_mismatch",
+                        "parity_evidence",
+                        format!(
+                            "parity evidence artifact_id '{}' does not match the accepted \
+                             intake artifact_id '{}'; the parity_evidence.json in the artifact \
+                             directory was not produced for the configured artifact — re-run the \
+                             TV-03 pipeline against the correct artifact",
+                            parity_id, accepted_id
+                        ),
+                    ));
+                }
+            }
             if !parity.is_start_safe() {
                 return Err(RuntimeLifecycleError::forbidden(
                     "runtime.start_refused.parity_evidence_not_present",
@@ -1937,13 +1982,15 @@ impl AppState {
 
         // TV-01C: capture artifact provenance at run start.
         //
-        // Evaluate artifact intake at the moment of successful run start and
-        // store the provenance if Accepted.  Only `Accepted` carries positive
-        // provenance; all other outcomes leave `accepted_artifact` as `None`
-        // (fail-closed: absent/invalid/unavailable artifacts are not recorded
-        // as consumed).
+        // Uses the artifact intake result evaluated once above (TV-01 hoist) —
+        // the same identity that passed all pre-DB gates is the identity recorded
+        // as this run's provenance.  No second evaluation; TOCTOU gap closed.
+        //
+        // Only `Accepted` carries positive provenance; all other outcomes leave
+        // `accepted_artifact` as `None` (fail-closed: absent/invalid/unavailable
+        // artifacts are not recorded as consumed).
         {
-            let provenance = match evaluate_artifact_intake_guarded() {
+            let provenance = match artifact_intake {
                 ArtifactIntakeOutcome::Accepted {
                     artifact_id,
                     artifact_type,

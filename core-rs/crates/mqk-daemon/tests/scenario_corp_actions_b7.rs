@@ -26,7 +26,7 @@
 //! - B7-E03: Neither surface omits the field (field must be a string, never null)
 //! - B7-E04: B4 `stop_order_wiring` is unaffected — B7 is strictly additive
 //! - B7-E05: Corp-actions screening value is stable across two independent calls
-//!           (stateless constant — not derived from ephemeral runtime state)
+//!   (stateless constant — not derived from ephemeral runtime state)
 //!
 //! All tests are pure in-process and always runnable in CI without environment
 //! variables.

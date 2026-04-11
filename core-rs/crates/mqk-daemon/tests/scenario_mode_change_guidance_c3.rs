@@ -35,19 +35,19 @@
 //! ## Tests (all pure in-process; require `--test-threads=1`)
 //!
 //! - C3-01: no `MQK_ARTIFACT_PATH` → guidance `parity_evidence_state:
-//!          "not_configured"`, `live_trust_complete: null`; not a positive trust
-//!          claim.
+//!   "not_configured"`, `live_trust_complete: null`; not a positive trust
+//!   claim.
 //! - C3-02: valid evidence with `live_trust_complete=false` → guidance
-//!          `"incomplete"`, `live_trust_complete: false`; explicit honest ceiling
-//!          alongside the Paper→LiveShadow admissibility verdict on same surface.
+//!   `"incomplete"`, `live_trust_complete: false`; explicit honest ceiling
+//!   alongside the Paper→LiveShadow admissibility verdict on same surface.
 //! - C3-03: Paper→LiveShadow "admissible_with_restart" + explicit
-//!          `live_trust_complete: false` co-present on the same surface.  Proves
-//!          the gap between "transition is structurally admissible" and "trust
-//!          ceiling is not met" is explicitly visible to the operator.
+//!   `live_trust_complete: false` co-present on the same surface.  Proves
+//!   the gap between "transition is structurally admissible" and "trust
+//!   ceiling is not met" is explicitly visible to the operator.
 //! - C3-04: `live_trust_complete` is never true on the guidance surface in
-//!          the current build for any artifact path configuration.
+//!   the current build for any artifact path configuration.
 //! - C3-05: Existing paper-path contract (transition_verdicts, transition_permitted,
-//!          operator_next_steps, restart_workflow) is not broken by C3.
+//!   operator_next_steps, restart_workflow) is not broken by C3.
 
 use std::io::Write as _;
 use std::sync::Arc;

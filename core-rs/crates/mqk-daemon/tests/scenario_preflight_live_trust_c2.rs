@@ -21,17 +21,17 @@
 //! ## Tests (all pure in-process; require `--test-threads=1`)
 //!
 //! - C2-01: no `MQK_ARTIFACT_PATH` → preflight `parity_evidence_state:
-//!          "not_configured"`, `live_trust_complete: null`; not a positive trust
-//!          claim.
+//!   "not_configured"`, `live_trust_complete: null`; not a positive trust
+//!   claim.
 //! - C2-02: absent `parity_evidence.json` → preflight `"absent"`,
-//!          `live_trust_complete: null`; absent evidence ≠ parity proven.
+//!   `live_trust_complete: null`; absent evidence ≠ parity proven.
 //! - C2-03: valid evidence with `live_trust_complete=false` → preflight
-//!          `"incomplete"`, `live_trust_complete: false`; explicit honest signal
-//!          even when `deployment_start_allowed=true`.
+//!   `"incomplete"`, `live_trust_complete: false`; explicit honest signal
+//!   even when `deployment_start_allowed=true`.
 //! - C2-04: `live_trust_complete` is null for all non-Present states on
-//!          preflight — null is never a false positive.
+//!   preflight — null is never a false positive.
 //! - C2-05: paper+alpaca path is not broken — preflight still includes the C2
-//!          fields and paper-specific autonomous readiness fields remain intact.
+//!   fields and paper-specific autonomous readiness fields remain intact.
 
 use std::io::Write as _;
 use std::sync::Arc;

@@ -34,20 +34,20 @@
 //! ## Tests (all pure in-process; require `--test-threads=1`)
 //!
 //! - C4-01: no `MQK_ARTIFACT_PATH` → session `parity_evidence_state:
-//!          "not_configured"`, `live_trust_complete: null`; not a positive
-//!          trust claim.
+//!   "not_configured"`, `live_trust_complete: null`; not a positive
+//!   trust claim.
 //! - C4-02: valid evidence with `live_trust_complete=false` → session
-//!          `"incomplete"`, `live_trust_complete: false`; explicit honest
-//!          ceiling on the lightweight session surface.
+//!   `"incomplete"`, `live_trust_complete: false`; explicit honest
+//!   ceiling on the lightweight session surface.
 //! - C4-03: `deployment_start_allowed=true` (paper+alpaca) and explicit
-//!          `live_trust_complete: false` co-present on the same session
-//!          response.  Proves the gap between "start is structurally allowed"
-//!          and "live-trust ceiling is not met" is visible on this surface.
+//!   `live_trust_complete: false` co-present on the same session
+//!   response.  Proves the gap between "start is structurally allowed"
+//!   and "live-trust ceiling is not met" is visible on this surface.
 //! - C4-04: `live_trust_complete` is never true on the session surface in the
-//!          current build for any artifact path configuration.
+//!   current build for any artifact path configuration.
 //! - C4-05: Existing session contract fields (`daemon_mode`, `adapter_id`,
-//!          `deployment_start_allowed`, `market_session`, `calendar_spec_id`,
-//!          `notes`) are not broken by C4.
+//!   `deployment_start_allowed`, `market_session`, `calendar_spec_id`,
+//!   `notes`) are not broken by C4.
 
 use std::io::Write as _;
 use std::sync::Arc;
