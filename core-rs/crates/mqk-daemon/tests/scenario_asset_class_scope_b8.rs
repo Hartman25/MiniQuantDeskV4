@@ -417,10 +417,7 @@ async fn as_10_asset_class_scope_field_never_null() {
         "AS-10: asset_class_scope must be a string, never null or missing; got: {json}"
     );
     assert!(
-        !json["asset_class_scope"]
-            .as_str()
-            .unwrap_or("")
-            .is_empty(),
+        !json["asset_class_scope"].as_str().unwrap_or("").is_empty(),
         "AS-10: asset_class_scope must be non-empty; got: {json}"
     );
 }
@@ -471,7 +468,11 @@ async fn as_12_b7_corp_actions_screening_unaffected_by_b8() {
     let router = routes::build_router(st);
 
     let (status, body) = call(router, oms_overview_req()).await;
-    assert_eq!(status, StatusCode::OK, "AS-12: oms/overview must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "AS-12: oms/overview must return 200"
+    );
 
     let json = parse_json(body);
     assert_eq!(
