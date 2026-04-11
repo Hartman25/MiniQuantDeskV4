@@ -149,7 +149,8 @@ fn write_valid_parity_evidence(dir: &std::path::Path, artifact_id: &str) {
     .to_string();
     let path = dir.join("parity_evidence.json");
     let mut f = std::fs::File::create(&path).expect("create parity_evidence.json");
-    f.write_all(content.as_bytes()).expect("write parity_evidence.json");
+    f.write_all(content.as_bytes())
+        .expect("write parity_evidence.json");
 }
 
 /// Write a minimal valid invalid parity_evidence.json (wrong schema_version).
@@ -157,7 +158,8 @@ fn write_invalid_parity_evidence(dir: &std::path::Path) {
     let content = r#"{"schema_version": "parity-v99"}"#;
     let path = dir.join("parity_evidence.json");
     let mut f = std::fs::File::create(&path).expect("create parity_evidence.json");
-    f.write_all(content.as_bytes()).expect("write parity_evidence.json");
+    f.write_all(content.as_bytes())
+        .expect("write parity_evidence.json");
 }
 
 /// Create a unique temp dir for artifact evidence, return path to a fake
@@ -165,10 +167,7 @@ fn write_invalid_parity_evidence(dir: &std::path::Path) {
 fn make_artifact_dir(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "mqk_c1_{tag}_{}_{n}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mqk_c1_{tag}_{}_{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let manifest = dir.join("promoted_manifest.json");
     // The evaluator only needs the manifest path to derive the parent dir.
@@ -304,7 +303,11 @@ async fn c1_04_live_trust_complete_null_for_non_present_states() {
         assert_eq!(s, StatusCode::OK);
         let j = parse_json(b);
         assert_eq!(j["parity_evidence_state"], "not_configured");
-        assert_eq!(j["live_trust_complete"], serde_json::Value::Null, "(a) not_configured → null");
+        assert_eq!(
+            j["live_trust_complete"],
+            serde_json::Value::Null,
+            "(a) not_configured → null"
+        );
     }
 
     // (b) absent
@@ -316,7 +319,11 @@ async fn c1_04_live_trust_complete_null_for_non_present_states() {
         assert_eq!(s, StatusCode::OK);
         let j = parse_json(b);
         assert_eq!(j["parity_evidence_state"], "absent");
-        assert_eq!(j["live_trust_complete"], serde_json::Value::Null, "(b) absent → null");
+        assert_eq!(
+            j["live_trust_complete"],
+            serde_json::Value::Null,
+            "(b) absent → null"
+        );
     }
 
     // (c) invalid — write a structurally invalid evidence file
@@ -328,7 +335,11 @@ async fn c1_04_live_trust_complete_null_for_non_present_states() {
         assert_eq!(s, StatusCode::OK);
         let j = parse_json(b);
         assert_eq!(j["parity_evidence_state"], "invalid");
-        assert_eq!(j["live_trust_complete"], serde_json::Value::Null, "(c) invalid → null");
+        assert_eq!(
+            j["live_trust_complete"],
+            serde_json::Value::Null,
+            "(c) invalid → null"
+        );
     }
 }
 

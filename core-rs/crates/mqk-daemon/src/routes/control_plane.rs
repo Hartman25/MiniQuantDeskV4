@@ -21,6 +21,7 @@ use crate::api_types::{
 };
 use crate::mode_transition::{evaluate_mode_transition, ModeTransitionVerdict};
 use crate::notify::{CriticalAlertPayload, OperatorNotifyPayload, RunStatusPayload};
+use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::DeploymentMode;
 use crate::state::{AppState, BusMsg, RuntimeLifecycleError, DAEMON_ENGINE_ID};
 
@@ -1202,6 +1203,33 @@ pub(crate) async fn build_mode_change_guidance(st: &AppState) -> ModeChangeGuida
         Err(_) => None,
     };
 
+    // C3: Surface the current parity evidence state so operators planning a
+    // mode transition see the live-trust ceiling on this surface without
+    // consulting a second endpoint.  Same evaluator as C1/C2/parity-evidence.
+    let parity_outcome = evaluate_parity_evidence_guarded();
+    let parity_evidence_state = match &parity_outcome {
+        ParityEvidenceOutcome::NotConfigured => "not_configured",
+        ParityEvidenceOutcome::Absent => "absent",
+        ParityEvidenceOutcome::Invalid { .. } => "invalid",
+        ParityEvidenceOutcome::Present {
+            live_trust_complete: true,
+            ..
+        } => "complete",
+        ParityEvidenceOutcome::Present {
+            live_trust_complete: false,
+            ..
+        } => "incomplete",
+        ParityEvidenceOutcome::Unavailable { .. } => "unavailable",
+    }
+    .to_string();
+    let live_trust_complete = match &parity_outcome {
+        ParityEvidenceOutcome::Present {
+            live_trust_complete,
+            ..
+        } => Some(*live_trust_complete),
+        _ => None,
+    };
+
     // CC-03A: Build the canonical transition verdict for every possible target
     // mode from the current mode.  All semantics come from the canonical seam
     // in `mode_transition::evaluate_mode_transition`; no route-local transition
@@ -1290,6 +1318,8 @@ pub(crate) async fn build_mode_change_guidance(st: &AppState) -> ModeChangeGuida
         restart_truth,
         transition_verdicts,
         restart_workflow,
+        parity_evidence_state,
+        live_trust_complete,
     }
 }
 

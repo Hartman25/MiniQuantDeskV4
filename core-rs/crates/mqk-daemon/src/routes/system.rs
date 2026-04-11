@@ -315,6 +315,41 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         (None, None, "not_applicable".to_string(), Vec::new(), None)
     };
 
+    // C2: Thread live-trust truth into the preflight surface.
+    //
+    // Preflight is the primary operator pre-start checklist.  Without these
+    // fields an operator could read `deployment_start_allowed=true` on a
+    // live-shadow or live-capital deployment and have no indication that
+    // `live_trust_complete=false` in all current builds.  C1 added this truth
+    // to `/api/v1/system/status`; C2 closes the same gap on preflight so the
+    // operator does not need to consult two surfaces to see the full picture.
+    //
+    // The same evaluator (`evaluate_parity_evidence_guarded`) is used here and
+    // on the status + parity-evidence routes, so all three surfaces stay in sync.
+    let parity_outcome_pf = evaluate_parity_evidence_guarded();
+    let parity_evidence_state = match &parity_outcome_pf {
+        ParityEvidenceOutcome::NotConfigured => "not_configured",
+        ParityEvidenceOutcome::Absent => "absent",
+        ParityEvidenceOutcome::Invalid { .. } => "invalid",
+        ParityEvidenceOutcome::Present {
+            live_trust_complete: true,
+            ..
+        } => "complete",
+        ParityEvidenceOutcome::Present {
+            live_trust_complete: false,
+            ..
+        } => "incomplete",
+        ParityEvidenceOutcome::Unavailable { .. } => "unavailable",
+    }
+    .to_string();
+    let live_trust_complete = match &parity_outcome_pf {
+        ParityEvidenceOutcome::Present {
+            live_trust_complete,
+            ..
+        } => Some(*live_trust_complete),
+        _ => None,
+    };
+
     let mut warnings = Vec::new();
     if status.notes.is_some() {
         warnings.push("Daemon status contains notes; verify runtime state.".to_string());
@@ -359,6 +394,8 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
             autonomous_arm_state,
             autonomous_blockers,
             session_in_window,
+            parity_evidence_state,
+            live_trust_complete,
         }),
     )
         .into_response()
@@ -702,6 +739,41 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
     let execution_allowed =
         strategy_allowed && status.state == "running" && status.active_run_id.is_some();
 
+    // C4: Live-trust truth on the session surface.
+    //
+    // `/api/v1/system/session` is the lightweight operator "can I execute now?"
+    // check.  Without C4 an operator consulting only this surface on a
+    // live-shadow or live-capital deployment would see `deployment_start_allowed`
+    // with no visibility into the live-trust ceiling.  Status (C1), preflight
+    // (C2), and mode-change-guidance (C3) already carry these fields; session is
+    // the final primary operator surface that was missing them.
+    //
+    // The same `evaluate_parity_evidence_guarded()` evaluator is used across all
+    // four surfaces so they cannot diverge.
+    let parity_outcome_sess = evaluate_parity_evidence_guarded();
+    let parity_evidence_state = match &parity_outcome_sess {
+        ParityEvidenceOutcome::NotConfigured => "not_configured",
+        ParityEvidenceOutcome::Absent => "absent",
+        ParityEvidenceOutcome::Invalid { .. } => "invalid",
+        ParityEvidenceOutcome::Present {
+            live_trust_complete: true,
+            ..
+        } => "complete",
+        ParityEvidenceOutcome::Present {
+            live_trust_complete: false,
+            ..
+        } => "incomplete",
+        ParityEvidenceOutcome::Unavailable { .. } => "unavailable",
+    }
+    .to_string();
+    let live_trust_complete = match &parity_outcome_sess {
+        ParityEvidenceOutcome::Present {
+            live_trust_complete,
+            ..
+        } => Some(*live_trust_complete),
+        _ => None,
+    };
+
     let calendar = st.calendar_spec();
     // AUTON-CALENDAR-01: use session_now_ts() so test-injected clocks propagate to
     // this display surface.  In production the override is None and it falls through
@@ -726,6 +798,9 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
             exchange_calendar_state: calendar.classify_exchange_calendar(now_ts).to_string(),
             calendar_spec_id: calendar.spec_id().to_string(),
             notes: vec![calendar.session_truth_note().to_string()],
+            // C4: Live-trust ceiling fields — same evaluator as C1/C2/C3.
+            parity_evidence_state,
+            live_trust_complete,
         }),
     )
         .into_response()
@@ -1208,7 +1283,11 @@ pub(crate) async fn system_topology(State(st): State<Arc<AppState>>) -> impl Int
     });
 
     // execution_loop
-    let exec_health = if exec_snap_present { "ok" } else { "not_started" };
+    let exec_health = if exec_snap_present {
+        "ok"
+    } else {
+        "not_started"
+    };
     services.push(SystemTopologyServiceRow {
         service_key: "execution_loop".to_string(),
         label: "Execution Loop".to_string(),
@@ -1229,10 +1308,7 @@ pub(crate) async fn system_topology(State(st): State<Arc<AppState>>) -> impl Int
 
     // broker.adapter
     let (broker_health, broker_notes) = match &ws {
-        AlpacaWsContinuityState::Live { .. } => (
-            "ok",
-            "WS continuity: live".to_string(),
-        ),
+        AlpacaWsContinuityState::Live { .. } => ("ok", "WS continuity: live".to_string()),
         AlpacaWsContinuityState::ColdStartUnproven => (
             "warning",
             "WS continuity: cold_start_unproven; signal ingestion blocked".to_string(),
