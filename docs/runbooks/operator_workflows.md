@@ -4,13 +4,17 @@ This runbook covers concrete, step-by-step operator workflows for the real contr
 of the daemon.  Each workflow names the exact route, the required precondition, the expected
 response shape, and the post-check that confirms the action took effect.
 
-**Manual vs automated boundary:**
+**Manual vs automated boundary (this runbook — non-autonomous / manual operation):**
 - The daemon enforces preconditions automatically (gates, auth, DB requirement).
 - The operator must initiate each action explicitly.  No auto-arm, auto-start, or
   auto-mode-change occurs without operator input.
 - Reconcile checks require the operator to verify the response; the daemon does not
   automatically block arming on dirty reconcile at every call site (reconcile gate
   is enforced at the reconcile logic layer).
+- **Exception — autonomous Paper + Alpaca path:** Auto-arm and auto-start both occur
+  when the autonomous session controller is active (proven in AUTON-01/AC-01).
+  See `docs/runbooks/autonomous_paper_ops.md` for the authoritative autonomous runbook.
+  The statements above apply to non-autonomous (manual) operation modes only.
 
 **Auth requirement:**
 All operator (mutating) routes require:

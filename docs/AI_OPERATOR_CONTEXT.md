@@ -207,7 +207,11 @@ Patches must be:
 
 # Completed Patches
 
-The following patch groups are complete.
+The following patch groups are listed here as an abbreviated early-stage history.
+The full verified-closed patch list (with scenario-file proof references) is in
+`docs/ai_workflow/MASTER_COMMAND_BRIEF.md` under "Closed — committed-state code/test
+proof verified" and the "Additionally closed" table.  Do not treat the list below
+as exhaustive — it covers only the foundational and broker series.
 
 ### Foundational Closure
 
@@ -253,9 +257,10 @@ Deployment policy and broker implementation separation:
 • AP-09: operator-truth semantics — execution/reconcile gated on external WS continuity;
   GUI SystemStatus typed for broker_snapshot_source + alpaca_ws_continuity
 
-Proof coverage: 75+ pure in-memory Alpaca adapter tests; 57 daemon route integration tests;
-20 GUI/daemon contract gate tests. See scripts/db_proof_bootstrap.sh for the external broker
-proof lane.
+Proof coverage: 75+ pure in-memory Alpaca adapter tests. Daemon route integration tests and
+GUI/daemon contract gate tests have grown substantially beyond the initial counts — see
+`docs/ai_workflow/MASTER_COMMAND_BRIEF.md` for the current verified-closed list.
+See scripts/db_proof_bootstrap.sh for the external broker proof lane.
 
 ---
 
@@ -264,6 +269,23 @@ proof lane.
 All 19 operator-facing screens hard-block on truthState !== null.
 Action catalog daemon-backed. Dead mode-change paths removed.
 Legacy fallback authority propagates through panelSources. 46/46 GUI truth tests pass.
+
+---
+
+### Subsequent series (abbreviated — see MASTER_COMMAND_BRIEF for full list)
+
+Major series proven in committed repo after the foundational batch above:
+
+- **CC-01 through CC-06**: operator control surfaces, alerts/events, OMS/metrics routes
+- **TV-01 through TV-EXEC-01B**: artifact promotion chain, deployability gate, parity evidence, capital policy, fill quality telemetry
+- **LO-01 through LO-03G**: operator runbooks, stressed recovery matrix, live shadow proof
+- **B1A through B8**: native strategy bootstrap, registry, fleet control, asset-class scope
+- **AUTON-01, AC-01, AUTON-TRUTH-01, AH-01**: autonomous paper session controller, calendar truth, history durability
+- **PTA-01/02, OPS-08/09**: canonical paper path, paper survivability, supervision proofs
+- **C1 through C4, LT-01**: live trust series (live_trust_complete=False is current honest state)
+- **BRK-00R-04/05/06/07R/08R/09R**: WS transport, cursor durability, gap recovery, reconcile start gate
+
+Full list with scenario-file proof references: `docs/ai_workflow/MASTER_COMMAND_BRIEF.md`.
 
 ---
 

@@ -10,22 +10,22 @@
 //!
 //! ## What is NOT in the manifest
 //!
-//! The following routes are intentionally absent — they are known-unmounted
-//! and the GUI uses `notProbed()` stubs instead of live HTTP probes:
+//! `NOT_MOUNTED` is empty — all previously-deferred GUI probe routes are now
+//! mounted on the daemon (Batches A2, A3, A4 graduated; see
+//! `gui_daemon_contract_waivers.md`).
 //!
-//! | Route                                    | Status                    |
-//! |------------------------------------------|---------------------------|
-//! | `/api/v1/system/topology`                | not yet implemented       |
-//! | `/api/v1/execution/transport`            | not yet implemented       |
-//! | `/api/v1/incidents`                      | not yet implemented       |
-//! | `/api/v1/execution/replace-cancel-chains`| not yet implemented       |
-//! | `/api/v1/alerts/triage`                  | not yet implemented       |
-//! | `/api/v1/market-data/quality`            | not yet implemented       |
-//! | `/api/v1/execution/timeline/{id}`        | per-order detail, not mounted |
-//! | `/api/v1/execution/trace/{id}`           | per-order detail, not mounted |
-//! | `/api/v1/execution/replay/{id}`          | per-order detail, not mounted |
-//! | `/api/v1/execution/chart/{id}`           | per-order detail, not mounted |
-//! | `/api/v1/execution/causality/{id}`       | per-order detail, not mounted |
+//! The following per-order detail routes are mounted but intentionally absent
+//! from the batch probe manifest.  They are accessed via dedicated exported
+//! fetch functions (`fetchExecutionTimeline`, etc.) in api.ts, not via the
+//! `fetchOperatorModel` batch:
+//!
+//! | Route                                             | Status                       |
+//! |---------------------------------------------------|------------------------------|
+//! | `/api/v1/execution/orders/:order_id/timeline`     | mounted; dedicated fetch fn  |
+//! | `/api/v1/execution/orders/:order_id/trace`        | mounted; dedicated fetch fn  |
+//! | `/api/v1/execution/orders/:order_id/replay`       | mounted; dedicated fetch fn  |
+//! | `/api/v1/execution/orders/:order_id/chart`        | mounted; dedicated fetch fn  |
+//! | `/api/v1/execution/orders/:order_id/causality`    | mounted; dedicated fetch fn  |
 //!
 //! POST/operator routes (ops/action, strategy/signal) require auth and are
 //! tested separately in the contract gate.

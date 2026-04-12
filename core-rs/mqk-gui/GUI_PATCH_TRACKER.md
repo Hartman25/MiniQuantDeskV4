@@ -257,6 +257,36 @@ violations. No un-guarded env var mutations remain in any test file under the da
 - `cargo clippy -p mqk-daemon --all-targets -- -D warnings` — PASS (zero warnings)
 - DB-backed tests (`risk_denial_persist_and_reload_roundtrip`, `risk_denials_route_returns_durable_history_after_restart`, `risk_denials_route_active_with_pool_returns_only_db_rows`, `risk_denials_route_no_snapshot_when_db_empty`) — NOT RUN (`MQK_DATABASE_URL` not available in this session); require `--include-ignored`
 
+### AP-09: External broker operator-truth semantics
+**Status:** DONE
+**Files:**
+- `core-rs/mqk-gui/src/features/system/types.ts` — `SystemStatus` + `SessionStateSummary` + `DEFAULT_STATUS`
+- `core-rs/mqk-gui/src/features/system/api.ts` — `mapLegacyStatusToSystemStatus` + `unavailableSessionState`
+- `core-rs/mqk-gui/src/features/system/truthRendering.ts` — `EXTERNAL_BROKER_GATED_PANELS`, `hasExternalBrokerContinuityGap`, AP-09 gate inserted before `isMissingPanelTruth`
+- `core-rs/mqk-gui/src/features/system/truthRendering.test.ts` — 6 new AP-09 tests
+- `core-rs/mqk-gui/src/features/system/mockData.ts` — `MOCK_STATUS` patched with 5 new required fields
+- `core-rs/crates/mqk-daemon/tests/scenario_gui_daemon_contract_gate.rs` — status shape check expanded
+**What changed:** `SystemStatus` now declares `broker_snapshot_source` (`"synthetic"|"external"`),
+`alpaca_ws_continuity` (`"not_applicable"|"cold_start_unproven"|"live"|"gap_detected"`),
+`deployment_start_allowed`, `daemon_mode`, `adapter_id`. `truthRendering.ts` gates execution
+and reconcile panels on external WS continuity: `cold_start_unproven`/`gap_detected` → `no_snapshot`.
+Portfolio is intentionally not gated (REST-independent truth). `DEFAULT_STATUS` and legacy path
+fail-closed with `synthetic`/`not_applicable`. 6 new tests; 46/46 pass. Contract gate shape
+check expanded to 9 status fields; 20/20 pass.
+
+### REC-01: Reconcile mismatch detail route + fail-closed GUI detail gate
+**Status:** DONE
+**Files:**
+- `core-rs/mqk-gui/src/features/system/truthRendering.ts`
+- `core-rs/mqk-gui/src/features/system/truthRendering.test.ts`
+- `core-rs/mqk-gui/src/features/system/api.ts`
+- `core-rs/crates/mqk-daemon/src/api_types.rs`
+- `core-rs/crates/mqk-daemon/src/routes.rs`
+- `core-rs/crates/mqk-daemon/src/state.rs`
+- `core-rs/crates/mqk-daemon/tests/scenario_gui_daemon_contract_gate.rs`
+- `docs/ci/gui_daemon_contract_waivers.md`
+**What changed:** Reconcile now requires both summary and mismatch detail truth. The daemon mounts `GET /api/v1/reconcile/mismatches` as a typed truth surface with `truth_state`. GUI only treats the endpoint as present when `truth_state === "active"`; `no_snapshot` and `stale` keep the panel fail-closed so empty mismatch rows cannot masquerade as authoritative zero mismatches.
+
 ---
 
 ## P0 — Foundation (make GUI a real workstation, keep current controls working)
@@ -406,32 +436,3 @@ violations. No un-guarded env var mutations remain in any test file under the da
 - Patch 1 is **GUI-1** only.
 - Backtest/Research tabs are placeholders until DAEMON-4+ are implemented.
 - Next most important is **GUI-2 (configurable daemon URL)** so you can target multiple machines cleanly.
-### AP-09: External broker operator-truth semantics
-**Status:** DONE
-**Files:**
-- `core-rs/mqk-gui/src/features/system/types.ts` — `SystemStatus` + `SessionStateSummary` + `DEFAULT_STATUS`
-- `core-rs/mqk-gui/src/features/system/api.ts` — `mapLegacyStatusToSystemStatus` + `unavailableSessionState`
-- `core-rs/mqk-gui/src/features/system/truthRendering.ts` — `EXTERNAL_BROKER_GATED_PANELS`, `hasExternalBrokerContinuityGap`, AP-09 gate inserted before `isMissingPanelTruth`
-- `core-rs/mqk-gui/src/features/system/truthRendering.test.ts` — 6 new AP-09 tests
-- `core-rs/mqk-gui/src/features/system/mockData.ts` — `MOCK_STATUS` patched with 5 new required fields
-- `core-rs/crates/mqk-daemon/tests/scenario_gui_daemon_contract_gate.rs` — status shape check expanded
-**What changed:** `SystemStatus` now declares `broker_snapshot_source` (`"synthetic"|"external"`),
-`alpaca_ws_continuity` (`"not_applicable"|"cold_start_unproven"|"live"|"gap_detected"`),
-`deployment_start_allowed`, `daemon_mode`, `adapter_id`. `truthRendering.ts` gates execution
-and reconcile panels on external WS continuity: `cold_start_unproven`/`gap_detected` → `no_snapshot`.
-Portfolio is intentionally not gated (REST-independent truth). `DEFAULT_STATUS` and legacy path
-fail-closed with `synthetic`/`not_applicable`. 6 new tests; 46/46 pass. Contract gate shape
-check expanded to 9 status fields; 20/20 pass.
-
-### REC-01: Reconcile mismatch detail route + fail-closed GUI detail gate
-**Status:** DONE
-**Files:**
-- `core-rs/mqk-gui/src/features/system/truthRendering.ts`
-- `core-rs/mqk-gui/src/features/system/truthRendering.test.ts`
-- `core-rs/mqk-gui/src/features/system/api.ts`
-- `core-rs/crates/mqk-daemon/src/api_types.rs`
-- `core-rs/crates/mqk-daemon/src/routes.rs`
-- `core-rs/crates/mqk-daemon/src/state.rs`
-- `core-rs/crates/mqk-daemon/tests/scenario_gui_daemon_contract_gate.rs`
-- `docs/ci/gui_daemon_contract_waivers.md`
-**What changed:** Reconcile now requires both summary and mismatch detail truth. The daemon mounts `GET /api/v1/reconcile/mismatches` as a typed truth surface with `truth_state`. GUI only treats the endpoint as present when `truth_state === "active"`; `no_snapshot` and `stale` keep the panel fail-closed so empty mismatch rows cannot masquerade as authoritative zero mismatches.

@@ -244,21 +244,23 @@ in the GUI. `NOT_MOUNTED` is empty. `notProbed()` stubs removed.
 | `/api/v1/execution/transport`             | A2    | `"active"` / `"no_snapshot"` — in-memory    |
 | `/api/v1/market-data/quality`             | A2    | `"active"` — in-memory WS + source state    |
 | `/api/v1/system/topology`                 | A3    | `"active"` — 5 local service nodes          |
-| `/api/v1/incidents`                       | A3    | `"not_wired"` — no incident manager         |
+| `/api/v1/incidents`                       | OPS-01 | `"no_db"` / `"active"` — DB-backed incident lifecycle; POST create + linked_incident_id in triage wired |
 | `/api/v1/execution/replace-cancel-chains` | A4    | `"not_wired"` — no chain lineage tracking   |
-| `/api/v1/alerts/triage`                   | A4    | `"alerts_no_triage"` — source real, lifecycle not |
+| `/api/v1/alerts/triage`                   | A4    | `"no_db"` / `"active"` — source real; ack lifecycle wired (OPS-02) |
 
-### Per-order detail surfaces — not mounted (static null in api.ts)
+### Per-order detail surfaces — mounted, not batch-probed (static null in api.ts)
 
-These five routes are not probed in the batch model assembly. They are always `null`
-in the `SystemModel`. Dedicated exported functions (`fetchExecutionTimeline`, etc.)
-remain for screen-level calls when these routes are eventually mounted.
+These five routes are mounted on the daemon but are not in the `fetchOperatorModel`
+batch probe manifest.  They are always `null` in the `SystemModel`.  Dedicated
+exported functions (`fetchExecutionTimeline`, etc.) are used for screen-level calls.
 
-- `/api/v1/execution/timeline/{order_id}`
-- `/api/v1/execution/trace/{order_id}`
-- `/api/v1/execution/replay/{order_id}`
-- `/api/v1/execution/chart/{order_id}`
-- `/api/v1/execution/causality/{order_id}`
+Note: paths use the `/orders/:order_id/` prefix, not a flat `/{id}` structure.
+
+- `/api/v1/execution/orders/:order_id/timeline`
+- `/api/v1/execution/orders/:order_id/trace`
+- `/api/v1/execution/orders/:order_id/replay`
+- `/api/v1/execution/orders/:order_id/chart`
+- `/api/v1/execution/orders/:order_id/causality`
 
 ### ROUTE-TRUTH-01 CI gate
 
