@@ -88,9 +88,7 @@ _Verification basis: scenario test files, production source modules, and runbook
 
 ### Open — genuinely remaining
 
-#### Maintainability / refactor
-1. **MT-01** — Decompose daemon state/routes sink files
-2. **MT-02** — Extract runtime orchestrator phases
+_No items remain open._
 
 ---
 
@@ -98,6 +96,8 @@ _Verification basis: scenario test files, production source modules, and runbook
 
 | Patch | Verification evidence |
 |---|---|
+| **MT-01** | `routes/execution_order_analysis.rs` extracted A5/outbox handlers (1122 lines) from `execution.rs`; `routes/system_artifact.rs` extracted artifact/parity/topology handlers (380 lines) from `system.rs`; `mod` declarations + router imports updated in `routes.rs`; `cargo check -p mqk-daemon` + clippy zero warnings; 96 lib tests + 72 scenario_daemon_routes + 23 contract gate tests all pass |
+| **MT-02** | `orchestrator/dispatch.rs` extracted Phase-1 dispatch helpers (`dispatch_submit_claimed_outbox_row`, `dispatch_cancel_claimed_outbox_row`) from `orchestrator.rs`; `mod dispatch;` registered; unused imports removed; `cargo check --workspace` + clippy zero warnings |
 | **MT-03** | `mqk-db/src/inbox.rs` extracted from `orders.rs`; `lib.rs` re-exports `inbox::*`; GUI route layer already modular (14 `routes/` modules in HEAD); `cargo check --workspace` clean |
 | **IR-01** | `scenario_operator_audit_ir01.rs` (3 pure in-process tests P1–P3); DB-backed proof (`ir01_control_arm_no_run_no_synthetic_run_created`, `ir01_control_disarm_no_run_no_synthetic_run_created`, `ir01_control_arm_with_real_run_writes_audit_event`) in `scenario_daemon_runtime_lifecycle.rs` |
 | **IR-02** | `scenario_operator_audit_ir02.rs` |

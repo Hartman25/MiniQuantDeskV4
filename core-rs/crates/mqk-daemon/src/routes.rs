@@ -6,12 +6,14 @@
 //!
 //! # Module layout
 //!
-//! | Module           | Contents                                              |
-//! |------------------|-------------------------------------------------------|
-//! | `control`        | Existing control sub-router (unchanged)               |
-//! | `helpers`        | Shared pure functions used by multiple route modules  |
-//! | `system`         | health, status, preflight, metadata, leadership,      |
-//! |                  | session, config-fingerprint, config-diffs             |
+//! | Module            | Contents                                              |
+//! |-------------------|-------------------------------------------------------|
+//! | `control`         | Existing control sub-router (unchanged)               |
+//! | `helpers`         | Shared pure functions used by multiple route modules  |
+//! | `system`          | health, status, preflight, metadata, leadership,      |
+//! |                   | session, config-fingerprint, config-diffs             |
+//! | `system_artifact` | artifact-intake, run-artifact, parity-evidence,       |
+//! |                   | topology (MT-01 split from system)                    |
 //! | `control_plane`  | run_start/stop/halt, integrity arm/disarm, ops_action,|
 //! |                  | ops_catalog, ops_mode_change_guidance                 |
 //! | `execution`      | execution_summary, execution_orders, order submit/cancel |
@@ -29,6 +31,7 @@ pub(crate) mod audit_ops;
 pub mod control;
 pub(crate) mod control_plane;
 pub(crate) mod execution;
+pub(crate) mod execution_order_analysis;
 pub(crate) mod helpers;
 pub(crate) mod oms_metrics;
 pub(crate) mod paper_journal;
@@ -36,6 +39,7 @@ pub(crate) mod portfolio;
 pub(crate) mod reconcile;
 pub(crate) mod strategy;
 pub(crate) mod system;
+pub(crate) mod system_artifact;
 pub(crate) mod trading;
 pub(crate) mod transport_quality;
 
@@ -143,10 +147,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         run_halt, run_start, run_stop,
     };
     use execution::{
-        execution_fill_quality, execution_order_cancel, execution_order_causality,
-        execution_order_chart, execution_order_replay, execution_order_submit,
-        execution_order_timeline, execution_order_trace, execution_orders, execution_outbox,
-        execution_protection_status, execution_replace_cancel_chains, execution_summary,
+        execution_fill_quality, execution_order_cancel, execution_order_submit,
+        execution_orders, execution_summary,
+    };
+    use execution_order_analysis::{
+        execution_order_causality, execution_order_chart, execution_order_replay,
+        execution_order_timeline, execution_order_trace, execution_outbox,
+        execution_protection_status, execution_replace_cancel_chains,
     };
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
@@ -157,10 +164,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use reconcile::{reconcile_mismatches, reconcile_status};
     use strategy::{strategy_signal, strategy_summary, strategy_suppressions};
     use system::{
-        autonomous_readiness, health, status_handler, system_artifact_intake, system_config_diffs,
-        system_config_fingerprint, system_metadata, system_parity_evidence, system_preflight,
-        system_run_artifact, system_runtime_leadership, system_session, system_status,
-        system_topology,
+        autonomous_readiness, health, status_handler, system_config_diffs,
+        system_config_fingerprint, system_metadata, system_preflight,
+        system_runtime_leadership, system_session, system_status,
+    };
+    use system_artifact::{
+        system_artifact_intake, system_parity_evidence, system_run_artifact, system_topology,
     };
     use trading::{
         diagnostics_snapshot, stream, trading_account, trading_fills, trading_orders,
