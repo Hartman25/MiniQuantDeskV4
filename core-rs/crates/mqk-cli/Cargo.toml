@@ -49,4 +49,7 @@ mqk-reconcile = { path = "../mqk-reconcile" }
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
-sqlx = { version = "0.7.4", features = ["runtime-tokio", "postgres", "macros", "tls-native-tls"] }
+# DEP-GOV-01: workspace = true so sqlx upgrade propagates automatically.
+# Previously hard-pinned to 0.7.4 (exact patch) — that pin would survive a workspace
+# upgrade to 0.8 and silently hold cli dev tests on the old version.
+sqlx.workspace = true

@@ -104,6 +104,9 @@ jobs:
       - name: CI-11 - Enforce no bare ignored load-bearing proof tests
         run: bash scripts/guards/check_ignored_load_bearing_proofs.sh
 
+      - name: DEP-GOV-01 - Enforce workspace dependency inheritance (no inline sqlx pins)
+        run: bash scripts/guards/check_workspace_dep_inheritance.sh
+
   rust:
     name: "Rust (fmt + clippy + test)"
     runs-on: ubuntu-latest

@@ -24,7 +24,8 @@ mqk-execution = { path = "../mqk-execution" }
 mqk-portfolio = { path = "../mqk-portfolio" }
 mqk-risk      = { path = "../mqk-risk" }
 
-sqlx = { version = "0.7", features = ["runtime-tokio", "postgres", "macros", "chrono", "uuid", "json"] }
+# DEP-GOV-01: workspace = true so sqlx upgrade propagates automatically.
+sqlx.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
