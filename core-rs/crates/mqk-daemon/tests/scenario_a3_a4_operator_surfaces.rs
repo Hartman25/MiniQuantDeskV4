@@ -13,7 +13,7 @@
 //!   truth_state="not_wired", chains=[], canonical_route correct.
 //! - A4-02: replace-cancel-chains note field is non-empty.
 //! - A4-03: GET /api/v1/alerts/triage returns 200 with
-//!   truth_state="alerts_no_triage", canonical_route correct.
+//!   truth_state="no_db" (no DB pool in test router; OPS-02), canonical_route correct.
 //! - A4-04: alerts/triage triage_note field is non-empty.
 //! - A4-05: alerts/triage rows contain status="unacked" for every emitted row
 //!   (triage lifecycle not backed).
@@ -119,42 +119,49 @@ async fn a3_03_topology_no_db_postgres_not_configured() {
 }
 
 // ---------------------------------------------------------------------------
-// A3-04: incidents 200 + truth_state="not_wired" + empty rows
+// A3-04: incidents 200 + truth_state="no_db" (no pool in test router)
 // ---------------------------------------------------------------------------
 
+/// Without DB pool: truth_state="no_db", rows=[] (authoritative empty; not
+/// absence of incidents).  With DB: truth_state="active" + sys_incidents rows.
+/// Test router has no DB, so expects "no_db" (OPS-01).
 #[tokio::test]
-async fn a3_04_incidents_not_wired_empty_rows() {
+async fn a3_04_incidents_no_db_empty_rows() {
     let (status, json) = get(make_router(), "/api/v1/incidents").await;
     assert_eq!(status, StatusCode::OK, "expected 200: {json}");
-    assert_eq!(str_field(&json, "truth_state"), "not_wired");
+    assert_eq!(str_field(&json, "truth_state"), "no_db");
     assert_eq!(str_field(&json, "canonical_route"), "/api/v1/incidents");
     let rows = json
         .get("rows")
         .and_then(|v| v.as_array())
         .expect("rows must be an array");
-    assert!(rows.is_empty(), "rows must be empty: {json}");
+    assert!(rows.is_empty(), "rows must be empty when no DB: {json}");
 }
 
 // ---------------------------------------------------------------------------
-// A3-05: incidents note field non-empty
+// A3-05: incidents backend field is non-empty
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a3_05_incidents_note_non_empty() {
+async fn a3_05_incidents_backend_non_empty() {
     let (_, json) = get(make_router(), "/api/v1/incidents").await;
-    let note = str_field(&json, "note");
-    assert!(!note.is_empty(), "note must be non-empty operator guidance");
+    let backend = str_field(&json, "backend");
+    assert!(!backend.is_empty(), "backend must be non-empty");
 }
 
 // ---------------------------------------------------------------------------
-// A4-01: replace-cancel-chains 200 + truth_state="not_wired" + empty chains
+// A4-01: replace-cancel-chains 200 + truth_state="no_db" (no pool) + empty chains
+//
+// EXEC-02: route is now DB-backed. Without DB pool truth_state = "no_db"
+// (previously "not_wired" when the surface was a static stub).
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn a4_01_replace_cancel_chains_not_wired_empty() {
+async fn a4_01_replace_cancel_chains_no_db_empty() {
     let (status, json) = get(make_router(), "/api/v1/execution/replace-cancel-chains").await;
     assert_eq!(status, StatusCode::OK, "expected 200: {json}");
-    assert_eq!(str_field(&json, "truth_state"), "not_wired");
+    // EXEC-02: no DB pool → truth_state="no_db" (not "not_wired").
+    assert_eq!(str_field(&json, "truth_state"), "no_db");
     assert_eq!(
         str_field(&json, "canonical_route"),
         "/api/v1/execution/replace-cancel-chains"
@@ -163,7 +170,7 @@ async fn a4_01_replace_cancel_chains_not_wired_empty() {
         .get("chains")
         .and_then(|v| v.as_array())
         .expect("chains must be an array");
-    assert!(chains.is_empty(), "chains must be empty: {json}");
+    assert!(chains.is_empty(), "chains must be empty when no DB: {json}");
 }
 
 // ---------------------------------------------------------------------------
@@ -178,14 +185,18 @@ async fn a4_02_replace_cancel_chains_note_non_empty() {
 }
 
 // ---------------------------------------------------------------------------
-// A4-03: alerts/triage 200 + truth_state="alerts_no_triage"
+// A4-03: alerts/triage 200 + truth_state conditional on DB presence
 // ---------------------------------------------------------------------------
 
+/// Without DB: truth_state="no_db" (ack state unavailable; OPS-02).
+/// With DB:    truth_state="active" (ack state from sys_alert_acks).
+/// The test router has no DB, so expects "no_db".
 #[tokio::test]
 async fn a4_03_alerts_triage_200_alerts_no_triage() {
     let (status, json) = get(make_router(), "/api/v1/alerts/triage").await;
     assert_eq!(status, StatusCode::OK, "expected 200: {json}");
-    assert_eq!(str_field(&json, "truth_state"), "alerts_no_triage");
+    // No DB pool in make_router() — truth_state must be "no_db".
+    assert_eq!(str_field(&json, "truth_state"), "no_db");
     assert_eq!(str_field(&json, "canonical_route"), "/api/v1/alerts/triage");
     // rows must be an array (may be empty in clean state)
     json.get("rows")

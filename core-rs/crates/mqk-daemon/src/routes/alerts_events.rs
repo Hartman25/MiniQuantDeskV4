@@ -49,7 +49,9 @@ use axum::{
 use sqlx::Row;
 
 use crate::api_types::{
-    ActiveAlertRow, ActiveAlertsResponse, EventFeedRow, EventsFeedResponse, RuntimeErrorResponse,
+    ActiveAlertRow, ActiveAlertsResponse, AlertAckRequest, AlertAckResponse, AlertTriageAlertRow,
+    AlertTriageResponse, CreateIncidentRequest, CreateIncidentResponse, EventFeedRow,
+    EventsFeedResponse, IncidentRow, IncidentsResponse, RuntimeErrorResponse,
 };
 use crate::state::{
     AlpacaWsContinuityState, AppState, AutonomousSessionTruth, StrategyMarketDataSource,
@@ -498,44 +500,189 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/incidents (A3)
+// GET /api/v1/incidents (OPS-01)
 // ---------------------------------------------------------------------------
 
-/// Incident surface — mounted but not wired.
+/// List durable incidents from `sys_incidents` (OPS-01).
 ///
-/// No durable incident manager exists.  Returns an explicit `"not_wired"`
-/// wrapper rather than 404 so the GUI can surface honest unavailable truth
-/// instead of treating the missing route as a backend error.
-pub(crate) async fn incidents(_: State<Arc<AppState>>) -> impl IntoResponse {
-    use crate::api_types::IncidentsResponse;
+/// Returns `truth_state = "active"` with DB-backed rows when a pool is
+/// configured.  Returns `truth_state = "no_db"` with empty rows when no pool
+/// is present — empty rows must not be interpreted as absence of incidents.
+pub(crate) async fn incidents(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(IncidentsResponse {
+                canonical_route: "/api/v1/incidents".to_string(),
+                truth_state: "no_db".to_string(),
+                backend: "unavailable".to_string(),
+                rows: vec![],
+            }),
+        )
+            .into_response();
+    };
 
-    (
-        StatusCode::OK,
-        Json(IncidentsResponse {
-            canonical_route: "/api/v1/incidents".to_string(),
-            truth_state: "not_wired".to_string(),
-            backend: "none".to_string(),
-            note: "No incident manager is implemented. \
-                   Empty rows must not be interpreted as absence of historical incidents."
-                .to_string(),
-            rows: vec![],
-        }),
-    )
-        .into_response()
+    match mqk_db::list_incidents(db).await {
+        Ok(db_rows) => {
+            let rows = db_rows
+                .into_iter()
+                .map(|r| IncidentRow {
+                    incident_id: r.incident_id,
+                    opened_at_utc: r.opened_at_utc.to_rfc3339(),
+                    title: r.title,
+                    severity: r.severity,
+                    status: r.status,
+                    linked_alert_id: r.linked_alert_id,
+                    opened_by: r.opened_by,
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(IncidentsResponse {
+                    canonical_route: "/api/v1/incidents".to_string(),
+                    truth_state: "active".to_string(),
+                    backend: "postgres.sys_incidents".to_string(),
+                    rows,
+                }),
+            )
+                .into_response()
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RuntimeErrorResponse {
+                error: format!("incidents query failed: {err}"),
+                fault_class: "incidents.query_failed".to_string(),
+                gate: None,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/incidents (OPS-01)
+// ---------------------------------------------------------------------------
+
+/// Declare a new incident (OPS-01).
+///
+/// Inserts a row into `sys_incidents`.  Requires a DB pool.  `title` must be
+/// non-empty.  `severity` must be one of `"info"`, `"warning"`, `"critical"`.
+///
+/// `incident_id` is derived as a UUIDv5 over the incident namespace +
+/// `title:opened_at_utc` so that a re-submit at identical wall time is
+/// idempotent (returns the same logical incident).
+pub(crate) async fn create_incident(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<CreateIncidentRequest>,
+) -> Response {
+    if body.title.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RuntimeErrorResponse {
+                error: "title must be a non-empty string".to_string(),
+                fault_class: "incidents.create.invalid_title".to_string(),
+                gate: Some("title_present".to_string()),
+            }),
+        )
+            .into_response();
+    }
+
+    let valid_severities = ["info", "warning", "critical"];
+    if !valid_severities.contains(&body.severity.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RuntimeErrorResponse {
+                error: format!(
+                    "severity must be one of: {}",
+                    valid_severities.join(", ")
+                ),
+                fault_class: "incidents.create.invalid_severity".to_string(),
+                gate: Some("severity_valid".to_string()),
+            }),
+        )
+            .into_response();
+    }
+
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(RuntimeErrorResponse {
+                error: "incident creation requires a DB pool; daemon has no DB configured"
+                    .to_string(),
+                fault_class: "incidents.create.no_db".to_string(),
+                gate: Some("db_pool".to_string()),
+            }),
+        )
+            .into_response();
+    };
+
+    let opened_at = chrono::Utc::now(); // operator-action timestamp — ops metadata only
+    let opened_by = body.opened_by.as_deref().unwrap_or("operator");
+
+    // UUIDv5: deterministic ID from title + opened_at so identical wall-time
+    // re-submits resolve to the same incident_id.
+    const INCIDENT_NS: uuid::Uuid =
+        uuid::uuid!("b7e2a1c4-0d5f-4e8b-9c3a-1f6d2e4a7b0c");
+    let id_name = format!("{}:{}", body.title, opened_at.to_rfc3339());
+    let incident_id = uuid::Uuid::new_v5(&INCIDENT_NS, id_name.as_bytes()).to_string();
+
+    let args = mqk_db::InsertIncidentArgs {
+        incident_id: &incident_id,
+        opened_at_utc: opened_at,
+        title: &body.title,
+        severity: &body.severity,
+        linked_alert_id: body.linked_alert_id.as_deref(),
+        opened_by,
+    };
+
+    match mqk_db::insert_incident(db, args).await {
+        Ok(Some(row)) => (
+            StatusCode::OK,
+            Json(CreateIncidentResponse {
+                canonical_route: "/api/v1/incidents".to_string(),
+                incident_id: row.incident_id,
+                opened_at_utc: row.opened_at_utc.to_rfc3339(),
+                title: row.title,
+                severity: row.severity,
+                status: row.status,
+                linked_alert_id: row.linked_alert_id,
+                opened_by: row.opened_by,
+            }),
+        )
+            .into_response(),
+        // Idempotent no-op: incident_id already existed (same title+ts window).
+        Ok(None) => (
+            StatusCode::OK,
+            Json(RuntimeErrorResponse {
+                error: "incident with this id already exists (idempotent no-op)".to_string(),
+                fault_class: "incidents.create.already_exists".to_string(),
+                gate: None,
+            }),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RuntimeErrorResponse {
+                error: format!("incident insert failed: {err}"),
+                fault_class: "incidents.create.db_write_failed".to_string(),
+                gate: None,
+            }),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/alerts/triage (A4)
 // ---------------------------------------------------------------------------
 
-/// Alert triage surface — active alerts with honest `"alerts_no_triage"` state.
+/// Alert triage surface — active alerts with DB-backed ack state (OPS-02).
 ///
-/// Rows are sourced from the same in-memory fault-signal computation as
-/// `/api/v1/alerts/active`.  `status` is always `"unacked"` because no
-/// triage workflow (ack/escalate/assign) is implemented or backed.
+/// Alert rows are sourced from the same in-memory fault-signal computation as
+/// `/api/v1/alerts/active`.  `status` reflects `sys_alert_acks` when DB is
+/// present (`truth_state = "active"`); falls back to `"unacked"` for all rows
+/// when no DB pool is available (`truth_state = "no_db"`).
 pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
-    use crate::api_types::{AlertTriageAlertRow, AlertTriageResponse};
-
     let status_snap = match st.current_status_snapshot().await {
         Ok(s) => s,
         Err(err) => return runtime_error_response(err),
@@ -553,7 +700,6 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
     };
 
     let fault_signals = build_fault_signals(&status_snap, &reconcile, risk_blocked);
-    let now_utc = chrono::Utc::now().to_rfc3339();
 
     // WS continuity signals — same as alerts/active
     let ws = st.alpaca_ws_continuity().await;
@@ -583,54 +729,159 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
         _ => {}
     }
 
+    // Load DB-backed ack records and incident linkages when DB is available.
+    //
+    // incident_map: alert_id → incident_id (first/most-recent incident that
+    // references each alert class slug via `linked_alert_id`).  Built from
+    // `sys_incidents` so that triage rows carry `linked_incident_id` when an
+    // operator has escalated an alert to a tracked incident (OPS-01).
+    let (truth_state, backend, ack_map, incident_map) = if let Some(db) = st.db.as_ref() {
+        let acks = mqk_db::load_alert_acks(db).await.unwrap_or_default();
+        let ack_map: std::collections::HashMap<String, String> = acks
+            .into_iter()
+            .map(|r| (r.alert_id, r.acked_at_utc.to_rfc3339()))
+            .collect();
+
+        // OPS-01: build alert_id → incident_id map.  list_incidents returns
+        // rows newest-first; first match wins so the most-recent incident
+        // linked to a given alert is surfaced.
+        let incidents = mqk_db::list_incidents(db).await.unwrap_or_default();
+        let mut inc_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for inc in incidents {
+            if let Some(alert_id) = inc.linked_alert_id {
+                inc_map.entry(alert_id).or_insert(inc.incident_id);
+            }
+        }
+
+        ("active", "postgres.sys_alert_acks+postgres.sys_incidents", ack_map, inc_map)
+    } else {
+        (
+            "no_db",
+            "daemon.runtime_state",
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        )
+    };
+
+    let make_row = |alert_id: String, severity: String, domain: String, title: String| {
+        let acked_at = ack_map.get(&alert_id).cloned();
+        let status = if acked_at.is_some() { "acked" } else { "unacked" }.to_string();
+        let linked_incident_id = incident_map.get(&alert_id).cloned();
+        AlertTriageAlertRow {
+            alert_id,
+            severity,
+            status,
+            title,
+            domain,
+            linked_incident_id,
+            linked_order_id: None,
+            linked_strategy_id: None,
+            created_at: acked_at, // None for unacked (no durable creation time)
+            assigned_to: None,
+        }
+    };
+
     let mut rows: Vec<AlertTriageAlertRow> = fault_signals
         .into_iter()
         .map(|s| {
-            let domain = domain_from_class(&s.class);
-            AlertTriageAlertRow {
-                alert_id: s.class.clone(),
-                severity: s.severity,
-                status: "unacked".to_string(),
-                title: s.summary,
-                domain: domain.to_string(),
-                linked_incident_id: None,
-                linked_order_id: None,
-                linked_strategy_id: None,
-                created_at: now_utc.clone(),
-                assigned_to: None,
-            }
+            let domain = domain_from_class(&s.class).to_string();
+            make_row(s.class, s.severity, domain, s.summary)
         })
         .collect();
 
     for (alert_id, severity, domain, title) in extra_signals {
-        rows.push(AlertTriageAlertRow {
-            alert_id: alert_id.to_string(),
-            severity: severity.to_string(),
-            status: "unacked".to_string(),
+        rows.push(make_row(
+            alert_id.to_string(),
+            severity.to_string(),
+            domain.to_string(),
             title,
-            domain: domain.to_string(),
-            linked_incident_id: None,
-            linked_order_id: None,
-            linked_strategy_id: None,
-            created_at: now_utc.clone(),
-            assigned_to: None,
-        });
+        ));
     }
+
+    let triage_note = if truth_state == "active" {
+        "Alert source is real (same as /api/v1/alerts/active). \
+         Ack state is DB-backed (sys_alert_acks). \
+         Incident linkage is DB-backed (sys_incidents via linked_alert_id). \
+         Assign/escalate lifecycle is not implemented."
+    } else {
+        "Alert source is real (same as /api/v1/alerts/active). \
+         Ack state and incident linkage unavailable (no DB pool); all rows carry status=unacked."
+    };
 
     (
         StatusCode::OK,
         Json(AlertTriageResponse {
             canonical_route: "/api/v1/alerts/triage".to_string(),
-            truth_state: "alerts_no_triage".to_string(),
-            backend: "daemon.runtime_state".to_string(),
-            triage_note: "Alert source is real (same as /api/v1/alerts/active). \
-                          Triage lifecycle (ack/escalate/assign) is not implemented; \
-                          all rows carry status=unacked."
-                .to_string(),
+            truth_state: truth_state.to_string(),
+            backend: backend.to_string(),
+            triage_note: triage_note.to_string(),
             rows,
         }),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/alerts/triage/ack
+// ---------------------------------------------------------------------------
+
+/// Acknowledge an active alert by class slug.
+///
+/// Upserts a row into `sys_alert_acks`.  Idempotent: re-acking the same
+/// `alert_id` updates the timestamp and `acked_by`.  Returns 503 when no DB
+/// pool is configured (ack requires durable storage).
+pub(crate) async fn alert_triage_ack(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<AlertAckRequest>,
+) -> Response {
+    if body.alert_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RuntimeErrorResponse {
+                error: "alert_id must be a non-empty string".to_string(),
+                fault_class: "alerts.triage.ack.invalid_alert_id".to_string(),
+                gate: Some("alert_id_present".to_string()),
+            }),
+        )
+            .into_response();
+    }
+
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(RuntimeErrorResponse {
+                error: "alert ack requires a DB pool; daemon has no DB configured".to_string(),
+                fault_class: "alerts.triage.ack.no_db".to_string(),
+                gate: Some("db_pool".to_string()),
+            }),
+        )
+            .into_response();
+    };
+
+    let acked_by = body.acked_by.as_deref().unwrap_or("operator");
+    let acked_at = chrono::Utc::now(); // operator action timestamp — ops metadata only
+
+    match mqk_db::upsert_alert_ack(db, &body.alert_id, acked_at, acked_by).await {
+        Ok(row) => (
+            StatusCode::OK,
+            Json(AlertAckResponse {
+                canonical_route: "/api/v1/alerts/triage/ack".to_string(),
+                alert_id: row.alert_id,
+                acked_at_utc: row.acked_at_utc.to_rfc3339(),
+                acked_by: row.acked_by,
+            }),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RuntimeErrorResponse {
+                error: format!("alert ack write failed: {err}"),
+                fault_class: "alerts.triage.ack.db_write_failed".to_string(),
+                gate: None,
+            }),
+        )
+            .into_response(),
+    }
 }
 
 /// Map a fault-signal class string to a coarse domain label for triage rows.

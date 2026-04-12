@@ -2675,46 +2675,112 @@ pub struct SystemTopologyResponse {
 }
 
 // ---------------------------------------------------------------------------
-// /api/v1/incidents (A3)
+// /api/v1/incidents (OPS-01)
 // ---------------------------------------------------------------------------
 
-/// Response for GET /api/v1/incidents (A3).
+/// A single incident row as surfaced by GET /api/v1/incidents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncidentRow {
+    pub incident_id: String,
+    pub opened_at_utc: String,
+    pub title: String,
+    /// "info" | "warning" | "critical"
+    pub severity: String,
+    /// "open" | "resolved"
+    pub status: String,
+    /// Alert class slug that prompted this incident; None if standalone.
+    pub linked_alert_id: Option<String>,
+    pub opened_by: String,
+}
+
+/// Response for GET /api/v1/incidents (OPS-01).
 ///
-/// `truth_state = "not_wired"`: no durable incident tracking system exists.
-/// Mounted to avoid 404 noise; rows are always empty.  Callers must not
-/// interpret empty rows as "no incidents have ever occurred."
+/// `truth_state`:
+/// - `"active"` — DB pool present; rows are authoritative.
+/// - `"no_db"` — no DB pool; rows are always empty (not absence of incidents).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IncidentsResponse {
     pub canonical_route: String,
-    /// Always "not_wired" — no incident manager is implemented.
+    /// "active" | "no_db"
     pub truth_state: String,
     pub backend: String,
-    /// Human-readable explanation of why rows are always empty.
-    pub note: String,
-    /// Always empty — no incident rows exist in the current implementation.
-    pub rows: Vec<JsonValue>,
+    pub rows: Vec<IncidentRow>,
+}
+
+/// Request body for POST /api/v1/incidents (OPS-01).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateIncidentRequest {
+    pub title: String,
+    /// "info" | "warning" | "critical"
+    pub severity: String,
+    /// Alert class slug from `/api/v1/alerts/active` that prompted this incident.
+    pub linked_alert_id: Option<String>,
+    /// Operator identifier; defaults to "operator" if absent.
+    pub opened_by: Option<String>,
+}
+
+/// Response for POST /api/v1/incidents (OPS-01).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateIncidentResponse {
+    pub canonical_route: String,
+    pub incident_id: String,
+    pub opened_at_utc: String,
+    pub title: String,
+    pub severity: String,
+    pub status: String,
+    pub linked_alert_id: Option<String>,
+    pub opened_by: String,
 }
 
 // ---------------------------------------------------------------------------
-// /api/v1/execution/replace-cancel-chains (A4)
+// /api/v1/execution/replace-cancel-chains (EXEC-02)
 // ---------------------------------------------------------------------------
 
-/// Response for GET /api/v1/execution/replace-cancel-chains (A4).
+/// One cancel or replace lifecycle event within a replace/cancel chain.
 ///
-/// `truth_state = "not_wired"`: no chain-lineage provenance exists in the
-/// current OMS implementation.  Mounted to avoid 404 noise; chains are always
-/// empty.  Callers must not interpret empty chains as "no replace/cancel
-/// operations have occurred."
+/// `operation` is one of:
+/// - `"cancel_ack"` — broker acknowledged the cancel; order is terminal.
+/// - `"replace_ack"` — broker acknowledged the replace; `new_total_qty` is set.
+/// - `"cancel_reject"` — broker rejected the cancel request.
+/// - `"replace_reject"` — broker rejected the replace request.
+///
+/// Source: `postgres.oms_order_lifecycle_events` via EXEC-02 Phase 3b hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderLifecycleEventApiRow {
+    /// Equals `broker_message_id` — stable deduplication identity.
+    pub event_id: String,
+    pub internal_order_id: String,
+    /// `"cancel_ack"` | `"replace_ack"` | `"cancel_reject"` | `"replace_reject"`
+    pub operation: String,
+    /// Broker-assigned order ID; `null` for paper adapters.
+    pub broker_order_id: Option<String>,
+    /// Post-replace total qty (`replace_ack` only); `null` for all others.
+    pub new_total_qty: Option<i64>,
+    /// RFC 3339 timestamp when the event was recorded by the orchestrator.
+    pub recorded_at_utc: String,
+}
+
+/// Response for GET /api/v1/execution/replace-cancel-chains (EXEC-02).
+///
+/// `truth_state` values:
+/// - `"no_db"` — DB pool unavailable; chain data cannot be read.
+/// - `"no_active_run"` — DB present but no active run ID is known.
+/// - `"active"` — DB-backed; `chains` contains lifecycle events for the
+///   active run (empty array = no cancel/replace events yet in this run).
+///
+/// Source: `postgres.oms_order_lifecycle_events` written by
+/// `ExecutionOrchestrator::tick()` Phase 3b (EXEC-02).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplaceCancelChainsResponse {
     pub canonical_route: String,
-    /// Always "not_wired" — no replace/cancel chain lineage is tracked.
+    /// `"no_db"` | `"no_active_run"` | `"active"`
     pub truth_state: String,
     pub backend: String,
-    /// Human-readable explanation of why chains are always empty.
+    /// Operator guidance note.
     pub note: String,
-    /// Always empty — no chain rows exist in the current implementation.
-    pub chains: Vec<JsonValue>,
+    /// Lifecycle events for the active run, oldest-first.
+    /// Empty array = no cancel/replace operations recorded yet.
+    pub chains: Vec<OrderLifecycleEventApiRow>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2724,42 +2790,61 @@ pub struct ReplaceCancelChainsResponse {
 /// One alert row on the triage surface.
 ///
 /// Sourced from the same in-memory fault-signal computation as
-/// `/api/v1/alerts/active`.  `status` is always `"unacked"` because no
-/// triage workflow (ack/escalate/assign) is implemented.
+/// `/api/v1/alerts/active`.  `status` reflects DB-backed ack state when DB
+/// is present; always `"unacked"` when no DB pool is available.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertTriageAlertRow {
     pub alert_id: String,
     /// "info" | "warning" | "critical".
     pub severity: String,
-    /// Always "unacked" — no triage state tracking is backed.
+    /// "acked" | "unacked".  "acked" requires DB presence; "unacked" when no DB.
     pub status: String,
     pub title: String,
     pub domain: String,
-    /// Always None — no incident linkage exists.
+    /// None — no incident linkage exists.
     pub linked_incident_id: Option<String>,
-    /// Always None — alert-to-order linkage is not tracked at this surface.
+    /// None — alert-to-order linkage is not tracked at this surface.
     pub linked_order_id: Option<String>,
-    /// Always None — alert-to-strategy linkage is not tracked at this surface.
+    /// None — alert-to-strategy linkage is not tracked at this surface.
     pub linked_strategy_id: Option<String>,
-    /// RFC3339 UTC of when this alert was first detected (response timestamp).
-    pub created_at: String,
-    /// Always None — assignment is not implemented.
+    /// RFC3339 UTC of when this alert was acked (acked rows); None for unacked
+    /// rows (in-memory fault signals have no durable creation timestamp).
+    pub created_at: Option<String>,
+    /// None — assignment is not implemented.
     pub assigned_to: Option<String>,
 }
 
 /// Response for GET /api/v1/alerts/triage (A4).
 ///
-/// `truth_state = "alerts_no_triage"`: active alerts are sourced from the
-/// same in-memory computation as `/api/v1/alerts/active`, but triage workflow
-/// state (ack, escalation, assignment) does not exist and is not claimed.
-/// All rows have `status = "unacked"`.
+/// `truth_state`:
+/// - `"active"` — alert source is real; ack state is DB-backed from
+///   `sys_alert_acks`.  `status` is authoritative ("acked" | "unacked").
+/// - `"no_db"` — alert source is real (in-memory); ack state unavailable
+///   (no DB pool).  All rows have `status = "unacked"`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertTriageResponse {
     pub canonical_route: String,
-    /// "alerts_no_triage" — alert source is real; triage lifecycle is not backed.
+    /// "active" (DB-backed ack state) | "no_db" (ack state unavailable).
     pub truth_state: String,
     pub backend: String,
-    /// Explicit operator notice that triage workflow is not implemented.
+    /// Operator notice about triage lifecycle scope.
     pub triage_note: String,
     pub rows: Vec<AlertTriageAlertRow>,
+}
+
+/// Request body for POST /api/v1/alerts/triage/ack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertAckRequest {
+    pub alert_id: String,
+    /// Optional operator identifier for audit trail. Defaults to "operator".
+    pub acked_by: Option<String>,
+}
+
+/// Response for POST /api/v1/alerts/triage/ack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertAckResponse {
+    pub canonical_route: String,
+    pub alert_id: String,
+    pub acked_at_utc: String,
+    pub acked_by: String,
 }

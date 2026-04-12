@@ -134,7 +134,9 @@ async fn token_auth_middleware(
 /// Middleware layers (CORS, tracing) are **not** applied here; `main.rs`
 /// attaches them after this call so tests can use the bare router.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    use alerts_events::{alerts_active, alerts_triage, events_feed, incidents};
+    use alerts_events::{
+        alert_triage_ack, alerts_active, alerts_triage, create_incident, events_feed, incidents,
+    };
     use audit_ops::{audit_artifacts, audit_operator_actions, ops_operator_timeline};
     use control_plane::{
         integrity_arm, integrity_disarm, ops_action, ops_catalog, ops_mode_change_guidance,
@@ -280,6 +282,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(execution_order_cancel),
         )
         .route("/api/v1/ops/action", post(ops_action))
+        .route("/api/v1/alerts/triage/ack", post(alert_triage_ack))
+        .route("/api/v1/incidents", post(create_incident))
         .route("/api/v1/strategy/signal", post(strategy_signal))
         .route("/v1/trading/snapshot", post(trading_snapshot_set))
         .route(
