@@ -17,7 +17,6 @@ struct MigrationEntry {
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL"]
 async fn migration_bootstrap_and_replay_follow_authoritative_manifest() -> anyhow::Result<()> {
-    println!("DB URL = {:?}", std::env::var("MQK_DATABASE_URL"));
     let db_url = std::env::var(mqk_db::ENV_DB_URL)
         .expect("DB tests require MQK_DATABASE_URL; run against a disposable postgres db");
 
