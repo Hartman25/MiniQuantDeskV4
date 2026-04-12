@@ -76,15 +76,17 @@ Update this after audits, proof runs, patch landings, or major repo changes.
 
 ## Patch Ledger
 
-_Last reconciled: 2026-04-11 against committed repo state._
+_Last reconciled: 2026-04-12 against committed repo state (commit caf64f23, full proof harness 17/17 lanes passed)._
 
 ### Open / active MAIN patches
-- **MT-01** — Decompose daemon state/routes sink files
-- **MT-02** — Extract runtime orchestrator phases
 
-### Closed — committed-state code/test proof verified (2026-04-11)
+_No active patches._
+
+### Closed — committed-state code/test proof verified (2026-04-12)
 
 **Maintainability series:**
+- **MT-01** — `routes/execution_order_analysis.rs` extracted A5/outbox handlers from `execution.rs`; `routes/system_artifact.rs` extracted artifact/parity/topology handlers from `system.rs`; `mod` declarations + router imports updated in `routes.rs`; workspace compiles clean
+- **MT-02** — `orchestrator/dispatch.rs` extracted Phase-1 dispatch helpers (`dispatch_submit_claimed_outbox_row`, `dispatch_cancel_claimed_outbox_row`) from `orchestrator.rs`; `mod dispatch;` registered; workspace compiles clean
 - **MT-03** — `mqk-db/src/inbox.rs` extracted from `orders.rs`; `lib.rs` re-exports `inbox::*`; GUI route layer already modular (14 `routes/` modules in HEAD); workspace compiles clean
 
 **Initial audit batch (IR/CC/TV/LO series):**

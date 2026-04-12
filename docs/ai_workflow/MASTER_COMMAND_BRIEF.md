@@ -83,8 +83,8 @@ Keep this file compact and current. This is the top-level command map to give an
 
 ## Current MAIN remaining-work list
 
-_Last reconciled: 2026-04-11 against committed repo state._
-_Verification basis: scenario test files, production source modules, and runbook files present in HEAD._
+_Last reconciled: 2026-04-12 against committed repo state (commit caf64f23, full proof harness 17/17 lanes passed)._
+_Verification basis: scenario test files, production source modules, runbook files present in HEAD, and confirmed proof harness result. Scenario-file presence is necessary but not sufficient — the harness result is required for closure._
 
 ### Open — genuinely remaining
 
@@ -115,9 +115,9 @@ _No items remain open._
 | **LO-03** | `docs/runbooks/live_shadow_operational_proof.md`; `scenario_live_shadow_preflight_lo03.rs` |
 | **DOC-01** | GUI tracker + AI workflow docs reconciled 2026-04-11 (Batch 1A) |
 
-### Additionally closed — scenario-file proof in committed HEAD (2026-04-11)
+### Additionally closed — scenario-file proof in committed HEAD (2026-04-12)
 
-_(Patches not in the initial audit table above; confirmed by scenario-file presence in committed repo. Not exhaustive — additional infrastructure patches predating this tracking format exist in scenario files.)_
+_(Patches not in the initial audit table above; confirmed by scenario-file presence in committed repo AND full proof harness pass (commit caf64f23, all 17 lanes passed). Scenario-file presence alone is not closure proof — the harness result is required. Not exhaustive — additional infrastructure patches predating this tracking format exist in scenario files.)_
 
 | Patch group | Verification evidence |
 |---|---|
