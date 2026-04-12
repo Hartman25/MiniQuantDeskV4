@@ -274,6 +274,14 @@ Portfolio is intentionally not gated (REST-independent truth). `DEFAULT_STATUS` 
 fail-closed with `synthetic`/`not_applicable`. 6 new tests; 46/46 pass. Contract gate shape
 check expanded to 9 status fields; 20/20 pass.
 
+### L-11: GUI patch tracker truth repair — DAEMON-1 and DAEMON-2 status corrected
+**Status:** DONE (2026-04-12)
+**Files:** `GUI_PATCH_TRACKER.md`
+**What changed:** DAEMON-1 and DAEMON-2 were marked TODO in the tracker but their routes were already mounted and real in the committed repo. Truth repair only — no daemon behavior changed.
+- **DAEMON-1:** `/v1/trading/account`, `/v1/trading/positions`, `/v1/trading/orders`, `/v1/trading/fills` + canonical `/api/v1/portfolio/*` suite — all mounted in `routes/trading.rs` and `routes/portfolio.rs`; all read from `broker_snapshot`; acceptance criteria met. Status corrected to DONE.
+- **DAEMON-2:** `/api/v1/risk/summary` mounted in `routes/portfolio.rs`; returns exposure + kill_switch truth; `daily_pnl`/`drawdown_pct`/`loss_limit_utilization_pct` honestly null. Status corrected to DONE.
+**Derivation basis:** `routes.rs` imports + handler source inspection (2026-04-12 committed HEAD).
+
 ### REC-01: Reconcile mismatch detail route + fail-closed GUI detail gate
 **Status:** DONE
 **Files:**
@@ -317,24 +325,28 @@ check expanded to 9 status fields; 20/20 pass.
 ## P1 — Daemon becomes the single control-plane for Trading tab
 
 ### DAEMON-1: Trading read APIs (positions/orders/fills/pnl)
-**Status:** TODO  
-**Goal:** GUI Trading tab shows real state.  
-**Files (expected):**
-- `core-rs/crates/mqk-daemon/src/routes.rs`
-- `core-rs/crates/mqk-daemon/src/*` (handlers)
-- `core-rs/crates/mqk-schemas` (response structs)  
-**Endpoints (proposed):**
+**Status:** DONE (L-11 truth repair — routes confirmed mounted 2026-04-12)
+**Goal:** GUI Trading tab shows real state.
+**Files:**
+- `core-rs/crates/mqk-daemon/src/routes/trading.rs` — `trading_account`, `trading_positions`, `trading_orders`, `trading_fills`
+- `core-rs/crates/mqk-daemon/src/routes/portfolio.rs` — `portfolio_summary`, `portfolio_positions`, `portfolio_open_orders`, `portfolio_fills`
+**Endpoints (mounted):**
+- `GET /v1/trading/account` (covers account summary; no `/v1/trading/pnl` endpoint)
 - `GET /v1/trading/positions`
 - `GET /v1/trading/orders`
 - `GET /v1/trading/fills`
-- `GET /v1/trading/pnl` (or summary)
-**Acceptance:** Deterministic responses; no hidden I/O beyond the daemon’s existing sources of truth.
+- `GET /api/v1/portfolio/summary`
+- `GET /api/v1/portfolio/positions`
+- `GET /api/v1/portfolio/orders/open`
+- `GET /api/v1/portfolio/fills`
+**Note:** All handlers read from `broker_snapshot` (in-memory truth) with snapshot_state logic; no hidden I/O. GUI-4 (GUI tab wiring to these routes) remains TODO.
 
 ### DAEMON-2: Risk summary API (allocator view)
-**Status:** TODO  
-**Endpoints (proposed):**
-- `GET /v1/risk/summary`  
-**Must include:** exposure, leverage, limits, violations, halt reasons, integrity state.
+**Status:** DONE (L-11 truth repair — route confirmed mounted 2026-04-12)
+**Endpoint (mounted):** `GET /api/v1/risk/summary` (note: `/api/v1/` prefix, not `/v1/` as originally proposed)
+**Available fields:** `has_snapshot`, `gross_exposure`, `net_exposure`, `concentration_pct`, `kill_switch_active`, `active_breaches`
+**Honestly unavailable:** `daily_pnl`, `drawdown_pct`, `loss_limit_utilization_pct`, `leverage` — all `null`; no source exists yet.
+**Note:** Exposure + kill_switch truth present; leverage and loss-limit utilization deferred until a durable source is wired.
 
 ### DAEMON-3: SSE topics expansion (structured, filterable)
 **Status:** TODO  
