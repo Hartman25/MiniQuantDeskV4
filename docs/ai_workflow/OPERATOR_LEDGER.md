@@ -81,9 +81,11 @@ _Last reconciled: 2026-04-11 against committed repo state._
 ### Open / active MAIN patches
 - **MT-01** — Decompose daemon state/routes sink files
 - **MT-02** — Extract runtime orchestrator phases
-- **MT-03** — Modularize DB access layer and GUI system API layer
 
 ### Closed — committed-state code/test proof verified (2026-04-11)
+
+**Maintainability series:**
+- **MT-03** — `mqk-db/src/inbox.rs` extracted from `orders.rs`; `lib.rs` re-exports `inbox::*`; GUI route layer already modular (14 `routes/` modules in HEAD); workspace compiles clean
 
 **Initial audit batch (IR/CC/TV/LO series):**
 - **IR-01** — `scenario_operator_audit_ir01.rs` (3 pure tests P1–P3); DB-backed proofs `ir01_control_arm_no_run_no_synthetic_run_created`, `ir01_control_disarm_no_run_no_synthetic_run_created`, `ir01_control_arm_with_real_run_writes_audit_event` in `scenario_daemon_runtime_lifecycle.rs`

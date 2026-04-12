@@ -91,7 +91,6 @@ _Verification basis: scenario test files, production source modules, and runbook
 #### Maintainability / refactor
 1. **MT-01** — Decompose daemon state/routes sink files
 2. **MT-02** — Extract runtime orchestrator phases
-3. **MT-03** — Modularize DB access layer and GUI system API layer
 
 ---
 
@@ -99,6 +98,7 @@ _Verification basis: scenario test files, production source modules, and runbook
 
 | Patch | Verification evidence |
 |---|---|
+| **MT-03** | `mqk-db/src/inbox.rs` extracted from `orders.rs`; `lib.rs` re-exports `inbox::*`; GUI route layer already modular (14 `routes/` modules in HEAD); `cargo check --workspace` clean |
 | **IR-01** | `scenario_operator_audit_ir01.rs` (3 pure in-process tests P1–P3); DB-backed proof (`ir01_control_arm_no_run_no_synthetic_run_created`, `ir01_control_disarm_no_run_no_synthetic_run_created`, `ir01_control_arm_with_real_run_writes_audit_event`) in `scenario_daemon_runtime_lifecycle.rs` |
 | **IR-02** | `scenario_operator_audit_ir02.rs` |
 | **CC-01** | `StrategySummaryResponse` in `api_types.rs`; daemon strategy summary route |
