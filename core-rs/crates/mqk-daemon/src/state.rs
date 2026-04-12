@@ -6,6 +6,7 @@
 
 mod alpaca_ws_transport;
 mod broker;
+mod deadman;
 mod env;
 mod lifecycle;
 mod loop_runner;
@@ -1642,72 +1643,6 @@ fn autonomous_truth_event_parts(
         AutonomousSessionTruth::StoppedAtBoundary { detail } => {
             Some(("stopped_at_boundary", None, detail.clone()))
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// DeadmanTruth (private impl block)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-struct DeadmanTruth {
-    status: String,
-    last_heartbeat_utc: Option<String>,
-}
-
-impl AppState {
-    async fn deadman_truth_for_run(
-        &self,
-        run_id: Uuid,
-    ) -> Result<DeadmanTruth, RuntimeLifecycleError> {
-        let db = self.db_pool()?;
-        let now = Utc::now();
-        let halted = mqk_db::enforce_deadman_or_halt(&db, run_id, DEADMAN_TTL_SECONDS, now)
-            .await
-            .map_err(|err| RuntimeLifecycleError::internal("deadman enforce failed", err))?;
-        let run = mqk_db::fetch_run(&db, run_id)
-            .await
-            .map_err(|err| RuntimeLifecycleError::internal("deadman fetch_run failed", err))?;
-
-        if halted {
-            mqk_db::persist_arm_state_canonical(
-                &db,
-                mqk_db::ArmState::Disarmed,
-                Some(mqk_db::DisarmReason::DeadmanExpired),
-            )
-            .await
-            .map_err(|err| {
-                RuntimeLifecycleError::internal("deadman persist_arm_state failed", err)
-            })?;
-            {
-                let mut integrity = self.integrity.write().await;
-                integrity.disarmed = true;
-                integrity.halted = true;
-            }
-        }
-
-        let status = match run.status {
-            mqk_db::RunStatus::Running => {
-                let expired = mqk_db::deadman_expired(&db, run_id, DEADMAN_TTL_SECONDS, now)
-                    .await
-                    .map_err(|err| RuntimeLifecycleError::internal("deadman check failed", err))?;
-                if expired {
-                    "expired"
-                } else {
-                    "healthy"
-                }
-            }
-            mqk_db::RunStatus::Halted => "expired",
-            mqk_db::RunStatus::Armed | mqk_db::RunStatus::Created | mqk_db::RunStatus::Stopped => {
-                "inactive"
-            }
-        }
-        .to_string();
-
-        Ok(DeadmanTruth {
-            status,
-            last_heartbeat_utc: run.last_heartbeat_utc.map(|ts| ts.to_rfc3339()),
-        })
     }
 }
 
