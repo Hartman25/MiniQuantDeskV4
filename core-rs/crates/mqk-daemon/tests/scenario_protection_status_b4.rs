@@ -20,8 +20,10 @@
 //! - B4-P01: `GET /api/v1/execution/protection-status` returns 200 + `truth_state = "not_wired"`
 //! - B4-P02: `stop_order_wiring` and `bracket_order_wiring` are both `"not_supported"`
 //! - B4-P03: OMS overview `stop_order_wiring` field is `"not_supported"` (protection lane present)
-//! - B4-P04: Submit validation rejects `order_type = "stop"` — no stop order can reach broker
-//! - B4-P05: Submit validation rejects `order_type = "trailing_stop"` — belt-and-suspenders
+//! - B4-P04: Route-level proof — `POST /api/v1/execution/orders` with `order_type = "stop"` → 400
+//!   `disposition = "rejected"` before any DB call; stop order cannot reach broker adapter.
+//! - B4-P05: Route-level proof — `POST /api/v1/execution/orders` with `order_type = "trailing_stop"`
+//!   → 400 `disposition = "rejected"`; no trailing stop variant can bypass the validator.
 //! - B4-P06: `canonical_route` is stable and machine-readable
 //!
 //! All tests are pure in-process and always runnable in CI without env vars.
@@ -66,6 +68,25 @@ fn oms_overview_req() -> Request<axum::body::Body> {
         .method("GET")
         .uri("/api/v1/oms/overview")
         .body(axum::body::Body::empty())
+        .unwrap()
+}
+
+fn submit_order_req_with_type(order_type: &str) -> Request<axum::body::Body> {
+    let body = serde_json::json!({
+        "client_request_id": format!("b4-test-{order_type}"),
+        "symbol": "SPY",
+        "side": "buy",
+        "qty": 10,
+        "order_type": order_type,
+        "time_in_force": "day",
+    });
+    Request::builder()
+        .method("POST")
+        .uri("/api/v1/execution/orders")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&body).expect("json serialize"),
+        ))
         .unwrap()
 }
 
@@ -156,57 +177,82 @@ async fn b4_p03_oms_overview_includes_stop_order_wiring_not_supported() {
 }
 
 // ---------------------------------------------------------------------------
-// B4-P04: order submit validation explicitly rejects order_type = "stop"
+// B4-P04: route-level proof — POST /api/v1/execution/orders with order_type = "stop"
+//         returns 400 "rejected" before any DB call.
 //
-// Proves: a stop order cannot reach the broker adapter — the failure is at the
-// validation gate, not silently swallowed or misrouted.  This is the primary
-// enforcement that stop orders cannot claim broker coverage.
+// Proves: validate_manual_order_submit (execution.rs:808) fires before the DB
+// path; a stop order cannot reach the broker adapter even without a running
+// DB.  No env vars required — validation is pure and short-circuits at the
+// route handler before the first db.as_ref() check.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn b4_p04_submit_validation_rejects_stop_order_type() {
-    // Exercise the internal validation function directly (pure, no I/O).
-    // This mirrors the test already in execution.rs but documents it as a
-    // B4 explicit proof that stop orders are fail-closed at the validation gate.
-    let body = serde_json::json!({
-        "client_request_id": "b4-p04-stop-test",
-        "symbol": "SPY",
-        "side": "buy",
-        "qty": 10,
-        "order_type": "stop",
-        "time_in_force": "day",
-    });
+#[tokio::test]
+async fn b4_p04_submit_validation_rejects_stop_order_type() {
+    let st = Arc::new(state::AppState::new());
+    let router = routes::build_router(st);
 
-    // A "stop" order type is not in the allowed set {"market", "limit"}.
-    // We cannot call the private validate_manual_order_submit directly, but
-    // we can verify the allowed set via the documented error message by
-    // asserting what the validator WOULD produce using the route contract.
-    //
-    // Prove via negative: serialize to the exact fields the validator reads,
-    // and confirm the order_type is not in the permitted enum.
-    let order_type = body["order_type"].as_str().unwrap();
+    let (status, body) = call(router, submit_order_req_with_type("stop")).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "B4-P04: stop order must be rejected 400 before DB; got {status}\nbody: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let json = parse_json(body);
+    assert_eq!(
+        json["disposition"], "rejected",
+        "B4-P04: disposition must be \"rejected\"; got: {json}"
+    );
+    assert_eq!(
+        json["accepted"], false,
+        "B4-P04: accepted must be false; got: {json}"
+    );
+    let blockers = json["blockers"].as_array().expect("B4-P04: blockers must be array");
     assert!(
-        !matches!(order_type, "market" | "limit"),
-        "B4-P04: \"stop\" must NOT be in the permitted order_type set \
-         {{\"market\", \"limit\"}}; if this assertion fails, a stop order could \
-         bypass validation and reach the broker adapter without stop-price wiring"
+        blockers
+            .iter()
+            .any(|b| b.as_str().unwrap_or("").contains("order_type")),
+        "B4-P04: blockers must name order_type as the rejection reason; got: {json}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// B4-P05: order submit validation rejects order_type = "trailing_stop"
+// B4-P05: route-level proof — POST /api/v1/execution/orders with
+//         order_type = "trailing_stop" returns 400 "rejected".
 //
-// Proves: trailing stop orders are also outside the permitted type set.
-// Belt-and-suspenders proof that no trailing stop variant can claim coverage.
+// Belt-and-suspenders: trailing stop variant also blocked before DB.
+// No trailing stop path exists on the current canonical execution path.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn b4_p05_submit_validation_rejects_trailing_stop_order_type() {
-    let order_type = "trailing_stop";
+#[tokio::test]
+async fn b4_p05_submit_validation_rejects_trailing_stop_order_type() {
+    let st = Arc::new(state::AppState::new());
+    let router = routes::build_router(st);
+
+    let (status, body) = call(router, submit_order_req_with_type("trailing_stop")).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "B4-P05: trailing_stop order must be rejected 400 before DB; got {status}\nbody: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let json = parse_json(body);
+    assert_eq!(
+        json["disposition"], "rejected",
+        "B4-P05: disposition must be \"rejected\"; got: {json}"
+    );
+    assert_eq!(
+        json["accepted"], false,
+        "B4-P05: accepted must be false; got: {json}"
+    );
+    let blockers = json["blockers"].as_array().expect("B4-P05: blockers must be array");
     assert!(
-        !matches!(order_type, "market" | "limit"),
-        "B4-P05: \"trailing_stop\" must NOT be in the permitted order_type set; \
-         trailing stop wiring does not exist on the current canonical path"
+        blockers
+            .iter()
+            .any(|b| b.as_str().unwrap_or("").contains("order_type")),
+        "B4-P05: blockers must name order_type as the rejection reason; got: {json}"
     );
 }
 
