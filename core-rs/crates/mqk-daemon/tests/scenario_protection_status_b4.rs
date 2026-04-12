@@ -208,7 +208,9 @@ async fn b4_p04_submit_validation_rejects_stop_order_type() {
         json["accepted"], false,
         "B4-P04: accepted must be false; got: {json}"
     );
-    let blockers = json["blockers"].as_array().expect("B4-P04: blockers must be array");
+    let blockers = json["blockers"]
+        .as_array()
+        .expect("B4-P04: blockers must be array");
     assert!(
         blockers
             .iter()
@@ -247,7 +249,9 @@ async fn b4_p05_submit_validation_rejects_trailing_stop_order_type() {
         json["accepted"], false,
         "B4-P05: accepted must be false; got: {json}"
     );
-    let blockers = json["blockers"].as_array().expect("B4-P05: blockers must be array");
+    let blockers = json["blockers"]
+        .as_array()
+        .expect("B4-P05: blockers must be array");
     assert!(
         blockers
             .iter()

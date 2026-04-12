@@ -592,10 +592,7 @@ pub(crate) async fn create_incident(
         return (
             StatusCode::BAD_REQUEST,
             Json(RuntimeErrorResponse {
-                error: format!(
-                    "severity must be one of: {}",
-                    valid_severities.join(", ")
-                ),
+                error: format!("severity must be one of: {}", valid_severities.join(", ")),
                 fault_class: "incidents.create.invalid_severity".to_string(),
                 gate: Some("severity_valid".to_string()),
             }),
@@ -621,8 +618,7 @@ pub(crate) async fn create_incident(
 
     // UUIDv5: deterministic ID from title + opened_at so identical wall-time
     // re-submits resolve to the same incident_id.
-    const INCIDENT_NS: uuid::Uuid =
-        uuid::uuid!("b7e2a1c4-0d5f-4e8b-9c3a-1f6d2e4a7b0c");
+    const INCIDENT_NS: uuid::Uuid = uuid::uuid!("b7e2a1c4-0d5f-4e8b-9c3a-1f6d2e4a7b0c");
     let id_name = format!("{}:{}", body.title, opened_at.to_rfc3339());
     let incident_id = uuid::Uuid::new_v5(&INCIDENT_NS, id_name.as_bytes()).to_string();
 
@@ -746,14 +742,20 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
         // rows newest-first; first match wins so the most-recent incident
         // linked to a given alert is surfaced.
         let incidents = mqk_db::list_incidents(db).await.unwrap_or_default();
-        let mut inc_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut inc_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for inc in incidents {
             if let Some(alert_id) = inc.linked_alert_id {
                 inc_map.entry(alert_id).or_insert(inc.incident_id);
             }
         }
 
-        ("active", "postgres.sys_alert_acks+postgres.sys_incidents", ack_map, inc_map)
+        (
+            "active",
+            "postgres.sys_alert_acks+postgres.sys_incidents",
+            ack_map,
+            inc_map,
+        )
     } else {
         (
             "no_db",
@@ -765,7 +767,12 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
 
     let make_row = |alert_id: String, severity: String, domain: String, title: String| {
         let acked_at = ack_map.get(&alert_id).cloned();
-        let status = if acked_at.is_some() { "acked" } else { "unacked" }.to_string();
+        let status = if acked_at.is_some() {
+            "acked"
+        } else {
+            "unacked"
+        }
+        .to_string();
         let linked_incident_id = incident_map.get(&alert_id).cloned();
         AlertTriageAlertRow {
             alert_id,

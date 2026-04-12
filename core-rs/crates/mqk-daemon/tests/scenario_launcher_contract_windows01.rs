@@ -159,7 +159,11 @@ async fn w01_observe_identity_chain_satisfies_launcher_contract() {
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "/api/v1/system/metadata must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/system/metadata must return 200"
+    );
     let metadata = parse_json(body);
     assert_eq!(
         metadata["daemon_mode"], "paper",
@@ -181,7 +185,11 @@ async fn w01_observe_identity_chain_satisfies_launcher_contract() {
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "/api/v1/system/status must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/system/status must return 200"
+    );
     let sys_status = parse_json(body);
     assert_eq!(
         sys_status["daemon_mode"], "paper",
@@ -218,7 +226,11 @@ async fn w01_observe_identity_chain_satisfies_launcher_contract() {
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "/api/v1/system/session must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/system/session must return 200"
+    );
     let session = parse_json(body);
     let session_daemon_mode = session["daemon_mode"]
         .as_str()
@@ -253,7 +265,11 @@ async fn w01_observe_identity_chain_satisfies_launcher_contract() {
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "/api/v1/system/preflight must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "/api/v1/system/preflight must return 200"
+    );
     let preflight = parse_json(body);
     assert_eq!(
         preflight["daemon_mode"], "paper",
@@ -356,10 +372,7 @@ async fn w02_trade_ready_auth_probe_returns_400_unknown_action_accepted_false() 
         resp["disposition"], "unknown_action",
         "launcher checks disposition == 'unknown_action'"
     );
-    assert_eq!(
-        resp["accepted"], false,
-        "launcher checks accepted == false"
-    );
+    assert_eq!(resp["accepted"], false, "launcher checks accepted == false");
 }
 
 // ---------------------------------------------------------------------------

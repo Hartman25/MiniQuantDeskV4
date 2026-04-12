@@ -147,8 +147,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         run_halt, run_start, run_stop,
     };
     use execution::{
-        execution_fill_quality, execution_order_cancel, execution_order_submit,
-        execution_orders, execution_summary,
+        execution_fill_quality, execution_order_cancel, execution_order_submit, execution_orders,
+        execution_summary,
     };
     use execution_order_analysis::{
         execution_order_causality, execution_order_chart, execution_order_replay,
@@ -165,8 +165,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use strategy::{strategy_signal, strategy_summary, strategy_suppressions};
     use system::{
         autonomous_readiness, health, status_handler, system_config_diffs,
-        system_config_fingerprint, system_metadata, system_preflight,
-        system_runtime_leadership, system_session, system_status,
+        system_config_fingerprint, system_metadata, system_preflight, system_runtime_leadership,
+        system_session, system_status,
     };
     use system_artifact::{
         system_artifact_intake, system_parity_evidence, system_run_artifact, system_topology,

@@ -15,9 +15,9 @@ use axum::{
 };
 
 use crate::api_types::{
-    ExecutionOrderRow, ExecutionSummaryResponse,
-    FillQualityTelemetryResponse, FillQualityTelemetryRow, ManualOrderCancelRequest,
-    ManualOrderCancelResponse, ManualOrderSubmitRequest, ManualOrderSubmitResponse,
+    ExecutionOrderRow, ExecutionSummaryResponse, FillQualityTelemetryResponse,
+    FillQualityTelemetryRow, ManualOrderCancelRequest, ManualOrderCancelResponse,
+    ManualOrderSubmitRequest, ManualOrderSubmitResponse,
 };
 use crate::state::AppState;
 

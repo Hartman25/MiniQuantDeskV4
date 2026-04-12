@@ -57,11 +57,9 @@ pub async fn upsert_alert_ack(
 /// Returns an empty `Vec` when the table is empty — authoritative empty
 /// (no acks recorded, not absence of source).
 pub async fn load_alert_acks(db: &PgPool) -> Result<Vec<AlertAckRow>> {
-    let rows = sqlx::query(
-        "SELECT alert_id, acked_at_utc, acked_by FROM sys_alert_acks",
-    )
-    .fetch_all(db)
-    .await?;
+    let rows = sqlx::query("SELECT alert_id, acked_at_utc, acked_by FROM sys_alert_acks")
+        .fetch_all(db)
+        .await?;
 
     Ok(rows
         .into_iter()

@@ -62,9 +62,7 @@ fn json_str<'a>(json: &'a serde_json::Value, key: &str) -> &'a str {
 
 async fn ops02_test_pool() -> sqlx::PgPool {
     let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
-        panic!(
-            "DB tests require MQK_DATABASE_URL; run with --include-ignored"
-        )
+        panic!("DB tests require MQK_DATABASE_URL; run with --include-ignored")
     });
     sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
@@ -353,7 +351,10 @@ async fn ops02_t5_db_backed_ack_roundtrip() {
         "OPS02-T5: acked_by must be 'ops02_test'"
     );
     let acked_at = json_str(&ack_json, "acked_at_utc");
-    assert!(!acked_at.is_empty(), "OPS02-T5: acked_at_utc must be non-empty");
+    assert!(
+        !acked_at.is_empty(),
+        "OPS02-T5: acked_at_utc must be non-empty"
+    );
 
     // --- Verify the ack was persisted via load_alert_acks ---
     let acks = mqk_db::load_alert_acks(&pool)

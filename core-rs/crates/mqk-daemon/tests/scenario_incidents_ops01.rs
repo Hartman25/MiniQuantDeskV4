@@ -44,8 +44,7 @@ async fn call(
         .await
         .expect("body collect")
         .to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&bytes).expect("body must be valid JSON");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("body must be valid JSON");
     (status, json)
 }
 
@@ -99,7 +98,10 @@ async fn ops01_i1_get_incidents_no_db_returns_no_db_empty_rows() {
         .get("rows")
         .and_then(|v| v.as_array())
         .expect("OPS01-I1: rows must be an array");
-    assert!(rows.is_empty(), "OPS01-I1: rows must be empty without DB: {json}");
+    assert!(
+        rows.is_empty(),
+        "OPS01-I1: rows must be empty without DB: {json}"
+    );
     let backend = str_field(&json, "backend");
     assert!(!backend.is_empty(), "OPS01-I1: backend must be non-empty");
 }
@@ -115,7 +117,11 @@ async fn ops01_i2_post_incident_no_db_returns_503() {
         "severity": "warning"
     });
     let (status, json) = post_json(make_router(), "/api/v1/incidents", body).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "OPS01-I2: expected 503: {json}");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "OPS01-I2: expected 503: {json}"
+    );
     assert_eq!(
         json.get("gate").and_then(|v| v.as_str()),
         Some("db_pool"),
@@ -134,7 +140,11 @@ async fn ops01_i3_post_incident_empty_title_returns_400() {
         "severity": "warning"
     });
     let (status, json) = post_json(make_router(), "/api/v1/incidents", body).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "OPS01-I3: expected 400: {json}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "OPS01-I3: expected 400: {json}"
+    );
     assert_eq!(
         json.get("gate").and_then(|v| v.as_str()),
         Some("title_present"),
@@ -153,7 +163,11 @@ async fn ops01_i4_post_incident_invalid_severity_returns_400() {
         "severity": "catastrophic"
     });
     let (status, json) = post_json(make_router(), "/api/v1/incidents", body).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "OPS01-I4: expected 400: {json}");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "OPS01-I4: expected 400: {json}"
+    );
     assert_eq!(
         json.get("gate").and_then(|v| v.as_str()),
         Some("severity_valid"),
@@ -172,11 +186,12 @@ async fn ops01_i4_post_incident_invalid_severity_returns_400() {
 async fn ops01_i5_triage_linked_incident_id_null_when_no_db() {
     let (status, json) = get(make_router(), "/api/v1/alerts/triage").await;
     assert_eq!(status, StatusCode::OK, "OPS01-I5: expected 200: {json}");
-    let rows = json["rows"].as_array().expect("OPS01-I5: rows must be array");
+    let rows = json["rows"]
+        .as_array()
+        .expect("OPS01-I5: rows must be array");
     for row in rows {
         assert!(
-            row.get("linked_incident_id").is_none()
-                || row["linked_incident_id"].is_null(),
+            row.get("linked_incident_id").is_none() || row["linked_incident_id"].is_null(),
             "OPS01-I5: linked_incident_id must be null without DB: {row}"
         );
     }
@@ -217,8 +232,7 @@ async fn ops01_i6_db_create_incident_and_list() {
         "severity": "warning",
         "opened_by": "ops01_test"
     });
-    let (create_status, create_json) =
-        post_json(router.clone(), "/api/v1/incidents", body).await;
+    let (create_status, create_json) = post_json(router.clone(), "/api/v1/incidents", body).await;
     assert_eq!(
         create_status,
         StatusCode::OK,
@@ -235,7 +249,10 @@ async fn ops01_i6_db_create_incident_and_list() {
         "OPS01-I6: severity must be warning"
     );
     let incident_id = str_field(&create_json, "incident_id").to_string();
-    assert!(!incident_id.is_empty(), "OPS01-I6: incident_id must be non-empty");
+    assert!(
+        !incident_id.is_empty(),
+        "OPS01-I6: incident_id must be non-empty"
+    );
 
     // List must include the new row.
     let (list_status, list_json) = get(router, "/api/v1/incidents").await;
@@ -249,11 +266,16 @@ async fn ops01_i6_db_create_incident_and_list() {
         "active",
         "OPS01-I6: truth_state must be active with DB"
     );
-    let rows = list_json["rows"].as_array().expect("OPS01-I6: rows must be array");
+    let rows = list_json["rows"]
+        .as_array()
+        .expect("OPS01-I6: rows must be array");
     let found = rows
         .iter()
         .any(|r| r.get("incident_id").and_then(|v| v.as_str()) == Some(&incident_id));
-    assert!(found, "OPS01-I6: created incident must appear in list rows: {list_json}");
+    assert!(
+        found,
+        "OPS01-I6: created incident must appear in list rows: {list_json}"
+    );
 
     // Cleanup.
     sqlx::query("DELETE FROM sys_incidents WHERE title = 'OPS01-I6 test incident'")
@@ -316,8 +338,7 @@ async fn ops01_i7_db_linked_incident_id_surfaces_in_triage() {
         "linked_alert_id": "reconcile.dispatch_block.dirty",
         "opened_by": "ops01_test"
     });
-    let (create_status, create_json) =
-        post_json(router.clone(), "/api/v1/incidents", body).await;
+    let (create_status, create_json) = post_json(router.clone(), "/api/v1/incidents", body).await;
     assert_eq!(
         create_status,
         StatusCode::OK,
@@ -333,12 +354,13 @@ async fn ops01_i7_db_linked_incident_id_surfaces_in_triage() {
         "OPS01-I7: triage must return 200: {triage_json}"
     );
 
-    let rows = triage_json["rows"].as_array().expect("OPS01-I7: rows must be array");
+    let rows = triage_json["rows"]
+        .as_array()
+        .expect("OPS01-I7: rows must be array");
     let alert_row = rows
         .iter()
         .find(|r| {
-            r.get("alert_id").and_then(|v| v.as_str())
-                == Some("reconcile.dispatch_block.dirty")
+            r.get("alert_id").and_then(|v| v.as_str()) == Some("reconcile.dispatch_block.dirty")
         })
         .expect("OPS01-I7: reconcile.dispatch_block.dirty row must be present in triage");
 

@@ -52,8 +52,7 @@ async fn get_json(router: axum::Router, path: &str) -> (StatusCode, serde_json::
         .await
         .expect("body collect failed")
         .to_bytes();
-    let json: serde_json::Value =
-        serde_json::from_slice(&body).expect("body must be valid JSON");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body must be valid JSON");
     (status, json)
 }
 
@@ -106,7 +105,10 @@ async fn e02_p03_chains_is_empty_array_no_db() {
         .get("chains")
         .and_then(|v| v.as_array())
         .expect("E02-P03: chains must be a JSON array");
-    assert!(chains.is_empty(), "E02-P03: chains must be empty when no DB: {json}");
+    assert!(
+        chains.is_empty(),
+        "E02-P03: chains must be empty when no DB: {json}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -178,8 +180,7 @@ async fn e02_d01_with_db_active_run_returns_active() {
 
     let st = Arc::new(state::AppState::new_with_db(pool));
     let router = routes::build_router(st);
-    let (status, json) =
-        get_json(router, "/api/v1/execution/replace-cancel-chains").await;
+    let (status, json) = get_json(router, "/api/v1/execution/replace-cancel-chains").await;
     assert_eq!(status, StatusCode::OK, "E02-D01: expected 200: {json}");
     // With DB but no active run: truth_state must be "no_active_run" (not "no_db").
     assert_ne!(
@@ -216,8 +217,7 @@ async fn e02_d02_with_db_wired_path_returns_valid_state() {
 
     let st = Arc::new(state::AppState::new_with_db(pool));
     let router = routes::build_router(st);
-    let (status, json) =
-        get_json(router, "/api/v1/execution/replace-cancel-chains").await;
+    let (status, json) = get_json(router, "/api/v1/execution/replace-cancel-chains").await;
     assert_eq!(status, StatusCode::OK, "E02-D02: expected 200: {json}");
 
     let truth = str_field(&json, "truth_state");
@@ -227,6 +227,8 @@ async fn e02_d02_with_db_wired_path_returns_valid_state() {
         "E02-D02: truth_state must be \"no_active_run\" or \"active\" when DB is configured; got \"{truth}\""
     );
     // chains must always be a JSON array regardless of run state.
-    json["chains"].as_array().expect("E02-D02: chains must be a JSON array");
+    json["chains"]
+        .as_array()
+        .expect("E02-D02: chains must be a JSON array");
     eprintln!("E02-D02: truth_state={truth}");
 }

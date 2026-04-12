@@ -320,8 +320,7 @@ async fn lc01_cancel_ack_writes_lifecycle_row() -> anyhow::Result<()> {
         "internal_order_id": "lc01-ord-unknown",
         "broker_order_id":   "brk-lc01-001"
     });
-    let inserted =
-        mqk_db::inbox_insert_deduped(&pool, run_id, "lc01-msg-001", cancel_json).await?;
+    let inserted = mqk_db::inbox_insert_deduped(&pool, run_id, "lc01-msg-001", cancel_json).await?;
     assert!(inserted, "LC-01: CancelAck inbox row must be inserted");
 
     let mut orch = make_orchestrator(pool.clone(), run_id);
@@ -330,8 +329,7 @@ async fn lc01_cancel_ack_writes_lifecycle_row() -> anyhow::Result<()> {
     })?;
 
     // Assert exactly one lifecycle event row.
-    let rows =
-        mqk_db::fetch_order_lifecycle_events_for_run(&pool, run_id).await?;
+    let rows = mqk_db::fetch_order_lifecycle_events_for_run(&pool, run_id).await?;
     assert_eq!(
         rows.len(),
         1,
@@ -340,13 +338,19 @@ async fn lc01_cancel_ack_writes_lifecycle_row() -> anyhow::Result<()> {
     );
 
     let row = &rows[0];
-    assert_eq!(row.event_id, "lc01-msg-001", "LC-01: event_id must equal broker_message_id");
+    assert_eq!(
+        row.event_id, "lc01-msg-001",
+        "LC-01: event_id must equal broker_message_id"
+    );
     assert_eq!(row.run_id, run_id, "LC-01: run_id");
     assert_eq!(
         row.internal_order_id, "lc01-ord-unknown",
         "LC-01: internal_order_id"
     );
-    assert_eq!(row.operation, "cancel_ack", "LC-01: operation must be cancel_ack");
+    assert_eq!(
+        row.operation, "cancel_ack",
+        "LC-01: operation must be cancel_ack"
+    );
     assert_eq!(
         row.broker_order_id.as_deref(),
         Some("brk-lc01-001"),
@@ -408,8 +412,7 @@ async fn lc02_replace_ack_writes_lifecycle_row_with_new_qty() -> anyhow::Result<
         anyhow::anyhow!("LC-02: tick() must succeed for ReplaceAck of unknown order, got: {e}")
     })?;
 
-    let rows =
-        mqk_db::fetch_order_lifecycle_events_for_run(&pool, run_id).await?;
+    let rows = mqk_db::fetch_order_lifecycle_events_for_run(&pool, run_id).await?;
     assert_eq!(
         rows.len(),
         1,
@@ -419,7 +422,10 @@ async fn lc02_replace_ack_writes_lifecycle_row_with_new_qty() -> anyhow::Result<
 
     let row = &rows[0];
     assert_eq!(row.event_id, "lc02-msg-001", "LC-02: event_id");
-    assert_eq!(row.operation, "replace_ack", "LC-02: operation must be replace_ack");
+    assert_eq!(
+        row.operation, "replace_ack",
+        "LC-02: operation must be replace_ack"
+    );
     assert_eq!(
         row.new_total_qty,
         Some(75),
@@ -468,8 +474,7 @@ async fn lc03_cancel_reject_writes_lifecycle_row() -> anyhow::Result<()> {
         "internal_order_id": "lc03-ord-unknown",
         "broker_order_id":   null
     });
-    let inserted =
-        mqk_db::inbox_insert_deduped(&pool, run_id, "lc03-msg-001", reject_json).await?;
+    let inserted = mqk_db::inbox_insert_deduped(&pool, run_id, "lc03-msg-001", reject_json).await?;
     assert!(inserted, "LC-03: CancelReject inbox row must be inserted");
 
     let mut orch = make_orchestrator(pool.clone(), run_id);
@@ -477,8 +482,7 @@ async fn lc03_cancel_reject_writes_lifecycle_row() -> anyhow::Result<()> {
         anyhow::anyhow!("LC-03: tick() must succeed for CancelReject of unknown order, got: {e}")
     })?;
 
-    let rows =
-        mqk_db::fetch_order_lifecycle_events_for_run(&pool, run_id).await?;
+    let rows = mqk_db::fetch_order_lifecycle_events_for_run(&pool, run_id).await?;
     assert_eq!(
         rows.len(),
         1,
@@ -488,8 +492,14 @@ async fn lc03_cancel_reject_writes_lifecycle_row() -> anyhow::Result<()> {
 
     let row = &rows[0];
     assert_eq!(row.event_id, "lc03-msg-001", "LC-03: event_id");
-    assert_eq!(row.operation, "cancel_reject", "LC-03: operation must be cancel_reject");
-    assert!(row.new_total_qty.is_none(), "LC-03: new_total_qty must be None for cancel_reject");
+    assert_eq!(
+        row.operation, "cancel_reject",
+        "LC-03: operation must be cancel_reject"
+    );
+    assert!(
+        row.new_total_qty.is_none(),
+        "LC-03: new_total_qty must be None for cancel_reject"
+    );
 
     cleanup_lifecycle_events(&pool, run_id).await?;
     clear_runtime_lease_rows(&pool).await?;
@@ -535,13 +545,10 @@ async fn lc04_replace_reject_writes_lifecycle_row() -> anyhow::Result<()> {
 
     let mut orch = make_orchestrator(pool.clone(), run_id);
     orch.tick().await.map_err(|e| {
-        anyhow::anyhow!(
-            "LC-04: tick() must succeed for ReplaceReject of unknown order, got: {e}"
-        )
+        anyhow::anyhow!("LC-04: tick() must succeed for ReplaceReject of unknown order, got: {e}")
     })?;
 
-    let rows =
-        mqk_db::fetch_order_lifecycle_events_for_run(&pool, run_id).await?;
+    let rows = mqk_db::fetch_order_lifecycle_events_for_run(&pool, run_id).await?;
     assert_eq!(
         rows.len(),
         1,

@@ -15,9 +15,9 @@ use axum::{
 };
 
 use crate::api_types::{
-    ExecutionOutboxResponse, ExecutionOutboxRow, OrderCausalityCausalNode,
-    OrderCausalityResponse, OrderChartResponse, OrderReplayFrame, OrderReplayResponse,
-    OrderTimelineResponse, OrderTimelineRow, OrderTraceResponse, OrderTraceRow,
+    ExecutionOutboxResponse, ExecutionOutboxRow, OrderCausalityCausalNode, OrderCausalityResponse,
+    OrderChartResponse, OrderReplayFrame, OrderReplayResponse, OrderTimelineResponse,
+    OrderTimelineRow, OrderTraceResponse, OrderTraceRow,
 };
 use crate::state::AppState;
 
