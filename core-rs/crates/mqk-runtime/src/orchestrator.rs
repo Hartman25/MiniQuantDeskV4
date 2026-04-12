@@ -557,15 +557,10 @@ where
             // Emitted for CancelAck, ReplaceAck, CancelReject, ReplaceReject only.
             // Failure is non-fatal so that telemetry errors cannot block the
             // primary execution path.
-            if let Some(lc_row) = build_lifecycle_event_row(
-                self.run_id,
-                &msg_id,
-                &event,
-                self.time_source.now_utc(),
-            ) {
-                if let Err(e) =
-                    mqk_db::insert_order_lifecycle_event(&self.pool, &lc_row).await
-                {
+            if let Some(lc_row) =
+                build_lifecycle_event_row(self.run_id, &msg_id, &event, self.time_source.now_utc())
+            {
+                if let Err(e) = mqk_db::insert_order_lifecycle_event(&self.pool, &lc_row).await {
                     tracing::warn!(
                         run_id = %self.run_id,
                         broker_message_id = %msg_id,

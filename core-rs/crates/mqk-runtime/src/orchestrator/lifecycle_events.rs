@@ -111,7 +111,10 @@ mod tests {
         assert_eq!(row.event_id, "msg-cancel-1");
         assert_eq!(row.internal_order_id, "ord-1");
         assert_eq!(row.broker_order_id.as_deref(), Some("brk-abc"));
-        assert!(row.new_total_qty.is_none(), "cancel_ack must not carry new_total_qty");
+        assert!(
+            row.new_total_qty.is_none(),
+            "cancel_ack must not carry new_total_qty"
+        );
     }
 
     // L02: ReplaceAck → operation="replace_ack", new_total_qty populated
