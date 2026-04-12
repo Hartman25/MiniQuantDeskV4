@@ -1,5 +1,6 @@
 use super::*;
 use ::chrono::TimeZone;
+use mqk_execution::oms::state_machine::OmsEvent;
 
 // ---------------------------------------------------------------------------
 // Test-only helpers (moved from orchestrator.rs outer scope)
@@ -1069,8 +1070,7 @@ impl mqk_execution::BrokerAdapter for SubmitCountingBroker {
         &self,
         _cursor: Option<&str>,
         _token: &mqk_execution::BrokerInvokeToken,
-    ) -> Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), mqk_execution::BrokerError>
-    {
+    ) -> Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), mqk_execution::BrokerError> {
         Ok((Vec::new(), None))
     }
 }
@@ -1096,9 +1096,7 @@ fn submit_request_rejects_out_of_range_quantity() {
     lossy["qty"] = serde_json::json!(1.5);
     let err = build_validated_submit_request("ord-lossy", &lossy)
         .expect_err("lossy quantity must be rejected before broker submission");
-    assert!(
-        err.to_string().contains("lossy conversion") || err.to_string().contains("integer")
-    );
+    assert!(err.to_string().contains("lossy conversion") || err.to_string().contains("integer"));
 }
 
 #[test]
@@ -1121,11 +1119,9 @@ fn legacy_payload_without_side_uses_signed_quantity_compatibility_rule() {
 
 #[test]
 fn legacy_payload_without_order_type_or_tif_uses_repo_backed_defaults() {
-    let req = build_validated_submit_request(
-        "ord-legacy-defaults",
-        &legacy_minimal_submit_order_json(),
-    )
-    .expect("legacy minimal payload must build with repo-backed defaults");
+    let req =
+        build_validated_submit_request("ord-legacy-defaults", &legacy_minimal_submit_order_json())
+            .expect("legacy minimal payload must build with repo-backed defaults");
 
     assert!(matches!(req.side, mqk_execution::Side::Buy));
     assert_eq!(req.quantity, 10);
@@ -1334,8 +1330,7 @@ fn durable_applied_gate_is_queue_membership_not_oms_memory() {
     }
     // OMS shows only F2's contribution (60), not F1+F2 (100).
     assert_eq!(
-        oms["ord-split"].filled_qty,
-        60,
+        oms["ord-split"].filled_qty, 60,
         "OMS filled_qty must reflect only F2 (unapplied); F1 (applied, absent) must not advance it"
     );
     // Portfolio cash changed: F2 was applied (cash ≠ initial).
@@ -1442,8 +1437,7 @@ impl mqk_execution::BrokerAdapter for NoopBroker {
         &self,
         _cursor: Option<&str>,
         _token: &mqk_execution::BrokerInvokeToken,
-    ) -> Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), mqk_execution::BrokerError>
-    {
+    ) -> Result<(Vec<mqk_execution::BrokerEvent>, Option<String>), mqk_execution::BrokerError> {
         Ok((Vec::new(), None))
     }
 }
@@ -1537,10 +1531,7 @@ fn make_lease_test_orchestrator(
         Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
     )
 }
-fn broker_snapshot_with_position(
-    fetched_at_ms: i64,
-    qty: i64,
-) -> mqk_reconcile::BrokerSnapshot {
+fn broker_snapshot_with_position(fetched_at_ms: i64, qty: i64) -> mqk_reconcile::BrokerSnapshot {
     let mut broker = mqk_reconcile::BrokerSnapshot::empty_at(fetched_at_ms);
     broker.positions.insert("SPY".to_string(), qty);
     broker
@@ -1584,10 +1575,9 @@ async fn runtime_refuses_to_run_without_lease() {
     let pool = runtime_test_pool().await;
     let clock = MutableClock::new(runtime_ts(10_000));
     let run_id = make_running_run(&pool, clock.now_utc()).await;
-    let locked =
-        mqk_db::runtime_lease::acquire_lease(&pool, "other-runtime", clock.now_utc(), 30)
-            .await
-            .expect("seed active lease");
+    let locked = mqk_db::runtime_lease::acquire_lease(&pool, "other-runtime", clock.now_utc(), 30)
+        .await
+        .expect("seed active lease");
     assert!(matches!(
         locked,
         mqk_db::runtime_lease::LeaseAcquireOutcome::Acquired(_)
@@ -1621,10 +1611,9 @@ async fn runtime_halts_when_lease_is_lost() {
         .await
         .expect("first tick acquires lease");
     clock.set(runtime_ts(20_016));
-    let stolen =
-        mqk_db::runtime_lease::acquire_lease(&pool, "other-runtime", clock.now_utc(), 30)
-            .await
-            .expect("steal expired lease");
+    let stolen = mqk_db::runtime_lease::acquire_lease(&pool, "other-runtime", clock.now_utc(), 30)
+        .await
+        .expect("steal expired lease");
     assert!(matches!(
         stolen,
         mqk_db::runtime_lease::LeaseAcquireOutcome::Acquired(_)

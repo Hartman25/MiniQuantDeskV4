@@ -206,6 +206,24 @@
       "path": "0032_autonomous_session_events.sql",
       "status": "applied",
       "intent": "Add sys_autonomous_session_events table for durable autonomous paper supervisor history/evidence (AUTON-PAPER-02): restart-safe recovery attempts/results, refusals, stop outcomes, and operator-reviewable soak evidence."
+    },
+    {
+      "id": "0033",
+      "path": "0033_alert_acks.sql",
+      "status": "applied",
+      "intent": "Add durable alert acknowledgment persistence for operator-facing alert triage truth."
+    },
+    {
+      "id": "0034",
+      "path": "0034_incidents.sql",
+      "status": "applied",
+      "intent": "Add durable incidents table and linkage support for operator incident tracking truth."
+    },
+    {
+      "id": "0035",
+      "path": "0035_oms_order_lifecycle_events.sql",
+      "status": "applied",
+      "intent": "Add durable OMS order lifecycle event history for authoritative cancel/replace/fill/reject lineage."
     }
   ]
 }
