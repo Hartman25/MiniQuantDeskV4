@@ -1906,29 +1906,96 @@ pub(crate) async fn execution_protection_status(_: State<Arc<AppState>>) -> impl
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/execution/replace-cancel-chains (A4)
+// GET /api/v1/execution/replace-cancel-chains (EXEC-02)
 // ---------------------------------------------------------------------------
 
-/// Replace/cancel chain surface — mounted but not wired.
+/// Replace/cancel chain surface — DB-backed via EXEC-02.
 ///
-/// No chain-lineage provenance exists in the current OMS implementation.
-/// Returns an explicit `"not_wired"` wrapper rather than 404 so the GUI can
-/// surface honest unavailable truth instead of treating the missing route as
-/// a backend error.
-pub(crate) async fn execution_replace_cancel_chains(_: State<Arc<AppState>>) -> impl IntoResponse {
-    use crate::api_types::ReplaceCancelChainsResponse;
+/// Returns lifecycle events (cancel_ack, replace_ack, cancel_reject,
+/// replace_reject) recorded by the orchestrator's Phase 3b hook for the
+/// active run.  Source: `postgres.oms_order_lifecycle_events`.
+///
+/// truth_state values:
+/// - `"no_db"` — DB pool unavailable.
+/// - `"no_active_run"` — DB present but no active run ID known.
+/// - `"active"` — DB-backed; chains may be empty (no cancel/replace yet).
+pub(crate) async fn execution_replace_cancel_chains(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    use crate::api_types::{OrderLifecycleEventApiRow, ReplaceCancelChainsResponse};
+
+    const CANONICAL: &str = "/api/v1/execution/replace-cancel-chains";
+
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(ReplaceCancelChainsResponse {
+                canonical_route: CANONICAL.to_string(),
+                truth_state: "no_db".to_string(),
+                backend: "unavailable".to_string(),
+                note: "DB pool unavailable — lifecycle events cannot be read.".to_string(),
+                chains: vec![],
+            }),
+        )
+            .into_response();
+    };
+
+    let active_run_id = match st.current_status_snapshot().await {
+        Ok(snap) => snap.active_run_id,
+        Err(_) => None,
+    };
+
+    let Some(run_id) = active_run_id else {
+        return (
+            StatusCode::OK,
+            Json(ReplaceCancelChainsResponse {
+                canonical_route: CANONICAL.to_string(),
+                truth_state: "no_active_run".to_string(),
+                backend: "unavailable".to_string(),
+                note: "No active run — no lifecycle events to show.".to_string(),
+                chains: vec![],
+            }),
+        )
+            .into_response();
+    };
+
+    let rows = match mqk_db::fetch_order_lifecycle_events_for_run(db, run_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "lifecycle_events_fetch_failed",
+                    "detail": e.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let api_rows: Vec<OrderLifecycleEventApiRow> = rows
+        .into_iter()
+        .map(|r| OrderLifecycleEventApiRow {
+            event_id: r.event_id,
+            internal_order_id: r.internal_order_id,
+            operation: r.operation,
+            broker_order_id: r.broker_order_id,
+            new_total_qty: r.new_total_qty,
+            recorded_at_utc: r.recorded_at_utc.to_rfc3339(),
+        })
+        .collect();
 
     (
         StatusCode::OK,
         Json(ReplaceCancelChainsResponse {
-            canonical_route: "/api/v1/execution/replace-cancel-chains".to_string(),
-            truth_state: "not_wired".to_string(),
-            backend: "none".to_string(),
-            note: "No replace/cancel chain lineage is tracked in the current OMS. \
-                   Empty chains must not be interpreted as absence of historical \
-                   replace or cancel operations."
+            canonical_route: CANONICAL.to_string(),
+            truth_state: "active".to_string(),
+            backend: "postgres.oms_order_lifecycle_events".to_string(),
+            note: "Source: oms_order_lifecycle_events. Events recorded for \
+                   cancel_ack, replace_ack, cancel_reject, replace_reject \
+                   operations per run by ExecutionOrchestrator Phase 3b (EXEC-02)."
                 .to_string(),
-            chains: vec![],
+            chains: api_rows,
         }),
     )
         .into_response()

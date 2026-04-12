@@ -62,9 +62,12 @@ pub use md::{ingest_csv_to_md_bars, ingest_provider_bars_to_md_bars};
 // Domain modules
 // ---------------------------------------------------------------------------
 
+pub mod alert_acks;
 pub mod arm_state;
 pub mod audit;
 pub mod fill_quality;
+pub mod incidents;
+pub mod order_lifecycle;
 pub mod orders;
 pub mod reconcile_state;
 pub mod restart_intent;
@@ -73,9 +76,12 @@ pub mod strategy;
 
 // Re-export all public items to preserve pre-refactor public API.
 // Callers continue to use `mqk_db::insert_run`, `mqk_db::RunStatus`, etc.
+pub use alert_acks::*;
 pub use arm_state::*;
 pub use audit::*;
 pub use fill_quality::*;
+pub use incidents::*;
+pub use order_lifecycle::*;
 pub use orders::*;
 pub use reconcile_state::*;
 pub use restart_intent::*;

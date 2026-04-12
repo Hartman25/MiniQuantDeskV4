@@ -54,10 +54,12 @@ use mqk_portfolio::{apply_entry, LedgerEntry, PortfolioState};
 mod apply;
 mod cancel;
 mod fill_quality;
+mod lifecycle_events;
 mod outbox;
 use apply::*;
 use cancel::*;
 use fill_quality::build_fill_quality_row;
+use lifecycle_events::build_lifecycle_event_row;
 use outbox::*;
 // ---------------------------------------------------------------------------
 // ExecutionOrchestrator
@@ -548,6 +550,27 @@ where
                         broker_message_id = %msg_id,
                         error = %e,
                         "TV-EXEC-01: fill_quality_telemetry write failed (non-fatal)"
+                    );
+                }
+            }
+            // EXEC-02: best-effort lifecycle event write for cancel/replace events.
+            // Emitted for CancelAck, ReplaceAck, CancelReject, ReplaceReject only.
+            // Failure is non-fatal so that telemetry errors cannot block the
+            // primary execution path.
+            if let Some(lc_row) = build_lifecycle_event_row(
+                self.run_id,
+                &msg_id,
+                &event,
+                self.time_source.now_utc(),
+            ) {
+                if let Err(e) =
+                    mqk_db::insert_order_lifecycle_event(&self.pool, &lc_row).await
+                {
+                    tracing::warn!(
+                        run_id = %self.run_id,
+                        broker_message_id = %msg_id,
+                        error = %e,
+                        "EXEC-02: order_lifecycle_event write failed (non-fatal)"
                     );
                 }
             }
