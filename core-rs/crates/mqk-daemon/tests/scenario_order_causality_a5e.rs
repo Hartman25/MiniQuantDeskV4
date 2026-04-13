@@ -37,9 +37,6 @@ use mqk_daemon::{routes, state};
 use std::sync::Arc;
 use tower::ServiceExt;
 
-// chrono is used by CA-11 for chronological ordering assertions.
-use chrono;
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -438,7 +435,7 @@ fn ca11_submit_event_node_is_first_chronologically() {
         submit_to_fill_ms: Some(2000),
     };
 
-    let nodes = vec![anchor, fill1, fill2];
+    let nodes = [anchor, fill1, fill2];
 
     // Anchor must be first.
     assert_eq!(

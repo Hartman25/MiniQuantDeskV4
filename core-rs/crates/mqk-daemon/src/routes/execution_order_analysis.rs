@@ -919,7 +919,7 @@ pub(crate) async fn execution_order_causality(
 
     let outbox_sent_node: Option<OrderCausalityCausalNode> = outbox_row.as_ref().and_then(|ob| {
         let sent = ob.sent_at_utc?;
-        let enqueued_ms = ob.created_at_utc.timestamp_millis();
+        let enqueued_ms = ob.created_at_utc.timestamp_millis(); // allow: ops-metadata
         Some(OrderCausalityCausalNode {
             node_key: format!("outbox_sent:{order_id}"),
             node_type: "outbox_sent".to_string(),
@@ -928,7 +928,7 @@ pub(crate) async fn execution_order_causality(
             subsystem: "execution".to_string(),
             linked_id: Some(ob.outbox_id.to_string()),
             timestamp: Some(sent.to_rfc3339()),
-            elapsed_from_prev_ms: Some(sent.timestamp_millis() - enqueued_ms),
+            elapsed_from_prev_ms: Some(sent.timestamp_millis() - enqueued_ms), // allow: ops-metadata
             anomaly_tags: vec![],
             summary: "order dispatched to broker adapter".to_string(),
             submit_ts_utc: None,
@@ -988,7 +988,7 @@ pub(crate) async fn execution_order_causality(
             .as_ref()
             .and_then(|n| n.timestamp.as_deref())
             .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-            .map(|dt| dt.timestamp_millis());
+            .map(|dt| dt.timestamp_millis()); // allow: ops-metadata
 
         let fill_nodes: Vec<OrderCausalityCausalNode> = fill_rows
             .iter()
