@@ -1,22 +1,37 @@
 # MiniQuantDeskV4 — Technical README
 
-This is the hands-on setup and operator guide for MiniQuantDeskV4.
+This is the hands-on setup, proof, and operator guide for MiniQuantDeskV4.
 
-## **What This Document Is For**
+## What this document is for
 
-This file is the practical companion to the top-level README.
+Use this file for:
 
-Use it for:
 - local setup
-- verification commands
+- proof and verification commands
 - DB proof execution
 - daemon and GUI startup
 - CLI usage
-- current operational boundaries
+- current deployment boundaries
+- operator workflow reality
 
-Use the root README for the high-level system story.
+Use the root `README.md` for the high-level system story.
 
-## **Core Principles**
+## Current proved posture
+
+The repo snapshot used for this README refresh reflects a clean committed state and a completed full DB-backed proof run through `full_repo_proof.ps1 -ProofProfile full -LowMemory`.
+
+That matters because this technical README is meant to describe the strongest currently proved path, not an aspirational one.
+
+The strongest current operational route is still:
+
+- `paper` deployment mode
+- `alpaca` adapter
+- daemon + Vite GUI operator path
+- DB-backed proof and guard lanes as the load-bearing validation standard
+
+This is a materially stronger operator posture than early scaffold state, but it is still **not** a safe-live-capital blanket claim.
+
+## Core principles
 
 - **Deterministic inputs and outputs**
 - **Explicit run lifecycle**
@@ -26,9 +41,9 @@ Use the root README for the high-level system story.
 - **Scenario-driven reliability validation**
 - **Fail-closed operator posture where truth is missing**
 
-## **Repository Structure**
+## Repository structure
 
-- `core-rs/` — Rust workspace
+- `core-rs/` — authoritative Rust workspace
   - `crates/`
     - `mqk-config` — layered config loading and config-hash support
     - `mqk-db` — persistence, outbox/inbox, run lifecycle, broker mapping, proof-backed DB contracts
@@ -44,37 +59,45 @@ Use the root README for the high-level system story.
     - `mqk-backtest` — deterministic backtest engine
     - `mqk-promotion` — promotion/evaluation layer
     - `mqk-broker-paper` — deterministic paper broker adapter
-    - `mqk-broker-alpaca` — live broker adapter under hardening
+    - `mqk-broker-alpaca` — Alpaca adapter under hardening
     - `mqk-daemon` — HTTP control plane
     - `mqk-runtime` — authoritative execution path
     - `mqk-testkit` — scenario-driven reliability harness
     - `mqk-md` — historical/provider market-data support
+    - `mqk-isolation` — cross-engine isolation and anti-state-bleed support
+    - `mqk-schemas` — shared schema contracts
   - `mqk-gui/` — Vite/React operator console
 - `research-py/` — optional Python research CLI
-- `config/` — layered config set
+- `config/` — layered config sets
 - `scripts/` — repo-native helper and proof scripts
 - `docs/` — specs, checklists, runbooks, audits
+- `assets/` — branding and diagrams
 
-Operationally, `MAIN` is the canonical engine. `EXP` is a research-side experimental sandbox and should not be treated as current readiness or operator truth unless explicitly promoted.
+Operationally, `MAIN` is the canonical engine.
+`EXP` is a research-side experimental sandbox and should not be treated as readiness truth unless explicitly promoted.
 
-## **Prerequisites**
+## Prerequisites
 
-### **Core Workspace**
+### Core workspace
+
 - Rust stable toolchain
 - Docker
 
-### **GUI**
+### GUI
+
 - Node.js + npm
 
-### **Windows-Specific**
+### Windows-specific
+
 - Git Bash is useful because the repo-native DB proof harness is a shell script
 - PowerShell is fine for Rust, Docker, daemon, GUI, and the root proof runner
-- Optional desktop bootstrap scripts now exist under `scripts/windows/`, but the primary documented path remains daemon + Vite GUI unless and until you validate the desktop shell on your machine
+- optional desktop bootstrap scripts exist under `scripts/windows/`, but the primary documented path remains daemon + browser GUI unless you have validated the desktop shell locally
 
-## **Database and DB Proof Lane**
+## Database and proof model
 
-### **Recommended Local Proof DB**
-Run a dedicated local proof container so your repo testing does not collide with an existing local Postgres on port `5432`.
+### Recommended local proof DB
+
+Run a dedicated local proof container so repo testing does not collide with another local Postgres on port `5432`.
 
 ```powershell
 docker run --name mqk-postgres-proof `
@@ -92,76 +115,87 @@ docker exec mqk-postgres-proof pg_isready -U mqk -d mqk_test
 docker exec mqk-postgres-proof psql -U mqk -d mqk_test -c "select current_user, current_database();"
 ```
 
-### **Canonical Local Proof Harness (full_repo_proof.ps1)**
+### Canonical local proof harness
 
-`full_repo_proof.ps1` at repo root is the authoritative local proof runner.  
-It runs all required proof lanes in sequence and produces a structured JSON summary.
+`full_repo_proof.ps1` at repo root is the authoritative local proof runner.
+It runs the required lanes in sequence and writes a structured summary to `.proof/full_repo_proof_output.txt`.
 
 ```powershell
-# Non-DB local proof (fmt + clippy + workspace tests + daemon/runtime/broker/GUI lanes + guards):
+# Non-DB local proof
 .\full_repo_proof.ps1 -ProofProfile local
 
-# Low-memory Windows profile — reproduces the proven Windows posture:
-#   CARGO_BUILD_JOBS=1, CARGO_INCREMENTAL=0, RUSTFLAGS=-C debuginfo=0
-# (each set only if not already overridden); all test lanes use --test-threads=1:
+# Low-memory Windows posture
 .\full_repo_proof.ps1 -ProofProfile local -LowMemory
 
-# Full DB-backed institutional proof (requires MQK_DATABASE_URL pointing at a live Postgres):
+# Full DB-backed institutional proof
+$env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
 .\full_repo_proof.ps1 -ProofProfile full
+
+# Full DB-backed proof using the proven Windows low-memory profile
+$env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
+.\full_repo_proof.ps1 -ProofProfile full -LowMemory
 ```
 
-The transcript is saved to `.proof/full_repo_proof_output.txt`. When `-LowMemory` is active
-this harness prints the full active settings in the transcript header so the proof posture is unambiguous.
+When `-LowMemory` is active, the harness sets or preserves the proven Windows posture:
 
-### **Repo-Native DB Proof Bootstrap (underlying shell harness)**
+- `CARGO_BUILD_JOBS=1`
+- `CARGO_INCREMENTAL=0`
+- `RUSTFLAGS=-C debuginfo=0`
+- all test lanes run with `--test-threads=1`
 
-`scripts/db_proof_bootstrap.sh` is the DB proof shell script invoked by `full_repo_proof.ps1`
-and by CI `db-proof`. You can run it directly if needed:
+Use that profile on Windows hosts where linker or codegen parallelism causes OOM pressure.
+
+### Repo-native DB proof bootstrap
+
+`scripts/db_proof_bootstrap.sh` is the underlying DB proof harness invoked by `full_repo_proof.ps1` and by CI `db-proof`.
 
 ```powershell
 & "C:\Program Files\Git\bin\bash.exe" -lc 'export MQK_DATABASE_URL="postgres://mqk:mqk@127.0.0.1:55432/mqk_test"; export DATABASE_URL="$MQK_DATABASE_URL"; ./scripts/db_proof_bootstrap.sh 2>&1 | tee db-proof.log'
 ```
 
 What this proves:
-- migration manifest / replay safety
+
+- migration manifest and replay safety
 - inbox dedupe and apply-fence behavior
-- outbox idempotency / claim / recovery behavior
+- outbox idempotency, claim, and recovery behavior
 - restart quarantine behavior
 - runtime lease behavior
-- deadman / runtime lifecycle behavior
+- deadman and runtime lifecycle behavior
 - arm-preflight and DB constraint behavior
 - market-data provider ingest and incremental sync DB behavior
 
-This is the same proof lane CI uses in the `db-proof` job. Prefer running it via
-`full_repo_proof.ps1 -ProofProfile full` so the full lane set runs together.
+Prefer running it through `full_repo_proof.ps1 -ProofProfile full` so the full lane set stays bundled.
 
-### **Local DB Helpers**
+### Local DB helpers
+
 Also present in `scripts/`:
+
 - `reset-mqk-testdb.ps1` — reset the local proof DB
 - `psql-local.ps1` — interactive psql shortcut
 
-**Deprecated scripts** (`test-all.ps1`, `test-db.ps1`, `ci_gate.ps1`) are stale wrappers
-that do not cover the full canonical proof lane set. Each file contains a deprecation
-warning pointing to `full_repo_proof.ps1`. Do not use them for operator validation.
+Deprecated wrappers such as `test-all.ps1`, `test-db.ps1`, and `ci_gate.ps1` should not be used for operator validation. The canonical local proof entrypoint is `full_repo_proof.ps1`.
 
-## **Core Verification Commands**
+## Core verification commands
 
 All Rust commands below assume you are in `core-rs/`.
 
-### **Formatting / Lint / Broad Test**
+### Formatting, lint, and broad tests
+
 ```powershell
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-### **GUI Contract Gate**
+### GUI contract gate
+
 ```powershell
 cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate
 cargo test -p mqk-daemon --test scenario_route_contract_rt01
 ```
 
-### **GUI Local Truth Checks**
+### GUI local truth checks
+
 From `core-rs/mqk-gui/`:
 
 ```powershell
@@ -170,7 +204,8 @@ npm run test
 npm run build
 ```
 
-### **Focused Execution / Runtime / Broker Checks**
+### Focused execution, runtime, and broker checks
+
 ```powershell
 cargo test -p mqk-execution --features testkit
 cargo test -p mqk-broker-paper
@@ -179,34 +214,37 @@ cargo test -p mqk-runtime
 cargo test -p mqk-testkit
 ```
 
-### **Workspace Build**
+### Workspace build
+
 ```powershell
 cargo build --workspace
 ```
 
-## **Current Deployment Reality**
+## Current deployment reality
 
-This matters because the technical README should not lie.
+This section is intentionally blunt.
 
-### **What the daemon supports today**
+### Valid daemon combinations today
 
-Valid mode+adapter combinations with `deployment_start_allowed: true`:
+Valid mode + adapter combinations with `deployment_start_allowed: true`:
 
-- `paper` mode + `alpaca` adapter — Alpaca paper endpoint, NYSE weekday/session calendar (AUTON-CALENDAR-01); canonical honest paper path
-- `live-shadow` mode + `alpaca` adapter — Alpaca live endpoint, NYSE weekday calendar, no capital authority
-- `live-capital` mode + `alpaca` adapter — Alpaca live endpoint, NYSE weekday calendar, real capital semantics; additional runtime gates (dev-token check, WS continuity proven) are enforced at start beyond the static readiness check
+- `paper` mode + `alpaca` adapter — canonical honest paper path
+- `live-shadow` mode + `alpaca` adapter — typed support, no capital authority
+- `live-capital` mode + `alpaca` adapter — typed support with additional runtime gates
 
-`paper` mode + `paper` adapter is **fail-closed** (`start_allowed: false`); the paper+paper combination is refused at the deployment-readiness gate (PT-TRUTH-01). It is not a valid start combination.
+### Fail-closed combinations
 
-Typed support and `start_allowed: true` exist in source and are tested for all three combinations above.
+- `paper` mode + `paper` adapter — refused; not a valid start-authoritative daemon combination
+- `live-shadow` or `live-capital` with `paper` adapter — refused
+- any unrecognized adapter ID — refused
+- `backtest` deployment in daemon runtime — unconditionally refused
 
-**Operational trust for live-shadow and live-capital is still partial.** Typed support in source is not the same as operational trust. Runbooks, recovery proof, and shadow-to-live parity evidence are not yet strong enough for safe live claims. Do not treat typed support as proof of safe live operation.
+### Strongest current operational path
 
-### **Strongest current operational path: Paper + Alpaca autonomous paper**
+The strongest current daemon path is canonical **Paper + Alpaca autonomous paper**.
 
-The strongest daemon path in the current snapshot is the canonical **Paper + Alpaca** route.
+That path has:
 
-That path now has:
 - truthful readiness at `GET /api/v1/autonomous/readiness`
 - truthful autonomous-paper fields on `GET /api/v1/system/preflight`
 - NYSE-session-aware autonomous controller behavior
@@ -216,40 +254,37 @@ That path now has:
 - a one-day soak harness: `scripts/paper_soak_day.sh`
 - an operator runbook: `docs/runbooks/autonomous_paper_ops.md`
 
-That does **not** make it live-capital ready. It means paper/autonomous operator truth is materially stronger than before.
+That does **not** make it live-capital ready.
+It means paper/autonomous operator truth is materially stronger than before.
 
-### **What the daemon unconditionally refuses**
+### Important vocabulary mismatch
 
-- `backtest` mode: not supported in the daemon runtime; refuses start fail-closed regardless of adapter
-
-### **What else fails closed**
-
-- `live-shadow` or `live-capital` with the `paper` adapter: refused (paper adapter cannot provide real external broker truth for these modes)
-- any mode with an unrecognised adapter ID: refused fail-closed
-
-### **Important vocabulary mismatch**
 - daemon deployment labels use `paper`, `live-shadow`, `live-capital`, and `backtest`
-- `mqk run start` still uses the older config/run-row mode vocabulary: `BACKTEST | PAPER | LIVE`
-- do not assume CLI `LIVE` maps one-to-one to daemon `live-shadow` versus `live-capital`; they describe different layers
+- `mqk run start` still uses the older run/config vocabulary: `BACKTEST | PAPER | LIVE`
+- do not assume CLI `LIVE` maps one-to-one to daemon `live-shadow` versus `live-capital`
 
-### **Default bind posture**
+### Default bind posture
+
 - default bind: `127.0.0.1:8899`
-- non-loopback bind requires explicit opt-in via environment configuration
+- non-loopback bind requires explicit opt-in through environment configuration
 
-### **Operator auth posture**
+### Operator auth posture
+
 If `MQK_OPERATOR_TOKEN` is not configured, privileged routes fail closed.
 
-### **Control-plane mode transitions**
-Mode transitions are still **restart-based**, not hot-swapped.
+### Control-plane mode transitions
 
-Current operator truth:
-- `change-system-mode` remains a guidance/compatibility path that returns 409
-- canonical operator actions now include persisted restart-intent workflow via `/api/v1/ops/action`
+Mode transitions are restart-based, not hot-swapped.
+
+Current truthful operator workflow:
+
+- `change-system-mode` remains a guidance/compatibility path that returns `409`
+- canonical operator actions now include persisted restart-intent workflow through `/api/v1/ops/action`
 - `request-mode-change` can persist a restart intent when the transition is admissible-with-restart
 - `cancel-mode-transition` can cancel a pending durable restart intent
-- the action catalog now exposes those truthful operator workflows rather than pretending hot mode changes are authoritative
+- the action catalog exposes those truthful restart workflows instead of pretending hot mode changes are authoritative
 
-## **CLI Entry Point**
+## CLI entry point
 
 The CLI binary is `mqk`.
 
@@ -259,31 +294,36 @@ From `core-rs/`:
 cargo run -p mqk-cli -- --help
 ```
 
-## **CLI — Common Operations**
+## CLI common operations
 
-### **DB Status and Migrations**
+### DB status and migrations
+
 ```powershell
 cargo run -p mqk-cli -- db status
 cargo run -p mqk-cli -- db migrate
 cargo run -p mqk-cli -- db migrate --yes
 ```
 
-Migrations live under:
-- `core-rs/crates/mqk-db/migrations/` — the only authoritative migration source
+Authoritative migration source:
 
-There is exactly one migration authority. Any SQL file tracked under a path containing `/migrations/` but outside `core-rs/crates/mqk-db/migrations/` is rejected by `scripts/guards/check_migration_governance.sh` and the CI guard step.
+- `core-rs/crates/mqk-db/migrations/`
 
-### **Config Hash**
+Any tracked SQL file under another `/migrations/` path is rejected by migration governance guards.
+
+### Config hash
+
 ```powershell
 cargo run -p mqk-cli -- config-hash config/defaults/base.yaml config/environments/windows-dev.yaml config/engines/main.yaml
 ```
 
-### **Market Data — CSV Ingest**
+### Market data — CSV ingest
+
 ```powershell
 cargo run -p mqk-cli -- md ingest-csv --path "<PATH_TO_CSV>" --timeframe "1D" --source "csv"
 ```
 
-### **Market Data — Provider Ingest**
+### Market data — provider ingest
+
 ```powershell
 cargo run -p mqk-cli -- md ingest-provider `
   --source "twelvedata" `
@@ -293,13 +333,10 @@ cargo run -p mqk-cli -- md ingest-provider `
   --end "2026-01-01"
 ```
 
-### **Market Data — Incremental Sync (`sync-provider`)**
+### Market data — incremental sync
 
-`sync-provider` detects the latest stored bar per symbol and fetches only the bars needed to
-extend coverage. An overlap window is subtracted from the latest stored bar's date to re-ingest
-recent bars and handle late completions.
+First run, when no bars exist yet:
 
-**First run — no bars exist yet (full backfill required):**
 ```powershell
 cargo run -p mqk-cli -- md sync-provider `
   --source "twelvedata" `
@@ -308,7 +345,8 @@ cargo run -p mqk-cli -- md sync-provider `
   --full-start "2020-01-01"
 ```
 
-**Subsequent runs — incremental (no `--full-start` needed once bars exist):**
+Subsequent incremental runs:
+
 ```powershell
 cargo run -p mqk-cli -- md sync-provider `
   --source "twelvedata" `
@@ -316,7 +354,8 @@ cargo run -p mqk-cli -- md sync-provider `
   --timeframe "1D"
 ```
 
-**Override end date or overlap:**
+Override end date or overlap:
+
 ```powershell
 cargo run -p mqk-cli -- md sync-provider `
   --source "twelvedata" `
@@ -326,38 +365,18 @@ cargo run -p mqk-cli -- md sync-provider `
   --overlap-days 10
 ```
 
-**Overlap defaults:** 5 calendar days for `1D`, 2 days for `5m`, 1 day for `1m`.
+Notes:
 
-**`--end` default:** today's date (wall clock, operator command only — no wall clock use in
-deterministic src/ paths).
+- default overlap is 5 calendar days for `1D`, 2 days for `5m`, and 1 day for `1m`
+- `--end` defaults to today for this operator-facing command
+- `sync-provider` and `ingest-provider` share the same ingest path
+- ingest ID is deterministic for identical inputs
+- research and backtest paths should read from `md_bars` rather than calling providers directly
 
-**Output format (per run):**
-```
-mode=sync-provider
-ingest_id=<uuid>
-source=twelvedata
-timeframe=1D
-symbol=SPY effective_start=2026-03-11
-symbol=QQQ effective_start=2026-03-11
-rows_read=N rows_ok=N rejected=0 inserted=N updated=N
-artifact=../exports/md_ingest/<uuid>/data_quality.json
-sql=select ingest_id, created_at, stats_json from md_quality_reports where ingest_id='<uuid>';
-```
+## Deterministic backtests
 
-**Notes:**
-- `sync-provider` and `ingest-provider` share the same ingest path (`ingest_provider_bars_to_md_bars`).
-  `ingest-provider` behavior is not changed.
-- Ingest ID is deterministic: re-running with identical inputs produces the same UUID and upserts
-  existing rows rather than duplicating them.
-- Research/backtest paths should read from `md_bars` via `fetch_md_bars` or `mqk backtest db`
-  rather than calling providers directly.
-- The repo-native DB proof lane explicitly runs both `scenario_md_ingest_provider` and
-  `scenario_md_sync_provider`, so incremental-sync DB semantics are part of promoted proof rather than
-  hidden in ignored-only tests.
+### Backtest from CSV
 
-## **Deterministic Backtests**
-
-### **Backtest from CSV**
 ```powershell
 cargo run -p mqk-cli -- backtest csv `
   --bars "<PATH_TO_BARS_CSV>" `
@@ -376,7 +395,8 @@ cargo run -p mqk-cli -- backtest csv `
   --out-dir "runs/backtests"
 ```
 
-### **Backtest from Postgres `md_bars`**
+### Backtest from Postgres `md_bars`
+
 ```powershell
 cargo run -p mqk-cli -- backtest db `
   --timeframe "1D" `
@@ -386,14 +406,16 @@ cargo run -p mqk-cli -- backtest db `
 ```
 
 Notes:
-- `start_end_ts` and `end_end_ts` are epoch seconds over the bar `end_ts` range
-- the backtest engine is deterministic, but the full promotion-grade backtest/provenance layer is still being hardened
 
-## **Run Lifecycle**
+- `start_end_ts` and `end_end_ts` are epoch seconds over the `end_ts` bar range
+- the backtest engine is deterministic, but promotion-grade provenance and realism are still being hardened
+
+## Run lifecycle
 
 Typical flow:
 
-### **Create a Run**
+### Create a run
+
 ```powershell
 cargo run -p mqk-cli -- run start `
   --engine "MAIN" `
@@ -403,52 +425,61 @@ cargo run -p mqk-cli -- run start `
   --config "config/engines/main.yaml"
 ```
 
-### **Arm**
+### Arm
+
 ```powershell
 cargo run -p mqk-cli -- run arm --run-id "<RUN_ID>"
 ```
 
-### **Begin**
+### Begin
+
 ```powershell
 cargo run -p mqk-cli -- run begin --run-id "<RUN_ID>"
 ```
 
-### **Heartbeat**
+### Heartbeat
+
 ```powershell
 cargo run -p mqk-cli -- run heartbeat --run-id "<RUN_ID>"
 ```
 
-### **Stop**
+### Stop
+
 ```powershell
 cargo run -p mqk-cli -- run stop --run-id "<RUN_ID>"
 ```
 
-### **Halt**
+### Halt
+
 ```powershell
 cargo run -p mqk-cli -- run halt --run-id "<RUN_ID>" --reason "manual halt"
 ```
 
-### **Status**
+### Status
+
 ```powershell
 cargo run -p mqk-cli -- run status --run-id "<RUN_ID>"
 ```
 
-### **Deadman Check**
+### Deadman check
+
 ```powershell
 cargo run -p mqk-cli -- run deadman-check --run-id "<RUN_ID>" --ttl-seconds 60
 ```
 
-### **Deadman Enforce**
+### Deadman enforce
+
 ```powershell
 cargo run -p mqk-cli -- run deadman-enforce --run-id "<RUN_ID>" --ttl-seconds 60
 ```
 
-Other lifecycle helpers exist:
+Other helpers exist:
+
 ```powershell
 cargo run -p mqk-cli -- run --help
 ```
 
-## **Daemon**
+## Daemon
 
 Run from `core-rs/`:
 
@@ -463,17 +494,20 @@ cargo run -p mqk-daemon
 ```
 
 Default local URL:
+
 - `http://127.0.0.1:8899`
 
-You may also need:
+Optional session override variables:
+
 ```powershell
 $env:MQK_SESSION_START_HH_MM = "14:30"
 $env:MQK_SESSION_STOP_HH_MM = "21:00"
 ```
 
-if you want to override the default NYSE regular-session autonomous window.
+Use those only if you explicitly want to override the default NYSE regular-session autonomous window.
 
-### **Useful daemon surfaces for the canonical paper path**
+### Useful daemon surfaces for the canonical paper path
+
 - `GET /api/v1/system/status`
 - `GET /api/v1/system/preflight`
 - `GET /api/v1/autonomous/readiness`
@@ -482,7 +516,7 @@ if you want to override the default NYSE regular-session autonomous window.
 - `GET /api/v1/ops/catalog`
 - `POST /api/v1/ops/action`
 
-## **GUI**
+## GUI
 
 Run from `core-rs/mqk-gui/`:
 
@@ -493,32 +527,41 @@ npm run dev
 ```
 
 Default dev URL:
+
 - `http://127.0.0.1:5173`
 
-The GUI defaults to daemon URL:
+Default daemon URL:
+
 - `http://127.0.0.1:8899`
 
-### **Important**
+### Practical operator path
+
 The practical repo-native operator flow today is still:
+
 - run daemon
 - run Vite GUI
 - point the GUI at the daemon
 
-### **Optional Windows desktop bootstrap**
+### Optional Windows desktop bootstrap
+
 An optional Windows desktop bootstrap exists under:
+
 - `scripts/windows/Launch-VeritasLedger.ps1`
 - `scripts/windows/Install-VeritasLedgerDesktopShortcut.ps1`
 
-Current intent:
+Intent of that path:
+
 - desktop launcher verifies canonical local daemon identity before GUI open
 - observe/attach and trade-ready launcher modes both exist
 - desktop privileged actions are canonical-only, not legacy-fallback
 
-Treat this as an operator convenience path that still requires local Windows runtime validation on your machine. The browser GUI + daemon path remains the primary documented workflow.
+Treat it as an operator convenience path that still requires local Windows validation on your machine.
+The browser GUI + daemon path remains the primary documented workflow.
 
-## **One-Shot Local Launch (Two Shells)**
+## One-shot local launch (two shells)
 
-### **Shell 1 — Daemon**
+### Shell 1 — daemon
+
 ```powershell
 cd C:\Users\<YOU>\Desktop\MiniQuantDeskV4\core-rs
 $env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
@@ -530,7 +573,8 @@ $env:ALPACA_API_SECRET_PAPER = "<your-paper-secret>"
 cargo run -p mqk-daemon
 ```
 
-### **Shell 2 — GUI**
+### Shell 2 — GUI
+
 ```powershell
 cd C:\Users\<YOU>\Desktop\MiniQuantDeskV4\core-rs\mqk-gui
 npm ci
@@ -539,7 +583,7 @@ npm run dev
 
 If you use `Start-Process`, keep the DB URL assignment quoted correctly inside the spawned command.
 
-## **Python Research Layer (Optional)**
+## Python research layer (optional)
 
 From `research-py/`:
 
@@ -550,11 +594,11 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m mqk_research.cli --help
 ```
 
-This layer is intended to emit deterministic artifacts that the Rust backtest/execution stack can consume.
+This layer is intended to emit deterministic artifacts that the Rust stack can consume.
 
-## **CI Overview**
+## CI overview
 
-The current GitHub Actions pipeline includes:
+Current GitHub Actions coverage includes:
 
 - **GUI contract lane** (`ubuntu-latest`)
   - GUI truth tests
@@ -574,37 +618,38 @@ The current GitHub Actions pipeline includes:
 - **DB proof lane** (`ubuntu-latest`, with Postgres service)
   - repo-native Postgres proof harness (`scripts/db_proof_bootstrap.sh`)
 
-- **Windows platform lane** (`windows-latest`, no DB) — CI-PLATFORM-01
+- **Windows platform lane** (`windows-latest`, no DB)
   - `cargo fmt --check`
   - `cargo clippy --workspace --all-targets -- -D warnings`
   - `cargo test --workspace -- --test-threads=1`
-  - `CARGO_BUILD_JOBS=1` + `CARGO_INCREMENTAL=0` + `RUSTFLAGS=-C debuginfo=0` reproduces the proven local `-LowMemory` posture exactly
-  - proves the Rust build is clean on the actual operator OS class
-  - no DB lanes: Postgres service containers are not available on `windows-latest`
+  - `CARGO_BUILD_JOBS=1` + `CARGO_INCREMENTAL=0` + `RUSTFLAGS=-C debuginfo=0` reproduces the proven local `-LowMemory` posture
 
-## **Development Discipline**
+## Development discipline
 
-This repo is designed to be patched in small, test-backed units.
+This repo should be patched in small, test-backed units.
 
 Recommended discipline:
+
 1. change one invariant at a time
-2. add or extend a scenario test that proves it
+2. add or extend the scenario test that proves it
 3. run targeted checks first
 4. run broader checks after milestone patches
-5. only commit once the patch and its directly affected surfaces are proven
+5. only commit once the patch and the directly affected surfaces are proven
 
-## **Current Technical Caveats**
+## Current technical caveats
 
 Be honest about these:
 
 - the daemon/operator plane is materially stronger, but some deeper GUI detail surfaces remain intentionally deferred or unmounted rather than faked
-- the daemon now has typed support for paper (Alpaca adapter only for start-authoritative paper execution), live-shadow (Alpaca adapter), and live-capital (Alpaca adapter); backtest is unconditionally refused; operational trust for live modes remains partial and is not yet strongly proven
+- the daemon has typed support for paper, live-shadow, and live-capital on Alpaca, but typed support is not the same thing as safe live operation
 - the backtest system is strong, but still being hardened toward promotion-grade provenance and lifecycle realism
-- “scenario-tested” does **not** mean “safe for live capital by default”
+- shadow/live parity evidence is not yet strong enough for a safe unattended live claim
+- scenario-tested does **not** mean safe for live capital by default
 
-## **Reference Docs**
+## Reference docs
 
 Useful repo docs:
+
 - `docs/GUI_CONVERGENCE_CHECKLIST.md`
 - `docs/ci/gui_daemon_contract_waivers.md`
 - `docs/ci/dependency_governance.md`
@@ -614,5 +659,7 @@ Useful repo docs:
 - `docs/runbooks/common_failure_modes.md`
 - `docs/specs/`
 - `docs/runbooks/`
+- `docs/INSTITUTIONAL_READINESS_LOCK.md`
+- `docs/INSTITUTIONAL_SCORECARD.md`
 - `MiniQuantDesk_V4_90plus_Patch_Tracker.md`
 - `MiniQuantDeskV4_Foundation_Patch_Tracker.md`
