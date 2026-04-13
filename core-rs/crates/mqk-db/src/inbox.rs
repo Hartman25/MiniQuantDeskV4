@@ -272,6 +272,63 @@ pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result
     Ok(out)
 }
 
+/// Minimal row for the broker ACK causality lane.
+///
+/// Contains only the fields required by the causality route:
+/// - `inbox_id` — durable ingest position (for display only)
+/// - `broker_message_id` — used as `linked_id` in the causality node
+/// - `received_at_utc` — the durable ACK timestamp surfaced as `timestamp`
+///
+/// This struct is intentionally smaller than `InboxRow` to avoid selecting
+/// columns (e.g. `message_json`, `applied_at_utc`) that are irrelevant here.
+#[derive(Debug, Clone)]
+pub struct InboxAckRow {
+    pub inbox_id: i64,
+    pub broker_message_id: String,
+    pub received_at_utc: chrono::DateTime<Utc>,
+}
+
+/// Fetch `oms_inbox` rows where `event_kind = 'ack'` for a specific order,
+/// ordered by `inbox_id asc` (durable ingest order).
+///
+/// Used by the causality route (EXEC-CAUSE-01C) to surface the durable broker
+/// ACK moment.  Returns an empty vec when no ACK rows exist — never errors on
+/// absence.
+///
+/// Scoped to `(run_id, internal_order_id)` so the result is always
+/// run-specific and order-specific.
+pub async fn inbox_fetch_ack_rows_for_order(
+    pool: &PgPool,
+    run_id: Uuid,
+    internal_order_id: &str,
+) -> Result<Vec<InboxAckRow>> {
+    let rows = sqlx::query(
+        r#"
+        select inbox_id, broker_message_id, received_at_utc
+          from oms_inbox
+         where run_id = $1
+           and internal_order_id = $2
+           and event_kind = 'ack'
+         order by inbox_id asc
+        "#,
+    )
+    .bind(run_id)
+    .bind(internal_order_id)
+    .fetch_all(pool)
+    .await
+    .context("inbox_fetch_ack_rows_for_order failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(InboxAckRow {
+            inbox_id: row.try_get("inbox_id")?,
+            broker_message_id: row.try_get("broker_message_id")?,
+            received_at_utc: row.try_get("received_at_utc")?,
+        });
+    }
+    Ok(out)
+}
+
 /// Load all applied inbox rows (`applied_at_utc IS NOT NULL`), ordered by
 /// inbox_id asc.  Used at cold-start to replay fills into the portfolio and
 /// advance OMS order state.  Disjoint from the unapplied set processed by

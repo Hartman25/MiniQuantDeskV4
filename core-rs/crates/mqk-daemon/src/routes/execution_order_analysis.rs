@@ -879,10 +879,120 @@ pub(crate) async fn execution_order_causality(
             }
         };
 
-    // Step 5: Build execution causality nodes (fill lane only).
+    // Step 4b: Fetch the durable outbox row for the intent lane (non-fatal).
+    //
+    // idempotency_key == order_id by convention established in OUTBOX_SIGNAL_SOURCE.
+    // On DB error, treat as absent — fills are still surfaced.
+    let outbox_row = mqk_db::outbox_fetch_by_idempotency_key(db, &order_id)
+        .await
+        .unwrap_or(None);
+
+    // Step 4c: Fetch broker ACK inbox rows for the broker_ack lane (non-fatal).
+    //
+    // Queries oms_inbox for rows where event_kind = 'ack' and internal_order_id
+    // matches.  ACK events are stored by the WS inbound path (alpaca_inbound.rs)
+    // with event_kind = "ack" via broker_event_kind(BrokerEvent::Ack).
+    // On DB error, treat as absent — other lanes are still surfaced.
+    let ack_rows = mqk_db::inbox_fetch_ack_rows_for_order(db, run_id, &order_id)
+        .await
+        .unwrap_or_default();
+
+    // Step 5: Build intent lane nodes from the outbox row (when present).
+    //
+    // outbox_enqueued: always present when the outbox row exists.
+    // outbox_sent: only when sent_at_utc is Some (order reached the broker adapter).
+    let outbox_enqueued_node: Option<OrderCausalityCausalNode> =
+        outbox_row.as_ref().map(|ob| OrderCausalityCausalNode {
+            node_key: format!("outbox_enqueued:{order_id}"),
+            node_type: "outbox_enqueued".to_string(),
+            title: "intent enqueued to outbox".to_string(),
+            status: "ok".to_string(),
+            subsystem: "execution".to_string(),
+            linked_id: Some(ob.outbox_id.to_string()),
+            timestamp: Some(ob.created_at_utc.to_rfc3339()),
+            elapsed_from_prev_ms: None,
+            anomaly_tags: vec![],
+            summary: format!("status={}", ob.status),
+            submit_ts_utc: None,
+            submit_to_fill_ms: None,
+        });
+
+    let outbox_sent_node: Option<OrderCausalityCausalNode> =
+        outbox_row.as_ref().and_then(|ob| {
+            let sent = ob.sent_at_utc?;
+            let enqueued_ms = ob.created_at_utc.timestamp_millis();
+            Some(OrderCausalityCausalNode {
+                node_key: format!("outbox_sent:{order_id}"),
+                node_type: "outbox_sent".to_string(),
+                title: "intent sent to broker".to_string(),
+                status: "ok".to_string(),
+                subsystem: "execution".to_string(),
+                linked_id: Some(ob.outbox_id.to_string()),
+                timestamp: Some(sent.to_rfc3339()),
+                elapsed_from_prev_ms: Some(sent.timestamp_millis() - enqueued_ms),
+                anomaly_tags: vec![],
+                summary: "order dispatched to broker adapter".to_string(),
+                submit_ts_utc: None,
+                submit_to_fill_ms: None,
+            })
+        });
+
+    // Step 6: Build execution causality nodes (broker_ack + fill lanes).
+    //
+    // Ordering: outbox_enqueued → outbox_sent → broker_ack → submit_event → execution_fills
+    //
+    // broker_ack nodes come from oms_inbox rows where event_kind = 'ack'.
+    // Each ACK row yields one node; linked_id carries the broker_message_id.
+    //
+    // If the first fill has submit_ts_utc, a synthetic "submit_event" node is
+    // prepended to the fill chain so the chain is anchored to the submit moment.
     let nodes: Vec<OrderCausalityCausalNode> = {
-        let mut prev_ts_ms: Option<i64> = None;
-        fill_rows
+        // Build broker_ack nodes (one per ACK inbox row, oldest-first).
+        let ack_nodes: Vec<OrderCausalityCausalNode> = ack_rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| OrderCausalityCausalNode {
+                node_key: format!("broker_ack_{}_{}", order_id, i),
+                node_type: "broker_ack".to_string(),
+                title: "broker ACK received".to_string(),
+                status: "ok".to_string(),
+                subsystem: "execution".to_string(),
+                linked_id: Some(r.broker_message_id.clone()),
+                timestamp: Some(r.received_at_utc.to_rfc3339()),
+                elapsed_from_prev_ms: None,
+                anomaly_tags: vec![],
+                summary: format!("inbox_id={}", r.inbox_id),
+                submit_ts_utc: None,
+                submit_to_fill_ms: None,
+            })
+            .collect();
+
+        // Determine whether a synthetic submit anchor should precede the fills.
+        let submit_anchor: Option<OrderCausalityCausalNode> =
+            fill_rows.first().and_then(|r| {
+                r.submit_ts_utc.map(|ts| OrderCausalityCausalNode {
+                    node_key: format!("submit:{order_id}"),
+                    node_type: "submit_event".to_string(),
+                    title: "order submitted".to_string(),
+                    status: "ok".to_string(),
+                    subsystem: "execution".to_string(),
+                    linked_id: None,
+                    timestamp: Some(ts.to_rfc3339()),
+                    elapsed_from_prev_ms: None,
+                    anomaly_tags: vec![],
+                    summary: String::new(),
+                    submit_ts_utc: None,
+                    submit_to_fill_ms: None,
+                })
+            });
+
+        let mut prev_ts_ms: Option<i64> = submit_anchor
+            .as_ref()
+            .and_then(|n| n.timestamp.as_deref())
+            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+            .map(|dt| dt.timestamp_millis());
+
+        let fill_nodes: Vec<OrderCausalityCausalNode> = fill_rows
             .iter()
             .map(|r| {
                 let ts_ms = r.fill_received_at_utc.timestamp_millis(); // allow: ops-metadata
@@ -904,22 +1014,83 @@ pub(crate) async fn execution_order_causality(
                         r.fill_price_micros as f64 / 1_000_000.0,
                         r.fill_kind,
                     ),
+                    submit_ts_utc: r.submit_ts_utc.map(|ts| ts.to_rfc3339()),
+                    submit_to_fill_ms: r.submit_to_fill_ms,
                 }
             })
-            .collect()
+            .collect();
+
+        let mut out =
+            Vec::with_capacity(fill_nodes.len() + ack_nodes.len() + 3);
+        if let Some(n) = outbox_enqueued_node {
+            out.push(n);
+        }
+        if let Some(n) = outbox_sent_node {
+            out.push(n);
+        }
+        out.extend(ack_nodes);
+        if let Some(anchor) = submit_anchor {
+            out.push(anchor);
+        }
+        out.extend(fill_nodes);
+        out
     };
 
-    // Step 6: Determine truth_state.
-    let (truth_state, backend, proven_lanes) = if !nodes.is_empty() {
-        (
-            "partial",
-            "postgres.fill_quality_telemetry",
-            vec!["execution_fill".to_string()],
-        )
+    // Step 7: Determine truth_state and proven/unproven lanes.
+    //
+    // "intent" is proven when the durable oms_outbox row is found.
+    // "broker_ack" is proven when oms_inbox ACK rows exist for this order.
+    // "execution_fill" is proven when fill_quality_telemetry rows exist.
+    let has_outbox = outbox_row.is_some();
+    let has_ack = !ack_rows.is_empty();
+    let has_fills = !fill_rows.is_empty();
+
+    let proven_lanes: Vec<String> = {
+        let mut lanes = Vec::new();
+        if has_outbox {
+            lanes.push("intent".to_string());
+        }
+        if has_ack {
+            lanes.push("broker_ack".to_string());
+        }
+        if has_fills {
+            lanes.push("execution_fill".to_string());
+        }
+        lanes
+    };
+
+    // Remove any lane from unproven that is now proven.
+    let unproven_lanes: Vec<String> = UNPROVEN_CAUSALITY_LANES
+        .iter()
+        .filter(|&&lane| !proven_lanes.iter().any(|p| p == lane))
+        .map(|s| s.to_string())
+        .collect();
+
+    let has_any = has_fills || has_outbox || has_ack;
+    let truth_state = if has_any {
+        "partial"
     } else if order_in_snapshot.is_some() {
-        ("no_fills_yet", "postgres.fill_quality_telemetry", vec![])
+        "no_fills_yet"
     } else {
-        ("no_order", "unavailable", vec![])
+        "no_order"
+    };
+
+    let backend: String = {
+        let mut parts: Vec<&str> = Vec::new();
+        if has_outbox {
+            parts.push("postgres.oms_outbox");
+        }
+        if has_ack {
+            parts.push("postgres.oms_inbox");
+        }
+        if has_fills {
+            parts.push("postgres.fill_quality_telemetry");
+        }
+        if parts.is_empty() {
+            "unavailable".to_string()
+        } else {
+            parts.join(",")
+        }
     };
 
     (
@@ -927,15 +1098,16 @@ pub(crate) async fn execution_order_causality(
         Json(OrderCausalityResponse {
             canonical_route,
             truth_state: truth_state.to_string(),
-            backend: backend.to_string(),
+            backend,
             order_id,
             symbol,
             proven_lanes,
             unproven_lanes,
             nodes,
-            comment: "Causality is partial: only fill events from fill_quality_telemetry \
-                are joinable by internal_order_id. Signal, intent, broker ACK, risk, \
-                portfolio, and reconcile lanes are not linked in the current schema."
+            comment: "Causality is partial: intent nodes from oms_outbox, broker ACK events \
+                from oms_inbox, and fill events from fill_quality_telemetry are proven when \
+                present. Signal, risk, portfolio, and reconcile lanes are not linked in the \
+                current schema."
                 .to_string(),
         }),
     )
