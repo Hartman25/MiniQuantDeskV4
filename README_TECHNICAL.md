@@ -7,6 +7,7 @@ This is the hands-on setup, proof, and operator guide for MiniQuantDeskV4.
 Use this file for:
 
 - local setup
+- env-file workflow
 - proof and verification commands
 - DB proof execution
 - daemon and GUI startup
@@ -76,6 +77,125 @@ This is a materially stronger operator posture than early scaffold state, but it
 Operationally, `MAIN` is the canonical engine.
 `EXP` is a research-side experimental sandbox and should not be treated as readiness truth unless explicitly promoted.
 
+## Local env-file workflow
+
+The repo ships `.env.local.example` as the canonical local starting point.
+It states that `.env.local` is loaded automatically by both `mqk-cli` and `mqk-daemon`.
+That is true **when the file is in the current working directory used to launch them**.
+
+### Practical rule
+
+- launch from the **repo root** if you want a repo-root `.env.local` to auto-load
+- if you launch from `core-rs/`, place a copy at `core-rs/.env.local` or export the needed env vars manually
+
+This matters because many older command examples start with `cd core-rs`, while the snapshot keeps `.env.local.example` at repo root.
+
+### Recommended local pattern
+
+1. Copy the template:
+
+```powershell
+Copy-Item .env.local.example .env.local
+```
+
+2. Fill in the values you actually use.
+
+3. For daemon and CLI runs that should auto-load repo-root `.env.local`, use repo-root launches such as:
+
+```powershell
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- --help
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-daemon
+```
+
+### What the local env file usually owns
+
+At minimum, local runtime work normally needs:
+
+- `MQK_DATABASE_URL`
+- `MQK_OPERATOR_TOKEN`
+- `MQK_DAEMON_DEPLOYMENT_MODE`
+- `MQK_DAEMON_ADAPTER_ID`
+- `ALPACA_API_KEY_PAPER`
+- `ALPACA_API_SECRET_PAPER`
+
+Optional but common entries include session-window overrides, Discord webhooks, and artifact/capital policy paths.
+
+## Proof DB vs runtime DB
+
+This repo now has a clearer local DB split than older docs suggested.
+Do not collapse these into one mental model.
+
+### Runtime/operator DB
+
+Use a **runtime DB** for actual daemon, GUI, and autonomous paper work.
+The template `.env.local.example` currently uses this runtime default:
+
+```text
+MQK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/mqk_dev
+```
+
+If you keep that default, a compatible local Postgres looks like this:
+
+```powershell
+docker run --name mqk-postgres-dev `
+  -e POSTGRES_USER=postgres `
+  -e POSTGRES_PASSWORD=postgres `
+  -e POSTGRES_DB=mqk_dev `
+  -p 5432:5432 `
+  -d postgres:16
+```
+
+You can use a different runtime DB layout.
+What matters is that your daemon and CLI point to the URL you actually configured.
+
+### Proof DB
+
+Use a **separate disposable proof DB** for proof work.
+The recommended isolated manual example binds to `55432` specifically to avoid collisions with a normal runtime DB on `5432`.
+
+```powershell
+docker run --name mqk-postgres-proof `
+  -e POSTGRES_USER=mqk `
+  -e POSTGRES_PASSWORD=mqk `
+  -e POSTGRES_DB=mqk_test `
+  -p 55432:5432 `
+  -d postgres:16
+```
+
+Sanity-check it:
+
+```powershell
+docker exec mqk-postgres-proof pg_isready -U mqk -d mqk_test
+docker exec mqk-postgres-proof psql -U mqk -d mqk_test -c "select current_user, current_database();"
+```
+
+### DB proof bootstrap default
+
+`scripts/db_proof_bootstrap.sh --start-postgres` has its own default local Docker path.
+It starts or reuses a Postgres 16 container on **5432** and defaults to:
+
+```text
+postgres://mqk:mqk@127.0.0.1:5432/mqk_test
+```
+
+That is fine for quick proof work, but it is a different path from the isolated manual `55432` example above.
+
+### Reality-test DB path
+
+The snapshot also includes a committed autonomous paper reality-test PowerShell script at repo root:
+
+- `autonomous_reality_test_paper.ps1.ps1`
+
+That script intentionally uses its **own isolated Docker default path**:
+
+- container: `mqk-reality-postgres`
+- host port: `5440`
+- DB user/password: `mqk` / `mqk`
+- DB name: `mqk_v4`
+
+That separation is deliberate.
+Treat reality-test DB state as a different lane from both everyday runtime ops and proof DB work.
+
 ## Prerequisites
 
 ### Core workspace
@@ -95,26 +215,6 @@ Operationally, `MAIN` is the canonical engine.
 
 ## Database and proof model
 
-### Recommended local proof DB
-
-Run a dedicated local proof container so repo testing does not collide with another local Postgres on port `5432`.
-
-```powershell
-docker run --name mqk-postgres-proof `
-  -e POSTGRES_USER=mqk `
-  -e POSTGRES_PASSWORD=mqk `
-  -e POSTGRES_DB=mqk_test `
-  -p 55432:5432 `
-  -d postgres:16
-```
-
-Sanity-check it:
-
-```powershell
-docker exec mqk-postgres-proof pg_isready -U mqk -d mqk_test
-docker exec mqk-postgres-proof psql -U mqk -d mqk_test -c "select current_user, current_database();"
-```
-
 ### Canonical local proof harness
 
 `full_repo_proof.ps1` at repo root is the authoritative local proof runner.
@@ -127,7 +227,7 @@ It runs the required lanes in sequence and writes a structured summary to `.proo
 # Low-memory Windows posture
 .\full_repo_proof.ps1 -ProofProfile local -LowMemory
 
-# Full DB-backed institutional proof
+# Full DB-backed institutional proof against the isolated manual proof DB
 $env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
 .\full_repo_proof.ps1 -ProofProfile full
 
@@ -148,6 +248,20 @@ Use that profile on Windows hosts where linker or codegen parallelism causes OOM
 ### Repo-native DB proof bootstrap
 
 `scripts/db_proof_bootstrap.sh` is the underlying DB proof harness invoked by `full_repo_proof.ps1` and by CI `db-proof`.
+
+From repo root on Windows:
+
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" -lc './scripts/db_proof_bootstrap.sh'
+```
+
+Or, to let the script start its own default `5432` proof DB container:
+
+```powershell
+& "C:\Program Files\Git\bin\bash.exe" -lc './scripts/db_proof_bootstrap.sh --start-postgres'
+```
+
+Or, to point it at the isolated manual proof DB on `55432`:
 
 ```powershell
 & "C:\Program Files\Git\bin\bash.exe" -lc 'export MQK_DATABASE_URL="postgres://mqk:mqk@127.0.0.1:55432/mqk_test"; export DATABASE_URL="$MQK_DATABASE_URL"; ./scripts/db_proof_bootstrap.sh 2>&1 | tee db-proof.log'
@@ -173,7 +287,8 @@ Also present in `scripts/`:
 - `reset-mqk-testdb.ps1` — reset the local proof DB
 - `psql-local.ps1` — interactive psql shortcut
 
-Deprecated wrappers such as `test-all.ps1`, `test-db.ps1`, and `ci_gate.ps1` should not be used for operator validation. The canonical local proof entrypoint is `full_repo_proof.ps1`.
+Deprecated wrappers such as `test-all.ps1`, `test-db.ps1`, and `ci_gate.ps1` should not be used for operator validation.
+The canonical local proof entrypoint is `full_repo_proof.ps1`.
 
 ## Core verification commands
 
@@ -288,10 +403,10 @@ Current truthful operator workflow:
 
 The CLI binary is `mqk`.
 
-From `core-rs/`:
+From repo root:
 
 ```powershell
-cargo run -p mqk-cli -- --help
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- --help
 ```
 
 ## CLI common operations
@@ -299,9 +414,9 @@ cargo run -p mqk-cli -- --help
 ### DB status and migrations
 
 ```powershell
-cargo run -p mqk-cli -- db status
-cargo run -p mqk-cli -- db migrate
-cargo run -p mqk-cli -- db migrate --yes
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- db status
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- db migrate
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- db migrate --yes
 ```
 
 Authoritative migration source:
@@ -313,19 +428,19 @@ Any tracked SQL file under another `/migrations/` path is rejected by migration 
 ### Config hash
 
 ```powershell
-cargo run -p mqk-cli -- config-hash config/defaults/base.yaml config/environments/windows-dev.yaml config/engines/main.yaml
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- config-hash config/defaults/base.yaml config/environments/windows-dev.yaml config/engines/main.yaml
 ```
 
 ### Market data — CSV ingest
 
 ```powershell
-cargo run -p mqk-cli -- md ingest-csv --path "<PATH_TO_CSV>" --timeframe "1D" --source "csv"
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- md ingest-csv --path "<PATH_TO_CSV>" --timeframe "1D" --source "csv"
 ```
 
 ### Market data — provider ingest
 
 ```powershell
-cargo run -p mqk-cli -- md ingest-provider `
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- md ingest-provider `
   --source "twelvedata" `
   --symbols "SPY,QQQ" `
   --timeframe "1D" `
@@ -338,7 +453,7 @@ cargo run -p mqk-cli -- md ingest-provider `
 First run, when no bars exist yet:
 
 ```powershell
-cargo run -p mqk-cli -- md sync-provider `
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- md sync-provider `
   --source "twelvedata" `
   --symbols "SPY,QQQ" `
   --timeframe "1D" `
@@ -348,7 +463,7 @@ cargo run -p mqk-cli -- md sync-provider `
 Subsequent incremental runs:
 
 ```powershell
-cargo run -p mqk-cli -- md sync-provider `
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- md sync-provider `
   --source "twelvedata" `
   --symbols "SPY,QQQ" `
   --timeframe "1D"
@@ -357,7 +472,7 @@ cargo run -p mqk-cli -- md sync-provider `
 Override end date or overlap:
 
 ```powershell
-cargo run -p mqk-cli -- md sync-provider `
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- md sync-provider `
   --source "twelvedata" `
   --symbols "SPY" `
   --timeframe "1D" `
@@ -378,7 +493,7 @@ Notes:
 ### Backtest from CSV
 
 ```powershell
-cargo run -p mqk-cli -- backtest csv `
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- backtest csv `
   --bars "<PATH_TO_BARS_CSV>" `
   --timeframe-secs 60 `
   --initial-cash-micros 100000000000 `
@@ -390,7 +505,7 @@ cargo run -p mqk-cli -- backtest csv `
 Optional artifact output:
 
 ```powershell
-cargo run -p mqk-cli -- backtest csv `
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- backtest csv `
   --bars "<PATH_TO_BARS_CSV>" `
   --out-dir "runs/backtests"
 ```
@@ -398,7 +513,7 @@ cargo run -p mqk-cli -- backtest csv `
 ### Backtest from Postgres `md_bars`
 
 ```powershell
-cargo run -p mqk-cli -- backtest db `
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- backtest db `
   --timeframe "1D" `
   --start-end-ts 946684800 `
   --end-end-ts 1704067200 `
@@ -417,7 +532,7 @@ Typical flow:
 ### Create a run
 
 ```powershell
-cargo run -p mqk-cli -- run start `
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- run start `
   --engine "MAIN" `
   --mode "PAPER" `
   --config "config/defaults/base.yaml" `
@@ -428,63 +543,78 @@ cargo run -p mqk-cli -- run start `
 ### Arm
 
 ```powershell
-cargo run -p mqk-cli -- run arm --run-id "<RUN_ID>"
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- run arm --run-id "<RUN_ID>"
 ```
 
 ### Begin
 
 ```powershell
-cargo run -p mqk-cli -- run begin --run-id "<RUN_ID>"
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- run begin --run-id "<RUN_ID>"
 ```
 
 ### Heartbeat
 
 ```powershell
-cargo run -p mqk-cli -- run heartbeat --run-id "<RUN_ID>"
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- run heartbeat --run-id "<RUN_ID>"
 ```
 
 ### Stop
 
 ```powershell
-cargo run -p mqk-cli -- run stop --run-id "<RUN_ID>"
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- run stop --run-id "<RUN_ID>"
 ```
 
 ### Halt
 
 ```powershell
-cargo run -p mqk-cli -- run halt --run-id "<RUN_ID>" --reason "manual halt"
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- run halt --run-id "<RUN_ID>" --reason "manual halt"
 ```
 
 ### Status
 
 ```powershell
-cargo run -p mqk-cli -- run status --run-id "<RUN_ID>"
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- run status --run-id "<RUN_ID>"
 ```
 
 ### Deadman check
 
 ```powershell
-cargo run -p mqk-cli -- run deadman-check --run-id "<RUN_ID>" --ttl-seconds 60
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- run deadman-check --run-id "<RUN_ID>" --ttl-seconds 60
 ```
 
 ### Deadman enforce
 
 ```powershell
-cargo run -p mqk-cli -- run deadman-enforce --run-id "<RUN_ID>" --ttl-seconds 60
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- run deadman-enforce --run-id "<RUN_ID>" --ttl-seconds 60
 ```
 
 Other helpers exist:
 
 ```powershell
-cargo run -p mqk-cli -- run --help
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- run --help
 ```
 
 ## Daemon
 
-Run from `core-rs/`:
+### Preferred local daemon launch
+
+From repo root, with repo-root `.env.local` already configured:
 
 ```powershell
-$env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-daemon
+```
+
+Default local URL:
+
+- `http://127.0.0.1:8899`
+
+### Manual override example
+
+If you prefer to launch from `core-rs/` instead, export env vars manually or keep a `core-rs/.env.local` copy.
+
+```powershell
+cd core-rs
+$env:MQK_DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5432/mqk_dev"
 $env:MQK_OPERATOR_TOKEN = "dev-local-operator-token"
 $env:MQK_DAEMON_DEPLOYMENT_MODE = "paper"
 $env:MQK_DAEMON_ADAPTER_ID = "alpaca"
@@ -492,10 +622,6 @@ $env:ALPACA_API_KEY_PAPER = "<your-paper-key>"
 $env:ALPACA_API_SECRET_PAPER = "<your-paper-secret>"
 cargo run -p mqk-daemon
 ```
-
-Default local URL:
-
-- `http://127.0.0.1:8899`
 
 Optional session override variables:
 
@@ -554,6 +680,7 @@ Intent of that path:
 - desktop launcher verifies canonical local daemon identity before GUI open
 - observe/attach and trade-ready launcher modes both exist
 - desktop privileged actions are canonical-only, not legacy-fallback
+- the launcher imports local env hints from repo-root and `core-rs` env files when present
 
 Treat it as an operator convenience path that still requires local Windows validation on your machine.
 The browser GUI + daemon path remains the primary documented workflow.
@@ -562,15 +689,11 @@ The browser GUI + daemon path remains the primary documented workflow.
 
 ### Shell 1 — daemon
 
+From repo root:
+
 ```powershell
-cd C:\Users\<YOU>\Desktop\MiniQuantDeskV4\core-rs
-$env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
-$env:MQK_OPERATOR_TOKEN = "dev-local-operator-token"
-$env:MQK_DAEMON_DEPLOYMENT_MODE = "paper"
-$env:MQK_DAEMON_ADAPTER_ID = "alpaca"
-$env:ALPACA_API_KEY_PAPER = "<your-paper-key>"
-$env:ALPACA_API_SECRET_PAPER = "<your-paper-secret>"
-cargo run -p mqk-daemon
+cd C:\Users\<YOU>\Desktop\MiniQuantDeskV4
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-daemon
 ```
 
 ### Shell 2 — GUI
@@ -582,6 +705,25 @@ npm run dev
 ```
 
 If you use `Start-Process`, keep the DB URL assignment quoted correctly inside the spawned command.
+
+## Autonomous paper reality test
+
+The repo includes a committed PowerShell reality-test harness at repo root:
+
+- `autonomous_reality_test_paper.ps1.ps1`
+
+Its job is different from normal proof or normal operator startup.
+It unpacks a snapshot, provisions its own Docker Postgres container, launches the daemon, checks readiness, optionally injects a crash, and validates recovery behavior.
+
+Default reality-test DB settings in the committed script:
+
+- container: `mqk-reality-postgres`
+- host port: `5440`
+- DB name: `mqk_v4`
+
+The script also looks for `.env.local` under both repo root and `core-rs/`.
+
+Treat this as a dedicated reality-test lane, not your everyday operator startup path.
 
 ## Python research layer (optional)
 
@@ -609,6 +751,7 @@ Current GitHub Actions coverage includes:
   - unsafe-pattern checks
   - migration-governance checks
   - ignored-proof hygiene checks
+  - workspace dependency inheritance guard
 
 - **Rust lane** (`ubuntu-latest`, with Postgres service)
   - `cargo fmt --check`
@@ -661,5 +804,3 @@ Useful repo docs:
 - `docs/runbooks/`
 - `docs/INSTITUTIONAL_READINESS_LOCK.md`
 - `docs/INSTITUTIONAL_SCORECARD.md`
-- `MiniQuantDesk_V4_90plus_Patch_Tracker.md`
-- `MiniQuantDeskV4_Foundation_Patch_Tracker.md`

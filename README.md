@@ -43,7 +43,7 @@ Safety is enforced architecturally, not socially.
 
 MiniQuantDeskV4 has real institutional bones and a materially stronger proof posture than scaffold-stage trading repos.
 
-The strongest current operational path is:
+The strongest current operational route is:
 
 - **deployment mode:** `paper`
 - **adapter:** `alpaca`
@@ -60,7 +60,7 @@ What that means in plain English:
 ## Architecture
 
 <p align="center">
-  <img src="assets\diagrams\architectureV2.png" alt="MiniQuantDeskV4 architecture" width="960" />
+  <img src="assets/diagrams/architecture.svg" alt="MiniQuantDeskV4 architecture" width="960" />
 </p>
 
 ### High-level flow
@@ -150,7 +150,7 @@ Operationally, `MAIN` is the canonical engine.
 - authoritative local proof runner: `full_repo_proof.ps1`
 - repo-native DB proof harness and mandatory DB matrix
 - scenario-driven reliability validation across runtime, execution, DB, broker, and daemon surfaces
-- guard rails for unsafe patterns, ignored-proof hygiene, migration governance, and GUI/daemon contract drift
+- guard rails for unsafe patterns, ignored-proof hygiene, migration governance, workspace dependency inheritance, and GUI/daemon contract drift
 
 ### Market data
 
@@ -206,16 +206,39 @@ Be honest about the open edges.
 - some deeper GUI detail surfaces are intentionally deferred or unmounted rather than faked
 - desktop bootstrap exists, but the primary documented operator path remains daemon + browser GUI
 
-## Current daemon posture
+## Local setup model
 
-- default bind is loopback-only: `127.0.0.1:8899`
-- non-loopback bind requires explicit opt-in
-- privileged routes fail closed until `MQK_OPERATOR_TOKEN` is configured
-- `paper + alpaca` is the strongest operational path today
-- `paper + paper` is refused as a start-authoritative daemon combination
-- `backtest` deployment through the daemon is intentionally refused fail-closed
-- `live-shadow` and `live-capital` remain partially trusted modes with additional gates and incomplete operational proof
-- mode transitions are restart-based, not magical hot swaps
+The repo now has a more explicit local Docker/DB split than older docs suggested.
+
+### Runtime/operator DB
+
+For real local daemon, GUI, and autonomous paper work, use a **runtime DB** that matches your local env configuration.
+
+The repo ships `.env.local.example` as the starting point for this workflow.
+It defines a default runtime URL of:
+
+```text
+MQK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/mqk_dev
+```
+
+Many local workflows keep separate runtime, proof, and reality-test DBs.
+That separation is healthy.
+
+### Proof DB
+
+For proof work, use a **disposable proof DB** instead of reusing your runtime DB.
+The isolated example below binds Postgres to `55432` specifically to avoid collisions with a normal local runtime DB on `5432`.
+
+### Env-file workflow
+
+`mqk-cli` and `mqk-daemon` will auto-load `.env.local` from the **current working directory**.
+
+Practical implication:
+
+- if you launch from the repo root, a repo-root `.env.local` is picked up automatically
+- if you launch from `core-rs/`, place a copy at `core-rs/.env.local` or export the env vars in your shell
+
+The Windows desktop launcher and the autonomous reality-test script already look for both repo-root and `core-rs` env files.
 
 ## Verification model
 
@@ -235,7 +258,7 @@ This repo does not rely on a single `cargo test` story.
 - **runtime lane** — lifecycle continuity and runtime proof surfaces
 - **DB proof lane** — migrations, lifecycle constraints, outbox/inbox durability, restart quarantine, deadman, and broker-map enforcement
 - **GUI contract lane** — GUI truth tests, GUI build, and daemon/GUI contract drift checks
-- **guard lanes** — unsafe patterns, ignored-proof hygiene, migration governance, and related repo protections
+- **guard lanes** — unsafe patterns, ignored-proof hygiene, migration governance, and workspace dependency inheritance
 - **Windows low-memory parity** — proof posture for the actual operator OS class
 
 That DB-backed lane remains the load-bearing proof surface for the most important durability claims.
@@ -249,14 +272,37 @@ git clone <your-repo-url>
 cd MiniQuantDeskV4
 ```
 
-### 2. Requirements
+### 2. Create your local env file
 
-- Rust stable toolchain
-- Docker
-- Node.js + npm
-- Git Bash on Windows if you want to run the shell proof harness directly
+```powershell
+Copy-Item .env.local.example .env.local
+```
 
-### 3. Start a local proof database
+Fill in the values you actually use for local runtime work.
+At minimum, that usually means:
+
+- `MQK_DATABASE_URL`
+- `MQK_OPERATOR_TOKEN`
+- `MQK_DAEMON_DEPLOYMENT_MODE`
+- `MQK_DAEMON_ADAPTER_ID`
+- `ALPACA_API_KEY_PAPER`
+- `ALPACA_API_SECRET_PAPER`
+
+### 3. Start a local runtime DB
+
+Match this to your `.env.local`.
+If you keep the example runtime DB URL from `.env.local.example`, a compatible local Postgres looks like this:
+
+```powershell
+docker run --name mqk-postgres-dev `
+  -e POSTGRES_USER=postgres `
+  -e POSTGRES_PASSWORD=postgres `
+  -e POSTGRES_DB=mqk_dev `
+  -p 5432:5432 `
+  -d postgres:16
+```
+
+### 4. Start a separate local proof DB
 
 ```powershell
 docker run --name mqk-postgres-proof `
@@ -267,31 +313,26 @@ docker run --name mqk-postgres-proof `
   -d postgres:16
 ```
 
-### 4. Run the canonical proof path
+### 5. Run the canonical proof path
 
 ```powershell
 # Non-DB proof
 .\full_repo_proof.ps1 -ProofProfile local
 
-# Full DB-backed proof
+# Full DB-backed proof against the isolated proof DB
 $env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
 .\full_repo_proof.ps1 -ProofProfile full
 ```
 
-### 5. Run the daemon
+### 6. Run the daemon from repo root
+
+Running from repo root lets `mqk-daemon` auto-load repo-root `.env.local`.
 
 ```powershell
-cd core-rs
-$env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
-$env:MQK_OPERATOR_TOKEN = "dev-local-operator-token"
-$env:MQK_DAEMON_DEPLOYMENT_MODE = "paper"
-$env:MQK_DAEMON_ADAPTER_ID = "alpaca"
-$env:ALPACA_API_KEY_PAPER = "<your-paper-key>"
-$env:ALPACA_API_SECRET_PAPER = "<your-paper-secret>"
-cargo run -p mqk-daemon
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-daemon
 ```
 
-### 6. Run the GUI
+### 7. Run the GUI
 
 ```powershell
 cd core-rs\mqk-gui
