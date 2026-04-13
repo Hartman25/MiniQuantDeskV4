@@ -6,8 +6,8 @@
 //! in `state.rs`; they are accessible here because Rust allows child modules to
 //! read items that are private to a parent module.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use chrono::Utc;
 
@@ -22,6 +22,7 @@ use crate::capital_policy::{
 use crate::parity_evidence::{evaluate_parity_evidence_from_env, ParityEvidenceOutcome};
 
 use super::loop_runner::spawn_execution_loop;
+use super::types::ExecutionLoopCommand;
 use super::{
     reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,
     spawn_reconcile_tick, uptime_secs,
@@ -30,7 +31,6 @@ use super::{
     AcceptedArtifactProvenance, BrokerKind, DeploymentMode, OperatorAuthMode,
     RuntimeLifecycleError, StatusSnapshot,
 };
-use super::types::ExecutionLoopCommand;
 use super::{AppState, DAEMON_ENGINE_ID, RECONCILE_TICK_INTERVAL};
 
 use mqk_runtime::native_strategy::{build_daemon_plugin_registry, NativeStrategyBootstrap};

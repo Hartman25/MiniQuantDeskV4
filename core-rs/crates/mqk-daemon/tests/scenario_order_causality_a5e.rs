@@ -526,11 +526,7 @@ fn ca14_broker_ack_node_serializes_with_correct_fields() {
         Some("execution"),
         "subsystem must be execution"
     );
-    assert_eq!(
-        v["status"].as_str(),
-        Some("ok"),
-        "status must be ok"
-    );
+    assert_eq!(v["status"].as_str(), Some("ok"), "status must be ok");
     assert!(
         v["linked_id"].as_str().is_some(),
         "linked_id must carry the broker_message_id"
@@ -550,10 +546,7 @@ fn ca14_broker_ack_node_serializes_with_correct_fields() {
     );
     // node_key must be deterministic and include the order_id.
     assert!(
-        v["node_key"]
-            .as_str()
-            .unwrap_or("")
-            .contains("order-xyz"),
+        v["node_key"].as_str().unwrap_or("").contains("order-xyz"),
         "broker_ack node_key must include the order_id"
     );
 }

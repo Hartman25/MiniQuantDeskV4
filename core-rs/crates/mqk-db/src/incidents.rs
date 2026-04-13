@@ -85,10 +85,7 @@ pub async fn insert_incident(
 /// Returns `None` when no row with the given `incident_id` exists (→ 404).
 /// Idempotent: if the incident is already `"resolved"` the UPDATE still
 /// succeeds and the updated row is returned unchanged.
-pub async fn resolve_incident(
-    db: &PgPool,
-    incident_id: &str,
-) -> Result<Option<IncidentDbRow>> {
+pub async fn resolve_incident(db: &PgPool, incident_id: &str) -> Result<Option<IncidentDbRow>> {
     let row = sqlx::query(
         r#"
         UPDATE sys_incidents

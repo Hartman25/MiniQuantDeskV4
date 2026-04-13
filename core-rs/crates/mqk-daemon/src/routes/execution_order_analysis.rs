@@ -917,25 +917,24 @@ pub(crate) async fn execution_order_causality(
             submit_to_fill_ms: None,
         });
 
-    let outbox_sent_node: Option<OrderCausalityCausalNode> =
-        outbox_row.as_ref().and_then(|ob| {
-            let sent = ob.sent_at_utc?;
-            let enqueued_ms = ob.created_at_utc.timestamp_millis();
-            Some(OrderCausalityCausalNode {
-                node_key: format!("outbox_sent:{order_id}"),
-                node_type: "outbox_sent".to_string(),
-                title: "intent sent to broker".to_string(),
-                status: "ok".to_string(),
-                subsystem: "execution".to_string(),
-                linked_id: Some(ob.outbox_id.to_string()),
-                timestamp: Some(sent.to_rfc3339()),
-                elapsed_from_prev_ms: Some(sent.timestamp_millis() - enqueued_ms),
-                anomaly_tags: vec![],
-                summary: "order dispatched to broker adapter".to_string(),
-                submit_ts_utc: None,
-                submit_to_fill_ms: None,
-            })
-        });
+    let outbox_sent_node: Option<OrderCausalityCausalNode> = outbox_row.as_ref().and_then(|ob| {
+        let sent = ob.sent_at_utc?;
+        let enqueued_ms = ob.created_at_utc.timestamp_millis();
+        Some(OrderCausalityCausalNode {
+            node_key: format!("outbox_sent:{order_id}"),
+            node_type: "outbox_sent".to_string(),
+            title: "intent sent to broker".to_string(),
+            status: "ok".to_string(),
+            subsystem: "execution".to_string(),
+            linked_id: Some(ob.outbox_id.to_string()),
+            timestamp: Some(sent.to_rfc3339()),
+            elapsed_from_prev_ms: Some(sent.timestamp_millis() - enqueued_ms),
+            anomaly_tags: vec![],
+            summary: "order dispatched to broker adapter".to_string(),
+            submit_ts_utc: None,
+            submit_to_fill_ms: None,
+        })
+    });
 
     // Step 6: Build execution causality nodes (broker_ack + fill lanes).
     //
@@ -968,23 +967,22 @@ pub(crate) async fn execution_order_causality(
             .collect();
 
         // Determine whether a synthetic submit anchor should precede the fills.
-        let submit_anchor: Option<OrderCausalityCausalNode> =
-            fill_rows.first().and_then(|r| {
-                r.submit_ts_utc.map(|ts| OrderCausalityCausalNode {
-                    node_key: format!("submit:{order_id}"),
-                    node_type: "submit_event".to_string(),
-                    title: "order submitted".to_string(),
-                    status: "ok".to_string(),
-                    subsystem: "execution".to_string(),
-                    linked_id: None,
-                    timestamp: Some(ts.to_rfc3339()),
-                    elapsed_from_prev_ms: None,
-                    anomaly_tags: vec![],
-                    summary: String::new(),
-                    submit_ts_utc: None,
-                    submit_to_fill_ms: None,
-                })
-            });
+        let submit_anchor: Option<OrderCausalityCausalNode> = fill_rows.first().and_then(|r| {
+            r.submit_ts_utc.map(|ts| OrderCausalityCausalNode {
+                node_key: format!("submit:{order_id}"),
+                node_type: "submit_event".to_string(),
+                title: "order submitted".to_string(),
+                status: "ok".to_string(),
+                subsystem: "execution".to_string(),
+                linked_id: None,
+                timestamp: Some(ts.to_rfc3339()),
+                elapsed_from_prev_ms: None,
+                anomaly_tags: vec![],
+                summary: String::new(),
+                submit_ts_utc: None,
+                submit_to_fill_ms: None,
+            })
+        });
 
         let mut prev_ts_ms: Option<i64> = submit_anchor
             .as_ref()
@@ -1020,8 +1018,7 @@ pub(crate) async fn execution_order_causality(
             })
             .collect();
 
-        let mut out =
-            Vec::with_capacity(fill_nodes.len() + ack_nodes.len() + 3);
+        let mut out = Vec::with_capacity(fill_nodes.len() + ack_nodes.len() + 3);
         if let Some(n) = outbox_enqueued_node {
             out.push(n);
         }

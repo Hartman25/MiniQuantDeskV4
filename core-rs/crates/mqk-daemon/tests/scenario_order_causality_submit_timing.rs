@@ -200,7 +200,8 @@ async fn ca09_db_submit_timing_surfaced_through_route() {
     .await;
 
     assert_eq!(
-        status, 200,
+        status,
+        200,
         "CA-09: route must return 200; body: {}",
         String::from_utf8_lossy(&body_bytes)
     );
@@ -212,7 +213,9 @@ async fn ca09_db_submit_timing_surfaced_through_route() {
         "CA-09: truth_state must be partial when fills exist"
     );
 
-    let nodes = body["nodes"].as_array().expect("CA-09: nodes must be array");
+    let nodes = body["nodes"]
+        .as_array()
+        .expect("CA-09: nodes must be array");
     assert_eq!(
         nodes.len(),
         2,
@@ -311,9 +314,9 @@ async fn ca10_db_null_submit_ts_produces_no_submit_event_node() {
             fill_price_micros: 200_000_000,
             reference_price_micros: None,
             slippage_bps: None,
-            submit_ts_utc: None,      // null — no submit anchor
+            submit_ts_utc: None, // null — no submit anchor
             fill_received_at_utc: fill_received_at,
-            submit_to_fill_ms: None,  // null — no fabricated timing
+            submit_to_fill_ms: None, // null — no fabricated timing
             fill_kind: "final_fill".to_string(),
             provenance_ref: format!("oms_inbox:{msg_id}"),
             created_at_utc: Utc::now(),
@@ -343,14 +346,17 @@ async fn ca10_db_null_submit_ts_produces_no_submit_event_node() {
     .await;
 
     assert_eq!(
-        status, 200,
+        status,
+        200,
         "CA-10: route must return 200; body: {}",
         String::from_utf8_lossy(&body_bytes)
     );
 
     let body: Value = serde_json::from_slice(&body_bytes).unwrap();
 
-    let nodes = body["nodes"].as_array().expect("CA-10: nodes must be array");
+    let nodes = body["nodes"]
+        .as_array()
+        .expect("CA-10: nodes must be array");
 
     // No submit_event node when submit_ts_utc is null.
     let submit_nodes: Vec<&Value> = nodes
@@ -368,7 +374,11 @@ async fn ca10_db_null_submit_ts_produces_no_submit_event_node() {
         .iter()
         .filter(|n| n["node_type"].as_str() == Some("execution_fill"))
         .collect();
-    assert_eq!(fill_nodes.len(), 1, "CA-10: exactly one execution_fill node");
+    assert_eq!(
+        fill_nodes.len(),
+        1,
+        "CA-10: exactly one execution_fill node"
+    );
 
     // Fill node timing fields are null — nothing fabricated.
     assert!(
@@ -509,14 +519,17 @@ async fn ca11_db_submit_node_is_first_and_elapsed_matches_submit_to_fill_ms() {
     .await;
 
     assert_eq!(
-        status, 200,
+        status,
+        200,
         "CA-11: route must return 200; body: {}",
         String::from_utf8_lossy(&body_bytes)
     );
 
     let body: Value = serde_json::from_slice(&body_bytes).unwrap();
 
-    let nodes = body["nodes"].as_array().expect("CA-11: nodes must be array");
+    let nodes = body["nodes"]
+        .as_array()
+        .expect("CA-11: nodes must be array");
     assert_eq!(
         nodes.len(),
         3,
@@ -577,8 +590,7 @@ async fn ca11_db_submit_node_is_first_and_elapsed_matches_submit_to_fill_ms() {
         .expect("CA-11: nodes[1].elapsed_from_prev_ms must be i64 (not null)");
 
     assert_eq!(
-        elapsed_fill1,
-        submit_to_fill_ms_1,
+        elapsed_fill1, submit_to_fill_ms_1,
         "CA-11: nodes[1].elapsed_from_prev_ms ({elapsed_fill1}) must equal \
          submit_to_fill_ms_1 ({submit_to_fill_ms_1}) — both measure \
          the submit_ts → first_fill interval"
@@ -668,7 +680,8 @@ async fn ca12_db_intent_lane_proven_when_outbox_row_present() {
     .await;
 
     assert_eq!(
-        status, 200,
+        status,
+        200,
         "CA-12: route must return 200; body: {}",
         String::from_utf8_lossy(&body_bytes)
     );
@@ -702,7 +715,9 @@ async fn ca12_db_intent_lane_proven_when_outbox_row_present() {
     );
 
     // outbox_enqueued node must be present.
-    let nodes = body["nodes"].as_array().expect("CA-12: nodes must be array");
+    let nodes = body["nodes"]
+        .as_array()
+        .expect("CA-12: nodes must be array");
     let enqueued_nodes: Vec<&Value> = nodes
         .iter()
         .filter(|n| n["node_type"].as_str() == Some("outbox_enqueued"))
@@ -762,8 +777,7 @@ async fn ca13_db_outbox_sent_node_present_when_sent_at_set() {
         chrono::DateTime::parse_from_rfc3339("2026-01-15T14:00:00.250Z")
             .unwrap()
             .with_timezone(&Utc);
-    let expected_elapsed_ms =
-        sent_at.timestamp_millis() - enqueued_at.timestamp_millis(); // 250
+    let expected_elapsed_ms = sent_at.timestamp_millis() - enqueued_at.timestamp_millis(); // 250
 
     // Insert outbox row with sent_at_utc set.
     sqlx::query(
@@ -804,14 +818,17 @@ async fn ca13_db_outbox_sent_node_present_when_sent_at_set() {
     .await;
 
     assert_eq!(
-        status, 200,
+        status,
+        200,
         "CA-13: route must return 200; body: {}",
         String::from_utf8_lossy(&body_bytes)
     );
 
     let body: Value = serde_json::from_slice(&body_bytes).unwrap();
 
-    let nodes = body["nodes"].as_array().expect("CA-13: nodes must be array");
+    let nodes = body["nodes"]
+        .as_array()
+        .expect("CA-13: nodes must be array");
 
     // First two nodes must be outbox intent nodes in order.
     assert!(
@@ -936,7 +953,8 @@ async fn ca15_db_broker_ack_lane_proven_when_inbox_ack_row_present() {
     .await;
 
     assert_eq!(
-        status, 200,
+        status,
+        200,
         "CA-15: route must return 200; body: {}",
         String::from_utf8_lossy(&body_bytes)
     );
@@ -979,7 +997,9 @@ async fn ca15_db_broker_ack_lane_proven_when_inbox_ack_row_present() {
     );
 
     // Exactly one broker_ack node.
-    let nodes = body["nodes"].as_array().expect("CA-15: nodes must be array");
+    let nodes = body["nodes"]
+        .as_array()
+        .expect("CA-15: nodes must be array");
     let ack_nodes: Vec<&Value> = nodes
         .iter()
         .filter(|n| n["node_type"].as_str() == Some("broker_ack"))

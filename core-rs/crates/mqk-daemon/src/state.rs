@@ -1347,7 +1347,6 @@ impl AppState {
         Ok(snapshot)
     }
 
-
     async fn integrity_armed(&self) -> bool {
         !self.integrity.read().await.is_execution_blocked()
     }

@@ -535,13 +535,17 @@ async fn ops01_r3_resolve_incident_and_idempotent() {
 
     // GET list must show the incident as resolved.
     let (list_status, list_json) = get(router, "/api/v1/incidents").await;
-    assert_eq!(list_status, StatusCode::OK, "OPS01-R3: list must return 200");
+    assert_eq!(
+        list_status,
+        StatusCode::OK,
+        "OPS01-R3: list must return 200"
+    );
     let rows = list_json["rows"]
         .as_array()
         .expect("OPS01-R3: rows must be array");
-    let found = rows.iter().find(|r| {
-        r.get("incident_id").and_then(|v| v.as_str()) == Some(&incident_id)
-    });
+    let found = rows
+        .iter()
+        .find(|r| r.get("incident_id").and_then(|v| v.as_str()) == Some(&incident_id));
     assert!(found.is_some(), "OPS01-R3: incident must appear in list");
     assert_eq!(
         found.unwrap()["status"].as_str(),
@@ -571,8 +575,7 @@ async fn ops01_b1_triage_linked_incident_status_null_when_no_db() {
         .expect("OPS01-B1: rows must be array");
     for row in rows {
         assert!(
-            row.get("linked_incident_status").is_none()
-                || row["linked_incident_status"].is_null(),
+            row.get("linked_incident_status").is_none() || row["linked_incident_status"].is_null(),
             "OPS01-B1: linked_incident_status must be null without DB: {row}"
         );
     }
@@ -657,8 +660,7 @@ async fn ops01_b2_db_triage_linked_incident_status_resolved_after_resolve() {
     let pre_row = rows
         .iter()
         .find(|r| {
-            r.get("alert_id").and_then(|v| v.as_str())
-                == Some("reconcile.dispatch_block.dirty")
+            r.get("alert_id").and_then(|v| v.as_str()) == Some("reconcile.dispatch_block.dirty")
         })
         .expect("OPS01-B2: reconcile row must be present before resolve");
     assert_eq!(
@@ -697,14 +699,11 @@ async fn ops01_b2_db_triage_linked_incident_status_resolved_after_resolve() {
     let post_row = rows2
         .iter()
         .find(|r| {
-            r.get("alert_id").and_then(|v| v.as_str())
-                == Some("reconcile.dispatch_block.dirty")
+            r.get("alert_id").and_then(|v| v.as_str()) == Some("reconcile.dispatch_block.dirty")
         })
         .expect("OPS01-B2: reconcile row must be present after resolve");
     assert_eq!(
-        post_row
-            .get("linked_incident_id")
-            .and_then(|v| v.as_str()),
+        post_row.get("linked_incident_id").and_then(|v| v.as_str()),
         Some(incident_id.as_str()),
         "OPS01-B2: linked_incident_id must remain populated after resolve"
     );

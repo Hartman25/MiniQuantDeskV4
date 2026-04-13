@@ -749,7 +749,9 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
             std::collections::HashMap::new();
         for inc in incidents {
             if let Some(alert_id) = inc.linked_alert_id {
-                inc_map.entry(alert_id).or_insert((inc.incident_id, inc.status));
+                inc_map
+                    .entry(alert_id)
+                    .or_insert((inc.incident_id, inc.status));
             }
         }
 
