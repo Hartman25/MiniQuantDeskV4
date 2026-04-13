@@ -13,6 +13,13 @@
 //! - OPS01-I6 (#[ignore], DB-backed): POST create incident + GET list shows row.
 //! - OPS01-I7 (#[ignore], DB-backed): POST create incident with linked_alert_id;
 //!   GET /api/v1/alerts/triage shows linked_incident_id populated on matching row.
+//!
+//! ALERTS-OPS-01A — Incident resolve lifecycle:
+//!
+//! - OPS01-R1: POST /api/v1/incidents/:id/resolve without DB → 503, gate="db_pool".
+//! - OPS01-R2 (#[ignore], DB-backed): POST resolve with unknown ID → 404.
+//! - OPS01-R3 (#[ignore], DB-backed): POST create → resolve → status="resolved";
+//!   second resolve is idempotent (200, status still "resolved").
 
 use std::sync::Arc;
 
@@ -378,4 +385,173 @@ async fn ops01_i7_db_linked_incident_id_surfaces_in_triage() {
         .execute(&pool)
         .await
         .expect("OPS01-I7: post-test cleanup");
+}
+
+// ---------------------------------------------------------------------------
+// OPS01-R1: resolve without DB → 503 db_pool gate (ALERTS-OPS-01A)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ops01_r1_resolve_incident_no_db_returns_503() {
+    let (status, json) = post_json(
+        make_router(),
+        "/api/v1/incidents/00000000-0000-0000-0000-000000000001/resolve",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "OPS01-R1: expected 503: {json}"
+    );
+    assert_eq!(
+        json.get("gate").and_then(|v| v.as_str()),
+        Some("db_pool"),
+        "OPS01-R1: gate must be db_pool: {json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// OPS01-R2: resolve unknown ID → 404 (DB-backed)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn ops01_r2_resolve_unknown_incident_returns_404() {
+    let db_url = match std::env::var("MQK_DATABASE_URL") {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    let pool = sqlx::PgPool::connect(&db_url)
+        .await
+        .expect("OPS01-R2: pool connect");
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(st);
+
+    // A UUID that is guaranteed not to exist in this DB.
+    let (status, json) = post_json(
+        router,
+        "/api/v1/incidents/00000000-dead-beef-0000-000000000000/resolve",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "OPS01-R2: expected 404 for unknown incident: {json}"
+    );
+    assert_eq!(
+        json.get("fault_class").and_then(|v| v.as_str()),
+        Some("incidents.resolve.not_found"),
+        "OPS01-R2: fault_class must be incidents.resolve.not_found: {json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// OPS01-R3: create → resolve → idempotent second resolve (DB-backed)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn ops01_r3_resolve_incident_and_idempotent() {
+    let db_url = match std::env::var("MQK_DATABASE_URL") {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    let pool = sqlx::PgPool::connect(&db_url)
+        .await
+        .expect("OPS01-R3: pool connect");
+
+    sqlx::query("DELETE FROM sys_incidents WHERE title = 'OPS01-R3 resolve test'")
+        .execute(&pool)
+        .await
+        .expect("OPS01-R3: pre-test cleanup");
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(st);
+
+    // Create.
+    let (create_status, create_json) = post_json(
+        router.clone(),
+        "/api/v1/incidents",
+        serde_json::json!({
+            "title": "OPS01-R3 resolve test",
+            "severity": "info",
+            "opened_by": "ops01_r3_test"
+        }),
+    )
+    .await;
+    assert_eq!(
+        create_status,
+        StatusCode::OK,
+        "OPS01-R3: create must return 200: {create_json}"
+    );
+    assert_eq!(
+        str_field(&create_json, "status"),
+        "open",
+        "OPS01-R3: new incident must have status=open"
+    );
+    let incident_id = str_field(&create_json, "incident_id").to_string();
+
+    // Resolve.
+    let resolve_path = format!("/api/v1/incidents/{incident_id}/resolve");
+    let (resolve_status, resolve_json) =
+        post_json(router.clone(), &resolve_path, serde_json::json!({})).await;
+    assert_eq!(
+        resolve_status,
+        StatusCode::OK,
+        "OPS01-R3: resolve must return 200: {resolve_json}"
+    );
+    assert_eq!(
+        str_field(&resolve_json, "status"),
+        "resolved",
+        "OPS01-R3: resolved incident must have status=resolved"
+    );
+    assert_eq!(
+        str_field(&resolve_json, "incident_id"),
+        incident_id,
+        "OPS01-R3: resolved incident_id must match"
+    );
+
+    // Idempotent: second resolve must also return 200 with status=resolved.
+    let (resolve2_status, resolve2_json) =
+        post_json(router.clone(), &resolve_path, serde_json::json!({})).await;
+    assert_eq!(
+        resolve2_status,
+        StatusCode::OK,
+        "OPS01-R3: second resolve must return 200 (idempotent): {resolve2_json}"
+    );
+    assert_eq!(
+        str_field(&resolve2_json, "status"),
+        "resolved",
+        "OPS01-R3: status must remain resolved on second call"
+    );
+
+    // GET list must show the incident as resolved.
+    let (list_status, list_json) = get(router, "/api/v1/incidents").await;
+    assert_eq!(list_status, StatusCode::OK, "OPS01-R3: list must return 200");
+    let rows = list_json["rows"]
+        .as_array()
+        .expect("OPS01-R3: rows must be array");
+    let found = rows.iter().find(|r| {
+        r.get("incident_id").and_then(|v| v.as_str()) == Some(&incident_id)
+    });
+    assert!(found.is_some(), "OPS01-R3: incident must appear in list");
+    assert_eq!(
+        found.unwrap()["status"].as_str(),
+        Some("resolved"),
+        "OPS01-R3: listed row must have status=resolved"
+    );
+
+    // Cleanup.
+    sqlx::query("DELETE FROM sys_incidents WHERE title = 'OPS01-R3 resolve test'")
+        .execute(&pool)
+        .await
+        .expect("OPS01-R3: post-test cleanup");
 }

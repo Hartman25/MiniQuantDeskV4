@@ -79,6 +79,39 @@ pub async fn insert_incident(
     }))
 }
 
+/// Resolve an existing incident by setting `status = 'resolved'`.
+///
+/// Uses `UPDATE … RETURNING` so the caller receives the post-update row.
+/// Returns `None` when no row with the given `incident_id` exists (→ 404).
+/// Idempotent: if the incident is already `"resolved"` the UPDATE still
+/// succeeds and the updated row is returned unchanged.
+pub async fn resolve_incident(
+    db: &PgPool,
+    incident_id: &str,
+) -> Result<Option<IncidentDbRow>> {
+    let row = sqlx::query(
+        r#"
+        UPDATE sys_incidents
+        SET status = 'resolved'
+        WHERE incident_id = $1
+        RETURNING incident_id, opened_at_utc, title, severity, status, linked_alert_id, opened_by
+        "#,
+    )
+    .bind(incident_id)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(row.map(|r| IncidentDbRow {
+        incident_id: r.get("incident_id"),
+        opened_at_utc: r.get("opened_at_utc"),
+        title: r.get("title"),
+        severity: r.get("severity"),
+        status: r.get("status"),
+        linked_alert_id: r.get("linked_alert_id"),
+        opened_by: r.get("opened_by"),
+    }))
+}
+
 /// Load all incidents ordered newest-first.
 ///
 /// Returns an authoritative empty `Vec` when no incidents exist.

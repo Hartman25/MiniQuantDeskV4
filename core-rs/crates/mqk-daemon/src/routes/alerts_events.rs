@@ -41,7 +41,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -51,7 +51,8 @@ use sqlx::Row;
 use crate::api_types::{
     ActiveAlertRow, ActiveAlertsResponse, AlertAckRequest, AlertAckResponse, AlertTriageAlertRow,
     AlertTriageResponse, CreateIncidentRequest, CreateIncidentResponse, EventFeedRow,
-    EventsFeedResponse, IncidentRow, IncidentsResponse, RuntimeErrorResponse,
+    EventsFeedResponse, IncidentRow, IncidentsResponse, ResolveIncidentResponse,
+    RuntimeErrorResponse,
 };
 use crate::state::{
     AlpacaWsContinuityState, AppState, AutonomousSessionTruth, StrategyMarketDataSource,
@@ -884,6 +885,71 @@ pub(crate) async fn alert_triage_ack(
             Json(RuntimeErrorResponse {
                 error: format!("alert ack write failed: {err}"),
                 fault_class: "alerts.triage.ack.db_write_failed".to_string(),
+                gate: None,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/incidents/:id/resolve (ALERTS-OPS-01A)
+// ---------------------------------------------------------------------------
+
+/// Resolve an open incident (ALERTS-OPS-01A).
+///
+/// Sets `status = 'resolved'` on the named incident and returns the updated
+/// row.  Semantics:
+///
+/// - `503` — no DB pool; resolve is impossible without persistent storage.
+/// - `404` — no row with the given `incident_id` exists.
+/// - `200` — row updated (or was already `"resolved"` — idempotent).
+pub(crate) async fn resolve_incident(
+    State(st): State<Arc<AppState>>,
+    Path(incident_id): Path<String>,
+) -> Response {
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(RuntimeErrorResponse {
+                error: "incident resolve requires a DB pool; daemon has no DB configured"
+                    .to_string(),
+                fault_class: "incidents.resolve.no_db".to_string(),
+                gate: Some("db_pool".to_string()),
+            }),
+        )
+            .into_response();
+    };
+
+    match mqk_db::resolve_incident(db, &incident_id).await {
+        Ok(Some(row)) => (
+            StatusCode::OK,
+            Json(ResolveIncidentResponse {
+                canonical_route: format!("/api/v1/incidents/{}/resolve", incident_id),
+                incident_id: row.incident_id,
+                opened_at_utc: row.opened_at_utc.to_rfc3339(),
+                title: row.title,
+                severity: row.severity,
+                status: row.status,
+                linked_alert_id: row.linked_alert_id,
+                opened_by: row.opened_by,
+            }),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(RuntimeErrorResponse {
+                error: format!("incident not found: {incident_id}"),
+                fault_class: "incidents.resolve.not_found".to_string(),
+                gate: None,
+            }),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RuntimeErrorResponse {
+                error: format!("incident resolve failed: {err}"),
+                fault_class: "incidents.resolve.db_write_failed".to_string(),
                 gate: None,
             }),
         )

@@ -2528,26 +2528,37 @@ pub struct OrderCausalityCausalNode {
     pub anomaly_tags: Vec<String>,
     /// Fill summary, e.g. `"fill_qty=20 fill_price=944.200000 (partial_fill)"`.
     pub summary: String,
+    /// UTC timestamp of the submit event that preceded this fill, RFC 3339.
+    /// `None` when submit timing was not recorded (market orders, legacy rows).
+    pub submit_ts_utc: Option<String>,
+    /// Milliseconds from order submit to this fill confirmation.
+    /// `None` when `submit_ts_utc` is absent.
+    pub submit_to_fill_ms: Option<i64>,
 }
 
 /// Response for `GET /api/v1/execution/orders/:order_id/causality`.
 ///
 /// # Truth-state contract
 ///
-/// | Condition                                         | truth_state   |
-/// |---------------------------------------------------|---------------|
-/// | DB + active run + at least one fill row           | partial       |
-/// | DB + active run + order visible, no fills yet     | no_fills_yet  |
-/// | DB + active run + order not found                 | no_order      |
-/// | No DB pool                                        | no_db         |
+/// | Condition                                              | truth_state   |
+/// |--------------------------------------------------------|---------------|
+/// | DB + active run + outbox row or fill row found         | partial       |
+/// | DB + active run + order in memory, no outbox/fills     | no_fills_yet  |
+/// | DB + active run + order not found anywhere             | no_order      |
+/// | No DB pool                                             | no_db         |
 ///
-/// `"partial"` (not `"active"`) is intentional: only the execution-fill lane is
-/// represented.  Full causality (signal→intent→risk→outbox→broker→portfolio→reconcile)
-/// is not provable from `fill_quality_telemetry` alone.
+/// `"partial"` (not `"active"`) is intentional: full causality
+/// (signal→intent→risk→outbox→broker→portfolio→reconcile) is not provable here.
+///
+/// # What this surface proves
+///
+/// - Intent lane: `outbox_enqueued` and `outbox_sent` nodes from `oms_outbox`
+///   when an outbox row exists for the `order_id` (idempotency_key convention).
+/// - Execution-fill lane: fill events from `fill_quality_telemetry`.
 ///
 /// # What this surface does NOT claim
 ///
-/// - Signal, intent, or risk provenance: not joinable to `internal_order_id`.
+/// - Signal provenance: not joinable to `internal_order_id`.
 /// - Broker ACK events: not joinable to `internal_order_id` in current schema.
 /// - Portfolio effects: not captured per-order in durable form.
 /// - Reconcile outcomes: not joinable to `internal_order_id` at this tier.
@@ -2727,6 +2738,22 @@ pub struct CreateIncidentResponse {
     pub opened_at_utc: String,
     pub title: String,
     pub severity: String,
+    pub status: String,
+    pub linked_alert_id: Option<String>,
+    pub opened_by: String,
+}
+
+/// Response for POST /api/v1/incidents/:id/resolve (ALERTS-OPS-01A).
+///
+/// Returns the post-update incident row.  `status` is always `"resolved"`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveIncidentResponse {
+    pub canonical_route: String,
+    pub incident_id: String,
+    pub opened_at_utc: String,
+    pub title: String,
+    pub severity: String,
+    /// Always `"resolved"` on success.
     pub status: String,
     pub linked_alert_id: Option<String>,
     pub opened_by: String,

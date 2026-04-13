@@ -140,6 +140,7 @@ async fn token_auth_middleware(
 pub fn build_router(state: Arc<AppState>) -> Router {
     use alerts_events::{
         alert_triage_ack, alerts_active, alerts_triage, create_incident, events_feed, incidents,
+        resolve_incident,
     };
     use audit_ops::{audit_artifacts, audit_operator_actions, ops_operator_timeline};
     use control_plane::{
@@ -293,6 +294,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/ops/action", post(ops_action))
         .route("/api/v1/alerts/triage/ack", post(alert_triage_ack))
         .route("/api/v1/incidents", post(create_incident))
+        .route(
+            "/api/v1/incidents/:id/resolve",
+            post(resolve_incident),
+        )
         .route("/api/v1/strategy/signal", post(strategy_signal))
         .route("/v1/trading/snapshot", post(trading_snapshot_set))
         .route(
