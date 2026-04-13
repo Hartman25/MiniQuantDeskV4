@@ -32,7 +32,7 @@
 //! four surfaces (status/C1, preflight/C2, parity-evidence, guidance/C3) so
 //! they cannot diverge.
 //!
-//! ## Tests (all pure in-process; require `--test-threads=1`)
+//! ## Tests (all pure in-process; env-var races serialised via `ENV_LOCK`)
 //!
 //! - C3-01: no `MQK_ARTIFACT_PATH` → guidance `parity_evidence_state:
 //!   "not_configured"`, `live_trust_complete: null`; not a positive trust
@@ -50,7 +50,9 @@
 //!   operator_next_steps, restart_workflow) is not broken by C3.
 
 use std::io::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Mutex;
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -62,6 +64,17 @@ use tower::ServiceExt;
 // ---------------------------------------------------------------------------
 
 const ENV_ARTIFACT_PATH: &str = "MQK_ARTIFACT_PATH";
+
+// ---------------------------------------------------------------------------
+// Env-var serialisation — same pattern as scenario_artifact_deployability_tv02.rs
+// ---------------------------------------------------------------------------
+
+/// Serialises tests that mutate `MQK_ARTIFACT_PATH` so they do not race.
+static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn env_lock() -> &'static Mutex<()> {
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -99,7 +112,7 @@ fn guidance_req() -> Request<axum::body::Body> {
 }
 
 /// RAII guard: saves and clears an env var; restores on drop.
-/// Requires `--test-threads=1`.
+/// Caller must hold `env_lock()` for the duration of the guard's lifetime.
 struct EnvGuard {
     key: &'static str,
     prior: Option<String>,
@@ -188,6 +201,7 @@ fn make_artifact_dir(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 /// explicit "not_configured" ceiling, not an absent field or ambiguous null.
 #[tokio::test]
 async fn c3_01_no_artifact_path_guidance_not_configured() {
+    let _lock = env_lock().lock().await;
     let _guard = EnvGuard::absent(ENV_ARTIFACT_PATH);
 
     let router = make_router();
@@ -230,6 +244,7 @@ async fn c3_01_no_artifact_path_guidance_not_configured() {
 /// mode transition can see the ceiling without consulting a second endpoint.
 #[tokio::test]
 async fn c3_02_incomplete_evidence_explicit_on_guidance() {
+    let _lock = env_lock().lock().await;
     let (dir, manifest) = make_artifact_dir("c3_02");
     write_valid_parity_evidence(&dir, "test-artifact-c3-02");
     let _guard = EnvGuard::set(ENV_ARTIFACT_PATH, manifest.to_str().unwrap());
@@ -268,6 +283,7 @@ async fn c3_02_incomplete_evidence_explicit_on_guidance() {
 /// second endpoint to learn (2).
 #[tokio::test]
 async fn c3_03_live_shadow_admissible_and_trust_ceiling_co_present() {
+    let _lock = env_lock().lock().await;
     let (dir, manifest) = make_artifact_dir("c3_03");
     write_valid_parity_evidence(&dir, "test-artifact-c3-03");
     let _guard = EnvGuard::set(ENV_ARTIFACT_PATH, manifest.to_str().unwrap());
@@ -328,6 +344,7 @@ async fn c3_03_live_shadow_admissible_and_trust_ceiling_co_present() {
 /// In neither case is `live_trust_complete: true` returned.
 #[tokio::test]
 async fn c3_04_live_trust_complete_never_true_on_guidance() {
+    let _lock = env_lock().lock().await;
     // (a) not_configured case
     {
         let _g = EnvGuard::absent(ENV_ARTIFACT_PATH);
@@ -386,6 +403,7 @@ async fn c3_04_live_trust_complete_never_true_on_guidance() {
 /// two new C3 fields.
 #[tokio::test]
 async fn c3_05_existing_paper_contract_not_broken() {
+    let _lock = env_lock().lock().await;
     let _guard = EnvGuard::absent(ENV_ARTIFACT_PATH);
 
     let router = make_router();

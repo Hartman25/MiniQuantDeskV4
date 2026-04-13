@@ -21,8 +21,8 @@
 //!
 //! ## Tests
 //!
-//! All tests are pure in-process.  Env-var manipulation requires
-//! `--test-threads=1`.
+//! All tests are pure in-process.  Env-var races are serialised via `ENV_LOCK`
+//! (a file-local `tokio::sync::Mutex`); `--test-threads=1` is not required.
 //!
 //! - C1-01: no `MQK_ARTIFACT_PATH` → `parity_evidence_state: "not_configured"`,
 //!   `live_trust_complete: null`; explicit ceiling, no false trust.
@@ -38,7 +38,9 @@
 //!   field is always populated regardless of deployment mode.
 
 use std::io::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Mutex;
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -50,6 +52,17 @@ use tower::ServiceExt;
 // ---------------------------------------------------------------------------
 
 const ENV_ARTIFACT_PATH: &str = "MQK_ARTIFACT_PATH";
+
+// ---------------------------------------------------------------------------
+// Env-var serialisation — same pattern as scenario_artifact_deployability_tv02.rs
+// ---------------------------------------------------------------------------
+
+/// Serialises tests that mutate `MQK_ARTIFACT_PATH` so they do not race.
+static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn env_lock() -> &'static Mutex<()> {
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -87,7 +100,7 @@ fn system_status_req() -> Request<axum::body::Body> {
 }
 
 /// RAII guard: saves and clears an env var; restores on drop.
-/// Requires `--test-threads=1`.
+/// Caller must hold `env_lock()` for the duration of the guard's lifetime.
 struct EnvGuard {
     key: &'static str,
     prior: Option<String>,
@@ -188,6 +201,7 @@ fn make_artifact_dir(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 /// Null live_trust_complete is not a positive trust claim.
 #[tokio::test]
 async fn c1_01_no_artifact_path_is_not_configured() {
+    let _lock = env_lock().lock().await;
     let _guard = EnvGuard::absent(ENV_ARTIFACT_PATH);
 
     let router = make_router();
@@ -229,6 +243,7 @@ async fn c1_01_no_artifact_path_is_not_configured() {
 /// absence of the evidence file for live trust being established.
 #[tokio::test]
 async fn c1_02_absent_evidence_is_not_trust() {
+    let _lock = env_lock().lock().await;
     let (dir, manifest) = make_artifact_dir("c1_02");
     // Create the manifest but NOT parity_evidence.json — it is absent.
     let _ = dir; // keep alive
@@ -260,6 +275,7 @@ async fn c1_02_absent_evidence_is_not_trust() {
 /// parity_evidence_state="incomplete" and live_trust_complete=false.
 #[tokio::test]
 async fn c1_03_present_evidence_is_incomplete_in_current_builds() {
+    let _lock = env_lock().lock().await;
     let (dir, manifest) = make_artifact_dir("c1_03");
     write_valid_parity_evidence(&dir, "test-artifact-c1-03");
     let _guard = EnvGuard::set(ENV_ARTIFACT_PATH, manifest.to_str().unwrap());
@@ -296,6 +312,7 @@ async fn c1_03_present_evidence_is_incomplete_in_current_builds() {
 /// Only the "incomplete" and "complete" states produce a non-null value.
 #[tokio::test]
 async fn c1_04_live_trust_complete_null_for_non_present_states() {
+    let _lock = env_lock().lock().await;
     // (a) not_configured
     {
         let _g = EnvGuard::absent(ENV_ARTIFACT_PATH);
@@ -356,6 +373,7 @@ async fn c1_04_live_trust_complete_null_for_non_present_states() {
 /// ceiling so the field is trustworthy across all modes.
 #[tokio::test]
 async fn c1_05_parity_state_present_on_paper_path() {
+    let _lock = env_lock().lock().await;
     let _guard = EnvGuard::absent(ENV_ARTIFACT_PATH);
 
     let router = make_router();
