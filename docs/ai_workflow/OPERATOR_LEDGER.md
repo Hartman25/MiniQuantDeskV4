@@ -76,11 +76,21 @@ Update this after audits, proof runs, patch landings, or major repo changes.
 
 ## Patch Ledger
 
-_Last reconciled: 2026-04-12 against committed repo state (commit caf64f23, full proof harness 17/17 lanes passed)._
+_Last reconciled: 2026-04-12 against committed repo state (commit a0b017d4, full proof harness 17/17 lanes passed)._
 
 ### Open / active MAIN patches
 
-_No active patches._
+| Patch | Status |
+|---|---|
+| **RUNTIME-LONGRUN-01** | open — long-run runtime durability |
+| **CTRL-AUTH-01** | open — operator auth controls |
+| **DATA-INTEGRITY-01** | open — data integrity enforcement |
+| **EXEC-PROTECT-01** | open — execution protection controls |
+| **CORP-ACT-01** | open — corporate actions handling |
+
+**Conditional only:** RESEARCH-NON-EQ-01 (open only if non-equity canonical surfaces are mounted)
+
+**Non-blocking follow-up only:** MT-07 (decomposition; does not block any MAIN lane)
 
 ### Closed — committed-state code/test proof verified (2026-04-12)
 
@@ -104,7 +114,8 @@ _No active patches._
 - **LO-01** — `docs/runbooks/operator_workflows.md` (full 9-section runbook)
 - **LO-02** — `docs/runbooks/stressed_recovery_proof_matrix.md`; `scenario_stressed_recovery_lo02.rs`
 - **LO-03** — `docs/runbooks/live_shadow_operational_proof.md`; `scenario_live_shadow_preflight_lo03.rs`
-- **DOC-01** — GUI tracker + AI workflow docs reconciled 2026-04-11 (Batch 1A)
+- **DOC-01** — AI workflow docs Batch 1A partial reconciliation 2026-04-11; superseded by DOC-TRUTH-FINAL-01
+- **DOC-TRUTH-FINAL-01** — Four ai_workflow + readiness docs reconciled to committed proof state a0b017d4; stale commit refs, false closure claims, remaining-work truth corrected (2026-04-12)
 
 **Subsequently closed (scenario-file proof in committed repo, verified 2026-04-11):**
 - **CC-01B** — `scenario_strategy_summary_registry.rs`
@@ -143,10 +154,10 @@ Use this section for findings retired by newer proof or newer source inspection.
 
 ## Evidence Ledger
 
-- **Latest repo snapshot:** update path/date
-- **Latest full proof transcript:** update path/date/commit
-- **Latest readiness lock:** update path/date
-- **Latest scorecard:** update path/date
+- **Latest repo snapshot:** committed HEAD a0b017d4db9a5c64133b179f925cbc4584f17f4e (2026-04-12); tree clean; no untracked files
+- **Latest full proof transcript:** `.proof/full_repo_proof_output.txt` — commit a0b017d4; 17/17 lanes PASSED; `audit_profile=full_db_backed_institutional_proof_audit`; `workspace_state=committed_repo_state`
+- **Latest readiness lock:** `docs/INSTITUTIONAL_READINESS_LOCK.md`
+- **Latest scorecard:** `docs/INSTITUTIONAL_SCORECARD.md`
 - **Latest carried-forward audits:** update list/date
 - **Latest EXP isolation policy:** update if changed
 

@@ -83,12 +83,24 @@ Keep this file compact and current. This is the top-level command map to give an
 
 ## Current MAIN remaining-work list
 
-_Last reconciled: 2026-04-12 against committed repo state (commit caf64f23, full proof harness 17/17 lanes passed)._
+_Last reconciled: 2026-04-12 against committed repo state (commit a0b017d4, full proof harness 17/17 lanes passed)._
 _Verification basis: scenario test files, production source modules, runbook files present in HEAD, and confirmed proof harness result. Scenario-file presence is necessary but not sufficient — the harness result is required for closure._
 
 ### Open — genuinely remaining
 
-_No items remain open._
+| Patch | Description |
+|---|---|
+| **RUNTIME-LONGRUN-01** | long-run runtime durability |
+| **CTRL-AUTH-01** | operator auth controls |
+| **DATA-INTEGRITY-01** | data integrity enforcement |
+| **EXEC-PROTECT-01** | execution protection controls |
+| **CORP-ACT-01** | corporate actions handling |
+
+**Conditional only (not blocking main lane):**
+- **RESEARCH-NON-EQ-01** — open only if non-equity research surfaces are mounted as canonical truth
+
+**Non-blocking follow-up only:**
+- **MT-07** — decomposition/refactor; does not block any MAIN lane
 
 ---
 
@@ -113,11 +125,12 @@ _No items remain open._
 | **LO-01** | `docs/runbooks/operator_workflows.md` (full runbook, 9+ sections) |
 | **LO-02** | `docs/runbooks/stressed_recovery_proof_matrix.md`; `scenario_stressed_recovery_lo02.rs` |
 | **LO-03** | `docs/runbooks/live_shadow_operational_proof.md`; `scenario_live_shadow_preflight_lo03.rs` |
-| **DOC-01** | GUI tracker + AI workflow docs reconciled 2026-04-11 (Batch 1A) |
+| **DOC-01** | AI workflow docs Batch 1A partial reconciliation 2026-04-11; full doc-truth reconciliation completed by DOC-TRUTH-FINAL-01 |
+| **DOC-TRUTH-FINAL-01** | Four ai_workflow + readiness docs reconciled to committed proof state a0b017d4; stale commit refs, false closure claims, and remaining-work truth corrected (2026-04-12) |
 
 ### Additionally closed — scenario-file proof in committed HEAD (2026-04-12)
 
-_(Patches not in the initial audit table above; confirmed by scenario-file presence in committed repo AND full proof harness pass (commit caf64f23, all 17 lanes passed). Scenario-file presence alone is not closure proof — the harness result is required. Not exhaustive — additional infrastructure patches predating this tracking format exist in scenario files.)_
+_(Patches not in the initial audit table above; confirmed by scenario-file presence in committed repo AND full proof harness pass (commit a0b017d4, all 17 lanes passed). Scenario-file presence alone is not closure proof — the harness result is required. Not exhaustive — additional infrastructure patches predating this tracking format exist in scenario files.)_
 
 | Patch group | Verification evidence |
 |---|---|
