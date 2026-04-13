@@ -2830,6 +2830,8 @@ pub struct AlertTriageAlertRow {
     pub domain: String,
     /// None — no incident linkage exists.
     pub linked_incident_id: Option<String>,
+    /// "open" | "resolved" when a linked incident exists; None when no incident is linked.
+    pub linked_incident_status: Option<String>,
     /// None — alert-to-order linkage is not tracked at this surface.
     pub linked_order_id: Option<String>,
     /// None — alert-to-strategy linkage is not tracked at this surface.

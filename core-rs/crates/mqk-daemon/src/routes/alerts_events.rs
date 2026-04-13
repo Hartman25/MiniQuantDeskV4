@@ -739,15 +739,17 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
             .map(|r| (r.alert_id, r.acked_at_utc.to_rfc3339()))
             .collect();
 
-        // OPS-01: build alert_id → incident_id map.  list_incidents returns
-        // rows newest-first; first match wins so the most-recent incident
-        // linked to a given alert is surfaced.
+        // OPS-01 / ALERTS-OPS-01B: build alert_id → (incident_id, status) map.
+        // list_incidents returns rows newest-first; first match wins so the
+        // most-recent incident linked to a given alert is surfaced.
+        // status ("open" | "resolved") is preserved so the triage surface can
+        // reflect whether the linked incident has been resolved.
         let incidents = mqk_db::list_incidents(db).await.unwrap_or_default();
-        let mut inc_map: std::collections::HashMap<String, String> =
+        let mut inc_map: std::collections::HashMap<String, (String, String)> =
             std::collections::HashMap::new();
         for inc in incidents {
             if let Some(alert_id) = inc.linked_alert_id {
-                inc_map.entry(alert_id).or_insert(inc.incident_id);
+                inc_map.entry(alert_id).or_insert((inc.incident_id, inc.status));
             }
         }
 
@@ -774,7 +776,9 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
             "unacked"
         }
         .to_string();
-        let linked_incident_id = incident_map.get(&alert_id).cloned();
+        let linked = incident_map.get(&alert_id);
+        let linked_incident_id = linked.map(|(id, _)| id.clone());
+        let linked_incident_status = linked.map(|(_, s)| s.clone());
         AlertTriageAlertRow {
             alert_id,
             severity,
@@ -782,6 +786,7 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
             title,
             domain,
             linked_incident_id,
+            linked_incident_status,
             linked_order_id: None,
             linked_strategy_id: None,
             created_at: acked_at, // None for unacked (no durable creation time)

@@ -555,3 +555,170 @@ async fn ops01_r3_resolve_incident_and_idempotent() {
         .await
         .expect("OPS01-R3: post-test cleanup");
 }
+
+// ---------------------------------------------------------------------------
+// ALERTS-OPS-01B: linked_incident_status proof
+// ---------------------------------------------------------------------------
+
+/// Without a DB pool the incident_map is empty; all triage rows must carry
+/// linked_incident_status=null (no fabricated status, fail-closed).
+#[tokio::test]
+async fn ops01_b1_triage_linked_incident_status_null_when_no_db() {
+    let (status, json) = get(make_router(), "/api/v1/alerts/triage").await;
+    assert_eq!(status, StatusCode::OK, "OPS01-B1: expected 200: {json}");
+    let rows = json["rows"]
+        .as_array()
+        .expect("OPS01-B1: rows must be array");
+    for row in rows {
+        assert!(
+            row.get("linked_incident_status").is_none()
+                || row["linked_incident_status"].is_null(),
+            "OPS01-B1: linked_incident_status must be null without DB: {row}"
+        );
+    }
+}
+
+/// DB-backed proof: create incident linked to a real alert class, resolve it,
+/// then GET /api/v1/alerts/triage and confirm that the matching triage row
+/// carries linked_incident_status="resolved".
+///
+/// Uses `reconcile.dispatch_block.dirty` as the synthetic alert (triggered by
+/// publishing a dirty reconcile snapshot) and cleans up after itself.
+#[tokio::test]
+#[ignore]
+async fn ops01_b2_db_triage_linked_incident_status_resolved_after_resolve() {
+    let db_url = match std::env::var("MQK_DATABASE_URL") {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    let pool = sqlx::PgPool::connect(&db_url)
+        .await
+        .expect("OPS01-B2: pool connect");
+
+    sqlx::query("DELETE FROM sys_incidents WHERE title = 'OPS01-B2 resolve-status proof'")
+        .execute(&pool)
+        .await
+        .expect("OPS01-B2: pre-test cleanup");
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    // Inject dirty reconcile so the alert_id is present in triage rows.
+    st.publish_reconcile_snapshot(state::ReconcileStatusSnapshot {
+        status: "dirty".to_string(),
+        last_run_at: Some("2026-04-12T00:00:00Z".to_string()),
+        snapshot_watermark_ms: None,
+        mismatched_positions: 1,
+        mismatched_orders: 0,
+        mismatched_fills: 0,
+        unmatched_broker_events: 0,
+        note: Some("ops01-b2 synthetic dirty".to_string()),
+    })
+    .await;
+
+    let router = routes::build_router(Arc::clone(&st));
+
+    // Create incident linked to the reconcile alert class.
+    let (create_status, create_json) = post_json(
+        router.clone(),
+        "/api/v1/incidents",
+        serde_json::json!({
+            "title": "OPS01-B2 resolve-status proof",
+            "severity": "critical",
+            "linked_alert_id": "reconcile.dispatch_block.dirty",
+            "opened_by": "ops01_b2_test"
+        }),
+    )
+    .await;
+    assert_eq!(
+        create_status,
+        StatusCode::OK,
+        "OPS01-B2: create must return 200: {create_json}"
+    );
+    let incident_id = str_field(&create_json, "incident_id").to_string();
+    assert_eq!(
+        str_field(&create_json, "status"),
+        "open",
+        "OPS01-B2: newly created incident must be open"
+    );
+
+    // GET triage: linked_incident_status must be "open" before resolve.
+    let (triage_status, triage_json) = get(router.clone(), "/api/v1/alerts/triage").await;
+    assert_eq!(
+        triage_status,
+        StatusCode::OK,
+        "OPS01-B2: triage must return 200 (pre-resolve): {triage_json}"
+    );
+    let rows = triage_json["rows"]
+        .as_array()
+        .expect("OPS01-B2: rows must be array");
+    let pre_row = rows
+        .iter()
+        .find(|r| {
+            r.get("alert_id").and_then(|v| v.as_str())
+                == Some("reconcile.dispatch_block.dirty")
+        })
+        .expect("OPS01-B2: reconcile row must be present before resolve");
+    assert_eq!(
+        pre_row
+            .get("linked_incident_status")
+            .and_then(|v| v.as_str()),
+        Some("open"),
+        "OPS01-B2: linked_incident_status must be 'open' before resolve: {pre_row}"
+    );
+
+    // Resolve the incident.
+    let resolve_path = format!("/api/v1/incidents/{incident_id}/resolve");
+    let (resolve_status, resolve_json) =
+        post_json(router.clone(), &resolve_path, serde_json::json!({})).await;
+    assert_eq!(
+        resolve_status,
+        StatusCode::OK,
+        "OPS01-B2: resolve must return 200: {resolve_json}"
+    );
+    assert_eq!(
+        str_field(&resolve_json, "status"),
+        "resolved",
+        "OPS01-B2: resolve response must carry status=resolved"
+    );
+
+    // GET triage again: linked_incident_status must now be "resolved".
+    let (triage_status2, triage_json2) = get(router, "/api/v1/alerts/triage").await;
+    assert_eq!(
+        triage_status2,
+        StatusCode::OK,
+        "OPS01-B2: triage must return 200 (post-resolve): {triage_json2}"
+    );
+    let rows2 = triage_json2["rows"]
+        .as_array()
+        .expect("OPS01-B2: rows must be array (post-resolve)");
+    let post_row = rows2
+        .iter()
+        .find(|r| {
+            r.get("alert_id").and_then(|v| v.as_str())
+                == Some("reconcile.dispatch_block.dirty")
+        })
+        .expect("OPS01-B2: reconcile row must be present after resolve");
+    assert_eq!(
+        post_row
+            .get("linked_incident_id")
+            .and_then(|v| v.as_str()),
+        Some(incident_id.as_str()),
+        "OPS01-B2: linked_incident_id must remain populated after resolve"
+    );
+    assert_eq!(
+        post_row
+            .get("linked_incident_status")
+            .and_then(|v| v.as_str()),
+        Some("resolved"),
+        "OPS01-B2: linked_incident_status must be 'resolved' after resolve: {post_row}"
+    );
+
+    // Cleanup.
+    sqlx::query("DELETE FROM sys_incidents WHERE title = 'OPS01-B2 resolve-status proof'")
+        .execute(&pool)
+        .await
+        .expect("OPS01-B2: post-test cleanup");
+}
