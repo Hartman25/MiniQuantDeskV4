@@ -60,7 +60,7 @@ What that means in plain English:
 ## Architecture
 
 <p align="center">
-  <img src="assets/diagrams/architectureV2.svg" alt="MiniQuantDeskV4 architecture" width="960" />
+  <img src="assets\diagrams\architectureV2.png" alt="MiniQuantDeskV4 architecture" width="960" />
 </p>
 
 ### High-level flow
