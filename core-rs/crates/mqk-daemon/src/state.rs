@@ -12,6 +12,7 @@ mod lifecycle;
 mod loop_runner;
 mod orchestrator_build;
 mod session_controller;
+mod signal_intake;
 mod snapshot;
 mod types;
 
@@ -68,16 +69,6 @@ use mqk_runtime::native_strategy::NativeStrategyBootstrap;
 use types::ReconcileTruthGate;
 
 pub(crate) const DAEMON_ENGINE_ID: &str = "mqk-daemon";
-/// PT-AUTO-02: Maximum number of strategy signals accepted per execution run.
-///
-/// Provides a hard per-run intake bound on the paper+alpaca signal ingestion
-/// path.  After this many distinct signals are enqueued (Gate 7 Ok(true)),
-/// Gate 1d refuses further signals with 409/day_limit_reached until the next
-/// run start resets the counter.
-///
-/// 100 signals per run is conservative for a supervised paper session.  It is
-/// not an economics guarantee — it is a safety bound.
-const MAX_AUTONOMOUS_SIGNALS_PER_RUN: u32 = 100;
 const DEFAULT_DAEMON_DEPLOYMENT_MODE: &str = "paper";
 const DEFAULT_DAEMON_ADAPTER_ID: &str = "paper";
 const DAEMON_RUN_CONFIG_HASH_PREFIX: &str = "daemon-runtime";
@@ -943,38 +934,6 @@ impl AppState {
     /// yet cleared by a Live transition.  Used by proof tests.
     pub fn gap_escalation_is_pending(&self) -> bool {
         self.gap_escalation_pending.load(Ordering::SeqCst)
-    }
-
-    // ---------------------------------------------------------------------------
-    // PT-AUTO-02: Per-run autonomous signal intake bound
-    // ---------------------------------------------------------------------------
-
-    /// Returns the current per-run signal intake count.
-    pub fn day_signal_count(&self) -> u32 {
-        self.day_signal_count.load(Ordering::SeqCst)
-    }
-
-    /// Increment the per-run signal intake counter by one.
-    ///
-    /// Called from the strategy signal route on Gate 7 Ok(true) (new enqueue).
-    /// Not called for duplicates (Ok(false)) or Gate failures.
-    pub(crate) fn increment_day_signal_count(&self) {
-        self.day_signal_count.fetch_add(1, Ordering::SeqCst);
-    }
-
-    /// Returns `true` when the per-run signal count has reached
-    /// `MAX_AUTONOMOUS_SIGNALS_PER_RUN`.  Gate 1d refuses signals when true.
-    pub fn day_signal_limit_exceeded(&self) -> bool {
-        self.day_signal_count.load(Ordering::SeqCst) >= MAX_AUTONOMOUS_SIGNALS_PER_RUN
-    }
-
-    /// Test seam: set the day signal count to an arbitrary value.
-    ///
-    /// Named `_for_test` to signal intent; never called in production code.
-    /// Used by PT-AUTO-02 proof tests to simulate a saturated counter without
-    /// submitting 100 real signals.
-    pub fn set_day_signal_count_for_test(&self, count: u32) {
-        self.day_signal_count.store(count, Ordering::SeqCst);
     }
 
     /// PT-DAY-03: Returns the current wall-clock Unix timestamp used by the
