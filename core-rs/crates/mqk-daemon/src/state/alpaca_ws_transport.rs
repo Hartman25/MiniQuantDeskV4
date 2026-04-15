@@ -68,7 +68,6 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use mqk_broker_alpaca::types::AlpacaFetchCursor;
 use mqk_broker_alpaca::{parse_ws_message, AlpacaWsMessage};
 use mqk_runtime::alpaca_inbound::{
     advance_cursor_after_ws_establish, persist_ws_gap_cursor, process_ws_inbound_batch,
@@ -88,58 +87,18 @@ const WS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
-// Public pure functions — testable without network
+// Submodules
 // ---------------------------------------------------------------------------
 
-/// Build the Alpaca WS authentication JSON message.
-///
-/// Wire format: `{"action":"auth","key":"<key>","secret":"<secret>"}`
-pub fn build_ws_auth_message(key: &str, secret: &str) -> String {
-    serde_json::json!({ "action": "auth", "key": key, "secret": secret }).to_string()
-}
+mod cursor_seed;
+// Re-exported so the inline test can access via `super::load_session_cursor_from_db`.
+pub(crate) use cursor_seed::load_session_cursor_from_db;
+use cursor_seed::recovery_resume_source_from_cursor;
 
-/// Build the Alpaca WS subscribe message for the `trade_updates` stream.
-///
-/// Wire format: `{"action":"listen","data":{"streams":["trade_updates"]}}`
-pub fn build_ws_subscribe_message() -> String {
-    serde_json::json!({
-        "action": "listen",
-        "data": { "streams": ["trade_updates"] }
-    })
-    .to_string()
-}
-
-/// Derive the Alpaca paper WS URL from the REST base URL.
-///
-/// Replaces `https://` with `wss://` and appends `/stream`.
-///
-/// ```text
-/// "https://paper-api.alpaca.markets"   → "wss://paper-api.alpaca.markets/stream"
-/// "https://paper-api.alpaca.markets/"  → "wss://paper-api.alpaca.markets/stream"
-/// ```
-pub fn ws_url_from_base_url(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    let ws_base = if let Some(host) = trimmed.strip_prefix("https://") {
-        format!("wss://{host}")
-    } else {
-        trimmed.to_string()
-    };
-    format!("{ws_base}/stream")
-}
-
-fn recovery_resume_source_from_cursor(
-    cursor: &AlpacaFetchCursor,
-) -> AutonomousRecoveryResumeSource {
-    match &cursor.trade_updates {
-        mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::ColdStartUnproven => {
-            AutonomousRecoveryResumeSource::ColdStart
-        }
-        mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::GapDetected { .. }
-        | mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::Live { .. } => {
-            AutonomousRecoveryResumeSource::PersistedCursor
-        }
-    }
-}
+mod handshake_messages;
+pub use handshake_messages::{
+    build_ws_auth_message, build_ws_subscribe_message, ws_url_from_base_url,
+};
 
 // ---------------------------------------------------------------------------
 // Spawn entry point
@@ -467,44 +426,6 @@ async fn alpaca_ws_session(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/// BRK-07R: Load the last persisted WS cursor from DB to seed the in-session
-/// cursor at session start.
-///
-/// Returns `cold_start_unproven(None)` when:
-/// - No DB pool is available (`AppState::db` is `None`).
-/// - No cursor row exists for this adapter in the DB.
-/// - The stored cursor JSON cannot be parsed (fail-closed: never panics).
-async fn load_session_cursor_from_db(state: &AppState) -> AlpacaFetchCursor {
-    let Some(pool) = state.db.as_ref() else {
-        return AlpacaFetchCursor::cold_start_unproven(None);
-    };
-    match mqk_db::load_broker_cursor(pool, state.adapter_id()).await {
-        Ok(Some(json)) => match serde_json::from_str::<AlpacaFetchCursor>(&json) {
-            Ok(cursor) => {
-                tracing::debug!("alpaca_ws: seeded session cursor from DB (BRK-07R)");
-                cursor
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "alpaca_ws: cursor parse failed at session seed; \
-                     starting ColdStartUnproven (BRK-07R)"
-                );
-                AlpacaFetchCursor::cold_start_unproven(None)
-            }
-        },
-        Ok(None) => AlpacaFetchCursor::cold_start_unproven(None),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "alpaca_ws: cursor DB load failed at session seed; \
-                 starting ColdStartUnproven (BRK-07R)"
-            );
-            AlpacaFetchCursor::cold_start_unproven(None)
-        }
-    }
-}
 
 /// Read the next text or binary frame from the WS stream, with a timeout.
 /// Returns the raw bytes of the frame.
