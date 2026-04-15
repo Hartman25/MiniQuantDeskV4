@@ -11,6 +11,13 @@ type PanelTruthRequirement = {
 // Rules: top-level probes only — no per-order/per-id fragments;
 // paths must match what fetchOperatorModel() actually probes.
 const PANEL_TRUTH_REQUIREMENTS: Partial<Record<CorePanelKey, PanelTruthRequirement>> = {
+  // Dashboard renders risk figures (loss-limit utilization, drawdown) and reconcile counts
+  // that are all zero-as-fallback when the execution loop is not running.
+  // /risk/denials absent = "no execution snapshot" (the risk-denials IIFE returns ok:false
+  // when truth_state === "no_snapshot" or "not_wired") — risk numbers are zeros-not-truth,
+  // not zeros-because-all-gates-are-healthy.  Block the entire dashboard when risk truth
+  // is absent, consistent with the hard-close comment in DashboardScreen.tsx.
+  dashboard: { hints: ["/risk/denials"] },
   // execution_orders (HTTP 503) is the definitive "no OMS truth" signal.
   // execution_summary can return HTTP 200 with has_snapshot=false and zero counts —
   // those zeros are honest (there are zero active orders because no loop is running).

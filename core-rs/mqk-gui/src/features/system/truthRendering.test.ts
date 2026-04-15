@@ -211,6 +211,45 @@ test("stale fires for dashboard panel when heartbeat exceeds threshold", () => {
   assert.equal(state, "stale");
 });
 
+// GUI-08: Dashboard must block with no_snapshot when /risk/denials is absent.
+// /risk/denials absent = execution loop not running = risk figures (loss-limit utilization,
+// drawdown) are zeros-as-fallback, not zeros-because-all-gates-are-healthy.
+// Rendering 0.0% utilization in that state is a truth collapse — the operator would
+// read it as "risk is clean" when actually "risk truth is unavailable."
+test("dashboard blocks with no_snapshot when risk/denials endpoint is missing (execution loop not running)", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "partial",
+        reachable: true,
+        realEndpoints: ["/api/v1/system/status", "/api/v1/execution/summary"],
+        missingEndpoints: ["/api/v1/risk/denials"],
+        mockSections: ["riskDenials"],
+        message: "",
+      },
+    }),
+    "dashboard",
+  );
+  assert.equal(state, "no_snapshot");
+});
+
+test("dashboard does not block when risk/denials endpoint resolves (execution loop running)", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "partial",
+        reachable: true,
+        realEndpoints: ["/api/v1/system/status", "/api/v1/risk/denials"],
+        missingEndpoints: [],
+        mockSections: [],
+        message: "",
+      },
+    }),
+    "dashboard",
+  );
+  assert.equal(state, null, "risk truth present — dashboard should render (null)");
+});
+
 test("degraded fires for execution panel when runtime_status is degraded", () => {
   const state = panelTruthRenderState(
     buildModel({
@@ -558,4 +597,81 @@ test("strategy panel renders not_wired when daemon explicitly reports mounted-bu
     "strategy",
   );
   assert.equal(state, "not_wired");
+});
+
+// ---------------------------------------------------------------------------
+// GUI-10: ops panel truth proof expansion
+//
+// The ops panel is the mode-change and action surface (ARM/DISARM/HALT).
+// Failure to block here under compromised truth allows an operator to execute
+// dangerous actions against stale or structurally incomplete system truth.
+//
+// Prior proof covered: stale, null (healthy), unimplemented, null (canonical).
+// These tests close the remaining fail-closed proof gaps for the ops panel.
+// ---------------------------------------------------------------------------
+
+// G1: /system/status missing in partial mode must block ops with no_snapshot.
+// ops hint is ["/system/status"]; when this endpoint goes to missingEndpoints,
+// isMissingPanelTruth must fire and block the action surface entirely.
+test("GUI-10: no_snapshot fires for ops panel when system/status is missing in partial mode", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "partial",
+        reachable: true,
+        realEndpoints: [],
+        missingEndpoints: ["/api/v1/system/status"],
+        mockSections: [],
+        message: "",
+      },
+    }),
+    "ops",
+  );
+  assert.equal(state, "no_snapshot", "ops must block with no_snapshot when system/status is unavailable");
+});
+
+// G2: runtime_status === "degraded" must block ops with degraded.
+// The ops panel is the action surface; degraded runtime truth must prevent
+// ARM/HALT/DISARM execution, not just degrade display of passive panels.
+test("GUI-10: degraded fires for ops panel when runtime_status is degraded", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      status: { runtime_status: "degraded" } as SystemModel["status"],
+    }),
+    "ops",
+  );
+  assert.equal(state, "degraded", "ops must block with degraded when runtime_status is degraded");
+});
+
+// G3: post_restart_recovery_state === "degraded" must also block ops with degraded.
+// truthRendering.ts:119 has two OR branches: runtime_status and post_restart_recovery_state.
+// The second branch was previously unproven for any panel. This proves it fires for ops.
+test("GUI-10: degraded fires for ops panel when post_restart_recovery_state is degraded", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      runtimeLeadership: { post_restart_recovery_state: "degraded" } as SystemModel["runtimeLeadership"],
+    }),
+    "ops",
+  );
+  assert.equal(state, "degraded", "ops must block with degraded when post_restart_recovery_state is degraded");
+});
+
+// G4: dataSource.reachable === false must return unavailable for ops.
+// truthRendering.ts:116 has three OR branches: !connected, !reachable, state==="disconnected".
+// The !reachable branch was previously unproven for any panel. This proves it fires for ops.
+test("GUI-10: unavailable fires for ops panel when dataSource is not reachable", () => {
+  const state = panelTruthRenderState(
+    buildModel({
+      dataSource: {
+        state: "partial",
+        reachable: false,
+        realEndpoints: [],
+        missingEndpoints: [],
+        mockSections: [],
+        message: "",
+      },
+    }),
+    "ops",
+  );
+  assert.equal(state, "unavailable", "ops must block with unavailable when dataSource.reachable is false");
 });
