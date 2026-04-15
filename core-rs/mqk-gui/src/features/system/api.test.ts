@@ -348,3 +348,55 @@ test("strategy summary no_db fails closed: endpoint in missingEndpoints and pane
     globalThis.fetch = originalFetch;
   }
 });
+
+test("DESKTOP-10: connected daemon with unavailable preflight — safety-state checks fail-closed", async () => {
+  // DESKTOP-10: when the daemon is reachable (status responds) but /api/v1/system/preflight
+  // is unavailable (404), the unavailablePreflight fallback must NOT inherit the
+  // "assume-safe" true defaults from DEFAULT_PREFLIGHT for safety-state checks.
+  // Presenting runtime_idle/strategy_disarmed/execution_disarmed/live_routing_disabled
+  // as true would cause PreflightGate to render them as "✓ Ready" — treating partial
+  // daemon reachability as if safety states were canonically confirmed from the daemon.
+  // All four must be false so the gate shows "Review required" (fail-closed).
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({
+        ...DEFAULT_STATUS,
+        daemon_reachable: true,
+        last_heartbeat: new Date().toISOString(),
+      });
+    }
+    // /api/v1/system/preflight intentionally not handled — falls through to 404.
+    return notFoundResponse();
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    // Daemon is reachable — status probe succeeded.
+    assert.equal(model.connected, true, "model must be connected when status probe succeeds");
+
+    // Preflight endpoint failed → unavailablePreflight is the fallback.
+    // daemon_reachable must reflect actual connectivity (true).
+    assert.equal(model.preflight.daemon_reachable, true, "daemon_reachable must reflect reachability");
+
+    // Safety-state checks must be false — not inherited as true from DEFAULT_PREFLIGHT.
+    // Each false means "this check is NOT confirmed" — fail-closed, not "condition is active".
+    assert.equal(model.preflight.runtime_idle, false, "runtime_idle must fail-closed when preflight truth is unavailable");
+    assert.equal(model.preflight.strategy_disarmed, false, "strategy_disarmed must fail-closed when preflight truth is unavailable");
+    assert.equal(model.preflight.execution_disarmed, false, "execution_disarmed must fail-closed when preflight truth is unavailable");
+    assert.equal(model.preflight.live_routing_disabled, false, "live_routing_disabled must fail-closed when preflight truth is unavailable");
+
+    // Blocker must explicitly name the condition so the operator knows preflight is absent.
+    assert.ok(
+      model.preflight.blockers.some((b) => b.toLowerCase().includes("preflight truth unavailable")),
+      "blocker must name that preflight truth is unavailable",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

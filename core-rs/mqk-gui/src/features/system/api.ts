@@ -70,6 +70,7 @@ import type {
   ConfigFingerprintSummary,
   ExecutionOrderRow,
   ExecutionSummary,
+  ModeChangeGuidanceResponse,
   OrderCausalityResponse,
   OrderChartResponse,
   OrderReplayResponse,
@@ -702,6 +703,17 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const unavailablePreflight: PreflightStatus = {
     ...DEFAULT_PREFLIGHT,
     daemon_reachable: connected,
+    // DESKTOP-10: Safety-state checks must fail-closed when preflight truth is unavailable.
+    // DEFAULT_PREFLIGHT defaults runtime_idle/strategy_disarmed/execution_disarmed/
+    // live_routing_disabled to true ("assume safe"). When the daemon is reachable but
+    // /api/v1/system/preflight fails, inheriting those true defaults causes PreflightGate
+    // to render these checks as "✓ Ready" — treating partial daemon reachability as if
+    // the safety states were canonically confirmed. Override to false so unconfirmed
+    // safety checks show "Review required" rather than a misleading green pass.
+    runtime_idle: false,
+    strategy_disarmed: false,
+    execution_disarmed: false,
+    live_routing_disabled: false,
     blockers: connected ? ["Backend preflight truth unavailable"] : ["Daemon unreachable"],
   };
   const unavailableExecutionSummary: ExecutionSummary = {
@@ -951,3 +963,16 @@ export async function fetchCausalityTrace(internalOrderId: string): Promise<Orde
 // Mode transitions require a controlled restart with configuration reload.
 // The change-system-mode action key returns 409 from /api/v1/ops/action
 // as a defense-in-depth rejection. Callers were removed in H-7.
+
+// ---------------------------------------------------------------------------
+// GUI-09: Mode-change guidance fetch (CC-03)
+// ---------------------------------------------------------------------------
+
+// GET /api/v1/ops/mode-change-guidance — mounted since CC-03.
+// Returns daemon-authoritative operator workflow for controlled restart-driven
+// mode changes. transition_permitted is always false (no hot switching).
+// Returns null only on network/fetch failure; callers must render an honest
+// unavailable notice rather than the old hardcoded "route not mounted" text.
+export async function fetchModeChangeGuidance(): Promise<ModeChangeGuidanceResponse | null> {
+  return tryFetchJson<ModeChangeGuidanceResponse>(["/api/v1/ops/mode-change-guidance"]);
+}
