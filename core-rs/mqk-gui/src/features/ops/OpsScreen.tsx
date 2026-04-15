@@ -1,9 +1,12 @@
+import { useEffect, useState } from "react";
 import { FieldSourceAuthority } from "../../components/common/FieldSourceAuthority";
 import { Panel } from "../../components/common/Panel";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
+import { fetchModeChangeGuidance } from "../system/api";
+import { normalizeModeChangeGuidance } from "../system/legacy";
 import { classifyFieldSource, type FieldEvidenceHints } from "../system/sourceAuthority";
 import { panelTruthRenderState } from "../system/truthRendering";
-import type { EnvironmentMode, OperatorActionDefinition, SystemModel } from "../system/types";
+import type { ModeChangeGuidanceResponse, OperatorActionDefinition, SystemModel } from "../system/types";
 
 function levelLabel(level: OperatorActionDefinition["level"]): string {
   switch (level) {
@@ -19,8 +22,6 @@ function levelLabel(level: OperatorActionDefinition["level"]): string {
       return "Level ?";
   }
 }
-
-const TARGET_MODES: EnvironmentMode[] = ["backtest", "paper", "live"];
 
 const MODE_FIELD_HINTS: Record<"environment" | "runtime" | "liveRouting" | "generation" | "sourceState", FieldEvidenceHints> = {
   // daemon_mode / environment comes from system/status and config-fingerprint — both runtime memory.
@@ -42,6 +43,15 @@ export function OpsScreen({
   onRunAction: (action: OperatorActionDefinition) => void;
 }) {
   const truthState = panelTruthRenderState(model, "ops");
+  const [guidance, setGuidance] = useState<ModeChangeGuidanceResponse | null>(null);
+  const [guidanceLoading, setGuidanceLoading] = useState(true);
+
+  useEffect(() => {
+    void fetchModeChangeGuidance().then((raw) => {
+      setGuidance(normalizeModeChangeGuidance(raw));
+      setGuidanceLoading(false);
+    });
+  }, []);
 
   // Hard-close on any compromised truth state: ops is the mode-change and action surface.
   // An operator must not be able to ARM, change mode, or execute actions under stale or
@@ -96,34 +106,97 @@ export function OpsScreen({
               />
             </div>
           </div>
-          {/* Mode-change buttons are disabled: /api/v1/ops/change-mode is not yet mounted on the
-              daemon. Mode transitions require a controlled restart with configuration reload — this
-              cannot be done via API in the current architecture. Buttons remain visible so the
-              operator knows the surface exists but cannot be misled into believing a click works. */}
-          <p className="panel-notice panel-notice-warn">
-            Mode transition is not yet available via the console. A controlled daemon restart with configuration reload is required. This route is not mounted.
-          </p>
-          <div className="mode-toggle-row">
-            {TARGET_MODES.map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                className={`mode-toggle ${model.status.environment === mode ? "is-active" : ""} ${mode === "live" ? "is-live" : ""}`}
-                disabled
-                aria-disabled="true"
-                title="Mode transition not available — daemon restart required"
-              >
-                <span>{mode.toUpperCase()}</span>
-                <small>{mode === "live" ? "controlled restart required" : "safe environment transition"}</small>
-              </button>
-            ))}
-          </div>
-          <ul className="check-list compact">
-            <li>Strategies should be disarmed before changing environment.</li>
-            <li>Execution should be disabled before restart.</li>
-            <li>Transport queues should be reviewed for backlog or orphaned claims.</li>
-            <li>Runtime generation and policy fingerprint will advance after successful transition.</li>
-          </ul>
+          {/* Mode-change buttons are disabled: mode transitions require a controlled daemon
+              restart with configuration reload — no hot switching is permitted.
+              Buttons remain visible so the operator knows the surface exists. */}
+          {guidanceLoading ? (
+            <p className="panel-notice">Loading mode-change guidance from daemon…</p>
+          ) : guidance === null ? (
+            <p className="panel-notice panel-notice-warn">
+              Mode-change guidance unavailable — /api/v1/ops/mode-change-guidance not reachable.
+              A controlled daemon restart with configuration reload is required for any mode change.
+            </p>
+          ) : (
+            <p className="panel-notice panel-notice-warn">
+              {guidance.transition_refused_reason}
+            </p>
+          )}
+          {guidance !== null && (
+            <div className="mode-toggle-row">
+              {guidance.transition_verdicts.map((entry) => {
+                const isActive = entry.verdict === "same_mode";
+                const verdictLabel = isActive ? "current mode" : entry.verdict.replace(/_/g, " ");
+                const isLive = entry.target_mode.startsWith("live");
+                return (
+                  <button
+                    key={entry.target_mode}
+                    type="button"
+                    className={`mode-toggle ${isActive ? "is-active" : ""} ${isLive ? "is-live" : ""}`}
+                    disabled
+                    aria-disabled="true"
+                    title={`${entry.verdict}: ${entry.reason}`}
+                  >
+                    <span>{entry.target_mode.toUpperCase()}</span>
+                    <small>{verdictLabel}</small>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {guidance !== null && guidance.preconditions.length > 0 && (
+            <div>
+              <strong className="check-list-heading">Required preconditions</strong>
+              <ul className="check-list compact">
+                {guidance.preconditions.map((p, i) => <li key={i}>{p}</li>)}
+              </ul>
+            </div>
+          )}
+          {guidance !== null && guidance.operator_next_steps.length > 0 && (
+            <div>
+              <strong className="check-list-heading">Operator next steps</strong>
+              <ol className="check-list compact">
+                {guidance.operator_next_steps.map((step, i) => <li key={i}>{step}</li>)}
+              </ol>
+            </div>
+          )}
+          {guidance !== null && (
+            <div className="metric-list compact-list">
+              <div><span>Parity evidence</span><strong>{guidance.parity_evidence_state}</strong></div>
+              <div><span>Live trust complete</span><strong>{guidance.live_trust_complete === null ? "—" : String(guidance.live_trust_complete)}</strong></div>
+            </div>
+          )}
+          {guidance !== null && (
+            <div>
+              <strong className="check-list-heading">Restart workflow</strong>
+              <div className="metric-list compact-list">
+                <div><span>State</span><strong>{guidance.restart_workflow.truth_state}</strong></div>
+                <div>
+                  <span>Pending intent</span>
+                  <strong>{guidance.restart_workflow.pending_intent !== null ? "yes" : "none"}</strong>
+                </div>
+              </div>
+              {guidance.restart_workflow.pending_intent !== null && (
+                <div className="metric-list compact-list">
+                  <div><span>From</span><strong>{guidance.restart_workflow.pending_intent.from_mode}</strong></div>
+                  <div><span>To</span><strong>{guidance.restart_workflow.pending_intent.to_mode}</strong></div>
+                  <div><span>Verdict</span><strong>{guidance.restart_workflow.pending_intent.transition_verdict}</strong></div>
+                  <div><span>Initiated by</span><strong>{guidance.restart_workflow.pending_intent.initiated_by}</strong></div>
+                  <div><span>At</span><strong>{guidance.restart_workflow.pending_intent.initiated_at_utc}</strong></div>
+                  {guidance.restart_workflow.pending_intent.note && (
+                    <div><span>Note</span><strong>{guidance.restart_workflow.pending_intent.note}</strong></div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+          {guidance === null && !guidanceLoading && (
+            <ul className="check-list compact">
+              <li>Strategies should be disarmed before changing environment.</li>
+              <li>Execution should be disabled before restart.</li>
+              <li>Transport queues should be reviewed for backlog or orphaned claims.</li>
+              <li>Runtime generation and policy fingerprint will advance after successful transition.</li>
+            </ul>
+          )}
         </div>
       </Panel>
 

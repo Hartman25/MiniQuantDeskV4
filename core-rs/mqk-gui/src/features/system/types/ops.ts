@@ -154,3 +154,63 @@ export interface OperatorActionReceipt {
   warnings: string[];
   blocking_failures: string[];
 }
+
+// ---------------------------------------------------------------------------
+// GUI-09: Mode-change guidance surface (CC-03)
+// GET /api/v1/ops/mode-change-guidance
+// ---------------------------------------------------------------------------
+
+/** Per-target canonical mode-transition verdict from the daemon state machine. */
+export interface ModeTransitionEntry {
+  /** Target mode label e.g. "live-shadow". */
+  target_mode: string;
+  /** One of: "same_mode" | "admissible_with_restart" | "refused" | "fail_closed". */
+  verdict: string;
+  /** Human-readable explanation of the verdict. */
+  reason: string;
+  /** Ordered operator preconditions. Non-empty only when verdict == "admissible_with_restart". */
+  preconditions: string[];
+}
+
+/** Durable restart workflow truth from sys_restart_intent. */
+export interface RestartWorkflowTruth {
+  /** "active" | "no_pending" | "backend_unavailable" */
+  truth_state: string;
+  pending_intent: {
+    intent_id: string;
+    /** Deployment mode at the time the intent was created. */
+    from_mode: string;
+    /** Intended target deployment mode. */
+    to_mode: string;
+    /** CC-03A canonical transition verdict string stored in the DB. */
+    transition_verdict: string;
+    initiated_by: string;
+    initiated_at_utc: string;
+    note: string;
+  } | null;
+}
+
+/**
+ * Response for GET /api/v1/ops/mode-change-guidance (CC-03).
+ *
+ * Provides the operator with the authoritative workflow for a controlled
+ * restart-driven mode change. transition_permitted is always false — there
+ * is no hot switching.
+ */
+export interface ModeChangeGuidanceResponse {
+  canonical_route: string;
+  current_mode: string;
+  transition_permitted: boolean;
+  transition_refused_reason: string;
+  /** Conditions that must be satisfied before the daemon can be safely restarted. */
+  preconditions: string[];
+  /** Ordered explicit steps the operator must follow for a safe mode transition. */
+  operator_next_steps: string[];
+  /** Per-target canonical transition verdicts from the daemon state machine. */
+  transition_verdicts: ModeTransitionEntry[];
+  restart_workflow: RestartWorkflowTruth;
+  /** "not_configured" | "absent" | "invalid" | "incomplete" | "complete" | "unavailable" */
+  parity_evidence_state: string;
+  /** null when parity evidence is absent/invalid. Always false in current builds. */
+  live_trust_complete: boolean | null;
+}
