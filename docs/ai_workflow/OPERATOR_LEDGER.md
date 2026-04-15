@@ -145,6 +145,7 @@ _Last reconciled: 2026-04-12 against committed repo state (commit a0b017d4, full
 - **OC-01/02** — `scenario_ops_control_oc01_oc02.rs`
 - **RT-01** — `scenario_route_contract_rt01.rs`
 - **EXEC-02** — `scenario_replace_cancel_chains_exec02.rs` (7 tests); `0035_oms_order_lifecycle_events.sql`; `order_lifecycle.rs`; orchestrator Phase 3b lifecycle hook
+- **AUTON-10** — `MASTER_COMMAND_BRIEF.md` "Live ops" posture corrected: autonomous intraday paper path classified as canonical MAIN; unattended live-capital caution preserved (2026-04-14)
 
 ### Disputed / needs targeted re-audit
 Use this section when a broad green proof exists but a source-level concern may still survive.

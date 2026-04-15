@@ -76,7 +76,8 @@ Keep this file compact and current. This is the top-level command map to give an
 - Alpha, economics, and business realism are still open questions.
 
 ### Live ops
-- Supervised paper/shadow-style work is more credible than unattended production use.
+- Autonomous intraday paper trading (Paper + Alpaca session controller) is the canonical MAIN path, proven for unattended intraday operation (AUTON-01, AC-01; see `autonomous_paper_ops.md`).
+- Unattended live-capital use is not yet proven or claimed.
 
 ### Maintainability
 - Several sink files remain too large and need staged decomposition later.
@@ -162,6 +163,7 @@ _(Patches not in the initial audit table above; confirmed by scenario-file prese
 | **OC-01/02** (ops control) | `scenario_ops_control_oc01_oc02.rs` |
 | **RT-01** (route contract) | `scenario_route_contract_rt01.rs` |
 | **EXEC-02** (replace/cancel lineage) | `scenario_replace_cancel_chains_exec02.rs` (7 tests E02-P01–P05+D01–D02); `0035_oms_order_lifecycle_events.sql`; `mqk-db/src/order_lifecycle.rs`; `orchestrator/lifecycle_events.rs`; Phase 3b hook |
+| **AUTON-10** (scope classification correction) | `MASTER_COMMAND_BRIEF.md` "Live ops" posture corrected: autonomous intraday paper path classified as canonical MAIN; unattended live-capital caution preserved (2026-04-14) |
 
 ## Default instructions for any serious AI task
 
