@@ -365,6 +365,12 @@ async fn gui_session_config_strategy_and_audit_surfaces_are_semantically_truthfu
         "daemon-runtime-paper-blocked-v1"
     );
     assert!(config["build_version"].is_string());
+    // OPTR-01: truth_state must be "no_db" when no DB pool is configured.
+    assert_eq!(
+        json_str(&config, "truth_state"),
+        "no_db",
+        "OPTR-01: config-fingerprint truth_state must be 'no_db' when DB pool is absent"
+    );
     assert!(
         config["risk_policy_version"].is_null(),
         "risk policy version must be null when canonical config fingerprint truth is unavailable"
@@ -646,9 +652,12 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
     // 2. Returns exactly the 7 supported action keys — no fantasy keys.
     // 3. Does NOT include change-system-mode (returns 409 from dispatcher).
     // 4. Each entry has all required fields.
-    // 5. Availability is state-correct: disarmed test state means
+    // 5. Availability is state-correct: disarmed paper+paper test state means
     //    arm-execution=enabled, disarm-execution=disabled,
-    //    start-system=enabled (idle), stop-system=disabled (not running),
+    //    start-system=disabled (idle but deployment not ready — paper+paper is
+    //      fail-closed per PT-TRUTH-01; deployment gate is now reflected in
+    //      the catalog per DESKTOP-10),
+    //    stop-system=disabled (not running),
     //    kill-switch=enabled (not halted),
     //    request-mode-change=enabled (not halted),
     //    cancel-mode-transition=disabled (no DB → no pending intent).
@@ -759,11 +768,17 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         "disarm-execution must have a disabled_reason in disarmed state"
     );
 
-    // Idle, not halted → start-system must be enabled.
+    // Idle but deployment not ready (paper+paper is fail-closed per PT-TRUTH-01).
+    // DESKTOP-10: start-system must be disabled when deployment_start_allowed=false,
+    // even if the runtime is idle and not halted.
     assert_eq!(
         by_key("start-system")["enabled"],
-        true,
-        "start-system must be enabled in idle test state"
+        false,
+        "start-system must be disabled in paper+paper test state (deployment not ready)"
+    );
+    assert!(
+        by_key("start-system")["disabled_reason"].is_string(),
+        "start-system must carry a disabled_reason explaining the deployment blocker"
     );
 
     // Not running → stop-system must be disabled.

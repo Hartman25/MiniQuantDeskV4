@@ -387,7 +387,7 @@ pub(crate) async fn ops_action(
                         } else {
                             vec![]
                         },
-                        audit_event_id: None,
+                        audit_event_id: audit_uuid.map(|id| id.to_string()),
                     },
                     pending_restart_intent: None,
                 };
@@ -443,7 +443,7 @@ pub(crate) async fn ops_action(
                         } else {
                             vec![]
                         },
-                        audit_event_id: None,
+                        audit_event_id: audit_uuid.map(|id| id.to_string()),
                     },
                     pending_restart_intent: None,
                 };
@@ -499,7 +499,7 @@ pub(crate) async fn ops_action(
                         } else {
                             vec![]
                         },
-                        audit_event_id: None,
+                        audit_event_id: audit_uuid.map(|id| id.to_string()),
                     },
                     pending_restart_intent: None,
                 };
@@ -908,6 +908,17 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
         false
     };
 
+    // DESKTOP-10: start-system must reflect the same deployment gate that
+    // start_execution_runtime enforces.  deployment_readiness() is a cheap
+    // in-memory read; every other readiness surface (preflight, status,
+    // session) already carries this truth.  Without this check, the catalog
+    // reports start-system=enabled for a paper+paper (or otherwise
+    // deployment-blocked) daemon that is idle and not halted — presenting a
+    // clickable "Start System" button to the operator while preflight shows
+    // an active blocker.
+    let dr = st.deployment_readiness();
+    let deployment_ready = dr.start_allowed;
+
     let actions = vec![
         ActionCatalogEntry {
             action_key: "arm-execution".to_string(),
@@ -947,11 +958,15 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             action_key: "start-system".to_string(),
             label: "Start System".to_string(),
             level: 1,
-            description: "Start the execution runtime. System must be idle to start.".to_string(),
+            description: "Start the execution runtime. System must be idle and deployment-ready to start.".to_string(),
             requires_reason: false,
             confirm_text: "Confirm: start execution runtime".to_string(),
-            enabled: idle && !halted,
-            disabled_reason: if halted {
+            enabled: idle && !halted && deployment_ready,
+            disabled_reason: if !deployment_ready {
+                dr.blocker
+                    .clone()
+                    .or_else(|| Some("Deployment is not start-ready.".to_string()))
+            } else if halted {
                 Some("Cannot start while system is halted.".to_string())
             } else if running {
                 Some("System is already running.".to_string())
