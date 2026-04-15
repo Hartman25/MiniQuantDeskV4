@@ -223,6 +223,7 @@ pub(crate) async fn ops_operator_timeline(State(st): State<Arc<AppState>>) -> Re
             run_id: Some(run_id.to_string()),
             detail: "CREATED".to_string(),
             provenance_ref: format!("runs:{}:started_at_utc", run_id),
+            audit_event_id: None,
         });
         if let Some(ts) = armed_at_utc {
             rows.push(OperatorTimelineRow {
@@ -231,6 +232,7 @@ pub(crate) async fn ops_operator_timeline(State(st): State<Arc<AppState>>) -> Re
                 run_id: Some(run_id.to_string()),
                 detail: "ARMED".to_string(),
                 provenance_ref: format!("runs:{}:armed_at_utc", run_id),
+                audit_event_id: None,
             });
         }
         if let Some(ts) = running_at_utc {
@@ -240,6 +242,7 @@ pub(crate) async fn ops_operator_timeline(State(st): State<Arc<AppState>>) -> Re
                 run_id: Some(run_id.to_string()),
                 detail: "RUNNING".to_string(),
                 provenance_ref: format!("runs:{}:running_at_utc", run_id),
+                audit_event_id: None,
             });
         }
         if let Some(ts) = stopped_at_utc {
@@ -249,6 +252,7 @@ pub(crate) async fn ops_operator_timeline(State(st): State<Arc<AppState>>) -> Re
                 run_id: Some(run_id.to_string()),
                 detail: "STOPPED".to_string(),
                 provenance_ref: format!("runs:{}:stopped_at_utc", run_id),
+                audit_event_id: None,
             });
         }
         if let Some(ts) = halted_at_utc {
@@ -258,6 +262,7 @@ pub(crate) async fn ops_operator_timeline(State(st): State<Arc<AppState>>) -> Re
                 run_id: Some(run_id.to_string()),
                 detail: "HALTED".to_string(),
                 provenance_ref: format!("runs:{}:halted_at_utc", run_id),
+                audit_event_id: None,
             });
         }
     }
@@ -300,6 +305,10 @@ pub(crate) async fn ops_operator_timeline(State(st): State<Arc<AppState>>) -> Re
             run_id: run_id.map(|id| id.to_string()),
             detail: event_type,
             provenance_ref: format!("audit_events:{}", event_id),
+            // OPTR-03: surface the raw audit event UUID as a first-class
+            // correlation key so consumers can join directly to
+            // /api/v1/audit/operator-actions without parsing provenance_ref.
+            audit_event_id: Some(event_id.to_string()),
         });
     }
 

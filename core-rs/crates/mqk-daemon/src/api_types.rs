@@ -147,6 +147,11 @@ pub struct OperatorTimelineRow {
     pub run_id: Option<String>,
     pub detail: String,
     pub provenance_ref: String,
+    /// OPTR-03: For `kind = "operator_action"` rows, the raw UUID string from
+    /// `audit_events.event_id`.  Allows direct stable correlation to
+    /// `/api/v1/audit/operator-actions` rows without parsing `provenance_ref`.
+    /// `None` for `kind = "runtime_transition"` rows (sourced from `runs`).
+    pub audit_event_id: Option<String>,
 }
 
 /// Response wrapper for `/api/v1/ops/operator-timeline`.
@@ -617,6 +622,16 @@ pub struct SessionStateResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigFingerprintResponse {
+    /// `"no_db"` = DB pool absent; `config_hash` is sourced from in-memory daemon config only —
+    /// no durable comparison baseline is available.  `runtime_generation_id` and
+    /// `last_restart_at` will be `null`.
+    ///
+    /// `"no_run"` = DB pool present but no durable run found; `config_hash` is sourced from
+    /// in-memory daemon config — same caveat as `"no_db"`.
+    ///
+    /// `"active"` = DB pool present and a durable run was found; `config_hash` is sourced
+    /// from that run's durable record and is authoritative.
+    pub truth_state: String,
     pub config_hash: String,
     pub adapter_id: String,
     pub risk_policy_version: Option<String>,
@@ -1622,6 +1637,12 @@ pub struct EventFeedRow {
     pub run_id: Option<String>,
     /// Stable provenance reference (equals `event_id`).
     pub provenance_ref: String,
+    /// OPS-11: For `kind = "operator_action"` and `kind = "signal_admission"` rows,
+    /// the raw UUID string from `audit_events.event_id`.  Allows direct stable correlation
+    /// to `/api/v1/audit/operator-actions` rows without parsing `event_id`.
+    /// `None` for `kind = "runtime_transition"` and `kind = "autonomous_session"` rows
+    /// (sourced from `runs` and `sys_autonomous_session_events` respectively).
+    pub audit_event_id: Option<String>,
 }
 
 /// Response wrapper for `GET /api/v1/events/feed`.
@@ -2343,10 +2364,25 @@ pub struct AlertAckRequest {
 }
 
 /// Response for POST /api/v1/alerts/triage/ack.
+///
+/// **Advisory semantics — not authoritative fault resolution.**
+///
+/// The ack records that an operator has acknowledged the alert class.
+/// It does **not** suppress the fault from `/api/v1/alerts/active` and does
+/// **not** resolve the underlying condition.  The alert remains active on the
+/// live surface until the fault condition itself clears, regardless of ack state.
+///
+/// `ack_scope` is always `"annotation_only"` to make this contract explicit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertAckResponse {
     pub canonical_route: String,
     pub alert_id: String,
     pub acked_at_utc: String,
     pub acked_by: String,
+    /// Always `"annotation_only"`.
+    ///
+    /// The ack is a durable operator annotation in `sys_alert_acks`.
+    /// It does not suppress or resolve the fault — the alert continues to
+    /// appear in `/api/v1/alerts/active` until the underlying condition clears.
+    pub ack_scope: String,
 }
