@@ -84,8 +84,17 @@ Keep this file compact and current. This is the top-level command map to give an
 
 ## Current MAIN remaining-work list
 
-_Last reconciled: 2026-04-12 against committed repo state (commit a0b017d4, full proof harness 17/17 lanes passed)._
+_Prior reconciliation snapshot: 2026-04-12, commit a0b017d4 (17/17 lanes passed). Current HEAD: 6bd208d (2026-04-14). No updated full proof run is documented against current HEAD; the prior snapshot remains the latest documented harness result._
 _Verification basis: scenario test files, production source modules, runbook files present in HEAD, and confirmed proof harness result. Scenario-file presence is necessary but not sufficient — the harness result is required for closure._
+
+### Closure taxonomy key
+
+| Label | Meaning |
+|---|---|
+| **HARNESS-BACKED** | Code + scenario test(s) committed; documented full harness pass explicitly covers the patch |
+| **SCENARIO-PRESENT** | Scenario file in committed HEAD; last documented harness pass (a0b017d4, 2026-04-12) covers it; not re-proven on any commit after that snapshot |
+| **POST-SNAPSHOT** | Code or doc committed after the last documented harness run (a0b017d4); harness status against current HEAD is not yet re-documented |
+| **DOC/WORKFLOW-ONLY** | Documentation or workflow-only change; no runtime proof required or applicable |
 
 ### Open — genuinely remaining
 
@@ -163,7 +172,14 @@ _(Patches not in the initial audit table above; confirmed by scenario-file prese
 | **OC-01/02** (ops control) | `scenario_ops_control_oc01_oc02.rs` |
 | **RT-01** (route contract) | `scenario_route_contract_rt01.rs` |
 | **EXEC-02** (replace/cancel lineage) | `scenario_replace_cancel_chains_exec02.rs` (7 tests E02-P01–P05+D01–D02); `0035_oms_order_lifecycle_events.sql`; `mqk-db/src/order_lifecycle.rs`; `orchestrator/lifecycle_events.rs`; Phase 3b hook |
-| **AUTON-10** (scope classification correction) | `MASTER_COMMAND_BRIEF.md` "Live ops" posture corrected: autonomous intraday paper path classified as canonical MAIN; unattended live-capital caution preserved (2026-04-14) |
+
+### Closed — doc/workflow only (no runtime proof required)
+
+_(No scenario file expected or applicable. Status is HARNESS-BACKED only in the sense that it is committed to HEAD; the doc change itself is the full deliverable.)_
+
+| Patch | Label | Note |
+|---|---|---|
+| **AUTON-10** | DOC/WORKFLOW-ONLY · POST-SNAPSHOT | `MASTER_COMMAND_BRIEF.md` "Live ops" posture corrected: autonomous intraday paper path classified as canonical MAIN; unattended live-capital caution preserved. Committed 2026-04-14, after last documented harness run. No runtime proof required. |
 
 ## Default instructions for any serious AI task
 

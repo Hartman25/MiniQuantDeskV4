@@ -76,7 +76,7 @@ Update this after audits, proof runs, patch landings, or major repo changes.
 
 ## Patch Ledger
 
-_Last reconciled: 2026-04-12 against committed repo state (commit a0b017d4, full proof harness 17/17 lanes passed)._
+_Prior reconciliation snapshot: 2026-04-12, commit a0b017d4 (17/17 lanes passed). Current HEAD: 6bd208d (2026-04-14). No updated full proof run is documented against current HEAD; the prior snapshot remains the latest documented harness result._
 
 ### Open / active MAIN patches
 
@@ -145,7 +145,14 @@ _Last reconciled: 2026-04-12 against committed repo state (commit a0b017d4, full
 - **OC-01/02** — `scenario_ops_control_oc01_oc02.rs`
 - **RT-01** — `scenario_route_contract_rt01.rs`
 - **EXEC-02** — `scenario_replace_cancel_chains_exec02.rs` (7 tests); `0035_oms_order_lifecycle_events.sql`; `order_lifecycle.rs`; orchestrator Phase 3b lifecycle hook
-- **AUTON-10** — `MASTER_COMMAND_BRIEF.md` "Live ops" posture corrected: autonomous intraday paper path classified as canonical MAIN; unattended live-capital caution preserved (2026-04-14)
+
+### Closed — doc/workflow only (no runtime proof required)
+
+Taxonomy: **DOC/WORKFLOW-ONLY** — documentation or workflow-only change; no scenario file expected or applicable. **POST-SNAPSHOT** if committed after the last documented harness run (a0b017d4, 2026-04-12).
+
+| Patch | Label | Note |
+|---|---|---|
+| **AUTON-10** | DOC/WORKFLOW-ONLY · POST-SNAPSHOT | `MASTER_COMMAND_BRIEF.md` posture correction; doc-only; committed 2026-04-14 (after a0b017d4 proof snapshot). No runtime proof required. |
 
 ### Disputed / needs targeted re-audit
 Use this section when a broad green proof exists but a source-level concern may still survive.
@@ -155,8 +162,8 @@ Use this section for findings retired by newer proof or newer source inspection.
 
 ## Evidence Ledger
 
-- **Latest repo snapshot:** committed HEAD a0b017d4db9a5c64133b179f925cbc4584f17f4e (2026-04-12); tree clean; no untracked files
-- **Latest full proof transcript:** `.proof/full_repo_proof_output.txt` — commit a0b017d4; 17/17 lanes PASSED; `audit_profile=full_db_backed_institutional_proof_audit`; `workspace_state=committed_repo_state`
+- **Latest repo snapshot:** committed HEAD 6bd208d (2026-04-14); prior documented clean snapshot a0b017d4 (2026-04-12)
+- **Latest full proof transcript:** `.proof/full_repo_proof_output.txt` — commit a0b017d4 (historical; 17/17 lanes PASSED; `audit_profile=full_db_backed_institutional_proof_audit`; `workspace_state=committed_repo_state`); no updated transcript documented for current HEAD
 - **Latest readiness lock:** `docs/INSTITUTIONAL_READINESS_LOCK.md`
 - **Latest scorecard:** `docs/INSTITUTIONAL_SCORECARD.md`
 - **Latest carried-forward audits:** update list/date
