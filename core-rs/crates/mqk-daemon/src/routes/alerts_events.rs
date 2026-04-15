@@ -303,6 +303,7 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
             detail: "CREATED".to_string(),
             run_id: Some(run_id_str.clone()),
             provenance_ref: format!("runs:{}:started_at_utc", run_id),
+            audit_event_id: None,
         });
         if let Some(ts) = armed_at_utc {
             rows.push(EventFeedRow {
@@ -312,6 +313,7 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
                 detail: "ARMED".to_string(),
                 run_id: Some(run_id_str.clone()),
                 provenance_ref: format!("runs:{}:armed_at_utc", run_id),
+                audit_event_id: None,
             });
         }
         if let Some(ts) = running_at_utc {
@@ -322,6 +324,7 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
                 detail: "RUNNING".to_string(),
                 run_id: Some(run_id_str.clone()),
                 provenance_ref: format!("runs:{}:running_at_utc", run_id),
+                audit_event_id: None,
             });
         }
         if let Some(ts) = stopped_at_utc {
@@ -332,6 +335,7 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
                 detail: "STOPPED".to_string(),
                 run_id: Some(run_id_str.clone()),
                 provenance_ref: format!("runs:{}:stopped_at_utc", run_id),
+                audit_event_id: None,
             });
         }
         if let Some(ts) = halted_at_utc {
@@ -342,6 +346,7 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
                 detail: "HALTED".to_string(),
                 run_id: Some(run_id_str.clone()),
                 provenance_ref: format!("runs:{}:halted_at_utc", run_id),
+                audit_event_id: None,
             });
         }
     }
@@ -386,6 +391,9 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
             detail: event_type,
             run_id: run_id.map(|id| id.to_string()),
             provenance_ref: format!("audit_events:{}", event_id),
+            // OPS-11: expose the raw audit UUID as a first-class field so consumers
+            // can join directly to /api/v1/audit/operator-actions without parsing event_id.
+            audit_event_id: Some(event_id.to_string()),
         });
     }
 
@@ -449,6 +457,9 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
             detail,
             run_id: run_id.map(|id| id.to_string()),
             provenance_ref: format!("audit_events:{}", event_id),
+            // OPS-11: signal_admission rows are also sourced from audit_events;
+            // expose the UUID so consumers can correlate to the full audit payload.
+            audit_event_id: Some(event_id.to_string()),
         });
     }
 
@@ -480,6 +491,7 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
             detail,
             run_id: row.run_id.map(|id| id.to_string()),
             provenance_ref: format!("sys_autonomous_session_events:{}", row.id),
+            audit_event_id: None,
         });
     }
 
@@ -726,6 +738,98 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
         _ => {}
     }
 
+    // Autonomous session signals — same source as /api/v1/alerts/active.
+    //
+    // The triage surface claims to have the same alert source as alerts/active.
+    // These signals are in-memory (no DB required) and must appear on both
+    // surfaces so operators see the same fault picture regardless of which
+    // route they consult.
+    match st.autonomous_session_truth().await {
+        AutonomousSessionTruth::Clear => {}
+        AutonomousSessionTruth::StartRefused { detail } => extra_signals.push((
+            "autonomous.session.start_refused",
+            "warning",
+            "system",
+            format!(
+                "Autonomous paper session start refused; controller will retry when conditions change. {detail}"
+            ),
+        )),
+        AutonomousSessionTruth::RecoveryRetrying {
+            resume_source,
+            detail,
+        } => extra_signals.push((
+            "autonomous.session.recovery_retrying",
+            "warning",
+            "system",
+            format!(
+                "Autonomous paper recovery retrying via {} truth; start remains fail-closed until WS continuity is restored. {detail}",
+                resume_source.as_str()
+            ),
+        )),
+        AutonomousSessionTruth::RecoverySucceeded {
+            resume_source,
+            detail,
+        } => extra_signals.push((
+            "autonomous.session.recovery_succeeded",
+            "info",
+            "system",
+            format!(
+                "Autonomous paper recovery restored continuity using {} truth. {detail}",
+                resume_source.as_str()
+            ),
+        )),
+        AutonomousSessionTruth::RecoveryFailed {
+            resume_source,
+            detail,
+        } => extra_signals.push((
+            "autonomous.session.recovery_failed",
+            "critical",
+            "system",
+            format!(
+                "Autonomous paper recovery failed resuming from {} truth; start blocked until continuity proven again. {detail}",
+                resume_source.as_str()
+            ),
+        )),
+        AutonomousSessionTruth::RunEndedUnexpectedly { detail } => extra_signals.push((
+            "autonomous.session.run_ended_unexpectedly",
+            "warning",
+            "system",
+            format!(
+                "Autonomous paper run ended unexpectedly; controller retry logic is active. {detail}"
+            ),
+        )),
+        AutonomousSessionTruth::StopFailed { detail } => extra_signals.push((
+            "autonomous.session.stop_failed",
+            "warning",
+            "system",
+            format!(
+                "Autonomous paper stop at session boundary failed; controller will retry while remaining fail-closed. {detail}"
+            ),
+        )),
+        AutonomousSessionTruth::StoppedAtBoundary { detail } => extra_signals.push((
+            "autonomous.session.stopped_at_boundary",
+            "info",
+            "system",
+            format!(
+                "Autonomous paper run stopped at the configured session boundary. {detail}"
+            ),
+        )),
+    }
+
+    // AUTON-PAPER-01: Day signal limit alert — same source as /api/v1/alerts/active.
+    if st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion
+        && st.day_signal_limit_exceeded()
+    {
+        extra_signals.push((
+            "autonomous.signal_limit.day_limit_reached",
+            "warning",
+            "system",
+            "Autonomous signal intake day limit reached; further signals are blocked \
+             until the next run start resets the counter (PT-AUTO-02)."
+                .to_string(),
+        ));
+    }
+
     // Load DB-backed ack records and incident linkages when DB is available.
     //
     // incident_map: alert_id → incident_id (first/most-recent incident that
@@ -816,10 +920,13 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
     let triage_note = if truth_state == "active" {
         "Alert source is real (same as /api/v1/alerts/active). \
          Ack state is DB-backed (sys_alert_acks). \
+         Ack is advisory (annotation_only): it does not suppress or resolve the fault; \
+         the alert remains active in /api/v1/alerts/active until the underlying condition clears. \
          Incident linkage is DB-backed (sys_incidents via linked_alert_id). \
          Assign/escalate lifecycle is not implemented."
     } else {
         "Alert source is real (same as /api/v1/alerts/active). \
+         Ack is advisory (annotation_only): it does not suppress or resolve the fault. \
          Ack state and incident linkage unavailable (no DB pool); all rows carry status=unacked."
     };
 
@@ -884,6 +991,10 @@ pub(crate) async fn alert_triage_ack(
                 alert_id: row.alert_id,
                 acked_at_utc: row.acked_at_utc.to_rfc3339(),
                 acked_by: row.acked_by,
+                // Advisory annotation only — does not suppress or resolve the
+                // fault.  The alert remains active in /api/v1/alerts/active
+                // until the underlying condition clears.
+                ack_scope: "annotation_only".to_string(),
             }),
         )
             .into_response(),

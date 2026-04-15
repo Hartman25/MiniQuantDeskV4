@@ -20,6 +20,7 @@ import type {
   FeedEvent,
   FillQualitySurface,
   FillRow,
+  ModeChangeGuidanceResponse,
   OpenOrderRow,
   OperatorActionDefinition,
   OperatorAlert,
@@ -627,6 +628,9 @@ export interface EventsFeedWrapper {
     kind: string;
     detail: string;
     run_id: string | null;
+    // OPS-11: present (non-null string) for operator_action and signal_admission rows;
+    // null/absent for runtime_transition and autonomous_session rows.
+    audit_event_id?: string | null;
   }>;
 }
 
@@ -936,4 +940,64 @@ export function paperJournalLaneNotice(truthState: PaperJournalTruthState): stri
     case "no_db": return "Unavailable: no database pool configured. Do not treat empty rows as authoritative.";
     case "unavailable": return "Endpoint unavailable.";
   }
+}
+
+// ---------------------------------------------------------------------------
+// GUI-09: Mode-change guidance normalizer (CC-03)
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate and narrow an unknown response from GET /api/v1/ops/mode-change-guidance
+ * to ModeChangeGuidanceResponse.
+ *
+ * Returns null for null, non-object, or structurally incomplete responses so
+ * callers can render an honest unavailable notice instead of partial data.
+ *
+ * Required fields (all must be present):
+ *   canonical_route, current_mode, operator_next_steps, transition_verdicts,
+ *   preconditions, restart_workflow.
+ *
+ * Exported for test isolation — pure function, no side effects.
+ */
+export function normalizeModeChangeGuidance(raw: unknown): ModeChangeGuidanceResponse | null {
+  if (raw == null || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (
+    typeof r["canonical_route"] !== "string" ||
+    typeof r["current_mode"] !== "string" ||
+    !Array.isArray(r["operator_next_steps"]) ||
+    !Array.isArray(r["transition_verdicts"]) ||
+    !Array.isArray(r["preconditions"]) ||
+    r["restart_workflow"] == null ||
+    typeof r["restart_workflow"] !== "object"
+  ) {
+    return null;
+  }
+  // restart_workflow must carry an explicit truth_state string.
+  // A present object without truth_state is structurally incomplete — fail closed.
+  const rw = r["restart_workflow"] as Record<string, unknown>;
+  if (typeof rw["truth_state"] !== "string") {
+    return null;
+  }
+  // If pending_intent is non-null, all fields consumed by OpsScreen must be
+  // structurally valid strings. A malformed non-null pending_intent must fail
+  // closed — it cannot be allowed to pass normalization and render undefined
+  // values into the UI.
+  const pi = rw["pending_intent"];
+  if (pi != null) {
+    if (typeof pi !== "object") return null;
+    const p = pi as Record<string, unknown>;
+    if (
+      typeof p["intent_id"] !== "string" ||
+      typeof p["from_mode"] !== "string" ||
+      typeof p["to_mode"] !== "string" ||
+      typeof p["transition_verdict"] !== "string" ||
+      typeof p["initiated_by"] !== "string" ||
+      typeof p["initiated_at_utc"] !== "string" ||
+      typeof p["note"] !== "string"
+    ) {
+      return null;
+    }
+  }
+  return raw as ModeChangeGuidanceResponse;
 }
