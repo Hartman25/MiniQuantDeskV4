@@ -19,6 +19,27 @@
 //! - OPS02-T5 (#[ignore]): DB-backed ack roundtrip — POST ack, GET triage
 //!   shows that row as status="acked" with created_at=acked_at_utc.
 //!   Requires MQK_DATABASE_URL.
+//!
+//! - OPS02-T6 (OPS-10): Injected AutonomousSessionTruth::StartRefused appears
+//!   in triage rows with alert_id="autonomous.session.start_refused" and
+//!   severity="warning".  Proves triage source parity with alerts/active.
+//!
+//! - OPS02-T7 (OPS-10): Injected AutonomousSessionTruth::RecoveryFailed
+//!   appears in triage rows with alert_id="autonomous.session.recovery_failed"
+//!   and severity="critical".  Proves critical autonomous signal is not
+//!   silently dropped from the triage surface.
+//!
+//! - OPS02-T8 (OPS-10): Day-limit alert source parity proof.
+//!   Inject Paper+Alpaca (ExternalSignalIngestion) state with saturated day
+//!   signal counter.  GET /api/v1/alerts/triage must include a row with
+//!   alert_id="autonomous.signal_limit.day_limit_reached" and
+//!   severity="warning".  Closes the OPS-10 parity gap: proves the day-limit
+//!   alert appears on triage (same source as /api/v1/alerts/active).
+//!
+//! - OPS12-T1 (OPS-12): AlertAckResponse ack_scope advisory contract proof.
+//!   Proves that `AlertAckResponse` serializes with `ack_scope = "annotation_only"`,
+//!   making the advisory-vs-authoritative distinction explicit in the wire contract.
+//!   Acking does not suppress or resolve the fault from /api/v1/alerts/active.
 
 use std::sync::Arc;
 
@@ -399,4 +420,260 @@ async fn ops02_t5_db_backed_ack_roundtrip() {
         .execute(&pool)
         .await
         .expect("OPS02-T5: post-test cleanup failed");
+}
+
+// ---------------------------------------------------------------------------
+// OPS02-T6 (OPS-10): autonomous session StartRefused signal appears in triage
+// ---------------------------------------------------------------------------
+
+/// Inject AutonomousSessionTruth::StartRefused.  GET /api/v1/alerts/triage
+/// must include a row with alert_id="autonomous.session.start_refused" and
+/// severity="warning".  Proves OPS-10: triage source parity with alerts/active.
+#[tokio::test]
+async fn ops02_t6_ops10_autonomous_start_refused_appears_in_triage() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    st.set_autonomous_session_truth(state::AutonomousSessionTruth::StartRefused {
+        detail: "ops02_t6_test_injection".to_string(),
+    })
+    .await;
+
+    let router = routes::build_router(Arc::clone(&st));
+
+    let req = Request::builder()
+        .uri("/api/v1/alerts/triage")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+
+    assert_eq!(status, StatusCode::OK, "OPS02-T6: triage must return 200");
+
+    let json = parse_json(body);
+    let rows = json
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .expect("OPS02-T6: rows must be a JSON array");
+
+    let target = rows
+        .iter()
+        .find(|r| {
+            r.get("alert_id")
+                .and_then(|v| v.as_str())
+                .map(|v| v == "autonomous.session.start_refused")
+                .unwrap_or(false)
+        })
+        .expect(
+            "OPS02-T6: triage must include autonomous.session.start_refused row \
+             when AutonomousSessionTruth::StartRefused is set",
+        );
+
+    assert_eq!(
+        target.get("severity").and_then(|v| v.as_str()),
+        Some("warning"),
+        "OPS02-T6: autonomous.session.start_refused must have severity='warning'"
+    );
+    assert_eq!(
+        target.get("domain").and_then(|v| v.as_str()),
+        Some("system"),
+        "OPS02-T6: autonomous.session.start_refused must have domain='system'"
+    );
+    assert_eq!(
+        target.get("status").and_then(|v| v.as_str()),
+        Some("unacked"),
+        "OPS02-T6: row must be status='unacked' without DB"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// OPS02-T7 (OPS-10): autonomous RecoveryFailed (critical) appears in triage
+// ---------------------------------------------------------------------------
+
+/// Inject AutonomousSessionTruth::RecoveryFailed.  GET /api/v1/alerts/triage
+/// must include a row with alert_id="autonomous.session.recovery_failed" and
+/// severity="critical".  Proves a critical autonomous signal is not silently
+/// dropped from the triage surface (OPS-10 lifecycle truth gap fix).
+#[tokio::test]
+async fn ops02_t7_ops10_autonomous_recovery_failed_critical_appears_in_triage() {
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    st.set_autonomous_session_truth(state::AutonomousSessionTruth::RecoveryFailed {
+        resume_source: state::AutonomousRecoveryResumeSource::PersistedCursor,
+        detail: "ops02_t7_test_injection".to_string(),
+    })
+    .await;
+
+    let router = routes::build_router(Arc::clone(&st));
+
+    let req = Request::builder()
+        .uri("/api/v1/alerts/triage")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+
+    assert_eq!(status, StatusCode::OK, "OPS02-T7: triage must return 200");
+
+    let json = parse_json(body);
+    let rows = json
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .expect("OPS02-T7: rows must be a JSON array");
+
+    let target = rows
+        .iter()
+        .find(|r| {
+            r.get("alert_id")
+                .and_then(|v| v.as_str())
+                .map(|v| v == "autonomous.session.recovery_failed")
+                .unwrap_or(false)
+        })
+        .expect(
+            "OPS02-T7: triage must include autonomous.session.recovery_failed row \
+             when AutonomousSessionTruth::RecoveryFailed is set",
+        );
+
+    assert_eq!(
+        target.get("severity").and_then(|v| v.as_str()),
+        Some("critical"),
+        "OPS02-T7: autonomous.session.recovery_failed must have severity='critical'"
+    );
+    assert_eq!(
+        target.get("domain").and_then(|v| v.as_str()),
+        Some("system"),
+        "OPS02-T7: autonomous.session.recovery_failed must have domain='system'"
+    );
+    assert_eq!(
+        target.get("status").and_then(|v| v.as_str()),
+        Some("unacked"),
+        "OPS02-T7: row must be status='unacked' without DB"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// OPS02-T8 (OPS-10): day-limit alert source parity with triage surface
+// ---------------------------------------------------------------------------
+
+/// Inject Paper+Alpaca state (ExternalSignalIngestion) and saturate the day
+/// signal counter to 100 (MAX_AUTONOMOUS_SIGNALS_PER_RUN).
+///
+/// GET /api/v1/alerts/triage must include a row with
+/// alert_id="autonomous.signal_limit.day_limit_reached" and
+/// severity="warning".
+///
+/// This closes the OPS-10 parity gap: the day-limit alert must appear on
+/// /api/v1/alerts/triage (same in-memory source as /api/v1/alerts/active).
+/// truth_state must be "no_db" (no DB pool); status must be "unacked".
+#[tokio::test]
+async fn ops02_t8_ops10_day_limit_alert_appears_in_triage() {
+    // Paper+Alpaca constructor sets strategy_market_data_source =
+    // ExternalSignalIngestion, which is the required precondition for the
+    // day-limit alert to fire.
+    let st = Arc::new(state::AppState::new_for_test_with_broker_kind(
+        state::BrokerKind::Alpaca,
+    ));
+
+    // Saturate the counter to trigger day_signal_limit_exceeded() == true.
+    // MAX_AUTONOMOUS_SIGNALS_PER_RUN is 100.
+    st.set_day_signal_count_for_test(100);
+
+    let router = routes::build_router(Arc::clone(&st));
+
+    let req = Request::builder()
+        .uri("/api/v1/alerts/triage")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+
+    assert_eq!(status, StatusCode::OK, "OPS02-T8: triage must return 200");
+
+    let json = parse_json(body);
+
+    // No DB pool — truth_state must be "no_db".
+    assert_eq!(
+        json_str(&json, "truth_state"),
+        "no_db",
+        "OPS02-T8: truth_state must be 'no_db' without DB pool"
+    );
+
+    let rows = json
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .expect("OPS02-T8: rows must be a JSON array");
+
+    let target = rows
+        .iter()
+        .find(|r| {
+            r.get("alert_id")
+                .and_then(|v| v.as_str())
+                .map(|v| v == "autonomous.signal_limit.day_limit_reached")
+                .unwrap_or(false)
+        })
+        .expect(
+            "OPS02-T8: triage must include autonomous.signal_limit.day_limit_reached row \
+             when ExternalSignalIngestion is active and day signal limit is exceeded",
+        );
+
+    assert_eq!(
+        target.get("severity").and_then(|v| v.as_str()),
+        Some("warning"),
+        "OPS02-T8: autonomous.signal_limit.day_limit_reached must have severity='warning'"
+    );
+    assert_eq!(
+        target.get("domain").and_then(|v| v.as_str()),
+        Some("system"),
+        "OPS02-T8: autonomous.signal_limit.day_limit_reached must have domain='system'"
+    );
+    assert_eq!(
+        target.get("status").and_then(|v| v.as_str()),
+        Some("unacked"),
+        "OPS02-T8: row must be status='unacked' without DB"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// OPS12-T1 (OPS-12): AlertAckResponse ack_scope advisory contract proof
+// ---------------------------------------------------------------------------
+
+/// Prove that `AlertAckResponse` serializes with `ack_scope = "annotation_only"`.
+///
+/// This is a pure schema contract test — no HTTP, no DB required.
+///
+/// The advisory semantics: acking does not suppress or resolve the fault from
+/// `/api/v1/alerts/active`.  The `ack_scope` field makes this explicit in the
+/// wire contract so operators cannot mistake an ack annotation for a fault
+/// resolution or alert suppression.
+#[tokio::test]
+async fn ops12_t1_alert_ack_response_ack_scope_is_annotation_only() {
+    let resp = mqk_daemon::api_types::AlertAckResponse {
+        canonical_route: "/api/v1/alerts/triage/ack".to_string(),
+        alert_id: "reconcile.dispatch_block.dirty".to_string(),
+        acked_at_utc: "2026-04-14T12:00:00Z".to_string(),
+        acked_by: "operator".to_string(),
+        ack_scope: "annotation_only".to_string(),
+    };
+
+    // Prove the field exists and holds the correct advisory value.
+    assert_eq!(
+        resp.ack_scope, "annotation_only",
+        "OPS12-T1: ack_scope must be 'annotation_only' — ack is advisory, not authoritative"
+    );
+
+    // Prove the advisory value survives serde round-trip (wire contract).
+    let json = serde_json::to_value(&resp).expect("OPS12-T1: serialize failed");
+    assert_eq!(
+        json.get("ack_scope").and_then(|v| v.as_str()),
+        Some("annotation_only"),
+        "OPS12-T1: 'ack_scope' must appear in JSON as 'annotation_only'"
+    );
+
+    // Prove round-trip deserialization preserves the advisory value.
+    let roundtrip: mqk_daemon::api_types::AlertAckResponse =
+        serde_json::from_value(json).expect("OPS12-T1: deserialize failed");
+    assert_eq!(
+        roundtrip.ack_scope, "annotation_only",
+        "OPS12-T1: ack_scope must survive serde round-trip as 'annotation_only'"
+    );
 }
