@@ -20,22 +20,25 @@ use crate::state::AppState;
 pub(crate) async fn system_config_fingerprint(
     State(st): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let latest_run = if let Some(db) = st.db.as_ref() {
-        mqk_db::fetch_latest_run_for_engine(
+    let (latest_run, truth_state) = if let Some(db) = st.db.as_ref() {
+        let run = mqk_db::fetch_latest_run_for_engine(
             db,
             super::DAEMON_ENGINE_ID,
             st.deployment_mode().as_db_mode(),
         )
         .await
         .ok()
-        .flatten()
+        .flatten();
+        let ts = if run.is_some() { "active" } else { "no_run" }.to_string();
+        (run, ts)
     } else {
-        None
+        (None, "no_db".to_string())
     };
 
     (
         StatusCode::OK,
         Json(ConfigFingerprintResponse {
+            truth_state,
             config_hash: latest_run
                 .as_ref()
                 .map(|run| run.config_hash.clone())

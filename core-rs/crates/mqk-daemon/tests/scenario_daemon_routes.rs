@@ -1072,6 +1072,14 @@ async fn api_config_and_suppression_surfaces_are_explicit_when_unavailable() {
     let (fp_status, fp_body) = call(router.clone(), fp_req).await;
     assert_eq!(fp_status, StatusCode::OK);
     let fp = parse_json(fp_body);
+    // OPTR-01: truth_state must be "no_db" when no DB pool is configured.
+    // "no_db" is the honest signal that config_hash came from in-memory config
+    // only — not from a durable run — so the operator cannot compare it against
+    // any historical baseline.
+    assert_eq!(
+        fp["truth_state"], "no_db",
+        "OPTR-01: config-fingerprint truth_state must be 'no_db' when DB pool is absent"
+    );
     assert_eq!(fp["config_hash"], "daemon-runtime-paper-blocked-v1");
     assert_eq!(fp["adapter_id"], "paper");
     assert!(
