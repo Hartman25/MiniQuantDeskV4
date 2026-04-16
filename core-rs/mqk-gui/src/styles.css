@@ -100,6 +100,32 @@ ul {
   color: var(--muted);
 }
 
+.truth-state-banner {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--warning);
+  background: rgba(245, 158, 11, 0.07);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.truth-state-banner strong {
+  color: var(--warning);
+  white-space: nowrap;
+}
+
+.truth-state-banner.truth-state-degraded {
+  border-color: var(--critical);
+  background: rgba(239, 68, 68, 0.07);
+}
+
+.truth-state-banner.truth-state-degraded strong {
+  color: var(--critical);
+}
+
 .eyebrow {
   color: #90a5c0;
   text-transform: uppercase;

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { SourceAuthority, SystemModel } from "./types.ts";
-import { panelTruthRenderState } from "./truthRendering.ts";
+import { isTruthHardBlock, panelTruthRenderState } from "./truthRendering.ts";
 
 type MinimalModel = Pick<SystemModel, "connected" | "dataSource" | "panelSources" | "status" | "runtimeLeadership">;
 
@@ -674,4 +674,32 @@ test("GUI-10: unavailable fires for ops panel when dataSource is not reachable",
     "ops",
   );
   assert.equal(state, "unavailable", "ops must block with unavailable when dataSource.reachable is false");
+});
+
+// --- GUI-SCREENFRAME-02: isTruthHardBlock discriminator ---
+// Hard-block states (data absent): unavailable, no_snapshot, unimplemented, not_wired.
+// Banner states (data present but compromised): stale, degraded.
+
+test("isTruthHardBlock: unavailable is a hard block", () => {
+  assert.equal(isTruthHardBlock("unavailable"), true);
+});
+
+test("isTruthHardBlock: no_snapshot is a hard block", () => {
+  assert.equal(isTruthHardBlock("no_snapshot"), true);
+});
+
+test("isTruthHardBlock: unimplemented is a hard block", () => {
+  assert.equal(isTruthHardBlock("unimplemented"), true);
+});
+
+test("isTruthHardBlock: not_wired is a hard block", () => {
+  assert.equal(isTruthHardBlock("not_wired"), true);
+});
+
+test("isTruthHardBlock: stale is NOT a hard block (banner state — data present)", () => {
+  assert.equal(isTruthHardBlock("stale"), false);
+});
+
+test("isTruthHardBlock: degraded is NOT a hard block (banner state — data present)", () => {
+  assert.equal(isTruthHardBlock("degraded"), false);
 });

@@ -127,6 +127,13 @@ export function panelTruthRenderState(model: SystemModel, panel: CorePanelKey): 
   return null;
 }
 
+// Returns true for states where no model data is available or trusted enough to display.
+// Returns false for states where cached model data is present but compromised (stale/degraded)
+// — those should render the domain body with a warning banner, not replace it entirely.
+export function isTruthHardBlock(state: TruthRenderState): boolean {
+  return state === "unavailable" || state === "no_snapshot" || state === "unimplemented" || state === "not_wired";
+}
+
 export function truthStateCopy(state: TruthRenderState): { title: string; detail: string } {
   switch (state) {
     case "unimplemented":
