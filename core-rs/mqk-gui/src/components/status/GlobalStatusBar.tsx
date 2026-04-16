@@ -2,6 +2,20 @@ import { formatDateTime, formatLatency, healthTone, runtimeTone } from "../../li
 import type { DataSourceDetail, SystemStatus } from "../../features/system/types";
 import { StatusPill } from "./StatusPill";
 
+// DESKTOP-12: WS continuity tone — separate from broker REST health.
+// "live" is the only proven state; all others are fail-closed warnings or critical.
+function wsContinuityTone(state: SystemStatus["alpaca_ws_continuity"]): "info" | "warning" | "critical" {
+  switch (state) {
+    case "live":
+      return "info";
+    case "gap_detected":
+      return "critical";
+    case "cold_start_unproven":
+    default:
+      return "warning";
+  }
+}
+
 interface GlobalStatusBarProps {
   status: SystemStatus;
   dataSource?: DataSourceDetail;
@@ -43,6 +57,18 @@ export function GlobalStatusBar({ status, dataSource }: GlobalStatusBarProps) {
         />
         <StatusPill label="Runtime" value={status.runtime_status} tone={runtimeTone(status.runtime_status)} />
         <StatusPill label="Broker" value={status.broker_status} tone={healthTone(status.broker_status)} />
+        {/* DESKTOP-12: WS continuity is a distinct truth from broker REST health.
+            Shown only when Alpaca WS applies — hidden for paper/synthetic deployments.
+            "cold_start_unproven" and "gap_detected" are start-blocking states that
+            broker_status alone does not distinguish from a healthy REST connection. */}
+        {status.alpaca_ws_continuity !== "not_applicable" && (
+          <StatusPill
+            label="WS Continuity"
+            value={status.alpaca_ws_continuity}
+            tone={wsContinuityTone(status.alpaca_ws_continuity)}
+            emphasis={status.alpaca_ws_continuity === "gap_detected" ? "loud" : "normal"}
+          />
+        )}
         <StatusPill label="Database" value={status.db_status} tone={healthTone(status.db_status)} />
         <StatusPill label="Market Data" value={status.market_data_health} tone={healthTone(status.market_data_health)} />
         <StatusPill label="Reconcile" value={status.reconcile_status} tone={healthTone(status.reconcile_status)} />
