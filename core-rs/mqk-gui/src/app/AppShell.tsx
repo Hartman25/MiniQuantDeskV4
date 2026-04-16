@@ -225,7 +225,9 @@ export function AppShell() {
             ) : null}
 
             <ActionReceiptBanner receipt={actionReceipt} />
-            <PreflightGate preflight={model.preflight} />
+            {activeScreen === "dashboard" && (
+              <PreflightGate preflight={model.preflight} />
+            )}
 
             <WorkspaceFrame
               title={screen.title}
