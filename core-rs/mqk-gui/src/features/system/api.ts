@@ -114,6 +114,30 @@ function objectOrFallback<T>(value: unknown, fallback: T): T {
   return value && typeof value === "object" ? (value as T) : fallback;
 }
 
+// DESKTOP-11: Structural guard for preflight responses.
+// objectOrFallback passes ANY non-null object through — a partial HTTP 200 body
+// that has the four safety-state booleans set to true but lacks blockers/warnings
+// would (a) show up to 4 "✓ Ready" checks with no daemon authority, and (b) crash
+// PreflightGate at preflight.blockers.length (TypeError on undefined).
+// Requiring only blockers/warnings arrays is insufficient: a partial body that has
+// blockers:[] + warnings:[] but is missing daemon_reachable (or any of the four
+// safety-state booleans) still passes and can surface false start-capable bootstrap
+// truth with no real daemon authority behind the positive values.
+// Require all five authority-critical boolean fields AND both arrays.
+function isStructurallyValidPreflight(data: unknown): data is PreflightStatus {
+  if (!data || typeof data !== "object") return false;
+  const p = data as Record<string, unknown>;
+  return (
+    typeof p["daemon_reachable"] === "boolean" &&
+    typeof p["runtime_idle"] === "boolean" &&
+    typeof p["strategy_disarmed"] === "boolean" &&
+    typeof p["execution_disarmed"] === "boolean" &&
+    typeof p["live_routing_disabled"] === "boolean" &&
+    Array.isArray(p["blockers"]) &&
+    Array.isArray(p["warnings"])
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Main model assembly
 // ---------------------------------------------------------------------------
@@ -847,13 +871,15 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
 
   return withClassifiedPanelSources({
     status: resolvedStatus,
-    // Preflight is fail-closed: if the canonical endpoint did not return a
-    // valid response, surface explicit unavailable state rather than a
-    // silently-derived fake preflight with no blockers.
-    preflight: objectOrFallback(
-      preflightR.ok ? preflightR.data : null,
-      unavailablePreflight,
-    ),
+    // Preflight is fail-closed: require structural completeness before accepting
+    // a daemon response. DESKTOP-10 closed the HTTP-failure path (ok:false →
+    // unavailablePreflight). DESKTOP-11 closes the partial-body path: an HTTP 200
+    // missing blockers/warnings arrays must also fall back to unavailablePreflight
+    // rather than passing through a partial object that crashes the gate or shows
+    // false-positive "✓ Ready" safety checks with no daemon authority.
+    preflight: isStructurallyValidPreflight(preflightR.ok ? preflightR.data : null)
+      ? (preflightR.data as PreflightStatus)
+      : unavailablePreflight,
     executionSummary: executionSummary ?? unavailableExecutionSummary,
     executionOrders,
     selectedTimeline,

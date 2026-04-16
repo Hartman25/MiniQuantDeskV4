@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { GlobalStatusBar } from "../../components/status/GlobalStatusBar.tsx";
 import { ConfigScreen } from "../config/ConfigScreen.tsx";
 import { RiskScreen } from "../risk/RiskScreen.tsx";
 import { StrategyScreen } from "../strategy/StrategyScreen.tsx";
@@ -349,6 +350,189 @@ test("strategy summary no_db fails closed: endpoint in missingEndpoints and pane
   }
 });
 
+test("DESKTOP-11: HTTP 200 with partial preflight body missing blockers/warnings — falls back to unavailablePreflight", async () => {
+  // DESKTOP-11 gap: objectOrFallback passes any non-null object through.
+  // A partial HTTP 200 body with positive safety-state booleans but no blockers/warnings
+  // would (a) show false-positive "✓ Ready" safety checks and (b) crash PreflightGate
+  // at preflight.blockers.length (TypeError on undefined).
+  // isStructurallyValidPreflight must reject this and apply unavailablePreflight.
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({
+        ...DEFAULT_STATUS,
+        daemon_reachable: true,
+        last_heartbeat: new Date().toISOString(),
+      });
+    }
+    if (path === "/api/v1/system/preflight") {
+      // Partial body: safety-state booleans present (and positive), but blockers/warnings absent.
+      return jsonResponse({
+        daemon_reachable: true,
+        runtime_idle: true,
+        strategy_disarmed: true,
+        execution_disarmed: true,
+        live_routing_disabled: true,
+        // blockers and warnings intentionally omitted — structural guard must reject this.
+      });
+    }
+    return notFoundResponse();
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    // Structural guard must reject the partial body — unavailablePreflight is applied.
+    // Safety-state checks must be false (fail-closed), not the partial body's true values.
+    assert.equal(model.preflight.runtime_idle, false, "runtime_idle must be false from unavailablePreflight, not partial body true");
+    assert.equal(model.preflight.strategy_disarmed, false, "strategy_disarmed must be false from unavailablePreflight");
+    assert.equal(model.preflight.execution_disarmed, false, "execution_disarmed must be false from unavailablePreflight");
+    assert.equal(model.preflight.live_routing_disabled, false, "live_routing_disabled must be false from unavailablePreflight");
+
+    // blockers must be a real array (from unavailablePreflight) — not undefined.
+    assert.ok(Array.isArray(model.preflight.blockers), "blockers must be an array (no crash risk)");
+    assert.ok(model.preflight.blockers.length > 0, "unavailablePreflight blocker must be present");
+    assert.ok(Array.isArray(model.preflight.warnings), "warnings must be an array (no crash risk)");
+
+    // daemon_reachable reflects actual connectivity (true — status probe succeeded).
+    assert.equal(model.preflight.daemon_reachable, true, "daemon_reachable must reflect actual connectivity");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DESKTOP-11: HTTP 200 with empty object preflight body — falls back to unavailablePreflight", async () => {
+  // A completely empty object ({}) is structurally incomplete.
+  // isStructurallyValidPreflight must reject it — unavailablePreflight is applied.
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({ ...DEFAULT_STATUS, daemon_reachable: true, last_heartbeat: new Date().toISOString() });
+    }
+    if (path === "/api/v1/system/preflight") {
+      return jsonResponse({}); // Empty object — no fields at all.
+    }
+    return notFoundResponse();
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    assert.equal(model.preflight.runtime_idle, false, "empty body: runtime_idle must be false (unavailablePreflight)");
+    assert.ok(Array.isArray(model.preflight.blockers), "empty body: blockers must be a real array");
+    assert.ok(model.preflight.blockers.length > 0, "empty body: unavailablePreflight blocker must be present");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DESKTOP-11: structurally complete HTTP 200 preflight is accepted — not replaced by unavailablePreflight", async () => {
+  // Positive proof: a structurally complete daemon response (has blockers and warnings as arrays)
+  // must pass through as-is. isStructurallyValidPreflight must accept it.
+  // This verifies the guard does not over-reject valid full responses.
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({ ...DEFAULT_STATUS, daemon_reachable: true, last_heartbeat: new Date().toISOString() });
+    }
+    if (path === "/api/v1/system/preflight") {
+      // Structurally complete: all required fields present including blockers/warnings arrays.
+      return jsonResponse({
+        ...DEFAULT_PREFLIGHT,
+        daemon_reachable: true,
+        db_reachable: true,
+        runtime_idle: true,
+        strategy_disarmed: true,
+        execution_disarmed: true,
+        live_routing_disabled: true,
+        blockers: [],
+        warnings: [],
+      });
+    }
+    return notFoundResponse();
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    // Daemon-confirmed safety state must be used — NOT overridden by unavailablePreflight.
+    assert.equal(model.preflight.runtime_idle, true, "daemon-confirmed runtime_idle must be accepted");
+    assert.equal(model.preflight.strategy_disarmed, true, "daemon-confirmed strategy_disarmed must be accepted");
+    assert.equal(model.preflight.execution_disarmed, true, "daemon-confirmed execution_disarmed must be accepted");
+    assert.equal(model.preflight.live_routing_disabled, true, "daemon-confirmed live_routing_disabled must be accepted");
+
+    // Daemon-confirmed empty blockers must be used — not overridden with unavailable blocker.
+    assert.ok(Array.isArray(model.preflight.blockers), "blockers must be an array");
+    assert.equal(model.preflight.blockers.length, 0, "daemon-confirmed empty blockers must not be replaced");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DESKTOP-11: HTTP 200 partial body with four positive safety booleans plus empty arrays but missing daemon_reachable — falls back to unavailablePreflight", async () => {
+  // Exact gap closed by DESKTOP-11 tightened guard:
+  // A body with blockers:[] + warnings:[] (passing the old array-only guard) plus all four
+  // safety-state booleans set to true, but missing daemon_reachable, can no longer pass.
+  // Without daemon_reachable, the partial body has no proven daemon authority but
+  // the old guard would have accepted it, surfacing runtime_idle=true etc. as if confirmed.
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({ ...DEFAULT_STATUS, daemon_reachable: true, last_heartbeat: new Date().toISOString() });
+    }
+    if (path === "/api/v1/system/preflight") {
+      // Partial body: four positive safety booleans + both empty arrays, daemon_reachable absent.
+      // Old guard (only checked arrays): this body passed through — false start-capable state.
+      // New guard (requires all 5 booleans + arrays): this body must be rejected.
+      return jsonResponse({
+        runtime_idle: true,
+        strategy_disarmed: true,
+        execution_disarmed: true,
+        live_routing_disabled: true,
+        blockers: [],
+        warnings: [],
+        // daemon_reachable intentionally omitted — structural guard must reject this.
+      });
+    }
+    return notFoundResponse();
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    // Guard must reject — unavailablePreflight is applied, not the partial body.
+    assert.equal(model.preflight.runtime_idle, false, "runtime_idle must be false (unavailablePreflight), not partial body true");
+    assert.equal(model.preflight.strategy_disarmed, false, "strategy_disarmed must be false (unavailablePreflight)");
+    assert.equal(model.preflight.execution_disarmed, false, "execution_disarmed must be false (unavailablePreflight)");
+    assert.equal(model.preflight.live_routing_disabled, false, "live_routing_disabled must be false (unavailablePreflight)");
+
+    // blockers must come from unavailablePreflight — not the partial body's empty array.
+    assert.ok(Array.isArray(model.preflight.blockers), "blockers must be an array");
+    assert.ok(model.preflight.blockers.length > 0, "unavailablePreflight blocker must be present — not partial body empty []");
+
+    // daemon_reachable reflects actual connectivity from the status probe.
+    assert.equal(model.preflight.daemon_reachable, true, "daemon_reachable must reflect actual connectivity");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("DESKTOP-10: connected daemon with unavailable preflight — safety-state checks fail-closed", async () => {
   // DESKTOP-10: when the daemon is reachable (status responds) but /api/v1/system/preflight
   // is unavailable (404), the unavailablePreflight fallback must NOT inherit the
@@ -399,4 +583,59 @@ test("DESKTOP-10: connected daemon with unavailable preflight — safety-state c
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// ---------------------------------------------------------------------------
+// DESKTOP-12: WS continuity pill in GlobalStatusBar
+//
+// broker_status alone conflates REST reachability with WS event-stream continuity.
+// For paper+alpaca, cold_start_unproven and gap_detected block execution start
+// even when broker_status is "healthy". The WS Continuity pill must be:
+//   - absent when alpaca_ws_continuity === "not_applicable" (synthetic/paper broker)
+//   - present with warning tone for cold_start_unproven
+//   - present with critical+loud for gap_detected (start-blocking terminal state)
+//   - present with info tone for live (proven continuity)
+// ---------------------------------------------------------------------------
+
+test("DESKTOP-12: WS continuity pill absent when not_applicable (synthetic broker / paper+paper)", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(GlobalStatusBar, {
+      status: { ...DEFAULT_STATUS, alpaca_ws_continuity: "not_applicable" },
+    }),
+  );
+  assert.doesNotMatch(html, /WS Continuity/i, "not_applicable: WS Continuity pill must not appear for synthetic broker");
+});
+
+test("DESKTOP-12: WS continuity pill present with warning tone for cold_start_unproven", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(GlobalStatusBar, {
+      status: { ...DEFAULT_STATUS, alpaca_ws_continuity: "cold_start_unproven" },
+    }),
+  );
+  assert.match(html, /WS Continuity/i, "cold_start_unproven: WS Continuity pill must be present");
+  assert.match(html, /tone-warning/, "cold_start_unproven: pill must carry warning tone");
+  // cold_start_unproven is a warning, not loud — operator must see it but it is not terminal.
+  assert.doesNotMatch(html, /emphasis-loud.*Cold Start Unproven|Cold Start Unproven.*emphasis-loud/, "cold_start_unproven: pill must not carry loud emphasis");
+});
+
+test("DESKTOP-12: WS continuity pill present with critical+loud emphasis for gap_detected", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(GlobalStatusBar, {
+      status: { ...DEFAULT_STATUS, alpaca_ws_continuity: "gap_detected" },
+    }),
+  );
+  assert.match(html, /WS Continuity/i, "gap_detected: WS Continuity pill must be present");
+  // gap_detected carries both critical tone and loud emphasis — it is a terminal start-blocking state.
+  assert.match(html, /tone-critical/, "gap_detected: pill must carry critical tone");
+  assert.match(html, /emphasis-loud/, "gap_detected: pill must carry loud emphasis");
+});
+
+test("DESKTOP-12: WS continuity pill present with info tone for live (proven continuity)", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(GlobalStatusBar, {
+      status: { ...DEFAULT_STATUS, alpaca_ws_continuity: "live" },
+    }),
+  );
+  assert.match(html, /WS Continuity/i, "live: WS Continuity pill must be present");
+  assert.match(html, /tone-info/, "live: pill must carry info tone (proven state)");
 });
