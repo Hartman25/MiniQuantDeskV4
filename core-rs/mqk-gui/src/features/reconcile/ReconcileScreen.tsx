@@ -1,25 +1,26 @@
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
+import { TruthStateBanner } from "../../components/common/TruthStateBanner";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime } from "../../lib/format";
-import { CausalityTraceViewer } from "../execution/components/CausalityTraceViewer";
-import { ExecutionReplayViewer } from "../execution/components/ExecutionReplayViewer";
-import { panelTruthRenderState } from "../system/truthRendering";
+import { isTruthHardBlock, panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
 export function ReconcileScreen({ model }: { model: SystemModel }) {
   const r = model.reconcileSummary;
   const truthState = panelTruthRenderState(model, "reconcile");
 
-  // Hard-close on any compromised truth state: stale mismatch counts and reconcile status
-  // reporting "clean" when drift exists is the worst possible false signal on this surface.
-  if (truthState !== null) {
+  // Hard-block when truth is structurally absent (unavailable, no_snapshot, unimplemented,
+  // not_wired). For stale/degraded, data is cached and present — show the domain body with
+  // a warning banner so the operator still sees reconcile context rather than a blank screen.
+  if (truthState !== null && isTruthHardBlock(truthState)) {
     return <TruthStateNotice state={truthState} />;
   }
 
   return (
     <div className="screen-grid desk-screen-grid">
+      {truthState !== null && <TruthStateBanner state={truthState} />}
       <div className="summary-grid summary-grid-four">
         <StatCard
           title="Reconcile Status"
@@ -74,13 +75,55 @@ export function ReconcileScreen({ model }: { model: SystemModel }) {
         />
       </Panel>
 
-      <div className="desk-component-grid">
-        <CausalityTraceViewer trace={model.causalityTrace} />
-        <ExecutionReplayViewer
-          replay={model.executionReplay}
-          selectedFrameIndex={model.executionReplay?.current_frame_index ?? 0}
-          onSelectFrame={() => undefined}
-        />
+      <div className="two-column-grid">
+        <Panel title="Drift by domain" subtitle="Mismatch count per domain — which class of disagreement is active.">
+          {model.mismatches.length === 0 ? (
+            <div className="empty-state">No active mismatches. Reconcile is clean across all domains.</div>
+          ) : (
+            <div className="metric-list">
+              {(["position", "order", "fill", "cash", "event"] as const).map((domain) => {
+                const rows = model.mismatches.filter((m) => m.domain === domain);
+                if (rows.length === 0) return null;
+                const hasCritical = rows.some((m) => m.status === "critical");
+                const hasWarning = rows.some((m) => m.status === "warning");
+                return (
+                  <div key={domain}>
+                    <span>{domain}</span>
+                    <strong style={{ color: hasCritical ? "var(--critical)" : hasWarning ? "var(--warning)" : "var(--good)" }}>
+                      {rows.length}
+                    </strong>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </Panel>
+
+        <Panel title="Active incidents" subtitle="Open and investigating incidents with reconcile impact.">
+          {model.incidents.filter((i) => i.status !== "resolved" && i.status !== "contained").length === 0 ? (
+            <div className="empty-state">No active incidents. All incidents resolved or contained.</div>
+          ) : (
+            <div className="list-stack">
+              {model.incidents
+                .filter((i) => i.status !== "resolved" && i.status !== "contained")
+                .map((incident) => (
+                  <div key={incident.incident_id} className="alert-card">
+                    <div className="alert-header">
+                      <strong>{incident.title}</strong>
+                      <span>{incident.severity} · {incident.status}</span>
+                    </div>
+                    {incident.impacted_subsystems.length > 0 && (
+                      <div className="summary-detail">Subsystems: {incident.impacted_subsystems.join(", ")}</div>
+                    )}
+                    {incident.reconcile_case_ids.length > 0 && (
+                      <div className="summary-detail">Reconcile cases: {incident.reconcile_case_ids.join(", ")}</div>
+                    )}
+                    <div className="summary-detail">Opened {formatDateTime(incident.opened_at)}</div>
+                  </div>
+                ))}
+            </div>
+          )}
+        </Panel>
       </div>
     </div>
   );
