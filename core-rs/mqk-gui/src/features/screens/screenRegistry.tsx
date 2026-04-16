@@ -81,6 +81,18 @@ export const MONITOR_GROUPS: Record<MonitorGroup, readonly ScreenKey[]> = {
   diagnostics: ["audit", "incidents", "alerts", "operatorTimeline", "runtime", "metrics", "topology", "transport", "artifacts", "risk"],
 };
 
+/**
+ * Curated screen set for each secondary-window role.
+ * Source of truth for RoleCommandStrip — control window uses LeftCommandRail (full set).
+ *
+ * execution: OMS state + outbox/inbox transport supervision + restart boundaries
+ * oversight: full diagnostics group (audit, forensics, incidents, alerts, supervision)
+ */
+export const ROLE_SCREENS: Record<"execution" | "oversight", readonly ScreenKey[]> = {
+  execution: ["execution", "transport", "runtime"],
+  oversight: MONITOR_GROUPS.diagnostics,
+};
+
 export const SCREEN_REGISTRY: Record<ScreenKey, ScreenDefinition> = {
   dashboard: {
     title: "Dashboard",

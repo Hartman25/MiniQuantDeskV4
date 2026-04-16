@@ -8,16 +8,16 @@ import { ActionReceiptBanner } from "../components/common/ActionReceiptBanner";
 import { BottomEventRail } from "../components/layout/BottomEventRail";
 import { LeftCommandRail } from "../components/layout/LeftCommandRail";
 import { RightOpsRail } from "../components/layout/RightOpsRail";
+import { RoleCommandStrip } from "../components/layout/RoleCommandStrip";
 import { WorkspaceFrame } from "../components/layout/WorkspaceFrame";
+import { WorkspaceToolbar } from "../components/layout/WorkspaceToolbar";
 import { PreflightGate } from "../components/preflight/PreflightGate";
 import { GlobalStatusBar } from "../components/status/GlobalStatusBar";
-import { SCREEN_REGISTRY, type ScreenKey } from "../features/screens/screenRegistry";
+import { ROLE_SCREENS, SCREEN_REGISTRY, type ScreenKey } from "../features/screens/screenRegistry";
 import { useOperatorModel } from "../features/system/useOperatorModel";
 import type { OperatorActionDefinition } from "../features/system/types";
 import { formatDateTime } from "../lib/format";
-
-type DeskMode = "single" | "two" | "three";
-type DeskRole = "control" | "execution" | "oversight";
+import type { DeskMode, DeskRole } from "./shellTypes";
 
 const DESK_MODE_STORAGE_KEY = "mqd.desktop.deskMode";
 
@@ -34,12 +34,14 @@ function detectDeskRole(): DeskRole {
   }
 }
 
+// Derives from ROLE_SCREENS so secondary-window defaults stay in sync with the
+// curated role-screen truth in screenRegistry.tsx (diagnostics[0] == "audit").
 function defaultScreenForRole(role: DeskRole): ScreenKey {
   switch (role) {
     case "execution":
-      return "execution";
+      return ROLE_SCREENS.execution[0];
     case "oversight":
-      return "risk";
+      return ROLE_SCREENS.oversight[0];
     case "control":
     default:
       return "dashboard";
@@ -111,15 +113,15 @@ async function applyDeskMode(mode: DeskMode) {
   }
 
   if (mode === "two") {
-    await ensureWindow("execution", "MiniQuantDesk - Execution", 1600, 1000);
+    await ensureWindow("execution", "Veritas Ledger — Execution", 1600, 1000);
     await closeWindow("oversight");
     console.log("Ensured execution, closed oversight");
     return;
   }
 
   if (mode === "three") {
-    await ensureWindow("execution", "MiniQuantDesk - Execution", 1600, 1000);
-    await ensureWindow("oversight", "MiniQuantDesk - Oversight", 1500, 960);
+    await ensureWindow("execution", "Veritas Ledger — Execution", 1600, 1000);
+    await ensureWindow("oversight", "Veritas Ledger — Oversight", 1500, 960);
     console.log("Ensured execution + oversight");
     return;
   }
@@ -203,47 +205,24 @@ export function AppShell() {
 
         <div className="workspace-layout">
           <main className="workspace-column">
-            <div className="workspace-toolbar panel">
-              <div>
-                <div className="eyebrow">Operator Session</div>
-                <h2>{screen.title}</h2>
-              </div>
+            <WorkspaceToolbar
+              loading={loading}
+              connected={model.connected}
+              lastUpdatedAtLabel={formatDateTime(model.lastUpdatedAt)}
+              screenTitle={screen.title}
+              deskRole={deskRole}
+              deskMode={deskMode}
+              onDeskModeChange={(mode) => void handleDeskModeChange(mode)}
+              onRefresh={() => void refresh()}
+            />
 
-              <div className="toolbar-metrics">
-                <span>{loading ? "Loading…" : model.connected ? "Connected" : "Disconnected"}</span>
-                <span>Last refresh: {formatDateTime(model.lastUpdatedAt)}</span>
-
-                {deskRole === "control" ? (
-                  <div className="desk-mode-toggle" role="group" aria-label="Desk mode">
-                    <button
-                      type="button"
-                      className={`action-button ghost ${deskMode === "single" ? "is-selected" : ""}`}
-                      onClick={() => void handleDeskModeChange("single")}
-                    >
-                      1 window
-                    </button>
-                    <button
-                      type="button"
-                      className={`action-button ghost ${deskMode === "two" ? "is-selected" : ""}`}
-                      onClick={() => void handleDeskModeChange("two")}
-                    >
-                      2 monitors
-                    </button>
-                    <button
-                      type="button"
-                      className={`action-button ghost ${deskMode === "three" ? "is-selected" : ""}`}
-                      onClick={() => void handleDeskModeChange("three")}
-                    >
-                      3 monitors
-                    </button>
-                  </div>
-                ) : null}
-
-                <button className="action-button ghost" onClick={() => void refresh()}>
-                  Refresh
-                </button>
-              </div>
-            </div>
+            {(deskRole === "execution" || deskRole === "oversight") ? (
+              <RoleCommandStrip
+                deskRole={deskRole}
+                activeScreen={activeScreen}
+                onSelect={setActiveScreen}
+              />
+            ) : null}
 
             <ActionReceiptBanner receipt={actionReceipt} />
             <PreflightGate preflight={model.preflight} />

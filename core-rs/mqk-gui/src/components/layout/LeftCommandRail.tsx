@@ -1,4 +1,4 @@
-import shieldLogo from "../../../../../assets/logo/miniquantdesk_logo_shield_terminal_transparent.png";
+import shieldLogo from "../../../../../assets/logo/veritas_ledger_shield.png";
 import { SCREEN_REGISTRY, type ScreenKey } from "../../features/screens/screenRegistry";
 
 export function LeftCommandRail({
@@ -44,11 +44,11 @@ export function LeftCommandRail({
         <div style={{ display: "flex", justifyContent: "center", width: "100%" }}>
           <img
             src={shieldLogo}
-            alt="MiniQuantDesk shield logo"
+            alt="Veritas Ledger shield"
           />
         </div>
 
-        <div className="eyebrow">MiniQuantDesk</div>
+        <div className="eyebrow">Veritas Ledger</div>
         <h1 className="brand-title">Operator Console</h1>
         <p className="brand-subtitle">Institution-grade trading control</p>
       </div>
