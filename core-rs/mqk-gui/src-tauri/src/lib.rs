@@ -39,8 +39,11 @@ pub fn run() {
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Veritas Ledger");
-                let _ = window.show();
-                let _ = window.set_focus();
+                // DESKTOP-LAUNCH-01: Window starts hidden (visible: false in
+                // tauri.conf.json). Show is triggered from the frontend via
+                // getCurrentWebviewWindow().show() after React mounts, so the
+                // operator never sees the blank white webview present during
+                // WebView2 init and JS bootstrap.
             }
 
             Ok(())

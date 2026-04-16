@@ -459,7 +459,10 @@ function Test-LocalPortOccupied {
 
 function Add-UniqueReason {
     param(
-        [Parameter(Mandatory = $true)][System.Collections.ArrayList]$Reasons,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.ArrayList]$Reasons,
+
         [string]$Reason
     )
 
@@ -472,13 +475,30 @@ function Add-UniqueReason {
 }
 
 function Join-Reasons {
-    param([string[]]$Reasons)
+    param(
+        $Reasons = $null
+    )
 
-    if ($null -eq $Reasons -or $Reasons.Count -eq 0) {
+    $normalized = @()
+    if ($null -ne $Reasons) {
+        $normalized = @($Reasons)
+    }
+
+    if ($normalized.Count -eq 0) {
         return 'none'
     }
 
-    return ($Reasons -join '; ')
+    $filtered = @(
+        $normalized | Where-Object {
+            $null -ne $_ -and ([string]$_).Trim().Length -gt 0
+        }
+    )
+
+    if ($filtered.Count -eq 0) {
+        return 'none'
+    }
+
+    return ($filtered -join '; ')
 }
 
 function Get-TradeReadinessReasons {
@@ -584,9 +604,7 @@ function Get-TradeReadinessReasons {
 function Get-BackendProbe {
     param(
         [Parameter(Mandatory = $true)][string]$BaseUrl,
-        [Parameter(Mandatory = $true)][string]$OperatorToken,
-        [ValidateSet('Observe', 'TradeReady')]
-        [string]$Mode = 'Observe'
+        [Parameter(Mandatory = $true)][string]$OperatorToken
     )
 
     $result = [ordered]@{
@@ -717,65 +735,63 @@ function Get-BackendProbe {
         return [pscustomobject]$result
     }
 
-    if ($Mode -eq 'TradeReady') {
-        # TradeReady mode requires a live Bearer auth round-trip before attaching.
-        # Observe/Attach mode is strictly idle-only and must not POST to operator routes.
-        # This probe calls the canonical dispatcher with an impossible action_key;
-        # 400 + unknown_action + accepted=false proves Bearer auth worked without
-        # changing runtime state.
-        try {
-            $authProbe = Invoke-JsonRequest `
-                -Method 'POST' `
-                -Url ($BaseUrl.TrimEnd('/') + '/api/v1/ops/action') `
-                -Headers @{ Authorization = "Bearer $OperatorToken" } `
-                -Body @{ action_key = '__veritas_launcher_auth_probe__' }
+    # Bearer auth round-trip required in all modes — both Observe and TradeReady.
+    # This probe calls the canonical dispatcher with an impossible action_key;
+    # 400 + unknown_action + accepted=false proves Bearer auth passed without
+    # mutating any runtime state.  A wrong or rotated token returns 401 and
+    # blocks the attach.
+    try {
+        $authProbe = Invoke-JsonRequest `
+            -Method 'POST' `
+            -Url ($BaseUrl.TrimEnd('/') + '/api/v1/ops/action') `
+            -Headers @{ Authorization = "Bearer $OperatorToken" } `
+            -Body @{ action_key = '__veritas_launcher_auth_probe__' }
 
-            $result.AuthProbeStatus = $authProbe.StatusCode
-            $result.AuthProbeDisposition = $authProbe.Json.disposition
-            if ($authProbe.StatusCode -ne 400 -or $authProbe.Json.disposition -ne 'unknown_action' -or $authProbe.Json.accepted -ne $false) {
-                $result.FailureReason = "unexpected auth probe response (status=$($authProbe.StatusCode), disposition=$($authProbe.Json.disposition), accepted=$($authProbe.Json.accepted))"
-                return [pscustomobject]$result
-            }
+        $result.AuthProbeStatus = $authProbe.StatusCode
+        $result.AuthProbeDisposition = $authProbe.Json.disposition
+        if ($authProbe.StatusCode -ne 400 -or $authProbe.Json.disposition -ne 'unknown_action' -or $authProbe.Json.accepted -ne $false) {
+            $result.FailureReason = "unexpected auth probe response (status=$($authProbe.StatusCode), disposition=$($authProbe.Json.disposition), accepted=$($authProbe.Json.accepted))"
+            return [pscustomobject]$result
         }
-        catch {
-            $details = Get-HttpFailureDetails -ErrorRecord $_
-            $result.AuthProbeStatus = $details.StatusCode
-            if ($details.Json -and $details.Json.disposition) {
-                $result.AuthProbeDisposition = $details.Json.disposition
-            }
-            # PowerShell 5.1: Invoke-WebRequest throws on ALL non-2xx responses,
-            # including 400.  400 + unknown_action + accepted=false is the expected
-            # contract response proving Bearer auth worked without mutating state.
-            # Treat it as success here and fall through to IdentityVerified.
-            # PS5.1 strict-mode guard: $details.Json may be $null when the
-            # WebException response stream was already consumed.  A 400 with
-            # no readable body is still the expected contract response — any
-            # 400 from this route proves Bearer auth passed (non-2xx means
-            # auth was checked; 401/503 are handled below).
-            if ($details.StatusCode -eq 400 -and ($null -eq $details.Json -or ($details.Json.disposition -eq 'unknown_action' -and $details.Json.accepted -eq $false))) {
-                # Expected auth probe response — do not set FailureReason.
-            }
-            elseif ($details.StatusCode -eq 401) {
-                $result.FailureReason = 'operator token was rejected by the daemon'
-                return [pscustomobject]$result
-            }
-            elseif ($details.StatusCode -eq 503) {
-                $result.FailureReason = 'daemon operator routes are fail-closed because operator auth is not fully configured'
-                return [pscustomobject]$result
-            }
-            elseif ($details.StatusCode -ne $null) {
-                $result.FailureReason = "auth probe failed with HTTP $($details.StatusCode)"
-                return [pscustomobject]$result
-            }
-            else {
-                $result.FailureReason = "auth probe failed: $($details.Message)"
-                return [pscustomobject]$result
-            }
+    }
+    catch {
+        $details = Get-HttpFailureDetails -ErrorRecord $_
+        $result.AuthProbeStatus = $details.StatusCode
+        if ($details.Json -and $details.Json.disposition) {
+            $result.AuthProbeDisposition = $details.Json.disposition
+        }
+        # PowerShell 5.1: Invoke-WebRequest throws on ALL non-2xx responses,
+        # including 400.  400 + unknown_action + accepted=false is the expected
+        # contract response proving Bearer auth worked without mutating state.
+        # Treat it as success here and fall through to IdentityVerified.
+        # PS5.1 strict-mode guard: $details.Json may be $null when the
+        # WebException response stream was already consumed.  A 400 with
+        # no readable body is still the expected contract response — any
+        # 400 from this route proves Bearer auth passed (non-2xx means
+        # auth was checked; 401/503 are handled below).
+        if ($details.StatusCode -eq 400 -and ($null -eq $details.Json -or ($details.Json.disposition -eq 'unknown_action' -and $details.Json.accepted -eq $false))) {
+            # Expected auth probe response — do not set FailureReason.
+        }
+        elseif ($details.StatusCode -eq 401) {
+            $result.FailureReason = 'operator token was rejected by the daemon'
+            return [pscustomobject]$result
+        }
+        elseif ($details.StatusCode -eq 503) {
+            $result.FailureReason = 'daemon operator routes are fail-closed because operator auth is not fully configured'
+            return [pscustomobject]$result
+        }
+        elseif ($details.StatusCode -ne $null) {
+            $result.FailureReason = "auth probe failed with HTTP $($details.StatusCode)"
+            return [pscustomobject]$result
+        }
+        else {
+            $result.FailureReason = "auth probe failed: $($details.Message)"
+            return [pscustomobject]$result
         }
     }
 
     $result.IdentityVerified = $true
-    $result.TradeReadinessReasons = Get-TradeReadinessReasons -Probe ([pscustomobject]$result)
+    $result.TradeReadinessReasons = @(Get-TradeReadinessReasons -Probe ([pscustomobject]$result))
     $result.TradeReady = ($result.TradeReadinessReasons.Count -eq 0)
     $result.FailureReason = $null
     return [pscustomobject]$result
@@ -786,15 +802,13 @@ function Wait-ForBackendState {
         [Parameter(Mandatory = $true)][string]$BaseUrl,
         [Parameter(Mandatory = $true)][string]$OperatorToken,
         [Parameter(Mandatory = $true)][int]$TimeoutSeconds,
-        [Parameter(Mandatory = $true)][bool]$RequireTradeReady,
-        [ValidateSet('Observe', 'TradeReady')]
-        [string]$Mode = 'Observe'
+        [Parameter(Mandatory = $true)][bool]$RequireTradeReady
     )
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $lastProbe = $null
     while ((Get-Date) -lt $deadline) {
-        $lastProbe = Get-BackendProbe -BaseUrl $BaseUrl -OperatorToken $OperatorToken -Mode $Mode
+        $lastProbe = Get-BackendProbe -BaseUrl $BaseUrl -OperatorToken $OperatorToken
         if ($lastProbe.IdentityVerified -and ((-not $RequireTradeReady) -or $lastProbe.TradeReady)) {
             return $lastProbe
         }
@@ -838,7 +852,18 @@ function Write-BackendSummary {
         return
     }
 
-    Write-LauncherWarn ('Backend is NOT trade-ready: ' + (Join-Reasons -Reasons $Probe.TradeReadinessReasons))
+    $tradeReasonText = if ($null -eq $Probe.TradeReadinessReasons -or @($Probe.TradeReadinessReasons).Count -eq 0) {
+    'none'
+}
+else {
+    @(
+        @($Probe.TradeReadinessReasons) | Where-Object {
+            $null -ne $_ -and ([string]$_).Trim().Length -gt 0
+        }
+    ) -join '; '
+}
+
+Write-LauncherWarn ('Backend is NOT trade-ready: ' + $tradeReasonText)
 }
 
 function Start-DaemonIfNeeded {
@@ -851,10 +876,21 @@ function Start-DaemonIfNeeded {
     )
 
     $requireTradeReady = $LauncherMode -eq 'TradeReady'
-    $existingProbe = Get-BackendProbe -BaseUrl $BaseUrl -OperatorToken $OperatorToken -Mode $LauncherMode
+    $existingProbe = Get-BackendProbe -BaseUrl $BaseUrl -OperatorToken $OperatorToken
     if ($existingProbe.IdentityVerified) {
         if ($requireTradeReady -and -not $existingProbe.TradeReady) {
-            throw "Verified canonical backend is not trade-ready. $(Join-Reasons -Reasons $existingProbe.TradeReadinessReasons)"
+            $existingReasonText = if ($null -eq $existingProbe.TradeReadinessReasons -or @($existingProbe.TradeReadinessReasons).Count -eq 0) {
+    'none'
+}
+else {
+    @(
+        @($existingProbe.TradeReadinessReasons) | Where-Object {
+            $null -ne $_ -and ([string]$_).Trim().Length -gt 0
+        }
+    ) -join '; '
+}
+
+throw "Verified canonical backend is not trade-ready. $existingReasonText"
         }
 
         $reuseLabel = if ($existingProbe.TradeReady) { 'trade-ready' } else { 'observe/attach' }
@@ -894,7 +930,7 @@ function Start-DaemonIfNeeded {
 
     $probe = $null
     try {
-        $probe = Wait-ForBackendState -BaseUrl $BaseUrl -OperatorToken $OperatorToken -TimeoutSeconds 30 -RequireTradeReady:$requireTradeReady -Mode $LauncherMode
+        $probe = Wait-ForBackendState -BaseUrl $BaseUrl -OperatorToken $OperatorToken -TimeoutSeconds 30 -RequireTradeReady:$requireTradeReady
         if (-not $probe.IdentityVerified) {
             throw "daemon did not reach verified canonical identity. $($probe.FailureReason)"
         }
@@ -903,14 +939,38 @@ function Start-DaemonIfNeeded {
         if (-not $process.HasExited) {
             $process | Stop-Process -Force -ErrorAction SilentlyContinue
         }
-        throw "mqk-daemon failed to reach required $((Get-ModeDisplayName -LauncherMode $LauncherMode)) launcher state. stdout=$stdoutLog stderr=$stderrLog"
+
+        $innerMsg = $null
+        if ($_.Exception -and $_.Exception.Message) {
+            $innerMsg = $_.Exception.Message
+        }
+        elseif ($_ ) {
+            $innerMsg = [string]$_
+        }
+        else {
+            $innerMsg = 'unknown launcher failure'
+        }
+
+        throw "mqk-daemon failed to reach required $((Get-ModeDisplayName -LauncherMode $LauncherMode)) launcher state: $innerMsg stdout=$stdoutLog stderr=$stderrLog"
     }
 
     if ($requireTradeReady -and -not $probe.TradeReady) {
         if (-not $process.HasExited) {
             $process | Stop-Process -Force -ErrorAction SilentlyContinue
         }
-        throw "Verified canonical backend started but is not trade-ready. $(Join-Reasons -Reasons $probe.TradeReadinessReasons) stdout=$stdoutLog stderr=$stderrLog"
+
+        $probeReasonText = if ($null -eq $probe.TradeReadinessReasons -or @($probe.TradeReadinessReasons).Count -eq 0) {
+            'none'
+        }
+        else {
+            @(
+                @($probe.TradeReadinessReasons) | Where-Object {
+                    $null -ne $_ -and ([string]$_).Trim().Length -gt 0
+                }
+            ) -join '; '
+        }
+
+        throw "Verified canonical backend started but is not trade-ready. $probeReasonText stdout=$stdoutLog stderr=$stderrLog"
     }
 
     return [pscustomobject]@{
@@ -922,48 +982,62 @@ function Start-DaemonIfNeeded {
     }
 }
 
-$repoRoot = Get-RepoRoot
-Import-LauncherEnvironmentFiles -RepoRoot $repoRoot
-$operatorToken = Resolve-RequiredOperatorToken
-$envSnapshot = Set-LauncherEnvironment -OperatorToken $operatorToken
-
+# DESKTOP-LAUNCH-01: Outer catch surfaces any startup failure in the console
+# window before it closes, so the operator can read the error instead of
+# seeing a flash-and-close with no diagnostic information.
 try {
-    Write-LauncherStep "Launcher mode: $(Get-ModeDisplayName -LauncherMode $Mode)"
-    Write-LauncherStep 'Resolving daemon binary'
-    $daemonExe = Ensure-DaemonBinary -RepoRoot $repoRoot -RebuildRequested:$Rebuild.IsPresent
+    $repoRoot = Get-RepoRoot
+    Import-LauncherEnvironmentFiles -RepoRoot $repoRoot
+    $operatorToken = Resolve-RequiredOperatorToken
+    $envSnapshot = Set-LauncherEnvironment -OperatorToken $operatorToken
 
-    $daemonInfo = Start-DaemonIfNeeded -DaemonExe $daemonExe -RepoRoot $repoRoot -BaseUrl $env:MQK_GUI_DAEMON_URL -OperatorToken $operatorToken -LauncherMode $Mode
-    $verified = $daemonInfo.Probe
+    try {
+        Write-LauncherStep "Launcher mode: $(Get-ModeDisplayName -LauncherMode $Mode)"
+        Write-LauncherStep 'Resolving daemon binary'
+        $daemonExe = Ensure-DaemonBinary -RepoRoot $repoRoot -RebuildRequested:$Rebuild.IsPresent
 
-    Write-BackendSummary -Probe $verified -LauncherMode $Mode
+        $daemonInfo = Start-DaemonIfNeeded -DaemonExe $daemonExe -RepoRoot $repoRoot -BaseUrl $env:MQK_GUI_DAEMON_URL -OperatorToken $operatorToken -LauncherMode $Mode
+        $verified = $daemonInfo.Probe
 
-    Write-LauncherStep 'Resolving desktop GUI binary'
-    $guiExe = Ensure-GuiBinary -RepoRoot $repoRoot -RebuildRequested:$Rebuild.IsPresent
+        Write-BackendSummary -Probe $verified -LauncherMode $Mode
 
-    Write-LauncherStep 'Launching desktop GUI against verified local daemon'
-    Start-Process -FilePath $guiExe -WorkingDirectory (Split-Path -Parent $guiExe) | Out-Null
+        Write-LauncherStep 'Resolving desktop GUI binary'
+        $guiExe = Ensure-GuiBinary -RepoRoot $repoRoot -RebuildRequested:$Rebuild.IsPresent
 
-    if ($daemonInfo.Started) {
-        if ($Mode -eq 'TradeReady') {
-            Write-LauncherSuccess "Started verified trade-ready local paper daemon (PID $($daemonInfo.ProcessId))"
+        Write-LauncherStep 'Launching desktop GUI against verified local daemon'
+        Start-Process -FilePath $guiExe -WorkingDirectory (Split-Path -Parent $guiExe) | Out-Null
+
+        if ($daemonInfo.Started) {
+            if ($Mode -eq 'TradeReady') {
+                Write-LauncherSuccess "Started verified trade-ready local paper daemon (PID $($daemonInfo.ProcessId))"
+            }
+            else {
+                Write-LauncherSuccess "Started verified local paper daemon (PID $($daemonInfo.ProcessId))"
+            }
+            Write-Host "[Veritas Ledger] stdout: $($daemonInfo.StdoutLog)" -ForegroundColor DarkGray
+            Write-Host "[Veritas Ledger] stderr: $($daemonInfo.StderrLog)" -ForegroundColor DarkGray
         }
         else {
-            Write-LauncherSuccess "Started verified local paper daemon (PID $($daemonInfo.ProcessId))"
+            Write-LauncherSuccess 'Verified local paper daemon was already running; GUI attached without starting runtime'
         }
-        Write-Host "[Veritas Ledger] stdout: $($daemonInfo.StdoutLog)" -ForegroundColor DarkGray
-        Write-Host "[Veritas Ledger] stderr: $($daemonInfo.StderrLog)" -ForegroundColor DarkGray
-    }
-    else {
-        Write-LauncherSuccess 'Verified local paper daemon was already running; GUI attached without starting runtime'
-    }
 
-    if ($Mode -eq 'TradeReady') {
-        Write-LauncherSuccess 'GUI opened in trade-ready mode against the verified canonical backend. Trading runtime remains idle until you explicitly start it.'
+        if ($Mode -eq 'TradeReady') {
+            Write-LauncherSuccess 'GUI opened in trade-ready mode against the verified canonical backend. Trading runtime remains idle until you explicitly start it.'
+        }
+        else {
+            Write-LauncherSuccess 'GUI opened in observe/attach mode against the verified canonical backend. No runtime auto-start was performed.'
+        }
     }
-    else {
-        Write-LauncherSuccess 'GUI opened in observe/attach mode against the verified canonical backend. No runtime auto-start was performed.'
+    finally {
+        Restore-EnvSnapshot -Snapshot $envSnapshot
     }
 }
-finally {
-    Restore-EnvSnapshot -Snapshot $envSnapshot
+catch {
+    Write-Host ''
+    Write-Host '[Veritas Ledger] LAUNCH FAILED' -ForegroundColor Red
+    Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host ''
+    Write-Host 'Review the error above. Press Enter to close this window.' -ForegroundColor Yellow
+    $null = Read-Host
+    exit 1
 }
