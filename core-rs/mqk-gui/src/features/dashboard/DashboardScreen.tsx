@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
@@ -6,7 +7,17 @@ import { formatDateTime, formatLatency } from "../../lib/format";
 import { MetricStripChart } from "../execution/components/MetricStripChart";
 import { panelTruthRenderState } from "../system/truthRendering";
 
+type DashTab = "posture" | "snapshots" | "desk";
+
+const TABS: { key: DashTab; label: string }[] = [
+  { key: "posture", label: "Session posture" },
+  { key: "snapshots", label: "Snapshots" },
+  { key: "desk", label: "Desk setup" },
+];
+
 export function DashboardScreen({ model }: { model: SystemModel }) {
+  const [activeTab, setActiveTab] = useState<DashTab>("posture");
+
   // Hard-close on any compromised truth state: dashboard shows armed/disarmed status, kill switch,
   // equity, and risk figures. A stale or degraded summary reads as normal — this is actively
   // misleading. Any non-null truth state blocks the entire surface.
@@ -29,6 +40,8 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
 
   return (
     <div className="screen-grid desk-screen-grid">
+
+      {/* Primary health signals — always visible */}
       <div className="summary-grid summary-grid-four">
         <StatCard
           title="Runtime"
@@ -64,29 +77,15 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
         />
       </div>
 
+      {/* Real-time runtime metrics — always visible */}
       <div className="metrics-grid desk-panel-row">
         {model.metrics.runtime.series.map((series) => (
           <MetricStripChart key={series.key} series={series} />
         ))}
       </div>
 
-      <div className="desk-panel-grid desk-panel-grid-primary">
-        <Panel title="Session posture" compact>
-          <div className="metric-list compact-list">
-            <div><span>Market session</span><strong>{model.sessionState.market_session}</strong></div>
-            <div><span>Trading window</span><strong>{model.sessionState.system_trading_window}</strong></div>
-            <div><span>Next change</span><strong>{formatDateTime(model.sessionState.next_session_change_at)}</strong></div>
-          </div>
-        </Panel>
-
-        <Panel title="Config fingerprint" compact>
-          <div className="metric-list compact-list">
-            <div><span>Config hash</span><strong>{model.configFingerprint.config_hash}</strong></div>
-            <div><span>Runtime generation</span><strong>{model.configFingerprint.runtime_generation_id}</strong></div>
-            <div><span>Risk policy</span><strong>{model.configFingerprint.risk_policy_version}</strong></div>
-          </div>
-        </Panel>
-
+      {/* Authoritative operator posture — always visible */}
+      <div className="two-column-grid">
         <Panel title="Execution pipeline summary" subtitle="System status and order-flow posture.">
           <div className="metric-list">
             <div><span>Strategy state</span><strong>{status.strategy_armed ? "Armed" : "Disarmed"}</strong></div>
@@ -110,63 +109,107 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
         </Panel>
       </div>
 
-      <Panel
-        title="Desk split recommendation"
-        subtitle="Two-monitor mode favors control + execution. Three-monitor mode gives risk / reconcile / audit their own dedicated view."
-        compact
-      >
-        <div className="desk-monitor-strip">
-          <div className="desk-monitor-card">
-            <strong>Monitor 1</strong>
-            <p>Runtime, global health, operator actions, alerts, and event supervision.</p>
-          </div>
-          <div className="desk-monitor-card">
-            <strong>Monitor 2</strong>
-            <p>Execution timelines, OMS state, traces, replay, open orders, and broker messages.</p>
-          </div>
-          <div className="desk-monitor-card optional-monitor">
-            <strong>Monitor 3</strong>
-            <p>Risk, portfolio, reconcile, incidents, audit evidence, and deeper forensics.</p>
-          </div>
+      {/* Secondary detail — tabbed to reduce persistent vertical pressure */}
+      <div className="dash-tabs">
+        <div className="dash-tab-strip" role="tablist">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === t.key}
+              className={`dash-tab-btn${activeTab === t.key ? " is-active" : ""}`}
+              onClick={() => setActiveTab(t.key)}
+            >
+              {t.label}
+            </button>
+          ))}
         </div>
-      </Panel>
 
-      <div className="desk-panel-grid desk-panel-grid-secondary">
-        <Panel title="Positions snapshot">
-          <div className="list-stack compact-list">
-            {positions.slice(0, 5).map((position) => (
-              <div key={`${position.strategy_id}-${position.symbol}`} className="list-row">
-                <strong>{position.symbol}</strong>
-                <span>{position.strategy_id}</span>
-                <span>{position.qty} sh</span>
-              </div>
-            ))}
-          </div>
-        </Panel>
+        <div className="dash-tab-body" role="tabpanel">
+          {activeTab === "posture" && (
+            <div className="two-column-grid">
+              <Panel title="Session posture" compact>
+                <div className="metric-list compact-list">
+                  <div><span>Market session</span><strong>{model.sessionState.market_session}</strong></div>
+                  <div><span>Trading window</span><strong>{model.sessionState.system_trading_window}</strong></div>
+                  <div><span>Next change</span><strong>{formatDateTime(model.sessionState.next_session_change_at)}</strong></div>
+                </div>
+              </Panel>
 
-        <Panel title="Open orders snapshot">
-          <div className="list-stack compact-list">
-            {openOrders.slice(0, 5).map((order) => (
-              <div key={order.internal_order_id} className="list-row">
-                <strong>{order.symbol}</strong>
-                <span>{order.status}</span>
-                <span>{order.filled_qty}/{order.requested_qty}</span>
-              </div>
-            ))}
-          </div>
-        </Panel>
+              <Panel title="Config fingerprint" compact>
+                <div className="metric-list compact-list">
+                  <div><span>Config hash</span><strong>{model.configFingerprint.config_hash}</strong></div>
+                  <div><span>Runtime generation</span><strong>{model.configFingerprint.runtime_generation_id}</strong></div>
+                  <div><span>Risk policy</span><strong>{model.configFingerprint.risk_policy_version}</strong></div>
+                </div>
+              </Panel>
+            </div>
+          )}
 
-        <Panel title="Recent fills snapshot">
-          <div className="list-stack compact-list">
-            {fills.slice(0, 5).map((fill) => (
-              <div key={fill.fill_id} className="list-row">
-                <strong>{fill.symbol}</strong>
-                <span>{fill.qty} @ {fill.price}</span>
-                <span>{formatDateTime(fill.at)}</span>
+          {activeTab === "snapshots" && (
+            <div className="three-column-grid">
+              <Panel title="Positions snapshot">
+                <div className="list-stack compact-list">
+                  {positions.slice(0, 5).map((position) => (
+                    <div key={`${position.strategy_id}-${position.symbol}`} className="list-row">
+                      <strong>{position.symbol}</strong>
+                      <span>{position.strategy_id}</span>
+                      <span>{position.qty} sh</span>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+
+              <Panel title="Open orders snapshot">
+                <div className="list-stack compact-list">
+                  {openOrders.slice(0, 5).map((order) => (
+                    <div key={order.internal_order_id} className="list-row">
+                      <strong>{order.symbol}</strong>
+                      <span>{order.status}</span>
+                      <span>{order.filled_qty}/{order.requested_qty}</span>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+
+              <Panel title="Recent fills snapshot">
+                <div className="list-stack compact-list">
+                  {fills.slice(0, 5).map((fill) => (
+                    <div key={fill.fill_id} className="list-row">
+                      <strong>{fill.symbol}</strong>
+                      <span>{fill.qty} @ {fill.price}</span>
+                      <span>{formatDateTime(fill.at)}</span>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+            </div>
+          )}
+
+          {activeTab === "desk" && (
+            <Panel
+              title="Desk split recommendation"
+              subtitle="Two-monitor mode favors control + execution. Three-monitor mode gives risk / reconcile / audit their own dedicated view."
+              compact
+            >
+              <div className="desk-monitor-strip">
+                <div className="desk-monitor-card">
+                  <strong>Monitor 1</strong>
+                  <p>Runtime, global health, operator actions, alerts, and event supervision.</p>
+                </div>
+                <div className="desk-monitor-card">
+                  <strong>Monitor 2</strong>
+                  <p>Execution timelines, OMS state, traces, replay, open orders, and broker messages.</p>
+                </div>
+                <div className="desk-monitor-card optional-monitor">
+                  <strong>Monitor 3</strong>
+                  <p>Risk, portfolio, reconcile, incidents, audit evidence, and deeper forensics.</p>
+                </div>
               </div>
-            ))}
-          </div>
-        </Panel>
+            </Panel>
+          )}
+        </div>
       </div>
     </div>
   );

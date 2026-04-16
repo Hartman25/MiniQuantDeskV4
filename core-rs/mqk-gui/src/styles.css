@@ -23,7 +23,7 @@ html,
 body,
 #root {
   margin: 0;
-  min-height: 100%;
+  height: 100%;
   background: radial-gradient(circle at top, #13233a 0%, #08111f 50%, #060d18 100%);
   color: var(--text);
 }
@@ -50,18 +50,22 @@ ul {
 }
 
 .app-shell {
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   display: grid;
   grid-template-columns: 280px 1fr;
+  grid-template-rows: 1fr;
 }
 
 .left-rail {
-  padding: 20px;
+  padding: 14px 16px;
   border-right: 1px solid var(--border);
   background: linear-gradient(180deg, rgba(9, 16, 29, 0.98), rgba(8, 17, 31, 0.92));
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .brand-card,
@@ -134,15 +138,17 @@ ul {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .global-status-bar {
-  padding: 14px 18px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--border);
   background: rgba(8, 17, 31, 0.92);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 .global-status-primary,
@@ -151,18 +157,18 @@ ul {
 .button-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 6px;
 }
 
 .status-pill {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 6px;
+  padding: 5px 10px;
   border-radius: 999px;
   border: 1px solid var(--border);
   background: rgba(15, 27, 45, 0.85);
-  font-size: 0.84rem;
+  font-size: 0.82rem;
 }
 
 .status-pill-label {
@@ -178,13 +184,13 @@ ul {
 }
 
 .status-metric {
-  padding: 8px 12px;
-  border-radius: 12px;
+  padding: 4px 10px;
+  border-radius: 10px;
   background: rgba(15, 27, 45, 0.72);
   border: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .metric-label,
@@ -205,23 +211,40 @@ ul {
 .workspace-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
-  gap: 18px;
-  padding: 18px;
+  grid-template-rows: 1fr;
+  gap: 14px;
+  padding: 14px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .workspace-column {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 10px;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
-.workspace-toolbar,
+.workspace-toolbar {
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .workspace-header,
-.preflight-panel,
 .bottom-rail,
 .right-rail {
   padding: 18px;
+}
+
+.preflight-panel {
+  padding: 12px 16px;
 }
 
 .toolbar-metrics {
@@ -232,7 +255,9 @@ ul {
 .workspace-frame {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
 }
 
 .workspace-body,
@@ -240,6 +265,18 @@ ul {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.workspace-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.bottom-rail {
+  flex-shrink: 0;
+  max-height: 150px;
+  overflow-y: auto;
 }
 
 .summary-grid {
@@ -256,9 +293,9 @@ ul {
 }
 
 .summary-value {
-  font-size: 1.55rem;
+  font-size: 1.3rem;
   font-weight: 800;
-  margin-top: 8px;
+  margin-top: 6px;
 }
 
 .two-column-grid {
@@ -271,8 +308,8 @@ ul {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 12px;
-  margin-bottom: 14px;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
 .panel-header.compact {
@@ -310,6 +347,8 @@ ul {
   flex-direction: column;
   gap: 18px;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .badge-grid {
@@ -356,34 +395,36 @@ ul {
 .checklist-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: 8px;
 }
 
 .check-card {
-  padding: 14px;
-  border-radius: 14px;
+  padding: 9px 12px;
+  border-radius: 12px;
   border: 1px solid var(--border);
   background: rgba(11, 21, 36, 0.75);
   display: flex;
-  gap: 12px;
+  gap: 10px;
   align-items: flex-start;
 }
 
 .check-icon {
-  width: 28px;
-  height: 28px;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
   display: inline-grid;
   place-items: center;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   font-weight: 700;
+  font-size: 0.78rem;
 }
 
 .preflight-notes {
-  margin-top: 16px;
+  margin-top: 10px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  gap: 10px;
 }
 
 .event-table,
@@ -1074,7 +1115,7 @@ ul {
 .global-status-primary,
 .global-status-secondary {
   display: flex;
-  gap: 10px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 
@@ -1237,6 +1278,51 @@ ul {
   }
 }
 
+/* ===== Role command strip (execution / oversight secondary windows) ===== */
+
+.role-command-strip {
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+}
+
+.role-strip-label {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.role-strip-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.role-strip-btn {
+  border: 1px solid var(--border);
+  background: rgba(10, 18, 31, 0.7);
+  color: var(--muted);
+  border-radius: 10px;
+  padding: 7px 14px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.role-strip-btn:hover {
+  background: rgba(15, 28, 47, 0.9);
+  border-color: rgba(84, 122, 199, 0.45);
+  color: var(--text);
+}
+
+.role-strip-btn.is-active {
+  background: rgba(19, 42, 67, 0.95);
+  border-color: rgba(59, 130, 246, 0.55);
+  color: var(--text);
+}
+
 /* ===== Brand block institutional styling ===== */
 
 .brand-block {
@@ -1244,8 +1330,8 @@ ul {
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: 22px 18px;
-  gap: 6px;
+  padding: 14px 16px;
+  gap: 4px;
 }
 
 .brand-block .eyebrow {
@@ -1264,7 +1350,7 @@ ul {
 }
 
 .brand-block .brand-subtitle {
-  margin-top: 8px;
+  margin-top: 4px;
   font-size: 0.82rem;
   line-height: 1.35;
   color: var(--muted);
@@ -1274,10 +1360,10 @@ ul {
 
 .brand-block img {
   display: block;
-  width: 112px;
-  height: 112px;
+  width: 68px;
+  height: 68px;
   object-fit: contain;
-  margin: 0 auto 12px auto;
+  margin: 0 auto 6px auto;
   filter: drop-shadow(0 10px 22px rgba(0, 0, 0, 0.35));
   background: transparent;
 }
@@ -1330,10 +1416,48 @@ ul {
   border-color: rgba(49, 233, 129, 0.45);
 }
 
-/* === MiniQuantDesk logo glow === */
+/* === Veritas Ledger logo glow === */
 
 .brand-block img {
   filter:
     drop-shadow(0 0 6px rgba(0,180,255,0.25))
     drop-shadow(0 0 12px rgba(0,180,255,0.15));
+}
+
+/* ===== Dashboard secondary tabs ===== */
+
+.dash-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.dash-tab-strip {
+  display: flex;
+  gap: 4px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 14px;
+}
+
+.dash-tab-btn {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 10px;
+  padding: 7px 16px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dash-tab-btn:hover {
+  color: var(--text);
+  background: rgba(15, 27, 45, 0.6);
+}
+
+.dash-tab-btn.is-active {
+  color: var(--text);
+  border-color: var(--border);
+  background: rgba(15, 27, 45, 0.92);
 }
