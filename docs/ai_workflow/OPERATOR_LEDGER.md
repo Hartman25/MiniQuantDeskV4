@@ -76,21 +76,27 @@ Update this after audits, proof runs, patch landings, or major repo changes.
 
 ## Patch Ledger
 
-_Prior reconciliation snapshot: 2026-04-12, commit a0b017d4 (17/17 lanes passed). Current HEAD: 6bd208d (2026-04-14). No updated full proof run is documented against current HEAD; the prior snapshot remains the latest documented harness result._
+_Last documented full proof snapshot: 2026-04-14, commit 236118b656984f4132539a3dfb99a4d2c3d0bd10 (17/17 lanes PASSED; full DB-backed institutional proof). Current HEAD: a8905aa. HEAD is 14 commits post-snapshot; no updated full proof run is documented against current HEAD._
 
 ### Open / active MAIN patches
 
-| Patch | Status |
-|---|---|
-| **RUNTIME-LONGRUN-01** | open — long-run runtime durability |
-| **CTRL-AUTH-01** | open — operator auth controls |
-| **DATA-INTEGRITY-01** | open — data integrity enforcement |
-| **EXEC-PROTECT-01** | open — execution protection controls |
-| **CORP-ACT-01** | open — corporate actions handling |
+_No MAIN patches currently outstanding following LEDGER-RECLASS-01 reclassification (2026-04-15)._
 
 **Conditional only:** RESEARCH-NON-EQ-01 (open only if non-equity canonical surfaces are mounted)
 
 **Non-blocking follow-up only:** MT-07 (decomposition; does not block any MAIN lane)
+
+### Closed — patch-local re-audit confirmed (2026-04-15)
+
+Implementation and targeted scenario proof exist in committed HEAD. Closure is patch-local only: scenario files and real implementation are committed; no new full-harness proof run has been documented against current HEAD. HEAD is post-snapshot relative to 236118b (2026-04-14).
+
+| Patch | Proof artifacts (committed HEAD) | Scope note |
+|---|---|---|
+| **RUNTIME-LONGRUN-01** | `mqk-daemon/tests/scenario_runtime_longrun_01.rs` (LR-01..LR-06, 6 pure in-process); `mqk-runtime/tests/scenario_runtime_longrun_01.rs` (LR-RT-01..LR-RT-03, 3 DB-backed; skip without `MQK_DATABASE_URL`) | Repeated-cycle runtime ingest / cursor / idempotency invariants; CI-11 guard passed. |
+| **CTRL-AUTH-01** | `mqk-daemon/tests/scenario_ctrl_auth_01.rs` (CA-01..CE-03, 21 pure in-process) | Control-plane authority consistency: arm/disarm surfaces, kill-switch semantics, auth fail-closed, idempotency, no stale routes. |
+| **DATA-INTEGRITY-01** | `mqk-testkit/tests/scenario_data_integrity_01.rs` (DI-01..DI-04, 4 pure); `mqk-testkit/tests/scenario_data_integrity_01_db.rs` (DB-DI-01..DB-DI-03, 3 DB-backed; skip without `MQK_DATABASE_URL`) | Multi-cycle idempotency, duplicate-event convergence, reconcile halt semantics, D2 crash-recovery alignment. |
+| **EXEC-PROTECT-01** | `mqk-testkit/tests/scenario_exec_protect_01.rs` (EP-UNSAFE..EP-STALE, 11 pure in-process) | Unified execution-protection gate ordering for submit, cancel, and replace; closes GAP-A/B/C left by prior per-operation coverage. |
+| **CORP-ACT-01** | `mqk-testkit/tests/scenario_corp_act_01.rs` (CA-01..CA-04, 4 pure in-process) | **Scope: backtest/accounting seam only.** Split-adjustment economic neutrality, `ForbidPeriods` boundary halt, explicit drift visibility. Live OMS corp-action path is not wired; B7 separately proves operator surface honesty (`corp_actions_screening = "not_wired"`). |
 
 ### Closed — committed-state code/test proof verified (2026-04-12)
 
@@ -148,11 +154,11 @@ _Prior reconciliation snapshot: 2026-04-12, commit a0b017d4 (17/17 lanes passed)
 
 ### Closed — doc/workflow only (no runtime proof required)
 
-Taxonomy: **DOC/WORKFLOW-ONLY** — documentation or workflow-only change; no scenario file expected or applicable. **POST-SNAPSHOT** if committed after the last documented harness run (a0b017d4, 2026-04-12).
+Taxonomy: **DOC/WORKFLOW-ONLY** — documentation or workflow-only change; no scenario file expected or applicable. **POST-SNAPSHOT** if committed after the last documented harness run (236118b656984f4132539a3dfb99a4d2c3d0bd10, 2026-04-14; see `.proof/proof_snapshot.json`).
 
 | Patch | Label | Note |
 |---|---|---|
-| **AUTON-10** | DOC/WORKFLOW-ONLY · POST-SNAPSHOT | `MASTER_COMMAND_BRIEF.md` posture correction; doc-only; committed 2026-04-14 (after a0b017d4 proof snapshot). No runtime proof required. |
+| **AUTON-10** | DOC/WORKFLOW-ONLY · POST-SNAPSHOT | `MASTER_COMMAND_BRIEF.md` posture correction; doc-only; committed 2026-04-14 (post-snapshot per `.proof/proof_snapshot.json`). No runtime proof required. |
 
 ### Disputed / needs targeted re-audit
 Use this section when a broad green proof exists but a source-level concern may still survive.
@@ -162,8 +168,9 @@ Use this section for findings retired by newer proof or newer source inspection.
 
 ## Evidence Ledger
 
-- **Latest repo snapshot:** committed HEAD 6bd208d (2026-04-14); prior documented clean snapshot a0b017d4 (2026-04-12)
-- **Latest full proof transcript:** `.proof/full_repo_proof_output.txt` — commit a0b017d4 (historical; 17/17 lanes PASSED; `audit_profile=full_db_backed_institutional_proof_audit`; `workspace_state=committed_repo_state`); no updated transcript documented for current HEAD
+- **Latest repo snapshot:** committed HEAD a8905aa; last documented clean proof snapshot commit 236118b656984f4132539a3dfb99a4d2c3d0bd10 (2026-04-14); HEAD is 14 commits post-snapshot
+- **Latest full proof transcript:** `.proof/full_repo_proof_output.txt` — commit 236118b656984f4132539a3dfb99a4d2c3d0bd10 (2026-04-14; 17/17 lanes PASSED; `audit_profile=full_db_backed_institutional_proof_audit`; `workspace_state=committed_repo_state`)
+- **Machine-readable proof provenance:** `.proof/proof_snapshot.json` (`schema_version=proof-snapshot-v1`); structured extraction of the snapshot above; no updated run documented for HEAD
 - **Latest readiness lock:** `docs/INSTITUTIONAL_READINESS_LOCK.md`
 - **Latest scorecard:** `docs/INSTITUTIONAL_SCORECARD.md`
 - **Latest carried-forward audits:** update list/date

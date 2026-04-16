@@ -98,19 +98,27 @@ _Verification basis: scenario test files, production source modules, runbook fil
 
 ### Open — genuinely remaining
 
-| Patch | Description |
-|---|---|
-| **RUNTIME-LONGRUN-01** | long-run runtime durability |
-| **CTRL-AUTH-01** | operator auth controls |
-| **DATA-INTEGRITY-01** | data integrity enforcement |
-| **EXEC-PROTECT-01** | execution protection controls |
-| **CORP-ACT-01** | corporate actions handling |
+_No MAIN patches currently outstanding following LEDGER-RECLASS-01 reclassification (2026-04-15)._
 
 **Conditional only (not blocking main lane):**
 - **RESEARCH-NON-EQ-01** — open only if non-equity research surfaces are mounted as canonical truth
 
 **Non-blocking follow-up only:**
 - **MT-07** — decomposition/refactor; does not block any MAIN lane
+
+---
+
+### Closed — patch-local re-audit confirmed (2026-04-15)
+
+Scenario files and implementation committed in HEAD. Closure is patch-local only; no new full-harness proof run documented against current HEAD (post-snapshot relative to 236118b, 2026-04-14). See OPERATOR_LEDGER.md for full proof-artifact inventory.
+
+| Patch | Scope note |
+|---|---|
+| **RUNTIME-LONGRUN-01** | LR-01..LR-06 pure + LR-RT-01..LR-RT-03 DB-backed (mqk-daemon + mqk-runtime); CI-11 guard passed |
+| **CTRL-AUTH-01** | CA-01..CE-03, 21 pure in-process (mqk-daemon) |
+| **DATA-INTEGRITY-01** | DI-01..DI-04 pure + DB-DI-01..DB-DI-03 DB-backed (mqk-testkit) |
+| **EXEC-PROTECT-01** | EP-UNSAFE..EP-STALE, 11 pure in-process (mqk-testkit) |
+| **CORP-ACT-01** | CA-01..CA-04 pure in-process (mqk-testkit); backtest/accounting seam only — live OMS corp-action path not wired |
 
 ---
 
