@@ -1,7 +1,12 @@
 import type { HealthState, MetricSeries, RuntimeStatus, Severity } from "../features/system/types";
 
-export function formatLabel(value: string): string {
-  return value
+export function formatLabel(value: string | null | undefined): string {
+  if (value == null) return "—";
+
+  const normalized = String(value).trim();
+  if (!normalized) return "—";
+
+  return normalized
     .replace(/_/g, " ")
     .replace(/\b\w/g, (m) => m.toUpperCase());
 }

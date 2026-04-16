@@ -19,9 +19,19 @@ pub use engine::targets_to_order_intents;
 
 // Re-export core strategy/execution types.
 pub use types::{
-    equity_instrument, ExecutionDecision, ExecutionIntent, ExecutionIntentV2, OrderIntent,
-    OrderIntentV2, Side, StrategyOutput, TargetPosition,
+    ExecutionDecision, ExecutionIntent, OrderIntent, Side, StrategyOutput, TargetPosition,
 };
+
+// RESEARCH-NON-EQ-01: V2 multi-asset scaffold — NOT wired into canonical MAIN execution path.
+//
+// These types (OrderIntentV2, ExecutionIntentV2, equity_instrument) exist for
+// forward-compatible multi-asset schema design only.  No orchestrator, runtime,
+// or broker adapter path in MAIN imports or uses them.  Only "equity" is
+// supported on the canonical execution path; Gate 0 at signal admission and
+// asset_class_scope: "equity_only" on /api/v1/system/status are the active
+// enforcement surfaces.  Do not wire V2 types into MAIN paths without a
+// dedicated scope-reviewed patch.
+pub use types::{equity_instrument, ExecutionIntentV2, OrderIntentV2};
 
 // Price fixed-point helpers expected by testkit.
 pub use prices::{micros_to_price, price_to_micros, MICROS_PER_UNIT};

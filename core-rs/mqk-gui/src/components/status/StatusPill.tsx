@@ -3,7 +3,7 @@ import type { Severity } from "../../features/system/types";
 
 interface StatusPillProps {
   label: string;
-  value: string;
+  value: string | null | undefined;
   tone: Severity;
   emphasis?: "normal" | "loud";
 }
