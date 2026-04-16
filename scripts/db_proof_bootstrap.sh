@@ -175,8 +175,15 @@ cargo test -p mqk-db --features testkit --test scenario_idempotency_constraints 
 echo "== AP series: external broker DB-backed runtime inbound (BRK-08R RT path) =="
 cargo test -p mqk-runtime --test scenario_alpaca_inbound_rt_brk08r -- --ignored --test-threads=1
 
+# RUNTIME-LONGRUN-01: DB-backed repeated-cycle runtime ingest / cursor / idempotency proofs.
+# Proves invariants across repeated WS ingest cycles, gap/recover transitions, and
+# resumed ingest after gap repair (LR-RT-01, LR-RT-02, LR-RT-03).
+echo "== RUNTIME-LONGRUN-01: DB-backed repeated-cycle runtime long-run proofs =="
+cargo test -p mqk-runtime --test scenario_runtime_longrun_01 -- --ignored --test-threads=1
+
 echo ""
 echo "All proof lanes passed:"
 echo "  AP series (pure in-memory): Alpaca adapter normalization, event mapping, inbound, snapshot."
 echo "  AP series (DB-backed):      runtime inbound ingest, cursor persistence (BRK-08R RT)."
+echo "  RUNTIME-LONGRUN-01 (DB-backed): repeated-cycle ingest idempotency + cursor monotonicity."
 echo "  DB proof (CI-10):           full mandatory proof matrix."

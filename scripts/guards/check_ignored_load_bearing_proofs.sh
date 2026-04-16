@@ -44,6 +44,8 @@ PROMOTED_FILES=(
   # Pure in-memory Alpaca tests in mqk-broker-alpaca/tests/ carry no #[ignore] and
   # are not listed here; they run unconditionally via cargo test -p mqk-broker-alpaca.
   "crates/mqk-runtime/tests/scenario_alpaca_inbound_rt_brk08r.rs"
+  # RUNTIME-LONGRUN-01: DB-backed repeated-cycle runtime ingest / cursor / idempotency proofs.
+  "crates/mqk-runtime/tests/scenario_runtime_longrun_01.rs"
 )
 
 violations=0
