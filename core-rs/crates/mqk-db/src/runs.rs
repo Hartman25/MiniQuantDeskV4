@@ -532,6 +532,42 @@ pub async fn halt_run(pool: &PgPool, run_id: Uuid, halted_at: DateTime<Utc>) -> 
     Ok(())
 }
 
+/// Clear a halted run: HALTED → STOPPED.
+///
+/// Explicit operator acknowledgment path. The operator has reviewed the halt
+/// condition and explicitly chosen to clear it. Transitions HALTED → STOPPED
+/// so that start_execution_runtime can proceed via the normal stopped-run path.
+/// The caller is responsible for subsequently re-arming and re-starting.
+///
+/// Returns Err if the run is not currently in HALTED state.
+pub async fn clear_halted_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
+    let r = fetch_run(pool, run_id).await?;
+    match r.status {
+        RunStatus::Halted => {}
+        _ => {
+            return Err(anyhow!(
+                "clear_halted_run invalid state: expected HALTED, found {}",
+                r.status.as_str()
+            ))
+        }
+    }
+
+    sqlx::query(
+        r#"
+        update runs
+        set status = 'STOPPED',
+            stopped_at_utc = now() -- allow: ops-metadata — operator-acknowledged halt clear
+        where run_id = $1
+        "#,
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await
+    .context("clear_halted_run update failed")?;
+
+    Ok(())
+}
+
 /// Heartbeat: RUNNING only updates last_heartbeat_utc.
 ///
 /// `heartbeat_at` is injected by the caller (FC-9: no now() in enforcement path).

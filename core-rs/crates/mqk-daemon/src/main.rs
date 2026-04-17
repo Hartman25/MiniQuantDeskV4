@@ -53,6 +53,12 @@ async fn main() -> anyhow::Result<()> {
     let _session_controller_handle =
         state::spawn_autonomous_session_controller(Arc::clone(&shared));
 
+    // AUTON-PAPER-BLOCKER-02: Spawn the autonomous bar ticker for Paper+Alpaca.
+    // Periodically deposits StrategyBarInput so native strategies can fire on_bar
+    // without requiring an external manual POST to /api/v1/strategy/signal.
+    // No-op for non-paper-alpaca deployments (ExternalSignalIngestion not wired).
+    let _bar_ticker_handle = state::spawn_autonomous_bar_ticker(Arc::clone(&shared));
+
     let app = routes::build_router(Arc::clone(&shared))
         .layer(
             TraceLayer::new_for_http()

@@ -847,6 +847,158 @@ pub(crate) async fn ops_action(
             (StatusCode::CONFLICT, Json(guidance)).into_response()
         }
 
+        // AUTON-PAPER-OPS-04: Clear a halted run so a fresh start can proceed.
+        //
+        // Gate sequence (fail-closed):
+        //   1. DB required — cannot verify or mutate run state without DB.
+        //   2. Latest run must exist — nothing to clear otherwise.
+        //   3. Latest run must be HALTED — state guard; rejects if already
+        //      stopped or still running so the operator cannot accidentally
+        //      terminate a live run via this path.
+        //   4. clear_halted_run transitions HALTED → STOPPED in DB.
+        //
+        // After success the operator must still re-arm and re-start; this
+        // action clears only the durable run blocking state.  Integrity
+        // in-memory halt flag is NOT cleared here — that requires arm-execution.
+        "clear-halted-run" => {
+            let Some(db) = st.db.as_ref() else {
+                return runtime_error_response(RuntimeLifecycleError::ServiceUnavailable {
+                    fault_class: "ops.action.clear_halted_run.no_db",
+                    message: "DB is required to clear a halted run; \
+                              clear-halted-run is not accepted without a DB connection."
+                        .to_string(),
+                });
+            };
+
+            let latest = match mqk_db::fetch_latest_run_for_engine(
+                db,
+                DAEMON_ENGINE_ID,
+                st.deployment_mode().as_db_mode(),
+            )
+            .await
+            {
+                Ok(Some(run)) => run,
+                Ok(None) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(OperatorActionResponse {
+                            requested_action: "clear-halted-run".to_string(),
+                            accepted: false,
+                            disposition: "no_run_found".to_string(),
+                            resulting_integrity_state: None,
+                            resulting_desired_armed: None,
+                            blockers: vec![
+                                "No run found for this engine and mode; nothing to clear."
+                                    .to_string(),
+                            ],
+                            warnings: vec![],
+                            environment: Some(st.deployment_mode().as_api_label().to_string()),
+                            scope: Some("daemon_instance".to_string()),
+                            audit: OperatorActionAuditFields {
+                                durable_db_write: false,
+                                durable_targets: vec![],
+                                audit_event_id: None,
+                            },
+                            pending_restart_intent: None,
+                        }),
+                    )
+                        .into_response();
+                }
+                Err(err) => {
+                    return runtime_error_response(RuntimeLifecycleError::internal(
+                        "clear_halted_run fetch failed",
+                        err,
+                    ))
+                }
+            };
+
+            if !matches!(latest.status, mqk_db::RunStatus::Halted) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "clear-halted-run".to_string(),
+                        accepted: false,
+                        disposition: "run_not_halted".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "The latest run {} is in state '{}', not 'HALTED'; \
+                             clear-halted-run can only be applied to a HALTED run.",
+                            latest.run_id,
+                            latest.status.as_str(),
+                        )],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            let run_id = latest.run_id;
+            match mqk_db::clear_halted_run(db, run_id).await {
+                Ok(_) => {
+                    info!(run_id = %run_id, "ops/action clear-halted-run");
+                    let audit_uuid = write_operator_audit_event(
+                        &st,
+                        Some(run_id),
+                        "run.clear_halted",
+                        "STOPPED",
+                    )
+                    .await
+                    .ok()
+                    .flatten();
+                    let _ = st.bus.send(BusMsg::LogLine {
+                        level: "INFO".to_string(),
+                        msg: format!(
+                            "ops/action: halted run {run_id} cleared to STOPPED; \
+                             operator must re-arm and re-start"
+                        ),
+                    });
+                    let mut durable_targets = vec!["runs".to_string()];
+                    if audit_uuid.is_some() {
+                        durable_targets.push("audit_events".to_string());
+                    }
+                    (
+                        StatusCode::OK,
+                        Json(OperatorActionResponse {
+                            requested_action: "clear-halted-run".to_string(),
+                            accepted: true,
+                            disposition: "halted_run_cleared".to_string(),
+                            resulting_integrity_state: None,
+                            resulting_desired_armed: None,
+                            blockers: vec![],
+                            warnings: vec![
+                                "Halted run cleared to STOPPED. You must re-arm \
+                                 (arm-execution) and then start (start-system) to begin \
+                                 a new execution cycle."
+                                    .to_string(),
+                            ],
+                            environment: Some(st.deployment_mode().as_api_label().to_string()),
+                            scope: Some("daemon_instance".to_string()),
+                            audit: OperatorActionAuditFields {
+                                durable_db_write: true,
+                                durable_targets,
+                                audit_event_id: audit_uuid.map(|id| id.to_string()),
+                            },
+                            pending_restart_intent: None,
+                        }),
+                    )
+                        .into_response()
+                }
+                Err(err) => runtime_error_response(RuntimeLifecycleError::internal(
+                    "clear_halted_run update failed",
+                    err,
+                )),
+            }
+        }
+
         _ => (
             StatusCode::BAD_REQUEST,
             Json(OperatorActionResponse {
@@ -858,7 +1010,7 @@ pub(crate) async fn ops_action(
                 blockers: vec![format!(
                     "Unknown action_key '{}'; accepted keys: arm-execution, arm-strategy, \
                      disarm-execution, disarm-strategy, start-system, stop-system, kill-switch, \
-                     request-mode-change, cancel-mode-transition",
+                     request-mode-change, cancel-mode-transition, clear-halted-run",
                     body.action_key
                 )],
                 warnings: vec![],
@@ -904,6 +1056,20 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             .ok()
             .flatten()
             .is_some()
+    } else {
+        false
+    };
+
+    // AUTON-PAPER-OPS-04: Check for a durable halted run so the clear-halted-run
+    // catalog entry reflects real availability.  One extra SELECT at catalog read
+    // time — same pattern as has_pending_intent above.
+    let has_halted_run = if let Some(db) = st.db.as_ref() {
+        mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, st.deployment_mode().as_db_mode())
+            .await
+            .ok()
+            .flatten()
+            .map(|r| matches!(r.status, mqk_db::RunStatus::Halted))
+            .unwrap_or(false)
     } else {
         false
     };
@@ -1052,6 +1218,31 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
                     )
                 } else {
                     Some("No pending mode-transition intent to cancel.".to_string())
+                }
+            } else {
+                None
+            },
+        },
+        // AUTON-PAPER-OPS-04: Operator path to clear a halted run so a fresh
+        // start can proceed without manual DB surgery.
+        ActionCatalogEntry {
+            action_key: "clear-halted-run".to_string(),
+            label: "Clear Halted Run".to_string(),
+            level: 3,
+            description: "Transition the most recent HALTED run to STOPPED, unblocking \
+                           a fresh start. Use only after reviewing the halt reason. \
+                           You must re-arm and re-start after clearing."
+                .to_string(),
+            requires_reason: false,
+            confirm_text: "Confirm: clear halted run and allow fresh start".to_string(),
+            enabled: has_halted_run,
+            disabled_reason: if !has_halted_run {
+                if st.db.is_none() {
+                    Some(
+                        "Backend unavailable; cannot query for halted run state.".to_string(),
+                    )
+                } else {
+                    Some("No halted run found; nothing to clear.".to_string())
                 }
             } else {
                 None

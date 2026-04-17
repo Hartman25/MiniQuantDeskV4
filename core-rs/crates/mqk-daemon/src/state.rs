@@ -5,6 +5,7 @@
 //! lifecycle control plus durable status reconstruction.
 
 mod alpaca_ws_transport;
+mod autonomous_bar_ticker;
 mod broker;
 mod deadman;
 mod env;
@@ -23,6 +24,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use mqk_broker_alpaca::types::AlpacaFetchCursor;
+use mqk_broker_alpaca::AlpacaBrokerAdapter;
 use mqk_integrity::{CalendarSpec, IntegrityState};
 use sqlx::PgPool;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
@@ -38,6 +40,9 @@ pub use alpaca_ws_transport::{
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
 pub use loop_runner::spawn_reconcile_tick;
+pub use autonomous_bar_ticker::{
+    spawn_autonomous_bar_ticker, BAR_INTERVAL_SECS_ENV, DEFAULT_QTY_ENV,
+};
 pub use session_controller::{
     autonomous_session_schedule_from_env, run_session_controller_tick, session_window_from_env,
     spawn_autonomous_session_controller, AutonomousSessionSchedule, SessionWindow,
@@ -76,6 +81,9 @@ const EXECUTION_LOOP_INTERVAL: Duration = Duration::from_secs(1);
 const DEADMAN_TTL_SECONDS: i64 = 5;
 /// DMON-06: background reconcile tick interval.
 const RECONCILE_TICK_INTERVAL: Duration = Duration::from_secs(30);
+/// AUTON-PAPER-RISK-03: execution-loop ticks between External broker snapshot refreshes.
+/// At 1 s/tick this is 60 s — fresh enough for paper reconcile without hammering the API.
+const EXTERNAL_SNAPSHOT_REFRESH_TICKS: u32 = 60;
 const DEV_ALLOW_NO_OPERATOR_TOKEN_ENV: &str = "MQK_DEV_ALLOW_NO_OPERATOR_TOKEN";
 const DAEMON_DEPLOYMENT_MODE_ENV: &str = "MQK_DAEMON_DEPLOYMENT_MODE";
 const DAEMON_ADAPTER_ID_ENV: &str = "MQK_DAEMON_ADAPTER_ID";
@@ -195,6 +203,12 @@ pub struct AppState {
     /// Zero means no bar input has been deposited in this daemon process lifetime.
     /// Read by `/api/v1/strategy/summary` to surface honest `last_decision_time`.
     last_bar_input_ts: Arc<AtomicI64>,
+    /// AUTON-PAPER-RISK-03: Alpaca adapter retained exclusively for periodic broker
+    /// snapshot refresh on the External-source path.  Set once in
+    /// `build_execution_orchestrator`; `None` for Synthetic source or before
+    /// the first run start.  The execution loop clones the inner Arc and calls
+    /// `fetch_broker_snapshot` every `EXTERNAL_SNAPSHOT_REFRESH_TICKS` ticks.
+    pub external_snapshot_refresher: Arc<RwLock<Option<Arc<AlpacaBrokerAdapter>>>>,
 }
 
 impl Default for AppState {
@@ -532,6 +546,7 @@ impl AppState {
             native_strategy_bootstrap: Arc::new(Mutex::new(None)),
             pending_strategy_bar_input: Arc::new(Mutex::new(None)),
             last_bar_input_ts: Arc::new(AtomicI64::new(0)),
+            external_snapshot_refresher: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -987,6 +1002,15 @@ impl AppState {
         bootstrap: Option<NativeStrategyBootstrap>,
     ) {
         *self.native_strategy_bootstrap.lock().await = bootstrap;
+    }
+
+    /// AUTON-PAPER-BLOCKER-02 test seam: returns `true` when no bar input is pending.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    /// Used by autonomous bar ticker tests to verify skip conditions without
+    /// consuming the pending input via `tick_strategy_dispatch`.
+    pub async fn pending_strategy_bar_input_is_none_for_test(&self) -> bool {
+        self.pending_strategy_bar_input.lock().await.is_none()
     }
 
     /// B1B: Invoke the native strategy `on_bar` callback from raw bar parameters.

@@ -623,18 +623,24 @@ impl AppState {
             .await?;
 
         if let Err(err) = mqk_db::arm_run(&db, run_id).await {
-            let _ = orchestrator.release_runtime_leadership().await;
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!("runtime_lease_release_failed_on_arm_rollback error={rel_err}");
+            }
             return Err(RuntimeLifecycleError::internal("start arm_run failed", err));
         }
         if let Err(err) = mqk_db::begin_run(&db, run_id).await {
-            let _ = orchestrator.release_runtime_leadership().await;
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!("runtime_lease_release_failed_on_begin_rollback error={rel_err}");
+            }
             return Err(RuntimeLifecycleError::internal(
                 "start begin_run failed",
                 err,
             ));
         }
         if let Err(err) = mqk_db::heartbeat_run(&db, run_id, Utc::now()).await {
-            let _ = orchestrator.release_runtime_leadership().await;
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!("runtime_lease_release_failed_on_heartbeat_rollback error={rel_err}");
+            }
             return Err(RuntimeLifecycleError::internal(
                 "start initial heartbeat failed",
                 err,
@@ -642,7 +648,9 @@ impl AppState {
         }
         if let Err(err) = orchestrator.tick().await {
             let message = err.to_string();
-            let _ = orchestrator.release_runtime_leadership().await;
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!("runtime_lease_release_failed_on_tick_rollback error={rel_err}");
+            }
             if message.contains("RUNTIME_LEASE") {
                 return Err(RuntimeLifecycleError::conflict(
                     "runtime.start_refused.service_unavailable",
@@ -977,14 +985,19 @@ impl AppState {
             match handle.join_handle.await {
                 Ok(_) => {
                     if let Some(db) = self.db.as_ref() {
-                        if let Ok(run) = mqk_db::fetch_run(db, run_id).await {
-                            if matches!(
-                                run.status,
-                                mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running
-                            ) {
-                                if let Err(err) = mqk_db::stop_run(db, run_id).await {
-                                    tracing::warn!("shutdown stop_run failed for {run_id}: {err}");
+                        match mqk_db::fetch_run(db, run_id).await {
+                            Ok(run) => {
+                                if matches!(
+                                    run.status,
+                                    mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running
+                                ) {
+                                    if let Err(err) = mqk_db::stop_run(db, run_id).await {
+                                        tracing::warn!("shutdown stop_run failed for {run_id}: {err}");
+                                    }
                                 }
+                            }
+                            Err(err) => {
+                                tracing::warn!("shutdown fetch_run_failed for {run_id}: {err}");
                             }
                         }
                     }

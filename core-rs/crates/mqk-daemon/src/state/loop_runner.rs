@@ -52,6 +52,8 @@ pub(super) fn spawn_execution_loop(
 
     let join_handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);
+        // AUTON-PAPER-RISK-03: countdown to next External broker snapshot refresh.
+        let mut external_refresh_ticks: u32 = 0;
         loop {
             tokio::select! {
                 changed = stop_rx.changed() => {
@@ -87,13 +89,18 @@ pub(super) fn spawn_execution_loop(
                             Ok(false) => {}
                             Err(err) => {
                                 tracing::error!("execution_loop_deadman_check_failed error={err}");
-                                let _ = mqk_db::halt_run(pool, run_id, now).await;
-                                let _ = mqk_db::persist_arm_state_canonical(
+                                if let Err(halt_err) = mqk_db::halt_run(pool, run_id, now).await {
+                                    tracing::error!(run_id = %run_id, "execution_loop_halt_run_persist_failed error={halt_err}");
+                                }
+                                if let Err(disarm_err) = mqk_db::persist_arm_state_canonical(
                                     pool,
                                     mqk_db::ArmState::Disarmed,
                                     Some(mqk_db::DisarmReason::DeadmanSupervisorFailure),
                                 )
-                                .await;
+                                .await
+                                {
+                                    tracing::error!(run_id = %run_id, "execution_loop_disarm_persist_failed error={disarm_err}");
+                                }
                                 {
                                     let mut ig = integrity.write().await;
                                     ig.disarmed = true;
@@ -126,7 +133,9 @@ pub(super) fn spawn_execution_loop(
                         );
                         if let Some(ref pool) = db {
                             let now = Utc::now();
-                            let _ = mqk_db::halt_run(pool, run_id, now).await;
+                            if let Err(halt_err) = mqk_db::halt_run(pool, run_id, now).await {
+                                tracing::error!(run_id = %run_id, "execution_loop_halt_run_persist_failed error={halt_err}");
+                            }
                         }
                         {
                             let mut ig = integrity.write().await;
@@ -152,7 +161,9 @@ pub(super) fn spawn_execution_loop(
                         tracing::error!("execution_loop_halt error={err}");
                         if let Some(ref pool) = db {
                             let now = Utc::now();
-                            let _ = mqk_db::halt_run(pool, run_id, now).await;
+                            if let Err(halt_err) = mqk_db::halt_run(pool, run_id, now).await {
+                                tracing::error!(run_id = %run_id, "execution_loop_halt_run_persist_failed error={halt_err}");
+                            }
                         }
                         {
                             let mut ig = integrity.write().await;
@@ -190,13 +201,18 @@ pub(super) fn spawn_execution_loop(
                         }
                         if let Err(err) = mqk_db::heartbeat_run(pool, run_id, now).await {
                             tracing::error!("execution_loop_heartbeat_failed error={err}");
-                            let _ = mqk_db::halt_run(pool, run_id, now).await;
-                            let _ = mqk_db::persist_arm_state_canonical(
+                            if let Err(halt_err) = mqk_db::halt_run(pool, run_id, now).await {
+                                tracing::error!(run_id = %run_id, "execution_loop_halt_run_persist_failed error={halt_err}");
+                            }
+                            if let Err(disarm_err) = mqk_db::persist_arm_state_canonical(
                                 pool,
                                 mqk_db::ArmState::Disarmed,
                                 Some(mqk_db::DisarmReason::DeadmanHeartbeatPersistFailed),
                             )
-                            .await;
+                            .await
+                            {
+                                tracing::error!(run_id = %run_id, "execution_loop_disarm_persist_failed error={disarm_err}");
+                            }
                             {
                                 let mut ig = integrity.write().await;
                                 ig.disarmed = true;
@@ -242,6 +258,49 @@ pub(super) fn spawn_execution_loop(
                         }
                         Err(err) => {
                             tracing::warn!("execution_snapshot_refresh_failed error={err}");
+                        }
+                    }
+
+                    // AUTON-PAPER-RISK-03: Periodic External broker snapshot refresh.
+                    //
+                    // For Synthetic source the snapshot is rebuilt every tick above.
+                    // For External source (paper+alpaca) we must re-fetch from the
+                    // broker REST API so reconcile compares against a reasonably
+                    // fresh snapshot rather than the permanently stale startup one.
+                    //
+                    // We refresh every EXTERNAL_SNAPSHOT_REFRESH_TICKS ticks (60 s).
+                    // On fetch failure we log and keep the last good snapshot — reconcile
+                    // still has something to compare against and will drift/halt if the
+                    // position truth is genuinely wrong.  This is fail-closed: a missing
+                    // refresh is never silently treated as a clean match.
+                    if broker_snapshot_source == BrokerSnapshotTruthSource::External {
+                        external_refresh_ticks += 1;
+                        if external_refresh_ticks >= super::EXTERNAL_SNAPSHOT_REFRESH_TICKS {
+                            external_refresh_ticks = 0;
+                            let adapter_opt: Option<std::sync::Arc<mqk_broker_alpaca::AlpacaBrokerAdapter>> = {
+                                let guard = state_arc.external_snapshot_refresher.read().await;
+                                guard.as_ref().cloned()
+                            };
+                            if let Some(adapter) = adapter_opt {
+                                let now = Utc::now();
+                                match tokio::task::block_in_place(|| {
+                                    adapter.fetch_broker_snapshot(now)
+                                }) {
+                                    Ok(fresh) => {
+                                        *broker_snapshot_cache.write().await = Some(fresh);
+                                        tracing::debug!(
+                                            run_id = %run_id,
+                                            "external_broker_snapshot_refreshed"
+                                        );
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            run_id = %run_id,
+                                            "external_broker_snapshot_refresh_failed error={err}"
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -459,14 +518,20 @@ pub(super) async fn publish_reconcile_failure(
     }
 
     if let Some(db) = state.db.as_ref() {
-        let _ = mqk_db::persist_arm_state_canonical(
+        if let Err(e) = mqk_db::persist_arm_state_canonical(
             db,
             mqk_db::ArmState::Disarmed,
             Some(mqk_db::DisarmReason::ReconcileDrift),
         )
-        .await;
-        let _ =
-            mqk_db::persist_risk_block_state(db, true, Some("RECONCILE_BLOCKED"), Utc::now()).await;
+        .await
+        {
+            tracing::error!("reconcile_disarm_persist_failed: durable disarm not written; error={e}");
+        }
+        if let Err(e) =
+            mqk_db::persist_risk_block_state(db, true, Some("RECONCILE_BLOCKED"), Utc::now()).await
+        {
+            tracing::error!("reconcile_risk_block_persist_failed: risk block not written; error={e}");
+        }
     }
 
     let active_run_id = state.status.read().await.active_run_id;

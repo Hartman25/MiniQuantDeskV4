@@ -687,11 +687,11 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         .as_array()
         .expect("/api/v1/ops/catalog must have an 'actions' array");
 
-    // Exactly 7 entries (OPS-CONTROL-02: request-mode-change + cancel-mode-transition added).
+    // Exactly 8 entries (AUTON-PAPER-OPS-04: clear-halted-run added).
     assert_eq!(
         actions.len(),
-        7,
-        "catalog must have exactly 7 entries; got: {actions:?}"
+        8,
+        "catalog must have exactly 8 entries; got: {actions:?}"
     );
 
     // Collect action_key values.
@@ -700,7 +700,7 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         .filter_map(|a| a["action_key"].as_str())
         .collect();
 
-    // All 7 supported keys must be present.
+    // All 8 supported keys must be present.
     for expected_key in &[
         "arm-execution",
         "disarm-execution",
@@ -709,6 +709,7 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         "kill-switch",
         "request-mode-change",
         "cancel-mode-transition",
+        "clear-halted-run",
     ] {
         assert!(
             keys.contains(expected_key),
