@@ -60,6 +60,16 @@ MQK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/mqk_dev
 # Operator auth — required for all mutating routes
 MQK_OPERATOR_TOKEN=<any strong token>
 
+# Risk gate — REQUIRED for any orders to be submitted (AUTON-PAPER-BLOCKER-01)
+# Without these the risk gate fails closed and NO orders will be placed even
+# when the run is active. Set both; use values appropriate to your paper account.
+MQK_RISK_INITIAL_EQUITY_USD=100000        # paper account equity in USD
+MQK_RISK_DAILY_LOSS_LIMIT=0.02            # fraction of equity (0 < r < 1)
+
+# Native strategy fleet — REQUIRED for autonomous bar-driven signal generation
+MQK_STRATEGY_IDS=intraday_scalper         # built-in engine name
+MQK_STRATEGY_SYMBOL=SPY                   # ticker symbol
+
 # Optional: override autonomous session window (default: NYSE regular session)
 # MQK_SESSION_START_HH_MM=14:30   # UTC HH:MM
 # MQK_SESSION_STOP_HH_MM=21:00    # UTC HH:MM
@@ -133,7 +143,12 @@ This is the standard autonomous path — **no manual arm is needed between conse
 A halt sets `kill_switch_active = true` and `ArmState::Halted` in DB.  Autonomous arm is **refused** until the operator manually:
 1. Investigates the halt reason (`GET /control/status`, `GET /api/v1/audit/operator-actions`).
 2. Disarms: `POST /api/v1/ops/action {"action_key": "disarm-execution"}`.
-3. Re-arms: `POST /v1/integrity/arm`.
+3. Clears the halted run record: `POST /api/v1/ops/action {"action_key": "clear-halted-run"}`.
+   This transitions the durable run record from HALTED → STOPPED so a fresh start is not blocked.
+   The action is available in the ops catalog (`GET /api/v1/ops/catalog`) only when a HALTED run exists.
+4. Re-arms: `POST /api/v1/ops/action {"action_key": "arm-execution"}` (or `POST /v1/integrity/arm`).
+
+Do not skip step 3.  Without it the daemon will find the prior run in HALTED state and refuse a new start.
 
 ---
 
@@ -399,7 +414,10 @@ arm_state = "halted"?
 ├── YES — Halt requires operator investigation.
 │         1. GET /api/v1/audit/operator-actions
 │         2. GET /control/status
-│         3. Disarm + re-arm after investigation.
+│         3. POST /api/v1/ops/action {"action_key": "disarm-execution"}
+│         4. POST /api/v1/ops/action {"action_key": "clear-halted-run"}
+│            (transitions run record HALTED → STOPPED; required before re-arm)
+│         5. POST /api/v1/ops/action {"action_key": "arm-execution"}
 └── NO  — Arm state is healthy.
 ```
 

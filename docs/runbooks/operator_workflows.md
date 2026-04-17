@@ -263,6 +263,26 @@ was triggered or persisted.
 
 Do not re-arm until the halt reason has been investigated and resolved.
 
+### Step 4 — Clear the halted run record (required before re-arm)
+
+```
+POST /api/v1/ops/action
+Authorization: Bearer <MQK_OPERATOR_TOKEN>
+{"action_key": "clear-halted-run"}
+```
+
+This transitions the durable run record from HALTED → STOPPED in the `runs`
+table so a fresh start is not blocked.  The action is only accepted when the
+most recent run is in HALTED state (`enabled: true` in `GET /api/v1/ops/catalog`).
+
+After this action the operator must disarm and re-arm before a new start:
+
+```
+POST /api/v1/ops/action {"action_key": "disarm-execution"}
+POST /api/v1/ops/action {"action_key": "arm-execution"}
+POST /v1/run/start
+```
+
 ---
 
 ## 5. Controlled Mode Transition / Restart Workflow
