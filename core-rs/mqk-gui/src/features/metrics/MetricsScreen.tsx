@@ -1,10 +1,9 @@
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
-import { TruthStateBanner } from "../../components/common/TruthStateBanner";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import type { MetricsSection, MetricSeries, SystemModel } from "../system/types";
 import { MetricStripChart } from "../execution/components/MetricStripChart";
-import { isTruthHardBlock, panelTruthRenderState } from "../system/truthRendering";
+import { panelTruthRenderState } from "../system/truthRendering";
 import { formatMetricValue } from "../../lib/format";
 
 type DomainTone = "good" | "warn" | "bad";
@@ -60,9 +59,10 @@ function buildPressureSeries(
 export function MetricsScreen({ model }: { model: SystemModel }) {
   const truthState = panelTruthRenderState(model, "metrics");
 
-  // Hard-block when truth is structurally absent. For stale/degraded, cached telemetry
-  // is still useful — show the domain body with a warning banner.
-  if (truthState !== null && isTruthHardBlock(truthState)) {
+  // Hard-block on any non-null truth state. stale and degraded are not safe to render
+  // as authoritative metrics data — the operator must see the explicit truth state notice.
+  // Canonical pattern: identical to RuntimeScreen, RiskScreen, and all other live-data screens.
+  if (truthState !== null) {
     return <TruthStateNotice state={truthState} />;
   }
 
@@ -80,7 +80,6 @@ export function MetricsScreen({ model }: { model: SystemModel }) {
 
   return (
     <div className="screen-grid desk-screen-grid">
-      {truthState !== null && <TruthStateBanner state={truthState} />}
       {/* Cross-domain health summary — which domain is degraded at a glance.
           Runtime and execution are included here for comparison even though their
           strip charts live on Dashboard and Execution respectively. */}
@@ -132,26 +131,38 @@ export function MetricsScreen({ model }: { model: SystemModel }) {
       <div className="desk-panel-grid desk-panel-grid-primary">
         <Panel title={metrics.fillQuality.title} subtitle={metrics.fillQuality.description}>
           <div className="metrics-grid">
-            {metrics.fillQuality.series.map((series) => (
-              <MetricStripChart key={series.key} series={series} />
-            ))}
+            {metrics.fillQuality.series.length === 0 ? (
+              <div className="empty-state">No fill quality telemetry available.</div>
+            ) : (
+              metrics.fillQuality.series.map((series) => (
+                <MetricStripChart key={series.key} series={series} />
+              ))
+            )}
           </div>
         </Panel>
 
         <Panel title={metrics.reconciliation.title} subtitle={metrics.reconciliation.description}>
           <div className="metrics-grid">
-            {metrics.reconciliation.series.map((series) => (
-              <MetricStripChart key={series.key} series={series} />
-            ))}
+            {metrics.reconciliation.series.length === 0 ? (
+              <div className="empty-state">No reconciliation telemetry available.</div>
+            ) : (
+              metrics.reconciliation.series.map((series) => (
+                <MetricStripChart key={series.key} series={series} />
+              ))
+            )}
           </div>
         </Panel>
       </div>
 
       <Panel title={metrics.riskSafety.title} subtitle={metrics.riskSafety.description}>
         <div className="metrics-grid">
-          {metrics.riskSafety.series.map((series) => (
-            <MetricStripChart key={series.key} series={series} />
-          ))}
+          {metrics.riskSafety.series.length === 0 ? (
+            <div className="empty-state">No risk & safety telemetry available.</div>
+          ) : (
+            metrics.riskSafety.series.map((series) => (
+              <MetricStripChart key={series.key} series={series} />
+            ))
+          )}
         </div>
       </Panel>
     </div>

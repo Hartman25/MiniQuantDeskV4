@@ -3,12 +3,9 @@ import type { FeedEvent } from "../../features/system/types";
 
 export function BottomEventRail({ events }: { events: FeedEvent[] }) {
   return (
-    <section className="bottom-rail panel">
-      <div className="panel-head">
-        <div>
-          <div className="eyebrow">Event Rail</div>
-          <h3>Recent system events</h3>
-        </div>
+    <section className="bottom-rail">
+      <div className="bottom-rail-header">
+        <span className="eyebrow">Recent events</span>
       </div>
 
       <div className="event-table">

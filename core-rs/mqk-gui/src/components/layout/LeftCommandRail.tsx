@@ -53,14 +53,16 @@ export function LeftCommandRail({
         <p className="brand-subtitle">Institution-grade trading control</p>
       </div>
 
-      <div className="rail-section">
-        <div className="rail-section-title">Primary</div>
-        <div className="rail-nav-list">{primary.map(renderButton)}</div>
-      </div>
+      <div className="rail-nav-scroll">
+        <div className="rail-section">
+          <div className="rail-section-title">Primary</div>
+          <div className="rail-nav-list">{primary.map(renderButton)}</div>
+        </div>
 
-      <div className="rail-section">
-        <div className="rail-section-title">Secondary</div>
-        <div className="rail-nav-list">{secondary.map(renderButton)}</div>
+        <div className="rail-section">
+          <div className="rail-section-title">Secondary</div>
+          <div className="rail-nav-list">{secondary.map(renderButton)}</div>
+        </div>
       </div>
     </aside>
   );

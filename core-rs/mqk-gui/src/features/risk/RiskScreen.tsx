@@ -19,6 +19,7 @@ export function RiskScreen({ model }: { model: SystemModel }) {
 
   return (
     <div className="screen-grid desk-screen-grid">
+      {/* Exposure summary — the four numbers an operator reads first on this screen */}
       <div className="summary-grid summary-grid-four">
         <StatCard title="Gross Exposure" value={formatMoney(r.gross_exposure)} detail="Current deployed gross capital" tone="neutral" />
         <StatCard title="Net Exposure" value={formatMoney(r.net_exposure)} detail="Directional net capital" tone="neutral" />
@@ -36,30 +37,22 @@ export function RiskScreen({ model }: { model: SystemModel }) {
         />
       </div>
 
-      <div className="desk-panel-grid desk-panel-grid-primary">
-        <Panel title="Risk posture">
-          <div className="metric-list">
-            <div><span>Daily PnL</span><strong>{formatMoney(r.daily_pnl)}</strong></div>
-            <div><span>Drawdown</span><strong>{formatPercent(r.drawdown_pct)}</strong></div>
-            <div><span>Kill switch</span><strong>{r.kill_switch_active ? "Active" : "Inactive"}</strong></div>
-            <div><span>Active breaches</span><strong>{r.active_breaches}</strong></div>
-          </div>
-        </Panel>
+      {/* Breach and halt posture — risk-triggered stops only.
+          Armed/disarmed and live routing are on Ops; runtime health is on Dashboard. */}
+      <Panel title="Breach and halt posture" subtitle="Risk-triggered hard stops, loss limits, and breach counts. Not system arm state.">
+        <div className="metric-list">
+          <div><span>Daily PnL</span><strong>{formatMoney(r.daily_pnl)}</strong></div>
+          <div><span>Drawdown</span><strong>{formatPercent(r.drawdown_pct)}</strong></div>
+          <div><span>Kill switch</span><strong>{r.kill_switch_active ? "Active" : "Inactive"}</strong></div>
+          <div><span>Active breaches</span><strong>{r.active_breaches}</strong></div>
+          <div><span>Risk halt</span><strong>{model.status.risk_halt_active ? "Active" : "Clear"}</strong></div>
+          <div><span>Integrity halt</span><strong>{model.status.integrity_halt_active ? "Active" : "Clear"}</strong></div>
+        </div>
+      </Panel>
 
-        <Panel title="System safety state">
-          <div className="metric-list">
-            <div><span>Strategy armed</span><strong>{model.status.strategy_armed ? "Yes" : "No"}</strong></div>
-            <div><span>Execution armed</span><strong>{model.status.execution_armed ? "Yes" : "No"}</strong></div>
-            <div><span>Risk halt</span><strong>{model.status.risk_halt_active ? "Active" : "Clear"}</strong></div>
-            <div><span>Integrity halt</span><strong>{model.status.integrity_halt_active ? "Active" : "Clear"}</strong></div>
-            <div><span>Live routing</span><strong>{model.status.live_routing_enabled ? "Enabled" : "Disabled"}</strong></div>
-            <div><span>Open alerts</span><strong>{model.alerts.length}</strong></div>
-          </div>
-        </Panel>
-      </div>
-
-      <div className="desk-panel-grid desk-panel-grid-secondary">
-        <Panel title="Risk denials" subtitle="Most recent strategy and symbol blocks.">
+      {/* Denial and suppression tables — what is being blocked and why */}
+      <div className="two-column-grid">
+        <Panel title="Risk denials" subtitle="Most recent strategy and symbol blocks by the risk layer.">
           <DataTable
             rows={model.riskDenials}
             rowKey={(row) => row.id}
@@ -73,7 +66,7 @@ export function RiskScreen({ model }: { model: SystemModel }) {
           />
         </Panel>
 
-        <Panel title="Strategy suppressions" subtitle="Active trading blocks that matter right now.">
+        <Panel title="Active suppressions" subtitle="Strategies currently blocked from signal admission. These are risk admission gates, not configuration flags.">
           {model.strategySuppressionsTruth.truth_state === "not_wired" ? (
             <div className="unavailable-notice">
               Strategy suppression truth is mounted but not wired. Do not read this as no active suppressions.
@@ -96,15 +89,6 @@ export function RiskScreen({ model }: { model: SystemModel }) {
           ) : (
             <div className="empty-state">No active suppressions.</div>
           )}
-        </Panel>
-
-        <Panel title="Operator context" compact>
-          <div className="metric-list compact-list">
-            <div><span>Source state</span><strong>{model.dataSource.state}</strong></div>
-            <div><span>Mock sections</span><strong>{model.dataSource.mockSections.length}</strong></div>
-            <div><span>Warnings</span><strong>{model.preflight.warnings.length}</strong></div>
-            <div><span>Blockers</span><strong>{model.preflight.blockers.length}</strong></div>
-          </div>
         </Panel>
       </div>
     </div>

@@ -268,7 +268,7 @@ test("authoritative active-empty truth stays distinct from not_wired wrappers", 
     assert.match(configHtml, /No config diffs recorded/i);
     assert.doesNotMatch(configHtml, /not wired/i);
 
-    assert.match(strategyHtml, /No strategy summary rows reported/i);
+    assert.match(strategyHtml, /No strategy engines reported/i);
     assert.doesNotMatch(strategyHtml, /not wired/i);
 
     assert.match(riskHtml, /No active suppressions/i);
@@ -284,7 +284,7 @@ test("strategy summary no_db fails closed: endpoint in missingEndpoints and pane
   //   1. The endpoint lands in missingEndpoints (not realEndpoints).
   //   2. isMissingPanelTruth fires for the strategy panel.
   //   3. panelTruthRenderState returns "no_snapshot" (not null).
-  //   4. StrategyScreen renders a TruthStateNotice — not "No strategy summary rows reported."
+  //   4. StrategyScreen renders a TruthStateNotice — not "No strategy engines reported."
   //
   // This proves "no_db" is never treated as authoritative active-empty truth.
   const originalFetch = globalThis.fetch;
@@ -342,7 +342,7 @@ test("strategy summary no_db fails closed: endpoint in missingEndpoints and pane
     const strategyHtml = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
     assert.doesNotMatch(
       strategyHtml,
-      /No strategy summary rows reported/i,
+      /No strategy engines reported/i,
       "no_db: empty-rows copy must not appear when registry truth is absent",
     );
   } finally {
