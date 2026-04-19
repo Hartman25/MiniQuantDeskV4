@@ -85,7 +85,14 @@ pub(crate) async fn alerts_active(State(st): State<Arc<AppState>>) -> Response {
         None
     };
 
-    let fault_signals = build_fault_signals(&status, &reconcile, risk_truth);
+    // HEARTBEAT-TICK-01: compute stall_secs for execution-loop liveness check.
+    let execution_loop_stall_secs = if status.state == "running" {
+        let last = st.execution_last_tick_secs();
+        if last > 0 { Some(chrono::Utc::now().timestamp() - last) } else { None }
+    } else {
+        None
+    };
+    let fault_signals = build_fault_signals(&status, &reconcile, risk_truth, execution_loop_stall_secs);
 
     let mut rows: Vec<ActiveAlertRow> = fault_signals
         .into_iter()
@@ -505,6 +512,56 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
         });
     }
 
+    // --- EVIDENCE-DURABILITY-01: Orchestrator halt-reason events ---
+    //
+    // Written by `persist_halt_and_disarm` in mqk-runtime with topic='orchestrator'.
+    // event_type carries the halt reason (RecoveryQuarantine, ReconcileDrift,
+    // IntegrityViolation, LeaderLeaseLost, LeaderLeaseUnavailable) so a morning-
+    // after review can answer "why was run X halted?" from a queryable surface
+    // without relying on transient logs.
+    let orchestrator_events = match sqlx::query(
+        r#"
+        select event_id, run_id, ts_utc, event_type
+        from audit_events
+        where topic = 'orchestrator'
+        order by ts_utc desc
+        limit 50
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(r) => r,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RuntimeErrorResponse {
+                    error: format!("events/feed orchestrator query failed: {err}"),
+                    fault_class: "events.feed.query_failed".to_string(),
+                    gate: None,
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    for row in orchestrator_events {
+        let event_id: uuid::Uuid = row.get("event_id");
+        let run_id: Option<uuid::Uuid> = row.get("run_id");
+        let ts_utc: chrono::DateTime<chrono::Utc> = row.get("ts_utc");
+        let event_type: String = row.get("event_type");
+
+        rows.push(EventFeedRow {
+            event_id: format!("audit_events:{}", event_id),
+            ts_utc: ts_utc.to_rfc3339(),
+            kind: "orchestrator_halt".to_string(),
+            detail: event_type,
+            run_id: run_id.map(|id| id.to_string()),
+            provenance_ref: format!("audit_events:{}", event_id),
+            audit_event_id: Some(event_id.to_string()),
+        });
+    }
+
     // Sort newest-first and cap at 50 rows.
     rows.sort_by(|a, b| b.ts_utc.cmp(&a.ts_utc));
     rows.truncate(50);
@@ -514,7 +571,7 @@ pub(crate) async fn events_feed(State(st): State<Arc<AppState>>) -> Response {
         Json(EventsFeedResponse {
             canonical_route: "/api/v1/events/feed".to_string(),
             truth_state: "active".to_string(),
-            backend: "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events"
+            backend: "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events+postgres.audit_events[orchestrator]"
                 .to_string(),
             rows,
         }),
@@ -718,7 +775,14 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
         None
     };
 
-    let fault_signals = build_fault_signals(&status_snap, &reconcile, risk_truth);
+    // HEARTBEAT-TICK-01: compute stall_secs for execution-loop liveness check.
+    let execution_loop_stall_secs_triage = if status_snap.state == "running" {
+        let last = st.execution_last_tick_secs();
+        if last > 0 { Some(chrono::Utc::now().timestamp() - last) } else { None }
+    } else {
+        None
+    };
+    let fault_signals = build_fault_signals(&status_snap, &reconcile, risk_truth, execution_loop_stall_secs_triage);
 
     // WS continuity signals — same as alerts/active
     let ws = st.alpaca_ws_continuity().await;

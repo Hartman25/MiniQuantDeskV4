@@ -76,6 +76,15 @@ pub(crate) fn runtime_error_response(err: RuntimeLifecycleError) -> Response {
 // build_fault_signals
 // ---------------------------------------------------------------------------
 
+/// HEARTBEAT-TICK-01: stall threshold for the execution loop.
+///
+/// A running daemon that has not recorded a tick in this many seconds surfaces
+/// a critical fault signal.  Set to 2× the deadman TTL (5 s) — tighter than
+/// what the DB deadman alone can detect (mid-tick hangs are invisible to the
+/// deadman until the stuck tick unblocks), but loose enough to avoid
+/// false-alarms on normal 1 s scheduler jitter.
+const EXECUTION_LOOP_STALL_THRESHOLD_SECS: i64 = 10;
+
 /// Build fault signals from runtime snapshot state.
 ///
 /// `risk_truth` distinguishes three states:
@@ -85,10 +94,15 @@ pub(crate) fn runtime_error_response(err: RuntimeLifecycleError) -> Response {
 ///   Emits a critical-level signal.
 /// - `Some(false)` — DB query succeeded and risk engine reports not blocked.
 ///   No signal emitted.
+///
+/// `execution_loop_stall_secs` is `Some(elapsed)` only when `state == "running"`
+/// and the loop has completed at least one tick (`last_tick_at > 0`).  `None`
+/// suppresses the stall check (idle, never ticked, or not applicable).
 pub(crate) fn build_fault_signals(
     status: &StatusSnapshot,
     reconcile: &crate::state::ReconcileStatusSnapshot,
     risk_truth: Option<bool>,
+    execution_loop_stall_secs: Option<i64>,
 ) -> Vec<FaultSignal> {
     let mut signals = Vec::new();
 
@@ -157,6 +171,25 @@ pub(crate) fn build_fault_signals(
         });
     }
 
+    // HEARTBEAT-TICK-01: detect stalled execution loop.
+    //
+    // `execution_loop_stall_secs` is `Some` only when the daemon is running and
+    // has completed at least one tick.  A zero `last_tick_at` (never ticked)
+    // causes callers to pass `None`, suppressing this check.
+    if let Some(stall_secs) = execution_loop_stall_secs {
+        if stall_secs > EXECUTION_LOOP_STALL_THRESHOLD_SECS {
+            signals.push(FaultSignal {
+                class: "runtime.execution_loop.stalled".to_string(),
+                severity: "critical".to_string(),
+                summary: format!(
+                    "Execution loop has not completed a tick in {stall_secs}s; \
+                     liveness unproven — dispatch cannot be trusted."
+                ),
+                detail: None,
+            });
+        }
+    }
+
     signals
 }
 
@@ -192,7 +225,7 @@ mod tests {
 
     #[test]
     fn st01_risk_truth_none_emits_warning_signal() {
-        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), None);
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), None, None);
         let risk_signals: Vec<_> = signals.iter().filter(|s| s.class.starts_with("risk.")).collect();
         assert_eq!(risk_signals.len(), 1, "expected exactly one risk signal");
         assert_eq!(risk_signals[0].class, "risk.truth_unavailable");
@@ -201,7 +234,7 @@ mod tests {
 
     #[test]
     fn st01_risk_truth_some_true_emits_critical_signal() {
-        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(true));
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(true), None);
         let risk_signals: Vec<_> = signals.iter().filter(|s| s.class.starts_with("risk.")).collect();
         assert_eq!(risk_signals.len(), 1);
         assert_eq!(risk_signals[0].class, "risk.dispatch_denied.engine_blocked");
@@ -210,19 +243,84 @@ mod tests {
 
     #[test]
     fn st01_risk_truth_some_false_emits_no_risk_signal() {
-        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false));
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), None);
         let risk_signals: Vec<_> = signals.iter().filter(|s| s.class.starts_with("risk.")).collect();
         assert!(risk_signals.is_empty(), "confirmed-clear risk must not fire a signal");
     }
 
     #[test]
     fn st01_risk_truth_none_distinct_from_confirmed_blocked() {
-        let signals_unknown = build_fault_signals(&ok_status(), &ok_reconcile(), None);
-        let signals_blocked = build_fault_signals(&ok_status(), &ok_reconcile(), Some(true));
+        let signals_unknown = build_fault_signals(&ok_status(), &ok_reconcile(), None, None);
+        let signals_blocked = build_fault_signals(&ok_status(), &ok_reconcile(), Some(true), None);
         // Both fire a risk signal but with different classes — operators can distinguish
         let class_unknown = &signals_unknown.iter().find(|s| s.class.starts_with("risk.")).unwrap().class;
         let class_blocked = &signals_blocked.iter().find(|s| s.class.starts_with("risk.")).unwrap().class;
         assert_ne!(class_unknown, class_blocked);
+    }
+
+    // HEARTBEAT-TICK-01 stall detection tests.
+    //
+    // build_fault_signals is pure so these are hermetic (no time.Now() calls
+    // inside; callers pre-compute stall_secs and pass it in).
+
+    #[test]
+    fn ht01_no_stall_signal_when_stall_secs_none() {
+        // None means "not running" or "never ticked" — no stall signal regardless.
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), None);
+        let stall: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class == "runtime.execution_loop.stalled")
+            .collect();
+        assert!(stall.is_empty(), "None stall_secs must produce no stall signal");
+    }
+
+    #[test]
+    fn ht01_no_stall_signal_under_threshold() {
+        // 5 s elapsed — under the 10 s threshold; no signal.
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), Some(5));
+        let stall: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class == "runtime.execution_loop.stalled")
+            .collect();
+        assert!(stall.is_empty(), "stall below threshold must not fire");
+    }
+
+    #[test]
+    fn ht01_no_stall_signal_at_exact_threshold() {
+        // Threshold is strict >; exactly 10 s is not stalled.
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), Some(10));
+        let stall: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class == "runtime.execution_loop.stalled")
+            .collect();
+        assert!(stall.is_empty(), "stall at exact threshold must not fire (strict >)");
+    }
+
+    #[test]
+    fn ht01_critical_stall_signal_over_threshold() {
+        // 15 s elapsed — over the 10 s threshold; critical signal.
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), Some(15));
+        let stall: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class == "runtime.execution_loop.stalled")
+            .collect();
+        assert_eq!(stall.len(), 1, "stall over threshold must fire exactly one signal");
+        assert_eq!(stall[0].severity, "critical");
+        assert_eq!(stall[0].class, "runtime.execution_loop.stalled");
+    }
+
+    #[test]
+    fn ht01_stall_signal_detail_includes_elapsed_secs() {
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), Some(30));
+        let stall = signals
+            .iter()
+            .find(|s| s.class == "runtime.execution_loop.stalled")
+            .expect("stall signal must be present at 30 s");
+        assert!(
+            stall.summary.contains("30s"),
+            "stall signal summary must include elapsed seconds; got: {}",
+            stall.summary
+        );
     }
 }
 

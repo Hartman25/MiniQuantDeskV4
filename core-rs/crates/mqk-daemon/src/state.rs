@@ -209,6 +209,13 @@ pub struct AppState {
     /// the first run start.  The execution loop clones the inner Arc and calls
     /// `fetch_broker_snapshot` every `EXTERNAL_SNAPSHOT_REFRESH_TICKS` ticks.
     pub external_snapshot_refresher: Arc<RwLock<Option<Arc<AlpacaBrokerAdapter>>>>,
+    /// HEARTBEAT-TICK-01: Unix-second timestamp of the last completed execution-loop tick.
+    ///
+    /// Written by `loop_runner` at the end of each successful tick (after
+    /// orchestrator progress and snapshot commit).  Zero until the first tick
+    /// completes.  Read by operator surfaces to detect a stalled or non-progressing
+    /// loop while `status.state == "running"`.
+    execution_last_tick_at: Arc<AtomicI64>,
 }
 
 impl Default for AppState {
@@ -547,6 +554,7 @@ impl AppState {
             pending_strategy_bar_input: Arc::new(Mutex::new(None)),
             last_bar_input_ts: Arc::new(AtomicI64::new(0)),
             external_snapshot_refresher: Arc::new(RwLock::new(None)),
+            execution_last_tick_at: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -572,6 +580,23 @@ impl AppState {
 
     pub fn strategy_market_data_source(&self) -> StrategyMarketDataSource {
         self.strategy_market_data_source
+    }
+
+    /// HEARTBEAT-TICK-01: Unix-second timestamp of the last completed execution-loop tick.
+    ///
+    /// Returns 0 when no tick has completed since daemon boot.  Callers check
+    /// `== 0` to distinguish "never ticked" from a stale timestamp.
+    pub fn execution_last_tick_secs(&self) -> i64 {
+        self.execution_last_tick_at.load(Ordering::SeqCst)
+    }
+
+    /// HEARTBEAT-TICK-01: Record a completed execution-loop tick at `now_secs`.
+    ///
+    /// Called by `loop_runner` once per tick after orchestrator progress and
+    /// snapshot commit succeed.  Not called on early-exit paths (deadman halt,
+    /// WS gap halt, orchestrator error, heartbeat failure).
+    pub(crate) fn record_execution_tick(&self, now_secs: i64) {
+        self.execution_last_tick_at.store(now_secs, Ordering::SeqCst);
     }
 
     pub async fn alpaca_ws_continuity(&self) -> AlpacaWsContinuityState {

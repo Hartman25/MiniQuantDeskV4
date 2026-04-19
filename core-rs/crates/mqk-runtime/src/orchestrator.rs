@@ -862,6 +862,51 @@ async fn persist_halt_and_disarm(
                  not be written (reason={reason}); runs.status=HALTED was persisted"
             )
         })?;
+    // EVIDENCE-DURABILITY-01: best-effort halt-reason audit event.
+    //
+    // The two mandatory writes above have already succeeded. This write makes the
+    // halt reason queryable from audit_events (topic='orchestrator') so a morning-
+    // after operator can answer "why was run X halted?" without relying on logs.
+    //
+    // Non-fatal: a telemetry write failure must not prevent the halt from being
+    // visible via runs.halted_at_utc and sys_arm_state (already persisted above).
+    {
+        let event_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            format!(
+                "mqk-runtime.halt-audit.v1|{}|{}|{}",
+                run_id,
+                reason,
+                now.timestamp_micros(),
+            )
+            .as_bytes(),
+        );
+        if let Err(err) = mqk_db::insert_audit_event(
+            pool,
+            &mqk_db::NewAuditEvent {
+                event_id,
+                run_id,
+                ts_utc: now,
+                topic: "orchestrator".to_string(),
+                event_type: reason.to_string(),
+                payload: serde_json::json!({
+                    "halt_reason": reason,
+                    "source": "mqk-runtime.orchestrator.persist_halt_and_disarm",
+                }),
+                hash_prev: None,
+                hash_self: None,
+            },
+        )
+        .await
+        {
+            tracing::warn!(
+                run_id = %run_id,
+                reason = reason,
+                error = %err,
+                "EVIDENCE-DURABILITY-01: halt_audit_event write failed (non-fatal)"
+            );
+        }
+    }
     Ok(())
 }
 

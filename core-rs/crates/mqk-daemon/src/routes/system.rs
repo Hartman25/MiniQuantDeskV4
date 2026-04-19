@@ -235,7 +235,18 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             risk_halt_active,
             integrity_halt_active: !integrity_armed,
             daemon_reachable: true,
-            fault_signals: build_fault_signals(&status, &reconcile, risk_truth),
+            // HEARTBEAT-TICK-01: compute elapsed seconds since the last execution-loop
+            // tick.  None when the daemon is not running or the loop has not yet
+            // completed its first tick (last_tick_secs == 0 means never ticked).
+            fault_signals: {
+                let execution_loop_stall_secs = if status.state == "running" {
+                    let last = st.execution_last_tick_secs();
+                    if last > 0 { Some(Utc::now().timestamp() - last) } else { None }
+                } else {
+                    None
+                };
+                build_fault_signals(&status, &reconcile, risk_truth, execution_loop_stall_secs)
+            },
             autonomous_signal_count,
             autonomous_signal_limit_hit,
             // B8: Canonical asset-class scope.  Hardcoded constant — not derived
