@@ -76,10 +76,19 @@ pub(crate) fn runtime_error_response(err: RuntimeLifecycleError) -> Response {
 // build_fault_signals
 // ---------------------------------------------------------------------------
 
+/// Build fault signals from runtime snapshot state.
+///
+/// `risk_truth` distinguishes three states:
+/// - `None` — DB is absent or the risk query failed; risk block state is unknown.
+///   Emits a warning-level signal so operators cannot mistake absence of data for safety.
+/// - `Some(true)` — DB query succeeded and risk engine reports blocked.
+///   Emits a critical-level signal.
+/// - `Some(false)` — DB query succeeded and risk engine reports not blocked.
+///   No signal emitted.
 pub(crate) fn build_fault_signals(
     status: &StatusSnapshot,
     reconcile: &crate::state::ReconcileStatusSnapshot,
-    risk_blocked: bool,
+    risk_truth: Option<bool>,
 ) -> Vec<FaultSignal> {
     let mut signals = Vec::new();
 
@@ -115,13 +124,28 @@ pub(crate) fn build_fault_signals(
         });
     }
 
-    if risk_blocked {
-        signals.push(FaultSignal {
-            class: "risk.dispatch_denied.engine_blocked".to_string(),
-            severity: "critical".to_string(),
-            summary: "Risk engine indicates dispatch is blocked.".to_string(),
-            detail: None,
-        });
+    match risk_truth {
+        None => {
+            // DB absent or query failed — cannot confirm risk state.  Emit a warning
+            // so the operator sees an explicit signal rather than a false-clear surface.
+            signals.push(FaultSignal {
+                class: "risk.truth_unavailable".to_string(),
+                severity: "warning".to_string(),
+                summary: "Risk block state is unknown: DB is absent or query failed; \
+                          risk-block enforcement cannot be confirmed."
+                    .to_string(),
+                detail: None,
+            });
+        }
+        Some(true) => {
+            signals.push(FaultSignal {
+                class: "risk.dispatch_denied.engine_blocked".to_string(),
+                severity: "critical".to_string(),
+                summary: "Risk engine indicates dispatch is blocked.".to_string(),
+                detail: None,
+            });
+        }
+        Some(false) => {} // confirmed not blocked — no signal
     }
 
     if status.state == "halted" {
@@ -134,6 +158,72 @@ pub(crate) fn build_fault_signals(
     }
 
     signals
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{ReconcileStatusSnapshot, StatusSnapshot};
+
+    fn ok_status() -> StatusSnapshot {
+        StatusSnapshot {
+            daemon_uptime_secs: 10,
+            active_run_id: None,
+            state: "idle".to_string(),
+            notes: None,
+            integrity_armed: true,
+            deadman_status: "ok".to_string(),
+            deadman_last_heartbeat_utc: None,
+        }
+    }
+
+    fn ok_reconcile() -> ReconcileStatusSnapshot {
+        ReconcileStatusSnapshot {
+            status: "ok".to_string(),
+            last_run_at: None,
+            snapshot_watermark_ms: None,
+            mismatched_positions: 0,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn st01_risk_truth_none_emits_warning_signal() {
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), None);
+        let risk_signals: Vec<_> = signals.iter().filter(|s| s.class.starts_with("risk.")).collect();
+        assert_eq!(risk_signals.len(), 1, "expected exactly one risk signal");
+        assert_eq!(risk_signals[0].class, "risk.truth_unavailable");
+        assert_eq!(risk_signals[0].severity, "warning");
+    }
+
+    #[test]
+    fn st01_risk_truth_some_true_emits_critical_signal() {
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(true));
+        let risk_signals: Vec<_> = signals.iter().filter(|s| s.class.starts_with("risk.")).collect();
+        assert_eq!(risk_signals.len(), 1);
+        assert_eq!(risk_signals[0].class, "risk.dispatch_denied.engine_blocked");
+        assert_eq!(risk_signals[0].severity, "critical");
+    }
+
+    #[test]
+    fn st01_risk_truth_some_false_emits_no_risk_signal() {
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false));
+        let risk_signals: Vec<_> = signals.iter().filter(|s| s.class.starts_with("risk.")).collect();
+        assert!(risk_signals.is_empty(), "confirmed-clear risk must not fire a signal");
+    }
+
+    #[test]
+    fn st01_risk_truth_none_distinct_from_confirmed_blocked() {
+        let signals_unknown = build_fault_signals(&ok_status(), &ok_reconcile(), None);
+        let signals_blocked = build_fault_signals(&ok_status(), &ok_reconcile(), Some(true));
+        // Both fire a risk signal but with different classes — operators can distinguish
+        let class_unknown = &signals_unknown.iter().find(|s| s.class.starts_with("risk.")).unwrap().class;
+        let class_blocked = &signals_blocked.iter().find(|s| s.class.starts_with("risk.")).unwrap().class;
+        assert_ne!(class_unknown, class_blocked);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +442,77 @@ pub(crate) async fn write_signal_admission_event(
     .await
     {
         tracing::warn!("write_signal_admission_event failed (non-fatal): {err}");
+        return None;
+    }
+    Some(event_id)
+}
+
+// ---------------------------------------------------------------------------
+// write_signal_refusal_event — SIGNAL-REFUSAL-OBS-01
+// ---------------------------------------------------------------------------
+
+/// Write a durable signal-refusal audit event when an active run is present.
+///
+/// Called by `strategy_signal` at Gates 5 and 6, where `active_run_id` is
+/// known.  Creates a `signal.refused` record in `audit_events` with
+/// `topic='signal_ingestion'` so the events feed surfaces why a signal was
+/// denied during a run.
+///
+/// # Non-fatal contract
+///
+/// If the DB write fails, the failure is logged at `warn` level and `None`
+/// is returned.  The caller's refusal response is not affected.
+///
+/// # Idempotency
+///
+/// `event_id` is a UUIDv5 derived from `(run_id, signal_id, gate, ts_utc_micros)`.
+pub(crate) async fn write_signal_refusal_event(
+    st: &Arc<AppState>,
+    run_id: uuid::Uuid,
+    gate: &str,
+    disposition: &str,
+    signal_id: &str,
+    strategy_id: &str,
+    symbol: &str,
+    blockers: &[String],
+) -> Option<uuid::Uuid> {
+    let db = st.db.as_ref()?;
+    let ts_utc = chrono::Utc::now();
+    let event_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk-daemon.signal-refusal.v1|{}|{}|{}|{}",
+            run_id,
+            signal_id,
+            gate,
+            ts_utc.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+        )
+        .as_bytes(),
+    );
+    if let Err(err) = mqk_db::insert_audit_event(
+        db,
+        &mqk_db::NewAuditEvent {
+            event_id,
+            run_id,
+            ts_utc,
+            topic: "signal_ingestion".to_string(),
+            event_type: "signal.refused".to_string(),
+            payload: serde_json::json!({
+                "signal_id": signal_id,
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "gate": gate,
+                "disposition": disposition,
+                "blockers": blockers,
+                "source": "mqk-daemon.routes.strategy_signal",
+            }),
+            hash_prev: None,
+            hash_self: None,
+        },
+    )
+    .await
+    {
+        tracing::warn!("write_signal_refusal_event failed (non-fatal): {err}");
         return None;
     }
     Some(event_id)
