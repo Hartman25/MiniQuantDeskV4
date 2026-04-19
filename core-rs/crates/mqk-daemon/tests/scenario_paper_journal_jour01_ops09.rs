@@ -561,8 +561,13 @@ async fn j12_paper_journal_active_never_emitted_without_db() {
 // ---------------------------------------------------------------------------
 
 /// With NotApplicable WS continuity and all clean runtime state, alerts/active
-/// must return truth_state=active, alert_count=0, and empty rows.
-/// This proves OPS-09 changes do not break the existing clean-state contract.
+/// must return truth_state=active with no paper.ws_continuity.* alerts.
+///
+/// Note: no-DB state produces exactly one alert — `risk.truth_unavailable`
+/// (warning) — because `build_fault_signals` emits this when the DB is absent
+/// and risk-block state cannot be confirmed (commit 85da8d7).  OPS-09's claim
+/// is narrower: it must not inject any additional `paper.ws_continuity.*`
+/// alerts when continuity is NotApplicable.
 #[tokio::test]
 async fn j10_existing_clean_state_contract_preserved_after_ops09() {
     let st = Arc::new(state::AppState::new_with_operator_auth(
@@ -586,6 +591,38 @@ async fn j10_existing_clean_state_contract_preserved_after_ops09() {
         .expect("alert_count must be numeric");
     let rows = json["rows"].as_array().expect("rows must be an array");
 
-    assert_eq!(alert_count, 0, "clean state must produce zero alerts");
-    assert_eq!(rows.len(), 0, "clean state rows must be empty");
+    // alert_count must always equal rows.len() — the J08 invariant.
+    assert_eq!(
+        alert_count as usize,
+        rows.len(),
+        "alert_count must equal rows.len()"
+    );
+
+    // OPS-09 claim: NotApplicable WS continuity must not inject any
+    // paper.ws_continuity.* alerts regardless of other active signals.
+    let ws_alerts: Vec<_> = rows
+        .iter()
+        .filter(|r| {
+            r["class"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("paper.ws_continuity.")
+        })
+        .collect();
+    assert!(
+        ws_alerts.is_empty(),
+        "NotApplicable WS continuity must produce no paper.ws_continuity.* alerts \
+         after OPS-09 changes; got: {ws_alerts:?}"
+    );
+
+    // No-DB state produces exactly risk.truth_unavailable (warning) and nothing else.
+    // Confirm all present alerts are from the expected no-DB set.
+    let allowed_no_db_classes = ["risk.truth_unavailable"];
+    for row in rows {
+        let class = row["class"].as_str().unwrap_or("");
+        assert!(
+            allowed_no_db_classes.contains(&class),
+            "unexpected alert in no-DB clean state: {class:?}"
+        );
+    }
 }
