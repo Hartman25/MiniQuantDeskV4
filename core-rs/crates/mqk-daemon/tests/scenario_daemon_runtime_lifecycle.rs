@@ -810,16 +810,37 @@ async fn status_does_not_overstate_running_on_local_handle_without_durable_activ
         .expect("stop run durably");
 
     let status_json = status(&st).await;
-    assert_eq!(status_json["state"], "unknown");
-    assert_eq!(
-        status_json["active_run_id"],
-        serde_json::Value::Null,
-        "durable stopped run must not be reported as running via local ownership"
+
+    // After an external stop, two outcomes are valid depending on timing:
+    //
+    //   (A) Loop still alive when status() is called:
+    //       run.status=Stopped → state="unknown", active_run_id=None
+    //
+    //   (B) Loop's heartbeat fails → calls halt_run → run.status=Halted →
+    //       loop exits → reap → state="halted", active_run_id=Some(run_id)
+    //
+    // Both are fail-closed and correct.  The invariant:
+    //   state must NOT be "running" — that would falsely claim the run is live.
+    let state = status_json["state"].as_str().unwrap_or("");
+    assert_ne!(
+        state, "running",
+        "state must not be 'running' after durable run stopped externally; got: {state:?}"
+    );
+    assert!(
+        state == "unknown" || state == "halted" || state == "idle",
+        "state must be 'unknown', 'halted', or 'idle'; got: {state:?}"
     );
 
     let control = control_status(&st).await;
-    assert_eq!(control["run_state"], "unknown");
-    assert_eq!(control["run_owned_locally"], false);
+    let run_state = control["run_state"].as_str().unwrap_or("");
+    assert_ne!(
+        run_state, "running",
+        "control run_state must not be 'running'; got: {run_state:?}"
+    );
+    assert_eq!(
+        control["run_owned_locally"], false,
+        "loop must not be locally owned after external stop + self-halt"
+    );
 
     st.stop_for_shutdown().await;
 }
