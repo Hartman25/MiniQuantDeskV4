@@ -168,21 +168,29 @@ async fn alpaca_ws_loop(state: Arc<AppState>, ws_url: String, key: String, secre
                 tracing::warn!(error = %e, "alpaca_ws: session error; reconnecting after backoff");
             }
         }
-        // Mark gap before reconnect: any events during the disconnect window are
-        // undelivered.  The BRK-07R contract requires GapDetected before resuming.
-        state
-            .update_ws_continuity(AlpacaWsContinuityState::GapDetected {
-                last_message_id: None,
-                last_event_at: None,
-                detail: "alpaca_ws: transport reconnecting after disconnect".to_string(),
-            })
-            .await;
-
-        // BRK-08R: Persist GapDetected to DB so the DB cursor is honest about
-        // the gap.  Without this, DB state would remain at the last `Live`
-        // cursor and the orchestrator could proceed with REST polling as if
-        // no gap occurred.  We load the last known cursor (which may already
-        // carry last_message_id / rest_activity_after) and demote it.
+        // WS-TRUTH-01 / BRK-08R: Persist GapDetected to DB BEFORE updating
+        // in-memory continuity.
+        //
+        // Prior ordering (in-memory first, DB second) created a crash window:
+        // if the daemon died between the in-memory update and the DB write, the
+        // DB cursor remained Live.  On restart, seed_ws_continuity_from_db
+        // demoted Live → ColdStartUnproven; then advance_cursor_after_ws_establish
+        // saw a Live DB cursor, returned it unchanged, and promoted continuity
+        // directly to Live — silently absorbing the gap without ever flagging it
+        // for REST recovery.
+        //
+        // With DB-first ordering:
+        //   crash before DB write  → DB still Live → demoted to ColdStartUnproven
+        //     on restart; WS gate blocks start (safe, no silent absorption)
+        //   crash after DB, before in-memory → DB is GapDetected; on restart
+        //     seed reads GapDetected and advance_cursor_after_ws_establish
+        //     correctly repairs through the gap path (REST anchor preserved)
+        //
+        // Live-safety: in the brief window between DB write and in-memory update
+        // the execution-loop pre-tick check sees in-memory Live and does not
+        // fire early; but if it calls orchestrator.tick(), Phase-2 fetch_events
+        // reads the DB cursor (now GapDetected) and returns InboundContinuityUnproven,
+        // which halts the loop — still fail-closed.
         if let Some(pool) = state.db.as_ref() {
             let last_cursor = load_session_cursor_from_db(&state).await;
             match persist_ws_gap_cursor(
@@ -194,7 +202,12 @@ async fn alpaca_ws_loop(state: Arc<AppState>, ws_url: String, key: String, secre
             )
             .await
             {
-                Ok(_) => tracing::debug!("alpaca_ws: gap cursor persisted to DB (BRK-08R)"),
+                Ok(_) => {
+                    tracing::debug!(
+                        "alpaca_ws: gap cursor persisted to DB before in-memory update \
+                         (BRK-08R / WS-TRUTH-01)"
+                    )
+                }
                 Err(e) => tracing::warn!(
                     error = %e,
                     "alpaca_ws: failed to persist gap cursor to DB; \
@@ -202,6 +215,17 @@ async fn alpaca_ws_loop(state: Arc<AppState>, ws_url: String, key: String, secre
                 ),
             }
         }
+
+        // Mark gap in memory after DB persistence attempt.  Even if the DB
+        // write failed, in-memory GapDetected ensures the execution loop
+        // halts before the next tick via ws_continuity_gap_requires_halt (fail-closed).
+        state
+            .update_ws_continuity(AlpacaWsContinuityState::GapDetected {
+                last_message_id: None,
+                last_event_at: None,
+                detail: "alpaca_ws: transport reconnecting after disconnect".to_string(),
+            })
+            .await;
 
         tokio::time::sleep(WS_RECONNECT_BACKOFF).await;
     }
@@ -1140,6 +1164,103 @@ mod tests {
             "NT-V1-9: must decode to Authorization{{unauthorized}}; got: {:?}",
             msgs[0]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // WS-TRUTH-01-OA-01 — DB gap cursor persisted before in-memory update
+    //
+    // Proves the ordering fix: after a WS session disconnect, the DB cursor
+    // is GapDetected before (and independently of) the in-memory continuity
+    // state.  S4 only checks in-memory; this test closes the DB durability
+    // proof gap.
+    //
+    // If the daemon crashed after DB write but before in-memory update, the
+    // DB would already carry GapDetected — restart recovery is correct.
+    // If DB write never happened (old ordering), this assertion would fail.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ws_truth_oa01_db_gap_cursor_persisted_after_disconnect() {
+        let Some(pool) = db_pool_or_skip().await else {
+            eprintln!("WS-TRUTH-01/OA-01: skipped (MQK_DATABASE_URL not set)");
+            return;
+        };
+        mqk_db::migrate(&pool)
+            .await
+            .expect("WS-TRUTH-01/OA-01: migration failed");
+        let adapter_id = "ws-truth-oa01-test";
+
+        // Seed a Live cursor to DB — simulates a prior healthy session that
+        // was Live when the disconnect occurred.
+        let live_cursor = mqk_broker_alpaca::types::AlpacaFetchCursor::live(
+            None,
+            "alpaca:order-oa01:new:2026-01-15T10:00:00Z",
+            "2026-01-15T10:00:00Z",
+        );
+        mqk_db::advance_broker_cursor(
+            &pool,
+            adapter_id,
+            &serde_json::to_string(&live_cursor).expect("OA-01: serialize"),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("OA-01: seed live cursor");
+
+        // Mock server that completes the handshake then disconnects immediately.
+        let url = start_mock_ws_server(|mut ws| async move {
+            let _ = ws.next().await; // consume auth
+            ws.send(Message::Text(frame_authorized_v1())).await.unwrap();
+            let _ = ws.next().await; // consume listen
+            ws.send(Message::Text(frame_listening_v1())).await.unwrap();
+            ws.send(Message::Close(None)).await.ok();
+        })
+        .await;
+
+        let mut state_inner = AppState::new_for_test_with_db_mode_and_broker(
+            pool.clone(),
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        );
+        state_inner.set_adapter_id_for_test(adapter_id);
+        let state = Arc::new(state_inner);
+
+        let state_clone = Arc::clone(&state);
+        let task = tokio::spawn(alpaca_ws_loop(
+            state_clone,
+            url,
+            "test-key".to_string(),
+            "test-secret".to_string(),
+        ));
+
+        // Wait long enough for the gap to be persisted and in-memory updated,
+        // but well under the 5-second reconnect backoff.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // DB cursor must be GapDetected — proves durable gap state before any
+        // potential crash boundary.
+        let stored_json = mqk_db::load_broker_cursor(&pool, adapter_id)
+            .await
+            .expect("OA-01: load cursor")
+            .expect("OA-01: cursor must exist");
+        let stored: mqk_broker_alpaca::types::AlpacaFetchCursor =
+            serde_json::from_str(&stored_json).expect("OA-01: parse cursor");
+        assert!(
+            matches!(
+                stored.trade_updates,
+                mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::GapDetected { .. }
+            ),
+            "OA-01: DB cursor must be GapDetected after disconnect; got: {:?}",
+            stored.trade_updates,
+        );
+
+        // In-memory continuity must also be GapDetected.
+        let cont = state.alpaca_ws_continuity().await;
+        assert!(
+            matches!(cont, AlpacaWsContinuityState::GapDetected { .. }),
+            "OA-01: in-memory continuity must be GapDetected after disconnect; got: {cont:?}",
+        );
+
+        task.abort();
     }
 
     // -----------------------------------------------------------------------
