@@ -430,7 +430,11 @@ async fn n04_alert_get_route_does_not_trigger_notifier() {
         "N04: truth_state must be active"
     );
     let rows = body["rows"].as_array().unwrap();
-    assert_eq!(rows.len(), 1, "N04: no-DB state must surface one truthful warning row");
+    assert_eq!(
+        rows.len(),
+        1,
+        "N04: no-DB state must surface one truthful warning row"
+    );
     assert_eq!(rows[0]["class"], "risk.truth_unavailable");
     assert_eq!(rows[0]["severity"], "warning");
 
