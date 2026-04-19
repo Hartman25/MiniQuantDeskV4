@@ -99,6 +99,17 @@ async fn lifecycle_pool() -> sqlx::PgPool {
         .execute(&pool)
         .await
         .expect("cleanup broker_event_cursor");
+    // STRATEGY-DORMANCY-01: ensure swing_momentum is registered and enabled so
+    // daemon_state() Paper+Alpaca start clears the native_strategy_bootstrap gate.
+    sqlx::query(
+        "INSERT INTO sys_strategy_registry \
+         (strategy_id, display_name, enabled, kind, registered_at_utc, updated_at_utc, note) \
+         VALUES ('swing_momentum', 'Swing Momentum', true, 'bar_driven', NOW(), NOW(), 'lifecycle-test-fixture') \
+         ON CONFLICT (strategy_id) DO UPDATE SET enabled = true, updated_at_utc = NOW()",
+    )
+    .execute(&pool)
+    .await
+    .expect("upsert swing_momentum for lifecycle tests");
 
     pool
 }
@@ -233,6 +244,10 @@ async fn daemon_state() -> Arc<state::AppState> {
         std::env::set_var("ALPACA_API_KEY_PAPER", "test-paper-key");
         std::env::set_var("ALPACA_API_SECRET_PAPER", "test-paper-secret");
         std::env::set_var("ALPACA_PAPER_BASE_URL", &mock_url);
+        // STRATEGY-DORMANCY-01: Paper+Alpaca requires a non-dormant bootstrap.
+        // swing_momentum is a registered built-in; lifecycle_pool() upserts it
+        // as enabled in sys_strategy_registry before any test calls start().
+        std::env::set_var("MQK_STRATEGY_IDS", "swing_momentum");
     }
 
     let state = Arc::new(state::AppState::new_with_db_and_operator_auth(
