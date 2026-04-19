@@ -437,6 +437,12 @@ pub enum AutonomousSessionTruth {
     StoppedAtBoundary {
         detail: String,
     },
+    /// EXEC-OBS-LIVENESS-01: the autonomous session controller task exited
+    /// (panic or unexpected loop exit).  Autonomous paper execution is now
+    /// UNMANAGED.  The daemon is still up but no session controller is alive.
+    ControllerExited {
+        detail: String,
+    },
 }
 
 impl AlpacaWsContinuityState {

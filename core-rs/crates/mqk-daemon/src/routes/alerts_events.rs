@@ -7,8 +7,9 @@
 //! ## `/api/v1/alerts/active`
 //!
 //! Source: `build_fault_signals()` — current in-memory computation from
-//! `StatusSnapshot` + `ReconcileStatusSnapshot` + DB-backed risk-block state
-//! (falls back to `false` when no DB, consistent with `system/status`).
+//! `StatusSnapshot` + `ReconcileStatusSnapshot` + DB-backed risk-block state.
+//! Risk truth is `None` (unknown) when no DB pool is present or the DB query
+//! errors — this emits an explicit warning fault signal instead of a false-clear.
 //!
 //! OPS-09 adds Alpaca WS continuity supervision signals:
 //! - `"paper.ws_continuity.cold_start_unproven"` (warning) when
@@ -71,19 +72,20 @@ pub(crate) async fn alerts_active(State(st): State<Arc<AppState>>) -> Response {
     };
     let reconcile = st.current_reconcile_snapshot().await;
 
-    // Risk-blocked state requires a DB query.  Falls back to false when no DB,
-    // matching the behaviour of `GET /api/v1/system/status`.
-    let risk_blocked = if let Some(db) = st.db.as_ref() {
-        mqk_db::load_risk_block_state(db)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|risk| risk.blocked)
+    // STATUS-TRUTH-01: risk_truth is Option<bool> — None when DB is absent or errors.
+    // Matches the behaviour of `GET /api/v1/system/status` so fault signals are
+    // consistent across both surfaces.  None emits a warning-level signal rather
+    // than a false-green silence.
+    let risk_truth: Option<bool> = if let Some(db) = st.db.as_ref() {
+        match mqk_db::load_risk_block_state(db).await {
+            Ok(row) => Some(row.is_some_and(|risk| risk.blocked)),
+            Err(_) => None,
+        }
     } else {
-        false
+        None
     };
 
-    let fault_signals = build_fault_signals(&status, &reconcile, risk_blocked);
+    let fault_signals = build_fault_signals(&status, &reconcile, risk_truth);
 
     let mut rows: Vec<ActiveAlertRow> = fault_signals
         .into_iter()
@@ -197,6 +199,14 @@ pub(crate) async fn alerts_active(State(st): State<Arc<AppState>>) -> Response {
             severity: "info".to_string(),
             class: "autonomous.session.stopped_at_boundary".to_string(),
             summary: "Autonomous paper run stopped at the configured session boundary.".to_string(),
+            detail: Some(detail),
+            source: "daemon.autonomous_session".to_string(),
+        }),
+        AutonomousSessionTruth::ControllerExited { detail } => rows.push(ActiveAlertRow {
+            alert_id: "autonomous.session.controller_exited".to_string(),
+            severity: "critical".to_string(),
+            class: "autonomous.session.controller_exited".to_string(),
+            summary: "Autonomous session controller task has exited; unattended paper execution is UNMANAGED. Operator intervention required.".to_string(),
             detail: Some(detail),
             source: "daemon.autonomous_session".to_string(),
         }),
@@ -698,17 +708,17 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
     };
     let reconcile = st.current_reconcile_snapshot().await;
 
-    let risk_blocked = if let Some(db) = st.db.as_ref() {
-        mqk_db::load_risk_block_state(db)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|r| r.blocked)
+    // STATUS-TRUTH-01: risk_truth is Option<bool> — None when DB absent or error.
+    let risk_truth: Option<bool> = if let Some(db) = st.db.as_ref() {
+        match mqk_db::load_risk_block_state(db).await {
+            Ok(row) => Some(row.is_some_and(|r| r.blocked)),
+            Err(_) => None,
+        }
     } else {
-        false
+        None
     };
 
-    let fault_signals = build_fault_signals(&status_snap, &reconcile, risk_blocked);
+    let fault_signals = build_fault_signals(&status_snap, &reconcile, risk_truth);
 
     // WS continuity signals — same as alerts/active
     let ws = st.alpaca_ws_continuity().await;
@@ -812,6 +822,14 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
             "system",
             format!(
                 "Autonomous paper run stopped at the configured session boundary. {detail}"
+            ),
+        )),
+        AutonomousSessionTruth::ControllerExited { detail } => extra_signals.push((
+            "autonomous.session.controller_exited",
+            "critical",
+            "system",
+            format!(
+                "Autonomous session controller task has exited; unattended paper execution is UNMANAGED. {detail}"
             ),
         )),
     }

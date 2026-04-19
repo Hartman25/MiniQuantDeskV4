@@ -288,8 +288,15 @@ async fn brk00r06_e02_live_continuity_unblocks_ws_gate_reaches_db_gate() {
         state::BrokerKind::Alpaca,
     ));
     arm(&st).await;
+    // STRATEGY-DORMANCY-01: set an active fleet so the bootstrap gate passes
+    // after Live WS is established and start can reach the DB gate.
+    st.set_strategy_fleet_for_test(Some(vec![state::StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
+    .await;
 
     // Baseline: ColdStartUnproven (default on boot) → start blocked at WS gate.
+    // (Fleet does not matter here — WS gate fires before bootstrap gate.)
     let start_req = Request::builder()
         .method("POST")
         .uri("/v1/run/start")
@@ -361,6 +368,12 @@ async fn brk00r06_e03_continuity_round_trip_is_fail_closed() {
         state::BrokerKind::Alpaca,
     ));
     arm(&st).await;
+    // STRATEGY-DORMANCY-01: set an active fleet so the bootstrap gate passes
+    // when WS is Live and start is expected to reach the DB gate.
+    st.set_strategy_fleet_for_test(Some(vec![state::StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
+    .await;
 
     let try_start = |st: Arc<state::AppState>| async move {
         let req = Request::builder()
@@ -1957,5 +1970,79 @@ async fn ptauto04_e17_phase2_consolidated_healthy_path_all_autonomous_controls_p
         status_json["alpaca_ws_continuity"], "live",
         "E17: system/status must surface alpaca_ws_continuity='live' on healthy path; \
          got: {status_json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BRK00R06-E18 — STRATEGY-DORMANCY-01: Dormant bootstrap blocks Paper+Alpaca start
+//
+// Proves that paper+alpaca with no MQK_STRATEGY_IDS configured (Dormant
+// bootstrap) is refused at the strategy bootstrap gate, not allowed to start
+// a silently idle execution loop.
+//
+// Gate sequence tested here:
+//   deployment_mode pass  (paper+alpaca is the canonical path)
+//   integrity arm pass    (armed before calling start)
+//   WS continuity pass    (Live WS established before start)
+//   artifact/parity/capital gates pass  (none configured, all NotConfigured → pass)
+//   B1A Failed check pass (no fleet entry; Failed gate does not apply)
+//   STRATEGY-DORMANCY-01 Dormant block → 403 gate=native_strategy_bootstrap
+//
+// Without this gate the daemon would enter a running state with zero strategy
+// decisions generated — indistinguishable from active execution at the surface.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn brk00r06_e18_dormant_bootstrap_blocks_paper_alpaca_start() {
+    let st = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    ));
+    arm(&st).await;
+
+    // Explicitly clear fleet (default is already None/empty, but explicit is cleaner).
+    st.set_strategy_fleet_for_test(None).await;
+
+    // Establish Live WS continuity so the WS gate (BRK-00R-04) passes.
+    st.update_ws_continuity(state::AlpacaWsContinuityState::Live {
+        last_message_id: "alpaca:e18-test:new:2026-01-01T00:00:00Z".to_string(),
+        last_event_at: "2026-01-01T00:00:00Z".to_string(),
+    })
+    .await;
+    assert!(
+        st.alpaca_ws_continuity().await.is_continuity_proven(),
+        "E18: continuity must be Live before testing bootstrap gate"
+    );
+
+    let start_req = Request::builder()
+        .method("POST")
+        .uri("/v1/run/start")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), start_req).await;
+
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "E18: paper+alpaca with dormant bootstrap must return 403; \
+         got: {status} body: {}",
+        String::from_utf8_lossy(&body)
+    );
+    let json = parse_json(body);
+    assert_eq!(
+        json["gate"], "native_strategy_bootstrap",
+        "E18: dormant bootstrap must name 'native_strategy_bootstrap' as the gate; got: {json}"
+    );
+    let code = json["fault_class"].as_str().unwrap_or("");
+    assert!(
+        code.contains("dormant"),
+        "E18: fault_class must contain 'dormant' to distinguish from the B1A Failed gate; \
+         got: {json}"
+    );
+    let error_text = json["error"].as_str().unwrap_or("");
+    assert!(
+        error_text.contains("MQK_STRATEGY_IDS"),
+        "E18: error message must name MQK_STRATEGY_IDS so operator knows what to set; \
+         got: {json}"
     );
 }

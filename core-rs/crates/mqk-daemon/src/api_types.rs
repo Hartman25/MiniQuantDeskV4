@@ -1558,7 +1558,7 @@ pub struct ProtectionStatusResponse {
 /// the condition is resolved.  `alert_id` is the fault signal class (a stable
 /// slug), not a UUIDv4 — there is no durable alert registry.
 ///
-/// Source: `build_fault_signals(StatusSnapshot, ReconcileStatusSnapshot, risk_blocked)`.
+/// Source: `build_fault_signals(StatusSnapshot, ReconcileStatusSnapshot, risk_truth: Option<bool>)`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActiveAlertRow {
     /// Stable slug derived from the fault signal class.

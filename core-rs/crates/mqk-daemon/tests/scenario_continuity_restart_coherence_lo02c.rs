@@ -65,7 +65,9 @@ use chrono::Utc;
 use http_body_util::BodyExt;
 use mqk_broker_alpaca::types::AlpacaFetchCursor;
 use mqk_daemon::routes;
-use mqk_daemon::state::{AlpacaWsContinuityState, AppState, BrokerKind, DeploymentMode};
+use mqk_daemon::state::{
+    AlpacaWsContinuityState, AppState, BrokerKind, DeploymentMode, StrategyFleetEntry,
+};
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -259,6 +261,13 @@ async fn lo02c_rc01_dirty_reconcile_in_db_auto_blocks_restart_without_in_memory_
     // Arm integrity gate.
     arm_in_memory(&st).await;
 
+    // STRATEGY-DORMANCY-01: provide an active fleet so the Dormant gate passes
+    // and the reconcile gate remains the target.
+    st.set_strategy_fleet_for_test(Some(vec![StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
+    .await;
+
     // Establish Live WS so Gate 3 (WS continuity) passes — isolating Gate 4.
     inject_live_ws(&st).await;
 
@@ -346,6 +355,13 @@ async fn lo02c_rc02_gap_cursor_and_dirty_reconcile_ws_gate_fires_first_then_reco
     );
 
     arm_in_memory(&st).await;
+
+    // STRATEGY-DORMANCY-01: provide an active fleet so the Dormant gate passes
+    // and the WS/reconcile gates remain the target.
+    st.set_strategy_fleet_for_test(Some(vec![StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
+    .await;
 
     // Step 1: WS gate fires first.
     let (status1, json1) = start_req(&st).await;
@@ -441,6 +457,13 @@ async fn lo02c_rc03_live_cursor_demoted_with_dirty_reconcile_ws_gate_fires_first
 
     arm_in_memory(&st).await;
 
+    // STRATEGY-DORMANCY-01: provide an active fleet so the Dormant gate passes
+    // and the WS/reconcile gates remain the target.
+    st.set_strategy_fleet_for_test(Some(vec![StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
+    .await;
+
     // Step 1: WS gate fires (ColdStartUnproven after demotion).
     let (status1, json1) = start_req(&st).await;
 
@@ -531,6 +554,13 @@ async fn lo02c_rc04_gap_cursor_with_ok_reconcile_only_ws_gate_fires() {
     );
 
     arm_in_memory(&st).await;
+
+    // STRATEGY-DORMANCY-01: provide an active fleet so the Dormant gate passes
+    // and the WS gate remains the only blocker.
+    st.set_strategy_fleet_for_test(Some(vec![StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
+    .await;
 
     // Start: WS gate fires; ok reconcile is NOT the blocker.
     let (status, json) = start_req(&st).await;

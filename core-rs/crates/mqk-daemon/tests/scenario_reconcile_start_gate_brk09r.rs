@@ -36,7 +36,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{
     routes,
-    state::{AppState, BrokerKind, DeploymentMode, ReconcileStatusSnapshot},
+    state::{AppState, BrokerKind, DeploymentMode, ReconcileStatusSnapshot, StrategyFleetEntry},
 };
 use tower::ServiceExt;
 
@@ -82,6 +82,15 @@ async fn ready_state() -> Arc<AppState> {
         last_message_id: "alpaca:ord-1:new:2026-01-01T00:00:00Z".to_string(),
         last_event_at: "2026-01-01T00:00:00Z".to_string(),
     })
+    .await;
+
+    // STRATEGY-DORMANCY-01: Set an active fleet so the bootstrap gate passes
+    // and tests reach their intended target gate (reconcile or DB).
+    // Without this, Paper+Alpaca start is blocked at the Dormant bootstrap gate
+    // before any reconcile check runs.
+    st.set_strategy_fleet_for_test(Some(vec![StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
     .await;
 
     st

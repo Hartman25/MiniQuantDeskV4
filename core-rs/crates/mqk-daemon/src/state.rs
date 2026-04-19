@@ -1625,6 +1625,9 @@ fn autonomous_truth_event_parts(
         AutonomousSessionTruth::StoppedAtBoundary { detail } => {
             Some(("stopped_at_boundary", None, detail.clone()))
         }
+        AutonomousSessionTruth::ControllerExited { detail } => {
+            Some(("controller_exited", None, detail.clone()))
+        }
     }
 }
 

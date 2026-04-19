@@ -33,7 +33,7 @@ use axum::http::{Request, StatusCode};
 use chrono::{TimeZone, Utc};
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
-use state::{AlpacaWsContinuityState, BrokerKind, DeploymentMode};
+use state::{AlpacaWsContinuityState, BrokerKind, DeploymentMode, StrategyFleetEntry};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -222,6 +222,12 @@ async fn ar04_live_armed_clean_reconcile_overall_ready() {
     // Required so that session_in_window = true regardless of wall-clock at test run time.
     st.set_session_clock_ts_for_test(nyse_regular_session_ts())
         .await;
+    // STRATEGY-DORMANCY-01: Paper+Alpaca overall_ready requires an active fleet.
+    // Without a fleet entry strategy_fleet_empty=true → overall_ready=false + blocker.
+    st.set_strategy_fleet_for_test(Some(vec![StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
+    .await;
     // Reconcile defaults to "unknown" which is not dirty/stale → reconcile_ready = true.
 
     let router = routes::build_router(st);

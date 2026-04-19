@@ -76,6 +76,7 @@ use mqk_daemon::{
     routes,
     state::{
         AlpacaWsContinuityState, AppState, BrokerKind, DeploymentMode, ReconcileStatusSnapshot,
+        StrategyFleetEntry,
     },
 };
 use tower::ServiceExt;
@@ -207,6 +208,15 @@ async fn aligned_state() -> Arc<AppState> {
 
     // Inject NYSE regular-session timestamp so Gate 1c passes.
     st.set_session_clock_ts_for_test(NYSE_REGULAR_TS).await;
+
+    // STRATEGY-DORMANCY-01: Set an active fleet so the bootstrap gate passes
+    // and tests reach their intended target gate (signal DB gate or start DB gate).
+    // Without this, Paper+Alpaca start is blocked at the Dormant bootstrap gate
+    // before reaching the gate each test is designed to prove.
+    st.set_strategy_fleet_for_test(Some(vec![StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
+    .await;
 
     st
 }

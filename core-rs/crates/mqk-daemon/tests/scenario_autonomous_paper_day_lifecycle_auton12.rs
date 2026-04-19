@@ -39,7 +39,7 @@ use chrono::{TimeZone, Utc};
 use mqk_daemon::state;
 use state::{
     AlpacaWsContinuityState, AutonomousSessionSchedule, AutonomousSessionTruth, BrokerKind,
-    DeploymentMode, SessionWindow,
+    DeploymentMode, SessionWindow, StrategyFleetEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -248,7 +248,13 @@ async fn al02_tick_driven_start_passes_all_pre_db_gates_reaches_db_gate() {
     .await;
 
     // reconcile defaults to "unknown" — passes BRK-09R ("dirty"/"stale" block, "unknown" passes).
-    // No artifact, no capital policy, no deployment economics, no strategy fleet — all pass-through.
+    // No artifact, no capital policy, no deployment economics — all pass-through.
+    // STRATEGY-DORMANCY-01: Paper+Alpaca requires an active fleet; set one so the
+    // bootstrap gate passes and the start reaches the DB gate as intended.
+    st.set_strategy_fleet_for_test(Some(vec![StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
+    .await;
 
     assert!(
         st.db.is_none(),

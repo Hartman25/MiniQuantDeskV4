@@ -30,8 +30,8 @@ use crate::api_types::{
 };
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::{
-    autonomous_session_schedule_from_env, AppState, AutonomousSessionTruth, DeploymentMode,
-    StrategyMarketDataSource,
+    autonomous_session_schedule_from_env, AppState, AutonomousSessionTruth, BrokerSnapshotTruthSource,
+    DeploymentMode, StrategyMarketDataSource,
 };
 
 use super::helpers::{
@@ -40,6 +40,14 @@ use super::helpers::{
 };
 
 const DAEMON_ENGINE_ID: &str = "mqk-daemon";
+
+/// Staleness threshold for External (Alpaca) broker snapshots.
+///
+/// External snapshots are refreshed every 60 ticks in the run loop.  If the
+/// snapshot is older than 3× the expected refresh interval while a run is
+/// active, the broker status is surfaced as `"stale"` instead of `"ok"` so
+/// the operator does not mistake a stale snapshot for confirmed-fresh state.
+const BROKER_SNAPSHOT_STALE_SECS: i64 = 180;
 
 // ---------------------------------------------------------------------------
 // GET /v1/health
@@ -77,33 +85,72 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
         Err(err) => return runtime_error_response(err),
     };
     let reconcile = st.current_reconcile_snapshot().await;
-    let snapshot_present = st.broker_snapshot.read().await.is_some();
     let integrity_armed = status.integrity_armed;
 
-    let (risk_blocked, db_status) = if let Some(db) = st.db.as_ref() {
-        let risk_result = mqk_db::load_risk_block_state(db).await;
-        let db_ok = risk_result.is_ok();
-        let risk_blocked = risk_result.ok().flatten().is_some_and(|risk| risk.blocked);
-        let db_status = if db_ok { "ok" } else { "warning" }.to_string();
-        (risk_blocked, db_status)
+    // STATUS-TRUTH-01: risk_truth distinguishes DB-confirmed-clear from DB-unavailable.
+    //
+    // Prior code used `bool` which collapsed both "no DB" and "DB error" into `false`
+    // (same as "confirmed not blocked"), producing a false-green surface.  `None`
+    // now means "unknown" and triggers an explicit warning fault signal.
+    let (risk_truth, db_status) = if let Some(db) = st.db.as_ref() {
+        match mqk_db::load_risk_block_state(db).await {
+            Ok(row) => {
+                let blocked = row.is_some_and(|risk| risk.blocked);
+                (Some(blocked), "ok".to_string())
+            }
+            Err(_) => (None, "warning".to_string()), // DB error → risk truth unknown
+        }
     } else {
-        (false, "unavailable".to_string())
+        (None, "unavailable".to_string()) // No DB pool → risk truth unknown
     };
+    let risk_halt_active = risk_truth == Some(true);
 
     let audit_writer_status = db_status.clone();
 
     let runtime_status = runtime_status_from_state(&status.state).to_string();
     let (environment, live_routing_enabled) =
         environment_and_live_routing_truth(&st, &status).await;
-    let broker_status = if snapshot_present { "ok" } else { "warning" }.to_string();
+
+    // STATUS-TRUTH-01: broker staleness check for External (Alpaca) snapshots.
+    //
+    // Presence alone (`is_some()`) was the prior check, which allowed an arbitrarily
+    // stale External snapshot to surface as "ok".  For External source + active run,
+    // check the captured_at_utc age.  Synthetic (paper) snapshots are always fresh
+    // (synthesized per orchestrator tick), so they skip the age check.
+    let broker_status = {
+        let snap_guard = st.broker_snapshot.read().await;
+        let snapshot_present = snap_guard.is_some();
+        if !snapshot_present {
+            "warning".to_string()
+        } else if st.broker_snapshot_source() == BrokerSnapshotTruthSource::External
+            && runtime_status == "running"
+        {
+            let age_secs = snap_guard
+                .as_ref()
+                .map(|s| (Utc::now() - s.captured_at_utc).num_seconds())
+                .unwrap_or(0);
+            if age_secs > BROKER_SNAPSHOT_STALE_SECS {
+                "stale".to_string()
+            } else {
+                "ok".to_string()
+            }
+        } else {
+            "ok".to_string()
+        }
+    };
+
     let integrity_status = if integrity_armed { "ok" } else { "warning" }.to_string();
     let reconcile_status = reconcile.status.clone();
     let has_critical = matches!(reconcile_status.as_str(), "dirty" | "stale")
         || (reconcile_status == "unknown" && runtime_status == "running");
+    // STATUS-TRUTH-01: "unavailable" (no DB pool) is also a warning condition —
+    // it means risk truth cannot be checked and broker snapshot cannot be refreshed.
     let has_warning = broker_status != "ok"
         || integrity_status != "ok"
         || reconcile_status != "ok"
         || db_status == "warning"
+        || db_status == "unavailable"
+        || risk_truth.is_none()
         || status.notes.is_some()
         || reconcile.note.is_some();
 
@@ -185,10 +232,10 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             execution_armed: integrity_armed,
             live_routing_enabled,
             kill_switch_active: status.state == "halted",
-            risk_halt_active: risk_blocked,
+            risk_halt_active,
             integrity_halt_active: !integrity_armed,
             daemon_reachable: true,
-            fault_signals: build_fault_signals(&status, &reconcile, risk_blocked),
+            fault_signals: build_fault_signals(&status, &reconcile, risk_truth),
             autonomous_signal_count,
             autonomous_signal_limit_hit,
             // B8: Canonical asset-class scope.  Hardcoded constant — not derived
@@ -304,6 +351,24 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
                      controller will not attempt a start until the window opens"
                     .to_string(),
             );
+        }
+        // STRATEGY-DORMANCY-01: Surface bootstrap dormancy as an autonomous blocker.
+        //
+        // Mirrors the gate added to start_execution_runtime.  If MQK_STRATEGY_IDS
+        // is absent or empty the bootstrap is Dormant and start would be refused
+        // with 403/native_strategy_bootstrap.  Surface the blocker here so the
+        // operator sees it before attempting start, not only after.
+        {
+            let fleet = st.strategy_fleet_snapshot().await;
+            if fleet.map_or(true, |f| f.is_empty()) {
+                auto_blockers.push(
+                    "strategy bootstrap is dormant: MQK_STRATEGY_IDS is absent or empty; \
+                     no strategy engine will generate decisions on the autonomous paper path; \
+                     set MQK_STRATEGY_IDS to a registered strategy name before starting \
+                     (STRATEGY-DORMANCY-01)"
+                        .to_string(),
+                );
+            }
         }
 
         (
@@ -431,6 +496,9 @@ fn autonomous_session_truth_to_api(truth: &AutonomousSessionTruth) -> (String, O
         }
         AutonomousSessionTruth::StoppedAtBoundary { detail } => {
             ("stopped_at_boundary".to_string(), Some(detail.clone()))
+        }
+        AutonomousSessionTruth::ControllerExited { detail } => {
+            ("controller_exited".to_string(), Some(detail.clone()))
         }
     }
 }
@@ -573,13 +641,32 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                 .to_string(),
         );
     }
+    // STRATEGY-DORMANCY-01: Check strategy bootstrap dormancy.
+    //
+    // Mirrors the gate added to start_execution_runtime and the autonomous_blockers
+    // check in system_preflight.  Dormant bootstrap on the Paper+Alpaca path means
+    // no strategy engine will generate decisions, so overall_ready must be false.
+    let strategy_fleet_empty = st
+        .strategy_fleet_snapshot()
+        .await
+        .map_or(true, |f| f.is_empty());
+    if strategy_fleet_empty {
+        blockers.push(
+            "strategy bootstrap is dormant: MQK_STRATEGY_IDS is absent or empty; \
+             no strategy engine will generate decisions; \
+             set MQK_STRATEGY_IDS to a registered strategy name before starting \
+             (STRATEGY-DORMANCY-01)"
+                .to_string(),
+        );
+    }
 
     let overall_ready = ws_continuity_ready
         && reconcile_ready
         && arm_ready
         && signal_ingestion_configured
         && session_in_window
-        && runtime_start_allowed;
+        && runtime_start_allowed
+        && !strategy_fleet_empty;
 
     let autonomous_history_degraded = st.autonomous_history_degraded();
 
@@ -806,4 +893,51 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn obs01_controller_exited_maps_to_distinct_api_state() {
+        let (state, detail) = autonomous_session_truth_to_api(&AutonomousSessionTruth::ControllerExited {
+            detail: "task panicked".to_string(),
+        });
+        assert_eq!(state, "controller_exited");
+        assert_eq!(detail, Some("task panicked".to_string()));
+    }
+
+    #[test]
+    fn obs01_all_truth_variants_map_to_distinct_states() {
+        let cases = [
+            (AutonomousSessionTruth::Clear, "clear"),
+            (
+                AutonomousSessionTruth::StartRefused { detail: "x".into() },
+                "start_refused",
+            ),
+            (
+                AutonomousSessionTruth::RunEndedUnexpectedly { detail: "x".into() },
+                "run_ended_unexpectedly",
+            ),
+            (
+                AutonomousSessionTruth::StopFailed { detail: "x".into() },
+                "stop_failed",
+            ),
+            (
+                AutonomousSessionTruth::StoppedAtBoundary { detail: "x".into() },
+                "stopped_at_boundary",
+            ),
+            (
+                AutonomousSessionTruth::ControllerExited { detail: "x".into() },
+                "controller_exited",
+            ),
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for (truth, expected_state) in cases {
+            let (state, _) = autonomous_session_truth_to_api(&truth);
+            assert_eq!(state, expected_state);
+            assert!(seen.insert(state), "duplicate API state string detected");
+        }
+    }
 }

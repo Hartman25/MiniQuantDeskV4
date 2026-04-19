@@ -492,6 +492,38 @@ impl AppState {
                     ),
                 ));
             }
+            // STRATEGY-DORMANCY-01: Paper+Alpaca autonomous path requires an active
+            // strategy bootstrap.
+            //
+            // For Paper+Alpaca (the canonical autonomous paper path) a Dormant bootstrap
+            // means no strategy engine will generate decisions.  The execution loop
+            // would run — consuming WS events, issuing heartbeats, ticking the
+            // orchestrator — while producing zero orders.  This is structurally
+            // indistinguishable from active execution at every operator surface and
+            // constitutes a silent no-op risk.
+            //
+            // Dormant is allowed for non-paper deployments (e.g. LiveShadow running
+            // in monitor-only mode) where the operator may legitimately operate without
+            // a strategy engine.  This block is scoped to Paper+Alpaca only.
+            //
+            // Gate ordering: fires immediately after the is_failed() check so both
+            // bootstrap failure modes (Failed and paper+alpaca Dormant) surface before
+            // any DB resources are acquired.
+            if bootstrap.is_dormant()
+                && self.deployment_mode() == DeploymentMode::Paper
+                && self.runtime_selection.broker_kind == Some(BrokerKind::Alpaca)
+            {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.strategy_bootstrap_dormant",
+                    "native_strategy_bootstrap",
+                    "paper+alpaca autonomous path requires an active strategy bootstrap; \
+                     MQK_STRATEGY_IDS is absent or empty — no strategy engine will generate \
+                     decisions; set MQK_STRATEGY_IDS to a registered strategy name \
+                     (e.g. 'swing_momentum') and ensure it is enabled in \
+                     sys_strategy_registry before starting the autonomous paper path \
+                     (STRATEGY-DORMANCY-01)",
+                ));
+            }
             bootstrap
         };
 

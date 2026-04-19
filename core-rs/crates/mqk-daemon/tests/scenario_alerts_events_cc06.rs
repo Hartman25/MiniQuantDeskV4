@@ -74,9 +74,16 @@ async fn cc06_test_pool() -> sqlx::PgPool {
 // CC06-01: alerts/active clean state
 // ---------------------------------------------------------------------------
 
-/// alerts/active in a fresh daemon state (idle, clean reconcile defaults to
+/// alerts/active in a no-DB daemon state (idle, clean reconcile defaults to
 /// "unknown" which does NOT emit a fault signal unless running).
-/// truth_state="active", rows=[], alert_count=0, canonical_route/backend correct.
+///
+/// STATUS-TRUTH-01: with no DB pool, risk block state is unknown (`None`).
+/// `build_fault_signals` now emits a `risk.truth_unavailable` warning rather
+/// than silently returning zero signals.  A no-DB daemon is NOT a "clean" state
+/// from an operator-truth perspective — risk enforcement cannot be confirmed.
+///
+/// Expected: truth_state="active", exactly one row with class="risk.truth_unavailable"
+/// and severity="warning".  canonical_route and backend are unchanged.
 #[tokio::test]
 async fn cc06_01_alerts_active_clean_state_empty_rows() {
     let router = make_router();
@@ -93,7 +100,7 @@ async fn cc06_01_alerts_active_clean_state_empty_rows() {
     assert_eq!(
         json_str(&json, "truth_state"),
         "active",
-        "truth_state must be 'active' in clean state"
+        "truth_state must be 'active' — in-memory state is always present"
     );
     assert_eq!(
         json_str(&json, "canonical_route"),
@@ -105,25 +112,34 @@ async fn cc06_01_alerts_active_clean_state_empty_rows() {
         "daemon.runtime_state",
         "backend must be 'daemon.runtime_state'"
     );
-    let alert_count = json
-        .get("alert_count")
-        .and_then(|v| v.as_u64())
-        .expect("alert_count must be present and numeric");
-    assert_eq!(alert_count, 0, "clean daemon state has no active alerts");
 
     let rows = json
         .get("rows")
         .and_then(|v| v.as_array())
         .expect("rows must be a JSON array");
+    let alert_count = json
+        .get("alert_count")
+        .and_then(|v| v.as_u64())
+        .expect("alert_count must be present and numeric");
+
+    // STATUS-TRUTH-01: no DB → risk truth unknown → exactly one warning row.
     assert_eq!(
         rows.len(),
-        0,
-        "rows must be empty in clean state — not a fabricated placeholder"
+        1,
+        "no-DB state must emit exactly one risk.truth_unavailable warning (STATUS-TRUTH-01)"
+    );
+    assert_eq!(alert_count as usize, rows.len(), "alert_count must equal rows.len()");
+
+    let risk_row = &rows[0];
+    assert_eq!(
+        risk_row.get("class").and_then(|v| v.as_str()).unwrap_or(""),
+        "risk.truth_unavailable",
+        "alert class must be risk.truth_unavailable when no DB is present"
     );
     assert_eq!(
-        alert_count as usize,
-        rows.len(),
-        "alert_count must equal rows.len()"
+        risk_row.get("severity").and_then(|v| v.as_str()).unwrap_or(""),
+        "warning",
+        "risk truth unavailable must be warning severity, not critical (not confirmed blocked)"
     );
 }
 

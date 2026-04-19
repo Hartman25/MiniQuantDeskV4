@@ -13,9 +13,44 @@ use tracing::{info, warn, Level};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = dotenvy::from_filename(".env.local");
+    // Load .env.local before init_tracing; store outcome so it can be logged
+    // after the subscriber is ready (BOOT-VALID-01).
+    let env_file_outcome = dotenvy::from_filename(".env.local");
 
     init_tracing();
+
+    // BOOT-VALID-01: Log .env.local load outcome explicitly.
+    //
+    // A silent "not found" previously hid the root cause of missing credentials.
+    // Now the operator sees a clear warn listing the vars that must come from
+    // the system environment when the file is absent.
+    match env_file_outcome {
+        Ok(_) => {
+            info!(file = ".env.local", "env_file: loaded");
+        }
+        Err(ref e) => {
+            let is_not_found = if let dotenvy::Error::Io(ref io_err) = e {
+                io_err.kind() == std::io::ErrorKind::NotFound
+            } else {
+                false
+            };
+            if is_not_found {
+                warn!(
+                    file = ".env.local",
+                    hint = "ALPACA_API_KEY_PAPER ALPACA_API_SECRET_PAPER \
+                            ALPACA_PAPER_BASE_URL MQK_DATABASE_URL",
+                    "env_file: not_found — env vars must be set via system environment \
+                     if .env.local is absent (BOOT-VALID-01)"
+                );
+            } else {
+                warn!(
+                    file = ".env.local",
+                    error = %e,
+                    "env_file: load_error — vars may be absent or malformed (BOOT-VALID-01)"
+                );
+            }
+        }
+    }
 
     let db = mqk_db::connect_from_env()
         .await
@@ -50,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
 
     // AUTON-PAPER-01: Spawn the autonomous session controller for Paper+Alpaca.
     // No-op for non-paper-alpaca deployments or when session env vars are absent.
-    let _session_controller_handle =
+    let session_controller_handle =
         state::spawn_autonomous_session_controller(Arc::clone(&shared));
 
     // AUTON-PAPER-BLOCKER-02: Spawn the autonomous bar ticker for Paper+Alpaca.
@@ -58,6 +93,74 @@ async fn main() -> anyhow::Result<()> {
     // without requiring an external manual POST to /api/v1/strategy/signal.
     // No-op for non-paper-alpaca deployments (ExternalSignalIngestion not wired).
     let _bar_ticker_handle = state::spawn_autonomous_bar_ticker(Arc::clone(&shared));
+
+    // BOOT-VALID-01: Explicit startup task outcome log.
+    //
+    // For paper+alpaca all three autonomous tasks must start.  If the WS
+    // transport started (credentials present) but the session controller or bar
+    // ticker did not, that is a configuration inconsistency: autonomous paper
+    // execution will not self-manage and the operator would otherwise see no
+    // indication of this from the startup logs.
+    {
+        let ws_started = _alpaca_ws_handle.is_some();
+        let ctrl_started = session_controller_handle.is_some();
+        let ticker_started = _bar_ticker_handle.is_some();
+
+        if ws_started && (!ctrl_started || !ticker_started) {
+            warn!(
+                alpaca_ws_started = ws_started,
+                session_controller_started = ctrl_started,
+                bar_ticker_started = ticker_started,
+                "startup_truth: WS transport started but autonomous session controller \
+                 or bar ticker did NOT start — autonomous paper execution will not \
+                 self-manage; verify ExternalSignalIngestion config (BOOT-VALID-01)"
+            );
+        } else {
+            info!(
+                alpaca_ws_started = ws_started,
+                session_controller_started = ctrl_started,
+                bar_ticker_started = ticker_started,
+                "startup_truth: background task start outcomes (BOOT-VALID-01)"
+            );
+        }
+    }
+
+    // EXEC-OBS-LIVENESS-01: Session-controller death watchdog.
+    //
+    // `run_session_controller` is an infinite loop that must never exit.
+    // If the Tokio task panics the JoinHandle resolves to Err(JoinError).
+    // Without this watchdog, controller death is silent: the daemon stays up,
+    // `autonomous_session_truth` freezes at its last value, and
+    // /api/v1/autonomous/readiness returns a stale state that looks like
+    // "waiting for session window" rather than "controller is dead".
+    //
+    // The watchdog awaits the handle, fires an error log, and records
+    // ControllerExited in autonomous_session_truth so the API surface reflects
+    // the real situation and an unattended operator can detect the failure.
+    if let Some(handle) = session_controller_handle {
+        let watchdog_state = Arc::clone(&shared);
+        tokio::spawn(async move {
+            let result = handle.await;
+            tracing::error!(
+                result_ok = result.is_ok(),
+                "session_controller_task_exited: autonomous session controller stopped \
+                 unexpectedly; unattended paper execution is now UNMANAGED \
+                 (EXEC-OBS-LIVENESS-01)"
+            );
+            let detail = match &result {
+                Ok(_) => {
+                    "session controller task exited normally (unexpected — loop should be infinite)"
+                        .to_string()
+                }
+                Err(e) => format!("session controller task panicked: {e}"),
+            };
+            watchdog_state
+                .set_autonomous_session_truth(state::AutonomousSessionTruth::ControllerExited {
+                    detail,
+                })
+                .await;
+        });
+    }
 
     let app = routes::build_router(Arc::clone(&shared))
         .layer(
