@@ -330,7 +330,7 @@ async fn cc06_04_events_feed_canonical_route_identity() {
     } else {
         assert_eq!(
             backend,
-            "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events"
+            "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events+postgres.audit_events[orchestrator]"
         );
     }
     // rows must be a JSON array
@@ -455,8 +455,8 @@ async fn cc06_05_events_feed_db_backed_positive_path_real_rows() {
     );
     assert_eq!(
         json_str(&json, "backend"),
-        "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events",
-        "CC06-05: backend must name all three source tables"
+        "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events+postgres.audit_events[orchestrator]",
+        "CC06-05: backend must name all four source lanes"
     );
     assert_eq!(
         json_str(&json, "canonical_route"),

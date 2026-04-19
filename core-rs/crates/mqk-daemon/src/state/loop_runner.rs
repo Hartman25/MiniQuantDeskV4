@@ -261,6 +261,17 @@ pub(super) fn spawn_execution_loop(
                         }
                     }
 
+                    // HEARTBEAT-TICK-01: record successful tick progress.
+                    //
+                    // Placed here — after orchestrator.tick() succeeded and the
+                    // execution snapshot was committed — so a mid-tick hang (blocked
+                    // orchestrator or snapshot) does NOT advance this timestamp.
+                    // Early-exit paths (deadman, WS gap, orchestrator error, heartbeat
+                    // failure) all return before reaching this point, so they never
+                    // mark progress.  Operator surfaces compare this timestamp against
+                    // wall-clock to detect a stalled loop before the DB deadman fires.
+                    state_arc.record_execution_tick(Utc::now().timestamp());
+
                     // AUTON-PAPER-RISK-03: Periodic External broker snapshot refresh.
                     //
                     // For Synthetic source the snapshot is rebuilt every tick above.
