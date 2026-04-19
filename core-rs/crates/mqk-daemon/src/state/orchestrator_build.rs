@@ -73,8 +73,11 @@ impl AppState {
         // with no /risk subtree.  Supplement from env vars so RuntimeRiskGate
         // receives real inputs.  Fields already in config_json are never overwritten.
         let (env_equity_micros, env_daily_loss_limit) = load_risk_env();
-        let effective_config =
-            effective_run_config_for_risk(&run.config_json, env_equity_micros, env_daily_loss_limit);
+        let effective_config = effective_run_config_for_risk(
+            &run.config_json,
+            env_equity_micros,
+            env_daily_loss_limit,
+        );
 
         let initial_equity_micros = effective_config
             .pointer("/risk/initial_equity_micros")
@@ -412,17 +415,18 @@ mod tests {
             .with_ymd_and_hms(2024, 1, 15, 9, 32, 45)
             .unwrap();
         let d = ts.date_naive();
-        let day_id: u32 =
-            (d.year() as u32) * 10_000 + d.month() * 100 + d.day();
+        let day_id: u32 = (d.year() as u32) * 10_000 + d.month() * 100 + d.day();
         assert_eq!(day_id, 20_240_115, "day_id must be YYYYMMDD");
 
         let reject_window_id: u32 = ts.hour() * 60 + ts.minute();
-        assert_eq!(reject_window_id, 9 * 60 + 32, "reject_window_id must be minute-of-day bucket");
+        assert_eq!(
+            reject_window_id,
+            9 * 60 + 32,
+            "reject_window_id must be minute-of-day bucket"
+        );
 
         // Boundary: midnight (00:00) yields bucket 0.
-        let midnight = chrono::Utc
-            .with_ymd_and_hms(2024, 1, 15, 0, 0, 0)
-            .unwrap();
+        let midnight = chrono::Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap();
         assert_eq!(midnight.hour() * 60 + midnight.minute(), 0);
 
         // Boundary: 23:59 yields bucket 1439 (max for a 24-hour day).
@@ -443,8 +447,7 @@ mod tests {
             "adapter": "alpaca",
             "mode": "paper",
         });
-        let effective =
-            effective_run_config_for_risk(&base, Some(50_000 * 1_000_000), Some(0.02));
+        let effective = effective_run_config_for_risk(&base, Some(50_000 * 1_000_000), Some(0.02));
 
         assert_eq!(
             effective
@@ -474,8 +477,7 @@ mod tests {
             }
         });
         // Env values that would overwrite if the guard failed.
-        let effective =
-            effective_run_config_for_risk(&base, Some(99_999_000_000), Some(0.99));
+        let effective = effective_run_config_for_risk(&base, Some(99_999_000_000), Some(0.99));
 
         assert_eq!(
             effective
@@ -507,12 +509,10 @@ mod tests {
     #[test]
     fn load_risk_env_rejects_invalid_ratio() {
         // Direct test of the filter logic — ratio >= 1.0 is invalid.
-        let bad: Option<f64> = Some(2.0_f64)
-            .filter(|&r| r.is_finite() && r > 0.0 && r < 1.0);
+        let bad: Option<f64> = Some(2.0_f64).filter(|&r| r.is_finite() && r > 0.0 && r < 1.0);
         assert!(bad.is_none(), "ratio >= 1.0 must be rejected");
 
-        let also_bad: Option<f64> = Some(0.0_f64)
-            .filter(|&r| r.is_finite() && r > 0.0 && r < 1.0);
+        let also_bad: Option<f64> = Some(0.0_f64).filter(|&r| r.is_finite() && r > 0.0 && r < 1.0);
         assert!(also_bad.is_none(), "zero ratio must be rejected");
     }
 
@@ -524,8 +524,7 @@ mod tests {
                 "initial_equity_micros": 25_000_000_000i64,
             }
         });
-        let effective =
-            effective_run_config_for_risk(&base, Some(99_000_000_000), Some(0.03));
+        let effective = effective_run_config_for_risk(&base, Some(99_000_000_000), Some(0.03));
 
         // Equity from base wins.
         assert_eq!(

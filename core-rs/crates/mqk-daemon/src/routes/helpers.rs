@@ -226,7 +226,10 @@ mod tests {
     #[test]
     fn st01_risk_truth_none_emits_warning_signal() {
         let signals = build_fault_signals(&ok_status(), &ok_reconcile(), None, None);
-        let risk_signals: Vec<_> = signals.iter().filter(|s| s.class.starts_with("risk.")).collect();
+        let risk_signals: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class.starts_with("risk."))
+            .collect();
         assert_eq!(risk_signals.len(), 1, "expected exactly one risk signal");
         assert_eq!(risk_signals[0].class, "risk.truth_unavailable");
         assert_eq!(risk_signals[0].severity, "warning");
@@ -235,7 +238,10 @@ mod tests {
     #[test]
     fn st01_risk_truth_some_true_emits_critical_signal() {
         let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(true), None);
-        let risk_signals: Vec<_> = signals.iter().filter(|s| s.class.starts_with("risk.")).collect();
+        let risk_signals: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class.starts_with("risk."))
+            .collect();
         assert_eq!(risk_signals.len(), 1);
         assert_eq!(risk_signals[0].class, "risk.dispatch_denied.engine_blocked");
         assert_eq!(risk_signals[0].severity, "critical");
@@ -244,8 +250,14 @@ mod tests {
     #[test]
     fn st01_risk_truth_some_false_emits_no_risk_signal() {
         let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), None);
-        let risk_signals: Vec<_> = signals.iter().filter(|s| s.class.starts_with("risk.")).collect();
-        assert!(risk_signals.is_empty(), "confirmed-clear risk must not fire a signal");
+        let risk_signals: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class.starts_with("risk."))
+            .collect();
+        assert!(
+            risk_signals.is_empty(),
+            "confirmed-clear risk must not fire a signal"
+        );
     }
 
     #[test]
@@ -253,8 +265,16 @@ mod tests {
         let signals_unknown = build_fault_signals(&ok_status(), &ok_reconcile(), None, None);
         let signals_blocked = build_fault_signals(&ok_status(), &ok_reconcile(), Some(true), None);
         // Both fire a risk signal but with different classes — operators can distinguish
-        let class_unknown = &signals_unknown.iter().find(|s| s.class.starts_with("risk.")).unwrap().class;
-        let class_blocked = &signals_blocked.iter().find(|s| s.class.starts_with("risk.")).unwrap().class;
+        let class_unknown = &signals_unknown
+            .iter()
+            .find(|s| s.class.starts_with("risk."))
+            .unwrap()
+            .class;
+        let class_blocked = &signals_blocked
+            .iter()
+            .find(|s| s.class.starts_with("risk."))
+            .unwrap()
+            .class;
         assert_ne!(class_unknown, class_blocked);
     }
 
@@ -271,7 +291,10 @@ mod tests {
             .iter()
             .filter(|s| s.class == "runtime.execution_loop.stalled")
             .collect();
-        assert!(stall.is_empty(), "None stall_secs must produce no stall signal");
+        assert!(
+            stall.is_empty(),
+            "None stall_secs must produce no stall signal"
+        );
     }
 
     #[test]
@@ -293,7 +316,10 @@ mod tests {
             .iter()
             .filter(|s| s.class == "runtime.execution_loop.stalled")
             .collect();
-        assert!(stall.is_empty(), "stall at exact threshold must not fire (strict >)");
+        assert!(
+            stall.is_empty(),
+            "stall at exact threshold must not fire (strict >)"
+        );
     }
 
     #[test]
@@ -304,7 +330,11 @@ mod tests {
             .iter()
             .filter(|s| s.class == "runtime.execution_loop.stalled")
             .collect();
-        assert_eq!(stall.len(), 1, "stall over threshold must fire exactly one signal");
+        assert_eq!(
+            stall.len(),
+            1,
+            "stall over threshold must fire exactly one signal"
+        );
         assert_eq!(stall[0].severity, "critical");
         assert_eq!(stall[0].class, "runtime.execution_loop.stalled");
     }

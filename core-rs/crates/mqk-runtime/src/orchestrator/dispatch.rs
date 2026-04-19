@@ -114,13 +114,8 @@ where
                                      Phase-0b quarantine will enforce on restart"
                                 );
                             }
-                            persist_halt_and_disarm(
-                                &self.pool,
-                                self.run_id,
-                                now,
-                                "AuthSession",
-                            )
-                            .await?;
+                            persist_halt_and_disarm(&self.pool, self.run_id, now, "AuthSession")
+                                .await?;
                         }
                     }
                     SubmitError::Broker(be) if be.is_safe_pre_send_retry() => {
@@ -145,13 +140,8 @@ where
                                  Phase-0b quarantine will enforce on restart"
                             );
                         }
-                        persist_halt_and_disarm(
-                            &self.pool,
-                            self.run_id,
-                            now,
-                            "AmbiguousSubmit",
-                        )
-                        .await?;
+                        persist_halt_and_disarm(&self.pool, self.run_id, now, "AmbiguousSubmit")
+                            .await?;
                     }
                     SubmitError::Broker(_) => {
                         let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
@@ -268,13 +258,8 @@ where
                                  Phase-0b quarantine will enforce on restart"
                             );
                         }
-                        persist_halt_and_disarm(
-                            &self.pool,
-                            self.run_id,
-                            now,
-                            "AmbiguousSubmit",
-                        )
-                        .await?;
+                        persist_halt_and_disarm(&self.pool, self.run_id, now, "AmbiguousSubmit")
+                            .await?;
                     }
                     CancelBrokerClass::HaltAuth => {
                         let now = self.time_source.now_utc();
@@ -314,13 +299,8 @@ where
                                  Phase-0b quarantine will enforce on restart"
                             );
                         }
-                        persist_halt_and_disarm(
-                            &self.pool,
-                            self.run_id,
-                            now,
-                            "AmbiguousSubmit",
-                        )
-                        .await?;
+                        persist_halt_and_disarm(&self.pool, self.run_id, now, "AmbiguousSubmit")
+                            .await?;
                     }
                     CancelBrokerClass::NonRetryable => {
                         let _ = mqk_db::outbox_mark_failed(&self.pool, &request_id).await;

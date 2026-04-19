@@ -536,12 +536,16 @@ pub(super) async fn publish_reconcile_failure(
         )
         .await
         {
-            tracing::error!("reconcile_disarm_persist_failed: durable disarm not written; error={e}");
+            tracing::error!(
+                "reconcile_disarm_persist_failed: durable disarm not written; error={e}"
+            );
         }
         if let Err(e) =
             mqk_db::persist_risk_block_state(db, true, Some("RECONCILE_BLOCKED"), Utc::now()).await
         {
-            tracing::error!("reconcile_risk_block_persist_failed: risk block not written; error={e}");
+            tracing::error!(
+                "reconcile_risk_block_persist_failed: risk block not written; error={e}"
+            );
         }
     }
 

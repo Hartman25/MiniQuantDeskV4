@@ -974,12 +974,10 @@ pub(crate) async fn ops_action(
                             resulting_integrity_state: None,
                             resulting_desired_armed: None,
                             blockers: vec![],
-                            warnings: vec![
-                                "Halted run cleared to STOPPED. You must re-arm \
+                            warnings: vec!["Halted run cleared to STOPPED. You must re-arm \
                                  (arm-execution) and then start (start-system) to begin \
                                  a new execution cycle."
-                                    .to_string(),
-                            ],
+                                .to_string()],
                             environment: Some(st.deployment_mode().as_api_label().to_string()),
                             scope: Some("daemon_instance".to_string()),
                             audit: OperatorActionAuditFields {
@@ -1124,7 +1122,9 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             action_key: "start-system".to_string(),
             label: "Start System".to_string(),
             level: 1,
-            description: "Start the execution runtime. System must be idle and deployment-ready to start.".to_string(),
+            description:
+                "Start the execution runtime. System must be idle and deployment-ready to start."
+                    .to_string(),
             requires_reason: false,
             confirm_text: "Confirm: start execution runtime".to_string(),
             enabled: idle && !halted && deployment_ready,
@@ -1238,9 +1238,7 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             enabled: has_halted_run,
             disabled_reason: if !has_halted_run {
                 if st.db.is_none() {
-                    Some(
-                        "Backend unavailable; cannot query for halted run state.".to_string(),
-                    )
+                    Some("Backend unavailable; cannot query for halted run state.".to_string())
                 } else {
                     Some("No halted run found; nothing to clear.".to_string())
                 }

@@ -45,7 +45,10 @@ use tower::ServiceExt;
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, serde_json::Value) {
+async fn call(
+    router: axum::Router,
+    req: Request<axum::body::Body>,
+) -> (StatusCode, serde_json::Value) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
     let status = resp.status();
     let bytes = resp
@@ -139,10 +142,18 @@ async fn obs01_validation_failure_produces_actionable_blockers() {
         "OBS-01: disposition must be 'rejected'"
     );
     assert_eq!(json["accepted"], false, "OBS-01: accepted must be false");
-    assert_eq!(json["intent_placed"], false, "OBS-01: intent_placed must be false");
+    assert_eq!(
+        json["intent_placed"], false,
+        "OBS-01: intent_placed must be false"
+    );
 
-    let blockers = json["blockers"].as_array().expect("OBS-01: blockers must be array");
-    assert!(!blockers.is_empty(), "OBS-01: blockers must be non-empty for diagnosis");
+    let blockers = json["blockers"]
+        .as_array()
+        .expect("OBS-01: blockers must be array");
+    assert!(
+        !blockers.is_empty(),
+        "OBS-01: blockers must be non-empty for diagnosis"
+    );
 
     let blocker_text = blockers[0].as_str().unwrap_or("");
     assert!(
@@ -165,16 +176,28 @@ async fn obs02_gate1_ingestion_not_configured_is_diagnosable() {
 
     let (status, json) = call(router, signal_req(valid_signal_body("obs02-sig-001"))).await;
 
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "OBS-02: expect 503");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "OBS-02: expect 503"
+    );
     assert_eq!(
         json["disposition"], "unavailable",
         "OBS-02: disposition must be 'unavailable'"
     );
     assert_eq!(json["accepted"], false, "OBS-02: accepted must be false");
-    assert_eq!(json["signal_id"], "obs02-sig-001", "OBS-02: signal_id echoed");
-    assert_eq!(json["strategy_id"], "strat-obs01", "OBS-02: strategy_id echoed");
+    assert_eq!(
+        json["signal_id"], "obs02-sig-001",
+        "OBS-02: signal_id echoed"
+    );
+    assert_eq!(
+        json["strategy_id"], "strat-obs01",
+        "OBS-02: strategy_id echoed"
+    );
 
-    let blockers = json["blockers"].as_array().expect("OBS-02: blockers must be array");
+    let blockers = json["blockers"]
+        .as_array()
+        .expect("OBS-02: blockers must be array");
     assert!(!blockers.is_empty(), "OBS-02: blockers must be non-empty");
     let text = blockers[0].as_str().unwrap_or("");
     assert!(
@@ -199,16 +222,28 @@ async fn obs03_gate1b_cold_start_refusal_is_diagnosable() {
 
     let (status, json) = call(router, signal_req(valid_signal_body("obs03-sig-001"))).await;
 
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "OBS-03: expect 503");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "OBS-03: expect 503"
+    );
     assert_eq!(
         json["disposition"], "unavailable",
         "OBS-03: disposition must be 'unavailable'"
     );
     assert_eq!(json["accepted"], false, "OBS-03: accepted must be false");
-    assert_eq!(json["signal_id"], "obs03-sig-001", "OBS-03: signal_id echoed");
-    assert_eq!(json["strategy_id"], "strat-obs01", "OBS-03: strategy_id echoed");
+    assert_eq!(
+        json["signal_id"], "obs03-sig-001",
+        "OBS-03: signal_id echoed"
+    );
+    assert_eq!(
+        json["strategy_id"], "strat-obs01",
+        "OBS-03: strategy_id echoed"
+    );
 
-    let blockers = json["blockers"].as_array().expect("OBS-03: blockers must be array");
+    let blockers = json["blockers"]
+        .as_array()
+        .expect("OBS-03: blockers must be array");
     assert!(!blockers.is_empty(), "OBS-03: blockers must be non-empty");
     let text = blockers[0].as_str().unwrap_or("");
     assert!(
@@ -233,15 +268,24 @@ async fn obs04_gate1b_gap_detected_disposition_is_unique() {
 
     let (status, json) = call(router, signal_req(valid_signal_body("obs04-sig-001"))).await;
 
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "OBS-04: expect 503");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "OBS-04: expect 503"
+    );
     assert_eq!(
         json["disposition"], "continuity_gap",
         "OBS-04: disposition must be 'continuity_gap' — distinct from generic 'unavailable'"
     );
     assert_eq!(json["accepted"], false, "OBS-04: accepted must be false");
-    assert_eq!(json["intent_placed"], false, "OBS-04: intent_placed must be false");
+    assert_eq!(
+        json["intent_placed"], false,
+        "OBS-04: intent_placed must be false"
+    );
 
-    let blockers = json["blockers"].as_array().expect("OBS-04: blockers must be array");
+    let blockers = json["blockers"]
+        .as_array()
+        .expect("OBS-04: blockers must be array");
     assert!(!blockers.is_empty(), "OBS-04: blockers must be non-empty");
     let text = blockers[0].as_str().unwrap_or("");
     assert!(
@@ -275,7 +319,9 @@ async fn obs05_gate1c_outside_session_is_diagnosable() {
     );
     assert_eq!(json["accepted"], false, "OBS-05: accepted must be false");
 
-    let blockers = json["blockers"].as_array().expect("OBS-05: blockers must be array");
+    let blockers = json["blockers"]
+        .as_array()
+        .expect("OBS-05: blockers must be array");
     assert!(!blockers.is_empty(), "OBS-05: blockers must be non-empty");
     let text = blockers[0].as_str().unwrap_or("");
     assert!(

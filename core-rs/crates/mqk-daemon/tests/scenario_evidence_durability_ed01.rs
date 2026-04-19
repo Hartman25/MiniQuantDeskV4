@@ -160,7 +160,11 @@ async fn ed01_01_events_feed_exposes_orchestrator_halt_rows() {
         .unwrap();
     let (status, body) = call(router, req).await;
 
-    assert_eq!(status, StatusCode::OK, "ED01-01: events/feed must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ED01-01: events/feed must return 200"
+    );
 
     let json = parse_json(body);
 
@@ -255,7 +259,11 @@ async fn ed01_02_no_db_path_unaffected() {
         .unwrap();
     let (status, body) = call(router, req).await;
 
-    assert_eq!(status, StatusCode::OK, "ED01-02: events/feed must return 200");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "ED01-02: events/feed must return 200"
+    );
 
     let json = parse_json(body);
     assert_eq!(
@@ -272,11 +280,7 @@ async fn ed01_02_no_db_path_unaffected() {
         .get("rows")
         .and_then(|v| v.as_array())
         .expect("ED01-02: rows must be a JSON array");
-    assert_eq!(
-        rows.len(),
-        0,
-        "ED01-02: no-DB path must return empty rows"
-    );
+    assert_eq!(rows.len(), 0, "ED01-02: no-DB path must return empty rows");
 }
 
 // ---------------------------------------------------------------------------
@@ -315,23 +319,19 @@ fn ed01_03_halt_reasons_are_distinct() {
 #[test]
 fn ed01_04_orchestrator_halt_kind_distinct_from_operator_action() {
     assert_ne!(
-        "orchestrator_halt",
-        "operator_action",
+        "orchestrator_halt", "operator_action",
         "ED01-04: orchestrator_halt and operator_action must be different kind values"
     );
     assert_ne!(
-        "orchestrator_halt",
-        "runtime_transition",
+        "orchestrator_halt", "runtime_transition",
         "ED01-04: orchestrator_halt and runtime_transition must be different kind values"
     );
     assert_ne!(
-        "orchestrator_halt",
-        "signal_admission",
+        "orchestrator_halt", "signal_admission",
         "ED01-04: orchestrator_halt and signal_admission must be different kind values"
     );
     assert_ne!(
-        "orchestrator_halt",
-        "autonomous_session",
+        "orchestrator_halt", "autonomous_session",
         "ED01-04: orchestrator_halt and autonomous_session must be different kind values"
     );
 }

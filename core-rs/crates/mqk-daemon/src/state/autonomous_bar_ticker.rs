@@ -70,9 +70,7 @@ pub(super) fn default_qty_from_env() -> i64 {
 /// Returns `None` when the deployment is not configured for
 /// `ExternalSignalIngestion` (the only path that benefits from this ticker).
 /// No-ops silently for all other deployment/broker combinations.
-pub fn spawn_autonomous_bar_ticker(
-    state: Arc<AppState>,
-) -> Option<tokio::task::JoinHandle<()>> {
+pub fn spawn_autonomous_bar_ticker(state: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
     if state.strategy_market_data_source != StrategyMarketDataSource::ExternalSignalIngestion {
         return None;
     }
@@ -144,9 +142,7 @@ pub(super) async fn run_bar_tick(state: &Arc<AppState>, qty: i64) {
         .await;
     info!(
         now_tick,
-        end_ts,
-        qty,
-        "autonomous_bar_ticker: bar_deposited"
+        end_ts, qty, "autonomous_bar_ticker: bar_deposited"
     );
 }
 

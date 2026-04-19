@@ -671,7 +671,9 @@ impl AppState {
         }
         if let Err(err) = mqk_db::heartbeat_run(&db, run_id, Utc::now()).await {
             if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!("runtime_lease_release_failed_on_heartbeat_rollback error={rel_err}");
+                tracing::warn!(
+                    "runtime_lease_release_failed_on_heartbeat_rollback error={rel_err}"
+                );
             }
             return Err(RuntimeLifecycleError::internal(
                 "start initial heartbeat failed",
@@ -1024,7 +1026,9 @@ impl AppState {
                                     mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running
                                 ) {
                                     if let Err(err) = mqk_db::stop_run(db, run_id).await {
-                                        tracing::warn!("shutdown stop_run failed for {run_id}: {err}");
+                                        tracing::warn!(
+                                            "shutdown stop_run failed for {run_id}: {err}"
+                                        );
                                     }
                                 }
                             }

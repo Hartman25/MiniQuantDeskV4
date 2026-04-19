@@ -85,8 +85,7 @@ async fn main() -> anyhow::Result<()> {
 
     // AUTON-PAPER-01: Spawn the autonomous session controller for Paper+Alpaca.
     // No-op for non-paper-alpaca deployments or when session env vars are absent.
-    let session_controller_handle =
-        state::spawn_autonomous_session_controller(Arc::clone(&shared));
+    let session_controller_handle = state::spawn_autonomous_session_controller(Arc::clone(&shared));
 
     // AUTON-PAPER-BLOCKER-02: Spawn the autonomous bar ticker for Paper+Alpaca.
     // Periodically deposits StrategyBarInput so native strategies can fire on_bar

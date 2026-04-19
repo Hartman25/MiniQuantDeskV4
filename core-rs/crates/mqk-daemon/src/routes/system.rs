@@ -30,8 +30,8 @@ use crate::api_types::{
 };
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::{
-    autonomous_session_schedule_from_env, AppState, AutonomousSessionTruth, BrokerSnapshotTruthSource,
-    DeploymentMode, StrategyMarketDataSource,
+    autonomous_session_schedule_from_env, AppState, AutonomousSessionTruth,
+    BrokerSnapshotTruthSource, DeploymentMode, StrategyMarketDataSource,
 };
 
 use super::helpers::{
@@ -241,7 +241,11 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             fault_signals: {
                 let execution_loop_stall_secs = if status.state == "running" {
                     let last = st.execution_last_tick_secs();
-                    if last > 0 { Some(Utc::now().timestamp() - last) } else { None }
+                    if last > 0 {
+                        Some(Utc::now().timestamp() - last)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 };
@@ -912,9 +916,10 @@ mod tests {
 
     #[test]
     fn obs01_controller_exited_maps_to_distinct_api_state() {
-        let (state, detail) = autonomous_session_truth_to_api(&AutonomousSessionTruth::ControllerExited {
-            detail: "task panicked".to_string(),
-        });
+        let (state, detail) =
+            autonomous_session_truth_to_api(&AutonomousSessionTruth::ControllerExited {
+                detail: "task panicked".to_string(),
+            });
         assert_eq!(state, "controller_exited");
         assert_eq!(detail, Some("task panicked".to_string()));
     }

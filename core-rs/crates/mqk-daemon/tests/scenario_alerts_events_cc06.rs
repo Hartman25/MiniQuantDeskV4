@@ -128,7 +128,11 @@ async fn cc06_01_alerts_active_clean_state_empty_rows() {
         1,
         "no-DB state must emit exactly one risk.truth_unavailable warning (STATUS-TRUTH-01)"
     );
-    assert_eq!(alert_count as usize, rows.len(), "alert_count must equal rows.len()");
+    assert_eq!(
+        alert_count as usize,
+        rows.len(),
+        "alert_count must equal rows.len()"
+    );
 
     let risk_row = &rows[0];
     assert_eq!(
@@ -137,7 +141,10 @@ async fn cc06_01_alerts_active_clean_state_empty_rows() {
         "alert class must be risk.truth_unavailable when no DB is present"
     );
     assert_eq!(
-        risk_row.get("severity").and_then(|v| v.as_str()).unwrap_or(""),
+        risk_row
+            .get("severity")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
         "warning",
         "risk truth unavailable must be warning severity, not critical (not confirmed blocked)"
     );

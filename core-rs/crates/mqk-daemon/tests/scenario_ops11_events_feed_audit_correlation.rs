@@ -201,7 +201,9 @@ async fn ops11_t4_events_feed_no_db_returns_backend_unavailable() {
         Some("backend_unavailable"),
         "T-04: truth_state must be backend_unavailable when no DB; got: {json}"
     );
-    let rows = json["rows"].as_array().expect("T-04: rows must be an array");
+    let rows = json["rows"]
+        .as_array()
+        .expect("T-04: rows must be an array");
     assert!(
         rows.is_empty(),
         "T-04: rows must be empty when no DB; got {} rows",

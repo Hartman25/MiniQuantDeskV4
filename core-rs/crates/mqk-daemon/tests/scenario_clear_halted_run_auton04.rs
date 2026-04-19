@@ -346,7 +346,9 @@ async fn h05_clear_halted_run_on_halted_run_returns_200() {
     );
 
     // Durable verification: run must now be STOPPED.
-    let after = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run after");
+    let after = mqk_db::fetch_run(&pool, run_id)
+        .await
+        .expect("fetch_run after");
     assert!(
         matches!(after.status, mqk_db::RunStatus::Stopped),
         "H05: run must be STOPPED after clear; status: {}",

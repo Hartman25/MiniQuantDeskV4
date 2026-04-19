@@ -37,12 +37,12 @@ pub use alpaca_ws_transport::{
     build_ws_auth_message, build_ws_subscribe_message, spawn_alpaca_paper_ws_task,
     ws_url_from_base_url,
 };
-pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
-pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
-pub use loop_runner::spawn_reconcile_tick;
 pub use autonomous_bar_ticker::{
     spawn_autonomous_bar_ticker, BAR_INTERVAL_SECS_ENV, DEFAULT_QTY_ENV,
 };
+pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
+pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
+pub use loop_runner::spawn_reconcile_tick;
 pub use session_controller::{
     autonomous_session_schedule_from_env, run_session_controller_tick, session_window_from_env,
     spawn_autonomous_session_controller, AutonomousSessionSchedule, SessionWindow,
@@ -596,7 +596,8 @@ impl AppState {
     /// snapshot commit succeed.  Not called on early-exit paths (deadman halt,
     /// WS gap halt, orchestrator error, heartbeat failure).
     pub(crate) fn record_execution_tick(&self, now_secs: i64) {
-        self.execution_last_tick_at.store(now_secs, Ordering::SeqCst);
+        self.execution_last_tick_at
+            .store(now_secs, Ordering::SeqCst);
     }
 
     pub async fn alpaca_ws_continuity(&self) -> AlpacaWsContinuityState {

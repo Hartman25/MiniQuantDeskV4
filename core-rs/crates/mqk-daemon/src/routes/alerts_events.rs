@@ -88,11 +88,16 @@ pub(crate) async fn alerts_active(State(st): State<Arc<AppState>>) -> Response {
     // HEARTBEAT-TICK-01: compute stall_secs for execution-loop liveness check.
     let execution_loop_stall_secs = if status.state == "running" {
         let last = st.execution_last_tick_secs();
-        if last > 0 { Some(chrono::Utc::now().timestamp() - last) } else { None }
+        if last > 0 {
+            Some(chrono::Utc::now().timestamp() - last)
+        } else {
+            None
+        }
     } else {
         None
     };
-    let fault_signals = build_fault_signals(&status, &reconcile, risk_truth, execution_loop_stall_secs);
+    let fault_signals =
+        build_fault_signals(&status, &reconcile, risk_truth, execution_loop_stall_secs);
 
     let mut rows: Vec<ActiveAlertRow> = fault_signals
         .into_iter()
@@ -778,11 +783,20 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
     // HEARTBEAT-TICK-01: compute stall_secs for execution-loop liveness check.
     let execution_loop_stall_secs_triage = if status_snap.state == "running" {
         let last = st.execution_last_tick_secs();
-        if last > 0 { Some(chrono::Utc::now().timestamp() - last) } else { None }
+        if last > 0 {
+            Some(chrono::Utc::now().timestamp() - last)
+        } else {
+            None
+        }
     } else {
         None
     };
-    let fault_signals = build_fault_signals(&status_snap, &reconcile, risk_truth, execution_loop_stall_secs_triage);
+    let fault_signals = build_fault_signals(
+        &status_snap,
+        &reconcile,
+        risk_truth,
+        execution_loop_stall_secs_triage,
+    );
 
     // WS continuity signals — same as alerts/active
     let ws = st.alpaca_ws_continuity().await;

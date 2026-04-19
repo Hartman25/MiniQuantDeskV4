@@ -643,8 +643,9 @@ pub(crate) async fn strategy_signal(
             }
         }
         Err(err) => {
-            let blockers =
-                vec![format!("strategy signal unavailable: suppression check failed: {err}")];
+            let blockers = vec![format!(
+                "strategy signal unavailable: suppression check failed: {err}"
+            )];
             write_signal_refusal_event(
                 &st,
                 active_run_id,
