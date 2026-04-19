@@ -375,7 +375,7 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         // operator sees it before attempting start, not only after.
         {
             let fleet = st.strategy_fleet_snapshot().await;
-            if fleet.map_or(true, |f| f.is_empty()) {
+            if fleet.is_none_or(|f| f.is_empty()) {
                 auto_blockers.push(
                     "strategy bootstrap is dormant: MQK_STRATEGY_IDS is absent or empty; \
                      no strategy engine will generate decisions on the autonomous paper path; \
@@ -664,7 +664,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
     let strategy_fleet_empty = st
         .strategy_fleet_snapshot()
         .await
-        .map_or(true, |f| f.is_empty());
+        .is_none_or(|f| f.is_empty());
     if strategy_fleet_empty {
         blockers.push(
             "strategy bootstrap is dormant: MQK_STRATEGY_IDS is absent or empty; \

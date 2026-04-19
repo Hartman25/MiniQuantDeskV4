@@ -21,7 +21,9 @@ use crate::api_types::{
 };
 use mqk_integrity::CalendarSpec;
 
-use super::helpers::{write_signal_admission_event, write_signal_refusal_event};
+use super::helpers::{
+    write_signal_admission_event, write_signal_refusal_event, SignalRefusalAudit,
+};
 use crate::notify::CriticalAlertPayload;
 use crate::state::{AlpacaWsContinuityState, AppState, StrategyBarInput, StrategyMarketDataSource};
 
@@ -158,11 +160,13 @@ pub(crate) async fn strategy_signal(
             StatusCode::SERVICE_UNAVAILABLE,
             "gate_1_ingestion",
             "unavailable",
-            validated.signal_id,
-            validated.strategy_id,
-            validated.symbol.clone(),
-            None,
-            vec!["strategy signal ingestion is not configured for this deployment".to_string()],
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec!["strategy signal ingestion is not configured for this deployment".to_string()],
+            },
         );
     }
 
@@ -205,15 +209,17 @@ pub(crate) async fn strategy_signal(
                 ),
             };
             return refused_signal_response(
-                status,
-                "gate_1e_budget",
-                disposition,
-                validated.signal_id,
-                validated.strategy_id,
-                validated.symbol.clone(),
-                None,
-                vec![blocker],
-            );
+            status,
+            "gate_1e_budget",
+            disposition,
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec![blocker],
+            },
+        );
         }
     }
 
@@ -263,15 +269,17 @@ pub(crate) async fn strategy_signal(
                 ),
             };
             return refused_signal_response(
-                status,
-                "gate_1f_sizing",
-                disposition,
-                validated.signal_id,
-                validated.strategy_id,
-                validated.symbol.clone(),
-                None,
-                vec![blocker],
-            );
+            status,
+            "gate_1f_sizing",
+            disposition,
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec![blocker],
+            },
+        );
         }
     }
 
@@ -326,15 +334,17 @@ pub(crate) async fn strategy_signal(
                 ),
             };
             return refused_signal_response(
-                status,
-                "gate_1g_risk",
-                disposition,
-                validated.signal_id,
-                validated.strategy_id,
-                validated.symbol.clone(),
-                None,
-                vec![blocker],
-            );
+            status,
+            "gate_1g_risk",
+            disposition,
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec![blocker],
+            },
+        );
         }
     }
 
@@ -350,19 +360,21 @@ pub(crate) async fn strategy_signal(
         AlpacaWsContinuityState::Live { .. } => {}
         AlpacaWsContinuityState::ColdStartUnproven => {
             return refused_signal_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "gate_1b_ws_cold_start",
-                "unavailable",
-                validated.signal_id,
-                validated.strategy_id,
-                validated.symbol.clone(),
-                None,
-                vec![
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gate_1b_ws_cold_start",
+            "unavailable",
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec![
                     "strategy signal refused: Alpaca WS continuity is unproven (cold start); \
                      wait for WS transport to establish Live before submitting signals"
                         .to_string(),
                 ],
-            );
+            },
+        );
         }
         AlpacaWsContinuityState::GapDetected { detail, .. } => {
             let msg = format!(
@@ -404,15 +416,17 @@ pub(crate) async fn strategy_signal(
                 });
             }
             return refused_signal_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "gate_1b_ws_gap",
-                "continuity_gap",
-                validated.signal_id,
-                validated.strategy_id,
-                validated.symbol.clone(),
-                None,
-                vec![msg],
-            );
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gate_1b_ws_gap",
+            "continuity_gap",
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec![msg],
+            },
+        );
         }
     }
 
@@ -436,15 +450,17 @@ pub(crate) async fn strategy_signal(
             StatusCode::CONFLICT,
             "gate_1c_session",
             "outside_session",
-            validated.signal_id,
-            validated.strategy_id,
-            validated.symbol.clone(),
-            None,
-            vec![format!(
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec![format!(
                 "strategy signal refused: NYSE market session is '{session}', not 'regular'; \
                  signals are only accepted during regular session hours (09:30–16:00 ET, \
                  NYSE weekdays excluding holidays)"
             )],
+            },
         );
     }
 
@@ -462,16 +478,18 @@ pub(crate) async fn strategy_signal(
             StatusCode::CONFLICT,
             "gate_1d_day_limit",
             "day_limit_reached",
-            validated.signal_id,
-            validated.strategy_id,
-            validated.symbol.clone(),
-            None,
-            vec![format!(
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec![format!(
                 "strategy signal refused: autonomous day signal limit reached \
                  ({} signals accepted this run); \
                  no further signals will be accepted until the next run start",
                 st.day_signal_count()
             )],
+            },
         );
     }
 
@@ -483,11 +501,13 @@ pub(crate) async fn strategy_signal(
             StatusCode::SERVICE_UNAVAILABLE,
             "gate_2_db",
             "unavailable",
-            validated.signal_id,
-            validated.strategy_id,
-            validated.symbol.clone(),
-            None,
-            vec!["durable execution DB truth is unavailable on this daemon".to_string()],
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec!["durable execution DB truth is unavailable on this daemon".to_string()],
+            },
         );
     };
 
@@ -496,31 +516,35 @@ pub(crate) async fn strategy_signal(
         Ok(Some((state, reason))) => (state, reason),
         Ok(None) => {
             return refused_signal_response(
-                StatusCode::FORBIDDEN,
-                "gate_3_arm",
-                "rejected",
-                validated.signal_id,
-                validated.strategy_id,
-                validated.symbol.clone(),
-                None,
-                vec!["strategy signal refused: durable arm state is not armed; \
+            StatusCode::FORBIDDEN,
+            "gate_3_arm",
+            "rejected",
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec!["strategy signal refused: durable arm state is not armed; \
                       fresh systems default to disarmed until explicitly armed"
                     .to_string()],
-            );
+            },
+        );
         }
         Err(err) => {
             return refused_signal_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "gate_3_arm",
-                "unavailable",
-                validated.signal_id,
-                validated.strategy_id,
-                validated.symbol.clone(),
-                None,
-                vec![format!(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gate_3_arm",
+            "unavailable",
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec![format!(
                     "strategy signal unavailable: arm-state truth could not be loaded: {err}"
                 )],
-            );
+            },
+        );
         }
     };
 
@@ -538,11 +562,13 @@ pub(crate) async fn strategy_signal(
             StatusCode::FORBIDDEN,
             "gate_3_arm",
             "rejected",
-            validated.signal_id,
-            validated.strategy_id,
-            validated.symbol.clone(),
-            None,
-            vec![blocker],
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec![blocker],
+            },
         );
     }
 
@@ -551,15 +577,17 @@ pub(crate) async fn strategy_signal(
         Ok(snapshot) => snapshot,
         Err(err) => {
             return refused_signal_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "gate_4_snapshot",
-                "unavailable",
-                validated.signal_id,
-                validated.strategy_id,
-                validated.symbol.clone(),
-                None,
-                vec![err.to_string()],
-            );
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gate_4_snapshot",
+            "unavailable",
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec![err.to_string()],
+            },
+        );
         }
     };
 
@@ -568,11 +596,13 @@ pub(crate) async fn strategy_signal(
             StatusCode::CONFLICT,
             "gate_4_active_run",
             "unavailable",
-            validated.signal_id,
-            validated.strategy_id,
-            validated.symbol.clone(),
-            None,
-            vec!["strategy signal refused: no active durable run is available".to_string()],
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec!["strategy signal refused: no active durable run is available".to_string()],
+            },
         );
     };
 
@@ -585,25 +615,29 @@ pub(crate) async fn strategy_signal(
             blockers.push(note);
         }
         write_signal_refusal_event(
-            &st,
-            active_run_id,
-            "gate_5_state",
-            "unavailable",
-            &validated.signal_id,
-            &validated.strategy_id,
-            &validated.symbol,
-            &blockers,
-        )
+                    &st,
+                    active_run_id,
+                    &SignalRefusalAudit {
+                        gate: "gate_5_state",
+                        disposition: "unavailable",
+                        signal_id: &validated.signal_id,
+                        strategy_id: &validated.strategy_id,
+                        symbol: &validated.symbol,
+                        blockers: &blockers,
+                    },
+                )
         .await;
         return refused_signal_response(
             StatusCode::CONFLICT,
             "gate_5_state",
             "unavailable",
-            validated.signal_id,
-            validated.strategy_id,
-            validated.symbol.clone(),
-            Some(active_run_id),
-            blockers,
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: Some(active_run_id),
+                blockers,
+            },
         );
     }
 
@@ -622,24 +656,28 @@ pub(crate) async fn strategy_signal(
                 write_signal_refusal_event(
                     &st,
                     active_run_id,
-                    "gate_6_suppressed",
-                    "suppressed",
-                    &validated.signal_id,
-                    &validated.strategy_id,
-                    &validated.symbol,
-                    &blockers,
+                    &SignalRefusalAudit {
+                        gate: "gate_6_suppressed",
+                        disposition: "suppressed",
+                        signal_id: &validated.signal_id,
+                        strategy_id: &validated.strategy_id,
+                        symbol: &validated.symbol,
+                        blockers: &blockers,
+                    },
                 )
                 .await;
                 return refused_signal_response(
-                    StatusCode::CONFLICT,
-                    "gate_6_suppressed",
-                    "suppressed",
-                    validated.signal_id,
-                    validated.strategy_id,
-                    validated.symbol.clone(),
-                    Some(active_run_id),
-                    blockers,
-                );
+            StatusCode::CONFLICT,
+            "gate_6_suppressed",
+            "suppressed",
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: Some(active_run_id),
+                blockers,
+            },
+        );
             }
         }
         Err(err) => {
@@ -647,26 +685,30 @@ pub(crate) async fn strategy_signal(
                 "strategy signal unavailable: suppression check failed: {err}"
             )];
             write_signal_refusal_event(
-                &st,
-                active_run_id,
-                "gate_6_suppression_check",
-                "unavailable",
-                &validated.signal_id,
-                &validated.strategy_id,
-                &validated.symbol,
-                &blockers,
-            )
+                    &st,
+                    active_run_id,
+                    &SignalRefusalAudit {
+                        gate: "gate_6_suppression_check",
+                        disposition: "unavailable",
+                        signal_id: &validated.signal_id,
+                        strategy_id: &validated.strategy_id,
+                        symbol: &validated.symbol,
+                        blockers: &blockers,
+                    },
+                )
             .await;
             return refused_signal_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "gate_6_suppression_check",
-                "unavailable",
-                validated.signal_id,
-                validated.strategy_id,
-                validated.symbol.clone(),
-                Some(active_run_id),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gate_6_suppression_check",
+            "unavailable",
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: Some(active_run_id),
                 blockers,
-            );
+            },
+        );
         }
     }
 
@@ -740,11 +782,13 @@ pub(crate) async fn strategy_signal(
             StatusCode::INTERNAL_SERVER_ERROR,
             "gate_7_outbox",
             "unavailable",
-            validated.signal_id,
-            validated.strategy_id,
-            validated.symbol,
-            Some(active_run_id),
-            vec![format!("outbox enqueue failed: {err}")],
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol,
+                active_run_id: Some(active_run_id),
+                blockers: vec![format!("outbox enqueue failed: {err}")],
+            },
         ),
     }
 }
@@ -935,33 +979,37 @@ fn is_intent_placed(accepted: bool, disposition: &str) -> bool {
 /// all refused signals produce a durable log entry with the gate label,
 /// strategy identity, symbol, and blockers — enabling morning-after diagnosis
 /// without relying solely on the caller's HTTP response capture.
-fn refused_signal_response(
-    status: StatusCode,
-    gate: &str,
-    disposition: &str,
+struct RefusedSignalArgs {
     signal_id: String,
     strategy_id: String,
     symbol: String,
     active_run_id: Option<uuid::Uuid>,
     blockers: Vec<String>,
+}
+
+fn refused_signal_response(
+    status: StatusCode,
+    gate: &str,
+    disposition: &str,
+    args: RefusedSignalArgs,
 ) -> Response {
     tracing::warn!(
         gate = gate,
-        signal_id = %signal_id,
-        strategy_id = %strategy_id,
-        symbol = %symbol,
+        signal_id = %args.signal_id,
+        strategy_id = %args.strategy_id,
+        symbol = %args.symbol,
         disposition = disposition,
-        ?blockers,
+        blockers = ?args.blockers,
         "strategy signal refused"
     );
     signal_response(
         status,
         false,
         disposition,
-        signal_id,
-        strategy_id,
-        active_run_id,
-        blockers,
+        args.signal_id,
+        args.strategy_id,
+        args.active_run_id,
+        args.blockers,
     )
 }
 

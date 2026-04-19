@@ -97,12 +97,14 @@ fn r03_04_refresh_tick_cadence_is_sane() {
     // (too aggressive); above 120 = >2 min between refreshes (stale).
     // The constant is 60 in the current patch — this test gates regressions.
     const REFRESH_TICKS: u32 = 60; // mirror of EXTERNAL_SNAPSHOT_REFRESH_TICKS
-    assert!(
-        REFRESH_TICKS > 0,
-        "R03-04: cadence must be > 0 to avoid refreshing every tick"
-    );
-    assert!(
-        REFRESH_TICKS <= 120,
-        "R03-04: cadence > 120 s is too stale for paper reconcile"
-    );
+    const _: () = {
+        assert!(
+            REFRESH_TICKS > 0,
+            "R03-04: cadence must be > 0 to avoid refreshing every tick"
+        );
+        assert!(
+            REFRESH_TICKS <= 120,
+            "R03-04: cadence > 120 s is too stale for paper reconcile"
+        );
+    };
 }

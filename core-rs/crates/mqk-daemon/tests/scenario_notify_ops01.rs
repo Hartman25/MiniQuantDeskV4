@@ -400,9 +400,9 @@ async fn n03_delivery_failure_does_not_corrupt_primary_result() {
 // ---------------------------------------------------------------------------
 
 /// Proves:
-/// - the GET /api/v1/alerts/active route returns 200 with clean-state empty rows
-/// - the notifier is NOT called from a read-only GET route
-///   (notifications are only emitted from accepted POST control actions)
+/// - the GET /api/v1/alerts/active route returns 200 and does not trigger the notifier
+/// - no-DB state now truthfully emits `risk.truth_unavailable` instead of a false-clean empty set
+/// - notifications are only emitted from accepted POST control actions
 #[tokio::test]
 async fn n04_alert_get_route_does_not_trigger_notifier() {
     let sink = start_webhook_sink().await;
@@ -422,17 +422,17 @@ async fn n04_alert_get_route_does_not_trigger_notifier() {
 
     let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-    // Confirm truth_state = active and empty rows (clean daemon state).
+    // Confirm truth_state = active. In a no-DB state, risk truth is unavailable
+    // and the route must surface that as a warning instead of a false-clean empty set.
     assert_eq!(
         body["truth_state"].as_str().unwrap(),
         "active",
         "N04: truth_state must be active"
     );
     let rows = body["rows"].as_array().unwrap();
-    assert!(
-        rows.is_empty(),
-        "N04: clean state must produce zero alert rows"
-    );
+    assert_eq!(rows.len(), 1, "N04: no-DB state must surface one truthful warning row");
+    assert_eq!(rows[0]["class"], "risk.truth_unavailable");
+    assert_eq!(rows[0]["severity"], "warning");
 
     // Give async any pending work time to flush.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

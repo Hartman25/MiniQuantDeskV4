@@ -193,167 +193,6 @@ pub(crate) fn build_fault_signals(
     signals
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state::{ReconcileStatusSnapshot, StatusSnapshot};
-
-    fn ok_status() -> StatusSnapshot {
-        StatusSnapshot {
-            daemon_uptime_secs: 10,
-            active_run_id: None,
-            state: "idle".to_string(),
-            notes: None,
-            integrity_armed: true,
-            deadman_status: "ok".to_string(),
-            deadman_last_heartbeat_utc: None,
-        }
-    }
-
-    fn ok_reconcile() -> ReconcileStatusSnapshot {
-        ReconcileStatusSnapshot {
-            status: "ok".to_string(),
-            last_run_at: None,
-            snapshot_watermark_ms: None,
-            mismatched_positions: 0,
-            mismatched_orders: 0,
-            mismatched_fills: 0,
-            unmatched_broker_events: 0,
-            note: None,
-        }
-    }
-
-    #[test]
-    fn st01_risk_truth_none_emits_warning_signal() {
-        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), None, None);
-        let risk_signals: Vec<_> = signals
-            .iter()
-            .filter(|s| s.class.starts_with("risk."))
-            .collect();
-        assert_eq!(risk_signals.len(), 1, "expected exactly one risk signal");
-        assert_eq!(risk_signals[0].class, "risk.truth_unavailable");
-        assert_eq!(risk_signals[0].severity, "warning");
-    }
-
-    #[test]
-    fn st01_risk_truth_some_true_emits_critical_signal() {
-        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(true), None);
-        let risk_signals: Vec<_> = signals
-            .iter()
-            .filter(|s| s.class.starts_with("risk."))
-            .collect();
-        assert_eq!(risk_signals.len(), 1);
-        assert_eq!(risk_signals[0].class, "risk.dispatch_denied.engine_blocked");
-        assert_eq!(risk_signals[0].severity, "critical");
-    }
-
-    #[test]
-    fn st01_risk_truth_some_false_emits_no_risk_signal() {
-        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), None);
-        let risk_signals: Vec<_> = signals
-            .iter()
-            .filter(|s| s.class.starts_with("risk."))
-            .collect();
-        assert!(
-            risk_signals.is_empty(),
-            "confirmed-clear risk must not fire a signal"
-        );
-    }
-
-    #[test]
-    fn st01_risk_truth_none_distinct_from_confirmed_blocked() {
-        let signals_unknown = build_fault_signals(&ok_status(), &ok_reconcile(), None, None);
-        let signals_blocked = build_fault_signals(&ok_status(), &ok_reconcile(), Some(true), None);
-        // Both fire a risk signal but with different classes — operators can distinguish
-        let class_unknown = &signals_unknown
-            .iter()
-            .find(|s| s.class.starts_with("risk."))
-            .unwrap()
-            .class;
-        let class_blocked = &signals_blocked
-            .iter()
-            .find(|s| s.class.starts_with("risk."))
-            .unwrap()
-            .class;
-        assert_ne!(class_unknown, class_blocked);
-    }
-
-    // HEARTBEAT-TICK-01 stall detection tests.
-    //
-    // build_fault_signals is pure so these are hermetic (no time.Now() calls
-    // inside; callers pre-compute stall_secs and pass it in).
-
-    #[test]
-    fn ht01_no_stall_signal_when_stall_secs_none() {
-        // None means "not running" or "never ticked" — no stall signal regardless.
-        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), None);
-        let stall: Vec<_> = signals
-            .iter()
-            .filter(|s| s.class == "runtime.execution_loop.stalled")
-            .collect();
-        assert!(
-            stall.is_empty(),
-            "None stall_secs must produce no stall signal"
-        );
-    }
-
-    #[test]
-    fn ht01_no_stall_signal_under_threshold() {
-        // 5 s elapsed — under the 10 s threshold; no signal.
-        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), Some(5));
-        let stall: Vec<_> = signals
-            .iter()
-            .filter(|s| s.class == "runtime.execution_loop.stalled")
-            .collect();
-        assert!(stall.is_empty(), "stall below threshold must not fire");
-    }
-
-    #[test]
-    fn ht01_no_stall_signal_at_exact_threshold() {
-        // Threshold is strict >; exactly 10 s is not stalled.
-        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), Some(10));
-        let stall: Vec<_> = signals
-            .iter()
-            .filter(|s| s.class == "runtime.execution_loop.stalled")
-            .collect();
-        assert!(
-            stall.is_empty(),
-            "stall at exact threshold must not fire (strict >)"
-        );
-    }
-
-    #[test]
-    fn ht01_critical_stall_signal_over_threshold() {
-        // 15 s elapsed — over the 10 s threshold; critical signal.
-        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), Some(15));
-        let stall: Vec<_> = signals
-            .iter()
-            .filter(|s| s.class == "runtime.execution_loop.stalled")
-            .collect();
-        assert_eq!(
-            stall.len(),
-            1,
-            "stall over threshold must fire exactly one signal"
-        );
-        assert_eq!(stall[0].severity, "critical");
-        assert_eq!(stall[0].class, "runtime.execution_loop.stalled");
-    }
-
-    #[test]
-    fn ht01_stall_signal_detail_includes_elapsed_secs() {
-        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), Some(30));
-        let stall = signals
-            .iter()
-            .find(|s| s.class == "runtime.execution_loop.stalled")
-            .expect("stall signal must be present at 30 s");
-        assert!(
-            stall.summary.contains("30s"),
-            "stall signal summary must include elapsed seconds; got: {}",
-            stall.summary
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // parse_decimal / oms_stage_label / runtime_status_from_state
 // ---------------------------------------------------------------------------
@@ -594,15 +433,20 @@ pub(crate) async fn write_signal_admission_event(
 /// # Idempotency
 ///
 /// `event_id` is a UUIDv5 derived from `(run_id, signal_id, gate, ts_utc_micros)`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SignalRefusalAudit<'a> {
+    pub gate: &'a str,
+    pub disposition: &'a str,
+    pub signal_id: &'a str,
+    pub strategy_id: &'a str,
+    pub symbol: &'a str,
+    pub blockers: &'a [String],
+}
+
 pub(crate) async fn write_signal_refusal_event(
     st: &Arc<AppState>,
     run_id: uuid::Uuid,
-    gate: &str,
-    disposition: &str,
-    signal_id: &str,
-    strategy_id: &str,
-    symbol: &str,
-    blockers: &[String],
+    refusal: &SignalRefusalAudit<'_>,
 ) -> Option<uuid::Uuid> {
     let db = st.db.as_ref()?;
     let ts_utc = chrono::Utc::now();
@@ -611,8 +455,8 @@ pub(crate) async fn write_signal_refusal_event(
         format!(
             "mqk-daemon.signal-refusal.v1|{}|{}|{}|{}",
             run_id,
-            signal_id,
-            gate,
+            refusal.signal_id,
+            refusal.gate,
             ts_utc.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
         )
         .as_bytes(),
@@ -626,12 +470,12 @@ pub(crate) async fn write_signal_refusal_event(
             topic: "signal_ingestion".to_string(),
             event_type: "signal.refused".to_string(),
             payload: serde_json::json!({
-                "signal_id": signal_id,
-                "strategy_id": strategy_id,
-                "symbol": symbol,
-                "gate": gate,
-                "disposition": disposition,
-                "blockers": blockers,
+                "signal_id": refusal.signal_id,
+                "strategy_id": refusal.strategy_id,
+                "symbol": refusal.symbol,
+                "gate": refusal.gate,
+                "disposition": refusal.disposition,
+                "blockers": refusal.blockers,
                 "source": "mqk-daemon.routes.strategy_signal",
             }),
             hash_prev: None,
@@ -654,5 +498,166 @@ pub(crate) fn runtime_transition_for_action(action: &str) -> Option<String> {
         "run.stop" => Some("STOPPED".to_string()),
         "run.halt" => Some("HALTED".to_string()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{ReconcileStatusSnapshot, StatusSnapshot};
+
+    fn ok_status() -> StatusSnapshot {
+        StatusSnapshot {
+            daemon_uptime_secs: 10,
+            active_run_id: None,
+            state: "idle".to_string(),
+            notes: None,
+            integrity_armed: true,
+            deadman_status: "ok".to_string(),
+            deadman_last_heartbeat_utc: None,
+        }
+    }
+
+    fn ok_reconcile() -> ReconcileStatusSnapshot {
+        ReconcileStatusSnapshot {
+            status: "ok".to_string(),
+            last_run_at: None,
+            snapshot_watermark_ms: None,
+            mismatched_positions: 0,
+            mismatched_orders: 0,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn st01_risk_truth_none_emits_warning_signal() {
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), None, None);
+        let risk_signals: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class.starts_with("risk."))
+            .collect();
+        assert_eq!(risk_signals.len(), 1, "expected exactly one risk signal");
+        assert_eq!(risk_signals[0].class, "risk.truth_unavailable");
+        assert_eq!(risk_signals[0].severity, "warning");
+    }
+
+    #[test]
+    fn st01_risk_truth_some_true_emits_critical_signal() {
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(true), None);
+        let risk_signals: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class.starts_with("risk."))
+            .collect();
+        assert_eq!(risk_signals.len(), 1);
+        assert_eq!(risk_signals[0].class, "risk.dispatch_denied.engine_blocked");
+        assert_eq!(risk_signals[0].severity, "critical");
+    }
+
+    #[test]
+    fn st01_risk_truth_some_false_emits_no_risk_signal() {
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), None);
+        let risk_signals: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class.starts_with("risk."))
+            .collect();
+        assert!(
+            risk_signals.is_empty(),
+            "confirmed-clear risk must not fire a signal"
+        );
+    }
+
+    #[test]
+    fn st01_risk_truth_none_distinct_from_confirmed_blocked() {
+        let signals_unknown = build_fault_signals(&ok_status(), &ok_reconcile(), None, None);
+        let signals_blocked = build_fault_signals(&ok_status(), &ok_reconcile(), Some(true), None);
+        // Both fire a risk signal but with different classes — operators can distinguish
+        let class_unknown = &signals_unknown
+            .iter()
+            .find(|s| s.class.starts_with("risk."))
+            .unwrap()
+            .class;
+        let class_blocked = &signals_blocked
+            .iter()
+            .find(|s| s.class.starts_with("risk."))
+            .unwrap()
+            .class;
+        assert_ne!(class_unknown, class_blocked);
+    }
+
+    // HEARTBEAT-TICK-01 stall detection tests.
+    //
+    // build_fault_signals is pure so these are hermetic (no time.Now() calls
+    // inside; callers pre-compute stall_secs and pass it in).
+
+    #[test]
+    fn ht01_no_stall_signal_when_stall_secs_none() {
+        // None means "not running" or "never ticked" — no stall signal regardless.
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), None);
+        let stall: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class == "runtime.execution_loop.stalled")
+            .collect();
+        assert!(
+            stall.is_empty(),
+            "None stall_secs must produce no stall signal"
+        );
+    }
+
+    #[test]
+    fn ht01_no_stall_signal_under_threshold() {
+        // 5 s elapsed — under the 10 s threshold; no signal.
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), Some(5));
+        let stall: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class == "runtime.execution_loop.stalled")
+            .collect();
+        assert!(stall.is_empty(), "stall below threshold must not fire");
+    }
+
+    #[test]
+    fn ht01_no_stall_signal_at_exact_threshold() {
+        // Threshold is strict >; exactly 10 s is not stalled.
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), Some(10));
+        let stall: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class == "runtime.execution_loop.stalled")
+            .collect();
+        assert!(
+            stall.is_empty(),
+            "stall at exact threshold must not fire (strict >)"
+        );
+    }
+
+    #[test]
+    fn ht01_critical_stall_signal_over_threshold() {
+        // 15 s elapsed — over the 10 s threshold; critical signal.
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), Some(15));
+        let stall: Vec<_> = signals
+            .iter()
+            .filter(|s| s.class == "runtime.execution_loop.stalled")
+            .collect();
+        assert_eq!(
+            stall.len(),
+            1,
+            "stall over threshold must fire exactly one signal"
+        );
+        assert_eq!(stall[0].severity, "critical");
+        assert_eq!(stall[0].class, "runtime.execution_loop.stalled");
+    }
+
+    #[test]
+    fn ht01_stall_signal_detail_includes_elapsed_secs() {
+        let signals = build_fault_signals(&ok_status(), &ok_reconcile(), Some(false), Some(30));
+        let stall = signals
+            .iter()
+            .find(|s| s.class == "runtime.execution_loop.stalled")
+            .expect("stall signal must be present at 30 s");
+        assert!(
+            stall.summary.contains("30s"),
+            "stall signal summary must include elapsed seconds; got: {}",
+            stall.summary
+        );
     }
 }

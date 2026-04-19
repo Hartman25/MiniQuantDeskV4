@@ -159,9 +159,8 @@ async fn optr02_p2_stop_system_no_db_audit_event_id_is_honest_null() {
         "stop-system",
         "P-02: requested_action must echo stop-system; body: {json}"
     );
-    assert_eq!(
+    assert!(
         json["accepted"].as_bool().unwrap_or(false),
-        true,
         "P-02: accepted must be true; body: {json}"
     );
     assert!(
@@ -175,9 +174,8 @@ async fn optr02_p2_stop_system_no_db_audit_event_id_is_honest_null() {
          body: {json}"
     );
     // durable_db_write must be false: no DB present
-    assert_eq!(
-        json["audit"]["durable_db_write"].as_bool().unwrap_or(true),
-        false,
+    assert!(
+        !json["audit"]["durable_db_write"].as_bool().unwrap_or(true),
         "P-02: durable_db_write must be false when no DB; body: {json}"
     );
 }
