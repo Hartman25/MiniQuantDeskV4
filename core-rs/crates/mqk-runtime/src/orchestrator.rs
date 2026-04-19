@@ -413,6 +413,12 @@ where
                 now,
             )
             .await?;
+            tracing::info!(
+                run_id = %self.run_id,
+                order_id = %event.internal_order_id(),
+                event_kind = %event_kind,
+                "exec_broker_event_ingested"
+            );
         }
         // Advance cursor only after all inbox persists succeed (crash-safe).
         if let Some(ref cursor) = new_cursor {
@@ -485,6 +491,58 @@ where
                     )));
                 }
             };
+            // EXEC-OBS-LIVENESS-01: structured apply milestone log.
+            // Fill events include symbol/side/qty/price for chain reconstruction.
+            {
+                let ek = match &event {
+                    BrokerEvent::Ack { .. } => "ack",
+                    BrokerEvent::PartialFill { .. } => "partial_fill",
+                    BrokerEvent::Fill { .. } => "fill",
+                    BrokerEvent::CancelAck { .. } => "cancel_ack",
+                    BrokerEvent::CancelReject { .. } => "cancel_reject",
+                    BrokerEvent::ReplaceAck { .. } => "replace_ack",
+                    BrokerEvent::ReplaceReject { .. } => "replace_reject",
+                    BrokerEvent::Reject { .. } => "reject",
+                };
+                match &event {
+                    BrokerEvent::Fill {
+                        symbol,
+                        side,
+                        delta_qty,
+                        price_micros,
+                        ..
+                    }
+                    | BrokerEvent::PartialFill {
+                        symbol,
+                        side,
+                        delta_qty,
+                        price_micros,
+                        ..
+                    } => {
+                        tracing::info!(
+                            run_id = %self.run_id,
+                            order_id = %internal_id,
+                            event_kind = %ek,
+                            symbol = %symbol,
+                            side = ?side,
+                            delta_qty = %delta_qty,
+                            price_micros = %price_micros,
+                            terminal = %apply_outcome.terminal_apply_succeeded,
+                            "exec_broker_event_applied"
+                        );
+                    }
+                    _ => {
+                        tracing::info!(
+                            run_id = %self.run_id,
+                            order_id = %internal_id,
+                            event_kind = %ek,
+                            terminal = %apply_outcome.terminal_apply_succeeded,
+                            "exec_broker_event_applied"
+                        );
+                    }
+                }
+            }
+
             // RT-9: Phase 3b - when a live broker Ack carries the exchange-assigned
             // order ID, register it in the in-memory order map.  For paper brokers
             // `broker_order_id` is `None` (the ID was already registered in Phase 1

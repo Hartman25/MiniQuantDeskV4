@@ -51,6 +51,13 @@ where
             self.time_source.now_utc(),
         )
         .await?;
+        tracing::info!(
+            run_id = %self.run_id,
+            order_id = %order_id,
+            symbol = %symbol,
+            qty = %qty,
+            "exec_submit_dispatching"
+        );
 
         // Step 3b: submit via BrokerGateway - the ONLY submit path.
         //
@@ -72,45 +79,87 @@ where
                     }
                     SubmitError::Broker(be) if be.requires_halt() => {
                         let now = self.time_source.now_utc();
+                        // Outbox state write is attempted first but must not block the
+                        // mandatory halt: if the mark fails, Phase-0b quarantine will
+                        // enforce on restart via the DISPATCHING row it leaves behind.
+                        // persist_halt_and_disarm is mandatory (propagates with ?) so
+                        // the caller receives HALT_PERSISTENCE_FAILURE rather than
+                        // silently continuing with runs.status still RUNNING.
                         if matches!(be, BrokerError::AmbiguousSubmit { .. }) {
-                            let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
-                            let _ = persist_halt_and_disarm(
+                            if let Err(mark_err) =
+                                mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await
+                            {
+                                tracing::warn!(
+                                    order_id = %order_id,
+                                    error = %mark_err,
+                                    "dispatch_halt: outbox_mark_ambiguous failed (AmbiguousSubmit); \
+                                     Phase-0b quarantine will enforce on restart"
+                                );
+                            }
+                            persist_halt_and_disarm(
                                 &self.pool,
                                 self.run_id,
                                 now,
                                 "AmbiguousSubmit",
                             )
-                            .await;
+                            .await?;
                         } else {
-                            let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
-                            let _ = persist_halt_and_disarm(
+                            if let Err(mark_err) =
+                                mqk_db::outbox_mark_failed(&self.pool, &order_id).await
+                            {
+                                tracing::warn!(
+                                    order_id = %order_id,
+                                    error = %mark_err,
+                                    "dispatch_halt: outbox_mark_failed failed (AuthSession); \
+                                     Phase-0b quarantine will enforce on restart"
+                                );
+                            }
+                            persist_halt_and_disarm(
                                 &self.pool,
                                 self.run_id,
                                 now,
                                 "AuthSession",
                             )
-                            .await;
+                            .await?;
                         }
                     }
                     SubmitError::Broker(be) if be.is_safe_pre_send_retry() => {
                         let _ = mqk_db::outbox_reset_dispatching_to_pending(&self.pool, &order_id)
                             .await;
-                        eprintln!("WARN broker_submit_retryable order_id={order_id} error={e}");
+                        tracing::warn!(
+                            order_id = %order_id,
+                            error = %e,
+                            "broker_submit_retryable"
+                        );
                     }
                     SubmitError::Broker(be) if be.is_ambiguous_send_outcome() => {
                         let now = self.time_source.now_utc();
-                        let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await;
-                        let _ = persist_halt_and_disarm(
+                        // Same halt-path pattern: outbox mark is best-effort, halt is mandatory.
+                        if let Err(mark_err) =
+                            mqk_db::outbox_mark_ambiguous(&self.pool, &order_id).await
+                        {
+                            tracing::warn!(
+                                order_id = %order_id,
+                                error = %mark_err,
+                                "dispatch_halt: outbox_mark_ambiguous failed (ambiguous-outcome); \
+                                 Phase-0b quarantine will enforce on restart"
+                            );
+                        }
+                        persist_halt_and_disarm(
                             &self.pool,
                             self.run_id,
                             now,
                             "AmbiguousSubmit",
                         )
-                        .await;
+                        .await?;
                     }
                     SubmitError::Broker(_) => {
                         let _ = mqk_db::outbox_mark_failed(&self.pool, &order_id).await;
-                        eprintln!("WARN broker_submit_non_retryable order_id={order_id} error={e}");
+                        tracing::warn!(
+                            order_id = %order_id,
+                            error = %e,
+                            "broker_submit_non_retryable"
+                        );
                     }
                 }
                 return Err(anyhow!("{e}"));
@@ -132,6 +181,14 @@ where
         }
 
         self.order_map.register(&order_id, &resp.broker_order_id);
+        tracing::info!(
+            run_id = %self.run_id,
+            order_id = %order_id,
+            broker_order_id = %resp.broker_order_id,
+            symbol = %symbol,
+            qty = %qty,
+            "exec_submit_sent"
+        );
         self.oms_orders
             .insert(order_id.clone(), OmsOrder::new(&order_id, &symbol, qty));
         Ok(())
@@ -199,47 +256,79 @@ where
                 match class {
                     CancelBrokerClass::HaltAmbiguous => {
                         let now = self.time_source.now_utc();
-                        let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &request_id).await;
-                        let _ = persist_halt_and_disarm(
+                        // Outbox mark is best-effort; persist_halt_and_disarm is mandatory.
+                        // See submit path for rationale on this ordering.
+                        if let Err(mark_err) =
+                            mqk_db::outbox_mark_ambiguous(&self.pool, &request_id).await
+                        {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                error = %mark_err,
+                                "dispatch_halt: outbox_mark_ambiguous failed (cancel HaltAmbiguous); \
+                                 Phase-0b quarantine will enforce on restart"
+                            );
+                        }
+                        persist_halt_and_disarm(
                             &self.pool,
                             self.run_id,
                             now,
                             "AmbiguousSubmit",
                         )
-                        .await;
+                        .await?;
                     }
                     CancelBrokerClass::HaltAuth => {
                         let now = self.time_source.now_utc();
-                        let _ = mqk_db::outbox_mark_failed(&self.pool, &request_id).await;
-                        let _ =
-                            persist_halt_and_disarm(&self.pool, self.run_id, now, "AuthSession")
-                                .await;
+                        if let Err(mark_err) =
+                            mqk_db::outbox_mark_failed(&self.pool, &request_id).await
+                        {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                error = %mark_err,
+                                "dispatch_halt: outbox_mark_failed failed (cancel HaltAuth); \
+                                 Phase-0b quarantine will enforce on restart"
+                            );
+                        }
+                        persist_halt_and_disarm(&self.pool, self.run_id, now, "AuthSession")
+                            .await?;
                     }
                     CancelBrokerClass::Retryable => {
                         let _ =
                             mqk_db::outbox_reset_dispatching_to_pending(&self.pool, &request_id)
                                 .await;
-                        eprintln!(
-                            "WARN broker_cancel_retryable request_id={request_id} target_order_id={target_order_id} error={}",
-                            err_text
+                        tracing::warn!(
+                            request_id = %request_id,
+                            target_order_id = %target_order_id,
+                            error = %err_text,
+                            "broker_cancel_retryable"
                         );
                     }
                     CancelBrokerClass::Ambiguous => {
                         let now = self.time_source.now_utc();
-                        let _ = mqk_db::outbox_mark_ambiguous(&self.pool, &request_id).await;
-                        let _ = persist_halt_and_disarm(
+                        if let Err(mark_err) =
+                            mqk_db::outbox_mark_ambiguous(&self.pool, &request_id).await
+                        {
+                            tracing::warn!(
+                                request_id = %request_id,
+                                error = %mark_err,
+                                "dispatch_halt: outbox_mark_ambiguous failed (cancel Ambiguous); \
+                                 Phase-0b quarantine will enforce on restart"
+                            );
+                        }
+                        persist_halt_and_disarm(
                             &self.pool,
                             self.run_id,
                             now,
                             "AmbiguousSubmit",
                         )
-                        .await;
+                        .await?;
                     }
                     CancelBrokerClass::NonRetryable => {
                         let _ = mqk_db::outbox_mark_failed(&self.pool, &request_id).await;
-                        eprintln!(
-                            "WARN broker_cancel_non_retryable request_id={request_id} target_order_id={target_order_id} error={}",
-                            err_text
+                        tracing::warn!(
+                            request_id = %request_id,
+                            target_order_id = %target_order_id,
+                            error = %err_text,
+                            "broker_cancel_non_retryable"
                         );
                     }
                     CancelBrokerClass::Unknown => {
