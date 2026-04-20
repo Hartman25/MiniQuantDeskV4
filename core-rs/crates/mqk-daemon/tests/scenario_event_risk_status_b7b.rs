@@ -92,6 +92,9 @@ async fn e7b_01_event_risk_status_returns_200_not_wired() {
     );
 
     let json = parse_json(body);
+    // truth_state is still "not_wired" when no source is configured — the flatten
+    // wiring is present in the loop but does not make truth_state "partial" on its
+    // own (no source means the evaluator always returns NotConfigured, a no-op).
     assert_eq!(
         json["truth_state"], "not_wired",
         "E7B-01: truth_state must be \"not_wired\" when no gate is configured (CI baseline); got: {json}"
@@ -125,10 +128,12 @@ async fn e7b_02_capability_fields_are_explicitly_absent() {
         "E7B-02: earnings_calendar_feed must be \"not_connected\" — no calendar source exists; \
          got: {json}"
     );
+    // EVENT-RISK-FLATTEN-WIRE-01: flatten wiring is now present in the loop;
+    // "wired_no_source" is the honest state when no source is configured.
     assert_eq!(
-        json["pre_event_flattening"], "not_wired",
-        "E7B-02: pre_event_flattening must be \"not_wired\" — no flattening gate exists; \
-         got: {json}"
+        json["pre_event_flattening"], "wired_no_source",
+        "E7B-02: pre_event_flattening must be \"wired_no_source\" — flatten wiring is in the \
+         execution loop but no blackout or earnings source is configured; got: {json}"
     );
     assert_eq!(
         json["signal_admission_gate"], "not_configured",
@@ -258,14 +263,15 @@ async fn e7b_05_truth_state_is_partial_when_gate_configured() {
         json["signal_admission_gate"], "configured",
         "E7B-05: signal_admission_gate must be \"configured\" when env var is set; got: {json}"
     );
-    // Calendar and flattening must remain absent — "partial" must not overstate.
+    // Calendar feed must remain absent — "partial" must not overstate.
     assert_eq!(
         json["earnings_calendar_feed"], "not_connected",
         "E7B-05: earnings_calendar_feed must remain \"not_connected\"; got: {json}"
     );
+    // With blackout source configured, flatten wiring is "active" (source present).
     assert_eq!(
-        json["pre_event_flattening"], "not_wired",
-        "E7B-05: pre_event_flattening must remain \"not_wired\"; got: {json}"
+        json["pre_event_flattening"], "active",
+        "E7B-05: pre_event_flattening must be \"active\" when Gate 1h source is configured; got: {json}"
     );
 }
 
@@ -320,9 +326,9 @@ async fn e7b_06_earnings_calendar_feed_is_operator_file_when_configured() {
         "E7B-06: signal_admission_gate must be \"not_configured\" when only earnings calendar \
          is set; got: {json}"
     );
-    // pre_event_flattening must remain absent — partial must not overstate.
+    // With earnings source configured, flatten wiring is "active" (source present).
     assert_eq!(
-        json["pre_event_flattening"], "not_wired",
-        "E7B-06: pre_event_flattening must remain \"not_wired\"; got: {json}"
+        json["pre_event_flattening"], "active",
+        "E7B-06: pre_event_flattening must be \"active\" when earnings source is configured; got: {json}"
     );
 }

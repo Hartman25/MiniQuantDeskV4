@@ -315,6 +315,77 @@ pub(super) fn spawn_execution_loop(
                         }
                     }
 
+                    // EVENT-RISK-FLATTEN-WIRE-01: Pre-event flatten check.
+                    //
+                    // For each non-flat position, evaluate both configured event-risk
+                    // sources (blackout-v1 / earnings-calendar-v1).  When either source
+                    // returns FlattenRequired or Unavailable (fail-closed: cannot verify
+                    // it is safe to hold), enqueue a market close order into the outbox.
+                    // The order is dispatched by the orchestrator's Phase 1 on the next
+                    // tick via the normal outbox claim + submit path.
+                    //
+                    // Idempotency: UUIDv5 key scoped to (run_id, symbol, minute) so
+                    // re-evaluating the same trigger within the same 60-second window is
+                    // a no-op.  Enqueue failure is non-fatal (logged, retried next tick).
+                    if let Some(ref pool) = db {
+                        let positions_to_check: Vec<(String, i64)> = {
+                            let snap = snapshot_cache.read().await;
+                            snap.as_ref()
+                                .map(|s| {
+                                    s.portfolio
+                                        .positions
+                                        .iter()
+                                        .filter(|p| p.net_qty != 0)
+                                        .map(|p| (p.symbol.clone(), p.net_qty))
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        };
+                        for (symbol, net_qty) in &positions_to_check {
+                            let ts_secs = Utc::now().timestamp();
+                            let outcome =
+                                crate::pre_event_flatten::evaluate_flatten_trigger_from_env(
+                                    symbol,
+                                    ts_secs,
+                                    crate::pre_event_flatten::DEFAULT_FLATTEN_LEAD_SECS,
+                                );
+                            if outcome.is_flatten_required() || outcome.is_unavailable() {
+                                let (key, order_json) =
+                                    crate::pre_event_flatten::build_flatten_close_order_json(
+                                        symbol, *net_qty, ts_secs, run_id,
+                                    );
+                                match mqk_db::outbox_enqueue(pool, run_id, &key, order_json).await
+                                {
+                                    Ok(true) => {
+                                        tracing::warn!(
+                                            run_id = %run_id,
+                                            symbol = %symbol,
+                                            net_qty = %net_qty,
+                                            idempotency_key = %key,
+                                            "pre_event_flatten_close_enqueued"
+                                        );
+                                    }
+                                    Ok(false) => {
+                                        tracing::debug!(
+                                            run_id = %run_id,
+                                            symbol = %symbol,
+                                            idempotency_key = %key,
+                                            "pre_event_flatten_close_already_pending"
+                                        );
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            run_id = %run_id,
+                                            symbol = %symbol,
+                                            error = %err,
+                                            "pre_event_flatten_close_enqueue_failed"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // B1C: Dispatch pending strategy bar input and submit Live-intent
                     // decisions through the canonical internal admission seam.
                     //

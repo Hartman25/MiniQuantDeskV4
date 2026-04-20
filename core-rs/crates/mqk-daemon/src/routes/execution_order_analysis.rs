@@ -357,13 +357,28 @@ pub(crate) async fn execution_event_risk_status(_: State<Arc<AppState>>) -> impl
     }
     .to_string();
 
+    // pre_event_flattening reflects the flatten wiring state
+    // (EVENT-RISK-FLATTEN-WIRE-01: wiring is in the execution loop):
+    //   "active"          — wiring present AND ≥1 source configured; flatten orders
+    //                       will be enqueued when blackout conditions are met.
+    //   "wired_no_source" — wiring present but no source configured; evaluator
+    //                       returns NotConfigured every tick (no-op).
+    let flatten_source_active =
+        signal_admission_gate == "configured" || earnings_calendar_feed == "operator_file";
+    let pre_event_flattening = if flatten_source_active {
+        "active"
+    } else {
+        "wired_no_source"
+    }
+    .to_string();
+
     (
         StatusCode::OK,
         Json(EventRiskStatusResponse {
             canonical_route: "/api/v1/execution/event-risk-status".to_string(),
             truth_state,
             earnings_calendar_feed,
-            pre_event_flattening: "not_wired".to_string(),
+            pre_event_flattening,
             signal_admission_gate,
             note: "Two operator-configured event-risk sources are available.  \
                    (1) Static blackout periods (Gate 1h): configure MQK_EVENT_RISK_BLACKOUT_PATH \
@@ -375,7 +390,12 @@ pub(crate) async fn execution_event_risk_status(_: State<Arc<AppState>>) -> impl
                    pre/post windows (earnings_calendar_feed → \"operator_file\").  \
                    Either source active → truth_state = \"partial\".  \
                    No live data-provider feed is connected.  \
-                   Pre-event position flattening is not wired (pre_event_flattening = \"not_wired\").  \
+                   Pre-event position flattening is wired in the execution loop \
+                   (EVENT-RISK-FLATTEN-WIRE-01): when any configured source returns FlattenRequired \
+                   or Unavailable for a held position, a market close order is enqueued to the \
+                   outbox for dispatch on the next tick.  \
+                   pre_event_flattening = \"active\" when ≥1 source is configured; \
+                   \"wired_no_source\" when no source is configured (no-op).  \
                    The backtest engine has CorporateActionPolicy::ForbidPeriods; both gates bring \
                    equivalent enforcement to the live/paper execution path for operator-declared \
                    periods only."

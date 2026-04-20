@@ -15,6 +15,7 @@ pub mod event_risk_blackout;
 pub mod mode_transition;
 pub mod notify;
 pub mod parity_evidence;
+pub mod pre_event_flatten;
 pub mod routes;
 pub mod state;
 pub mod suppression;
