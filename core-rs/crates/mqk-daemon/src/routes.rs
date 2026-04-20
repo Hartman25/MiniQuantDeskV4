@@ -152,8 +152,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         execution_summary,
     };
     use execution_order_analysis::{
-        execution_order_causality, execution_order_chart, execution_order_replay,
-        execution_order_timeline, execution_order_trace, execution_outbox,
+        execution_event_risk_status, execution_order_causality, execution_order_chart,
+        execution_order_replay, execution_order_timeline, execution_order_trace, execution_outbox,
         execution_protection_status, execution_replace_cancel_chains,
     };
     use oms_metrics::{metrics_dashboards, oms_overview};
@@ -269,6 +269,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/execution/protection-status",
             get(execution_protection_status),
+        )
+        .route(
+            "/api/v1/execution/event-risk-status",
+            get(execution_event_risk_status),
         )
         .route("/api/v1/execution/transport", get(execution_transport))
         .route("/api/v1/market-data/quality", get(market_data_quality))

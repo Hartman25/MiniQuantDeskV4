@@ -10,6 +10,8 @@ pub mod capital_policy;
 pub mod cors;
 pub mod decision;
 pub mod dev_gate;
+pub mod earnings_calendar;
+pub mod event_risk_blackout;
 pub mod mode_transition;
 pub mod notify;
 pub mod parity_evidence;

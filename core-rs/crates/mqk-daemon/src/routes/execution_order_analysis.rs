@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 
-use crate::api_types::{ExecutionOutboxResponse, ExecutionOutboxRow};
+use crate::api_types::{EventRiskStatusResponse, ExecutionOutboxResponse, ExecutionOutboxRow};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -297,6 +297,89 @@ pub(crate) async fn execution_replace_cancel_chains(
                    operations per run by ExecutionOrchestrator Phase 3b (EXEC-02)."
                 .to_string(),
             chains: api_rows,
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/execution/event-risk-status (EVENT-RISK-01)
+// ---------------------------------------------------------------------------
+
+/// Event-risk screening status surface.
+///
+/// EVENT-RISK-GATE-01 (Gate 1h) exists in the signal admission path and enforces
+/// symbol-level blackout periods when `MQK_EVENT_RISK_BLACKOUT_PATH` is set.
+/// `truth_state` reflects the current posture dynamically:
+///
+/// - `"partial"` — Gate 1h is configured and enforcing; the operator-declared
+///   blackout check runs at signal admission.  Earnings calendar feed and
+///   pre-event flattening remain absent.
+/// - `"not_wired"` — `MQK_EVENT_RISK_BLACKOUT_PATH` is absent; the gate exists
+///   in code but is not enforcing.
+///
+/// This route follows the exact pattern established by B4 (`execution_protection_status`)
+/// so operator tooling and runbooks can explicitly distinguish the current
+/// enforcement posture from "route unavailable".
+///
+/// # Why this matters
+///
+/// The backtest engine has an explicit `CorporateActionPolicy::ForbidPeriods`
+/// that halts simulation on declared exclusion periods.  Gate 1h brings equivalent
+/// enforcement to the live/paper execution path for operator-declared periods only
+/// — not from a live calendar feed.  The following capabilities remain absent
+/// regardless of Gate 1h configuration:
+///
+/// - No earnings calendar feed is connected (`earnings_calendar_feed = "not_connected"`).
+/// - No pre-event position flattening gate exists (`pre_event_flattening = "not_wired"`).
+pub(crate) async fn execution_event_risk_status(_: State<Arc<AppState>>) -> impl IntoResponse {
+    use crate::earnings_calendar::earnings_calendar_surface_label;
+    use crate::event_risk_blackout::blackout_surface_label;
+
+    // signal_admission_gate reflects whether Gate 1h (static blackout) is active:
+    //   "configured"     — MQK_EVENT_RISK_BLACKOUT_PATH is set (gate enforcing).
+    //   "not_configured" — env var absent (gate present in code but not enforcing).
+    let signal_admission_gate = blackout_surface_label().to_string();
+
+    // earnings_calendar_feed reflects whether Gate 1h-calendar (earnings proximity) is active:
+    //   "operator_file"  — MQK_EARNINGS_CALENDAR_PATH is set (earnings-calendar-v1 source active).
+    //   "not_connected"  — env var absent (no earnings calendar source configured).
+    let earnings_calendar_feed = earnings_calendar_surface_label().to_string();
+
+    // truth_state reflects the overall screening posture:
+    //   "partial"   — at least one event-risk gate is configured and enforcing;
+    //                 one or more capabilities remain absent.
+    //   "not_wired" — no event-risk gate is configured; nothing is enforcing.
+    let truth_state = if signal_admission_gate == "configured" || earnings_calendar_feed == "operator_file" {
+        "partial"
+    } else {
+        "not_wired"
+    }
+    .to_string();
+
+    (
+        StatusCode::OK,
+        Json(EventRiskStatusResponse {
+            canonical_route: "/api/v1/execution/event-risk-status".to_string(),
+            truth_state,
+            earnings_calendar_feed,
+            pre_event_flattening: "not_wired".to_string(),
+            signal_admission_gate,
+            note: "Two operator-configured event-risk sources are available.  \
+                   (1) Static blackout periods (Gate 1h): configure MQK_EVENT_RISK_BLACKOUT_PATH \
+                   with a blackout-v1 JSON file to enforce symbol-level blackout ranges at signal \
+                   ingestion (signal_admission_gate → \"configured\").  \
+                   (2) Earnings calendar proximity (Gate 1h-calendar): configure \
+                   MQK_EARNINGS_CALENDAR_PATH with an earnings-calendar-v1 JSON file; the gate \
+                   derives blackout windows from declared earnings events with operator-specified \
+                   pre/post windows (earnings_calendar_feed → \"operator_file\").  \
+                   Either source active → truth_state = \"partial\".  \
+                   No live data-provider feed is connected.  \
+                   Pre-event position flattening is not wired (pre_event_flattening = \"not_wired\").  \
+                   The backtest engine has CorporateActionPolicy::ForbidPeriods; both gates bring \
+                   equivalent enforcement to the live/paper execution path for operator-declared \
+                   periods only."
+                .to_string(),
         }),
     )
         .into_response()

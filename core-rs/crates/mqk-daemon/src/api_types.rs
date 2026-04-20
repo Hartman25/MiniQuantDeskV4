@@ -1547,6 +1547,52 @@ pub struct ProtectionStatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/execution/event-risk-status (EVENT-RISK-01)
+// ---------------------------------------------------------------------------
+
+/// Honest event-risk screening status for the canonical paper+alpaca execution path.
+///
+/// EVENT-RISK-01 closure: no earnings calendar feed is connected, no pre-event
+/// position flattening gate exists, and no earnings blackout is enforced at
+/// signal admission.  This type surfaces that gap explicitly — following the
+/// same pattern as B4's `ProtectionStatusResponse` — so operator tooling and
+/// runbooks cannot mistake the current system for an event-risk-aware execution
+/// environment.
+///
+/// # Truth semantics
+///
+/// - `truth_state = "not_wired"` — no admission gate is configured; nothing is enforcing.
+/// - `truth_state = "partial"` — Gate 1h (`MQK_EVENT_RISK_BLACKOUT_PATH`) is configured
+///   and enforcing symbol-level blackout periods; `earnings_calendar_feed` and
+///   `pre_event_flattening` remain absent.
+/// - `earnings_calendar_feed = "not_connected"` — no earnings calendar data
+///   source is connected.  No upcoming-earnings awareness exists.
+/// - `pre_event_flattening = "not_wired"` — no pre-event position flattening
+///   gate exists.  Positions are not automatically exited before earnings.
+/// - `signal_admission_gate = "configured"` — Gate 1h is enforcing (env var set).
+/// - `signal_admission_gate = "not_configured"` — Gate 1h exists in code but is
+///   not enforcing (`MQK_EVENT_RISK_BLACKOUT_PATH` absent).
+///
+/// The backtest engine has an explicit `CorporateActionPolicy::ForbidPeriods`
+/// that halts simulation on declared exclusion periods.  Gate 1h brings equivalent
+/// enforcement to the live/paper signal path for operator-declared periods only —
+/// not from a live calendar feed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventRiskStatusResponse {
+    pub canonical_route: String,
+    /// `"not_wired"` — no gate configured; `"partial"` — Gate 1h configured (others absent).
+    pub truth_state: String,
+    /// `"not_connected"` — no earnings calendar feed is connected.
+    pub earnings_calendar_feed: String,
+    /// `"not_wired"` — no pre-event position flattening gate exists.
+    pub pre_event_flattening: String,
+    /// `"configured"` / `"not_configured"` — whether `MQK_EVENT_RISK_BLACKOUT_PATH` is set (Gate 1h).
+    pub signal_admission_gate: String,
+    /// Honest note for operator tooling and runbooks.
+    pub note: String,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/alerts/active (CC-06)
 // ---------------------------------------------------------------------------
 

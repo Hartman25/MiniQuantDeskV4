@@ -113,6 +113,9 @@ pub(crate) async fn strategy_suppressions(State(st): State<Arc<AppState>>) -> im
 //   1.  signal_ingestion_configured — ExternalSignalIngestion must be wired
 //   1e. capital_budget              — per-strategy budget authorized (TV-04B)
 //   1f. position_sizing             — implied notional within broker/account cap (TV-04C)
+//   1g. portfolio_risk              — exposure and capital exhaustion (TV-04E)
+//   1h. event_risk_blackout         — symbol-level static blackout periods (EVENT-RISK-GATE-01)
+//   1h2.earnings_calendar           — symbol-level earnings proximity blackout (EVENT-RISK-CALENDAR-01)
 //   1b. alpaca_ws_continuity        — must be Live (PT-DAY-02)
 //   1c. nyse_session                — must be regular session (PT-DAY-03)
 //   1d. day_signal_limit            — per-run intake bound not exceeded (PT-AUTO-02)
@@ -350,6 +353,116 @@ pub(crate) async fn strategy_signal(
         }
     }
 
+    // Gate 1h: event-risk blackout check (EVENT-RISK-GATE-01).
+    //
+    // `session_ts` is obtained here (Unix epoch seconds from AppState) and reused
+    // by Gate 1c's NYSE session check below, avoiding a redundant async call.
+    //
+    // If MQK_EVENT_RISK_BLACKOUT_PATH is configured, the signal's symbol is checked
+    // against operator-declared blackout periods at the current session timestamp.
+    // Placed before Gate 1b (WS continuity) because this is a pure filesystem
+    // check, cheaper than the network-state check.
+    //
+    // NotConfigured → no blackout file; pass through.
+    // Authorized    → symbol not in any blackout period; pass.
+    // Blackout      → symbol in a declared blackout period; 403 fail-closed.
+    // Unavailable   → file configured but unreadable/unparseable; 503 fail-closed.
+    let session_ts = st.session_now_ts().await;
+    {
+        use crate::event_risk_blackout::evaluate_event_risk_blackout_from_env;
+        let blackout = evaluate_event_risk_blackout_from_env(&validated.symbol, session_ts);
+        if !blackout.is_signal_safe() {
+            let (status, disposition, blocker) = match &blackout {
+                crate::event_risk_blackout::EventRiskBlackoutOutcome::Blackout { note } => (
+                    StatusCode::FORBIDDEN,
+                    "event_risk_blackout",
+                    format!("strategy signal refused: {note}"),
+                ),
+                crate::event_risk_blackout::EventRiskBlackoutOutcome::Unavailable { reason } => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "unavailable",
+                    format!(
+                        "strategy signal unavailable: event-risk blackout file is \
+                         configured but cannot be read: {reason}"
+                    ),
+                ),
+                _ => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "unavailable",
+                    "strategy signal unavailable: event-risk blackout evaluation failed"
+                        .to_string(),
+                ),
+            };
+            return refused_signal_response(
+                status,
+                "gate_1h_event_risk",
+                disposition,
+                RefusedSignalArgs {
+                    signal_id: validated.signal_id,
+                    strategy_id: validated.strategy_id,
+                    symbol: validated.symbol.clone(),
+                    active_run_id: None,
+                    blockers: vec![blocker],
+                },
+            );
+        }
+    }
+
+    // Gate 1h2: earnings-calendar proximity check (EVENT-RISK-CALENDAR-01).
+    //
+    // If MQK_EARNINGS_CALENDAR_PATH is configured, the signal's symbol is checked
+    // against operator-declared earnings events.  The evaluator derives the effective
+    // blackout window from each entry's earnings_ts + pre_window_secs + post_window_secs.
+    //
+    // Distinct from Gate 1h (blackout-v1): this source encodes earnings events with
+    // operator-specified proximity windows rather than raw timestamp ranges.  Both gates
+    // can be configured simultaneously; either refusal blocks the signal.
+    //
+    // Reuses session_ts captured at Gate 1h — no additional async call required.
+    //
+    // NotConfigured    → no calendar file; pass through.
+    // Authorized       → symbol not within any earnings proximity window; pass.
+    // EarningsBlackout → within declared window; 403 fail-closed.
+    // Unavailable      → file configured but unreadable/unparseable; 503 fail-closed.
+    {
+        use crate::earnings_calendar::evaluate_earnings_calendar_from_env;
+        let calendar = evaluate_earnings_calendar_from_env(&validated.symbol, session_ts);
+        if !calendar.is_signal_safe() {
+            let (status, disposition, blocker) = match &calendar {
+                crate::earnings_calendar::EarningsCalendarOutcome::EarningsBlackout { note } => (
+                    StatusCode::FORBIDDEN,
+                    "event_risk_calendar",
+                    format!("strategy signal refused: {note}"),
+                ),
+                crate::earnings_calendar::EarningsCalendarOutcome::Unavailable { reason } => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "unavailable",
+                    format!(
+                        "strategy signal unavailable: earnings calendar file is \
+                         configured but cannot be read: {reason}"
+                    ),
+                ),
+                _ => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "unavailable",
+                    "strategy signal unavailable: earnings calendar evaluation failed".to_string(),
+                ),
+            };
+            return refused_signal_response(
+                status,
+                "gate_1h_calendar",
+                disposition,
+                RefusedSignalArgs {
+                    signal_id: validated.signal_id,
+                    strategy_id: validated.strategy_id,
+                    symbol: validated.symbol.clone(),
+                    active_run_id: None,
+                    blockers: vec![blocker],
+                },
+            );
+        }
+    }
+
     // Gate 1b: WS continuity must be Live for Alpaca signal ingestion (PT-DAY-02).
     //
     // A GapDetected or ColdStartUnproven state means broker event delivery is
@@ -445,7 +558,9 @@ pub(crate) async fn strategy_signal(
     // of the daemon's configured calendar_spec (which is AlwaysOn for Paper
     // mode — appropriate for in-process bar-driven paper, not broker-backed
     // paper).  ExternalSignalIngestion is always NYSE-backed via Alpaca.
-    let session_ts = st.session_now_ts().await;
+    //
+    // session_ts is obtained at Gate 1h above; reused here to avoid a redundant
+    // async call.
     let session = CalendarSpec::NyseWeekdays.classify_market_session(session_ts);
     if session != "regular" {
         return refused_signal_response(
