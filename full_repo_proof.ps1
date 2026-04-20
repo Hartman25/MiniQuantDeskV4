@@ -554,9 +554,32 @@ Invoke-ProofLane -Name 'Repo identity + working tree truth' -Required $true -Act
 }
 
 Invoke-ProofLane -Name 'Rust fmt check (non-mutating)' -Required $true -Action {
-    Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('fmt', '--manifest-path', $cargoManifest, '--all', '--', '--check') -WorkingDirectory $repoRoot
-    Write-Host 'cargo fmt --check passed.' -ForegroundColor Green
-    return (New-LaneNote -Note 'cargo fmt --check passed.')
+    if (Test-IsWindowsPlatform) {
+        # WINPATH-01: cargo fmt --all batches all workspace source files into one rustfmt
+        # invocation. On this repo (452 files), the combined command line is ~32,907 chars —
+        # 140 chars over Windows' CreateProcess limit of 32,767. cargo canonicalizes all
+        # source paths to \\?\C:\... before building the command, so path-shortening (subst,
+        # CARGO_TARGET_DIR) cannot reduce this. Coverage is preserved: every workspace package
+        # is checked individually — identical in substance to --all --check, within limits.
+        $metadataJson = (& $script:CargoExe metadata --format-version 1 --no-deps --manifest-path $cargoManifest 2>$null) -join ''
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($metadataJson)) {
+            throw 'EXITCODE=1;cargo metadata failed; cannot enumerate workspace packages for fmt check.'
+        }
+        $packageNames = @(($metadataJson | ConvertFrom-Json).packages | ForEach-Object { $_.name })
+        if ($packageNames.Count -eq 0) {
+            throw 'EXITCODE=1;cargo metadata returned no packages for fmt check.'
+        }
+        foreach ($pkg in $packageNames) {
+            Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('fmt', '--manifest-path', $cargoManifest, '-p', $pkg, '--', '--check') -WorkingDirectory $repoRoot
+        }
+        $note = "cargo fmt --check passed for all $($packageNames.Count) workspace packages (Windows per-package; WINPATH-01)."
+        Write-Host $note -ForegroundColor Green
+        return (New-LaneNote -Note $note)
+    } else {
+        Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('fmt', '--manifest-path', $cargoManifest, '--all', '--', '--check') -WorkingDirectory $repoRoot
+        Write-Host 'cargo fmt --check passed.' -ForegroundColor Green
+        return (New-LaneNote -Note 'cargo fmt --check passed.')
+    }
 }
 
 Invoke-ProofLane -Name 'Workspace clippy' -Required $true -Action {

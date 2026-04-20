@@ -117,11 +117,7 @@ pub fn evaluate_event_risk_blackout_from_file(
 /// Core pure evaluator — accepts the JSON content of a blackout file directly.
 ///
 /// Exported for tests that supply JSON without a filesystem dependency.
-pub fn evaluate_event_risk_blackout(
-    json: &str,
-    symbol: &str,
-    ts: i64,
-) -> EventRiskBlackoutOutcome {
+pub fn evaluate_event_risk_blackout(json: &str, symbol: &str, ts: i64) -> EventRiskBlackoutOutcome {
     let file: BlackoutFile = match serde_json::from_str(json) {
         Ok(f) => f,
         Err(e) => {

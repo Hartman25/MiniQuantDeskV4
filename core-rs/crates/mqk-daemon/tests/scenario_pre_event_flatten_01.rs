@@ -48,7 +48,7 @@
 use mqk_daemon::pre_event_flatten::{
     build_flatten_close_order_json, evaluate_flatten_trigger_from_blackout,
     evaluate_flatten_trigger_from_earnings, evaluate_flatten_trigger_from_env,
-    FlattenTriggerOutcome, FLATTEN_SIGNAL_SOURCE, DEFAULT_FLATTEN_LEAD_SECS,
+    FlattenTriggerOutcome, DEFAULT_FLATTEN_LEAD_SECS, FLATTEN_SIGNAL_SOURCE,
 };
 
 // ---------------------------------------------------------------------------
@@ -69,7 +69,12 @@ fn blackout_json(symbol: &str, start_ts: i64, end_ts: i64) -> String {
 }
 
 /// Build a minimal earnings-calendar-v1 JSON with one entry for `symbol`.
-fn earnings_json(symbol: &str, earnings_ts: i64, pre_window_secs: i64, post_window_secs: i64) -> String {
+fn earnings_json(
+    symbol: &str,
+    earnings_ts: i64,
+    pre_window_secs: i64,
+    post_window_secs: i64,
+) -> String {
     format!(
         r#"{{"schema_version":"earnings-calendar-v1","entries":[{{"symbol":"{symbol}","earnings_ts":{earnings_ts},"pre_window_secs":{pre_window_secs},"post_window_secs":{post_window_secs}}}]}}"#
     )
@@ -214,8 +219,7 @@ fn pf_06_lead_boundary_inclusive() {
     // One second past the lead boundary → NoFlattenRequired.
     let past_boundary = TS_NOW + LEAD + 1;
     let json_past = blackout_json("AAPL", past_boundary, past_boundary + 3600);
-    let outcome_past =
-        evaluate_flatten_trigger_from_blackout(&json_past, "AAPL", TS_NOW, LEAD);
+    let outcome_past = evaluate_flatten_trigger_from_blackout(&json_past, "AAPL", TS_NOW, LEAD);
     assert_eq!(
         outcome_past,
         FlattenTriggerOutcome::NoFlattenRequired,
@@ -279,7 +283,7 @@ fn pf_08_flatten_required_when_earnings_blackout_within_lead() {
 fn pf_09_flatten_required_when_in_active_earnings_blackout() {
     // TS_NOW is between earnings_ts - pre_window and earnings_ts + post_window.
     let earnings_ts = TS_NOW + 1800; // earnings in 30 minutes
-    let pre_window = 7200_i64;       // pre-window = 2 hours → blackout started 90 min ago
+    let pre_window = 7200_i64; // pre-window = 2 hours → blackout started 90 min ago
     let post_window = 3600_i64;
     let json = earnings_json("AAPL", earnings_ts, pre_window, post_window);
 
@@ -412,13 +416,29 @@ fn pf_15_outcome_contract() {
         "PF-15: NoFlattenRequired must not be unavailable"
     );
 
-    let flatten = FlattenTriggerOutcome::FlattenRequired { note: "test".to_string() };
-    assert!(flatten.is_flatten_required(), "PF-15: FlattenRequired must be flatten-required");
-    assert!(!flatten.is_unavailable(), "PF-15: FlattenRequired must not be unavailable");
+    let flatten = FlattenTriggerOutcome::FlattenRequired {
+        note: "test".to_string(),
+    };
+    assert!(
+        flatten.is_flatten_required(),
+        "PF-15: FlattenRequired must be flatten-required"
+    );
+    assert!(
+        !flatten.is_unavailable(),
+        "PF-15: FlattenRequired must not be unavailable"
+    );
 
-    let unavail = FlattenTriggerOutcome::Unavailable { reason: "test".to_string() };
-    assert!(!unavail.is_flatten_required(), "PF-15: Unavailable must not be flatten-required");
-    assert!(unavail.is_unavailable(), "PF-15: Unavailable must be unavailable");
+    let unavail = FlattenTriggerOutcome::Unavailable {
+        reason: "test".to_string(),
+    };
+    assert!(
+        !unavail.is_flatten_required(),
+        "PF-15: Unavailable must not be flatten-required"
+    );
+    assert!(
+        unavail.is_unavailable(),
+        "PF-15: Unavailable must be unavailable"
+    );
 }
 
 // ============================================================================
@@ -579,14 +599,23 @@ fn pf_20_long_position_produces_sell_close_order() {
     let (key, json) = build_flatten_close_order_json("AAPL", 100, TS_NOW, RUN_ID);
 
     assert_eq!(json["symbol"], "AAPL", "PF-20: symbol must be AAPL");
-    assert_eq!(json["side"], "sell", "PF-20: long position must produce side=sell");
+    assert_eq!(
+        json["side"], "sell",
+        "PF-20: long position must produce side=sell"
+    );
     assert_eq!(json["qty"], 100, "PF-20: qty must equal abs(net_qty)");
-    assert_eq!(json["order_type"], "market", "PF-20: order_type must be market");
+    assert_eq!(
+        json["order_type"], "market",
+        "PF-20: order_type must be market"
+    );
     assert_eq!(
         json["signal_source"], FLATTEN_SIGNAL_SOURCE,
         "PF-20: signal_source must be FLATTEN_SIGNAL_SOURCE"
     );
-    assert_eq!(json["request_type"], "submit", "PF-20: request_type must be submit");
+    assert_eq!(
+        json["request_type"], "submit",
+        "PF-20: request_type must be submit"
+    );
     assert!(!key.is_empty(), "PF-20: idempotency_key must be non-empty");
 }
 
@@ -601,9 +630,15 @@ fn pf_21_short_position_produces_buy_close_order() {
     let (key, json) = build_flatten_close_order_json("MSFT", -50, TS_NOW, RUN_ID);
 
     assert_eq!(json["symbol"], "MSFT", "PF-21: symbol must be MSFT");
-    assert_eq!(json["side"], "buy", "PF-21: short position must produce side=buy");
+    assert_eq!(
+        json["side"], "buy",
+        "PF-21: short position must produce side=buy"
+    );
     assert_eq!(json["qty"], 50, "PF-21: qty must equal abs(net_qty)");
-    assert_eq!(json["order_type"], "market", "PF-21: order_type must be market");
+    assert_eq!(
+        json["order_type"], "market",
+        "PF-21: order_type must be market"
+    );
     assert!(!key.is_empty(), "PF-21: idempotency_key must be non-empty");
 }
 

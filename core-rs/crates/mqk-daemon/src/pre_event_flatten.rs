@@ -87,15 +87,25 @@ impl FlattenTriggerOutcome {
 ///   found) → `Unavailable` (fail-closed; cannot verify it is safe to hold).
 /// - Both sources `NotConfigured` → `NotConfigured`.
 /// - At least one source configured, no trigger, no error → `NoFlattenRequired`.
-pub fn evaluate_flatten_trigger_from_env(symbol: &str, ts: i64, lead_secs: i64) -> FlattenTriggerOutcome {
+pub fn evaluate_flatten_trigger_from_env(
+    symbol: &str,
+    ts: i64,
+    lead_secs: i64,
+) -> FlattenTriggerOutcome {
     let blackout_result = evaluate_flatten_trigger_from_blackout_env(symbol, ts, lead_secs);
     let earnings_result = evaluate_flatten_trigger_from_earnings_env(symbol, ts, lead_secs);
 
     // FlattenRequired from any source wins immediately.
-    if matches!(blackout_result, FlattenTriggerOutcome::FlattenRequired { .. }) {
+    if matches!(
+        blackout_result,
+        FlattenTriggerOutcome::FlattenRequired { .. }
+    ) {
         return blackout_result;
     }
-    if matches!(earnings_result, FlattenTriggerOutcome::FlattenRequired { .. }) {
+    if matches!(
+        earnings_result,
+        FlattenTriggerOutcome::FlattenRequired { .. }
+    ) {
         return earnings_result;
     }
 
@@ -401,8 +411,8 @@ pub fn build_flatten_close_order_json(
     let qty = net_qty_signed.abs();
 
     let key_input = format!("mqk-flatten.v1.{run_id}.{symbol}.{ts_minute}");
-    let idempotency_key = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, key_input.as_bytes())
-        .to_string();
+    let idempotency_key =
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, key_input.as_bytes()).to_string();
 
     let order_json = serde_json::json!({
         "symbol": symbol,

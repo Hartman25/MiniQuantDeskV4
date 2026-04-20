@@ -350,12 +350,13 @@ pub(crate) async fn execution_event_risk_status(_: State<Arc<AppState>>) -> impl
     //   "partial"   — at least one event-risk gate is configured and enforcing;
     //                 one or more capabilities remain absent.
     //   "not_wired" — no event-risk gate is configured; nothing is enforcing.
-    let truth_state = if signal_admission_gate == "configured" || earnings_calendar_feed == "operator_file" {
-        "partial"
-    } else {
-        "not_wired"
-    }
-    .to_string();
+    let truth_state =
+        if signal_admission_gate == "configured" || earnings_calendar_feed == "operator_file" {
+            "partial"
+        } else {
+            "not_wired"
+        }
+        .to_string();
 
     // pre_event_flattening reflects the flatten wiring state
     // (EVENT-RISK-FLATTEN-WIRE-01: wiring is in the execution loop):

@@ -60,7 +60,10 @@ fn ec_01_authorized_when_symbol_not_in_calendar() {
         EarningsCalendarOutcome::Authorized,
         "EC-01: symbol with no calendar entry must be Authorized; got: {outcome:?}"
     );
-    assert!(outcome.is_signal_safe(), "EC-01: Authorized must be signal-safe");
+    assert!(
+        outcome.is_signal_safe(),
+        "EC-01: Authorized must be signal-safe"
+    );
 }
 
 // ---------------------------------------------------------------------------
