@@ -22,10 +22,10 @@ const TEST_OPERATOR_TOKEN: &str = "test-operator-token";
 /// base URL to set as `ALPACA_PAPER_BASE_URL`.
 ///
 /// Handled routes:
-/// - `GET /v2/account/activities` → `[]`  (fetch_events polling, always empty)
+/// - `GET /v2/account/activities/FILL` → `[]`  (fetch_events polling, always empty)
 async fn start_mock_alpaca_server() -> String {
     let app = axum::Router::new().route(
-        "/v2/account/activities",
+        "/v2/account/activities/FILL",
         axum::routing::get(|| async { axum::Json(serde_json::json!([])) }),
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
