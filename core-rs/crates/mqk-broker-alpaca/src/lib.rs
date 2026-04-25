@@ -18,7 +18,7 @@
 //! | `submit_order`  | `POST   /v2/orders`                    | AmbiguousSubmit on unknown timeout |
 //! | `cancel_order`  | `DELETE /v2/orders/{broker_order_id}`  | 404/422 → Reject                   |
 //! | `replace_order` | `GET+PATCH /v2/orders/{id}`            | Fetches filled_qty before PATCH    |
-//! | `fetch_events`  | `GET /v2/account/activities`           | Polling; maps lifecycle activities  |
+//! | `fetch_events`  | `GET /v2/account/activities/FILL`      | Polling; maps fill lifecycle only   |
 //!
 //! # Inbound lifecycle coverage
 //!
@@ -34,12 +34,12 @@
 //! types (Ack, CancelAck, CancelReject, ReplaceAck, ReplaceReject, Reject,
 //! PartialFill, Fill) are proven to flow through the WS ingest path.
 //!
-//! **REST activity polling boundary:** `GET /v2/account/activities` at the
-//! Alpaca API level only returns `FILL` and `PARTIAL_FILL` activity records.
-//! The `activity_to_trade_update` function in this crate handles all known
-//! activity types for defensive completeness, but in practice only fill-class
-//! events arrive via REST.  All lifecycle events are authoritative via the WS
-//! path.
+//! **REST activity polling boundary:** `fetch_events` polls the type-specific
+//! `GET /v2/account/activities/FILL` endpoint so the REST payload contains only
+//! fill-class trade activities.  Alpaca's unfiltered account-activities feed can
+//! include non-order records (for example `JNLC` and `FEE`) that do not match
+//! the trade-activity schema this adapter normalises.  All non-fill lifecycle
+//! events remain authoritative via the WS path.
 //!
 //! # No randomness, no wall-clock reads
 //!
@@ -417,16 +417,20 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
             }
             AlpacaTradeUpdatesResume::Live { .. } => {}
         }
-        let mut path = "/v2/account/activities?direction=asc&page_size=50".to_string();
-        if let Some(c) = state.rest_activity_after.as_deref() {
+
+        let mut path = "/v2/account/activities/FILL?direction=asc&page_size=50".to_string();
+        if let Some(after_ts) = state.rest_activity_after.as_deref() {
             path.push_str("&after=");
-            path.push_str(c);
+            path.push_str(after_ts);
         }
+
         let activities: Vec<AlpacaOrderActivity> = self.get(&path)?;
+
         let next_rest_activity_after = activities
             .last()
-            .map(|a| a.id.clone())
+            .map(|a| a.transaction_time.clone())
             .or_else(|| state.rest_activity_after.clone());
+
         let mut events = Vec::new();
         for activity in &activities {
             let order = self.fetch_order(&activity.order_id)?;
@@ -440,6 +444,7 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
                 })?;
             events.push(event);
         }
+
         let new_cursor = if next_rest_activity_after != state.rest_activity_after {
             Some(encode_fetch_cursor(&AlpacaFetchCursor {
                 schema_version: state.schema_version,
@@ -449,6 +454,7 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
         } else {
             None
         };
+
         Ok((events, new_cursor))
     }
 }

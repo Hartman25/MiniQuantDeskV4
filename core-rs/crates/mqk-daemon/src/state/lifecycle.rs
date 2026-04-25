@@ -608,7 +608,30 @@ impl AppState {
 
         let run_id = match latest.as_ref() {
             Some(run) => match run.status {
-                mqk_db::RunStatus::Created | mqk_db::RunStatus::Stopped => run.run_id,
+                mqk_db::RunStatus::Created => run.run_id,
+                mqk_db::RunStatus::Stopped => {
+                    let run_id = self.next_daemon_run_id(&db).await?;
+                    mqk_db::insert_run(
+                        &db,
+                        &mqk_db::NewRun {
+                            run_id,
+                            engine_id: DAEMON_ENGINE_ID.to_string(),
+                            mode: self.deployment_mode().as_db_mode().to_string(),
+                            started_at_utc: Utc::now(),
+                            git_hash: "UNKNOWN".to_string(),
+                            config_hash: self.run_config_hash().to_string(),
+                            config_json: serde_json::json!({
+                                "runtime": "mqk-daemon",
+                                "adapter": self.adapter_id(),
+                                "mode": self.deployment_mode().as_db_mode(),
+                            }),
+                            host_fingerprint: self.node_id.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|err| RuntimeLifecycleError::internal("start insert_run failed", err))?;
+                    run_id
+                }
                 mqk_db::RunStatus::Halted => {
                     return Err(RuntimeLifecycleError::conflict(
                         "runtime.start_refused.halted_lifecycle",
