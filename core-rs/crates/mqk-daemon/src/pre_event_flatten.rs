@@ -24,7 +24,7 @@
 //! `pre_event_flattening` on `/api/v1/execution/event-risk-status`:
 //! - `"active"`          — wiring is in the loop AND ≥1 source is configured.
 //! - `"wired_no_source"` — wiring is in the loop but no source is configured;
-//!                         evaluator returns `NotConfigured` every tick (no-op).
+//!   evaluator returns `NotConfigured` every tick (no-op).
 //!
 //! # Fail-closed contract
 //!
