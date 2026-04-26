@@ -12,6 +12,7 @@
 //! - Price strings are parsed via mqk_execution::price_to_micros at the
 //!   wire boundary only; no f64 crosses the decision surface.
 use crate::types::AlpacaTradeUpdate;
+use chrono;
 use mqk_execution::{price_to_micros, BrokerEvent, Side};
 // ---------------------------------------------------------------------------
 // NormalizeError
@@ -231,6 +232,28 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
         other => Err(NormalizeError::UnknownEventType(other.to_string())),
     }
 }
+/// Extract the broker event timestamp (milliseconds since UNIX epoch) from an
+/// Alpaca `broker_message_id`.
+///
+/// Alpaca message IDs have the format `"alpaca:{order_id}:{event_type}:{iso_ts}"`.
+/// `order_id` (UUID) and `event_type` contain no colons, so the ISO timestamp
+/// begins at the fourth colon-delimited segment via `splitn(4, ':')`.
+///
+/// Returns `0` when the input is not in Alpaca format or the timestamp cannot
+/// be parsed as RFC 3339.  Safe to call for any `broker_message_id` — non-Alpaca
+/// IDs silently return `0`, preserving backward compatibility.
+pub fn alpaca_event_ts_ms_from_message_id(broker_message_id: &str) -> i64 {
+    let mut parts = broker_message_id.splitn(4, ':');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("alpaca"), Some(_order_id), Some(_event_type), Some(ts)) => {
+            chrono::DateTime::parse_from_rfc3339(ts)
+                .ok()
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
 // ---------------------------------------------------------------------------
 // Unit tests (no network, no DB, no clock)
 // ---------------------------------------------------------------------------
@@ -299,5 +322,46 @@ mod tests {
         );
         let err = normalize_trade_update(&u).unwrap_err();
         assert!(matches!(err, NormalizeError::UnknownEventType(_)));
+    }
+
+    // OBS-TIME-01: alpaca_event_ts_ms_from_message_id unit proofs
+    #[test]
+    fn obs_time_01_t1_fill_message_id_produces_correct_ms() {
+        // broker_message_id: "alpaca:{uuid}:fill:{iso_ts}"
+        // The ISO timestamp contains colons; splitn(4, ':') must handle them.
+        let mid = "alpaca:3e6d6a10-6547-4d5a-ae56-4f0c08a0b94c:fill:2024-01-15T10:30:00.000Z";
+        let ms = alpaca_event_ts_ms_from_message_id(mid);
+        assert!(ms > 0, "fill message_id must produce non-zero event_ts_ms");
+        // 2024-01-15T10:30:00Z → 1705314600000 ms
+        assert_eq!(
+            ms, 1_705_314_600_000,
+            "timestamp must match expected epoch ms"
+        );
+    }
+
+    #[test]
+    fn obs_time_01_t2_non_alpaca_message_id_returns_zero() {
+        assert_eq!(
+            alpaca_event_ts_ms_from_message_id("null_broker:ord-1:fill"),
+            0
+        );
+        assert_eq!(alpaca_event_ts_ms_from_message_id(""), 0);
+        assert_eq!(alpaca_event_ts_ms_from_message_id("no-colons-at-all"), 0);
+    }
+
+    #[test]
+    fn obs_time_01_t3_alpaca_id_with_bad_ts_returns_zero() {
+        // Well-formed prefix but unparseable timestamp → 0 (fail-safe).
+        let mid = "alpaca:uuid-123:fill:not-a-timestamp";
+        assert_eq!(alpaca_event_ts_ms_from_message_id(mid), 0);
+    }
+
+    #[test]
+    fn obs_time_01_t4_determinism_same_input_same_output() {
+        let mid = "alpaca:uuid-abc:partial_fill:2024-06-15T09:30:01.500Z";
+        let ms1 = alpaca_event_ts_ms_from_message_id(mid);
+        let ms2 = alpaca_event_ts_ms_from_message_id(mid);
+        assert_eq!(ms1, ms2, "function must be deterministic");
+        assert!(ms1 > 0, "must produce non-zero ms for a valid timestamp");
     }
 }

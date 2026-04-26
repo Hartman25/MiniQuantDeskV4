@@ -45,6 +45,7 @@
 //! seen — the system does not stall on replay.
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
+use mqk_broker_alpaca::normalize::alpaca_event_ts_ms_from_message_id;
 use mqk_broker_alpaca::types::{AlpacaFetchCursor, AlpacaTradeUpdatesResume};
 use mqk_broker_alpaca::{
     build_inbound_batch_from_ws_update, mark_gap_detected, parse_ws_message, AlpacaWsMessage,
@@ -253,6 +254,10 @@ pub async fn process_ws_inbound_batch(
             let msg_json =
                 serde_json::to_value(event).context("ws_inbound: event serialization failed")?;
             let event_kind = broker_event_kind(event);
+            // OBS-TIME-01: use real broker event time from the Alpaca
+            // broker_message_id ("alpaca:{order_id}:{event}:{iso_ts}").
+            // Returns 0 for non-Alpaca adapters (safe default).
+            let event_ts_ms = alpaca_event_ts_ms_from_message_id(event.broker_message_id());
             mqk_db::inbox_insert_deduped_with_identity(
                 pool,
                 run_id,
@@ -262,7 +267,7 @@ pub async fn process_ws_inbound_batch(
                 event.broker_order_id().unwrap_or(event.internal_order_id()),
                 event_kind,
                 &msg_json,
-                0,
+                event_ts_ms,
                 now,
             )
             .await

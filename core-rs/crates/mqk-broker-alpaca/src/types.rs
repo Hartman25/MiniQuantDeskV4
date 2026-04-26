@@ -245,9 +245,10 @@ pub struct AlpacaOrderFull {
 pub struct AlpacaOrderActivity {
     /// Unique activity ID.
     ///
-    /// Used as the cursor for incremental polling.  Alpaca returns activities
-    /// ordered by `transaction_time`; the last `id` in a page is passed as
-    /// `after` on the next call.
+    /// Used as the pagination cursor for incremental polling.  Alpaca returns
+    /// activities ordered by `transaction_time`; the last `id` from a full
+    /// page is passed as `page_token` on the next request to retrieve the
+    /// subsequent page.  Must NOT be used as the `after` date-time filter.
     ///
     /// Format: `"YYYYMMDDHHMMSS{fraction}::{uuid}"`.
     pub id: String,

@@ -400,6 +400,12 @@ where
                 BrokerEvent::Reject { .. } => "reject",
             };
             let now = self.time_source.now_utc();
+            // OBS-TIME-01: propagate real broker event time from the Alpaca
+            // broker_message_id ("alpaca:{order_id}:{event}:{iso_ts}").
+            // Returns 0 for non-Alpaca adapters — safe default, no regression.
+            let event_ts_ms = mqk_broker_alpaca::normalize::alpaca_event_ts_ms_from_message_id(
+                event.broker_message_id(),
+            );
             let _inserted = mqk_db::inbox_insert_deduped_with_identity(
                 &self.pool,
                 self.run_id,
@@ -409,7 +415,7 @@ where
                 event.broker_order_id().unwrap_or(event.internal_order_id()),
                 event_kind,
                 &msg_json,
-                0,
+                event_ts_ms,
                 now,
             )
             .await?;

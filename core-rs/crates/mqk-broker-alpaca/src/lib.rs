@@ -67,6 +67,13 @@ use mqk_execution::{
 };
 use mqk_schemas::BrokerSnapshot;
 pub use snapshot::{build_snapshot, normalize_account, normalize_open_order, normalize_position};
+/// Number of FILL activities requested per page from Alpaca REST.
+///
+/// Alpaca's API maximum is 100; 50 is a conservative default that leaves room
+/// for any per-account rate-limit budgets.  `fetch_events` loops until the
+/// response contains fewer than this many items, recovering all available
+/// activities in one call.
+pub const FILL_ACTIVITIES_PAGE_SIZE: usize = 50;
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -388,6 +395,13 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
     /// serialized `AlpacaFetchCursor`. The runtime still treats the cursor as
     /// opaque adapter-owned state.
     ///
+    /// BRK-REST-02: fetch_events now paginates through all available FILL
+    /// activities in one call.  The loop continues until the response contains
+    /// fewer than [`FILL_ACTIVITIES_PAGE_SIZE`] activities (Alpaca's signal that
+    /// the last page has been reached).  The cursor advances to the last
+    /// activity's `id` field — not `transaction_time` — which Alpaca treats as
+    /// an exact exclusive pagination marker on subsequent calls.
+    ///
     /// Current honest coverage boundary:
     /// - REST account activities continue to provide fill / partial-fill polling.
     /// - websocket lifecycle continuity is represented explicitly in the cursor.
@@ -418,44 +432,83 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
             AlpacaTradeUpdatesResume::Live { .. } => {}
         }
 
-        let mut path = "/v2/account/activities/FILL?direction=asc&page_size=50".to_string();
-        if let Some(after_ts) = state.rest_activity_after.as_deref() {
-            path.push_str("&after=");
-            path.push_str(after_ts);
+        // BRK-REST-02: paginate through all available FILL activities.
+        //
+        // Alpaca activity pagination uses `page_token=<last_activity_id>` —
+        // NOT `after=<activity_id>`.  The `after` parameter is a date-time
+        // filter and must not be used as an activity-id pagination cursor.
+        // `page_token` takes the last activity `id` from the previous page
+        // and returns the strictly subsequent page of results.
+        //
+        // The durable cursor field `rest_activity_after` retains its name for
+        // backward compatibility; its stored value is the last activity `id`
+        // to pass as `page_token` on the next call.
+        let mut current_page_token = state.rest_activity_after.clone();
+        let mut all_events: Vec<BrokerEvent> = Vec::new();
+
+        loop {
+            let mut path = format!(
+                "/v2/account/activities/FILL?direction=asc&page_size={FILL_ACTIVITIES_PAGE_SIZE}"
+            );
+            if let Some(token) = current_page_token.as_deref() {
+                path.push_str("&page_token=");
+                path.push_str(token);
+            }
+
+            let activities: Vec<AlpacaOrderActivity> = self.get(&path)?;
+            let page_len = activities.len();
+
+            // Record the token used for this fetch for the no-progress guard.
+            let prev_page_token = current_page_token.clone();
+
+            // Advance cursor to the last activity ID on this page.
+            if let Some(last) = activities.last() {
+                current_page_token = Some(last.id.clone());
+            }
+
+            // No-progress guard: if the page is full but the cursor did not
+            // advance, the broker returned the same page again.  Fail closed
+            // rather than spin indefinitely.
+            if page_len == FILL_ACTIVITIES_PAGE_SIZE && current_page_token == prev_page_token {
+                return Err(BrokerError::Transient {
+                    detail: format!(
+                        "fetch_events: pagination made no progress at page_token={prev_page_token:?}; \
+                         refusing to loop"
+                    ),
+                });
+            }
+
+            for activity in &activities {
+                let order = self.fetch_order(&activity.order_id)?;
+                let trade_update = activity_to_trade_update(activity, &order).map_err(|e| {
+                    BrokerError::Transient {
+                        detail: format!("fetch_events: activity mapping error: {e}"),
+                    }
+                })?;
+                let event =
+                    normalize_trade_update(&trade_update).map_err(|e| BrokerError::Transient {
+                        detail: format!("fetch_events: normalize error: {e}"),
+                    })?;
+                all_events.push(event);
+            }
+
+            // A partial (or empty) page means no more activities are available.
+            if page_len < FILL_ACTIVITIES_PAGE_SIZE {
+                break;
+            }
         }
 
-        let activities: Vec<AlpacaOrderActivity> = self.get(&path)?;
-
-        let next_rest_activity_after = activities
-            .last()
-            .map(|a| a.transaction_time.clone())
-            .or_else(|| state.rest_activity_after.clone());
-
-        let mut events = Vec::new();
-        for activity in &activities {
-            let order = self.fetch_order(&activity.order_id)?;
-            let trade_update =
-                activity_to_trade_update(activity, &order).map_err(|e| BrokerError::Transient {
-                    detail: format!("fetch_events: activity mapping error: {e}"),
-                })?;
-            let event =
-                normalize_trade_update(&trade_update).map_err(|e| BrokerError::Transient {
-                    detail: format!("fetch_events: normalize error: {e}"),
-                })?;
-            events.push(event);
-        }
-
-        let new_cursor = if next_rest_activity_after != state.rest_activity_after {
+        let new_cursor = if current_page_token != state.rest_activity_after {
             Some(encode_fetch_cursor(&AlpacaFetchCursor {
                 schema_version: state.schema_version,
-                rest_activity_after: next_rest_activity_after,
+                rest_activity_after: current_page_token,
                 trade_updates: state.trade_updates.clone(),
             })?)
         } else {
             None
         };
 
-        Ok((events, new_cursor))
+        Ok((all_events, new_cursor))
     }
 }
 // ---------------------------------------------------------------------------
