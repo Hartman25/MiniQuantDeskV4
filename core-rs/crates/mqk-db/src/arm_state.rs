@@ -75,6 +75,9 @@ pub enum DisarmReason {
     DeadmanExpired,
     DeadmanSupervisorFailure,
     DeadmanHeartbeatPersistFailed,
+    /// EXEC-CONT-01: Alpaca WS inbound continuity is cold-start unproven or
+    /// gap-detected; the orchestrator durably halts and disarms before returning.
+    InboundContinuityUnproven,
 }
 
 impl DisarmReason {
@@ -86,6 +89,7 @@ impl DisarmReason {
             Self::DeadmanExpired => "DeadmanExpired",
             Self::DeadmanSupervisorFailure => "DeadmanSupervisorFailure",
             Self::DeadmanHeartbeatPersistFailed => "DeadmanHeartbeatPersistFailed",
+            Self::InboundContinuityUnproven => "InboundContinuityUnproven",
         }
     }
 }

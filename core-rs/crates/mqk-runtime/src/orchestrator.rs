@@ -377,6 +377,20 @@ where
                         crate::alpaca_inbound::check_alpaca_ws_continuity_from_opaque_cursor(
                             self.broker_cursor.as_deref(),
                         );
+                    // EXEC-CONT-01: durable halt+disarm on inbound continuity failure.
+                    // This is mandatory — the same fail-closed contract that applies to
+                    // RecoveryQuarantine, ReconcileDrift, IntegrityViolation, etc.
+                    // Without it, runs.status stays RUNNING and sys_arm_state stays ARMED
+                    // across a crash/restart, bypassing the Phase-0 halt guard on the
+                    // next tick call.  The cursor was already persisted in the block above.
+                    let now = self.time_source.now_utc();
+                    persist_halt_and_disarm(
+                        &self.pool,
+                        self.run_id,
+                        now,
+                        "InboundContinuityUnproven",
+                    )
+                    .await?;
                     return Err(anyhow!(
                         "WS_CONTINUITY_UNPROVEN: tick refused by runtime-owned gate; \
                          continuity={:?}; adapter_detail={}",

@@ -669,3 +669,117 @@ async fn a6_orchestrator_names_gap_continuity_failure() -> Result<()> {
     cleanup_lease(&pool).await?;
     Ok(())
 }
+// ---------------------------------------------------------------------------
+// A7 - EXEC-CONT-01: InboundContinuityUnproven durably halts and disarms
+// ---------------------------------------------------------------------------
+/// Fixed run UUID for the A7 durable halt/disarm proof test.
+const A7_RUN_ID: &str = "a7000007-0000-0000-0000-000000000000";
+const A7_ADAPTER_ID: &str = "a7-exec-cont-01-halt-disarm-proof";
+/// A7 (EXEC-CONT-01): When `InboundContinuityUnproven` is received, the orchestrator
+/// durably writes `runs.status = HALTED` and `sys_arm_state = DISARMED` before
+/// returning an error.
+///
+/// This proves the fail-closed contract at the runtime boundary:
+/// - Cursor is persisted (already proven by A4/A5/A6 for the error subtype; repeated
+///   here as a baseline assertion).
+/// - `runs.halted_at_utc IS NOT NULL` after tick returns `Err`.
+/// - `sys_arm_state = 'DISARMED'` with `reason = 'InboundContinuityUnproven'` after tick.
+/// - No broker dispatch proceeded — tick returned `Err` immediately.
+///
+/// The test explicitly seeds `sys_arm_state = 'ARMED'` so the DISARMED assertion is
+/// not contaminated by prior test state (sys_arm_state is a singleton).
+///
+/// Requires `MQK_DATABASE_URL`.  Skips gracefully if absent or unreachable.
+#[tokio::test]
+async fn a7_continuity_failure_durably_halts_and_disarms() -> Result<()> {
+    let Some(url) = db_url_or_skip() else {
+        return Ok(());
+    };
+    let Some(pool) = try_pool_or_skip(&url).await? else {
+        return Ok(());
+    };
+    mqk_db::migrate(&pool).await?;
+    let run_id: Uuid = A7_RUN_ID.parse().expect("A7_RUN_ID must be a valid UUID");
+    cleanup_run(&pool, run_id).await?;
+    cleanup_cursor(&pool, A7_ADAPTER_ID).await?;
+    cleanup_lease(&pool).await?;
+    seed_running_run(&pool, run_id).await?;
+
+    // Seed arm state to ARMED so the DISARMED assertion is not ambiguous.
+    mqk_db::persist_arm_state(&pool, "ARMED", None).await?;
+
+    let cursor_json =
+        r#"{"schema_version":1,"trade_updates":{"status":"cold_start_unproven"}}"#.to_string();
+    let broker = FetchErrorCursorBroker {
+        calls: Arc::new(Mutex::new(Vec::new())),
+        error: BrokerError::InboundContinuityUnproven {
+            detail: "a7: cold-start continuity unproven".to_string(),
+            persist_cursor: Some(cursor_json.clone()),
+        },
+    };
+    let gateway = BrokerGateway::for_test(broker, BoolGate(true), BoolGate(true), BoolGate(true));
+    let mut orch = ExecutionOrchestrator::new(
+        pool.clone(),
+        gateway,
+        BrokerOrderMap::new(),
+        BTreeMap::new(),
+        PortfolioState::new(1_000_000_000_i64),
+        run_id,
+        "a7-dispatcher",
+        A7_ADAPTER_ID,
+        None,
+        FixedClock::new(Utc::now()),
+        Box::new(mqk_reconcile::LocalSnapshot::empty),
+        Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
+    );
+    let err = orch
+        .tick()
+        .await
+        .expect_err("A7: tick must fail closed on continuity failure");
+    assert!(
+        err.to_string().contains("WS_CONTINUITY_UNPROVEN"),
+        "A7: error must be named WS_CONTINUITY_UNPROVEN; got: {err}"
+    );
+
+    // EXEC-CONT-01 proof A: runs.status must be HALTED and halted_at_utc set.
+    let run = mqk_db::fetch_run(&pool, run_id).await?;
+    assert!(
+        matches!(run.status, mqk_db::RunStatus::Halted),
+        "A7: runs.status must be HALTED after continuity failure; got: {:?}",
+        run.status
+    );
+    assert!(
+        run.halted_at_utc.is_some(),
+        "A7: runs.halted_at_utc must be set after continuity failure"
+    );
+
+    // EXEC-CONT-01 proof B: sys_arm_state must be DISARMED with the correct reason.
+    let arm = mqk_db::load_arm_state(&pool)
+        .await?
+        .expect("A7: sys_arm_state must be present after continuity failure");
+    assert_eq!(
+        arm.0.as_str(),
+        "DISARMED",
+        "A7: sys_arm_state must be DISARMED after continuity failure; got: {}",
+        arm.0
+    );
+    assert_eq!(
+        arm.1.as_deref(),
+        Some("InboundContinuityUnproven"),
+        "A7: disarm reason must be InboundContinuityUnproven; got: {:?}",
+        arm.1
+    );
+
+    // EXEC-CONT-01 proof C: cursor was persisted before halt.
+    let stored = mqk_db::load_broker_cursor(&pool, A7_ADAPTER_ID).await?;
+    assert_eq!(
+        stored.as_deref(),
+        Some(cursor_json.as_str()),
+        "A7: cursor must be persisted before halt"
+    );
+
+    cleanup_run(&pool, run_id).await?;
+    cleanup_cursor(&pool, A7_ADAPTER_ID).await?;
+    cleanup_lease(&pool).await?;
+    Ok(())
+}

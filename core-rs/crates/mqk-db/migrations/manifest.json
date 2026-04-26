@@ -224,6 +224,12 @@
       "path": "0035_oms_order_lifecycle_events.sql",
       "status": "applied",
       "intent": "Add durable OMS order lifecycle event history for authoritative cancel/replace/fill/reject lineage."
+    },
+    {
+      "id": "0036",
+      "path": "0036_arm_state_reason_inbound_continuity.sql",
+      "status": "applied",
+      "intent": "Extend sys_arm_state.reason constraint to include InboundContinuityUnproven, enabling durable halt/disarm when Alpaca WS inbound continuity is cold-start unproven or gap-detected (EXEC-CONT-01)."
     }
   ]
 }
