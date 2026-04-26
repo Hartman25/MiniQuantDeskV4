@@ -76,8 +76,12 @@ Keep this file compact and current. This is the top-level command map to give an
 - Alpha, economics, and business realism are still open questions.
 
 ### Live ops
-- Autonomous intraday paper trading (Paper + Alpaca session controller) is the canonical MAIN path, proven for unattended intraday operation (AUTON-01, AC-01; see `autonomous_paper_ops.md`).
-- Unattended live-capital use is not yet proven or claimed.
+- Autonomous intraday paper trading (Paper + Alpaca session controller) is the canonical MAIN path.
+  Architecture proven to AUTON-01/AC-01 scope (supervised_paper_candidate).
+  Unattended autonomous paper operation requires BRK-GAP-01 (WS gap recovery lifecycle) and
+  OPS-REPAIR-01 (audited repair workflow) to close first. Treat as supervised-paper-candidate
+  until those items are closed. See `autonomous_paper_ops.md` for the supervised path.
+- Unattended live-capital use is not yet proven or claimed (live_ready_false).
 
 ### Maintainability
 - Several sink files remain too large and need staged decomposition later.

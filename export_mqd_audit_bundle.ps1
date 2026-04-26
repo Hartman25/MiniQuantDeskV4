@@ -90,15 +90,32 @@ function Copy-RepoSnapshot {
         "dist",
         "build",
         "coverage",
-        "htmlcov"
+        "htmlcov",
+        # SEC-SNAPSHOT-01: exclude generated proof output and AI tooling scratch dirs that
+        # may contain session-local or secret-bearing state.
+        ".proof",
+        ".claude",
+        ".claude-worktrees"
     )
 
+    # SEC-SNAPSHOT-01: broadly exclude all .env / .env.* files from robocopy.
+    # This catches .env, .env.local, .env.paper, .env.live, .env.production,
+    # .env.development, .env.staging, .env.local.backup, and any future .env.* variants.
+    # Safe example/template files (.env.local.example, .env.example) are also matched by
+    # .env.* and are therefore excluded here; they are explicitly copied back after the
+    # robocopy call so the bundle still contains the safe placeholder-only templates.
     $excludeFiles = @(
         "*.pyc",
         "*.pyo",
         "*.pyd",
         "*.tmp",
-        "*.log"
+        "*.log",
+        ".env",
+        ".env.*",
+        "secrets.env",
+        "secrets.local",
+        "*.pem",
+        "*.key"
     )
 
     $args = @(
@@ -227,6 +244,17 @@ What this bundle includes:
 - optional local verification logs under logs\
 - optional Linux Rust toolchain copy under rust-toolchain-linux\ if provided
 
+Secret / snapshot hygiene (SEC-SNAPSHOT-01):
+- All .env and .env.* files are EXCLUDED from the robocopy pass (.env, .env.local,
+  .env.paper, .env.live, .env.production, .env.development, .env.staging, .env.local.backup,
+  and any other .env.* variants). Never share any real .env.* file.
+- secrets.env, secrets.local, *.pem, and *.key are excluded.
+- .env.local.example and .env.example are safe placeholder-only templates; they are
+  explicitly copied back into the bundle after the exclusion pass.
+- .proof/ and .claude/ dirs are excluded (may contain session-local or secret-bearing state).
+- If a real secret file was ever accidentally bundled, rotate all broker keys, API keys,
+  operator tokens, and webhooks before running broker-connected sessions again.
+
 Important:
 - Windows Rust toolchain binaries are NOT useful for Linux audit execution.
 - To let ChatGPT run cargo off-machine in a Linux container, provide a Linux x86_64 Rust toolchain path with -LinuxToolchainPath.
@@ -242,6 +270,19 @@ Write-TextFile -Path (Join-Path $bundleRoot "ENV_NOTES.md") -Content $envNotes
 # ----------------------------
 Write-Host "Copying repo snapshot..."
 Copy-RepoSnapshot -Source $RepoRoot -Dest $repoCopy
+
+# SEC-SNAPSHOT-01: re-include safe env example/template files excluded by the broad .env.*
+# pattern above. These files contain placeholder names only — no real credentials.
+# Never add a real .env.local or any file that holds actual keys/tokens to this list.
+$safeEnvExamples = @('.env.local.example', '.env.example')
+foreach ($safeFile in $safeEnvExamples) {
+    $srcFile = Join-Path $RepoRoot $safeFile
+    $dstFile = Join-Path $repoCopy $safeFile
+    if ((Test-Path -LiteralPath $srcFile) -and -not (Test-Path -LiteralPath $dstFile)) {
+        Copy-Item -LiteralPath $srcFile -Destination $dstFile
+        Write-Host "Restored safe env example to bundle: $safeFile" -ForegroundColor Cyan
+    }
+}
 
 # ----------------------------
 # Vendor dependencies offline

@@ -769,6 +769,11 @@ $summary = [ordered]@{
     mandatory_db_lanes_completed        = $mandatoryDbLanesCompleted
     missing_mandatory_db_lanes          = @($missingMandatoryDbLanes)
     institutional_ready_proof_completed = $institutionalReadyProofCompleted
+    # DOC-READY-01: proof_scope_note disambiguates proof-clean from live/autonomous readiness.
+    # institutional_ready_proof_completed = true means the current locked proof bundle passed
+    # on a clean committed state. It does NOT mean live-ready, unattended-autonomous-ready,
+    # or safe for capital deployment. See readiness_lock_doc for the full definition.
+    proof_scope_note                    = 'proof_clean_current_scope. Proof-clean does not establish live_ready, autonomous_paper_ready, or safe_capital_deployment. See docs/INSTITUTIONAL_READINESS_LOCK.md.'
     readiness_lock_doc                  = 'docs/INSTITUTIONAL_READINESS_LOCK.md'
     scorecard_doc                       = 'docs/INSTITUTIONAL_SCORECARD.md'
     passed_lanes                        = @($passedLanes | ForEach-Object { $_.lane_name })
@@ -843,7 +848,10 @@ Write-Host '============================================================' -Foreg
 Write-Host (ConvertTo-Json $summary -Depth 6)
 
 if ($institutionalReadyProofCompleted) {
-    Write-Host 'VERDICT: Full DB-backed canonical proof completed on a clean committed state.' -ForegroundColor Green
+    # DOC-READY-01: proof_clean_current_scope. Proof-clean ≠ live-ready.
+    Write-Host 'VERDICT: proof_clean_current_scope. Full DB-backed canonical proof completed for the current locked scope on a clean committed state.' -ForegroundColor Green
+    Write-Host '         This does NOT establish live_ready, unattended_autonomous_paper_ready, or safe_capital_deployment.' -ForegroundColor Yellow
+    Write-Host '         See docs/INSTITUTIONAL_READINESS_LOCK.md for the full definition of what this verdict covers.' -ForegroundColor Yellow
 }
 elseif ($ProofProfile -eq 'full' -and $missingRequiredLanes.Count -gt 0) {
     Write-Host 'VERDICT: Full profile is invalid; one or more expected required lanes are missing from the harness result set.' -ForegroundColor Red

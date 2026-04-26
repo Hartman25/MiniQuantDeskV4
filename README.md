@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/Rust-stable-orange?logo=rust" />
   <img src="https://img.shields.io/badge/Execution-deterministic-purple" />
   <img src="https://img.shields.io/badge/Proof-DB--backed-blue" />
-  <img src="https://img.shields.io/badge/Status-paper%20path%20strong%20%7C%20live%20partial-yellow" />
+  <img src="https://img.shields.io/badge/Status-supervised%20paper%20candidate%20%7C%20live%20not%20ready-orange" />
 </p>
 
 ## Overview
@@ -56,6 +56,18 @@ What that means in plain English:
 - paper+paper is not treated as an authoritative execution path
 - backtest deployment through the daemon is intentionally refused fail-closed
 - live-shadow and live-capital have typed support and start-gate work, but should still be treated as partially trusted modes rather than finished operational claims
+
+### Current readiness boundary
+
+Use these labels precisely:
+
+| Mode | Current posture | Meaning |
+|---|---|---|
+| **Supervised Paper + Alpaca** | Candidate / operator-watched | Credible current path after a clean proof run, valid env, live Alpaca paper auth, and operator supervision. |
+| **Autonomous Paper + Alpaca** | Partial | Strong architecture exists, but unattended operation still depends on closing broker-gap recovery, retry budgets, and repair workflows. |
+| **Live / live-capital** | Not ready | Typed support and gates exist, but this repo should not be treated as safe for unattended live trading yet. |
+
+The proof harness can prove the current locked repo scope. It does **not** mean the system is profitable, broker-proof, or live-ready.
 
 ## Architecture
 
@@ -201,6 +213,9 @@ Be honest about the open edges.
 
 - research → deployability → runtime artifact closure is not fully complete
 - live-shadow and live-capital typed support are not the same thing as proven safe live operation
+- Alpaca WebSocket gap recovery is still not a complete lifecycle replay story for every non-fill event
+- Alpaca REST fill recovery must remain treated carefully until pagination and high-volume recovery are proven end to end
+- bounded broker retry budgets and operator repair workflows still need hardening before unattended operation
 - shadow/live parity evidence is not yet fully surfaced and enforced end to end
 - portfolio realism and capital-allocation realism still need further hardening
 - some deeper GUI detail surfaces are intentionally deferred or unmounted rather than faked
@@ -244,11 +259,20 @@ The Windows desktop launcher and the autonomous reality-test script already look
 
 This repo does not rely on a single `cargo test` story.
 
+Command verification note for this README refresh:
+
+- `full_repo_proof.ps1` exists at repo root and accepts `-ProofProfile local`, `-ProofProfile full`, `-ProofProfile exploratory`, and optional `-LowMemory`.
+- `core-rs/Cargo.toml` is the current workspace manifest.
+- `mqk-daemon` is a workspace package with a binary named `mqk-daemon`.
+- `core-rs/mqk-gui/package.json` includes `dev`, `test`, and `build` scripts.
+- `core-rs/mqk-gui/vite.config.ts` pins the browser dev server to port `1420`, not Vite's usual `5173`.
+
+
 ### Authoritative local proof runner
 
 - `full_repo_proof.ps1 -ProofProfile local` runs the non-DB local lane set
-- `full_repo_proof.ps1 -ProofProfile full` runs the DB-backed institutional proof path
-- `-LowMemory` reproduces the proven Windows low-memory posture for local proof execution
+- `full_repo_proof.ps1 -ProofProfile full` runs the DB-backed proof path and requires `MQK_DATABASE_URL`
+- `-LowMemory` can be added to any proof profile and reproduces the proven Windows low-memory posture
 
 ### Main proof and guard lanes
 
@@ -262,6 +286,27 @@ This repo does not rely on a single `cargo test` story.
 - **Windows low-memory parity** — proof posture for the actual operator OS class
 
 That DB-backed lane remains the load-bearing proof surface for the most important durability claims.
+
+### CI vs operator-class local proof boundary (CI-DB-01)
+
+CI runs five jobs on every push:
+
+- **gui-contract** — GUI truth tests, build gate, daemon/GUI contract gate (ubuntu)
+- **guards** — safety pattern guards (ubuntu)
+- **rust** — fmt + clippy + workspace tests with ephemeral Postgres (ubuntu)
+- **db-proof** — DB proof bootstrap and targeted DB-backed safety proof lanes (ubuntu)
+- **windows** — fmt + clippy + workspace tests on windows-latest; no Postgres available on GitHub Actions Windows runners, so **DB-backed lanes do not run in CI Windows**
+
+The Windows CI job proves the build is correct on the operator OS class. It does NOT run the full operator-class DB proof. DB-backed proof in CI is run on ubuntu only.
+
+The full operator-class proof — Windows platform + DB-backed lanes together — requires a local run:
+
+```powershell
+$env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
+.\full_repo_proof.ps1 -ProofProfile full
+```
+
+Release and readiness claims require a clean transcript from this local full proof run (or an equivalent operator-class DB proof). CI passing alone does not substitute for it.
 
 ## Quick start
 
@@ -295,22 +340,34 @@ If you keep the example runtime DB URL from `.env.local.example`, a compatible l
 
 ```powershell
 docker run --name mqk-postgres-dev `
+  --restart unless-stopped `
   -e POSTGRES_USER=postgres `
   -e POSTGRES_PASSWORD=postgres `
   -e POSTGRES_DB=mqk_dev `
   -p 5432:5432 `
   -d postgres:16
+
+# If the container already exists, use this instead:
+# docker start mqk-postgres-dev
+
+docker exec mqk-postgres-dev pg_isready -U postgres -d mqk_dev
 ```
 
 ### 4. Start a separate local proof DB
 
 ```powershell
 docker run --name mqk-postgres-proof `
+  --restart unless-stopped `
   -e POSTGRES_USER=mqk `
   -e POSTGRES_PASSWORD=mqk `
   -e POSTGRES_DB=mqk_test `
   -p 55432:5432 `
   -d postgres:16
+
+# If the container already exists, use this instead:
+# docker start mqk-postgres-proof
+
+docker exec mqk-postgres-proof pg_isready -U mqk -d mqk_test
 ```
 
 ### 5. Run the canonical proof path
@@ -322,6 +379,10 @@ docker run --name mqk-postgres-proof `
 # Full DB-backed proof against the isolated proof DB
 $env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
 .\full_repo_proof.ps1 -ProofProfile full
+
+# Same full proof using the Windows low-memory posture
+$env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
+.\full_repo_proof.ps1 -ProofProfile full -LowMemory
 ```
 
 ### 6. Run the daemon from repo root
@@ -329,7 +390,7 @@ $env:MQK_DATABASE_URL = "postgres://mqk:mqk@127.0.0.1:55432/mqk_test"
 Running from repo root lets `mqk-daemon` auto-load repo-root `.env.local`.
 
 ```powershell
-cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-daemon
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --bin mqk-daemon
 ```
 
 ### 7. Run the GUI
@@ -342,8 +403,10 @@ npm run dev
 
 Open:
 
-- GUI: `http://127.0.0.1:5173`
+- GUI: `http://127.0.0.1:1420`
 - Daemon: `http://127.0.0.1:8899`
+
+The GUI defaults to the daemon URL `http://127.0.0.1:8899`. You can override it with `VITE_MQK_DAEMON_URL` or through the GUI's saved daemon URL setting.
 
 ## Design philosophy
 
@@ -379,6 +442,12 @@ Veritas Ledger is engineered primarily to address the second.
 - `docs/runbooks/live_shadow_operational_proof.md` — current live-shadow proof posture
 - `docs/INSTITUTIONAL_READINESS_LOCK.md` — readiness lock and guardrail context
 - `docs/INSTITUTIONAL_SCORECARD.md` — scorecard context
+
+## Snapshot and secret hygiene
+
+Never include a real `.env.local`, API keys, operator tokens, Discord webhooks, or broker secrets in repo snapshots, support zips, or AI handoff bundles. `.env.local.example` is safe to share because it contains names/placeholders only; `.env.local` is not safe to share.
+
+If a support snapshot ever included real credentials, rotate them before running broker-connected sessions again.
 
 ## Disclaimer
 
