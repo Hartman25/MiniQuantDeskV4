@@ -690,18 +690,37 @@ impl AppState {
             Ok(repaired) => {
                 self.update_ws_continuity(AlpacaWsContinuityState::from_fetch_cursor(&repaired))
                     .await;
-                self.set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
-                    resume_source: resume_source.clone(),
-                    detail: match resume_source {
-                        AutonomousRecoveryResumeSource::PersistedCursor => {
-                            "WS continuity restored from persisted broker cursor truth".to_string()
-                        }
-                        AutonomousRecoveryResumeSource::ColdStart => {
-                            "WS continuity established from cold-start cursor truth".to_string()
-                        }
-                    },
-                })
-                .await;
+                // BRK-GAP-01: gap cursor → WsGapPartialRecovery (not RecoverySucceeded).
+                // Non-fill lifecycle events from the gap window are permanently
+                // unrecoverable from Alpaca REST.
+                let repair_truth = if matches!(
+                    prev_cursor.trade_updates,
+                    mqk_broker_alpaca::types::AlpacaTradeUpdatesResume::GapDetected { .. }
+                ) {
+                    AutonomousSessionTruth::WsGapPartialRecovery {
+                        resume_source: resume_source.clone(),
+                        detail: "ws_gap_detected: WS connectivity re-established after gap; \
+fill_recovery_available via REST catch-up from preserved cursor position; \
+lifecycle_recovery_unproven: Ack/CancelAck/ReplaceAck/Reject events from the gap window \
+are permanently unrecoverable via Alpaca REST; \
+operator_reconcile_or_repair_required"
+                            .to_string(),
+                    }
+                } else {
+                    AutonomousSessionTruth::RecoverySucceeded {
+                        resume_source: resume_source.clone(),
+                        detail: match resume_source {
+                            AutonomousRecoveryResumeSource::PersistedCursor => {
+                                "WS continuity restored from persisted broker cursor truth"
+                                    .to_string()
+                            }
+                            AutonomousRecoveryResumeSource::ColdStart => {
+                                "WS continuity established from cold-start cursor truth".to_string()
+                            }
+                        },
+                    }
+                };
+                self.set_autonomous_session_truth(repair_truth).await;
                 Ok(repaired)
             }
             Err(err) => {
@@ -1639,6 +1658,14 @@ fn autonomous_truth_event_parts(
             detail,
         } => Some((
             "recovery_failed",
+            Some(resume_source.as_str().to_string()),
+            detail.clone(),
+        )),
+        AutonomousSessionTruth::WsGapPartialRecovery {
+            resume_source,
+            detail,
+        } => Some((
+            "ws_gap_partial_recovery",
             Some(resume_source.as_str().to_string()),
             detail.clone(),
         )),

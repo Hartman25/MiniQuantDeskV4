@@ -453,8 +453,11 @@ pub struct AutonomousPaperReadinessResponse {
     pub reconcile_ready: bool,
     /// Autonomous supervisory state from `AppState::autonomous_session_truth()`.
     /// `"clear"` | `"start_refused"` | `"recovery_retrying"` | `"recovery_succeeded"`
-    /// | `"recovery_failed"` | `"run_ended_unexpectedly"` | `"stop_failed"`
-    /// | `"stopped_at_boundary"` | `"not_applicable"`.
+    /// | `"recovery_failed"` | `"ws_gap_partial_recovery"` | `"run_ended_unexpectedly"`
+    /// | `"stop_failed"` | `"stopped_at_boundary"` | `"not_applicable"`.
+    /// `"ws_gap_partial_recovery"` (BRK-GAP-01): WS gap detected; fill recovery
+    /// available via REST; non-fill lifecycle events permanently unrecoverable;
+    /// operator reconcile/repair required.
     pub autonomous_session_state: String,
     /// Human-readable detail from the current autonomous supervisory truth, if any.
     pub autonomous_session_detail: Option<String>,

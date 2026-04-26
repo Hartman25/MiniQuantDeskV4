@@ -68,6 +68,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use mqk_broker_alpaca::types::AlpacaTradeUpdatesResume;
 use mqk_broker_alpaca::{parse_ws_message, AlpacaWsMessage};
 use mqk_runtime::alpaca_inbound::{
     advance_cursor_after_ws_establish, persist_ws_gap_cursor, process_ws_inbound_batch,
@@ -339,15 +340,34 @@ async fn alpaca_ws_session(
             Ok(repaired) => {
                 let restored_continuity = AlpacaWsContinuityState::from_fetch_cursor(&repaired);
                 state.update_ws_continuity(restored_continuity).await;
-                state
-                    .set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
+                // BRK-GAP-01: If the cursor that was repaired came from a
+                // GapDetected state, non-fill lifecycle events (Ack, CancelAck,
+                // ReplaceAck, Reject) from the gap window are permanently
+                // unrecoverable from the Alpaca REST API.  Represent this
+                // honestly as WsGapPartialRecovery rather than RecoverySucceeded.
+                let session_truth = if matches!(
+                    prev_cursor.trade_updates,
+                    AlpacaTradeUpdatesResume::GapDetected { .. }
+                ) {
+                    AutonomousSessionTruth::WsGapPartialRecovery {
+                        resume_source: resume_source.clone(),
+                        detail: "ws_gap_detected: WS connectivity re-established after gap; \
+fill_recovery_available via REST catch-up from preserved cursor position; \
+lifecycle_recovery_unproven: Ack/CancelAck/ReplaceAck/Reject events from the gap window \
+are permanently unrecoverable via Alpaca REST; \
+operator_reconcile_or_repair_required"
+                            .to_string(),
+                    }
+                } else {
+                    AutonomousSessionTruth::RecoverySucceeded {
                         resume_source: resume_source.clone(),
                         detail: match resume_source {
                             AutonomousRecoveryResumeSource::PersistedCursor => "WS continuity restored from persisted broker cursor; REST catch-up remains anchored to the preserved cursor position".to_string(),
                             AutonomousRecoveryResumeSource::ColdStart => "WS continuity established from a cold start; autonomous paper start may proceed once the remaining gates pass".to_string(),
                         },
-                    })
-                    .await;
+                    }
+                };
+                state.set_autonomous_session_truth(session_truth).await;
                 tracing::info!(
                     "alpaca_ws: repaired cursor to Live after WS re-establish;                      REST poll will recover gap-window fills (BRK-08R)"
                 );
@@ -786,16 +806,18 @@ mod tests {
             matches!(cont, AlpacaWsContinuityState::Live { .. }),
             "S5: continuity must be Live after restart repair; got: {cont:?}"
         );
+        // BRK-GAP-01: gap cursor → WsGapPartialRecovery (not RecoverySucceeded).
+        // Non-fill lifecycle events from the gap window are permanently unrecoverable.
         let truth = state.autonomous_session_truth().await;
         assert!(
             matches!(
                 truth,
-                AutonomousSessionTruth::RecoverySucceeded {
+                AutonomousSessionTruth::WsGapPartialRecovery {
                     resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
                     ..
                 }
             ),
-            "S5: recovery truth must record persisted-cursor success; got: {truth:?}"
+            "S5: gap cursor repair must produce WsGapPartialRecovery (not RecoverySucceeded); got: {truth:?}"
         );
 
         let stored_json = mqk_db::load_broker_cursor(state.db.as_ref().unwrap(), adapter_id)

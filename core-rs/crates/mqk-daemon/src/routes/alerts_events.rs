@@ -190,6 +190,22 @@ pub(crate) async fn alerts_active(State(st): State<Arc<AppState>>) -> Response {
             detail: Some(detail),
             source: "daemon.autonomous_session".to_string(),
         }),
+        // BRK-GAP-01: WS gap partial recovery — fill recovery available via REST;
+        // non-fill lifecycle events (Ack/CancelAck/ReplaceAck/Reject) from the
+        // gap window are permanently unrecoverable.  Operator action required.
+        AutonomousSessionTruth::WsGapPartialRecovery { resume_source, detail } => rows.push(ActiveAlertRow {
+            alert_id: "autonomous.session.ws_gap_partial_recovery".to_string(),
+            severity: "warning".to_string(),
+            class: "autonomous.session.ws_gap_partial_recovery".to_string(),
+            summary: format!(
+                "Autonomous paper WS gap recovery: fill_recovery_available via REST; \
+lifecycle_recovery_unproven: Ack/CancelAck/ReplaceAck/Reject events from the gap window \
+are permanently unrecoverable; operator_reconcile_or_repair_required ({} truth).",
+                resume_source.as_str()
+            ),
+            detail: Some(detail),
+            source: "daemon.autonomous_session".to_string(),
+        }),
         AutonomousSessionTruth::RunEndedUnexpectedly { detail } => rows.push(ActiveAlertRow {
             alert_id: "autonomous.session.run_ended_unexpectedly".to_string(),
             severity: "warning".to_string(),
@@ -875,6 +891,22 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
             "system",
             format!(
                 "Autonomous paper recovery failed resuming from {} truth; start blocked until continuity proven again. {detail}",
+                resume_source.as_str()
+            ),
+        )),
+        // BRK-GAP-01: WS gap partial recovery — fill recovery available via REST;
+        // non-fill lifecycle events permanently unrecoverable.  Operator action required.
+        AutonomousSessionTruth::WsGapPartialRecovery {
+            resume_source,
+            detail,
+        } => extra_signals.push((
+            "autonomous.session.ws_gap_partial_recovery",
+            "warning",
+            "system",
+            format!(
+                "Autonomous paper WS gap recovery: fill_recovery_available; \
+lifecycle_recovery_unproven: Ack/CancelAck/ReplaceAck/Reject events from gap window \
+are permanently unrecoverable; operator_reconcile_or_repair_required ({} truth). {detail}",
                 resume_source.as_str()
             ),
         )),

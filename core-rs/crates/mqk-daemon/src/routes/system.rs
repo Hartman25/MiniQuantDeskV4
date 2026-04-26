@@ -503,6 +503,10 @@ fn autonomous_session_truth_to_api(truth: &AutonomousSessionTruth) -> (String, O
         AutonomousSessionTruth::RecoveryFailed { detail, .. } => {
             ("recovery_failed".to_string(), Some(detail.clone()))
         }
+        // BRK-GAP-01: partial recovery — fill only, lifecycle unproven.
+        AutonomousSessionTruth::WsGapPartialRecovery { detail, .. } => {
+            ("ws_gap_partial_recovery".to_string(), Some(detail.clone()))
+        }
         AutonomousSessionTruth::RunEndedUnexpectedly { detail } => {
             ("run_ended_unexpectedly".to_string(), Some(detail.clone()))
         }
@@ -926,11 +930,41 @@ mod tests {
 
     #[test]
     fn obs01_all_truth_variants_map_to_distinct_states() {
+        use crate::state::AutonomousRecoveryResumeSource;
         let cases = [
             (AutonomousSessionTruth::Clear, "clear"),
             (
                 AutonomousSessionTruth::StartRefused { detail: "x".into() },
                 "start_refused",
+            ),
+            (
+                AutonomousSessionTruth::RecoveryRetrying {
+                    resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+                    detail: "x".into(),
+                },
+                "recovery_retrying",
+            ),
+            (
+                AutonomousSessionTruth::RecoverySucceeded {
+                    resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+                    detail: "x".into(),
+                },
+                "recovery_succeeded",
+            ),
+            (
+                AutonomousSessionTruth::RecoveryFailed {
+                    resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+                    detail: "x".into(),
+                },
+                "recovery_failed",
+            ),
+            // BRK-GAP-01: partial recovery must map to its own distinct API state.
+            (
+                AutonomousSessionTruth::WsGapPartialRecovery {
+                    resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+                    detail: "x".into(),
+                },
+                "ws_gap_partial_recovery",
             ),
             (
                 AutonomousSessionTruth::RunEndedUnexpectedly { detail: "x".into() },

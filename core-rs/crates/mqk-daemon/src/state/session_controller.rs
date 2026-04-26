@@ -239,9 +239,13 @@ async fn attempt_auto_start(
         Ok(snap) => {
             *locally_started = true;
             let current_truth = state.autonomous_session_truth().await;
+            // BRK-GAP-01: preserve WsGapPartialRecovery after start so the
+            // operator surface continues to show that non-fill lifecycle events
+            // from the gap window remain permanently unrecoverable.
             if !matches!(
                 current_truth,
                 AutonomousSessionTruth::RecoverySucceeded { .. }
+                    | AutonomousSessionTruth::WsGapPartialRecovery { .. }
             ) {
                 state.clear_autonomous_session_truth().await;
             }

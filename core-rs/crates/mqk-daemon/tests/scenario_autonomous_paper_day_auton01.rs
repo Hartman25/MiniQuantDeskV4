@@ -951,15 +951,18 @@ async fn au10f_db_backed_autonomous_recovery_round_trip_is_honest() {
         ),
         "AU-10F step4: repaired continuity must be Live"
     );
+    // BRK-GAP-01: gap cursor repair must produce WsGapPartialRecovery (not
+    // RecoverySucceeded) — non-fill lifecycle events from the gap window are
+    // permanently unrecoverable from Alpaca REST.
     assert!(
         matches!(
             restarted.autonomous_session_truth().await,
-            AutonomousSessionTruth::RecoverySucceeded {
+            AutonomousSessionTruth::WsGapPartialRecovery {
                 resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
                 ..
             }
         ),
-        "AU-10F step4: repaired continuity must surface RecoverySucceeded from persisted cursor"
+        "AU-10F step4: gap cursor repair must surface WsGapPartialRecovery (not RecoverySucceeded)"
     );
 
     let restarted_router = routes::build_router(Arc::clone(&restarted));
@@ -977,9 +980,10 @@ async fn au10f_db_backed_autonomous_recovery_round_trip_is_honest() {
         .iter()
         .filter_map(|r| r["class"].as_str())
         .collect();
+    // BRK-GAP-01: gap recovery → ws_gap_partial_recovery alert class.
     assert!(
-        alert_classes.contains(&"autonomous.session.recovery_succeeded"),
-        "AU-10F step5: alerts must include autonomous.session.recovery_succeeded while current; got classes: {alert_classes:?}"
+        alert_classes.contains(&"autonomous.session.ws_gap_partial_recovery"),
+        "AU-10F step5: alerts must include autonomous.session.ws_gap_partial_recovery while current; got classes: {alert_classes:?}"
     );
 
     let feed_req = Request::builder()
@@ -1001,9 +1005,10 @@ async fn au10f_db_backed_autonomous_recovery_round_trip_is_honest() {
         autonomous_details.contains(&"recovery_retrying:persisted_cursor"),
         "AU-10F: durable events feed must include recovery_retrying row"
     );
+    // BRK-GAP-01: gap recovery → ws_gap_partial_recovery event in the feed.
     assert!(
-        autonomous_details.contains(&"recovery_succeeded:persisted_cursor"),
-        "AU-10F: durable events feed must include recovery_succeeded row"
+        autonomous_details.contains(&"ws_gap_partial_recovery:persisted_cursor"),
+        "AU-10F: durable events feed must include ws_gap_partial_recovery row; got: {autonomous_details:?}"
     );
 
     mqk_db::persist_arm_state_canonical(

@@ -428,6 +428,17 @@ pub enum AutonomousSessionTruth {
         resume_source: AutonomousRecoveryResumeSource,
         detail: String,
     },
+    /// BRK-GAP-01: A WS gap was detected during a prior session.  WS connectivity
+    /// has been re-established and the cursor repaired to `Live`.  FILL/PARTIAL_FILL
+    /// events from the gap window may be recovered via REST catch-up on the next
+    /// orchestrator tick.  Non-fill lifecycle events (Ack, CancelAck, ReplaceAck,
+    /// Reject) from the gap window are permanently unrecoverable from the Alpaca
+    /// REST API.  Operator reconcile/repair is required before full lifecycle truth
+    /// can be claimed.
+    WsGapPartialRecovery {
+        resume_source: AutonomousRecoveryResumeSource,
+        detail: String,
+    },
     RunEndedUnexpectedly {
         detail: String,
     },
