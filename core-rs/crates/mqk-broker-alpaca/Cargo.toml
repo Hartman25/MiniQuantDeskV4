@@ -14,10 +14,10 @@ chrono.workspace = true
 mqk-execution = { path = "../mqk-execution" }
 mqk-schemas = { path = "../mqk-schemas" }
 
-# reqwest with blocking support is required: this crate IS the live HTTP adapter.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
-# tokio is required for block_in_place to avoid Tokio 1.49 panic when
-# reqwest::blocking drops its internal runtime inside an async context.
+# reqwest async client: no embedded runtime, no blocking feature.
+# HTTP I/O is driven by the caller's Tokio runtime via run_async inside the adapter.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# tokio: required for Handle::try_current, block_in_place, and Builder in run_async.
 tokio = { workspace = true }
 
 [dev-dependencies]

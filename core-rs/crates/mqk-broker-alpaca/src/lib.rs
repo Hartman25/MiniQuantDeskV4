@@ -11,7 +11,7 @@
 //! # `AlpacaBrokerAdapter`
 //!
 //! Implements `mqk_execution::BrokerAdapter` against the Alpaca v2 REST API using
-//! `reqwest::blocking`.  All four methods are real HTTP calls:
+//! `reqwest` (async client).  All four methods are real HTTP calls:
 //!
 //! | Method          | Endpoint                               | Notes                              |
 //! |-----------------|----------------------------------------|------------------------------------|
@@ -97,7 +97,7 @@ pub struct AlpacaConfig {
 /// `AlpacaBrokerAdapter::new(cfg)` with explicit credentials.
 pub struct AlpacaBrokerAdapter {
     cfg: AlpacaConfig,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 impl std::fmt::Debug for AlpacaBrokerAdapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -109,10 +109,10 @@ impl std::fmt::Debug for AlpacaBrokerAdapter {
 impl AlpacaBrokerAdapter {
     /// Create a new adapter with the given configuration.
     ///
-    /// A single `reqwest::blocking::Client` is shared across all calls made
-    /// through this adapter instance.
+    /// A single `reqwest::Client` is shared across all calls made through this
+    /// adapter instance.  `reqwest::Client` is cheaply cloneable (Arc-backed).
     pub fn new(cfg: AlpacaConfig) -> Self {
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::Client::new();
         Self { cfg, client }
     }
     /// Convenience constructor for Alpaca paper trading.
@@ -142,44 +142,51 @@ impl AlpacaBrokerAdapter {
     // Private HTTP helpers
     // -----------------------------------------------------------------------
 
-    /// Run a blocking closure, using `block_in_place` when called from within
-    /// a Tokio async context.
+    /// Drive an async future to completion from a sync caller.
     ///
-    /// `reqwest::blocking` internally creates and drops a temporary
-    /// `tokio::runtime::Runtime` on every network operation (`send()`,
-    /// `.json()`, `.text()`, …).  Tokio 1.49 panics when any runtime is
-    /// dropped from inside an async executor context.  Wrapping with
-    /// `block_in_place` suspends the current async task and runs the
-    /// blocking closure on the current OS thread outside the executor,
-    /// preventing the panic.
+    /// When called from within a Tokio multi-thread async task (the normal
+    /// production path), `block_in_place` suspends the current task and
+    /// drives the future on the current OS thread via the existing runtime's
+    /// `Handle::block_on`.  No embedded runtime is created; `reqwest`'s
+    /// connection pool shares the outer runtime's I/O reactor.
     ///
-    /// Falls back to calling the closure directly when there is no Tokio
-    /// runtime (e.g. unit tests, stand-alone CLI tools).  Requires a
-    /// `multi_thread` Tokio runtime when called from async; panics on
-    /// `current_thread` — the same restriction as `block_in_place` itself.
-    fn blocking<F, T>(f: F) -> T
+    /// When called with no Tokio runtime present (plain `#[test]` contexts
+    /// or CLI tools), a minimal `current_thread` runtime is created for the
+    /// duration of the call and then dropped.  This matches the behavior of
+    /// `reqwest::blocking` in the same context, with no extra overhead.
+    ///
+    /// Nested calls from within a daemon-side `block_in_place` wrapper are
+    /// safe: Tokio detects the already-blocking thread state and executes the
+    /// inner closure directly without a redundant scheduler transition.
+    fn run_async<F>(f: F) -> F::Output
     where
-        F: FnOnce() -> T,
+        F: std::future::Future,
     {
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(f)
-        } else {
-            f()
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
+            Err(_) => tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("broker: failed to build tokio runtime for sync HTTP call")
+                .block_on(f),
         }
     }
 
     /// Perform an authenticated `GET` and deserialize the JSON response body.
     fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, BrokerError> {
         let url = format!("{}{}", self.cfg.base_url, path);
-        Self::blocking(|| {
-            let resp = self
-                .client
+        let client = self.client.clone();
+        let key_id = self.cfg.api_key_id.clone();
+        let secret_key = self.cfg.api_secret_key.clone();
+        Self::run_async(async move {
+            let resp = client
                 .get(&url)
-                .header("APCA-API-KEY-ID", &self.cfg.api_key_id)
-                .header("APCA-API-SECRET-KEY", &self.cfg.api_secret_key)
+                .header("APCA-API-KEY-ID", &key_id)
+                .header("APCA-API-SECRET-KEY", &secret_key)
                 .send()
+                .await
                 .map_err(classify_transport_err)?;
-            parse_success_json(resp)
+            parse_success_response(resp).await
         })
     }
     /// Perform an authenticated `PATCH` with a JSON body; deserialize response.
@@ -189,34 +196,44 @@ impl AlpacaBrokerAdapter {
         T: serde::de::DeserializeOwned,
     {
         let url = format!("{}{}", self.cfg.base_url, path);
-        Self::blocking(|| {
-            let resp = self
-                .client
+        let client = self.client.clone();
+        let key_id = self.cfg.api_key_id.clone();
+        let secret_key = self.cfg.api_secret_key.clone();
+        let body_bytes = serde_json::to_vec(body).map_err(|e| BrokerError::Transient {
+            detail: format!("patch: body serialize error: {e}"),
+        })?;
+        Self::run_async(async move {
+            let resp = client
                 .patch(&url)
-                .header("APCA-API-KEY-ID", &self.cfg.api_key_id)
-                .header("APCA-API-SECRET-KEY", &self.cfg.api_secret_key)
-                .json(body)
+                .header("APCA-API-KEY-ID", &key_id)
+                .header("APCA-API-SECRET-KEY", &secret_key)
+                .header("Content-Type", "application/json")
+                .body(body_bytes)
                 .send()
+                .await
                 .map_err(classify_transport_err)?;
-            parse_success_json(resp)
+            parse_success_response(resp).await
         })
     }
     /// Perform an authenticated `DELETE`; return Ok(()) on success.
     fn delete(&self, path: &str) -> Result<(), BrokerError> {
         let url = format!("{}{}", self.cfg.base_url, path);
-        Self::blocking(|| {
-            let resp = self
-                .client
+        let client = self.client.clone();
+        let key_id = self.cfg.api_key_id.clone();
+        let secret_key = self.cfg.api_secret_key.clone();
+        Self::run_async(async move {
+            let resp = client
                 .delete(&url)
-                .header("APCA-API-KEY-ID", &self.cfg.api_key_id)
-                .header("APCA-API-SECRET-KEY", &self.cfg.api_secret_key)
+                .header("APCA-API-KEY-ID", &key_id)
+                .header("APCA-API-SECRET-KEY", &secret_key)
                 .send()
+                .await
                 .map_err(classify_transport_err)?;
             let status = resp.status();
             if status.is_success() {
                 Ok(())
             } else {
-                let body = resp.text().unwrap_or_default();
+                let body = resp.text().await.unwrap_or_default();
                 Err(classify_http_status(status, &body))
             }
         })
@@ -292,21 +309,29 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
     ) -> Result<BrokerSubmitResponse, BrokerError> {
         let body = build_submit_body(&req);
         let url = format!("{}/v2/orders", self.cfg.base_url);
-        Self::blocking(|| {
-            let http_resp = self
-                .client
+        let client = self.client.clone();
+        let key_id = self.cfg.api_key_id.clone();
+        let secret_key = self.cfg.api_secret_key.clone();
+        // Serialize body before entering the async block so the Future is 'static.
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| BrokerError::AmbiguousSubmit {
+            detail: format!("submit: body serialize error: {e}"),
+        })?;
+        Self::run_async(async move {
+            let http_resp = client
                 .post(&url)
-                .header("APCA-API-KEY-ID", &self.cfg.api_key_id)
-                .header("APCA-API-SECRET-KEY", &self.cfg.api_secret_key)
-                .json(&body)
+                .header("APCA-API-KEY-ID", &key_id)
+                .header("APCA-API-SECRET-KEY", &secret_key)
+                .header("Content-Type", "application/json")
+                .body(body_bytes)
                 .send()
+                .await
                 .map_err(classify_transport_err_for_submit)?;
             let status = http_resp.status();
             if !status.is_success() {
-                let resp_body = http_resp.text().unwrap_or_default();
+                let resp_body = http_resp.text().await.unwrap_or_default();
                 return Err(classify_http_status(status, &resp_body));
             }
-            let alpaca: AlpacaSubmitResponse = http_resp.json().map_err(|e| {
+            let alpaca: AlpacaSubmitResponse = http_resp.json().await.map_err(|e| {
                 // We got a 2xx but couldn't parse the body.  The order may be live.
                 BrokerError::AmbiguousSubmit {
                     detail: format!("submit: response parse error: {e}"),
@@ -524,10 +549,10 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
 ///   on every lifecycle event, enabling `internal_order_id` mapping.
 pub fn build_submit_body(req: &BrokerSubmitRequest) -> AlpacaSubmitBody {
     let side = side_to_str(&req.side);
-    let limit_price = req.limit_price.map(micros_to_price_str);
+    let limit_price = req.limit_price.map(format_alpaca_price);
     AlpacaSubmitBody {
         symbol: req.symbol.clone(),
-        qty: req.quantity.to_string(),
+        qty: format_alpaca_qty(req.quantity),
         side: side.to_string(),
         order_type: req.order_type.clone(),
         time_in_force: req.time_in_force.clone(),
@@ -548,8 +573,8 @@ pub fn build_replace_body(
 ) -> AlpacaReplaceBody {
     let new_total_qty = filled_qty + new_leaves_qty;
     AlpacaReplaceBody {
-        qty: new_total_qty.to_string(),
-        limit_price: limit_price.map(micros_to_price_str),
+        qty: format_alpaca_qty(new_total_qty),
+        limit_price: limit_price.map(format_alpaca_price),
         time_in_force: time_in_force.to_string(),
     }
 }
@@ -636,17 +661,60 @@ fn side_to_str(side: &Side) -> &'static str {
         Side::Sell => "sell",
     }
 }
-/// Convert integer micros to a decimal price string for the broker wire.
+/// Format an order quantity for the Alpaca REST wire.
 ///
-/// **Only call at the wire boundary** - this is the sole site in this crate
-/// that crosses the i64-micros / f64-decimal boundary for prices.
+/// **Equity default: whole-share integer string.**  `qty` is the canonical
+/// positive `i64` from `BrokerSubmitRequest.quantity` or the computed
+/// total-quantity in replace semantics.
 ///
-/// Uses 2 decimal places, which covers all standard US equity prices.
-/// Sub-cent precision is handled by the 6-decimal scale if needed by
-/// callers that have set fractional micros, but US equities trade in cents.
-pub fn micros_to_price_str(micros: i64) -> String {
-    // micros_to_price returns f64; format to 2 decimal places for the wire.
+/// `i64::to_string()` never produces scientific notation or floating-point
+/// artifacts, so this function is deterministic for all valid inputs.
+///
+/// # Equity invariant
+/// The current execution model carries quantity as a whole-share `i64`.
+/// Fractional quantities are structurally not expressible through
+/// `BrokerSubmitRequest.quantity: i64` and are not claimed supported here.
+///
+/// # TODO BRK-PRICE-01: multi-asset extension point
+/// When `BrokerSubmitRequest` gains `instrument: Instrument`, select
+/// precision by `AssetClass`:
+/// - `Equity`: whole shares → integer string (current behavior)
+/// - Fractional equity / `Crypto`: decimal string at asset-specific scale
+pub fn format_alpaca_qty(qty: i64) -> String {
+    qty.to_string()
+}
+
+/// Format a price in integer micros for the Alpaca REST wire.
+///
+/// **Equity default: 2 decimal places (cent precision).**  This covers all
+/// standard US equity and ETF limit prices.  The `{:.2}` formatter rounds
+/// to the nearest cent — sub-cent precision stored in micros (e.g.
+/// `150_505_000` = $150.505) rounds to `"150.51"`.
+///
+/// # Rounding policy
+/// For US equities the minimum tick is $0.01 (100_000 micros).  Sub-cent
+/// micros on the submit path indicate a data-quality error upstream.  The
+/// rounding here is **explicit and deterministic**, not silent: callers can
+/// verify the round-trip via `price_to_micros(format_alpaca_price(m))`.
+///
+/// # TODO BRK-PRICE-01: multi-asset extension point
+/// When `BrokerSubmitRequest` gains `instrument: Instrument`, select
+/// precision by `ContractSpec`:
+/// - `Equity`: 2dp (current)
+/// - `Future`: `tick_size_micros` from `ContractSpec::Future`
+/// - `Crypto`: asset-specific decimal precision (often 2–8dp)
+/// - `Option`: $0.01 increments (same as equity for equity options)
+pub fn format_alpaca_price(micros: i64) -> String {
+    // micros_to_price returns f64; format to 2 decimal places for US equity wire.
     format!("{:.2}", micros_to_price(micros))
+}
+
+/// Convert integer micros to a decimal price string for the Alpaca broker wire.
+///
+/// **Backward-compatibility alias for [`format_alpaca_price`].**
+/// New code should call `format_alpaca_price` directly.
+pub fn micros_to_price_str(micros: i64) -> String {
+    format_alpaca_price(micros)
 }
 /// Parse a broker decimal quantity string (e.g. `"100.000000"`) to `i64`.
 ///
@@ -664,18 +732,18 @@ fn parse_iso_to_epoch_ms(ts: &str) -> Option<u64> {
         .ok()
         .map(|dt| dt.timestamp_millis() as u64) // allow: ops-metadata - converts broker-supplied ISO timestamp to cursor ms; not a wall-clock read
 }
-/// Read the HTTP response: return parsed JSON on success, or classify the
-/// error on failure.
-fn parse_success_json<T: serde::de::DeserializeOwned>(
-    resp: reqwest::blocking::Response,
+/// Read the async HTTP response: return parsed JSON on success, or classify
+/// the error on failure.
+async fn parse_success_response<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
 ) -> Result<T, BrokerError> {
     let status = resp.status();
     if status.is_success() {
-        resp.json::<T>().map_err(|e| BrokerError::Transient {
+        resp.json::<T>().await.map_err(|e| BrokerError::Transient {
             detail: format!("response parse error: {e}"),
         })
     } else {
-        let body = resp.text().unwrap_or_default();
+        let body = resp.text().await.unwrap_or_default();
         Err(classify_http_status(status, &body))
     }
 }
