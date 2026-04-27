@@ -1005,6 +1005,68 @@ fn unknown_order_non_fill_is_silently_skipped() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// OPTR-LABEL-01: Error taxonomy proof
+// ---------------------------------------------------------------------------
+
+/// OPTR-LABEL-01 — T1.
+///
+/// An OMS transition error for a *known* order (fill overflowing total_qty)
+/// must surface with label "OMS transition error" at the `apply_broker_event_step`
+/// level.  It must NOT be labeled "UNKNOWN_ORDER_FILL", which is reserved for
+/// fills on orders absent from the OMS map entirely.
+///
+/// This prevents mislabeling of OMS integrity violations as unknown-fill events
+/// in operator logs and traces.
+#[test]
+fn optr_label_01_oms_transition_error_not_labeled_unknown_fill() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    let mut order = OmsOrder::new("ord-overflow-optr", "SPY", 100);
+    order
+        .apply(&OmsEvent::PartialFill { delta_qty: 60 }, Some("pf-setup"))
+        .unwrap();
+    oms.insert("ord-overflow-optr".to_string(), order);
+
+    // Fill(60) when filled=60, total=100 → 120 > 100 → OMS rejects.
+    let ev = make_fill_event("ord-overflow-optr", "fill-overflow-optr", 60);
+    let err = apply_broker_event_step(&mut oms, "ord-overflow-optr", &ev, "fill-overflow-optr")
+        .unwrap_err();
+
+    assert!(
+        err.to_string().contains("OMS transition error"),
+        "OPTR-LABEL-01: OMS transition error must surface as 'OMS transition error', got: {err}"
+    );
+    assert!(
+        !err.to_string().contains("UNKNOWN_ORDER_FILL"),
+        "OPTR-LABEL-01: OMS transition error must NOT be labeled UNKNOWN_ORDER_FILL, got: {err}"
+    );
+}
+
+/// OPTR-LABEL-01 — T2.
+///
+/// A fill event for an order *absent* from the OMS map must surface with label
+/// "UNKNOWN_ORDER_FILL" at the `apply_broker_event_step` level.  This is the
+/// canonical label for "broker sent a fill for an order we have no record of".
+///
+/// UNKNOWN_ORDER_FILL must remain distinct from OMS transition errors: they
+/// are different failure modes requiring different operator responses.
+#[test]
+fn optr_label_01_unknown_fill_label_preserved() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    let ev = make_fill_event("ord-absent-optr", "fill-absent-optr", 50);
+    let err =
+        apply_broker_event_step(&mut oms, "ord-absent-optr", &ev, "fill-absent-optr").unwrap_err();
+
+    assert!(
+        err.to_string().contains("UNKNOWN_ORDER_FILL"),
+        "OPTR-LABEL-01: true unknown fill must be labeled UNKNOWN_ORDER_FILL, got: {err}"
+    );
+    assert!(
+        !err.to_string().contains("OMS transition error"),
+        "OPTR-LABEL-01: unknown fill must NOT carry OMS-transition-error label, got: {err}"
+    );
+}
+
 fn valid_submit_order_json() -> serde_json::Value {
     serde_json::json!({
         "symbol": "SPY",

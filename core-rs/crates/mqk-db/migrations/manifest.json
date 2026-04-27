@@ -230,6 +230,12 @@
       "path": "0036_arm_state_reason_inbound_continuity.sql",
       "status": "applied",
       "intent": "Extend sys_arm_state.reason constraint to include InboundContinuityUnproven, enabling durable halt/disarm when Alpaca WS inbound continuity is cold-start unproven or gap-detected (EXEC-CONT-01)."
+    },
+    {
+      "id": "0037",
+      "path": "0037_arm_state_reason_cancel_target_missing.sql",
+      "status": "applied",
+      "intent": "Extend sys_arm_state.reason constraint to include CancelTargetMissing, enabling durable halt/disarm when a cancel outbox row targets an order absent from the live OMS map (EXEC-CANCEL-01)."
     }
   ]
 }

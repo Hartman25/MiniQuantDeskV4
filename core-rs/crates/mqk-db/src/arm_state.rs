@@ -78,6 +78,10 @@ pub enum DisarmReason {
     /// EXEC-CONT-01: Alpaca WS inbound continuity is cold-start unproven or
     /// gap-detected; the orchestrator durably halts and disarms before returning.
     InboundContinuityUnproven,
+    /// EXEC-CANCEL-01: A cancel outbox row targets an order absent from the live
+    /// OMS map.  The cancel was never submitted to the broker; lifecycle truth is
+    /// unsafe.  The orchestrator halts and disarms before returning.
+    CancelTargetMissing,
 }
 
 impl DisarmReason {
@@ -90,6 +94,7 @@ impl DisarmReason {
             Self::DeadmanSupervisorFailure => "DeadmanSupervisorFailure",
             Self::DeadmanHeartbeatPersistFailed => "DeadmanHeartbeatPersistFailed",
             Self::InboundContinuityUnproven => "InboundContinuityUnproven",
+            Self::CancelTargetMissing => "CancelTargetMissing",
         }
     }
 }

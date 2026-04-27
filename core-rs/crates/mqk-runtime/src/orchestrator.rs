@@ -505,8 +505,15 @@ where
                     // to persist HALTED is more dangerous than the OMS fault itself.
                     persist_halt_and_disarm(&self.pool, self.run_id, now, "IntegrityViolation")
                         .await?;
+                    // OPTR-LABEL-01: use BROKER_EVENT_APPLY_FAILED as the outer
+                    // operator-visible label.  The inner error already names the
+                    // specific cause:
+                    //   - "UNKNOWN_ORDER_FILL: ..."  for fills on absent OMS orders
+                    //   - "OMS transition error for '...': ..."  for illegal transitions
+                    // Wrapping both as UNKNOWN_ORDER_FILL mislabels OMS transition
+                    // failures in operator logs and traces.
                     return Err(e.context(format!(
-                        "UNKNOWN_ORDER_FILL: run {} halted and disarmed (Section C)",
+                        "BROKER_EVENT_APPLY_FAILED: run {} halted and disarmed (Section C)",
                         self.run_id
                     )));
                 }

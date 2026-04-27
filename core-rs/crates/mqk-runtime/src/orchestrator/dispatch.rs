@@ -199,13 +199,43 @@ where
         )
         .await?;
 
-        let order = self.oms_orders.get_mut(&target_order_id).ok_or_else(|| {
-            anyhow!(
-                "cancel request {} refused: target order '{}' is not present in live OMS state",
+        // EXEC-CANCEL-01: if the cancel target is absent from the live OMS map,
+        // handle it immediately and durably.  The row is already DISPATCHING;
+        // the broker was never called, but we cannot know whether the broker
+        // still holds an open order with that ID (the OMS context was lost).
+        //
+        // Policy (fail-closed):
+        //   1. Mark the row AMBIGUOUS (best-effort) — the cancel was never sent
+        //      so the broker-side outcome is unknown; AMBIGUOUS signals operator
+        //      intervention is required and prevents Phase-0b silent re-dispatch.
+        //   2. persist_halt_and_disarm("CancelTargetMissing") — mandatory.
+        //      Continuing to dispatch new orders when cancel-target provenance is
+        //      broken is unsafe.  The Phase-0 HALT_GUARD blocks all future ticks.
+        //   3. Return Err with "CANCEL_TARGET_MISSING" as the operator-visible label.
+        //
+        // Do not silently drop the cancel.
+        // Do not synthesize a successful cancel.
+        // Do not keep trading as if lifecycle state is safe.
+        let Some(order) = self.oms_orders.get_mut(&target_order_id) else {
+            let now = self.time_source.now_utc();
+            if let Err(mark_err) = mqk_db::outbox_mark_ambiguous(&self.pool, &request_id).await {
+                tracing::warn!(
+                    request_id = %request_id,
+                    target_order_id = %target_order_id,
+                    error = %mark_err,
+                    "dispatch_cancel: outbox_mark_ambiguous failed (CANCEL_TARGET_MISSING); \
+                     Phase-0b quarantine will enforce on restart via DISPATCHING row"
+                );
+            }
+            persist_halt_and_disarm(&self.pool, self.run_id, now, "CancelTargetMissing").await?;
+            return Err(anyhow!(
+                "CANCEL_TARGET_MISSING: cancel request '{}' refused: target order '{}' is not \
+                 present in live OMS state; run {} halted and disarmed",
                 request_id,
-                target_order_id
-            )
-        })?;
+                target_order_id,
+                self.run_id
+            ));
+        };
         order
             .apply(&OmsEvent::CancelRequest, Some(&request_id))
             .map_err(|err| {

@@ -174,6 +174,10 @@ async fn check_constraints_reject_invalid_enum_values() -> anyhow::Result<()> {
         "DeadmanHeartbeatPersistFailed",
         "LeaderLeaseLost",
         "LeaderLeaseUnavailable",
+        // EXEC-CONT-01 (migration 0036)
+        "InboundContinuityUnproven",
+        // EXEC-CANCEL-01 (migration 0037)
+        "CancelTargetMissing",
     ] {
         sqlx::query(
             r#"
