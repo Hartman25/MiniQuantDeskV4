@@ -3,23 +3,32 @@
 //! Proves that `GET /api/v1/execution/flow` exhibits correct truth-state
 //! semantics and enforces the hard query limits.
 //!
-//! All tests here are in-process and always runnable in CI without any
+//! FL-01..FL-10 are in-process and always runnable in CI without any
 //! environment variables or DB connection.
+//!
+//! FL-11..FL-16 are DB-backed and require MQK_DATABASE_URL; they carry
+//! `#[ignore]` and must be run with `--include-ignored`.
 //!
 //! # Test matrix
 //!
-//! | Test ID | Scenario                                    | DB | Run |
-//! |---------|---------------------------------------------|----|-----|
-//! | FL-01   | No DB pool → truth_state = "no_db"         | ✗  | —   |
-//! | FL-02   | DB present, no active run, no order_id      | —  | ✗   |
-//! | FL-03   | Route is mounted (non-404)                  | ✗  | —   |
-//! | FL-04   | limit > 200 is clamped to 200               | ✗  | —   |
-//! | FL-05   | limit = 0 → treated as 1 (min clamp)       | ✗  | —   |
-//! | FL-06   | Invalid run_id UUID → 400                   | ✗  | —   |
-//! | FL-07   | canonical_route is self-identifying         | ✗  | —   |
-//! | FL-08   | no_db does not claim authoritative rows     | ✗  | —   |
-//! | FL-09   | no_active_run does not claim rows           | —  | ✗   |
-//! | FL-10   | order_id param bypasses no_active_run gate  | —  | ✗   |
+//! | Test ID | Scenario                                          | DB | Run |
+//! |---------|---------------------------------------------------|----|-----|
+//! | FL-01   | No DB pool → truth_state = "no_db"               | ✗  | —   |
+//! | FL-02   | DB present, no active run, no order_id            | —  | ✗   |
+//! | FL-03   | Route is mounted (non-404)                        | ✗  | —   |
+//! | FL-04   | limit > 200 is clamped to 200                     | ✗  | —   |
+//! | FL-05   | limit = 0 → treated as 1 (min clamp)             | ✗  | —   |
+//! | FL-06   | Invalid run_id UUID → 400                         | ✗  | —   |
+//! | FL-07   | canonical_route is self-identifying               | ✗  | —   |
+//! | FL-08   | no_db does not claim authoritative rows           | ✗  | —   |
+//! | FL-09   | no_active_run does not claim rows                 | —  | ✗   |
+//! | FL-10   | order_id param bypasses no_active_run gate        | —  | ✗   |
+//! | FL-11   | Real outbox row appears via run_id filter         | ✓  | —   |
+//! | FL-12   | Real lifecycle row appears via run_id filter      | ✓  | —   |
+//! | FL-13   | Real fill row appears via run_id filter           | ✓  | —   |
+//! | FL-14   | order_id filter returns only matching outbox row  | ✓  | —   |
+//! | FL-15   | limit cap enforced when real DB rows exist        | ✓  | —   |
+//! | FL-16   | Empty DB → truth_state=active rows=[] (auth empty)| ✓  | —   |
 
 use std::sync::Arc;
 
@@ -325,5 +334,504 @@ async fn fl_10_order_id_bypasses_no_active_run_gate() {
         json["truth_state"], "no_active_run",
         "FL-10: truth_state must NOT be 'no_active_run' when order_id is provided; \
          got: {json}"
+    );
+}
+
+// ===========================================================================
+// DB-backed tests — FL-11..FL-16
+//
+// These tests require a live Postgres instance.  Run with:
+//   MQK_DATABASE_URL=postgres://mqk:mqk@127.0.0.1:55432/mqk_test \
+//   cargo test -p mqk-daemon --test scenario_execution_flow_flow01 \
+//     -- --include-ignored --test-threads=1
+//
+// Each test:
+//   1. Connects to Postgres and runs migrations.
+//   2. Seeds the relevant durable row(s) using approved DB helpers.
+//   3. Builds an AppState that holds the real pool.
+//   4. Calls the route via the in-process router.
+//   5. Asserts the response shape and data.
+//   6. Cleans up seeded rows (best-effort; idempotent primary keys ensure
+//      a failed cleanup does not corrupt future runs).
+// ===========================================================================
+
+/// Returns a pool connected to MQK_DATABASE_URL with migrations applied.
+/// Panics if the env var is absent (caller has `#[ignore]` to prevent CI
+/// running these without the variable set).
+async fn fl_db_pool() -> sqlx::PgPool {
+    let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
+        panic!(
+            "DB tests require MQK_DATABASE_URL; run: \
+             MQK_DATABASE_URL=postgres://mqk:mqk@127.0.0.1:55432/mqk_test \
+             cargo test -p mqk-daemon --test scenario_execution_flow_flow01 \
+             -- --include-ignored --test-threads=1"
+        )
+    });
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("fl_db_pool: connect failed");
+    mqk_db::migrate(&pool)
+        .await
+        .expect("fl_db_pool: migrate failed");
+    pool
+}
+
+/// Seed a minimal run row that satisfies FK constraints for outbox/inbox/fill tables.
+async fn fl_seed_run(pool: &sqlx::PgPool, run_id: uuid::Uuid, ts: chrono::DateTime<chrono::Utc>) {
+    // Pre-cleanup: delete in FK-safe order so a prior failed test does not block.
+    sqlx::query("delete from fill_quality_telemetry where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("fl_seed_run: cleanup fill_quality_telemetry failed");
+    sqlx::query("delete from oms_order_lifecycle_events where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("fl_seed_run: cleanup lifecycle_events failed");
+    sqlx::query("delete from broker_order_map where internal_id in (select idempotency_key from oms_outbox where run_id = $1)")
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("fl_seed_run: cleanup broker_order_map failed");
+    sqlx::query("delete from oms_inbox where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("fl_seed_run: cleanup oms_inbox failed");
+    sqlx::query("delete from oms_outbox where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("fl_seed_run: cleanup oms_outbox failed");
+    sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("fl_seed_run: cleanup runs failed");
+
+    mqk_db::insert_run(
+        pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: ts,
+            git_hash: "flow-test-hash".to_string(),
+            config_hash: "flow-test-config".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "flow-test-host".to_string(),
+        },
+    )
+    .await
+    .expect("fl_seed_run: insert_run failed");
+}
+
+/// Best-effort cleanup for a test run and all child rows.
+async fn fl_cleanup_run(pool: &sqlx::PgPool, run_id: uuid::Uuid) {
+    let _ = sqlx::query("delete from fill_quality_telemetry where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("delete from oms_order_lifecycle_events where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("delete from broker_order_map where internal_id in (select idempotency_key from oms_outbox where run_id = $1)")
+        .bind(run_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("delete from oms_inbox where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("delete from oms_outbox where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
+}
+
+// ---------------------------------------------------------------------------
+// FL-11: Real oms_outbox row appears via run_id filter
+//
+// Seeds one oms_outbox row for a deterministic run_id, calls the route with
+// ?run_id=<run_id>, and asserts:
+//   - truth_state = "active"
+//   - rows array is non-empty
+//   - first row has stage = "outbox_enqueued", source_table = "oms_outbox"
+//   - row_id, ts_utc, severity, run_id, internal_order_id, message are all present
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn fl_11_real_outbox_row_appears_via_run_id() {
+    let pool = fl_db_pool().await;
+
+    let run_id = uuid::Uuid::parse_str("f100001b-0000-4000-8000-000000000001").unwrap();
+    let ts = chrono::DateTime::parse_from_rfc3339("2024-01-01T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    fl_seed_run(&pool, run_id, ts).await;
+
+    mqk_db::outbox_enqueue(
+        &pool,
+        run_id,
+        "fl11-order-001",
+        serde_json::json!({"symbol": "AAPL", "qty": 10, "side": "buy"}),
+    )
+    .await
+    .expect("FL-11: outbox_enqueue failed");
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(st);
+
+    let uri = format!("/api/v1/execution/flow?run_id={run_id}");
+    let (status, body) = call(router, get(&uri)).await;
+
+    fl_cleanup_run(&pool, run_id).await;
+
+    assert_eq!(status, StatusCode::OK, "FL-11: must return 200; body: {}", String::from_utf8_lossy(&body));
+
+    let json = parse_json(body);
+
+    assert_eq!(
+        json["truth_state"], "active",
+        "FL-11: truth_state must be 'active' when DB row exists; got: {json}"
+    );
+    assert_eq!(
+        json["canonical_route"], "/api/v1/execution/flow",
+        "FL-11: canonical_route must be self-identifying; got: {json}"
+    );
+
+    let rows = json["rows"].as_array().expect("FL-11: rows must be an array");
+    assert!(!rows.is_empty(), "FL-11: rows must not be empty when outbox row was seeded; got: {json}");
+
+    let row = &rows[0];
+    assert_eq!(row["stage"], "outbox_enqueued", "FL-11: stage must be 'outbox_enqueued'; got: {row}");
+    assert_eq!(row["source_table"], "oms_outbox", "FL-11: source_table must be 'oms_outbox'; got: {row}");
+    assert_eq!(row["severity"], "info", "FL-11: severity must be 'info'; got: {row}");
+    assert!(row["row_id"].as_str().unwrap_or("").starts_with("outbox:enqueued:"), "FL-11: row_id must start with 'outbox:enqueued:'; got: {row}");
+    assert!(row["ts_utc"].is_string(), "FL-11: ts_utc must be a string; got: {row}");
+    assert_eq!(row["internal_order_id"], "fl11-order-001", "FL-11: internal_order_id mismatch; got: {row}");
+    assert_eq!(row["run_id"].as_str().unwrap_or(""), run_id.to_string(), "FL-11: run_id mismatch; got: {row}");
+    assert!(row["message"].as_str().unwrap_or("").contains("Outbox enqueued"), "FL-11: message must mention 'Outbox enqueued'; got: {row}");
+}
+
+// ---------------------------------------------------------------------------
+// FL-12: Real oms_order_lifecycle_events row appears via run_id filter
+//
+// Seeds one cancel_ack lifecycle event, calls the route with ?run_id=<run_id>,
+// and asserts the row has stage = "broker_cancel_ack".
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn fl_12_real_lifecycle_row_appears_via_run_id() {
+    let pool = fl_db_pool().await;
+
+    let run_id = uuid::Uuid::parse_str("f100001b-0000-4000-8000-000000000002").unwrap();
+    let ts = chrono::DateTime::parse_from_rfc3339("2024-01-01T11:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    fl_seed_run(&pool, run_id, ts).await;
+
+    mqk_db::insert_order_lifecycle_event(
+        &pool,
+        &mqk_db::NewOrderLifecycleEvent {
+            event_id: "fl12-lifecycle-cancel-001".to_string(),
+            run_id,
+            internal_order_id: "fl12-order-001".to_string(),
+            operation: "cancel_ack".to_string(),
+            broker_order_id: Some("broker-fl12-001".to_string()),
+            new_total_qty: None,
+            recorded_at_utc: ts,
+        },
+    )
+    .await
+    .expect("FL-12: insert_order_lifecycle_event failed");
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(st);
+
+    let uri = format!("/api/v1/execution/flow?run_id={run_id}");
+    let (status, body) = call(router, get(&uri)).await;
+
+    fl_cleanup_run(&pool, run_id).await;
+
+    assert_eq!(status, StatusCode::OK, "FL-12: must return 200");
+
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active", "FL-12: truth_state must be 'active'; got: {json}");
+
+    let rows = json["rows"].as_array().expect("FL-12: rows must be array");
+    assert!(!rows.is_empty(), "FL-12: rows must not be empty when lifecycle row was seeded; got: {json}");
+
+    let row = rows.iter().find(|r| r["source_table"] == "oms_order_lifecycle_events")
+        .expect("FL-12: no row with source_table=oms_order_lifecycle_events found");
+    assert_eq!(row["stage"], "broker_cancel_ack", "FL-12: stage must be 'broker_cancel_ack'; got: {row}");
+    assert_eq!(row["severity"], "info", "FL-12: severity must be 'info'; got: {row}");
+    assert!(row["row_id"].as_str().unwrap_or("").starts_with("lifecycle:"), "FL-12: row_id must start with 'lifecycle:'; got: {row}");
+    assert_eq!(row["internal_order_id"], "fl12-order-001", "FL-12: internal_order_id mismatch; got: {row}");
+    assert_eq!(row["broker_order_id"], "broker-fl12-001", "FL-12: broker_order_id mismatch; got: {row}");
+}
+
+// ---------------------------------------------------------------------------
+// FL-13: Real fill_quality_telemetry row appears via run_id filter
+//
+// Seeds one final_fill row, calls the route with ?run_id=<run_id>, and asserts
+// the returned row has stage = "broker_final_fill".
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn fl_13_real_fill_row_appears_via_run_id() {
+    let pool = fl_db_pool().await;
+
+    let run_id = uuid::Uuid::parse_str("f100001b-0000-4000-8000-000000000003").unwrap();
+    let ts = chrono::DateTime::parse_from_rfc3339("2024-01-01T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let telemetry_id = uuid::Uuid::parse_str("f100001b-0000-4000-8000-000000000031").unwrap();
+
+    fl_seed_run(&pool, run_id, ts).await;
+
+    mqk_db::insert_fill_quality_telemetry(
+        &pool,
+        &mqk_db::NewFillQualityTelemetry {
+            telemetry_id,
+            run_id,
+            internal_order_id: "fl13-order-001".to_string(),
+            broker_order_id: Some("broker-fl13-001".to_string()),
+            broker_fill_id: Some("fill-fl13-001".to_string()),
+            broker_message_id: "alpaca:fl13-order-001:fill:1704110400000000".to_string(),
+            symbol: "NVDA".to_string(),
+            side: "buy".to_string(),
+            ordered_qty: 5,
+            fill_qty: 5,
+            fill_price_micros: 600_000_000,
+            reference_price_micros: Some(601_000_000),
+            slippage_bps: Some(-17),
+            submit_ts_utc: Some(ts),
+            fill_received_at_utc: ts,
+            submit_to_fill_ms: Some(42),
+            fill_kind: "final_fill".to_string(),
+            provenance_ref: "oms_inbox:alpaca:fl13-order-001:fill:1704110400000000".to_string(),
+            created_at_utc: ts,
+        },
+    )
+    .await
+    .expect("FL-13: insert_fill_quality_telemetry failed");
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(st);
+
+    let uri = format!("/api/v1/execution/flow?run_id={run_id}");
+    let (status, body) = call(router, get(&uri)).await;
+
+    fl_cleanup_run(&pool, run_id).await;
+
+    assert_eq!(status, StatusCode::OK, "FL-13: must return 200");
+
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active", "FL-13: truth_state must be 'active'; got: {json}");
+
+    let rows = json["rows"].as_array().expect("FL-13: rows must be array");
+    assert!(!rows.is_empty(), "FL-13: rows must not be empty when fill row was seeded; got: {json}");
+
+    let row = rows.iter().find(|r| r["source_table"] == "fill_quality_telemetry")
+        .expect("FL-13: no row with source_table=fill_quality_telemetry found");
+    assert_eq!(row["stage"], "broker_final_fill", "FL-13: stage must be 'broker_final_fill'; got: {row}");
+    assert_eq!(row["severity"], "info", "FL-13: severity must be 'info'; got: {row}");
+    assert!(row["row_id"].as_str().unwrap_or("").starts_with("fill:"), "FL-13: row_id must start with 'fill:'; got: {row}");
+    assert_eq!(row["internal_order_id"], "fl13-order-001", "FL-13: internal_order_id mismatch; got: {row}");
+    assert_eq!(row["symbol"], "NVDA", "FL-13: symbol mismatch; got: {row}");
+    assert!(row["message"].as_str().unwrap_or("").contains("NVDA"), "FL-13: message must mention symbol; got: {row}");
+}
+
+// ---------------------------------------------------------------------------
+// FL-14: order_id filter returns only the matching outbox row
+//
+// Seeds two outbox rows for the same run under different idempotency keys.
+// Queries with ?run_id=<run_id>&order_id=<key1>. Only the row for key1
+// must appear.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn fl_14_order_id_filter_returns_only_matching_row() {
+    let pool = fl_db_pool().await;
+
+    let run_id = uuid::Uuid::parse_str("f100001b-0000-4000-8000-000000000004").unwrap();
+    let ts = chrono::DateTime::parse_from_rfc3339("2024-01-01T13:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    fl_seed_run(&pool, run_id, ts).await;
+
+    mqk_db::outbox_enqueue(
+        &pool,
+        run_id,
+        "fl14-order-A",
+        serde_json::json!({"symbol": "GOOG", "qty": 1, "side": "buy"}),
+    )
+    .await
+    .expect("FL-14: outbox_enqueue A failed");
+
+    mqk_db::outbox_enqueue(
+        &pool,
+        run_id,
+        "fl14-order-B",
+        serde_json::json!({"symbol": "MSFT", "qty": 2, "side": "sell"}),
+    )
+    .await
+    .expect("FL-14: outbox_enqueue B failed");
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(st);
+
+    let uri = format!("/api/v1/execution/flow?run_id={run_id}&order_id=fl14-order-A");
+    let (status, body) = call(router, get(&uri)).await;
+
+    fl_cleanup_run(&pool, run_id).await;
+
+    assert_eq!(status, StatusCode::OK, "FL-14: must return 200");
+
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active", "FL-14: truth_state must be 'active'; got: {json}");
+
+    let rows = json["rows"].as_array().expect("FL-14: rows must be array");
+    assert!(!rows.is_empty(), "FL-14: rows must not be empty; got: {json}");
+
+    for row in rows {
+        assert_eq!(
+            row["internal_order_id"], "fl14-order-A",
+            "FL-14: order_id filter must exclude fl14-order-B; got row: {row}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FL-15: limit cap enforced when real DB rows exist
+//
+// Seeds 3 outbox rows for the same run. Queries with ?run_id=<run_id>&limit=2.
+// Asserts that at most 2 rows are returned, proving the limit is applied after
+// DB rows are assembled.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn fl_15_limit_enforced_against_real_db_rows() {
+    let pool = fl_db_pool().await;
+
+    let run_id = uuid::Uuid::parse_str("f100001b-0000-4000-8000-000000000005").unwrap();
+    let ts = chrono::DateTime::parse_from_rfc3339("2024-01-01T14:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    fl_seed_run(&pool, run_id, ts).await;
+
+    for i in 1u32..=3 {
+        mqk_db::outbox_enqueue(
+            &pool,
+            run_id,
+            &format!("fl15-order-{i:03}"),
+            serde_json::json!({"symbol": "SPY", "qty": i, "side": "buy"}),
+        )
+        .await
+        .expect("FL-15: outbox_enqueue failed");
+    }
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(st);
+
+    let uri = format!("/api/v1/execution/flow?run_id={run_id}&limit=2");
+    let (status, body) = call(router, get(&uri)).await;
+
+    fl_cleanup_run(&pool, run_id).await;
+
+    assert_eq!(status, StatusCode::OK, "FL-15: must return 200");
+
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active", "FL-15: truth_state must be 'active'; got: {json}");
+
+    let rows = json["rows"].as_array().expect("FL-15: rows must be array");
+    assert_eq!(
+        rows.len(),
+        2,
+        "FL-15: limit=2 must cap rows to exactly 2 when 3 exist; got {} rows; {json}",
+        rows.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FL-16: Empty DB for run → truth_state=active rows=[] (authoritative empty)
+//
+// Creates a run but seeds no child rows. Queries with ?run_id=<run_id>.
+// Asserts truth_state="active" and rows=[]. This proves that "active" with
+// empty rows is the honest authoritative-empty signal, not no_active_run.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn fl_16_active_run_empty_tables_returns_authoritative_empty() {
+    let pool = fl_db_pool().await;
+
+    let run_id = uuid::Uuid::parse_str("f100001b-0000-4000-8000-000000000006").unwrap();
+    let ts = chrono::DateTime::parse_from_rfc3339("2024-01-01T15:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    fl_seed_run(&pool, run_id, ts).await;
+    // Do NOT seed any outbox, lifecycle, or fill rows.
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(st);
+
+    let uri = format!("/api/v1/execution/flow?run_id={run_id}");
+    let (status, body) = call(router, get(&uri)).await;
+
+    fl_cleanup_run(&pool, run_id).await;
+
+    assert_eq!(status, StatusCode::OK, "FL-16: must return 200");
+
+    let json = parse_json(body);
+    assert_eq!(
+        json["truth_state"], "active",
+        "FL-16: truth_state must be 'active' when DB pool is present and run_id is explicit; got: {json}"
+    );
+    assert_eq!(
+        json["rows"],
+        serde_json::json!([]),
+        "FL-16: rows must be [] (authoritative empty) when no child rows exist; got: {json}"
+    );
+    assert_ne!(
+        json["truth_state"], "no_active_run",
+        "FL-16: must NOT be 'no_active_run' when run_id is explicit; got: {json}"
     );
 }
