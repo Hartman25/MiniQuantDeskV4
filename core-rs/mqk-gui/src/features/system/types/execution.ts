@@ -763,3 +763,68 @@ export interface OrderTimelineSurface {
   last_updated_at: string | null;
   rows: OrderTimelineRow[];
 }
+
+// ---------------------------------------------------------------------------
+// FLOW-01 / FLOW-03: Execution flow surface (GET /api/v1/execution/flow)
+// ---------------------------------------------------------------------------
+
+/**
+ * One row in the execution flow read model.
+ *
+ * Assembled from three durable tables:
+ * - `oms_outbox`                  → `outbox_enqueued`, `outbox_claimed`, etc.
+ * - `oms_order_lifecycle_events`  → `broker_cancel_ack`, `broker_replace_ack`, etc.
+ * - `fill_quality_telemetry`      → `broker_partial_fill`, `broker_final_fill`
+ *
+ * `row_id` is deterministic and stable across re-queries.
+ */
+export interface ExecutionFlowRow {
+  /** Stable deterministic identifier. Never a random UUID. */
+  row_id: string;
+  /** RFC 3339 timestamp from the authoritative source column. */
+  ts_utc: string;
+  /** Stage label. Examples: "outbox_enqueued", "broker_sent", "broker_final_fill". */
+  stage: string;
+  /** "info" | "warn" | "error" */
+  severity: "info" | "warn" | "error";
+  /** UUID of the durable run this event belongs to. */
+  run_id: string;
+  /** Internal order ID (= idempotency_key for outbox rows). null when not derivable. */
+  internal_order_id: string | null;
+  /** Broker-assigned order ID. null until the broker acknowledges. */
+  broker_order_id: string | null;
+  /** Ticker symbol. null for outbox lifecycle events that don't carry symbol. */
+  symbol: string | null;
+  /** Short operator-readable description. */
+  message: string;
+  /** Which durable DB table this row was assembled from. */
+  source_table: string;
+}
+
+/**
+ * truth_state for the execution flow surface.
+ *
+ * - "active"          DB available, run context resolved. `rows` is authoritative.
+ *                     Empty `rows` means no matching events — not absence of source.
+ * - "no_active_run"   DB available but no run context. `rows` is empty and NOT authoritative.
+ * - "no_db"           No DB pool configured. `rows` is empty and NOT authoritative.
+ */
+export type ExecutionFlowTruthState = "active" | "no_active_run" | "no_db";
+
+/**
+ * Response wrapper for `GET /api/v1/execution/flow`.
+ *
+ * Consumers MUST check `truth_state` before rendering rows.
+ * `"no_active_run"` and `"no_db"` must render as explicit unavailable states,
+ * not as authoritative empty flow history.
+ */
+export interface ExecutionFlowSurface {
+  canonical_route: string;
+  truth_state: ExecutionFlowTruthState;
+  /** Durable sources joined. "unavailable" when truth_state is not "active". */
+  backend: string;
+  /** Run UUID used for the query. null when truth_state is not "active". */
+  run_id: string | null;
+  /** Flow rows sorted oldest-first. At most `limit` rows (default 100, max 200). */
+  rows: ExecutionFlowRow[];
+}

@@ -68,6 +68,7 @@ import type {
   ArtifactRow,
   AuditActionRow,
   ConfigFingerprintSummary,
+  ExecutionFlowSurface,
   ExecutionOrderRow,
   ExecutionSummary,
   ModeChangeGuidanceResponse,
@@ -982,6 +983,39 @@ export async function fetchExecutionChart(internalOrderId: string): Promise<Orde
 
 export async function fetchCausalityTrace(internalOrderId: string): Promise<OrderCausalityResponse | null> {
   return tryFetchJson<OrderCausalityResponse>([`/api/v1/execution/orders/${internalOrderId}/causality`]);
+}
+
+// ---------------------------------------------------------------------------
+// FLOW-01/FLOW-03: Execution flow surface (GET /api/v1/execution/flow)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch the execution flow read model.
+ *
+ * Returns a unified, time-ordered sequence of lifecycle events for an active
+ * run or a specific order, assembled from oms_outbox,
+ * oms_order_lifecycle_events, and fill_quality_telemetry.
+ *
+ * Callers MUST check `truth_state` before rendering:
+ * - "active"         → rows are authoritative (may be empty — no events yet).
+ * - "no_active_run"  → no run context; rows are NOT authoritative.
+ * - "no_db"          → no DB; rows are NOT authoritative.
+ *
+ * Returns null only on network/fetch failure (caller should surface
+ * backend_unavailable, not an empty table).
+ */
+export async function fetchExecutionFlow(params?: {
+  runId?: string;
+  orderId?: string;
+  limit?: number;
+}): Promise<ExecutionFlowSurface | null> {
+  const search = new URLSearchParams();
+  if (params?.runId) search.set("run_id", params.runId);
+  if (params?.orderId) search.set("order_id", params.orderId);
+  if (params?.limit != null) search.set("limit", String(params.limit));
+  const qs = search.toString();
+  const url = qs ? `/api/v1/execution/flow?${qs}` : "/api/v1/execution/flow";
+  return tryFetchJson<ExecutionFlowSurface>([url]);
 }
 
 // requestSystemModeTransition was removed (H-7 / PC-1):

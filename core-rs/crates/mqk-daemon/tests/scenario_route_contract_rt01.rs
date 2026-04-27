@@ -90,6 +90,7 @@ const GUI_PROBE_MANIFEST: &[&str] = &[
     "/api/v1/execution/orders",
     "/api/v1/execution/outbox",
     "/api/v1/execution/fill-quality",
+    "/api/v1/execution/flow",
     // --- OMS and metrics ---
     "/api/v1/oms/overview",
     "/api/v1/metrics/dashboards",

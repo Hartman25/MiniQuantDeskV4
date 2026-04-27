@@ -11,6 +11,7 @@ import type { SystemModel } from "../system/types";
 import { CausalityTraceViewer } from "./components/CausalityTraceViewer";
 import { ExecutionReplayViewer } from "./components/ExecutionReplayViewer";
 import { ExecutionChartPanel } from "./components/ExecutionChartPanel";
+import { ExecutionFlowPanel } from "./components/ExecutionFlowPanel";
 import { ExecutionTraceViewer } from "./components/ExecutionTraceViewer";
 import { MetricStripChart } from "./components/MetricStripChart";
 import { OmsStateMachineVisualizer } from "./components/OmsStateMachineVisualizer";
@@ -268,6 +269,12 @@ export function ExecutionScreen({
           />
         )}
       </Panel>
+
+      {/* FLOW-04: Execution flow panel — unified lifecycle timeline from durable sources. */}
+      <ExecutionFlowPanel
+        runId={model.executionOutbox.run_id ?? null}
+        orderId={timeline?.internal_order_id ?? null}
+      />
 
       <Panel title="Lifecycle stage strip" compact>
         {timeline && timeline.truth_state !== "no_db" ? (
