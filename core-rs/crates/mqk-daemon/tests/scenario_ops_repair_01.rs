@@ -139,13 +139,11 @@ async fn seed_ambiguous_row(pool: &sqlx::PgPool, idempotency_key: &str) -> uuid:
 
     if !transitioned {
         // Already AMBIGUOUS from a prior test run — force it unconditionally.
-        sqlx::query(
-            "update oms_outbox set status = 'AMBIGUOUS' where idempotency_key = $1",
-        )
-        .bind(idempotency_key)
-        .execute(pool)
-        .await
-        .expect("force AMBIGUOUS fallback");
+        sqlx::query("update oms_outbox set status = 'AMBIGUOUS' where idempotency_key = $1")
+            .bind(idempotency_key)
+            .execute(pool)
+            .await
+            .expect("force AMBIGUOUS fallback");
     }
 
     run_id
