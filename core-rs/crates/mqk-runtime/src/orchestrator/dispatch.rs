@@ -5,7 +5,7 @@
 //! orchestrator.rs focused on the tick-sequence skeleton.
 
 use anyhow::anyhow;
-use mqk_db::{ClaimedOutboxRow, TimeSource};
+use mqk_db::{ClaimedOutboxRow, RetryDispatchOutcome, TimeSource};
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{
     BrokerAdapter, BrokerError, BrokerSubmitRequest, GateRefusal, IntegrityGate, ReconcileGate,
@@ -119,13 +119,39 @@ where
                         }
                     }
                     SubmitError::Broker(be) if be.is_safe_pre_send_retry() => {
-                        let _ = mqk_db::outbox_reset_dispatching_to_pending(&self.pool, &order_id)
-                            .await;
-                        tracing::warn!(
-                            order_id = %order_id,
-                            error = %e,
-                            "broker_submit_retryable"
-                        );
+                        let now = self.time_source.now_utc();
+                        match mqk_db::outbox_record_retry(
+                            &self.pool,
+                            &order_id,
+                            &format!("{e}"),
+                            now,
+                        )
+                        .await
+                        {
+                            Ok(RetryDispatchOutcome::WillRetry { attempt }) => {
+                                tracing::warn!(
+                                    order_id = %order_id,
+                                    attempt,
+                                    error = %e,
+                                    "broker_submit_retryable_will_retry"
+                                );
+                            }
+                            Ok(RetryDispatchOutcome::ExhaustedFailed { attempts }) => {
+                                tracing::warn!(
+                                    order_id = %order_id,
+                                    attempts,
+                                    error = %e,
+                                    "broker_submit_retryable_exhausted_failed"
+                                );
+                            }
+                            Err(retry_err) => {
+                                tracing::warn!(
+                                    order_id = %order_id,
+                                    error = %retry_err,
+                                    "broker_submit_retryable_record_retry_failed"
+                                );
+                            }
+                        }
                     }
                     SubmitError::Broker(be) if be.is_ambiguous_send_outcome() => {
                         let now = self.time_source.now_utc();
@@ -307,15 +333,37 @@ where
                             .await?;
                     }
                     CancelBrokerClass::Retryable => {
-                        let _ =
-                            mqk_db::outbox_reset_dispatching_to_pending(&self.pool, &request_id)
-                                .await;
-                        tracing::warn!(
-                            request_id = %request_id,
-                            target_order_id = %target_order_id,
-                            error = %err_text,
-                            "broker_cancel_retryable"
-                        );
+                        let now = self.time_source.now_utc();
+                        match mqk_db::outbox_record_retry(&self.pool, &request_id, &err_text, now)
+                            .await
+                        {
+                            Ok(RetryDispatchOutcome::WillRetry { attempt }) => {
+                                tracing::warn!(
+                                    request_id = %request_id,
+                                    target_order_id = %target_order_id,
+                                    attempt,
+                                    error = %err_text,
+                                    "broker_cancel_retryable_will_retry"
+                                );
+                            }
+                            Ok(RetryDispatchOutcome::ExhaustedFailed { attempts }) => {
+                                tracing::warn!(
+                                    request_id = %request_id,
+                                    target_order_id = %target_order_id,
+                                    attempts,
+                                    error = %err_text,
+                                    "broker_cancel_retryable_exhausted_failed"
+                                );
+                            }
+                            Err(retry_err) => {
+                                tracing::warn!(
+                                    request_id = %request_id,
+                                    target_order_id = %target_order_id,
+                                    error = %retry_err,
+                                    "broker_cancel_retryable_record_retry_failed"
+                                );
+                            }
+                        }
                     }
                     CancelBrokerClass::Ambiguous => {
                         let now = self.time_source.now_utc();

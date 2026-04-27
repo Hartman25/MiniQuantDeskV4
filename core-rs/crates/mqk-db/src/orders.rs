@@ -258,6 +258,7 @@ async fn outbox_claim_batch_inner(
                 from oms_outbox
                 where run_id = $2
                   and status = 'PENDING'
+                  and (next_dispatch_after_utc is null or next_dispatch_after_utc <= $4)
                 order by outbox_id asc
                 limit $1
                 for update skip locked
@@ -286,6 +287,7 @@ async fn outbox_claim_batch_inner(
                 select outbox_id
                 from oms_outbox
                 where status = 'PENDING'
+                  and (next_dispatch_after_utc is null or next_dispatch_after_utc <= $3)
                 order by outbox_id asc
                 limit $1
                 for update skip locked
@@ -664,6 +666,95 @@ pub async fn outbox_reset_dispatching_to_pending(
     .context("outbox_reset_dispatching_to_pending failed")?;
 
     Ok(row.is_some())
+}
+
+// ---------------------------------------------------------------------------
+// EXEC-RETRY-01: bounded, backoff-gated retry
+// ---------------------------------------------------------------------------
+
+/// Hard ceiling on automatic dispatch retries per outbox row.
+///
+/// On the `MAX_DISPATCH_ATTEMPTS`-th failure the row transitions to `FAILED`
+/// rather than `PENDING`, preventing unbounded retry loops.
+pub const MAX_DISPATCH_ATTEMPTS: i32 = 3;
+
+/// Backoff window written to `next_dispatch_after_utc` on each retry.
+///
+/// `outbox_claim_batch` will not re-claim the row until this many seconds
+/// after the retry is recorded.  Fixed (not exponential) to keep behaviour
+/// deterministic and auditable.
+const RETRY_BACKOFF_SECS: i64 = 30;
+
+/// Outcome returned by [`outbox_record_retry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryDispatchOutcome {
+    /// Row reset to `PENDING`; caller-visible attempt number (1-based).
+    WillRetry { attempt: i32 },
+    /// Attempt ceiling reached; row transitioned to `FAILED`.
+    ExhaustedFailed { attempts: i32 },
+}
+
+/// Record a retryable dispatch failure and re-queue with backoff.
+///
+/// Transitions a `DISPATCHING` row to either `PENDING` (with backoff) or
+/// `FAILED` (when `dispatch_attempt_count + 1 >= MAX_DISPATCH_ATTEMPTS`).
+///
+/// Increments `dispatch_attempt_count`, writes `last_dispatch_error`, and
+/// sets `next_dispatch_after_utc = now + RETRY_BACKOFF_SECS` on the
+/// `WillRetry` path so `outbox_claim_batch` ignores the row until the window
+/// expires.  On the `ExhaustedFailed` path the row is permanently quarantined
+/// as `FAILED`.
+///
+/// Returns `Err` only on DB failure or if the row is not found / not
+/// `DISPATCHING`.
+pub async fn outbox_record_retry(
+    pool: &PgPool,
+    idempotency_key: &str,
+    error_detail: &str,
+    now_utc: DateTime<Utc>,
+) -> Result<RetryDispatchOutcome> {
+    let retry_after = now_utc + chrono::Duration::seconds(RETRY_BACKOFF_SECS);
+
+    let row: Option<(i32, String)> = sqlx::query_as(
+        r#"
+        update oms_outbox
+           set dispatch_attempt_count  = dispatch_attempt_count + 1,
+               last_dispatch_error     = $2,
+               status = case
+                   when dispatch_attempt_count + 1 >= $3 then 'FAILED'
+                   else 'PENDING'
+               end,
+               next_dispatch_after_utc = case
+                   when dispatch_attempt_count + 1 >= $3 then next_dispatch_after_utc
+                   else $4
+               end,
+               claimed_by          = null,
+               claimed_at_utc      = null,
+               dispatching_at_utc  = null,
+               dispatch_attempt_id = null
+         where idempotency_key = $1
+           and status = 'DISPATCHING'
+        returning dispatch_attempt_count, status
+        "#,
+    )
+    .bind(idempotency_key)
+    .bind(error_detail)
+    .bind(MAX_DISPATCH_ATTEMPTS)
+    .bind(retry_after)
+    .fetch_optional(pool)
+    .await
+    .context("outbox_record_retry failed")?;
+
+    match row {
+        None => Err(anyhow!(
+            "outbox_record_retry: row '{}' not found or not DISPATCHING",
+            idempotency_key
+        )),
+        Some((count, ref status)) if status == "FAILED" => {
+            Ok(RetryDispatchOutcome::ExhaustedFailed { attempts: count })
+        }
+        Some((count, _)) => Ok(RetryDispatchOutcome::WillRetry { attempt: count }),
+    }
 }
 
 /// A4: Transition a DISPATCHING outbox row to AMBIGUOUS explicit quarantine.
