@@ -490,6 +490,65 @@ pub(crate) async fn write_signal_refusal_event(
     Some(event_id)
 }
 
+// ---------------------------------------------------------------------------
+// CTRL-ARM-01: arm safety preflight gate
+// ---------------------------------------------------------------------------
+
+/// Check safety preconditions before persisting ARMED state.
+///
+/// Called by all three HTTP arm paths before any state mutation.  Returns
+/// `Ok(())` when arming is safe; `Err((gate, blockers))` when a blocking
+/// condition is found so the caller can return a 403 with structured body.
+///
+/// Gate order:
+/// 1. Reconcile — blocks if `dirty` or `stale` (proven-bad state).
+///    Checked from in-memory snapshot; no DB required.
+/// 2. Risk — blocks if DB confirms risk engine is blocking dispatch.
+///    Skipped when DB is absent (only in-memory arm path; no truth to read).
+///    Fails closed if the DB query itself fails.
+pub(crate) async fn check_arm_safety(
+    st: &Arc<AppState>,
+    db: Option<&sqlx::PgPool>,
+) -> Result<(), (String, Vec<String>)> {
+    // Gate 1: reconcile must not be proven-bad.
+    let reconcile = st.current_reconcile_snapshot().await;
+    if matches!(reconcile.status.as_str(), "dirty" | "stale") {
+        return Err((
+            "arm_preflight.reconcile_not_clean".to_string(),
+            vec![format!(
+                "reconcile status is '{}'; arm refused until reconcile is clean \
+                 — resolve the reconcile mismatch before arming (CTRL-ARM-01)",
+                reconcile.status
+            )],
+        ));
+    }
+
+    // Gate 2: risk block state — only when DB is present.
+    if let Some(pool) = db {
+        match mqk_db::load_risk_block_state(pool).await {
+            Ok(Some(risk)) if risk.blocked => {
+                return Err((
+                    "arm_preflight.risk_blocked".to_string(),
+                    vec![risk
+                        .reason
+                        .unwrap_or_else(|| "risk engine is blocking dispatch".to_string())],
+                ));
+            }
+            Err(_) => {
+                return Err((
+                    "arm_preflight.risk_state_unavailable".to_string(),
+                    vec!["risk block state query failed; arm refused fail-closed \
+                         (CTRL-ARM-01)"
+                        .to_string()],
+                ));
+            }
+            _ => {} // Ok(None) or Ok(Some(risk)) where !risk.blocked → pass
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn runtime_transition_for_action(action: &str) -> Option<String> {
     match action {
         "control.arm" => Some("ARMED".to_string()),

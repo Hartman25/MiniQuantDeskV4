@@ -17,6 +17,8 @@ use crate::{
     state::{AppState, RestartTruthSnapshot, RuntimeLifecycleError},
 };
 
+use super::helpers::check_arm_safety;
+
 #[derive(Debug, Serialize)]
 pub struct ControlStatus {
     pub daemon_mode: String,
@@ -314,6 +316,25 @@ async fn arm(State(state): State<Arc<AppState>>) -> Response {
         )
             .into_response();
     };
+
+    // CTRL-ARM-01: preflight before any state mutation.
+    if let Err((gate, blockers)) = check_arm_safety(&state, state.db.as_ref()).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(operator_action_response(
+                "control.arm",
+                false,
+                "refused",
+                None,
+                None,
+                blockers,
+                vec![format!("arm blocked by gate: {gate}")],
+                vec![],
+                None,
+            )),
+        )
+            .into_response();
+    }
 
     if let Err(err) = write_desired_armed(db, true).await {
         return (

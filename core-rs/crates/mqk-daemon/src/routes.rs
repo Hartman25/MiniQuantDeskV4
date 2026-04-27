@@ -31,12 +31,14 @@ pub(crate) mod audit_ops;
 pub mod control;
 pub(crate) mod control_plane;
 pub(crate) mod execution;
+pub(crate) mod execution_flow;
 pub(crate) mod execution_order_analysis;
 pub(crate) mod helpers;
 pub(crate) mod oms_metrics;
 pub(crate) mod paper_journal;
 pub(crate) mod portfolio;
 pub(crate) mod reconcile;
+pub(crate) mod repair;
 pub(crate) mod strategy;
 pub(crate) mod system;
 pub(crate) mod system_artifact;
@@ -151,6 +153,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         execution_fill_quality, execution_order_cancel, execution_order_submit, execution_orders,
         execution_summary,
     };
+    use execution_flow::execution_flow;
     use execution_order_analysis::{
         execution_event_risk_status, execution_order_causality, execution_order_chart,
         execution_order_replay, execution_order_timeline, execution_order_trace, execution_outbox,
@@ -163,6 +166,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         risk_denials, risk_summary,
     };
     use reconcile::{reconcile_mismatches, reconcile_status};
+    use repair::repair_outbox_ambiguous;
     use strategy::{strategy_signal, strategy_summary, strategy_suppressions};
     use system::{
         autonomous_readiness, health, status_handler, system_config_diffs,
@@ -193,6 +197,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/execution/summary", get(execution_summary))
         .route("/api/v1/execution/orders", get(execution_orders))
         .route("/api/v1/execution/outbox", get(execution_outbox))
+        .route("/api/v1/execution/flow", get(execution_flow))
         .route(
             "/api/v1/execution/fill-quality",
             get(execution_fill_quality),
@@ -296,6 +301,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(execution_order_cancel),
         )
         .route("/api/v1/ops/action", post(ops_action))
+        .route(
+            "/api/v1/ops/repair/outbox-ambiguous",
+            post(repair_outbox_ambiguous),
+        )
         .route("/api/v1/alerts/triage/ack", post(alert_triage_ack))
         .route("/api/v1/incidents", post(create_incident))
         .route("/api/v1/incidents/:id/resolve", post(resolve_incident))

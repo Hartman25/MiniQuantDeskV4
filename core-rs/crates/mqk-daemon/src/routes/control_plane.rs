@@ -30,13 +30,28 @@ use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOut
 use crate::state::DeploymentMode;
 use crate::state::{AppState, BusMsg, RuntimeLifecycleError, DAEMON_ENGINE_ID};
 
-use super::helpers::{runtime_error_response, write_operator_audit_event};
+use super::helpers::{check_arm_safety, runtime_error_response, write_operator_audit_event};
 
 // ---------------------------------------------------------------------------
 // POST /v1/integrity/arm
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn integrity_arm(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+pub(crate) async fn integrity_arm(State(st): State<Arc<AppState>>) -> Response {
+    // CTRL-ARM-01: preflight before any state mutation.
+    if let Err((gate, blockers)) = check_arm_safety(&st, st.db.as_ref()).await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": format!("GATE_REFUSED: arm blocked by {gate}"),
+                "gate": gate,
+                "accepted": false,
+                "disposition": "refused",
+                "blockers": blockers,
+            })),
+        )
+            .into_response();
+    }
+
     {
         let mut ig = st.integrity.write().await;
         ig.disarmed = false;
@@ -207,6 +222,30 @@ pub(crate) async fn ops_action(
 
     match action_key {
         "arm-execution" | "arm-strategy" => {
+            // CTRL-ARM-01: preflight before any state mutation.
+            if let Err((gate, blockers)) = check_arm_safety(&st, st.db.as_ref()).await {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(OperatorActionResponse {
+                        requested_action: "control.arm".to_string(),
+                        accepted: false,
+                        disposition: "refused".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers,
+                        warnings: vec![format!("arm blocked by gate: {gate}")],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            }
             {
                 let mut ig = st.integrity.write().await;
                 ig.disarmed = false;

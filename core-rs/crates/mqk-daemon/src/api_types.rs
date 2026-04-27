@@ -901,6 +901,33 @@ pub struct OpsActionRequest {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/ops/repair/outbox-ambiguous — OPS-REPAIR-01
+// ---------------------------------------------------------------------------
+
+/// Request body for POST /api/v1/ops/repair/outbox-ambiguous.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboxRepairRequest {
+    /// Idempotency key of the AMBIGUOUS outbox row to release.
+    pub idempotency_key: String,
+}
+
+/// Response for POST /api/v1/ops/repair/outbox-ambiguous.
+#[derive(Debug, Clone, Serialize)]
+pub struct OutboxRepairResponse {
+    /// `true` if the row was released; `false` if refused.
+    pub accepted: bool,
+    /// `"released"` or `"refused"`.
+    pub decision: String,
+    pub idempotency_key: String,
+    /// Human-readable summary of the evidence or refusal reason.
+    pub evidence: String,
+    /// Refusal gate name if `accepted == false`.
+    pub gate: Option<String>,
+    /// Durable audit event UUID written for this action (if DB and run_id available).
+    pub audit_event_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/ops/catalog — canonical Action Catalog
 // ---------------------------------------------------------------------------
 
@@ -2410,6 +2437,74 @@ pub struct AlertAckRequest {
     pub alert_id: String,
     /// Optional operator identifier for audit trail. Defaults to "operator".
     pub acked_by: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// FLOW-01 / FLOW-03: Execution flow read model
+// ---------------------------------------------------------------------------
+
+/// One row in the execution flow read model assembled from existing durable
+/// tables: `oms_outbox`, `oms_order_lifecycle_events`, `fill_quality_telemetry`.
+///
+/// `row_id` is stable and deterministic across re-queries of the same event.
+/// `source_table` identifies which DB table the row was derived from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionFlowApiRow {
+    /// Stable deterministic row identifier. Never a UUIDv4.
+    /// Format varies by source: `"outbox:enqueued:{key}"`, `"lifecycle:{id}"`,
+    /// `"fill:{uuid}"`.
+    pub row_id: String,
+    /// RFC 3339 timestamp from the authoritative source column.
+    pub ts_utc: String,
+    /// Stage label. Examples: `"outbox_enqueued"`, `"outbox_claimed"`,
+    /// `"outbox_dispatching"`, `"broker_sent"`, `"broker_cancel_ack"`,
+    /// `"broker_partial_fill"`, `"broker_final_fill"`.
+    pub stage: String,
+    /// `"info"` | `"warn"` | `"error"`.
+    pub severity: String,
+    /// The durable run this event belongs to.
+    pub run_id: String,
+    /// Internal order identifier. For outbox rows this equals `idempotency_key`.
+    /// `None` when not derivable from the source row.
+    pub internal_order_id: Option<String>,
+    /// Broker-assigned order identifier. `None` until the broker acknowledges.
+    pub broker_order_id: Option<String>,
+    /// Ticker symbol. `None` for outbox lifecycle events where the symbol
+    /// is not stored in a dedicated column.
+    pub symbol: Option<String>,
+    /// Short operator-readable description of this event.
+    pub message: String,
+    /// Which durable table this row was assembled from.
+    pub source_table: String,
+}
+
+/// Response wrapper for `GET /api/v1/execution/flow`.
+///
+/// `truth_state`:
+/// - `"active"` — DB available, run context resolved; `rows` is authoritative.
+///   Empty `rows` means no flow events match the query — not absence of source.
+/// - `"no_active_run"` — DB available but no active run exists and no explicit
+///   `run_id` was provided. `rows` is empty and **not authoritative**.
+/// - `"no_db"` — no DB pool configured. `rows` is empty and not authoritative.
+///
+/// The operator must not interpret `"no_active_run"` or `"no_db"` as
+/// authoritative empty history.
+///
+/// Filters: `run_id` (UUID, optional), `order_id` (string, optional),
+/// `limit` (1–200, default 100).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionFlowResponse {
+    /// Self-identifying canonical route.
+    pub canonical_route: String,
+    /// `"active"` | `"no_active_run"` | `"no_db"`.
+    pub truth_state: String,
+    /// Durable sources joined. `"unavailable"` when truth_state is not `"active"`.
+    pub backend: String,
+    /// The run_id used for the query. `None` when truth_state is not `"active"`.
+    pub run_id: Option<String>,
+    /// Flow event rows, sorted oldest-first. At most `limit` rows (default 100,
+    /// max 200). Empty when truth_state is not `"active"` or when no events match.
+    pub rows: Vec<ExecutionFlowApiRow>,
 }
 
 /// Response for POST /api/v1/alerts/triage/ack.
