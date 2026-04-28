@@ -1811,3 +1811,172 @@ ul {
   opacity: 0.38;
   cursor: not-allowed;
 }
+
+/* ==========================================================================
+   Phase 5A — Dashboard + Execution screen polish
+   CSS-only. No logic, API, or data changes.
+   ========================================================================== */
+
+/* Screen-level vertical rhythm.
+   Generic screen-grid uses gap:16px which reads as consumer-app spaciousness.
+   Desk screens need tighter inter-section gaps to read as data-dense terminals. */
+.desk-screen-grid {
+  gap: 10px;
+}
+
+/* --- Execution: in-flight orders table (left) + detail side-stack (right) ---
+   Without this class both collapse to full-width stacked blocks. */
+.execution-main-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+/* Execution side-stack: selected order summary + timeline status + chain inspector. */
+.execution-side-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* --- Execution: chart+trace pairs side by side ---
+   ExecutionChartPanel + ExecutionTraceViewer, and
+   ExecutionReplayViewer + CausalityTraceViewer.
+   Without this class all four panels stack vertically. */
+.desk-component-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+
+/* --- ExecutionFlowPanel: filter bar --- */
+
+.flow-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.flow-filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.flow-filter-field span {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.flow-filter-input,
+.flow-filter-select {
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: rgba(10, 10, 10, 0.9);
+  color: var(--text);
+  font-size: 0.82rem;
+  min-width: 200px;
+}
+
+.flow-filter-input:focus,
+.flow-filter-select:focus {
+  outline: none;
+  border-color: rgba(245, 166, 35, 0.45);
+}
+
+.flow-filter-select {
+  min-width: 80px;
+  cursor: pointer;
+}
+
+/* --- Severity badge (ExecutionFlowPanel rows) --- */
+
+.severity-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.severity-badge.severity-error {
+  border-color: rgba(239, 68, 68, 0.45);
+  color: rgba(239, 68, 68, 0.9);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.severity-badge.severity-warn {
+  border-color: rgba(245, 158, 11, 0.45);
+  color: rgba(245, 158, 11, 0.9);
+  background: rgba(245, 158, 11, 0.06);
+}
+
+.severity-badge.severity-info {
+  border-color: rgba(59, 130, 246, 0.35);
+  color: rgba(59, 130, 246, 0.85);
+  background: rgba(59, 130, 246, 0.06);
+}
+
+/* --- Dashboard: desk monitor strip (Desk setup tab) --- */
+
+.desk-monitor-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.desk-monitor-card {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(12, 12, 12, 0.90);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.desk-monitor-card.optional-monitor {
+  border-style: dashed;
+  opacity: 0.75;
+}
+
+.desk-monitor-card strong {
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.desk-monitor-card p {
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* --- Responsive: collapse execution side-by-side layouts on narrow viewports --- */
+
+@media (max-width: 1400px) {
+  .execution-main-grid {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+}
+
+@media (max-width: 1180px) {
+  .execution-main-grid,
+  .desk-component-grid,
+  .desk-monitor-strip {
+    grid-template-columns: 1fr;
+  }
+}
