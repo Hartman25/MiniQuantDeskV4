@@ -500,7 +500,12 @@ async fn fl_11_real_outbox_row_appears_via_run_id() {
 
     fl_cleanup_run(&pool, run_id).await;
 
-    assert_eq!(status, StatusCode::OK, "FL-11: must return 200; body: {}", String::from_utf8_lossy(&body));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "FL-11: must return 200; body: {}",
+        String::from_utf8_lossy(&body)
+    );
 
     let json = parse_json(body);
 
@@ -513,18 +518,54 @@ async fn fl_11_real_outbox_row_appears_via_run_id() {
         "FL-11: canonical_route must be self-identifying; got: {json}"
     );
 
-    let rows = json["rows"].as_array().expect("FL-11: rows must be an array");
-    assert!(!rows.is_empty(), "FL-11: rows must not be empty when outbox row was seeded; got: {json}");
+    let rows = json["rows"]
+        .as_array()
+        .expect("FL-11: rows must be an array");
+    assert!(
+        !rows.is_empty(),
+        "FL-11: rows must not be empty when outbox row was seeded; got: {json}"
+    );
 
     let row = &rows[0];
-    assert_eq!(row["stage"], "outbox_enqueued", "FL-11: stage must be 'outbox_enqueued'; got: {row}");
-    assert_eq!(row["source_table"], "oms_outbox", "FL-11: source_table must be 'oms_outbox'; got: {row}");
-    assert_eq!(row["severity"], "info", "FL-11: severity must be 'info'; got: {row}");
-    assert!(row["row_id"].as_str().unwrap_or("").starts_with("outbox:enqueued:"), "FL-11: row_id must start with 'outbox:enqueued:'; got: {row}");
-    assert!(row["ts_utc"].is_string(), "FL-11: ts_utc must be a string; got: {row}");
-    assert_eq!(row["internal_order_id"], "fl11-order-001", "FL-11: internal_order_id mismatch; got: {row}");
-    assert_eq!(row["run_id"].as_str().unwrap_or(""), run_id.to_string(), "FL-11: run_id mismatch; got: {row}");
-    assert!(row["message"].as_str().unwrap_or("").contains("Outbox enqueued"), "FL-11: message must mention 'Outbox enqueued'; got: {row}");
+    assert_eq!(
+        row["stage"], "outbox_enqueued",
+        "FL-11: stage must be 'outbox_enqueued'; got: {row}"
+    );
+    assert_eq!(
+        row["source_table"], "oms_outbox",
+        "FL-11: source_table must be 'oms_outbox'; got: {row}"
+    );
+    assert_eq!(
+        row["severity"], "info",
+        "FL-11: severity must be 'info'; got: {row}"
+    );
+    assert!(
+        row["row_id"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("outbox:enqueued:"),
+        "FL-11: row_id must start with 'outbox:enqueued:'; got: {row}"
+    );
+    assert!(
+        row["ts_utc"].is_string(),
+        "FL-11: ts_utc must be a string; got: {row}"
+    );
+    assert_eq!(
+        row["internal_order_id"], "fl11-order-001",
+        "FL-11: internal_order_id mismatch; got: {row}"
+    );
+    assert_eq!(
+        row["run_id"].as_str().unwrap_or(""),
+        run_id.to_string(),
+        "FL-11: run_id mismatch; got: {row}"
+    );
+    assert!(
+        row["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Outbox enqueued"),
+        "FL-11: message must mention 'Outbox enqueued'; got: {row}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -575,18 +616,44 @@ async fn fl_12_real_lifecycle_row_appears_via_run_id() {
     assert_eq!(status, StatusCode::OK, "FL-12: must return 200");
 
     let json = parse_json(body);
-    assert_eq!(json["truth_state"], "active", "FL-12: truth_state must be 'active'; got: {json}");
+    assert_eq!(
+        json["truth_state"], "active",
+        "FL-12: truth_state must be 'active'; got: {json}"
+    );
 
     let rows = json["rows"].as_array().expect("FL-12: rows must be array");
-    assert!(!rows.is_empty(), "FL-12: rows must not be empty when lifecycle row was seeded; got: {json}");
+    assert!(
+        !rows.is_empty(),
+        "FL-12: rows must not be empty when lifecycle row was seeded; got: {json}"
+    );
 
-    let row = rows.iter().find(|r| r["source_table"] == "oms_order_lifecycle_events")
+    let row = rows
+        .iter()
+        .find(|r| r["source_table"] == "oms_order_lifecycle_events")
         .expect("FL-12: no row with source_table=oms_order_lifecycle_events found");
-    assert_eq!(row["stage"], "broker_cancel_ack", "FL-12: stage must be 'broker_cancel_ack'; got: {row}");
-    assert_eq!(row["severity"], "info", "FL-12: severity must be 'info'; got: {row}");
-    assert!(row["row_id"].as_str().unwrap_or("").starts_with("lifecycle:"), "FL-12: row_id must start with 'lifecycle:'; got: {row}");
-    assert_eq!(row["internal_order_id"], "fl12-order-001", "FL-12: internal_order_id mismatch; got: {row}");
-    assert_eq!(row["broker_order_id"], "broker-fl12-001", "FL-12: broker_order_id mismatch; got: {row}");
+    assert_eq!(
+        row["stage"], "broker_cancel_ack",
+        "FL-12: stage must be 'broker_cancel_ack'; got: {row}"
+    );
+    assert_eq!(
+        row["severity"], "info",
+        "FL-12: severity must be 'info'; got: {row}"
+    );
+    assert!(
+        row["row_id"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("lifecycle:"),
+        "FL-12: row_id must start with 'lifecycle:'; got: {row}"
+    );
+    assert_eq!(
+        row["internal_order_id"], "fl12-order-001",
+        "FL-12: internal_order_id mismatch; got: {row}"
+    );
+    assert_eq!(
+        row["broker_order_id"], "broker-fl12-001",
+        "FL-12: broker_order_id mismatch; got: {row}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -650,19 +717,42 @@ async fn fl_13_real_fill_row_appears_via_run_id() {
     assert_eq!(status, StatusCode::OK, "FL-13: must return 200");
 
     let json = parse_json(body);
-    assert_eq!(json["truth_state"], "active", "FL-13: truth_state must be 'active'; got: {json}");
+    assert_eq!(
+        json["truth_state"], "active",
+        "FL-13: truth_state must be 'active'; got: {json}"
+    );
 
     let rows = json["rows"].as_array().expect("FL-13: rows must be array");
-    assert!(!rows.is_empty(), "FL-13: rows must not be empty when fill row was seeded; got: {json}");
+    assert!(
+        !rows.is_empty(),
+        "FL-13: rows must not be empty when fill row was seeded; got: {json}"
+    );
 
-    let row = rows.iter().find(|r| r["source_table"] == "fill_quality_telemetry")
+    let row = rows
+        .iter()
+        .find(|r| r["source_table"] == "fill_quality_telemetry")
         .expect("FL-13: no row with source_table=fill_quality_telemetry found");
-    assert_eq!(row["stage"], "broker_final_fill", "FL-13: stage must be 'broker_final_fill'; got: {row}");
-    assert_eq!(row["severity"], "info", "FL-13: severity must be 'info'; got: {row}");
-    assert!(row["row_id"].as_str().unwrap_or("").starts_with("fill:"), "FL-13: row_id must start with 'fill:'; got: {row}");
-    assert_eq!(row["internal_order_id"], "fl13-order-001", "FL-13: internal_order_id mismatch; got: {row}");
+    assert_eq!(
+        row["stage"], "broker_final_fill",
+        "FL-13: stage must be 'broker_final_fill'; got: {row}"
+    );
+    assert_eq!(
+        row["severity"], "info",
+        "FL-13: severity must be 'info'; got: {row}"
+    );
+    assert!(
+        row["row_id"].as_str().unwrap_or("").starts_with("fill:"),
+        "FL-13: row_id must start with 'fill:'; got: {row}"
+    );
+    assert_eq!(
+        row["internal_order_id"], "fl13-order-001",
+        "FL-13: internal_order_id mismatch; got: {row}"
+    );
     assert_eq!(row["symbol"], "NVDA", "FL-13: symbol mismatch; got: {row}");
-    assert!(row["message"].as_str().unwrap_or("").contains("NVDA"), "FL-13: message must mention symbol; got: {row}");
+    assert!(
+        row["message"].as_str().unwrap_or("").contains("NVDA"),
+        "FL-13: message must mention symbol; got: {row}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -717,10 +807,16 @@ async fn fl_14_order_id_filter_returns_only_matching_row() {
     assert_eq!(status, StatusCode::OK, "FL-14: must return 200");
 
     let json = parse_json(body);
-    assert_eq!(json["truth_state"], "active", "FL-14: truth_state must be 'active'; got: {json}");
+    assert_eq!(
+        json["truth_state"], "active",
+        "FL-14: truth_state must be 'active'; got: {json}"
+    );
 
     let rows = json["rows"].as_array().expect("FL-14: rows must be array");
-    assert!(!rows.is_empty(), "FL-14: rows must not be empty; got: {json}");
+    assert!(
+        !rows.is_empty(),
+        "FL-14: rows must not be empty; got: {json}"
+    );
 
     for row in rows {
         assert_eq!(
@@ -775,7 +871,10 @@ async fn fl_15_limit_enforced_against_real_db_rows() {
     assert_eq!(status, StatusCode::OK, "FL-15: must return 200");
 
     let json = parse_json(body);
-    assert_eq!(json["truth_state"], "active", "FL-15: truth_state must be 'active'; got: {json}");
+    assert_eq!(
+        json["truth_state"], "active",
+        "FL-15: truth_state must be 'active'; got: {json}"
+    );
 
     let rows = json["rows"].as_array().expect("FL-15: rows must be array");
     assert_eq!(

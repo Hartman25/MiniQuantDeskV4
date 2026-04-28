@@ -248,7 +248,7 @@ pub fn alpaca_event_ts_ms_from_message_id(broker_message_id: &str) -> i64 {
         (Some("alpaca"), Some(_order_id), Some(_event_type), Some(ts)) => {
             chrono::DateTime::parse_from_rfc3339(ts)
                 .ok()
-                .map(|dt| dt.timestamp_millis())
+                .map(|dt| dt.timestamp_millis()) // allow: ops-metadata — converts broker-provided RFC3339 event ts to epoch ms; not wall-clock
                 .unwrap_or(0)
         }
         _ => 0,
