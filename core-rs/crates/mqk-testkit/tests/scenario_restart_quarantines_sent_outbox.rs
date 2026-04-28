@@ -212,7 +212,9 @@ async fn restart_quarantines_legacy_sent_row_without_broker_map_and_refuses_disp
     .await?;
     assert!(created, "outbox row must be created");
 
-    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "patch2-dispatcher", Utc::now()).await?;
+    let claimed =
+        mqk_db::outbox_claim_batch_for_run(&pool, run_id, 1, "patch2-dispatcher", Utc::now())
+            .await?;
     assert_eq!(claimed.len(), 1, "must claim the pending row");
 
     // Forge a legacy/corrupt SENT row without broker_map durability.

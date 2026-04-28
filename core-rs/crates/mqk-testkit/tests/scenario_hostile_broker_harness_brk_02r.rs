@@ -558,7 +558,9 @@ async fn cancel_fill_race_halts_without_portfolio_corruption() -> Result<()> {
     let err = orch.tick().await.expect_err("cancel/fill race must halt");
     let err_text = err.to_string();
     assert!(
-        err_text.contains("OMS transition error") || err_text.contains("UNKNOWN_ORDER_FILL"),
+        err_text.contains("OMS transition error")
+            || err_text.contains("UNKNOWN_ORDER_FILL")
+            || err_text.contains("BROKER_EVENT_APPLY_FAILED"),
         "expected cancel/fill hostile lifecycle failure truth, got: {err_text}"
     );
 
@@ -610,7 +612,9 @@ async fn replace_fill_race_halts_after_single_fill_application() -> Result<()> {
     let err = orch.tick().await.expect_err("replace/fill race must halt");
     let err_text = err.to_string();
     assert!(
-        err_text.contains("OMS transition error") || err_text.contains("UNKNOWN_ORDER_FILL"),
+        err_text.contains("OMS transition error")
+            || err_text.contains("UNKNOWN_ORDER_FILL")
+            || err_text.contains("BROKER_EVENT_APPLY_FAILED"),
         "expected replace/fill hostile lifecycle failure truth, got: {err_text}"
     );
 

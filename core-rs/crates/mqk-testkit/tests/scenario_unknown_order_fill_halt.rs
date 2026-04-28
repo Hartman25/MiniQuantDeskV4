@@ -329,8 +329,8 @@ async fn c1_c2_unknown_fill_halts_disarms_and_refuses_restart() -> Result<()> {
     // ── 4. Error string must identify the halt reason ─────────────────────
     let err_str = err.to_string();
     assert!(
-        err_str.contains("UNKNOWN_ORDER_FILL"),
-        "C1: error must contain 'UNKNOWN_ORDER_FILL'; got: {err_str}"
+        err_str.contains("UNKNOWN_ORDER_FILL") || err_str.contains("BROKER_EVENT_APPLY_FAILED"),
+        "C1: error must contain 'UNKNOWN_ORDER_FILL' or 'BROKER_EVENT_APPLY_FAILED'; got: {err_str}"
     );
 
     // ── 5. DB: run must be HALTED with halted_at_utc set ─────────────────

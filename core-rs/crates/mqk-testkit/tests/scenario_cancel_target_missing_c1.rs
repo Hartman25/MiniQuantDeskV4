@@ -385,6 +385,7 @@ mod db_tests {
         );
 
         cleanup_run(&pool, run_id).await?;
+        reset_c1_runtime_lease(&pool).await?;
         Ok(())
     }
 }
