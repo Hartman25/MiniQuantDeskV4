@@ -5,6 +5,13 @@ import { formatDateTime, formatLabel, formatNumber } from "../../lib/format";
 import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
+function checkpointStatusClass(status: string): string {
+  if (status === "ok") return "state-ok";
+  if (status === "critical") return "state-critical";
+  if (status === "warning") return "state-warning";
+  return "val-muted";
+}
+
 export function RuntimeScreen({ model }: { model: SystemModel }) {
   const runtime = model.runtimeLeadership;
   const truthState = panelTruthRenderState(model, "runtime");
@@ -80,7 +87,11 @@ export function RuntimeScreen({ model }: { model: SystemModel }) {
             </div>
             <div>
               <span>Lease state</span>
-              <strong className={leadershipClean ? "state-ok" : "state-warning"}>
+              <strong className={
+                runtime.leader_lease_state === "held" ? "state-ok" :
+                runtime.leader_lease_state === "lost" ? "state-critical" :
+                "state-warning"
+              }>
                 {formatLabel(runtime.leader_lease_state)}
               </strong>
             </div>
@@ -105,7 +116,11 @@ export function RuntimeScreen({ model }: { model: SystemModel }) {
             </div>
             <div>
               <span>Recovery state</span>
-              <strong className={recoveryClean ? "state-ok" : "state-warning"}>
+              <strong className={
+                runtime.post_restart_recovery_state === "complete" ? "state-ok" :
+                runtime.post_restart_recovery_state === "degraded" ? "state-critical" :
+                "state-warning"
+              }>
                 {formatLabel(runtime.post_restart_recovery_state)}
               </strong>
             </div>
@@ -127,8 +142,8 @@ export function RuntimeScreen({ model }: { model: SystemModel }) {
           rowKey={(row) => row.checkpoint_id}
           columns={[
             { key: "timestamp", title: "Timestamp", render: (row) => formatDateTime(row.timestamp) },
-            { key: "type", title: "Event", render: (row) => formatLabel(row.checkpoint_type) },
-            { key: "status", title: "Status", render: (row) => formatLabel(row.status) },
+            { key: "type", title: "Event", render: (row) => <span className={`checkpoint-type-badge checkpoint-type-${row.checkpoint_type}`}>{formatLabel(row.checkpoint_type)}</span> },
+            { key: "status", title: "Status", render: (row) => <span className={checkpointStatusClass(row.status)}>{formatLabel(row.status)}</span> },
             { key: "generation", title: "Generation", render: (row) => row.generation_id },
             { key: "leader", title: "Leader Node", render: (row) => row.leader_node },
             { key: "note", title: "Note", render: (row) => row.note },

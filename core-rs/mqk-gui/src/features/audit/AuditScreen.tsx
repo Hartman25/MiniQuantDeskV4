@@ -6,6 +6,19 @@ import { formatDateTime } from "../../lib/format";
 import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
+function resultStateClass(result: string): string {
+  if (result === "ok" || result === "success") return "state-ok";
+  if (result === "blocked" || result === "denied" || result === "rejected" || result === "error" || result === "failed") return "state-critical";
+  if (result === "partial" || result === "warn") return "state-warning";
+  return "val-muted";
+}
+
+function feedSeverityClass(severity: string): string {
+  if (severity === "critical") return "state-critical";
+  if (severity === "warning") return "state-warning";
+  return "";
+}
+
 export function AuditScreen({ model }: { model: SystemModel }) {
   const truthState = panelTruthRenderState(model, "audit");
 
@@ -28,12 +41,12 @@ export function AuditScreen({ model }: { model: SystemModel }) {
           rowKey={(row) => row.audit_ref}
           columns={[
             { key: "at", title: "At", render: (row) => formatDateTime(row.at) },
-            { key: "actor", title: "Actor", render: (row) => row.actor },
+            { key: "actor", title: "Actor", render: (row) => row.actor ?? "—" },
             { key: "action", title: "Action", render: (row) => row.action_key },
-            { key: "environment", title: "Environment", render: (row) => row.environment },
-            { key: "scope", title: "Scope", render: (row) => row.target_scope },
-            { key: "result", title: "Result", render: (row) => row.result_state },
-            { key: "warnings", title: "Warnings", render: (row) => row.warnings.join(", ") || "—" },
+            { key: "environment", title: "Env", render: (row) => row.environment ?? "—" },
+            { key: "scope", title: "Scope", render: (row) => row.target_scope ?? "—" },
+            { key: "result", title: "Result", render: (row) => <span className={resultStateClass(row.result_state)}>{row.result_state}</span> },
+            { key: "warnings", title: "Warnings", render: (row) => row.warnings.length > 0 ? <span className="state-warning">{row.warnings.join(", ")}</span> : "—" },
           ]}
         />
       </Panel>
@@ -44,7 +57,7 @@ export function AuditScreen({ model }: { model: SystemModel }) {
           rowKey={(row) => row.id}
           columns={[
             { key: "at", title: "At", render: (row) => formatDateTime(row.at) },
-            { key: "severity", title: "Severity", render: (row) => row.severity },
+            { key: "severity", title: "Sev", render: (row) => <span className={feedSeverityClass(row.severity)}>{row.severity}</span> },
             { key: "source", title: "Source", render: (row) => row.source },
             { key: "text", title: "Text", render: (row) => row.text },
           ]}

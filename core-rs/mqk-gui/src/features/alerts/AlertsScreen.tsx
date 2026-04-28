@@ -109,7 +109,7 @@ export function AlertsScreen({ model }: { model: SystemModel }) {
                       {" — "}
                       {row.title}
                     </strong>
-                    <span className="operator-timeline-meta">{row.domain}</span>
+                    <span className="alert-domain-badge">{row.domain}</span>
                   </div>
                   <div className="operator-timeline-meta">
                     <span>
@@ -182,7 +182,7 @@ export function AlertsScreen({ model }: { model: SystemModel }) {
         }
       >
         {model.dataSource.missingEndpoints.includes(FEED_ENDPOINT) ? (
-          <div className="unavailable-notice">
+          <div className="unavailable-notice unavailable-critical">
             Events feed backend unavailable. Empty feed is NOT authoritative — do not read as "no events".
           </div>
         ) : model.feed.length === 0 ? (
@@ -194,7 +194,7 @@ export function AlertsScreen({ model }: { model: SystemModel }) {
             columns={[
               { key: "at", title: "At", render: (row) => formatDateTime(row.at) },
               { key: "source", title: "Source", render: (row) => row.source },
-              { key: "severity", title: "Severity", render: (row) => row.severity },
+              { key: "severity", title: "Severity", render: (row) => <span className={severityStyle(row.severity)}>{row.severity}</span> },
               { key: "text", title: "Event", render: (row) => row.text },
             ]}
           />

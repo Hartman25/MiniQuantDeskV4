@@ -2182,3 +2182,84 @@ ul {
 .drift-row-clean {
   border-left: 3px solid rgba(34, 197, 94, 0.32) !important;
 }
+
+/* ==========================================================================
+   Phase 5D — Audit + Alerts + Runtime/System screen polish
+   CSS additions only. No API, data, contract, or behavior changes.
+   ========================================================================== */
+
+/* --- Alerts: domain badge in action-required triage cards ---
+   Replaces plain muted text on the right side of the card head with a
+   compact uppercase tag, consistent with source-authority-badge language. */
+.alert-domain-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  background: rgba(12, 12, 12, 0.88);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* --- Alerts: fail-closed feed unavailable notice ---
+   The events feed is fail-closed (api.ts places the endpoint in
+   missingEndpoints when backend is unreachable). An empty feed must
+   not look authoritative. Critical red makes this explicit. */
+.unavailable-notice.unavailable-critical {
+  border-color: rgba(239, 68, 68, 0.40);
+  background: rgba(239, 68, 68, 0.04);
+  color: rgba(248, 113, 113, 0.92);
+}
+
+/* --- Runtime: checkpoint event-type badge ---
+   Applied as checkpoint-type-badge + checkpoint-type-{type} on the
+   Event column of the checkpoint timeline DataTable. */
+.checkpoint-type-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: rgba(10, 10, 10, 0.80);
+}
+
+/* restart — red: abnormal event, warrants investigation */
+.checkpoint-type-restart {
+  border-color: rgba(239, 68, 68, 0.38);
+  color: rgba(248, 113, 113, 0.90);
+}
+
+/* leader_lost — amber: leadership continuity interrupted */
+.checkpoint-type-leader_lost {
+  border-color: rgba(245, 158, 11, 0.38);
+  color: rgba(245, 166, 35, 0.88);
+}
+
+/* leader_acquired — green: continuity re-established */
+.checkpoint-type-leader_acquired {
+  border-color: rgba(34, 197, 94, 0.32);
+  color: rgba(34, 197, 94, 0.85);
+}
+
+/* recovery_complete — green: post-restart recovery confirmed */
+.checkpoint-type-recovery_complete {
+  border-color: rgba(34, 197, 94, 0.38);
+  color: rgba(34, 197, 94, 0.90);
+}
+
+/* snapshot_refresh — blue: informational, routine maintenance */
+.checkpoint-type-snapshot_refresh {
+  border-color: rgba(59, 130, 246, 0.30);
+  color: rgba(96, 165, 250, 0.85);
+}
