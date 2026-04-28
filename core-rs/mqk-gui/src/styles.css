@@ -1980,3 +1980,59 @@ ul {
     grid-template-columns: 1fr;
   }
 }
+
+/* ==========================================================================
+   Phase 5B — Portfolio + Risk screen polish
+   CSS additions only. No logic, API, data, or calculation changes.
+   ========================================================================== */
+
+/* --- Table column-count variants ---
+   Base .table-row uses repeat(3, 1fr). .table-cols-N on the parent
+   .table-grid overrides the column layout for the actual column count. */
+.table-cols-2 .table-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.table-cols-3 .table-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.table-cols-4 .table-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.table-cols-5 .table-row { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.table-cols-6 .table-row { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.table-cols-7 .table-row { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.table-cols-8 .table-row { grid-template-columns: repeat(8, minmax(0, 1fr)); }
+
+/* --- Panel header inset ---
+   Without this the panel title h3 is flush against the panel border edge. */
+.panel-header {
+  padding: 10px 14px 0;
+}
+
+/* --- Semantic value tokens ---
+   Used by PortfolioScreen and RiskScreen render functions for directional
+   and state-dependent values. Green/red only applied where semantically
+   meaningful (pnl, drift, halt state, breach count). */
+.val-positive { color: var(--success); font-weight: 600; }
+.val-negative { color: var(--critical); font-weight: 600; }
+.val-ok       { color: var(--success); }
+.val-warn     { color: var(--warning); }
+.val-critical { color: var(--critical); font-weight: 700; }
+.val-muted    { color: var(--muted); }
+
+/* Conventional terminal side coloring: buy = green, sell = red */
+.side-buy  { color: var(--success); font-weight: 600; letter-spacing: 0.03em; }
+.side-sell { color: var(--critical); font-weight: 600; letter-spacing: 0.03em; }
+
+/* --- Portfolio: 3-panel secondary row (Orders / Fills / Notes) ---
+   Replaces the 2-col secondary so Portfolio Notes sits beside Open Orders
+   and Recent Fills instead of wrapping to a half-width orphan row. */
+.desk-panel-grid-thirds {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 1400px) {
+  .desk-panel-grid-thirds {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1180px) {
+  .desk-panel-grid-thirds {
+    grid-template-columns: 1fr;
+  }
+}

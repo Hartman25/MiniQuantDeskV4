@@ -50,14 +50,24 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
               { key: "qty", title: "Qty", render: (row) => row.qty },
               { key: "avg", title: "Avg", render: (row) => formatMoney(row.avg_price) },
               { key: "mark", title: "Mark", render: (row) => formatMoney(row.mark_price ?? null) },
-              { key: "u", title: "Unrealized", render: (row) => formatMoney(row.unrealized_pnl ?? null) },
-              { key: "drift", title: "Drift", render: (row) => (row.drift == null ? "—" : row.drift ? "Yes" : "No") },
+              { key: "u", title: "Unrealized", render: (row) => {
+                const v = row.unrealized_pnl ?? null;
+                const s = formatMoney(v);
+                if (v == null) return s;
+                if (v < 0) return <span className="val-negative">{s}</span>;
+                if (v > 0) return <span className="val-positive">{s}</span>;
+                return s;
+              }},
+              { key: "drift", title: "Drift", render: (row) => {
+                if (row.drift == null) return "—";
+                return row.drift ? <span className="val-critical">Yes</span> : <span className="val-ok">No</span>;
+              }},
             ]}
           />
         </Panel>
       </div>
 
-      <div className="desk-panel-grid desk-panel-grid-secondary">
+      <div className="desk-panel-grid desk-panel-grid-thirds">
         <Panel title="Open Orders">
           <DataTable
             rows={model.openOrders}
@@ -78,7 +88,7 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
             columns={[
               { key: "at", title: "At", render: (row) => formatDateTime(row.at) },
               { key: "symbol", title: "Symbol", render: (row) => row.symbol },
-              { key: "side", title: "Side", render: (row) => row.side },
+              { key: "side", title: "Side", render: (row) => <span className={row.side === "buy" ? "side-buy" : "side-sell"}>{row.side}</span> },
               { key: "qty", title: "Qty", render: (row) => row.qty },
               { key: "price", title: "Price", render: (row) => formatMoney(row.price) },
             ]}
@@ -115,7 +125,7 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
               rowKey={(row) => row.telemetry_id}
               columns={[
                 { key: "symbol", title: "Symbol", render: (row) => row.symbol },
-                { key: "side", title: "Side", render: (row) => row.side },
+                { key: "side", title: "Side", render: (row) => <span className={row.side === "buy" ? "side-buy" : "side-sell"}>{row.side}</span> },
                 { key: "kind", title: "Kind", render: (row) => row.fill_kind },
                 { key: "qty", title: "Fill/Ordered", render: (row) => `${row.fill_qty}/${row.ordered_qty}` },
                 { key: "price", title: "Fill Price", render: (row) => formatMicros(row.fill_price_micros) },
@@ -146,7 +156,7 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
                 { key: "at", title: "At", render: (row) => formatDateTime(row.ts_utc) },
                 { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
                 { key: "symbol", title: "Symbol", render: (row) => row.symbol },
-                { key: "side", title: "Side", render: (row) => row.side },
+                { key: "side", title: "Side", render: (row) => <span className={row.side === "buy" ? "side-buy" : "side-sell"}>{row.side}</span> },
                 { key: "qty", title: "Qty", render: (row) => String(row.qty) },
                 { key: "signal", title: "Signal ID", render: (row) => row.signal_id },
               ]}

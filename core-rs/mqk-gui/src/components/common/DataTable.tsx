@@ -8,7 +8,7 @@ export interface DataTableColumn<T> {
 
 export function DataTable<T>({ rows, columns, rowKey }: { rows: T[]; columns: DataTableColumn<T>[]; rowKey: (row: T) => string }) {
   return (
-    <div className="table-grid">
+    <div className={`table-grid table-cols-${columns.length}`}>
       <div className="table-row table-head">
         {columns.map((column) => (
           <span key={column.key}>{column.title}</span>

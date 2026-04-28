@@ -41,12 +41,12 @@ export function RiskScreen({ model }: { model: SystemModel }) {
           Armed/disarmed and live routing are on Ops; runtime health is on Dashboard. */}
       <Panel title="Breach and halt posture" subtitle="Risk-triggered hard stops, loss limits, and breach counts. Not system arm state.">
         <div className="metric-list">
-          <div><span>Daily PnL</span><strong>{formatMoney(r.daily_pnl)}</strong></div>
-          <div><span>Drawdown</span><strong>{formatPercent(r.drawdown_pct)}</strong></div>
-          <div><span>Kill switch</span><strong>{r.kill_switch_active ? "Active" : "Inactive"}</strong></div>
-          <div><span>Active breaches</span><strong>{r.active_breaches}</strong></div>
-          <div><span>Risk halt</span><strong>{model.status.risk_halt_active ? "Active" : "Clear"}</strong></div>
-          <div><span>Integrity halt</span><strong>{model.status.integrity_halt_active ? "Active" : "Clear"}</strong></div>
+          <div><span>Daily PnL</span><strong className={r.daily_pnl < 0 ? "val-negative" : r.daily_pnl > 0 ? "val-positive" : ""}>{formatMoney(r.daily_pnl)}</strong></div>
+          <div><span>Drawdown</span><strong className={r.drawdown_pct > 15 ? "val-critical" : r.drawdown_pct > 8 ? "val-warn" : ""}>{formatPercent(r.drawdown_pct)}</strong></div>
+          <div><span>Kill switch</span><strong className={r.kill_switch_active ? "val-critical" : "val-ok"}>{r.kill_switch_active ? "Active" : "Inactive"}</strong></div>
+          <div><span>Active breaches</span><strong className={r.active_breaches > 0 ? "val-critical" : "val-ok"}>{r.active_breaches}</strong></div>
+          <div><span>Risk halt</span><strong className={model.status.risk_halt_active ? "val-critical" : "val-ok"}>{model.status.risk_halt_active ? "Active" : "Clear"}</strong></div>
+          <div><span>Integrity halt</span><strong className={model.status.integrity_halt_active ? "val-critical" : "val-ok"}>{model.status.integrity_halt_active ? "Active" : "Clear"}</strong></div>
         </div>
       </Panel>
 
