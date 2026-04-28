@@ -42,7 +42,7 @@ function dataSourceSummary(dataSource?: DataSourceDetail): string {
   if (!dataSource) return "daemon status unknown";
   if (dataSource.state === "disconnected") return "daemon unreachable";
   if (dataSource.state === "mock") return "mock fallback active";
-  return `${dataSource.realEndpoints.length} real / ${dataSource.missingEndpoints.length} missing`;
+  return `${dataSource.realEndpoints.length} real / ${dataSource.missingEndpoints.length} unavailable`;
 }
 
 export function GlobalStatusBar({ status, dataSource }: GlobalStatusBarProps) {
@@ -103,7 +103,7 @@ export function GlobalStatusBar({ status, dataSource }: GlobalStatusBarProps) {
           <span className="metric-value">{dataSourceSummary(dataSource)}</span>
         </div>
         <div className="status-metric">
-          <span className="metric-label">Missing</span>
+          <span className="metric-label">Unavailable</span>
           <span className="metric-value">
             {dataSource && dataSource.missingEndpoints.length > 0 ? dataSource.missingEndpoints.slice(0, 2).join(", ") : "—"}
           </span>
