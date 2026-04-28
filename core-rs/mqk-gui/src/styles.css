@@ -1585,3 +1585,203 @@ ul {
     grid-template-columns: 1fr;
   }
 }
+
+/* ==========================================================================
+   Phase 3 — Shared component redesign
+   Institutional terminal aesthetic. CSS-only — no logic or contract changes.
+   Charts deferred to Phase 4. Screen-by-screen polish deferred to Phase 5.
+   ========================================================================== */
+
+/* Shadow token: flatten the heavy consumer shadow to a terminal-appropriate value */
+:root {
+  --shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+/* === Panels === */
+
+/* .panel-header.compact was margin-bottom:12px — larger than base 10px, wrong direction.
+   Compact must be tighter, not looser. */
+.panel-header.compact {
+  margin-bottom: 8px;
+}
+
+/* === Stat / metric cards — compact density === */
+
+.summary-card {
+  padding: 10px 14px;
+}
+
+.summary-value {
+  font-size: 1.15rem;
+  margin-top: 4px;
+}
+
+.summary-detail {
+  font-size: 0.75rem;
+  margin-top: 3px;
+}
+
+/* Stat tone: left-accent edge for stronger at-a-glance severity signal */
+.stat-good { border-left: 2px solid rgba(34, 197, 94, 0.55); }
+.stat-warn { border-left: 2px solid rgba(245, 158, 11, 0.55); }
+.stat-bad  { border-left: 2px solid rgba(239, 68, 68, 0.55); }
+
+/* === Status pills — tone-specific value colors (previously only border-color) === */
+
+.status-pill.tone-neutral  .status-pill-value { color: var(--text); }
+.status-pill.tone-good     .status-pill-value { color: var(--success); }
+.status-pill.tone-ok       .status-pill-value { color: var(--success); }
+.status-pill.tone-warn     .status-pill-value { color: var(--warning); }
+.status-pill.tone-warning  .status-pill-value { color: var(--warning); }
+.status-pill.tone-bad      .status-pill-value,
+.status-pill.tone-critical .status-pill-value { color: var(--critical); }
+.status-pill.tone-info     .status-pill-value { color: var(--info); }
+
+/* === Truth state banners — tighter radius, active variant === */
+
+.truth-state-banner {
+  border-radius: 3px;
+  padding: 6px 10px;
+}
+
+.truth-state-banner.truth-state-active {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.05);
+}
+
+.truth-state-banner.truth-state-active strong {
+  color: var(--success);
+}
+
+/* === Truth state notices — add visual presence; previously unstyled (only muted text) === */
+
+.truth-state-notice {
+  padding: 12px 14px;
+  border-radius: 3px;
+  border: 1px solid rgba(245, 158, 11, 0.22);
+  background: rgba(245, 158, 11, 0.03);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.truth-state-notice strong {
+  color: var(--warning);
+}
+
+/* degraded + no_snapshot: execution/OMS truth is compromised — critical red */
+.truth-state-notice.truth-state-degraded,
+.truth-state-notice.truth-state-no_snapshot {
+  border-color: rgba(239, 68, 68, 0.22);
+  background: rgba(239, 68, 68, 0.03);
+}
+
+.truth-state-notice.truth-state-degraded strong,
+.truth-state-notice.truth-state-no_snapshot strong {
+  color: var(--critical);
+}
+
+/* unimplemented + not_wired: expected placeholder states — neutral, not alarming */
+.truth-state-notice.truth-state-unimplemented,
+.truth-state-notice.truth-state-not_wired {
+  border-color: var(--border);
+  background: rgba(12, 12, 12, 0.7);
+}
+
+.truth-state-notice.truth-state-unimplemented strong,
+.truth-state-notice.truth-state-not_wired strong {
+  color: var(--muted);
+}
+
+/* === Unavailable notice — tighter radius to match panel language === */
+
+.unavailable-notice {
+  border-radius: 3px;
+  padding: 7px 10px;
+}
+
+/* === Source authority badges — previously had zero CSS; now terminal-appropriate === */
+
+.source-authority-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 5px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  background: rgba(12, 12, 12, 0.9);
+  font-size: 0.68rem;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.source-authority-db_truth       { border-color: rgba(34, 197, 94, 0.28);  color: rgba(34, 197, 94, 0.9); }
+.source-authority-runtime_memory { border-color: rgba(245, 166, 35, 0.28); color: rgba(245, 166, 35, 0.85); }
+.source-authority-broker_snapshot { border-color: rgba(59, 130, 246, 0.28); color: rgba(59, 130, 246, 0.9); }
+.source-authority-placeholder,
+.source-authority-unknown        { border-color: rgba(239, 68, 68, 0.28);  color: rgba(239, 68, 68, 0.85); }
+.source-authority-mixed          { border-color: rgba(245, 166, 35, 0.18); color: var(--muted); }
+
+/* === Tables — denser rows, tighter separators === */
+
+.event-table,
+.table-grid {
+  gap: 4px;
+}
+
+.event-table-head,
+.event-row,
+.table-row {
+  padding: 6px 10px;
+}
+
+/* === List rows — denser spacing === */
+
+.compact-list .list-row,
+.list-row {
+  padding: 8px 12px;
+}
+
+/* === Mini badges — more compact === */
+
+.mini-badge {
+  padding: 8px 10px;
+  gap: 4px;
+}
+
+/* === Alert cards — severity left-accent border (CausalityTraceViewer already uses these) === */
+
+.alert-card.severity-critical { border-left: 3px solid rgba(239, 68, 68, 0.65); }
+.alert-card.severity-warning  { border-left: 3px solid rgba(245, 158, 11, 0.65); }
+.alert-card.severity-info     { border-left: 3px solid rgba(59, 130, 246, 0.55); }
+
+/* === Action buttons — terminal flat style, hover + selected + disabled states === */
+
+.action-button {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.action-button:hover:not(:disabled) {
+  background: rgba(90, 62, 8, 0.42);
+  border-color: rgba(245, 166, 35, 0.72);
+}
+
+.action-button.ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+/* is-selected: used by WorkspaceToolbar layout toggle buttons — was missing */
+.action-button.is-selected {
+  background: rgba(35, 24, 5, 0.92);
+  border-color: rgba(245, 166, 35, 0.5);
+}
+
+.action-button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
