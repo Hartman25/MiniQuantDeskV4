@@ -2036,3 +2036,149 @@ ul {
     grid-template-columns: 1fr;
   }
 }
+
+/* ==========================================================================
+   Phase 5C — Reconcile + Ops screen polish
+   CSS additions only where possible. TSX changes in ReconcileScreen are
+   equivalent presentation substitutions (inline style → semantic class).
+   No logic, API, data, calculation, or contract changes.
+   ========================================================================== */
+
+/* --- Ops: panel notices — operator guidance blocks inside mode-transition panel --- */
+
+.panel-notice {
+  padding: 8px 12px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  background: rgba(11, 11, 11, 0.92);
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.panel-notice-warn {
+  border-color: rgba(245, 158, 11, 0.38);
+  background: rgba(245, 158, 11, 0.04);
+  color: rgba(245, 165, 35, 0.88);
+}
+
+/* --- Ops: section sub-headings within the mode-transition panel --- */
+
+.check-list-heading {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+/* --- Ops: action catalog level visual language ---
+   Level 0: safe / informational (green border)
+   Level 1: soft-impact (blue border)
+   Level 2: amber — already defined in Phase 3
+   Level 3: critical / halt — already defined in Phase 3 */
+
+.action-level-0 { border-color: rgba(34, 197, 94, 0.22); }
+.action-level-1 { border-color: rgba(59, 130, 246, 0.22); }
+
+/* Level badge in card header — colored by level for instant at-a-glance severity */
+.action-level-0 .action-card-head span { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: rgba(34, 197, 94, 0.70); }
+.action-level-1 .action-card-head span { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: rgba(59, 130, 246, 0.78); }
+.action-level-2 .action-card-head span { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: rgba(245, 158, 11, 0.82); }
+.action-level-3 .action-card-head span { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: rgba(239, 68, 68, 0.88); }
+
+/* Level 0 Run button: green — safe/status query actions */
+.action-level-0 .action-button {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(8, 30, 16, 0.35);
+  color: rgba(34, 197, 94, 0.88);
+}
+.action-level-0 .action-button:hover:not(:disabled) {
+  background: rgba(12, 40, 22, 0.52);
+  border-color: rgba(34, 197, 94, 0.65);
+}
+
+/* Level 1 Run button: blue — informational / soft-impact */
+.action-level-1 .action-button {
+  border-color: rgba(59, 130, 246, 0.35);
+  background: rgba(8, 18, 38, 0.35);
+  color: rgba(59, 130, 246, 0.88);
+}
+.action-level-1 .action-button:hover:not(:disabled) {
+  background: rgba(10, 22, 50, 0.52);
+  border-color: rgba(59, 130, 246, 0.65);
+}
+
+/* Level 3 Run button: red — halt / emergency actions must look dangerous */
+.action-level-3 .action-button {
+  border-color: rgba(239, 68, 68, 0.48);
+  background: rgba(50, 10, 10, 0.38);
+  color: rgba(239, 68, 68, 0.92);
+}
+.action-level-3 .action-button:hover:not(:disabled) {
+  background: rgba(72, 14, 14, 0.55);
+  border-color: rgba(239, 68, 68, 0.75);
+}
+
+/* --- Ops: mode toggle disabled states --- */
+
+/* Non-active mode toggles: dimmed to signal they are disabled choices */
+.mode-toggle:disabled:not(.is-active) {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Active mode toggle: full opacity even though the button is disabled —
+   the operator needs to see the current mode state clearly. */
+.mode-toggle.is-active:disabled {
+  cursor: not-allowed;
+}
+
+/* Live mode toggles: stronger red language to prevent accidental live routing */
+.mode-toggle.is-live {
+  border-color: rgba(220, 38, 38, 0.50);
+  box-shadow: 0 0 0 1px rgba(220, 38, 38, 0.13);
+}
+
+.mode-toggle.is-live span {
+  color: rgba(248, 113, 113, 0.92);
+  font-weight: 700;
+}
+
+.mode-toggle.is-live.is-active {
+  border-color: rgba(239, 68, 68, 0.70);
+  background: rgba(40, 8, 8, 0.95);
+}
+
+/* --- Reconcile: tighter secondary row (Drift by domain + Active incidents) --- */
+
+.reconcile-secondary-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 1180px) {
+  .reconcile-secondary-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* --- Reconcile: domain drift row left-accent severity borders ---
+   Applied alongside the existing metric-list > div base style.
+   Provides per-domain severity signal without inline color hacks. */
+
+.drift-row-critical {
+  border-left: 3px solid rgba(239, 68, 68, 0.65) !important;
+}
+
+.drift-row-warn {
+  border-left: 3px solid rgba(245, 158, 11, 0.58) !important;
+}
+
+.drift-row-clean {
+  border-left: 3px solid rgba(34, 197, 94, 0.32) !important;
+}

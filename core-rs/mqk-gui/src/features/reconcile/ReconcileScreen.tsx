@@ -75,7 +75,7 @@ export function ReconcileScreen({ model }: { model: SystemModel }) {
         />
       </Panel>
 
-      <div className="two-column-grid">
+      <div className="reconcile-secondary-grid">
         <Panel title="Drift by domain" subtitle="Mismatch count per domain — which class of disagreement is active.">
           {model.mismatches.length === 0 ? (
             <div className="empty-state">No active mismatches. Reconcile is clean across all domains.</div>
@@ -87,9 +87,9 @@ export function ReconcileScreen({ model }: { model: SystemModel }) {
                 const hasCritical = rows.some((m) => m.status === "critical");
                 const hasWarning = rows.some((m) => m.status === "warning");
                 return (
-                  <div key={domain}>
+                  <div key={domain} className={`drift-row-${hasCritical ? "critical" : hasWarning ? "warn" : "clean"}`}>
                     <span>{domain}</span>
-                    <strong style={{ color: hasCritical ? "var(--critical)" : hasWarning ? "var(--warning)" : "var(--good)" }}>
+                    <strong className={hasCritical ? "val-critical" : hasWarning ? "val-warn" : "val-ok"}>
                       {rows.length}
                     </strong>
                   </div>
@@ -107,7 +107,7 @@ export function ReconcileScreen({ model }: { model: SystemModel }) {
               {model.incidents
                 .filter((i) => i.status !== "resolved" && i.status !== "contained")
                 .map((incident) => (
-                  <div key={incident.incident_id} className="alert-card">
+                  <div key={incident.incident_id} className={`alert-card severity-${incident.severity}`}>
                     <div className="alert-header">
                       <strong>{incident.title}</strong>
                       <span>{incident.severity} · {incident.status}</span>
