@@ -489,6 +489,29 @@ pub struct AutonomousPaperReadinessResponse {
     /// cleared in-session.  When true, `/api/v1/events/feed` autonomous-session
     /// history is incomplete or absent.  Operator must restart with a working DB.
     pub autonomous_history_degraded: bool,
+
+    // --- OBS-SESSION-DISCORD-01: Session-window diagnostics ---
+    /// RFC 3339 timestamp of when this response was generated (UTC).
+    pub now_utc: String,
+    /// Effective session start time as `"HH:MM UTC"` when a fixed env-window is
+    /// active; `null` when the NYSE regular-session seam is used (the boundary
+    /// depends on the market calendar, not a fixed time).
+    pub session_start_utc: Option<String>,
+    /// Effective session stop time as `"HH:MM UTC"` when a fixed env-window is
+    /// active; `null` for the NYSE regular-session seam.
+    pub session_stop_utc: Option<String>,
+    /// `"env"` when `MQK_SESSION_START_HH_MM` and `MQK_SESSION_STOP_HH_MM` are
+    /// both set and valid; `"default"` when absent or unparseable (falls back to
+    /// NYSE regular-session seam).
+    pub session_window_source: String,
+    /// Always `"UTC"` — all session times in this response are UTC.
+    pub session_window_basis: String,
+    /// Raw value of `MQK_SESSION_START_HH_MM` as read from the environment, or
+    /// `null` if the variable is absent or empty.
+    pub session_start_env_raw: Option<String>,
+    /// Raw value of `MQK_SESSION_STOP_HH_MM` as read from the environment, or
+    /// `null` if the variable is absent or empty.
+    pub session_stop_env_raw: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -30,8 +30,9 @@ use crate::api_types::{
 };
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::{
-    autonomous_session_schedule_from_env, AppState, AutonomousSessionTruth,
-    BrokerSnapshotTruthSource, DeploymentMode, StrategyMarketDataSource,
+    autonomous_session_schedule_from_env, session_window_from_env, AppState,
+    AutonomousSessionTruth, BrokerSnapshotTruthSource, DeploymentMode, StrategyMarketDataSource,
+    SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
 };
 
 use super::helpers::{
@@ -522,6 +523,54 @@ fn autonomous_session_truth_to_api(truth: &AutonomousSessionTruth) -> (String, O
     }
 }
 
+/// OBS-SESSION-DISCORD-01: Session-window diagnostic fields, computed once per request.
+struct SessionWindowDiagnostics {
+    now_utc: String,
+    session_start_utc: Option<String>,
+    session_stop_utc: Option<String>,
+    session_window_source: String,
+    session_window_basis: String,
+    session_start_env_raw: Option<String>,
+    session_stop_env_raw: Option<String>,
+}
+
+/// Build session-window diagnostics from the current environment and clock.
+///
+/// When `MQK_SESSION_START_HH_MM` and `MQK_SESSION_STOP_HH_MM` are both set and
+/// parse correctly, `session_window_source = "env"` and derived `HH:MM UTC`
+/// strings are populated.  Otherwise `session_window_source = "default"` and the
+/// derived UTC times are `None` (NYSE seam, time varies by calendar day).
+/// Raw env values are always returned verbatim so the operator can see what was
+/// configured even when parsing fails.
+fn session_window_diagnostics(now: chrono::DateTime<chrono::Utc>) -> SessionWindowDiagnostics {
+    let start_raw = std::env::var(SESSION_START_HH_MM_ENV)
+        .ok()
+        .filter(|s| !s.is_empty());
+    let stop_raw = std::env::var(SESSION_STOP_HH_MM_ENV)
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    let window_opt = session_window_from_env();
+    let (source, start_utc, stop_utc) = match &window_opt {
+        Some(w) => (
+            "env".to_string(),
+            Some(format!("{:02}:{:02} UTC", w.start_hh, w.start_mm)),
+            Some(format!("{:02}:{:02} UTC", w.stop_hh, w.stop_mm)),
+        ),
+        None => ("default".to_string(), None, None),
+    };
+
+    SessionWindowDiagnostics {
+        now_utc: now.to_rfc3339(),
+        session_start_utc: start_utc,
+        session_stop_utc: stop_utc,
+        session_window_source: source,
+        session_window_basis: "UTC".to_string(),
+        session_start_env_raw: start_raw,
+        session_stop_env_raw: stop_raw,
+    }
+}
+
 /// AUTON-TRUTH-01: Autonomous-paper readiness truth surface.
 ///
 /// Surfaces the live gate state that governs whether the session controller
@@ -529,6 +578,10 @@ fn autonomous_session_truth_to_api(truth: &AutonomousSessionTruth) -> (String, O
 /// state; no DB queries are issued.  Returns `truth_state = "not_applicable"`
 /// for non-paper+alpaca deployments.
 pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    // Snapshot now once so diagnostic fields are consistent across both paths.
+    let now = Utc::now();
+    let diag = session_window_diagnostics(now);
+
     let is_paper_alpaca = st.deployment_mode() == DeploymentMode::Paper
         && st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion;
 
@@ -558,6 +611,13 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                 ],
                 overall_ready: false,
                 autonomous_history_degraded: false,
+                now_utc: diag.now_utc,
+                session_start_utc: diag.session_start_utc,
+                session_stop_utc: diag.session_stop_utc,
+                session_window_source: diag.session_window_source,
+                session_window_basis: diag.session_window_basis,
+                session_start_env_raw: diag.session_start_env_raw,
+                session_stop_env_raw: diag.session_stop_env_raw,
             }),
         )
             .into_response();
@@ -598,8 +658,9 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
         st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion;
 
     // Session-window truth: derive from the configured schedule.
+    // Use the already-snapshotted `now` so the diagnostic timestamps are consistent.
     let schedule = autonomous_session_schedule_from_env();
-    let session_in_window = schedule.is_in_session(&st, Utc::now()).await;
+    let session_in_window = schedule.is_in_session(&st, now).await;
     let session_window_state = if session_in_window {
         "in_window".to_string()
     } else {
@@ -710,6 +771,13 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
             blockers,
             overall_ready,
             autonomous_history_degraded,
+            now_utc: diag.now_utc,
+            session_start_utc: diag.session_start_utc,
+            session_stop_utc: diag.session_stop_utc,
+            session_window_source: diag.session_window_source,
+            session_window_basis: diag.session_window_basis,
+            session_start_env_raw: diag.session_start_env_raw,
+            session_stop_env_raw: diag.session_stop_env_raw,
         }),
     )
         .into_response()

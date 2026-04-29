@@ -25,7 +25,9 @@ use crate::api_types::{
     OpsActionRequest, PendingRestartIntentSnapshot, RestartWorkflowTruth,
 };
 use crate::mode_transition::{evaluate_mode_transition, ModeTransitionVerdict};
-use crate::notify::{CriticalAlertPayload, OperatorNotifyPayload, RunStatusPayload};
+use crate::notify::{
+    CriticalAlertPayload, OperatorNotifyPayload, RunStatusPayload, TestAlertPayload,
+};
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::DeploymentMode;
 use crate::state::{AppState, BusMsg, RuntimeLifecycleError, DAEMON_ENGINE_ID};
@@ -1036,6 +1038,82 @@ pub(crate) async fn ops_action(
             }
         }
 
+        // OBS-SESSION-DISCORD-01: Operator test of Discord webhook delivery.
+        //
+        // Fires a clearly-labelled "[TEST]" notification to the configured webhook.
+        // Does NOT mutate any trading, runtime, arm, or integrity state.
+        // Requires operator bearer token (route is in the authenticated sub-router).
+        // Response never includes the webhook URL.
+        "test-discord-alert" => {
+            let ts = Utc::now().to_rfc3339();
+            let env_label = st.deployment_mode().as_api_label().to_string();
+            let notifier_status = st.discord_notifier.status();
+
+            let (disposition, warnings) = if !notifier_status.configured {
+                (
+                    "noop_unconfigured".to_string(),
+                    vec![
+                        "Discord notifier not configured; DISCORD_WEBHOOK_URL is absent or \
+                         empty — set it to enable delivery"
+                            .to_string(),
+                    ],
+                )
+            } else {
+                // Delivery is best-effort; result is informational only.
+                let delivered = st
+                    .discord_notifier
+                    .notify_test_alert(&TestAlertPayload {
+                        environment: Some(env_label.clone()),
+                        ts_utc: ts.clone(),
+                        note: "operator test via test-discord-alert route; \
+                               no trading state affected"
+                            .to_string(),
+                    })
+                    .await;
+                let disposition = if delivered {
+                    "delivery_attempted".to_string()
+                } else {
+                    "delivery_failed".to_string()
+                };
+                let mut warns = vec![];
+                if !delivered {
+                    warns.push(
+                        "Discord test-alert delivery failed; check DISCORD_WEBHOOK_URL \
+                         and network connectivity"
+                            .to_string(),
+                    );
+                }
+                (disposition, warns)
+            };
+
+            info!(
+                disposition = %disposition,
+                "ops/action test-discord-alert"
+            );
+
+            (
+                StatusCode::OK,
+                Json(OperatorActionResponse {
+                    requested_action: "test-discord-alert".to_string(),
+                    accepted: true,
+                    disposition,
+                    resulting_integrity_state: None,
+                    resulting_desired_armed: None,
+                    blockers: vec![],
+                    warnings,
+                    environment: Some(env_label),
+                    scope: Some("daemon_instance".to_string()),
+                    audit: OperatorActionAuditFields {
+                        durable_db_write: false,
+                        durable_targets: vec![],
+                        audit_event_id: None,
+                    },
+                    pending_restart_intent: None,
+                }),
+            )
+                .into_response()
+        }
+
         _ => (
             StatusCode::BAD_REQUEST,
             Json(OperatorActionResponse {
@@ -1047,7 +1125,8 @@ pub(crate) async fn ops_action(
                 blockers: vec![format!(
                     "Unknown action_key '{}'; accepted keys: arm-execution, arm-strategy, \
                      disarm-execution, disarm-strategy, start-system, stop-system, kill-switch, \
-                     request-mode-change, cancel-mode-transition, clear-halted-run",
+                     request-mode-change, cancel-mode-transition, clear-halted-run, \
+                     test-discord-alert",
                     body.action_key
                 )],
                 warnings: vec![],

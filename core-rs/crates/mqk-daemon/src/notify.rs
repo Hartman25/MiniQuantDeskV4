@@ -100,6 +100,33 @@ pub struct RunStatusPayload {
     pub ts_utc: String,
 }
 
+/// Payload for an operator-triggered test alert (OBS-SESSION-DISCORD-01).
+///
+/// Fires on `POST /api/v1/ops/action {"action_key":"test-discord-alert"}`.
+/// The payload is clearly marked as a test so Discord operators can distinguish
+/// it from real fault alerts.  No trading state is mutated by this path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestAlertPayload {
+    /// Daemon deployment mode label (e.g. `"paper"`).
+    pub environment: Option<String>,
+    /// RFC 3339 timestamp of the test-alert event.
+    pub ts_utc: String,
+    /// Human-readable note; always includes "operator test" marker.
+    pub note: String,
+}
+
+/// Status of the Discord notifier as surfaced on operator read surfaces.
+///
+/// No secrets (webhook URL) are included.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordNotifierStatus {
+    /// True when `DISCORD_WEBHOOK_URL` is set and non-empty.
+    pub configured: bool,
+    /// True when delivery will be attempted on the next notify call.
+    /// Identical to `configured` — present for clarity on operator surfaces.
+    pub delivery_enabled: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Notifier
 // ---------------------------------------------------------------------------
@@ -148,6 +175,61 @@ impl DiscordNotifier {
     /// attempted on the next call.
     pub fn is_configured(&self) -> bool {
         self.webhook_url.is_some()
+    }
+
+    /// Returns a redacted status snapshot — never includes the webhook URL.
+    pub fn status(&self) -> DiscordNotifierStatus {
+        DiscordNotifierStatus {
+            configured: self.webhook_url.is_some(),
+            delivery_enabled: self.webhook_url.is_some(),
+        }
+    }
+
+    /// Best-effort delivery of an operator test alert (OBS-SESSION-DISCORD-01).
+    ///
+    /// Used by `POST /api/v1/ops/action {"action_key":"test-discord-alert"}`.
+    /// Returns `true` when delivery was attempted and the HTTP response was
+    /// received (any status), `false` when unconfigured or when a transport
+    /// error prevented delivery.  Never panics.
+    ///
+    /// The payload is clearly labelled `"[TEST]"` so operators can distinguish
+    /// it from production fault alerts.  No trading state is mutated.
+    pub async fn notify_test_alert(&self, payload: &TestAlertPayload) -> bool {
+        let (Some(url), Some(client)) = (&self.webhook_url, &self.client) else {
+            return false;
+        };
+
+        let content = format!(
+            "[mqk-daemon] [TEST] test-discord-alert | env: `{}` | ts: `{}` | {}",
+            payload.environment.as_deref().unwrap_or("unknown"),
+            payload.ts_utc,
+            payload.note,
+        );
+
+        let body = serde_json::json!({
+            "content": content,
+            "alert_type": "test",
+            "environment": payload.environment,
+            "note": payload.note,
+            "ts_utc": payload.ts_utc,
+        });
+
+        match client
+            .post(url.as_str())
+            .json(&body)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+        {
+            Ok(_) => true,
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "discord test-alert delivery failed (best-effort; operator action truth unaffected)"
+                );
+                false
+            }
+        }
     }
 
     /// Best-effort delivery of an accepted operator action notification.
