@@ -558,6 +558,14 @@ export function mapDaemonCatalog(response: DaemonActionCatalogResponse): Operato
 // Data source derivation
 // ---------------------------------------------------------------------------
 
+// Error codes that indicate a truthful "pre-run / no snapshot" response (HTTP 200 + no_snapshot
+// or equivalent) — NOT a missing/unreachable route.
+const NO_SNAPSHOT_ERRORS = new Set([
+  "no_broker_snapshot",       // portfolio/positions, portfolio/orders/open, portfolio/fills
+  "no_denial_truth",          // risk/denials when execution loop not running
+  "no_reconcile_detail_truth", // reconcile/mismatches when no snapshot
+]);
+
 export function deriveDataSourceDetail(args: {
   probeResults: EndpointFetchResult<unknown>[];
   usedMockSections: string[];
@@ -565,6 +573,14 @@ export function deriveDataSourceDetail(args: {
 }): DataSourceDetail {
   const realEndpoints = args.probeResults.filter((r) => r.ok).map((r) => r.endpoint);
   const missingEndpoints = args.probeResults.filter((r) => !r.ok).map((r) => r.endpoint);
+  // Categorize failed probes: no_snapshot (pre-run, route is alive and responding truthfully)
+  // vs no_active_run (HTTP 503 = execution loop not started) vs genuinely unavailable.
+  const noSnapshotEndpoints = args.probeResults
+    .filter((r) => !r.ok && r.error != null && NO_SNAPSHOT_ERRORS.has(r.error))
+    .map((r) => r.endpoint);
+  const noActiveRunEndpoints = args.probeResults
+    .filter((r) => !r.ok && r.error === "HTTP 503")
+    .map((r) => r.endpoint);
 
   let state: DataSourceDetail["state"];
   if (!args.daemonReachable && realEndpoints.length === 0) {
@@ -583,6 +599,8 @@ export function deriveDataSourceDetail(args: {
     realEndpoints,
     missingEndpoints,
     mockSections: args.usedMockSections,
+    noSnapshotEndpoints,
+    noActiveRunEndpoints,
     message:
       state === "disconnected"
         ? "Daemon unreachable; GUI is not receiving live data."
@@ -592,6 +610,22 @@ export function deriveDataSourceDetail(args: {
             ? "Mixed resolved and unresolved backend truth across panels."
             : "All tracked surfaces resolved from daemon endpoints.",
   };
+}
+
+// ---------------------------------------------------------------------------
+// OBS-SESSION-DISCORD-01: Autonomous readiness partial shape (session-window diagnostics).
+// Only the session-window fields consumed by the GUI are typed here.
+// truth_state === "active" for paper+alpaca; "not_applicable" otherwise.
+// ---------------------------------------------------------------------------
+
+export interface AutonomousReadinessPartial {
+  truth_state: string;
+  session_in_window: boolean;
+  session_window_state: string;
+  now_utc: string;
+  session_start_utc: string | null;
+  session_stop_utc: string | null;
+  session_window_source: string;
 }
 
 // ---------------------------------------------------------------------------

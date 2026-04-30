@@ -55,4 +55,8 @@ export interface DataSourceDetail {
   missingEndpoints: string[];
   mockSections: string[];
   message?: string;
+  /** Endpoints that returned 200 but reported no_snapshot (pre-run state, not a missing route). */
+  noSnapshotEndpoints?: string[];
+  /** Endpoints that returned 503 because no active execution run exists yet. */
+  noActiveRunEndpoints?: string[];
 }

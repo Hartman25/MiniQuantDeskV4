@@ -61,6 +61,7 @@ import {
   type IncidentsWrapper,
   type ReplaceCancelChainsWrapper,
   type AlertTriageWrapper,
+  type AutonomousReadinessPartial,
 } from "./legacy";
 import type {
   AlertTriageRow,
@@ -156,7 +157,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
       ? (statusProbe.data as LegacyDaemonStatusSnapshot)
       : null;
 
-  const probes = await Promise.all([
+  // OBS-SESSION-DISCORD-01: autonomous/readiness is fetched in parallel with the main
+  // probes batch for session-window diagnostics (now_utc, session_start_utc, etc.).
+  // Kept outside the probes array so it does not contribute to dataSource endpoint counts.
+  const [probes, autonomousReadinessR] = await Promise.all([
+    Promise.all([
     fetchJsonCandidates<PreflightStatus>(["/api/v1/system/preflight"]),
     fetchJsonCandidates<ExecutionSummary>(["/api/v1/execution/summary"]),
     // Execution orders: two-step fetch to distinguish "no snapshot" from "not mounted".
@@ -471,6 +476,8 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     fetchJsonCandidates<FillQualityWrapper>(["/api/v1/execution/fill-quality"]),
     // GUI-OPS-01: Paper journal — fills_lane + admissions_lane with independent truth_states.
     fetchJsonCandidates<PaperJournalWrapper>(["/api/v1/paper/journal"]),
+    ]),
+    fetchJsonCandidate<AutonomousReadinessPartial>("/api/v1/autonomous/readiness"),
   ]);
 
   const [
@@ -870,6 +877,26 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     unavailableStatus,
   );
 
+  // OBS-SESSION-DISCORD-01: Merge session-window diagnostics from autonomous/readiness into
+  // preflight. Only merged when truth_state === "active" (paper+alpaca deployment).
+  // These fields are optional on PreflightStatus — absent for non-paper+alpaca deployments.
+  const autonomousReadinessDiag =
+    autonomousReadinessR.ok && autonomousReadinessR.data?.truth_state === "active"
+      ? autonomousReadinessR.data
+      : null;
+  const sessionWindowMerge: Partial<PreflightStatus> = autonomousReadinessDiag
+    ? {
+        now_utc: autonomousReadinessDiag.now_utc,
+        session_start_utc: autonomousReadinessDiag.session_start_utc,
+        session_stop_utc: autonomousReadinessDiag.session_stop_utc,
+        session_window_source: autonomousReadinessDiag.session_window_source,
+        session_window_state: autonomousReadinessDiag.session_window_state,
+      }
+    : {};
+  const resolvedPreflight: PreflightStatus = isStructurallyValidPreflight(preflightR.ok ? preflightR.data : null)
+    ? { ...(preflightR.data as PreflightStatus), ...sessionWindowMerge }
+    : unavailablePreflight;
+
   return withClassifiedPanelSources({
     status: resolvedStatus,
     // Preflight is fail-closed: require structural completeness before accepting
@@ -878,9 +905,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     // missing blockers/warnings arrays must also fall back to unavailablePreflight
     // rather than passing through a partial object that crashes the gate or shows
     // false-positive "✓ Ready" safety checks with no daemon authority.
-    preflight: isStructurallyValidPreflight(preflightR.ok ? preflightR.data : null)
-      ? (preflightR.data as PreflightStatus)
-      : unavailablePreflight,
+    preflight: resolvedPreflight,
     executionSummary: executionSummary ?? unavailableExecutionSummary,
     executionOrders,
     selectedTimeline,

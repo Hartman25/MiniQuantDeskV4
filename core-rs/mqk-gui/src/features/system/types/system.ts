@@ -117,6 +117,18 @@ export interface PreflightStatus {
   autonomous_blockers?: string[];
   /** Whether the current wall-clock is inside the autonomous session window. Null when not paper+alpaca. */
   session_in_window?: boolean | null;
+  // OBS-SESSION-DISCORD-01: Session-window diagnostics merged from /autonomous/readiness.
+  // Populated only when truth_state === "active" (paper+alpaca). Absent otherwise.
+  /** RFC 3339 UTC timestamp of when the readiness response was generated. */
+  now_utc?: string | null;
+  /** Effective session start time as "HH:MM UTC" when a fixed env-window is active; null for NYSE seam. */
+  session_start_utc?: string | null;
+  /** Effective session stop time as "HH:MM UTC" when a fixed env-window is active; null for NYSE seam. */
+  session_stop_utc?: string | null;
+  /** "env" when session window is from env vars; "default" when absent/unparseable (NYSE seam). */
+  session_window_source?: string | null;
+  /** "in_window" | "outside_window". Null when not applicable. */
+  session_window_state?: string | null;
 }
 
 export interface MetadataSummary {

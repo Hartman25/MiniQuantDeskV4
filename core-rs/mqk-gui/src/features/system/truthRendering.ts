@@ -154,7 +154,7 @@ export function truthStateCopy(state: TruthRenderState): { title: string; detail
     case "no_snapshot":
       return {
         title: "No snapshot",
-        detail: "Required truth snapshot endpoints are missing for this panel.",
+        detail: "No execution snapshot available — the runtime loop has not yet started or the broker snapshot is absent. Values will populate once the execution loop is running.",
       };
     case "degraded":
       return {

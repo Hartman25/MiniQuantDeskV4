@@ -42,7 +42,15 @@ function dataSourceSummary(dataSource?: DataSourceDetail): string {
   if (!dataSource) return "daemon status unknown";
   if (dataSource.state === "disconnected") return "daemon unreachable";
   if (dataSource.state === "mock") return "mock fallback active";
-  return `${dataSource.realEndpoints.length} real / ${dataSource.missingEndpoints.length} unavailable`;
+  const noSnapshot = dataSource.noSnapshotEndpoints?.length ?? 0;
+  const noActiveRun = dataSource.noActiveRunEndpoints?.length ?? 0;
+  // "unavailable" = failed probes that are not in the pre-run state buckets above.
+  const genuinelyUnavailable = dataSource.missingEndpoints.length - noSnapshot - noActiveRun;
+  const parts: string[] = [`${dataSource.realEndpoints.length} real`];
+  if (genuinelyUnavailable > 0) parts.push(`${genuinelyUnavailable} unavailable`);
+  if (noSnapshot > 0) parts.push(`${noSnapshot} no snapshot`);
+  if (noActiveRun > 0) parts.push(`${noActiveRun} no active run`);
+  return parts.join(" / ");
 }
 
 export function GlobalStatusBar({ status, dataSource }: GlobalStatusBarProps) {
@@ -105,7 +113,15 @@ export function GlobalStatusBar({ status, dataSource }: GlobalStatusBarProps) {
         <div className="status-metric">
           <span className="metric-label">Unavailable</span>
           <span className="metric-value">
-            {dataSource && dataSource.missingEndpoints.length > 0 ? dataSource.missingEndpoints.slice(0, 2).join(", ") : "—"}
+            {(() => {
+              if (!dataSource) return "—";
+              const excluded = new Set([
+                ...(dataSource.noSnapshotEndpoints ?? []),
+                ...(dataSource.noActiveRunEndpoints ?? []),
+              ]);
+              const genuinely = dataSource.missingEndpoints.filter((ep) => !excluded.has(ep));
+              return genuinely.length > 0 ? genuinely.slice(0, 2).join(", ") : "—";
+            })()}
           </span>
         </div>
       </div>

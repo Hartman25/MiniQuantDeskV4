@@ -4,6 +4,32 @@ interface PreflightGateProps {
   preflight: PreflightStatus;
 }
 
+// Format an RFC 3339 UTC timestamp as "HH:MM UTC" for compact display.
+function formatHHMM(isoString: string | null | undefined): string | null {
+  if (!isoString) return null;
+  try {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return null;
+    return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")} UTC`;
+  } catch {
+    return null;
+  }
+}
+
+// Build the session-window detail line for the "Session window open" card.
+// Returns a compact description when timing data is available; null otherwise.
+function sessionWindowDetail(preflight: PreflightStatus, ok: boolean, unknown: boolean): string {
+  if (ok) return "Ready";
+  if (unknown) return "Unknown";
+  const nowStr = formatHHMM(preflight.now_utc);
+  const start = preflight.session_start_utc ?? null;
+  const source = preflight.session_window_source ?? null;
+  if (nowStr && start && source) {
+    return `Outside window — now ${nowStr}, opens ${start}, source: ${source}`;
+  }
+  return "Blocking";
+}
+
 const CHECKS: Array<{ key: keyof PreflightStatus; label: string }> = [
   { key: "daemon_reachable", label: "Daemon reachable" },
   { key: "db_reachable", label: "Database reachable" },
@@ -73,6 +99,9 @@ export function PreflightGate({ preflight }: PreflightGateProps) {
               const val = preflight[check.key];
               const ok = val === true;
               const unknown = val == null;
+              const detail = check.key === "session_in_window"
+                ? sessionWindowDetail(preflight, ok, unknown)
+                : ok ? "Ready" : unknown ? "Unknown" : "Blocking";
               return (
                 <div
                   key={check.key}
@@ -81,7 +110,7 @@ export function PreflightGate({ preflight }: PreflightGateProps) {
                   <span className="check-icon">{ok ? "✓" : unknown ? "?" : "!"}</span>
                   <div>
                     <strong>{check.label}</strong>
-                    <p>{ok ? "Ready" : unknown ? "Unknown" : "Blocking"}</p>
+                    <p>{detail}</p>
                   </div>
                 </div>
               );
