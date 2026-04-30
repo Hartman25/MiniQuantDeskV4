@@ -1672,7 +1672,8 @@ async fn runtime_halts_when_lease_is_lost() {
         .tick()
         .await
         .expect("first tick acquires lease");
-    clock.set(runtime_ts(20_016));
+    // Advance past the new TTL (90s) so the lease is expired and can be stolen.
+    clock.set(runtime_ts(20_091));
     let stolen = mqk_db::runtime_lease::acquire_lease(&pool, "other-runtime", clock.now_utc(), 30)
         .await
         .expect("steal expired lease");
@@ -1700,4 +1701,101 @@ async fn runtime_halts_when_lease_is_lost() {
         .expect("fetch current lease")
         .expect("active lease row");
     assert_eq!(lease.holder_id, "other-runtime");
+}
+
+// ---------------------------------------------------------------------------
+// AUTON-RUNTIME-LEASE-01: lease-cadence regression tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn lease_refresh_survives_33_second_blocking_gap() {
+    // Prove that a 33-second gap between acquire and refresh does NOT lose the
+    // lease under the new TTL=90.  This is the exact failure scenario from the
+    // forced-window smoke run on 2026-04-30: fetch_events blocked for ~33s
+    // (Alpaca REST with no HTTP timeout), which exceeded the old TTL of 15s
+    // and triggered RUNTIME_LEASE_LOST.
+    //
+    // The test operates directly on the lease layer — no full orchestrator tick —
+    // to isolate the TTL behaviour from the reconcile watermark check.
+    let pool = runtime_test_pool().await;
+    let clock = MutableClock::new(runtime_ts(50_000));
+
+    // Acquire lease at T=50_000 (mirrors Phase 0b of the initial tick).
+    let outcome = mqk_db::runtime_lease::acquire_lease(
+        &pool,
+        "test-holder|run=lease-ttl-test",
+        clock.now_utc(),
+        RUNTIME_LEASE_TTL_SECS,
+    )
+    .await
+    .expect("acquire_lease");
+    let epoch = match outcome {
+        mqk_db::runtime_lease::LeaseAcquireOutcome::Acquired(l) => l.epoch,
+        mqk_db::runtime_lease::LeaseAcquireOutcome::HeldByOther(l) => {
+            panic!("expected Acquired, got HeldByOther: {:?}", l)
+        }
+    };
+
+    // Advance clock by 33 seconds — the observed fetch_events blocking duration.
+    // 33 > old TTL (15) → would have triggered RUNTIME_LEASE_LOST before this fix.
+    // 33 < new TTL (90) → must succeed after this fix.
+    clock.set(runtime_ts(50_033));
+
+    let refreshed = mqk_db::runtime_lease::refresh_lease(
+        &pool,
+        "test-holder|run=lease-ttl-test",
+        epoch,
+        clock.now_utc(),
+        RUNTIME_LEASE_TTL_SECS,
+    )
+    .await;
+
+    assert!(
+        refreshed.is_ok(),
+        "AUTON-RUNTIME-LEASE-01: lease refresh must survive a 33-second blocking gap \
+         (old TTL=15 would fail here; new TTL={} must pass); error: {:?}",
+        RUNTIME_LEASE_TTL_SECS,
+        refreshed.err()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn runtime_holder_id_is_compact_and_stable() {
+    // Prove that derive_runtime_holder_id does not duplicate the host/user/pid
+    // segments that are already embedded in dispatcher_id.  Prior to
+    // AUTON-RUNTIME-LEASE-01 the function re-read COMPUTERNAME/USERNAME/PID,
+    // producing "…|HOST|USER|pid=N|HOST|USER|pid=N|run=…" in the DB lease row.
+    //
+    // After the fix, holder_id must be exactly "{dispatcher_id}|run={run_id}".
+    let pool = runtime_test_pool().await;
+    let clock = MutableClock::new(runtime_ts(60_000));
+    let run_id = make_running_run(&pool, clock.now_utc()).await;
+    let mut orchestrator = make_lease_test_orchestrator(pool.clone(), run_id, clock.clone());
+
+    orchestrator
+        .tick()
+        .await
+        .expect("first tick acquires lease");
+
+    let lease = mqk_db::runtime_lease::fetch_current_lease(&pool)
+        .await
+        .expect("fetch_current_lease")
+        .expect("active lease row");
+
+    // make_lease_test_orchestrator passes "runtime-lease-test" as dispatcher_id.
+    let expected = format!("runtime-lease-test|run={run_id}");
+    assert_eq!(
+        lease.holder_id, expected,
+        "holder_id must be compact (no duplicated segments); got {:?}",
+        lease.holder_id
+    );
+    // Belt-and-suspenders: dispatcher_id prefix appears exactly once.
+    assert_eq!(
+        lease.holder_id.matches("runtime-lease-test").count(),
+        1,
+        "dispatcher_id must not be repeated in holder_id: {:?}",
+        lease.holder_id
+    );
 }

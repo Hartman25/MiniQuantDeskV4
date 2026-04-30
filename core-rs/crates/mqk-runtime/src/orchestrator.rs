@@ -38,7 +38,15 @@ impl TimeSource for WallClock {
         chrono::Utc::now()
     }
 }
-const RUNTIME_LEASE_TTL_SECS: i64 = 15;
+// AUTON-RUNTIME-LEASE-01: TTL must exceed the maximum blocking duration of
+// any single orchestrator phase.  `fetch_events` makes a synchronous HTTP
+// call (reqwest via block_in_place) to the Alpaca REST API with no timeout
+// configured on the client.  A smoke run on 2026-04-30 showed a 33-second
+// block, which exceeded the old 15-second TTL and caused RUNTIME_LEASE_LOST.
+// 90 seconds provides 3× headroom over the observed maximum while still
+// detecting a dead owner within two minutes.  Do NOT lower this value without
+// first configuring a shorter HTTP request timeout on the broker adapter.
+const RUNTIME_LEASE_TTL_SECS: i64 = 90;
 /// Maximum entries in the in-memory risk denial ring buffer.
 ///
 /// Older entries are evicted when the cap is reached.  The buffer is
@@ -837,16 +845,13 @@ where
     }
 }
 fn derive_runtime_holder_id(dispatcher_id: &str, run_id: Uuid) -> String {
-    let host = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "UNKNOWN_HOST".to_string());
-    let user = std::env::var("USERNAME").unwrap_or_else(|_| "UNKNOWN_USER".to_string());
-    format!(
-        "{}|{}|{}|pid={}|run={}",
-        dispatcher_id,
-        host,
-        user,
-        std::process::id(),
-        run_id
-    )
+    // `dispatcher_id` is produced by `default_node_id` which already embeds
+    // "{service}|{host}|{user}|pid={pid}".  Re-reading COMPUTERNAME/USERNAME/
+    // PID here produced a doubled string in the DB lease row:
+    //   "mqk-daemon|HOST|USER|pid=N|HOST|USER|pid=N|run=..."
+    // Appending only the run_id is sufficient to scope the holder to this
+    // specific execution run while keeping the lease row readable.
+    format!("{dispatcher_id}|run={run_id}")
 }
 // ---------------------------------------------------------------------------
 // Internal helper - mandatory halt + disarm persistence
