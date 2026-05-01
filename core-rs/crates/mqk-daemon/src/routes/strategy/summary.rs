@@ -127,6 +127,9 @@ pub(crate) async fn strategy_summary(State(state): State<Arc<AppState>>) -> impl
     } else {
         None
     };
+    // AUTON-NO-TRADE-01: expose bar-tick signal telemetry for the active fleet strategy.
+    let last_bar_signal_qty = state.last_bar_signal_qty();
+    let bar_tick_dispatch_count_val = state.bar_tick_dispatch_count();
 
     // Registry ID set used to detect fleet entries that have no registry row.
     let registry_id_set: std::collections::HashSet<&str> =
@@ -143,21 +146,24 @@ pub(crate) async fn strategy_summary(State(state): State<Arc<AppState>>) -> impl
             admission_state_for_registry_row(&fleet_id_set, &r.strategy_id, r.enabled);
         let is_single_target = single_fleet_id.as_deref() == Some(r.strategy_id.as_str());
 
-        let (throttle_state, row_last_decision) = if is_single_target {
-            (
-                Some(
-                    if throttle_open {
-                        "open"
-                    } else {
-                        "day_limit_reached"
-                    }
-                    .to_string(),
-                ),
-                last_decision_time.clone(),
-            )
-        } else {
-            (None, None)
-        };
+        let (throttle_state, row_last_decision, row_signal_qty, row_tick_count) =
+            if is_single_target {
+                (
+                    Some(
+                        if throttle_open {
+                            "open"
+                        } else {
+                            "day_limit_reached"
+                        }
+                        .to_string(),
+                    ),
+                    last_decision_time.clone(),
+                    last_bar_signal_qty,
+                    Some(bar_tick_dispatch_count_val),
+                )
+            } else {
+                (None, None, None, None)
+            };
 
         rows.push(StrategySummaryRow {
             strategy_id: r.strategy_id.clone(),
@@ -177,6 +183,8 @@ pub(crate) async fn strategy_summary(State(state): State<Arc<AppState>>) -> impl
             regime: None,
             throttle_state,
             last_decision_time: row_last_decision,
+            last_bar_signal_qty: row_signal_qty,
+            bar_tick_dispatch_count: row_tick_count,
         });
     }
 
@@ -213,6 +221,8 @@ pub(crate) async fn strategy_summary(State(state): State<Arc<AppState>>) -> impl
                 regime: None,
                 throttle_state: None,
                 last_decision_time: None,
+                last_bar_signal_qty: None,
+                bar_tick_dispatch_count: None,
             });
         }
     }

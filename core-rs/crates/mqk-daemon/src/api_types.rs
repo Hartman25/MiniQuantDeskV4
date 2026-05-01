@@ -764,6 +764,20 @@ pub struct StrategySummaryRow {
     /// `null` also when no bar input has been deposited in this daemon
     /// process lifetime (no signal has been accepted and dispatched yet).
     pub last_decision_time: Option<String>,
+    /// AUTON-NO-TRADE-01: Sum of target quantities from the last bar dispatch.
+    ///
+    /// Wired for the single active fleet strategy; `null` otherwise.
+    /// `null` when no bar has been dispatched this session.
+    /// Zero means strategy returned no trade signal last tick (hold/flat).
+    /// Non-zero means targets were produced (though admission gates may still
+    /// filter them before the outbox).
+    pub last_bar_signal_qty: Option<i64>,
+    /// AUTON-NO-TRADE-01: Total bar ticks dispatched to this strategy this session.
+    ///
+    /// Wired for the single active fleet strategy; `null` otherwise.
+    /// Zero at session start; increments each time `tick_strategy_dispatch`
+    /// fires a bar result.  Non-zero proves the strategy is being invoked.
+    pub bar_tick_dispatch_count: Option<u64>,
 }
 
 /// Response wrapper for `/api/v1/strategy/summary`.

@@ -404,6 +404,18 @@ pub(super) fn spawn_execution_loop(
                     // active bootstrap exists — both are fail-closed, not errors.
                     // Shadow-mode results produce no decisions (fail-closed).
                     if let Some(bar_result) = state_arc.tick_strategy_dispatch().await {
+                        // AUTON-NO-TRADE-01: record signal qty before decisions are
+                        // derived. This is the raw strategy output — zero means the
+                        // strategy returned hold/flat for all targets this tick.
+                        let raw_signal_qty: i64 = bar_result
+                            .intents
+                            .output
+                            .targets
+                            .iter()
+                            .map(|t| t.qty)
+                            .sum();
+                        state_arc.record_bar_tick_outcome(raw_signal_qty);
+
                         let now_micros = Utc::now().timestamp_micros(); // allow: loop-context wall-clock for decision_id
                         // Derive current position truth from the execution snapshot
                         // settled above.  Symbols absent from the map are flat (qty=0).
@@ -431,6 +443,20 @@ pub(super) fn spawn_execution_loop(
                             now_micros,
                             &current_positions,
                         );
+                        // AUTON-NO-TRADE-01: log when strategy produced no admissible
+                        // decisions.  This is honest: signal=0 means hold/flat or the
+                        // strategy's conditions (lookback, completeness, price guards)
+                        // were not satisfied.  No fabrication; no forced trades.
+                        if decisions.is_empty() {
+                            tracing::info!(
+                                run_id = %run_id,
+                                raw_signal_qty,
+                                bar_tick_count = state_arc.bar_tick_dispatch_count(),
+                                "b1c_bar_tick_no_decisions: strategy returned no admissible \
+                                 decisions this tick (signal_qty={raw_signal_qty}; \
+                                 check bar lookback, is_complete, and price availability)"
+                            );
+                        }
                         for decision in decisions {
                             let did = decision.decision_id.clone();
                             let sid = decision.strategy_id.clone();

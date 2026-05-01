@@ -727,6 +727,8 @@ impl AppState {
         // PT-AUTO-02: reset per-run signal intake counter at each new start so
         // the bound applies per execution run, not per daemon process lifetime.
         self.day_signal_count.store(0, Ordering::SeqCst);
+        // AUTON-NO-TRADE-01: reset bar-tick counters alongside signal counter.
+        self.reset_bar_tick_counters();
 
         // TV-01C: capture artifact provenance at run start.
         //

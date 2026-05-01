@@ -18,7 +18,7 @@ mod snapshot;
 mod types;
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -203,6 +203,19 @@ pub struct AppState {
     /// Zero means no bar input has been deposited in this daemon process lifetime.
     /// Read by `/api/v1/strategy/summary` to surface honest `last_decision_time`.
     last_bar_input_ts: Arc<AtomicI64>,
+    /// AUTON-NO-TRADE-01: Sum of target quantities from the last bar dispatch.
+    ///
+    /// Set after each `tick_strategy_dispatch` that yields a bar result.  Zero
+    /// means the strategy returned no net-positive targets (signal = hold/flat).
+    /// `i64::MIN` means no bar has been dispatched this session (sentinel).
+    /// Surfaced in `/api/v1/strategy/summary` as `last_bar_signal_qty`.
+    last_bar_signal_qty: Arc<AtomicI64>,
+    /// AUTON-NO-TRADE-01: Total bar ticks dispatched to the native strategy this session.
+    ///
+    /// Incremented each time `tick_strategy_dispatch` fires a real bar result.
+    /// Zero means no bar has been dispatched yet.  Reset on run-start via
+    /// `reset_bar_tick_counters`.  Surfaced in `/api/v1/strategy/summary`.
+    bar_tick_dispatch_count: Arc<AtomicU64>,
     /// AUTON-PAPER-RISK-03: Alpaca adapter retained exclusively for periodic broker
     /// snapshot refresh on the External-source path.  Set once in
     /// `build_execution_orchestrator`; `None` for Synthetic source or before
@@ -553,6 +566,8 @@ impl AppState {
             native_strategy_bootstrap: Arc::new(Mutex::new(None)),
             pending_strategy_bar_input: Arc::new(Mutex::new(None)),
             last_bar_input_ts: Arc::new(AtomicI64::new(0)),
+            last_bar_signal_qty: Arc::new(AtomicI64::new(i64::MIN)),
+            bar_tick_dispatch_count: Arc::new(AtomicU64::new(0)),
             external_snapshot_refresher: Arc::new(RwLock::new(None)),
             execution_last_tick_at: Arc::new(AtomicI64::new(0)),
         }
@@ -1105,6 +1120,40 @@ operator_reconcile_or_repair_required"
     /// Read by `/api/v1/strategy/summary` to surface honest `last_decision_time`.
     pub fn last_bar_input_ts(&self) -> i64 {
         self.last_bar_input_ts.load(Ordering::SeqCst)
+    }
+
+    /// AUTON-NO-TRADE-01: Record the outcome of a bar tick dispatch.
+    ///
+    /// Called from the execution loop after `tick_strategy_dispatch` returns
+    /// a bar result.  `signal_qty` is the sum of all target quantities the
+    /// strategy returned; zero means "no trade signal this tick".
+    pub(crate) fn record_bar_tick_outcome(&self, signal_qty: i64) {
+        self.last_bar_signal_qty.store(signal_qty, Ordering::SeqCst);
+        self.bar_tick_dispatch_count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// AUTON-NO-TRADE-01: Sum of target quantities from the last bar dispatch.
+    ///
+    /// `None` when no bar has been dispatched this session (sentinel = i64::MIN).
+    /// Zero means strategy returned no net-positive targets (hold/flat signal).
+    pub fn last_bar_signal_qty(&self) -> Option<i64> {
+        let v = self.last_bar_signal_qty.load(Ordering::SeqCst);
+        if v == i64::MIN {
+            None
+        } else {
+            Some(v)
+        }
+    }
+
+    /// AUTON-NO-TRADE-01: Count of bar ticks dispatched to the native strategy this session.
+    pub fn bar_tick_dispatch_count(&self) -> u64 {
+        self.bar_tick_dispatch_count.load(Ordering::SeqCst)
+    }
+
+    /// AUTON-NO-TRADE-01: Reset bar-tick counters on new run start.
+    pub(crate) fn reset_bar_tick_counters(&self) {
+        self.last_bar_signal_qty.store(i64::MIN, Ordering::SeqCst);
+        self.bar_tick_dispatch_count.store(0, Ordering::SeqCst);
     }
 
     /// B1B: Execution loop dispatch seam — take pending bar input and invoke `on_bar`.
