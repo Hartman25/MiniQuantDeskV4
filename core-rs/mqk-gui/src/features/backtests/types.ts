@@ -100,3 +100,55 @@ export interface ArtifactBundle {
   orders: FileResult<ParsedCsvResult<OrderRow>>;
   fills: FileResult<ParsedCsvResult<FillRow>>;
 }
+
+// ---------------------------------------------------------------------------
+// BACKTEST-GUI-RUNNER-01: Daemon backtest job API types
+// ---------------------------------------------------------------------------
+
+export interface BacktestJobRequest {
+  bars_path: string;
+  strategy: string;
+  symbol: string;
+  timeframe_secs: number;
+  initial_cash_micros: number;
+  out_dir?: string | null;
+  integrity_enabled?: boolean | null;
+  shadow?: boolean | null;
+}
+
+export interface BacktestJobAcceptedResponse {
+  accepted: boolean;
+  job_id: string;
+  status: string;
+  artifact_dir: string | null;
+  error: string | null;
+}
+
+export interface BacktestJobStatusResponse {
+  truth_state: string;
+  job_id: string;
+  status: string;
+  strategy: string;
+  symbol: string;
+  created_at_utc: string;
+  started_at_utc: string | null;
+  completed_at_utc: string | null;
+  artifact_dir: string | null;
+  manifest_path: string | null;
+  metrics_path: string | null;
+  error: string | null;
+}
+
+export type BacktestJobStatusKind = "queued" | "running" | "completed" | "failed" | "unknown";
+
+export interface ActiveBacktestJob {
+  jobId: string;
+  status: BacktestJobStatusKind;
+  strategy: string;
+  symbol: string;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  artifactDir: string | null;
+  error: string | null;
+}

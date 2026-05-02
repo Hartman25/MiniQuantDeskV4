@@ -2313,6 +2313,97 @@ ul {
   border-color: rgba(245, 166, 35, 0.55);
 }
 
+/* BACKTEST-GUI-RUNNER-01: job form and status styles */
+.bt-job-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 20px;
+  margin-bottom: 12px;
+}
+
+.bt-job-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bt-job-field label {
+  font-size: 0.76rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.bt-job-field input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 0.83rem;
+  font-family: monospace;
+  outline: none;
+}
+
+.bt-job-field input:focus {
+  border-color: rgba(245, 166, 35, 0.55);
+}
+
+.bt-job-status-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.bt-job-status-badge {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.bt-job-status-badge.status-queued {
+  background: rgba(245, 166, 35, 0.15);
+  color: var(--accent);
+  border: 1px solid rgba(245, 166, 35, 0.35);
+}
+
+.bt-job-status-badge.status-running {
+  background: rgba(245, 166, 35, 0.25);
+  color: var(--accent);
+  border: 1px solid rgba(245, 166, 35, 0.5);
+}
+
+.bt-job-status-badge.status-completed {
+  background: rgba(72, 199, 142, 0.15);
+  color: var(--success);
+  border: 1px solid rgba(72, 199, 142, 0.35);
+}
+
+.bt-job-status-badge.status-failed,
+.bt-job-status-badge.status-unknown {
+  background: rgba(255, 56, 96, 0.15);
+  color: var(--critical);
+  border: 1px solid rgba(255, 56, 96, 0.35);
+}
+
+.bt-job-meta {
+  font-size: 0.82rem;
+  color: var(--muted);
+  font-family: monospace;
+}
+
+.bt-section-divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 8px 0 16px;
+}
+
 /* Equity curve SVG wrapper */
 .bt-equity-curve {
   display: flex;

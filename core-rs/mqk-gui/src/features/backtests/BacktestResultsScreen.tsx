@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { DataTable } from "../../components/common/DataTable";
 import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
@@ -13,16 +13,32 @@ import {
   parseMetrics,
   parseOrders,
 } from "./parsers.ts";
+import { getBacktestJob, isTerminalJobStatus, normalizeJobStatus, submitBacktestJob } from "./api.ts";
+import {
+  classifyArtifactPathInput,
+  buildRepoRelativePath,
+  buildMd1DSymbolPath,
+  FIXTURE_BARS_SEGMENTS,
+  BACKTEST_OUT_SEGMENTS,
+  MD_BACKUP_1D_SEGMENTS,
+} from "./pathHelpers.ts";
+import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
 import type {
+  ActiveBacktestJob,
   ArtifactBundle,
   BacktestManifest,
   BacktestMetrics,
+  BacktestJobStatusKind,
   EquityCurveRow,
   FileResult,
   FillRow,
   OrderRow,
   ParsedCsvResult,
 } from "./types.ts";
+
+// ---------------------------------------------------------------------------
+// Artifact loading
+// ---------------------------------------------------------------------------
 
 async function invokeReadArtifactFile(
   folder: string,
@@ -60,6 +76,10 @@ async function loadBundle(folder: string): Promise<ArtifactBundle> {
   ]);
   return { manifest, metrics, equityCurve, orders, fills };
 }
+
+// ---------------------------------------------------------------------------
+// Shared display components
+// ---------------------------------------------------------------------------
 
 function FileStatusNote({ label, result }: { label: string; result: FileResult<unknown> }) {
   if (result.kind === "ok") return null;
@@ -533,7 +553,66 @@ function FillsContent({ data }: { data: ParsedCsvResult<FillRow> }) {
   );
 }
 
+function ArtifactDisplay({ bundle }: { bundle: ArtifactBundle }) {
+  return (
+    <>
+      <FileStatusNote label="manifest.json" result={bundle.manifest} />
+      {bundle.manifest.kind === "ok" && (
+        <ManifestSection manifest={bundle.manifest.data} />
+      )}
+
+      <FileStatusNote label="metrics.json" result={bundle.metrics} />
+      {bundle.metrics.kind === "ok" && (
+        <MetricsSection m={bundle.metrics.data} />
+      )}
+
+      <EquityCurveSection result={bundle.equityCurve} />
+      <OrdersSection result={bundle.orders} />
+      <FillsSection result={bundle.fills} />
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Job status badge
+// ---------------------------------------------------------------------------
+
+function JobStatusBadge({ status }: { status: BacktestJobStatusKind }) {
+  const label =
+    status === "queued" ? "Queued" :
+    status === "running" ? "Running…" :
+    status === "completed" ? "Completed" :
+    status === "failed" ? "Failed" : "Unknown";
+
+  return (
+    <span className={`bt-job-status-badge status-${status}`}>{label}</span>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Portable default path builder — derives defaults from the repo root
+// injected by the launcher via MQK_REPO_ROOT. Returns "" when unavailable
+// so the operator sees a blank field with placeholder instead of a stale path.
+// ---------------------------------------------------------------------------
+
+function deriveDefaultBarsPath(): string {
+  return buildRepoRelativePath(getDesktopRepoRoot(), ...FIXTURE_BARS_SEGMENTS) ?? "";
+}
+
+function deriveDefaultOutDir(): string {
+  return buildRepoRelativePath(getDesktopRepoRoot(), ...BACKTEST_OUT_SEGMENTS) ?? "";
+}
+
+function deriveMdBackup1DPath(): string {
+  return buildRepoRelativePath(getDesktopRepoRoot(), ...MD_BACKUP_1D_SEGMENTS) ?? "";
+}
+
+// ---------------------------------------------------------------------------
+// Main screen component
+// ---------------------------------------------------------------------------
+
 export function BacktestResultsScreen() {
+  // --- Workflow A: manual artifact folder load ---
   const [folderPath, setFolderPath] = useState("");
   const [bundle, setBundle] = useState<ArtifactBundle | null>(null);
   const [loading, setLoading] = useState(false);
@@ -542,6 +621,15 @@ export function BacktestResultsScreen() {
   const handleLoad = useCallback(async () => {
     const trimmed = folderPath.trim();
     if (!trimmed) return;
+
+    const pathKind = classifyArtifactPathInput(trimmed);
+    if (pathKind.kind === "csv_file") {
+      setLoadError(
+        "This is a bars CSV. To view results, select the artifact folder containing manifest.json and metrics.json.",
+      );
+      return;
+    }
+
     setLoading(true);
     setLoadError(null);
     setBundle(null);
@@ -562,16 +650,183 @@ export function BacktestResultsScreen() {
     [handleLoad],
   );
 
+  // --- Workflow B: submit CSV backtest job ---
+  const [barsPath, setBarsPath] = useState(() => deriveDefaultBarsPath());
+  const [strategy, setStrategy] = useState("swing_momentum");
+  const [symbol, setSymbol] = useState("TEST");
+  const [timeframeSecs, setTimeframeSecs] = useState("86400");
+  const [initialCashMicros, setInitialCashMicros] = useState("100000000000");
+  const [outDir, setOutDir] = useState(() => deriveDefaultOutDir());
+
+  // Refresh portable defaults once the Tauri bootstrap cache is warm (async
+  // init may not have finished before first render). Only fills empty fields —
+  // any operator edits are preserved.
+  useEffect(() => {
+    const root = getDesktopRepoRoot();
+    if (!root) return;
+    setBarsPath((prev) => prev || (buildRepoRelativePath(root, ...FIXTURE_BARS_SEGMENTS) ?? ""));
+    setOutDir((prev) => prev || (buildRepoRelativePath(root, ...BACKTEST_OUT_SEGMENTS) ?? ""));
+  }, []);
+
+  const [jobSubmitting, setJobSubmitting] = useState(false);
+  const [jobSubmitError, setJobSubmitError] = useState<string | null>(null);
+  const [activeJob, setActiveJob] = useState<ActiveBacktestJob | null>(null);
+  const [jobBundle, setJobBundle] = useState<ArtifactBundle | null>(null);
+  const [jobBundleLoading, setJobBundleLoading] = useState(false);
+  const [jobBundleError, setJobBundleError] = useState<string | null>(null);
+
+  // Polling: fire when a non-terminal job is active. Bounded cadence: 2s.
+  // Cancellation token prevents state updates after unmount or job change.
+  const pollingRef = useRef<{ cancelled: boolean }>({ cancelled: false });
+
+  useEffect(() => {
+    if (!activeJob) return;
+    if (isTerminalJobStatus(activeJob.status)) return;
+
+    const token = { cancelled: false };
+    pollingRef.current = token;
+
+    async function poll() {
+      while (!token.cancelled) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+        if (token.cancelled) break;
+
+        const result = await getBacktestJob(activeJob!.jobId);
+        if (token.cancelled) break;
+
+        if (!result.ok) {
+          setActiveJob((prev) =>
+            prev?.jobId === activeJob!.jobId
+              ? { ...prev, status: "failed" as BacktestJobStatusKind, error: result.error ?? "Poll failed." }
+              : prev,
+          );
+          break;
+        }
+
+        const data = result.data!;
+        const newStatus = normalizeJobStatus(data.status);
+
+        setActiveJob((prev) =>
+          prev?.jobId === activeJob!.jobId
+            ? {
+                ...prev,
+                status: newStatus,
+                startedAt: data.started_at_utc ?? null,
+                completedAt: data.completed_at_utc ?? null,
+                artifactDir: data.artifact_dir ?? null,
+                error: data.error ?? null,
+              }
+            : prev,
+        );
+
+        if (isTerminalJobStatus(newStatus)) {
+          if (newStatus === "completed") {
+            if (data.artifact_dir) {
+              if (!token.cancelled) setJobBundleLoading(true);
+              loadBundle(data.artifact_dir)
+                .then((b) => {
+                  if (!token.cancelled) {
+                    setJobBundle(b);
+                    setJobBundleLoading(false);
+                  }
+                })
+                .catch((e) => {
+                  if (!token.cancelled) {
+                    setJobBundleError(String(e));
+                    setJobBundleLoading(false);
+                  }
+                });
+            }
+            // completed but no artifact_dir — leave jobBundle null; screen shows warning
+          }
+          break;
+        }
+      }
+    }
+
+    void poll();
+
+    return () => {
+      token.cancelled = true;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeJob?.jobId]);
+
+  const handleSubmitJob = useCallback(async () => {
+    const tf = parseInt(timeframeSecs, 10);
+    const cash = parseInt(initialCashMicros, 10);
+
+    if (!barsPath.trim()) { setJobSubmitError("bars_path is required."); return; }
+    if (!strategy.trim()) { setJobSubmitError("strategy is required."); return; }
+    if (!symbol.trim()) { setJobSubmitError("symbol is required."); return; }
+    if (Number.isNaN(tf) || tf <= 0) { setJobSubmitError("timeframe_secs must be a positive integer."); return; }
+    if (Number.isNaN(cash) || cash <= 0) { setJobSubmitError("initial_cash_micros must be a positive integer."); return; }
+
+    setJobSubmitting(true);
+    setJobSubmitError(null);
+    setActiveJob(null);
+    setJobBundle(null);
+    setJobBundleError(null);
+
+    const result = await submitBacktestJob({
+      bars_path: barsPath.trim(),
+      strategy: strategy.trim(),
+      symbol: symbol.trim(),
+      timeframe_secs: tf,
+      initial_cash_micros: cash,
+      out_dir: outDir.trim() || null,
+    });
+
+    setJobSubmitting(false);
+
+    if (!result.ok) {
+      setJobSubmitError(result.error ?? "Submission failed.");
+      return;
+    }
+
+    const data = result.data!;
+
+    if (!data.accepted) {
+      setJobSubmitError(data.error ?? "Job refused by daemon.");
+      return;
+    }
+
+    setActiveJob({
+      jobId: data.job_id,
+      status: normalizeJobStatus(data.status),
+      strategy: strategy.trim(),
+      symbol: symbol.trim(),
+      createdAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null,
+      artifactDir: data.artifact_dir ?? null,
+      error: null,
+    });
+  }, [barsPath, strategy, symbol, timeframeSecs, initialCashMicros, outDir]);
+
+  const jobIsActive = activeJob !== null && !isTerminalJobStatus(activeJob.status);
+
   return (
     <div className="screen-grid desk-screen-grid">
-      <Panel title="Artifact folder" subtitle="Paste the path to a backtest artifact folder (the folder containing manifest.json, metrics.json, etc.).">
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Workflow A — Load completed artifact folder                          */}
+      {/* ------------------------------------------------------------------ */}
+
+      <Panel
+        title="A — Load completed artifact folder"
+        subtitle="Paste the path to the folder that directly contains manifest.json, metrics.json, equity_curve.csv, orders.csv, fills.csv."
+      >
+        <div className="bt-path-hint" style={{ marginBottom: 8, fontSize: "0.82rem", color: "var(--text-muted, #888)" }}>
+          The artifact folder is the run-id folder inside <code>exports\backtests\</code>, not a CSV file.
+        </div>
         <div className="bt-path-row">
           <input
             className="bt-path-input"
             type="text"
-            placeholder="e.g. C:\Users\…\exports\backtests\run-name\<run-id>"
+            placeholder="Folder path — e.g. exports\backtests\7273b99b-bbed-58be-9db4-615e9bfaf901"
             value={folderPath}
-            onChange={(e) => setFolderPath(e.target.value)}
+            onChange={(e) => { setFolderPath(e.target.value); setLoadError(null); }}
             onKeyDown={handleKeyDown}
             spellCheck={false}
             autoComplete="off"
@@ -593,28 +848,218 @@ export function BacktestResultsScreen() {
       </Panel>
 
       {!bundle && !loading && !loadError && (
-        <div className="empty-state" style={{ padding: "32px 0" }}>
-          No artifact folder loaded. Enter a path above and click Load.
+        <div className="empty-state" style={{ padding: "16px 0" }}>
+          No artifact folder loaded. Enter a completed backtest run folder path above and click Load.
         </div>
       )}
 
-      {bundle && (
-        <>
-          <FileStatusNote label="manifest.json" result={bundle.manifest} />
-          {bundle.manifest.kind === "ok" && (
-            <ManifestSection manifest={bundle.manifest.data} />
+      {bundle && <ArtifactDisplay bundle={bundle} />}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Workflow B — Run new CSV backtest (offline research only)            */}
+      {/* ------------------------------------------------------------------ */}
+
+      <Panel
+        title="B — Run new CSV backtest (offline research only)"
+        subtitle="Runs an offline backtest against a CSV bars file. No live or paper orders are created. No broker adapter is called."
+      >
+        <div className="bt-job-form-grid">
+          <div className="bt-job-field" style={{ gridColumn: "1 / -1" }}>
+            <label htmlFor="bt-bars-path">Bars CSV path</label>
+            <input
+              id="bt-bars-path"
+              type="text"
+              value={barsPath}
+              onChange={(e) => setBarsPath(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder={
+                getDesktopRepoRoot()
+                  ? "Path to .csv bars file (portable default pre-filled above)"
+                  : "Absolute path to .csv bars file — repo root not detected, set manually"
+              }
+            />
+            {(() => {
+              const md1DDir = deriveMdBackup1DPath();
+              const examplePath = buildMd1DSymbolPath(getDesktopRepoRoot(), symbol || "AAPL");
+              return (
+                <div className="bt-field-hint" style={{ marginTop: 4, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
+                  {md1DDir
+                    ? <>
+                        <strong>Real 1D market-data backup:</strong>{" "}
+                        <code>{md1DDir}</code> — paste <code>{"<SYMBOL>"}_1D.csv</code> from that folder
+                        {examplePath ? <> (e.g. <code>{examplePath.split(/[\\/]/).pop()}</code>)</> : null}.
+                        {" "}The pre-filled <code>bkt4_bars.csv</code> fixture has 3 bars — plumbing proof only.
+                      </>
+                    : <>
+                        Set repo root via the launcher to see the portable 1D market-data backup path.
+                        Real 1D bars live in <code>exports\md_backup\1D\{"<SYMBOL>"}_1D.csv</code>.
+                        The pre-filled <code>bkt4_bars.csv</code> fixture has 3 bars — plumbing proof only.
+                      </>
+                  }
+                </div>
+              );
+            })()}
+          </div>
+          <div className="bt-job-field">
+            <label htmlFor="bt-strategy">Strategy</label>
+            <input
+              id="bt-strategy"
+              type="text"
+              value={strategy}
+              onChange={(e) => setStrategy(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="e.g. swing_momentum"
+            />
+          </div>
+          <div className="bt-job-field">
+            <label htmlFor="bt-symbol">Symbol</label>
+            <input
+              id="bt-symbol"
+              type="text"
+              value={symbol}
+              onChange={(e) => setSymbol(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="e.g. TEST"
+            />
+          </div>
+          <div className="bt-job-field">
+            <label htmlFor="bt-timeframe">Timeframe (seconds)</label>
+            <input
+              id="bt-timeframe"
+              type="text"
+              value={timeframeSecs}
+              onChange={(e) => setTimeframeSecs(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="e.g. 86400"
+            />
+          </div>
+          <div className="bt-job-field">
+            <label htmlFor="bt-cash">Initial cash (micros)</label>
+            <input
+              id="bt-cash"
+              type="text"
+              value={initialCashMicros}
+              onChange={(e) => setInitialCashMicros(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="e.g. 100000000000"
+            />
+          </div>
+          <div className="bt-job-field" style={{ gridColumn: "1 / -1" }}>
+            <label htmlFor="bt-out-dir">Output folder</label>
+            <input
+              id="bt-out-dir"
+              type="text"
+              value={outDir}
+              onChange={(e) => setOutDir(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder={
+                getDesktopRepoRoot()
+                  ? "Output folder (portable default pre-filled above)"
+                  : "exports\\backtests — repo root not detected, set manually"
+              }
+            />
+            <div className="bt-field-hint" style={{ marginTop: 4, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
+              Artifacts are written into a run-id subfolder here. Load that subfolder with Workflow A to view results.
+            </div>
+          </div>
+        </div>
+
+        <div className="bt-path-row" style={{ marginTop: 4 }}>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void handleSubmitJob()}
+            disabled={jobSubmitting || jobIsActive}
+          >
+            {jobSubmitting ? "Submitting…" : jobIsActive ? "Job running…" : "Submit backtest"}
+          </button>
+        </div>
+
+        <div className="bt-field-hint" style={{ marginTop: 8, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
+          Submission requires the daemon to be running and the operator token to be configured
+          (launch via <code>Launch-VeritasLedger.ps1</code> with <code>MQK_OPERATOR_TOKEN</code> set).
+        </div>
+
+        {jobSubmitError && (
+          <div className="unavailable-notice unavailable-critical" style={{ marginTop: 10 }}>
+            <strong>Submit failed:</strong> {jobSubmitError}
+          </div>
+        )}
+      </Panel>
+
+      {/* Job status display */}
+      {activeJob && (
+        <Panel
+          title="Job status"
+          subtitle={`Offline backtest job — research only. No broker adapter, no live/paper orders.`}
+        >
+          <div className="bt-job-status-row">
+            <JobStatusBadge status={activeJob.status} />
+            <span className="bt-job-meta" title={activeJob.jobId}>
+              job {activeJob.jobId.slice(0, 8)}…
+            </span>
+            <span className="bt-job-meta">
+              {activeJob.strategy} / {activeJob.symbol}
+            </span>
+            {activeJob.completedAt && (
+              <span className="bt-job-meta">
+                completed {formatDateTime(activeJob.completedAt)}
+              </span>
+            )}
+            {!activeJob.completedAt && activeJob.startedAt && (
+              <span className="bt-job-meta">
+                started {formatDateTime(activeJob.startedAt)}
+              </span>
+            )}
+          </div>
+
+          {activeJob.status === "failed" && activeJob.error && (
+            <div className="unavailable-notice unavailable-critical" style={{ marginTop: 4 }}>
+              <strong>Job failed:</strong> {activeJob.error}
+            </div>
           )}
 
-          <FileStatusNote label="metrics.json" result={bundle.metrics} />
-          {bundle.metrics.kind === "ok" && (
-            <MetricsSection m={bundle.metrics.data} />
+          {activeJob.status === "completed" && !activeJob.artifactDir && (
+            <div className="unavailable-notice" style={{ marginTop: 4 }}>
+              <strong>Completed without artifact path.</strong> Job completed but daemon returned no artifact_dir. Artifacts may still exist on disk — use Workflow A to load manually.
+            </div>
           )}
 
-          <EquityCurveSection result={bundle.equityCurve} />
-          <OrdersSection result={bundle.orders} />
-          <FillsSection result={bundle.fills} />
-        </>
+          {activeJob.artifactDir && (
+            <div className="bt-job-meta" style={{ marginTop: 6, wordBreak: "break-all" }}>
+              <span className="eyebrow">artifact dir</span>{" "}
+              <span style={{ color: "var(--text)" }}>{activeJob.artifactDir}</span>
+            </div>
+          )}
+
+          {(activeJob.status === "queued" || activeJob.status === "running") && (
+            <div className="bt-job-meta" style={{ marginTop: 6, color: "var(--accent)" }}>
+              Polling for status every 2 seconds…
+            </div>
+          )}
+        </Panel>
       )}
+
+      {/* Job artifact bundle loading state */}
+      {jobBundleLoading && (
+        <div className="empty-state" style={{ padding: "16px 0" }}>
+          Loading artifact results…
+        </div>
+      )}
+
+      {jobBundleError && (
+        <div className="unavailable-notice unavailable-critical" style={{ margin: "8px 0" }}>
+          <strong>Job completed but artifact load failed:</strong> {jobBundleError}
+        </div>
+      )}
+
+      {jobBundle && <ArtifactDisplay bundle={jobBundle} />}
     </div>
   );
 }
