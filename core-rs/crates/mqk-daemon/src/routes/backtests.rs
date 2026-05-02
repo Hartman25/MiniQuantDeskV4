@@ -165,6 +165,7 @@ pub(crate) async fn backtest_job_submit(
     let timeframe_secs = req.timeframe_secs;
     let initial_cash_micros = req.initial_cash_micros;
     let integrity_enabled = req.integrity_enabled.unwrap_or(false);
+    let integrity_stale_threshold_ticks = req.integrity_stale_threshold_ticks;
     let shadow = req.shadow.unwrap_or(false);
 
     // --- Spawn background task ---
@@ -187,6 +188,7 @@ pub(crate) async fn backtest_job_submit(
                 timeframe_secs,
                 initial_cash_micros,
                 integrity_enabled,
+                integrity_stale_threshold_ticks,
                 shadow,
                 out_dir,
             )
@@ -324,6 +326,7 @@ fn run_backtest_csv_blocking(
     timeframe_secs: i64,
     initial_cash_micros: i64,
     integrity_enabled: bool,
+    integrity_stale_threshold_ticks: Option<u64>,
     shadow: bool,
     out_dir: String,
 ) -> Result<(String, String, String), String> {
@@ -337,6 +340,16 @@ fn run_backtest_csv_blocking(
     cfg.initial_cash_micros = initial_cash_micros;
     cfg.shadow_mode = shadow;
     cfg.integrity_enabled = integrity_enabled;
+    // Timeframe-aware stale threshold: conservative_defaults() uses 120 s which
+    // immediately triggers execution_blocked=true on daily bar gaps (86400 s).
+    // Apply operator-supplied value when present; otherwise default by timeframe.
+    cfg.integrity_stale_threshold_ticks = integrity_stale_threshold_ticks.unwrap_or({
+        if timeframe_secs >= 86_400 {
+            172_800
+        } else {
+            120
+        }
+    });
 
     // Resolve strategy from built-in registry.
     let mut reg = mqk_strategy::PluginRegistry::new();

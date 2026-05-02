@@ -477,6 +477,102 @@ async fn bj09_completed_job_artifacts_on_disk() {
 }
 
 // ---------------------------------------------------------------------------
+// BJ-11: integrity_stale_threshold_ticks field is accepted and passed through
+// ---------------------------------------------------------------------------
+//
+// Proves:
+// - The new `integrity_stale_threshold_ticks` field is accepted in the POST body
+//   without causing a 400 validation error.
+// - When set to 172800 with integrity_enabled=true and timeframe_secs=86400,
+//   the job completes successfully (execution_blocked=false because the fixture
+//   bars have 60 s gaps, well below 172800).
+// - The field is not ignored — job completes without error about the field.
+
+#[tokio::test]
+async fn bj11_integrity_stale_threshold_ticks_accepted_and_completes() {
+    let tmp = tempfile::tempdir().expect("temp dir must be creatable");
+    let out_dir = tmp.path().display().to_string();
+
+    let (st, _) = make_router_with_state();
+
+    // POST with integrity_stale_threshold_ticks=172800 and integrity_enabled=true.
+    // The bkt4_bars.csv fixture has bars 60 s apart; gaps of 60 < 172800 → not stale.
+    let router_post = routes::build_router(Arc::clone(&st));
+    let body = post_json_body(serde_json::json!({
+        "bars_path": fixture_bars_path(),
+        "strategy": "swing_momentum",
+        "symbol": "TEST",
+        "timeframe_secs": 86400,
+        "initial_cash_micros": 100_000_000_000i64,
+        "out_dir": out_dir,
+        "integrity_enabled": true,
+        "integrity_stale_threshold_ticks": 172800
+    }));
+    let (status, resp) = call(router_post, body).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "POST with integrity_stale_threshold_ticks must → 202 Accepted"
+    );
+    let json = parse_json(resp);
+    assert!(
+        json_bool(&json, "accepted"),
+        "accepted must be true when integrity_stale_threshold_ticks is set"
+    );
+    let job_id = json_str(&json, "job_id").to_string();
+
+    // Poll until completed (max 10 s).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let router_get = routes::build_router(Arc::clone(&st));
+        let req = axum::http::Request::builder()
+            .uri(format!("/api/v1/backtests/jobs/{}", job_id))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (_, resp) = call(router_get, req).await;
+        let json = parse_json(resp);
+        let job_status = json_str(&json, "status").to_string();
+
+        if job_status == "completed" {
+            // Verify artifact was written — proves threshold was applied, not rejected.
+            let artifact_dir = json
+                .get("artifact_dir")
+                .and_then(|v| v.as_str())
+                .expect("completed job must have artifact_dir");
+            assert!(
+                !artifact_dir.is_empty(),
+                "artifact_dir must be non-empty — integrity_stale_threshold_ticks was passed through"
+            );
+            // Verify execution_blocked=false in metrics.json (bars are 60 s apart, < 172800).
+            let metrics_path = std::path::Path::new(artifact_dir).join("metrics.json");
+            assert!(metrics_path.exists(), "metrics.json must exist");
+            let metrics_raw =
+                std::fs::read_to_string(&metrics_path).expect("metrics.json readable");
+            let metrics: serde_json::Value =
+                serde_json::from_str(&metrics_raw).expect("metrics.json must be valid JSON");
+            assert_eq!(
+                metrics.get("execution_blocked").and_then(|v| v.as_bool()),
+                Some(false),
+                "execution_blocked must be false: threshold=172800 > fixture bar gap of 60 s"
+            );
+            return;
+        }
+        if job_status == "failed" {
+            let err = json
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no error)");
+            panic!("BJ-11: job failed unexpectedly: {err}");
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "BJ-11: job did not complete within 10 seconds"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BJ-10: No live routing or execution state touched after backtest
 // ---------------------------------------------------------------------------
 

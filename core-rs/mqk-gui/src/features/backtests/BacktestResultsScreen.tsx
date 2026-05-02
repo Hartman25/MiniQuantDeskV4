@@ -294,6 +294,15 @@ function MetricsSection({ m }: { m: BacktestMetrics }) {
             </strong>
           </div>
         </div>
+        {m.execution_blocked && (
+          <div className="unavailable-notice" style={{ marginTop: 12 }}>
+            <strong>Execution blocked by integrity gate.</strong>{" "}
+            No orders were placed after the block. Common cause for daily (1D) data:{" "}
+            the default stale threshold of 120 s is exceeded by the first 86400 s bar gap.
+            Re-run via Workflow B with the stale threshold field left blank (auto-default 172800)
+            or set it explicitly to at least 172800.
+          </div>
+        )}
         {m.halted && (
           <div
             className="unavailable-notice unavailable-critical"
@@ -657,6 +666,8 @@ export function BacktestResultsScreen() {
   const [timeframeSecs, setTimeframeSecs] = useState("86400");
   const [initialCashMicros, setInitialCashMicros] = useState("100000000000");
   const [outDir, setOutDir] = useState(() => deriveDefaultOutDir());
+  // Empty = use daemon's timeframe-aware default (172800 for daily, 120 otherwise).
+  const [integrityStaleThresholdTicks, setIntegrityStaleThresholdTicks] = useState("");
 
   // Refresh portable defaults once the Tauri bootstrap cache is warm (async
   // init may not have finished before first render). Only fills empty fields —
@@ -755,12 +766,18 @@ export function BacktestResultsScreen() {
   const handleSubmitJob = useCallback(async () => {
     const tf = parseInt(timeframeSecs, 10);
     const cash = parseInt(initialCashMicros, 10);
+    const staleThresholdRaw = integrityStaleThresholdTicks.trim();
+    const staleThreshold = staleThresholdRaw ? parseInt(staleThresholdRaw, 10) : null;
 
     if (!barsPath.trim()) { setJobSubmitError("bars_path is required."); return; }
     if (!strategy.trim()) { setJobSubmitError("strategy is required."); return; }
     if (!symbol.trim()) { setJobSubmitError("symbol is required."); return; }
     if (Number.isNaN(tf) || tf <= 0) { setJobSubmitError("timeframe_secs must be a positive integer."); return; }
     if (Number.isNaN(cash) || cash <= 0) { setJobSubmitError("initial_cash_micros must be a positive integer."); return; }
+    if (staleThreshold !== null && (Number.isNaN(staleThreshold) || staleThreshold <= 0)) {
+      setJobSubmitError("Integrity stale threshold must be a positive integer (or leave blank for auto).");
+      return;
+    }
 
     setJobSubmitting(true);
     setJobSubmitError(null);
@@ -775,6 +792,7 @@ export function BacktestResultsScreen() {
       timeframe_secs: tf,
       initial_cash_micros: cash,
       out_dir: outDir.trim() || null,
+      integrity_stale_threshold_ticks: staleThreshold,
     });
 
     setJobSubmitting(false);
@@ -802,7 +820,7 @@ export function BacktestResultsScreen() {
       artifactDir: data.artifact_dir ?? null,
       error: null,
     });
-  }, [barsPath, strategy, symbol, timeframeSecs, initialCashMicros, outDir]);
+  }, [barsPath, strategy, symbol, timeframeSecs, initialCashMicros, outDir, integrityStaleThresholdTicks]);
 
   const jobIsActive = activeJob !== null && !isTerminalJobStatus(activeJob.status);
 
@@ -966,6 +984,39 @@ export function BacktestResultsScreen() {
             />
             <div className="bt-field-hint" style={{ marginTop: 4, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
               Artifacts are written into a run-id subfolder here. Load that subfolder with Workflow A to view results.
+            </div>
+          </div>
+          <div className="bt-job-field">
+            <label htmlFor="bt-stale-threshold">
+              Integrity stale threshold (seconds){" "}
+              <span style={{ fontWeight: "normal", color: "var(--text-muted, #888)" }}>optional</span>
+            </label>
+            <input
+              id="bt-stale-threshold"
+              type="text"
+              value={integrityStaleThresholdTicks}
+              onChange={(e) => setIntegrityStaleThresholdTicks(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder={
+                parseInt(timeframeSecs, 10) >= 86400
+                  ? "auto → 172800 (daily default)"
+                  : "auto → 120 (intraday default)"
+              }
+            />
+            <div className="bt-field-hint" style={{ marginTop: 4, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
+              {parseInt(timeframeSecs, 10) >= 86400
+                ? <>
+                    <strong>Daily bars detected.</strong>{" "}
+                    Leave blank to use the safe default of <strong>172800</strong> (2 days).
+                    Daily bar gaps are 86400 s; the intraday default of 120 s would set{" "}
+                    <code>execution_blocked=true</code> immediately.
+                  </>
+                : <>
+                    Leave blank to use the intraday default of <strong>120</strong> s.
+                    For daily bars (timeframe_secs=86400), use at least <strong>172800</strong>.
+                  </>
+              }
             </div>
           </div>
         </div>

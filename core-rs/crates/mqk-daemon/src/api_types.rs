@@ -2590,6 +2590,19 @@ pub struct BacktestJobRequest {
     pub out_dir: Option<String>,
     /// Enable integrity checks. Defaults to false.
     pub integrity_enabled: Option<bool>,
+    /// Integrity stale threshold in ticks (seconds for time-indexed bar feeds).
+    ///
+    /// When `integrity_enabled` is true and a bar arrives more than this many seconds
+    /// after the previous bar, integrity disarms and sets `execution_blocked=true`.
+    ///
+    /// If omitted, the daemon applies a timeframe-aware default:
+    /// - `timeframe_secs >= 86400` (daily): **172800** (2 days — covers normal daily gaps)
+    /// - otherwise: **120** (mirrors `conservative_defaults`)
+    ///
+    /// The conservative_defaults value of 120 causes immediate `execution_blocked=true`
+    /// on the first daily bar gap (86400 s >> 120 s). Always set this explicitly
+    /// for daily data, or rely on the timeframe-aware default.
+    pub integrity_stale_threshold_ticks: Option<u64>,
     /// Run in shadow mode (strategy signals observed but not executed). Defaults to false.
     pub shadow: Option<bool>,
 }

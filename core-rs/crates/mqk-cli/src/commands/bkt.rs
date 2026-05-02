@@ -141,6 +141,7 @@ pub async fn run_backtest_db(
     initial_cash_micros: i64,
     shadow: bool,
     integrity_enabled: bool,
+    integrity_stale_threshold_ticks: u64,
     out_dir: Option<String>,
 ) -> Result<()> {
     if timeframe_secs <= 0 {
@@ -196,6 +197,7 @@ pub async fn run_backtest_db(
     cfg.initial_cash_micros = initial_cash_micros;
     cfg.shadow_mode = shadow;
     cfg.integrity_enabled = integrity_enabled;
+    cfg.integrity_stale_threshold_ticks = integrity_stale_threshold_ticks;
 
     // BKT-06P: resolve strategy from built-in plugin registry.
     let mut reg = PluginRegistry::new();

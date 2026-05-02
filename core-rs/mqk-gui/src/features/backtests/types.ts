@@ -113,6 +113,15 @@ export interface BacktestJobRequest {
   initial_cash_micros: number;
   out_dir?: string | null;
   integrity_enabled?: boolean | null;
+  /**
+   * Integrity stale threshold in ticks (seconds for time-indexed bar feeds).
+   * When omitted, the daemon applies a timeframe-aware default:
+   *   - timeframe_secs >= 86400 (daily): 172800 (2 days)
+   *   - otherwise: 120 (conservative_defaults)
+   * Daily bars have 86400 s gaps; the 120 s default causes execution_blocked=true
+   * immediately. Always set this explicitly for daily data or rely on the default.
+   */
+  integrity_stale_threshold_ticks?: number | null;
   shadow?: boolean | null;
 }
 

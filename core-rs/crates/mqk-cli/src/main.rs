@@ -104,7 +104,12 @@ enum BacktestCmd {
         #[arg(long, default_value_t = true)]
         integrity_enabled: bool,
 
-        /// Integrity stale threshold (ticks).
+        /// Integrity stale threshold in ticks (seconds for time-indexed bar feeds).
+        /// Default 120 is correct for intraday data (1m/5m bars with ~60-300 s gaps).
+        /// For daily bars (timeframe_secs=86400), use at least 172800: daily gaps are
+        /// 86400 s and a threshold of 120 would immediately set execution_blocked=true.
+        /// Weekend gaps in daily data can reach 259200 s (3 days); 172800 covers
+        /// datasets that store only trading-day timestamps with no weekend entries.
         #[arg(long, default_value_t = 120)]
         integrity_stale_threshold_ticks: u64,
 
@@ -158,6 +163,12 @@ enum BacktestCmd {
         /// Enable integrity checks.
         #[arg(long, default_value_t = true)]
         integrity_enabled: bool,
+
+        /// Integrity stale threshold in ticks (seconds for time-indexed bar feeds).
+        /// Default 120 is correct for intraday data (1m/5m bars with ~60-300 s gaps).
+        /// For daily bars (timeframe_secs=86400), use at least 172800.
+        #[arg(long, default_value_t = 120)]
+        integrity_stale_threshold_ticks: u64,
 
         /// Optional output directory for deterministic artifacts (fills/equity/metrics/manifest).
         #[arg(long)]
@@ -522,6 +533,7 @@ async fn main() -> Result<()> {
                 initial_cash_micros,
                 shadow,
                 integrity_enabled,
+                integrity_stale_threshold_ticks,
                 out_dir,
             } => {
                 run_backtest_db(
@@ -535,6 +547,7 @@ async fn main() -> Result<()> {
                     initial_cash_micros,
                     shadow,
                     integrity_enabled,
+                    integrity_stale_threshold_ticks,
                     out_dir,
                 )
                 .await?;
