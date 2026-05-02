@@ -1,5 +1,6 @@
 import type { ReactElement } from "react";
 import { AuditScreen } from "../audit/AuditScreen";
+import { BacktestResultsScreen } from "../backtests/BacktestResultsScreen";
 import { DashboardScreen } from "../dashboard/DashboardScreen";
 import { ExecutionScreen } from "../execution/ExecutionScreen";
 import { AlertsScreen } from "../alerts/AlertsScreen";
@@ -41,7 +42,8 @@ export type ScreenKey =
   | "marketData"
   | "runtime"
   | "artifacts"
-  | "operatorTimeline";
+  | "operatorTimeline"
+  | "backtests";
 
 /**
  * Which monitor this screen is designed to occupy.
@@ -78,7 +80,7 @@ export interface ScreenDefinition {
 export const MONITOR_GROUPS: Record<MonitorGroup, readonly ScreenKey[]> = {
   operator:    ["dashboard", "ops", "portfolio", "reconcile", "strategy", "session", "config", "marketData", "settings"],
   execution:   ["execution"],
-  diagnostics: ["audit", "incidents", "alerts", "operatorTimeline", "runtime", "metrics", "topology", "transport", "artifacts", "risk"],
+  diagnostics: ["audit", "incidents", "alerts", "operatorTimeline", "runtime", "metrics", "topology", "transport", "artifacts", "backtests", "risk"],
 };
 
 /**
@@ -215,5 +217,11 @@ export const SCREEN_REGISTRY: Record<ScreenKey, ScreenDefinition> = {
     description: "Make risk posture obvious and hard to ignore.",
     monitorGroup: "diagnostics",
     render: ({ model }) => <RiskScreen model={model} />,
+  },
+  backtests: {
+    title: "Backtest Results",
+    description: "View performance artifacts from completed CLI backtest runs.",
+    monitorGroup: "diagnostics",
+    render: () => <BacktestResultsScreen />,
   },
 };

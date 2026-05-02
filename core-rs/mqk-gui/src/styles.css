@@ -319,6 +319,11 @@ ul {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  padding-bottom: 16px;
+}
+
+.screen-grid {
+  flex-shrink: 0;
 }
 
 .bottom-rail {
@@ -2262,4 +2267,71 @@ ul {
 .checkpoint-type-snapshot_refresh {
   border-color: rgba(59, 130, 246, 0.30);
   color: rgba(96, 165, 250, 0.85);
+}
+
+/* ==========================================================================
+   BACKTEST-GUI-ARTIFACTS-01 — Backtest Results screen
+   Display-only artifact viewer. No execution, no job submission.
+   ========================================================================== */
+
+/* DataTable column-count overrides.
+   The base .table-row rule defaults to 3 columns. These selectors widen the
+   grid to match the actual column count used by orders (7) and fills (8)
+   tables in BacktestResultsScreen. */
+.table-cols-5 .table-row,
+.table-cols-5 .table-head { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+
+.table-cols-6 .table-row,
+.table-cols-6 .table-head { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+
+.table-cols-7 .table-row,
+.table-cols-7 .table-head { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+
+.table-cols-8 .table-row,
+.table-cols-8 .table-head { grid-template-columns: repeat(8, minmax(0, 1fr)); }
+
+/* Artifact folder path input row */
+.bt-path-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.bt-path-input {
+  flex: 1;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 0.85rem;
+  font-family: monospace;
+  outline: none;
+}
+
+.bt-path-input:focus {
+  border-color: rgba(245, 166, 35, 0.55);
+}
+
+/* Equity curve SVG wrapper */
+.bt-equity-curve {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bt-equity-meta {
+  display: flex;
+  gap: 20px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.bt-equity-svg {
+  width: 100%;
+  height: 80px;
+  display: block;
+  background: rgba(10, 10, 10, 0.60);
+  border: 1px solid var(--border);
+  border-radius: 2px;
 }

@@ -22,6 +22,7 @@ export function LeftCommandRail({
     "strategy",
     "audit",
     "artifacts",
+    "backtests",
     "settings",
   ];
 
@@ -41,16 +42,15 @@ export function LeftCommandRail({
   return (
     <aside className="left-rail">
       <div className="brand-block panel panel-compact">
-        <div style={{ display: "flex", justifyContent: "center", width: "100%" }}>
-          <img
-            src={shieldLogo}
-            alt="Veritas Ledger shield"
-          />
+        <img
+          src={shieldLogo}
+          alt="Veritas Ledger shield"
+        />
+        <div>
+          <div className="eyebrow">Veritas Ledger</div>
+          <h1 className="brand-title">Operator Console</h1>
+          <p className="brand-subtitle">Institution-grade trading control</p>
         </div>
-
-        <div className="eyebrow">Veritas Ledger</div>
-        <h1 className="brand-title">Operator Console</h1>
-        <p className="brand-subtitle">Institution-grade trading control</p>
       </div>
 
       <div className="rail-nav-scroll">

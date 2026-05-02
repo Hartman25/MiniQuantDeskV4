@@ -1,6 +1,15 @@
 use serde::Serialize;
 use tauri::Manager;
 
+const ALLOWED_ARTIFACT_FILES: &[&str] = &[
+    "manifest.json",
+    "metrics.json",
+    "equity_curve.csv",
+    "orders.csv",
+    "fills.csv",
+    "audit.jsonl",
+];
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DesktopBootstrapPayload {
@@ -21,6 +30,23 @@ fn non_empty_env(name: &str) -> Option<String> {
     })
 }
 
+/// Read one of the permitted backtest artifact files from a given folder path.
+/// Returns `Ok(Some(content))` on success, `Ok(None)` if the file is not found,
+/// and `Err(message)` for all other I/O errors or if the filename is not in the
+/// allowlist.
+#[tauri::command]
+fn read_artifact_file(folder: String, filename: String) -> Result<Option<String>, String> {
+    if !ALLOWED_ARTIFACT_FILES.contains(&filename.as_str()) {
+        return Err(format!("'{}' is not a permitted artifact filename", filename));
+    }
+    let path = std::path::Path::new(&folder).join(&filename);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {}", filename, e)),
+    }
+}
+
 #[tauri::command]
 fn get_desktop_bootstrap(app: tauri::AppHandle) -> DesktopBootstrapPayload {
     DesktopBootstrapPayload {
@@ -35,7 +61,7 @@ fn get_desktop_bootstrap(app: tauri::AppHandle) -> DesktopBootstrapPayload {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![get_desktop_bootstrap])
+        .invoke_handler(tauri::generate_handler![get_desktop_bootstrap, read_artifact_file])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("Veritas Ledger");

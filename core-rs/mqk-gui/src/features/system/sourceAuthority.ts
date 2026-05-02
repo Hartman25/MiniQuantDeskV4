@@ -228,6 +228,13 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: [],
     placeholder: ["operatorTimeline", "auditActions"],
   },
+  // Backtest results reads local artifact files via Tauri — no daemon endpoints.
+  backtests: {
+    db: [],
+    runtime: [],
+    broker: [],
+    placeholder: [],
+  },
 };
 
 function hasEndpoint(realEndpoints: string[], hints: string[]) {
