@@ -2,6 +2,13 @@
 param(
     [ValidateSet('Observe', 'TradeReady')]
     [string]$Mode = 'Observe',
+    # -RebuildGui: force GUI rebuild only (safe when daemon is already running)
+    [switch]$RebuildGui,
+    # -RebuildDaemon: force daemon rebuild only (requires daemon not locked)
+    [switch]$RebuildDaemon,
+    # -RebuildAll: force rebuild of both daemon and GUI
+    [switch]$RebuildAll,
+    # -Rebuild: legacy alias for -RebuildAll (backward compatibility)
     [switch]$Rebuild
 )
 
@@ -91,6 +98,39 @@ function Resolve-GuiBinary {
     return $null
 }
 
+function Test-GuiBinaryFreshness {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [string]$GuiExe
+    )
+
+    # Missing binary is always stale
+    if ([string]::IsNullOrWhiteSpace($GuiExe) -or -not (Test-Path $GuiExe)) {
+        return $true
+    }
+
+    $binaryTime = (Get-Item $GuiExe).LastWriteTimeUtc
+    $guiRoot = Join-Path $RepoRoot 'core-rs\mqk-gui'
+
+    # Scan source/config files; exclude generated/build directories
+    $sourceFiles = Get-ChildItem -Path $guiRoot -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notmatch '\\(node_modules|dist|target)\\' }
+
+    $latestSource = $null
+    foreach ($file in $sourceFiles) {
+        if ($null -eq $latestSource -or $file.LastWriteTimeUtc -gt $latestSource) {
+            $latestSource = $file.LastWriteTimeUtc
+        }
+    }
+
+    if ($null -eq $latestSource) {
+        # No source files found — treat as fresh to avoid spurious rebuilds
+        return $false
+    }
+
+    return ($latestSource -gt $binaryTime)
+}
+
 function Ensure-NodeModules {
     param([Parameter(Mandatory = $true)][string]$GuiRoot)
 
@@ -107,21 +147,24 @@ function Ensure-NodeModules {
 function Ensure-DaemonBinary {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
-        [Parameter(Mandatory = $true)][bool]$RebuildRequested
+        [Parameter(Mandatory = $true)][bool]$ForceRebuild
     )
 
-    if ($RebuildRequested) {
+    if ($ForceRebuild) {
         $cargo = Get-CommandPath 'cargo'
         Write-LauncherStep 'Rebuilding mqk-daemon --release'
         Invoke-ExternalCommand -FilePath $cargo -Arguments @('build', '-p', 'mqk-daemon', '--release') -WorkingDirectory (Join-Path $RepoRoot 'core-rs')
+        return Resolve-DaemonBinary -RepoRoot $RepoRoot
     }
 
     try {
-        return Resolve-DaemonBinary -RepoRoot $RepoRoot
+        $existing = Resolve-DaemonBinary -RepoRoot $RepoRoot
+        Write-LauncherStep 'Daemon rebuild skipped; binary present (use -RebuildDaemon or -RebuildAll to force)'
+        return $existing
     }
     catch {
         $cargo = Get-CommandPath 'cargo'
-        Write-LauncherStep 'Building mqk-daemon --release'
+        Write-LauncherStep 'Daemon binary missing; building mqk-daemon --release'
         Invoke-ExternalCommand -FilePath $cargo -Arguments @('build', '-p', 'mqk-daemon', '--release') -WorkingDirectory (Join-Path $RepoRoot 'core-rs')
         return Resolve-DaemonBinary -RepoRoot $RepoRoot
     }
@@ -130,14 +173,25 @@ function Ensure-DaemonBinary {
 function Ensure-GuiBinary {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
-        [Parameter(Mandatory = $true)][bool]$RebuildRequested
+        [Parameter(Mandatory = $true)][bool]$ForceRebuild
     )
 
-    if (-not $RebuildRequested) {
-        $existing = Resolve-GuiBinary -RepoRoot $RepoRoot
-        if ($existing) {
+    $existing = Resolve-GuiBinary -RepoRoot $RepoRoot
+
+    if (-not $ForceRebuild) {
+        if ($null -eq $existing) {
+            Write-LauncherStep 'GUI binary missing; building'
+        }
+        elseif (Test-GuiBinaryFreshness -RepoRoot $RepoRoot -GuiExe $existing) {
+            Write-LauncherStep 'GUI source newer than binary; rebuilding'
+        }
+        else {
+            Write-LauncherSuccess 'GUI binary fresh; reusing'
             return $existing
         }
+    }
+    else {
+        Write-LauncherStep 'GUI rebuild requested; building'
     }
 
     $guiRoot = Join-Path $RepoRoot 'core-rs\mqk-gui'
@@ -297,7 +351,10 @@ function Resolve-RequiredOperatorToken {
 }
 
 function Set-LauncherEnvironment {
-    param([Parameter(Mandatory = $true)][string]$OperatorToken)
+    param(
+        [Parameter(Mandatory = $true)][string]$OperatorToken,
+        [Parameter(Mandatory = $true)][string]$RepoRoot
+    )
 
     $names = @(
         'MQK_DAEMON_DEPLOYMENT_MODE',
@@ -305,7 +362,8 @@ function Set-LauncherEnvironment {
         'MQK_DAEMON_ADDR',
         'MQK_GUI_DAEMON_URL',
         'MQK_GUI_OPERATOR_TOKEN',
-        'MQK_OPERATOR_TOKEN'
+        'MQK_OPERATOR_TOKEN',
+        'MQK_REPO_ROOT'
     )
 
     $snapshot = New-EnvSnapshot -Names $names
@@ -316,6 +374,7 @@ function Set-LauncherEnvironment {
     $env:MQK_GUI_DAEMON_URL = 'http://127.0.0.1:8899'
     $env:MQK_GUI_OPERATOR_TOKEN = $OperatorToken
     $env:MQK_OPERATOR_TOKEN = $OperatorToken
+    $env:MQK_REPO_ROOT = $RepoRoot
 
     return $snapshot
 }
@@ -989,12 +1048,17 @@ try {
     $repoRoot = Get-RepoRoot
     Import-LauncherEnvironmentFiles -RepoRoot $repoRoot
     $operatorToken = Resolve-RequiredOperatorToken
-    $envSnapshot = Set-LauncherEnvironment -OperatorToken $operatorToken
+    $envSnapshot = Set-LauncherEnvironment -OperatorToken $operatorToken -RepoRoot $repoRoot
 
     try {
+        # Resolve rebuild flags: -Rebuild is a legacy alias for -RebuildAll
+        $rebuildAll = $Rebuild.IsPresent -or $RebuildAll.IsPresent
+        $forceRebuildDaemon = $RebuildDaemon.IsPresent -or $rebuildAll
+        $forceRebuildGui = $RebuildGui.IsPresent -or $rebuildAll
+
         Write-LauncherStep "Launcher mode: $(Get-ModeDisplayName -LauncherMode $Mode)"
         Write-LauncherStep 'Resolving daemon binary'
-        $daemonExe = Ensure-DaemonBinary -RepoRoot $repoRoot -RebuildRequested:$Rebuild.IsPresent
+        $daemonExe = Ensure-DaemonBinary -RepoRoot $repoRoot -ForceRebuild:$forceRebuildDaemon
 
         $daemonInfo = Start-DaemonIfNeeded -DaemonExe $daemonExe -RepoRoot $repoRoot -BaseUrl $env:MQK_GUI_DAEMON_URL -OperatorToken $operatorToken -LauncherMode $Mode
         $verified = $daemonInfo.Probe
@@ -1002,7 +1066,7 @@ try {
         Write-BackendSummary -Probe $verified -LauncherMode $Mode
 
         Write-LauncherStep 'Resolving desktop GUI binary'
-        $guiExe = Ensure-GuiBinary -RepoRoot $repoRoot -RebuildRequested:$Rebuild.IsPresent
+        $guiExe = Ensure-GuiBinary -RepoRoot $repoRoot -ForceRebuild:$forceRebuildGui
 
         Write-LauncherStep 'Launching desktop GUI against verified local daemon'
         Start-Process -FilePath $guiExe -WorkingDirectory (Split-Path -Parent $guiExe) | Out-Null

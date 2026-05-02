@@ -3,6 +3,7 @@ export interface DesktopBootstrapState {
   daemonUrl: string | null;
   operatorToken: string | null;
   productName: string | null;
+  repoRoot: string | null;
 }
 
 const DEFAULT_BOOTSTRAP: DesktopBootstrapState = {
@@ -10,6 +11,7 @@ const DEFAULT_BOOTSTRAP: DesktopBootstrapState = {
   daemonUrl: null,
   operatorToken: null,
   productName: null,
+  repoRoot: null,
 };
 
 let cachedBootstrap: DesktopBootstrapState = { ...DEFAULT_BOOTSTRAP };
@@ -32,6 +34,7 @@ function coerceBootstrapPayload(value: unknown): DesktopBootstrapState {
     daemonUrl: normalizeOptionalString(payload.daemonUrl),
     operatorToken: normalizeOptionalString(payload.operatorToken),
     productName: normalizeOptionalString(payload.productName),
+    repoRoot: normalizeOptionalString(payload.repoRoot),
   };
 }
 
@@ -68,4 +71,8 @@ export function getDesktopOperatorToken(): string | null {
 
 export function isDesktopShell(): boolean {
   return cachedBootstrap.isDesktopShell;
+}
+
+export function getDesktopRepoRoot(): string | null {
+  return cachedBootstrap.repoRoot;
 }

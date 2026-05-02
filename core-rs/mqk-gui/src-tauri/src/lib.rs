@@ -17,6 +17,7 @@ struct DesktopBootstrapPayload {
     daemon_url: Option<String>,
     operator_token: Option<String>,
     product_name: Option<String>,
+    repo_root: Option<String>,
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
@@ -54,6 +55,7 @@ fn get_desktop_bootstrap(app: tauri::AppHandle) -> DesktopBootstrapPayload {
         daemon_url: non_empty_env("MQK_GUI_DAEMON_URL"),
         operator_token: non_empty_env("MQK_GUI_OPERATOR_TOKEN"),
         product_name: Some(app.package_info().name.clone()),
+        repo_root: non_empty_env("MQK_REPO_ROOT"),
     }
 }
 
