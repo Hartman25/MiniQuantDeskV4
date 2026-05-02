@@ -79,7 +79,7 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
 
       {/* Real-time runtime metrics — always visible */}
       <div className="metrics-grid desk-panel-row">
-        {model.metrics.runtime.series.map((series) => (
+        {(model.metrics.runtime?.series ?? []).map((series) => (
           <MetricStripChart key={series.key} series={series} />
         ))}
       </div>

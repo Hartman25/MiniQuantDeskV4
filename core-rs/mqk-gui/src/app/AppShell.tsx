@@ -5,6 +5,7 @@ import {
   getCurrentWebviewWindow,
 } from "@tauri-apps/api/webviewWindow";
 import { ActionReceiptBanner } from "../components/common/ActionReceiptBanner";
+import { ScreenErrorBoundary } from "../components/common/ScreenErrorBoundary";
 import { BottomEventRail } from "../components/layout/BottomEventRail";
 import { LeftCommandRail } from "../components/layout/LeftCommandRail";
 import { RightOpsRail } from "../components/layout/RightOpsRail";
@@ -235,12 +236,14 @@ export function AppShell() {
               panelKey={activeScreen}
               authority={model.panelSources[activeScreen]}
             >
-              {screen.render({
-                model,
-                selectTimeline: (internalOrderId) => void selectTimeline(internalOrderId),
-                timelineLoading,
-                runAction: (action) => void handleRunAction(action),
-              })}
+              <ScreenErrorBoundary key={activeScreen} screenKey={activeScreen}>
+                {screen.render({
+                  model,
+                  selectTimeline: (internalOrderId) => void selectTimeline(internalOrderId),
+                  timelineLoading,
+                  runAction: (action) => void handleRunAction(action),
+                })}
+              </ScreenErrorBoundary>
             </WorkspaceFrame>
 
             {showBottomRail ? <BottomEventRail events={model.feed} /> : null}
