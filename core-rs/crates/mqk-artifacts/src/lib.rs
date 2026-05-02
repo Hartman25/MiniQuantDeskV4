@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use mqk_portfolio::Side;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,7 +72,7 @@ pub fn init_run_artifacts(args: InitRunArtifactsArgs<'_>) -> Result<InitRunArtif
     ensure_file_exists_with(&run_dir.join("equity_curve.csv"), "ts_utc,equity\n")?;
     ensure_file_exists_with(&run_dir.join("metrics.json"), "{}\n")?;
 
-    // Write manifest.json (overwrite is OK; it’s deterministic for a run start).
+    // Write manifest.json (overwrite is OK; it's deterministic for a run start).
     let manifest = RunManifest {
         schema_version: args.schema_version,
         run_id: args.run_id,
@@ -116,8 +117,10 @@ fn ensure_file_exists_with(path: &Path, contents_if_create: &str) -> Result<()> 
 // Backtest report writer (deterministic outputs)
 // ---------------------------------------------------------------------------
 
+/// Deep performance metrics fields, computed by pure helper functions.
 #[derive(Debug, Clone, Serialize)]
 struct BacktestMetrics<'a> {
+    // --- Existing fields (preserved; schema_version stays 1 — additive change) ---
     schema_version: i32,
     run_id: Uuid,
     strategy_name: &'a str,
@@ -129,21 +132,329 @@ struct BacktestMetrics<'a> {
     orders_filled: usize,
     orders_rejected: usize,
     fills: usize,
+    /// Preserved for backward compatibility. Equals `ending_equity_micros`.
     final_equity_micros: i64,
     symbols: Vec<&'a str>,
     last_prices_micros: std::collections::BTreeMap<&'a str, i64>,
+
+    // --- BACKTEST-METRICS-01: equity performance ---
+    starting_equity_micros: i64,
+    /// Alias for final_equity_micros; both carry the same value.
+    ending_equity_micros: i64,
+    /// ending_equity - starting_equity (signed; negative = net loss).
+    total_return_micros: i64,
+    /// (ending - starting) / starting * 100. E.g. 12.34 means 12.34%.
+    total_return_pct: f64,
+    /// Peak equity seen over the run (including starting equity as baseline).
+    equity_high_water_mark_micros: i64,
+    /// Largest peak-to-trough decline in equity (always >= 0).
+    max_drawdown_micros: i64,
+    /// max_drawdown_micros / hwm * 100. E.g. 5.0 means 5%.
+    max_drawdown_pct: f64,
+
+    // --- BACKTEST-METRICS-01: costs ---
+    /// Sum of all fill fee_micros across the run.
+    total_commission_micros: i64,
+
+    // --- BACKTEST-METRICS-01: FIFO round-trip trade metrics ---
+    /// Number of completed round-trip trades (FIFO pairing of BUY/SELL per symbol).
+    /// Open positions at run end are NOT counted (no closing price available for trade PnL).
+    trade_count: usize,
+    winning_trade_count: usize,
+    losing_trade_count: usize,
+    /// Trades where FIFO-paired PnL == 0 after fees.
+    flat_trade_count: usize,
+    /// winning / trade_count * 100. None if trade_count == 0.
+    win_rate_pct: Option<f64>,
+    /// Sum of PnL micros across winning trades (>= 0).
+    gross_profit_micros: i64,
+    /// Sum of PnL micros across losing trades (<= 0; negative value represents losses).
+    gross_loss_micros: i64,
+    /// gross_profit / abs(gross_loss). None if no losing trades (infinite).
+    profit_factor: Option<f64>,
+    /// Average PnL micros of winning trades. None if no winning trades.
+    average_win_micros: Option<i64>,
+    /// Average PnL micros of losing trades (negative value). None if no losing trades.
+    average_loss_micros: Option<i64>,
+    /// win_rate * avg_win + (1 - win_rate) * avg_loss (expected PnL per trade).
+    /// None if trade_count == 0.
+    expectancy_micros: Option<i64>,
+    /// Best (highest) single trade PnL micros. None if trade_count == 0.
+    best_trade_micros: Option<i64>,
+    /// Worst (lowest) single trade PnL micros. None if trade_count == 0.
+    worst_trade_micros: Option<i64>,
+
+    // --- BACKTEST-METRICS-01: risk-adjusted ratios ---
+    /// Per-bar Sharpe ratio (non-annualized): mean(returns) / std(returns).
+    /// Returns are computed bar-by-bar from equity_curve (first return vs starting_equity).
+    /// None if fewer than 2 return observations or zero variance.
+    sharpe_ratio: Option<f64>,
+    /// Per-bar Sortino ratio (non-annualized): mean(returns) / downside_std.
+    /// Downside std uses negative returns only (MAR = 0). None if no downside observations.
+    sortino_ratio: Option<f64>,
+
+    // --- BACKTEST-METRICS-01: exposure ---
+    /// Number of bars where at least one position was non-zero at bar close.
+    exposure_bars: usize,
+    /// exposure_bars / bars * 100. E.g. 50.0 means 50%.
+    exposure_time_pct: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Pure metric computation helpers
+// ---------------------------------------------------------------------------
+
+/// Compute equity curve performance metrics from starting equity and curve data.
+///
+/// Returns (hwm, max_drawdown_micros, max_drawdown_pct, total_return_micros, total_return_pct).
+fn compute_equity_metrics(starting_equity: i64, curve: &[(i64, i64)]) -> (i64, i64, f64, i64, f64) {
+    let ending = curve.last().map(|(_, eq)| *eq).unwrap_or(starting_equity);
+    let total_return_micros = ending.saturating_sub(starting_equity);
+    let total_return_pct = if starting_equity != 0 {
+        total_return_micros as f64 / starting_equity as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    // High water mark starts at starting_equity, then tracks curve peaks.
+    let mut hwm = starting_equity;
+    let mut max_dd_micros: i64 = 0;
+    let mut max_dd_pct: f64 = 0.0;
+
+    for &(_, eq) in curve {
+        if eq > hwm {
+            hwm = eq;
+        }
+        let dd = hwm.saturating_sub(eq);
+        if dd > max_dd_micros {
+            max_dd_micros = dd;
+            max_dd_pct = if hwm > 0 {
+                dd as f64 / hwm as f64 * 100.0
+            } else {
+                0.0
+            };
+        }
+    }
+
+    (
+        hwm,
+        max_dd_micros,
+        max_dd_pct,
+        total_return_micros,
+        total_return_pct,
+    )
+}
+
+/// Compute per-bar Sharpe and Sortino ratios (non-annualized).
+///
+/// Bar returns: r[0] = (curve[0] - starting) / starting;
+///              r[i] = (curve[i] - curve[i-1]) / curve[i-1] for i >= 1.
+/// Returns (sharpe, sortino). Both None if fewer than 2 return observations.
+fn compute_sharpe_sortino(
+    starting_equity: i64,
+    curve: &[(i64, i64)],
+) -> (Option<f64>, Option<f64>) {
+    if curve.is_empty() {
+        return (None, None);
+    }
+
+    let mut returns: Vec<f64> = Vec::with_capacity(curve.len());
+
+    if starting_equity != 0 {
+        returns.push((curve[0].1 - starting_equity) as f64 / starting_equity as f64);
+    }
+    for i in 1..curve.len() {
+        let prev = curve[i - 1].1;
+        if prev != 0 {
+            returns.push((curve[i].1 - prev) as f64 / prev as f64);
+        }
+    }
+
+    if returns.len() < 2 {
+        return (None, None);
+    }
+
+    let n = returns.len() as f64;
+    let mean = returns.iter().sum::<f64>() / n;
+
+    // Sample standard deviation (n-1 denominator).
+    let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
+    let std_dev = variance.sqrt();
+
+    let sharpe = if std_dev > 0.0 {
+        Some(mean / std_dev)
+    } else {
+        None
+    };
+
+    // Sortino: downside deviation from MAR=0 (uses all negative returns, population denominator).
+    let downside: Vec<f64> = returns.iter().filter(|&&r| r < 0.0).copied().collect();
+    let sortino = if downside.is_empty() {
+        None
+    } else {
+        let down_var = downside.iter().map(|r| r.powi(2)).sum::<f64>() / downside.len() as f64;
+        let down_std = down_var.sqrt();
+        if down_std > 0.0 {
+            Some(mean / down_std)
+        } else {
+            None
+        }
+    };
+
+    (sharpe, sortino)
+}
+
+/// FIFO round-trip trade pairing.
+///
+/// Returns one `i64` (pnl_micros) per completed round-trip trade.
+/// Long trades: opened by BUY, closed by SELL. pnl = (sell - buy) * qty - fees.
+/// Short trades: opened by SELL, closed by BUY. pnl = (buy_short_entry - buy_exit) * qty - fees.
+/// Open positions remaining at run end are excluded (no exit price for PnL).
+/// Fills must already be in chronological order (engine guarantees this).
+fn compute_fifo_trade_pnls(fills: &[mqk_backtest::BacktestFill]) -> Vec<i64> {
+    use std::collections::{HashMap, VecDeque};
+
+    // Lot: (open_qty, price_micros, remaining_fee_micros).
+    type Lot = (i64, i64, i64);
+    let mut long_lots: HashMap<String, VecDeque<Lot>> = HashMap::new();
+    let mut short_lots: HashMap<String, VecDeque<Lot>> = HashMap::new();
+    let mut pnls: Vec<i64> = Vec::new();
+
+    for fill in fills {
+        let sym = fill.symbol.clone();
+        let qty = fill.qty;
+        let price = fill.price_micros;
+        let fee = fill.fee_micros;
+
+        match &fill.inner.side {
+            Side::Buy => {
+                // Close existing short lots first (FIFO), then open long with remainder.
+                let mut rem_qty = qty;
+                let mut rem_fee = fee;
+                {
+                    let shorts = short_lots.entry(sym.clone()).or_default();
+                    while rem_qty > 0 && !shorts.is_empty() {
+                        let lot = shorts.front_mut().unwrap();
+                        let close_qty = rem_qty.min(lot.0);
+                        let open_fee_part = if lot.0 > 0 {
+                            lot.2 * close_qty / lot.0
+                        } else {
+                            0
+                        };
+                        let close_fee_part = if qty > 0 { fee * close_qty / qty } else { 0 };
+                        // Short PnL: entry = lot price (sell), exit = current buy price.
+                        let pnl = (lot.1 - price)
+                            .saturating_mul(close_qty)
+                            .saturating_sub(open_fee_part)
+                            .saturating_sub(close_fee_part);
+                        pnls.push(pnl);
+                        lot.0 -= close_qty;
+                        lot.2 -= open_fee_part;
+                        rem_qty -= close_qty;
+                        rem_fee = rem_fee.saturating_sub(close_fee_part);
+                        if lot.0 == 0 {
+                            shorts.pop_front();
+                        }
+                    }
+                }
+                if rem_qty > 0 {
+                    long_lots
+                        .entry(sym)
+                        .or_default()
+                        .push_back((rem_qty, price, rem_fee));
+                }
+            }
+            Side::Sell => {
+                // Close existing long lots first (FIFO), then open short with remainder.
+                let mut rem_qty = qty;
+                let mut rem_fee = fee;
+                {
+                    let longs = long_lots.entry(sym.clone()).or_default();
+                    while rem_qty > 0 && !longs.is_empty() {
+                        let lot = longs.front_mut().unwrap();
+                        let close_qty = rem_qty.min(lot.0);
+                        let open_fee_part = if lot.0 > 0 {
+                            lot.2 * close_qty / lot.0
+                        } else {
+                            0
+                        };
+                        let close_fee_part = if qty > 0 { fee * close_qty / qty } else { 0 };
+                        // Long PnL: entry = lot price (buy), exit = current sell price.
+                        let pnl = (price - lot.1)
+                            .saturating_mul(close_qty)
+                            .saturating_sub(open_fee_part)
+                            .saturating_sub(close_fee_part);
+                        pnls.push(pnl);
+                        lot.0 -= close_qty;
+                        lot.2 -= open_fee_part;
+                        rem_qty -= close_qty;
+                        rem_fee = rem_fee.saturating_sub(close_fee_part);
+                        if lot.0 == 0 {
+                            longs.pop_front();
+                        }
+                    }
+                }
+                if rem_qty > 0 {
+                    short_lots
+                        .entry(sym)
+                        .or_default()
+                        .push_back((rem_qty, price, rem_fee));
+                }
+            }
+        }
+    }
+
+    pnls
+}
+
+/// Count equity-curve bars where at least one position was non-zero at bar close.
+///
+/// Reconstructs net position per symbol by replaying fills in order.
+/// Fills must be sorted by bar_end_ts (engine guarantees this).
+fn count_exposure_bars(fills: &[mqk_backtest::BacktestFill], equity_curve: &[(i64, i64)]) -> usize {
+    use std::collections::HashMap;
+
+    let mut net_positions: HashMap<String, i64> = HashMap::new();
+    let mut fill_idx = 0;
+    let mut exposed = 0usize;
+
+    for &(bar_ts, _) in equity_curve {
+        // Apply all fills whose bar_end_ts <= this bar's timestamp.
+        while fill_idx < fills.len() && fills[fill_idx].bar_end_ts <= bar_ts {
+            let f = &fills[fill_idx];
+            let delta = match &f.inner.side {
+                Side::Buy => f.qty,
+                Side::Sell => -f.qty,
+            };
+            *net_positions.entry(f.symbol.clone()).or_insert(0) += delta;
+            fill_idx += 1;
+        }
+        if net_positions.values().any(|&q| q != 0) {
+            exposed += 1;
+        }
+    }
+
+    exposed
 }
 
 /// Write deterministic backtest artifacts into an existing run directory.
 ///
-/// This function performs explicit IO. It is intended to be called by CLI/daemons.
-/// No wall-clock time is used; timestamps are derived from `report.equity_curve` / bar end_ts.
+/// This function performs explicit IO. No wall-clock time is used;
+/// timestamps are derived from `report.equity_curve` / bar end_ts.
+///
+/// `initial_cash_micros` is the starting cash value from `BacktestConfig`
+/// at the time of the run. It is required for accurate return and drawdown metrics.
 ///
 /// Files written (overwritten):
+/// - `orders.csv`
 /// - `fills.csv`
 /// - `equity_curve.csv`
 /// - `metrics.json`
-pub fn write_backtest_report(run_dir: &Path, report: &mqk_backtest::BacktestReport) -> Result<()> {
+pub fn write_backtest_report(
+    run_dir: &Path,
+    report: &mqk_backtest::BacktestReport,
+    initial_cash_micros: i64,
+) -> Result<()> {
     fs::create_dir_all(run_dir).with_context(|| {
         format!(
             "create backtest artifacts dir failed: {}",
@@ -195,7 +506,7 @@ pub fn write_backtest_report(run_dir: &Path, report: &mqk_backtest::BacktestRepo
     fs::write(&fills_path, fills_csv)
         .with_context(|| format!("write fills.csv failed: {}", fills_path.display()))?;
 
-    // equity_curve.csv (match placeholder header)
+    // equity_curve.csv
     let mut eq_csv = String::from("ts_utc,equity\n");
     for (ts, eq) in &report.equity_curve {
         eq_csv.push_str(&format!("{},{}\n", ts, eq));
@@ -204,10 +515,14 @@ pub fn write_backtest_report(run_dir: &Path, report: &mqk_backtest::BacktestRepo
     fs::write(&eq_path, eq_csv)
         .with_context(|| format!("write equity_curve.csv failed: {}", eq_path.display()))?;
 
-    // metrics.json
-    let final_equity = report.equity_curve.last().map(|(_, eq)| *eq).unwrap_or(0);
+    // metrics.json — compute deep performance metrics from report data.
+    let final_equity = report
+        .equity_curve
+        .last()
+        .map(|(_, eq)| *eq)
+        .unwrap_or(initial_cash_micros);
 
-    // deterministic symbol listing
+    // Deterministic symbol listing (sorted).
     let mut symbols: Vec<&str> = report.last_prices.keys().map(|s| s.as_str()).collect();
     symbols.sort();
 
@@ -228,6 +543,70 @@ pub fn write_backtest_report(run_dir: &Path, report: &mqk_backtest::BacktestRepo
         .filter(|o| o.status == mqk_backtest::OrderStatus::Rejected)
         .count();
 
+    // Equity performance.
+    let (hwm, max_dd_micros, max_dd_pct, total_return_micros, total_return_pct) =
+        compute_equity_metrics(initial_cash_micros, &report.equity_curve);
+
+    // Risk-adjusted ratios.
+    let (sharpe_ratio, sortino_ratio) =
+        compute_sharpe_sortino(initial_cash_micros, &report.equity_curve);
+
+    // Total commissions from fills.
+    let total_commission_micros: i64 = report.fills.iter().map(|f| f.fee_micros).sum();
+
+    // FIFO trade-level metrics.
+    let trade_pnls = compute_fifo_trade_pnls(&report.fills);
+    let trade_count = trade_pnls.len();
+    let winning_trade_count = trade_pnls.iter().filter(|&&p| p > 0).count();
+    let losing_trade_count = trade_pnls.iter().filter(|&&p| p < 0).count();
+    let flat_trade_count = trade_pnls.iter().filter(|&&p| p == 0).count();
+
+    let gross_profit_micros: i64 = trade_pnls.iter().filter(|&&p| p > 0).sum();
+    let gross_loss_micros: i64 = trade_pnls.iter().filter(|&&p| p < 0).sum();
+
+    let win_rate_pct = if trade_count > 0 {
+        Some(winning_trade_count as f64 / trade_count as f64 * 100.0)
+    } else {
+        None
+    };
+
+    let profit_factor = if gross_loss_micros < 0 {
+        Some(gross_profit_micros as f64 / (-gross_loss_micros) as f64)
+    } else {
+        None // no losing trades — infinite profit factor, report as null
+    };
+
+    let average_win_micros = if winning_trade_count > 0 {
+        Some(gross_profit_micros / winning_trade_count as i64)
+    } else {
+        None
+    };
+    let average_loss_micros = if losing_trade_count > 0 {
+        Some(gross_loss_micros / losing_trade_count as i64)
+    } else {
+        None
+    };
+
+    let expectancy_micros = if trade_count > 0 {
+        let wr = winning_trade_count as f64 / trade_count as f64;
+        let avg_win = average_win_micros.unwrap_or(0) as f64;
+        let avg_loss = average_loss_micros.unwrap_or(0) as f64;
+        Some((wr * avg_win + (1.0 - wr) * avg_loss) as i64)
+    } else {
+        None
+    };
+
+    let best_trade_micros = trade_pnls.iter().copied().max();
+    let worst_trade_micros = trade_pnls.iter().copied().min();
+
+    // Exposure bars from fill replay.
+    let exposure_bars = count_exposure_bars(&report.fills, &report.equity_curve);
+    let exposure_time_pct = if report.equity_curve.is_empty() {
+        0.0
+    } else {
+        exposure_bars as f64 / report.equity_curve.len() as f64 * 100.0
+    };
+
     let metrics = BacktestMetrics {
         schema_version: 1,
         run_id: report.run_id,
@@ -243,6 +622,31 @@ pub fn write_backtest_report(run_dir: &Path, report: &mqk_backtest::BacktestRepo
         final_equity_micros: final_equity,
         symbols,
         last_prices_micros,
+        starting_equity_micros: initial_cash_micros,
+        ending_equity_micros: final_equity,
+        total_return_micros,
+        total_return_pct,
+        equity_high_water_mark_micros: hwm,
+        max_drawdown_micros: max_dd_micros,
+        max_drawdown_pct: max_dd_pct,
+        total_commission_micros,
+        trade_count,
+        winning_trade_count,
+        losing_trade_count,
+        flat_trade_count,
+        win_rate_pct,
+        gross_profit_micros,
+        gross_loss_micros,
+        profit_factor,
+        average_win_micros,
+        average_loss_micros,
+        expectancy_micros,
+        best_trade_micros,
+        worst_trade_micros,
+        sharpe_ratio,
+        sortino_ratio,
+        exposure_bars,
+        exposure_time_pct,
     };
 
     let metrics_path = run_dir.join("metrics.json");
@@ -313,17 +717,13 @@ mod tests {
     }
 
     /// ART-01: orders.csv header column count must match every data row.
-    ///
-    /// Regression guard for the schema mismatch where the 9-column header
-    /// had only 8 fields per row (stop_price was missing, status landed in
-    /// the wrong slot).
     #[test]
     fn orders_csv_header_matches_row_column_count() {
         let tmp = std::env::temp_dir().join(format!("mqk_art_test_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let report = test_report_with_orders();
-        write_backtest_report(&tmp, &report).unwrap();
+        write_backtest_report(&tmp, &report, 1_000_000_000).unwrap();
 
         let orders_csv = std::fs::read_to_string(tmp.join("orders.csv")).unwrap();
         let lines: Vec<&str> = orders_csv.lines().filter(|l| !l.is_empty()).collect();
@@ -360,7 +760,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let report = test_report_with_orders();
-        write_backtest_report(&tmp, &report).unwrap();
+        write_backtest_report(&tmp, &report, 1_000_000_000).unwrap();
 
         let fills_csv = std::fs::read_to_string(tmp.join("fills.csv")).unwrap();
         let lines: Vec<&str> = fills_csv.lines().filter(|l| !l.is_empty()).collect();
@@ -397,7 +797,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let report = test_report_with_orders();
-        write_backtest_report(&tmp, &report).unwrap();
+        write_backtest_report(&tmp, &report, 1_000_000_000).unwrap();
 
         let eq_csv = std::fs::read_to_string(tmp.join("equity_curve.csv")).unwrap();
         let lines: Vec<&str> = eq_csv.lines().filter(|l| !l.is_empty()).collect();
@@ -420,7 +820,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let report = test_report_with_orders();
-        write_backtest_report(&tmp, &report).unwrap();
+        write_backtest_report(&tmp, &report, 1_000_000_000).unwrap();
 
         let contents = std::fs::read_to_string(tmp.join("metrics.json")).unwrap();
         let v: serde_json::Value =
@@ -445,16 +845,13 @@ mod tests {
     }
 
     /// ART-05: orders.csv status column carries correct values (not in stop_price slot).
-    ///
-    /// Regression: before the fix, `MARKET,,{}` put status in column 7 (stop_price)
-    /// and left column 8 (status) empty.
     #[test]
     fn orders_csv_status_column_is_correct() {
         let tmp = std::env::temp_dir().join(format!("mqk_art_test_status_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let report = test_report_with_orders();
-        write_backtest_report(&tmp, &report).unwrap();
+        write_backtest_report(&tmp, &report, 1_000_000_000).unwrap();
 
         let csv = std::fs::read_to_string(tmp.join("orders.csv")).unwrap();
         let mut lines = csv.lines().filter(|l| !l.is_empty());
@@ -485,6 +882,270 @@ mod tests {
                 stop_price_val
             );
         }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // BACKTEST-METRICS-01: focused deep-metric computation tests
+    // -----------------------------------------------------------------------
+
+    fn make_report_no_fills(equity_curve: Vec<(i64, i64)>) -> BacktestReport {
+        BacktestReport {
+            strategy_name: "test".to_string(),
+            run_id: Uuid::new_v5(&Uuid::from_bytes([0u8; 16]), b"r"),
+            config_id: Uuid::new_v5(&Uuid::from_bytes([0u8; 16]), b"c"),
+            input_data_hash: derive_input_data_hash(&[]),
+            halted: false,
+            halt_reason: None,
+            equity_curve,
+            orders: vec![],
+            fills: vec![],
+            last_prices: BTreeMap::new(),
+            execution_blocked: false,
+        }
+    }
+
+    fn make_fill(
+        bar_ts: i64,
+        symbol: &str,
+        side: Side,
+        qty: i64,
+        price_micros: i64,
+        fee_micros: i64,
+    ) -> BacktestFill {
+        let ns = Uuid::from_bytes([0xBBu8; 16]);
+        let key = format!("{}:{}:{}:{}", bar_ts, symbol, qty, price_micros);
+        let order_id = Uuid::new_v5(&ns, key.as_bytes());
+        let fill_id = Uuid::new_v5(&ns, order_id.as_bytes());
+        BacktestFill {
+            fill_id,
+            order_id,
+            bar_end_ts: bar_ts,
+            inner: Fill::new(symbol, side, qty, price_micros, fee_micros),
+        }
+    }
+
+    /// BM-01: flat/no-trade run — equity unchanged, all trade metrics are zero/null.
+    #[test]
+    fn bm01_flat_no_trade_run() {
+        let starting = 100_000_000_000i64; // $100k
+        let report = make_report_no_fills(vec![(1, starting)]);
+
+        let (hwm, max_dd, max_dd_pct, ret_micros, ret_pct) =
+            compute_equity_metrics(starting, &report.equity_curve);
+
+        assert_eq!(hwm, starting);
+        assert_eq!(max_dd, 0);
+        assert_eq!(max_dd_pct, 0.0);
+        assert_eq!(ret_micros, 0);
+        assert_eq!(ret_pct, 0.0);
+
+        let pnls = compute_fifo_trade_pnls(&report.fills);
+        assert!(pnls.is_empty(), "no fills → no closed trades");
+
+        let exposure = count_exposure_bars(&report.fills, &report.equity_curve);
+        assert_eq!(exposure, 0, "no fills → no exposure bars");
+
+        let (sharpe, sortino) = compute_sharpe_sortino(starting, &report.equity_curve);
+        assert!(sharpe.is_none(), "only 1 return observation → sharpe None");
+        assert!(sortino.is_none());
+    }
+
+    /// BM-02: equity curve with a clear drawdown — HWM, max_drawdown_micros, max_drawdown_pct.
+    #[test]
+    fn bm02_equity_curve_drawdown() {
+        let starting = 100_000_000i64;
+        // Equity goes 100 → 110 → 95 → 105 (peak=110, trough=95, dd=15).
+        let curve = vec![
+            (1, 100_000_000),
+            (2, 110_000_000),
+            (3, 95_000_000),
+            (4, 105_000_000),
+        ];
+
+        let (hwm, max_dd, max_dd_pct, ret_micros, ret_pct) =
+            compute_equity_metrics(starting, &curve);
+
+        assert_eq!(hwm, 110_000_000, "HWM must be the peak equity");
+        assert_eq!(max_dd, 15_000_000, "drawdown = peak(110) - trough(95) = 15");
+        // 15/110 * 100 ≈ 13.636%
+        assert!(
+            (max_dd_pct - 13.636).abs() < 0.001,
+            "max_dd_pct ≈ 13.636%, got {}",
+            max_dd_pct
+        );
+        assert_eq!(ret_micros, 5_000_000, "final=105 - starting=100 = 5");
+        assert_eq!(ret_pct, 5.0, "5/100 * 100 = 5.0%");
+    }
+
+    /// BM-03: total commission is the sum of all fill fees.
+    #[test]
+    fn bm03_commission_aggregation() {
+        let fills = [
+            make_fill(1, "SPY", Side::Buy, 10, 100_000_000, 1_000_000),
+            make_fill(2, "SPY", Side::Buy, 5, 100_000_000, 500_000),
+        ];
+        let total_fee: i64 = fills.iter().map(|f| f.fee_micros).sum();
+        assert_eq!(total_fee, 1_500_000);
+    }
+
+    /// BM-04: FIFO pairing — simple winning long trade (BUY then SELL).
+    #[test]
+    fn bm04_winning_long_trade() {
+        // BUY 100 @ $10 ($10 each, price=10_000_000 micros), fee=1_000 micros.
+        // SELL 100 @ $11 ($11 each, price=11_000_000 micros), fee=1_000 micros.
+        // PnL = (11_000_000 - 10_000_000) * 100 - 1_000 - 1_000 = 100_000_000 - 2_000 = 99_998_000.
+        let fills = vec![
+            make_fill(1, "SPY", Side::Buy, 100, 10_000_000, 1_000),
+            make_fill(2, "SPY", Side::Sell, 100, 11_000_000, 1_000),
+        ];
+
+        let pnls = compute_fifo_trade_pnls(&fills);
+        assert_eq!(pnls.len(), 1, "one completed round-trip");
+        assert_eq!(pnls[0], 99_998_000, "pnl = 100M - 2k fees = 99_998_000");
+
+        let winning = pnls.iter().filter(|&&p| p > 0).count();
+        let losing = pnls.iter().filter(|&&p| p < 0).count();
+        assert_eq!(winning, 1);
+        assert_eq!(losing, 0);
+
+        let gross_profit: i64 = pnls.iter().filter(|&&p| p > 0).sum();
+        let gross_loss: i64 = pnls.iter().filter(|&&p| p < 0).sum();
+        assert_eq!(gross_profit, 99_998_000);
+        assert_eq!(gross_loss, 0);
+
+        // profit_factor: no losses → None
+        assert!(
+            gross_loss == 0,
+            "no losing trades → profit_factor should be None"
+        );
+
+        let win_rate = winning as f64 / pnls.len() as f64 * 100.0;
+        assert_eq!(win_rate, 100.0);
+    }
+
+    /// BM-05: FIFO pairing — simple losing long trade (BUY then SELL at lower price).
+    #[test]
+    fn bm05_losing_long_trade() {
+        // BUY 100 @ $11, fee=1_000. SELL 100 @ $10, fee=1_000.
+        // PnL = (10M - 11M) * 100 - 1_000 - 1_000 = -100M - 2_000 = -100_002_000.
+        let fills = vec![
+            make_fill(1, "SPY", Side::Buy, 100, 11_000_000, 1_000),
+            make_fill(2, "SPY", Side::Sell, 100, 10_000_000, 1_000),
+        ];
+
+        let pnls = compute_fifo_trade_pnls(&fills);
+        assert_eq!(pnls.len(), 1, "one completed round-trip");
+        assert_eq!(pnls[0], -100_002_000, "loss = -100M - 2k fees");
+
+        let winning = pnls.iter().filter(|&&p| p > 0).count();
+        let losing = pnls.iter().filter(|&&p| p < 0).count();
+        assert_eq!(winning, 0);
+        assert_eq!(losing, 1);
+
+        let gross_profit: i64 = pnls.iter().filter(|&&p| p > 0).sum();
+        let gross_loss: i64 = pnls.iter().filter(|&&p| p < 0).sum();
+        assert_eq!(gross_profit, 0);
+        assert_eq!(gross_loss, -100_002_000);
+
+        // profit_factor = gross_profit / abs(gross_loss) = 0 / 100_002_000 = 0.0
+        let pf = gross_profit as f64 / (-gross_loss) as f64;
+        assert_eq!(pf, 0.0);
+
+        let win_rate = winning as f64 / pnls.len() as f64 * 100.0;
+        assert_eq!(win_rate, 0.0);
+
+        let avg_loss = gross_loss / losing as i64;
+        assert_eq!(avg_loss, -100_002_000);
+
+        // Expectancy = 0 * 0 + 1 * avg_loss = avg_loss.
+        let wr = winning as f64 / pnls.len() as f64;
+        let expectancy = (wr * gross_profit as f64 + (1.0 - wr) * avg_loss as f64) as i64;
+        assert_eq!(expectancy, -100_002_000);
+    }
+
+    /// BM-06: Sharpe/Sortino require at least 2 return observations.
+    #[test]
+    fn bm06_sharpe_sortino_minimum_observations() {
+        let starting = 100_000_000i64;
+
+        // Single-bar equity curve → only 1 return observation → both None.
+        let (s1, so1) = compute_sharpe_sortino(starting, &[(1, 100_000_000)]);
+        assert!(s1.is_none(), "1 return obs → sharpe None");
+        assert!(so1.is_none());
+
+        // Two bars: r0=0.0, r1=0.1 → variance is non-zero, sharpe computable; no downside.
+        let (s2, so2) = compute_sharpe_sortino(starting, &[(1, 100_000_000), (2, 110_000_000)]);
+        // r0 = 0.0, r1 = 0.1 → mean=0.05, std≈0.0707, sharpe≈0.707
+        assert!(s2.is_some(), "non-zero variance → sharpe computable");
+        assert!(so2.is_none(), "no downside returns → sortino None");
+
+        // Positive then negative return → both computable.
+        let (s3, so3) = compute_sharpe_sortino(starting, &[(1, 110_000_000), (2, 95_000_000)]);
+        // r0 = 0.1, r1 = -15/110 ≈ -0.1364
+        assert!(s3.is_some(), "mixed returns → sharpe computable");
+        assert!(
+            so3.is_some(),
+            "negative return present → sortino computable"
+        );
+    }
+
+    /// BM-07: exposure_bars counts bars where net position is non-zero.
+    #[test]
+    fn bm07_exposure_bars() {
+        // Bar 1: BUY 10 shares → position = +10 (exposed).
+        // Bar 2: no fill → position still +10 (exposed).
+        // Bar 3: SELL 10 shares → position = 0 (flat at bar close).
+        let fills = vec![
+            make_fill(1, "SPY", Side::Buy, 10, 100_000_000, 0),
+            make_fill(3, "SPY", Side::Sell, 10, 105_000_000, 0),
+        ];
+        let curve = vec![(1, 100_000_000), (2, 101_000_000), (3, 105_000_000)];
+        let exposed = count_exposure_bars(&fills, &curve);
+        assert_eq!(
+            exposed, 2,
+            "bars 1 and 2 are exposed; bar 3 position closes to 0"
+        );
+    }
+
+    /// ART-06: metrics.json includes all deep performance fields from BACKTEST-METRICS-01.
+    #[test]
+    fn art06_metrics_json_includes_deep_performance_fields() {
+        let tmp = std::env::temp_dir().join(format!("mqk_art_test_deep_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let report = test_report_with_orders();
+        write_backtest_report(&tmp, &report, 1_000_000_000).unwrap();
+
+        let contents = std::fs::read_to_string(tmp.join("metrics.json")).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&contents).expect("metrics.json must be valid JSON");
+
+        // Equity performance fields.
+        assert!(v["starting_equity_micros"].is_number());
+        assert!(v["ending_equity_micros"].is_number());
+        assert!(v["total_return_micros"].is_number());
+        assert!(v["total_return_pct"].is_number());
+        assert!(v["equity_high_water_mark_micros"].is_number());
+        assert!(v["max_drawdown_micros"].is_number());
+        assert!(v["max_drawdown_pct"].is_number());
+
+        // Cost field.
+        assert!(v["total_commission_micros"].is_number());
+
+        // Trade-level fields (trade_count is a number; win_rate_pct may be null if no trades).
+        assert!(v["trade_count"].is_number());
+        assert!(v["winning_trade_count"].is_number());
+        assert!(v["losing_trade_count"].is_number());
+        assert!(v["flat_trade_count"].is_number());
+        assert!(v["gross_profit_micros"].is_number());
+        assert!(v["gross_loss_micros"].is_number());
+        assert!(v["exposure_bars"].is_number());
+        assert!(v["exposure_time_pct"].is_number());
+
+        // Backward-compat field still present.
+        assert!(v["final_equity_micros"].is_number());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

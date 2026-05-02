@@ -89,12 +89,13 @@ pub async fn run_backtest_csv(
         })
         .with_context(|| format!("init run artifacts failed: {}", dir))?;
 
-        mqk_artifacts::write_backtest_report(&init_result.run_dir, &report).with_context(|| {
-            format!(
-                "write backtest artifacts failed: {}",
-                init_result.run_dir.display()
-            )
-        })?;
+        mqk_artifacts::write_backtest_report(&init_result.run_dir, &report, initial_cash_micros)
+            .with_context(|| {
+                format!(
+                    "write backtest artifacts failed: {}",
+                    init_result.run_dir.display()
+                )
+            })?;
 
         println!("artifacts_written=true");
         println!("artifacts_dir={}", init_result.run_dir.display());
@@ -245,12 +246,13 @@ pub async fn run_backtest_db(
         })
         .with_context(|| format!("init run artifacts failed: {}", dir))?;
 
-        mqk_artifacts::write_backtest_report(&init_result.run_dir, &report).with_context(|| {
-            format!(
-                "write backtest artifacts failed: {}",
-                init_result.run_dir.display()
-            )
-        })?;
+        mqk_artifacts::write_backtest_report(&init_result.run_dir, &report, initial_cash_micros)
+            .with_context(|| {
+                format!(
+                    "write backtest artifacts failed: {}",
+                    init_result.run_dir.display()
+                )
+            })?;
 
         println!("artifacts_written=true");
         println!("artifacts_dir={}", init_result.run_dir.display());
