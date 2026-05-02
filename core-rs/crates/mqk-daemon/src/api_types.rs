@@ -2567,3 +2567,80 @@ pub struct AlertAckResponse {
     /// appear in `/api/v1/alerts/active` until the underlying condition clears.
     pub ack_scope: String,
 }
+
+// ---------------------------------------------------------------------------
+// BACKTEST-DAEMON-JOBS-01: Backtest job API types
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/backtests/jobs — submit a CSV backtest job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacktestJobRequest {
+    /// Absolute path to the CSV bars file (required).
+    pub bars_path: String,
+    /// Strategy name (e.g. "swing_momentum"). Must be a registered built-in.
+    pub strategy: String,
+    /// Ticker symbol (e.g. "TEST", "SPY").
+    pub symbol: String,
+    /// Bar timeframe in seconds (must be > 0).
+    pub timeframe_secs: i64,
+    /// Starting cash in micros (must be > 0).
+    pub initial_cash_micros: i64,
+    /// Optional output directory root (artifacts written to `<out_dir>/<run_id>/`).
+    /// Defaults to `exports/backtests` relative to daemon working directory.
+    pub out_dir: Option<String>,
+    /// Enable integrity checks. Defaults to false.
+    pub integrity_enabled: Option<bool>,
+    /// Run in shadow mode (strategy signals observed but not executed). Defaults to false.
+    pub shadow: Option<bool>,
+}
+
+/// Response to POST /api/v1/backtests/jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacktestJobAcceptedResponse {
+    pub accepted: bool,
+    pub job_id: Uuid,
+    /// "queued" immediately after acceptance.
+    pub status: String,
+    /// Populated only if job already completed synchronously (not expected).
+    pub artifact_dir: Option<String>,
+    /// Populated if request was refused before queuing.
+    pub error: Option<String>,
+}
+
+/// Single job summary row in GET /api/v1/backtests/jobs list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacktestJobSummary {
+    pub job_id: Uuid,
+    pub status: String,
+    pub strategy: String,
+    pub symbol: String,
+    pub created_at_utc: String,
+    pub started_at_utc: Option<String>,
+    pub completed_at_utc: Option<String>,
+    pub artifact_dir: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Response to GET /api/v1/backtests/jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacktestJobsListResponse {
+    pub truth_state: String,
+    pub jobs: Vec<BacktestJobSummary>,
+}
+
+/// Response to GET /api/v1/backtests/jobs/:job_id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacktestJobStatusResponse {
+    pub truth_state: String,
+    pub job_id: Uuid,
+    pub status: String,
+    pub strategy: String,
+    pub symbol: String,
+    pub created_at_utc: String,
+    pub started_at_utc: Option<String>,
+    pub completed_at_utc: Option<String>,
+    pub artifact_dir: Option<String>,
+    pub manifest_path: Option<String>,
+    pub metrics_path: Option<String>,
+    pub error: Option<String>,
+}

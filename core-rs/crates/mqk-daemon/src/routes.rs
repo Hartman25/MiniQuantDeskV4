@@ -28,6 +28,7 @@
 
 pub(crate) mod alerts_events;
 pub(crate) mod audit_ops;
+pub(crate) mod backtests;
 pub mod control;
 pub(crate) mod control_plane;
 pub(crate) mod execution;
@@ -145,6 +146,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         resolve_incident,
     };
     use audit_ops::{audit_artifacts, audit_operator_actions, ops_operator_timeline};
+    use backtests::{backtest_job_status, backtest_job_submit, backtest_jobs_list};
     use control_plane::{
         integrity_arm, integrity_disarm, ops_action, ops_catalog, ops_mode_change_guidance,
         run_halt, run_start, run_stop,
@@ -286,7 +288,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/trading/orders", get(trading_orders))
         .route("/v1/trading/fills", get(trading_fills))
         .route("/v1/trading/snapshot", get(trading_snapshot))
-        .route("/v1/diagnostics/snapshot", get(diagnostics_snapshot));
+        .route("/v1/diagnostics/snapshot", get(diagnostics_snapshot))
+        // BACKTEST-DAEMON-JOBS-01: read-only backtest job status (public, no auth)
+        .route("/api/v1/backtests/jobs", get(backtest_jobs_list))
+        .route("/api/v1/backtests/jobs/:job_id", get(backtest_job_status));
 
     // --- Operator (authenticated) routes — mutating state changes. ---
     let operator = Router::new()
@@ -314,6 +319,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/trading/snapshot",
             axum::routing::delete(trading_snapshot_clear),
         )
+        // BACKTEST-DAEMON-JOBS-01: submit backtest job (operator, requires auth)
+        .route("/api/v1/backtests/jobs", post(backtest_job_submit))
         .merge(control::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

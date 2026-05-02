@@ -22,6 +22,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::backtest_jobs::{new_job_store, BacktestJobStore};
+
 use chrono::Utc;
 use mqk_broker_alpaca::types::AlpacaFetchCursor;
 use mqk_broker_alpaca::AlpacaBrokerAdapter;
@@ -229,6 +231,10 @@ pub struct AppState {
     /// completes.  Read by operator surfaces to detect a stalled or non-progressing
     /// loop while `status.state == "running"`.
     execution_last_tick_at: Arc<AtomicI64>,
+    /// BACKTEST-DAEMON-JOBS-01: In-memory backtest job registry.
+    ///
+    /// Process-lifetime only. No DB persistence. Isolated from live/paper execution.
+    pub backtest_jobs: BacktestJobStore,
 }
 
 impl Default for AppState {
@@ -570,6 +576,7 @@ impl AppState {
             bar_tick_dispatch_count: Arc::new(AtomicU64::new(0)),
             external_snapshot_refresher: Arc::new(RwLock::new(None)),
             execution_last_tick_at: Arc::new(AtomicI64::new(0)),
+            backtest_jobs: new_job_store(),
         }
     }
 

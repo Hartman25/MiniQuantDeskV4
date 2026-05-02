@@ -5,6 +5,7 @@
 
 pub mod api_types;
 pub mod artifact_intake;
+pub mod backtest_jobs;
 pub mod bind;
 pub mod capital_policy;
 pub mod cors;
