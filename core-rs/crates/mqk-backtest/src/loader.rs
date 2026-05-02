@@ -199,8 +199,8 @@ fn parse_u32(s: &str, col: &str) -> Result<u32, LoadError> {
 fn parse_bool(s: &str, col: &str) -> Result<bool, LoadError> {
     let t = s.trim();
     match t {
-        "1" | "true" | "TRUE" | "True" => Ok(true),
-        "0" | "false" | "FALSE" | "False" => Ok(false),
+        "1" | "t" | "true" | "TRUE" | "True" => Ok(true),
+        "0" | "f" | "false" | "FALSE" | "False" => Ok(false),
         _ => Err(LoadError::ParseBool {
             column: col.to_string(),
             value: t.to_string(),
