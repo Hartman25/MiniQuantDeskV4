@@ -8,11 +8,115 @@
 
 use std::sync::Arc;
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    Json,
+};
 use chrono::Utc;
 
-use crate::api_types::{ExecutionTransportResponse, MarketDataQualityResponse, TransportQueueRow};
+use crate::api_types::{
+    ExecutionTransportResponse, MarketDataQualityResponse, MdBarsCoverageResponse,
+    MdBarsCoverageRow, TransportQueueRow,
+};
 use crate::state::{AlpacaWsContinuityState, AppState, StrategyMarketDataSource};
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/market-data/coverage (DATA-INGEST-GUI-RESULTS-01)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub(crate) struct CoverageParams {
+    pub timeframe: Option<String>,
+}
+
+/// Read-only view: what md_bars data exists locally, grouped by (symbol, timeframe).
+///
+/// Public route (no operator auth). Read-only DB query. No broker adapter.
+/// No live/paper execution state touched.
+///
+/// `truth_state`:
+/// - `"active"` — DB has rows matching the filter.
+/// - `"empty"`  — DB responded but returned zero rows.
+/// - `"db_unavailable"` — no DB pool configured.
+/// - `"unavailable"` — pool present but query failed.
+pub(crate) async fn market_data_coverage(
+    Query(params): Query<CoverageParams>,
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let route = "/api/v1/market-data/coverage";
+
+    // Normalize: empty string → None (all timeframes). Echo the normalized value.
+    let timeframe_echo: Option<String> = params.timeframe.filter(|s| !s.is_empty());
+    let tf: Option<&str> = timeframe_echo.as_deref();
+
+    let pool = match st.db.as_ref() {
+        None => {
+            return (
+                StatusCode::OK,
+                Json(MdBarsCoverageResponse {
+                    canonical_route: route.to_string(),
+                    truth_state: "db_unavailable".to_string(),
+                    timeframe: timeframe_echo,
+                    rows: vec![],
+                    error: Some("database pool not configured".to_string()),
+                }),
+            )
+                .into_response();
+        }
+        Some(p) => p.clone(),
+    };
+
+    match mqk_db::md::fetch_md_bars_coverage(&pool, tf).await {
+        Ok(db_rows) if db_rows.is_empty() => (
+            StatusCode::OK,
+            Json(MdBarsCoverageResponse {
+                canonical_route: route.to_string(),
+                truth_state: "empty".to_string(),
+                timeframe: timeframe_echo,
+                rows: vec![],
+                error: None,
+            }),
+        )
+            .into_response(),
+        Ok(db_rows) => {
+            let rows = db_rows
+                .into_iter()
+                .map(|r| MdBarsCoverageRow {
+                    symbol: r.symbol,
+                    timeframe: r.timeframe,
+                    bars: r.bars,
+                    min_end_ts: r.min_end_ts,
+                    max_end_ts: r.max_end_ts,
+                    latest_ingested_at: r.latest_ingested_at,
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(MdBarsCoverageResponse {
+                    canonical_route: route.to_string(),
+                    truth_state: "active".to_string(),
+                    timeframe: timeframe_echo,
+                    rows,
+                    error: None,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::OK,
+            Json(MdBarsCoverageResponse {
+                canonical_route: route.to_string(),
+                truth_state: "unavailable".to_string(),
+                timeframe: timeframe_echo,
+                rows: vec![],
+                error: Some(format!("coverage query failed: {e}")),
+            }),
+        )
+            .into_response(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/execution/transport (A2)
