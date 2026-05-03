@@ -7,6 +7,7 @@ import {
   FIXTURE_BARS_SEGMENTS,
   BACKTEST_OUT_SEGMENTS,
   MD_BACKUP_1D_SEGMENTS,
+  MD_INGEST_SEGMENTS,
 } from "../pathHelpers.ts";
 
 // ---------------------------------------------------------------------------
@@ -156,4 +157,28 @@ test("buildMd1DSymbolPath: does not contain hardcoded user home path", () => {
   assert.ok(result !== null, "should be non-null with valid inputs");
   assert.ok(!result!.includes("Zacha"), "must not contain hardcoded user path");
   assert.ok(!result!.includes("Users\\Zacha"), "must not contain hardcoded user path");
+});
+
+// ---------------------------------------------------------------------------
+// MD_INGEST_SEGMENTS (DATA-INGEST-GUI-RUNNER-01)
+// ---------------------------------------------------------------------------
+
+test("MD_INGEST_SEGMENTS builds correct Windows path via buildRepoRelativePath", () => {
+  const result = buildRepoRelativePath("C:\\repo", ...MD_INGEST_SEGMENTS);
+  assert.equal(result, "C:\\repo\\exports\\md_ingest");
+});
+
+test("MD_INGEST_SEGMENTS builds correct Unix path via buildRepoRelativePath", () => {
+  const result = buildRepoRelativePath("/home/dev/repo", ...MD_INGEST_SEGMENTS);
+  assert.equal(result, "/home/dev/repo/exports/md_ingest");
+});
+
+test("MD_INGEST_SEGMENTS returns null for null repoRoot", () => {
+  assert.equal(buildRepoRelativePath(null, ...MD_INGEST_SEGMENTS), null);
+});
+
+test("MD_INGEST_SEGMENTS does not contain hardcoded user home path", () => {
+  const result = buildRepoRelativePath("C:\\repo", ...MD_INGEST_SEGMENTS);
+  assert.ok(result !== null);
+  assert.ok(!result!.includes("Zacha"), "must not contain hardcoded user path");
 });

@@ -43,6 +43,7 @@ export const FIXTURE_BARS_SEGMENTS: string[] = [
 ];
 export const BACKTEST_OUT_SEGMENTS: string[] = ["exports", "backtests"];
 export const MD_BACKUP_1D_SEGMENTS: string[] = ["exports", "md_backup", "1D"];
+export const MD_INGEST_SEGMENTS: string[] = ["exports", "md_ingest"];
 
 /**
  * Build the expected CSV path for a symbol in the md_backup/1D folder.

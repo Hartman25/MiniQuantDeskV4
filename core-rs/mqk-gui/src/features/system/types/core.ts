@@ -40,6 +40,7 @@ export const CORE_PANEL_KEYS = [
   "session",
   "config",
   "marketData",
+  "ingest",
   "runtime",
   "artifacts",
   "operatorTimeline",

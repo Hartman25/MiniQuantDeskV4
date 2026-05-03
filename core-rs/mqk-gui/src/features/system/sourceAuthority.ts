@@ -235,6 +235,13 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: [],
     placeholder: [],
   },
+  // Ingest runner: job list/status are public daemon endpoints; submit is privileged.
+  ingest: {
+    db: [],
+    runtime: [],
+    broker: [],
+    placeholder: [],
+  },
 };
 
 function hasEndpoint(realEndpoints: string[], hints: string[]) {

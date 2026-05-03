@@ -6,6 +6,7 @@ import { ExecutionScreen } from "../execution/ExecutionScreen";
 import { AlertsScreen } from "../alerts/AlertsScreen";
 import { ConfigScreen } from "../config/ConfigScreen";
 import { ArtifactsScreen } from "../artifacts/ArtifactsScreen";
+import { IngestScreen } from "../ingest/IngestScreen";
 import { MarketDataScreen } from "../marketData/MarketDataScreen";
 import { RuntimeScreen } from "../runtime/RuntimeScreen";
 import { IncidentsScreen } from "../incidents/IncidentsScreen";
@@ -40,6 +41,7 @@ export type ScreenKey =
   | "session"
   | "config"
   | "marketData"
+  | "ingest"
   | "runtime"
   | "artifacts"
   | "operatorTimeline"
@@ -78,7 +80,7 @@ export interface ScreenDefinition {
  * LeftCommandRail primary/secondary split is derived from operator vs diagnostics groups.
  */
 export const MONITOR_GROUPS: Record<MonitorGroup, readonly ScreenKey[]> = {
-  operator:    ["dashboard", "ops", "portfolio", "reconcile", "strategy", "session", "config", "marketData", "settings"],
+  operator:    ["dashboard", "ops", "portfolio", "reconcile", "strategy", "session", "config", "marketData", "ingest", "settings"],
   execution:   ["execution"],
   diagnostics: ["audit", "incidents", "alerts", "operatorTimeline", "runtime", "metrics", "topology", "transport", "artifacts", "backtests", "risk"],
 };
@@ -143,6 +145,12 @@ export const SCREEN_REGISTRY: Record<ScreenKey, ScreenDefinition> = {
     description: "Feed freshness, venue disagreement, and strategy-blocking data quality issues.",
     monitorGroup: "operator",
     render: ({ model }) => <MarketDataScreen model={model} />,
+  },
+  ingest: {
+    title: "Ingest",
+    description: "Submit CSV market-data ingest jobs and monitor job status. No broker orders.",
+    monitorGroup: "operator",
+    render: () => <IngestScreen />,
   },
   settings: {
     title: "Settings / Operations",
