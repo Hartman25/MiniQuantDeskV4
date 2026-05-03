@@ -504,6 +504,20 @@ pub struct AutonomousPaperReadinessResponse {
     /// — bar deposits are blocked regardless of arm/WS/run state.
     /// `"not_applicable"` for non-paper+alpaca deployments.
     pub bar_ticker_gate: String,
+    /// AUTON-NO-TRADE-02: Count of bar ticks dispatched to the native strategy
+    /// this session.
+    ///
+    /// `null` when `ExternalSignalIngestion` is not configured (not applicable).
+    /// Zero at session start.  Non-zero proves the strategy is being invoked.
+    pub bar_tick_dispatch_count: Option<u64>,
+    /// AUTON-NO-TRADE-02: Sum of target quantities returned by the native strategy
+    /// on the last bar dispatch.
+    ///
+    /// `null` when no bar has been dispatched this session.
+    /// Zero means the strategy returned hold/flat on the last tick — either
+    /// the lookback window is insufficiently populated or the bar is not complete
+    /// (`is_complete == false` because no price reference was available).
+    pub last_bar_signal_qty: Option<i64>,
 
     // --- OBS-SESSION-DISCORD-01: Session-window diagnostics ---
     /// RFC 3339 timestamp of when this response was generated (UTC).

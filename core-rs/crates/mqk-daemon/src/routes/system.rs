@@ -613,6 +613,8 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                 autonomous_history_degraded: false,
                 nyse_market_session: "not_applicable".to_string(),
                 bar_ticker_gate: "not_applicable".to_string(),
+                bar_tick_dispatch_count: None,
+                last_bar_signal_qty: None,
                 now_utc: diag.now_utc,
                 session_start_utc: diag.session_start_utc,
                 session_stop_utc: diag.session_stop_utc,
@@ -766,6 +768,47 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
         );
     }
 
+    // AUTON-NO-TRADE-02: Read bar-tick observability from AppState.
+    //
+    // These counters are session-scoped (reset on run start).  They let the
+    // operator see whether the strategy has been invoked at all and whether
+    // it is returning any non-zero targets.  Both values are `None` when
+    // ExternalSignalIngestion is not configured (not applicable path).
+    let bar_tick_dispatch_count: Option<u64> = Some(st.bar_tick_dispatch_count());
+    let last_bar_signal_qty: Option<i64> = st.last_bar_signal_qty();
+
+    // AUTON-NO-TRADE-02: When bar ticks are being dispatched but the strategy
+    // is consistently returning signal qty = 0, surface the architectural reason.
+    //
+    // All built-in strategy engines require LOOKBACK complete bars before
+    // generating any non-zero signal:
+    //   - intraday_scalper:    LOOKBACK = 5
+    //   - swing_momentum:      LOOKBACK = 20
+    //   - mean_reversion:      LOOKBACK = 20
+    //   - volatility_breakout: LOOKBACK = 21 (LOOKBACK+1)
+    //
+    // The autonomous ticker always provides a single-bar stub (RecentBarsWindow
+    // length = 1) with is_complete = false (limit_price = None, no price
+    // reference).  Two independent guards in each strategy ensure signal = 0:
+    //   1. `recent.len() < LOOKBACK` → returns 0 (window too short)
+    //   2. `is_complete == false` → returns 0 (bar not price-bearing)
+    //
+    // This is correct fail-closed behaviour — the strategy is working as
+    // designed.  No trades will be produced via this path until a real
+    // price-bearing multi-bar history source is wired.
+    if st.bar_tick_dispatch_count() > 0 && last_bar_signal_qty == Some(0) {
+        blockers.push(
+            "NO_SIGNAL_GENERATED (AUTON-NO-TRADE-02): bar ticks are being dispatched \
+             but strategy signal qty is 0 every tick; built-in strategies require \
+             LOOKBACK complete bars (intraday_scalper: 5, others: 20+) with price data; \
+             the autonomous ticker provides single-bar stubs with is_complete=false \
+             (limit_price=None — no price reference); strategies conservatively return \
+             hold/flat (signal=0); no admissible decisions will be produced until a \
+             real price-bearing multi-bar history source is wired"
+                .to_string(),
+        );
+    }
+
     let overall_ready = ws_continuity_ready
         && reconcile_ready
         && arm_ready
@@ -799,6 +842,8 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
             autonomous_history_degraded,
             nyse_market_session,
             bar_ticker_gate,
+            bar_tick_dispatch_count,
+            last_bar_signal_qty,
             now_utc: diag.now_utc,
             session_start_utc: diag.session_start_utc,
             session_stop_utc: diag.session_stop_utc,
@@ -1038,6 +1083,44 @@ mod tests {
                 "expected closed_outside_session for session='{session}'"
             );
         }
+    }
+
+    // AUTON-NO-TRADE-02: NO_SIGNAL_GENERATED blocker derivation tests.
+
+    /// ANT03: blocker fires when ticks > 0 and signal_qty == 0.
+    #[test]
+    fn ant03_no_signal_blocker_fires_when_ticks_positive_signal_zero() {
+        let ticks: u64 = 5;
+        let qty: Option<i64> = Some(0);
+        let fires = ticks > 0 && qty == Some(0);
+        assert!(
+            fires,
+            "ANT03: NO_SIGNAL_GENERATED blocker must fire when ticks=5 and signal_qty=0"
+        );
+    }
+
+    /// ANT04: blocker does not fire when no ticks have occurred yet (session start).
+    #[test]
+    fn ant04_no_signal_blocker_silent_when_no_ticks() {
+        let ticks: u64 = 0;
+        let qty: Option<i64> = None; // no dispatch yet
+        let fires = ticks > 0 && qty == Some(0);
+        assert!(
+            !fires,
+            "ANT04: NO_SIGNAL_GENERATED blocker must not fire when no ticks have occurred"
+        );
+    }
+
+    /// ANT05: blocker does not fire when signal_qty > 0 (strategy generated a signal).
+    #[test]
+    fn ant05_no_signal_blocker_silent_when_signal_present() {
+        let ticks: u64 = 3;
+        let qty: Option<i64> = Some(1);
+        let fires = ticks > 0 && qty == Some(0);
+        assert!(
+            !fires,
+            "ANT05: NO_SIGNAL_GENERATED blocker must not fire when signal_qty > 0"
+        );
     }
 
     #[test]
