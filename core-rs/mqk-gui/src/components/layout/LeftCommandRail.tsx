@@ -1,5 +1,8 @@
 import shieldLogo from "../../../../../assets/logo/veritas_ledger_shield.png";
 import { SCREEN_REGISTRY, type ScreenKey } from "../../features/screens/screenRegistry";
+import { LEFT_RAIL_PRIMARY, LEFT_RAIL_SECONDARY } from "./leftRailNav";
+
+export { LEFT_RAIL_PRIMARY, LEFT_RAIL_SECONDARY };
 
 export function LeftCommandRail({
   activeScreen,
@@ -8,23 +11,8 @@ export function LeftCommandRail({
   activeScreen: ScreenKey;
   onSelect: (screen: ScreenKey) => void;
 }) {
-  const primary: ScreenKey[] = ["dashboard", "execution", "risk", "portfolio", "reconcile", "ops", "runtime"];
-  const secondary: ScreenKey[] = [
-    "metrics",
-    "transport",
-    "topology",
-    "alerts",
-    "incidents",
-    "operatorTimeline",
-    "session",
-    "config",
-    "marketData",
-    "strategy",
-    "audit",
-    "artifacts",
-    "backtests",
-    "settings",
-  ];
+  const primary = LEFT_RAIL_PRIMARY;
+  const secondary = LEFT_RAIL_SECONDARY;
 
   const renderButton = (screen: ScreenKey) => (
     <button
