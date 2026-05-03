@@ -1326,6 +1326,70 @@ pub async fn fetch_md_bars_coverage(
     Ok(out)
 }
 
+/// AUTON-SIGNAL-CONTEXT-01: Load the N most recent *complete* bars for a given
+/// (symbol, timeframe) pair, ordered oldest-to-newest (ascending `end_ts`).
+///
+/// Used to build a `RecentBarsWindow` for the autonomous strategy context.
+/// Caller must check cardinality — an empty result means no completed bars
+/// exist for this symbol/timeframe (surface `NO_MARKET_DATA`); fewer than
+/// the strategy's LOOKBACK bars means `INSUFFICIENT_LOOKBACK`.
+///
+/// Read-only query: no inserts, updates, or deletes.
+pub async fn fetch_recent_completed_bars_for_strategy(
+    pool: &PgPool,
+    symbol: &str,
+    timeframe: &str,
+    limit: i64,
+) -> Result<Vec<MdBarRow>> {
+    let rows = sqlx::query(
+        r#"
+        select
+            symbol,
+            timeframe,
+            end_ts,
+            open_micros,
+            high_micros,
+            low_micros,
+            close_micros,
+            volume,
+            is_complete
+        from md_bars
+        where symbol = $1
+          and timeframe = $2
+          and is_complete = true
+        order by end_ts desc
+        limit $3
+        "#,
+    )
+    .bind(symbol)
+    .bind(timeframe)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_completed_bars_for_strategy query failed")?;
+
+    let mut out: Vec<MdBarRow> = rows
+        .iter()
+        .map(|r| -> Result<MdBarRow> {
+            Ok(MdBarRow {
+                symbol: r.try_get::<String, _>("symbol")?,
+                timeframe: r.try_get::<String, _>("timeframe")?,
+                end_ts: r.try_get::<i64, _>("end_ts")?,
+                open_micros: r.try_get::<i64, _>("open_micros")?,
+                high_micros: r.try_get::<i64, _>("high_micros")?,
+                low_micros: r.try_get::<i64, _>("low_micros")?,
+                close_micros: r.try_get::<i64, _>("close_micros")?,
+                volume: r.try_get::<i64, _>("volume")?,
+                is_complete: r.try_get::<bool, _>("is_complete")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Reverse to oldest-first so callers can build a window without reversing again.
+    out.reverse();
+    Ok(out)
+}
+
 /// Return the maximum `end_ts` stored in `md_bars` for a given (symbol, timeframe) pair.
 ///
 /// Returns `None` when no bars exist yet — the caller must require a `--full-start` date

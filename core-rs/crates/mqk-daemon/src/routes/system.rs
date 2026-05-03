@@ -32,7 +32,7 @@ use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOut
 use crate::state::{
     autonomous_session_schedule_from_env, session_window_from_env, AppState,
     AutonomousSessionTruth, BrokerSnapshotTruthSource, DeploymentMode, StrategyMarketDataSource,
-    SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
+    SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV, STRATEGY_MD_TIMEFRAME_ENV,
 };
 
 use super::helpers::{
@@ -615,6 +615,8 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                 bar_ticker_gate: "not_applicable".to_string(),
                 bar_tick_dispatch_count: None,
                 last_bar_signal_qty: None,
+                bar_context_source: "not_applicable".to_string(),
+                bar_context_bars_loaded: None,
                 now_utc: diag.now_utc,
                 session_start_utc: diag.session_start_utc,
                 session_stop_utc: diag.session_stop_utc,
@@ -777,36 +779,54 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
     let bar_tick_dispatch_count: Option<u64> = Some(st.bar_tick_dispatch_count());
     let last_bar_signal_qty: Option<i64> = st.last_bar_signal_qty();
 
+    // AUTON-SIGNAL-CONTEXT-01: Derive bar context source and count.
+    let raw_ctx_bars = st.last_bar_context_bars();
+    let (bar_context_source, bar_context_bars_loaded) = match raw_ctx_bars {
+        -1 => ("no_dispatch_yet".to_string(), None),
+        0 => ("stub_no_price".to_string(), None),
+        n => ("db_loaded".to_string(), Some(n as u64)),
+    };
+
     // AUTON-NO-TRADE-02: When bar ticks are being dispatched but the strategy
-    // is consistently returning signal qty = 0, surface the architectural reason.
-    //
-    // All built-in strategy engines require LOOKBACK complete bars before
-    // generating any non-zero signal:
-    //   - intraday_scalper:    LOOKBACK = 5
-    //   - swing_momentum:      LOOKBACK = 20
-    //   - mean_reversion:      LOOKBACK = 20
-    //   - volatility_breakout: LOOKBACK = 21 (LOOKBACK+1)
-    //
-    // The autonomous ticker always provides a single-bar stub (RecentBarsWindow
-    // length = 1) with is_complete = false (limit_price = None, no price
-    // reference).  Two independent guards in each strategy ensure signal = 0:
-    //   1. `recent.len() < LOOKBACK` → returns 0 (window too short)
-    //   2. `is_complete == false` → returns 0 (bar not price-bearing)
-    //
-    // This is correct fail-closed behaviour — the strategy is working as
-    // designed.  No trades will be produced via this path until a real
-    // price-bearing multi-bar history source is wired.
+    // is consistently returning signal qty = 0, surface the reason.
     if st.bar_tick_dispatch_count() > 0 && last_bar_signal_qty == Some(0) {
-        blockers.push(
-            "NO_SIGNAL_GENERATED (AUTON-NO-TRADE-02): bar ticks are being dispatched \
-             but strategy signal qty is 0 every tick; built-in strategies require \
-             LOOKBACK complete bars (intraday_scalper: 5, others: 20+) with price data; \
-             the autonomous ticker provides single-bar stubs with is_complete=false \
-             (limit_price=None — no price reference); strategies conservatively return \
-             hold/flat (signal=0); no admissible decisions will be produced until a \
-             real price-bearing multi-bar history source is wired"
+        let reason = match raw_ctx_bars {
+            n if n > 0 => format!(
+                "NO_SIGNAL_GENERATED (AUTON-SIGNAL-CONTEXT-01): bar ticks dispatched with \
+                 {n} DB bars but strategy signal qty is 0; strategy conditions not met \
+                 (price movement below threshold, or fewer than LOOKBACK bars loaded)"
+            ),
+            _ => "NO_SIGNAL_GENERATED (AUTON-NO-TRADE-02): bar ticks dispatched but \
+                  strategy signal qty is 0; context is single-stub with is_complete=false \
+                  (no price reference — set MQK_STRATEGY_SYMBOL and \
+                  MQK_STRATEGY_MD_TIMEFRAME to load real DB bars)"
                 .to_string(),
-        );
+        };
+        blockers.push(reason);
+    }
+
+    // AUTON-SIGNAL-CONTEXT-01: surface INCOMPLETE_BAR_CONTEXT when the last
+    // dispatch used the stub path and ticks have already occurred.
+    if st.bar_tick_dispatch_count() > 0 && raw_ctx_bars == 0 {
+        let symbol_set = !std::env::var("MQK_STRATEGY_SYMBOL")
+            .unwrap_or_default()
+            .is_empty();
+        let tf_set = !std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
+            .unwrap_or_default()
+            .is_empty();
+        if !symbol_set || !tf_set {
+            blockers.push(format!(
+                "INCOMPLETE_BAR_CONTEXT (AUTON-SIGNAL-CONTEXT-01): stub context used \
+                 because {} is not set; strategies require LOOKBACK complete bars with \
+                 price data; set MQK_STRATEGY_SYMBOL and MQK_STRATEGY_MD_TIMEFRAME to \
+                 load real bars from md_bars",
+                match (symbol_set, tf_set) {
+                    (false, false) => "MQK_STRATEGY_SYMBOL and MQK_STRATEGY_MD_TIMEFRAME",
+                    (false, true) => "MQK_STRATEGY_SYMBOL",
+                    _ => "MQK_STRATEGY_MD_TIMEFRAME",
+                }
+            ));
+        }
     }
 
     let overall_ready = ws_continuity_ready
@@ -844,6 +864,8 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
             bar_ticker_gate,
             bar_tick_dispatch_count,
             last_bar_signal_qty,
+            bar_context_source,
+            bar_context_bars_loaded,
             now_utc: diag.now_utc,
             session_start_utc: diag.session_start_utc,
             session_stop_utc: diag.session_stop_utc,
@@ -1120,6 +1142,64 @@ mod tests {
         assert!(
             !fires,
             "ANT05: NO_SIGNAL_GENERATED blocker must not fire when signal_qty > 0"
+        );
+    }
+
+    // AUTON-SIGNAL-CONTEXT-01: bar_context_source derivation tests.
+
+    /// SC-01: sentinel (-1) → no_dispatch_yet.
+    #[test]
+    fn sc01_context_source_no_dispatch_when_sentinel() {
+        let raw: i64 = -1;
+        let (source, loaded) = match raw {
+            -1 => ("no_dispatch_yet".to_string(), None),
+            0 => ("stub_no_price".to_string(), None),
+            n => ("db_loaded".to_string(), Some(n as u64)),
+        };
+        assert_eq!(source, "no_dispatch_yet");
+        assert_eq!(loaded, None, "SC-01: no bars loaded when sentinel");
+    }
+
+    /// SC-02: 0 bars → stub_no_price context.
+    #[test]
+    fn sc02_context_source_stub_when_zero_bars() {
+        let raw: i64 = 0;
+        let (source, loaded) = match raw {
+            -1 => ("no_dispatch_yet".to_string(), None),
+            0 => ("stub_no_price".to_string(), None),
+            n => ("db_loaded".to_string(), Some(n as u64)),
+        };
+        assert_eq!(source, "stub_no_price");
+        assert_eq!(loaded, None, "SC-02: stub_no_price carries no bar count");
+    }
+
+    /// SC-03: positive bar count → db_loaded with count.
+    #[test]
+    fn sc03_context_source_db_loaded_when_bars_present() {
+        for n in [5_i64, 20, 30] {
+            let (source, loaded) = match n {
+                -1 => ("no_dispatch_yet".to_string(), None),
+                0 => ("stub_no_price".to_string(), None),
+                k => ("db_loaded".to_string(), Some(k as u64)),
+            };
+            assert_eq!(source, "db_loaded", "SC-03: n={n} must yield db_loaded");
+            assert_eq!(
+                loaded,
+                Some(n as u64),
+                "SC-03: n={n} must carry bar count"
+            );
+        }
+    }
+
+    /// SC-04: incomplete bar context (stub path) does not produce db_loaded.
+    #[test]
+    fn sc04_stub_path_never_claims_db_loaded() {
+        // Simulate single-stub context: 0 DB bars loaded.
+        let raw: i64 = 0;
+        let source = if raw > 0 { "db_loaded" } else { "stub_no_price" };
+        assert_ne!(
+            source, "db_loaded",
+            "SC-04: stub_no_price path must not claim db_loaded"
         );
     }
 

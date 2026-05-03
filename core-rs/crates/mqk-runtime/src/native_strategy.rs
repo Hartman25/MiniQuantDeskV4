@@ -180,6 +180,44 @@ impl NativeStrategyBootstrap {
         }
     }
 
+    /// AUTON-SIGNAL-CONTEXT-01: Return the registered strategy's `timeframe_secs`.
+    ///
+    /// Returns `None` when the bootstrap is not Active (Dormant or Failed).
+    /// Used by the daemon dispatch path to derive the correct `StrategyContext`
+    /// when building a window from DB bars.
+    pub fn strategy_timeframe_secs(&self) -> Option<i64> {
+        match &self.outcome {
+            NativeStrategyBootstrapOutcome::Active { host, .. } => {
+                host.spec().ok().map(|s| s.timeframe_secs)
+            }
+            _ => None,
+        }
+    }
+
+    /// AUTON-SIGNAL-CONTEXT-01: Invoke `on_bar` with a pre-built `RecentBarsWindow`.
+    ///
+    /// Used when the daemon has loaded real completed bars from `md_bars` rather
+    /// than creating a single-bar stub from an operator signal.  The context
+    /// `timeframe_secs` is derived from the strategy's own spec so the
+    /// `StrategyHost` timeframe check always passes.
+    ///
+    /// Returns `Some(StrategyBarResult)` when Active and the callback succeeds.
+    /// Returns `None` for Dormant, Failed, or spec-read error — all fail-closed.
+    pub fn invoke_on_bar_from_window(
+        &mut self,
+        now_tick: u64,
+        recent: RecentBarsWindow,
+    ) -> Option<StrategyBarResult> {
+        match &mut self.outcome {
+            NativeStrategyBootstrapOutcome::Active { host, .. } => {
+                let timeframe_secs = host.spec().ok()?.timeframe_secs;
+                let ctx = StrategyContext::new(timeframe_secs, now_tick, recent);
+                host.on_bar(&ctx).ok()
+            }
+            _ => None,
+        }
+    }
+
     /// B1B: Invoke `on_bar` from an operator signal payload.
     ///
     /// Reads the registered strategy's `timeframe_secs` from its spec, builds a
@@ -268,4 +306,130 @@ pub fn build_daemon_plugin_registry() -> PluginRegistry {
     mqk_strategy::engines::register_builtin_strategies(&mut registry, symbol)
         .expect("daemon built-in strategy registration must not fail: duplicate names are a programming error");
     registry
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_scalper_bootstrap() -> NativeStrategyBootstrap {
+        let mut registry = PluginRegistry::new();
+        mqk_strategy::engines::register_builtin_strategies(&mut registry, "AAPL")
+            .expect("registration must not fail");
+        NativeStrategyBootstrap::bootstrap(Some(&["intraday_scalper".to_string()]), &registry)
+    }
+
+    fn complete_bar(end_ts: i64, close_micros: i64) -> BarStub {
+        BarStub::new(end_ts, true, close_micros, 100)
+    }
+
+    /// SC-NS-01: invoke_on_bar_from_window with Dormant bootstrap returns None.
+    #[test]
+    fn sc_ns01_dormant_bootstrap_returns_none_for_window() {
+        let registry = PluginRegistry::new();
+        let mut bootstrap = NativeStrategyBootstrap::bootstrap(None, &registry);
+        let window = RecentBarsWindow::new(1, vec![complete_bar(1_000_000, 200_000_000)]);
+        let result = bootstrap.invoke_on_bar_from_window(0, window);
+        assert!(
+            result.is_none(),
+            "SC-NS-01: Dormant bootstrap must return None for window dispatch"
+        );
+    }
+
+    /// SC-NS-02: invoke_on_bar_from_window with 1 bar (< LOOKBACK=5) returns
+    /// signal_qty=0 — insufficient lookback, not a crash.
+    #[test]
+    fn sc_ns02_insufficient_lookback_returns_zero_signal() {
+        let mut bootstrap = make_scalper_bootstrap();
+        // Only 1 complete bar — intraday_scalper needs 5.
+        let window =
+            RecentBarsWindow::new(1, vec![complete_bar(1_000_000, 200_000_000)]);
+        let result = bootstrap
+            .invoke_on_bar_from_window(0, window)
+            .expect("SC-NS-02: Active bootstrap must return Some");
+        let qty: i64 = result.intents.output.targets.iter().map(|t| t.qty).sum();
+        assert_eq!(qty, 0, "SC-NS-02: insufficient lookback → signal_qty must be 0");
+    }
+
+    /// SC-NS-03: invoke_on_bar_from_window with 5 complete bars and sufficient
+    /// price displacement produces a non-zero signal (proves DB window path works).
+    #[test]
+    fn sc_ns03_five_complete_bars_with_displacement_produces_signal() {
+        let mut bootstrap = make_scalper_bootstrap();
+        // intraday_scalper LOOKBACK=5, MICRO_MOVE_BPS=20 (0.20%)
+        // Use price rising from 100 USD to 100.25 USD (25 bps > 20 bps threshold).
+        let bars = vec![
+            complete_bar(1_000_000, 100_000_000), // 100.000000 USD
+            complete_bar(1_000_300, 100_050_000), // 100.050000 USD
+            complete_bar(1_000_600, 100_100_000), // 100.100000 USD
+            complete_bar(1_000_900, 100_150_000), // 100.150000 USD
+            complete_bar(1_001_200, 100_250_000), // 100.250000 USD — 25 bps above bar[0]
+        ];
+        let window = RecentBarsWindow::new(5, bars);
+        let result = bootstrap
+            .invoke_on_bar_from_window(1, window)
+            .expect("SC-NS-03: Active bootstrap must return Some");
+        let qty: i64 = result.intents.output.targets.iter().map(|t| t.qty).sum();
+        assert_eq!(
+            qty, 1,
+            "SC-NS-03: 5 complete bars with 25 bps displacement must produce signal_qty=1"
+        );
+    }
+
+    /// SC-NS-04: invoke_on_bar_from_window with incomplete last bar returns 0.
+    #[test]
+    fn sc_ns04_incomplete_last_bar_returns_zero_signal() {
+        let mut bootstrap = make_scalper_bootstrap();
+        let mut bars = vec![
+            complete_bar(1_000_000, 100_000_000),
+            complete_bar(1_000_300, 100_050_000),
+            complete_bar(1_000_600, 100_100_000),
+            complete_bar(1_000_900, 100_150_000),
+        ];
+        // Last bar is incomplete — no price reference.
+        bars.push(BarStub::new(1_001_200, false, 100_250_000, 100));
+        let window = RecentBarsWindow::new(5, bars);
+        let result = bootstrap
+            .invoke_on_bar_from_window(2, window)
+            .expect("SC-NS-04: Active bootstrap must return Some");
+        let qty: i64 = result.intents.output.targets.iter().map(|t| t.qty).sum();
+        assert_eq!(
+            qty, 0,
+            "SC-NS-04: incomplete last bar → signal_qty must be 0"
+        );
+    }
+
+    /// SC-NS-05: strategy_timeframe_secs returns the strategy's canonical value.
+    #[test]
+    fn sc_ns05_timeframe_secs_matches_strategy_spec() {
+        let bootstrap = make_scalper_bootstrap();
+        assert_eq!(
+            bootstrap.strategy_timeframe_secs(),
+            Some(300),
+            "SC-NS-05: intraday_scalper timeframe_secs must be 300"
+        );
+    }
+
+    /// SC-NS-06: build_signal_context with no limit_price → is_complete=false.
+    ///
+    /// Proves the stub path still correctly marks bars incomplete when no price
+    /// reference is available (B1B legacy path preservation).
+    #[test]
+    fn sc_ns06_build_signal_context_no_price_yields_incomplete_bar() {
+        let ctx = build_signal_context(300, 0, 1_000_000, None, 1);
+        let bar = ctx.recent.last().expect("SC-NS-06: must have one bar");
+        assert!(
+            !bar.is_complete,
+            "SC-NS-06: stub bar with limit_price=None must be incomplete"
+        );
+        assert_eq!(
+            ctx.recent.len(),
+            1,
+            "SC-NS-06: stub context must have exactly one bar"
+        );
+    }
 }

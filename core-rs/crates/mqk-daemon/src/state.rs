@@ -87,6 +87,16 @@ const RECONCILE_TICK_INTERVAL: Duration = Duration::from_secs(30);
 /// AUTON-PAPER-RISK-03: execution-loop ticks between External broker snapshot refreshes.
 /// At 1 s/tick this is 60 s — fresh enough for paper reconcile without hammering the API.
 const EXTERNAL_SNAPSHOT_REFRESH_TICKS: u32 = 60;
+/// AUTON-SIGNAL-CONTEXT-01: DB timeframe string for loading completed bars for
+/// autonomous strategy context (e.g. "1D", "5m").  Must match the `timeframe`
+/// column value in `md_bars` for the configured symbol.  If absent, the daemon
+/// falls back to the single-stub context path (no signal expected).
+pub const STRATEGY_MD_TIMEFRAME_ENV: &str = "MQK_STRATEGY_MD_TIMEFRAME";
+
+/// AUTON-SIGNAL-CONTEXT-01: Number of recent completed bars to load per dispatch.
+/// 30 covers every built-in strategy's maximum lookback (20) with headroom.
+const STRATEGY_CONTEXT_LOAD_LIMIT: i64 = 30;
+
 const DEV_ALLOW_NO_OPERATOR_TOKEN_ENV: &str = "MQK_DEV_ALLOW_NO_OPERATOR_TOKEN";
 const DAEMON_DEPLOYMENT_MODE_ENV: &str = "MQK_DAEMON_DEPLOYMENT_MODE";
 const DAEMON_ADAPTER_ID_ENV: &str = "MQK_DAEMON_ADAPTER_ID";
@@ -219,6 +229,15 @@ pub struct AppState {
     /// Zero means no bar has been dispatched yet.  Reset on run-start via
     /// `reset_bar_tick_counters`.  Surfaced in `/api/v1/strategy/summary`.
     bar_tick_dispatch_count: Arc<AtomicU64>,
+    /// AUTON-SIGNAL-CONTEXT-01: Number of DB bars used in the most recent
+    /// `tick_strategy_dispatch` call.
+    ///
+    /// `-1` (sentinel) means no dispatch has occurred yet.
+    /// `0` means the last dispatch used the single-stub fallback (no DB bars).
+    /// `> 0` means that many completed bars were loaded from `md_bars`.
+    ///
+    /// Surfaced in `/api/v1/autonomous/readiness` as `bar_context_bars_loaded`.
+    last_bar_context_bars: Arc<AtomicI64>,
     /// AUTON-PAPER-RISK-03: Alpaca adapter retained exclusively for periodic broker
     /// snapshot refresh on the External-source path.  Set once in
     /// `build_execution_orchestrator`; `None` for Synthetic source or before
@@ -580,6 +599,7 @@ impl AppState {
             last_bar_input_ts: Arc::new(AtomicI64::new(0)),
             last_bar_signal_qty: Arc::new(AtomicI64::new(i64::MIN)),
             bar_tick_dispatch_count: Arc::new(AtomicU64::new(0)),
+            last_bar_context_bars: Arc::new(AtomicI64::new(-1)),
             external_snapshot_refresher: Arc::new(RwLock::new(None)),
             execution_last_tick_at: Arc::new(AtomicI64::new(0)),
             backtest_jobs: new_job_store(),
@@ -1168,20 +1188,121 @@ operator_reconcile_or_repair_required"
     pub(crate) fn reset_bar_tick_counters(&self) {
         self.last_bar_signal_qty.store(i64::MIN, Ordering::SeqCst);
         self.bar_tick_dispatch_count.store(0, Ordering::SeqCst);
+        self.last_bar_context_bars.store(-1, Ordering::SeqCst);
     }
 
-    /// B1B: Execution loop dispatch seam — take pending bar input and invoke `on_bar`.
+    /// AUTON-SIGNAL-CONTEXT-01: Number of DB bars used in the most recent dispatch.
+    ///
+    /// `-1` = no dispatch yet; `0` = stub fallback; `> 0` = DB bars loaded.
+    pub fn last_bar_context_bars(&self) -> i64 {
+        self.last_bar_context_bars.load(Ordering::SeqCst)
+    }
+
+    /// B1B/AUTON-SIGNAL-CONTEXT-01: Execution loop dispatch seam.
     ///
     /// Called exclusively by the execution loop on each tick.  The loop is the
     /// canonical runtime-owned `on_bar` dispatch owner.
     ///
-    /// Returns `Some(StrategyBarResult)` when a bar was pending AND the bootstrap
-    /// is Active.  Returns `None` on most ticks (no pending bar), and when the
-    /// bootstrap is absent / Dormant / Failed — all fail-closed.
+    /// AUTON-SIGNAL-CONTEXT-01: When `MQK_STRATEGY_SYMBOL` and
+    /// `MQK_STRATEGY_MD_TIMEFRAME` are both set and the daemon has a DB pool,
+    /// loads up to `STRATEGY_CONTEXT_LOAD_LIMIT` recent completed bars from
+    /// `md_bars` and builds a real `RecentBarsWindow`.  This lets built-in
+    /// strategies satisfy their LOOKBACK requirements using real price history.
     ///
-    /// The result carries shadow-mode intents in B1B; B1C wires it to the outbox.
+    /// Falls back to the single-stub context (original B1B path) when:
+    /// - env vars are absent (not configured)
+    /// - DB pool is unavailable
+    /// - DB returns no completed bars for the symbol/timeframe
+    /// - DB query fails
+    ///
+    /// Returns `Some(StrategyBarResult)` when a bar was pending AND the bootstrap
+    /// is Active.  Returns `None` on most ticks (no pending bar) or when the
+    /// bootstrap is absent / Dormant / Failed — all fail-closed.
     pub async fn tick_strategy_dispatch(&self) -> Option<mqk_strategy::StrategyBarResult> {
         let bar = self.pending_strategy_bar_input.lock().await.take()?;
+
+        // AUTON-SIGNAL-CONTEXT-01: attempt DB-backed context window.
+        let symbol = std::env::var("MQK_STRATEGY_SYMBOL").unwrap_or_default();
+        let md_timeframe = std::env::var(STRATEGY_MD_TIMEFRAME_ENV).unwrap_or_default();
+
+        if let (Some(ref pool), true) = (
+            &self.db,
+            !symbol.is_empty() && !md_timeframe.is_empty(),
+        ) {
+            match mqk_db::fetch_recent_completed_bars_for_strategy(
+                pool,
+                &symbol,
+                &md_timeframe,
+                STRATEGY_CONTEXT_LOAD_LIMIT,
+            )
+            .await
+            {
+                Ok(db_bars) if !db_bars.is_empty() => {
+                    let bars_loaded = db_bars.len();
+                    let stubs: Vec<mqk_strategy::BarStub> = db_bars
+                        .iter()
+                        .map(|b| {
+                            mqk_strategy::BarStub::new(
+                                b.end_ts,
+                                b.is_complete,
+                                b.close_micros,
+                                b.volume,
+                            )
+                        })
+                        .collect();
+                    let window =
+                        mqk_strategy::RecentBarsWindow::new(bars_loaded.max(1), stubs);
+                    self.last_bar_context_bars
+                        .store(bars_loaded as i64, Ordering::SeqCst);
+                    tracing::debug!(
+                        symbol = %symbol,
+                        timeframe = %md_timeframe,
+                        bars_loaded,
+                        "auton_signal_context_01: db_bar_window_built"
+                    );
+                    return self
+                        .invoke_native_strategy_on_bar_from_window(bar.now_tick, window)
+                        .await;
+                }
+                Ok(_) => {
+                    // No completed bars for this symbol/timeframe.
+                    self.last_bar_context_bars.store(0, Ordering::SeqCst);
+                    tracing::warn!(
+                        symbol = %symbol,
+                        timeframe = %md_timeframe,
+                        "auton_signal_context_01: NO_MARKET_DATA — \
+                         no completed bars in md_bars; falling back to stub (no signal expected)"
+                    );
+                }
+                Err(e) => {
+                    self.last_bar_context_bars.store(0, Ordering::SeqCst);
+                    tracing::warn!(
+                        symbol = %symbol,
+                        timeframe = %md_timeframe,
+                        error = %e,
+                        "auton_signal_context_01: db_bar_load_failed; falling back to stub"
+                    );
+                }
+            }
+        } else if symbol.is_empty() || md_timeframe.is_empty() {
+            tracing::debug!(
+                symbol_set = !symbol.is_empty(),
+                timeframe_set = !md_timeframe.is_empty(),
+                "auton_signal_context_01: STRATEGY_CONTEXT_DB_LOAD_MISSING — \
+                 MQK_STRATEGY_SYMBOL or MQK_STRATEGY_MD_TIMEFRAME not set; \
+                 falling back to stub context"
+            );
+            // Do not overwrite a previously recorded non-negative value.
+            // Only update if still at sentinel (no dispatch yet this session).
+            let cur = self.last_bar_context_bars.load(Ordering::SeqCst);
+            if cur < 0 {
+                self.last_bar_context_bars.store(0, Ordering::SeqCst);
+            }
+        }
+
+        // Fallback: single-stub context (B1B legacy path).
+        // limit_price=None → is_complete=false → strategies return signal=0.
+        // Correct conservative behaviour when no DB context is available.
         self.invoke_native_strategy_on_bar_from_signal(
             bar.now_tick,
             bar.end_ts,
@@ -1189,6 +1310,19 @@ operator_reconcile_or_repair_required"
             bar.qty,
         )
         .await
+    }
+
+    /// AUTON-SIGNAL-CONTEXT-01: Invoke `on_bar` with a pre-built DB-sourced window.
+    async fn invoke_native_strategy_on_bar_from_window(
+        &self,
+        now_tick: u64,
+        window: mqk_strategy::RecentBarsWindow,
+    ) -> Option<mqk_strategy::StrategyBarResult> {
+        self.native_strategy_bootstrap
+            .lock()
+            .await
+            .as_mut()?
+            .invoke_on_bar_from_window(now_tick, window)
     }
 
     pub fn adapter_id(&self) -> &str {

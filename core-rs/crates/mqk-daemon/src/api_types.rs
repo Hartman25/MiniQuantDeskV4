@@ -518,6 +518,18 @@ pub struct AutonomousPaperReadinessResponse {
     /// the lookback window is insufficiently populated or the bar is not complete
     /// (`is_complete == false` because no price reference was available).
     pub last_bar_signal_qty: Option<i64>,
+    /// AUTON-SIGNAL-CONTEXT-01: Source of the bar context used in the most recent dispatch.
+    ///
+    /// `"db_loaded"` — context was built from completed bars fetched from `md_bars`.
+    /// `"stub_no_price"` — fallback single-bar stub with `is_complete=false` was used.
+    /// `"no_dispatch_yet"` — no bar has been dispatched this session.
+    /// `"not_applicable"` — not a paper+alpaca deployment.
+    pub bar_context_source: String,
+    /// AUTON-SIGNAL-CONTEXT-01: Number of completed DB bars used in the last dispatch.
+    ///
+    /// `null` when `bar_context_source != "db_loaded"`.
+    /// Non-null and ≥ 0 when DB bars were loaded; this is the actual window size.
+    pub bar_context_bars_loaded: Option<u64>,
 
     // --- OBS-SESSION-DISCORD-01: Session-window diagnostics ---
     /// RFC 3339 timestamp of when this response was generated (UTC).
