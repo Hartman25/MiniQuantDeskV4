@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backtest_jobs::{new_job_store, BacktestJobStore};
+use crate::ingest_jobs::{new_ingest_job_store, IngestJobStore};
 
 use chrono::Utc;
 use mqk_broker_alpaca::types::AlpacaFetchCursor;
@@ -235,6 +236,11 @@ pub struct AppState {
     ///
     /// Process-lifetime only. No DB persistence. Isolated from live/paper execution.
     pub backtest_jobs: BacktestJobStore,
+    /// DATA-INGEST-DAEMON-JOBS-01: In-memory market-data ingest job registry.
+    ///
+    /// Process-lifetime only. No DB persistence of job state.
+    /// Isolated from live/paper execution: no broker adapters, no OMS tables.
+    pub ingest_jobs: IngestJobStore,
 }
 
 impl Default for AppState {
@@ -577,6 +583,7 @@ impl AppState {
             external_snapshot_refresher: Arc::new(RwLock::new(None)),
             execution_last_tick_at: Arc::new(AtomicI64::new(0)),
             backtest_jobs: new_job_store(),
+            ingest_jobs: new_ingest_job_store(),
         }
     }
 

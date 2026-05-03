@@ -35,6 +35,7 @@ pub(crate) mod execution;
 pub(crate) mod execution_flow;
 pub(crate) mod execution_order_analysis;
 pub(crate) mod helpers;
+pub(crate) mod ingest;
 pub(crate) mod oms_metrics;
 pub(crate) mod paper_journal;
 pub(crate) mod portfolio;
@@ -161,6 +162,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         execution_order_replay, execution_order_timeline, execution_order_trace, execution_outbox,
         execution_protection_status, execution_replace_cancel_chains,
     };
+    use ingest::{ingest_job_status, ingest_job_submit, ingest_jobs_list};
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
     use portfolio::{
@@ -182,7 +184,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         diagnostics_snapshot, stream, trading_account, trading_fills, trading_orders,
         trading_positions, trading_snapshot, trading_snapshot_clear, trading_snapshot_set,
     };
-    use transport_quality::{execution_transport, market_data_quality};
+    use transport_quality::{execution_transport, market_data_coverage, market_data_quality};
 
     // --- Public (unauthenticated) routes — read-only telemetry & data. ---
     let public = Router::new()
@@ -283,6 +285,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/execution/transport", get(execution_transport))
         .route("/api/v1/market-data/quality", get(market_data_quality))
+        // DATA-INGEST-GUI-RESULTS-01: read-only md_bars coverage (public, no auth)
+        .route("/api/v1/market-data/coverage", get(market_data_coverage))
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
         .route("/v1/trading/orders", get(trading_orders))
@@ -291,7 +295,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/diagnostics/snapshot", get(diagnostics_snapshot))
         // BACKTEST-DAEMON-JOBS-01: read-only backtest job status (public, no auth)
         .route("/api/v1/backtests/jobs", get(backtest_jobs_list))
-        .route("/api/v1/backtests/jobs/:job_id", get(backtest_job_status));
+        .route("/api/v1/backtests/jobs/:job_id", get(backtest_job_status))
+        // DATA-INGEST-DAEMON-JOBS-01: read-only ingest job status (public, no auth)
+        .route("/api/v1/ingest/jobs", get(ingest_jobs_list))
+        .route("/api/v1/ingest/jobs/:job_id", get(ingest_job_status));
 
     // --- Operator (authenticated) routes — mutating state changes. ---
     let operator = Router::new()
@@ -321,6 +328,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         // BACKTEST-DAEMON-JOBS-01: submit backtest job (operator, requires auth)
         .route("/api/v1/backtests/jobs", post(backtest_job_submit))
+        // DATA-INGEST-DAEMON-JOBS-01: submit ingest job (operator, requires auth)
+        // Route identity: market-data ingestion / research-data-control.
+        // Not trading execution. Does not require arm_state.
+        .route("/api/v1/ingest/jobs", post(ingest_job_submit))
         .merge(control::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

@@ -2657,3 +2657,118 @@ pub struct BacktestJobStatusResponse {
     pub metrics_path: Option<String>,
     pub error: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// DATA-INGEST-DAEMON-JOBS-01: Market-data ingest job API
+// ---------------------------------------------------------------------------
+
+/// Request body for POST /api/v1/ingest/jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestJobRequest {
+    /// Source type. "csv" is the only supported value in this patch.
+    /// "twelvedata" and other providers are explicitly deferred.
+    pub source: String,
+    /// For source="csv": path to the CSV file (required, must not be empty).
+    pub csv_path: Option<String>,
+    /// Timeframe string: "1D" | "1m" | "5m".
+    pub timeframe: String,
+    /// Source label stored in the quality report (defaults to "csv" if omitted).
+    pub source_label: Option<String>,
+    /// Output directory root for quality report artifacts.
+    /// Defaults to "exports/md_ingest" relative to daemon working directory.
+    pub out_dir: Option<String>,
+}
+
+/// Response to POST /api/v1/ingest/jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestJobAcceptedResponse {
+    pub accepted: bool,
+    pub job_id: Uuid,
+    /// "queued" immediately after acceptance; "refused" on validation failure.
+    pub status: String,
+    pub source: String,
+    /// Populated if request was refused before queuing.
+    pub error: Option<String>,
+}
+
+/// Single job summary row in GET /api/v1/ingest/jobs list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestJobSummary {
+    pub job_id: Uuid,
+    pub status: String,
+    pub source: String,
+    pub timeframe: String,
+    pub created_at_utc: String,
+    pub started_at_utc: Option<String>,
+    pub completed_at_utc: Option<String>,
+    pub rows_read: Option<i64>,
+    pub rows_inserted: Option<i64>,
+    pub rows_rejected: Option<i64>,
+    /// Filesystem path to the written data_quality.json artifact (completed jobs).
+    pub quality_report_path: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Response to GET /api/v1/ingest/jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestJobsListResponse {
+    pub truth_state: String,
+    pub jobs: Vec<IngestJobSummary>,
+}
+
+// ---------------------------------------------------------------------------
+// DATA-INGEST-GUI-RESULTS-01: md_bars coverage query response
+// ---------------------------------------------------------------------------
+
+/// One (symbol, timeframe) group row in the coverage response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MdBarsCoverageRow {
+    pub symbol: String,
+    pub timeframe: String,
+    /// Total bar count for this group.
+    pub bars: i64,
+    /// Earliest `end_ts` (Unix seconds) in this group.
+    pub min_end_ts: i64,
+    /// Latest `end_ts` (Unix seconds) in this group.
+    pub max_end_ts: i64,
+    /// RFC3339 timestamp of the most-recent ingest for this group. Null when not tracked.
+    pub latest_ingested_at: Option<String>,
+}
+
+/// Response for `GET /api/v1/market-data/coverage`.
+///
+/// `truth_state` values:
+/// - `"active"`        — DB responded; one or more groups returned.
+/// - `"empty"`         — DB responded; no rows match the filter.
+/// - `"db_unavailable"` — daemon has no DB pool configured.
+/// - `"unavailable"`   — DB pool present but query failed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MdBarsCoverageResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    /// Echoes the `?timeframe=` query param, or `null` when not supplied (all timeframes).
+    pub timeframe: Option<String>,
+    pub rows: Vec<MdBarsCoverageRow>,
+    pub error: Option<String>,
+}
+
+/// Response to GET /api/v1/ingest/jobs/:job_id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestJobStatusResponse {
+    pub truth_state: String,
+    pub job_id: Uuid,
+    pub status: String,
+    pub source: String,
+    pub timeframe: String,
+    /// CSV path for source="csv" jobs.
+    pub csv_path: Option<String>,
+    pub created_at_utc: String,
+    pub started_at_utc: Option<String>,
+    pub completed_at_utc: Option<String>,
+    pub rows_read: Option<i64>,
+    pub rows_inserted: Option<i64>,
+    pub rows_rejected: Option<i64>,
+    /// Filesystem path to the written data_quality.json artifact (completed jobs).
+    pub quality_report_path: Option<String>,
+    pub error: Option<String>,
+}
