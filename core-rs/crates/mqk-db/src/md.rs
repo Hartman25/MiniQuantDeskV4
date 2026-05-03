@@ -320,19 +320,91 @@ fn count_missing_weekdays_between(prev_end_ts: i64, cur_end_ts: i64) -> u64 {
     gaps
 }
 
-/// CSV -> md_bars ingestion. CSV must include headers:
-/// symbol,timeframe,end_ts,open,high,low,close,volume,is_complete
+/// DB backup CSV row — columns exported by `mqk-db` backup tooling.
+/// Prices are already in micros (i64); `is_complete` uses PostgreSQL `t`/`f` notation.
+/// Extra columns (e.g. `ingested_at`) are ignored by the csv deserializer.
+#[derive(Debug, Clone, Deserialize)]
+struct DbBackupCsvRow {
+    symbol: String,
+    timeframe: String,
+    end_ts: i64,
+    open_micros: i64,
+    high_micros: i64,
+    low_micros: i64,
+    close_micros: i64,
+    volume: i64,
+    #[serde(deserialize_with = "deserialize_pg_bool")]
+    is_complete: bool,
+    // ingested_at is intentionally absent — extra CSV columns are ignored
+}
+
+/// Deserialize PostgreSQL boolean notation: `t`/`f` as well as `true`/`false`/`1`/`0`/`yes`/`no`.
+fn deserialize_pg_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let s = String::deserialize(d)?;
+    match s.trim().to_ascii_lowercase().as_str() {
+        "t" | "true" | "1" | "yes" => Ok(true),
+        "f" | "false" | "0" | "no" => Ok(false),
+        other => Err(serde::de::Error::custom(format!(
+            "unrecognized boolean value: '{other}'"
+        ))),
+    }
+}
+
+/// Convert i64 micros to a 6-decimal-place price string accepted by `price_to_micros`.
+/// Round-trip is exact: micros_to_price_str(x) |> price_to_micros == x for all x >= 0.
+fn micros_to_price_str(micros: i64) -> String {
+    let int_part = micros / 1_000_000;
+    let frac_part = micros % 1_000_000;
+    format!("{int_part}.{frac_part:06}")
+}
+
+/// CSV -> md_bars ingestion.
+///
+/// Supports two CSV schemas detected from the header:
+/// - **Provider artifact schema**: `symbol,timeframe,end_ts,open,high,low,close,volume,is_complete`
+///   (decimal-string prices; `is_complete` as `true`/`false`)
+/// - **DB backup schema**: `symbol,timeframe,end_ts,open_micros,high_micros,low_micros,close_micros,volume,is_complete[,ingested_at]`
+///   (integer-micro prices; `is_complete` as PostgreSQL `t`/`f` or `true`/`false`)
+///
+/// Schema detection: header column `open_micros` present → backup schema; otherwise provider schema.
 pub async fn ingest_csv_to_md_bars(pool: &PgPool, args: IngestCsvArgs) -> Result<IngestResult> {
     let csv = std::fs::read_to_string(&args.path)
         .with_context(|| format!("read ingest csv failed: {}", args.path.display()))?;
 
-    let mut rdr = csv::Reader::from_reader(csv.as_bytes());
+    // Detect schema from header line.
+    let is_db_backup = csv
+        .lines()
+        .next()
+        .map(|h| h.to_ascii_lowercase().contains("open_micros"))
+        .unwrap_or(false);
 
-    let mut bars: Vec<ProviderBar> = Vec::new();
-    for rec in rdr.deserialize() {
-        let b: ProviderBar = rec.context("deserialize ProviderBar failed")?;
-        bars.push(b);
-    }
+    let bars: Vec<ProviderBar> = if is_db_backup {
+        let mut rdr = csv::Reader::from_reader(csv.as_bytes());
+        let mut result = Vec::new();
+        for rec in rdr.deserialize() {
+            let b: DbBackupCsvRow = rec.context("deserialize DbBackupCsvRow failed")?;
+            result.push(ProviderBar {
+                symbol: b.symbol,
+                timeframe: b.timeframe,
+                end_ts: b.end_ts,
+                open: micros_to_price_str(b.open_micros),
+                high: micros_to_price_str(b.high_micros),
+                low: micros_to_price_str(b.low_micros),
+                close: micros_to_price_str(b.close_micros),
+                volume: b.volume,
+                is_complete: b.is_complete,
+            });
+        }
+        result
+    } else {
+        let mut rdr = csv::Reader::from_reader(csv.as_bytes());
+        let mut result = Vec::new();
+        for rec in rdr.deserialize() {
+            let b: ProviderBar = rec.context("deserialize ProviderBar failed")?;
+            result.push(b);
+        }
+        result
+    };
 
     ingest_provider_bars_to_md_bars(
         pool,
@@ -1183,6 +1255,77 @@ pub async fn fetch_md_bars(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// DATA-INGEST-GUI-RESULTS-01: md_bars coverage summary (read-only)
+// ---------------------------------------------------------------------------
+
+/// One row of the coverage summary: one (symbol, timeframe) group.
+#[derive(Debug, Clone)]
+pub struct MdCoverageRow {
+    pub symbol: String,
+    pub timeframe: String,
+    /// Total bar count for this (symbol, timeframe) pair.
+    pub bars: i64,
+    pub min_end_ts: i64,
+    pub max_end_ts: i64,
+    /// RFC3339-formatted `max(ingested_at)` for this group. `None` if somehow null.
+    pub latest_ingested_at: Option<String>,
+}
+
+/// Read-only aggregate query: count/min/max per (symbol, timeframe) group.
+///
+/// `timeframe = None`  — return all timeframes.
+/// `timeframe = Some(tf)` — restrict to that timeframe only.
+///
+/// Ordered deterministically: `symbol ASC, timeframe ASC`.
+/// No inserts, updates, or deletes.
+pub async fn fetch_md_bars_coverage(
+    pool: &PgPool,
+    timeframe: Option<&str>,
+) -> Result<Vec<MdCoverageRow>> {
+    let rows = sqlx::query(
+        r#"
+        select
+          symbol,
+          timeframe,
+          count(*) as bars,
+          min(end_ts) as min_end_ts,
+          max(end_ts) as max_end_ts,
+          max(ingested_at) as latest_ingested_at
+        from md_bars
+        where ($1::text is null or timeframe = $1)
+        group by symbol, timeframe
+        order by symbol asc, timeframe asc
+        "#,
+    )
+    .bind(timeframe)
+    .fetch_all(pool)
+    .await
+    .context("fetch_md_bars_coverage query failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let latest: Option<DateTime<Utc>> = r
+            .try_get::<Option<DateTime<Utc>>, _>("latest_ingested_at")
+            .context("md_bars.latest_ingested_at")?;
+        out.push(MdCoverageRow {
+            symbol: r.try_get::<String, _>("symbol").context("md_bars.symbol")?,
+            timeframe: r
+                .try_get::<String, _>("timeframe")
+                .context("md_bars.timeframe")?,
+            bars: r.try_get::<i64, _>("bars").context("md_bars.bars")?,
+            min_end_ts: r
+                .try_get::<i64, _>("min_end_ts")
+                .context("md_bars.min_end_ts")?,
+            max_end_ts: r
+                .try_get::<i64, _>("max_end_ts")
+                .context("md_bars.max_end_ts")?,
+            latest_ingested_at: latest.map(|t| t.to_rfc3339()),
+        });
+    }
+    Ok(out)
+}
+
 /// Return the maximum `end_ts` stored in `md_bars` for a given (symbol, timeframe) pair.
 ///
 /// Returns `None` when no bars exist yet — the caller must require a `--full-start` date
@@ -1210,6 +1353,53 @@ pub async fn latest_stored_bar_end_ts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- micros_to_price_str round-trip ---
+
+    #[test]
+    fn micros_to_price_str_round_trip() {
+        for micros in [0_i64, 531250, 100_500_000, 1_000_000, 999_999_999_999] {
+            let s = micros_to_price_str(micros);
+            let back = price_to_micros(&s)
+                .unwrap_or_else(|e| panic!("round-trip failed for {micros}: {e}"));
+            assert_eq!(back, micros, "round-trip mismatch for {micros} → '{s}'");
+        }
+    }
+
+    #[test]
+    fn micros_to_price_str_format() {
+        assert_eq!(micros_to_price_str(531250), "0.531250");
+        assert_eq!(micros_to_price_str(100_500_000), "100.500000");
+        assert_eq!(micros_to_price_str(0), "0.000000");
+        assert_eq!(micros_to_price_str(1_000_000), "1.000000");
+    }
+
+    // --- deserialize_pg_bool (via DbBackupCsvRow CSV parse) ---
+
+    #[test]
+    fn pg_bool_csv_parses_t_and_f() {
+        // DB backup format uses t/f from PostgreSQL COPY export.
+        let csv = "symbol,timeframe,end_ts,open_micros,high_micros,low_micros,close_micros,volume,is_complete,ingested_at\n\
+                   AAPL,1D,726105600,531250,535713,515625,520088,129136000,t,2026-04-19 12:21:42Z\n\
+                   AAPL,1D,726192000,517857,529017,511161,529017,186256000,f,2026-04-19 12:21:42Z\n";
+        let mut rdr = csv::Reader::from_reader(csv.as_bytes());
+        let rows: Vec<DbBackupCsvRow> = rdr.deserialize().map(|r| r.expect("parse row")).collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].is_complete, "t → true");
+        assert!(!rows[1].is_complete, "f → false");
+    }
+
+    #[test]
+    fn pg_bool_csv_parses_true_and_false() {
+        let csv = "symbol,timeframe,end_ts,open_micros,high_micros,low_micros,close_micros,volume,is_complete\n\
+                   SPY,1D,1708041600,100500000,101000000,99500000,100750000,1000,true\n\
+                   SPY,1D,1708128000,100500000,101000000,99500000,100750000,1000,false\n";
+        let mut rdr = csv::Reader::from_reader(csv.as_bytes());
+        let rows: Vec<DbBackupCsvRow> = rdr.deserialize().map(|r| r.expect("parse row")).collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].is_complete);
+        assert!(!rows[1].is_complete);
+    }
 
     #[test]
     fn price_to_micros_basic() {
