@@ -611,6 +611,8 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                 ],
                 overall_ready: false,
                 autonomous_history_degraded: false,
+                nyse_market_session: "not_applicable".to_string(),
+                bar_ticker_gate: "not_applicable".to_string(),
                 now_utc: diag.now_utc,
                 session_start_utc: diag.session_start_utc,
                 session_stop_utc: diag.session_stop_utc,
@@ -670,6 +672,19 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
     // Runtime-start truth: a locally-owned run blocks start (409 Conflict).
     let runtime_start_allowed = st.locally_owned_run_id().await.is_none();
 
+    // AUTON-NO-TRADE-01: Bar ticker Gate 2 — NYSE session must be "regular".
+    //
+    // The autonomous bar ticker only deposits bar inputs during the NYSE regular
+    // session.  When a run is active but the NYSE is closed, autonomous_signal_count
+    // remains 0 and no paper orders are attempted — this is correct fail-closed
+    // behaviour.  We surface it here so an operator can see exactly why ticks are
+    // not occurring without having to separately query /api/v1/system/session.
+    let nyse_market_session = st
+        .calendar_spec()
+        .classify_market_session(now.timestamp())
+        .to_string();
+    let bar_ticker_gate = bar_ticker_gate_from_session(&nyse_market_session).to_string();
+
     // Build blockers in gate order matching start_execution_runtime.
     let mut blockers = Vec::new();
     if !ws_continuity_ready {
@@ -721,6 +736,17 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                 .to_string(),
         );
     }
+    // AUTON-NO-TRADE-01: When a run is active but the NYSE market is not in regular
+    // session, the bar ticker Gate 2 will block all bar deposits.  Surface this as
+    // an explicit observation so the operator knows why autonomous_signal_count is 0.
+    if !runtime_start_allowed && bar_ticker_gate != "open" {
+        blockers.push(format!(
+            "run is active but bar ticker Gate 2 is blocked: NYSE market session is \
+             '{}', not 'regular'; no bar deposits will occur until the regular \
+             session opens (Mon–Fri 09:30–16:00 ET, holidays excluded)",
+            nyse_market_session
+        ));
+    }
     // STRATEGY-DORMANCY-01: Check strategy bootstrap dormancy.
     //
     // Mirrors the gate added to start_execution_runtime and the autonomous_blockers
@@ -771,6 +797,8 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
             blockers,
             overall_ready,
             autonomous_history_degraded,
+            nyse_market_session,
+            bar_ticker_gate,
             now_utc: diag.now_utc,
             session_start_utc: diag.session_start_utc,
             session_stop_utc: diag.session_stop_utc,
@@ -781,6 +809,15 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
         }),
     )
         .into_response()
+}
+
+// AUTON-NO-TRADE-01: Bar ticker Gate 2 derivation — pure helper for testability.
+fn bar_ticker_gate_from_session(nyse_session: &str) -> &'static str {
+    if nyse_session == "regular" {
+        "open"
+    } else {
+        "closed_outside_session"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -985,6 +1022,23 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // AUTON-NO-TRADE-01: bar ticker Gate 2 derivation tests.
+    #[test]
+    fn ant01_bar_ticker_gate_open_when_regular() {
+        assert_eq!(bar_ticker_gate_from_session("regular"), "open");
+    }
+
+    #[test]
+    fn ant02_bar_ticker_gate_closed_for_non_regular() {
+        for session in &["premarket", "after_hours", "closed"] {
+            assert_eq!(
+                bar_ticker_gate_from_session(session),
+                "closed_outside_session",
+                "expected closed_outside_session for session='{session}'"
+            );
+        }
+    }
 
     #[test]
     fn obs01_controller_exited_maps_to_distinct_api_state() {

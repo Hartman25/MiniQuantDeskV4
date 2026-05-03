@@ -489,6 +489,21 @@ pub struct AutonomousPaperReadinessResponse {
     /// cleared in-session.  When true, `/api/v1/events/feed` autonomous-session
     /// history is incomplete or absent.  Operator must restart with a working DB.
     pub autonomous_history_degraded: bool,
+    /// AUTON-NO-TRADE-01: Current NYSE market-session classification as seen by
+    /// the autonomous bar ticker (Gate 2).
+    ///
+    /// One of `"regular"` | `"premarket"` | `"after_hours"` | `"closed"`.
+    /// `"regular"` means the bar ticker will deposit on its next interval tick.
+    /// Any other value means Gate 2 is blocking all bar deposits.
+    /// `"not_applicable"` for non-paper+alpaca deployments.
+    pub nyse_market_session: String,
+    /// AUTON-NO-TRADE-01: Bar ticker Gate 2 state derived from `nyse_market_session`.
+    ///
+    /// `"open"` when `nyse_market_session == "regular"` — bar deposits allowed.
+    /// `"closed_outside_session"` when the NYSE market is not in regular session
+    /// — bar deposits are blocked regardless of arm/WS/run state.
+    /// `"not_applicable"` for non-paper+alpaca deployments.
+    pub bar_ticker_gate: String,
 
     // --- OBS-SESSION-DISCORD-01: Session-window diagnostics ---
     /// RFC 3339 timestamp of when this response was generated (UTC).
