@@ -284,7 +284,39 @@ pub(super) fn spawn_execution_loop(
                     // still has something to compare against and will drift/halt if the
                     // position truth is genuinely wrong.  This is fail-closed: a missing
                     // refresh is never silently treated as a clean match.
+                    //
+                    // AUTON-SENT-ORDER-BROKER-TRUTH-01: active-order eager refresh.
+                    //
+                    // The broker seed snapshot is fetched at run-start before any orders
+                    // are placed.  After the first order dispatch, the local snapshot
+                    // shows the in-flight order but the stale seed does not — causing
+                    // Phase 0c to fire LocalOrderMissingAtBroker and halt the run.
+                    //
+                    // When the current execution snapshot has any non-terminal orders
+                    // (Open / PartiallyFilled / CancelPending / ReplacePending), force the
+                    // external broker snapshot refresh this tick so Phase 0c on the next
+                    // tick compares against a current Alpaca order list.
                     if broker_snapshot_source == BrokerSnapshotTruthSource::External {
+                        let has_active_orders = snapshot_cache
+                            .read()
+                            .await
+                            .as_ref()
+                            .map(|s| {
+                                s.active_orders.iter().any(|o| {
+                                    matches!(
+                                        o.status.as_str(),
+                                        "Open"
+                                            | "PartiallyFilled"
+                                            | "CancelPending"
+                                            | "ReplacePending"
+                                    )
+                                })
+                            })
+                            .unwrap_or(false);
+                        if has_active_orders {
+                            // Force refresh this tick — do NOT wait for the 60-tick cadence.
+                            external_refresh_ticks = super::EXTERNAL_SNAPSHOT_REFRESH_TICKS;
+                        }
                         external_refresh_ticks += 1;
                         if external_refresh_ticks >= super::EXTERNAL_SNAPSHOT_REFRESH_TICKS {
                             external_refresh_ticks = 0;

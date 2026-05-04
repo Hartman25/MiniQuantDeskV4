@@ -304,27 +304,59 @@ where
         // - DIRTY  => HALT run + DISARM arm state + refuse dispatch
         //
         // This is intentionally fail-closed.
+        //
+        // AUTON-SENT-ORDER-BROKER-TRUTH-01: inbox-pending guard.
+        //
+        // The local reconcile snapshot is built from the execution snapshot
+        // published after the PREVIOUS tick.  WS-ingested fill/ack events can
+        // arrive between ticks and sit in oms_inbox (applied_at_utc IS NULL)
+        // before Phase 3 processes them.  Comparing a stale local snapshot
+        // (no fill applied) against the broker snapshot (fill reflected) causes
+        // a false-positive dirty reconcile that halts the run before Phase 3
+        // ever gets to apply the inbox rows.
+        //
+        // Guard: skip the inline reconcile check when there are unapplied inbox
+        // rows for this run.  Phase 3 will drain them; the reconcile check runs
+        // on the next tick once the local snapshot is current.
+        //
+        // Safety: a single-tick deferral cannot suppress genuine drift
+        // indefinitely — Phase 3 either applies the rows (resolving the
+        // discrepancy) or halts on an OMS error (UNKNOWN_ORDER_FILL, invariant
+        // violation, etc.).  If the inbox is permanently stuck (DB failure),
+        // the fetch itself returns Err and the tick halts.
         // ------------------------------------------------------------------
         {
-            let local = (self.local_snapshot_provider)();
-            let broker = (self.broker_snapshot_provider)();
-            if let Err(err) =
-                evaluate_monotonic_reconcile(&mut self.reconcile_watermark, &local, &broker)
-            {
-                let now = self.time_source.now_utc();
-                // Mandatory halt + disarm - same fail-closed contract as Phase 0b.
-                persist_halt_and_disarm(&self.pool, self.run_id, now, "ReconcileDrift").await?;
-                return match err {
-                    MonotonicReconcileError::Dirty => Err(anyhow!(
-                        "RECONCILE_DRIFT: run {} halted and disarmed; dispatch refused",
-                        self.run_id
-                    )),
-                    MonotonicReconcileError::Stale(stale) => Err(anyhow!(
-                        "RECONCILE_SNAPSHOT_STALE: run {} halted and disarmed; dispatch refused: {}",
-                        self.run_id,
-                        stale
-                    )),
-                };
+            let pending_inbox =
+                mqk_db::inbox_load_unapplied_for_run(&self.pool, self.run_id).await?;
+            if pending_inbox.is_empty() {
+                let local = (self.local_snapshot_provider)();
+                let broker = (self.broker_snapshot_provider)();
+                if let Err(err) =
+                    evaluate_monotonic_reconcile(&mut self.reconcile_watermark, &local, &broker)
+                {
+                    let now = self.time_source.now_utc();
+                    // Mandatory halt + disarm - same fail-closed contract as Phase 0b.
+                    persist_halt_and_disarm(&self.pool, self.run_id, now, "ReconcileDrift").await?;
+                    return match err {
+                        MonotonicReconcileError::Dirty => Err(anyhow!(
+                            "RECONCILE_DRIFT: run {} halted and disarmed; dispatch refused",
+                            self.run_id
+                        )),
+                        MonotonicReconcileError::Stale(stale) => Err(anyhow!(
+                            "RECONCILE_SNAPSHOT_STALE: run {} halted and disarmed; dispatch refused: {}",
+                            self.run_id,
+                            stale
+                        )),
+                    };
+                }
+            } else {
+                tracing::debug!(
+                    run_id = %self.run_id,
+                    pending_count = pending_inbox.len(),
+                    "reconcile_check_deferred: unapplied inbox rows present; \
+                     reconcile will re-evaluate after Phase 3 drains the inbox \
+                     (AUTON-SENT-ORDER-BROKER-TRUTH-01)"
+                );
             }
         }
         // ------------------------------------------------------------------

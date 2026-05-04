@@ -346,13 +346,15 @@ mod tests {
     fn sc_ns02_insufficient_lookback_returns_zero_signal() {
         let mut bootstrap = make_scalper_bootstrap();
         // Only 1 complete bar — intraday_scalper needs 5.
-        let window =
-            RecentBarsWindow::new(1, vec![complete_bar(1_000_000, 200_000_000)]);
+        let window = RecentBarsWindow::new(1, vec![complete_bar(1_000_000, 200_000_000)]);
         let result = bootstrap
             .invoke_on_bar_from_window(0, window)
             .expect("SC-NS-02: Active bootstrap must return Some");
         let qty: i64 = result.intents.output.targets.iter().map(|t| t.qty).sum();
-        assert_eq!(qty, 0, "SC-NS-02: insufficient lookback → signal_qty must be 0");
+        assert_eq!(
+            qty, 0,
+            "SC-NS-02: insufficient lookback → signal_qty must be 0"
+        );
     }
 
     /// SC-NS-03: invoke_on_bar_from_window with 5 complete bars and sufficient
