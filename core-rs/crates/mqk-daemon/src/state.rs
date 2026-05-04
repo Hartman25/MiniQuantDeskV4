@@ -260,6 +260,12 @@ pub struct AppState {
     /// Process-lifetime only. No DB persistence of job state.
     /// Isolated from live/paper execution: no broker adapters, no OMS tables.
     pub ingest_jobs: IngestJobStore,
+    /// DATA-INGEST-GUI-SYNC-ALL-01: Filesystem path to the canonical instrument registry.
+    ///
+    /// Read at route-time (not cached) by GET /api/v1/ingest/tracked-equities.
+    /// Default: "config/instruments/equities.json" (relative to daemon CWD).
+    /// Override: MQK_INSTRUMENT_REGISTRY_PATH env var.
+    pub instrument_registry_path: String,
 }
 
 impl Default for AppState {
@@ -604,6 +610,8 @@ impl AppState {
             execution_last_tick_at: Arc::new(AtomicI64::new(0)),
             backtest_jobs: new_job_store(),
             ingest_jobs: new_ingest_job_store(),
+            instrument_registry_path: std::env::var("MQK_INSTRUMENT_REGISTRY_PATH")
+                .unwrap_or_else(|_| "config/instruments/equities.json".to_string()),
         }
     }
 
@@ -1225,10 +1233,7 @@ operator_reconcile_or_repair_required"
         let symbol = std::env::var("MQK_STRATEGY_SYMBOL").unwrap_or_default();
         let md_timeframe = std::env::var(STRATEGY_MD_TIMEFRAME_ENV).unwrap_or_default();
 
-        if let (Some(ref pool), true) = (
-            &self.db,
-            !symbol.is_empty() && !md_timeframe.is_empty(),
-        ) {
+        if let (Some(ref pool), true) = (&self.db, !symbol.is_empty() && !md_timeframe.is_empty()) {
             match mqk_db::fetch_recent_completed_bars_for_strategy(
                 pool,
                 &symbol,
@@ -1250,8 +1255,7 @@ operator_reconcile_or_repair_required"
                             )
                         })
                         .collect();
-                    let window =
-                        mqk_strategy::RecentBarsWindow::new(bars_loaded.max(1), stubs);
+                    let window = mqk_strategy::RecentBarsWindow::new(bars_loaded.max(1), stubs);
                     self.last_bar_context_bars
                         .store(bars_loaded as i64, Ordering::SeqCst);
                     tracing::debug!(

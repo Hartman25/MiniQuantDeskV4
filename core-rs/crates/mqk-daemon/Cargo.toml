@@ -52,6 +52,8 @@ mqk-portfolio = { path = "../mqk-portfolio" }
 # BACKTEST-DAEMON-JOBS-01: offline backtest job API (no broker, no live execution)
 mqk-backtest = { path = "../mqk-backtest" }
 mqk-artifacts = { path = "../mqk-artifacts" }
+# DATA-INGEST-GUI-SYNC-ALL-01: read-only instrument registry access for tracked-equities route
+mqk-md = { path = "../mqk-md" }
 reqwest.workspace = true
 # BRK-00R-05: Alpaca paper WebSocket transport.
 tokio-tungstenite.workspace = true

@@ -84,6 +84,30 @@ export interface MdBarsCoverageResponse {
   error: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// DATA-INGEST-GUI-SYNC-ALL-01: Tracked-equities registry preview
+// ---------------------------------------------------------------------------
+
+export interface TrackedEquitySummary {
+  symbol: string;
+  instrument_id: string;
+  provider: string;
+  venue: string;
+  timeframes: string[];
+}
+
+export interface TrackedEquitiesResponse {
+  canonical_route: string;
+  /** "active" | "registry_unavailable" | "registry_invalid" */
+  truth_state: string;
+  registry_path: string;
+  count: number;
+  symbols: TrackedEquitySummary[];
+  first_symbol: string | null;
+  last_symbol: string | null;
+  error: string | null;
+}
+
 export interface ActiveIngestJob {
   jobId: string;
   source: string;

@@ -12,16 +12,19 @@ import { formatDateTime } from "../../lib/format";
 import {
   coverageTruthLabel,
   fetchMdBarsCoverage,
+  fetchTrackedEquities,
   formatEndTs,
   getIngestJob,
   isCoverageActive,
+  isTrackedEquitiesActive,
   isTerminalIngestStatus,
   normalizeIngestJobStatus,
   submitIngestJob,
+  trackedEquitiesTruthLabel,
 } from "./api.ts";
 import { buildRepoRelativePath, buildMd1DSymbolPath, MD_BACKUP_1D_SEGMENTS, MD_INGEST_SEGMENTS } from "../backtests/pathHelpers.ts";
 import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
-import type { ActiveIngestJob, IngestJobStatusKind, MdBarsCoverageResponse } from "./types.ts";
+import type { ActiveIngestJob, IngestJobStatusKind, MdBarsCoverageResponse, TrackedEquitiesResponse } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -132,6 +135,11 @@ export function IngestScreen() {
   const [coverageLoading, setCoverageLoading] = useState(false);
   const [coverageError, setCoverageError] = useState<string | null>(null);
 
+  // DATA-INGEST-GUI-SYNC-ALL-01: Tracked-equities registry preview state
+  const [trackedEquities, setTrackedEquities] = useState<TrackedEquitiesResponse | null>(null);
+  const [trackedEquitiesLoading, setTrackedEquitiesLoading] = useState(false);
+  const [trackedEquitiesError, setTrackedEquitiesError] = useState<string | null>(null);
+
   const loadCoverage = useCallback(async () => {
     setCoverageLoading(true);
     setCoverageError(null);
@@ -148,6 +156,24 @@ export function IngestScreen() {
   // Auto-load coverage on mount
   useEffect(() => {
     void loadCoverage();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadTrackedEquities = useCallback(async () => {
+    setTrackedEquitiesLoading(true);
+    setTrackedEquitiesError(null);
+    const result = await fetchTrackedEquities();
+    setTrackedEquitiesLoading(false);
+    if (!result.ok) {
+      setTrackedEquitiesError(result.error ?? "Tracked-equities fetch failed.");
+      return;
+    }
+    setTrackedEquities(result.data ?? null);
+  }, []);
+
+  // Auto-load tracked equities on mount
+  useEffect(() => {
+    void loadTrackedEquities();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -527,16 +553,91 @@ export function IngestScreen() {
         )}
       </Panel>
 
-      {/* Provider ingestion — deferred notice */}
+      {/* DATA-INGEST-GUI-SYNC-ALL-01: Tracked equities registry preview */}
       <Panel
-        title="Provider ingestion (deferred)"
-        subtitle="TwelveData and other market-data providers are not implemented in this GUI."
+        title="Tracked equities"
+        subtitle="Registry-backed universe from config/instruments/equities.json. Read-only. No provider calls. No API credits consumed."
       >
-        <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
-          Provider-based ingestion (TwelveData, etc.) is explicitly deferred.
-          Only CSV ingestion is available. No provider API credentials are read or API credits consumed by this GUI.
-          To ingest from a provider, use the CLI (<code>mqk-cli</code>) directly.
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void loadTrackedEquities()}
+            disabled={trackedEquitiesLoading}
+            style={{ padding: "2px 12px" }}
+          >
+            {trackedEquitiesLoading ? "Loading…" : "Refresh"}
+          </button>
         </div>
+
+        {trackedEquitiesError && (
+          <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+            <strong>Fetch failed:</strong> {trackedEquitiesError}
+          </div>
+        )}
+
+        {trackedEquities === null && !trackedEquitiesLoading && !trackedEquitiesError && (
+          <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+            Not loaded yet. Click Refresh or wait for auto-load.
+          </div>
+        )}
+
+        {trackedEquities !== null && (
+          <>
+            <div className="bt-job-meta" style={{ marginBottom: 6 }}>
+              <span className="eyebrow">truth_state</span>{" "}
+              <strong>{trackedEquitiesTruthLabel(trackedEquities.truth_state)}</strong>
+              {isTrackedEquitiesActive(trackedEquities.truth_state) && (
+                <>
+                  {" "}<span className="eyebrow">count</span>{" "}
+                  <strong>{trackedEquities.count}</strong>
+                  {trackedEquities.first_symbol && (
+                    <>
+                      {" "}<span className="eyebrow">first</span>{" "}
+                      <strong>{trackedEquities.first_symbol}</strong>
+                    </>
+                  )}
+                  {trackedEquities.last_symbol && (
+                    <>
+                      {" "}<span className="eyebrow">last</span>{" "}
+                      <strong>{trackedEquities.last_symbol}</strong>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+
+            {isTrackedEquitiesActive(trackedEquities.truth_state) && (
+              <div className="bt-field-hint" style={{ marginBottom: 8, fontSize: "0.82rem" }}>
+                <span className="eyebrow">registry</span>{" "}
+                <code style={{ wordBreak: "break-all" }}>{trackedEquities.registry_path}</code>
+              </div>
+            )}
+
+            {!isTrackedEquitiesActive(trackedEquities.truth_state) && (
+              <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+                <strong>truth_state:</strong> {trackedEquitiesTruthLabel(trackedEquities.truth_state)}
+                {trackedEquities.error ? ` — ${trackedEquities.error}` : ""}
+              </div>
+            )}
+
+            <div
+              className="unavailable-notice"
+              style={{ marginTop: 8, borderColor: "var(--accent, #c8a84b)", color: "var(--text-muted, #888)" }}
+            >
+              Provider sync job not enabled yet. No API credits consumed.
+              To sync from TwelveData, use the CLI (<code>mqk-cli md sync-provider</code>) or{" "}
+              <code>backfill_daily_bars.ps1</code>.
+              Follow-up: DATA-INGEST-DAEMON-PROVIDER-JOBS-01 / DATA-INGEST-GUI-PROVIDER-RUNNER-01.
+            </div>
+          </>
+        )}
+
+        {trackedEquitiesLoading && (
+          <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
+            Loading tracked equities…
+          </div>
+        )}
       </Panel>
 
     </div>

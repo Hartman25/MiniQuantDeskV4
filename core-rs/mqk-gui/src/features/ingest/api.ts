@@ -15,6 +15,7 @@ import type {
   IngestJobStatusResponse,
   IngestJobsListResponse,
   MdBarsCoverageResponse,
+  TrackedEquitiesResponse,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -222,4 +223,59 @@ export function coverageTruthLabel(truthState: string): string {
  */
 export function isCoverageActive(truthState: string): boolean {
   return truthState === "active";
+}
+
+// ---------------------------------------------------------------------------
+// DATA-INGEST-GUI-SYNC-ALL-01: Tracked-equities registry preview
+// ---------------------------------------------------------------------------
+
+export interface FetchTrackedEquitiesResult {
+  ok: boolean;
+  data?: TrackedEquitiesResponse;
+  error?: string;
+}
+
+/**
+ * Return true if the tracked-equities truth_state means "registry loaded successfully".
+ *
+ * Safety: registry_unavailable and registry_invalid are explicitly not active.
+ */
+export function isTrackedEquitiesActive(truthState: string): boolean {
+  return truthState === "active";
+}
+
+/**
+ * Return a human-readable label for a tracked-equities truth_state.
+ */
+export function trackedEquitiesTruthLabel(truthState: string): string {
+  switch (truthState) {
+    case "active":
+      return "active";
+    case "registry_unavailable":
+      return "registry unavailable";
+    case "registry_invalid":
+      return "registry invalid";
+    default:
+      return truthState;
+  }
+}
+
+/**
+ * Fetch GET /api/v1/ingest/tracked-equities.
+ *
+ * Safety invariants:
+ * - No provider API calls. No DB writes. No execution state touched.
+ * - Read-only access to the instrument registry file on the daemon host.
+ * - No API credits consumed.
+ */
+export async function fetchTrackedEquities(): Promise<FetchTrackedEquitiesResult> {
+  const result = await fetchJsonCandidate<TrackedEquitiesResponse>(
+    "/api/v1/ingest/tracked-equities",
+  );
+
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Tracked-equities fetch failed." };
+  }
+
+  return { ok: true, data: result.data };
 }

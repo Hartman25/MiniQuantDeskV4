@@ -2793,6 +2793,52 @@ pub struct MdBarsCoverageResponse {
     pub error: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// DATA-INGEST-GUI-SYNC-ALL-01: Tracked-equities registry preview
+// ---------------------------------------------------------------------------
+
+/// One enabled equity entry in GET /api/v1/ingest/tracked-equities.
+///
+/// Contains only the fields needed for operator display — not the full TrackedInstrument.
+/// No provider API calls. No DB writes. Pure registry read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackedEquitySummary {
+    pub symbol: String,
+    pub instrument_id: String,
+    pub provider: String,
+    pub venue: String,
+    pub timeframes: Vec<String>,
+}
+
+/// Response for GET /api/v1/ingest/tracked-equities.
+///
+/// `truth_state` values:
+/// - `"active"`              — registry loaded; symbols returned.
+/// - `"registry_unavailable"` — file not found or not readable.
+/// - `"registry_invalid"`    — file found but failed JSON parsing or validation.
+///
+/// Safety invariants:
+/// - No broker adapter called. No provider API calls. No DB writes.
+/// - Does not touch live/paper execution state.
+/// - Read-only access to config/instruments/equities.json (or MQK_INSTRUMENT_REGISTRY_PATH).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackedEquitiesResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    /// Absolute or relative path to the registry file that was read.
+    pub registry_path: String,
+    /// Total count of enabled equity instruments.
+    pub count: usize,
+    /// All enabled equity symbols in deterministic alphabetical order.
+    pub symbols: Vec<TrackedEquitySummary>,
+    /// First symbol alphabetically (None when count=0).
+    pub first_symbol: Option<String>,
+    /// Last symbol alphabetically (None when count=0).
+    pub last_symbol: Option<String>,
+    /// Populated on registry_unavailable or registry_invalid.
+    pub error: Option<String>,
+}
+
 /// Response to GET /api/v1/ingest/jobs/:job_id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestJobStatusResponse {

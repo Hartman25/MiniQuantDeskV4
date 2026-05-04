@@ -162,7 +162,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         execution_order_replay, execution_order_timeline, execution_order_trace, execution_outbox,
         execution_protection_status, execution_replace_cancel_chains,
     };
-    use ingest::{ingest_job_status, ingest_job_submit, ingest_jobs_list};
+    use ingest::{ingest_job_status, ingest_job_submit, ingest_jobs_list, tracked_equities_list};
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
     use portfolio::{
@@ -298,7 +298,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/backtests/jobs/:job_id", get(backtest_job_status))
         // DATA-INGEST-DAEMON-JOBS-01: read-only ingest job status (public, no auth)
         .route("/api/v1/ingest/jobs", get(ingest_jobs_list))
-        .route("/api/v1/ingest/jobs/:job_id", get(ingest_job_status));
+        .route("/api/v1/ingest/jobs/:job_id", get(ingest_job_status))
+        // DATA-INGEST-GUI-SYNC-ALL-01: read-only tracked-equity registry preview (public, no auth)
+        // No provider calls. No DB writes. No execution state touched.
+        .route(
+            "/api/v1/ingest/tracked-equities",
+            get(tracked_equities_list),
+        );
 
     // --- Operator (authenticated) routes — mutating state changes. ---
     let operator = Router::new()

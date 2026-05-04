@@ -611,3 +611,220 @@ async fn ij12_ingest_job_does_not_touch_execution_snapshot() {
         "execution_snapshot must remain None (no live execution started)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// DATA-INGEST-GUI-SYNC-ALL-01: GET /api/v1/ingest/tracked-equities
+//
+// | Test   | What it proves                                                      |
+// |--------|---------------------------------------------------------------------|
+// | TE-01  | Returns count=88 from the canonical registry (AAPL+SPY present)     |
+// | TE-02  | Missing registry path → truth_state=registry_unavailable + error    |
+// | TE-03  | Response symbols are in deterministic alphabetical order            |
+// | TE-04  | Execution state and arm_state are untouched                         |
+// | TE-05  | No DB pool required; route works without a database                 |
+//
+// No provider API calls. No DB writes. No TwelveData credits consumed.
+// ---------------------------------------------------------------------------
+
+/// Return an Axum router pointed at the real canonical registry file.
+///
+/// CARGO_MANIFEST_DIR is the `mqk-daemon` crate directory.
+/// The registry lives three levels up: ../../../config/instruments/equities.json.
+fn make_router_with_real_registry() -> axum::Router {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/instruments/equities.json")
+        .canonicalize()
+        .expect("registry path must resolve from CARGO_MANIFEST_DIR")
+        .to_string_lossy()
+        .to_string();
+
+    let mut st =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st.instrument_registry_path = registry_path;
+    let st = Arc::new(st);
+    routes::build_router(st)
+}
+
+/// Return a router pointing at a guaranteed-nonexistent registry path.
+fn make_router_with_missing_registry() -> axum::Router {
+    let mut st =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st.instrument_registry_path = "/nonexistent/path/that/cannot/exist/equities.json".to_string();
+    let st = Arc::new(st);
+    routes::build_router(st)
+}
+
+async fn get_tracked_equities(router: axum::Router) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/ingest/tracked-equities")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    (status, parse_json(body))
+}
+
+// TE-01: real registry → count=88, AAPL and SPY present, truth_state=active
+#[tokio::test]
+async fn te_01_tracked_equities_count_88_aapl_spy_present() {
+    let router = make_router_with_real_registry();
+    let (status, body) = get_tracked_equities(router).await;
+
+    assert_eq!(status, StatusCode::OK, "must return 200");
+    assert_eq!(
+        body["truth_state"], "active",
+        "truth_state must be active: {body}"
+    );
+    assert_eq!(
+        body["canonical_route"], "/api/v1/ingest/tracked-equities",
+        "canonical_route must be set"
+    );
+
+    let count = body["count"].as_u64().expect("count must be a number");
+    assert_eq!(count, 88, "count must equal 88 enabled equities");
+
+    let symbols = body["symbols"]
+        .as_array()
+        .expect("symbols must be an array");
+    assert_eq!(symbols.len(), 88, "symbols array length must equal count");
+
+    let symbol_strings: Vec<&str> = symbols
+        .iter()
+        .map(|s| s["symbol"].as_str().expect("symbol must be a string"))
+        .collect();
+
+    assert!(
+        symbol_strings.contains(&"AAPL"),
+        "AAPL must be in the symbol list"
+    );
+    assert!(
+        symbol_strings.contains(&"SPY"),
+        "SPY must be in the symbol list"
+    );
+
+    assert_eq!(
+        body["error"],
+        serde_json::Value::Null,
+        "error must be null on success"
+    );
+    assert!(body["first_symbol"].is_string(), "first_symbol must be set");
+    assert!(body["last_symbol"].is_string(), "last_symbol must be set");
+}
+
+// TE-02: missing registry path → truth_state=registry_unavailable, error populated
+#[tokio::test]
+async fn te_02_missing_registry_returns_unavailable() {
+    let router = make_router_with_missing_registry();
+    let (status, body) = get_tracked_equities(router).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "must still return 200 (truth envelope)"
+    );
+    assert_eq!(
+        body["truth_state"], "registry_unavailable",
+        "truth_state must be registry_unavailable: {body}"
+    );
+    assert_eq!(body["count"].as_u64().unwrap(), 0, "count must be 0");
+    assert!(
+        body["symbols"].as_array().unwrap().is_empty(),
+        "symbols must be empty"
+    );
+    assert!(body["error"].is_string(), "error must be populated: {body}");
+    assert_eq!(
+        body["first_symbol"],
+        serde_json::Value::Null,
+        "first_symbol must be null"
+    );
+    assert_eq!(
+        body["last_symbol"],
+        serde_json::Value::Null,
+        "last_symbol must be null"
+    );
+}
+
+// TE-03: symbols are in deterministic alphabetical order
+#[tokio::test]
+async fn te_03_symbols_are_alphabetically_sorted() {
+    let router = make_router_with_real_registry();
+    let (status, body) = get_tracked_equities(router).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let symbols = body["symbols"].as_array().unwrap();
+    let syms: Vec<&str> = symbols
+        .iter()
+        .map(|s| s["symbol"].as_str().unwrap())
+        .collect();
+
+    for window in syms.windows(2) {
+        assert!(
+            window[0] <= window[1],
+            "symbols must be sorted: '{}' before '{}'",
+            window[0],
+            window[1]
+        );
+    }
+
+    // Sanity: first alphabetically should be AAL, last should start after W
+    let first = syms.first().unwrap();
+    let last = syms.last().unwrap();
+    assert!(
+        *first <= "AAL",
+        "first symbol must sort at or before AAL, got {first}"
+    );
+    assert!(*first < *last, "first < last required for sorted list");
+
+    // first_symbol and last_symbol fields must match the array
+    assert_eq!(body["first_symbol"], *first);
+    assert_eq!(body["last_symbol"], *last);
+}
+
+// TE-04: execution_snapshot and arm_state are untouched after calling the route
+#[tokio::test]
+async fn te_04_execution_state_untouched() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/instruments/equities.json")
+        .canonicalize()
+        .expect("registry must exist")
+        .to_string_lossy()
+        .to_string();
+
+    let mut st =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st.instrument_registry_path = registry_path;
+    let st = Arc::new(st);
+
+    // Record state before the call.
+    let snap_before = st.execution_snapshot.read().await.is_none();
+    let arm_before = st.integrity.read().await.disarmed;
+
+    let router = routes::build_router(Arc::clone(&st));
+    let (status, _) = get_tracked_equities(router).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Both must remain unchanged.
+    let snap_after = st.execution_snapshot.read().await.is_none();
+    let arm_after = st.integrity.read().await.disarmed;
+
+    assert_eq!(
+        snap_before, snap_after,
+        "execution_snapshot must be untouched"
+    );
+    assert_eq!(arm_before, arm_after, "arm_state must be untouched");
+}
+
+// TE-05: route works without a DB pool (no database required)
+#[tokio::test]
+async fn te_05_no_db_required() {
+    // make_router_with_real_registry uses new_with_operator_auth which has no DB pool.
+    let router = make_router_with_real_registry();
+    let (status, body) = get_tracked_equities(router).await;
+
+    // Must succeed even with no DB configured.
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"], "active");
+    assert_eq!(body["count"].as_u64().unwrap(), 88);
+}

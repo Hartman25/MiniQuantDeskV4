@@ -30,7 +30,7 @@ use uuid::Uuid;
 use crate::{
     api_types::{
         IngestJobAcceptedResponse, IngestJobRequest, IngestJobStatusResponse, IngestJobSummary,
-        IngestJobsListResponse,
+        IngestJobsListResponse, TrackedEquitiesResponse, TrackedEquitySummary,
     },
     ingest_jobs::{IngestJobRecord, IngestJobStatus},
     state::AppState,
@@ -329,6 +329,73 @@ pub(crate) async fn ingest_jobs_list(State(st): State<Arc<AppState>>) -> impl In
     Json(IngestJobsListResponse {
         truth_state: "active".to_string(),
         jobs,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/ingest/tracked-equities
+// ---------------------------------------------------------------------------
+
+/// Return the enabled equity universe from the canonical instrument registry.
+///
+/// Safety invariants:
+/// - No broker adapter. No provider API calls. No DB writes.
+/// - Does not touch live/paper execution state. No arm_state required.
+/// - Read-only filesystem access to the registry JSON file.
+/// - Provider sync job is NOT triggered. No API credits consumed.
+pub(crate) async fn tracked_equities_list(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let registry_path = st.instrument_registry_path.clone();
+    let path = std::path::Path::new(&registry_path);
+
+    let instruments = match mqk_md::instrument_registry::load_instrument_registry(path) {
+        Ok(v) => v,
+        Err(e) => {
+            let (truth_state, error_msg) = if path.exists() {
+                ("registry_invalid", format!("registry parse failed: {}", e))
+            } else {
+                (
+                    "registry_unavailable",
+                    format!("registry file not found: {}", registry_path),
+                )
+            };
+            return Json(TrackedEquitiesResponse {
+                canonical_route: "/api/v1/ingest/tracked-equities".to_string(),
+                truth_state: truth_state.to_string(),
+                registry_path,
+                count: 0,
+                symbols: vec![],
+                first_symbol: None,
+                last_symbol: None,
+                error: Some(error_msg),
+            });
+        }
+    };
+
+    let equities = mqk_md::instrument_registry::enabled_equities(&instruments);
+    let count = equities.len();
+    let first_symbol = equities.first().map(|e| e.symbol.clone());
+    let last_symbol = equities.last().map(|e| e.symbol.clone());
+
+    let symbols: Vec<TrackedEquitySummary> = equities
+        .into_iter()
+        .map(|e| TrackedEquitySummary {
+            symbol: e.symbol.clone(),
+            instrument_id: e.instrument_id.clone(),
+            provider: e.provider.clone(),
+            venue: e.venue.clone(),
+            timeframes: e.timeframes.clone(),
+        })
+        .collect();
+
+    Json(TrackedEquitiesResponse {
+        canonical_route: "/api/v1/ingest/tracked-equities".to_string(),
+        truth_state: "active".to_string(),
+        registry_path,
+        count,
+        symbols,
+        first_symbol,
+        last_symbol,
+        error: None,
     })
 }
 

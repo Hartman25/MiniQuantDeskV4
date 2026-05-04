@@ -8,8 +8,10 @@ import {
   formatEndTs,
   coverageTruthLabel,
   isCoverageActive,
+  isTrackedEquitiesActive,
+  trackedEquitiesTruthLabel,
 } from "../api.ts";
-import type { IngestJobStatusResponse, MdBarsCoverageResponse } from "../types.ts";
+import type { IngestJobStatusResponse, MdBarsCoverageResponse, TrackedEquitiesResponse } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // normalizeIngestJobStatus
@@ -309,4 +311,105 @@ test("MdBarsCoverageResponse with db_unavailable has empty rows", () => {
   assert.ok(!isCoverageActive(resp.truth_state));
   assert.equal(resp.rows.length, 0);
   assert.ok(resp.error !== null);
+});
+
+// ---------------------------------------------------------------------------
+// DATA-INGEST-GUI-SYNC-ALL-01: tracked-equities helpers
+// ---------------------------------------------------------------------------
+
+// isTrackedEquitiesActive
+
+test("isTrackedEquitiesActive returns true for active", () => {
+  assert.ok(isTrackedEquitiesActive("active"));
+});
+
+test("isTrackedEquitiesActive returns false for registry_unavailable", () => {
+  assert.ok(!isTrackedEquitiesActive("registry_unavailable"));
+});
+
+test("isTrackedEquitiesActive returns false for registry_invalid", () => {
+  assert.ok(!isTrackedEquitiesActive("registry_invalid"));
+});
+
+test("isTrackedEquitiesActive returns false for unknown string", () => {
+  assert.ok(!isTrackedEquitiesActive(""));
+});
+
+// trackedEquitiesTruthLabel
+
+test("trackedEquitiesTruthLabel active → active", () => {
+  assert.equal(trackedEquitiesTruthLabel("active"), "active");
+});
+
+test("trackedEquitiesTruthLabel registry_unavailable → registry unavailable", () => {
+  assert.equal(trackedEquitiesTruthLabel("registry_unavailable"), "registry unavailable");
+});
+
+test("trackedEquitiesTruthLabel registry_invalid → registry invalid", () => {
+  assert.equal(trackedEquitiesTruthLabel("registry_invalid"), "registry invalid");
+});
+
+test("trackedEquitiesTruthLabel unknown string passes through", () => {
+  assert.equal(trackedEquitiesTruthLabel("some_other_state"), "some_other_state");
+});
+
+// TrackedEquitiesResponse shape
+
+test("TrackedEquitiesResponse active shape has count and symbols", () => {
+  const resp: TrackedEquitiesResponse = {
+    canonical_route: "/api/v1/ingest/tracked-equities",
+    truth_state: "active",
+    registry_path: "config/instruments/equities.json",
+    count: 88,
+    symbols: [
+      { symbol: "AAPL", instrument_id: "equity:US:AAPL", provider: "twelvedata", venue: "NASDAQ", timeframes: ["1D"] },
+      { symbol: "SPY", instrument_id: "equity:US:SPY", provider: "twelvedata", venue: "NYSEARCA", timeframes: ["1D"] },
+    ],
+    first_symbol: "AAPL",
+    last_symbol: "SPY",
+    error: null,
+  };
+  assert.ok(isTrackedEquitiesActive(resp.truth_state));
+  assert.equal(resp.count, 88);
+  assert.equal(resp.symbols.length, 2);
+  assert.equal(resp.symbols[0].symbol, "AAPL");
+  assert.equal(resp.first_symbol, "AAPL");
+  assert.equal(resp.last_symbol, "SPY");
+  assert.equal(resp.error, null);
+});
+
+test("TrackedEquitiesResponse registry_unavailable shape is honest", () => {
+  const resp: TrackedEquitiesResponse = {
+    canonical_route: "/api/v1/ingest/tracked-equities",
+    truth_state: "registry_unavailable",
+    registry_path: "/nonexistent/equities.json",
+    count: 0,
+    symbols: [],
+    first_symbol: null,
+    last_symbol: null,
+    error: "registry file not found: /nonexistent/equities.json",
+  };
+  assert.ok(!isTrackedEquitiesActive(resp.truth_state));
+  assert.equal(resp.count, 0);
+  assert.equal(resp.symbols.length, 0);
+  assert.ok(resp.error !== null);
+});
+
+// provider sync NOT active — this panel is preview-only
+
+test("TrackedEquitiesResponse does not contain provider sync fields", () => {
+  const resp: TrackedEquitiesResponse = {
+    canonical_route: "/api/v1/ingest/tracked-equities",
+    truth_state: "active",
+    registry_path: "config/instruments/equities.json",
+    count: 1,
+    symbols: [{ symbol: "AAPL", instrument_id: "equity:US:AAPL", provider: "twelvedata", venue: "NASDAQ", timeframes: ["1D"] }],
+    first_symbol: "AAPL",
+    last_symbol: "AAPL",
+    error: null,
+  };
+  // No provider job, no dry_run, no api_credits fields exist on this type.
+  assert.ok(!("provider_job" in resp));
+  assert.ok(!("dry_run" in resp));
+  assert.ok(!("api_credits" in resp));
 });
