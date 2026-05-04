@@ -1183,11 +1183,7 @@ mod tests {
                 k => ("db_loaded".to_string(), Some(k as u64)),
             };
             assert_eq!(source, "db_loaded", "SC-03: n={n} must yield db_loaded");
-            assert_eq!(
-                loaded,
-                Some(n as u64),
-                "SC-03: n={n} must carry bar count"
-            );
+            assert_eq!(loaded, Some(n as u64), "SC-03: n={n} must carry bar count");
         }
     }
 
@@ -1196,7 +1192,11 @@ mod tests {
     fn sc04_stub_path_never_claims_db_loaded() {
         // Simulate single-stub context: 0 DB bars loaded.
         let raw: i64 = 0;
-        let source = if raw > 0 { "db_loaded" } else { "stub_no_price" };
+        let source = if raw > 0 {
+            "db_loaded"
+        } else {
+            "stub_no_price"
+        };
         assert_ne!(
             source, "db_loaded",
             "SC-04: stub_no_price path must not claim db_loaded"
