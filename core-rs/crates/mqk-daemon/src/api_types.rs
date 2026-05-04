@@ -2703,21 +2703,56 @@ pub struct BacktestJobStatusResponse {
 // DATA-INGEST-DAEMON-JOBS-01: Market-data ingest job API
 // ---------------------------------------------------------------------------
 
+fn default_dry_run() -> bool {
+    true
+}
+
 /// Request body for POST /api/v1/ingest/jobs.
+///
+/// For CSV jobs: set source="csv", csv_path, timeframe.
+/// For provider dry-run jobs: set source="twelvedata", mode="sync_provider",
+///   symbols_source="registry", dry_run=true (default), allow_provider_api_calls=false (default).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestJobRequest {
-    /// Source type. "csv" is the only supported value in this patch.
-    /// "twelvedata" and other providers are explicitly deferred.
+    /// Source type: "csv" | "twelvedata".
     pub source: String,
+    /// Job mode. Required for provider jobs: "sync_provider".
+    /// Omit or null for CSV jobs.
+    pub mode: Option<String>,
     /// For source="csv": path to the CSV file (required, must not be empty).
     pub csv_path: Option<String>,
     /// Timeframe string: "1D" | "1m" | "5m".
     pub timeframe: String,
-    /// Source label stored in the quality report (defaults to "csv" if omitted).
+    /// Source label stored in the quality report (defaults to source if omitted).
     pub source_label: Option<String>,
     /// Output directory root for quality report artifacts.
     /// Defaults to "exports/md_ingest" relative to daemon working directory.
     pub out_dir: Option<String>,
+    // -----------------------------------------------------------------------
+    // Provider-job fields (DATA-INGEST-DAEMON-PROVIDER-JOBS-01)
+    // -----------------------------------------------------------------------
+    /// Symbol source for provider jobs: "registry" uses config/instruments/equities.json.
+    /// Required when source="twelvedata" and mode="sync_provider".
+    pub symbols_source: Option<String>,
+    /// Override the instrument registry path.
+    /// When omitted, uses MQK_INSTRUMENT_REGISTRY_PATH or "config/instruments/equities.json".
+    pub registry_path: Option<String>,
+    /// Inclusive start date YYYY-MM-DD (optional; used for scoped provider sync).
+    pub start: Option<String>,
+    /// Inclusive end date YYYY-MM-DD (optional; used for scoped provider sync).
+    pub end: Option<String>,
+    /// Dry-run mode: resolve symbols and validate, but do NOT call provider,
+    /// do NOT write DB, do NOT write CSV. Default: true (safe).
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
+    /// Permit real provider API calls. Default: false (safe).
+    /// Must be explicitly true to allow live provider ingestion.
+    #[serde(default)]
+    pub allow_provider_api_calls: bool,
+    /// Optional guardrail: max API credits per minute.
+    pub api_credits_per_minute: Option<i64>,
+    /// Optional guardrail: max API credits per day.
+    pub api_credits_per_day: Option<i64>,
 }
 
 /// Response to POST /api/v1/ingest/jobs.
@@ -2730,6 +2765,15 @@ pub struct IngestJobAcceptedResponse {
     pub source: String,
     /// Populated if request was refused before queuing.
     pub error: Option<String>,
+    // Provider job fields (null for CSV jobs or on refusal):
+    /// Whether this is a dry-run job (no provider calls, no writes).
+    pub dry_run: Option<bool>,
+    /// Whether provider API calls are permitted.
+    pub provider_api_calls_allowed: Option<bool>,
+    /// Number of planned symbols (null until background task resolves them).
+    pub symbols_count: Option<usize>,
+    /// Number of provider API calls made (always 0 at acceptance time).
+    pub api_calls_made: Option<i64>,
 }
 
 /// Single job summary row in GET /api/v1/ingest/jobs list.
@@ -2738,6 +2782,8 @@ pub struct IngestJobSummary {
     pub job_id: Uuid,
     pub status: String,
     pub source: String,
+    /// Job mode: null for CSV, "sync_provider" for provider jobs.
+    pub mode: Option<String>,
     pub timeframe: String,
     pub created_at_utc: String,
     pub started_at_utc: Option<String>,
@@ -2748,6 +2794,10 @@ pub struct IngestJobSummary {
     /// Filesystem path to the written data_quality.json artifact (completed jobs).
     pub quality_report_path: Option<String>,
     pub error: Option<String>,
+    // Provider job fields:
+    pub dry_run: bool,
+    pub symbols_count: Option<usize>,
+    pub api_calls_made: i64,
 }
 
 /// Response to GET /api/v1/ingest/jobs.
@@ -2846,6 +2896,8 @@ pub struct IngestJobStatusResponse {
     pub job_id: Uuid,
     pub status: String,
     pub source: String,
+    /// Job mode: null for CSV, "sync_provider" for provider jobs.
+    pub mode: Option<String>,
     pub timeframe: String,
     /// CSV path for source="csv" jobs.
     pub csv_path: Option<String>,
@@ -2858,4 +2910,13 @@ pub struct IngestJobStatusResponse {
     /// Filesystem path to the written data_quality.json artifact (completed jobs).
     pub quality_report_path: Option<String>,
     pub error: Option<String>,
+    // Provider job fields:
+    pub dry_run: bool,
+    pub provider_api_calls_allowed: bool,
+    pub api_calls_made: i64,
+    pub symbols_source: Option<String>,
+    pub registry_path_used: Option<String>,
+    pub symbols_count: Option<usize>,
+    pub planned_first_symbol: Option<String>,
+    pub planned_last_symbol: Option<String>,
 }

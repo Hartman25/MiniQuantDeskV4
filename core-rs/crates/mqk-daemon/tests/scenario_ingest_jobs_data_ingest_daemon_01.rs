@@ -828,3 +828,401 @@ async fn te_05_no_db_required() {
     assert_eq!(body["truth_state"], "active");
     assert_eq!(body["count"].as_u64().unwrap(), 88);
 }
+
+// ---------------------------------------------------------------------------
+// DATA-INGEST-DAEMON-PROVIDER-JOBS-01: Provider dry-run job tests
+//
+// | Test   | What it proves                                                              |
+// |--------|-----------------------------------------------------------------------------|
+// | PD-01  | POST dry_run=true → 202, accepted=true, dry_run=true, api_calls_made=0     |
+// | PD-02  | After wait, job is dry_run_completed, symbols_count=88, api_calls_made=0   |
+// | PD-03  | dry_run=false + allow_provider_api_calls=false → 400 refused               |
+// | PD-04  | dry_run=false + allow_provider_api_calls=true → 400 not_implemented        |
+// | PD-05  | source=twelvedata without mode → 400 refused (IJ-05 compat preserved)     |
+// | PD-06  | invalid registry path → job fails truthfully (registry_load_failed)        |
+//
+// No provider API calls in any test. No DB writes. No TwelveData credits consumed.
+// All tests are fully in-process with no network access.
+// ---------------------------------------------------------------------------
+
+/// Return a router + shared state pointing at the real canonical registry.
+fn make_provider_router_with_registry() -> (Arc<state::AppState>, axum::Router) {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/instruments/equities.json")
+        .canonicalize()
+        .expect("registry must resolve")
+        .to_string_lossy()
+        .to_string();
+
+    let mut st =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st.instrument_registry_path = registry_path;
+    let st = Arc::new(st);
+    let router = routes::build_router(Arc::clone(&st));
+    (st, router)
+}
+
+/// POST a provider sync job and return (status, parsed JSON body).
+async fn post_provider_job(
+    router: axum::Router,
+    payload: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/v1/ingest/jobs")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&payload).unwrap(),
+        ))
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    (status, parse_json(body))
+}
+
+/// GET job status by id and return (status code, parsed JSON body).
+async fn get_job_status(router: axum::Router, job_id: &str) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .uri(format!("/api/v1/ingest/jobs/{}", job_id))
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    (status, parse_json(body))
+}
+
+// PD-01: dry_run=true → 202, accepted=true, dry_run echoed, api_calls_made=0
+#[tokio::test]
+async fn pd_01_provider_dryryn_accepted() {
+    let (_, router) = make_provider_router_with_registry();
+    let (status, body) = post_provider_job(
+        router,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "dry-run POST must → 202: {body}"
+    );
+    assert!(
+        json_bool(&body, "accepted"),
+        "accepted must be true: {body}"
+    );
+    assert_eq!(
+        json_str(&body, "status"),
+        "queued",
+        "status must be queued: {body}"
+    );
+    assert_eq!(
+        json_str(&body, "source"),
+        "twelvedata",
+        "source must echo: {body}"
+    );
+
+    // dry_run and api_calls_made must be reported at acceptance time.
+    assert_eq!(
+        body["dry_run"],
+        serde_json::Value::Bool(true),
+        "dry_run must be true: {body}"
+    );
+    assert_eq!(
+        body["api_calls_made"].as_i64().unwrap_or(999),
+        0,
+        "api_calls_made must be 0 at acceptance: {body}"
+    );
+    assert_eq!(
+        body["provider_api_calls_allowed"],
+        serde_json::Value::Bool(false),
+        "provider_api_calls_allowed must be false: {body}"
+    );
+
+    // job_id must be a non-nil UUID.
+    let job_id_str = json_str(&body, "job_id");
+    let job_id: uuid::Uuid = job_id_str.parse().expect("job_id must be a valid UUID");
+    assert!(!job_id.is_nil(), "job_id must be non-nil");
+}
+
+// PD-02: after wait → dry_run_completed, symbols_count=88, api_calls_made=0
+#[tokio::test]
+async fn pd_02_provider_dryryn_completes_88_symbols_zero_api_calls() {
+    let (st, _) = make_provider_router_with_registry();
+
+    // POST the job.
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "POST must → 202: {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+
+    // Wait for the background task to resolve symbols (pure fs read — fast).
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Poll job status.
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (status, body) = get_job_status(router_get, &job_id).await;
+    assert_eq!(status, StatusCode::OK, "GET status must → 200");
+
+    // Status must be dry_run_completed.
+    let job_status = json_str(&body, "status");
+    assert_eq!(
+        job_status, "dry_run_completed",
+        "job must reach dry_run_completed; got: {job_status}. body: {body}"
+    );
+
+    // symbols_count must equal the canonical registry size.
+    let symbols_count = body["symbols_count"]
+        .as_u64()
+        .expect("symbols_count must be a number in completed job");
+    assert_eq!(
+        symbols_count, 88,
+        "symbols_count must be 88 (canonical registry), got: {symbols_count}"
+    );
+
+    // api_calls_made must be exactly 0 — the dry-run invariant.
+    let api_calls = body["api_calls_made"]
+        .as_i64()
+        .expect("api_calls_made must be a number");
+    assert_eq!(
+        api_calls, 0,
+        "api_calls_made must be 0 for dry-run; got: {api_calls}"
+    );
+
+    // dry_run and provider_api_calls_allowed must be correct.
+    assert_eq!(body["dry_run"], serde_json::Value::Bool(true));
+    assert_eq!(
+        body["provider_api_calls_allowed"],
+        serde_json::Value::Bool(false)
+    );
+
+    // symbols_source and registry_path_used must be populated.
+    assert_eq!(body["symbols_source"], "registry");
+    assert!(
+        body["registry_path_used"].is_string(),
+        "registry_path_used must be a string: {body}"
+    );
+
+    // planned_first_symbol and planned_last_symbol must be populated.
+    assert!(
+        body["planned_first_symbol"].is_string(),
+        "planned_first_symbol must be populated: {body}"
+    );
+    assert!(
+        body["planned_last_symbol"].is_string(),
+        "planned_last_symbol must be populated: {body}"
+    );
+
+    // No DB rows. No CSV files. No error.
+    assert_eq!(
+        body["error"],
+        serde_json::Value::Null,
+        "error must be null on success"
+    );
+    assert_eq!(
+        body["rows_read"],
+        serde_json::Value::Null,
+        "rows_read must be null for dry-run"
+    );
+    assert_eq!(body["rows_inserted"], serde_json::Value::Null);
+
+    // source and mode must be correct.
+    assert_eq!(json_str(&body, "source"), "twelvedata");
+    assert_eq!(body["mode"], "sync_provider");
+}
+
+// PD-03: dry_run=false + allow_provider_api_calls=false → 400 refused
+#[tokio::test]
+async fn pd_03_provider_real_without_allow_refused() {
+    let (_, router) = make_provider_router_with_registry();
+    let (status, body) = post_provider_job(
+        router,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "must → 400 when dry_run=false and allow=false: {body}"
+    );
+    assert!(
+        !json_bool(&body, "accepted"),
+        "accepted must be false: {body}"
+    );
+
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("allow_provider_api_calls")
+            || err.contains("not allowed")
+            || err.contains("dry_run"),
+        "error must explain why provider calls are refused: {err}"
+    );
+
+    // api_calls_made must be 0 — never called provider.
+    assert_eq!(
+        body["api_calls_made"].as_i64().unwrap_or(999),
+        0,
+        "api_calls_made must be 0 on refusal: {body}"
+    );
+}
+
+// PD-04: dry_run=false + allow_provider_api_calls=true → 400 not_implemented
+#[tokio::test]
+async fn pd_04_provider_real_with_allow_not_implemented() {
+    let (_, router) = make_provider_router_with_registry();
+    let (status, body) = post_provider_job(
+        router,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "must → 400 (not_implemented): {body}"
+    );
+    assert!(
+        !json_bool(&body, "accepted"),
+        "accepted must be false: {body}"
+    );
+
+    let job_status = json_str(&body, "status");
+    assert_eq!(
+        job_status, "not_implemented",
+        "status must be not_implemented, got: {job_status}"
+    );
+
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("not implemented") || err.contains("not_implemented"),
+        "error must explain real sync is not implemented: {err}"
+    );
+
+    // api_calls_made must be 0 — never called provider.
+    assert_eq!(
+        body["api_calls_made"].as_i64().unwrap_or(999),
+        0,
+        "api_calls_made must be 0 on not_implemented: {body}"
+    );
+}
+
+// PD-05: source=twelvedata without mode → 400 (IJ-05 behaviour preserved)
+#[tokio::test]
+async fn pd_05_twelvedata_without_mode_still_refused() {
+    let (_, router) = make_provider_router_with_registry();
+    let (status, body) = post_provider_job(
+        router,
+        serde_json::json!({
+            "source": "twelvedata",
+            "timeframe": "1D"
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "must → 400 without mode: {body}"
+    );
+    assert!(
+        !json_bool(&body, "accepted"),
+        "accepted must be false: {body}"
+    );
+    assert_eq!(json_str(&body, "source"), "twelvedata", "source must echo");
+
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("mode") || err.contains("twelvedata"),
+        "error must mention mode or source: {err}"
+    );
+}
+
+// PD-06: invalid registry path → job fails with registry_load_failed error
+#[tokio::test]
+async fn pd_06_invalid_registry_path_job_fails_truthfully() {
+    // Use a router pointing at a guaranteed-nonexistent registry path.
+    let mut st =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st.instrument_registry_path =
+        "/nonexistent/path/that/cannot/exist/equities_phantom.json".to_string();
+    let st = Arc::new(st);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+
+    // Job should be accepted (registry check is async).
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "POST must → 202 even with bad path: {body}"
+    );
+    let job_id = json_str(&body, "job_id").to_string();
+
+    // Wait for background task to attempt and fail registry load.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (status, body) = get_job_status(router_get, &job_id).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let job_status = json_str(&body, "status");
+    assert_eq!(
+        job_status, "failed",
+        "job must fail when registry path is invalid, got: {job_status}"
+    );
+
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("registry") || err.contains("failed") || err.contains("not found"),
+        "error must describe registry load failure: {err}"
+    );
+
+    // api_calls_made must be 0 — never got as far as a provider call.
+    assert_eq!(
+        body["api_calls_made"].as_i64().unwrap_or(999),
+        0,
+        "api_calls_made must be 0 on registry failure: {body}"
+    );
+}
