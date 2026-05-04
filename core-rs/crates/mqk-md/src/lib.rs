@@ -5,6 +5,7 @@
 //! This crate owns the provider abstraction and concrete historical providers.
 //! It does **not** write to the DB; callers (CLI) fetch bars and hand them to mqk-db ingestion.
 
+pub mod instrument_registry;
 pub mod normalizer;
 pub mod provider;
 pub mod quality;
