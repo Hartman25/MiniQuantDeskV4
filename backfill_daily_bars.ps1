@@ -12,6 +12,9 @@ param(
     [int]$MinuteBoundaryBufferSeconds = 2,
     [string]$StartFromSymbol = "",
     [string]$EndAtSymbol = "",
+    [string]$SymbolsRegistryPath = "",
+    [switch]$UseLegacyHardcodedSymbols,
+    [switch]$ListSymbolsOnly,
     [switch]$AppendOnly,
     [switch]$ContinueOnSymbolError,
     [switch]$WaitForDailyReset,
@@ -325,6 +328,44 @@ function Add-PhaseFailure {
     }) | Out-Null
 }
 
+function Resolve-SymbolsFromRegistry {
+    param(
+        [Parameter(Mandatory)]
+        [string]$RegistryPath
+    )
+
+    if (-not (Test-Path $RegistryPath)) {
+        throw "Registry file not found: $RegistryPath"
+    }
+
+    $raw = Get-Content -Raw -Path $RegistryPath | ConvertFrom-Json
+
+    $symbols = @()
+    foreach ($entry in $raw) {
+        if ($entry.asset_class -ne "equity") { continue }
+        if ($entry.enabled -ne $true) { continue }
+
+        $sym = if (
+            ($entry.PSObject.Properties.Name -contains "provider_symbol") -and
+            (-not [string]::IsNullOrWhiteSpace($entry.provider_symbol))
+        ) {
+            $entry.provider_symbol
+        } else {
+            $entry.symbol
+        }
+
+        $symbols += $sym.Trim().ToUpperInvariant()
+    }
+
+    $deduped = [string[]]($symbols | Sort-Object -Unique)
+
+    if ($deduped.Count -eq 0) {
+        throw "Registry at '$RegistryPath' produced zero enabled equity symbols."
+    }
+
+    return $deduped
+}
+
 if ([string]::IsNullOrWhiteSpace($EnvFilePath)) {
     $candidatePaths = @(
         (Join-Path $RepoRoot ".env.local"),
@@ -351,18 +392,20 @@ else {
     Write-Warning "No .env.local file was auto-loaded. Using current process environment only."
 }
 
-if (-not $env:TWELVEDATA_API_KEY) {
-    throw "Missing env var: TWELVEDATA_API_KEY"
-}
+if (-not $ListSymbolsOnly.IsPresent) {
+    if (-not $env:TWELVEDATA_API_KEY) {
+        throw "Missing env var: TWELVEDATA_API_KEY"
+    }
 
-if (-not $env:MQK_DATABASE_URL) {
-    throw "Missing env var: MQK_DATABASE_URL"
-}
+    if (-not $env:MQK_DATABASE_URL) {
+        throw "Missing env var: MQK_DATABASE_URL"
+    }
 
-Set-PgPasswordFromDatabaseUrlIfMissing -DatabaseUrl $env:MQK_DATABASE_URL
+    Set-PgPasswordFromDatabaseUrlIfMissing -DatabaseUrl $env:MQK_DATABASE_URL
 
-if (-not $env:PGPASSWORD) {
-    Write-Warning "PGPASSWORD is not set and could not be derived. CSV export via psql may prompt or fail."
+    if (-not $env:PGPASSWORD) {
+        Write-Warning "PGPASSWORD is not set and could not be derived. CSV export via psql may prompt or fail."
+    }
 }
 
 if ($ApiCreditsPerMinute -lt 1) {
@@ -385,15 +428,21 @@ if ($MinuteBoundaryBufferSeconds -lt 0) {
     throw "MinuteBoundaryBufferSeconds must be >= 0"
 }
 
-$coreRs = Join-Path $RepoRoot "core-rs"
-if (-not (Test-Path $coreRs)) {
-    throw "Could not find core-rs under repo root: $RepoRoot"
+if (-not $ListSymbolsOnly.IsPresent) {
+    $coreRs = Join-Path $RepoRoot "core-rs"
+    if (-not (Test-Path $coreRs)) {
+        throw "Could not find core-rs under repo root: $RepoRoot"
+    }
+
+    $exportRoot = Join-Path $RepoRoot ("exports\md_backup\" + $Timeframe)
+    New-Item -ItemType Directory -Force -Path $exportRoot | Out-Null
 }
 
-$exportRoot = Join-Path $RepoRoot ("exports\md_backup\" + $Timeframe)
-New-Item -ItemType Directory -Force -Path $exportRoot | Out-Null
+# ---------- Symbol universe resolution ----------
+if ([string]::IsNullOrWhiteSpace($SymbolsRegistryPath)) {
+    $SymbolsRegistryPath = Join-Path $RepoRoot "config\instruments\equities.json"
+}
 
-# ---------- Symbol lists ----------
 $repoTop50 = @(
     "SPY","QQQ","IWM","DIA","TLT","IEF","SHY","EEM","EFA","VTI",
     "XLF","XLK","XLV","XLE","XLI","XLY","XLP","XLU","XLB","VNQ",
@@ -410,7 +459,18 @@ $smallAcctTop50 = @(
     "RIOT","RKLB","HIMS","IONQ","ACHR","JOBY","AFRM","UPST","RBLX","CHPT","LYFT","PLTR"
 )
 
-$allSymbolsFull = [string[]](($repoTop50 + $smallAcctTop50) | Sort-Object -Unique)
+if ($UseLegacyHardcodedSymbols.IsPresent) {
+    $allSymbolsFull = [string[]](($repoTop50 + $smallAcctTop50) | Sort-Object -Unique)
+    $symbolSource = "legacy-hardcoded"
+    $symbolSourcePath = "(inline arrays)"
+} elseif (Test-Path $SymbolsRegistryPath) {
+    $allSymbolsFull = Resolve-SymbolsFromRegistry -RegistryPath $SymbolsRegistryPath
+    $symbolSource = "registry"
+    $symbolSourcePath = $SymbolsRegistryPath
+} else {
+    throw "Registry file not found: $SymbolsRegistryPath`nUse -UseLegacyHardcodedSymbols to fall back to inline arrays."
+}
+
 $backfillSymbols = $allSymbolsFull
 $appendOnlyMode = $AppendOnly.IsPresent
 
@@ -462,6 +522,33 @@ else {
 
 $exportSymbols = $finalSyncSymbols
 
+# ---------- List-symbols-only exit (no provider call, no DB/CSV write) ----------
+if ($ListSymbolsOnly.IsPresent) {
+    Write-Host ""
+    Write-Host "=== LIST-SYMBOLS-ONLY MODE (no provider calls, no DB/CSV writes) ==="
+    Write-Host "Symbol source    : $symbolSource"
+    Write-Host "Registry path    : $symbolSourcePath"
+    Write-Host "Total universe   : $($allSymbolsFull.Count)"
+    Write-Host "Backfill symbols : $($backfillSymbols.Count)"
+
+    if ($allSymbolsFull.Count -gt 0) {
+        $showFirst = [math]::Min(5, $allSymbolsFull.Count)
+        $showLast  = [math]::Min(5, $allSymbolsFull.Count)
+        $firstFew  = $allSymbolsFull[0..($showFirst - 1)]
+        $lastStart = [math]::Max(0, $allSymbolsFull.Count - $showLast)
+        $lastFew   = $allSymbolsFull[$lastStart..($allSymbolsFull.Count - 1)]
+        Write-Host "First symbols    : $($firstFew -join ', ')"
+        Write-Host "Last symbols     : $($lastFew -join ', ')"
+    }
+
+    if ($backfillSymbols.Count -ne $allSymbolsFull.Count) {
+        Write-Host "Sliced symbols   : $($backfillSymbols -join ', ')"
+    }
+
+    Write-Host ""
+    exit 0
+}
+
 $startDt = [datetime]::ParseExact($StartDate, "yyyy-MM-dd", $null)
 $endDt   = [datetime]::ParseExact($EndDate, "yyyy-MM-dd", $null)
 
@@ -489,6 +576,7 @@ $totalPlannedRequests = $totalBackfillRequests + $totalFinalSyncRequests
 $phaseFailures = New-Object System.Collections.Generic.List[object]
 
 Write-Host "Repo root: $RepoRoot"
+Write-Host "Symbol source: $symbolSource ($symbolSourcePath)"
 Write-Host "Timeframe: $Timeframe"
 Write-Host "Universe symbols total (deduped): $($allSymbolsFull.Count)"
 Write-Host "Backfill symbols in this run: $($backfillSymbols.Count)"
