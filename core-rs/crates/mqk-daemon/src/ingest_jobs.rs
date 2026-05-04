@@ -72,7 +72,7 @@ pub struct IngestJobRecord {
     pub error: Option<String>,
 
     // -----------------------------------------------------------------------
-    // Provider-job fields (DATA-INGEST-DAEMON-PROVIDER-JOBS-01)
+    // Provider-job fields (DATA-INGEST-DAEMON-PROVIDER-JOBS-01 / DATA-PROVIDER-FOUNDATION-01)
     // -----------------------------------------------------------------------
     /// Whether this job ran as a dry run (no provider calls, no DB/CSV writes).
     pub dry_run: bool,
@@ -90,6 +90,12 @@ pub struct IngestJobRecord {
     pub planned_first_symbol: Option<String>,
     /// Last planned symbol alphabetically (operator preview).
     pub planned_last_symbol: Option<String>,
+    /// Asset class requested for this job (e.g. "equity").
+    pub asset_class: String,
+    /// Whether the provider is enabled per the provider registry (None if registry unavailable).
+    pub provider_enabled: Option<bool>,
+    /// Provider verification status from the provider registry (None if registry unavailable).
+    pub provider_verification_status: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

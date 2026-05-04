@@ -2707,6 +2707,10 @@ fn default_dry_run() -> bool {
     true
 }
 
+fn default_asset_class_equity() -> String {
+    "equity".to_string()
+}
+
 /// Request body for POST /api/v1/ingest/jobs.
 ///
 /// For CSV jobs: set source="csv", csv_path, timeframe.
@@ -2729,7 +2733,7 @@ pub struct IngestJobRequest {
     /// Defaults to "exports/md_ingest" relative to daemon working directory.
     pub out_dir: Option<String>,
     // -----------------------------------------------------------------------
-    // Provider-job fields (DATA-INGEST-DAEMON-PROVIDER-JOBS-01)
+    // Provider-job fields (DATA-INGEST-DAEMON-PROVIDER-JOBS-01 / DATA-PROVIDER-FOUNDATION-01)
     // -----------------------------------------------------------------------
     /// Symbol source for provider jobs: "registry" uses config/instruments/equities.json.
     /// Required when source="twelvedata" and mode="sync_provider".
@@ -2737,6 +2741,13 @@ pub struct IngestJobRequest {
     /// Override the instrument registry path.
     /// When omitted, uses MQK_INSTRUMENT_REGISTRY_PATH or "config/instruments/equities.json".
     pub registry_path: Option<String>,
+    /// Override the provider registry path.
+    /// When omitted, uses MQK_PROVIDER_REGISTRY_PATH or "config/providers/providers.json".
+    pub provider_registry_path: Option<String>,
+    /// Asset class to ingest. Default: "equity".
+    /// Accepted: "equity" | "etf" | "crypto" | "futures" | "options" | "forex".
+    #[serde(default = "default_asset_class_equity")]
+    pub asset_class: String,
     /// Inclusive start date YYYY-MM-DD (optional; used for scoped provider sync).
     pub start: Option<String>,
     /// Inclusive end date YYYY-MM-DD (optional; used for scoped provider sync).
@@ -2919,4 +2930,11 @@ pub struct IngestJobStatusResponse {
     pub symbols_count: Option<usize>,
     pub planned_first_symbol: Option<String>,
     pub planned_last_symbol: Option<String>,
+    // Provider registry fields (DATA-PROVIDER-FOUNDATION-01):
+    /// Asset class requested for this job.
+    pub asset_class: String,
+    /// Whether the provider is enabled in the provider registry (None if registry unavailable).
+    pub provider_enabled: Option<bool>,
+    /// Provider verification status from the provider registry (None if registry unavailable).
+    pub provider_verification_status: Option<String>,
 }

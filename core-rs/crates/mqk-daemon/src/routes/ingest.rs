@@ -238,6 +238,9 @@ async fn handle_csv_job(st: Arc<AppState>, req: IngestJobRequest, source: String
         symbols_count: None,
         planned_first_symbol: None,
         planned_last_symbol: None,
+        asset_class: "equity".to_string(),
+        provider_enabled: None,
+        provider_verification_status: None,
     };
 
     {
@@ -311,6 +314,11 @@ async fn handle_csv_job(st: Arc<AppState>, req: IngestJobRequest, source: String
 /// - dry_run=false + allow_provider_api_calls=false (default): refused immediately.
 /// - dry_run=false + allow_provider_api_calls=true: not_implemented in this patch.
 ///   Real provider wiring is queued as DATA-INGEST-PROVIDER-REAL-SYNC-01.
+///
+/// DATA-PROVIDER-FOUNDATION-01 additions:
+/// - Validates asset_class against known values.
+/// - Loads provider registry (if available) to validate provider enabled + asset_class support.
+/// - Reports provider_enabled and provider_verification_status in job status.
 async fn handle_provider_sync_job(
     st: Arc<AppState>,
     req: IngestJobRequest,
@@ -369,6 +377,120 @@ async fn handle_provider_sync_job(
     }
 
     // From here: dry_run=true path only.
+
+    // asset_class validation (synchronous, no file I/O).
+    let asset_class = req.asset_class.trim().to_ascii_lowercase();
+    const VALID_ASSET_CLASSES: &[&str] =
+        &["equity", "etf", "crypto", "futures", "options", "forex"];
+    if !VALID_ASSET_CLASSES.contains(&asset_class.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(IngestJobAcceptedResponse {
+                accepted: false,
+                job_id: Uuid::nil(),
+                status: "refused".to_string(),
+                source: source.clone(),
+                error: Some(format!(
+                    "unsupported asset_class '{}'. accepted: {}",
+                    asset_class,
+                    VALID_ASSET_CLASSES.join(", ")
+                )),
+                dry_run: Some(true),
+                provider_api_calls_allowed: Some(false),
+                symbols_count: None,
+                api_calls_made: Some(0),
+            }),
+        )
+            .into_response();
+    }
+
+    // Provider registry validation (synchronous, graceful if file absent).
+    // Validates provider is enabled and supports the requested asset_class.
+    let provider_registry_path = req
+        .provider_registry_path
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&st.provider_registry_path)
+        .to_string();
+
+    let (provider_enabled_val, provider_verification_status_val) =
+        match mqk_md::provider_registry::load_provider_registry(std::path::Path::new(
+            &provider_registry_path,
+        )) {
+            Ok(providers) => match mqk_md::provider_registry::find_provider(&providers, &source) {
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(IngestJobAcceptedResponse {
+                            accepted: false,
+                            job_id: Uuid::nil(),
+                            status: "refused".to_string(),
+                            source: source.clone(),
+                            error: Some(format!(
+                                "provider '{}' is not registered in the provider registry. \
+                                     Check config/providers/providers.json.",
+                                source
+                            )),
+                            dry_run: Some(true),
+                            provider_api_calls_allowed: Some(false),
+                            symbols_count: None,
+                            api_calls_made: Some(0),
+                        }),
+                    )
+                        .into_response();
+                }
+                Some(p) => {
+                    if !p.enabled {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(IngestJobAcceptedResponse {
+                                accepted: false,
+                                job_id: Uuid::nil(),
+                                status: "refused".to_string(),
+                                source: source.clone(),
+                                error: Some(format!(
+                                    "provider '{}' is disabled in the provider registry \
+                                         (enabled=false). No real ingestion is possible until \
+                                         the provider is implemented and enabled.",
+                                    source
+                                )),
+                                dry_run: Some(true),
+                                provider_api_calls_allowed: Some(false),
+                                symbols_count: None,
+                                api_calls_made: Some(0),
+                            }),
+                        )
+                            .into_response();
+                    }
+                    if !p.supports_asset_class(&asset_class) {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(IngestJobAcceptedResponse {
+                                accepted: false,
+                                job_id: Uuid::nil(),
+                                status: "refused".to_string(),
+                                source: source.clone(),
+                                error: Some(format!(
+                                    "provider '{}' does not support asset_class='{}'. \
+                                         Supported by this provider: {}",
+                                    source,
+                                    asset_class,
+                                    p.asset_classes.join(", ")
+                                )),
+                                dry_run: Some(true),
+                                provider_api_calls_allowed: Some(false),
+                                symbols_count: None,
+                                api_calls_made: Some(0),
+                            }),
+                        )
+                            .into_response();
+                    }
+                    (Some(p.enabled), Some(p.verification_status.clone()))
+                }
+            },
+            // Registry unavailable: skip validation, proceed with None values.
+            Err(_) => (None, None),
+        };
 
     // symbols_source validation.
     let symbols_source = req
@@ -462,6 +584,9 @@ async fn handle_provider_sync_job(
         symbols_count: None,
         planned_first_symbol: None,
         planned_last_symbol: None,
+        asset_class: asset_class.clone(),
+        provider_enabled: provider_enabled_val,
+        provider_verification_status: provider_verification_status_val,
     };
 
     {
@@ -755,6 +880,9 @@ pub(crate) async fn ingest_job_status(
                 symbols_count: r.symbols_count,
                 planned_first_symbol: r.planned_first_symbol.clone(),
                 planned_last_symbol: r.planned_last_symbol.clone(),
+                asset_class: r.asset_class.clone(),
+                provider_enabled: r.provider_enabled,
+                provider_verification_status: r.provider_verification_status.clone(),
             }),
         )
             .into_response(),

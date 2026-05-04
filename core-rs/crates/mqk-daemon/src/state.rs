@@ -266,6 +266,12 @@ pub struct AppState {
     /// Default: "config/instruments/equities.json" (relative to daemon CWD).
     /// Override: MQK_INSTRUMENT_REGISTRY_PATH env var.
     pub instrument_registry_path: String,
+    /// DATA-PROVIDER-REGISTRY-01: Filesystem path to the canonical provider registry.
+    ///
+    /// Read at route-time (not cached) by provider dry-run handlers.
+    /// Default: "config/providers/providers.json" (relative to daemon CWD).
+    /// Override: MQK_PROVIDER_REGISTRY_PATH env var.
+    pub provider_registry_path: String,
 }
 
 impl Default for AppState {
@@ -612,6 +618,8 @@ impl AppState {
             ingest_jobs: new_ingest_job_store(),
             instrument_registry_path: std::env::var("MQK_INSTRUMENT_REGISTRY_PATH")
                 .unwrap_or_else(|_| "config/instruments/equities.json".to_string()),
+            provider_registry_path: std::env::var("MQK_PROVIDER_REGISTRY_PATH")
+                .unwrap_or_else(|_| "config/providers/providers.json".to_string()),
         }
     }
 

@@ -8,6 +8,7 @@
 pub mod instrument_registry;
 pub mod normalizer;
 pub mod provider;
+pub mod provider_registry;
 pub mod quality;
 
 use anyhow::{anyhow, Context, Result};

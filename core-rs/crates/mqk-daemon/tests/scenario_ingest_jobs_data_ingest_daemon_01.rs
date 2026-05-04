@@ -1226,3 +1226,180 @@ async fn pd_06_invalid_registry_path_job_fails_truthfully() {
         "api_calls_made must be 0 on registry failure: {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// DATA-PROVIDER-FOUNDATION-01: Provider registry + asset_class validation tests
+//
+// | Test   | What it proves                                                               |
+// |--------|------------------------------------------------------------------------------|
+// | PD-07  | asset_class="futures" for twelvedata → 400 refused (unsupported by provider) |
+// | PD-08  | asset_class="invalid_xyz" → 400 refused (not a known asset class)           |
+// | PD-09  | provider_enabled + verification_status reported in completed dry-run job     |
+//
+// Uses make_full_registry_router which sets BOTH instrument and provider registry paths.
+// No provider API calls. No DB writes. No TwelveData credits consumed.
+// ---------------------------------------------------------------------------
+
+/// Return a router + state pointing at BOTH canonical registries (instruments + providers).
+fn make_full_registry_router() -> (Arc<state::AppState>, axum::Router) {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let instrument_registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/instruments/equities.json")
+        .canonicalize()
+        .expect("instrument registry must resolve")
+        .to_string_lossy()
+        .to_string();
+    let provider_registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/providers/providers.json")
+        .canonicalize()
+        .expect("provider registry must resolve")
+        .to_string_lossy()
+        .to_string();
+
+    let mut st =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st.instrument_registry_path = instrument_registry_path;
+    st.provider_registry_path = provider_registry_path;
+    let st = Arc::new(st);
+    let router = routes::build_router(Arc::clone(&st));
+    (st, router)
+}
+
+// PD-07: twelvedata + asset_class="futures" → 400 refused (provider does not support futures)
+#[tokio::test]
+async fn pd_07_unsupported_asset_class_refused() {
+    let (_, router) = make_full_registry_router();
+    let (status, body) = post_provider_job(
+        router,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "asset_class": "futures",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "unsupported asset_class must → 400: {body}"
+    );
+    assert!(
+        !json_bool(&body, "accepted"),
+        "accepted must be false: {body}"
+    );
+
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("futures") || err.contains("asset_class") || err.contains("not support"),
+        "error must describe unsupported asset_class, got: {err}"
+    );
+
+    // api_calls_made must be 0 — no provider call was made.
+    assert_eq!(
+        body["api_calls_made"].as_i64().unwrap_or(999),
+        0,
+        "api_calls_made must be 0 on refusal: {body}"
+    );
+}
+
+// PD-08: unknown asset_class value → 400 refused immediately (not a valid class)
+#[tokio::test]
+async fn pd_08_invalid_asset_class_refused() {
+    let (_, router) = make_full_registry_router();
+    let (status, body) = post_provider_job(
+        router,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "asset_class": "invalid_xyz",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "invalid asset_class must → 400: {body}"
+    );
+    assert!(
+        !json_bool(&body, "accepted"),
+        "accepted must be false: {body}"
+    );
+
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("invalid_xyz") || err.contains("asset_class") || err.contains("unsupported"),
+        "error must describe invalid asset_class, got: {err}"
+    );
+}
+
+// PD-09: completed dry-run job reports provider_enabled=true and verification_status
+#[tokio::test]
+async fn pd_09_dry_run_reports_provider_registry_fields() {
+    let (st, _) = make_full_registry_router();
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "asset_class": "equity",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "POST must → 202: {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+
+    // Wait for background task.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (status, body) = get_job_status(router_get, &job_id).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let job_status = json_str(&body, "status");
+    assert_eq!(
+        job_status, "dry_run_completed",
+        "job must be dry_run_completed: {body}"
+    );
+
+    // provider_enabled must be true (twelvedata is enabled in registry).
+    assert_eq!(
+        body["provider_enabled"],
+        serde_json::Value::Bool(true),
+        "provider_enabled must be true for twelvedata: {body}"
+    );
+
+    // provider_verification_status must be populated.
+    assert!(
+        body["provider_verification_status"].is_string(),
+        "provider_verification_status must be a string: {body}"
+    );
+
+    // asset_class must echo back correctly.
+    assert_eq!(
+        body["asset_class"], "equity",
+        "asset_class must be echoed correctly: {body}"
+    );
+
+    // Safety: api_calls_made must remain 0.
+    assert_eq!(
+        body["api_calls_made"].as_i64().unwrap_or(999),
+        0,
+        "api_calls_made must be 0: {body}"
+    );
+}
