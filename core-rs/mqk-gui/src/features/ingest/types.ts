@@ -8,6 +8,12 @@ export interface IngestJobRequest {
   timeframe: string;
   source_label?: string | null;
   out_dir?: string | null;
+  // Provider job fields (DATA-INGEST-GUI-PROVIDER-RUNNER-01):
+  mode?: string | null;
+  symbols_source?: string | null;
+  asset_class?: string;
+  dry_run?: boolean;
+  allow_provider_api_calls?: boolean;
 }
 
 export interface IngestJobAcceptedResponse {
@@ -16,6 +22,11 @@ export interface IngestJobAcceptedResponse {
   status: string;
   source: string;
   error: string | null;
+  // Provider job fields (null for CSV jobs or on refusal):
+  dry_run?: boolean | null;
+  provider_api_calls_allowed?: boolean | null;
+  symbols_count?: number | null;
+  api_calls_made?: number | null;
 }
 
 export interface IngestJobSummary {
@@ -43,6 +54,8 @@ export interface IngestJobStatusResponse {
   job_id: string;
   status: string;
   source: string;
+  /** null for CSV, "sync_provider" for provider jobs */
+  mode: string | null;
   timeframe: string;
   csv_path: string | null;
   created_at_utc: string;
@@ -53,9 +66,21 @@ export interface IngestJobStatusResponse {
   rows_rejected: number | null;
   quality_report_path: string | null;
   error: string | null;
+  // Provider job fields (DATA-INGEST-GUI-PROVIDER-RUNNER-01):
+  dry_run: boolean;
+  provider_api_calls_allowed: boolean;
+  api_calls_made: number;
+  symbols_source: string | null;
+  registry_path_used: string | null;
+  symbols_count: number | null;
+  planned_first_symbol: string | null;
+  planned_last_symbol: string | null;
+  asset_class: string;
+  provider_enabled: boolean | null;
+  provider_verification_status: string | null;
 }
 
-export type IngestJobStatusKind = "queued" | "running" | "completed" | "failed" | "unknown";
+export type IngestJobStatusKind = "queued" | "running" | "completed" | "dry_run_completed" | "failed" | "unknown";
 
 // ---------------------------------------------------------------------------
 // DATA-INGEST-GUI-RESULTS-01: md_bars coverage types
