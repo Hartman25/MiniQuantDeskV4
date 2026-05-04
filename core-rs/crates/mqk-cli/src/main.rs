@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-#[cfg(feature = "testkit")]
 use std::path::PathBuf;
 
 mod commands;
@@ -199,9 +198,14 @@ enum MdCmd {
         #[arg(long)]
         source: String,
 
-        /// Comma-separated symbols
+        /// Comma-separated symbols. Mutually exclusive with --symbols-from-registry.
         #[arg(long)]
-        symbols: String,
+        symbols: Option<String>,
+
+        /// Path to instrument registry JSON (e.g. config/instruments/equities.json).
+        /// Loads all enabled equity symbols. Mutually exclusive with --symbols.
+        #[arg(long)]
+        symbols_from_registry: Option<PathBuf>,
 
         /// Timeframe (1D | 1m | 5m)
         #[arg(long)]
@@ -227,9 +231,14 @@ enum MdCmd {
         #[arg(long)]
         source: String,
 
-        /// Comma-separated symbols
+        /// Comma-separated symbols. Mutually exclusive with --symbols-from-registry.
         #[arg(long)]
-        symbols: String,
+        symbols: Option<String>,
+
+        /// Path to instrument registry JSON (e.g. config/instruments/equities.json).
+        /// Loads all enabled equity symbols. Mutually exclusive with --symbols.
+        #[arg(long)]
+        symbols_from_registry: Option<PathBuf>,
 
         /// Timeframe (1D | 1m | 5m)
         #[arg(long)]
@@ -477,21 +486,40 @@ async fn main() -> Result<()> {
             MdCmd::IngestProvider {
                 source,
                 symbols,
+                symbols_from_registry,
                 timeframe,
                 start,
                 end,
             } => {
-                md_ingest_provider(source, symbols, timeframe, start, end).await?;
+                md_ingest_provider(
+                    source,
+                    symbols,
+                    symbols_from_registry,
+                    timeframe,
+                    start,
+                    end,
+                )
+                .await?;
             }
             MdCmd::SyncProvider {
                 source,
                 symbols,
+                symbols_from_registry,
                 timeframe,
                 full_start,
                 end,
                 overlap_days,
             } => {
-                md_sync_provider(source, symbols, timeframe, full_start, end, overlap_days).await?;
+                md_sync_provider(
+                    source,
+                    symbols,
+                    symbols_from_registry,
+                    timeframe,
+                    full_start,
+                    end,
+                    overlap_days,
+                )
+                .await?;
             }
         },
 

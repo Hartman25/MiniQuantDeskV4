@@ -154,6 +154,60 @@ pub async fn md_ingest_csv(path: String, timeframe: String, source: String) -> R
 }
 
 // ---------------------------------------------------------------------------
+// Symbol resolution helper
+// ---------------------------------------------------------------------------
+
+/// Resolve the symbol list from exactly one of `--symbols` or `--symbols-from-registry`.
+///
+/// Rules:
+/// - Providing both is an error (mutually exclusive).
+/// - Providing neither is an error.
+/// - `--symbols`: comma-separated list; must contain at least one non-empty token.
+/// - `--symbols-from-registry`: load the registry JSON, validate it, and return
+///   all enabled equity `provider_symbol` values in deterministic alphabetical order.
+pub fn resolve_symbols(
+    symbols: Option<&str>,
+    symbols_from_registry: Option<&std::path::Path>,
+) -> Result<Vec<String>> {
+    match (symbols, symbols_from_registry) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!(
+                "--symbols and --symbols-from-registry are mutually exclusive; provide only one"
+            )
+        }
+        (None, None) => {
+            anyhow::bail!("one of --symbols or --symbols-from-registry is required")
+        }
+        (Some(csv), None) => {
+            let syms: Vec<String> = csv
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            if syms.is_empty() {
+                anyhow::bail!("--symbols must contain at least one symbol");
+            }
+            Ok(syms)
+        }
+        (None, Some(path)) => {
+            let instruments = mqk_md::instrument_registry::load_instrument_registry(path)
+                .with_context(|| format!("failed to load registry: {}", path.display()))?;
+            mqk_md::instrument_registry::validate_registry(&instruments)
+                .with_context(|| format!("registry validation failed: {}", path.display()))?;
+            let syms = mqk_md::instrument_registry::enabled_equity_symbols(&instruments);
+            if syms.is_empty() {
+                anyhow::bail!(
+                    "registry at {} contains no enabled equity instruments",
+                    path.display()
+                );
+            }
+            Ok(syms)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PATCH C — Provider ingestion (with chunked fetching + CSV backup artifacts)
 // ---------------------------------------------------------------------------
 
@@ -173,7 +227,8 @@ pub async fn md_ingest_csv(path: String, timeframe: String, source: String) -> R
 /// normalized fetch is preserved independently of DB state.
 pub async fn md_ingest_provider(
     source: String,
-    symbols: String,
+    symbols: Option<String>,
+    symbols_from_registry: Option<PathBuf>,
     timeframe: String,
     start: String,
     end: String,
@@ -185,15 +240,7 @@ pub async fn md_ingest_provider(
         anyhow::bail!("unsupported --source '{}'. supported: twelvedata", source);
     }
 
-    let syms: Vec<String> = symbols
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-    if syms.is_empty() {
-        anyhow::bail!("--symbols must contain at least one symbol");
-    }
+    let syms = resolve_symbols(symbols.as_deref(), symbols_from_registry.as_deref())?;
 
     let tf = mqk_md::Timeframe::parse(&timeframe)?;
     let start_d = NaiveDate::parse_from_str(start.trim(), "%Y-%m-%d")
@@ -343,7 +390,8 @@ pub async fn md_ingest_provider(
 /// No wall-clock use is introduced in deterministic src/ paths.
 pub async fn md_sync_provider(
     source: String,
-    symbols: String,
+    symbols: Option<String>,
+    symbols_from_registry: Option<PathBuf>,
     timeframe: String,
     full_start: Option<String>,
     end: Option<String>,
@@ -356,15 +404,7 @@ pub async fn md_sync_provider(
         anyhow::bail!("unsupported --source '{}'. supported: twelvedata", source);
     }
 
-    let syms: Vec<String> = symbols
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-    if syms.is_empty() {
-        anyhow::bail!("--symbols must contain at least one symbol");
-    }
+    let syms = resolve_symbols(symbols.as_deref(), symbols_from_registry.as_deref())?;
 
     let tf = mqk_md::Timeframe::parse(&timeframe)?;
 
@@ -662,6 +702,103 @@ mod tests {
         assert_eq!(
             lines[2],
             "SPY,1D,1708128000,100.75,102,100,101.5,1200,false"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_symbols — DATA-INGEST-SYNC-ALL-EQUITIES-01
+    // -----------------------------------------------------------------------
+
+    fn canonical_registry_path() -> std::path::PathBuf {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        std::path::PathBuf::from(manifest_dir).join("../../../config/instruments/equities.json")
+    }
+
+    // RS-01: --symbols CSV resolves to the expected symbol list (no provider call).
+    #[test]
+    fn rs_01_symbols_csv_resolves_correctly() {
+        let syms = resolve_symbols(Some("AAPL,SPY,MSFT"), None).unwrap();
+        assert_eq!(syms, vec!["AAPL", "SPY", "MSFT"]);
+    }
+
+    // RS-02: --symbols trims whitespace around commas.
+    #[test]
+    fn rs_02_symbols_csv_trims_whitespace() {
+        let syms = resolve_symbols(Some(" AAPL , SPY , MSFT "), None).unwrap();
+        assert_eq!(syms, vec!["AAPL", "SPY", "MSFT"]);
+    }
+
+    // RS-03: --symbols-from-registry loads canonical registry and returns 88 symbols.
+    #[test]
+    fn rs_03_registry_resolves_88_enabled_equities() {
+        let path = canonical_registry_path();
+        let syms = resolve_symbols(None, Some(&path)).unwrap();
+        assert_eq!(
+            syms.len(),
+            88,
+            "registry must resolve exactly 88 enabled equity symbols"
+        );
+    }
+
+    // RS-04: symbols from registry are in deterministic alphabetical order.
+    #[test]
+    fn rs_04_registry_symbols_are_sorted() {
+        let path = canonical_registry_path();
+        let syms = resolve_symbols(None, Some(&path)).unwrap();
+        for window in syms.windows(2) {
+            assert!(
+                window[0] <= window[1],
+                "symbols not sorted: {} before {}",
+                window[0],
+                window[1]
+            );
+        }
+    }
+
+    // RS-05: --symbols-from-registry includes known anchors (AAPL, SPY).
+    #[test]
+    fn rs_05_registry_contains_known_anchors() {
+        let path = canonical_registry_path();
+        let syms = resolve_symbols(None, Some(&path)).unwrap();
+        assert!(syms.contains(&"AAPL".to_string()), "AAPL must be present");
+        assert!(syms.contains(&"SPY".to_string()), "SPY must be present");
+    }
+
+    // RS-06: providing both --symbols and --symbols-from-registry is a conflict error.
+    #[test]
+    fn rs_06_both_symbols_and_registry_is_conflict_error() {
+        let path = canonical_registry_path();
+        let result = resolve_symbols(Some("AAPL"), Some(&path));
+        assert!(result.is_err(), "conflict must return Err");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("mutually exclusive"),
+            "error must mention 'mutually exclusive': {msg}"
+        );
+    }
+
+    // RS-07: providing neither --symbols nor --symbols-from-registry is an error.
+    #[test]
+    fn rs_07_neither_symbols_nor_registry_is_error() {
+        let result = resolve_symbols(None, None);
+        assert!(result.is_err(), "missing both must return Err");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("required"),
+            "error must mention 'required': {msg}"
+        );
+    }
+
+    // RS-08: missing registry file returns a clear error (not a panic).
+    #[test]
+    fn rs_08_missing_registry_file_returns_clear_error() {
+        let bad_path = std::path::Path::new("/nonexistent/path/equities.json");
+        let result = resolve_symbols(None, Some(bad_path));
+        assert!(result.is_err(), "missing registry must return Err");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("failed to load registry"),
+            "error must mention 'failed to load registry': {msg}"
         );
     }
 }
