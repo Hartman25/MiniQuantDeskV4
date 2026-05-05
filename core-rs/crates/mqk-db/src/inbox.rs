@@ -402,6 +402,73 @@ pub async fn inbox_find_stale_broker_map_for_halted_runs(
     Ok(out)
 }
 
+/// Enriched inbox row for operator repair actions.
+///
+/// Unlike `InboxRow`, this struct exposes `internal_order_id` and
+/// `broker_order_id` which are required to identify which specific order
+/// a fill row belongs to when performing targeted repair operations.
+#[derive(Debug, Clone)]
+pub struct InboxFillDetail {
+    pub inbox_id: i64,
+    pub run_id: Uuid,
+    pub broker_message_id: String,
+    pub internal_order_id: String,
+    pub broker_order_id: String,
+    pub event_kind: String,
+    pub message_json: Value,
+    pub received_at_utc: DateTime<Utc>,
+    pub applied_at_utc: Option<DateTime<Utc>>,
+}
+
+/// Load unapplied fill or partial_fill inbox rows for a specific order within a run.
+///
+/// Returns only rows where `applied_at_utc IS NULL` and `event_kind` is
+/// `'fill'` or `'partial_fill'` and `internal_order_id` matches.
+///
+/// Used by BROKER-FILL-REPLAY-APPLY-01 to locate the specific fill evidence
+/// for an operator repair action.  Read-only; callers must not mark rows
+/// applied without completing a successful portfolio-apply step.
+pub async fn inbox_load_unapplied_fill_for_order(
+    pool: &PgPool,
+    run_id: Uuid,
+    internal_order_id: &str,
+) -> Result<Vec<InboxFillDetail>> {
+    let rows = sqlx::query(
+        r#"
+        select inbox_id, run_id, broker_message_id, internal_order_id,
+               broker_order_id, event_kind, message_json,
+               received_at_utc, applied_at_utc
+          from oms_inbox
+         where run_id = $1
+           and internal_order_id = $2
+           and event_kind in ('fill', 'partial_fill')
+           and applied_at_utc is null
+         order by inbox_id asc
+        "#,
+    )
+    .bind(run_id)
+    .bind(internal_order_id)
+    .fetch_all(pool)
+    .await
+    .context("inbox_load_unapplied_fill_for_order failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(InboxFillDetail {
+            inbox_id: row.try_get("inbox_id")?,
+            run_id: row.try_get("run_id")?,
+            broker_message_id: row.try_get("broker_message_id")?,
+            internal_order_id: row.try_get("internal_order_id")?,
+            broker_order_id: row.try_get("broker_order_id")?,
+            event_kind: row.try_get("event_kind")?,
+            message_json: row.try_get("message_json")?,
+            received_at_utc: row.try_get("received_at_utc")?,
+            applied_at_utc: row.try_get("applied_at_utc")?,
+        });
+    }
+    Ok(out)
+}
+
 /// Load all applied inbox rows (`applied_at_utc IS NOT NULL`), ordered by
 /// inbox_id asc.  Used at cold-start to replay fills into the portfolio and
 /// advance OMS order state.  Disjoint from the unapplied set processed by

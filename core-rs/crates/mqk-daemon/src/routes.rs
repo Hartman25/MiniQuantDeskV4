@@ -170,7 +170,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         risk_denials, risk_summary,
     };
     use reconcile::{reconcile_mismatches, reconcile_status};
-    use repair::{repair_halted_run_fill_plan, repair_outbox_ambiguous};
+    use repair::{repair_halted_run_fill_apply, repair_halted_run_fill_plan, repair_outbox_ambiguous};
     use strategy::{strategy_signal, strategy_summary, strategy_suppressions};
     use system::{
         autonomous_readiness, health, status_handler, system_config_diffs,
@@ -326,6 +326,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/ops/repair/halted-run-fill-plan",
             get(repair_halted_run_fill_plan),
+        )
+        .route(
+            "/api/v1/ops/repair/halted-run-fill-apply",
+            post(repair_halted_run_fill_apply),
         )
         .route("/api/v1/alerts/triage/ack", post(alert_triage_ack))
         .route("/api/v1/incidents", post(create_incident))

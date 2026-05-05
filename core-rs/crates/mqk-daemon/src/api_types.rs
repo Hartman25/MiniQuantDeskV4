@@ -1082,6 +1082,47 @@ pub struct HaltedRunFillPlanResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/ops/repair/halted-run-fill-apply — BROKER-FILL-REPLAY-APPLY-01
+// ---------------------------------------------------------------------------
+
+/// Request body for POST /api/v1/ops/repair/halted-run-fill-apply.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HaltedRunFillApplyRequest {
+    pub run_id: String,
+    pub internal_order_id: String,
+    pub broker_order_id: String,
+    /// When `true` (default), no state is mutated; the response describes
+    /// what would happen.  When `false`, `confirmation` is required.
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
+    /// Must equal `"APPLY_HALTED_FILL_REPAIR"` when `dry_run = false`.
+    pub confirmation: Option<String>,
+}
+
+/// Response for POST /api/v1/ops/repair/halted-run-fill-apply.
+#[derive(Debug, Clone, Serialize)]
+pub struct HaltedRunFillApplyResponse {
+    /// `"active"`, `"no_db"`, or `"backend_unavailable"`.
+    pub truth_state: String,
+    /// `"applied"`, `"dry_run_ok"`, `"already_repaired"`, `"refused"`, or `"noop"`.
+    pub decision: String,
+    pub dry_run: bool,
+    pub run_id: String,
+    pub internal_order_id: String,
+    pub broker_order_id: String,
+    /// Classification derived from the planner logic.
+    pub classification: String,
+    /// Human-readable explanation of the decision.
+    pub evidence: String,
+    /// Gate name when `decision = "refused"`.
+    pub gate: Option<String>,
+    /// Durable audit event UUID written for this action.
+    pub audit_event_id: Option<String>,
+    /// Follow-up patch required if further recovery is needed.
+    pub follow_up_patch: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/ops/catalog — canonical Action Catalog
 // ---------------------------------------------------------------------------
 
