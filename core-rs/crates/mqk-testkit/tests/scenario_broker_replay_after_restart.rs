@@ -49,11 +49,6 @@ async fn make_run(pool: &sqlx::PgPool) -> anyhow::Result<Uuid> {
     Ok(run_id)
 }
 
-async fn cleanup_inbox(pool: &sqlx::PgPool) -> anyhow::Result<()> {
-    sqlx::query("delete from oms_inbox").execute(pool).await?;
-    Ok(())
-}
-
 fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
@@ -72,7 +67,6 @@ fn require_db_url() -> String {
 #[tokio::test]
 async fn restart_replay_preserves_durable_apply_order() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
-    cleanup_inbox(&pool).await?;
     let run_id = make_run(&pool).await?;
 
     let ev = BrokerEvent::Fill {
@@ -114,6 +108,13 @@ async fn restart_replay_preserves_durable_apply_order() -> anyhow::Result<()> {
         matching, 1,
         "only one inbox row may exist for replayed event"
     );
+
+    // Post-test hygiene: remove only rows owned by this test's run_id.
+    // CASCADE on oms_inbox.run_id → runs means deleting the run removes inbox rows.
+    let _ = sqlx::query("DELETE FROM runs WHERE run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await;
 
     Ok(())
 }

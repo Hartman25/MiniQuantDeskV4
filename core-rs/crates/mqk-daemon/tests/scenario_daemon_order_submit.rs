@@ -213,22 +213,27 @@ async fn lifecycle_pool() -> sqlx::PgPool {
         .expect("connect");
 
     mqk_db::migrate(&pool).await.expect("migrate");
-    sqlx::query("DELETE FROM broker_order_map")
+    // Scope broker_order_map cleanup to rows belonging to test-owned runs only.
+    // broker_order_map.internal_id = oms_outbox.idempotency_key (FK: ON DELETE RESTRICT),
+    // so this must execute before the runs deletion which cascades to oms_outbox.
+    sqlx::query(
+        "DELETE FROM broker_order_map \
+         WHERE internal_id IN ( \
+             SELECT idempotency_key FROM oms_outbox \
+             WHERE run_id IN ( \
+                 SELECT run_id FROM runs WHERE engine_id = 'mqk-daemon' AND mode = 'PAPER' \
+             ) \
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("cleanup broker_order_map (scoped to test runs)");
+    // Deleting test-owned runs cascades to oms_inbox, oms_outbox, and audit_events
+    // (all carry ON DELETE CASCADE → runs).  No separate inbox/outbox/audit deletes needed.
+    sqlx::query("DELETE FROM runs WHERE engine_id = 'mqk-daemon' AND mode = 'PAPER'")
         .execute(&pool)
         .await
-        .expect("cleanup broker_order_map");
-    sqlx::query("DELETE FROM oms_inbox")
-        .execute(&pool)
-        .await
-        .expect("cleanup oms_inbox");
-    sqlx::query("DELETE FROM oms_outbox")
-        .execute(&pool)
-        .await
-        .expect("cleanup oms_outbox");
-    sqlx::query("DELETE FROM audit_events")
-        .execute(&pool)
-        .await
-        .expect("cleanup audit_events");
+        .expect("cleanup daemon runs");
     sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
         .execute(&pool)
         .await
@@ -245,10 +250,6 @@ async fn lifecycle_pool() -> sqlx::PgPool {
         .execute(&pool)
         .await
         .expect("cleanup sys_reconcile_status_state");
-    sqlx::query("DELETE FROM runs WHERE engine_id = 'mqk-daemon' AND mode = 'PAPER'")
-        .execute(&pool)
-        .await
-        .expect("cleanup daemon runs");
 
     pool
 }

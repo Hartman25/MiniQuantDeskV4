@@ -40,11 +40,6 @@ async fn make_run(pool: &sqlx::PgPool) -> anyhow::Result<Uuid> {
     Ok(run_id)
 }
 
-async fn cleanup_inbox(pool: &sqlx::PgPool) -> anyhow::Result<()> {
-    sqlx::query("delete from oms_inbox").execute(pool).await?;
-    Ok(())
-}
-
 fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
@@ -63,7 +58,6 @@ fn require_db_url() -> String {
 #[tokio::test]
 async fn duplicate_events_remain_dedupe_safe_under_new_ordering() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
-    cleanup_inbox(&pool).await?;
     let run_id = make_run(&pool).await?;
 
     let ev = BrokerEvent::PartialFill {
@@ -105,6 +99,12 @@ async fn duplicate_events_remain_dedupe_safe_under_new_ordering() -> anyhow::Res
         .filter(|r| r.broker_message_id == "storm-fill-1")
         .count();
     assert_eq!(matching, 1);
+
+    // Post-test hygiene: remove only rows owned by this test's run_id.
+    let _ = sqlx::query("DELETE FROM runs WHERE run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await;
 
     Ok(())
 }

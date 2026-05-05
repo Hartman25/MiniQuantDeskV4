@@ -41,11 +41,6 @@ async fn make_run(pool: &sqlx::PgPool) -> anyhow::Result<Uuid> {
     Ok(run_id)
 }
 
-async fn cleanup_inbox(pool: &sqlx::PgPool) -> anyhow::Result<()> {
-    sqlx::query("delete from oms_inbox").execute(pool).await?;
-    Ok(())
-}
-
 fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
@@ -64,7 +59,6 @@ fn require_db_url() -> String {
 #[tokio::test]
 async fn replace_cancel_race_events_remain_distinct() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
-    cleanup_inbox(&pool).await?;
     let run_id = make_run(&pool).await?;
 
     let cancel_ack = BrokerEvent::CancelAck {
@@ -109,6 +103,12 @@ async fn replace_cancel_race_events_remain_distinct() -> anyhow::Result<()> {
         "replace reject must persist independently"
     );
     assert_eq!(ids.len(), 2, "race events must not collapse into one row");
+
+    // Post-test hygiene: remove only rows owned by this test's run_id.
+    let _ = sqlx::query("DELETE FROM runs WHERE run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await;
 
     Ok(())
 }

@@ -41,11 +41,6 @@ async fn make_run(pool: &sqlx::PgPool) -> anyhow::Result<Uuid> {
     Ok(run_id)
 }
 
-async fn cleanup_inbox(pool: &sqlx::PgPool) -> anyhow::Result<()> {
-    sqlx::query("delete from oms_inbox").execute(pool).await?;
-    Ok(())
-}
-
 fn require_db_url() -> String {
     match std::env::var(mqk_db::ENV_DB_URL) {
         Ok(v) => v,
@@ -64,7 +59,6 @@ fn require_db_url() -> String {
 #[tokio::test]
 async fn out_of_order_broker_delivery_uses_real_ordering_truth() -> anyhow::Result<()> {
     let pool = make_pool(&require_db_url()).await?;
-    cleanup_inbox(&pool).await?;
     let run_id = make_run(&pool).await?;
 
     let events = vec![
@@ -120,6 +114,12 @@ async fn out_of_order_broker_delivery_uses_real_ordering_truth() -> anyhow::Resu
         .collect();
 
     assert_eq!(ids, vec!["pf-3", "pf-1", "pf-2"]);
+
+    // Post-test hygiene: remove only rows owned by this test's run_id.
+    let _ = sqlx::query("DELETE FROM runs WHERE run_id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await;
 
     Ok(())
 }
