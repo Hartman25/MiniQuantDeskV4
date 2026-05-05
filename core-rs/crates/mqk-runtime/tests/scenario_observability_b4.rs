@@ -217,6 +217,7 @@ fn b4_8_inbox_snapshots_extract_event_type() {
             message_json: json!({"type": "fill", "broker_order_id": "brk-1"}),
             received_at_utc: now,
             applied_at_utc: Some(now),
+            event_kind: "fill".to_string(),
         },
         // Row without "type" field → should fall back to "unknown".
         InboxRow {
@@ -229,6 +230,7 @@ fn b4_8_inbox_snapshots_extract_event_type() {
             message_json: json!({"broker_order_id": "brk-2"}),
             received_at_utc: now,
             applied_at_utc: None,
+            event_kind: "unknown".to_string(),
         },
     ];
 

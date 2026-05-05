@@ -26,6 +26,10 @@ pub struct InboxRow {
     /// apply.  Rows with applied_at_utc IS NULL are returned by
     /// inbox_load_unapplied_for_run() for crash-recovery replay (Patch D2).
     pub applied_at_utc: Option<DateTime<Utc>>,
+    /// Broker event kind stored at ingest time: "ack", "fill", "partial_fill",
+    /// "cancel_ack", "cancel_reject", "replace_ack", "replace_reject", "reject".
+    /// Mirrors the `event_kind` column added in migration 0021.
+    pub event_kind: String,
 }
 
 #[derive(Debug, Clone)]
@@ -243,7 +247,7 @@ pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result
         r#"
         select inbox_id, run_id, broker_message_id, broker_fill_id,
                broker_sequence_id, broker_timestamp, message_json,
-               received_at_utc, applied_at_utc
+               received_at_utc, applied_at_utc, event_kind
           from oms_inbox
          where run_id = $1
            and applied_at_utc is null
@@ -267,6 +271,7 @@ pub async fn inbox_load_unapplied_for_run(pool: &PgPool, run_id: Uuid) -> Result
             message_json: row.try_get("message_json")?,
             received_at_utc: row.try_get("received_at_utc")?,
             applied_at_utc: row.try_get("applied_at_utc")?,
+            event_kind: row.try_get("event_kind")?,
         });
     }
     Ok(out)
@@ -329,6 +334,74 @@ pub async fn inbox_fetch_ack_rows_for_order(
     Ok(out)
 }
 
+/// A stale broker-order-map entry belonging to a HALTED run.
+///
+/// Returned by [`inbox_find_stale_broker_map_for_halted_runs`] for use by the
+/// BROKER-FILL-REPLAY-REPAIR-01 repair planner.  All fields are read-only;
+/// no DB writes occur in that query.
+#[derive(Debug, Clone)]
+pub struct StaleBrokerMapEntry {
+    /// Internal order ID (= `oms_outbox.idempotency_key`).
+    pub internal_order_id: String,
+    /// Exchange-assigned broker order ID.
+    pub broker_order_id: String,
+    /// Run that owns this order.
+    pub run_id: Uuid,
+    /// Current `oms_outbox.status` (typically `"SENT"` for an orphaned fill).
+    pub outbox_status: String,
+    /// `runs.status` for the owning run (always `"HALTED"` from this query).
+    pub run_status: String,
+    /// When the run was halted.
+    pub halted_at_utc: Option<DateTime<Utc>>,
+    /// When the broker_order_map entry was registered.
+    pub broker_map_registered_at_utc: DateTime<Utc>,
+}
+
+/// Find all `broker_order_map` entries whose owning run is HALTED.
+///
+/// These are candidate stale entries where a broker fill may have occurred but
+/// was never applied to the portfolio (the run halted before Phase 3 could
+/// drain the inbox, or the inbox row was deleted before being applied).
+///
+/// Read-only: does not modify any state.  Safe to call at any time.
+pub async fn inbox_find_stale_broker_map_for_halted_runs(
+    pool: &PgPool,
+) -> Result<Vec<StaleBrokerMapEntry>> {
+    let rows = sqlx::query(
+        r#"
+        select bom.internal_id,
+               bom.broker_id,
+               bom.registered_at_utc,
+               o.run_id,
+               o.status  as outbox_status,
+               r.status  as run_status,
+               r.halted_at_utc
+          from broker_order_map bom
+          join oms_outbox o on bom.internal_id = o.idempotency_key
+          join runs r on o.run_id = r.run_id
+         where r.status = 'HALTED'
+         order by r.halted_at_utc desc, bom.internal_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("inbox_find_stale_broker_map_for_halted_runs failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(StaleBrokerMapEntry {
+            internal_order_id: row.try_get("internal_id")?,
+            broker_order_id: row.try_get("broker_id")?,
+            broker_map_registered_at_utc: row.try_get("registered_at_utc")?,
+            run_id: row.try_get("run_id")?,
+            outbox_status: row.try_get("outbox_status")?,
+            run_status: row.try_get("run_status")?,
+            halted_at_utc: row.try_get("halted_at_utc")?,
+        });
+    }
+    Ok(out)
+}
+
 /// Load all applied inbox rows (`applied_at_utc IS NOT NULL`), ordered by
 /// inbox_id asc.  Used at cold-start to replay fills into the portfolio and
 /// advance OMS order state.  Disjoint from the unapplied set processed by
@@ -338,7 +411,7 @@ pub async fn inbox_load_all_applied_for_run(pool: &PgPool, run_id: Uuid) -> Resu
         r#"
         select inbox_id, run_id, broker_message_id, broker_fill_id,
                broker_sequence_id, broker_timestamp, message_json,
-               received_at_utc, applied_at_utc
+               received_at_utc, applied_at_utc, event_kind
           from oms_inbox
          where run_id = $1
            and applied_at_utc is not null
@@ -362,6 +435,7 @@ pub async fn inbox_load_all_applied_for_run(pool: &PgPool, run_id: Uuid) -> Resu
             message_json: row.try_get("message_json")?,
             received_at_utc: row.try_get("received_at_utc")?,
             applied_at_utc: row.try_get("applied_at_utc")?,
+            event_kind: row.try_get("event_kind")?,
         });
     }
     Ok(out)

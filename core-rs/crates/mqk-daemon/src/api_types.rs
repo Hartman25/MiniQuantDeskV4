@@ -1006,6 +1006,82 @@ pub struct OutboxRepairResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/ops/repair/halted-run-fill-plan — BROKER-FILL-REPLAY-REPAIR-01
+// ---------------------------------------------------------------------------
+
+/// Classification of one stale broker-order-map entry for a HALTED run.
+///
+/// `"unapplied_inbox_fill"` — unapplied fill row exists in `oms_inbox`.
+/// `"cursor_only_fill_evidence"` — no inbox row but the broker cursor confirms
+///   a fill event matching `broker_order_id` was received.
+/// `"no_fill_evidence"` — broker_order_map entry present but no fill evidence in
+///   either `oms_inbox` or the broker cursor.
+/// `"ambiguous"` — cannot classify safely; operator investigation required.
+///
+/// Only `"unapplied_inbox_fill"` and `"cursor_only_fill_evidence"` indicate a
+/// fill that should be reflected in portfolio state.
+#[derive(Debug, Clone, Serialize)]
+pub struct HaltedRunFillEntry {
+    /// Internal order ID (= `oms_outbox.idempotency_key`).
+    pub internal_order_id: String,
+    /// Exchange-assigned broker order ID.
+    pub broker_order_id: String,
+    /// Run that owns this order.
+    pub run_id: String,
+    /// `oms_outbox.status` at time of query.
+    pub outbox_status: String,
+    /// When the run was halted (ISO-8601).
+    pub halted_at_utc: Option<String>,
+    /// Number of unapplied inbox rows (`applied_at_utc IS NULL`) for this run.
+    pub unapplied_inbox_count: usize,
+    /// Unapplied inbox row event kinds present (e.g. `["fill"]`, `["ack", "fill"]`).
+    pub unapplied_inbox_event_kinds: Vec<String>,
+    /// `true` when the broker event cursor `last_message_id` contains the
+    /// `broker_order_id`, confirming the broker processed this order's fill.
+    pub cursor_fill_evidence: bool,
+    /// The `last_message_id` from the broker cursor at query time, if present.
+    pub cursor_last_message_id: Option<String>,
+    /// Classification of this entry's repair state.
+    ///
+    /// One of: `"unapplied_inbox_fill"`, `"cursor_only_fill_evidence"`,
+    /// `"no_fill_evidence"`, `"ambiguous"`.
+    pub classification: String,
+    /// Operator action description prescribed by the planner.
+    pub prescribed_action: String,
+    /// `true` if a safe mutation path is known (i.e. `BROKER-FILL-REPLAY-APPLY-01`
+    /// would be safe to execute for this entry).  Currently always `false` —
+    /// mutation is deferred to `BROKER-FILL-REPLAY-APPLY-01`.
+    pub mutation_safe: bool,
+}
+
+/// Response for GET /api/v1/ops/repair/halted-run-fill-plan.
+///
+/// Dry-run planner: identifies stale broker-order-map entries for HALTED runs
+/// and classifies whether a fill event was received but not applied.
+///
+/// No DB state is modified by this route.
+///
+/// `truth_state` values:
+/// - `"active"` — plan computed successfully.
+/// - `"no_db"` — daemon has no DB; plan cannot be computed.
+/// - `"backend_unavailable"` — DB query failed.
+#[derive(Debug, Clone, Serialize)]
+pub struct HaltedRunFillPlanResponse {
+    pub truth_state: String,
+    /// All stale broker_order_map entries for HALTED runs found at query time.
+    /// Empty when no stale entries exist.
+    pub entries: Vec<HaltedRunFillEntry>,
+    /// Human-readable summary for operator UI.
+    pub summary: String,
+    /// `true` when at least one entry has `classification` of
+    /// `"unapplied_inbox_fill"` or `"cursor_only_fill_evidence"`.
+    pub repair_required: bool,
+    /// Follow-up patch required for mutation: `"BROKER-FILL-REPLAY-APPLY-01"`.
+    /// `None` when `repair_required == false`.
+    pub follow_up_patch: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/ops/catalog — canonical Action Catalog
 // ---------------------------------------------------------------------------
 

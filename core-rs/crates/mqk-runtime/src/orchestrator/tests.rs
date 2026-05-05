@@ -347,6 +347,7 @@ fn out_of_order_broker_delivery_uses_real_ordering_truth() {
             .unwrap(),
             received_at_utc: chrono::Utc::now(),
             applied_at_utc: None,
+            event_kind: "fill".to_string(),
         },
         mqk_db::InboxRow {
             inbox_id: 11,
@@ -363,6 +364,7 @@ fn out_of_order_broker_delivery_uses_real_ordering_truth() {
             .unwrap(),
             received_at_utc: chrono::Utc::now(),
             applied_at_utc: None,
+            event_kind: "fill".to_string(),
         },
     ])
     .expect("canonical queue should build");
@@ -397,6 +399,7 @@ fn restart_replay_preserves_durable_apply_order() {
             .unwrap(),
             received_at_utc: chrono::Utc::now(),
             applied_at_utc: None,
+            event_kind: "fill".to_string(),
         },
         mqk_db::InboxRow {
             inbox_id: 201,
@@ -413,6 +416,7 @@ fn restart_replay_preserves_durable_apply_order() {
             .unwrap(),
             received_at_utc: chrono::Utc::now(),
             applied_at_utc: None,
+            event_kind: "fill".to_string(),
         },
     ])
     .unwrap();
@@ -438,6 +442,7 @@ fn restart_replay_preserves_durable_apply_order() {
             .unwrap(),
             received_at_utc: chrono::Utc::now(),
             applied_at_utc: None,
+            event_kind: "fill".to_string(),
         },
         mqk_db::InboxRow {
             inbox_id: 201,
@@ -454,6 +459,7 @@ fn restart_replay_preserves_durable_apply_order() {
             .unwrap(),
             received_at_utc: chrono::Utc::now(),
             applied_at_utc: None,
+            event_kind: "fill".to_string(),
         },
     ])
     .unwrap();
@@ -481,6 +487,7 @@ fn ambiguous_ordering_truth_fails_closed() {
             .unwrap(),
             received_at_utc: chrono::Utc::now(),
             applied_at_utc: None,
+            event_kind: "fill".to_string(),
         },
         mqk_db::InboxRow {
             inbox_id: 7,
@@ -497,6 +504,7 @@ fn ambiguous_ordering_truth_fails_closed() {
             .unwrap(),
             received_at_utc: chrono::Utc::now(),
             applied_at_utc: None,
+            event_kind: "fill".to_string(),
         },
     ])
     .expect_err("duplicate canonical key must fail closed");
