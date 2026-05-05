@@ -146,15 +146,21 @@ pub(crate) fn reconcile_local_snapshot_from_runtime_with_sides(
 }
 
 pub(crate) fn oms_execution_status_to_reconcile(status: &str) -> mqk_reconcile::OrderStatus {
-    let raw = status.to_ascii_lowercase();
-    if raw == "filled" {
-        mqk_reconcile::OrderStatus::Filled
-    } else if raw == "canceled" || raw == "cancelled" {
-        mqk_reconcile::OrderStatus::Canceled
-    } else if raw == "rejected" {
-        mqk_reconcile::OrderStatus::Rejected
-    } else {
-        mqk_reconcile::OrderStatus::Unknown
+    // RECONCILE-ORDER-STATUS-MAP-01: Map local OMS state strings to the
+    // reconcile OrderStatus taxonomy.  Active states map to New so that
+    // local "Open" compares compatible with broker "new" / "accepted".
+    // Terminal states map strictly; unknown strings stay Unknown (fail-closed).
+    match status.to_ascii_lowercase().as_str() {
+        // Active states — broker reports these as "new" / "accepted"
+        "open" | "cancelpending" | "replacepending" => mqk_reconcile::OrderStatus::New,
+        // Partial-fill in flight
+        "partiallyfilled" => mqk_reconcile::OrderStatus::PartiallyFilled,
+        // Terminal
+        "filled" => mqk_reconcile::OrderStatus::Filled,
+        "canceled" | "cancelled" => mqk_reconcile::OrderStatus::Canceled,
+        "rejected" => mqk_reconcile::OrderStatus::Rejected,
+        // Unrecognized — fail-closed
+        _ => mqk_reconcile::OrderStatus::Unknown,
     }
 }
 
@@ -576,4 +582,189 @@ pub(crate) async fn recover_oms_and_portfolio(
     sides.retain(|order_id, _| oms_orders.contains_key(order_id));
 
     Ok((oms_orders, sides, portfolio))
+}
+
+// ---------------------------------------------------------------------------
+// RECONCILE-ORDER-STATUS-MAP-01 unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod reconcile_status_map_tests {
+    use super::oms_execution_status_to_reconcile;
+    use mqk_reconcile::{
+        reconcile, BrokerSnapshot, LocalSnapshot, OrderSnapshot, OrderStatus, ReconcileAction, Side,
+    };
+
+    // Helper: build a minimal matched order pair (same id/symbol/side/qty/filled_qty).
+    fn matched_order(
+        local_status: OrderStatus,
+        broker_status: OrderStatus,
+    ) -> (LocalSnapshot, BrokerSnapshot) {
+        let mut local = LocalSnapshot::empty();
+        local.orders.insert(
+            "ord-1".to_string(),
+            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, 1, 0, local_status),
+        );
+        let mut broker = BrokerSnapshot::empty_at(1_000);
+        broker.orders.insert(
+            "ord-1".to_string(),
+            OrderSnapshot::new("ord-1", "AAPL", Side::Buy, 1, 0, broker_status),
+        );
+        (local, broker)
+    }
+
+    // SM-01: local "Open" maps to OrderStatus::New — no false OrderDrift vs broker "new".
+    #[test]
+    fn open_maps_to_new() {
+        assert_eq!(oms_execution_status_to_reconcile("Open"), OrderStatus::New,);
+    }
+
+    // SM-02: local "Open" vs broker New does not produce OrderDrift.
+    #[test]
+    fn open_vs_broker_new_is_clean() {
+        let (local, broker) = matched_order(OrderStatus::New, OrderStatus::New);
+        let r = reconcile(&local, &broker);
+        assert_eq!(
+            r.action,
+            ReconcileAction::Clean,
+            "Open vs New must be clean: {:?}",
+            r.diffs
+        );
+    }
+
+    // SM-03: local "PartiallyFilled" maps to OrderStatus::PartiallyFilled.
+    #[test]
+    fn partially_filled_maps_correctly() {
+        assert_eq!(
+            oms_execution_status_to_reconcile("PartiallyFilled"),
+            OrderStatus::PartiallyFilled,
+        );
+    }
+
+    // SM-04: local PartiallyFilled vs broker PartiallyFilled is clean.
+    #[test]
+    fn partially_filled_vs_broker_partially_filled_is_clean() {
+        let mut local = LocalSnapshot::empty();
+        local.orders.insert(
+            "ord-1".to_string(),
+            OrderSnapshot::new(
+                "ord-1",
+                "AAPL",
+                Side::Buy,
+                10,
+                3,
+                OrderStatus::PartiallyFilled,
+            ),
+        );
+        let mut broker = BrokerSnapshot::empty_at(1_000);
+        broker.orders.insert(
+            "ord-1".to_string(),
+            OrderSnapshot::new(
+                "ord-1",
+                "AAPL",
+                Side::Buy,
+                10,
+                3,
+                OrderStatus::PartiallyFilled,
+            ),
+        );
+        let r = reconcile(&local, &broker);
+        assert_eq!(
+            r.action,
+            ReconcileAction::Clean,
+            "PartiallyFilled vs PartiallyFilled must be clean: {:?}",
+            r.diffs
+        );
+    }
+
+    // SM-05: local "CancelPending" maps to New (still active at broker).
+    #[test]
+    fn cancel_pending_maps_to_new() {
+        assert_eq!(
+            oms_execution_status_to_reconcile("CancelPending"),
+            OrderStatus::New,
+        );
+    }
+
+    // SM-06: local "ReplacePending" maps to New (still active at broker).
+    #[test]
+    fn replace_pending_maps_to_new() {
+        assert_eq!(
+            oms_execution_status_to_reconcile("ReplacePending"),
+            OrderStatus::New,
+        );
+    }
+
+    // SM-07: Terminal states map strictly — local Filled vs broker Canceled → drift.
+    #[test]
+    fn local_filled_vs_broker_canceled_is_drift() {
+        let (local, broker) = matched_order(OrderStatus::Filled, OrderStatus::Canceled);
+        let r = reconcile(&local, &broker);
+        assert_eq!(
+            r.action,
+            ReconcileAction::Halt,
+            "Filled vs Canceled must drift"
+        );
+    }
+
+    // SM-08: local active vs broker terminal → drift.
+    #[test]
+    fn local_new_vs_broker_canceled_is_drift() {
+        let (local, broker) = matched_order(OrderStatus::New, OrderStatus::Canceled);
+        let r = reconcile(&local, &broker);
+        assert_eq!(
+            r.action,
+            ReconcileAction::Halt,
+            "New vs Canceled must drift"
+        );
+    }
+
+    // SM-09: local terminal vs broker active → drift.
+    #[test]
+    fn local_canceled_vs_broker_new_is_drift() {
+        let (local, broker) = matched_order(OrderStatus::Canceled, OrderStatus::New);
+        let r = reconcile(&local, &broker);
+        assert_eq!(
+            r.action,
+            ReconcileAction::Halt,
+            "Canceled vs New must drift"
+        );
+    }
+
+    // SM-10: Unrecognized OMS status maps to Unknown (fail-closed).
+    #[test]
+    fn unknown_oms_status_maps_to_unknown() {
+        assert_eq!(
+            oms_execution_status_to_reconcile("warp_speed"),
+            OrderStatus::Unknown,
+        );
+    }
+
+    // SM-11: Terminal string variants — all must map strictly.
+    #[test]
+    fn terminal_status_mappings() {
+        assert_eq!(
+            oms_execution_status_to_reconcile("Filled"),
+            OrderStatus::Filled
+        );
+        assert_eq!(
+            oms_execution_status_to_reconcile("Canceled"),
+            OrderStatus::Canceled
+        );
+        assert_eq!(
+            oms_execution_status_to_reconcile("Cancelled"),
+            OrderStatus::Canceled
+        );
+        assert_eq!(
+            oms_execution_status_to_reconcile("Rejected"),
+            OrderStatus::Rejected
+        );
+    }
+
+    // SM-12: Case-insensitive — both "open" and "OPEN" map to New.
+    #[test]
+    fn case_insensitive_open() {
+        assert_eq!(oms_execution_status_to_reconcile("open"), OrderStatus::New);
+        assert_eq!(oms_execution_status_to_reconcile("OPEN"), OrderStatus::New);
+    }
 }
