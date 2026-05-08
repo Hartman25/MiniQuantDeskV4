@@ -272,6 +272,28 @@ pub struct AppState {
     /// Default: "config/providers/providers.json" (relative to daemon CWD).
     /// Override: MQK_PROVIDER_REGISTRY_PATH env var.
     pub provider_registry_path: String,
+    /// BROKER-FILL-REST-RECOVERY-01: Injectable Alpaca fill activity fetcher.
+    ///
+    /// `None` when REST recovery is not configured on this daemon instance.
+    /// Set via `set_fill_activity_fetcher_for_test` in tests; production wiring
+    /// is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.
+    pub fill_activity_fetcher: Option<Arc<dyn BrokerFillActivityFetcher>>,
+}
+
+/// BROKER-FILL-REST-RECOVERY-01: Injectable abstraction over Alpaca REST activity fetch.
+///
+/// Defined here so both `state.rs` (storage) and `routes/repair.rs` (usage) can reference
+/// it without a module cycle.  Tests inject a fake implementation; production wiring
+/// is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.
+pub trait BrokerFillActivityFetcher: Send + Sync {
+    /// Fetch all account activities for the given Alpaca broker order UUID.
+    ///
+    /// Callers filter the returned list for FILL/PARTIAL_FILL activity types.
+    /// Returns `Err(String)` if the REST call fails.
+    fn fetch_fill_activities_for_order(
+        &self,
+        broker_order_id: &str,
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaOrderActivity>, String>;
 }
 
 impl Default for AppState {
@@ -443,6 +465,16 @@ impl AppState {
     /// running in parallel (BRK-07R).
     pub fn set_adapter_id_for_test(&mut self, adapter_id: &str) {
         self.runtime_selection.adapter_id = adapter_id.to_string();
+    }
+
+    /// Test helper: inject a fill activity fetcher for BROKER-FILL-REST-RECOVERY-01 tests.
+    ///
+    /// Production wiring is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.
+    pub fn set_fill_activity_fetcher_for_test(
+        &mut self,
+        fetcher: Arc<dyn BrokerFillActivityFetcher>,
+    ) {
+        self.fill_activity_fetcher = Some(fetcher);
     }
 
     /// BRK-07R: Seed WS continuity state from the last persisted broker cursor.
@@ -620,6 +652,7 @@ impl AppState {
                 .unwrap_or_else(|_| "config/instruments/equities.json".to_string()),
             provider_registry_path: std::env::var("MQK_PROVIDER_REGISTRY_PATH")
                 .unwrap_or_else(|_| "config/providers/providers.json".to_string()),
+            fill_activity_fetcher: None,
         }
     }
 

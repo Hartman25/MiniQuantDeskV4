@@ -1123,6 +1123,61 @@ pub struct HaltedRunFillApplyResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/ops/repair/halted-run-fill-rest-recovery — BROKER-FILL-REST-RECOVERY-01
+// ---------------------------------------------------------------------------
+
+/// Request body for POST /api/v1/ops/repair/halted-run-fill-rest-recovery.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HaltedRunFillRestRecoveryRequest {
+    pub run_id: String,
+    pub internal_order_id: String,
+    pub broker_order_id: String,
+}
+
+/// Authoritative fill details recovered from Alpaca REST account activities.
+///
+/// Plan-only evidence for operator review.  `mutation_safe` is always `false`
+/// in this patch — inbox apply is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.
+#[derive(Debug, Clone, Serialize)]
+pub struct RestRecoveredFill {
+    /// Alpaca-assigned activity ID; used as authoritative fill identity.
+    pub broker_activity_id: String,
+    pub symbol: String,
+    pub side: String,
+    /// Fill quantity as returned by Alpaca (decimal string).
+    pub qty_str: String,
+    /// Fill price as returned by Alpaca (decimal string).
+    pub price_str: String,
+    /// Transaction timestamp from Alpaca (ISO 8601).
+    pub timestamp: String,
+    /// Always `"alpaca_rest_activity"` — identifies the evidence source.
+    pub source: String,
+    /// Always `false` in this patch — mutation deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.
+    pub mutation_safe: bool,
+}
+
+/// Response for POST /api/v1/ops/repair/halted-run-fill-rest-recovery.
+///
+/// `truth_state` values: `"active"`, `"no_db"`, `"backend_unavailable"`.
+/// `decision` values: `"rest_recovered_fill_evidence"` (success), `"refused"` (any failure).
+#[derive(Debug, Clone, Serialize)]
+pub struct HaltedRunFillRestRecoveryResponse {
+    pub truth_state: String,
+    pub decision: String,
+    pub run_id: String,
+    pub internal_order_id: String,
+    pub broker_order_id: String,
+    /// Classification derived from planner logic at query time.
+    pub classification: String,
+    /// Human-readable explanation of the decision.
+    pub evidence: String,
+    pub gate: Option<String>,
+    pub audit_event_id: Option<String>,
+    /// Authoritative fill details from Alpaca REST; `None` when decision != "rest_recovered_fill_evidence".
+    pub rest_fill: Option<RestRecoveredFill>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/ops/catalog — canonical Action Catalog
 // ---------------------------------------------------------------------------
 

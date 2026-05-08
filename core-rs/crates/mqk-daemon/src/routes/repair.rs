@@ -30,7 +30,9 @@ use chrono::Utc;
 use crate::{
     api_types::{
         HaltedRunFillApplyRequest, HaltedRunFillApplyResponse, HaltedRunFillEntry,
-        HaltedRunFillPlanResponse, OutboxRepairRequest, OutboxRepairResponse,
+        HaltedRunFillPlanResponse, HaltedRunFillRestRecoveryRequest,
+        HaltedRunFillRestRecoveryResponse, OutboxRepairRequest, OutboxRepairResponse,
+        RestRecoveredFill,
     },
     state::AppState,
 };
@@ -1153,6 +1155,536 @@ async fn write_fill_apply_audit(
 
     if let Err(err) = result {
         tracing::warn!("repair_halted_run_fill_apply: audit write failed (non-fatal): {err}");
+        return None;
+    }
+
+    Some(event_id)
+}
+
+// ---------------------------------------------------------------------------
+// BROKER-FILL-REST-RECOVERY-01 — REST activity lookup for cursor_only evidence
+// ---------------------------------------------------------------------------
+//
+// POST /api/v1/ops/repair/halted-run-fill-rest-recovery
+//
+// For stale halted-run entries classified as `cursor_only_fill_evidence`,
+// this route fetches authoritative Alpaca REST account activities for the
+// given broker_order_id and returns the recovered fill details for operator
+// review.
+//
+// ## Safety contract
+//
+// - Requires DB — entry existence and cursor classification are derived from
+//   DB state; no DB → 503.
+// - Only accepts `cursor_only_fill_evidence` entries; other classifications →
+//   409 (refused).
+// - Requires a configured fill activity fetcher; absent fetcher → 503
+//   (recovery_unavailable).  Production wiring is deferred to
+//   BROKER-FILL-REST-RECOVERY-APPLY-01.
+// - Fails closed if REST returns 0 matches (no_rest_match), >1 matches
+//   (ambiguous_rest_match), or price/qty absent/malformed
+//   (recovery_data_malformed).
+// - Plan-only in this patch: `mutation_safe` is always `false`; no
+//   portfolio/inbox mutation occurs.
+// - All outcomes are audited (non-fatal).
+// - No credentials or secrets are exposed in the response.
+
+/// POST /api/v1/ops/repair/halted-run-fill-rest-recovery
+pub(crate) async fn repair_halted_run_fill_rest_recovery(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<HaltedRunFillRestRecoveryRequest>,
+) -> Response {
+    macro_rules! refused_active {
+        ($classification:expr, $evidence:expr, $gate:expr, $audit_id:expr) => {
+            (
+                StatusCode::CONFLICT,
+                Json(HaltedRunFillRestRecoveryResponse {
+                    truth_state: "active".to_string(),
+                    decision: "refused".to_string(),
+                    run_id: body.run_id.clone(),
+                    internal_order_id: body.internal_order_id.clone(),
+                    broker_order_id: body.broker_order_id.clone(),
+                    classification: $classification.to_string(),
+                    evidence: $evidence.to_string(),
+                    gate: $gate,
+                    audit_event_id: $audit_id,
+                    rest_fill: None,
+                }),
+            )
+                .into_response()
+        };
+    }
+
+    // Gate 1: DB required.
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(HaltedRunFillRestRecoveryResponse {
+                truth_state: "no_db".to_string(),
+                decision: "refused".to_string(),
+                run_id: body.run_id.clone(),
+                internal_order_id: body.internal_order_id.clone(),
+                broker_order_id: body.broker_order_id.clone(),
+                classification: "unknown".to_string(),
+                evidence: "DB is not configured on this daemon".to_string(),
+                gate: Some("repair.db_required".to_string()),
+                audit_event_id: None,
+                rest_fill: None,
+            }),
+        )
+            .into_response();
+    };
+
+    // Gate 2: parse run_id.
+    let run_id = match uuid::Uuid::parse_str(&body.run_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(HaltedRunFillRestRecoveryResponse {
+                    truth_state: "active".to_string(),
+                    decision: "refused".to_string(),
+                    run_id: body.run_id.clone(),
+                    internal_order_id: body.internal_order_id.clone(),
+                    broker_order_id: body.broker_order_id.clone(),
+                    classification: "unknown".to_string(),
+                    evidence: format!("invalid run_id: '{}'", body.run_id),
+                    gate: Some("repair.invalid_request".to_string()),
+                    audit_event_id: None,
+                    rest_fill: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let rest_audit_ctx = RestRecoveryAuditCtx {
+        db,
+        run_id,
+        internal_order_id: &body.internal_order_id,
+        broker_order_id: &body.broker_order_id,
+    };
+
+    // Gate 3: locate stale broker_order_map entry for this run + order.
+    let stale = match mqk_db::inbox_find_stale_broker_map_for_halted_runs(db).await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(HaltedRunFillRestRecoveryResponse {
+                    truth_state: "backend_unavailable".to_string(),
+                    decision: "refused".to_string(),
+                    run_id: body.run_id.clone(),
+                    internal_order_id: body.internal_order_id.clone(),
+                    broker_order_id: body.broker_order_id.clone(),
+                    classification: "unknown".to_string(),
+                    evidence: format!("DB query failed: {e}"),
+                    gate: Some("repair.db_error".to_string()),
+                    audit_event_id: None,
+                    rest_fill: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let entry_exists = stale.iter().any(|e| {
+        e.run_id == run_id
+            && e.internal_order_id == body.internal_order_id
+            && e.broker_order_id == body.broker_order_id
+    });
+
+    if !entry_exists {
+        let evidence = format!(
+            "no stale broker_order_map entry found for run_id='{}' \
+             internal_order_id='{}' broker_order_id='{}' in a HALTED run",
+            body.run_id, body.internal_order_id, body.broker_order_id
+        );
+        let audit_id = write_rest_recovery_audit(
+            &rest_audit_ctx,
+            "refused",
+            "repair.entry_not_found",
+            &evidence,
+        )
+        .await;
+        return (
+            StatusCode::NOT_FOUND,
+            Json(HaltedRunFillRestRecoveryResponse {
+                truth_state: "active".to_string(),
+                decision: "refused".to_string(),
+                run_id: body.run_id.clone(),
+                internal_order_id: body.internal_order_id.clone(),
+                broker_order_id: body.broker_order_id.clone(),
+                classification: "unknown".to_string(),
+                evidence,
+                gate: Some("repair.entry_not_found".to_string()),
+                audit_event_id: audit_id.map(|id| id.to_string()),
+                rest_fill: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // Gate 4: classify the entry — must be cursor_only_fill_evidence.
+    let unapplied = match mqk_db::inbox_load_unapplied_for_run(db, run_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(HaltedRunFillRestRecoveryResponse {
+                    truth_state: "backend_unavailable".to_string(),
+                    decision: "refused".to_string(),
+                    run_id: body.run_id.clone(),
+                    internal_order_id: body.internal_order_id.clone(),
+                    broker_order_id: body.broker_order_id.clone(),
+                    classification: "unknown".to_string(),
+                    evidence: format!("inbox query failed: {e}"),
+                    gate: Some("repair.db_error".to_string()),
+                    audit_event_id: None,
+                    rest_fill: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let cursor_last_message_id: Option<String> =
+        match mqk_db::load_broker_cursor(db, ALPACA_ADAPTER_ID).await {
+            Ok(Some(cursor_json)) => serde_json::from_str::<serde_json::Value>(&cursor_json)
+                .ok()
+                .and_then(|v| {
+                    v.get("trade_updates")
+                        .and_then(|tu| tu.get("last_message_id"))
+                        .and_then(|mid| mid.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                }),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(
+                    "repair_halted_run_fill_rest_recovery: load_broker_cursor failed (non-fatal): {e}"
+                );
+                None
+            }
+        };
+
+    let (classification, _, _) = classify_stale_entry(
+        &body.internal_order_id,
+        &body.broker_order_id,
+        &unapplied,
+        cursor_last_message_id.as_deref(),
+    );
+
+    if classification != "cursor_only_fill_evidence" {
+        let evidence = format!(
+            "entry classification is '{}'; REST recovery is only applicable to \
+             'cursor_only_fill_evidence' entries. \
+             For 'unapplied_inbox_fill' use BROKER-FILL-REPLAY-APPLY-01; \
+             for 'no_fill_evidence' there is nothing to recover.",
+            classification
+        );
+        let audit_id = write_rest_recovery_audit(
+            &rest_audit_ctx,
+            "refused",
+            "repair.evidence_not_cursor_only",
+            &evidence,
+        )
+        .await;
+        return refused_active!(
+            classification,
+            evidence,
+            Some("repair.evidence_not_cursor_only".to_string()),
+            audit_id.map(|id| id.to_string())
+        );
+    }
+
+    // Gate 5: fill activity fetcher must be configured.
+    let Some(fetcher) = st.fill_activity_fetcher.as_ref() else {
+        let evidence = format!(
+            "REST fill activity fetcher is not configured on this daemon; \
+             cannot look up Alpaca activities for broker_order_id='{}'. \
+             Production wiring is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.",
+            body.broker_order_id
+        );
+        let audit_id = write_rest_recovery_audit(
+            &rest_audit_ctx,
+            "refused",
+            "repair.recovery_unavailable",
+            &evidence,
+        )
+        .await;
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(HaltedRunFillRestRecoveryResponse {
+                truth_state: "active".to_string(),
+                decision: "refused".to_string(),
+                run_id: body.run_id.clone(),
+                internal_order_id: body.internal_order_id.clone(),
+                broker_order_id: body.broker_order_id.clone(),
+                classification,
+                evidence,
+                gate: Some("repair.recovery_unavailable".to_string()),
+                audit_event_id: audit_id.map(|id| id.to_string()),
+                rest_fill: None,
+            }),
+        )
+            .into_response();
+    };
+
+    // Gate 6: fetch activities from the broker — fail closed on error.
+    let activities = match fetcher.fetch_fill_activities_for_order(&body.broker_order_id) {
+        Ok(a) => a,
+        Err(e) => {
+            let evidence = format!(
+                "Alpaca REST activity fetch failed for broker_order_id='{}': {e}",
+                body.broker_order_id
+            );
+            let audit_id = write_rest_recovery_audit(
+                &rest_audit_ctx,
+                "refused",
+                "repair.rest_unavailable",
+                &evidence,
+            )
+            .await;
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(HaltedRunFillRestRecoveryResponse {
+                    truth_state: "backend_unavailable".to_string(),
+                    decision: "refused".to_string(),
+                    run_id: body.run_id.clone(),
+                    internal_order_id: body.internal_order_id.clone(),
+                    broker_order_id: body.broker_order_id.clone(),
+                    classification,
+                    evidence,
+                    gate: Some("repair.rest_unavailable".to_string()),
+                    audit_event_id: audit_id.map(|id| id.to_string()),
+                    rest_fill: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Gate 7: filter to FILL/PARTIAL_FILL — must be exactly one match.
+    let fill_activities: Vec<&mqk_broker_alpaca::types::AlpacaOrderActivity> = activities
+        .iter()
+        .filter(|a| matches!(a.activity_type.as_str(), "FILL" | "PARTIAL_FILL"))
+        .collect();
+
+    match fill_activities.len() {
+        0 => {
+            let evidence = format!(
+                "Alpaca REST returned no FILL/PARTIAL_FILL activities for \
+                 broker_order_id='{}' ({} total activities fetched). \
+                 The fill may not yet be present in the activity feed, \
+                 or the order was not filled.",
+                body.broker_order_id,
+                activities.len()
+            );
+            let audit_id = write_rest_recovery_audit(
+                &rest_audit_ctx,
+                "refused",
+                "repair.no_rest_match",
+                &evidence,
+            )
+            .await;
+            return refused_active!(
+                classification,
+                evidence,
+                Some("repair.no_rest_match".to_string()),
+                audit_id.map(|id| id.to_string())
+            );
+        }
+        n if n > 1 => {
+            let ids: Vec<&str> = fill_activities.iter().map(|a| a.id.as_str()).collect();
+            let evidence = format!(
+                "Alpaca REST returned {n} FILL/PARTIAL_FILL activities for \
+                 broker_order_id='{}'; ambiguous — cannot select a single authoritative fill. \
+                 Activity IDs: {:?}. Manual broker reconcile required.",
+                body.broker_order_id, ids
+            );
+            let audit_id = write_rest_recovery_audit(
+                &rest_audit_ctx,
+                "refused",
+                "repair.ambiguous_rest_match",
+                &evidence,
+            )
+            .await;
+            return refused_active!(
+                classification,
+                evidence,
+                Some("repair.ambiguous_rest_match".to_string()),
+                audit_id.map(|id| id.to_string())
+            );
+        }
+        _ => {}
+    }
+
+    let activity = fill_activities[0];
+
+    // Gate 8: price and qty must be present and non-empty.
+    let price_str = match activity.price.as_deref().filter(|s| !s.is_empty()) {
+        Some(p) => p.to_string(),
+        None => {
+            let evidence = format!(
+                "Alpaca REST activity (id='{}') for broker_order_id='{}' \
+                 has no fill price; data is incomplete. Manual reconcile required.",
+                activity.id, body.broker_order_id
+            );
+            let audit_id = write_rest_recovery_audit(
+                &rest_audit_ctx,
+                "refused",
+                "repair.recovery_data_malformed",
+                &evidence,
+            )
+            .await;
+            return refused_active!(
+                classification,
+                evidence,
+                Some("repair.recovery_data_malformed".to_string()),
+                audit_id.map(|id| id.to_string())
+            );
+        }
+    };
+
+    let qty_str = match activity.qty.as_deref().filter(|s| !s.is_empty()) {
+        Some(q) => q.to_string(),
+        None => {
+            let evidence = format!(
+                "Alpaca REST activity (id='{}') for broker_order_id='{}' \
+                 has no fill quantity; data is incomplete. Manual reconcile required.",
+                activity.id, body.broker_order_id
+            );
+            let audit_id = write_rest_recovery_audit(
+                &rest_audit_ctx,
+                "refused",
+                "repair.recovery_data_malformed",
+                &evidence,
+            )
+            .await;
+            return refused_active!(
+                classification,
+                evidence,
+                Some("repair.recovery_data_malformed".to_string()),
+                audit_id.map(|id| id.to_string())
+            );
+        }
+    };
+
+    // All gates passed — return plan-only REST-recovered fill evidence.
+    let rest_fill = RestRecoveredFill {
+        broker_activity_id: activity.id.clone(),
+        symbol: activity.symbol.clone(),
+        side: activity.side.clone(),
+        qty_str,
+        price_str,
+        timestamp: activity.transaction_time.clone(),
+        source: "alpaca_rest_activity".to_string(),
+        mutation_safe: false,
+    };
+
+    let evidence = format!(
+        "REST recovery: Alpaca activity (id='{}') confirms one {} fill for \
+         broker_order_id='{}' (internal='{}', run='{}'). \
+         price='{}' qty='{}' side='{}' symbol='{}' at '{}'. \
+         mutation_safe=false — apply is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.",
+        rest_fill.broker_activity_id,
+        activity.activity_type,
+        body.broker_order_id,
+        body.internal_order_id,
+        body.run_id,
+        rest_fill.price_str,
+        rest_fill.qty_str,
+        rest_fill.side,
+        rest_fill.symbol,
+        rest_fill.timestamp,
+    );
+
+    let audit_id = write_rest_recovery_audit(
+        &rest_audit_ctx,
+        "rest_recovered_fill_evidence",
+        "repair.rest_recovered",
+        &evidence,
+    )
+    .await;
+
+    (
+        StatusCode::OK,
+        Json(HaltedRunFillRestRecoveryResponse {
+            truth_state: "active".to_string(),
+            decision: "rest_recovered_fill_evidence".to_string(),
+            run_id: body.run_id.clone(),
+            internal_order_id: body.internal_order_id.clone(),
+            broker_order_id: body.broker_order_id.clone(),
+            classification,
+            evidence,
+            gate: None,
+            audit_event_id: audit_id.map(|id| id.to_string()),
+            rest_fill: Some(rest_fill),
+        }),
+    )
+        .into_response()
+}
+
+struct RestRecoveryAuditCtx<'a> {
+    db: &'a sqlx::PgPool,
+    run_id: uuid::Uuid,
+    internal_order_id: &'a str,
+    broker_order_id: &'a str,
+}
+
+/// Write a durable REST recovery audit event.
+///
+/// Non-fatal: audit failure does not block the recovery outcome.
+/// Returns the event UUID on success, `None` on failure.
+async fn write_rest_recovery_audit(
+    ctx: &RestRecoveryAuditCtx<'_>,
+    decision: &str,
+    gate: &str,
+    evidence: &str,
+) -> Option<uuid::Uuid> {
+    let db = ctx.db;
+    let run_id = ctx.run_id;
+    let internal_order_id = ctx.internal_order_id;
+    let broker_order_id = ctx.broker_order_id;
+    let ts_utc = Utc::now();
+    let event_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk-daemon.repair.halted-fill-rest-recovery.v1|{}|{}|{}|{}",
+            run_id,
+            internal_order_id,
+            decision,
+            ts_utc.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+        )
+        .as_bytes(),
+    );
+    let result = mqk_db::insert_audit_event(
+        db,
+        &mqk_db::NewAuditEvent {
+            event_id,
+            run_id,
+            ts_utc,
+            topic: "operator".to_string(),
+            event_type: "ops.repair.halted_fill_rest_recovery".to_string(),
+            payload: serde_json::json!({
+                "internal_order_id": internal_order_id,
+                "broker_order_id": broker_order_id,
+                "decision": decision,
+                "gate": gate,
+                "evidence": evidence,
+                "source": "mqk-daemon.routes.repair",
+            }),
+            hash_prev: None,
+            hash_self: None,
+        },
+    )
+    .await;
+
+    if let Err(err) = result {
+        tracing::warn!(
+            "repair_halted_run_fill_rest_recovery: audit write failed (non-fatal): {err}"
+        );
         return None;
     }
 
