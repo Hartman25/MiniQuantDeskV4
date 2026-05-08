@@ -1,4 +1,4 @@
-//! OPS-REPAIR-01 — Audited ambiguous outbox repair route.
+//! OPS-REPAIR-01 â€” Audited ambiguous outbox repair route.
 //!
 //! POST /api/v1/ops/repair/outbox-ambiguous
 //!
@@ -8,10 +8,10 @@
 //!
 //! ## Safety contract
 //!
-//! - Broker snapshot must be present — absent snapshot → refused.
+//! - Broker snapshot must be present â€” absent snapshot â†’ refused.
 //! - Broker snapshot must not contain a live order with matching client_order_id
-//!   — detected live order → refused.
-//! - Row must exist and must be AMBIGUOUS — any other status → refused.
+//!   â€” detected live order â†’ refused.
+//! - Row must exist and must be AMBIGUOUS â€” any other status â†’ refused.
 //! - `outbox_reset_ambiguous_to_pending` is called only after all evidence
 //!   checks pass.
 //! - Every call writes a durable audit event (non-fatal: audit failure does
@@ -70,7 +70,7 @@ pub(crate) async fn repair_outbox_ambiguous(
             .into_response();
     }
 
-    // Load the outbox row — must exist and must be AMBIGUOUS.
+    // Load the outbox row â€” must exist and must be AMBIGUOUS.
     let row = match mqk_db::outbox_fetch_by_idempotency_key(db, &idempotency_key).await {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -136,7 +136,7 @@ pub(crate) async fn repair_outbox_ambiguous(
     // for this idempotency_key (== client_order_id in the broker snapshot).
     let broker_snap = st.current_broker_snapshot().await;
     let Some(snapshot) = broker_snap else {
-        let evidence = "broker snapshot is absent; cannot confirm broker state — \
+        let evidence = "broker snapshot is absent; cannot confirm broker state â€” \
                         ensure a broker snapshot is loaded before repairing (OPS-REPAIR-01)"
             .to_string();
         write_repair_audit(
@@ -171,7 +171,7 @@ pub(crate) async fn repair_outbox_ambiguous(
         let evidence = format!(
             "broker snapshot contains a live order for this idempotency_key \
              (broker_order_id={}, status='{}'); \
-             cannot release — verify broker side before retrying (OPS-REPAIR-01)",
+             cannot release â€” verify broker side before retrying (OPS-REPAIR-01)",
             live_order.broker_order_id, live_order.status
         );
         write_repair_audit(
@@ -198,7 +198,7 @@ pub(crate) async fn repair_outbox_ambiguous(
             .into_response();
     }
 
-    // Evidence passed — release the row.
+    // Evidence passed â€” release the row.
     match mqk_db::outbox_reset_ambiguous_to_pending(db, &idempotency_key).await {
         Ok(true) => {}
         Ok(false) => {
@@ -247,7 +247,7 @@ pub(crate) async fn repair_outbox_ambiguous(
 
     let evidence = format!(
         "broker snapshot captured at {} confirmed no live open order for \
-         idempotency_key='{}'; row released AMBIGUOUS→PENDING",
+         idempotency_key='{}'; row released AMBIGUOUSâ†’PENDING",
         snapshot.captured_at_utc.to_rfc3339(),
         idempotency_key
     );
@@ -332,7 +332,7 @@ async fn write_repair_audit(
 }
 
 // ---------------------------------------------------------------------------
-// BROKER-FILL-REPLAY-REPAIR-01 — dry-run halted-run fill planner
+// BROKER-FILL-REPLAY-REPAIR-01 â€” dry-run halted-run fill planner
 // ---------------------------------------------------------------------------
 //
 // GET /api/v1/ops/repair/halted-run-fill-plan
@@ -349,20 +349,20 @@ const ALPACA_ADAPTER_ID: &str = "alpaca";
 /// Classify one stale broker-order-map entry.
 ///
 /// Classification rules:
-/// 1. `unapplied_inbox_fill` — `oms_inbox` has at least one unapplied
+/// 1. `unapplied_inbox_fill` â€” `oms_inbox` has at least one unapplied
 ///    (`applied_at_utc IS NULL`) fill or partial_fill row for this run.
 ///    The fill arrived in the inbox but Phase 3 never ran (run halted first).
-/// 2. `cursor_only_fill_evidence` — no unapplied inbox fill row, but the
+/// 2. `cursor_only_fill_evidence` â€” no unapplied inbox fill row, but the
 ///    broker event cursor's `last_message_id` contains the `broker_order_id`,
 ///    proving the WS transport received the fill and advanced the cursor.
 ///    The inbox row was either applied+then-deleted or the run halted between
 ///    cursor advance and inbox insert (both rare; the latter is impossible
 ///    given the BRK-02R ordering invariant where inbox insert precedes cursor
 ///    advance).
-/// 3. `no_fill_evidence` — no inbox fill row and the cursor does not mention
+/// 3. `no_fill_evidence` â€” no inbox fill row and the cursor does not mention
 ///    the broker_order_id.  Order may still be open or fill may not have
 ///    arrived yet.
-/// 4. `ambiguous` — classification could not be determined; operator must
+/// 4. `ambiguous` â€” classification could not be determined; operator must
 ///    investigate directly.
 fn classify_stale_entry(
     internal_order_id: &str,
@@ -575,7 +575,7 @@ pub(crate) async fn repair_halted_run_fill_plan(State(st): State<Arc<AppState>>)
 }
 
 // ---------------------------------------------------------------------------
-// BROKER-FILL-REPLAY-APPLY-01 — guarded operator repair apply route
+// BROKER-FILL-REPLAY-APPLY-01 â€” guarded operator repair apply route
 // ---------------------------------------------------------------------------
 //
 // POST /api/v1/ops/repair/halted-run-fill-apply
@@ -590,11 +590,11 @@ pub(crate) async fn repair_halted_run_fill_plan(State(st): State<Arc<AppState>>)
 //   audit event.  The in-memory portfolio for the HALTED run is NOT updated
 //   (run is terminal); this is explicitly documented in the response.
 //
-// - `cursor_only_fill_evidence` case: REFUSED — the broker cursor confirms a
+// - `cursor_only_fill_evidence` case: REFUSED â€” the broker cursor confirms a
 //   fill arrived but does not carry price or qty.  REST activity recovery
 //   (BROKER-FILL-REST-RECOVERY-01) is required for authoritative fill details.
 //
-// - `no_fill_evidence` case: REFUSED — nothing to apply.
+// - `no_fill_evidence` case: REFUSED â€” nothing to apply.
 //
 // - `dry_run = true` (default): no mutation; returns planned actions only.
 // - `dry_run = false`: requires `confirmation = "APPLY_HALTED_FILL_REPAIR"`.
@@ -675,6 +675,15 @@ pub(crate) async fn repair_halted_run_fill_apply(
         }
     };
 
+    // Build audit context for all subsequent write_fill_apply_audit calls.
+    let audit_ctx = FillAuditCtx {
+        db,
+        run_id,
+        internal_order_id: &body.internal_order_id,
+        broker_order_id: &body.broker_order_id,
+        dry_run,
+    };
+
     // Gate 3: dry_run=false requires confirmation token.
     if !dry_run {
         match body.confirmation.as_deref() {
@@ -698,9 +707,7 @@ pub(crate) async fn repair_halted_run_fill_apply(
                     StatusCode::BAD_REQUEST,
                     "unknown",
                     "refused",
-                    format!(
-                        "dry_run=false requires confirmation='{APPLY_CONFIRMATION_TOKEN}'"
-                    ),
+                    format!("dry_run=false requires confirmation='{APPLY_CONFIRMATION_TOKEN}'"),
                     Some("repair.confirmation_required".to_string()),
                     None,
                     None
@@ -746,18 +753,9 @@ pub(crate) async fn repair_halted_run_fill_apply(
              entry may have already been cleaned up or IDs are incorrect",
             body.run_id, body.internal_order_id, body.broker_order_id
         );
-        let audit_id = write_fill_apply_audit(
-            &st,
-            db,
-            run_id,
-            &body.internal_order_id,
-            &body.broker_order_id,
-            "refused",
-            "repair.entry_not_found",
-            &evidence,
-            dry_run,
-        )
-        .await;
+        let audit_id =
+            write_fill_apply_audit(&audit_ctx, "refused", "repair.entry_not_found", &evidence)
+                .await;
         return refused!(
             StatusCode::NOT_FOUND,
             "unknown",
@@ -820,7 +818,7 @@ pub(crate) async fn repair_halted_run_fill_apply(
         cursor_last_message_id.as_deref(),
     );
 
-    // Gate 6: refuse cursor_only — no authoritative fill price/qty.
+    // Gate 6: refuse cursor_only â€” no authoritative fill price/qty.
     if classification == "cursor_only_fill_evidence" {
         let evidence = format!(
             "cursor_only_fill_evidence: the broker WS cursor confirms a fill event \
@@ -832,15 +830,10 @@ pub(crate) async fn repair_halted_run_fill_apply(
             body.broker_order_id
         );
         let audit_id = write_fill_apply_audit(
-            &st,
-            db,
-            run_id,
-            &body.internal_order_id,
-            &body.broker_order_id,
+            &audit_ctx,
             "refused",
             "repair.evidence_insufficient",
             &evidence,
-            dry_run,
         )
         .await;
         return refused!(
@@ -854,25 +847,15 @@ pub(crate) async fn repair_halted_run_fill_apply(
         );
     }
 
-    // Gate 7: refuse no_fill_evidence — nothing to apply.
+    // Gate 7: refuse no_fill_evidence â€” nothing to apply.
     if classification == "no_fill_evidence" {
         let evidence = format!(
             "no_fill_evidence: no unapplied inbox fill row and no cursor evidence \
              for broker_order_id='{}'; nothing to apply.",
             body.broker_order_id
         );
-        let audit_id = write_fill_apply_audit(
-            &st,
-            db,
-            run_id,
-            &body.internal_order_id,
-            &body.broker_order_id,
-            "refused",
-            "repair.no_evidence",
-            &evidence,
-            dry_run,
-        )
-        .await;
+        let audit_id =
+            write_fill_apply_audit(&audit_ctx, "refused", "repair.no_evidence", &evidence).await;
         return refused!(
             StatusCode::CONFLICT,
             classification,
@@ -886,52 +869,46 @@ pub(crate) async fn repair_halted_run_fill_apply(
 
     // classification == "unapplied_inbox_fill"
     // Gate 8: load the specific fill row for this order.
-    let fill_rows =
-        match mqk_db::inbox_load_unapplied_fill_for_order(db, run_id, &body.internal_order_id)
-            .await
-        {
-            Ok(rows) => rows,
-            Err(e) => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(HaltedRunFillApplyResponse {
-                        truth_state: "backend_unavailable".to_string(),
-                        decision: "refused".to_string(),
-                        dry_run,
-                        run_id: body.run_id.clone(),
-                        internal_order_id: body.internal_order_id.clone(),
-                        broker_order_id: body.broker_order_id.clone(),
-                        classification: classification.clone(),
-                        evidence: format!("fill row query failed: {e}"),
-                        gate: Some("repair.db_error".to_string()),
-                        audit_event_id: None,
-                        follow_up_patch: None,
-                    }),
-                )
-                    .into_response();
-            }
-        };
+    let fill_rows = match mqk_db::inbox_load_unapplied_fill_for_order(
+        db,
+        run_id,
+        &body.internal_order_id,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(HaltedRunFillApplyResponse {
+                    truth_state: "backend_unavailable".to_string(),
+                    decision: "refused".to_string(),
+                    dry_run,
+                    run_id: body.run_id.clone(),
+                    internal_order_id: body.internal_order_id.clone(),
+                    broker_order_id: body.broker_order_id.clone(),
+                    classification: classification.clone(),
+                    evidence: format!("fill row query failed: {e}"),
+                    gate: Some("repair.db_error".to_string()),
+                    audit_event_id: None,
+                    follow_up_patch: None,
+                }),
+            )
+                .into_response();
+        }
+    };
 
     // Gate 9: at least one fill row must be present.
     let fill_row = match fill_rows.first() {
         Some(r) => r,
         None => {
             let evidence = "unapplied_inbox_fill classification but no fill row found \
-                            after targeted query — state changed between classification \
+                            after targeted query â€” state changed between classification \
                             and apply; retry the planner"
                 .to_string();
-            let audit_id = write_fill_apply_audit(
-                &st,
-                db,
-                run_id,
-                &body.internal_order_id,
-                &body.broker_order_id,
-                "refused",
-                "repair.fill_row_missing",
-                &evidence,
-                dry_run,
-            )
-            .await;
+            let audit_id =
+                write_fill_apply_audit(&audit_ctx, "refused", "repair.fill_row_missing", &evidence)
+                    .await;
             return refused!(
                 StatusCode::CONFLICT,
                 classification,
@@ -956,15 +933,10 @@ pub(crate) async fn repair_halted_run_fill_apply(
                 .unwrap_or_default()
         );
         let audit_id = write_fill_apply_audit(
-            &st,
-            db,
-            run_id,
-            &body.internal_order_id,
-            &body.broker_order_id,
+            &audit_ctx,
             "already_repaired",
             "repair.already_applied",
             &evidence,
-            dry_run,
         )
         .await;
         return (
@@ -987,7 +959,7 @@ pub(crate) async fn repair_halted_run_fill_apply(
     }
 
     // Gate 11: verify the inbox row's message_json deserializes as a BrokerEvent
-    // fill variant — proves the data is structurally complete before any mutation.
+    // fill variant â€” proves the data is structurally complete before any mutation.
     let event_valid =
         match serde_json::from_value::<mqk_execution::BrokerEvent>(fill_row.message_json.clone()) {
             Ok(mqk_execution::BrokerEvent::Fill { .. })
@@ -1004,15 +976,10 @@ pub(crate) async fn repair_halted_run_fill_apply(
             fill_row.broker_message_id
         );
         let audit_id = write_fill_apply_audit(
-            &st,
-            db,
-            run_id,
-            &body.internal_order_id,
-            &body.broker_order_id,
+            &audit_ctx,
             "refused",
             "repair.malformed_fill_event",
             &evidence,
-            dry_run,
         )
         .await;
         return refused!(
@@ -1035,18 +1002,8 @@ pub(crate) async fn repair_halted_run_fill_apply(
              confirmation='APPLY_HALTED_FILL_REPAIR' to execute.",
             fill_row.broker_message_id, run_id
         );
-        let audit_id = write_fill_apply_audit(
-            &st,
-            db,
-            run_id,
-            &body.internal_order_id,
-            &body.broker_order_id,
-            "dry_run_ok",
-            "repair.dry_run",
-            &evidence,
-            dry_run,
-        )
-        .await;
+        let audit_id =
+            write_fill_apply_audit(&audit_ctx, "dry_run_ok", "repair.dry_run", &evidence).await;
         return (
             StatusCode::OK,
             Json(HaltedRunFillApplyResponse {
@@ -1078,9 +1035,7 @@ pub(crate) async fn repair_halted_run_fill_apply(
     let applied_at = Utc::now();
     let msg_id = fill_row.broker_message_id.clone();
 
-    if let Err(e) =
-        mqk_db::inbox_mark_applied(db, run_id, &msg_id, applied_at).await
-    {
+    if let Err(e) = mqk_db::inbox_mark_applied(db, run_id, &msg_id, applied_at).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(HaltedRunFillApplyResponse {
@@ -1104,7 +1059,7 @@ pub(crate) async fn repair_halted_run_fill_apply(
         "Inbox row (broker_message_id='{}') marked applied at {}. \
          Fill evidence acknowledged: run_id='{}', internal_order_id='{}', \
          broker_order_id='{}'. NOTE: in-memory portfolio for this HALTED run \
-         was NOT updated — run is terminal. Start a new run to begin with \
+         was NOT updated â€” run is terminal. Start a new run to begin with \
          fresh portfolio state.",
         msg_id,
         applied_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
@@ -1113,18 +1068,7 @@ pub(crate) async fn repair_halted_run_fill_apply(
         body.broker_order_id
     );
 
-    let audit_id = write_fill_apply_audit(
-        &st,
-        db,
-        run_id,
-        &body.internal_order_id,
-        &body.broker_order_id,
-        "applied",
-        "repair.applied",
-        &evidence,
-        dry_run,
-    )
-    .await;
+    let audit_id = write_fill_apply_audit(&audit_ctx, "applied", "repair.applied", &evidence).await;
 
     (
         StatusCode::OK,
@@ -1145,21 +1089,29 @@ pub(crate) async fn repair_halted_run_fill_apply(
         .into_response()
 }
 
+struct FillAuditCtx<'a> {
+    db: &'a sqlx::PgPool,
+    run_id: uuid::Uuid,
+    internal_order_id: &'a str,
+    broker_order_id: &'a str,
+    dry_run: bool,
+}
+
 /// Write a durable fill-apply repair audit event.
 ///
 /// Non-fatal: audit failure does not block the repair outcome.
 /// Returns the event UUID on success, `None` on failure.
 async fn write_fill_apply_audit(
-    _st: &Arc<AppState>,
-    db: &sqlx::PgPool,
-    run_id: uuid::Uuid,
-    internal_order_id: &str,
-    broker_order_id: &str,
+    ctx: &FillAuditCtx<'_>,
     decision: &str,
     gate: &str,
     evidence: &str,
-    dry_run: bool,
 ) -> Option<uuid::Uuid> {
+    let db = ctx.db;
+    let run_id = ctx.run_id;
+    let internal_order_id = ctx.internal_order_id;
+    let broker_order_id = ctx.broker_order_id;
+    let dry_run = ctx.dry_run;
     let ts_utc = Utc::now();
     // Deterministic event ID: same logical repair decision on same order produces
     // the same audit ID (idempotent audit trail for dry_run).

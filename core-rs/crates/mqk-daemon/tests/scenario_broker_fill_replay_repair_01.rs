@@ -203,7 +203,7 @@ async fn seed_unapplied_fill_inbox(
 ) {
     let now = chrono::Utc::now();
     let fill_event = serde_json::json!({
-        "type": "Fill",
+        "type": "fill",
         "broker_message_id": msg_id,
         "broker_fill_id": null,
         "internal_order_id": internal_id,
@@ -220,7 +220,9 @@ async fn seed_unapplied_fill_inbox(
                                broker_order_id, event_kind, message_json,
                                event_ts_ms, received_at_utc, applied_at_utc)
         values ($1, $2, $3, $4, 'fill', $5, 0, $6, null)
-        on conflict (run_id, broker_message_id) do nothing
+        on conflict (run_id, broker_message_id) do update
+            set message_json    = excluded.message_json,
+                applied_at_utc  = null
         "#,
     )
     .bind(run_id)
@@ -1027,13 +1029,14 @@ async fn a08_cursor_only_no_inbox_row_never_marked_applied() {
     );
 
     // Confirm no oms_inbox row exists for this order.
-    let row_count: (i64,) =
-        sqlx::query_as("select count(*) from oms_inbox where run_id = $1 and internal_order_id = $2")
-            .bind(run_id)
-            .bind(&internal_id)
-            .fetch_one(pool)
-            .await
-            .expect("A08: count query");
+    let row_count: (i64,) = sqlx::query_as(
+        "select count(*) from oms_inbox where run_id = $1 and internal_order_id = $2",
+    )
+    .bind(run_id)
+    .bind(&internal_id)
+    .fetch_one(pool)
+    .await
+    .expect("A08: count query");
     assert_eq!(
         row_count.0, 0,
         "A08: no inbox rows should exist for cursor-only order"
