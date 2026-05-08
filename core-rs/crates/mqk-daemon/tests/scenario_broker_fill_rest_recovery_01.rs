@@ -42,7 +42,6 @@ impl FakeFillFetcher {
             error: None,
         })
     }
-
 }
 
 impl state::BrokerFillActivityFetcher for FakeFillFetcher {
@@ -828,4 +827,688 @@ async fn r08_cursor_only_malformed_price_returns_409() {
     restore_broker_cursor(&pool, "alpaca", saved_cursor.as_deref()).await;
     clear_broker_map(&pool, &internal_id).await;
     clear_outbox(&pool, &internal_id).await;
+}
+
+// ===========================================================================
+// BROKER-FILL-REST-RECOVERY-APPLY-01 proof tests
+//
+// | Test  | Claim                                                                              |
+// |-------|------------------------------------------------------------------------------------|
+// | A01   | dry_run=true with exact REST fill → 200 no inbox row inserted                      |
+// | A02   | dry_run=false without confirmation → 400 refused, no mutation                      |
+// | A03   | dry_run=false + valid confirmation → 200 applied, inbox row inserted and stamped   |
+// | A04   | second confirmed apply → 200 already_repaired, no duplicate row                   |
+// | A05   | ambiguous REST matches + confirmation → 409 refused, no mutation                   |
+// | A06   | malformed REST fill + confirmation → 409 refused, no mutation                      |
+// | A07   | no REST match + confirmation → 409 refused, no mutation                            |
+// | A08   | cursor-only entry, no fetcher + confirmation → 503 refused, no mutation            |
+//
+// A01-A08 are DB-backed; they skip gracefully without MQK_DATABASE_URL.
+// ===========================================================================
+
+fn apply_req(body: serde_json::Value) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::builder()
+        .method(axum::http::Method::POST)
+        .uri("/api/v1/ops/repair/halted-run-fill-rest-recovery")
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&body).expect("serialize body"),
+        ))
+        .unwrap()
+}
+
+async fn inbox_applied_at(
+    pool: &sqlx::PgPool,
+    run_id: uuid::Uuid,
+    msg_id: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+        "select applied_at_utc from oms_inbox where run_id = $1 and broker_message_id = $2",
+    )
+    .bind(run_id)
+    .bind(msg_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+}
+
+async fn inbox_row_count(pool: &sqlx::PgPool, run_id: uuid::Uuid, msg_id: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*) from oms_inbox where run_id = $1 and broker_message_id = $2",
+    )
+    .bind(run_id)
+    .bind(msg_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// A01 — dry_run=true with valid REST fill → 200 rest_recovered_fill_evidence, no inbox row
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a01_dry_run_true_no_inbox_insert() {
+    let url = match std::env::var(mqk_db::ENV_DB_URL) {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP A01: MQK_DATABASE_URL not set");
+            return;
+        }
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("A01: DB connect");
+    mqk_db::migrate(&pool).await.expect("A01: migrate");
+
+    let run_id = seed_halted_run(&pool, "a01").await;
+    let (internal_id, broker_id) = seed_sent_outbox_and_broker_map(&pool, run_id, "a01").await;
+    let saved_cursor = save_broker_cursor(&pool, "alpaca").await;
+    seed_broker_cursor(&pool, "alpaca", &broker_id).await;
+
+    let act_id = "act-a01-dry-run";
+    let act = make_fill_activity(act_id, &broker_id);
+    let mut state_inner = state::AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        state::DeploymentMode::LiveShadow,
+        state::BrokerKind::Alpaca,
+    );
+    state_inner.set_fill_activity_fetcher_for_test(FakeFillFetcher::returning(vec![act]));
+    let state = Arc::new(state_inner);
+
+    let router = routes::build_router(Arc::clone(&state));
+    let (status, body) = call(
+        router,
+        apply_req(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "internal_order_id": internal_id,
+            "broker_order_id": broker_id,
+            "dry_run": true
+        })),
+    )
+    .await;
+
+    assert_eq!(status, axum::http::StatusCode::OK, "A01: expected 200");
+    let j = parse_json(body);
+    assert_eq!(
+        j["decision"].as_str().unwrap_or(""),
+        "rest_recovered_fill_evidence",
+        "A01: decision must be 'rest_recovered_fill_evidence'"
+    );
+    assert_eq!(
+        j["dry_run"].as_bool(),
+        Some(true),
+        "A01: dry_run must be true"
+    );
+    assert_eq!(
+        j["mutated"].as_bool(),
+        Some(false),
+        "A01: mutated must be false"
+    );
+    assert!(
+        j["inbox_broker_message_id"].is_null(),
+        "A01: no inbox_broker_message_id on dry_run"
+    );
+
+    let stable_msg_id = format!("alpaca-rest-recovery:{act_id}");
+    let count = inbox_row_count(&pool, run_id, &stable_msg_id).await;
+    assert_eq!(count, 0, "A01: dry_run must not insert inbox row");
+
+    restore_broker_cursor(&pool, "alpaca", saved_cursor.as_deref()).await;
+    clear_broker_map(&pool, &internal_id).await;
+    clear_outbox(&pool, &internal_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// A02 — dry_run=false without confirmation → 400 refused, no mutation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a02_dry_run_false_no_confirmation_refused() {
+    let url = match std::env::var(mqk_db::ENV_DB_URL) {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP A02: MQK_DATABASE_URL not set");
+            return;
+        }
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("A02: DB connect");
+    mqk_db::migrate(&pool).await.expect("A02: migrate");
+
+    let run_id = seed_halted_run(&pool, "a02").await;
+    let (internal_id, broker_id) = seed_sent_outbox_and_broker_map(&pool, run_id, "a02").await;
+    let saved_cursor = save_broker_cursor(&pool, "alpaca").await;
+    seed_broker_cursor(&pool, "alpaca", &broker_id).await;
+
+    let act_id = "act-a02-no-confirm";
+    let act = make_fill_activity(act_id, &broker_id);
+    let mut state_inner = state::AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        state::DeploymentMode::LiveShadow,
+        state::BrokerKind::Alpaca,
+    );
+    state_inner.set_fill_activity_fetcher_for_test(FakeFillFetcher::returning(vec![act]));
+    let state = Arc::new(state_inner);
+
+    let router = routes::build_router(Arc::clone(&state));
+    let (status, body) = call(
+        router,
+        apply_req(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "internal_order_id": internal_id,
+            "broker_order_id": broker_id,
+            "dry_run": false
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        axum::http::StatusCode::BAD_REQUEST,
+        "A02: expected 400"
+    );
+    let j = parse_json(body);
+    assert_eq!(
+        j["decision"].as_str().unwrap_or(""),
+        "refused",
+        "A02: decision must be 'refused'"
+    );
+    assert_eq!(
+        j["gate"].as_str().unwrap_or(""),
+        "repair.confirmation_required",
+        "A02: gate must be confirmation_required"
+    );
+    assert_eq!(
+        j["mutated"].as_bool(),
+        Some(false),
+        "A02: mutated must be false"
+    );
+
+    let stable_msg_id = format!("alpaca-rest-recovery:{act_id}");
+    assert_eq!(
+        inbox_row_count(&pool, run_id, &stable_msg_id).await,
+        0,
+        "A02: no inbox row on refused"
+    );
+
+    restore_broker_cursor(&pool, "alpaca", saved_cursor.as_deref()).await;
+    clear_broker_map(&pool, &internal_id).await;
+    clear_outbox(&pool, &internal_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// A03 — dry_run=false + valid confirmation → 200 applied, inbox row present and stamped
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a03_confirmed_apply_inserts_and_stamps_inbox() {
+    let url = match std::env::var(mqk_db::ENV_DB_URL) {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP A03: MQK_DATABASE_URL not set");
+            return;
+        }
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("A03: DB connect");
+    mqk_db::migrate(&pool).await.expect("A03: migrate");
+
+    let run_id = seed_halted_run(&pool, "a03").await;
+    let (internal_id, broker_id) = seed_sent_outbox_and_broker_map(&pool, run_id, "a03").await;
+    let saved_cursor = save_broker_cursor(&pool, "alpaca").await;
+    seed_broker_cursor(&pool, "alpaca", &broker_id).await;
+
+    let act_id = "act-a03-confirmed";
+    let act = make_fill_activity(act_id, &broker_id);
+    let stable_msg_id = format!("alpaca-rest-recovery:{act_id}");
+
+    assert_eq!(
+        inbox_row_count(&pool, run_id, &stable_msg_id).await,
+        0,
+        "A03: precondition — no inbox row before apply"
+    );
+
+    let mut state_inner = state::AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        state::DeploymentMode::LiveShadow,
+        state::BrokerKind::Alpaca,
+    );
+    state_inner.set_fill_activity_fetcher_for_test(FakeFillFetcher::returning(vec![act]));
+    let state = Arc::new(state_inner);
+
+    let router = routes::build_router(Arc::clone(&state));
+    let (status, body) = call(
+        router,
+        apply_req(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "internal_order_id": internal_id,
+            "broker_order_id": broker_id,
+            "dry_run": false,
+            "confirmation": "APPLY_REST_FILL_RECOVERY"
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "A03: expected 200; body={}",
+        { std::str::from_utf8(&body).unwrap_or("<binary>") }
+    );
+    let j = parse_json(body);
+    assert_eq!(
+        j["decision"].as_str().unwrap_or(""),
+        "applied",
+        "A03: decision must be 'applied'"
+    );
+    assert_eq!(
+        j["dry_run"].as_bool(),
+        Some(false),
+        "A03: dry_run must be false"
+    );
+    assert_eq!(
+        j["mutated"].as_bool(),
+        Some(true),
+        "A03: mutated must be true"
+    );
+    assert_eq!(
+        j["inbox_broker_message_id"].as_str().unwrap_or(""),
+        stable_msg_id,
+        "A03: inbox_broker_message_id must match stable key"
+    );
+    let rf = &j["rest_fill"];
+    assert!(!rf.is_null(), "A03: rest_fill must be present");
+    assert_eq!(
+        rf["mutation_safe"].as_bool(),
+        Some(true),
+        "A03: mutation_safe must be true after apply"
+    );
+
+    assert_eq!(
+        inbox_row_count(&pool, run_id, &stable_msg_id).await,
+        1,
+        "A03: exactly one inbox row after apply"
+    );
+    assert!(
+        inbox_applied_at(&pool, run_id, &stable_msg_id)
+            .await
+            .is_some(),
+        "A03: applied_at_utc must be set after apply"
+    );
+
+    restore_broker_cursor(&pool, "alpaca", saved_cursor.as_deref()).await;
+    clear_test_inbox(&pool, "alpaca-rest-recovery:act-a03").await;
+    clear_broker_map(&pool, &internal_id).await;
+    clear_outbox(&pool, &internal_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// A04 — second confirmed apply → 200 already_repaired, no duplicate row
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a04_second_apply_is_idempotent_already_repaired() {
+    let url = match std::env::var(mqk_db::ENV_DB_URL) {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP A04: MQK_DATABASE_URL not set");
+            return;
+        }
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("A04: DB connect");
+    mqk_db::migrate(&pool).await.expect("A04: migrate");
+
+    let run_id = seed_halted_run(&pool, "a04").await;
+    let (internal_id, broker_id) = seed_sent_outbox_and_broker_map(&pool, run_id, "a04").await;
+    let saved_cursor = save_broker_cursor(&pool, "alpaca").await;
+    seed_broker_cursor(&pool, "alpaca", &broker_id).await;
+
+    let act_id = "act-a04-idempotent";
+    let stable_msg_id = format!("alpaca-rest-recovery:{act_id}");
+
+    let req_body = serde_json::json!({
+        "run_id": run_id.to_string(),
+        "internal_order_id": internal_id,
+        "broker_order_id": broker_id,
+        "dry_run": false,
+        "confirmation": "APPLY_REST_FILL_RECOVERY"
+    });
+
+    let make_state = || {
+        let act = make_fill_activity(act_id, &broker_id);
+        let mut state_inner = state::AppState::new_for_test_with_db_mode_and_broker(
+            pool.clone(),
+            state::DeploymentMode::LiveShadow,
+            state::BrokerKind::Alpaca,
+        );
+        state_inner.set_fill_activity_fetcher_for_test(FakeFillFetcher::returning(vec![act]));
+        Arc::new(state_inner)
+    };
+
+    // First apply.
+    let (s1, b1) = call(
+        routes::build_router(make_state()),
+        apply_req(req_body.clone()),
+    )
+    .await;
+    let j1 = parse_json(b1);
+    assert_eq!(
+        s1,
+        axum::http::StatusCode::OK,
+        "A04: first call must be 200"
+    );
+    assert_eq!(
+        j1["decision"].as_str().unwrap_or(""),
+        "applied",
+        "A04: first call decision must be 'applied'"
+    );
+    assert_eq!(
+        inbox_row_count(&pool, run_id, &stable_msg_id).await,
+        1,
+        "A04: exactly one inbox row after first apply"
+    );
+
+    // Second apply — must be idempotent.
+    let (s2, b2) = call(routes::build_router(make_state()), apply_req(req_body)).await;
+    let j2 = parse_json(b2);
+    assert_eq!(
+        s2,
+        axum::http::StatusCode::OK,
+        "A04: second call must be 200"
+    );
+    assert_eq!(
+        j2["decision"].as_str().unwrap_or(""),
+        "already_repaired",
+        "A04: second call decision must be 'already_repaired'"
+    );
+    assert_eq!(
+        j2["mutated"].as_bool(),
+        Some(false),
+        "A04: mutated must be false on already_repaired"
+    );
+    assert_eq!(
+        inbox_row_count(&pool, run_id, &stable_msg_id).await,
+        1,
+        "A04: still exactly one inbox row after second apply"
+    );
+
+    restore_broker_cursor(&pool, "alpaca", saved_cursor.as_deref()).await;
+    clear_test_inbox(&pool, "alpaca-rest-recovery:act-a04").await;
+    clear_broker_map(&pool, &internal_id).await;
+    clear_outbox(&pool, &internal_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// A05 — ambiguous REST matches + confirmation → 409 refused, no mutation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a05_ambiguous_rest_match_with_confirmation_refused() {
+    let url = match std::env::var(mqk_db::ENV_DB_URL) {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP A05: MQK_DATABASE_URL not set");
+            return;
+        }
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("A05: DB connect");
+    mqk_db::migrate(&pool).await.expect("A05: migrate");
+
+    let run_id = seed_halted_run(&pool, "a05").await;
+    let (internal_id, broker_id) = seed_sent_outbox_and_broker_map(&pool, run_id, "a05").await;
+    let saved_cursor = save_broker_cursor(&pool, "alpaca").await;
+    seed_broker_cursor(&pool, "alpaca", &broker_id).await;
+
+    let acts = vec![
+        make_fill_activity("act-a05-1", &broker_id),
+        make_fill_activity("act-a05-2", &broker_id),
+    ];
+    let mut state_inner = state::AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        state::DeploymentMode::LiveShadow,
+        state::BrokerKind::Alpaca,
+    );
+    state_inner.set_fill_activity_fetcher_for_test(FakeFillFetcher::returning(acts));
+    let state = Arc::new(state_inner);
+
+    let (status, body) = call(
+        routes::build_router(state),
+        apply_req(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "internal_order_id": internal_id,
+            "broker_order_id": broker_id,
+            "dry_run": false,
+            "confirmation": "APPLY_REST_FILL_RECOVERY"
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        axum::http::StatusCode::CONFLICT,
+        "A05: expected 409"
+    );
+    let j = parse_json(body);
+    assert_eq!(
+        j["gate"].as_str().unwrap_or(""),
+        "repair.ambiguous_rest_match",
+        "A05: gate must be ambiguous_rest_match"
+    );
+    assert_eq!(
+        j["mutated"].as_bool(),
+        Some(false),
+        "A05: mutated must be false"
+    );
+
+    restore_broker_cursor(&pool, "alpaca", saved_cursor.as_deref()).await;
+    clear_broker_map(&pool, &internal_id).await;
+    clear_outbox(&pool, &internal_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// A06 — malformed REST fill (no price) + confirmation → 409 refused, no mutation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a06_malformed_rest_fill_with_confirmation_refused() {
+    let url = match std::env::var(mqk_db::ENV_DB_URL) {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP A06: MQK_DATABASE_URL not set");
+            return;
+        }
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("A06: DB connect");
+    mqk_db::migrate(&pool).await.expect("A06: migrate");
+
+    let run_id = seed_halted_run(&pool, "a06").await;
+    let (internal_id, broker_id) = seed_sent_outbox_and_broker_map(&pool, run_id, "a06").await;
+    let saved_cursor = save_broker_cursor(&pool, "alpaca").await;
+    seed_broker_cursor(&pool, "alpaca", &broker_id).await;
+
+    let act = make_fill_activity_no_price("act-a06-no-price", &broker_id);
+    let mut state_inner = state::AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        state::DeploymentMode::LiveShadow,
+        state::BrokerKind::Alpaca,
+    );
+    state_inner.set_fill_activity_fetcher_for_test(FakeFillFetcher::returning(vec![act]));
+    let state = Arc::new(state_inner);
+
+    let (status, body) = call(
+        routes::build_router(state),
+        apply_req(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "internal_order_id": internal_id,
+            "broker_order_id": broker_id,
+            "dry_run": false,
+            "confirmation": "APPLY_REST_FILL_RECOVERY"
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        axum::http::StatusCode::CONFLICT,
+        "A06: expected 409"
+    );
+    let j = parse_json(body);
+    assert_eq!(
+        j["gate"].as_str().unwrap_or(""),
+        "repair.recovery_data_malformed",
+        "A06: gate must be recovery_data_malformed"
+    );
+    assert_eq!(
+        j["mutated"].as_bool(),
+        Some(false),
+        "A06: mutated must be false"
+    );
+    assert!(
+        j["rest_fill"].is_null(),
+        "A06: rest_fill must be null on malformed data"
+    );
+
+    restore_broker_cursor(&pool, "alpaca", saved_cursor.as_deref()).await;
+    clear_broker_map(&pool, &internal_id).await;
+    clear_outbox(&pool, &internal_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// A07 — no REST match + confirmation → 409 refused, no mutation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a07_no_rest_match_with_confirmation_refused() {
+    let url = match std::env::var(mqk_db::ENV_DB_URL) {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP A07: MQK_DATABASE_URL not set");
+            return;
+        }
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("A07: DB connect");
+    mqk_db::migrate(&pool).await.expect("A07: migrate");
+
+    let run_id = seed_halted_run(&pool, "a07").await;
+    let (internal_id, broker_id) = seed_sent_outbox_and_broker_map(&pool, run_id, "a07").await;
+    let saved_cursor = save_broker_cursor(&pool, "alpaca").await;
+    seed_broker_cursor(&pool, "alpaca", &broker_id).await;
+
+    let mut state_inner = state::AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        state::DeploymentMode::LiveShadow,
+        state::BrokerKind::Alpaca,
+    );
+    state_inner.set_fill_activity_fetcher_for_test(FakeFillFetcher::returning(vec![]));
+    let state = Arc::new(state_inner);
+
+    let (status, body) = call(
+        routes::build_router(state),
+        apply_req(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "internal_order_id": internal_id,
+            "broker_order_id": broker_id,
+            "dry_run": false,
+            "confirmation": "APPLY_REST_FILL_RECOVERY"
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        axum::http::StatusCode::CONFLICT,
+        "A07: expected 409"
+    );
+    let j = parse_json(body);
+    assert_eq!(
+        j["gate"].as_str().unwrap_or(""),
+        "repair.no_rest_match",
+        "A07: gate must be no_rest_match"
+    );
+    assert_eq!(
+        j["mutated"].as_bool(),
+        Some(false),
+        "A07: mutated must be false"
+    );
+
+    restore_broker_cursor(&pool, "alpaca", saved_cursor.as_deref()).await;
+    clear_broker_map(&pool, &internal_id).await;
+    clear_outbox(&pool, &internal_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// A08 — cursor-only entry, no fetcher + confirmation → 503 refused, no mutation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a08_cursor_only_no_fetcher_with_confirmation_refused() {
+    let state = require_db!("A08");
+    let pool = state.db.as_ref().expect("DB pool");
+
+    let run_id = seed_halted_run(pool, "a08").await;
+    let (internal_id, broker_id) = seed_sent_outbox_and_broker_map(pool, run_id, "a08").await;
+    let saved_cursor = save_broker_cursor(pool, "alpaca").await;
+    seed_broker_cursor(pool, "alpaca", &broker_id).await;
+
+    // No fetcher injected — state.fill_activity_fetcher remains None.
+    let router = routes::build_router(Arc::clone(&state));
+    let (status, body) = call(
+        router,
+        apply_req(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "internal_order_id": internal_id,
+            "broker_order_id": broker_id,
+            "dry_run": false,
+            "confirmation": "APPLY_REST_FILL_RECOVERY"
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "A08: expected 503"
+    );
+    let j = parse_json(body);
+    assert_eq!(
+        j["gate"].as_str().unwrap_or(""),
+        "repair.recovery_unavailable",
+        "A08: gate must be recovery_unavailable"
+    );
+    assert_eq!(
+        j["mutated"].as_bool(),
+        Some(false),
+        "A08: mutated must be false"
+    );
+
+    restore_broker_cursor(pool, "alpaca", saved_cursor.as_deref()).await;
+    clear_broker_map(pool, &internal_id).await;
+    clear_outbox(pool, &internal_id).await;
 }

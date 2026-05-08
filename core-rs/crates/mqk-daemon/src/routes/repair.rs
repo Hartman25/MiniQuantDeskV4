@@ -1189,11 +1189,15 @@ async fn write_fill_apply_audit(
 // - All outcomes are audited (non-fatal).
 // - No credentials or secrets are exposed in the response.
 
+const REST_RECOVERY_APPLY_CONFIRMATION_TOKEN: &str = "APPLY_REST_FILL_RECOVERY";
+
 /// POST /api/v1/ops/repair/halted-run-fill-rest-recovery
 pub(crate) async fn repair_halted_run_fill_rest_recovery(
     State(st): State<Arc<AppState>>,
     Json(body): Json<HaltedRunFillRestRecoveryRequest>,
 ) -> Response {
+    let dry_run = body.dry_run;
+
     macro_rules! refused_active {
         ($classification:expr, $evidence:expr, $gate:expr, $audit_id:expr) => {
             (
@@ -1201,6 +1205,8 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                 Json(HaltedRunFillRestRecoveryResponse {
                     truth_state: "active".to_string(),
                     decision: "refused".to_string(),
+                    dry_run,
+                    mutated: false,
                     run_id: body.run_id.clone(),
                     internal_order_id: body.internal_order_id.clone(),
                     broker_order_id: body.broker_order_id.clone(),
@@ -1209,6 +1215,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                     gate: $gate,
                     audit_event_id: $audit_id,
                     rest_fill: None,
+                    inbox_broker_message_id: None,
                 }),
             )
                 .into_response()
@@ -1222,6 +1229,8 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
             Json(HaltedRunFillRestRecoveryResponse {
                 truth_state: "no_db".to_string(),
                 decision: "refused".to_string(),
+                dry_run,
+                mutated: false,
                 run_id: body.run_id.clone(),
                 internal_order_id: body.internal_order_id.clone(),
                 broker_order_id: body.broker_order_id.clone(),
@@ -1230,6 +1239,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                 gate: Some("repair.db_required".to_string()),
                 audit_event_id: None,
                 rest_fill: None,
+                inbox_broker_message_id: None,
             }),
         )
             .into_response();
@@ -1244,6 +1254,8 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                 Json(HaltedRunFillRestRecoveryResponse {
                     truth_state: "active".to_string(),
                     decision: "refused".to_string(),
+                    dry_run,
+                    mutated: false,
                     run_id: body.run_id.clone(),
                     internal_order_id: body.internal_order_id.clone(),
                     broker_order_id: body.broker_order_id.clone(),
@@ -1252,6 +1264,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                     gate: Some("repair.invalid_request".to_string()),
                     audit_event_id: None,
                     rest_fill: None,
+                    inbox_broker_message_id: None,
                 }),
             )
                 .into_response();
@@ -1274,6 +1287,8 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                 Json(HaltedRunFillRestRecoveryResponse {
                     truth_state: "backend_unavailable".to_string(),
                     decision: "refused".to_string(),
+                    dry_run,
+                    mutated: false,
                     run_id: body.run_id.clone(),
                     internal_order_id: body.internal_order_id.clone(),
                     broker_order_id: body.broker_order_id.clone(),
@@ -1282,6 +1297,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                     gate: Some("repair.db_error".to_string()),
                     audit_event_id: None,
                     rest_fill: None,
+                    inbox_broker_message_id: None,
                 }),
             )
                 .into_response();
@@ -1312,6 +1328,8 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
             Json(HaltedRunFillRestRecoveryResponse {
                 truth_state: "active".to_string(),
                 decision: "refused".to_string(),
+                dry_run,
+                mutated: false,
                 run_id: body.run_id.clone(),
                 internal_order_id: body.internal_order_id.clone(),
                 broker_order_id: body.broker_order_id.clone(),
@@ -1320,6 +1338,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                 gate: Some("repair.entry_not_found".to_string()),
                 audit_event_id: audit_id.map(|id| id.to_string()),
                 rest_fill: None,
+                inbox_broker_message_id: None,
             }),
         )
             .into_response();
@@ -1334,6 +1353,8 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                 Json(HaltedRunFillRestRecoveryResponse {
                     truth_state: "backend_unavailable".to_string(),
                     decision: "refused".to_string(),
+                    dry_run,
+                    mutated: false,
                     run_id: body.run_id.clone(),
                     internal_order_id: body.internal_order_id.clone(),
                     broker_order_id: body.broker_order_id.clone(),
@@ -1342,6 +1363,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                     gate: Some("repair.db_error".to_string()),
                     audit_event_id: None,
                     rest_fill: None,
+                    inbox_broker_message_id: None,
                 }),
             )
                 .into_response();
@@ -1362,8 +1384,8 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
             Ok(None) => None,
             Err(e) => {
                 tracing::warn!(
-                    "repair_halted_run_fill_rest_recovery: load_broker_cursor failed (non-fatal): {e}"
-                );
+                "repair_halted_run_fill_rest_recovery: load_broker_cursor failed (non-fatal): {e}"
+            );
                 None
             }
         };
@@ -1402,8 +1424,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
     let Some(fetcher) = st.fill_activity_fetcher.as_ref() else {
         let evidence = format!(
             "REST fill activity fetcher is not configured on this daemon; \
-             cannot look up Alpaca activities for broker_order_id='{}'. \
-             Production wiring is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.",
+             cannot look up Alpaca activities for broker_order_id='{}'.",
             body.broker_order_id
         );
         let audit_id = write_rest_recovery_audit(
@@ -1418,6 +1439,8 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
             Json(HaltedRunFillRestRecoveryResponse {
                 truth_state: "active".to_string(),
                 decision: "refused".to_string(),
+                dry_run,
+                mutated: false,
                 run_id: body.run_id.clone(),
                 internal_order_id: body.internal_order_id.clone(),
                 broker_order_id: body.broker_order_id.clone(),
@@ -1426,6 +1449,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                 gate: Some("repair.recovery_unavailable".to_string()),
                 audit_event_id: audit_id.map(|id| id.to_string()),
                 rest_fill: None,
+                inbox_broker_message_id: None,
             }),
         )
             .into_response();
@@ -1451,6 +1475,8 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                 Json(HaltedRunFillRestRecoveryResponse {
                     truth_state: "backend_unavailable".to_string(),
                     decision: "refused".to_string(),
+                    dry_run,
+                    mutated: false,
                     run_id: body.run_id.clone(),
                     internal_order_id: body.internal_order_id.clone(),
                     broker_order_id: body.broker_order_id.clone(),
@@ -1459,6 +1485,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
                     gate: Some("repair.rest_unavailable".to_string()),
                     audit_event_id: audit_id.map(|id| id.to_string()),
                     rest_fill: None,
+                    inbox_broker_message_id: None,
                 }),
             )
                 .into_response();
@@ -1571,7 +1598,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
         }
     };
 
-    // All gates passed — return plan-only REST-recovered fill evidence.
+    // All evidence gates passed — build the plan evidence payload.
     let rest_fill = RestRecoveredFill {
         broker_activity_id: activity.id.clone(),
         symbol: activity.symbol.clone(),
@@ -1583,27 +1610,447 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
         mutation_safe: false,
     };
 
+    // ---------------------------------------------------------------------------
+    // Gate 9a: dry_run=true — plan-only, no inbox mutation.
+    // ---------------------------------------------------------------------------
+    if dry_run {
+        let evidence = format!(
+            "REST recovery: Alpaca activity (id='{}') confirms one {} fill for \
+             broker_order_id='{}' (internal='{}', run='{}'). \
+             price='{}' qty='{}' side='{}' symbol='{}' at '{}'. \
+             dry_run=true — no mutation. Resubmit with dry_run=false and \
+             confirmation='APPLY_REST_FILL_RECOVERY' to insert and apply.",
+            rest_fill.broker_activity_id,
+            activity.activity_type,
+            body.broker_order_id,
+            body.internal_order_id,
+            body.run_id,
+            rest_fill.price_str,
+            rest_fill.qty_str,
+            rest_fill.side,
+            rest_fill.symbol,
+            rest_fill.timestamp,
+        );
+        let audit_id = write_rest_recovery_audit(
+            &rest_audit_ctx,
+            "rest_recovered_fill_evidence",
+            "repair.rest_recovered",
+            &evidence,
+        )
+        .await;
+        return (
+            StatusCode::OK,
+            Json(HaltedRunFillRestRecoveryResponse {
+                truth_state: "active".to_string(),
+                decision: "rest_recovered_fill_evidence".to_string(),
+                dry_run: true,
+                mutated: false,
+                run_id: body.run_id.clone(),
+                internal_order_id: body.internal_order_id.clone(),
+                broker_order_id: body.broker_order_id.clone(),
+                classification,
+                evidence,
+                gate: None,
+                audit_event_id: audit_id.map(|id| id.to_string()),
+                rest_fill: Some(rest_fill),
+                inbox_broker_message_id: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // ---------------------------------------------------------------------------
+    // Gate 9b: dry_run=false requires confirmation token.
+    // ---------------------------------------------------------------------------
+    match body.confirmation.as_deref() {
+        Some(REST_RECOVERY_APPLY_CONFIRMATION_TOKEN) => {}
+        Some(other) => {
+            let evidence = format!(
+                "dry_run=false requires confirmation='{REST_RECOVERY_APPLY_CONFIRMATION_TOKEN}'; \
+                 got: '{other}'"
+            );
+            let audit_id = write_rest_recovery_audit(
+                &rest_audit_ctx,
+                "refused",
+                "repair.confirmation_required",
+                &evidence,
+            )
+            .await;
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(HaltedRunFillRestRecoveryResponse {
+                    truth_state: "active".to_string(),
+                    decision: "refused".to_string(),
+                    dry_run: false,
+                    mutated: false,
+                    run_id: body.run_id.clone(),
+                    internal_order_id: body.internal_order_id.clone(),
+                    broker_order_id: body.broker_order_id.clone(),
+                    classification,
+                    evidence,
+                    gate: Some("repair.confirmation_required".to_string()),
+                    audit_event_id: audit_id.map(|id| id.to_string()),
+                    rest_fill: None,
+                    inbox_broker_message_id: None,
+                }),
+            )
+                .into_response();
+        }
+        None => {
+            let evidence = format!(
+                "dry_run=false requires confirmation='{REST_RECOVERY_APPLY_CONFIRMATION_TOKEN}'"
+            );
+            let audit_id = write_rest_recovery_audit(
+                &rest_audit_ctx,
+                "refused",
+                "repair.confirmation_required",
+                &evidence,
+            )
+            .await;
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(HaltedRunFillRestRecoveryResponse {
+                    truth_state: "active".to_string(),
+                    decision: "refused".to_string(),
+                    dry_run: false,
+                    mutated: false,
+                    run_id: body.run_id.clone(),
+                    internal_order_id: body.internal_order_id.clone(),
+                    broker_order_id: body.broker_order_id.clone(),
+                    classification,
+                    evidence,
+                    gate: Some("repair.confirmation_required".to_string()),
+                    audit_event_id: audit_id.map(|id| id.to_string()),
+                    rest_fill: None,
+                    inbox_broker_message_id: None,
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Gate 10: parse numeric fields — fail closed if qty/price do not convert.
+    //
+    // Gate 8 already proved non-empty strings; here we prove parseable values.
+    // ---------------------------------------------------------------------------
+    let delta_qty: i64 = {
+        let v: f64 = match rest_fill.qty_str.parse() {
+            Ok(f) => f,
+            Err(_) => {
+                let evidence = format!(
+                    "REST activity (id='{}') qty='{}' is not a valid number; \
+                     manual reconcile required.",
+                    rest_fill.broker_activity_id, rest_fill.qty_str
+                );
+                let audit_id = write_rest_recovery_audit(
+                    &rest_audit_ctx,
+                    "refused",
+                    "repair.recovery_data_malformed",
+                    &evidence,
+                )
+                .await;
+                return refused_active!(
+                    classification,
+                    evidence,
+                    Some("repair.recovery_data_malformed".to_string()),
+                    audit_id.map(|id| id.to_string())
+                );
+            }
+        };
+        if !v.is_finite() || v <= 0.0 {
+            let evidence = format!(
+                "REST activity (id='{}') qty='{}' is not a positive finite number; \
+                 manual reconcile required.",
+                rest_fill.broker_activity_id, rest_fill.qty_str
+            );
+            let audit_id = write_rest_recovery_audit(
+                &rest_audit_ctx,
+                "refused",
+                "repair.recovery_data_malformed",
+                &evidence,
+            )
+            .await;
+            return refused_active!(
+                classification,
+                evidence,
+                Some("repair.recovery_data_malformed".to_string()),
+                audit_id.map(|id| id.to_string())
+            );
+        }
+        v.round() as i64
+    };
+
+    let price_micros: i64 = {
+        let f: f64 = match rest_fill.price_str.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                let evidence = format!(
+                    "REST activity (id='{}') price='{}' is not a valid number; \
+                     manual reconcile required.",
+                    rest_fill.broker_activity_id, rest_fill.price_str
+                );
+                let audit_id = write_rest_recovery_audit(
+                    &rest_audit_ctx,
+                    "refused",
+                    "repair.recovery_data_malformed",
+                    &evidence,
+                )
+                .await;
+                return refused_active!(
+                    classification,
+                    evidence,
+                    Some("repair.recovery_data_malformed".to_string()),
+                    audit_id.map(|id| id.to_string())
+                );
+            }
+        };
+        match mqk_execution::price_to_micros(f) {
+            Ok(m) => m,
+            Err(_) => {
+                let evidence = format!(
+                    "REST activity (id='{}') price='{}' could not be converted to micros; \
+                     manual reconcile required.",
+                    rest_fill.broker_activity_id, rest_fill.price_str
+                );
+                let audit_id = write_rest_recovery_audit(
+                    &rest_audit_ctx,
+                    "refused",
+                    "repair.recovery_data_malformed",
+                    &evidence,
+                )
+                .await;
+                return refused_active!(
+                    classification,
+                    evidence,
+                    Some("repair.recovery_data_malformed".to_string()),
+                    audit_id.map(|id| id.to_string())
+                );
+            }
+        }
+    };
+
+    let side = match rest_fill.side.as_str() {
+        "buy" => mqk_execution::Side::Buy,
+        "sell" => mqk_execution::Side::Sell,
+        other => {
+            let evidence = format!(
+                "REST activity (id='{}') side='{}' is not 'buy' or 'sell'; \
+                 manual reconcile required.",
+                rest_fill.broker_activity_id, other
+            );
+            let audit_id = write_rest_recovery_audit(
+                &rest_audit_ctx,
+                "refused",
+                "repair.recovery_data_malformed",
+                &evidence,
+            )
+            .await;
+            return refused_active!(
+                classification,
+                evidence,
+                Some("repair.recovery_data_malformed".to_string()),
+                audit_id.map(|id| id.to_string())
+            );
+        }
+    };
+
+    // ---------------------------------------------------------------------------
+    // Gate 11: build canonical BrokerEvent and stable inbox identity.
+    //
+    // broker_message_id is deterministic: same activity ID → same inbox key.
+    // This is the idempotency anchor for retry safety.
+    // ---------------------------------------------------------------------------
+    let stable_msg_id = format!("alpaca-rest-recovery:{}", rest_fill.broker_activity_id);
+    let event_kind = match activity.activity_type.as_str() {
+        "PARTIAL_FILL" => "partial_fill",
+        _ => "fill",
+    };
+    let broker_event = match activity.activity_type.as_str() {
+        "PARTIAL_FILL" => mqk_execution::BrokerEvent::PartialFill {
+            broker_message_id: stable_msg_id.clone(),
+            broker_fill_id: Some(rest_fill.broker_activity_id.clone()),
+            internal_order_id: body.internal_order_id.clone(),
+            broker_order_id: Some(body.broker_order_id.clone()),
+            symbol: rest_fill.symbol.clone(),
+            side,
+            delta_qty,
+            price_micros,
+            fee_micros: 0,
+        },
+        _ => mqk_execution::BrokerEvent::Fill {
+            broker_message_id: stable_msg_id.clone(),
+            broker_fill_id: Some(rest_fill.broker_activity_id.clone()),
+            internal_order_id: body.internal_order_id.clone(),
+            broker_order_id: Some(body.broker_order_id.clone()),
+            symbol: rest_fill.symbol.clone(),
+            side,
+            delta_qty,
+            price_micros,
+            fee_micros: 0,
+        },
+    };
+    let event_json =
+        serde_json::to_value(&broker_event).expect("BrokerEvent serializes to JSON infallibly");
+
+    let received_at = chrono::DateTime::parse_from_rfc3339(&rest_fill.timestamp)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now);
+
+    // ---------------------------------------------------------------------------
+    // Gate 12: idempotent inbox insert.
+    //
+    // Returns true if newly inserted, false if (run_id, broker_message_id) already existed.
+    // ---------------------------------------------------------------------------
+    let inserted = match mqk_db::inbox_insert_deduped_with_identity(
+        db,
+        run_id,
+        &stable_msg_id,
+        Some(rest_fill.broker_activity_id.as_str()),
+        &body.internal_order_id,
+        &body.broker_order_id,
+        event_kind,
+        &event_json,
+        0,
+        received_at,
+    )
+    .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(HaltedRunFillRestRecoveryResponse {
+                    truth_state: "backend_unavailable".to_string(),
+                    decision: "refused".to_string(),
+                    dry_run: false,
+                    mutated: false,
+                    run_id: body.run_id.clone(),
+                    internal_order_id: body.internal_order_id.clone(),
+                    broker_order_id: body.broker_order_id.clone(),
+                    classification,
+                    evidence: format!("inbox insert failed: {e}"),
+                    gate: Some("repair.db_error".to_string()),
+                    audit_event_id: None,
+                    rest_fill: None,
+                    inbox_broker_message_id: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // ---------------------------------------------------------------------------
+    // Gate 13: if the row already existed, check whether it was already applied.
+    //
+    // If applied_at_utc IS NOT NULL → already_repaired (idempotent noop).
+    // If applied_at_utc IS NULL → fall through to Gate 14 and stamp it.
+    // ---------------------------------------------------------------------------
+    if !inserted {
+        let already_applied: bool = sqlx::query_scalar::<_, Option<chrono::DateTime<Utc>>>(
+            "select applied_at_utc from oms_inbox \
+             where run_id = $1 and broker_message_id = $2",
+        )
+        .bind(run_id)
+        .bind(&stable_msg_id)
+        .fetch_optional(db)
+        .await
+        .unwrap_or(None)
+        .map(|opt_ts| opt_ts.is_some())
+        .unwrap_or(false);
+
+        if already_applied {
+            let evidence = format!(
+                "REST recovery inbox row (broker_message_id='{}') for \
+                 internal_order_id='{}' was already applied from a prior call; \
+                 idempotent noop — no mutation performed.",
+                stable_msg_id, body.internal_order_id
+            );
+            let audit_id = write_rest_recovery_audit(
+                &rest_audit_ctx,
+                "already_repaired",
+                "repair.rest_recovery_already_applied",
+                &evidence,
+            )
+            .await;
+            return (
+                StatusCode::OK,
+                Json(HaltedRunFillRestRecoveryResponse {
+                    truth_state: "active".to_string(),
+                    decision: "already_repaired".to_string(),
+                    dry_run: false,
+                    mutated: false,
+                    run_id: body.run_id.clone(),
+                    internal_order_id: body.internal_order_id.clone(),
+                    broker_order_id: body.broker_order_id.clone(),
+                    classification,
+                    evidence,
+                    gate: None,
+                    audit_event_id: audit_id.map(|id| id.to_string()),
+                    rest_fill: Some(RestRecoveredFill {
+                        mutation_safe: true,
+                        ..rest_fill
+                    }),
+                    inbox_broker_message_id: Some(stable_msg_id),
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Gate 14: stamp applied_at_utc.
+    //
+    // inbox_mark_applied is idempotent: only stamps rows where applied_at_utc IS NULL.
+    // NOTE: the in-memory portfolio for this HALTED run is NOT updated — run is
+    // terminal.  Portfolio reconstruction for a new run reads
+    // inbox_load_all_applied_for_run which will include this row after apply.
+    // ---------------------------------------------------------------------------
+    let applied_at = Utc::now();
+    if let Err(e) = mqk_db::inbox_mark_applied(db, run_id, &stable_msg_id, applied_at).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HaltedRunFillRestRecoveryResponse {
+                truth_state: "backend_unavailable".to_string(),
+                decision: "refused".to_string(),
+                dry_run: false,
+                mutated: false,
+                run_id: body.run_id.clone(),
+                internal_order_id: body.internal_order_id.clone(),
+                broker_order_id: body.broker_order_id.clone(),
+                classification,
+                evidence: format!("inbox_mark_applied failed: {e}"),
+                gate: Some("repair.db_error".to_string()),
+                audit_event_id: None,
+                rest_fill: None,
+                inbox_broker_message_id: None,
+            }),
+        )
+            .into_response();
+    }
+
     let evidence = format!(
-        "REST recovery: Alpaca activity (id='{}') confirms one {} fill for \
-         broker_order_id='{}' (internal='{}', run='{}'). \
-         price='{}' qty='{}' side='{}' symbol='{}' at '{}'. \
-         mutation_safe=false — apply is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.",
+        "REST recovery applied: Alpaca activity (id='{}') inserted into inbox and stamped applied. \
+         broker_message_id='{}' run_id='{}' internal_order_id='{}' broker_order_id='{}'. \
+         price='{}' qty='{}' side='{}' symbol='{}'. \
+         NOTE: in-memory portfolio for this HALTED run was NOT updated — run is terminal. \
+         Start a new run to begin with fresh portfolio state reflecting this fill.",
         rest_fill.broker_activity_id,
-        activity.activity_type,
-        body.broker_order_id,
-        body.internal_order_id,
+        stable_msg_id,
         body.run_id,
+        body.internal_order_id,
+        body.broker_order_id,
         rest_fill.price_str,
         rest_fill.qty_str,
         rest_fill.side,
         rest_fill.symbol,
-        rest_fill.timestamp,
     );
 
     let audit_id = write_rest_recovery_audit(
         &rest_audit_ctx,
-        "rest_recovered_fill_evidence",
-        "repair.rest_recovered",
+        "applied",
+        "repair.rest_recovery_applied",
         &evidence,
     )
     .await;
@@ -1612,7 +2059,9 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
         StatusCode::OK,
         Json(HaltedRunFillRestRecoveryResponse {
             truth_state: "active".to_string(),
-            decision: "rest_recovered_fill_evidence".to_string(),
+            decision: "applied".to_string(),
+            dry_run: false,
+            mutated: true,
             run_id: body.run_id.clone(),
             internal_order_id: body.internal_order_id.clone(),
             broker_order_id: body.broker_order_id.clone(),
@@ -1620,7 +2069,11 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
             evidence,
             gate: None,
             audit_event_id: audit_id.map(|id| id.to_string()),
-            rest_fill: Some(rest_fill),
+            rest_fill: Some(RestRecoveredFill {
+                mutation_safe: true,
+                ..rest_fill
+            }),
+            inbox_broker_message_id: Some(stable_msg_id),
         }),
     )
         .into_response()

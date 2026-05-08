@@ -1123,7 +1123,7 @@ pub struct HaltedRunFillApplyResponse {
 }
 
 // ---------------------------------------------------------------------------
-// /api/v1/ops/repair/halted-run-fill-rest-recovery — BROKER-FILL-REST-RECOVERY-01
+// /api/v1/ops/repair/halted-run-fill-rest-recovery — BROKER-FILL-REST-RECOVERY-APPLY-01
 // ---------------------------------------------------------------------------
 
 /// Request body for POST /api/v1/ops/repair/halted-run-fill-rest-recovery.
@@ -1132,12 +1132,16 @@ pub struct HaltedRunFillRestRecoveryRequest {
     pub run_id: String,
     pub internal_order_id: String,
     pub broker_order_id: String,
+    /// When `true` (default), no state is mutated; the response describes the
+    /// recovered fill for operator review.  When `false`, `confirmation` is
+    /// required and the recovered fill is inserted into the inbox and stamped applied.
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
+    /// Must equal `"APPLY_REST_FILL_RECOVERY"` when `dry_run = false`.
+    pub confirmation: Option<String>,
 }
 
 /// Authoritative fill details recovered from Alpaca REST account activities.
-///
-/// Plan-only evidence for operator review.  `mutation_safe` is always `false`
-/// in this patch — inbox apply is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.
 #[derive(Debug, Clone, Serialize)]
 pub struct RestRecoveredFill {
     /// Alpaca-assigned activity ID; used as authoritative fill identity.
@@ -1152,18 +1156,27 @@ pub struct RestRecoveredFill {
     pub timestamp: String,
     /// Always `"alpaca_rest_activity"` — identifies the evidence source.
     pub source: String,
-    /// Always `false` in this patch — mutation deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.
+    /// `false` when `dry_run=true` (plan-only evidence); `true` after a
+    /// successful confirmed apply.
     pub mutation_safe: bool,
 }
 
 /// Response for POST /api/v1/ops/repair/halted-run-fill-rest-recovery.
 ///
 /// `truth_state` values: `"active"`, `"no_db"`, `"backend_unavailable"`.
-/// `decision` values: `"rest_recovered_fill_evidence"` (success), `"refused"` (any failure).
+/// `decision` values:
+/// - `"rest_recovered_fill_evidence"` — dry_run=true, fill evidence found, no mutation.
+/// - `"applied"` — fill inbox row inserted and stamped applied.
+/// - `"already_repaired"` — idempotent: row was already applied from a prior call.
+/// - `"refused"` — any failure gate fired.
 #[derive(Debug, Clone, Serialize)]
 pub struct HaltedRunFillRestRecoveryResponse {
     pub truth_state: String,
     pub decision: String,
+    /// Mirrors the `dry_run` field from the request.
+    pub dry_run: bool,
+    /// `true` only when `decision = "applied"`.  `false` for plan-only and refusals.
+    pub mutated: bool,
     pub run_id: String,
     pub internal_order_id: String,
     pub broker_order_id: String,
@@ -1173,8 +1186,11 @@ pub struct HaltedRunFillRestRecoveryResponse {
     pub evidence: String,
     pub gate: Option<String>,
     pub audit_event_id: Option<String>,
-    /// Authoritative fill details from Alpaca REST; `None` when decision != "rest_recovered_fill_evidence".
+    /// Authoritative fill details from Alpaca REST.
     pub rest_fill: Option<RestRecoveredFill>,
+    /// Stable `broker_message_id` of the inbox row.  Set on `"applied"` and
+    /// `"already_repaired"`; `None` otherwise.
+    pub inbox_broker_message_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
