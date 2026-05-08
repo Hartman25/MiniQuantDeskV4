@@ -597,7 +597,7 @@ Invoke-ProofLane -Name 'Daemon proof lanes' -Required $true -Action {
         'scenario_snapshot_inject_release_gate',
         'scenario_token_auth_middleware',
         'scenario_daemon_boot_is_fail_closed',
-        'scenario_daemon_deadman_blocks_dispatch',
+        'scenario_dm_gate_blocks_start',
         'scenario_reconcile_tick_disarms_on_drift',
         'scenario_daemon_runtime_lifecycle'
     )
