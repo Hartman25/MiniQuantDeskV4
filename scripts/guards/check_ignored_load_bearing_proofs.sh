@@ -31,7 +31,7 @@ PROMOTED_FILES=(
   "crates/mqk-db/tests/scenario_stale_claim_recovery.rs"
   "crates/mqk-db/tests/scenario_recovery_query_returns_pending_outbox.rs"
   "crates/mqk-db/tests/scenario_outbox_first_enforced.rs"
-  "crates/mqk-db/tests/scenario_outbox_claim_lock_prevents_double_dispatch.rs"
+  "crates/mqk-db/tests/scenario_outbox_claim_lock_prevents_double_send.rs"
   "crates/mqk-db/tests/scenario_arm_preflight_blocks_zero_risk_limits.rs"
   "crates/mqk-db/tests/scenario_arm_preflight_forged_audit_rejected.rs"
   "crates/mqk-db/tests/scenario_arm_preflight_requires_reconcile.rs"

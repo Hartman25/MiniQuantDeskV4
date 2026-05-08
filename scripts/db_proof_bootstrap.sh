@@ -120,7 +120,7 @@ cargo test -p mqk-db --test scenario_inbox_dedupe_prevents_double_fill -- --igno
 # CI-07: outbox claim, dispatch, sent, idempotency proofs
 echo "== CI-07: outbox claim + dispatch + sent + idempotency =="
 cargo test -p mqk-db --features testkit --test scenario_outbox_first_enforced -- --test-threads=1
-cargo test -p mqk-db --features testkit --test scenario_outbox_claim_lock_prevents_double_dispatch -- --test-threads=1
+cargo test -p mqk-db --features testkit --test scenario_outbox_claim_lock_prevents_double_send -- --test-threads=1
 cargo test -p mqk-db --test scenario_outbox_idempotency_prevents_double_submit -- --ignored --test-threads=1
 cargo test -p mqk-db --test scenario_outbox_ack_transition_guard -- --ignored --test-threads=1
 cargo test -p mqk-db --features testkit --test scenario_stale_claim_recovery -- --ignored --test-threads=1

@@ -47,8 +47,8 @@ required-features = ["runtime-claim"]
 # Without required-features, cargo test --workspace would try to compile them
 # without any feature active and fail because outbox_claim_batch is gated.
 [[test]]
-name = "scenario_outbox_claim_lock_prevents_double_dispatch"
-path = "tests/scenario_outbox_claim_lock_prevents_double_dispatch.rs"
+name = "scenario_outbox_claim_lock_prevents_double_send"
+path = "tests/scenario_outbox_claim_lock_prevents_double_send.rs"
 required-features = ["testkit"]
 
 [[test]]
