@@ -167,7 +167,7 @@ _(Patches not in the initial audit table above; confirmed by scenario-file prese
 | **TV-EXEC-01 / TV-EXEC-01B** (fill quality telemetry) | `scenario_fill_quality_tv_exec01.rs`; `scenario_fill_quality_orchestrator_tv_exec01b.rs` |
 | **A3/A4** (operator surfaces) | `scenario_a3_a4_operator_surfaces.rs` |
 | **A5A–A5E** (execution/OMS surface series) | `scenario_order_timeline_a5a.rs`; `scenario_order_trace_a5b.rs`; `scenario_order_replay_a5c.rs`; `scenario_order_chart_a5d.rs`; `scenario_order_causality_a5e.rs` |
-| **B1A–B1C** (native strategy bootstrap/bridge) | `scenario_native_strategy_bootstrap_daemon_b1a.rs`; `scenario_native_strategy_loop_dispatch_b1b.rs`; `scenario_native_strategy_bridge_b1c.rs` |
+| **B1A–B1C** (native strategy bootstrap/bridge) | `scenario_native_strategy_bootstrap_daemon_b1a.rs`; `scenario_native_strategy_loop_send_b1b.rs`; `scenario_native_strategy_bridge_b1c.rs` |
 | **B2A–B3** (strategy registry / fleet control) | `scenario_native_strategy_registry_b2a.rs`; `scenario_strategy_fleet_control_truth_b2b_b3.rs` |
 | **B4–B6** (protection / short guard / budget gate) | `scenario_protection_status_b4.rs`; `scenario_native_strategy_b5_short_guard.rs`; `scenario_native_strategy_b6_budget_gate.rs` |
 | **B7–B8** (corp-actions / asset-class scope) | `scenario_corp_actions_b7.rs`; `scenario_asset_class_scope_b8.rs` |

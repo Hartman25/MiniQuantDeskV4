@@ -129,7 +129,7 @@ cargo test -p mqk-db --features testkit --test scenario_recovery_query_returns_p
 # CI-06: ambiguous outbox restart quarantine proofs
 echo "== CI-06: broker cursor + restart quarantine =="
 cargo test -p mqk-testkit --test scenario_broker_cursor_restart -- --test-threads=1
-cargo test -p mqk-testkit --test scenario_restart_quarantines_dispatching_outbox -- --test-threads=1
+cargo test -p mqk-testkit --test scenario_restart_quarantines_sending_outbox -- --test-threads=1
 
 # CI-05: runtime lease acquire, refresh, release, stale-owner proofs
 echo "== CI-05: runtime lease =="
