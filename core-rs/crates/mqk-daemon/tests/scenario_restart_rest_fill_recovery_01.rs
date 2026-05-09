@@ -685,3 +685,538 @@ async fn g10_existing_manual_repair_route_unaffected() {
         "G10: halted-run REST recovery route must be untouched"
     );
 }
+
+// ---------------------------------------------------------------------------
+// BRK-GAP-REST-CURSOR-ADVANCE-01 — cursor advancement tests (C01–C09)
+//
+// All C tests require MQK_DATABASE_URL and skip gracefully without it.
+//
+// Cursor JSON format: {"schema_version":1,"rest_activity_after":"<id>","trade_updates":{"status":"cold_start_unproven"}}
+// Activity IDs are chronological: lexicographic order == chronological order.
+// ---------------------------------------------------------------------------
+
+const CURSOR_ANCHOR_OLD: &str = "20260508000000000000001::old-anchor-001000";
+const CURSOR_ANCHOR_NEW: &str = "20260510000000000000001::new-anchor-001000";
+
+fn cursor_json_with_anchor(anchor: &str) -> String {
+    format!(
+        r#"{{"schema_version":1,"rest_activity_after":"{}","trade_updates":{{"status":"cold_start_unproven"}}}}"#,
+        anchor
+    )
+}
+
+async fn seed_cursor(pool: &sqlx::PgPool, adapter_id: &str, cursor_json: &str) {
+    mqk_db::advance_broker_cursor(pool, adapter_id, cursor_json, chrono::Utc::now())
+        .await
+        .expect("seed_cursor failed");
+}
+
+async fn load_cursor_json(pool: &sqlx::PgPool, adapter_id: &str) -> Option<String> {
+    mqk_db::load_broker_cursor(pool, adapter_id)
+        .await
+        .expect("load_cursor_json failed")
+}
+
+async fn delete_cursor(pool: &sqlx::PgPool, adapter_id: &str) {
+    sqlx::query("delete from broker_event_cursor where adapter_id = $1")
+        .bind(adapter_id)
+        .execute(pool)
+        .await
+        .ok();
+}
+
+async fn cursor_rest_anchor(pool: &sqlx::PgPool, adapter_id: &str) -> Option<String> {
+    let json = load_cursor_json(pool, adapter_id).await?;
+    serde_json::from_str::<serde_json::Value>(&json)
+        .ok()
+        .and_then(|v| {
+            v.get("rest_activity_after")
+                .and_then(|a| a.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+}
+
+/// Build a DB-backed AppState and return (Arc<AppState>, pool).
+async fn cursor_test_state(
+    fetcher: std::sync::Arc<dyn state::WsGapFillFetcher>,
+) -> Option<(std::sync::Arc<state::AppState>, sqlx::PgPool)> {
+    let url = std::env::var(mqk_db::ENV_DB_URL).ok()?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("DB connect failed");
+    let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        state::DeploymentMode::LiveShadow,
+        state::BrokerKind::Alpaca,
+    );
+    st.set_ws_gap_fill_fetcher_for_test(fetcher);
+    Some((std::sync::Arc::new(st), pool))
+}
+
+// ---------------------------------------------------------------------------
+// C01 — dry_run=true does not advance rest_activity_after
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn c01_dry_run_does_not_advance_cursor() {
+    let activity = make_fill_activity(TEST_ACTIVITY_ID, TEST_BROKER_ORDER_ID, "AAPL", "buy");
+    let fetcher = FakeGapFetcher::returning(vec![activity]);
+    let Some((st, pool)) = cursor_test_state(fetcher).await else {
+        eprintln!("C01: skipped — MQK_DATABASE_URL not set");
+        return;
+    };
+    cleanup_run(&pool).await;
+    setup_run_with_order(&pool).await;
+    seed_cursor(&pool, "alpaca", &cursor_json_with_anchor(CURSOR_ANCHOR_OLD)).await;
+
+    let router = routes::build_router(st);
+    let (status, body) = call(
+        router,
+        gap_req(serde_json::json!({ "run_id": TEST_RUN_ID, "dry_run": true })),
+    )
+    .await;
+    let j = parse_json(body);
+
+    assert_eq!(status, StatusCode::OK, "C01: expect 200; body={j}");
+    assert_eq!(j["dry_run"], true, "C01: dry_run must be true");
+    assert_eq!(
+        j["cursor_advanced"], false,
+        "C01: cursor must not advance on dry_run"
+    );
+    assert!(
+        j["new_rest_activity_after"].is_null(),
+        "C01: new anchor must be null"
+    );
+
+    let anchor = cursor_rest_anchor(&pool, "alpaca").await;
+    assert_eq!(
+        anchor.as_deref(),
+        Some(CURSOR_ANCHOR_OLD),
+        "C01: cursor must remain unchanged"
+    );
+
+    delete_cursor(&pool, "alpaca").await;
+    cleanup_run(&pool).await;
+}
+
+// ---------------------------------------------------------------------------
+// C02 — successful confirmed recovery advances rest_activity_after
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn c02_successful_recovery_advances_cursor() {
+    let activity = make_fill_activity(TEST_ACTIVITY_ID, TEST_BROKER_ORDER_ID, "AAPL", "buy");
+    let fetcher = FakeGapFetcher::returning(vec![activity]);
+    let Some((st, pool)) = cursor_test_state(fetcher).await else {
+        eprintln!("C02: skipped — MQK_DATABASE_URL not set");
+        return;
+    };
+    cleanup_run(&pool).await;
+    setup_run_with_order(&pool).await;
+    // Seed cursor with old anchor — recovery activity ID is newer.
+    seed_cursor(&pool, "alpaca", &cursor_json_with_anchor(CURSOR_ANCHOR_OLD)).await;
+
+    let router = routes::build_router(st);
+    let (status, body) = call(
+        router,
+        gap_req(serde_json::json!({ "run_id": TEST_RUN_ID, "dry_run": false })),
+    )
+    .await;
+    let j = parse_json(body);
+
+    assert_eq!(status, StatusCode::OK, "C02: expect 200; body={j}");
+    assert_eq!(j["recovered_count"], 1, "C02: one fill recovered");
+    assert_eq!(j["cursor_advanced"], true, "C02: cursor must advance");
+    assert_eq!(
+        j["new_rest_activity_after"], TEST_ACTIVITY_ID,
+        "C02: new anchor must be activity ID"
+    );
+
+    let anchor = cursor_rest_anchor(&pool, "alpaca").await;
+    assert_eq!(
+        anchor.as_deref(),
+        Some(TEST_ACTIVITY_ID),
+        "C02: DB cursor must reflect advanced anchor"
+    );
+
+    delete_cursor(&pool, "alpaca").await;
+    cleanup_run(&pool).await;
+}
+
+// ---------------------------------------------------------------------------
+// C03 — second run idempotent: cursor does not move backward
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn c03_second_run_cursor_does_not_move_backward() {
+    let activity = make_fill_activity(TEST_ACTIVITY_ID, TEST_BROKER_ORDER_ID, "AAPL", "buy");
+    let url = match std::env::var(mqk_db::ENV_DB_URL) {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("C03: skipped — MQK_DATABASE_URL not set");
+            return;
+        }
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("DB connect failed");
+
+    cleanup_run(&pool).await;
+    setup_run_with_order(&pool).await;
+
+    // First run: cursor is seeded with old anchor, recovery advances to TEST_ACTIVITY_ID.
+    seed_cursor(&pool, "alpaca", &cursor_json_with_anchor(CURSOR_ANCHOR_OLD)).await;
+    let f1 = FakeGapFetcher::returning(vec![activity.clone()]);
+    let st1 = {
+        let mut s = state::AppState::new_for_test_with_db_mode_and_broker(
+            pool.clone(),
+            state::DeploymentMode::LiveShadow,
+            state::BrokerKind::Alpaca,
+        );
+        s.set_ws_gap_fill_fetcher_for_test(f1);
+        std::sync::Arc::new(s)
+    };
+    let (s1, _b1) = call(
+        routes::build_router(st1),
+        gap_req(serde_json::json!({ "run_id": TEST_RUN_ID, "dry_run": false })),
+    )
+    .await;
+    assert_eq!(s1, StatusCode::OK, "C03: first run must succeed");
+    let anchor_after_first = cursor_rest_anchor(&pool, "alpaca").await;
+    assert_eq!(
+        anchor_after_first.as_deref(),
+        Some(TEST_ACTIVITY_ID),
+        "C03: cursor advanced to TEST_ACTIVITY_ID after first run"
+    );
+
+    // Second run: same activity (already_present), cursor must not move backward.
+    let f2 = FakeGapFetcher::returning(vec![activity]);
+    let st2 = {
+        let mut s = state::AppState::new_for_test_with_db_mode_and_broker(
+            pool.clone(),
+            state::DeploymentMode::LiveShadow,
+            state::BrokerKind::Alpaca,
+        );
+        s.set_ws_gap_fill_fetcher_for_test(f2);
+        std::sync::Arc::new(s)
+    };
+    let (s2, b2) = call(
+        routes::build_router(st2),
+        gap_req(serde_json::json!({ "run_id": TEST_RUN_ID, "dry_run": false })),
+    )
+    .await;
+    let j2 = parse_json(b2);
+    assert_eq!(s2, StatusCode::OK, "C03: second run must succeed");
+    // Activity is already present — cursor stays at TEST_ACTIVITY_ID (same value, not backward).
+    // advance_broker_cursor_rest_anchor returns false when new_anchor == existing.
+    assert_eq!(
+        j2["already_present_count"], 1,
+        "C03: second run sees already_present"
+    );
+    let anchor_after_second = cursor_rest_anchor(&pool, "alpaca").await;
+    assert_eq!(
+        anchor_after_second.as_deref(),
+        Some(TEST_ACTIVITY_ID),
+        "C03: cursor must remain at TEST_ACTIVITY_ID (no backward movement)"
+    );
+
+    delete_cursor(&pool, "alpaca").await;
+    cleanup_run(&pool).await;
+}
+
+// ---------------------------------------------------------------------------
+// C04 — unknown order activity does not advance cursor
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn c04_unknown_order_does_not_advance_cursor() {
+    let activity = make_fill_activity(TEST_ACTIVITY_ID, "broker-order-NOT-IN-MAP", "AAPL", "buy");
+    let fetcher = FakeGapFetcher::returning(vec![activity]);
+    let Some((st, pool)) = cursor_test_state(fetcher).await else {
+        eprintln!("C04: skipped — MQK_DATABASE_URL not set");
+        return;
+    };
+    cleanup_run(&pool).await;
+    setup_run_with_order(&pool).await;
+    seed_cursor(&pool, "alpaca", &cursor_json_with_anchor(CURSOR_ANCHOR_OLD)).await;
+
+    let router = routes::build_router(st);
+    let (status, body) = call(
+        router,
+        gap_req(serde_json::json!({ "run_id": TEST_RUN_ID, "dry_run": false })),
+    )
+    .await;
+    let j = parse_json(body);
+
+    assert_eq!(status, StatusCode::OK, "C04: expect 200; body={j}");
+    assert_eq!(j["unknown_order_count"], 1, "C04: unknown_order_count=1");
+    assert_eq!(
+        j["cursor_advanced"], false,
+        "C04: cursor must not advance on unknown order"
+    );
+    assert!(
+        j["new_rest_activity_after"].is_null(),
+        "C04: new anchor must be null"
+    );
+
+    let anchor = cursor_rest_anchor(&pool, "alpaca").await;
+    assert_eq!(
+        anchor.as_deref(),
+        Some(CURSOR_ANCHOR_OLD),
+        "C04: DB cursor must remain unchanged"
+    );
+
+    delete_cursor(&pool, "alpaca").await;
+    cleanup_run(&pool).await;
+}
+
+// ---------------------------------------------------------------------------
+// C05 — malformed activity (missing price) does not advance cursor
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn c05_malformed_activity_does_not_advance_cursor() {
+    let activity = make_fill_no_price(TEST_ACTIVITY_ID, TEST_BROKER_ORDER_ID);
+    let fetcher = FakeGapFetcher::returning(vec![activity]);
+    let Some((st, pool)) = cursor_test_state(fetcher).await else {
+        eprintln!("C05: skipped — MQK_DATABASE_URL not set");
+        return;
+    };
+    cleanup_run(&pool).await;
+    setup_run_with_order(&pool).await;
+    seed_cursor(&pool, "alpaca", &cursor_json_with_anchor(CURSOR_ANCHOR_OLD)).await;
+
+    let router = routes::build_router(st);
+    let (status, body) = call(
+        router,
+        gap_req(serde_json::json!({ "run_id": TEST_RUN_ID, "dry_run": false })),
+    )
+    .await;
+    let j = parse_json(body);
+
+    assert_eq!(status, StatusCode::OK, "C05: expect 200; body={j}");
+    assert_eq!(j["malformed_count"], 1, "C05: malformed_count=1");
+    assert_eq!(
+        j["cursor_advanced"], false,
+        "C05: cursor must not advance on malformed"
+    );
+    assert!(
+        j["new_rest_activity_after"].is_null(),
+        "C05: new anchor must be null"
+    );
+
+    let anchor = cursor_rest_anchor(&pool, "alpaca").await;
+    assert_eq!(
+        anchor.as_deref(),
+        Some(CURSOR_ANCHOR_OLD),
+        "C05: DB cursor must remain unchanged"
+    );
+
+    delete_cursor(&pool, "alpaca").await;
+    cleanup_run(&pool).await;
+}
+
+// ---------------------------------------------------------------------------
+// C06 — ambiguous mapping (unrecognized side) does not advance cursor
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn c06_ambiguous_side_does_not_advance_cursor() {
+    let mut activity = make_fill_activity(TEST_ACTIVITY_ID, TEST_BROKER_ORDER_ID, "AAPL", "buy");
+    activity.side = "long".to_owned(); // unrecognized side — malformed
+    let fetcher = FakeGapFetcher::returning(vec![activity]);
+    let Some((st, pool)) = cursor_test_state(fetcher).await else {
+        eprintln!("C06: skipped — MQK_DATABASE_URL not set");
+        return;
+    };
+    cleanup_run(&pool).await;
+    setup_run_with_order(&pool).await;
+    seed_cursor(&pool, "alpaca", &cursor_json_with_anchor(CURSOR_ANCHOR_OLD)).await;
+
+    let router = routes::build_router(st);
+    let (status, body) = call(
+        router,
+        gap_req(serde_json::json!({ "run_id": TEST_RUN_ID, "dry_run": false })),
+    )
+    .await;
+    let j = parse_json(body);
+
+    assert_eq!(status, StatusCode::OK, "C06: expect 200; body={j}");
+    assert_eq!(
+        j["malformed_count"], 1,
+        "C06: malformed_count=1 (unrecognized side)"
+    );
+    assert_eq!(
+        j["cursor_advanced"], false,
+        "C06: cursor must not advance on ambiguous side"
+    );
+    assert!(
+        j["new_rest_activity_after"].is_null(),
+        "C06: new anchor must be null"
+    );
+
+    let anchor = cursor_rest_anchor(&pool, "alpaca").await;
+    assert_eq!(
+        anchor.as_deref(),
+        Some(CURSOR_ANCHOR_OLD),
+        "C06: DB cursor must remain unchanged"
+    );
+
+    delete_cursor(&pool, "alpaca").await;
+    cleanup_run(&pool).await;
+}
+
+// ---------------------------------------------------------------------------
+// C07 — REST unavailable does not advance cursor
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn c07_rest_unavailable_does_not_advance_cursor() {
+    let fetcher = FakeGapFetcher::failing("simulated REST failure");
+    let Some((st, pool)) = cursor_test_state(fetcher).await else {
+        eprintln!("C07: skipped — MQK_DATABASE_URL not set");
+        return;
+    };
+    seed_cursor(&pool, "alpaca", &cursor_json_with_anchor(CURSOR_ANCHOR_OLD)).await;
+
+    let router = routes::build_router(st);
+    let (status, body) = call(
+        router,
+        gap_req(serde_json::json!({ "run_id": TEST_RUN_ID, "dry_run": false })),
+    )
+    .await;
+    let j = parse_json(body);
+
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "C07: expect 503 on REST failure; body={j}"
+    );
+    assert_eq!(
+        j["cursor_advanced"], false,
+        "C07: cursor must not advance on REST error"
+    );
+    assert!(
+        j["new_rest_activity_after"].is_null(),
+        "C07: new anchor must be null"
+    );
+
+    let anchor = cursor_rest_anchor(&pool, "alpaca").await;
+    assert_eq!(
+        anchor.as_deref(),
+        Some(CURSOR_ANCHOR_OLD),
+        "C07: DB cursor must remain unchanged after REST failure"
+    );
+
+    delete_cursor(&pool, "alpaca").await;
+}
+
+// ---------------------------------------------------------------------------
+// C08 — mixed safe + unsafe batch does not advance cursor
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn c08_mixed_safe_unsafe_batch_does_not_advance_cursor() {
+    // Two activities: one maps to known order (safe), one does not (unsafe).
+    let safe_activity = make_fill_activity(TEST_ACTIVITY_ID, TEST_BROKER_ORDER_ID, "AAPL", "buy");
+    let unsafe_activity = make_fill_activity(
+        "20260509143000000000002::a1b1c1d1e1f1a1b1",
+        "broker-order-NOT-IN-MAP",
+        "AAPL",
+        "buy",
+    );
+    let fetcher = FakeGapFetcher::returning(vec![safe_activity, unsafe_activity]);
+    let Some((st, pool)) = cursor_test_state(fetcher).await else {
+        eprintln!("C08: skipped — MQK_DATABASE_URL not set");
+        return;
+    };
+    cleanup_run(&pool).await;
+    setup_run_with_order(&pool).await;
+    seed_cursor(&pool, "alpaca", &cursor_json_with_anchor(CURSOR_ANCHOR_OLD)).await;
+
+    let router = routes::build_router(st);
+    let (status, body) = call(
+        router,
+        gap_req(serde_json::json!({ "run_id": TEST_RUN_ID, "dry_run": false })),
+    )
+    .await;
+    let j = parse_json(body);
+
+    assert_eq!(status, StatusCode::OK, "C08: expect 200; body={j}");
+    assert_eq!(j["recovered_count"], 1, "C08: safe fill is recovered");
+    assert_eq!(j["unknown_order_count"], 1, "C08: unsafe fill is unknown");
+    assert_eq!(
+        j["cursor_advanced"], false,
+        "C08: cursor must NOT advance on mixed unsafe batch"
+    );
+    assert!(
+        j["new_rest_activity_after"].is_null(),
+        "C08: new anchor must be null"
+    );
+
+    let anchor = cursor_rest_anchor(&pool, "alpaca").await;
+    assert_eq!(
+        anchor.as_deref(),
+        Some(CURSOR_ANCHOR_OLD),
+        "C08: DB cursor must remain unchanged for mixed unsafe batch"
+    );
+
+    delete_cursor(&pool, "alpaca").await;
+    cleanup_run(&pool).await;
+}
+
+// ---------------------------------------------------------------------------
+// C09 — cursor monotonic: existing newer anchor not overwritten by older activity
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn c09_cursor_is_monotonic_newer_anchor_not_overwritten() {
+    // Seed cursor with CURSOR_ANCHOR_NEW (newer than TEST_ACTIVITY_ID).
+    // A fill is successfully recovered, but its ID is older than the current anchor.
+    // The cursor must not move backward.
+    let activity = make_fill_activity(TEST_ACTIVITY_ID, TEST_BROKER_ORDER_ID, "AAPL", "buy");
+    let fetcher = FakeGapFetcher::returning(vec![activity]);
+    let Some((st, pool)) = cursor_test_state(fetcher).await else {
+        eprintln!("C09: skipped — MQK_DATABASE_URL not set");
+        return;
+    };
+    cleanup_run(&pool).await;
+    setup_run_with_order(&pool).await;
+    // Seed with NEWER anchor — activity ID (TEST_ACTIVITY_ID) is lexicographically smaller.
+    seed_cursor(&pool, "alpaca", &cursor_json_with_anchor(CURSOR_ANCHOR_NEW)).await;
+
+    let router = routes::build_router(st);
+    let (status, body) = call(
+        router,
+        gap_req(serde_json::json!({ "run_id": TEST_RUN_ID, "dry_run": false })),
+    )
+    .await;
+    let j = parse_json(body);
+
+    assert_eq!(status, StatusCode::OK, "C09: expect 200; body={j}");
+    assert_eq!(j["recovered_count"], 1, "C09: fill is recovered");
+    // cursor_advanced must be false because TEST_ACTIVITY_ID < CURSOR_ANCHOR_NEW.
+    assert_eq!(
+        j["cursor_advanced"], false,
+        "C09: cursor must not advance (monotonic guard)"
+    );
+    assert!(
+        j["new_rest_activity_after"].is_null(),
+        "C09: new anchor must be null"
+    );
+
+    let anchor = cursor_rest_anchor(&pool, "alpaca").await;
+    assert_eq!(
+        anchor.as_deref(),
+        Some(CURSOR_ANCHOR_NEW),
+        "C09: DB cursor must remain at CURSOR_ANCHOR_NEW (monotonic)"
+    );
+
+    delete_cursor(&pool, "alpaca").await;
+    cleanup_run(&pool).await;
+}

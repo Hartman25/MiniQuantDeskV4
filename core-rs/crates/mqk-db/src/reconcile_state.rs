@@ -267,3 +267,43 @@ pub async fn advance_broker_cursor(
     .context("advance_broker_cursor failed")?;
     Ok(())
 }
+
+/// Advance only the `rest_activity_after` field in the persisted broker cursor,
+/// preserving all other cursor fields (WS `trade_updates` state, schema version).
+///
+/// Returns `Ok(true)` if the cursor was advanced.
+/// Returns `Ok(false)` (fail-closed) when:
+///   - No cursor exists for this adapter (cannot construct a safe cursor without WS state).
+///   - The existing `rest_activity_after` is `>=` `new_anchor` (monotonic guard).
+///   - The existing cursor JSON is not parseable.
+///
+/// `updated_at` is caller-supplied (D1 policy: no SQL `now()`).
+pub async fn advance_broker_cursor_rest_anchor(
+    pool: &PgPool,
+    adapter_id: &str,
+    new_anchor: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<bool> {
+    let existing_json = match load_broker_cursor(pool, adapter_id).await? {
+        Some(j) => j,
+        None => return Ok(false),
+    };
+    let mut cursor_val: serde_json::Value = match serde_json::from_str(&existing_json) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    let existing_anchor = cursor_val
+        .get("rest_activity_after")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    if let Some(existing) = existing_anchor {
+        if new_anchor <= existing {
+            return Ok(false);
+        }
+    }
+    cursor_val["rest_activity_after"] = serde_json::Value::String(new_anchor.to_owned());
+    let new_json = serde_json::to_string(&cursor_val)
+        .context("advance_broker_cursor_rest_anchor: re-serialize cursor")?;
+    advance_broker_cursor(pool, adapter_id, &new_json, updated_at).await?;
+    Ok(true)
+}

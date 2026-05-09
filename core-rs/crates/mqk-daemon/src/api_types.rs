@@ -3258,4 +3258,9 @@ pub struct WsGapFillRecoveryResponse {
     pub evidence: String,
     /// Fills recovered (or planned in dry-run mode).
     pub recovered_fills: Vec<WsGapRecoveredFill>,
+    /// Whether the persisted `rest_activity_after` cursor was advanced after recovery.
+    /// Always `false` for dry_run, REST error, no eligible activity, or unsafe batch.
+    pub cursor_advanced: bool,
+    /// New `rest_activity_after` value after advancement; `None` when `cursor_advanced` is `false`.
+    pub new_rest_activity_after: Option<String>,
 }

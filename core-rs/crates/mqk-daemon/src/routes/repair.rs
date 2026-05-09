@@ -2660,6 +2660,8 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
                 gate: Some("repair.db_required".to_string()),
                 evidence: "DB is not configured on this daemon".to_string(),
                 recovered_fills: vec![],
+                cursor_advanced: false,
+                new_rest_activity_after: None,
             }),
         )
             .into_response();
@@ -2685,6 +2687,8 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
                     gate: Some("repair.invalid_request".to_string()),
                     evidence: format!("invalid run_id: '{}'", body.run_id),
                     recovered_fills: vec![],
+                    cursor_advanced: false,
+                    new_rest_activity_after: None,
                 }),
             )
                 .into_response();
@@ -2711,6 +2715,8 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
                            REST gap recovery is unavailable"
                     .to_string(),
                 recovered_fills: vec![],
+                cursor_advanced: false,
+                new_rest_activity_after: None,
             }),
         )
             .into_response();
@@ -2756,6 +2762,8 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
                     gate: Some("repair.db_error".to_string()),
                     evidence: format!("broker_map_load_for_run failed: {e}"),
                     recovered_fills: vec![],
+                    cursor_advanced: false,
+                    new_rest_activity_after: None,
                 }),
             )
                 .into_response();
@@ -2784,6 +2792,8 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
                         "WsGapFillFetcher.fetch_fills_since returned error (fail closed): {e}"
                     ),
                     recovered_fills: vec![],
+                    cursor_advanced: false,
+                    new_rest_activity_after: None,
                 }),
             )
                 .into_response();
@@ -2796,6 +2806,9 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
     let mut unknown_order_count: usize = 0;
     let mut malformed_count: usize = 0;
     let mut recovered_fills: Vec<WsGapRecoveredFill> = Vec::new();
+    // BRK-GAP-REST-CURSOR-ADVANCE-01: track safe cursor advancement eligibility.
+    let mut last_safe_activity_id: Option<String> = None;
+    let mut has_unsafe_fill = false;
 
     // Match each REST activity to a known broker order for this run.
     'activity: for activity in &activities {
@@ -2810,6 +2823,7 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
             .find(|e| e.broker_order_id == activity.order_id);
         let Some(entry) = map_entry else {
             unknown_order_count += 1;
+            has_unsafe_fill = true;
             tracing::debug!(
                 "repair_ws_gap_fill_recovery: activity '{}' order_id='{}' not in run broker_map \
                  (run_id='{run_id}'); skipped",
@@ -2824,6 +2838,7 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
             Some(s) => s.to_owned(),
             None => {
                 malformed_count += 1;
+                has_unsafe_fill = true;
                 tracing::warn!(
                     "repair_ws_gap_fill_recovery: activity '{}' has missing qty; skipped",
                     activity.id
@@ -2835,6 +2850,7 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
             Some(s) => s.to_owned(),
             None => {
                 malformed_count += 1;
+                has_unsafe_fill = true;
                 tracing::warn!(
                     "repair_ws_gap_fill_recovery: activity '{}' has missing price; skipped",
                     activity.id
@@ -2845,6 +2861,7 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
         let side = activity.side.as_str();
         if side != "buy" && side != "sell" {
             malformed_count += 1;
+            has_unsafe_fill = true;
             tracing::warn!(
                 "repair_ws_gap_fill_recovery: activity '{}' has unrecognized side='{}'; skipped",
                 activity.id,
@@ -2866,6 +2883,7 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
             Ok(v) if v > 0.0 && v.is_finite() => v,
             _ => {
                 malformed_count += 1;
+                has_unsafe_fill = true;
                 tracing::warn!(
                     "repair_ws_gap_fill_recovery: activity '{}' qty='{}' is not positive finite; \
                      skipped",
@@ -2881,6 +2899,7 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
             Ok(v) if v >= 0.0 && v.is_finite() => v,
             _ => {
                 malformed_count += 1;
+                has_unsafe_fill = true;
                 tracing::warn!(
                     "repair_ws_gap_fill_recovery: activity '{}' price='{}' is not valid; skipped",
                     activity.id,
@@ -2893,6 +2912,7 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
             Ok(m) => m,
             Err(_) => {
                 malformed_count += 1;
+                has_unsafe_fill = true;
                 tracing::warn!(
                     "repair_ws_gap_fill_recovery: activity '{}' price='{}' micros conversion \
                      failed; skipped",
@@ -2978,12 +2998,14 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
             Ok(true) => {
                 recovered_count += 1;
                 recovered_fills.push(fill);
+                last_safe_activity_id = Some(activity.id.clone());
             }
             Ok(false) => {
                 already_present_count += 1;
                 let mut dup_fill = fill;
                 dup_fill.already_present = true;
                 recovered_fills.push(dup_fill);
+                last_safe_activity_id = Some(activity.id.clone());
             }
             Err(e) => {
                 tracing::error!(
@@ -2993,9 +3015,43 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
                 );
                 // Treat as malformed/failed for this activity; do not abort entire recovery.
                 malformed_count += 1;
+                has_unsafe_fill = true;
             }
         }
     }
+
+    // BRK-GAP-REST-CURSOR-ADVANCE-01: advance rest_activity_after when safe.
+    // Conditions for advancement:
+    //   - dry_run=false (no mutation in dry-run mode)
+    //   - no unsafe fills in the batch (unknown/malformed/insert-error)
+    //   - at least one fill was confirmed (recovered or already present)
+    // Cursor advancement is monotonic: existing newer anchor is never overwritten.
+    let (cursor_advanced, new_rest_activity_after) = if !dry_run && !has_unsafe_fill {
+        if let Some(new_anchor) = last_safe_activity_id {
+            match mqk_db::advance_broker_cursor_rest_anchor(
+                db,
+                ALPACA_ADAPTER_ID,
+                &new_anchor,
+                Utc::now(),
+            )
+            .await
+            {
+                Ok(true) => (true, Some(new_anchor)),
+                Ok(false) => (false, None),
+                Err(e) => {
+                    tracing::warn!(
+                        "repair_ws_gap_fill_recovery: advance_broker_cursor_rest_anchor \
+                             failed (non-fatal): {e}"
+                    );
+                    (false, None)
+                }
+            }
+        } else {
+            (false, None)
+        }
+    } else {
+        (false, None)
+    };
 
     let evidence = if dry_run {
         format!(
@@ -3031,6 +3087,8 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
             gate: None,
             evidence,
             recovered_fills,
+            cursor_advanced,
+            new_rest_activity_after,
         }),
     )
         .into_response()
