@@ -263,6 +263,65 @@ impl AlpacaBrokerAdapter {
     }
 
     // -----------------------------------------------------------------------
+    // BRK-GAP-REST-RECOVERY-01: account-wide fill fetch since cursor
+    // -----------------------------------------------------------------------
+    /// Fetch all FILL-class account activities since `after_id` (exclusive).
+    ///
+    /// `after_id`: when `Some`, passed as `page_token` so Alpaca returns only
+    /// activities whose `id` is strictly after the given value (ascending order).
+    /// When `None`, fetches the most recent page of FILL activities.
+    ///
+    /// Paginates through all available results using the same
+    /// [`FILL_ACTIVITIES_PAGE_SIZE`] page loop and no-progress guard as
+    /// `fetch_events`.  Returns raw [`AlpacaOrderActivity`] records — no order
+    /// lookup and no [`BrokerEvent`] normalization.  Read-only.
+    ///
+    /// Does not check WS continuity.  The caller (repair route) is responsible
+    /// for gating on gap state before invoking this method.
+    pub fn fetch_fill_activities_since(
+        &self,
+        after_id: Option<&str>,
+    ) -> Result<Vec<AlpacaOrderActivity>, BrokerError> {
+        let mut current_page_token: Option<String> = after_id.map(str::to_owned);
+        let mut all_activities: Vec<AlpacaOrderActivity> = Vec::new();
+
+        loop {
+            let mut path = format!(
+                "/v2/account/activities/FILL?direction=asc&page_size={FILL_ACTIVITIES_PAGE_SIZE}"
+            );
+            if let Some(token) = current_page_token.as_deref() {
+                path.push_str("&page_token=");
+                path.push_str(token);
+            }
+
+            let activities: Vec<AlpacaOrderActivity> = self.get(&path)?;
+            let page_len = activities.len();
+            let prev_page_token = current_page_token.clone();
+
+            if let Some(last) = activities.last() {
+                current_page_token = Some(last.id.clone());
+            }
+
+            if page_len == FILL_ACTIVITIES_PAGE_SIZE && current_page_token == prev_page_token {
+                return Err(BrokerError::Transient {
+                    detail: format!(
+                        "fetch_fill_activities_since: pagination made no progress at \
+                         page_token={prev_page_token:?}; refusing to loop"
+                    ),
+                });
+            }
+
+            all_activities.extend(activities);
+
+            if page_len < FILL_ACTIVITIES_PAGE_SIZE {
+                break;
+            }
+        }
+
+        Ok(all_activities)
+    }
+
+    // -----------------------------------------------------------------------
     // AP-03: Broker snapshot fetch
     // -----------------------------------------------------------------------
     /// Fetch a point-in-time broker snapshot from Alpaca.

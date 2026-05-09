@@ -158,11 +158,14 @@ async fn db_state_no_fetcher() -> Option<(Arc<state::AppState>, sqlx::PgPool)> {
         .connect(&url)
         .await
         .expect("DB connect failed");
-    let st = state::AppState::new_for_test_with_db_mode_and_broker(
+    let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
         pool.clone(),
         state::DeploymentMode::LiveShadow,
         state::BrokerKind::Alpaca,
     );
+    // BRK-GAP-REST-RECOVERY-01: explicitly clear the production-wired fetcher so the
+    // "no fetcher configured" gate tests remain valid regardless of env credentials.
+    st.ws_gap_fill_fetcher = None;
     Some((Arc::new(st), pool))
 }
 

@@ -43,7 +43,7 @@ pub use alpaca_ws_transport::{
 pub use autonomous_bar_ticker::{
     spawn_autonomous_bar_ticker, BAR_INTERVAL_SECS_ENV, DEFAULT_QTY_ENV,
 };
-use broker::build_fill_activity_fetcher_from_env;
+use broker::{build_fill_activity_fetcher_from_env, build_ws_gap_fill_fetcher_from_env};
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
 pub use loop_runner::spawn_reconcile_tick;
@@ -659,6 +659,14 @@ impl AppState {
             runtime_selection.deployment_mode,
         );
 
+        // BRK-GAP-REST-RECOVERY-01: account-wide gap fill fetcher; mirrors
+        // fill_activity_fetcher wiring.  None when Alpaca not configured or
+        // credentials absent (fail-closed).
+        let ws_gap_fill_fetcher = build_ws_gap_fill_fetcher_from_env(
+            runtime_selection.broker_kind,
+            runtime_selection.deployment_mode,
+        );
+
         Self {
             bus,
             node_id: env::default_node_id(build.service),
@@ -701,7 +709,7 @@ impl AppState {
             provider_registry_path: std::env::var("MQK_PROVIDER_REGISTRY_PATH")
                 .unwrap_or_else(|_| "config/providers/providers.json".to_string()),
             fill_activity_fetcher,
-            ws_gap_fill_fetcher: None,
+            ws_gap_fill_fetcher,
         }
     }
 
@@ -2605,5 +2613,90 @@ mod tests {
             state.fill_activity_fetcher.is_none() || std::env::var(ALPACA_KEY_PAPER_ENV).is_ok(),
             "fill_activity_fetcher must be None when Alpaca credentials are absent"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // BRK-GAP-REST-RECOVERY-01 production wiring proof tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ws_gap_fetcher_non_alpaca_broker_is_none() {
+        // None broker_kind → no fetcher (fail-closed).
+        let fetcher = build_ws_gap_fill_fetcher_from_env(None, DeploymentMode::Paper);
+        assert!(
+            fetcher.is_none(),
+            "None broker_kind must yield no ws_gap fetcher"
+        );
+
+        // Paper broker (LockedPaperBroker) also yields no fetcher.
+        let fetcher =
+            build_ws_gap_fill_fetcher_from_env(Some(BrokerKind::Paper), DeploymentMode::Paper);
+        assert!(
+            fetcher.is_none(),
+            "BrokerKind::Paper must yield no ws_gap fetcher"
+        );
+    }
+
+    #[test]
+    fn ws_gap_fetcher_alpaca_missing_creds_is_none_no_panic() {
+        // When Alpaca credentials are absent the function returns None without panicking.
+        // If credentials ARE present in this environment, prove the Some path instead.
+        let fetcher =
+            build_ws_gap_fill_fetcher_from_env(Some(BrokerKind::Alpaca), DeploymentMode::Paper);
+        if std::env::var(ALPACA_KEY_PAPER_ENV).is_ok() {
+            assert!(
+                fetcher.is_some(),
+                "Alpaca+Paper with credentials must yield Some ws_gap fetcher"
+            );
+        } else {
+            assert!(
+                fetcher.is_none(),
+                "Alpaca+Paper without credentials must yield None ws_gap fetcher"
+            );
+        }
+    }
+
+    #[test]
+    fn ws_gap_fetcher_default_appstate_has_no_fetcher() {
+        // Default AppState built without Alpaca env vars has no ws_gap_fill_fetcher.
+        // Proves the None path in new_inner for non-Alpaca configurations.
+        let state = AppState::new();
+        assert!(
+            state.ws_gap_fill_fetcher.is_none() || std::env::var(ALPACA_KEY_PAPER_ENV).is_ok(),
+            "ws_gap_fill_fetcher must be None when Alpaca credentials are absent"
+        );
+    }
+
+    #[test]
+    fn ws_gap_fetcher_test_setter_override_works() {
+        use mqk_broker_alpaca::types::AlpacaOrderActivity;
+
+        struct DummyFetcher;
+        impl WsGapFillFetcher for DummyFetcher {
+            fn fetch_fills_since(
+                &self,
+                _since: Option<&str>,
+            ) -> Result<Vec<AlpacaOrderActivity>, String> {
+                Ok(vec![])
+            }
+        }
+
+        let mut state = AppState::new();
+        assert!(
+            state.ws_gap_fill_fetcher.is_none() || std::env::var(ALPACA_KEY_PAPER_ENV).is_ok(),
+            "start without injected fetcher"
+        );
+        state.set_ws_gap_fill_fetcher_for_test(Arc::new(DummyFetcher));
+        assert!(
+            state.ws_gap_fill_fetcher.is_some(),
+            "setter must inject the fetcher regardless of env"
+        );
+        // Confirm the fetcher is callable without panic.
+        let result = state
+            .ws_gap_fill_fetcher
+            .as_deref()
+            .unwrap()
+            .fetch_fills_since(None);
+        assert!(result.is_ok(), "dummy fetcher must return Ok");
     }
 }
