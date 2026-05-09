@@ -279,6 +279,13 @@ pub struct AppState {
     /// Set via `set_fill_activity_fetcher_for_test` in tests; production wiring
     /// is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.
     pub fill_activity_fetcher: Option<Arc<dyn BrokerFillActivityFetcher>>,
+    /// BRK-GAP-REST-RECOVERY-01: Injectable account-wide fill fetcher for WS gap recovery.
+    ///
+    /// Fetches all FILL/PARTIAL_FILL activities since a cursor position without
+    /// filtering by order ID.  Used by the ws-gap-fill-recovery repair route.
+    /// `None` when not configured (tests inject a fake; production wiring
+    /// is a follow-up once the service function is proven safe).
+    pub ws_gap_fill_fetcher: Option<Arc<dyn WsGapFillFetcher>>,
 }
 
 /// BROKER-FILL-REST-RECOVERY-01: Injectable abstraction over Alpaca REST activity fetch.
@@ -294,6 +301,31 @@ pub trait BrokerFillActivityFetcher: Send + Sync {
     fn fetch_fill_activities_for_order(
         &self,
         broker_order_id: &str,
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaOrderActivity>, String>;
+}
+
+/// BRK-GAP-REST-RECOVERY-01: Injectable abstraction over account-wide Alpaca fill fetch.
+///
+/// Unlike `BrokerFillActivityFetcher` (which filters by `order_id`), this trait
+/// fetches all FILL and PARTIAL_FILL activities since a cursor position.  It is
+/// the correct seam for WS gap recovery where the specific broker_order_ids that
+/// were active during the gap window are not known up-front.
+///
+/// Tests inject a fake implementation.  Production wiring via `AlpacaWsGapFillFetcher`
+/// in `state/broker.rs` once the service function is proven safe by scenario tests.
+pub trait WsGapFillFetcher: Send + Sync {
+    /// Fetch all FILL and PARTIAL_FILL account activities since `since_activity_id`.
+    ///
+    /// `since_activity_id`: if `Some`, only activities with an ID strictly after
+    /// this value are returned (exclusive lower bound, ascending order, Alpaca
+    /// `?after=` semantics).  If `None`, implementation returns recent activities
+    /// from a reasonable default window.
+    ///
+    /// Returns `Err(String)` if the REST call fails; callers treat this as
+    /// REST unavailable and fail closed (no mutation).
+    fn fetch_fills_since(
+        &self,
+        since_activity_id: Option<&str>,
     ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaOrderActivity>, String>;
 }
 
@@ -476,6 +508,14 @@ impl AppState {
         fetcher: Arc<dyn BrokerFillActivityFetcher>,
     ) {
         self.fill_activity_fetcher = Some(fetcher);
+    }
+
+    /// BRK-GAP-REST-RECOVERY-01: Test helper — inject an account-wide gap fill fetcher.
+    ///
+    /// Allows scenario tests to inject a fake `WsGapFillFetcher` without real network
+    /// calls.  Production wiring is a follow-up once the service function is proven.
+    pub fn set_ws_gap_fill_fetcher_for_test(&mut self, fetcher: Arc<dyn WsGapFillFetcher>) {
+        self.ws_gap_fill_fetcher = Some(fetcher);
     }
 
     /// BRK-07R: Seed WS continuity state from the last persisted broker cursor.
@@ -661,6 +701,7 @@ impl AppState {
             provider_registry_path: std::env::var("MQK_PROVIDER_REGISTRY_PATH")
                 .unwrap_or_else(|_| "config/providers/providers.json".to_string()),
             fill_activity_fetcher,
+            ws_gap_fill_fetcher: None,
         }
     }
 

@@ -3190,3 +3190,72 @@ pub struct IngestJobStatusResponse {
     /// Provider verification status from the provider registry (None if registry unavailable).
     pub provider_verification_status: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// BRK-GAP-REST-RECOVERY-01 — WS gap fill recovery API types
+// ---------------------------------------------------------------------------
+
+/// POST /api/v1/ops/repair/ws-gap-fill-recovery — request body.
+#[derive(Debug, Deserialize)]
+pub struct WsGapFillRecoveryRequest {
+    /// Run UUID to recover fills for.
+    pub run_id: String,
+    /// If `true`, plan only (classify what would be recovered without mutating inbox).
+    /// Default: `true`.  Set to `false` to actually insert the inbox rows.
+    #[serde(default = "default_ws_gap_dry_run")]
+    pub dry_run: bool,
+}
+
+fn default_ws_gap_dry_run() -> bool {
+    true
+}
+
+/// One fill successfully recovered or already present from the WS gap window.
+#[derive(Debug, Serialize, Clone)]
+pub struct WsGapRecoveredFill {
+    /// Alpaca activity ID (the authoritative broker-side activity identifier).
+    pub broker_activity_id: String,
+    /// Alpaca broker order UUID matched in `broker_order_map`.
+    pub broker_order_id: String,
+    /// OMS internal order ID that owns this broker order.
+    pub internal_order_id: String,
+    pub symbol: String,
+    pub side: String,
+    pub qty_str: String,
+    pub price_str: String,
+    /// `"fill"` or `"partial_fill"`.
+    pub event_kind: String,
+    /// Stable `broker_message_id` used as the inbox idempotency key.
+    pub inbox_broker_message_id: String,
+    /// `true` when the row was already present (idempotent recovery).
+    pub already_present: bool,
+}
+
+/// POST /api/v1/ops/repair/ws-gap-fill-recovery — response body.
+#[derive(Debug, Serialize)]
+pub struct WsGapFillRecoveryResponse {
+    pub truth_state: String,
+    pub run_id: String,
+    /// `rest_activity_after` cursor value used as the lower bound for fetching.
+    /// `None` when no prior cursor was available (recovery covered all activities).
+    pub rest_activity_after: Option<String>,
+    /// Whether a `WsGapFillFetcher` was configured on this daemon.
+    pub fetcher_available: bool,
+    /// Total activities returned by the fetcher.
+    pub activities_fetched: usize,
+    /// Number of fills successfully inserted (or dry-run planned).
+    pub recovered_count: usize,
+    /// Number of fills that were already present in the inbox (idempotent).
+    pub already_present_count: usize,
+    /// Number of REST activities where `order_id` was not in the run's broker_order_map.
+    pub unknown_order_count: usize,
+    /// Number of REST activities refused due to malformed/missing fields.
+    pub malformed_count: usize,
+    /// Whether this response reflects a dry-run (no mutation).
+    pub dry_run: bool,
+    /// Filled when the operation was refused before any fetch or mutation.
+    pub gate: Option<String>,
+    pub evidence: String,
+    /// Fills recovered (or planned in dry-run mode).
+    pub recovered_fills: Vec<WsGapRecoveredFill>,
+}

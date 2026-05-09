@@ -173,7 +173,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use repair::{
         repair_halted_run_fill_apply, repair_halted_run_fill_plan,
         repair_halted_run_fill_rest_recovery, repair_halted_run_portfolio_snapshot,
-        repair_outbox_ambiguous,
+        repair_outbox_ambiguous, repair_ws_gap_fill_recovery,
     };
     use strategy::{strategy_signal, strategy_summary, strategy_suppressions};
     use system::{
@@ -342,6 +342,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/ops/repair/halted-run-portfolio-snapshot",
             post(repair_halted_run_portfolio_snapshot),
+        )
+        .route(
+            "/api/v1/ops/repair/ws-gap-fill-recovery",
+            post(repair_ws_gap_fill_recovery),
         )
         .route("/api/v1/alerts/triage/ack", post(alert_triage_ack))
         .route("/api/v1/incidents", post(create_incident))

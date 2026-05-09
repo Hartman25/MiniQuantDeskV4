@@ -469,6 +469,55 @@ pub async fn inbox_load_unapplied_fill_for_order(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// BRK-GAP-REST-RECOVERY-01 — Run-scoped broker map load
+// ---------------------------------------------------------------------------
+
+/// One row from `broker_order_map` scoped to a specific run.
+///
+/// Used by the WS-gap fill recovery service to match REST account activities
+/// to orders that belong to the target run without touching other runs.
+#[derive(Debug, Clone)]
+pub struct RunBrokerMapEntry {
+    /// OMS internal order ID (`oms_outbox.idempotency_key`).
+    pub internal_order_id: String,
+    /// Alpaca-assigned broker order UUID.
+    pub broker_order_id: String,
+}
+
+/// Load all `broker_order_map` entries whose owning outbox row belongs to `run_id`.
+///
+/// Returns one entry per submitted order for the run.  Read-only — no state is
+/// mutated.  Used by the WS-gap fill recovery service to scope REST activity
+/// matching to a single run without touching sibling runs.
+pub async fn broker_map_load_for_run(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<Vec<RunBrokerMapEntry>> {
+    let rows = sqlx::query(
+        r#"
+        select bom.internal_id, bom.broker_id
+          from broker_order_map bom
+          join oms_outbox o on bom.internal_id = o.idempotency_key
+         where o.run_id = $1
+         order by bom.registered_at_utc asc
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .context("broker_map_load_for_run failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(RunBrokerMapEntry {
+            internal_order_id: row.try_get("internal_id")?,
+            broker_order_id: row.try_get("broker_id")?,
+        });
+    }
+    Ok(out)
+}
+
 /// Load all applied inbox rows (`applied_at_utc IS NOT NULL`), ordered by
 /// inbox_id asc.  Used at cold-start to replay fills into the portfolio and
 /// advance OMS order state.  Disjoint from the unapplied set processed by
