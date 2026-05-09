@@ -16,6 +16,7 @@ mod session_controller;
 mod signal_intake;
 mod snapshot;
 mod types;
+pub mod ws_gap_recovery;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
@@ -62,6 +63,7 @@ pub use types::{
     RuntimeLifecycleError, StatusSnapshot, StrategyMarketDataSource,
 };
 pub(crate) use types::{ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHandle};
+pub use ws_gap_recovery::WsGapRecoveryOutcome;
 // Internal (crate-visible) re-exports used across this module.
 #[cfg(test)]
 use broker::alpaca_base_url_for_mode;

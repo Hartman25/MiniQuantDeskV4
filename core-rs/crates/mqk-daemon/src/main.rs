@@ -79,6 +79,32 @@ async fn main() -> anyhow::Result<()> {
     }
     state::spawn_heartbeat(shared.bus.clone(), Duration::from_secs(1));
 
+    // BRK-GAP-REST-AUTO-TRIGGER-01: If the persisted WS cursor is GapDetected,
+    // attempt REST gap fill recovery before the WS transport starts.
+    // Fires only when DB, fetcher, and a non-halted prior run are all present.
+    // Failure is warn-only — GapDetected already blocks start_execution_runtime
+    // via BRK-00R-04; this path only inserts missed inbox rows.
+    if let Some(ref outcome) = shared.try_ws_gap_auto_recovery().await {
+        if outcome.gate.is_some() {
+            tracing::warn!(
+                run_id = %outcome.run_id,
+                gate = ?outcome.gate,
+                evidence = %outcome.evidence,
+                "BRK-GAP-REST-AUTO-TRIGGER-01: startup gap recovery refused by internal gate"
+            );
+        } else {
+            tracing::info!(
+                run_id = %outcome.run_id,
+                recovered = outcome.recovered_count,
+                already_present = outcome.already_present_count,
+                unknown_order = outcome.unknown_order_count,
+                malformed = outcome.malformed_count,
+                cursor_advanced = outcome.cursor_advanced,
+                "BRK-GAP-REST-AUTO-TRIGGER-01: startup gap fill recovery completed"
+            );
+        }
+    }
+
     // BRK-00R-05: Spawn the Alpaca paper WS transport if configured for paper+alpaca.
     // The handle is kept alive for the lifetime of the daemon.
     let _alpaca_ws_handle = state::spawn_alpaca_paper_ws_task(Arc::clone(&shared));

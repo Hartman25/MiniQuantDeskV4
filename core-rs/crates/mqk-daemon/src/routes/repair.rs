@@ -34,7 +34,7 @@ use crate::{
         HaltedRunFillRestRecoveryResponse, HaltedRunPortfolioSnapshotRequest,
         HaltedRunPortfolioSnapshotResponse, OutboxRepairRequest, OutboxRepairResponse,
         PortfolioPositionSummary, RestRecoveredFill, WsGapFillRecoveryRequest,
-        WsGapFillRecoveryResponse, WsGapRecoveredFill,
+        WsGapFillRecoveryResponse,
     },
     state::AppState,
 };
@@ -2608,32 +2608,23 @@ pub(crate) async fn repair_halted_run_portfolio_snapshot(
 }
 
 // ---------------------------------------------------------------------------
-// BRK-GAP-REST-RECOVERY-01 — WS gap fill recovery route
+// BRK-GAP-REST-RECOVERY-01 / BRK-GAP-REST-AUTO-TRIGGER-01 — WS gap fill route
 // ---------------------------------------------------------------------------
 //
 // POST /api/v1/ops/repair/ws-gap-fill-recovery
 //
-// Recovers fill activity missed during a websocket gap by querying Alpaca REST
-// account activities since the persisted `rest_activity_after` cursor.
+// Thin handler: gates DB/run_id/fetcher then delegates to the shared service
+// `crate::state::ws_gap_recovery::run_ws_gap_fill_recovery_core`.  The same
+// service function is called by the startup auto-trigger so both paths share
+// the proven recovery logic.
 //
-// ## Safety contract
+// ## Safety contract (unchanged from BRK-GAP-REST-RECOVERY-01)
 //
-// - No orders are submitted.  No fills are fabricated.  No OMS state is written.
-// - REST activity is the ONLY source of fill data — cursor-only evidence is not
-//   sufficient to insert an inbox row.
-// - Inbox inserts use `inbox_insert_deduped_with_identity`; re-running is safe
-//   (idempotent on `(run_id, broker_message_id)`).
-// - `broker_message_id` is `"alpaca-rest-gap:{activity_id}"` — stable across retries.
-// - `dry_run = true` (default): plan only, no inbox mutation.
-// - `dry_run = false`: inserts inbox rows but does NOT apply them to portfolio.
-//   Application is handled by existing inbox apply paths.
-// - Unknown `order_id` → skipped, counted in `unknown_order_count`.
-// - Malformed activity (missing price/qty/side) → skipped, counted in `malformed_count`.
+// - No orders submitted. No fills fabricated. No OMS state written.
+// - REST activity is the ONLY source of fill data.
+// - Inbox inserts are idempotent (`inbox_insert_deduped_with_identity`).
+// - Unknown order_id → skipped. Malformed activity → skipped.
 // - REST unavailable → fail closed, no mutation.
-// - No existing manual repair routes are weakened by this route.
-
-/// Stable broker_message_id prefix for gap-recovery REST-sourced inbox rows.
-const GAP_RECOVERY_MSG_PREFIX: &str = "alpaca-rest-gap";
 
 /// POST /api/v1/ops/repair/ws-gap-fill-recovery
 pub(crate) async fn repair_ws_gap_fill_recovery(
@@ -2722,373 +2713,58 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
             .into_response();
     };
 
-    // Load broker cursor to get rest_activity_after anchor.
-    let rest_activity_after: Option<String> =
-        match mqk_db::load_broker_cursor(db, ALPACA_ADAPTER_ID).await {
-            Ok(Some(cursor_json)) => serde_json::from_str::<serde_json::Value>(&cursor_json)
-                .ok()
-                .and_then(|v| {
-                    v.get("rest_activity_after")
-                        .and_then(|a| a.as_str())
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                }),
-            Ok(None) => None,
-            Err(e) => {
-                tracing::warn!(
-                    "repair_ws_gap_fill_recovery: load_broker_cursor failed (non-fatal): {e}"
-                );
-                None
-            }
+    // Core recovery via shared service (BRK-GAP-REST-AUTO-TRIGGER-01).
+    let outcome =
+        crate::state::ws_gap_recovery::run_ws_gap_fill_recovery_core(db, fetcher, run_id, dry_run)
+            .await;
+
+    // Map gate refusals from the service to HTTP error responses.
+    if let Some(ref gate) = outcome.gate {
+        let (status, truth_state) = match gate.as_str() {
+            "repair.db_error" => (StatusCode::SERVICE_UNAVAILABLE, "backend_unavailable"),
+            _ => (StatusCode::SERVICE_UNAVAILABLE, "active"),
         };
-
-    // Load broker_order_map entries for this run.
-    let run_broker_map = match mqk_db::broker_map_load_for_run(db, run_id).await {
-        Ok(entries) => entries,
-        Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(WsGapFillRecoveryResponse {
-                    truth_state: "backend_unavailable".to_string(),
-                    run_id: body.run_id.clone(),
-                    rest_activity_after,
-                    fetcher_available: true,
-                    activities_fetched: 0,
-                    recovered_count: 0,
-                    already_present_count: 0,
-                    unknown_order_count: 0,
-                    malformed_count: 0,
-                    dry_run,
-                    gate: Some("repair.db_error".to_string()),
-                    evidence: format!("broker_map_load_for_run failed: {e}"),
-                    recovered_fills: vec![],
-                    cursor_advanced: false,
-                    new_rest_activity_after: None,
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    // Fetch activities since cursor — fail closed if REST unavailable.
-    let activities = match fetcher.fetch_fills_since(rest_activity_after.as_deref()) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(WsGapFillRecoveryResponse {
-                    truth_state: "active".to_string(),
-                    run_id: body.run_id.clone(),
-                    rest_activity_after,
-                    fetcher_available: true,
-                    activities_fetched: 0,
-                    recovered_count: 0,
-                    already_present_count: 0,
-                    unknown_order_count: 0,
-                    malformed_count: 0,
-                    dry_run,
-                    gate: Some("repair.rest_unavailable".to_string()),
-                    evidence: format!(
-                        "WsGapFillFetcher.fetch_fills_since returned error (fail closed): {e}"
-                    ),
-                    recovered_fills: vec![],
-                    cursor_advanced: false,
-                    new_rest_activity_after: None,
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    let activities_fetched = activities.len();
-    let mut recovered_count: usize = 0;
-    let mut already_present_count: usize = 0;
-    let mut unknown_order_count: usize = 0;
-    let mut malformed_count: usize = 0;
-    let mut recovered_fills: Vec<WsGapRecoveredFill> = Vec::new();
-    // BRK-GAP-REST-CURSOR-ADVANCE-01: track safe cursor advancement eligibility.
-    let mut last_safe_activity_id: Option<String> = None;
-    let mut has_unsafe_fill = false;
-
-    // Match each REST activity to a known broker order for this run.
-    'activity: for activity in &activities {
-        // Filter: only FILL or PARTIAL_FILL activity types.
-        if activity.activity_type != "FILL" && activity.activity_type != "PARTIAL_FILL" {
-            continue;
-        }
-
-        // Match order_id to broker_order_map for this run.
-        let map_entry = run_broker_map
-            .iter()
-            .find(|e| e.broker_order_id == activity.order_id);
-        let Some(entry) = map_entry else {
-            unknown_order_count += 1;
-            has_unsafe_fill = true;
-            tracing::debug!(
-                "repair_ws_gap_fill_recovery: activity '{}' order_id='{}' not in run broker_map \
-                 (run_id='{run_id}'); skipped",
-                activity.id,
-                activity.order_id,
-            );
-            continue 'activity;
-        };
-
-        // Validate required fields — fail closed per activity on malformed data.
-        let qty_str = match activity.qty.as_deref().filter(|s| !s.is_empty()) {
-            Some(s) => s.to_owned(),
-            None => {
-                malformed_count += 1;
-                has_unsafe_fill = true;
-                tracing::warn!(
-                    "repair_ws_gap_fill_recovery: activity '{}' has missing qty; skipped",
-                    activity.id
-                );
-                continue 'activity;
-            }
-        };
-        let price_str = match activity.price.as_deref().filter(|s| !s.is_empty()) {
-            Some(s) => s.to_owned(),
-            None => {
-                malformed_count += 1;
-                has_unsafe_fill = true;
-                tracing::warn!(
-                    "repair_ws_gap_fill_recovery: activity '{}' has missing price; skipped",
-                    activity.id
-                );
-                continue 'activity;
-            }
-        };
-        let side = activity.side.as_str();
-        if side != "buy" && side != "sell" {
-            malformed_count += 1;
-            has_unsafe_fill = true;
-            tracing::warn!(
-                "repair_ws_gap_fill_recovery: activity '{}' has unrecognized side='{}'; skipped",
-                activity.id,
-                side
-            );
-            continue 'activity;
-        }
-
-        // Build stable broker_message_id — idempotency anchor for retry safety.
-        let stable_msg_id = format!("{GAP_RECOVERY_MSG_PREFIX}:{}", activity.id);
-        let event_kind = if activity.activity_type == "PARTIAL_FILL" {
-            "partial_fill"
-        } else {
-            "fill"
-        };
-
-        // Parse qty / price — fail closed per activity.
-        let qty_f64: f64 = match qty_str.parse::<f64>() {
-            Ok(v) if v > 0.0 && v.is_finite() => v,
-            _ => {
-                malformed_count += 1;
-                has_unsafe_fill = true;
-                tracing::warn!(
-                    "repair_ws_gap_fill_recovery: activity '{}' qty='{}' is not positive finite; \
-                     skipped",
-                    activity.id,
-                    qty_str
-                );
-                continue 'activity;
-            }
-        };
-        let delta_qty = (qty_f64 * 1_000_000.0).round() as i64;
-
-        let price_f64: f64 = match price_str.parse::<f64>() {
-            Ok(v) if v >= 0.0 && v.is_finite() => v,
-            _ => {
-                malformed_count += 1;
-                has_unsafe_fill = true;
-                tracing::warn!(
-                    "repair_ws_gap_fill_recovery: activity '{}' price='{}' is not valid; skipped",
-                    activity.id,
-                    price_str
-                );
-                continue 'activity;
-            }
-        };
-        let price_micros = match mqk_execution::price_to_micros(price_f64) {
-            Ok(m) => m,
-            Err(_) => {
-                malformed_count += 1;
-                has_unsafe_fill = true;
-                tracing::warn!(
-                    "repair_ws_gap_fill_recovery: activity '{}' price='{}' micros conversion \
-                     failed; skipped",
-                    activity.id,
-                    price_str
-                );
-                continue 'activity;
-            }
-        };
-        let exe_side = match side {
-            "buy" => mqk_execution::Side::Buy,
-            _ => mqk_execution::Side::Sell,
-        };
-
-        // Build canonical BrokerEvent payload.
-        let broker_event = if event_kind == "partial_fill" {
-            mqk_execution::BrokerEvent::PartialFill {
-                broker_message_id: stable_msg_id.clone(),
-                broker_fill_id: Some(activity.id.clone()),
-                internal_order_id: entry.internal_order_id.clone(),
-                broker_order_id: Some(activity.order_id.clone()),
-                symbol: activity.symbol.clone(),
-                side: exe_side,
-                delta_qty,
-                price_micros,
-                fee_micros: 0,
-            }
-        } else {
-            mqk_execution::BrokerEvent::Fill {
-                broker_message_id: stable_msg_id.clone(),
-                broker_fill_id: Some(activity.id.clone()),
-                internal_order_id: entry.internal_order_id.clone(),
-                broker_order_id: Some(activity.order_id.clone()),
-                symbol: activity.symbol.clone(),
-                side: exe_side,
-                delta_qty,
-                price_micros,
-                fee_micros: 0,
-            }
-        };
-        let event_json =
-            serde_json::to_value(&broker_event).expect("BrokerEvent serializes to JSON infallibly");
-
-        let received_at = chrono::DateTime::parse_from_rfc3339(&activity.transaction_time)
-            .ok()
-            .map(|dt| dt.with_timezone(&Utc))
-            .unwrap_or_else(Utc::now);
-
-        let fill = WsGapRecoveredFill {
-            broker_activity_id: activity.id.clone(),
-            broker_order_id: activity.order_id.clone(),
-            internal_order_id: entry.internal_order_id.clone(),
-            symbol: activity.symbol.clone(),
-            side: side.to_owned(),
-            qty_str: qty_str.clone(),
-            price_str: price_str.clone(),
-            event_kind: event_kind.to_owned(),
-            inbox_broker_message_id: stable_msg_id.clone(),
-            already_present: false,
-        };
-
-        if dry_run {
-            recovered_count += 1;
-            recovered_fills.push(fill);
-            continue 'activity;
-        }
-
-        // dry_run=false: insert the canonical inbox row.
-        match mqk_db::inbox_insert_deduped_with_identity(
-            db,
-            run_id,
-            &stable_msg_id,
-            Some(activity.id.as_str()),
-            &entry.internal_order_id,
-            &activity.order_id,
-            event_kind,
-            &event_json,
-            0,
-            received_at,
+        return (
+            status,
+            Json(WsGapFillRecoveryResponse {
+                truth_state: truth_state.to_string(),
+                run_id: body.run_id,
+                rest_activity_after: outcome.rest_activity_after,
+                fetcher_available: true,
+                activities_fetched: outcome.activities_fetched,
+                recovered_count: outcome.recovered_count,
+                already_present_count: outcome.already_present_count,
+                unknown_order_count: outcome.unknown_order_count,
+                malformed_count: outcome.malformed_count,
+                dry_run: outcome.dry_run,
+                gate: Some(gate.clone()),
+                evidence: outcome.evidence,
+                recovered_fills: outcome.recovered_fills,
+                cursor_advanced: outcome.cursor_advanced,
+                new_rest_activity_after: outcome.new_rest_activity_after,
+            }),
         )
-        .await
-        {
-            Ok(true) => {
-                recovered_count += 1;
-                recovered_fills.push(fill);
-                last_safe_activity_id = Some(activity.id.clone());
-            }
-            Ok(false) => {
-                already_present_count += 1;
-                let mut dup_fill = fill;
-                dup_fill.already_present = true;
-                recovered_fills.push(dup_fill);
-                last_safe_activity_id = Some(activity.id.clone());
-            }
-            Err(e) => {
-                tracing::error!(
-                    "repair_ws_gap_fill_recovery: inbox_insert_deduped_with_identity failed for \
-                     activity='{}': {e}",
-                    activity.id
-                );
-                // Treat as malformed/failed for this activity; do not abort entire recovery.
-                malformed_count += 1;
-                has_unsafe_fill = true;
-            }
-        }
+            .into_response();
     }
-
-    // BRK-GAP-REST-CURSOR-ADVANCE-01: advance rest_activity_after when safe.
-    // Conditions for advancement:
-    //   - dry_run=false (no mutation in dry-run mode)
-    //   - no unsafe fills in the batch (unknown/malformed/insert-error)
-    //   - at least one fill was confirmed (recovered or already present)
-    // Cursor advancement is monotonic: existing newer anchor is never overwritten.
-    let (cursor_advanced, new_rest_activity_after) = if !dry_run && !has_unsafe_fill {
-        if let Some(new_anchor) = last_safe_activity_id {
-            match mqk_db::advance_broker_cursor_rest_anchor(
-                db,
-                ALPACA_ADAPTER_ID,
-                &new_anchor,
-                Utc::now(),
-            )
-            .await
-            {
-                Ok(true) => (true, Some(new_anchor)),
-                Ok(false) => (false, None),
-                Err(e) => {
-                    tracing::warn!(
-                        "repair_ws_gap_fill_recovery: advance_broker_cursor_rest_anchor \
-                             failed (non-fatal): {e}"
-                    );
-                    (false, None)
-                }
-            }
-        } else {
-            (false, None)
-        }
-    } else {
-        (false, None)
-    };
-
-    let evidence = if dry_run {
-        format!(
-            "dry_run=true: fetched {activities_fetched} activities; \
-             planned {recovered_count} recovery inserts; \
-             {already_present_count} already present; \
-             {unknown_order_count} unknown orders; \
-             {malformed_count} malformed"
-        )
-    } else {
-        format!(
-            "dry_run=false: fetched {activities_fetched} activities; \
-             inserted {recovered_count} new inbox rows; \
-             {already_present_count} already present (idempotent); \
-             {unknown_order_count} unknown orders skipped; \
-             {malformed_count} malformed skipped"
-        )
-    };
 
     (
         StatusCode::OK,
         Json(WsGapFillRecoveryResponse {
             truth_state: "active".to_string(),
             run_id: body.run_id,
-            rest_activity_after,
+            rest_activity_after: outcome.rest_activity_after,
             fetcher_available: true,
-            activities_fetched,
-            recovered_count,
-            already_present_count,
-            unknown_order_count,
-            malformed_count,
-            dry_run,
+            activities_fetched: outcome.activities_fetched,
+            recovered_count: outcome.recovered_count,
+            already_present_count: outcome.already_present_count,
+            unknown_order_count: outcome.unknown_order_count,
+            malformed_count: outcome.malformed_count,
+            dry_run: outcome.dry_run,
             gate: None,
-            evidence,
-            recovered_fills,
-            cursor_advanced,
-            new_rest_activity_after,
+            evidence: outcome.evidence,
+            recovered_fills: outcome.recovered_fills,
+            cursor_advanced: outcome.cursor_advanced,
+            new_rest_activity_after: outcome.new_rest_activity_after,
         }),
     )
         .into_response()
