@@ -1194,6 +1194,70 @@ pub struct HaltedRunFillRestRecoveryResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/ops/repair/halted-run-portfolio-snapshot — PORTFOLIO-SNAPSHOT-DURABILITY-01
+// ---------------------------------------------------------------------------
+
+/// Per-symbol position summary derived from applied inbox fills.
+#[derive(Debug, Clone, Serialize)]
+pub struct PortfolioPositionSummary {
+    pub symbol: String,
+    /// Signed quantity: positive = long, negative = short.  Flat symbols are omitted.
+    pub qty_signed: i64,
+    /// Number of open FIFO lots.
+    pub lot_count: usize,
+}
+
+fn default_dry_run_true() -> bool {
+    true
+}
+
+/// Request body for POST /api/v1/ops/repair/halted-run-portfolio-snapshot.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HaltedRunPortfolioSnapshotRequest {
+    pub run_id: String,
+    /// If true (default), compute and return the portfolio summary without writing any snapshot.
+    #[serde(default = "default_dry_run_true")]
+    pub dry_run: bool,
+    /// Required when `dry_run = false`: must equal `"WRITE_PORTFOLIO_SNAPSHOT"`.
+    pub confirmation: Option<String>,
+}
+
+/// Response for POST /api/v1/ops/repair/halted-run-portfolio-snapshot.
+///
+/// `truth_state` values: `"active"`, `"no_db"`, `"backend_unavailable"`.
+///
+/// `decision` values:
+/// - `"dry_run_ok"` — positions computed; no snapshot written.
+/// - `"snapshot_written"` — snapshot written to audit store.
+/// - `"already_current"` — snapshot for this applied-fill dataset already exists.
+/// - `"refused"` — a gate fired; see `gate` and `evidence`.
+#[derive(Debug, Clone, Serialize)]
+pub struct HaltedRunPortfolioSnapshotResponse {
+    pub truth_state: String,
+    pub decision: String,
+    pub dry_run: bool,
+    pub run_id: String,
+    /// Number of applied fill/partial_fill inbox rows used for portfolio reconstruction.
+    pub applied_fill_count: usize,
+    /// Derived open positions (flat symbols omitted).
+    pub positions: Vec<PortfolioPositionSummary>,
+    /// Derived cash balance in micros, starting from `initial_cash_micros`.
+    pub cash_micros: i64,
+    /// Accumulated realized PnL from all applied fills, in micros.
+    pub realized_pnl_micros: i64,
+    /// Initial cash seed used for reconstruction (0 unless run config specifies otherwise).
+    pub initial_cash_micros: i64,
+    /// Whether a durable snapshot artifact was written to the audit store on this call.
+    pub snapshot_written: bool,
+    /// Audit event UUID of the written (or existing) snapshot.
+    pub audit_event_id: Option<String>,
+    /// Always `"applied_inbox_rows"` when positions are derived.
+    pub source: String,
+    pub evidence: String,
+    pub gate: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/ops/catalog — canonical Action Catalog
 // ---------------------------------------------------------------------------
 

@@ -31,8 +31,9 @@ use crate::{
     api_types::{
         HaltedRunFillApplyRequest, HaltedRunFillApplyResponse, HaltedRunFillEntry,
         HaltedRunFillPlanResponse, HaltedRunFillRestRecoveryRequest,
-        HaltedRunFillRestRecoveryResponse, OutboxRepairRequest, OutboxRepairResponse,
-        RestRecoveredFill,
+        HaltedRunFillRestRecoveryResponse, HaltedRunPortfolioSnapshotRequest,
+        HaltedRunPortfolioSnapshotResponse, OutboxRepairRequest, OutboxRepairResponse,
+        PortfolioPositionSummary, RestRecoveredFill,
     },
     state::AppState,
 };
@@ -2142,4 +2143,465 @@ async fn write_rest_recovery_audit(
     }
 
     Some(event_id)
+}
+
+// ---------------------------------------------------------------------------
+// PORTFOLIO-SNAPSHOT-DURABILITY-01 — deterministic portfolio rebuild proof path
+// ---------------------------------------------------------------------------
+//
+// POST /api/v1/ops/repair/halted-run-portfolio-snapshot
+//
+// Rebuilds durable portfolio truth for a HALTED run from its applied oms_inbox
+// fill rows.  Portfolio truth must come only from durable applied inbox rows —
+// never from repair response data, REST responses, or in-memory state.
+//
+// ## Safety contract
+//
+// - Gate 1: dry_run=false requires confirmation="WRITE_PORTFOLIO_SNAPSHOT".
+// - Gate 2: DB required; absent DB → 503.
+// - Gate 3: run_id must parse as UUID.
+// - Gate 4: run must exist and be HALTED; active runs → 409.
+// - Gate 5: all applied inbox rows loaded via inbox_load_all_applied_for_run.
+// - Gate 6: every row with event_kind "fill"/"partial_fill" must deserialize
+//   as BrokerEvent::Fill or BrokerEvent::PartialFill; failure → 409 fail-closed.
+//   Non-fill rows (ack, cancel_ack, etc.) are skipped — they do not affect
+//   portfolio state, consistent with orchestrator Phase 3 semantics.
+// - Gate 7: delta_qty must be > 0 for every fill row; 0 or negative → 409.
+//
+// dry_run=true (default): positions computed, nothing written.
+// dry_run=false: writes computed summary as a durable audit event
+//   (audit_events table, UUIDv5-keyed on run_id + max_fill_inbox_id).
+//   Same applied-fill dataset → same event_id → 23505 → "already_current".
+//
+// No orders submitted.  No portfolio mutated.  No inbox rows changed.
+
+const PORTFOLIO_SNAPSHOT_CONFIRMATION_TOKEN: &str = "WRITE_PORTFOLIO_SNAPSHOT";
+
+/// POST /api/v1/ops/repair/halted-run-portfolio-snapshot
+pub(crate) async fn repair_halted_run_portfolio_snapshot(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<HaltedRunPortfolioSnapshotRequest>,
+) -> Response {
+    let dry_run = body.dry_run;
+
+    // Inline macro for refusal responses to reduce repetition.
+    macro_rules! refuse {
+        ($status:expr, $truth:expr, $gate:expr, $evidence:expr) => {
+            (
+                $status,
+                Json(HaltedRunPortfolioSnapshotResponse {
+                    truth_state: $truth.to_string(),
+                    decision: "refused".to_string(),
+                    dry_run,
+                    run_id: body.run_id.clone(),
+                    applied_fill_count: 0,
+                    positions: vec![],
+                    cash_micros: 0,
+                    realized_pnl_micros: 0,
+                    initial_cash_micros: 0,
+                    snapshot_written: false,
+                    audit_event_id: None,
+                    source: "none".to_string(),
+                    evidence: $evidence.to_string(),
+                    gate: Some($gate.to_string()),
+                }),
+            )
+                .into_response()
+        };
+    }
+
+    // Gate 1: dry_run=false requires confirmation token.
+    if !dry_run {
+        match body.confirmation.as_deref() {
+            Some(PORTFOLIO_SNAPSHOT_CONFIRMATION_TOKEN) => {}
+            Some(other) => {
+                return refuse!(
+                    StatusCode::BAD_REQUEST,
+                    "active",
+                    "snapshot.confirmation_required",
+                    format!(
+                        "dry_run=false requires confirmation='{PORTFOLIO_SNAPSHOT_CONFIRMATION_TOKEN}'; \
+                         got: '{other}'"
+                    )
+                );
+            }
+            None => {
+                return refuse!(
+                    StatusCode::BAD_REQUEST,
+                    "active",
+                    "snapshot.confirmation_required",
+                    format!(
+                        "dry_run=false requires confirmation='{PORTFOLIO_SNAPSHOT_CONFIRMATION_TOKEN}'"
+                    )
+                );
+            }
+        }
+    }
+
+    // Gate 2: DB required.
+    let Some(db) = st.db.as_ref() else {
+        return refuse!(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no_db",
+            "snapshot.db_required",
+            "DB is not configured on this daemon"
+        );
+    };
+
+    // Gate 3: parse run_id.
+    let run_id = match uuid::Uuid::parse_str(&body.run_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return refuse!(
+                StatusCode::BAD_REQUEST,
+                "active",
+                "snapshot.invalid_request",
+                format!("invalid run_id: '{}'", body.run_id)
+            );
+        }
+    };
+
+    // Gate 4: fetch run — must exist and must be HALTED.
+    let run = match mqk_db::fetch_run(db, run_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse!(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "backend_unavailable",
+                "snapshot.db_error",
+                format!("fetch_run failed: {e}")
+            );
+        }
+    };
+
+    if run.status.as_str() != "HALTED" {
+        return refuse!(
+            StatusCode::CONFLICT,
+            "active",
+            "snapshot.run_not_halted",
+            format!(
+                "run '{}' is in state '{}'; portfolio snapshot is only supported for HALTED runs",
+                body.run_id,
+                run.status.as_str()
+            )
+        );
+    }
+
+    // Gate 5: load all applied inbox rows for the run.
+    let applied_rows = match mqk_db::inbox_load_all_applied_for_run(db, run_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            return refuse!(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "backend_unavailable",
+                "snapshot.db_error",
+                format!("inbox_load_all_applied_for_run failed: {e}")
+            );
+        }
+    };
+
+    // Compute the highest inbox_id among fill rows for the idempotency key.
+    let max_fill_inbox_id: i64 = applied_rows
+        .iter()
+        .filter(|r| r.event_kind == "fill" || r.event_kind == "partial_fill")
+        .map(|r| r.inbox_id)
+        .max()
+        .unwrap_or(0);
+
+    // Portfolio reconstruction starting from zero initial cash.
+    // Initial cash is not extractable from the halted run config without a schema
+    // contract; zero is the safe, honest baseline.  Callers receive initial_cash_micros=0
+    // explicitly so they can adjust offline if needed.
+    let initial_cash_micros: i64 = 0;
+    let mut pf = mqk_portfolio::PortfolioState::new(initial_cash_micros);
+    let mut applied_fill_count: usize = 0;
+
+    // Gate 6 + Gate 7: parse and apply fill rows fail-closed.
+    for row in &applied_rows {
+        // Skip non-fill events (ack, cancel_ack, replace_ack, etc.) — they do not
+        // affect portfolio state, consistent with orchestrator Phase 3.
+        if row.event_kind != "fill" && row.event_kind != "partial_fill" {
+            continue;
+        }
+
+        let broker_event =
+            match serde_json::from_value::<mqk_execution::BrokerEvent>(row.message_json.clone()) {
+                Ok(e) => e,
+                Err(e) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(HaltedRunPortfolioSnapshotResponse {
+                            truth_state: "active".to_string(),
+                            decision: "refused".to_string(),
+                            dry_run,
+                            run_id: body.run_id.clone(),
+                            applied_fill_count,
+                            positions: vec![],
+                            cash_micros: 0,
+                            realized_pnl_micros: 0,
+                            initial_cash_micros,
+                            snapshot_written: false,
+                            audit_event_id: None,
+                            source: "applied_inbox_rows".to_string(),
+                            evidence: format!(
+                                "applied inbox row (inbox_id={}, broker_message_id='{}') with \
+                                 event_kind='{}' failed to deserialize as BrokerEvent: {e}. \
+                                 Portfolio reconstruction refused — manual reconcile required.",
+                                row.inbox_id, row.broker_message_id, row.event_kind
+                            ),
+                            gate: Some("snapshot.malformed_applied_fill".to_string()),
+                        }),
+                    )
+                        .into_response();
+                }
+            };
+
+        let (symbol, side, delta_qty, price_micros, fee_micros) = match broker_event {
+            mqk_execution::BrokerEvent::Fill {
+                symbol,
+                side,
+                delta_qty,
+                price_micros,
+                fee_micros,
+                ..
+            }
+            | mqk_execution::BrokerEvent::PartialFill {
+                symbol,
+                side,
+                delta_qty,
+                price_micros,
+                fee_micros,
+                ..
+            } => (symbol, side, delta_qty, price_micros, fee_micros),
+            _ => {
+                // event_kind is "fill" or "partial_fill" but variant is not — inconsistent.
+                return (
+                    StatusCode::CONFLICT,
+                    Json(HaltedRunPortfolioSnapshotResponse {
+                        truth_state: "active".to_string(),
+                        decision: "refused".to_string(),
+                        dry_run,
+                        run_id: body.run_id.clone(),
+                        applied_fill_count,
+                        positions: vec![],
+                        cash_micros: 0,
+                        realized_pnl_micros: 0,
+                        initial_cash_micros,
+                        snapshot_written: false,
+                        audit_event_id: None,
+                        source: "applied_inbox_rows".to_string(),
+                        evidence: format!(
+                            "applied inbox row (inbox_id={}, broker_message_id='{}') has \
+                             event_kind='{}' but deserializes as a non-fill BrokerEvent variant; \
+                             data is inconsistent — manual reconcile required.",
+                            row.inbox_id, row.broker_message_id, row.event_kind
+                        ),
+                        gate: Some("snapshot.malformed_applied_fill".to_string()),
+                    }),
+                )
+                    .into_response();
+            }
+        };
+
+        // Gate 7: delta_qty must be positive.
+        if delta_qty <= 0 {
+            return (
+                StatusCode::CONFLICT,
+                Json(HaltedRunPortfolioSnapshotResponse {
+                    truth_state: "active".to_string(),
+                    decision: "refused".to_string(),
+                    dry_run,
+                    run_id: body.run_id.clone(),
+                    applied_fill_count,
+                    positions: vec![],
+                    cash_micros: 0,
+                    realized_pnl_micros: 0,
+                    initial_cash_micros,
+                    snapshot_written: false,
+                    audit_event_id: None,
+                    source: "applied_inbox_rows".to_string(),
+                    evidence: format!(
+                        "applied inbox row (inbox_id={}, broker_message_id='{}') has \
+                         delta_qty={delta_qty} which is not positive; \
+                         portfolio reconstruction refused — manual reconcile required.",
+                        row.inbox_id, row.broker_message_id
+                    ),
+                    gate: Some("snapshot.malformed_applied_fill".to_string()),
+                }),
+            )
+                .into_response();
+        }
+
+        let pf_side = match side {
+            mqk_execution::Side::Buy => mqk_portfolio::Side::Buy,
+            mqk_execution::Side::Sell => mqk_portfolio::Side::Sell,
+        };
+        let pf_fill =
+            mqk_portfolio::Fill::new(symbol, pf_side, delta_qty, price_micros, fee_micros);
+        mqk_portfolio::apply_fill(&mut pf, &pf_fill);
+        applied_fill_count += 1;
+    }
+
+    // Build derived positions summary (flat symbols omitted).
+    let positions: Vec<PortfolioPositionSummary> = pf
+        .positions
+        .iter()
+        .map(|(sym, pos)| PortfolioPositionSummary {
+            symbol: sym.clone(),
+            qty_signed: pos.qty_signed(),
+            lot_count: pos.lots.len(),
+        })
+        .collect();
+
+    // --- dry_run=true: return computed summary without writing anything. ---
+    if dry_run {
+        return (
+            StatusCode::OK,
+            Json(HaltedRunPortfolioSnapshotResponse {
+                truth_state: "active".to_string(),
+                decision: "dry_run_ok".to_string(),
+                dry_run,
+                run_id: body.run_id.clone(),
+                applied_fill_count,
+                positions,
+                cash_micros: pf.cash_micros,
+                realized_pnl_micros: pf.realized_pnl_micros,
+                initial_cash_micros,
+                snapshot_written: false,
+                audit_event_id: None,
+                source: "applied_inbox_rows".to_string(),
+                evidence: format!(
+                    "dry_run=true: portfolio reconstructed from {applied_fill_count} applied \
+                     fill row(s) for run '{}'. Positions: {}. No snapshot written. \
+                     Resubmit with dry_run=false and \
+                     confirmation='{PORTFOLIO_SNAPSHOT_CONFIRMATION_TOKEN}' to persist.",
+                    body.run_id,
+                    pf.positions.len()
+                ),
+                gate: None,
+            }),
+        )
+            .into_response();
+    }
+
+    // --- dry_run=false: write durable snapshot to audit store. ---
+    //
+    // UUIDv5 key: run_id + "|portfolio-snapshot.v1|" + max_fill_inbox_id.
+    // Same applied-fill dataset → same max_fill_inbox_id → same event_id.
+    // 23505 on second insert → "already_current" (idempotent, no duplicate written).
+    let positions_count = positions.len();
+    let ts_utc = chrono::Utc::now();
+    let snapshot_event_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk-daemon.repair.portfolio-snapshot.v1|{}|{}",
+            run_id, max_fill_inbox_id
+        )
+        .as_bytes(),
+    );
+
+    let snapshot_payload = serde_json::json!({
+        "run_id": run_id.to_string(),
+        "source": "applied_inbox_rows",
+        "applied_fill_count": applied_fill_count,
+        "max_fill_inbox_id": max_fill_inbox_id,
+        "initial_cash_micros": initial_cash_micros,
+        "cash_micros": pf.cash_micros,
+        "realized_pnl_micros": pf.realized_pnl_micros,
+        "positions": positions.iter().map(|p| serde_json::json!({
+            "symbol": p.symbol,
+            "qty_signed": p.qty_signed,
+            "lot_count": p.lot_count,
+        })).collect::<Vec<_>>(),
+    });
+
+    // Use inline sqlx to get the raw sqlx::Error and detect 23505 explicitly.
+    let insert_result = sqlx::query(
+        r#"
+        insert into audit_events (event_id, run_id, ts_utc, topic, event_type, payload,
+                                  hash_prev, hash_self)
+        values ($1, $2, $3, $4, $5, $6, null, null)
+        "#,
+    )
+    .bind(snapshot_event_id)
+    .bind(run_id)
+    .bind(ts_utc)
+    .bind("operator")
+    .bind("ops.repair.portfolio_snapshot")
+    .bind(&snapshot_payload)
+    .execute(db)
+    .await;
+
+    match insert_result {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(HaltedRunPortfolioSnapshotResponse {
+                truth_state: "active".to_string(),
+                decision: "snapshot_written".to_string(),
+                dry_run,
+                run_id: body.run_id.clone(),
+                applied_fill_count,
+                positions,
+                cash_micros: pf.cash_micros,
+                realized_pnl_micros: pf.realized_pnl_micros,
+                initial_cash_micros,
+                snapshot_written: true,
+                audit_event_id: Some(snapshot_event_id.to_string()),
+                source: "applied_inbox_rows".to_string(),
+                evidence: format!(
+                    "Portfolio snapshot written to audit store. run_id='{}', \
+                     applied_fill_count={applied_fill_count}, positions={positions_count}, \
+                     audit_event_id='{snapshot_event_id}'. Source: applied_inbox_rows.",
+                    body.run_id,
+                ),
+                gate: None,
+            }),
+        )
+            .into_response(),
+
+        Err(sqlx::Error::Database(ref db_err)) if db_err.code().as_deref() == Some("23505") => (
+            StatusCode::OK,
+            Json(HaltedRunPortfolioSnapshotResponse {
+                truth_state: "active".to_string(),
+                decision: "already_current".to_string(),
+                dry_run,
+                run_id: body.run_id.clone(),
+                applied_fill_count,
+                positions,
+                cash_micros: pf.cash_micros,
+                realized_pnl_micros: pf.realized_pnl_micros,
+                initial_cash_micros,
+                snapshot_written: false,
+                audit_event_id: Some(snapshot_event_id.to_string()),
+                source: "applied_inbox_rows".to_string(),
+                evidence: format!(
+                    "Portfolio snapshot for this applied-fill dataset already exists \
+                     (audit_event_id='{snapshot_event_id}'); idempotent noop — no duplicate written."
+                ),
+                gate: None,
+            }),
+        )
+            .into_response(),
+
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(HaltedRunPortfolioSnapshotResponse {
+                truth_state: "backend_unavailable".to_string(),
+                decision: "refused".to_string(),
+                dry_run,
+                run_id: body.run_id.clone(),
+                applied_fill_count,
+                positions: vec![],
+                cash_micros: 0,
+                realized_pnl_micros: 0,
+                initial_cash_micros,
+                snapshot_written: false,
+                audit_event_id: None,
+                source: "applied_inbox_rows".to_string(),
+                evidence: format!("audit event insert failed: {e}"),
+                gate: Some("snapshot.db_error".to_string()),
+            }),
+        )
+            .into_response(),
+    }
 }
