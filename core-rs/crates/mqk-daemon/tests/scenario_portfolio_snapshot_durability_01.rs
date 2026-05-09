@@ -413,6 +413,15 @@ async fn p04_confirmed_write_persists_snapshot() {
     let pool = st.db.as_ref().unwrap().clone();
     let run_id = seed_halted_run(&pool, "p04").await;
 
+    // Remove any snapshot audit event left by a prior test run so the test is re-runnable.
+    sqlx::query(
+        "delete from audit_events where run_id = $1 and event_type = 'ops.repair.portfolio_snapshot'",
+    )
+    .bind(run_id)
+    .execute(&pool)
+    .await
+    .ok();
+
     let msg_id = format!("p04-fill-{run_id}");
     seed_applied_fill(&pool, run_id, &msg_id, "TSLA", "Buy", 5, 200_000_000).await;
 
@@ -484,6 +493,15 @@ async fn p05_second_write_is_idempotent() {
     };
     let pool = st.db.as_ref().unwrap().clone();
     let run_id = seed_halted_run(&pool, "p05").await;
+
+    // Remove any snapshot audit event left by a prior test run so the test is re-runnable.
+    sqlx::query(
+        "delete from audit_events where run_id = $1 and event_type = 'ops.repair.portfolio_snapshot'",
+    )
+    .bind(run_id)
+    .execute(&pool)
+    .await
+    .ok();
 
     let msg_id = format!("p05-fill-{run_id}");
     seed_applied_fill(&pool, run_id, &msg_id, "NVDA", "Buy", 3, 800_000_000).await;
