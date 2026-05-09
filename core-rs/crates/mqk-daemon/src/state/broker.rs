@@ -1,9 +1,11 @@
 //! DaemonBroker enum-dispatch seam and broker construction helpers.
 //!
 //! Contains: DaemonBroker, alpaca_base_url_for_mode, build_daemon_broker,
+//! AlpacaFillActivityFetcher, build_fill_activity_fetcher_from_env,
 //! DeploymentReadiness, RuntimeSelection, StrategyFleetEntry.
 
 use std::fmt;
+use std::sync::Arc;
 
 use mqk_broker_alpaca::{AlpacaBrokerAdapter, AlpacaConfig};
 use mqk_broker_paper::LockedPaperBroker;
@@ -14,8 +16,8 @@ use mqk_execution::{
 
 use super::types::{BrokerKind, DeploymentMode, RuntimeLifecycleError};
 use super::{
-    ALPACA_BASE_URL_PAPER_ENV, ALPACA_KEY_LIVE_ENV, ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_LIVE_ENV,
-    ALPACA_SECRET_PAPER_ENV,
+    BrokerFillActivityFetcher, ALPACA_BASE_URL_PAPER_ENV, ALPACA_KEY_LIVE_ENV,
+    ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_LIVE_ENV, ALPACA_SECRET_PAPER_ENV,
 };
 
 // ---------------------------------------------------------------------------
@@ -194,4 +196,73 @@ pub struct RuntimeSelection {
 #[derive(Debug, Clone)]
 pub struct StrategyFleetEntry {
     pub strategy_id: String,
+}
+
+// ---------------------------------------------------------------------------
+// BROKER-FILL-REST-PRODUCTION-WIRING-01: production fill-activity fetcher
+// ---------------------------------------------------------------------------
+
+/// Thin newtype wrapping `AlpacaBrokerAdapter` that implements `BrokerFillActivityFetcher`.
+///
+/// Only the read-only fill-activity fetch path is reachable through this type.
+/// Order submission, cancel, replace, and `fetch_events` are not exposed.
+struct AlpacaFillActivityFetcher(AlpacaBrokerAdapter);
+
+impl BrokerFillActivityFetcher for AlpacaFillActivityFetcher {
+    fn fetch_fill_activities_for_order(
+        &self,
+        broker_order_id: &str,
+    ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaOrderActivity>, String> {
+        self.0
+            .fetch_fill_activities_for_order(broker_order_id)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// BROKER-FILL-REST-PRODUCTION-WIRING-01: construct a production fill-activity fetcher.
+///
+/// Returns `Some(fetcher)` only when `broker_kind == Some(BrokerKind::Alpaca)` and
+/// the matching credentials are present in the environment.  Returns `None` for all
+/// other broker kinds or when any credential env var is absent — the repair route
+/// will respond with `recovery_unavailable` rather than panicking or guessing.
+///
+/// Credential and base-URL selection mirrors `build_daemon_broker` exactly so
+/// the fetcher targets the same Alpaca endpoint as the execution broker.
+pub(super) fn build_fill_activity_fetcher_from_env(
+    broker_kind: Option<BrokerKind>,
+    deployment_mode: DeploymentMode,
+) -> Option<Arc<dyn BrokerFillActivityFetcher>> {
+    match broker_kind {
+        Some(BrokerKind::Alpaca) => {}
+        _ => return None,
+    }
+
+    let (key_env, secret_env) = match deployment_mode {
+        DeploymentMode::Paper => (ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_PAPER_ENV),
+        _ => (ALPACA_KEY_LIVE_ENV, ALPACA_SECRET_LIVE_ENV),
+    };
+    let paper_override = match deployment_mode {
+        DeploymentMode::Paper => std::env::var(ALPACA_BASE_URL_PAPER_ENV).ok(),
+        _ => None,
+    };
+    let base_url = match alpaca_base_url_for_mode(deployment_mode, paper_override.as_deref()) {
+        Ok(u) => u,
+        Err(_) => return None, // e.g. Backtest mode — not wired for Alpaca
+    };
+    let key_id = match std::env::var(key_env) {
+        Ok(v) => v,
+        Err(_) => return None, // credentials absent — fail-closed
+    };
+    let secret = match std::env::var(secret_env) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+
+    Some(Arc::new(AlpacaFillActivityFetcher(
+        AlpacaBrokerAdapter::new(AlpacaConfig {
+            base_url,
+            api_key_id: key_id,
+            api_secret_key: secret,
+        }),
+    )))
 }

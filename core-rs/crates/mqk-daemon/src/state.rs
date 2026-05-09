@@ -43,6 +43,7 @@ pub use alpaca_ws_transport::{
 pub use autonomous_bar_ticker::{
     spawn_autonomous_bar_ticker, BAR_INTERVAL_SECS_ENV, DEFAULT_QTY_ENV,
 };
+use broker::build_fill_activity_fetcher_from_env;
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
 pub use loop_runner::spawn_reconcile_tick;
@@ -611,6 +612,13 @@ impl AppState {
                 .collect::<Vec<_>>()
         });
 
+        // BROKER-FILL-REST-PRODUCTION-WIRING-01: computed before moving runtime_selection
+        // into the struct literal below.
+        let fill_activity_fetcher = build_fill_activity_fetcher_from_env(
+            runtime_selection.broker_kind,
+            runtime_selection.deployment_mode,
+        );
+
         Self {
             bus,
             node_id: env::default_node_id(build.service),
@@ -652,7 +660,7 @@ impl AppState {
                 .unwrap_or_else(|_| "config/instruments/equities.json".to_string()),
             provider_registry_path: std::env::var("MQK_PROVIDER_REGISTRY_PATH")
                 .unwrap_or_else(|_| "config/providers/providers.json".to_string()),
-            fill_activity_fetcher: None,
+            fill_activity_fetcher,
         }
     }
 
@@ -2507,5 +2515,54 @@ mod tests {
             reconcile_status.write().await.status = "ok".to_string();
         });
         assert!(gate.is_clean(), "ok reconcile may allow dispatch");
+    }
+
+    // -----------------------------------------------------------------------
+    // BROKER-FILL-REST-PRODUCTION-WIRING-01 proof tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fill_fetcher_non_alpaca_broker_is_none() {
+        // None broker_kind yields no fetcher — fail-closed.
+        let fetcher = build_fill_activity_fetcher_from_env(None, DeploymentMode::Paper);
+        assert!(fetcher.is_none(), "None broker_kind must yield no fetcher");
+
+        // Paper broker (LockedPaperBroker) also yields no fetcher.
+        let fetcher =
+            build_fill_activity_fetcher_from_env(Some(BrokerKind::Paper), DeploymentMode::Paper);
+        assert!(
+            fetcher.is_none(),
+            "BrokerKind::Paper must yield no fill fetcher"
+        );
+    }
+
+    #[test]
+    fn fill_fetcher_alpaca_missing_creds_is_none() {
+        // When Alpaca credentials are absent the function returns None (fail-closed).
+        // If credentials ARE present in this environment, prove the Some path instead.
+        let fetcher =
+            build_fill_activity_fetcher_from_env(Some(BrokerKind::Alpaca), DeploymentMode::Paper);
+        if std::env::var(ALPACA_KEY_PAPER_ENV).is_ok() {
+            assert!(
+                fetcher.is_some(),
+                "Alpaca+Paper with credentials must yield Some fetcher"
+            );
+        } else {
+            assert!(
+                fetcher.is_none(),
+                "Alpaca+Paper without credentials must yield None"
+            );
+        }
+    }
+
+    #[test]
+    fn fill_fetcher_default_appstate_has_no_fetcher() {
+        // Default AppState (paper+paper env not set to alpaca) has no fetcher.
+        // This proves the None path in new_inner for non-Alpaca configurations.
+        let state = AppState::new();
+        assert!(
+            state.fill_activity_fetcher.is_none() || std::env::var(ALPACA_KEY_PAPER_ENV).is_ok(),
+            "fill_activity_fetcher must be None when Alpaca credentials are absent"
+        );
     }
 }

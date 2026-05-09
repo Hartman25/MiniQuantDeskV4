@@ -242,6 +242,26 @@ impl AlpacaBrokerAdapter {
     fn fetch_order(&self, broker_order_id: &str) -> Result<AlpacaOrderFull, BrokerError> {
         self.get(&format!("/v2/orders/{broker_order_id}"))
     }
+
+    // -----------------------------------------------------------------------
+    // BROKER-FILL-REST-PRODUCTION-WIRING-01: per-order fill activity fetch
+    // -----------------------------------------------------------------------
+    /// Fetch all FILL-class account activities for one Alpaca broker order UUID.
+    ///
+    /// Calls `GET /v2/account/activities/FILL?order_id={broker_order_id}`.
+    /// Returns raw `AlpacaOrderActivity` records without normalization or
+    /// pagination (repair path expects O(1) activities per halted order).
+    ///
+    /// Does not affect order submission, cancellation, replacement, or the
+    /// `fetch_events` inbound lane.  Read-only.
+    pub fn fetch_fill_activities_for_order(
+        &self,
+        broker_order_id: &str,
+    ) -> Result<Vec<AlpacaOrderActivity>, BrokerError> {
+        let path = format!("/v2/account/activities/FILL?order_id={broker_order_id}");
+        self.get::<Vec<AlpacaOrderActivity>>(&path)
+    }
+
     // -----------------------------------------------------------------------
     // AP-03: Broker snapshot fetch
     // -----------------------------------------------------------------------
