@@ -722,11 +722,23 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   // GUI-OPS-01: Paper journal surface — dual-lane via extracted mapper.
   const paperJournal = mapPaperJournalWrapper(paperJournalR.ok && paperJournalR.data != null ? paperJournalR.data as PaperJournalWrapper : null);
 
-  const dataSource = deriveDataSourceDetail({
-    probeResults: [statusProbe, healthProbe, ...probes],
+  const allProbeResults = [statusProbe, healthProbe, ...probes];
+  // Detect 401/403 auth rejections — surface specific message so AppShell can
+  // show "auth required" rather than the generic "daemon unreachable" copy.
+  const hasAuthRejection =
+    !daemonReachable &&
+    allProbeResults.some((p) => p.error === "HTTP 401" || p.error === "HTTP 403");
+  const dataSourceBase = deriveDataSourceDetail({
+    probeResults: allProbeResults,
     usedMockSections,
     daemonReachable,
   });
+  const dataSource = hasAuthRejection
+    ? {
+        ...dataSourceBase,
+        message: "Daemon refused connection — operator auth required (HTTP 401/403).",
+      }
+    : dataSourceBase;
 
   const unavailableStatus: SystemStatus = {
     ...DEFAULT_STATUS,

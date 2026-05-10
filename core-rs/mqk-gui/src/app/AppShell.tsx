@@ -4,6 +4,7 @@ import {
   getAllWebviewWindows,
   getCurrentWebviewWindow,
 } from "@tauri-apps/api/webviewWindow";
+import { getDaemonUrl } from "../config";
 import { ActionReceiptBanner } from "../components/common/ActionReceiptBanner";
 import { ScreenErrorBoundary } from "../components/common/ScreenErrorBoundary";
 import { BottomEventRail } from "../components/layout/BottomEventRail";
@@ -195,6 +196,23 @@ export function AppShell() {
   const showBottomRail = deskRole !== "oversight";
   const showRightRail = true;
 
+  // Boot card: shown during the initial fetch (before first daemon response).
+  // Replaced by the full layout once loading=false, whether connected or not.
+  if (loading) {
+    return (
+      <div className="app-shell-boot">
+        <div className="daemon-boot-card panel">
+          <div className="eyebrow">Veritas Ledger</div>
+          <h2 className="boot-title">Connecting to daemon&hellip;</h2>
+          <p className="boot-detail">
+            Waiting for first response from the daemon API. If this persists, verify the daemon process is running.
+          </p>
+          <p className="boot-endpoint">{getDaemonUrl()}</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`app-shell desk-mode-${deskMode} desk-role-${deskRole}`}>
       {showLeftRail ? (
@@ -226,6 +244,15 @@ export function AppShell() {
             ) : null}
 
             <ActionReceiptBanner receipt={actionReceipt} />
+            {!model.connected && (
+              <div className="daemon-disconnected-notice" role="status" aria-live="polite">
+                <strong className="notice-label">Daemon unreachable</strong>
+                <span className="notice-detail">
+                  {model.dataSource.message ?? "No connection to daemon established."}
+                </span>
+                <span className="notice-endpoint">{getDaemonUrl()}</span>
+              </div>
+            )}
             {activeScreen === "dashboard" && (
               <PreflightGate preflight={model.preflight} />
             )}

@@ -48,11 +48,14 @@ export async function fetchJsonCandidate<T>(path: string): Promise<EndpointFetch
 }
 
 export async function fetchJsonCandidates<T>(paths: string[]): Promise<EndpointFetchResult<T>> {
+  let firstFailure: EndpointFetchResult<T> | null = null;
   for (const path of paths) {
     const result = await fetchJsonCandidate<T>(path);
     if (result.ok) return result;
+    if (firstFailure === null) firstFailure = result;
   }
-  return {
+  // Return the first candidate's error so callers can inspect the specific HTTP status.
+  return firstFailure ?? {
     ok: false,
     endpoint: paths[0] ?? "unknown",
     error: "all candidates failed",
