@@ -644,19 +644,38 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
     let (autonomous_state_str, autonomous_detail) =
         autonomous_session_truth_to_api(&autonomous_truth);
 
-    let (arm_state, arm_ready) = {
-        let ig = st.integrity.read().await;
-        if ig.halted {
-            ("halted".to_string(), false)
-        } else if ig.disarmed {
-            // In-memory disarmed but not halted.  The session controller calls
-            // try_autonomous_arm which checks the DB; if the prior session ended
-            // cleanly (DB=ARMED), it will advance to armed automatically.
-            // Surface as "arm_pending" — not yet armed, but may self-heal on the
-            // next controller tick without operator intervention.
-            ("arm_pending".to_string(), false)
+    // AUTON-NO-TRADE-01: Distinguish arm_pending (DB=ARMED, in-memory pending,
+    // auto-heals on next tick) from disarmed_db (DB=DISARMED, operator must
+    // re-arm).  Without this check a ReconcileDrift disarm surfaces as
+    // "arm_pending" with "(DB-ARMED → auto-advances)" — misleading the operator
+    // into believing the system will self-heal when try_autonomous_arm will
+    // refuse on every session-window tick.
+    let (arm_state, arm_ready, disarm_reason): (String, bool, Option<String>) = {
+        let (halted, in_memory_disarmed) = {
+            let ig = st.integrity.read().await;
+            (ig.halted, ig.disarmed)
+        };
+        if halted {
+            ("halted".to_string(), false, None)
+        } else if in_memory_disarmed {
+            // Check DB for authoritative arm state.  Drop the integrity lock
+            // before awaiting the DB call so we do not hold it across I/O.
+            let (db_state, reason) = if let Some(ref pool) = st.db {
+                match mqk_db::load_arm_state(pool).await {
+                    Ok(Some((ref s, _))) if s == "ARMED" => ("arm_pending", None),
+                    Ok(Some((_, reason))) => ("disarmed_db", reason),
+                    // No row or DB error: treat as arm_pending — we cannot
+                    // assert DISARMED without evidence.
+                    Ok(None) | Err(_) => ("arm_pending", None),
+                }
+            } else {
+                // No DB pool (test-only path) — treat as arm_pending so
+                // existing in-memory tests are unaffected.
+                ("arm_pending", None)
+            };
+            (db_state.to_string(), false, reason)
         } else {
-            ("armed".to_string(), true)
+            ("armed".to_string(), true, None)
         }
     };
 
@@ -717,6 +736,19 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                  try_autonomous_arm on the next tick (DB-ARMED → auto-advances to armed)"
                     .to_string(),
             ),
+            "disarmed_db" => {
+                // AUTON-NO-TRADE-01: DB is DISARMED — try_autonomous_arm will
+                // refuse on every tick until the operator re-arms.  Surface the
+                // exact DB reason so the operator knows the required action.
+                let reason = disarm_reason.as_deref().unwrap_or("unknown");
+                blockers.push(format!(
+                    "DB arm state is DISARMED (reason={reason}); \
+                     try_autonomous_arm will refuse on every session-window tick; \
+                     operator must re-arm via POST /api/v1/ops/action \
+                     {{\"action\":\"arm-execution\"}} before the next session \
+                     can start (AUTON-NO-TRADE-01)"
+                ));
+            }
             _ => {}
         }
     }
