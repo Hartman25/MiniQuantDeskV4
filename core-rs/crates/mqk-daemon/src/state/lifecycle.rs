@@ -778,13 +778,22 @@ impl AppState {
             let snap_arc = Arc::clone(&self.execution_snapshot);
             let sides_arc = Arc::clone(&self.local_order_sides);
             let broker_arc = Arc::clone(&self.broker_snapshot);
+            // BROKER-POSITION-BASELINE-ADOPTION-01: when no execution run is active,
+            // use the operator-adopted baseline (if any) as local truth so the
+            // reconcile tick sees local == broker and publishes clean state.
+            let baseline_arc = Arc::clone(&self.broker_baseline);
             let local_fn = move || {
                 let snapshot = snap_arc.try_read().ok().and_then(|g| g.clone());
                 if let Some(snapshot) = snapshot {
                     let sides = sides_arc.try_read().map(|g| g.clone()).unwrap_or_default();
                     reconcile_local_snapshot_from_runtime_with_sides(&snapshot, &sides)
                 } else {
-                    mqk_reconcile::LocalSnapshot::empty()
+                    // No active run: use adopted baseline if present, else empty.
+                    baseline_arc
+                        .try_read()
+                        .ok()
+                        .and_then(|g| g.clone())
+                        .unwrap_or_else(mqk_reconcile::LocalSnapshot::empty)
                 }
             };
             let broker_fn = move || {

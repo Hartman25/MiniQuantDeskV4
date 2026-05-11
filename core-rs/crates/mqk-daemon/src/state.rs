@@ -288,6 +288,15 @@ pub struct AppState {
     /// `None` when not configured (tests inject a fake; production wiring
     /// is a follow-up once the service function is proven safe).
     pub ws_gap_fill_fetcher: Option<Arc<dyn WsGapFillFetcher>>,
+    /// BROKER-POSITION-BASELINE-ADOPTION-01: Adopted broker position baseline.
+    ///
+    /// Operator-confirmed local truth snapshot used by the reconcile tick as
+    /// `local_fn()` when no execution run is active.  `None` at boot until the
+    /// operator calls `POST /api/v1/ops/repair/adopt-broker-position-baseline`.
+    ///
+    /// Seeded from `sys_broker_position_baseline` at daemon boot by
+    /// `seed_broker_baseline_from_db()`.  Written by the adoption route.
+    pub broker_baseline: Arc<RwLock<Option<mqk_reconcile::LocalSnapshot>>>,
 }
 
 /// BROKER-FILL-REST-RECOVERY-01: Injectable abstraction over Alpaca REST activity fetch.
@@ -598,6 +607,67 @@ impl AppState {
         }
     }
 
+    /// BROKER-POSITION-BASELINE-ADOPTION-01: Seed the in-memory broker baseline
+    /// cache from the persisted `sys_broker_position_baseline` row at daemon boot.
+    ///
+    /// Must be called after `new_with_db` and before `spawn_reconcile_tick` so
+    /// the reconcile tick's `local_fn` sees the adopted baseline immediately on
+    /// the first tick.  No-ops when DB is absent or no baseline has been adopted.
+    pub async fn seed_broker_baseline_from_db(&self) {
+        let Some(pool) = self.db.as_ref() else {
+            return;
+        };
+        let row = match mqk_db::load_broker_position_baseline(pool).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "BROKER-BASELINE-01: failed to load broker position baseline at boot; \
+                     leaving baseline empty"
+                );
+                return;
+            }
+        };
+        let Some(row) = row else {
+            return;
+        };
+        // Deserialize the stored BrokerSnapshot JSON back to the schema type then
+        // build the reconcile LocalSnapshot (same conversion the reconcile tick uses).
+        let schema_snap: mqk_schemas::BrokerSnapshot =
+            match serde_json::from_value(row.broker_snapshot_json.clone()) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "BROKER-BASELINE-01: stored broker snapshot JSON is malformed; \
+                         ignoring stale baseline"
+                    );
+                    return;
+                }
+            };
+        let broker_reconcile = match reconcile_broker_snapshot_from_schema(&schema_snap) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "BROKER-BASELINE-01: stored broker snapshot failed schema conversion; \
+                     ignoring stale baseline"
+                );
+                return;
+            }
+        };
+        let local_baseline = mqk_reconcile::LocalSnapshot {
+            orders: broker_reconcile.orders,
+            positions: broker_reconcile.positions,
+        };
+        tracing::info!(
+            adopted_at = %row.adopted_at_utc,
+            adopted_by = %row.adopted_by,
+            "BROKER-BASELINE-01: seeded broker position baseline from DB"
+        );
+        *self.broker_baseline.write().await = Some(local_baseline);
+    }
+
     fn new_inner(operator_auth: OperatorAuthMode, db: Option<PgPool>) -> Self {
         let (bus, _rx) = broadcast::channel::<BusMsg>(1024);
 
@@ -712,6 +782,7 @@ impl AppState {
                 .unwrap_or_else(|_| "config/providers/providers.json".to_string()),
             fill_activity_fetcher,
             ws_gap_fill_fetcher,
+            broker_baseline: Arc::new(RwLock::new(None)),
         }
     }
 

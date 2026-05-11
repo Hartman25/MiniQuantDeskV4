@@ -25,8 +25,8 @@
 //! | MD04  | No bar ticks yet → bar_context_source=no_dispatch_yet, no NO_SIGNAL_GENERATED                                               |
 //! | MD05  | db-sourced tick + signal>0 → no INCOMPLETE_BAR_CONTEXT, no NO_SIGNAL_GENERATED                                              |
 
-use std::sync::OnceLock;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -296,11 +296,15 @@ async fn md04_no_ticks_yet_reports_no_dispatch_yet() {
 
     let blockers = v["blockers"].as_array().expect("blockers must be array");
     assert!(
-        !blockers.iter().any(|b| b.as_str().unwrap_or("").contains("NO_SIGNAL_GENERATED")),
+        !blockers
+            .iter()
+            .any(|b| b.as_str().unwrap_or("").contains("NO_SIGNAL_GENERATED")),
         "MD04: NO_SIGNAL_GENERATED must NOT fire before any bar tick; got: {blockers:?}"
     );
     assert!(
-        !blockers.iter().any(|b| b.as_str().unwrap_or("").contains("INCOMPLETE_BAR_CONTEXT")),
+        !blockers
+            .iter()
+            .any(|b| b.as_str().unwrap_or("").contains("INCOMPLETE_BAR_CONTEXT")),
         "MD04: INCOMPLETE_BAR_CONTEXT must NOT fire before any bar tick; got: {blockers:?}"
     );
 }
@@ -337,11 +341,15 @@ async fn md05_db_bar_with_nonzero_signal_no_blockers() {
 
     let blockers = v["blockers"].as_array().expect("blockers must be array");
     assert!(
-        !blockers.iter().any(|b| b.as_str().unwrap_or("").contains("INCOMPLETE_BAR_CONTEXT")),
+        !blockers
+            .iter()
+            .any(|b| b.as_str().unwrap_or("").contains("INCOMPLETE_BAR_CONTEXT")),
         "MD05: INCOMPLETE_BAR_CONTEXT must NOT appear when db_loaded + signal>0; got: {blockers:?}"
     );
     assert!(
-        !blockers.iter().any(|b| b.as_str().unwrap_or("").contains("NO_SIGNAL_GENERATED")),
+        !blockers
+            .iter()
+            .any(|b| b.as_str().unwrap_or("").contains("NO_SIGNAL_GENERATED")),
         "MD05: NO_SIGNAL_GENERATED must NOT appear when signal_qty>0; got: {blockers:?}"
     );
 }

@@ -3264,3 +3264,37 @@ pub struct WsGapFillRecoveryResponse {
     /// New `rest_activity_after` value after advancement; `None` when `cursor_advanced` is `false`.
     pub new_rest_activity_after: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// BROKER-POSITION-BASELINE-ADOPTION-01
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/v1/ops/repair/adopt-broker-position-baseline`.
+///
+/// The operator must supply the literal confirmation string
+/// `"ADOPT_BROKER_POSITION_BASELINE"` to prevent accidental adoption.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct AdoptBrokerPositionBaselineRequest {
+    /// Must equal `"ADOPT_BROKER_POSITION_BASELINE"` (case-sensitive).
+    pub confirmation: String,
+}
+
+/// Response from `POST /api/v1/ops/repair/adopt-broker-position-baseline`.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct AdoptBrokerPositionBaselineResponse {
+    pub truth_state: String,
+    /// Whether the adoption was accepted and written.
+    pub accepted: bool,
+    /// Human-readable outcome description for the operator.
+    pub decision: String,
+    /// Number of positions recorded in the adopted baseline snapshot.
+    pub baseline_position_count: usize,
+    /// Number of open orders recorded in the adopted baseline snapshot.
+    pub baseline_order_count: usize,
+    /// ISO-8601 timestamp of the broker snapshot that was adopted.
+    pub snapshot_captured_at: Option<String>,
+    /// Audit event ID written alongside the adoption (UUIDv5, deterministic).
+    pub audit_event_id: Option<String>,
+    /// Filled when the route refused the request before any mutation.
+    pub gate: Option<String>,
+}

@@ -63,6 +63,11 @@ async fn main() -> anyhow::Result<()> {
     // will immediately block start rather than starting as ColdStartUnproven.
     shared.seed_ws_continuity_from_db().await;
 
+    // BROKER-POSITION-BASELINE-ADOPTION-01: Seed the broker position baseline
+    // from DB so the reconcile tick's local_fn uses it immediately on the first
+    // tick when no execution run is active.  Must run before spawn_reconcile_tick.
+    shared.seed_broker_baseline_from_db().await;
+
     match shared.operator_auth_mode() {
         state::OperatorAuthMode::TokenRequired(_) => {
             info!(

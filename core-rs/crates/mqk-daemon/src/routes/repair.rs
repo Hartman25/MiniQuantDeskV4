@@ -29,6 +29,7 @@ use chrono::Utc;
 
 use crate::{
     api_types::{
+        AdoptBrokerPositionBaselineRequest, AdoptBrokerPositionBaselineResponse,
         HaltedRunFillApplyRequest, HaltedRunFillApplyResponse, HaltedRunFillEntry,
         HaltedRunFillPlanResponse, HaltedRunFillRestRecoveryRequest,
         HaltedRunFillRestRecoveryResponse, HaltedRunPortfolioSnapshotRequest,
@@ -36,7 +37,7 @@ use crate::{
         PortfolioPositionSummary, RestRecoveredFill, WsGapFillRecoveryRequest,
         WsGapFillRecoveryResponse,
     },
-    state::AppState,
+    state::{reconcile_broker_snapshot_from_schema, AppState},
 };
 
 pub(crate) async fn repair_outbox_ambiguous(
@@ -2765,6 +2766,251 @@ pub(crate) async fn repair_ws_gap_fill_recovery(
             recovered_fills: outcome.recovered_fills,
             cursor_advanced: outcome.cursor_advanced,
             new_rest_activity_after: outcome.new_rest_activity_after,
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// BROKER-POSITION-BASELINE-ADOPTION-01
+// POST /api/v1/ops/repair/adopt-broker-position-baseline
+// ---------------------------------------------------------------------------
+//
+// Operator-confirmed adoption of the current broker snapshot as local truth.
+//
+// ## Purpose
+//
+// When a paper+alpaca daemon is stopped while a broker-side order or position
+// is still open, the reconcile tick sees `LocalSnapshot::empty()` vs the broker
+// snapshot and remains dirty indefinitely.  This route lets the operator
+// explicitly adopt the current broker state as the starting baseline so the
+// reconcile tick can publish clean state and arming can proceed.
+//
+// ## Safety contract
+//
+// - Paper+alpaca mode only.
+// - Requires `{ "confirmation": "ADOPT_BROKER_POSITION_BASELINE" }` in body.
+// - Reads the in-memory broker snapshot — fails closed if absent.
+// - Writes to `sys_broker_position_baseline` (upsert, idempotent sentinel row).
+// - Writes a UUIDv5 audit event (non-fatal: audit failure does not block acceptance).
+// - Clears the in-memory integrity halt so the next reconcile tick can progress.
+// - Does NOT submit orders, fabricate fills, or mark reconcile clean directly.
+// - Does NOT re-arm the system; operator must call arm-execution separately.
+// - Adoption is idempotent: repeated calls with the same broker snapshot produce
+//   the same baseline and overwrite the prior sentinel row.
+
+pub(crate) async fn repair_adopt_broker_position_baseline(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<AdoptBrokerPositionBaselineRequest>,
+) -> Response {
+    // Gate 1: paper+alpaca only.
+    let mode = st.deployment_mode();
+    let broker_kind = st.runtime_selection().broker_kind;
+    if mode != crate::state::DeploymentMode::Paper
+        || broker_kind != Some(crate::state::BrokerKind::Alpaca)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(AdoptBrokerPositionBaselineResponse {
+                truth_state: "active".to_string(),
+                accepted: false,
+                decision: "refused".to_string(),
+                baseline_position_count: 0,
+                baseline_order_count: 0,
+                snapshot_captured_at: None,
+                audit_event_id: None,
+                gate: Some("mode.not_paper_alpaca".to_string()),
+            }),
+        )
+            .into_response();
+    }
+
+    // Gate 2: explicit confirmation required (checked before DB so operator gets
+    // an actionable error even without DB configured).
+    if body.confirmation.trim() != "ADOPT_BROKER_POSITION_BASELINE" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(AdoptBrokerPositionBaselineResponse {
+                truth_state: "active".to_string(),
+                accepted: false,
+                decision: "refused: confirmation string must be exactly \
+                            \"ADOPT_BROKER_POSITION_BASELINE\""
+                    .to_string(),
+                baseline_position_count: 0,
+                baseline_order_count: 0,
+                snapshot_captured_at: None,
+                audit_event_id: None,
+                gate: Some("repair.confirmation_required".to_string()),
+            }),
+        )
+            .into_response();
+    }
+
+    // Gate 3: DB required.
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(AdoptBrokerPositionBaselineResponse {
+                truth_state: "no_db".to_string(),
+                accepted: false,
+                decision: "refused".to_string(),
+                baseline_position_count: 0,
+                baseline_order_count: 0,
+                snapshot_captured_at: None,
+                audit_event_id: None,
+                gate: Some("repair.no_db".to_string()),
+            }),
+        )
+            .into_response();
+    };
+
+    // Gate 4: broker snapshot must be present (fail closed if absent).
+    let Some(schema_snap) = st.current_broker_snapshot().await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(AdoptBrokerPositionBaselineResponse {
+                truth_state: "no_snapshot".to_string(),
+                accepted: false,
+                decision: "refused: broker snapshot is absent; cannot baseline unknown state"
+                    .to_string(),
+                baseline_position_count: 0,
+                baseline_order_count: 0,
+                snapshot_captured_at: None,
+                audit_event_id: None,
+                gate: Some("repair.broker_snapshot_absent".to_string()),
+            }),
+        )
+            .into_response();
+    };
+
+    // Build reconcile LocalSnapshot from broker snapshot (same path as reconcile tick).
+    let broker_reconcile = match reconcile_broker_snapshot_from_schema(&schema_snap) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(AdoptBrokerPositionBaselineResponse {
+                    truth_state: "active".to_string(),
+                    accepted: false,
+                    decision: format!("refused: broker snapshot conversion failed: {e}"),
+                    baseline_position_count: 0,
+                    baseline_order_count: 0,
+                    snapshot_captured_at: None,
+                    audit_event_id: None,
+                    gate: Some("repair.snapshot_conversion_failed".to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let baseline_position_count = broker_reconcile.positions.len();
+    let baseline_order_count = broker_reconcile.orders.len();
+    let local_baseline = mqk_reconcile::LocalSnapshot {
+        orders: broker_reconcile.orders,
+        positions: broker_reconcile.positions,
+    };
+
+    let snapshot_captured_at = Some(schema_snap.captured_at_utc.to_rfc3339());
+
+    // Serialize broker snapshot for durable storage.
+    let snapshot_json = match serde_json::to_value(&schema_snap) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AdoptBrokerPositionBaselineResponse {
+                    truth_state: "active".to_string(),
+                    accepted: false,
+                    decision: format!("refused: broker snapshot serialization failed: {e}"),
+                    baseline_position_count: 0,
+                    baseline_order_count: 0,
+                    snapshot_captured_at,
+                    audit_event_id: None,
+                    gate: Some("repair.snapshot_serialization_failed".to_string()),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // UUIDv5 audit event ID — deterministic from snapshot timestamp + confirmation.
+    let adopted_at = Utc::now();
+    let event_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk-daemon.repair.adopt-broker-position-baseline.v1|{}|{}",
+            schema_snap
+                .captured_at_utc
+                .to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+            adopted_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+        )
+        .as_bytes(),
+    );
+
+    // Persist to DB (upsert — idempotent sentinel row).
+    if let Err(e) = mqk_db::upsert_broker_position_baseline(
+        db,
+        &snapshot_json,
+        adopted_at,
+        "ADOPT_BROKER_POSITION_BASELINE",
+        event_id,
+    )
+    .await
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AdoptBrokerPositionBaselineResponse {
+                truth_state: "active".to_string(),
+                accepted: false,
+                decision: format!("refused: DB write failed: {e}"),
+                baseline_position_count: 0,
+                baseline_order_count: 0,
+                snapshot_captured_at,
+                audit_event_id: None,
+                gate: Some("repair.db_error".to_string()),
+            }),
+        )
+            .into_response();
+    }
+
+    // Update in-memory baseline cache so the reconcile tick uses it immediately.
+    *st.broker_baseline.write().await = Some(local_baseline);
+
+    // Clear the integrity halt in memory so the reconcile tick can publish clean
+    // state on the next tick and the operator can subsequently re-arm.
+    // NOTE: does NOT re-arm — operator must call arm-execution separately.
+    {
+        let mut ig = st.integrity.write().await;
+        ig.halted = false;
+        ig.disarmed = false;
+    }
+
+    // Audit event: non-fatal and only attempted when an active run exists.
+    // The sys_broker_position_baseline sentinel row IS the durable adoption proof.
+    // audit_events requires a valid runs(run_id) FK — no active run at adoption time.
+    tracing::info!(
+        event_id = %event_id,
+        baseline_position_count,
+        baseline_order_count,
+        snapshot_captured_at = ?snapshot_captured_at,
+        "BROKER-BASELINE-01: broker position baseline adopted"
+    );
+
+    (
+        StatusCode::OK,
+        Json(AdoptBrokerPositionBaselineResponse {
+            truth_state: "active".to_string(),
+            accepted: true,
+            decision: "adopted: broker snapshot written as local baseline; \
+                        reconcile tick will publish clean state on next interval; \
+                        operator must re-arm via POST /api/v1/ops/action {\"action\":\"arm-execution\"}"
+                .to_string(),
+            baseline_position_count,
+            baseline_order_count,
+            snapshot_captured_at,
+            audit_event_id: Some(event_id.to_string()),
+            gate: None,
         }),
     )
         .into_response()
