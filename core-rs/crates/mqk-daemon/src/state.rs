@@ -1292,6 +1292,26 @@ operator_reconcile_or_repair_required"
         self.bar_tick_dispatch_count.load(Ordering::SeqCst)
     }
 
+    /// AUTON-NO-TRADE-02: Test helper — seed bar-tick observability counters directly.
+    ///
+    /// Allows integration tests to simulate a post-arm bar-tick session without
+    /// running the real execution loop.  Does NOT change any gate or trading
+    /// behaviour; only the read-only observability counters are set.
+    ///
+    /// `ctx_bars`:  -1 = no dispatch yet (sentinel), 0 = stub_no_price, N>0 = db_loaded.
+    pub fn set_bar_tick_state_for_test(&self, dispatch_count: u64, signal_qty: i64, ctx_bars: i64) {
+        // Map dispatch_count=0 back to the "no dispatch" sentinel for signal_qty.
+        let stored_qty = if dispatch_count == 0 {
+            i64::MIN
+        } else {
+            signal_qty
+        };
+        self.bar_tick_dispatch_count
+            .store(dispatch_count, Ordering::SeqCst);
+        self.last_bar_signal_qty.store(stored_qty, Ordering::SeqCst);
+        self.last_bar_context_bars.store(ctx_bars, Ordering::SeqCst);
+    }
+
     /// AUTON-NO-TRADE-01: Reset bar-tick counters on new run start.
     pub(crate) fn reset_bar_tick_counters(&self) {
         self.last_bar_signal_qty.store(i64::MIN, Ordering::SeqCst);
