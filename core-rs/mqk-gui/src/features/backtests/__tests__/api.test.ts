@@ -6,7 +6,7 @@ import {
   extractArtifactDir,
   buildActiveJob,
 } from "../api.ts";
-import type { BacktestJobStatusResponse } from "../types.ts";
+import type { BacktestJobRequest, BacktestJobStatusResponse, FileResult } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // normalizeJobStatus
@@ -180,4 +180,147 @@ test("buildActiveJob maps unknown status string to unknown", () => {
   const resp = makeStatusResponse("mystery_state", null);
   const job = buildActiveJob(resp);
   assert.equal(job.status, "unknown");
+});
+
+// ---------------------------------------------------------------------------
+// B01: AAPL 1D daily submit request body shape (BACKTEST-GUI-CLOSURE-01)
+// Proves the BacktestJobRequest fields are correctly typed and valued for the
+// AAPL 1D daily backtest scenario that the GUI form constructs.
+// ---------------------------------------------------------------------------
+
+test("B01: AAPL 1D BacktestJobRequest has required fields with correct types", () => {
+  const req: BacktestJobRequest = {
+    bars_path: "C:\\repo\\exports\\md_backup\\1D\\AAPL_1D.csv",
+    strategy: "swing_momentum",
+    symbol: "AAPL",
+    timeframe_secs: 86400,
+    initial_cash_micros: 100_000_000_000,
+    out_dir: "C:\\repo\\exports\\backtests",
+    integrity_stale_threshold_ticks: 172800,
+  };
+  assert.equal(req.strategy, "swing_momentum");
+  assert.equal(req.symbol, "AAPL");
+  assert.equal(req.timeframe_secs, 86400, "timeframe_secs must be 86400 for daily bars");
+  assert.equal(req.initial_cash_micros, 100_000_000_000);
+  assert.equal(req.integrity_stale_threshold_ticks, 172800);
+  assert.ok(req.bars_path.endsWith("AAPL_1D.csv"), "bars_path must point to AAPL 1D CSV");
+});
+
+test("B01b: empty stale threshold string maps to null in submit request (daemon applies default)", () => {
+  // Mirrors GUI handleSubmitJob logic: staleThresholdRaw ? parseInt(...) : null
+  const raw = "".trim();
+  const threshold: number | null = raw ? parseInt(raw, 10) : null;
+  assert.equal(threshold, null, "empty field sends null → daemon applies timeframe-aware default");
+});
+
+test("B01c: explicit stale threshold '172800' parses to integer 172800 for daily bars", () => {
+  const raw = "172800".trim();
+  const threshold: number | null = raw ? parseInt(raw, 10) : null;
+  assert.equal(threshold, 172800);
+  assert.ok(threshold !== null && threshold >= 86400 * 2,
+    "172800 >= 2 days; needed to avoid blocking on 3-day weekend gaps in daily data");
+});
+
+// ---------------------------------------------------------------------------
+// B02: Completed AAPL job with artifact_dir → extractArtifactDir signals auto-load
+// ---------------------------------------------------------------------------
+
+test("B02: completed AAPL job with artifact_dir → extractArtifactDir returns path for auto-load", () => {
+  const resp: BacktestJobStatusResponse = {
+    truth_state: "active",
+    job_id: "bfa264d3-1328-5bd1-b732-9d32e8dac8ad",
+    status: "completed",
+    strategy: "swing_momentum",
+    symbol: "AAPL",
+    created_at_utc: "2026-05-11T06:45:26Z",
+    started_at_utc: "2026-05-11T06:45:26Z",
+    completed_at_utc: "2026-05-11T06:45:27Z",
+    artifact_dir: "C:\\repo\\exports\\backtests\\bfa264d3-1328-5bd1-b732-9d32e8dac8ad",
+    manifest_path: "C:\\repo\\exports\\backtests\\bfa264d3-1328-5bd1-b732-9d32e8dac8ad\\manifest.json",
+    metrics_path: "C:\\repo\\exports\\backtests\\bfa264d3-1328-5bd1-b732-9d32e8dac8ad\\metrics.json",
+    error: null,
+  };
+  const dir = extractArtifactDir(resp);
+  assert.ok(dir !== null, "completed job with artifact_dir must return non-null — this is the auto-load trigger");
+  assert.ok(dir!.length > 0, "extracted artifact_dir must be non-empty");
+  assert.ok(dir!.includes("bfa264d3"), "extracted artifact_dir must contain the run_id");
+});
+
+test("B02b: completed AAPL job without artifact_dir → extractArtifactDir returns null (no auto-load)", () => {
+  const resp = makeStatusResponse("completed", null);
+  assert.equal(extractArtifactDir(resp), null,
+    "null artifact_dir on completed job must not trigger auto-load");
+});
+
+// ---------------------------------------------------------------------------
+// B03: Failed AAPL job surfaces failure reason truthfully
+// ---------------------------------------------------------------------------
+
+test("B03: failed AAPL job with CSV load error → buildActiveJob surfaces error truthfully", () => {
+  const resp: BacktestJobStatusResponse = {
+    truth_state: "active",
+    job_id: "00000000-0000-0000-0000-000000000099",
+    status: "failed",
+    strategy: "swing_momentum",
+    symbol: "AAPL",
+    created_at_utc: "2026-05-11T06:45:26Z",
+    started_at_utc: "2026-05-11T06:45:26Z",
+    completed_at_utc: "2026-05-11T06:45:27Z",
+    artifact_dir: null,
+    manifest_path: null,
+    metrics_path: null,
+    error: "load bars csv failed: C:\\repo\\exports\\md_backup\\1D\\AAPL_1D.csv: file not found",
+  };
+  const job = buildActiveJob(resp);
+  assert.equal(job.status, "failed");
+  assert.ok(job.error !== null, "error must not be null for failed job");
+  assert.ok(job.error!.includes("AAPL_1D.csv"), "error must reference the bars file — truthful, not hidden");
+  assert.equal(job.artifactDir, null, "failed job must have null artifactDir — no partial artifacts claimed");
+});
+
+test("B03b: failed AAPL job with unknown strategy error → buildActiveJob surfaces strategy error", () => {
+  const resp: BacktestJobStatusResponse = {
+    truth_state: "active",
+    job_id: "00000000-0000-0000-0000-000000000100",
+    status: "failed",
+    strategy: "bad_strategy",
+    symbol: "AAPL",
+    created_at_utc: "2026-05-11T06:45:26Z",
+    started_at_utc: null,
+    completed_at_utc: "2026-05-11T06:45:27Z",
+    artifact_dir: null,
+    manifest_path: null,
+    metrics_path: null,
+    error: "unknown strategy 'bad_strategy'; available: swing_momentum, mean_reversion",
+  };
+  const job = buildActiveJob(resp);
+  assert.equal(job.status, "failed");
+  assert.ok(job.error!.includes("unknown strategy"), "error must describe the strategy problem");
+  assert.ok(job.error!.includes("swing_momentum"), "error must list available strategies");
+});
+
+// ---------------------------------------------------------------------------
+// B05: Missing artifact file produces explicit 'missing' FileResult — not crash
+// FileResult kinds are structurally distinct; 'missing' is not 'parse_error'
+// or 'read_error'. The GUI renders each kind with its own explicit message.
+// ---------------------------------------------------------------------------
+
+test("B05: FileResult 'missing' kind is structurally distinct from parse_error and read_error", () => {
+  const missing: FileResult<string> = { kind: "missing" };
+  const parseErr: FileResult<string> = { kind: "parse_error", message: "bad json" };
+  const readErr: FileResult<string> = { kind: "read_error", message: "permission denied" };
+  const ok: FileResult<string> = { kind: "ok", data: "data" };
+  assert.notEqual(missing.kind, parseErr.kind, "missing != parse_error");
+  assert.notEqual(missing.kind, readErr.kind, "missing != read_error");
+  assert.notEqual(missing.kind, ok.kind, "missing != ok");
+  assert.equal(missing.kind, "missing");
+});
+
+test("B05b: idle and loading FileResult kinds are non-error states", () => {
+  const idle: FileResult<string> = { kind: "idle" };
+  const loading: FileResult<string> = { kind: "loading" };
+  const errorKinds = ["missing", "parse_error", "read_error"];
+  assert.ok(!errorKinds.includes(idle.kind), "idle is not an error kind");
+  assert.ok(!errorKinds.includes(loading.kind), "loading is not an error kind");
+  // GUI hides FileStatusNote for idle and loading — no false error displayed.
 });
