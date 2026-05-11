@@ -828,25 +828,44 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                  {n} DB bars but strategy signal qty is 0; strategy conditions not met \
                  (price movement below threshold, or fewer than LOOKBACK bars loaded)"
             ),
-            _ => "NO_SIGNAL_GENERATED (AUTON-NO-TRADE-02): bar ticks dispatched but \
-                  strategy signal qty is 0; context is single-stub with is_complete=false \
-                  (no price reference — set MQK_STRATEGY_SYMBOL and \
-                  MQK_STRATEGY_MD_TIMEFRAME to load real DB bars)"
-                .to_string(),
+            // MARKET-DATA-BAR-CONTEXT-01: distinguish "env vars missing" from "env vars
+            // set but md_bars has no data for this symbol/timeframe".
+            _ => {
+                let ns_sym = std::env::var("MQK_STRATEGY_SYMBOL").unwrap_or_default();
+                let ns_tf = std::env::var(STRATEGY_MD_TIMEFRAME_ENV).unwrap_or_default();
+                if !ns_sym.is_empty() && !ns_tf.is_empty() {
+                    format!(
+                        "NO_SIGNAL_GENERATED (MARKET-DATA-BAR-CONTEXT-01): bar ticks \
+                         dispatched but md_bars has no completed bars for \
+                         {ns_sym}/{ns_tf}; ingest historical bars before the session \
+                         opens so the strategy can satisfy its LOOKBACK requirement"
+                    )
+                } else {
+                    "NO_SIGNAL_GENERATED (AUTON-NO-TRADE-02): bar ticks dispatched but \
+                     strategy signal qty is 0; context is single-stub with is_complete=false \
+                     (no price reference — set MQK_STRATEGY_SYMBOL and \
+                     MQK_STRATEGY_MD_TIMEFRAME to load real DB bars)"
+                        .to_string()
+                }
+            }
         };
         blockers.push(reason);
     }
 
-    // AUTON-SIGNAL-CONTEXT-01: surface INCOMPLETE_BAR_CONTEXT when the last
-    // dispatch used the stub path and ticks have already occurred.
+    // AUTON-SIGNAL-CONTEXT-01 / MARKET-DATA-BAR-CONTEXT-01: surface
+    // INCOMPLETE_BAR_CONTEXT when the last dispatch used the stub path and ticks
+    // have already occurred.  Two distinct sub-cases:
+    //   A. One or both env vars (MQK_STRATEGY_SYMBOL / MQK_STRATEGY_MD_TIMEFRAME)
+    //      are absent → operator needs to configure them.
+    //   B. Both env vars are set but md_bars contains no completed bars for that
+    //      symbol/timeframe → operator needs to ingest historical data.
     if st.bar_tick_dispatch_count() > 0 && raw_ctx_bars == 0 {
-        let symbol_set = !std::env::var("MQK_STRATEGY_SYMBOL")
-            .unwrap_or_default()
-            .is_empty();
-        let tf_set = !std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
-            .unwrap_or_default()
-            .is_empty();
+        let ibc_sym = std::env::var("MQK_STRATEGY_SYMBOL").unwrap_or_default();
+        let ibc_tf = std::env::var(STRATEGY_MD_TIMEFRAME_ENV).unwrap_or_default();
+        let symbol_set = !ibc_sym.is_empty();
+        let tf_set = !ibc_tf.is_empty();
         if !symbol_set || !tf_set {
+            // Sub-case A: missing configuration.
             blockers.push(format!(
                 "INCOMPLETE_BAR_CONTEXT (AUTON-SIGNAL-CONTEXT-01): stub context used \
                  because {} is not set; strategies require LOOKBACK complete bars with \
@@ -857,6 +876,16 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                     (false, true) => "MQK_STRATEGY_SYMBOL",
                     _ => "MQK_STRATEGY_MD_TIMEFRAME",
                 }
+            ));
+        } else {
+            // Sub-case B: both env vars are set but md_bars has no completed bars
+            // for this symbol/timeframe (MARKET-DATA-BAR-CONTEXT-01).
+            blockers.push(format!(
+                "INCOMPLETE_BAR_CONTEXT (MARKET-DATA-BAR-CONTEXT-01): \
+                 MQK_STRATEGY_SYMBOL={ibc_sym} and MQK_STRATEGY_MD_TIMEFRAME={ibc_tf} \
+                 are configured but md_bars contains no completed bars for this \
+                 symbol/timeframe; ingest historical bars before the session opens \
+                 so the strategy receives a real price context"
             ));
         }
     }
