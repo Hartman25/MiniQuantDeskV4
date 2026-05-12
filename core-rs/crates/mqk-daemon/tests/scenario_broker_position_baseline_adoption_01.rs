@@ -924,3 +924,248 @@ async fn bsr08_seed_broker_baseline_from_db_restores_baseline_at_boot() {
 
     let _ = mqk_db::clear_broker_position_baseline(&db).await;
 }
+
+// ===========================================================================
+// IDLE-RECONCILE-AFTER-BASELINE-01 tests (IR01-IR08)
+//
+// These tests prove that the adopt-broker-position-baseline route now:
+// - Runs an idle reconcile comparison after durable baseline write.
+// - Persists reconcile status so BRK-09R unblocks without requiring runtime.
+// - Refused (pre-mutation) responses report reconcile_refreshed=false.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// IR01: Successful adoption with matching broker snapshot → reconcile_refreshed=true,
+// reconcile_status_after="ok", all counts 0.
+// (DB-backed — Gate 3 requires DB)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ir01_adoption_publishes_clean_reconcile_status() {
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("ir01: skip — MQK_DATABASE_URL not set");
+        return;
+    }
+    let db = test_db_pool().await;
+    mqk_db::migrate(&db).await.expect("migration failed");
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+
+    let snap = fake_broker_snapshot_with_position();
+    let st = state::AppState::new_for_test_with_db_mode_and_broker(
+        db.clone(),
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    );
+    // Inject snapshot directly into cache so Gate 4 uses it without fetcher.
+    *st.broker_snapshot.write().await = Some(snap.clone());
+    let st = Arc::new(st);
+
+    let router = paper_alpaca_router_from_state(Arc::clone(&st));
+    let (status, json) = post_adopt(router, "ADOPT_BROKER_POSITION_BASELINE").await;
+
+    assert_eq!(status, StatusCode::OK, "adoption must succeed: {json}");
+    assert_eq!(json["accepted"], true, "{json}");
+
+    // Core IDLE-RECONCILE-AFTER-BASELINE-01 assertions.
+    assert_eq!(
+        json["reconcile_refreshed"], true,
+        "reconcile_refreshed must be true after successful adoption: {json}"
+    );
+    assert_eq!(
+        json["reconcile_status_after"], "ok",
+        "reconcile_status_after must be 'ok' when baseline==broker snapshot: {json}"
+    );
+    assert_eq!(
+        json["reconcile_mismatched_positions"], 0,
+        "no position mismatches when baseline derives from broker snapshot: {json}"
+    );
+    assert_eq!(
+        json["reconcile_mismatched_orders"], 0,
+        "no order mismatches when baseline derives from broker snapshot: {json}"
+    );
+    assert_eq!(
+        json["reconcile_mismatched_fills"], 0,
+        "no fill mismatches when baseline derives from broker snapshot: {json}"
+    );
+
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+}
+
+// ---------------------------------------------------------------------------
+// IR06: Adoption clears BRK-09R blocker — reconcile status in DB becomes "ok".
+//
+// Proves that after adoption, current_reconcile_snapshot().status is "ok"
+// (read from DB via publish_reconcile_snapshot), so the BRK-09R gate
+// (matches "dirty"|"stale") no longer fires.
+// (DB-backed)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ir06_adoption_clears_brk09r_blocker() {
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("ir06: skip — MQK_DATABASE_URL not set");
+        return;
+    }
+    let db = test_db_pool().await;
+    mqk_db::migrate(&db).await.expect("migration failed");
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+
+    // Pre-seed a dirty reconcile state in DB to simulate the BRK-09R condition.
+    mqk_db::persist_reconcile_status_state(
+        &db,
+        &mqk_db::PersistReconcileStatusState {
+            status: "dirty",
+            last_run_at_utc: None,
+            snapshot_watermark_ms: None,
+            mismatched_positions: 0,
+            mismatched_orders: 1,
+            mismatched_fills: 0,
+            unmatched_broker_events: 0,
+            note: Some("test: pre-seeded dirty state"),
+            updated_at_utc: chrono::Utc::now(),
+        },
+    )
+    .await
+    .expect("pre-seed dirty reconcile failed");
+
+    let snap = fake_broker_snapshot_with_position();
+    let st = state::AppState::new_for_test_with_db_mode_and_broker(
+        db.clone(),
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    );
+    *st.broker_snapshot.write().await = Some(snap.clone());
+    let st = Arc::new(st);
+
+    // Verify BRK-09R condition before adoption.
+    let before = st.current_reconcile_snapshot().await;
+    assert_eq!(
+        before.status, "dirty",
+        "reconcile must be dirty before adoption: {:?}",
+        before
+    );
+
+    let router = paper_alpaca_router_from_state(Arc::clone(&st));
+    let (status, json) = post_adopt(router, "ADOPT_BROKER_POSITION_BASELINE").await;
+    assert_eq!(status, StatusCode::OK, "adoption must succeed: {json}");
+    assert_eq!(json["reconcile_status_after"], "ok", "{json}");
+
+    // BRK-09R gate condition: reconcile must no longer be "dirty" or "stale".
+    let after = st.current_reconcile_snapshot().await;
+    assert_eq!(
+        after.status, "ok",
+        "reconcile must be 'ok' after adoption; BRK-09R gate must unblock: {:?}",
+        after
+    );
+    assert!(
+        !matches!(after.status.as_str(), "dirty" | "stale"),
+        "BRK-09R condition cleared: reconcile is '{}', not 'dirty'/'stale'",
+        after.status
+    );
+
+    // Verify DB row was updated (not just in-memory).
+    let db_row = mqk_db::load_reconcile_status_state(&db)
+        .await
+        .expect("load failed")
+        .expect("reconcile status row must exist");
+    assert_eq!(
+        db_row.status, "ok",
+        "DB sys_reconcile_status_state must be 'ok' after adoption: {:?}",
+        db_row
+    );
+
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+}
+
+// ---------------------------------------------------------------------------
+// IR07: Refused adoption (pre-mutation) → reconcile_refreshed=false.
+//
+// No state mutation occurs before Gate 2 (confirmation) or Gate 3 (DB).
+// Proves refused responses carry reconcile_refreshed=false.
+// Pure in-memory — no DB required.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ir07_refused_adoption_does_not_refresh_reconcile() {
+    // Wrong confirmation — refused at Gate 2 before any DB or snapshot access.
+    let st = paper_alpaca_state();
+    let (status, json) = post_adopt(
+        paper_alpaca_router_from_state(Arc::clone(&st)),
+        "WRONG_CONFIRMATION_STRING",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["accepted"], false, "{json}");
+    assert_eq!(
+        json["reconcile_refreshed"], false,
+        "refused response must have reconcile_refreshed=false: {json}"
+    );
+
+    // Mode guard — refused at Gate 1 before confirmation is even checked.
+    let st_live = Arc::new(state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::LiveShadow,
+        state::BrokerKind::Alpaca,
+    ));
+    let (status2, json2) = post_adopt(
+        paper_alpaca_router_from_state(st_live),
+        "ADOPT_BROKER_POSITION_BASELINE",
+    )
+    .await;
+    assert_eq!(status2, StatusCode::FORBIDDEN, "{json2}");
+    assert_eq!(
+        json2["reconcile_refreshed"], false,
+        "mode-refused response must have reconcile_refreshed=false: {json2}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// IR08: Repeated adoption with the same snapshot is idempotent:
+// reconcile_refreshed=true and reconcile_status_after="ok" on every call.
+// (DB-backed)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ir08_repeated_adoption_is_idempotent_reconcile_stays_clean() {
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("ir08: skip — MQK_DATABASE_URL not set");
+        return;
+    }
+    let db = test_db_pool().await;
+    mqk_db::migrate(&db).await.expect("migration failed");
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+
+    let snap = fake_broker_snapshot_with_position();
+
+    for i in 0..2_u32 {
+        let st = state::AppState::new_for_test_with_db_mode_and_broker(
+            db.clone(),
+            state::DeploymentMode::Paper,
+            state::BrokerKind::Alpaca,
+        );
+        *st.broker_snapshot.write().await = Some(snap.clone());
+        let (status, json) = post_adopt(
+            paper_alpaca_router_from_state(Arc::new(st)),
+            "ADOPT_BROKER_POSITION_BASELINE",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "attempt {i} must succeed: {json}");
+        assert_eq!(
+            json["reconcile_refreshed"], true,
+            "attempt {i}: reconcile_refreshed must be true: {json}"
+        );
+        assert_eq!(
+            json["reconcile_status_after"], "ok",
+            "attempt {i}: reconcile_status_after must be 'ok': {json}"
+        );
+        assert_eq!(
+            json["reconcile_mismatched_positions"], 0,
+            "attempt {i}: no position mismatches: {json}"
+        );
+        assert_eq!(
+            json["reconcile_mismatched_orders"], 0,
+            "attempt {i}: no order mismatches: {json}"
+        );
+    }
+
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+}

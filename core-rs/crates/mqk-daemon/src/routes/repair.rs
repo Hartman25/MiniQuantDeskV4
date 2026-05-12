@@ -37,7 +37,7 @@ use crate::{
         PortfolioPositionSummary, RestRecoveredFill, WsGapFillRecoveryRequest,
         WsGapFillRecoveryResponse,
     },
-    state::{reconcile_broker_snapshot_from_schema, AppState},
+    state::{reconcile_broker_snapshot_from_schema, AppState, ReconcileStatusSnapshot},
 };
 
 pub(crate) async fn repair_outbox_ambiguous(
@@ -2820,6 +2820,11 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
                 snapshot_captured_at: None,
                 audit_event_id: None,
                 gate: Some("mode.not_paper_alpaca".to_string()),
+                reconcile_refreshed: false,
+                reconcile_status_after: String::new(),
+                reconcile_mismatched_positions: 0,
+                reconcile_mismatched_orders: 0,
+                reconcile_mismatched_fills: 0,
             }),
         )
             .into_response();
@@ -2841,6 +2846,11 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
                 snapshot_captured_at: None,
                 audit_event_id: None,
                 gate: Some("repair.confirmation_required".to_string()),
+                reconcile_refreshed: false,
+                reconcile_status_after: String::new(),
+                reconcile_mismatched_positions: 0,
+                reconcile_mismatched_orders: 0,
+                reconcile_mismatched_fills: 0,
             }),
         )
             .into_response();
@@ -2859,6 +2869,11 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
                 snapshot_captured_at: None,
                 audit_event_id: None,
                 gate: Some("repair.no_db".to_string()),
+                reconcile_refreshed: false,
+                reconcile_status_after: String::new(),
+                reconcile_mismatched_positions: 0,
+                reconcile_mismatched_orders: 0,
+                reconcile_mismatched_fills: 0,
             }),
         )
             .into_response();
@@ -2889,6 +2904,11 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
                         snapshot_captured_at: None,
                         audit_event_id: None,
                         gate: Some("repair.broker_snapshot_refresh_unavailable".to_string()),
+                        reconcile_refreshed: false,
+                        reconcile_status_after: String::new(),
+                        reconcile_mismatched_positions: 0,
+                        reconcile_mismatched_orders: 0,
+                        reconcile_mismatched_fills: 0,
                     }),
                 )
                     .into_response();
@@ -2914,6 +2934,11 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
                                 snapshot_captured_at: None,
                                 audit_event_id: None,
                                 gate: Some("repair.broker_snapshot_refresh_failed".to_string()),
+                                reconcile_refreshed: false,
+                                reconcile_status_after: String::new(),
+                                reconcile_mismatched_positions: 0,
+                                reconcile_mismatched_orders: 0,
+                                reconcile_mismatched_fills: 0,
                             }),
                         )
                             .into_response();
@@ -2938,6 +2963,11 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
                     snapshot_captured_at: None,
                     audit_event_id: None,
                     gate: Some("repair.snapshot_conversion_failed".to_string()),
+                    reconcile_refreshed: false,
+                    reconcile_status_after: String::new(),
+                    reconcile_mismatched_positions: 0,
+                    reconcile_mismatched_orders: 0,
+                    reconcile_mismatched_fills: 0,
                 }),
             )
                 .into_response();
@@ -2947,8 +2977,8 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
     let baseline_position_count = broker_reconcile.positions.len();
     let baseline_order_count = broker_reconcile.orders.len();
     let local_baseline = mqk_reconcile::LocalSnapshot {
-        orders: broker_reconcile.orders,
-        positions: broker_reconcile.positions,
+        orders: broker_reconcile.orders.clone(),
+        positions: broker_reconcile.positions.clone(),
     };
 
     let snapshot_captured_at = Some(schema_snap.captured_at_utc.to_rfc3339());
@@ -2968,6 +2998,11 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
                     snapshot_captured_at,
                     audit_event_id: None,
                     gate: Some("repair.snapshot_serialization_failed".to_string()),
+                    reconcile_refreshed: false,
+                    reconcile_status_after: String::new(),
+                    reconcile_mismatched_positions: 0,
+                    reconcile_mismatched_orders: 0,
+                    reconcile_mismatched_fills: 0,
                 }),
             )
                 .into_response();
@@ -3009,13 +3044,18 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
                 snapshot_captured_at,
                 audit_event_id: None,
                 gate: Some("repair.db_error".to_string()),
+                reconcile_refreshed: false,
+                reconcile_status_after: String::new(),
+                reconcile_mismatched_positions: 0,
+                reconcile_mismatched_orders: 0,
+                reconcile_mismatched_fills: 0,
             }),
         )
             .into_response();
     }
 
     // Update in-memory baseline cache so the reconcile tick uses it immediately.
-    *st.broker_baseline.write().await = Some(local_baseline);
+    *st.broker_baseline.write().await = Some(local_baseline.clone());
 
     // Clear the integrity halt in memory so the reconcile tick can publish clean
     // state on the next tick and the operator can subsequently re-arm.
@@ -3026,6 +3066,56 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
         ig.disarmed = false;
     }
 
+    // IDLE-RECONCILE-AFTER-BASELINE-01: Run reconcile comparison while idle.
+    //
+    // Both sides of the comparison derive from the same just-fetched broker
+    // snapshot (local_baseline was constructed from broker_reconcile's
+    // positions/orders), so a clean result proves the adopted baseline equals
+    // live broker truth.  A dirty result means the snapshot itself carries
+    // internal inconsistency — extremely unlikely in practice, but we fail
+    // closed and leave reconcile dirty rather than publishing a false clean.
+    //
+    // This call writes reconcile status to DB so BRK-09R can unblock on the
+    // next start attempt without requiring the runtime to tick first.
+    let reconcile_report = mqk_reconcile::reconcile(&local_baseline, &broker_reconcile);
+    let mut idle_pos = 0usize;
+    let mut idle_ord = 0usize;
+    let mut idle_fills = 0usize;
+    for diff in &reconcile_report.diffs {
+        match diff {
+            mqk_reconcile::ReconcileDiff::PositionQtyMismatch { .. } => idle_pos += 1,
+            mqk_reconcile::ReconcileDiff::OrderMismatch { .. }
+            | mqk_reconcile::ReconcileDiff::LocalOrderMissingAtBroker { .. }
+            | mqk_reconcile::ReconcileDiff::UnknownOrder { .. } => idle_ord += 1,
+            mqk_reconcile::ReconcileDiff::UnknownBrokerFill { .. } => idle_fills += 1,
+        }
+    }
+    let reconcile_status_after = if reconcile_report.is_clean() {
+        "ok".to_string()
+    } else {
+        "dirty".to_string()
+    };
+    let idle_reconcile_snapshot = ReconcileStatusSnapshot {
+        status: reconcile_status_after.clone(),
+        last_run_at: chrono::DateTime::<Utc>::from_timestamp_millis(broker_reconcile.fetched_at_ms) // allow: ops-metadata
+            .map(|ts| ts.to_rfc3339()),
+        snapshot_watermark_ms: Some(broker_reconcile.fetched_at_ms),
+        mismatched_positions: idle_pos,
+        mismatched_orders: idle_ord,
+        mismatched_fills: idle_fills,
+        unmatched_broker_events: 0,
+        note: if reconcile_report.is_clean() {
+            None
+        } else {
+            Some(
+                "idle reconcile after baseline adoption: \
+                 baseline does not match live broker snapshot"
+                    .to_string(),
+            )
+        },
+    };
+    st.publish_reconcile_snapshot(idle_reconcile_snapshot).await;
+
     // Audit event: non-fatal and only attempted when an active run exists.
     // The sys_broker_position_baseline sentinel row IS the durable adoption proof.
     // audit_events requires a valid runs(run_id) FK — no active run at adoption time.
@@ -3033,8 +3123,9 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
         event_id = %event_id,
         baseline_position_count,
         baseline_order_count,
+        reconcile_status = %reconcile_status_after,
         snapshot_captured_at = ?snapshot_captured_at,
-        "BROKER-BASELINE-01: broker position baseline adopted"
+        "BROKER-BASELINE-01 / IDLE-RECONCILE-AFTER-BASELINE-01: broker position baseline adopted"
     );
 
     (
@@ -3043,7 +3134,7 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
             truth_state: "active".to_string(),
             accepted: true,
             decision: "adopted: broker snapshot written as local baseline; \
-                        reconcile tick will publish clean state on next interval; \
+                        idle reconcile ran and result persisted; \
                         operator must re-arm via POST /api/v1/ops/action {\"action\":\"arm-execution\"}"
                 .to_string(),
             baseline_position_count,
@@ -3051,6 +3142,11 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
             snapshot_captured_at,
             audit_event_id: Some(event_id.to_string()),
             gate: None,
+            reconcile_refreshed: true,
+            reconcile_status_after,
+            reconcile_mismatched_positions: idle_pos,
+            reconcile_mismatched_orders: idle_ord,
+            reconcile_mismatched_fills: idle_fills,
         }),
     )
         .into_response()

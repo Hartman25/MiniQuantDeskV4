@@ -3297,4 +3297,20 @@ pub struct AdoptBrokerPositionBaselineResponse {
     pub audit_event_id: Option<String>,
     /// Filled when the route refused the request before any mutation.
     pub gate: Option<String>,
+    /// True when idle reconcile comparison was run and its result persisted.
+    /// False for refused responses (adoption did not complete).
+    #[serde(default)]
+    pub reconcile_refreshed: bool,
+    /// Reconcile status after idle refresh: `"ok"`, `"dirty"`, or `""` (not run).
+    #[serde(default)]
+    pub reconcile_status_after: String,
+    /// Position mismatch count from idle reconcile (0 if not run or clean).
+    #[serde(default)]
+    pub reconcile_mismatched_positions: usize,
+    /// Order mismatch count from idle reconcile (0 if not run or clean).
+    #[serde(default)]
+    pub reconcile_mismatched_orders: usize,
+    /// Fill mismatch count from idle reconcile (0 if not run or clean).
+    #[serde(default)]
+    pub reconcile_mismatched_fills: usize,
 }
