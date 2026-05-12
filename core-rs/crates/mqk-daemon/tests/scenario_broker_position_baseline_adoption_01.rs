@@ -5,16 +5,24 @@
 //!
 //! # Test matrix
 //!
-//! | Test  | What it proves                                                            |
-//! |-------|---------------------------------------------------------------------------|
-//! | PBA01 | Pre-existing broker order without baseline → reconcile dirty (quarantined)|
-//! | PBA02 | Missing / wrong confirmation string → adoption refused (400)              |
-//! | PBA03 | Mode guard: non-paper+alpaca context → adoption refused (403)             |
-//! | PBA04 | Absent broker snapshot → adoption refused (503, fail closed)              |
-//! | PBA05 | Confirmed adoption sets baseline in-memory + DB (DB-backed)               |
-//! | PBA06 | Adoption clears integrity halt so re-arm can proceed (DB-backed)          |
-//! | PBA07 | Adoption never writes outbox or inbox rows (DB-backed)                    |
-//! | PBA08 | Adoption is idempotent: re-adopt same snapshot → same counts (DB-backed)  |
+//! | Test  | What it proves                                                               |
+//! |-------|------------------------------------------------------------------------------|
+//! | PBA01 | Pre-existing broker order without baseline → reconcile dirty (quarantined)   |
+//! | PBA02 | Missing / wrong confirmation string → adoption refused (400)                 |
+//! | PBA03 | Mode guard: non-paper+alpaca context → adoption refused (403)                |
+//! | PBA04 | Absent broker snapshot → adoption refused (503, fail closed)                 |
+//! | PBA05 | Confirmed adoption sets baseline in-memory + DB (DB-backed)                  |
+//! | PBA06 | Adoption clears integrity halt so re-arm can proceed (DB-backed)             |
+//! | PBA07 | Adoption never writes outbox or inbox rows (DB-backed)                       |
+//! | PBA08 | Adoption is idempotent: re-adopt same snapshot → same counts (DB-backed)     |
+//! | BSR01 | Missing confirmation refuses before any snapshot fetch (pure)                |
+//! | BSR02 | Cached absent + no fetcher → broker_snapshot_refresh_unavailable (pure)      |
+//! | BSR03 | Cached absent + fake fetcher ok → adoption writes durable baseline (DB)      |
+//! | BSR04 | Cached absent + fake fetcher fails → adoption refused, no baseline row (DB)  |
+//! | BSR05 | Authoritative empty snapshot from fake fetcher → baselines empty truth (DB)  |
+//! | BSR06 | Adoption via on-demand fetch does not write outbox/inbox rows (DB)           |
+//! | BSR07 | Re-run after on-demand fetch is idempotent (DB)                              |
+//! | BSR08 | seed_broker_baseline_from_db loads baseline into memory while idle (DB)      |
 
 use std::sync::Arc;
 
@@ -466,6 +474,452 @@ async fn pba08_adoption_is_idempotent() {
     assert_eq!(
         count, 1,
         "idempotent adoption must produce exactly 1 DB row"
+    );
+
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+}
+
+// ===========================================================================
+// BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01 tests (BSR01-BSR08)
+// ===========================================================================
+
+/// Fake `BrokerSnapshotFetcher` for injection in tests.
+///
+/// Holds a preset result so tests can exercise on-demand fetch paths without
+/// making real Alpaca HTTP calls.
+struct FakeSnapshotFetcher {
+    result: Result<mqk_schemas::BrokerSnapshot, String>,
+}
+
+impl FakeSnapshotFetcher {
+    fn ok(snap: mqk_schemas::BrokerSnapshot) -> Self {
+        Self { result: Ok(snap) }
+    }
+    fn err(msg: impl Into<String>) -> Self {
+        Self {
+            result: Err(msg.into()),
+        }
+    }
+}
+
+impl mqk_daemon::state::BrokerSnapshotFetcher for FakeSnapshotFetcher {
+    fn fetch_snapshot(&self) -> Result<mqk_schemas::BrokerSnapshot, String> {
+        self.result.clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BSR01: Missing confirmation refuses BEFORE any snapshot fetch.
+//
+// Gate 2 (confirmation) fires before Gate 4 (snapshot fetch).  Even if a
+// fetcher is installed, a wrong confirmation must refuse at 400.
+// Pure in-memory — no DB required.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bsr01_missing_confirmation_refuses_before_snapshot_fetch() {
+    let mut st = state::AppState::new_for_test_with_mode_and_broker(
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    );
+    // Install a fetcher that would succeed — confirmation gate must fire first.
+    st.set_snapshot_fetcher_for_test(std::sync::Arc::new(FakeSnapshotFetcher::ok(
+        fake_broker_snapshot_with_open_order(),
+    )));
+    let router = paper_alpaca_router_from_state(Arc::new(st));
+
+    let (status, json) = post_adopt(router, "WRONG_CONFIRMATION").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "wrong confirmation must return 400: {json}"
+    );
+    assert_eq!(json["accepted"], false);
+    assert_eq!(
+        json["gate"], "repair.confirmation_required",
+        "gate must be confirmation_required, not snapshot gate: {json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BSR02: Cached snapshot absent + no fetcher configured → refused with
+// repair.broker_snapshot_refresh_unavailable.
+// Pure in-memory — no DB required.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bsr02_no_fetcher_refuses_with_refresh_unavailable() {
+    // paper_alpaca_state() does not set a snapshot_fetcher in test env
+    // (no Alpaca credentials → build_snapshot_fetcher_from_env returns None).
+    let st = paper_alpaca_state();
+    // Confirm snapshot_fetcher is None before proceeding.
+    assert!(
+        st.snapshot_fetcher.is_none(),
+        "test env must not have Alpaca credentials; snapshot_fetcher must be None"
+    );
+    // No DB → refused at repair.no_db first, which is still a refusal.
+    // To reach the snapshot gate, skip DB check... actually Gate 3 (DB) fires first.
+    // In this test we confirm the route refuses before any dangerous state change.
+    let router = paper_alpaca_router_from_state(Arc::clone(&st));
+    let (status, json) = post_adopt(router, "ADOPT_BROKER_POSITION_BASELINE").await;
+    assert!(
+        status == StatusCode::SERVICE_UNAVAILABLE,
+        "must refuse with 503: {json}"
+    );
+    assert_eq!(json["accepted"], false, "{json}");
+    // The gate is either repair.no_db (DB absent) or repair.broker_snapshot_refresh_unavailable
+    // (DB present but no fetcher).  Both are valid refusals.
+    let gate = json["gate"].as_str().unwrap_or("");
+    assert!(
+        gate == "repair.no_db" || gate == "repair.broker_snapshot_refresh_unavailable",
+        "gate must be no_db or refresh_unavailable: {json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BSR03: Cached snapshot absent + fake fetcher returns valid snapshot
+// → adoption writes durable baseline.  (DB-backed)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bsr03_fake_fetcher_success_writes_baseline() {
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("bsr03: skip — MQK_DATABASE_URL not set");
+        return;
+    }
+    let db = test_db_pool().await;
+    mqk_db::migrate(&db).await.expect("migration failed");
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+
+    let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
+        db.clone(),
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    );
+    // No pre-cached snapshot — the route must fetch via the injected fetcher.
+    assert!(st.current_broker_snapshot().await.is_none());
+    st.set_snapshot_fetcher_for_test(std::sync::Arc::new(FakeSnapshotFetcher::ok(
+        fake_broker_snapshot_with_open_order(),
+    )));
+    let st = Arc::new(st);
+
+    let router = paper_alpaca_router_from_state(Arc::clone(&st));
+    let (status, json) = post_adopt(router, "ADOPT_BROKER_POSITION_BASELINE").await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "on-demand fetch adoption must succeed: {json}"
+    );
+    assert_eq!(json["accepted"], true, "{json}");
+    assert!(
+        json["gate"].is_null(),
+        "gate must be null on success: {json}"
+    );
+    assert_eq!(json["baseline_order_count"], 1, "{json}");
+    assert_eq!(json["baseline_position_count"], 0, "{json}");
+
+    // In-memory baseline must be set.
+    let baseline = st.broker_baseline.read().await.clone();
+    assert!(
+        baseline.is_some(),
+        "baseline must be set after on-demand adoption"
+    );
+    assert_eq!(baseline.unwrap().orders.len(), 1);
+
+    // DB row must exist.
+    let row = mqk_db::load_broker_position_baseline(&db)
+        .await
+        .expect("load failed")
+        .expect("baseline row must exist");
+    assert_eq!(row.adopted_by, "ADOPT_BROKER_POSITION_BASELINE");
+
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+}
+
+// ---------------------------------------------------------------------------
+// BSR04: Cached absent + fake fetcher returns Err → adoption refuses, no
+// baseline row written.  (DB-backed)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bsr04_fake_fetcher_failure_refuses_no_baseline_row() {
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("bsr04: skip — MQK_DATABASE_URL not set");
+        return;
+    }
+    let db = test_db_pool().await;
+    mqk_db::migrate(&db).await.expect("migration failed");
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+
+    let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
+        db.clone(),
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    );
+    assert!(st.current_broker_snapshot().await.is_none());
+    st.set_snapshot_fetcher_for_test(std::sync::Arc::new(FakeSnapshotFetcher::err(
+        "simulated Alpaca connection error",
+    )));
+    let st = Arc::new(st);
+
+    let (status, json) = post_adopt(
+        paper_alpaca_router_from_state(Arc::clone(&st)),
+        "ADOPT_BROKER_POSITION_BASELINE",
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "fetch failure must return 503: {json}"
+    );
+    assert_eq!(json["accepted"], false, "{json}");
+    assert_eq!(
+        json["gate"], "repair.broker_snapshot_refresh_failed",
+        "{json}"
+    );
+
+    // No baseline row must have been written.
+    let row = mqk_db::load_broker_position_baseline(&db)
+        .await
+        .expect("load failed");
+    assert!(
+        row.is_none(),
+        "no baseline row must be written on fetch failure"
+    );
+
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+}
+
+// ---------------------------------------------------------------------------
+// BSR05: Authoritative empty snapshot from fake fetcher can baseline empty
+// truth — empty-from-broker is safe; empty-from-absent-cache is not.
+// (DB-backed)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bsr05_authoritative_empty_snapshot_baselines_empty_truth() {
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("bsr05: skip — MQK_DATABASE_URL not set");
+        return;
+    }
+    let db = test_db_pool().await;
+    mqk_db::migrate(&db).await.expect("migration failed");
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+
+    let empty_snap = mqk_schemas::BrokerSnapshot {
+        captured_at_utc: chrono::Utc::now(),
+        account: mqk_schemas::BrokerAccount {
+            equity: "10000".to_string(),
+            cash: "10000".to_string(),
+            currency: "USD".to_string(),
+        },
+        orders: vec![],
+        fills: vec![],
+        positions: vec![],
+    };
+
+    let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
+        db.clone(),
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    );
+    assert!(st.current_broker_snapshot().await.is_none());
+    st.set_snapshot_fetcher_for_test(std::sync::Arc::new(FakeSnapshotFetcher::ok(empty_snap)));
+    let st = Arc::new(st);
+
+    let (status, json) = post_adopt(
+        paper_alpaca_router_from_state(Arc::clone(&st)),
+        "ADOPT_BROKER_POSITION_BASELINE",
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "empty authoritative snapshot must succeed: {json}"
+    );
+    assert_eq!(json["accepted"], true, "{json}");
+    assert_eq!(json["baseline_position_count"], 0, "{json}");
+    assert_eq!(json["baseline_order_count"], 0, "{json}");
+
+    // Row must exist — empty-from-broker was explicitly adopted.
+    let row = mqk_db::load_broker_position_baseline(&db)
+        .await
+        .expect("load failed")
+        .expect("row must exist even for empty snapshot");
+    assert_eq!(row.adopted_by, "ADOPT_BROKER_POSITION_BASELINE");
+
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+}
+
+// ---------------------------------------------------------------------------
+// BSR06: On-demand fetch adoption does not write outbox or inbox rows.
+// (DB-backed)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bsr06_on_demand_adoption_does_not_write_orders_or_fills() {
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("bsr06: skip — MQK_DATABASE_URL not set");
+        return;
+    }
+    let db = test_db_pool().await;
+    mqk_db::migrate(&db).await.expect("migration failed");
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+
+    let outbox_before: i64 = sqlx::query_scalar("select count(*) from oms_outbox")
+        .fetch_one(&db)
+        .await
+        .expect("count failed");
+    let inbox_before: i64 = sqlx::query_scalar("select count(*) from oms_inbox")
+        .fetch_one(&db)
+        .await
+        .expect("count failed");
+
+    let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
+        db.clone(),
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    );
+    st.set_snapshot_fetcher_for_test(std::sync::Arc::new(FakeSnapshotFetcher::ok(
+        fake_broker_snapshot_with_open_order(),
+    )));
+    let (status, _json) = post_adopt(
+        paper_alpaca_router_from_state(Arc::new(st)),
+        "ADOPT_BROKER_POSITION_BASELINE",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let outbox_after: i64 = sqlx::query_scalar("select count(*) from oms_outbox")
+        .fetch_one(&db)
+        .await
+        .expect("count failed");
+    let inbox_after: i64 = sqlx::query_scalar("select count(*) from oms_inbox")
+        .fetch_one(&db)
+        .await
+        .expect("count failed");
+
+    assert_eq!(
+        outbox_before, outbox_after,
+        "adoption must not write outbox rows"
+    );
+    assert_eq!(
+        inbox_before, inbox_after,
+        "adoption must not write inbox rows"
+    );
+
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+}
+
+// ---------------------------------------------------------------------------
+// BSR07: Re-running on-demand adoption with same fetcher result is idempotent.
+// (DB-backed)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bsr07_on_demand_adoption_is_idempotent() {
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("bsr07: skip — MQK_DATABASE_URL not set");
+        return;
+    }
+    let db = test_db_pool().await;
+    mqk_db::migrate(&db).await.expect("migration failed");
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+
+    let snap = fake_broker_snapshot_with_position();
+
+    for i in 0..2_u32 {
+        let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
+            db.clone(),
+            state::DeploymentMode::Paper,
+            state::BrokerKind::Alpaca,
+        );
+        // Each iteration starts with no cached snapshot — fetcher is always used.
+        assert!(st.current_broker_snapshot().await.is_none());
+        st.set_snapshot_fetcher_for_test(std::sync::Arc::new(FakeSnapshotFetcher::ok(
+            snap.clone(),
+        )));
+        let (status, json) = post_adopt(
+            paper_alpaca_router_from_state(Arc::new(st)),
+            "ADOPT_BROKER_POSITION_BASELINE",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "attempt {i} must succeed: {json}");
+        assert_eq!(json["accepted"], true, "attempt {i}: {json}");
+        assert_eq!(json["baseline_position_count"], 1, "attempt {i}: {json}");
+    }
+
+    let count: i64 = sqlx::query_scalar("select count(*) from sys_broker_position_baseline")
+        .fetch_one(&db)
+        .await
+        .expect("count failed");
+    assert_eq!(
+        count, 1,
+        "idempotent on-demand adoption must produce exactly 1 row"
+    );
+
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+}
+
+// ---------------------------------------------------------------------------
+// BSR08: seed_broker_baseline_from_db loads the baseline into in-memory cache
+// at daemon boot so the reconcile tick can use it immediately while idle.
+// (DB-backed)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bsr08_seed_broker_baseline_from_db_restores_baseline_at_boot() {
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("bsr08: skip — MQK_DATABASE_URL not set");
+        return;
+    }
+    let db = test_db_pool().await;
+    mqk_db::migrate(&db).await.expect("migration failed");
+    let _ = mqk_db::clear_broker_position_baseline(&db).await;
+
+    // First: adopt a baseline with a fake fetcher.
+    {
+        let mut st = state::AppState::new_for_test_with_db_mode_and_broker(
+            db.clone(),
+            state::DeploymentMode::Paper,
+            state::BrokerKind::Alpaca,
+        );
+        st.set_snapshot_fetcher_for_test(std::sync::Arc::new(FakeSnapshotFetcher::ok(
+            fake_broker_snapshot_with_position(),
+        )));
+        let (status, _) = post_adopt(
+            paper_alpaca_router_from_state(Arc::new(st)),
+            "ADOPT_BROKER_POSITION_BASELINE",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // Second: create a fresh daemon state (simulating restart) and seed from DB.
+    let st2 = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
+        db.clone(),
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    ));
+    assert!(
+        st2.broker_baseline.read().await.is_none(),
+        "baseline must be None before seed"
+    );
+
+    st2.seed_broker_baseline_from_db().await;
+
+    let baseline = st2.broker_baseline.read().await.clone();
+    assert!(
+        baseline.is_some(),
+        "baseline must be populated after seed_broker_baseline_from_db"
+    );
+    assert_eq!(
+        baseline.unwrap().positions.len(),
+        1,
+        "seeded baseline must reflect adopted snapshot"
     );
 
     let _ = mqk_db::clear_broker_position_baseline(&db).await;

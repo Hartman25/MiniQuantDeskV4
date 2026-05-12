@@ -2864,23 +2864,63 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
             .into_response();
     };
 
-    // Gate 4: broker snapshot must be present (fail closed if absent).
-    let Some(schema_snap) = st.current_broker_snapshot().await else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(AdoptBrokerPositionBaselineResponse {
-                truth_state: "no_snapshot".to_string(),
-                accepted: false,
-                decision: "refused: broker snapshot is absent; cannot baseline unknown state"
-                    .to_string(),
-                baseline_position_count: 0,
-                baseline_order_count: 0,
-                snapshot_captured_at: None,
-                audit_event_id: None,
-                gate: Some("repair.broker_snapshot_absent".to_string()),
-            }),
-        )
-            .into_response();
+    // Gate 4: broker snapshot — use cached, or fetch on-demand when fetcher is available.
+    //
+    // At daemon idle (no active run) the in-memory cache is always None because
+    // the snapshot refresh loop only runs inside an active execution loop.
+    // BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01 adds an on-demand fetcher so adoption
+    // can obtain an authoritative snapshot without requiring a run to have started.
+    let schema_snap = match st.current_broker_snapshot().await {
+        Some(snap) => snap,
+        None => match &st.snapshot_fetcher {
+            None => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(AdoptBrokerPositionBaselineResponse {
+                        truth_state: "no_snapshot".to_string(),
+                        accepted: false,
+                        decision:
+                            "refused: broker snapshot is absent and no on-demand fetcher \
+                                    is available; ensure Alpaca credentials are configured, or \
+                                    start a run to populate the snapshot cache, then retry adoption"
+                                .to_string(),
+                        baseline_position_count: 0,
+                        baseline_order_count: 0,
+                        snapshot_captured_at: None,
+                        audit_event_id: None,
+                        gate: Some("repair.broker_snapshot_refresh_unavailable".to_string()),
+                    }),
+                )
+                    .into_response();
+            }
+            Some(fetcher) => {
+                let fetcher = Arc::clone(fetcher);
+                match tokio::task::block_in_place(|| fetcher.fetch_snapshot()) {
+                    Ok(fresh) => {
+                        *st.broker_snapshot.write().await = Some(fresh.clone());
+                        fresh
+                    }
+                    Err(e) => {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(AdoptBrokerPositionBaselineResponse {
+                                truth_state: "no_snapshot".to_string(),
+                                accepted: false,
+                                decision: format!(
+                                    "refused: on-demand broker snapshot fetch failed: {e}"
+                                ),
+                                baseline_position_count: 0,
+                                baseline_order_count: 0,
+                                snapshot_captured_at: None,
+                                audit_event_id: None,
+                                gate: Some("repair.broker_snapshot_refresh_failed".to_string()),
+                            }),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        },
     };
 
     // Build reconcile LocalSnapshot from broker snapshot (same path as reconcile tick).

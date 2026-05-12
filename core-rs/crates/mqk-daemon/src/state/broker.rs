@@ -16,8 +16,8 @@ use mqk_execution::{
 
 use super::types::{BrokerKind, DeploymentMode, RuntimeLifecycleError};
 use super::{
-    BrokerFillActivityFetcher, WsGapFillFetcher, ALPACA_BASE_URL_PAPER_ENV, ALPACA_KEY_LIVE_ENV,
-    ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_LIVE_ENV, ALPACA_SECRET_PAPER_ENV,
+    BrokerFillActivityFetcher, BrokerSnapshotFetcher, WsGapFillFetcher, ALPACA_BASE_URL_PAPER_ENV,
+    ALPACA_KEY_LIVE_ENV, ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_LIVE_ENV, ALPACA_SECRET_PAPER_ENV,
 };
 
 // ---------------------------------------------------------------------------
@@ -329,6 +329,72 @@ pub(super) fn build_ws_gap_fill_fetcher_from_env(
     };
 
     Some(Arc::new(AlpacaWsGapFillFetcher(AlpacaBrokerAdapter::new(
+        AlpacaConfig {
+            base_url,
+            api_key_id: key_id,
+            api_secret_key: secret,
+        },
+    ))))
+}
+
+// ---------------------------------------------------------------------------
+// BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: on-demand broker snapshot fetcher
+// ---------------------------------------------------------------------------
+
+/// Thin newtype wrapping `AlpacaBrokerAdapter` that implements `BrokerSnapshotFetcher`.
+///
+/// Only the read-only broker snapshot fetch path is reachable through this type.
+/// Order submission, cancel, replace, and `fetch_events` are not exposed.
+struct AlpacaSnapshotFetcher(AlpacaBrokerAdapter);
+
+impl BrokerSnapshotFetcher for AlpacaSnapshotFetcher {
+    fn fetch_snapshot(&self) -> Result<mqk_schemas::BrokerSnapshot, String> {
+        self.0
+            .fetch_broker_snapshot(chrono::Utc::now())
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: construct a production on-demand snapshot fetcher.
+///
+/// Returns `Some(fetcher)` only when `broker_kind == Some(BrokerKind::Alpaca)` and
+/// the matching credentials are present in the environment.  Returns `None` for all
+/// other broker kinds or when any credential env var is absent — the adoption route
+/// will respond with `repair.broker_snapshot_refresh_unavailable` rather than panicking.
+///
+/// Credential and base-URL selection mirrors `build_fill_activity_fetcher_from_env`
+/// exactly so the fetcher targets the same Alpaca endpoint as the execution broker.
+pub(super) fn build_snapshot_fetcher_from_env(
+    broker_kind: Option<BrokerKind>,
+    deployment_mode: DeploymentMode,
+) -> Option<Arc<dyn BrokerSnapshotFetcher>> {
+    match broker_kind {
+        Some(BrokerKind::Alpaca) => {}
+        _ => return None,
+    }
+
+    let (key_env, secret_env) = match deployment_mode {
+        DeploymentMode::Paper => (ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_PAPER_ENV),
+        _ => (ALPACA_KEY_LIVE_ENV, ALPACA_SECRET_LIVE_ENV),
+    };
+    let paper_override = match deployment_mode {
+        DeploymentMode::Paper => std::env::var(ALPACA_BASE_URL_PAPER_ENV).ok(),
+        _ => None,
+    };
+    let base_url = match alpaca_base_url_for_mode(deployment_mode, paper_override.as_deref()) {
+        Ok(u) => u,
+        Err(_) => return None,
+    };
+    let key_id = match std::env::var(key_env) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    let secret = match std::env::var(secret_env) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+
+    Some(Arc::new(AlpacaSnapshotFetcher(AlpacaBrokerAdapter::new(
         AlpacaConfig {
             base_url,
             api_key_id: key_id,

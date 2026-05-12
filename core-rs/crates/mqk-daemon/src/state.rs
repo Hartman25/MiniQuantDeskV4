@@ -44,7 +44,10 @@ pub use alpaca_ws_transport::{
 pub use autonomous_bar_ticker::{
     spawn_autonomous_bar_ticker, BAR_INTERVAL_SECS_ENV, DEFAULT_QTY_ENV,
 };
-use broker::{build_fill_activity_fetcher_from_env, build_ws_gap_fill_fetcher_from_env};
+use broker::{
+    build_fill_activity_fetcher_from_env, build_snapshot_fetcher_from_env,
+    build_ws_gap_fill_fetcher_from_env,
+};
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
 pub use loop_runner::spawn_reconcile_tick;
@@ -297,6 +300,13 @@ pub struct AppState {
     /// Seeded from `sys_broker_position_baseline` at daemon boot by
     /// `seed_broker_baseline_from_db()`.  Written by the adoption route.
     pub broker_baseline: Arc<RwLock<Option<mqk_reconcile::LocalSnapshot>>>,
+    /// BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: On-demand broker snapshot fetcher.
+    ///
+    /// Used by the adopt-broker-position-baseline route when the in-memory broker
+    /// snapshot is absent at adoption time (daemon idle — no active run).
+    /// `None` when credentials are absent or broker kind is not Alpaca.
+    /// Tests inject a fake implementation via `set_snapshot_fetcher_for_test`.
+    pub snapshot_fetcher: Option<Arc<dyn BrokerSnapshotFetcher>>,
 }
 
 /// BROKER-FILL-REST-RECOVERY-01: Injectable abstraction over Alpaca REST activity fetch.
@@ -338,6 +348,21 @@ pub trait WsGapFillFetcher: Send + Sync {
         &self,
         since_activity_id: Option<&str>,
     ) -> Result<Vec<mqk_broker_alpaca::types::AlpacaOrderActivity>, String>;
+}
+
+/// BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: Injectable on-demand broker snapshot fetcher.
+///
+/// Used by the adopt-broker-position-baseline route when the in-memory broker
+/// snapshot is absent and a fresh authoritative read is needed before adoption.
+///
+/// Tests inject a fake implementation via `set_snapshot_fetcher_for_test`.
+/// Production wiring via `build_snapshot_fetcher_from_env` in `state/broker.rs`.
+pub trait BrokerSnapshotFetcher: Send + Sync {
+    /// Fetch a point-in-time broker snapshot.
+    ///
+    /// Returns `Err(String)` if the fetch fails; the adoption route treats this
+    /// as `repair.broker_snapshot_refresh_failed` and refuses adoption.
+    fn fetch_snapshot(&self) -> Result<mqk_schemas::BrokerSnapshot, String>;
 }
 
 impl Default for AppState {
@@ -527,6 +552,15 @@ impl AppState {
     /// calls.  Production wiring is a follow-up once the service function is proven.
     pub fn set_ws_gap_fill_fetcher_for_test(&mut self, fetcher: Arc<dyn WsGapFillFetcher>) {
         self.ws_gap_fill_fetcher = Some(fetcher);
+    }
+
+    /// BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: Test helper — inject an on-demand
+    /// broker snapshot fetcher.
+    ///
+    /// Allows scenario tests to inject a fake `BrokerSnapshotFetcher` without making
+    /// real Alpaca HTTP calls.  Production wiring is via `build_snapshot_fetcher_from_env`.
+    pub fn set_snapshot_fetcher_for_test(&mut self, fetcher: Arc<dyn BrokerSnapshotFetcher>) {
+        self.snapshot_fetcher = Some(fetcher);
     }
 
     /// BRK-07R: Seed WS continuity state from the last persisted broker cursor.
@@ -739,6 +773,13 @@ impl AppState {
             runtime_selection.deployment_mode,
         );
 
+        // BROKER-SNAPSHOT-REFRESH-FOR-BASELINE-01: on-demand snapshot fetcher for
+        // the adopt-broker-position-baseline route when the cache is absent at idle.
+        let snapshot_fetcher = build_snapshot_fetcher_from_env(
+            runtime_selection.broker_kind,
+            runtime_selection.deployment_mode,
+        );
+
         Self {
             bus,
             node_id: env::default_node_id(build.service),
@@ -783,6 +824,7 @@ impl AppState {
             fill_activity_fetcher,
             ws_gap_fill_fetcher,
             broker_baseline: Arc::new(RwLock::new(None)),
+            snapshot_fetcher,
         }
     }
 
