@@ -260,19 +260,38 @@ impl AppState {
                 let sides = self.local_order_sides.read().await;
                 reconcile_local_snapshot_from_runtime_with_sides(&snap, &sides)
             } else {
-                mqk_reconcile::LocalSnapshot::empty()
+                // RSB01: when no execution snapshot is available (fresh start),
+                // use the adopted broker baseline as local truth so the first-tick
+                // Phase-0c reconcile check sees local == broker and does not
+                // false-positive ReconcileDrift after a clean idle adoption.
+                // If no baseline has been adopted, fall back to empty (unchanged
+                // behaviour — broker must also be empty for reconcile to pass).
+                self.broker_baseline
+                    .read()
+                    .await
+                    .clone()
+                    .unwrap_or_else(mqk_reconcile::LocalSnapshot::empty)
             }
         };
 
         let local_snapshots = Arc::clone(&self.execution_snapshot);
         let side_cache_for_local = Arc::clone(&self.local_order_sides);
+        // RSB01: live baseline arc for the closure so each tick reads the current
+        // baseline when execution_snapshot is still None (e.g. during the first tick).
+        let baseline_for_runtime = Arc::clone(&self.broker_baseline);
         let local_snapshot_provider = move || {
             let Some(snapshot) = local_snapshots
                 .try_read()
                 .ok()
                 .and_then(|snapshot| snapshot.clone())
             else {
-                return local_seed_reconcile.clone();
+                // RSB01: prefer live baseline reading; fall back to static seed if
+                // the baseline lock is transiently contended.
+                return baseline_for_runtime
+                    .try_read()
+                    .ok()
+                    .and_then(|g| g.clone())
+                    .unwrap_or_else(|| local_seed_reconcile.clone());
             };
             let sides = side_cache_for_local
                 .try_read()
