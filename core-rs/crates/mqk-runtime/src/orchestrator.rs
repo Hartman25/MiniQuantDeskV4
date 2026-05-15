@@ -442,6 +442,33 @@ where
             }
         };
         for event in &events {
+            // REB-01: Skip fill events for orders with no ownership in this run.
+            //
+            // REST polling may fetch historical fills from prior runs when the
+            // broker cursor's rest_activity_after position is anchored before
+            // those fills (e.g. first start, cursor reset, or baseline adoption).
+            // Historical fills carry internal_order_ids that were never submitted
+            // by this run — they are not in self.oms_orders and would halt with
+            // UNKNOWN_ORDER_FILL in Phase 3 apply (Section C).
+            //
+            // Guard: only skip when the order is absent from this run's OMS map.
+            // Any order submitted by this run is present in self.oms_orders:
+            //   - at startup via recover_oms_and_portfolio (outbox_load_submitted)
+            //   - during Phase 1 dispatch (self.oms_orders.insert at submit time)
+            // Historical fills for orders from prior runs are therefore reliably
+            // identified by absence from self.oms_orders.
+            //
+            // Non-fill events (Ack, CancelAck, etc.) are safe to ingest for
+            // unknown orders: Phase 3 apply silently skips them without halting.
+            if is_historical_fill_no_run_ownership(event, &self.oms_orders) {
+                tracing::info!(
+                    run_id = %self.run_id,
+                    broker_message_id = %event.broker_message_id(),
+                    internal_order_id = %event.internal_order_id(),
+                    "exec_broker_fill_skipped_no_run_ownership"
+                );
+                continue;
+            }
             let msg_json = serde_json::to_value(event)?;
             let event_kind = match event {
                 BrokerEvent::Ack { .. } => "ack",
@@ -876,6 +903,41 @@ where
         }
     }
 }
+// ---------------------------------------------------------------------------
+// REB-01: Historical fill gate
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when a fetched broker event is a fill (Fill or PartialFill)
+/// for an order that is absent from this run's OMS map.
+///
+/// Fills for absent orders are **historical fills from prior runs**.  They were
+/// fetched by REST polling because the broker cursor's `rest_activity_after`
+/// position was anchored before those activities (e.g. first start, cursor
+/// reset, or baseline adoption).  Ingesting them as active-run events would
+/// produce `UNKNOWN_ORDER_FILL` in Phase 3 apply and halt the run incorrectly.
+///
+/// Non-fill events (Ack, CancelAck, etc.) are excluded from this gate because
+/// Phase 3 apply already silently skips non-fill events for unknown orders
+/// without halting — ingesting them is harmless.
+///
+/// # Invariant preserved
+///
+/// Any order submitted by the current run is present in `oms_orders`:
+/// - At run start via `recover_oms_and_portfolio` (loads outbox rows).
+/// - During Phase 1 dispatch (inserted immediately at submit time).
+///
+/// A fill for an order absent from `oms_orders` therefore cannot belong to
+/// the current run under correct code paths.
+pub fn is_historical_fill_no_run_ownership(
+    event: &BrokerEvent,
+    oms_orders: &std::collections::BTreeMap<String, mqk_execution::oms::state_machine::OmsOrder>,
+) -> bool {
+    matches!(
+        event,
+        BrokerEvent::PartialFill { .. } | BrokerEvent::Fill { .. }
+    ) && !oms_orders.contains_key(event.internal_order_id())
+}
+
 fn derive_runtime_holder_id(dispatcher_id: &str, run_id: Uuid) -> String {
     // `dispatcher_id` is produced by `default_node_id` which already embeds
     // "{service}|{host}|{user}|pid={pid}".  Re-reading COMPUTERNAME/USERNAME/
