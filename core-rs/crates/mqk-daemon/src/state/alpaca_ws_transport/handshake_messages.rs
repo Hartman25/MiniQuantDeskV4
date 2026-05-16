@@ -31,7 +31,7 @@ pub fn build_ws_subscribe_message() -> String {
 /// "https://paper-api.alpaca.markets/"  → "wss://paper-api.alpaca.markets/stream"
 /// ```
 pub fn ws_url_from_base_url(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
+    let trimmed = base_url.trim().trim_end_matches('/');
     let ws_base = if let Some(host) = trimmed.strip_prefix("https://") {
         format!("wss://{host}")
     } else {
