@@ -555,7 +555,7 @@ async fn deadman_expiry_halts_and_disarms_runtime() {
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     sqlx::query(
-        "UPDATE runs SET last_heartbeat_utc = now() - interval '10 second' WHERE run_id = $1",
+        "UPDATE runs SET last_heartbeat_utc = now() - interval '130 second' WHERE run_id = $1",
     )
     .bind(run_id)
     .execute(pool)
@@ -588,7 +588,7 @@ async fn runtime_refuses_to_continue_after_deadman_expiry() {
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     sqlx::query(
-        "UPDATE runs SET last_heartbeat_utc = now() - interval '10 second' WHERE run_id = $1",
+        "UPDATE runs SET last_heartbeat_utc = now() - interval '130 second' WHERE run_id = $1",
     )
     .bind(run_id)
     .execute(pool)
@@ -655,7 +655,7 @@ async fn status_surface_reports_deadman_truth() {
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     sqlx::query(
-        "UPDATE runs SET last_heartbeat_utc = now() - interval '10 second' WHERE run_id = $1",
+        "UPDATE runs SET last_heartbeat_utc = now() - interval '130 second' WHERE run_id = $1",
     )
     .bind(run_id)
     .execute(pool)

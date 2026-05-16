@@ -720,6 +720,24 @@ impl AppState {
             ));
         }
 
+        // DEADMAN-EXPIRED-AFTER-START-01: refresh heartbeat after the initial
+        // tick.  orchestrator.tick() may block for tens of seconds (Alpaca
+        // fetch_events has no HTTP timeout).  The heartbeat written above can
+        // be stale by the time tick() returns; the execution loop's first
+        // pre-tick deadman check would then fire immediately.  A fresh
+        // heartbeat here ensures the loop starts with a current timestamp.
+        if let Err(err) = mqk_db::heartbeat_run(&db, run_id, Utc::now()).await {
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!(
+                    "runtime_lease_release_failed_on_post_tick_heartbeat error={rel_err}"
+                );
+            }
+            return Err(RuntimeLifecycleError::internal(
+                "post-initial-tick heartbeat refresh failed",
+                err,
+            ));
+        }
+
         if let Ok(initial_snapshot) = orchestrator.snapshot().await {
             *self.execution_snapshot.write().await = Some(initial_snapshot);
         }

@@ -87,7 +87,15 @@ const DEFAULT_DAEMON_DEPLOYMENT_MODE: &str = "paper";
 const DEFAULT_DAEMON_ADAPTER_ID: &str = "paper";
 const DAEMON_RUN_CONFIG_HASH_PREFIX: &str = "daemon-runtime";
 const EXECUTION_LOOP_INTERVAL: Duration = Duration::from_secs(1);
-const DEADMAN_TTL_SECONDS: i64 = 5;
+// DEADMAN-EXPIRED-AFTER-START-01: TTL must exceed the maximum blocking
+// duration of a single orchestrator tick.  Phase 2 (fetch_events) makes a
+// synchronous Alpaca REST call with no HTTP timeout; a smoke run observed a
+// 33-second block.  RUNTIME_LEASE_TTL_SECS=90 already accommodates the
+// maximum single-phase block.  DEADMAN_TTL must be consistent: set to 120 so
+// a loop tick that blocks up to RUNTIME_LEASE_TTL_SECS (90 s) does not cause
+// a false deadman expiration on the next pre-tick check.  With TTL=120 a
+// truly dead loop is still detected within 2 minutes.
+const DEADMAN_TTL_SECONDS: i64 = 120;
 /// DMON-06: background reconcile tick interval.
 const RECONCILE_TICK_INTERVAL: Duration = Duration::from_secs(30);
 /// AUTON-PAPER-RISK-03: execution-loop ticks between External broker snapshot refreshes.

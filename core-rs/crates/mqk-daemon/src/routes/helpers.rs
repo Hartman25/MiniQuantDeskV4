@@ -79,10 +79,10 @@ pub(crate) fn runtime_error_response(err: RuntimeLifecycleError) -> Response {
 /// HEARTBEAT-TICK-01: stall threshold for the execution loop.
 ///
 /// A running daemon that has not recorded a tick in this many seconds surfaces
-/// a critical fault signal.  Set to 2× the deadman TTL (5 s) — tighter than
-/// what the DB deadman alone can detect (mid-tick hangs are invisible to the
-/// deadman until the stuck tick unblocks), but loose enough to avoid
-/// false-alarms on normal 1 s scheduler jitter.
+/// a critical fault signal.  Mid-tick hangs (e.g., blocked orchestrator) are
+/// invisible to the DB deadman until the stuck tick unblocks; this 10-second
+/// threshold provides earlier operator visibility while avoiding false-alarms
+/// on normal 1 s scheduler jitter.  Independent of DEADMAN_TTL_SECONDS.
 const EXECUTION_LOOP_STALL_THRESHOLD_SECS: i64 = 10;
 
 /// Build fault signals from runtime snapshot state.

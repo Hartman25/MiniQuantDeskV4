@@ -184,17 +184,36 @@ pub(super) fn spawn_execution_loop(
                         if let Ok(true) =
                             mqk_db::deadman_expired(pool, run_id, DEADMAN_TTL_SECONDS, now).await
                         {
+                            // DEADMAN-EXPIRED-AFTER-START-01: tick() blocked beyond
+                            // DEADMAN_TTL (e.g., fetch_events with no HTTP timeout).
+                            // Halt and disarm explicitly so the run is not left RUNNING
+                            // with a dead loop — mirrors pre-tick enforce_deadman_or_halt.
                             tracing::error!(
                                 run_id = %run_id,
-                                "execution_loop_deadman_expired: heartbeat stale, self-terminating without refresh"
+                                "execution_loop_deadman_post_tick: tick duration exceeded \
+                                 DEADMAN_TTL; halting and disarming"
                             );
+                            let _ = mqk_db::halt_run(pool, run_id, now).await;
+                            let _ = mqk_db::persist_arm_state_canonical(
+                                pool,
+                                mqk_db::ArmState::Disarmed,
+                                Some(mqk_db::DisarmReason::DeadmanExpired),
+                            )
+                            .await;
+                            {
+                                let mut ig = integrity.write().await;
+                                ig.disarmed = true;
+                                ig.halted = true;
+                            }
                             if let Err(release_err) =
                                 orchestrator.release_runtime_leadership().await
                             {
                                 tracing::warn!("runtime_lease_release_failed error={release_err}");
                             }
                             let exit = ExecutionLoopExit {
-                                note: Some("execution loop exited: deadman expired".to_string()),
+                                note: Some(
+                                    "execution loop halted: deadman expired post-tick".to_string(),
+                                ),
                             };
                             drop_outside_async_context(orchestrator);
                             return exit;
