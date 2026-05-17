@@ -111,9 +111,24 @@ impl AlpacaBrokerAdapter {
     ///
     /// A single `reqwest::Client` is shared across all calls made through this
     /// adapter instance.  `reqwest::Client` is cheaply cloneable (Arc-backed).
+    /// Construct a new adapter, trimming whitespace and control characters
+    /// (e.g. CRLF from Windows `.env` files) from all three config fields.
+    ///
+    /// HTTP header values must not contain control characters; an untrimmed
+    /// `\r` or `\n` in a credential string causes reqwest to fail with an
+    /// opaque "builder error" before any TCP connection is attempted.
+    /// Trimming here is the single canonical seam — `paper()`, `live()`, and
+    /// all `build_*_from_env` helpers all go through this constructor.
     pub fn new(cfg: AlpacaConfig) -> Self {
         let client = reqwest::Client::new();
-        Self { cfg, client }
+        Self {
+            cfg: AlpacaConfig {
+                base_url: cfg.base_url.trim().to_owned(),
+                api_key_id: cfg.api_key_id.trim().to_owned(),
+                api_secret_key: cfg.api_secret_key.trim().to_owned(),
+            },
+            client,
+        }
     }
     /// Convenience constructor for Alpaca paper trading.
     ///
