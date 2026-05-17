@@ -122,8 +122,15 @@ pub fn spawn_alpaca_paper_ws_task(state: Arc<AppState>) -> Option<JoinHandle<()>
         return None;
     }
 
+    // ALPACA-WS-AUTH-REJECTED-01: trim CR/LF and whitespace from credentials
+    // at the WS construction seam, mirroring AlpacaBrokerAdapter::new().
+    // The REST path trims inside AlpacaBrokerAdapter::new(); the WS path reads
+    // env vars directly and must trim here before the values enter the auth JSON.
+    // An untrimmed \r or \n in the key/secret causes Alpaca's WS server to
+    // reject the authentication message even when the same credentials work
+    // over REST (where reqwest header validation catches CRLF separately).
     let key = match std::env::var(super::ALPACA_KEY_PAPER_ENV) {
-        Ok(v) => v,
+        Ok(v) => v.trim().to_owned(),
         Err(_) => {
             tracing::warn!(
                 "alpaca_ws: {} not set; WS transport will not start (BRK-00R-05)",
@@ -133,7 +140,7 @@ pub fn spawn_alpaca_paper_ws_task(state: Arc<AppState>) -> Option<JoinHandle<()>
         }
     };
     let secret = match std::env::var(super::ALPACA_SECRET_PAPER_ENV) {
-        Ok(v) => v,
+        Ok(v) => v.trim().to_owned(),
         Err(_) => {
             tracing::warn!(
                 "alpaca_ws: {} not set; WS transport will not start (BRK-00R-05)",
