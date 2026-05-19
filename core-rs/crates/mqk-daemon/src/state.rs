@@ -1471,8 +1471,12 @@ operator_reconcile_or_repair_required"
         let bar = self.pending_strategy_bar_input.lock().await.take()?;
 
         // AUTON-SIGNAL-CONTEXT-01: attempt DB-backed context window.
-        let symbol = std::env::var("MQK_STRATEGY_SYMBOL").unwrap_or_default();
-        let md_timeframe = std::env::var(STRATEGY_MD_TIMEFRAME_ENV).unwrap_or_default();
+        let symbol = std::env::var("MQK_STRATEGY_SYMBOL")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        let md_timeframe = std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
 
         if let (Some(ref pool), true) = (&self.db, !symbol.is_empty() && !md_timeframe.is_empty()) {
             match mqk_db::fetch_recent_completed_bars_for_strategy(

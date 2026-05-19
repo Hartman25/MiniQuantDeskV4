@@ -831,8 +831,12 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
             // MARKET-DATA-BAR-CONTEXT-01: distinguish "env vars missing" from "env vars
             // set but md_bars has no data for this symbol/timeframe".
             _ => {
-                let ns_sym = std::env::var("MQK_STRATEGY_SYMBOL").unwrap_or_default();
-                let ns_tf = std::env::var(STRATEGY_MD_TIMEFRAME_ENV).unwrap_or_default();
+                let ns_sym = std::env::var("MQK_STRATEGY_SYMBOL")
+                    .map(|v| v.trim().to_string())
+                    .unwrap_or_default();
+                let ns_tf = std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
+                    .map(|v| v.trim().to_string())
+                    .unwrap_or_default();
                 if !ns_sym.is_empty() && !ns_tf.is_empty() {
                     format!(
                         "NO_SIGNAL_GENERATED (MARKET-DATA-BAR-CONTEXT-01): bar ticks \
@@ -860,8 +864,12 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
     //   B. Both env vars are set but md_bars contains no completed bars for that
     //      symbol/timeframe → operator needs to ingest historical data.
     if st.bar_tick_dispatch_count() > 0 && raw_ctx_bars == 0 {
-        let ibc_sym = std::env::var("MQK_STRATEGY_SYMBOL").unwrap_or_default();
-        let ibc_tf = std::env::var(STRATEGY_MD_TIMEFRAME_ENV).unwrap_or_default();
+        let ibc_sym = std::env::var("MQK_STRATEGY_SYMBOL")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        let ibc_tf = std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
         let symbol_set = !ibc_sym.is_empty();
         let tf_set = !ibc_tf.is_empty();
         if !symbol_set || !tf_set {

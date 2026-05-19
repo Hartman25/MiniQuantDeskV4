@@ -353,3 +353,74 @@ async fn md05_db_bar_with_nonzero_signal_no_blockers() {
         "MD05: NO_SIGNAL_GENERATED must NOT appear when signal_qty>0; got: {blockers:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// MD06 — Trailing \r in env vars is stripped (CRLF .env.local regression)
+//
+// On Windows, dotenvy 0.15 does not strip the trailing \r from values when
+// the .env.local file uses CRLF line endings (UTF-8 with BOM).  Without the
+// .trim() fix, MQK_STRATEGY_SYMBOL="AAPL\r" would be passed verbatim to the
+// DB lookup and to readiness blocker text, causing "AAPL\r/1D\r" lookups that
+// return 0 rows and blocker messages with embedded carriage-return characters.
+//
+// This test sets env vars with an explicit trailing \r and verifies:
+//  - The INCOMPLETE_BAR_CONTEXT blocker references the trimmed symbol/timeframe.
+//  - The blocker text does not contain \r (no raw carriage-return in output).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn md06_trailing_cr_in_env_vars_is_trimmed() {
+    let _g = env_lock().lock().await;
+    // Simulate CRLF .env.local values — the \r is the carriage-return byte.
+    std::env::set_var("MQK_STRATEGY_SYMBOL", "TESTFOO\r");
+    std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "1D\r");
+
+    let st = make_live_paper_alpaca();
+    st.update_ws_continuity(AlpacaWsContinuityState::Live {
+        last_message_id: "md06-msg".to_string(),
+        last_event_at: "2026-03-30T15:00:00Z".to_string(),
+    })
+    .await;
+    // 1 tick dispatched, signal=0, ctx_bars=0 — sub-case B: both vars set, no DB bars.
+    st.set_bar_tick_state_for_test(1, 0, 0);
+
+    let v = call_readiness(Arc::clone(&st)).await;
+
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+
+    let blockers = v["blockers"].as_array().expect("blockers must be array");
+
+    let ibc = blockers
+        .iter()
+        .find(|b| b.as_str().unwrap_or("").contains("INCOMPLETE_BAR_CONTEXT"))
+        .expect("MD06: INCOMPLETE_BAR_CONTEXT blocker must appear");
+    let ibc_str = ibc.as_str().unwrap();
+
+    assert!(
+        ibc_str.contains("TESTFOO"),
+        "MD06: blocker must contain trimmed symbol 'TESTFOO'; got: {ibc_str}"
+    );
+    assert!(
+        !ibc_str.contains("TESTFOO\r"),
+        "MD06: blocker must NOT contain 'TESTFOO\\r' (raw \\r must be stripped); got: {ibc_str:?}"
+    );
+    assert!(
+        ibc_str.contains("1D"),
+        "MD06: blocker must contain trimmed timeframe '1D'; got: {ibc_str}"
+    );
+    assert!(
+        !ibc_str.contains("1D\r"),
+        "MD06: blocker must NOT contain '1D\\r' (raw \\r must be stripped); got: {ibc_str:?}"
+    );
+
+    let nsg = blockers
+        .iter()
+        .find(|b| b.as_str().unwrap_or("").contains("NO_SIGNAL_GENERATED"))
+        .expect("MD06: NO_SIGNAL_GENERATED blocker must appear");
+    let nsg_str = nsg.as_str().unwrap();
+    assert!(
+        !nsg_str.contains("TESTFOO\r"),
+        "MD06: NO_SIGNAL_GENERATED must NOT contain 'TESTFOO\\r'; got: {nsg_str:?}"
+    );
+}
