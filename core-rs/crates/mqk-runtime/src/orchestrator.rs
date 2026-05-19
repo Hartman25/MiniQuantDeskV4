@@ -672,11 +672,41 @@ where
                     self.run_id
                 )));
             }
+            // RECOVERY-QUARANTINE-AFTER-PAPER-FILL-01: advance oms_outbox status
+            // SENT → ACKED before removing the broker_order_map entry.
+            //
+            // Phase 0b (outbox_load_restart_ambiguous_for_run) quarantines any
+            // SENT outbox row whose broker_order_map entry is absent.  Without
+            // this call, the sequence is:
+            //   terminal fill applied → broker_map_remove (map entry gone)
+            //   next tick Phase 0b: SENT + no broker_map → RECOVERY_QUARANTINE
+            //
+            // By marking ACKED first, the outbox row is excluded from the
+            // ambiguous query on the very next tick.  The call is idempotent
+            // (already-ACKED rows return Ok(false)); a missing row is also
+            // treated as a no-op.
+            //
+            // Crash-safety ordering (critical):
+            //   1. outbox_mark_acked   → SENT → ACKED durably in DB
+            //   2. broker_map_remove   → entry deleted
+            //   3. inbox_mark_applied  → applied_at_utc written (end of loop)
+            //
+            // Crash between (1) and (2): ACKED + broker_map present.
+            //   Phase 0b: no SENT row → no quarantine.  Broker map entry is
+            //   harmless; cleanup retried via Phase 3 replay of the still-
+            //   unapplied inbox row on restart.
+            //
+            // Crash between (2) and (3): ACKED + no broker_map + inbox row
+            //   unapplied.  Phase 0b: no SENT row → no quarantine.  Phase 3
+            //   replays and calls outbox_mark_acked again (idempotent Ok(false))
+            //   then broker_map_remove (silent no-op).
+            //
             // EXE-03R: terminal lifecycle events must clear broker-order mappings
             // before the inbox row is marked applied. If a crash occurs after
             // mark_applied but before cleanup, the durable inbox fence would
             // suppress replay and strand a stale broker mapping permanently.
             if apply_outcome.terminal_apply_succeeded {
+                mqk_db::outbox_mark_acked(&self.pool, &internal_id).await?;
                 mqk_db::broker_map_remove(&self.pool, &internal_id).await?;
                 remove_broker_mapping_from_memory(&mut self.order_map, &internal_id);
             }
