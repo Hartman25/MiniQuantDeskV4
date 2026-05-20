@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # OPERATOR-RUNBOOK-STARTUP-HARDENING-01
 # Start-PaperTradingSmoke.ps1
 #
@@ -204,7 +204,7 @@ if (-not (Test-Path $envLocalPath)) {
     exit 1
 }
 
-# Load .env.local lines safely — never print secret values
+# Load .env.local lines safely - never print secret values
 $loadedVars = @()
 foreach ($line in Get-Content -Path $envLocalPath) {
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
@@ -236,12 +236,12 @@ $env:MQK_DAEMON_ADAPTER_ID         = 'alpaca'
 $env:MQK_DAEMON_ADDR               = "127.0.0.1:$DaemonPort"
 $env:MQK_SESSION_START_HH_MM       = $SessionStart
 $env:MQK_SESSION_STOP_HH_MM        = $SessionStop
-Write-Ok "MQK_DATABASE_URL reasserted to paper DB (not printed — contains credentials)."
+Write-Ok "MQK_DATABASE_URL reasserted to paper DB (not printed - contains credentials)."
 Write-Ok "MQK_DAEMON_DEPLOYMENT_MODE=paper  MQK_DAEMON_ADAPTER_ID=alpaca"
 Write-Ok "MQK_DAEMON_ADDR=127.0.0.1:$DaemonPort"
 Write-Ok "Session window: $SessionStart - $SessionStop UTC"
 
-# Verify operator token is configured (presence only — never print value)
+# Verify operator token is configured (presence only - never print value)
 $operatorToken = [Environment]::GetEnvironmentVariable('MQK_OPERATOR_TOKEN', 'Process')
 if ([string]::IsNullOrWhiteSpace($operatorToken)) {
     $operatorToken = [Environment]::GetEnvironmentVariable('MQK_OPERATOR_TOKEN', 'User')
@@ -460,11 +460,11 @@ try { $status = Invoke-DaemonGet -Path '/api/v1/system/status' } catch {
 }
 
 if ($status.daemon_mode -ne 'paper') {
-    Write-Fail "daemon_mode='$($status.daemon_mode)' — expected 'paper'. Refusing to continue."
+    Write-Fail "daemon_mode='$($status.daemon_mode)' - expected 'paper'. Refusing to continue."
     exit 1
 }
 if ($status.adapter_id -ne 'alpaca') {
-    Write-Fail "adapter_id='$($status.adapter_id)' — expected 'alpaca'. Refusing to continue."
+    Write-Fail "adapter_id='$($status.adapter_id)' - expected 'alpaca'. Refusing to continue."
     exit 1
 }
 if ($status.live_routing_enabled -eq $true) {
@@ -501,7 +501,7 @@ if ($wsContinuity -eq 'live') {
     Write-Ok "Alpaca WS continuity=live."
 } else {
     Write-Warn "Alpaca WS continuity='$wsContinuity' (not live after 45 s). Check Alpaca credentials."
-    Write-Warn "Continuing — WS may still be establishing. Verify at /api/v1/system/status."
+    Write-Warn "Continuing - WS may still be establishing. Verify at /api/v1/system/status."
 }
 
 # ---------------------------------------------------------------------------
@@ -530,7 +530,7 @@ try {
         }
         Write-Ok "clear-halted-run accepted."
     } else {
-        Write-Ok "arm_state=$armState — no halted run to clear."
+        Write-Ok "arm_state=$armState - no halted run to clear."
     }
 } catch {
     Write-Warn "Could not read autonomous readiness for halt check: $_"
@@ -548,7 +548,7 @@ $adoptResp = Invoke-DaemonPost `
 if ($adoptResp.StatusCode -eq 200) {
     Write-Ok "Broker position baseline adopted: adopted=$($adoptResp.Body.adopted)  baseline_id=$($adoptResp.Body.baseline_id)"
 } elseif ($adoptResp.StatusCode -eq 409) {
-    Write-Ok "Broker position baseline already adopted (409 conflict — idempotent path): $($adoptResp.RawBody)"
+    Write-Ok "Broker position baseline already adopted (409 conflict - idempotent path): $($adoptResp.RawBody)"
 } else {
     Write-Fail "adopt-broker-position-baseline failed (HTTP $($adoptResp.StatusCode))."
     if ($adoptResp.RawBody) { Write-Fail "Response: $($adoptResp.RawBody)" }
@@ -572,11 +572,11 @@ if ($null -ne $reconcile) {
         Write-Warn "Continuing (operator must decide whether to proceed)."
     }
 } else {
-    Write-Warn "Reconcile status unavailable — continuing."
+    Write-Warn "Reconcile status unavailable - continuing."
 }
 
 # ---------------------------------------------------------------------------
-# STEP 13: Verify durable arm state — arm if needed
+# STEP 13: Verify durable arm state - arm if needed
 # ---------------------------------------------------------------------------
 Write-Section "STEP 13: Verify / set arm state"
 
@@ -657,7 +657,7 @@ if ($NoStartRuntime) {
     if ($startResp.StatusCode -eq 200 -and $startResp.Body.accepted -eq $true) {
         Write-Ok "start-system accepted. disposition=$($startResp.Body.disposition)"
     } elseif ($startResp.StatusCode -eq 503) {
-        Write-Warn "start-system returned 503 — may be waiting for session window or WS continuity."
+        Write-Warn "start-system returned 503 - may be waiting for session window or WS continuity."
         if ($startResp.RawBody) { Write-Warn "Response: $($startResp.RawBody)" }
     } else {
         Write-Warn "start-system returned HTTP $($startResp.StatusCode)."
@@ -757,7 +757,7 @@ Write-Host "Daemon logs:"
 Write-Host "  stdout: $stdoutLog"
 Write-Host "  stderr: $stderrLog"
 Write-Host ""
-Write-Host "Key endpoints (requires Bearer token — not printed here):"
+Write-Host "Key endpoints (requires Bearer token - not printed here):"
 Write-Host "  GET  $DaemonBaseUrl/api/v1/system/status"
 Write-Host "  GET  $DaemonBaseUrl/api/v1/autonomous/readiness"
 Write-Host "  GET  $DaemonBaseUrl/api/v1/system/preflight"
