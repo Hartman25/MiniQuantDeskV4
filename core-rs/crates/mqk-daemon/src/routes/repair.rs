@@ -3057,15 +3057,6 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
     // Update in-memory baseline cache so the reconcile tick uses it immediately.
     *st.broker_baseline.write().await = Some(local_baseline.clone());
 
-    // Clear the integrity halt in memory so the reconcile tick can publish clean
-    // state on the next tick and the operator can subsequently re-arm.
-    // NOTE: does NOT re-arm — operator must call arm-execution separately.
-    {
-        let mut ig = st.integrity.write().await;
-        ig.halted = false;
-        ig.disarmed = false;
-    }
-
     // IDLE-RECONCILE-AFTER-BASELINE-01: Run reconcile comparison while idle.
     //
     // Both sides of the comparison derive from the same just-fetched broker
@@ -3116,6 +3107,54 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
     };
     st.publish_reconcile_snapshot(idle_reconcile_snapshot).await;
 
+    // DURABLE-ARM-AFTER-BASELINE-ADOPTION-01:
+    //
+    // Reconcile-conditional arm state update.  Both local_baseline and
+    // broker_reconcile were derived from the same broker snapshot, so
+    // is_clean() == true proves the adopted baseline equals live broker truth.
+    //
+    // When reconcile is ok: write durable ARMED to sys_arm_state and clear
+    // in-memory so Gate 5 (submit_internal_strategy_decision) and the session
+    // controller's try_autonomous_arm agree.  Without this, try_autonomous_arm
+    // would skip the DB check (Gate 2 returns Ok when ig.disarmed=false) and the
+    // session controller would start a runtime that Gate 5 immediately rejects.
+    //
+    // When reconcile is dirty: clear only ig.halted so the reconcile tick can
+    // run again.  Keep ig.disarmed=true so the session controller cannot
+    // auto-start a runtime that Gate 5 would reject.
+    let decision = if reconcile_report.is_clean() {
+        if let Err(arm_err) =
+            mqk_db::persist_arm_state_canonical(db, mqk_db::ArmState::Armed, None).await
+        {
+            tracing::warn!(
+                err = %arm_err,
+                "adoption: persist ARMED to sys_arm_state failed; \
+                 in-memory cleared anyway; operator must arm manually"
+            );
+        }
+        {
+            let mut ig = st.integrity.write().await;
+            ig.halted = false;
+            ig.disarmed = false;
+        }
+        "adopted: broker snapshot written as local baseline; \
+         idle reconcile ok; durable ARMED written to sys_arm_state; \
+         system is ready for autonomous session start"
+            .to_string()
+    } else {
+        // reconcile dirty: allow reconcile tick to progress, block auto-start.
+        {
+            let mut ig = st.integrity.write().await;
+            ig.halted = false;
+            // ig.disarmed intentionally not cleared — session controller must not
+            // auto-start when reconcile is dirty and durable arm is DISARMED.
+        }
+        "adopted: broker snapshot written as local baseline; \
+         idle reconcile dirty (see mismatch counts); \
+         arm-execution required after reconcile becomes clean"
+            .to_string()
+    };
+
     // Audit event: non-fatal and only attempted when an active run exists.
     // The sys_broker_position_baseline sentinel row IS the durable adoption proof.
     // audit_events requires a valid runs(run_id) FK — no active run at adoption time.
@@ -3125,7 +3164,7 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
         baseline_order_count,
         reconcile_status = %reconcile_status_after,
         snapshot_captured_at = ?snapshot_captured_at,
-        "BROKER-BASELINE-01 / IDLE-RECONCILE-AFTER-BASELINE-01: broker position baseline adopted"
+        "BROKER-BASELINE-01 / IDLE-RECONCILE-AFTER-BASELINE-01 / DURABLE-ARM-AFTER-BASELINE-ADOPTION-01: broker position baseline adopted"
     );
 
     (
@@ -3133,10 +3172,7 @@ pub(crate) async fn repair_adopt_broker_position_baseline(
         Json(AdoptBrokerPositionBaselineResponse {
             truth_state: "active".to_string(),
             accepted: true,
-            decision: "adopted: broker snapshot written as local baseline; \
-                        idle reconcile ran and result persisted; \
-                        operator must re-arm via POST /api/v1/ops/action {\"action\":\"arm-execution\"}"
-                .to_string(),
+            decision,
             baseline_position_count,
             baseline_order_count,
             snapshot_captured_at,
