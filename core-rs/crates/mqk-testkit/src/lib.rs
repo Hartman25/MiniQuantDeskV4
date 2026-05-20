@@ -152,3 +152,115 @@ pub mod orchestrator;
 pub use orchestrator::{
     Orchestrator, OrchestratorBar, OrchestratorConfig, OrchestratorReport, OrchestratorRunMeta,
 };
+
+// ---------------------------------------------------------------------------
+// TEST-DB-SAFETY-GUARD-01: reject paper/live DB URLs before any mutation
+// ---------------------------------------------------------------------------
+
+/// Forbidden substrings in the database-name segment of a test DB URL.
+///
+/// Any URL whose database name contains one of these tokens will be rejected
+/// loudly before the first DB connection is opened by a DB-backed test.
+const FORBIDDEN_DB_NAME_TOKENS: &[&str] =
+    &["miniquantdesk_paper", "miniquantdesk_live", "paper", "live"];
+
+/// Override env var that bypasses the safety check.
+///
+/// Required value: the full literal string below. Anything shorter is treated
+/// as absent. The name is intentionally scary.
+const ALLOW_NON_TEST_DB_VAR: &str = "MQK_ALLOW_DB_TESTS_AGAINST_NON_TEST_DB";
+const ALLOW_NON_TEST_DB_VALUE: &str = "I_UNDERSTAND_THIS_MUTATES_OPERATIONAL_DB";
+
+/// Parse the database name from a `postgres://` URL.
+///
+/// Returns `None` if the URL is not parseable as a postgres URL with a path
+/// segment, so callers can fail closed.
+fn db_name_from_url(url: &str) -> Option<&str> {
+    // postgres[ql]://[user[:password]@][host][:port]/dbname[?params]
+    // Strip scheme, find the path portion starting at the first '/' after "://".
+    let after_scheme = url
+        .strip_prefix("postgres://")
+        .or_else(|| url.strip_prefix("postgresql://"))?;
+    // The path starts at the first '/' that follows the host[:port].
+    let slash_pos = after_scheme.find('/')?;
+    let path = &after_scheme[slash_pos + 1..];
+    // Strip query string.
+    let dbname = path.split('?').next()?;
+    if dbname.is_empty() {
+        None
+    } else {
+        Some(dbname)
+    }
+}
+
+/// Redact the password portion of a postgres URL for safe display.
+///
+/// `postgres://user:PASSWORD@host/db` → `postgres://user:***@host/db`
+fn redact_url(url: &str) -> String {
+    // Find "://" then look for '@' to locate the userinfo segment.
+    let Some(after_scheme_start) = url.find("://") else {
+        return url.to_string();
+    };
+    let after_scheme = &url[after_scheme_start + 3..];
+    let Some(at_pos) = after_scheme.find('@') else {
+        // No userinfo — nothing to redact.
+        return url.to_string();
+    };
+    let userinfo = &after_scheme[..at_pos];
+    let Some(colon_pos) = userinfo.find(':') else {
+        // No password in userinfo.
+        return url.to_string();
+    };
+    let scheme_prefix = &url[..after_scheme_start + 3];
+    let user = &userinfo[..colon_pos];
+    let rest = &after_scheme[at_pos..]; // includes '@'
+    format!("{scheme_prefix}{user}:***{rest}")
+}
+
+/// Assert that `url` points at a safe test database before opening a connection.
+///
+/// Panics with a clear, actionable, password-redacted message if the database
+/// name contains any forbidden token (`paper`, `live`, etc.).
+///
+/// Callers: every DB-backed test helper that reads `MQK_DATABASE_URL` before
+/// connecting. Centralised here so the check cannot be accidentally skipped.
+///
+/// Override (discouraged): set
+/// `MQK_ALLOW_DB_TESTS_AGAINST_NON_TEST_DB=I_UNDERSTAND_THIS_MUTATES_OPERATIONAL_DB`
+/// to bypass. Omit unless absolutely necessary.
+pub fn assert_test_db_url(url: &str) {
+    let override_val = std::env::var(ALLOW_NON_TEST_DB_VAR).unwrap_or_default();
+    if override_val.trim() == ALLOW_NON_TEST_DB_VALUE {
+        return;
+    }
+
+    let db_name = db_name_from_url(url).unwrap_or("");
+    let db_name_lower = db_name.to_lowercase();
+
+    let hit = FORBIDDEN_DB_NAME_TOKENS
+        .iter()
+        .find(|&&tok| db_name_lower.contains(tok));
+
+    if let Some(token) = hit {
+        let safe_url = redact_url(url);
+        panic!(
+            "\n\
+             ╔══════════════════════════════════════════════════════════════╗\n\
+             ║  TEST-DB-SAFETY-GUARD: refused to connect to operational DB  ║\n\
+             ╚══════════════════════════════════════════════════════════════╝\n\
+             \n\
+             Env var : MQK_DATABASE_URL\n\
+             URL     : {safe_url}\n\
+             DB name : {db_name}\n\
+             Problem : database name contains forbidden token \"{token}\"\n\
+             \n\
+             DB-backed tests must only run against the dedicated test database.\n\
+             Expected: a URL whose database name does NOT contain: {toks:?}\n\
+             Example : MQK_DATABASE_URL=postgres://postgres:pass@127.0.0.1:55433/mqk_test\n\
+             \n\
+             If you truly intend to mutate an operational database (dangerous!),\n\
+             set: {ALLOW_NON_TEST_DB_VAR}={ALLOW_NON_TEST_DB_VALUE}\n",
+            toks = FORBIDDEN_DB_NAME_TOKENS,
+        );
+    }
+}

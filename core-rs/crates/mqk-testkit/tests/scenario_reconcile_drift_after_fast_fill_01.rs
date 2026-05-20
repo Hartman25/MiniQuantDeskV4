@@ -148,7 +148,11 @@ impl ReconcileGate for PassGate {
 
 fn db_url_or_skip() -> Option<String> {
     match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(v) if !v.trim().is_empty() => Some(v),
+        Ok(v) if !v.trim().is_empty() => {
+            let url = v.trim().to_string();
+            mqk_testkit::assert_test_db_url(&url);
+            Some(url)
+        }
         _ => {
             println!("SKIP: requires MQK_DATABASE_URL");
             None
@@ -312,7 +316,6 @@ fn aapl_broker_post_fill(ts_ms: i64) -> BrokerSnapshot {
     s.positions.insert("AAPL".to_string(), 2);
     s
 }
-
 
 fn make_orchestrator_with_snapshots(
     pool: PgPool,

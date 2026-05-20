@@ -170,7 +170,11 @@ mod db_tests {
 
     fn skip_without_db() -> Option<String> {
         match std::env::var(mqk_db::ENV_DB_URL) {
-            Ok(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
+            Ok(v) if !v.trim().is_empty() => {
+                let url = v.trim().to_string();
+                mqk_testkit::assert_test_db_url(&url);
+                Some(url)
+            }
             _ => {
                 eprintln!("SKIP: MQK_DATABASE_URL not set — skipping DB-backed RQA tests");
                 None

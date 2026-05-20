@@ -120,6 +120,7 @@ async fn make_db_pool() -> sqlx::PgPool {
              -- --include-ignored"
         )
     });
+    mqk_testkit::assert_test_db_url(&url);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(&url)
