@@ -872,6 +872,58 @@ pub async fn outbox_list_unacked_for_run(pool: &PgPool, run_id: Uuid) -> Result<
     Ok(out)
 }
 
+/// Load SENT outbox rows that have a confirmed broker_order_map entry for this run.
+///
+/// Used by Phase 0c's pending-fill-propagation guard
+/// (RECONCILE-DRIFT-AFTER-FAST-PAPER-FILL-01): a SENT row with a broker_order_map
+/// entry proves the broker received the order.  When the WS fill event has not
+/// yet arrived in oms_inbox, the local OMS still shows the order as open while
+/// the broker REST snapshot already reflects the fill.  Phase 0c uses this query
+/// to detect whether the reconcile drift is in the ack→fill propagation window
+/// before deciding to halt.
+///
+/// Returns only SENT rows (not ACKED or others): ACKED rows have already been
+/// confirmed terminal and their broker_order_map entries have been removed.
+pub async fn outbox_load_sent_with_broker_map_for_run(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<Vec<OutboxRow>> {
+    let rows = sqlx::query(
+        r#"
+        select o.outbox_id, o.run_id, o.idempotency_key, o.order_json, o.status,
+               o.created_at_utc, o.sent_at_utc, o.claimed_at_utc, o.claimed_by,
+               o.dispatching_at_utc, o.dispatch_attempt_id
+        from oms_outbox o
+        inner join broker_order_map m on m.internal_id = o.idempotency_key
+        where o.run_id = $1
+          and o.status = 'SENT'
+        order by o.outbox_id asc
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .context("outbox_load_sent_with_broker_map_for_run failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(OutboxRow {
+            outbox_id: row.try_get("outbox_id")?,
+            run_id: row.try_get("run_id")?,
+            idempotency_key: row.try_get("idempotency_key")?,
+            order_json: row.try_get("order_json")?,
+            status: row.try_get("status")?,
+            created_at_utc: row.try_get("created_at_utc")?,
+            sent_at_utc: row.try_get("sent_at_utc")?,
+            claimed_at_utc: row.try_get("claimed_at_utc")?,
+            claimed_by: row.try_get("claimed_by")?,
+            dispatching_at_utc: row.try_get("dispatching_at_utc")?,
+            dispatch_attempt_id: row.try_get("dispatch_attempt_id")?,
+        });
+    }
+    Ok(out)
+}
+
 /// Load outbox rows with status SENT or ACKED (submitted to broker), ordered
 /// by outbox_id asc.  Used at cold-start to reconstruct the in-flight OMS
 /// order map without querying the broker.

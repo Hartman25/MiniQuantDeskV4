@@ -22,11 +22,12 @@
 use anyhow::{anyhow, Context as _};
 use mqk_db::TimeSource;
 use mqk_reconcile::{
-    reconcile_monotonic, BrokerSnapshot, LocalSnapshot, SnapshotWatermark, StaleBrokerSnapshot,
+    reconcile_monotonic, BrokerSnapshot, LocalSnapshot, OrderStatus, SnapshotWatermark,
+    StaleBrokerSnapshot,
 };
 use sqlx::types::chrono;
 use sqlx::PgPool;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use uuid::Uuid;
 /// Production wall-clock time source.
 ///
@@ -145,6 +146,115 @@ where
     /// not denied any order since the execution loop started.
     recent_denials: VecDeque<crate::observability::RiskDenialRecord>,
 }
+/// Grace window for the pending-fill-propagation deferral in Phase 0c.
+///
+/// If a SENT+mapped outbox row was sent within this many seconds, the
+/// reconcile check may be deferred while the WS fill event propagates.
+/// Paper market orders on Alpaca typically fill in under one second; 30s
+/// provides 30× headroom while bounding the deferral window.
+///
+/// After this window, RECONCILE_DRIFT fires regardless.
+const PENDING_FILL_PROPAGATION_GRACE_SECS: i64 = 30;
+
+/// Returns `true` if the broker-vs-local reconcile drift is fully explained by
+/// the expected fills from `sent_mapped` outbox rows.
+///
+/// Conditions that must ALL hold for the drift to be considered consistent:
+/// 1. Every non-zero position delta (broker - local) has the same sign as the
+///    expected fill for that symbol (buy → positive, sell → negative) and does
+///    not exceed the expected fill quantity.
+/// 2. No position delta exists for a symbol that has no corresponding
+///    SENT+mapped order (unexpected symbol → not consistent).
+/// 3. Every local active order absent from the broker snapshot corresponds to
+///    one of the SENT+mapped outbox rows (the broker filled and closed it).
+/// 4. No unknown broker orders exist (broker has an order our OMS never saw).
+///
+/// If any condition fails, the drift is NOT explained and RECONCILE_DRIFT fires
+/// immediately without waiting for the grace window to expire.
+fn drift_is_consistent_with_pending_fills(
+    sent_mapped: &[mqk_db::OutboxRow],
+    local: &LocalSnapshot,
+    broker: &BrokerSnapshot,
+) -> bool {
+    // Build expected position deltas and the set of mapped order IDs from the
+    // SENT+mapped outbox rows.
+    let mut expected_deltas: BTreeMap<String, i64> = BTreeMap::new();
+    let mut mapped_ids: BTreeSet<String> = BTreeSet::new();
+
+    for row in sent_mapped {
+        mapped_ids.insert(row.idempotency_key.clone());
+        let sym = row
+            .order_json
+            .get("symbol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let side = row
+            .order_json
+            .get("side")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let qty = row
+            .order_json
+            .get("qty")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        if !sym.is_empty() && qty > 0 {
+            let delta = if side.eq_ignore_ascii_case("buy") {
+                qty
+            } else {
+                -qty
+            };
+            *expected_deltas.entry(sym.to_string()).or_default() += delta;
+        }
+    }
+
+    // Check position deltas across the union of all symbols.
+    let mut all_syms: BTreeSet<String> = BTreeSet::new();
+    all_syms.extend(local.positions.keys().cloned());
+    all_syms.extend(broker.positions.keys().cloned());
+
+    for sym in &all_syms {
+        let lq = local.positions.get(sym).copied().unwrap_or(0);
+        let bq = broker.positions.get(sym).copied().unwrap_or(0);
+        let actual = bq - lq;
+        if actual != 0 {
+            let expected = expected_deltas.get(sym).copied().unwrap_or(0);
+            if expected == 0 {
+                return false; // drift on a symbol with no pending fill
+            }
+            if (expected > 0) != (actual > 0) {
+                return false; // wrong direction
+            }
+            if actual.abs() > expected.abs() {
+                return false; // more fill than ordered
+            }
+        }
+    }
+
+    // No unknown broker orders.
+    for oid in broker.orders.keys() {
+        if !local.orders.contains_key(oid) {
+            return false;
+        }
+    }
+
+    // All active local orders absent from the broker snapshot must correspond
+    // to a SENT+mapped row (the broker filled and closed the order).
+    for (oid, ord) in &local.orders {
+        if !broker.orders.contains_key(oid) {
+            let is_terminal = matches!(
+                ord.status,
+                OrderStatus::Filled | OrderStatus::Canceled | OrderStatus::Rejected
+            );
+            if !is_terminal && !mapped_ids.contains(oid) {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
 #[derive(Debug)]
 enum MonotonicReconcileError {
     Dirty,
@@ -301,7 +411,8 @@ where
         //
         // Policy:
         // - CLEAN  => continue
-        // - DIRTY  => HALT run + DISARM arm state + refuse dispatch
+        // - DIRTY  => check pending-fill-propagation window (see below)
+        // - STALE  => HALT run + DISARM arm state + refuse dispatch
         //
         // This is intentionally fail-closed.
         //
@@ -324,6 +435,39 @@ where
         // discrepancy) or halts on an OMS error (UNKNOWN_ORDER_FILL, invariant
         // violation, etc.).  If the inbox is permanently stuck (DB failure),
         // the fetch itself returns Err and the tick halts.
+        //
+        // RECONCILE-DRIFT-AFTER-FAST-PAPER-FILL-01: pending-fill-propagation
+        // deferral for the ack→fill window.
+        //
+        // Even when the inbox is empty, a false-positive DIRTY reconcile can
+        // occur when:
+        //   1. The ACK inbox rows have already been applied.
+        //   2. The WS fill event has NOT yet arrived in oms_inbox at all.
+        //   3. The broker REST snapshot already reflects the fill.
+        //
+        // In this window the outbox row is still SENT (not yet ACKED — that
+        // only happens when the terminal fill/cancel event applies in Phase 3)
+        // and its broker_order_map entry is still present.
+        //
+        // Guard: when DIRTY fires and the inbox is empty, check for SENT outbox
+        // rows with confirmed broker_order_map entries that were sent within the
+        // grace window.  If such rows exist AND the drift is directionally
+        // consistent with their expected fills (same symbol, same side, within
+        // qty), defer rather than halt.  The fill event either arrives (resolving
+        // drift in Phase 3) or the window expires (RECONCILE_DRIFT fires on the
+        // next tick when in_grace is false).
+        //
+        // RECONCILE_DRIFT still fires immediately when:
+        //   - The broker snapshot is stale (Stale error path; unchanged).
+        //   - No SENT+mapped orders exist for this run (no evidence of a pending
+        //     fill; genuine drift).
+        //   - SENT+mapped orders exist but are outside the grace window (fill
+        //     never arrived; genuine drift).
+        //   - The drift direction/symbol does not match any pending fill
+        //     (unexpected broker state; genuine drift).
+        //   - The broker has unknown orders we did not submit (fail-closed).
+        //   - Local active orders missing at broker are not in the SENT+mapped
+        //     set (unmapped drift; fail-closed).
         // ------------------------------------------------------------------
         {
             let pending_inbox =
@@ -331,23 +475,57 @@ where
             if pending_inbox.is_empty() {
                 let local = (self.local_snapshot_provider)();
                 let broker = (self.broker_snapshot_provider)();
-                if let Err(err) =
-                    evaluate_monotonic_reconcile(&mut self.reconcile_watermark, &local, &broker)
-                {
-                    let now = self.time_source.now_utc();
-                    // Mandatory halt + disarm - same fail-closed contract as Phase 0b.
-                    persist_halt_and_disarm(&self.pool, self.run_id, now, "ReconcileDrift").await?;
-                    return match err {
-                        MonotonicReconcileError::Dirty => Err(anyhow!(
-                            "RECONCILE_DRIFT: run {} halted and disarmed; dispatch refused",
-                            self.run_id
-                        )),
-                        MonotonicReconcileError::Stale(stale) => Err(anyhow!(
-                            "RECONCILE_SNAPSHOT_STALE: run {} halted and disarmed; dispatch refused: {}",
+                match evaluate_monotonic_reconcile(&mut self.reconcile_watermark, &local, &broker) {
+                    Ok(()) => {}
+                    Err(MonotonicReconcileError::Dirty) => {
+                        let sent_mapped = mqk_db::outbox_load_sent_with_broker_map_for_run(
+                            &self.pool,
+                            self.run_id,
+                        )
+                        .await?;
+                        let now = self.time_source.now_utc();
+                        let in_grace = sent_mapped.iter().any(|row| {
+                            row.sent_at_utc.is_some_and(|sent_at| {
+                                let elapsed = (now - sent_at).num_seconds();
+                                (0..PENDING_FILL_PROPAGATION_GRACE_SECS).contains(&elapsed)
+                            })
+                        });
+                        if in_grace
+                            && drift_is_consistent_with_pending_fills(&sent_mapped, &local, &broker)
+                        {
+                            tracing::debug!(
+                                run_id = %self.run_id,
+                                sent_mapped_count = sent_mapped.len(),
+                                grace_secs = PENDING_FILL_PROPAGATION_GRACE_SECS,
+                                "reconcile_deferred_pending_fill_propagation: \
+                                 SENT+mapped orders within grace window and drift \
+                                 consistent with pending fills; re-evaluate after \
+                                 WS fill event arrives \
+                                 (RECONCILE-DRIFT-AFTER-FAST-PAPER-FILL-01)"
+                            );
+                        } else {
+                            // Mandatory halt + disarm - same fail-closed contract as
+                            // Phase 0b.  Grace either expired or drift is unexplained.
+                            persist_halt_and_disarm(&self.pool, self.run_id, now, "ReconcileDrift")
+                                .await?;
+                            return Err(anyhow!(
+                                "RECONCILE_DRIFT: run {} halted and disarmed; dispatch refused",
+                                self.run_id
+                            ));
+                        }
+                    }
+                    Err(MonotonicReconcileError::Stale(stale)) => {
+                        let now = self.time_source.now_utc();
+                        // Mandatory halt + disarm - same fail-closed contract as Phase 0b.
+                        persist_halt_and_disarm(&self.pool, self.run_id, now, "ReconcileDrift")
+                            .await?;
+                        return Err(anyhow!(
+                            "RECONCILE_SNAPSHOT_STALE: run {} halted and disarmed; \
+                             dispatch refused: {}",
                             self.run_id,
                             stale
-                        )),
-                    };
+                        ));
+                    }
                 }
             } else {
                 tracing::debug!(
