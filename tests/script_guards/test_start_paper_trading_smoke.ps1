@@ -1,5 +1,5 @@
 # =============================================================================
-# OPERATOR-RUNBOOK-STARTUP-HARDENING-01 — Script static-invariant tests
+# OPERATOR-RUNBOOK-STARTUP-HARDENING-01 -- Script static-invariant tests
 #
 # Reads Start-PaperTradingSmoke.ps1 as text and asserts OPR01-OPR08.
 # No daemon, no DB, no live calls. Pure text invariant checks.
@@ -196,6 +196,88 @@ foreach ($c in $paperChecks) {
     } else {
         Fail 'OPR08' "Missing: $($c.Desc)  (pattern: $($c.Pattern))"
     }
+}
+
+# ---------------------------------------------------------------------------
+# OPR09: Script parses cleanly under the Windows PowerShell 5.1 AST parser
+# ---------------------------------------------------------------------------
+if (Test-Path $TargetScript) {
+    $ps09Tokens = $null
+    $ps09Errors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile(
+        $TargetScript,
+        [ref]$ps09Tokens,
+        [ref]$ps09Errors
+    ) | Out-Null
+    if ($ps09Errors.Count -eq 0) {
+        Pass 'OPR09' ("PS5.1 AST parser: PARSE_OK (" + $ps09Tokens.Count + " tokens)")
+    } else {
+        foreach ($e in $ps09Errors) {
+            Fail 'OPR09' ("Parse error at line " + $e.Extent.StartLineNumber + ": " + $e.Message)
+        }
+    }
+} else {
+    Fail 'OPR09' 'Cannot run parse check - script file not found (see OPR01)'
+}
+
+# ---------------------------------------------------------------------------
+# OPR10: Script is ASCII-safe -- no non-ASCII bytes beyond the UTF-8 BOM
+# ---------------------------------------------------------------------------
+if (Test-Path $TargetScript) {
+    $opr10Bytes = [System.IO.File]::ReadAllBytes($TargetScript)
+    $opr10Offset = 0
+    if ($opr10Bytes.Length -ge 3 -and
+        $opr10Bytes[0] -eq 0xEF -and
+        $opr10Bytes[1] -eq 0xBB -and
+        $opr10Bytes[2] -eq 0xBF) {
+        $opr10Offset = 3
+    }
+    $opr10High = @()
+    for ($i = $opr10Offset; $i -lt $opr10Bytes.Length; $i++) {
+        if ($opr10Bytes[$i] -gt 0x7F) { $opr10High += $i }
+    }
+    if ($opr10High.Count -eq 0) {
+        Pass 'OPR10' ("Script is ASCII-safe (no non-ASCII bytes after BOM; BOM offset=" + $opr10Offset + ")")
+    } else {
+        Fail 'OPR10' ("Found " + $opr10High.Count + " non-ASCII byte(s) at positions: " + ($opr10High[0..4] -join ', '))
+    }
+} else {
+    Fail 'OPR10' 'Cannot run ASCII check - script file not found (see OPR01)'
+}
+
+# ---------------------------------------------------------------------------
+# OPR11: Script contains no known mojibake or unsafe Unicode punctuation
+# ---------------------------------------------------------------------------
+$opr11Chars = @(
+    [char]0x00E2,  # circumflex-a (UTF-8 mojibake prefix e.g. a^M--)
+    [char]0x2014,  # em dash
+    [char]0x2013,  # en dash
+    [char]0x2192,  # rightward arrow
+    [char]0x2713,  # check mark
+    [char]0x201C,  # left double quotation mark
+    [char]0x201D,  # right double quotation mark
+    [char]0x2018,  # left single quotation mark
+    [char]0x2019   # right single quotation mark
+)
+$opr11Found = @()
+foreach ($ch in $opr11Chars) {
+    if ($scriptText.Contains([string]$ch)) {
+        $opr11Found += ('U+' + ([int]$ch).ToString('X4'))
+    }
+}
+if ($opr11Found.Count -eq 0) {
+    Pass 'OPR11' 'No mojibake or unsafe Unicode punctuation in script'
+} else {
+    Fail 'OPR11' ("Unsafe Unicode chars found: " + ($opr11Found -join ', '))
+}
+
+# ---------------------------------------------------------------------------
+# OPR12: Script declares -CheckOnly parameter
+# ---------------------------------------------------------------------------
+if ($scriptText -match '\[switch\]\$CheckOnly') {
+    Pass 'OPR12' 'Script declares -CheckOnly switch parameter'
+} else {
+    Fail 'OPR12' 'Script must declare -CheckOnly switch parameter'
 }
 
 # ---------------------------------------------------------------------------

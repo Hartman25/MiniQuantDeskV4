@@ -10,6 +10,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\windows\Start-PaperTradingSmoke.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\windows\Start-PaperTradingSmoke.ps1 -NoStartRuntime -WatchSeconds 30
 #   powershell -ExecutionPolicy Bypass -File scripts\windows\Start-PaperTradingSmoke.ps1 -SkipGui
+#   powershell -ExecutionPolicy Bypass -File scripts\windows\Start-PaperTradingSmoke.ps1 -CheckOnly
 #
 # Parameters:
 #   -RepoRoot         Repo root directory. Default: two levels up from this script.
@@ -20,6 +21,7 @@
 #   -WatchSeconds     How long to run the watcher loop (seconds). Default: 420
 #   -SkipGui          Skip GUI launch step.
 #   -NoStartRuntime   Set env and verify daemon readiness but do not call start-system.
+#   -CheckOnly        Check prerequisites only (docker, .env.local). No daemon or runtime start.
 #
 # Hard rules enforced by this script:
 #   - Paper+Alpaca path only. Fails if daemon_mode != paper.
@@ -38,7 +40,8 @@ param(
     [string]$SessionStop   = '20:00',
     [int]   $WatchSeconds  = 420,
     [switch]$SkipGui,
-    [switch]$NoStartRuntime
+    [switch]$NoStartRuntime,
+    [switch]$CheckOnly
 )
 
 Set-StrictMode -Version Latest
@@ -82,6 +85,50 @@ $RepoRoot = $RepoRoot.TrimEnd('\')
 Write-Step "Repo root: $RepoRoot"
 
 $DaemonBaseUrl = "http://127.0.0.1:$DaemonPort"
+
+# ---------------------------------------------------------------------------
+# CHECK-ONLY mode: verify prerequisites without starting anything
+# ---------------------------------------------------------------------------
+if ($CheckOnly) {
+    Write-Section "CHECK-ONLY: prerequisites check (no daemon start)"
+    $checkPassed = $true
+
+    # Check docker command availability (not whether daemon is running)
+    try {
+        $null = Get-Command 'docker' -ErrorAction Stop
+        Write-Ok "docker command available."
+    } catch {
+        Write-Fail "docker command not found. Install Docker Desktop and retry."
+        $checkPassed = $false
+    }
+
+    # Check .env.local exists
+    $envLocalCheckPath = Join-Path $RepoRoot '.env.local'
+    if (Test-Path $envLocalCheckPath) {
+        Write-Ok ".env.local present at $envLocalCheckPath"
+    } else {
+        Write-Fail ".env.local not found at $envLocalCheckPath"
+        Write-Fail "Copy .env.local.example to .env.local and fill in credentials."
+        $checkPassed = $false
+    }
+
+    # Check daemon binary (informational - warn only, build on first run is expected)
+    $daemonBinCheckPath = Join-Path $RepoRoot 'core-rs\target\release\mqk-daemon.exe'
+    if (Test-Path $daemonBinCheckPath) {
+        Write-Ok "Daemon binary present at core-rs\target\release\mqk-daemon.exe"
+    } else {
+        Write-Warn "Daemon binary not yet built. It will be built on first full run."
+    }
+
+    Write-Section "CHECK-ONLY complete"
+    if ($checkPassed) {
+        Write-Ok "All prerequisite checks passed. Ready for full startup."
+        exit 0
+    } else {
+        Write-Fail "One or more prerequisite checks failed. Resolve above before running full startup."
+        exit 1
+    }
+}
 
 # ---------------------------------------------------------------------------
 # STEP 1: Stop stale daemon / GUI / dev processes
