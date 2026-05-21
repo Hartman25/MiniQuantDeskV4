@@ -46,6 +46,10 @@ PROMOTED_FILES=(
   "crates/mqk-runtime/tests/scenario_alpaca_inbound_rt_brk08r.rs"
   # RUNTIME-LONGRUN-01: DB-backed repeated-cycle runtime ingest / cursor / idempotency proofs.
   "crates/mqk-runtime/tests/scenario_runtime_longrun_01.rs"
+  # SIGNAL-TO-OUTBOX-UNIT-PROOF-01: DB-backed signal admission / outbox enqueue proof.
+  "crates/mqk-daemon/tests/scenario_signal_to_outbox_unit_proof_01.rs"
+  # DEADMAN-EXPIRED-AFTER-START-01: DB-backed deadman halt-after-start scenarios.
+  "crates/mqk-daemon/tests/scenario_deadman_after_start_01.rs"
 )
 
 violations=0

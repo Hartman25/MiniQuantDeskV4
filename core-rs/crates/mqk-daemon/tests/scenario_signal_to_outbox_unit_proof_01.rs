@@ -415,7 +415,7 @@ async fn sto08_live_routing_remains_false_in_paper_mode() {
 /// (Paper mode), a valid strategy decision creates exactly one durable outbox row.
 /// Disposition must be "accepted".
 #[tokio::test]
-#[ignore]
+#[ignore = "requires MQK_DATABASE_URL; run: cargo test -p mqk-daemon --test scenario_signal_to_outbox_unit_proof_01 -- --include-ignored --test-threads=1"]
 async fn sto01_armed_running_creates_exactly_one_outbox_row() {
     let pool = make_db_pool().await;
 
@@ -477,7 +477,7 @@ async fn sto01_armed_running_creates_exactly_one_outbox_row() {
 /// The second call must return "duplicate" and must NOT create a second row.
 /// The day signal counter must not advance for the duplicate.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires MQK_DATABASE_URL; run: cargo test -p mqk-daemon --test scenario_signal_to_outbox_unit_proof_01 -- --include-ignored --test-threads=1"]
 async fn sto02_duplicate_decision_id_creates_no_second_row() {
     let pool = make_db_pool().await;
 
@@ -543,7 +543,7 @@ async fn sto02_duplicate_decision_id_creates_no_second_row() {
 /// A DISARMED durable arm state must block the decision before outbox enqueue.
 /// Gate 5 fires with disposition "rejected".
 #[tokio::test]
-#[ignore]
+#[ignore = "requires MQK_DATABASE_URL; run: cargo test -p mqk-daemon --test scenario_signal_to_outbox_unit_proof_01 -- --include-ignored --test-threads=1"]
 async fn sto03_disarmed_state_refuses_and_creates_no_outbox() {
     let pool = make_db_pool().await;
 
@@ -598,7 +598,7 @@ async fn sto03_disarmed_state_refuses_and_creates_no_outbox() {
 ///
 /// This proves the full serialization contract for the internal decision path.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires MQK_DATABASE_URL; run: cargo test -p mqk-daemon --test scenario_signal_to_outbox_unit_proof_01 -- --include-ignored --test-threads=1"]
 async fn sto06_outbox_order_json_has_expected_fields() {
     let pool = make_db_pool().await;
 
