@@ -181,9 +181,38 @@ cargo test -p mqk-runtime --test scenario_alpaca_inbound_rt_brk08r -- --ignored 
 echo "== RUNTIME-LONGRUN-01: DB-backed repeated-cycle runtime long-run proofs =="
 cargo test -p mqk-runtime --test scenario_runtime_longrun_01 -- --ignored --test-threads=1
 
+# CI-DBPROOF-NEWSCENARIOS-01: recently closed daemon DB-backed scenarios.
+#
+# Four safe scenarios promoted to the mandatory DB proof lane.
+# Not promoted yet (fill-dedup / fast-fill live-pending chain):
+#   scenario_recovery_quarantine_after_ack_fill_01
+#   scenario_reconcile_drift_after_fast_fill_01
+#   scenario_fill_dedup_ws_rest_precision_01
+#
+# SIGNAL-TO-OUTBOX-UNIT-PROOF-01: proves signal/admission/outbox unit path.
+#   Mixed: 5 pure tests + 4 #[ignore] DB-backed tests.
+#   Uses --include-ignored so both pure and DB-backed tests run here.
+#
+# DURABLE-ARM-AFTER-BASELINE-ADOPTION-01: durable arm state written after
+#   broker position baseline adoption. DB-backed tests use the if_err()/return
+#   skip pattern — no --include-ignored needed.
+#
+# BROKER-POSITION-BASELINE-ADOPTION-01: broker position baseline adoption path
+#   (PBA01-PBA08, BSR01-BSR08, IR01-IR08). DB-backed tests use the if_err()/return
+#   skip pattern — no --include-ignored needed.
+#
+# DEADMAN-EXPIRED-AFTER-START-01: proves 120-second TTL boundary (DAS01-DAS05).
+#   All five tests are #[ignore] DB-backed. Uses --include-ignored.
+echo "== CI-DBPROOF-NEWSCENARIOS-01: daemon DB-backed scenarios (signal-to-outbox + durable-arm + broker-baseline + deadman) =="
+cargo test -p mqk-daemon --test scenario_signal_to_outbox_unit_proof_01 -- --include-ignored --test-threads=1
+cargo test -p mqk-daemon --test scenario_durable_arm_after_baseline_adoption_01 -- --test-threads=1
+cargo test -p mqk-daemon --test scenario_broker_position_baseline_adoption_01 -- --test-threads=1
+cargo test -p mqk-daemon --test scenario_deadman_after_start_01 -- --include-ignored --test-threads=1
+
 echo ""
 echo "All proof lanes passed:"
 echo "  AP series (pure in-memory): Alpaca adapter normalization, event mapping, inbound, snapshot."
 echo "  AP series (DB-backed):      runtime inbound ingest, cursor persistence (BRK-08R RT)."
 echo "  RUNTIME-LONGRUN-01 (DB-backed): repeated-cycle ingest idempotency + cursor monotonicity."
+echo "  CI-DBPROOF-NEWSCENARIOS-01: signal-to-outbox, durable-arm, broker-baseline, deadman (daemon)."
 echo "  DB proof (CI-10):           full mandatory proof matrix."
