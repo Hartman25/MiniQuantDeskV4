@@ -569,9 +569,32 @@ pub(crate) async fn recover_oms_and_portfolio(
             Err(_) => continue,
         };
         let internal_id = event.internal_order_id().to_string();
+        let is_fill = matches!(
+            event,
+            BrokerEvent::Fill { .. } | BrokerEvent::PartialFill { .. }
+        );
         let oms_event = broker_event_to_oms_event(&event);
-        if let Some(order) = oms_orders.get_mut(&internal_id) {
-            let _ = order.apply(&oms_event, Some(&row.broker_message_id));
+        // Mirror the live apply path: use broker_fill_id as the economic
+        // event identity when present, fall back to broker_message_id.
+        // This ensures WS (no fill_id, uses msg_id) and REST (fill_id
+        // present) versions of the same fill collapse to a single OMS
+        // advance via the applied_event_ids set.
+        let economic_event_id = event
+            .broker_fill_id()
+            .map(str::to_string)
+            .unwrap_or_else(|| row.broker_message_id.clone());
+        let oms_noop = if let Some(order) = oms_orders.get_mut(&internal_id) {
+            let pre_qty = order.filled_qty;
+            let _ = order.apply(&oms_event, Some(&economic_event_id));
+            // Detect duplicate fills: if filled_qty did not advance, the OMS
+            // treated this as a no-op (duplicate event_id or terminal-state
+            // guard).  Skip the portfolio mutation to prevent double-counting.
+            is_fill && order.filled_qty == pre_qty
+        } else {
+            false
+        };
+        if oms_noop {
+            continue;
         }
         if let Some(fill) = broker_event_to_portfolio_fill(&event) {
             apply_entry(&mut portfolio, LedgerEntry::Fill(fill));

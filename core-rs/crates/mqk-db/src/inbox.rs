@@ -183,6 +183,7 @@ pub async fn inbox_insert_deduped_with_identity(
                     Some("uq_inbox_run_broker_message_id")
                         | Some("uq_inbox_run_message")
                         | Some("uq_inbox_run_broker_fill_id")
+                        | Some("uq_inbox_run_order_single_fill")
                 ) =>
         {
             Ok(false)
