@@ -242,6 +242,18 @@
       "path": "0038_outbox_retry_state.sql",
       "status": "applied",
       "intent": "Add dispatch_attempt_count, next_dispatch_after_utc, last_dispatch_error to oms_outbox for bounded, backoff-gated, restart-safe retryable dispatch (EXEC-RETRY-01). Claim filter gates on next_dispatch_after_utc so backed-off rows are invisible to the dispatcher until their window expires."
+    },
+    {
+      "id": "0039",
+      "path": "0039_broker_position_baseline.sql",
+      "status": "applied",
+      "intent": "Add sys_broker_position_baseline singleton table for durable operator-adopted broker position baseline at paper startup (sentinel_id=1 pattern matching sys_arm_state). No DEFAULT now() or DEFAULT gen_random_uuid() — callers supply all fields."
+    },
+    {
+      "id": "0040",
+      "path": "0040_inbox_single_final_fill.sql",
+      "status": "applied",
+      "intent": "MIGRATION-0040-BACKFILL-DUP-FILLS-01: deterministic historical cleanup of duplicate event_kind='fill' rows (WS+REST dual delivery, Pattern A applied; REST reingestion, Pattern B unapplied) followed by unique partial index uq_inbox_run_order_single_fill enforcing at most one final fill per (run_id, internal_order_id). Canonical keep rule: applied over unapplied, broker_fill_id present over null, earliest applied_at_utc, earliest received_at_utc, lowest inbox_id."
     }
   ]
 }
