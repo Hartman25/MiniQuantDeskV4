@@ -238,6 +238,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: PowerShell script guards (CI-SCRIPT-GUARDS-WIRE-GHA-01)
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          & powershell.exe -ExecutionPolicy Bypass -NonInteractive -File tests\script_guards\run_all_script_guards.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
