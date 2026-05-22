@@ -1,20 +1,30 @@
-# SCRIPT-TRUTH-01: DEPRECATED
+# DEPRECATED: test-all.ps1 -- hard-fail wrapper
 #
-# This script is a stale ad-hoc wrapper that does NOT reproduce the canonical local
-# proof posture. It omits --test-threads=1, skips clippy, skips guards, and does not
-# produce a structured proof transcript.
+# This script is retained for reference only. It does NOT run.
+# It is not the canonical proof harness and must not be used for operator validation.
 #
-# Use the canonical proof harness instead:
+# Problems with the old script:
+#   - Did not use --test-threads=1 (required for determinism)
+#   - Skipped clippy (required gate)
+#   - Skipped all guard scripts
+#   - Did not produce a structured proof transcript
 #
-#   .\full_repo_proof.ps1 -ProofProfile local
-#   .\full_repo_proof.ps1 -ProofProfile local -LowMemory   # memory-sensitive Windows
-#   .\full_repo_proof.ps1 -ProofProfile full                # full DB-backed institutional proof
+# REPLACEMENT COMMANDS:
 #
-# This file is retained for historical reference only. Do not use for operator validation.
+#   powershell -ExecutionPolicy Bypass -File .\full_repo_proof.ps1 -ProofProfile local
+#   powershell -ExecutionPolicy Bypass -File .\full_repo_proof.ps1 -ProofProfile local -LowMemory
+#
+# Running this script is an error. Use the canonical proof harness above.
 
-Write-Warning "DEPRECATED: test-all.ps1 is not the canonical proof harness."
-Write-Warning "Use: .\full_repo_proof.ps1 -ProofProfile local"
-Write-Warning "     .\full_repo_proof.ps1 -ProofProfile local -LowMemory  (memory-sensitive Windows)"
-
-& "$PSScriptRoot\dev-shell.ps1"
-cargo test
+Write-Host ""
+Write-Host "ERROR: test-all.ps1 is DEPRECATED and must not be used for operator validation." -ForegroundColor Red
+Write-Host ""
+Write-Host "  This script omits clippy, guards, and --test-threads=1." -ForegroundColor Yellow
+Write-Host "  It cannot establish repo truth." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  Use the canonical proof harness instead:" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "    powershell -ExecutionPolicy Bypass -File .\full_repo_proof.ps1 -ProofProfile local" -ForegroundColor Cyan
+Write-Host "    powershell -ExecutionPolicy Bypass -File .\full_repo_proof.ps1 -ProofProfile local -LowMemory" -ForegroundColor Cyan
+Write-Host ""
+exit 1

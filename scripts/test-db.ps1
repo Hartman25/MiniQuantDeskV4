@@ -1,20 +1,32 @@
-# SCRIPT-TRUTH-01: DEPRECATED
+# DEPRECATED: test-db.ps1 -- hard-fail wrapper
 #
-# This script targets a single legacy scenario test and does NOT reproduce the canonical
-# DB-backed proof lane. It does not run migrations, does not cover the full DB proof
-# matrix, and does not produce a structured proof transcript.
+# This script is retained for reference only. It does NOT run.
+# It is not the canonical DB proof path and must not be used for operator validation.
 #
-# For the canonical local DB-backed proof, use:
+# Problems with the old script:
+#   - Targeted a single legacy scenario test only
+#   - Did not run migrations from scratch
+#   - Did not cover the full DB proof matrix
+#   - Did not produce a structured proof transcript
 #
-#   .\full_repo_proof.ps1 -ProofProfile full
+# REPLACEMENT COMMANDS:
 #
-# That runs the full db_proof_bootstrap.sh matrix (same as CI db-proof job) plus all
-# non-DB proof lanes in sequence, with a structured JSON summary.
+#   Full DB-backed institutional proof:
+#     powershell -ExecutionPolicy Bypass -File .\full_repo_proof.ps1 -ProofProfile full
 #
-# This file is retained for historical reference only. Do not use for operator validation.
+#   DB bootstrap lane only:
+#     bash scripts/db_proof_bootstrap.sh
+#
+# Running this script is an error. Use the canonical proof harness above.
 
-Write-Warning "DEPRECATED: test-db.ps1 is not the canonical DB proof path."
-Write-Warning "Use: .\full_repo_proof.ps1 -ProofProfile full"
-
-& "$PSScriptRoot\dev-shell.ps1"
-cargo test -p mqk-db --test scenario_inbox_apply_atomic_recovery -- --nocapture
+Write-Host ""
+Write-Host "ERROR: test-db.ps1 is DEPRECATED and must not be used for operator validation." -ForegroundColor Red
+Write-Host ""
+Write-Host "  This script targets a single legacy test and cannot establish DB proof truth." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  Use the canonical DB proof harness instead:" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "    powershell -ExecutionPolicy Bypass -File .\full_repo_proof.ps1 -ProofProfile full" -ForegroundColor Cyan
+Write-Host "    bash scripts/db_proof_bootstrap.sh" -ForegroundColor Cyan
+Write-Host ""
+exit 1
