@@ -383,6 +383,7 @@ $lockDoc = Join-Path $repoRoot 'docs/INSTITUTIONAL_READINESS_LOCK.md'
 $scorecardDoc = Join-Path $repoRoot 'docs/INSTITUTIONAL_SCORECARD.md'
 $ignoredGuard = Join-Path $repoRoot 'scripts/guards/check_ignored_load_bearing_proofs.sh'
 $unsafeGuard = Join-Path $repoRoot 'scripts/guards/check_unsafe_patterns.sh'
+$scriptGuardAggregator = Join-Path $repoRoot 'tests/script_guards/run_all_script_guards.ps1'
 $dbBootstrap = Join-Path $repoRoot 'scripts/db_proof_bootstrap.sh'
 $dbUrl = $env:MQK_DATABASE_URL
 
@@ -414,7 +415,8 @@ $alwaysRequiredLaneNames = @(
     'Market data proof lane',
     'GUI typecheck + truth tests + build',
     'Ignored-proof guard',
-    'Unsafe-pattern guard'
+    'Unsafe-pattern guard',
+    'Script guard aggregator'
 )
 
 $mandatoryDbLaneNames = @(
@@ -448,6 +450,7 @@ try {
     Require-Path -PathToCheck $scorecardDoc -Label 'institutional scorecard'
     Require-Path -PathToCheck $ignoredGuard -Label 'ignored-proof guard'
     Require-Path -PathToCheck $unsafeGuard -Label 'unsafe-pattern guard'
+    Require-Path -PathToCheck $scriptGuardAggregator -Label 'script guard aggregator'
     Require-Path -PathToCheck $dbBootstrap -Label 'DB proof bootstrap helper'
 
     if ($dbRequired -and [string]::IsNullOrWhiteSpace($dbUrl)) {
@@ -641,6 +644,12 @@ Invoke-ProofLane -Name 'Unsafe-pattern guard' -Required $true -Action {
     Invoke-RepoBashScript -BashExe $script:BashExe -RepoRoot $repoRoot -ScriptPath $unsafeGuard
     Write-Host 'Unsafe-pattern guard passed.' -ForegroundColor Green
     return (New-LaneNote -Note 'Unsafe-pattern guard passed.')
+}
+
+Invoke-ProofLane -Name 'Script guard aggregator' -Required $true -Action {
+    Invoke-NativeCommand -FilePath 'powershell.exe' -Arguments @('-ExecutionPolicy', 'Bypass', '-NonInteractive', '-File', $scriptGuardAggregator) -WorkingDirectory $repoRoot
+    Write-Host 'Script guard aggregator passed.' -ForegroundColor Green
+    return (New-LaneNote -Note 'Script guard aggregator passed (CI-SCRIPT-GUARDS-WIRE-GHA-01 suite).')
 }
 
 Invoke-ProofLane -Name 'DB proof bootstrap / CI-10 mandatory matrix' -Required $dbRequired -Action {
