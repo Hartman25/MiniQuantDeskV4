@@ -10,18 +10,19 @@
 //! and the live-closure fallback in `build_execution_orchestrator` now read from
 //! `AppState::broker_baseline` before falling through to empty.
 //!
-//! RECONCILE-DRIFT-LIVE-01 extension:
+//! RECONCILE-DRIFT-BASELINE-SEED-01 extension:
 //!
-//! Second blocker: even after the initial lifecycle tick sets
-//! `execution_snapshot = Some(initial_snapshot)`, the closure switched from
-//! baseline to execution snapshot for all subsequent loop ticks.  That
-//! initial_snapshot carries an empty portfolio (no fills applied yet).  Phase-0c
-//! on tick 2 saw local=empty vs broker=AAPL → ReconcileDrift.
+//! Third blocker: after an order is ACK'd by the broker, `active_orders` becomes
+//! non-empty.  The prior RDL guard (RECONCILE-DRIFT-LIVE-01) switched to using
+//! the execution snapshot at this point, which has empty positions (no fills yet).
+//! The broker still holds the adopted baseline position (e.g. AAPL=4) → local=0
+//! vs broker=4 → RECONCILE_DRIFT.
 //!
-//! Fix (RDL patch): when `execution_snapshot` is `Some` but reflects a fresh-run
-//! state (no positions, no realized P&L, no active OMS orders), the closure falls
-//! back to broker_baseline as local truth.  Once any order is dispatched or fill
-//! applied, the execution snapshot is used as authoritative local truth.
+//! Fix (RECONCILE-DRIFT-BASELINE-SEED-01): remove the `has_local_activity` guard.
+//! Instead, always merge adopted baseline positions into the local portfolio
+//! positions: total_local = baseline + portfolio_delta.  This is correct at every
+//! stage — before fills (delta=0), after ACK (delta=0), after fills (delta>0).
+//! Real broker drift (broker != baseline + delta) continues to halt.
 //!
 //! # Test matrix
 //!
@@ -37,9 +38,9 @@
 //! | RDL01  | pure  | exec_snap Some+empty + matching baseline + broker → clean (no false drift)  |
 //! | RDL02  | pure  | exec_snap Some+empty + absent baseline + broker-with-position → dirty       |
 //! | RDL03  | pure  | exec_snap Some+empty + baseline(1) + broker(2) → dirty (mismatch)          |
-//! | RDL04  | pure  | exec_snap Some with positions (activity) → uses exec_snap, not baseline    |
-//! | RDL05  | pure  | exec_snap Some with realized_pnl activity → uses exec_snap, not baseline   |
-//! | RDL06  | pure  | exec_snap Some with active_orders activity → uses exec_snap, not baseline  |
+//! | RDL04  | pure  | exec_snap with fill (+1) + baseline(1) → merged total=2; broker=2 → clean  |
+//! | RDL05  | pure  | exec_snap with realized_pnl (no positions) + no baseline + broker flat→clean|
+//! | RDL06  | pure  | exec_snap with active_orders + empty baseline + broker order → empty pos    |
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -356,12 +357,12 @@ fn exec_snapshot_with_active_order(order_id: &str) -> ExecutionSnapshot {
     snap
 }
 
-/// Simulate the patched `local_snapshot_provider` closure logic.
+/// Simulate the `local_snapshot_provider` closure logic after
+/// RECONCILE-DRIFT-BASELINE-SEED-01.
 ///
-/// This mirrors exactly the logic added under RECONCILE-DRIFT-LIVE-01 in
-/// `build_execution_orchestrator`.  Kept in-test rather than extracted to a
-/// library so the test stays decoupled from the production implementation and
-/// serves as an independent specification of the expected behavior.
+/// This mirrors the production behavior in `build_execution_orchestrator`:
+/// when an execution snapshot is present, merge the adopted baseline positions
+/// into the portfolio positions (baseline = starting position; portfolio = delta).
 fn patched_local_provider(
     exec_snap: Option<&ExecutionSnapshot>,
     baseline: Option<&LocalSnapshot>,
@@ -372,28 +373,21 @@ fn patched_local_provider(
         return baseline.cloned().unwrap_or_else(|| fallback_seed.clone());
     };
 
-    // RECONCILE-DRIFT-LIVE-01 guard.
-    let has_local_activity = !snapshot.portfolio.positions.is_empty()
-        || snapshot.portfolio.realized_pnl_micros != 0
-        || !snapshot.active_orders.is_empty();
-
-    if !has_local_activity {
-        if let Some(bl) = baseline {
-            return bl.clone();
-        }
-        // No baseline and no activity: return empty (broker must also be empty).
-        return LocalSnapshot::empty();
-    }
-
-    // Has local activity: derive from execution snapshot (simplified — full
-    // production path also merges side cache, but positions are what matter
-    // for these tests).
+    // RECONCILE-DRIFT-BASELINE-SEED-01: always merge baseline positions into
+    // exec_snap portfolio positions.  baseline = starting broker position;
+    // portfolio = delta accumulated via fills during the run.
     let mut local = LocalSnapshot::empty();
     for pos in &snapshot.portfolio.positions {
         if pos.net_qty != 0 {
-            local.positions.insert(pos.symbol.clone(), pos.net_qty);
+            *local.positions.entry(pos.symbol.clone()).or_insert(0) += pos.net_qty;
         }
     }
+    if let Some(bl) = baseline {
+        for (sym, &bl_qty) in &bl.positions {
+            *local.positions.entry(sym.clone()).or_insert(0) += bl_qty;
+        }
+    }
+    local.positions.retain(|_, qty| *qty != 0);
     local
 }
 
@@ -491,112 +485,90 @@ fn rdl03_fresh_exec_snap_baseline_mismatch_is_dirty() {
 }
 
 // ---------------------------------------------------------------------------
-// RDL04 — exec_snap Some with positions → uses exec_snap (not baseline)
+// RDL04 — exec_snap with fill (+1) + baseline (AAPL=1) → merged total=2; broker=2 → clean
 //
-// Proves: once the portfolio has non-zero positions (a fill was applied),
-// has_local_activity = true and the execution snapshot is used as local truth.
-// The baseline is NOT returned (transition to normal reconcile).
+// Proves: after a fill is applied, baseline positions are merged into the
+// portfolio delta.  Total local = baseline(1) + fill(+1) = 2.  Broker also
+// has 2 (1 inherited + 1 from fill).  Reconcile must be clean.
 //
-// Scenario: run bought AAPL (1 share filled), portfolio has AAPL=1.
-// Baseline also has AAPL=1 (adopted before the run).  We must use
-// exec_snap path, not baseline path (both happen to agree here, but the
-// code path is proven by the assertion on `local` origin).
+// This is the correct behaviour replacing the old "exec_snap is authoritative
+// and ignores baseline" guard from RECONCILE-DRIFT-LIVE-01.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rdl04_exec_snap_with_positions_uses_exec_snap_not_baseline() {
-    let baseline = local_with_position("MSFT", 5); // different symbol/qty
-    let exec_snap = exec_snapshot_with_position("AAPL", 1);
-    let broker = broker_with_position("AAPL", 1, ts());
+fn rdl04_fill_plus_baseline_merges_to_correct_total() {
+    let baseline = local_with_position("AAPL", 1); // adopted before run
+    let exec_snap = exec_snapshot_with_position("AAPL", 1); // +1 fill applied
+    let broker = broker_with_position("AAPL", 2, ts()); // 1 baseline + 1 fill
     let seed = LocalSnapshot::empty();
 
     let local = patched_local_provider(Some(&exec_snap), Some(&baseline), &seed);
 
-    // Exec_snap has AAPL, baseline has MSFT — exec_snap path must win.
+    // Merge: portfolio AAPL=1 + baseline AAPL=1 = 2.
     assert_eq!(
         local.positions.get("AAPL").copied(),
-        Some(1),
-        "RDL04: exec_snap with AAPL position must be used (not MSFT baseline)"
-    );
-    assert!(
-        !local.positions.contains_key("MSFT"),
-        "RDL04: MSFT from baseline must NOT appear — exec_snap path is authoritative"
+        Some(2),
+        "RDL04: portfolio(AAPL=1) + baseline(AAPL=1) must merge to total=2"
     );
 
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         result.is_clean(),
-        "RDL04: exec_snap(AAPL=1) vs broker(AAPL=1) must be clean; diffs={:?}",
+        "RDL04: merged(AAPL=2) vs broker(AAPL=2) must be clean; diffs={:?}",
         result.diffs
     );
 }
 
 // ---------------------------------------------------------------------------
-// RDL05 — exec_snap Some with realized_pnl → uses exec_snap (not baseline)
+// RDL05 — exec_snap with realized_pnl (round-trip closed), no baseline → clean
 //
-// Proves: non-zero realized_pnl_micros (sell fill applied) sets
-// has_local_activity = true even when portfolio positions are now empty
-// (position was opened and closed).  The execution snapshot — not the baseline
-// — is used as local truth.
-//
-// Scenario: run bought and sold AAPL for a profit.  Portfolio is flat (no
-// positions), but realized_pnl_micros > 0.  Broker is also flat.
-// Baseline had AAPL=1.  Reconcile must be clean (exec_snap → empty, broker → empty).
+// Proves: when no baseline is adopted and the portfolio shows realized P&L
+// (position was opened and closed, now flat), the local snapshot is empty
+// and the broker is also flat.  Reconcile must be clean.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rdl05_exec_snap_with_realized_pnl_uses_exec_snap_not_baseline() {
-    let baseline = local_with_position("AAPL", 1); // stale; position now closed
-    let exec_snap = exec_snapshot_with_pnl(500_000); // $0.50 realized profit
-    let broker = BrokerSnapshot::empty_at(ts()); // broker: flat (position closed)
+fn rdl05_realized_pnl_no_baseline_flat_broker_is_clean() {
+    let exec_snap = exec_snapshot_with_pnl(500_000); // $0.50 realized profit; positions flat
+    let broker = BrokerSnapshot::empty_at(ts()); // broker: flat
     let seed = LocalSnapshot::empty();
 
-    let local = patched_local_provider(Some(&exec_snap), Some(&baseline), &seed);
+    let local = patched_local_provider(Some(&exec_snap), None, &seed);
 
-    // realized_pnl_micros != 0 → has_local_activity = true → exec_snap path.
-    // Exec_snap has no positions (flat after the round-trip).
+    // No baseline, exec_snap has no positions (flat after round-trip) → empty local.
     assert!(
         local.positions.is_empty(),
-        "RDL05: exec_snap path (realized_pnl active) must return empty positions (flat)"
+        "RDL05: no baseline + flat exec_snap must return empty positions"
     );
 
-    // Both local and broker are flat → clean.
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         result.is_clean(),
-        "RDL05: exec_snap(flat)+realized_pnl vs broker(flat) must be clean; diffs={:?}",
+        "RDL05: empty local vs flat broker must be clean; diffs={:?}",
         result.diffs
     );
 }
 
 // ---------------------------------------------------------------------------
-// RDL06 — exec_snap Some with active_orders → uses exec_snap (not baseline)
+// RDL06 — exec_snap with active_orders + empty baseline → empty positions
 //
-// Proves: a non-empty active_orders list (order dispatched, not yet filled)
-// sets has_local_activity = true and the execution snapshot is used.
-// The baseline is NOT returned.
-//
-// Scenario: order submitted to broker (Open state), no fill yet.
-// Baseline is empty (adopted before any orders existed).  Exec_snap has
-// the order in active_orders.  Broker also has the order.
+// Proves: with an empty baseline and a pending (unfilled) order, the merged
+// local snapshot has no positions (portfolio delta=0, baseline=empty).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rdl06_exec_snap_with_active_orders_uses_exec_snap_not_baseline() {
-    let baseline = LocalSnapshot::empty(); // adopted before any orders
+fn rdl06_active_order_with_empty_baseline_has_no_positions() {
+    let baseline = LocalSnapshot::empty(); // no baseline adopted
     let exec_snap = exec_snapshot_with_active_order("order-abc-001");
     let seed = LocalSnapshot::empty();
 
     let local = patched_local_provider(Some(&exec_snap), Some(&baseline), &seed);
 
-    // active_orders non-empty → has_local_activity = true → exec_snap path.
-    // Exec_snap has no positions (order not yet filled).
+    // portfolio positions empty + baseline empty → merged positions empty.
     assert!(
         local.positions.is_empty(),
-        "RDL06: exec_snap path (order dispatched) must return empty positions (unfilled)"
+        "RDL06: empty baseline + unfilled order must produce empty positions"
     );
-    // Critically: the exec_snap path was taken, not the baseline path.
-    // (Both produce empty positions here, but we prove has_local_activity fires.)
 }

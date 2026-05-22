@@ -803,37 +803,19 @@ impl AppState {
             let local_fn = move || {
                 let snapshot = snap_arc.try_read().ok().and_then(|g| g.clone());
                 if let Some(snapshot) = snapshot {
-                    // MONOTONIC-RECONCILE-DIRTY-IN-RUN-01: when the execution snapshot
-                    // reflects a fresh-run state (no positions, no realized P&L, no
-                    // active OMS orders), local activity has not yet occurred for this
-                    // run.  The runtime portfolio starts empty and has not been updated
-                    // by any fill or dispatch.  Using it as local truth produces
-                    // local=empty vs broker=<adopted-baseline-positions>, which fires
-                    // a false dirty halt on the background reconcile tick.
-                    //
-                    // Guard: fall back to the adopted broker baseline as local truth
-                    // when no local activity exists — identical to the guard applied in
-                    // build_execution_orchestrator for Phase-0c reconcile.
-                    //
-                    // Transition: once any order is dispatched (active_orders non-empty)
-                    // or any fill is applied (positions or realized_pnl_micros non-zero),
-                    // has_local_activity becomes true and the execution snapshot is used
-                    // as authoritative local truth.  Real mismatches continue to halt
-                    // correctly after this transition.
-                    let has_local_activity = !snapshot.portfolio.positions.is_empty()
-                        || snapshot.portfolio.realized_pnl_micros != 0
-                        || !snapshot.active_orders.is_empty();
-                    if !has_local_activity {
-                        if let Some(baseline) = baseline_arc.try_read().ok().and_then(|g| g.clone())
-                        {
-                            return baseline;
-                        }
-                        // No baseline and no local activity: fall through to execution
-                        // snapshot (produces empty — broker must also be empty for
-                        // reconcile to pass, which is the correct fail-closed behavior).
-                    }
                     let sides = sides_arc.try_read().map(|g| g.clone()).unwrap_or_default();
-                    reconcile_local_snapshot_from_runtime_with_sides(&snapshot, &sides)
+                    let mut local =
+                        reconcile_local_snapshot_from_runtime_with_sides(&snapshot, &sides);
+                    // RECONCILE-DRIFT-BASELINE-SEED-01: merge adopted broker baseline
+                    // positions into local portfolio positions.  See the matching
+                    // comment in build_execution_orchestrator for rationale.
+                    if let Some(bl) = baseline_arc.try_read().ok().and_then(|g| g.clone()) {
+                        for (sym, bl_qty) in &bl.positions {
+                            *local.positions.entry(sym.clone()).or_insert(0) += bl_qty;
+                        }
+                        local.positions.retain(|_, qty| *qty != 0);
+                    }
+                    local
                 } else {
                     // No active run: use adopted baseline if present, else empty.
                     baseline_arc

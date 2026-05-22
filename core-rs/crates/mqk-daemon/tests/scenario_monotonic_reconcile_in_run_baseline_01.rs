@@ -89,32 +89,29 @@ fn exec_snapshot_with_position(symbol: &str, qty: i64) -> ExecutionSnapshot {
     snap
 }
 
-/// Simulate the patched `local_fn` closure logic as applied in lifecycle.rs.
+/// Simulate the `local_fn` closure logic as applied in lifecycle.rs after
+/// RECONCILE-DRIFT-BASELINE-SEED-01.
 ///
-/// This mirrors exactly the logic added by MONOTONIC-RECONCILE-DIRTY-IN-RUN-01.
-/// Kept in-test so the test suite serves as an independent specification and
-/// detects any divergence in the production closure.
+/// Merges adopted baseline positions into the exec_snap portfolio positions.
+/// total_local = baseline + portfolio_delta.
 fn patched_in_run_local_fn(
     exec_snap: Option<&ExecutionSnapshot>,
     baseline: Option<&LocalSnapshot>,
 ) -> LocalSnapshot {
     if let Some(snapshot) = exec_snap {
-        let has_local_activity = !snapshot.portfolio.positions.is_empty()
-            || snapshot.portfolio.realized_pnl_micros != 0
-            || !snapshot.active_orders.is_empty();
-        if !has_local_activity {
-            if let Some(bl) = baseline {
-                return bl.clone();
-            }
-            return LocalSnapshot::empty();
-        }
-        // Has local activity: derive positions from execution snapshot.
+        // RECONCILE-DRIFT-BASELINE-SEED-01: merge baseline into exec_snap positions.
         let mut local = LocalSnapshot::empty();
         for pos in &snapshot.portfolio.positions {
             if pos.net_qty != 0 {
-                local.positions.insert(pos.symbol.clone(), pos.net_qty);
+                *local.positions.entry(pos.symbol.clone()).or_insert(0) += pos.net_qty;
             }
         }
+        if let Some(bl) = baseline {
+            for (sym, &bl_qty) in &bl.positions {
+                *local.positions.entry(sym.clone()).or_insert(0) += bl_qty;
+            }
+        }
+        local.positions.retain(|_, qty| *qty != 0);
         local
     } else {
         // No active run.
@@ -255,47 +252,47 @@ fn mrir03_baseline_mismatch_is_dirty_real_drift_still_halts() {
 }
 
 // ---------------------------------------------------------------------------
-// MRIR04 — exec_snap with positions (has_local_activity) → exec_snap is used
+// MRIR04 — exec_snap with fill position + empty baseline → fill wins; real drift halts
 //
-// Proves: once the portfolio has a real position (a fill was applied), the
-// execution snapshot becomes authoritative; the baseline is NOT returned.
+// Proves: when the portfolio has a fill-applied position (AAPL=1) and the
+// baseline is empty, the merged result is AAPL=1 (portfolio delta only).
 // A genuine local-vs-broker mismatch continues to block correctly.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn mrir04_after_local_activity_exec_snap_is_authoritative_not_baseline() {
-    // Baseline: empty (no position adopted before the run, or already consumed).
+fn mrir04_fill_position_with_empty_baseline_is_used_correctly() {
+    // Baseline: empty (no position adopted before the run).
     let baseline = LocalSnapshot::empty();
     // Exec snap: fill applied for AAPL qty=1.
     let exec_snap = exec_snapshot_with_position("AAPL", 1);
-    // Broker: also shows AAPL=1 (matching).
+    // Broker: also shows AAPL=1 (matching the fill).
     let broker = broker_with_position("AAPL", 1, ts());
 
     let local = patched_in_run_local_fn(Some(&exec_snap), Some(&baseline));
 
-    // Exec_snap path: positions from exec_snap, not baseline.
+    // Merge: portfolio AAPL=1 + baseline empty = AAPL=1.
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(1),
-        "MRIR04: exec_snap AAPL=1 must be returned when has_local_activity is true"
+        "MRIR04: portfolio(AAPL=1) + baseline(empty) must give AAPL=1"
     );
 
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         result.is_clean(),
-        "MRIR04: exec_snap(AAPL=1) vs broker(AAPL=1) must be clean; diffs={:?}",
+        "MRIR04: merged(AAPL=1) vs broker(AAPL=1) must be clean; diffs={:?}",
         result.diffs
     );
 
-    // Now prove a real mismatch still blocks.
+    // Prove a real mismatch still blocks.
     let broker_drifted = broker_with_position("AAPL", 2, ts() + 1);
     let mut wm2 = SnapshotWatermark::new();
     let result2 =
         reconcile_monotonic(&mut wm2, &local, &broker_drifted).expect("watermark must pass");
     assert!(
         !result2.is_clean(),
-        "MRIR04: exec_snap(AAPL=1) vs broker(AAPL=2) must be dirty — fail-closed preserved"
+        "MRIR04: merged(AAPL=1) vs broker(AAPL=2) must be dirty — fail-closed preserved"
     );
 }
 
@@ -354,31 +351,29 @@ async fn mrir05_stale_broker_snapshot_not_false_proven_dirty() {
 }
 
 // ---------------------------------------------------------------------------
-// MRIR06 — no outbox rows created by reconcile baseline fallback path
+// MRIR06 — no outbox rows created by reconcile baseline merge path
 //
-// Proves: the patched local_fn baseline fallback is read-only.  No DB writes
+// Proves: the patched local_fn baseline merge is read-only.  No DB writes
 // occur on the reconcile path; in particular, no outbox rows are created.
 // Validated structurally: spawn_reconcile_tick has no outbox write paths.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn mrir06_reconcile_baseline_fallback_is_read_only_no_outbox() {
+fn mrir06_reconcile_baseline_merge_is_read_only_no_outbox() {
     // Structural proof: patched_in_run_local_fn only reads state; it never
     // writes to DB, outbox, or any mutable data structure.
-    // The call below must complete without side effects.
     let baseline = local_with_position("AAPL", 1);
     let exec_snap = fresh_exec_snapshot();
 
     let local = patched_in_run_local_fn(Some(&exec_snap), Some(&baseline));
 
-    // The only observable outcome is the returned LocalSnapshot value.
+    // Merge: portfolio positions={} + baseline AAPL=1 = AAPL=1.
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(1),
-        "MRIR06: baseline fallback must return AAPL=1 — only read ops occurred"
+        "MRIR06: baseline merge must return AAPL=1 — only read ops occurred"
     );
-    // No assertions on external state needed: patched_in_run_local_fn is
-    // a pure function with no side effects.
+    // No assertions on external state: patched_in_run_local_fn is a pure function.
 }
 
 // ---------------------------------------------------------------------------

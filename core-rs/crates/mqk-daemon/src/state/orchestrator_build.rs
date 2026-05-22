@@ -294,42 +294,31 @@ impl AppState {
                     .unwrap_or_else(|| local_seed_reconcile.clone());
             };
 
-            // RECONCILE-DRIFT-LIVE-01: the execution snapshot is set to an
-            // empty-portfolio value after the initial lifecycle tick (before any
-            // fills or dispatches have occurred for this run).  If Phase-0c sees
-            // local=empty vs broker=<adopted-baseline-positions>, it halts with
-            // a false ReconcileDrift.
-            //
-            // Guard: when the snapshot reflects a fresh run state (no positions,
-            // no realized P&L, no active OMS orders), no local activity has yet
-            // occurred.  Return the adopted broker baseline as local truth — the
-            // same fallback used when execution_snapshot is None — so Phase-0c
-            // sees local == broker and does not fire a spurious drift halt.
-            //
-            // Transition: as soon as any order is dispatched (active_orders
-            // non-empty) or any fill is applied (positions or realized_pnl_micros
-            // non-zero), has_local_activity becomes true and the execution
-            // snapshot is used as authoritative local truth.  Real mismatches
-            // (local != broker after activity) continue to halt correctly.
-            let has_local_activity = !snapshot.portfolio.positions.is_empty()
-                || snapshot.portfolio.realized_pnl_micros != 0
-                || !snapshot.active_orders.is_empty();
-
-            if !has_local_activity {
-                if let Some(baseline) = baseline_for_runtime.try_read().ok().and_then(|g| g.clone())
-                {
-                    return baseline;
-                }
-                // No baseline and no local activity: fall through to execution
-                // snapshot (will produce empty local, which is correct — broker
-                // must also be empty for reconcile to pass).
-            }
-
             let sides = side_cache_for_local
                 .try_read()
                 .map(|g| g.clone())
                 .unwrap_or_default();
-            reconcile_local_snapshot_from_runtime_with_sides(&snapshot, &sides)
+            let mut local = reconcile_local_snapshot_from_runtime_with_sides(&snapshot, &sides);
+
+            // RECONCILE-DRIFT-BASELINE-SEED-01: merge adopted broker baseline
+            // positions into local portfolio positions.  The baseline represents
+            // broker positions inherited from prior sessions (adopted by the operator
+            // before this run started); portfolio positions represent the delta
+            // accumulated via fills during this run.  Total local position =
+            // baseline + delta, at every stage of the run lifecycle:
+            //   - before any fills: delta=0, local = baseline (broker matches)
+            //   - after order ACK (no fill yet): delta=0, local = baseline, broker
+            //     still holds baseline → clean (the live smoke failure case)
+            //   - after fills: delta=filled qty, local = baseline + delta → broker
+            //     should also have baseline + delta for clean reconcile
+            // Real broker drift (broker qty != baseline + delta) continues to halt.
+            if let Some(bl) = baseline_for_runtime.try_read().ok().and_then(|g| g.clone()) {
+                for (sym, bl_qty) in &bl.positions {
+                    *local.positions.entry(sym.clone()).or_insert(0) += bl_qty;
+                }
+                local.positions.retain(|_, qty| *qty != 0);
+            }
+            local
         };
 
         let broker_snapshot_provider = move || {
