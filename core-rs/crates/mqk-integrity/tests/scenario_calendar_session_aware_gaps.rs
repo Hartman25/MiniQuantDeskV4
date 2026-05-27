@@ -123,14 +123,15 @@ fn weekend_gap_always_on_halts() {
 // ---------------------------------------------------------------------------
 
 /// Christmas 2024 falls on Wednesday 2024-12-25 (NYSE closed).
-/// Tuesday 2024-12-24 close → Thursday 2024-12-26 open+5min:
-/// the holiday slot is not a trading session → no halt.
+/// Tue 2024-12-24 early close (13:00 ET) → Thu 2024-12-26 open+5min:
+/// early-close + holiday slots are not trading sessions → no halt.
 ///
-/// Tue 2024-12-24 16:00 ET = 2024-12-24T21:00:00Z = 1_735_077_600
+/// Note: 2024-12-24 is an NYSE early-close day (closes 13:00 ET, not 16:00 ET).
+/// Tue 2024-12-24 13:00 ET = 2024-12-24T18:00:00Z = 1_735_066_800
 /// Thu 2024-12-26 09:35 ET = 2024-12-26T14:35:00Z = 1_735_220_100
 #[test]
 fn holiday_gap_nyse_does_not_halt() {
-    let xmas_eve_close: i64 = 1_735_077_600; // Tue 2024-12-24 16:00 ET
+    let xmas_eve_close: i64 = 1_735_066_800; // Tue 2024-12-24 13:00 ET (early close)
     let day_after_xmas: i64 = 1_735_220_100; // Thu 2024-12-26 09:35 ET
 
     let mut st = IntegrityState::new();

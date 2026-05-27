@@ -35,7 +35,9 @@ pub enum CalendarSpec {
 
     /// NYSE-style equities:
     /// - Weekdays only (Monday–Friday).
-    /// - Regular session: 09:30–16:00 Eastern (DST-aware via chrono-tz America/New_York).
+    /// - Regular session: 09:30–close ET (DST-aware via chrono-tz America/New_York).
+    ///   Normal close is 16:00 ET; early-close days (Black Friday, Christmas Eve
+    ///   etc.) close at 13:00 ET per [`nyse_early_close_et`].
     /// - Hardcoded US market holidays 2023–2026.
     ///
     /// A bar whose `end_ts` falls outside these windows is treated as a
@@ -166,8 +168,9 @@ impl CalendarSpec {
 ///
 /// Rules:
 /// - Day-of-week: Monday–Friday only.
-/// - Session: 09:30 < time ≤ 16:00 Eastern (DST-aware via chrono-tz America/New_York).
-///   Handles EDT (UTC-4, mid-Mar – early Nov) and EST (UTC-5, Nov – mid-Mar) correctly.
+/// - Session: 09:30 < time ≤ close ET (DST-aware via chrono-tz America/New_York).
+///   On early-close days (e.g., Black Friday, Christmas Eve) the session closes
+///   at 13:00 ET; otherwise the normal close is 16:00 ET.
 ///   A bar `end_ts` represents the **close** of an interval, so a bar ending
 ///   exactly at open (09:30:00) is excluded; one ending at 09:35:00 is the
 ///   first 5-minute bar of the day.
@@ -196,10 +199,14 @@ fn is_nyse_session_end(end_ts: i64) -> bool {
         return false;
     }
 
-    // Time-of-day check: 09:30:00 < time ≤ 16:00:00 ET.
+    // Time-of-day check: 09:30:00 < time ≤ close ET.
+    // On early-close days the session ends at 13:00 ET; otherwise normal 16:00 ET.
     let et_secs = et_dt.hour() as i64 * 3600 + et_dt.minute() as i64 * 60 + et_dt.second() as i64;
     let open = 9 * 3600 + 30 * 60; //  9:30:00 = 34200 seconds
-    let close = 16 * 3600; // 16:00:00 = 57600 seconds
+    let close = match nyse_early_close_et(year, month, day) {
+        Some((eh, em)) => (eh as i64) * 3600 + (em as i64) * 60,
+        None => 16 * 3600, // 16:00:00 ET
+    };
     et_secs > open && et_secs <= close
 }
 
@@ -492,5 +499,71 @@ mod tests {
     fn edt_after_close_16h01_is_not_trading() {
         let ts = 1_713_211_260_i64; // 2024-04-15T20:01:00Z = 16:01 EDT
         assert!(!CalendarSpec::NyseWeekdays.is_session_bar_end(ts));
+    }
+
+    // Early-close tests (SMART-CALENDAR-BAR-GAP-EARLY-CLOSE-01) ————————————
+    //
+    // Black Friday 2024-11-29 (EST=UTC-5, early close 13:00 ET):
+    //   13:00 EST = 18:00 UTC = 1_732_903_200
+    //   16:00 EST = 21:00 UTC = 1_732_914_000  ← after early close
+    //
+    // Independence Day Eve 2024-07-03 (EDT=UTC-4, early close 13:00 ET):
+    //   13:00 EDT = 17:00 UTC = 1_720_026_000
+    //   13:05 EDT = 17:05 UTC = 1_720_026_300  ← 5 min after early close
+
+    /// Black Friday 2024-11-29 (EST) at exactly 13:00 ET = last bar → session bar.
+    #[test]
+    fn early_close_est_13h00_is_last_session_bar() {
+        let ts = 1_732_903_200_i64; // 2024-11-29T18:00:00Z = 13:00 EST (early close)
+        assert!(
+            CalendarSpec::NyseWeekdays.is_session_bar_end(ts),
+            "13:00 ET bar on early-close day must be the last session bar"
+        );
+    }
+
+    /// Black Friday 2024-11-29 (EST) at 16:00 ET = after early close → not session.
+    #[test]
+    fn early_close_est_16h00_is_not_session() {
+        let ts = 1_732_914_000_i64; // 2024-11-29T21:00:00Z = 16:00 EST (after early close)
+        assert!(
+            !CalendarSpec::NyseWeekdays.is_session_bar_end(ts),
+            "16:00 ET bar on early-close (13:00) day must NOT be a session bar"
+        );
+    }
+
+    /// Independence Day Eve 2024-07-03 (EDT) at 13:00 EDT = last bar → session bar.
+    #[test]
+    fn early_close_edt_13h00_is_last_session_bar() {
+        let ts = 1_720_026_000_i64; // 2024-07-03T17:00:00Z = 13:00 EDT (early close)
+        assert!(
+            CalendarSpec::NyseWeekdays.is_session_bar_end(ts),
+            "13:00 EDT bar on early-close day must be the last session bar"
+        );
+    }
+
+    /// Independence Day Eve 2024-07-03 (EDT) at 13:05 EDT → 5 min after early close → not session.
+    #[test]
+    fn early_close_edt_13h05_is_not_session() {
+        let ts = 1_720_026_300_i64; // 2024-07-03T17:05:00Z = 13:05 EDT (after early close)
+        assert!(
+            !CalendarSpec::NyseWeekdays.is_session_bar_end(ts),
+            "13:05 EDT on early-close day is after early close; must NOT be a session bar"
+        );
+    }
+
+    /// missing_bars_between from early-close end (13:00 EST) to next Monday open+5min:
+    /// all intervening slots are non-session → 0 missing bars.
+    #[test]
+    fn missing_bars_early_close_to_next_open_is_zero() {
+        // Black Friday 2024-11-29 13:00 EST = 18:00 UTC = early-close bar end
+        let early_close_end: i64 = 1_732_903_200;
+        // Monday 2024-12-02 09:35 EST = 14:35 UTC = first bar of next trading week
+        let monday_open5: i64 = 1_733_150_100;
+        let missing =
+            CalendarSpec::NyseWeekdays.missing_bars_between(early_close_end, monday_open5, 300);
+        assert_eq!(
+            missing, 0,
+            "Gap from early close to next Monday open must have 0 missing bars, got {missing}"
+        );
     }
 }
