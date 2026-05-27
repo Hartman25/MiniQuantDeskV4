@@ -188,6 +188,8 @@ cargo test -p mqk-runtime --test scenario_runtime_longrun_01 -- --ignored --test
 #   scenario_recovery_quarantine_after_ack_fill_01
 #   scenario_reconcile_drift_after_fast_fill_01
 #   scenario_fill_dedup_ws_rest_precision_01
+# Not promoted yet (terminal-fill settle window -- live smoke pending RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01):
+#   scenario_reconcile_after_terminal_fill_01
 #
 # SIGNAL-TO-OUTBOX-UNIT-PROOF-01: proves signal/admission/outbox unit path.
 #   Mixed: 5 pure tests + 4 #[ignore] DB-backed tests.

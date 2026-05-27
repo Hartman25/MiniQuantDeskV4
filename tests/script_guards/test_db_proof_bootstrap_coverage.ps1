@@ -137,20 +137,22 @@ for ($i = 0; $i -lt $IgnoredRequired.Count; $i++) {
 }
 
 # ---------------------------------------------------------------------------
-# CBP08-CBP10: Live-pending scenarios are NOT promoted to cargo test lines.
+# CBP08-CBP10, CBP14: Live-pending scenarios are NOT promoted to cargo test lines.
 #
-# These three depend on the fill-dedup live smoke proof and must not appear
-# as cargo test invocations until that proof is complete.
+# CBP08-CBP10: fill-dedup / fast-fill chain -- depends on fill-dedup live smoke proof.
+# CBP14: terminal-fill settle window -- depends on RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01 live smoke.
+# None may appear as cargo test invocations until the respective live smoke proof is complete.
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "  -- CBP08-CBP10: live-pending scenarios not promoted to cargo test lines --"
+Write-Host "  -- CBP08-CBP10 CBP14: live-pending scenarios not promoted to cargo test lines --"
 
 $LivePendingScenarios = @(
     'scenario_recovery_quarantine_after_ack_fill_01',
     'scenario_reconcile_drift_after_fast_fill_01',
-    'scenario_fill_dedup_ws_rest_precision_01'
+    'scenario_fill_dedup_ws_rest_precision_01',
+    'scenario_reconcile_after_terminal_fill_01'
 )
-$LivePendingIds = @('CBP08', 'CBP09', 'CBP10')
+$LivePendingIds = @('CBP08', 'CBP09', 'CBP10', 'CBP14')
 
 for ($i = 0; $i -lt $LivePendingScenarios.Count; $i++) {
     $scenario = $LivePendingScenarios[$i]
@@ -159,21 +161,21 @@ for ($i = 0; $i -lt $LivePendingScenarios.Count; $i++) {
     if (-not $hits) {
         Pass $id "$scenario is not a cargo test line (held as live-pending)"
     } else {
-        Fail $id "$scenario appears as a cargo test line -- it is live-pending (fill-dedup/fast-fill chain) and must not be promoted until the live smoke proof is complete"
+        Fail $id "$scenario appears as a cargo test line -- it is live-pending and must not be promoted until the live smoke proof is complete"
     }
 }
 
 # ---------------------------------------------------------------------------
-# CBP11-CBP13: Live-pending scenarios ARE documented in comments.
+# CBP11-CBP13, CBP15: Live-pending scenarios ARE documented in comments.
 #
 # A scenario that is absent from db_proof_bootstrap.sh with no comment is an
 # invisible coverage gap. Each live-pending scenario must appear by name in at
 # least one comment line so the deferral is explicit and reviewable.
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "  -- CBP11-CBP13: live-pending scenarios documented in comments --"
+Write-Host "  -- CBP11-CBP13 CBP15: live-pending scenarios documented in comments --"
 
-$DeferIds = @('CBP11', 'CBP12', 'CBP13')
+$DeferIds = @('CBP11', 'CBP12', 'CBP13', 'CBP15')
 
 for ($i = 0; $i -lt $LivePendingScenarios.Count; $i++) {
     $scenario = $LivePendingScenarios[$i]
