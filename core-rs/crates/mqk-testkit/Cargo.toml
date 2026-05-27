@@ -43,4 +43,8 @@ mqk-execution = { path = "../mqk-execution", features = ["testkit"] }
 mqk-broker-paper = { path = "../mqk-broker-paper" }
 mqk-reconcile    = { path = "../mqk-reconcile" }
 # I9-1: invariant-violation halt/disarm scenario requires ExecutionOrchestrator.
-mqk-runtime      = { path = "../mqk-runtime" }
+# Testkit feature activates inject_recent_terminal_fill_for_test used by
+# scenario_reconcile_after_terminal_fill_01.
+# MUST NOT be moved to [dependencies] — same transitive propagation concern as
+# mqk-db and mqk-execution testkit features above.
+mqk-runtime = { path = "../mqk-runtime", features = ["testkit"] }

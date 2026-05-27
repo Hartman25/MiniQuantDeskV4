@@ -145,6 +145,15 @@ where
     /// `ExecutionSnapshot::recent_risk_denials`.  Empty only when the gate has
     /// not denied any order since the execution loop started.
     recent_denials: VecDeque<crate::observability::RiskDenialRecord>,
+    /// RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01: ring buffer of recent terminal
+    /// fills applied in Phase 3.  Used by Phase 0c to defer RECONCILE_DRIFT
+    /// while the broker REST snapshot catches up after a fill.
+    ///
+    /// Capped at [`RECENT_FILLS_RING_CAP`] entries.  Empty on startup and after
+    /// a crash/restart (in-memory only; not persisted).  On restart, the fill
+    /// has already been applied and the broker snapshot will refresh within
+    /// `TERMINAL_FILL_SETTLE_GRACE_SECS`; if not, genuine drift fires normally.
+    recently_applied_fills: VecDeque<RecentTerminalFill>,
 }
 /// Grace window for the pending-fill-propagation deferral in Phase 0c.
 ///
@@ -155,6 +164,33 @@ where
 ///
 /// After this window, RECONCILE_DRIFT fires regardless.
 const PENDING_FILL_PROPAGATION_GRACE_SECS: i64 = 30;
+
+/// Grace window for the post-terminal-fill broker snapshot settlement deferral.
+///
+/// After a terminal fill is applied locally (Phase 3), the local portfolio
+/// advances immediately but the broker REST snapshot may still show the
+/// pre-fill position.  Phase 0c defers RECONCILE_DRIFT for this window to
+/// allow the broker snapshot to catch up.
+///
+/// 60 seconds covers the typical broker snapshot refresh cadence (60 ticks)
+/// plus headroom.  After this window, RECONCILE_DRIFT fires regardless.
+const TERMINAL_FILL_SETTLE_GRACE_SECS: i64 = 60;
+
+/// Maximum recent terminal fills to track in memory.
+const RECENT_FILLS_RING_CAP: usize = 50;
+
+/// Record of a recently applied terminal fill.
+///
+/// Populated by Phase 3 when a terminal fill is durably applied.
+/// Consumed by Phase 0c to defer RECONCILE_DRIFT while the broker REST
+/// snapshot catches up to the local portfolio advance.
+#[derive(Debug, Clone)]
+struct RecentTerminalFill {
+    symbol: String,
+    /// Signed position delta: positive for buy fills, negative for sell fills.
+    signed_delta: i64,
+    applied_at: chrono::DateTime<chrono::Utc>,
+}
 
 /// Returns `true` if the broker-vs-local reconcile drift is fully explained by
 /// the expected fills from `sent_mapped` outbox rows.
@@ -255,6 +291,64 @@ fn drift_is_consistent_with_pending_fills(
     true
 }
 
+/// Returns `true` if the broker-vs-local drift is fully explained by recently
+/// applied terminal fills still within the settle grace window.
+///
+/// After Phase 3 applies a terminal fill, the local portfolio advances but
+/// the broker REST snapshot may still reflect the pre-fill position.
+/// `signed_delta` in each entry is positive for buy fills, negative for sells.
+///
+/// Conditions that must ALL hold:
+/// 1. At least one fill is within `TERMINAL_FILL_SETTLE_GRACE_SECS`.
+/// 2. Every symbol with non-zero drift (local ahead of broker, `lq - bq != 0`)
+///    has a corresponding recent fill with the same sign.
+/// 3. The drift magnitude does not exceed the accumulated fill magnitude.
+/// 4. No symbol shows broker-ahead drift (`lq - bq < 0` for a net-buy
+///    symbol) — that would be unexpected external broker activity.
+fn drift_is_consistent_with_recent_terminal_fills(
+    recent_fills: &std::collections::VecDeque<RecentTerminalFill>,
+    local: &LocalSnapshot,
+    broker: &BrokerSnapshot,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    // Accumulate expected local-ahead deltas from fills within the window.
+    let mut expected: BTreeMap<String, i64> = BTreeMap::new();
+    let mut any_in_grace = false;
+    for fill in recent_fills {
+        let elapsed = (now - fill.applied_at).num_seconds();
+        if (0..TERMINAL_FILL_SETTLE_GRACE_SECS).contains(&elapsed) {
+            any_in_grace = true;
+            *expected.entry(fill.symbol.clone()).or_default() += fill.signed_delta;
+        }
+    }
+    if !any_in_grace {
+        return false;
+    }
+
+    let mut all_syms: BTreeSet<String> = BTreeSet::new();
+    all_syms.extend(local.positions.keys().cloned());
+    all_syms.extend(broker.positions.keys().cloned());
+
+    for sym in &all_syms {
+        let lq = local.positions.get(sym).copied().unwrap_or(0);
+        let bq = broker.positions.get(sym).copied().unwrap_or(0);
+        let actual = lq - bq; // positive = local ahead of broker
+        if actual != 0 {
+            let exp = expected.get(sym).copied().unwrap_or(0);
+            if exp == 0 {
+                return false; // unexplained drift on this symbol
+            }
+            if (exp > 0) != (actual > 0) {
+                return false; // wrong direction
+            }
+            if actual.abs() > exp.abs() {
+                return false; // drift exceeds what the fills explain
+            }
+        }
+    }
+    true
+}
+
 #[derive(Debug)]
 enum MonotonicReconcileError {
     Dirty,
@@ -326,6 +420,7 @@ where
             reconcile_watermark: SnapshotWatermark::new(),
             last_risk_denial: None,
             recent_denials: VecDeque::new(),
+            recently_applied_fills: VecDeque::new(),
         }
     }
     /// Execute one orchestrator tick.
@@ -457,6 +552,24 @@ where
         // drift in Phase 3) or the window expires (RECONCILE_DRIFT fires on the
         // next tick when in_grace is false).
         //
+        // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01: terminal-fill settle window.
+        //
+        // A second false-positive case occurs AFTER the fill is applied:
+        //   1. Phase 3 applied the terminal fill this tick or a prior tick.
+        //   2. broker_map_remove ran → outbox_load_sent_with_broker_map returns 0.
+        //   3. The in-grace path above does NOT fire (in_grace = false).
+        //   4. The broker REST snapshot still shows the pre-fill position.
+        //
+        // This is structurally different from the pending-fill case: the fill
+        // HAS been applied to the local portfolio but the broker snapshot hasn't
+        // refreshed yet.  The local-ahead delta (lq - bq > 0 for a buy) is the
+        // mirror of the pending-fill case (bq - lq > 0).
+        //
+        // Guard: when the pending-fill path does not cover the drift, also check
+        // the in-memory `recently_applied_fills` ring buffer.  If a terminal fill
+        // was applied within `TERMINAL_FILL_SETTLE_GRACE_SECS` AND the drift is
+        // directionally consistent with those fills, defer rather than halt.
+        //
         // RECONCILE_DRIFT still fires immediately when:
         //   - The broker snapshot is stale (Stale error path; unchanged).
         //   - No SENT+mapped orders exist for this run (no evidence of a pending
@@ -468,6 +581,8 @@ where
         //   - The broker has unknown orders we did not submit (fail-closed).
         //   - Local active orders missing at broker are not in the SENT+mapped
         //     set (unmapped drift; fail-closed).
+        //   - The terminal-fill settle window expires and broker snapshot still
+        //     disagrees (genuine drift or broker reporting error).
         // ------------------------------------------------------------------
         {
             let pending_inbox =
@@ -502,6 +617,24 @@ where
                                  consistent with pending fills; re-evaluate after \
                                  WS fill event arrives \
                                  (RECONCILE-DRIFT-AFTER-FAST-PAPER-FILL-01)"
+                            );
+                        } else if drift_is_consistent_with_recent_terminal_fills(
+                            &self.recently_applied_fills,
+                            &local,
+                            &broker,
+                            now,
+                        ) {
+                            // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01: local portfolio
+                            // advanced after terminal fill; broker snapshot not yet
+                            // refreshed.  Defer until broker catches up or grace expires.
+                            tracing::debug!(
+                                run_id = %self.run_id,
+                                grace_secs = TERMINAL_FILL_SETTLE_GRACE_SECS,
+                                recent_fills = self.recently_applied_fills.len(),
+                                "reconcile_deferred_terminal_fill_settle: \
+                                 recently applied terminal fill explains drift; \
+                                 re-evaluating after broker snapshot refreshes \
+                                 (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01)"
                             );
                         } else {
                             // Mandatory halt + disarm - same fail-closed contract as
@@ -884,6 +1017,38 @@ where
             // mark_applied but before cleanup, the durable inbox fence would
             // suppress replay and strand a stale broker mapping permanently.
             if apply_outcome.terminal_apply_succeeded {
+                // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01: record fill so Phase 0c
+                // can defer RECONCILE_DRIFT during broker snapshot settlement.
+                // Only fill events carry a position delta; non-fill terminal events
+                // (Reject, CancelAck) don't change position so there's nothing to
+                // defer.
+                if let BrokerEvent::Fill {
+                    symbol,
+                    side,
+                    delta_qty,
+                    ..
+                }
+                | BrokerEvent::PartialFill {
+                    symbol,
+                    side,
+                    delta_qty,
+                    ..
+                } = &event
+                {
+                    let signed = if matches!(side, mqk_execution::Side::Buy) {
+                        *delta_qty
+                    } else {
+                        -*delta_qty
+                    };
+                    if self.recently_applied_fills.len() >= RECENT_FILLS_RING_CAP {
+                        self.recently_applied_fills.pop_front();
+                    }
+                    self.recently_applied_fills.push_back(RecentTerminalFill {
+                        symbol: symbol.clone(),
+                        signed_delta: signed,
+                        applied_at: self.time_source.now_utc(),
+                    });
+                }
                 mqk_db::outbox_mark_acked(&self.pool, &internal_id).await?;
                 mqk_db::broker_map_remove(&self.pool, &internal_id).await?;
                 remove_broker_mapping_from_memory(&mut self.order_map, &internal_id);
@@ -947,6 +1112,27 @@ where
     /// Immutable view of the current OMS order map.
     pub fn oms_orders(&self) -> &BTreeMap<String, OmsOrder> {
         &self.oms_orders
+    }
+    /// RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01: inject a recent terminal fill
+    /// into the settle window buffer for testing purposes.
+    ///
+    /// Allows tests to simulate the Phase 3 recording without running a full
+    /// tick with broker events.  Only compiled under test/testkit builds.
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn inject_recent_terminal_fill_for_test(
+        &mut self,
+        symbol: impl Into<String>,
+        signed_delta: i64,
+        applied_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        if self.recently_applied_fills.len() >= RECENT_FILLS_RING_CAP {
+            self.recently_applied_fills.pop_front();
+        }
+        self.recently_applied_fills.push_back(RecentTerminalFill {
+            symbol: symbol.into(),
+            signed_delta,
+            applied_at,
+        });
     }
     async fn capture_risk_denial(
         &mut self,
