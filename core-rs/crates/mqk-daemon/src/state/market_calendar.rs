@@ -1,4 +1,5 @@
 //! SMART-CALENDAR-SESSION-PROVIDER-01: Market calendar and session provider seam.
+//! NYSE-CALENDAR-EXTENSION-AND-EXCHANGE-PROVIDER-01: Exchange-sourced provider seam.
 //!
 //! Adds a formal [`MarketCalendarProvider`] trait so autonomous session
 //! controllers and readiness surfaces consume session truth through a
@@ -18,14 +19,24 @@
 //!   window to match the exchange's DST period.  Source label:
 //!   `"fixed_window_override"`.
 //!
+//! - [`ExchangeSourcedCalendarProvider`]: accepts injected exchange calendar data
+//!   (fixture, file, or future API-backed source) and classifies session truth
+//!   against that data.  Fails closed (`Unknown`) when source is unavailable,
+//!   stale, or invalid — or falls back to the static heuristic provider when
+//!   explicitly configured via [`ExchangeUnavailablePolicy::FallbackToStatic`].
+//!   Source label determined by [`ExchangeCalendarMeta::source_name`]; fallback
+//!   labeled `"exchange_sourced_fallback_to_static"`.
+//!
 //! # Fail-closed contract (SCSP07)
 //!
 //! `MarketSessionTruth::is_in_session()` returns `false` for every state except
 //! `RegularOpen`.  `Unknown` is explicitly fail-closed: providers must return it
 //! when truth cannot be determined, and callers must treat it as session-closed.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
-use mqk_integrity::{nyse_is_early_close_today, CalendarSpec};
+use mqk_integrity::{nyse_is_early_close_today, utc_to_et_components, CalendarSpec};
 
 use super::session_controller::SessionWindow;
 
@@ -235,6 +246,222 @@ impl MarketCalendarProvider for FixedWindowOverrideProvider {
             is_trading_day: in_window, // unknowable without calendar; approximate
             is_early_close: false,
             session_close_note: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exchange-sourced calendar provider seam
+// (NYSE-CALENDAR-EXTENSION-AND-EXCHANGE-PROVIDER-01)
+// ---------------------------------------------------------------------------
+
+/// Per-day status from an exchange-sourced calendar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExchangeDayStatus {
+    /// Full-day exchange holiday — market closed all day.
+    Holiday,
+    /// Shortened session — market closes at [`ExchangeCalendarDay::early_close_et`].
+    EarlyClose,
+    /// Normal trading day — market open 09:30–16:00 ET.
+    Open,
+}
+
+/// A single date entry in an exchange-sourced calendar.
+///
+/// Dates are expressed in Eastern Time (the NYSE/Nasdaq timezone).
+/// Only holidays and early-close dates need to appear; unlisted weekdays
+/// within the provider's coverage range are treated as normal open days.
+#[derive(Debug, Clone)]
+pub struct ExchangeCalendarDay {
+    /// `(year, month, day)` in Eastern Time.
+    pub date: (i64, i64, i64),
+    /// Calendar status for this date.
+    pub status: ExchangeDayStatus,
+    /// For [`ExchangeDayStatus::EarlyClose`]: `(hour, minute)` ET close time.
+    /// Ignored for other statuses.  Defaults to `(13, 0)` if `None`.
+    pub early_close_et: Option<(u32, u32)>,
+}
+
+/// Provenance and coverage metadata for an exchange-sourced calendar dataset.
+#[derive(Debug, Clone)]
+pub struct ExchangeCalendarMeta {
+    /// Stable identifier for the source (e.g., `"nyse_official_api_v1"`, `"fixture"`).
+    /// Used as [`MarketSessionTruth::source`] when the provider is active.
+    pub source_name: &'static str,
+    /// Exchange whose calendar was loaded.
+    pub exchange: &'static str,
+    /// ISO8601 string indicating when this data was generated, if known.
+    pub generated_at: Option<&'static str>,
+    /// First date `(year, month, day)` covered by this dataset (ET, inclusive).
+    pub coverage_start: (i64, i64, i64),
+    /// Last date `(year, month, day)` covered by this dataset (ET, inclusive).
+    pub coverage_end: (i64, i64, i64),
+}
+
+/// Source health state for an [`ExchangeSourcedCalendarProvider`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExchangeSourceState {
+    /// Data is loaded and authoritative.
+    Active,
+    /// Data loaded but past configured freshness window.
+    Stale,
+    /// Data could not be parsed or is structurally invalid.
+    Invalid,
+    /// No data source has been configured or data could not be loaded.
+    Unavailable,
+}
+
+/// What to do when the exchange source is not [`ExchangeSourceState::Active`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExchangeUnavailablePolicy {
+    /// Return `MarketSessionTruth::unknown()` — fail closed (SCSP07).
+    FailClosed,
+    /// Delegate to [`NyseWeekdaysProvider`] and relabel source as
+    /// `"exchange_sourced_fallback_to_static"` so operators can distinguish
+    /// this from a directly configured heuristic provider.
+    FallbackToStatic,
+}
+
+/// Exchange-sourced calendar provider — accepts injected calendar data.
+///
+/// Classifies market sessions against per-day exchange calendar entries
+/// (holiday, early-close, or normal open day) within a declared coverage
+/// window.  Dates outside the coverage window fail closed (`Unknown`).
+///
+/// Fail-closed contract: when `source_state` is not `Active`, returns
+/// `Unknown` (if `on_unavailable == FailClosed`) or delegates to the static
+/// heuristic provider with an honest `"exchange_sourced_fallback_to_static"`
+/// source label (if `on_unavailable == FallbackToStatic`).
+///
+/// No network calls are made — the caller is responsible for loading and
+/// validating the `days` map before constructing this provider.
+pub struct ExchangeSourcedCalendarProvider {
+    /// Source provenance and coverage metadata.
+    pub meta: ExchangeCalendarMeta,
+    /// Current health of the underlying data source.
+    pub source_state: ExchangeSourceState,
+    /// Per-day calendar entries keyed by `(year, month, day)` in Eastern Time.
+    pub days: HashMap<(i64, i64, i64), ExchangeCalendarDay>,
+    /// Policy when source is not `Active`.
+    pub on_unavailable: ExchangeUnavailablePolicy,
+}
+
+impl ExchangeSourcedCalendarProvider {
+    fn in_coverage(&self, year: i64, month: i64, day: i64) -> bool {
+        let date = (year, month, day);
+        date >= self.meta.coverage_start && date <= self.meta.coverage_end
+    }
+
+    fn classify_open_day(
+        &self,
+        et_secs: i64,
+        is_early_close: bool,
+        ec_close_secs: i64,
+    ) -> MarketSessionState {
+        let open_secs = 9 * 3600 + 30 * 60; // 09:30 ET
+        let close_secs = if is_early_close {
+            ec_close_secs
+        } else {
+            16 * 3600 // 16:00 ET
+        };
+        if et_secs <= open_secs {
+            MarketSessionState::PreMarket
+        } else if et_secs <= close_secs {
+            MarketSessionState::RegularOpen
+        } else if is_early_close {
+            MarketSessionState::EarlyClose
+        } else {
+            MarketSessionState::AfterHours
+        }
+    }
+}
+
+impl MarketCalendarProvider for ExchangeSourcedCalendarProvider {
+    fn session_for(&self, now_utc: DateTime<Utc>) -> MarketSessionTruth {
+        // If source is not active, apply the unavailability policy.
+        if self.source_state != ExchangeSourceState::Active {
+            return match self.on_unavailable {
+                ExchangeUnavailablePolicy::FailClosed => MarketSessionTruth::unknown(),
+                ExchangeUnavailablePolicy::FallbackToStatic => {
+                    let base = NyseWeekdaysProvider.session_for(now_utc);
+                    MarketSessionTruth {
+                        source: "exchange_sourced_fallback_to_static",
+                        ..base
+                    }
+                }
+            };
+        }
+
+        // Decompose now_utc into Eastern Time components.
+        let ts = now_utc.timestamp();
+        let (year, month, day, et_secs, is_weekday) = match utc_to_et_components(ts) {
+            Some(c) => c,
+            None => return MarketSessionTruth::unknown(),
+        };
+
+        // Coverage check FIRST: dates outside the declared window are Unknown
+        // (fail-closed) regardless of weekday/weekend.  We only have authoritative
+        // truth for dates within coverage.
+        if !self.in_coverage(year, month, day) {
+            return MarketSessionTruth::unknown();
+        }
+
+        // Weekend within coverage: always Closed (exchange never trades Sat/Sun).
+        if !is_weekday {
+            return MarketSessionTruth {
+                state: MarketSessionState::Closed,
+                source: self.meta.source_name,
+                exchange: self.meta.exchange,
+                is_trading_day: false,
+                is_early_close: false,
+                session_close_note: None,
+            };
+        }
+
+        // Look up this date in the per-day entries map.
+        match self.days.get(&(year, month, day)) {
+            Some(ExchangeCalendarDay {
+                status: ExchangeDayStatus::Holiday,
+                ..
+            }) => MarketSessionTruth {
+                state: MarketSessionState::Holiday,
+                source: self.meta.source_name,
+                exchange: self.meta.exchange,
+                is_trading_day: false,
+                is_early_close: false,
+                session_close_note: None,
+            },
+
+            Some(ExchangeCalendarDay {
+                status: ExchangeDayStatus::EarlyClose,
+                early_close_et,
+                ..
+            }) => {
+                let (ec_h, ec_m) = early_close_et.unwrap_or((13, 0));
+                let ec_close_secs = (ec_h as i64) * 3600 + (ec_m as i64) * 60;
+                let state = self.classify_open_day(et_secs, true, ec_close_secs);
+                MarketSessionTruth {
+                    state,
+                    source: self.meta.source_name,
+                    exchange: self.meta.exchange,
+                    is_trading_day: true,
+                    is_early_close: true,
+                    session_close_note: Some("early close"),
+                }
+            }
+
+            // ExchangeDayStatus::Open or not in map → normal trading day.
+            _ => {
+                let state = self.classify_open_day(et_secs, false, 0);
+                MarketSessionTruth {
+                    state,
+                    source: self.meta.source_name,
+                    exchange: self.meta.exchange,
+                    is_trading_day: true,
+                    is_early_close: false,
+                    session_close_note: None,
+                }
+            }
         }
     }
 }

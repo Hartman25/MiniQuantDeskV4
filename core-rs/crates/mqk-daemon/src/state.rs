@@ -53,8 +53,9 @@ pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
 pub use loop_runner::spawn_reconcile_tick;
 pub use market_calendar::{
-    FixedWindowOverrideProvider, MarketCalendarProvider, MarketSessionState, MarketSessionTruth,
-    NyseWeekdaysProvider,
+    ExchangeCalendarDay, ExchangeCalendarMeta, ExchangeDayStatus, ExchangeSourceState,
+    ExchangeSourcedCalendarProvider, ExchangeUnavailablePolicy, FixedWindowOverrideProvider,
+    MarketCalendarProvider, MarketSessionState, MarketSessionTruth, NyseWeekdaysProvider,
 };
 pub use session_controller::{
     autonomous_session_schedule_from_env, run_session_controller_tick, session_window_from_env,

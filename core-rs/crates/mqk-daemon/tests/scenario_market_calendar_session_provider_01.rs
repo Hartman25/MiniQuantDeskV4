@@ -1,4 +1,5 @@
 //! # SMART-CALENDAR-SESSION-PROVIDER-01 — Market calendar session provider proof
+//! # NYSE-CALENDAR-EXTENSION-AND-EXCHANGE-PROVIDER-01 — 2027/2028 static table proof
 //!
 //! Proves that:
 //! - DST is handled correctly (EDT vs EST → 13:30 vs 14:30 UTC open)
@@ -9,6 +10,7 @@
 //! - Unknown/unavailable provider state fails closed
 //! - `NyseWeekdaysProvider` and `CalendarSpec::NyseWeekdays.classify_market_session`
 //!   agree on `is_in_session()` (SCSP08 consistency)
+//! - Extended 2027–2028 holiday and early-close dates are correctly classified
 //!
 //! All tests are pure in-process.  No DB, no network, no daemon startup.
 //!
@@ -22,6 +24,11 @@
 //! | MCSP06  | FixedWindowOverrideProvider is labeled "fixed_window_override" (SCSP06)      |
 //! | MCSP07  | MarketSessionTruth::unknown() fails closed (SCSP07)                          |
 //! | MCSP08  | NyseWeekdaysProvider.is_in_session() agrees with CalendarSpec (SCSP08)       |
+//! | NCAL01  | 2027 full-day holiday (Jan 1) returns Holiday                                |
+//! | NCAL02  | 2027 normal trading day (Jan 4) is regular session during session hours       |
+//! | NCAL03  | 2027 day-after-Thanksgiving (Nov 26) closes at 13:00 ET                      |
+//! | NCAL04  | 2028 full-day holiday (Dec 25 Christmas) returns Holiday                     |
+//! | NCAL05  | 2028 day-after-Thanksgiving (Nov 24) closes at 13:00 ET                      |
 
 use chrono::{TimeZone, Utc};
 use mqk_daemon::state::{
@@ -345,7 +352,7 @@ fn mcsp07_unknown_truth_fails_closed() {
     );
 
     // Far-future valid timestamp: provider must not panic and must fail closed.
-    // Year 9999-12-31 23:59:59 UTC is beyond all NYSE calendar tables (2023–2026)
+    // Year 9999-12-31 23:59:59 UTC is beyond all NYSE calendar tables (2023–2028)
     // and at 23:59 ET is firmly after-hours → is_in_session must be false.
     let far_future = Utc.with_ymd_and_hms(9999, 12, 31, 23, 59, 59).unwrap();
     let t = NyseWeekdaysProvider.session_for(far_future);
@@ -410,4 +417,156 @@ fn mcsp08_provider_and_calendar_spec_agree_on_session_truth() {
              spec={spec_in_session}, provider={provider_in_session}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// NCAL01 — 2027 full-day holiday: New Year's Day Jan 1
+// ---------------------------------------------------------------------------
+
+/// 2027-01-01 is a Friday (New Year's Day).  Any time on that day must return
+/// Holiday with is_in_session=false, regardless of time-of-day.
+/// Proves the extended 2027 holiday table entry (NYSE-CALENDAR-EXTENSION-01).
+#[test]
+fn ncal01_2027_new_years_day_returns_holiday() {
+    let p = provider();
+
+    // 14:00 UTC = 09:00 EST — would be premarket if not a holiday
+    let mid_morning = ts(2027, 1, 1, 14, 0, 0);
+    let t = p.session_for(mid_morning);
+    assert_eq!(
+        t.state,
+        MarketSessionState::Holiday,
+        "NCAL01: 2027-01-01 (New Year's Day) must return Holiday"
+    );
+    assert!(!t.is_in_session(), "NCAL01: Holiday must not be in-session");
+    assert!(!t.is_trading_day, "NCAL01: Holiday is not a trading day");
+}
+
+// ---------------------------------------------------------------------------
+// NCAL02 — 2027 normal trading day in regular session hours
+// ---------------------------------------------------------------------------
+
+/// 2027-01-04 (Monday, not a holiday, EST) at 15:00 UTC = 10:00 EST → in session.
+/// Proves that the 2027 calendar table does not accidentally block normal trading.
+#[test]
+fn ncal02_2027_normal_trading_day_is_regular_session() {
+    let p = provider();
+
+    // 15:00 UTC = 10:00 EST (EST = UTC-5, early January, no DST)
+    let in_session = ts(2027, 1, 4, 15, 0, 0);
+    let t = p.session_for(in_session);
+    assert_eq!(
+        t.state,
+        MarketSessionState::RegularOpen,
+        "NCAL02: 2027-01-04 Mon 10:00 EST must be RegularOpen"
+    );
+    assert!(t.is_in_session(), "NCAL02: must be in-session");
+    assert!(t.is_trading_day, "NCAL02: must be a trading day");
+}
+
+// ---------------------------------------------------------------------------
+// NCAL03 — 2027 day-after-Thanksgiving (Nov 26) early close at 13:00 ET
+// ---------------------------------------------------------------------------
+
+/// 2027-11-26 (Friday, day after Thanksgiving Nov 25): NYSE closes at 13:00 EST.
+/// November is EST (UTC-5): 13:00 ET = 18:00 UTC.
+///
+/// 17:59 UTC = 12:59 EST → RegularOpen, is_early_close=true.
+/// 18:01 UTC = 13:01 EST → EarlyClose.
+#[test]
+fn ncal03_2027_black_friday_early_close_at_13_et() {
+    let p = provider();
+
+    let before_ec = ts(2027, 11, 26, 17, 59, 0); // 12:59 EST
+    let t_before = p.session_for(before_ec);
+    assert_eq!(
+        t_before.state,
+        MarketSessionState::RegularOpen,
+        "NCAL03: 17:59 UTC on 2027-11-26 must be RegularOpen (12:59 EST, before early close)"
+    );
+    assert!(
+        t_before.is_early_close,
+        "NCAL03: is_early_close must be true on early-close day"
+    );
+
+    let after_ec = ts(2027, 11, 26, 18, 1, 0); // 13:01 EST
+    let t_after = p.session_for(after_ec);
+    assert_eq!(
+        t_after.state,
+        MarketSessionState::EarlyClose,
+        "NCAL03: 18:01 UTC on 2027-11-26 must be EarlyClose (13:01 EST, after early close)"
+    );
+    assert!(
+        !t_after.is_in_session(),
+        "NCAL03: must not be in-session after early close"
+    );
+    assert!(
+        t_after.is_early_close,
+        "NCAL03: is_early_close must be true after early close"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NCAL04 — 2028 full-day holiday: Christmas Dec 25 (Monday)
+// ---------------------------------------------------------------------------
+
+/// 2028-12-25 is a Monday (Christmas).  Any time on that day must return
+/// Holiday with is_in_session=false.
+/// Proves the extended 2028 holiday table entry.
+#[test]
+fn ncal04_2028_christmas_day_returns_holiday() {
+    let p = provider();
+
+    // 15:00 UTC = 10:00 EST — would be regular session on a normal day
+    let mid_session = ts(2028, 12, 25, 15, 0, 0);
+    let t = p.session_for(mid_session);
+    assert_eq!(
+        t.state,
+        MarketSessionState::Holiday,
+        "NCAL04: 2028-12-25 (Christmas, Monday) must return Holiday"
+    );
+    assert!(!t.is_in_session(), "NCAL04: Holiday must not be in-session");
+    assert!(!t.is_trading_day, "NCAL04: Holiday is not a trading day");
+}
+
+// ---------------------------------------------------------------------------
+// NCAL05 — 2028 day-after-Thanksgiving (Nov 24) early close at 13:00 ET
+// ---------------------------------------------------------------------------
+
+/// 2028-11-24 (Friday, day after Thanksgiving Nov 23): NYSE closes at 13:00 EST.
+/// November is EST (UTC-5): 13:00 ET = 18:00 UTC.
+///
+/// 17:59 UTC = 12:59 EST → RegularOpen, is_early_close=true.
+/// 18:01 UTC = 13:01 EST → EarlyClose.
+#[test]
+fn ncal05_2028_black_friday_early_close_at_13_et() {
+    let p = provider();
+
+    let before_ec = ts(2028, 11, 24, 17, 59, 0); // 12:59 EST
+    let t_before = p.session_for(before_ec);
+    assert_eq!(
+        t_before.state,
+        MarketSessionState::RegularOpen,
+        "NCAL05: 17:59 UTC on 2028-11-24 must be RegularOpen (12:59 EST, before early close)"
+    );
+    assert!(
+        t_before.is_early_close,
+        "NCAL05: is_early_close must be true on early-close day"
+    );
+
+    let after_ec = ts(2028, 11, 24, 18, 1, 0); // 13:01 EST
+    let t_after = p.session_for(after_ec);
+    assert_eq!(
+        t_after.state,
+        MarketSessionState::EarlyClose,
+        "NCAL05: 18:01 UTC on 2028-11-24 must be EarlyClose (13:01 EST, after early close)"
+    );
+    assert!(
+        !t_after.is_in_session(),
+        "NCAL05: must not be in-session after early close"
+    );
+    assert!(
+        t_after.is_early_close,
+        "NCAL05: is_early_close must be true after early close"
+    );
 }

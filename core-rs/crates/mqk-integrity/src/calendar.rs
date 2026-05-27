@@ -14,7 +14,7 @@
 //!   a valid trading slot. Preserves exact pre-B3 gap-detection behavior.
 //! - [`CalendarSpec::NyseWeekdays`] — NYSE-style equities: weekdays 09:30–16:00
 //!   Eastern (DST-aware via chrono-tz America/New_York), excluding a hardcoded
-//!   set of US market holidays for 2023–2026.
+//!   set of US market holidays for 2023–2028.
 
 use chrono::{DateTime, Datelike, LocalResult, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::America::New_York;
@@ -38,7 +38,7 @@ pub enum CalendarSpec {
     /// - Regular session: 09:30–close ET (DST-aware via chrono-tz America/New_York).
     ///   Normal close is 16:00 ET; early-close days (Black Friday, Christmas Eve
     ///   etc.) close at 13:00 ET per [`nyse_early_close_et`].
-    /// - Hardcoded US market holidays 2023–2026.
+    /// - Hardcoded US market holidays 2023–2028.
     ///
     /// A bar whose `end_ts` falls outside these windows is treated as a
     /// non-trading slot and is **not** counted as a missing bar.
@@ -174,7 +174,7 @@ impl CalendarSpec {
 ///   A bar `end_ts` represents the **close** of an interval, so a bar ending
 ///   exactly at open (09:30:00) is excluded; one ending at 09:35:00 is the
 ///   first 5-minute bar of the day.
-/// - Holidays: excluded via hardcoded table for 2023–2026.
+/// - Holidays: excluded via hardcoded table for 2023–2028.
 fn is_nyse_session_end(end_ts: i64) -> bool {
     // Convert to Eastern Time (DST-aware). America/New_York switches between
     // EST (UTC-5) and EDT (UTC-4) automatically.
@@ -279,13 +279,18 @@ fn nyse_classify_exchange(now_ts: i64) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Early-close table 2023–2026 (SMART-CALENDAR-SESSION-PROVIDER-01)
+// Early-close table 2023–2028 (SMART-CALENDAR-SESSION-PROVIDER-01,
+//                               NYSE-CALENDAR-EXTENSION-AND-EXCHANGE-PROVIDER-01)
 // ---------------------------------------------------------------------------
 
 /// NYSE early-close dates: (year, month, day, close_hour_ET, close_min_ET).
 ///
 /// NYSE closes at 13:00 ET on these dates.  Session hours are
 /// 09:30–13:00 ET rather than the normal 09:30–16:00 ET.
+///
+/// Source: NYSE Group Holiday Schedule rules (nyse.com/markets/hours-calendars).
+/// Dates derived from fixed US holiday observation rules; not live-API data.
+/// Calendar calculation verified 2026-05-27.
 const EARLY_CLOSE_DATES: &[(i64, i64, i64, u32, u32)] = &[
     // ── 2023 ─────────────────────────────────────────────────────────
     (2023, 11, 24, 13, 0), // Day after Thanksgiving (Nov 23)
@@ -299,6 +304,13 @@ const EARLY_CLOSE_DATES: &[(i64, i64, i64, u32, u32)] = &[
     // ── 2026 ─────────────────────────────────────────────────────────
     (2026, 11, 27, 13, 0), // Day after Thanksgiving (Nov 26)
     (2026, 12, 24, 13, 0), // Christmas Eve (Thursday)
+    // ── 2027 ─────────────────────────────────────────────────────────
+    // Dec 25, 2027 = Saturday → Christmas observed Friday Dec 24 (full holiday,
+    // not early close). No Christmas Eve early close in 2027.
+    (2027, 11, 26, 13, 0), // Day after Thanksgiving (Nov 25 Thanksgiving)
+    // ── 2028 ─────────────────────────────────────────────────────────
+    // Dec 25, 2028 = Monday. Dec 24 = Sunday (markets closed). No early close.
+    (2028, 11, 24, 13, 0), // Day after Thanksgiving (Nov 23 Thanksgiving)
 ];
 
 /// Returns the early-close time `(hour, min)` in Eastern Time for the given
@@ -334,12 +346,18 @@ pub fn nyse_is_early_close_today(ts: i64) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Holiday table 2023–2026
+// Holiday table 2023–2028  (NYSE-CALENDAR-EXTENSION-AND-EXCHANGE-PROVIDER-01)
 // ---------------------------------------------------------------------------
 
 /// Returns `true` if (year, month, day) is a NYSE market holiday.
 ///
-/// Hardcoded observed dates for 2023–2026. Extend as needed.
+/// Hardcoded observed closure dates for 2023–2028.
+///
+/// Source: NYSE Group Holiday Schedule rules (nyse.com/markets/hours-calendars).
+/// Observation rule: holiday on Saturday → preceding Friday observed;
+/// holiday on Sunday → following Monday observed.
+/// Good Friday dates computed via the Gregorian Easter algorithm.
+/// Calendar calculations verified 2026-05-27.
 fn is_nyse_holiday(year: i64, month: i64, day: i64) -> bool {
     // Encoded as (year, month, day) tuples for readability and determinism.
     const HOLIDAYS: &[(i64, i64, i64)] = &[
@@ -387,6 +405,31 @@ fn is_nyse_holiday(year: i64, month: i64, day: i64) -> bool {
         (2026, 9, 7),   // Labor Day
         (2026, 11, 26), // Thanksgiving
         (2026, 12, 25), // Christmas
+        // ── 2027 ─────────────────────────────────────────────────────────
+        // Jan 1 = Friday. 2027 is not a leap year. Easter = March 28 (Gregorian algorithm).
+        (2027, 1, 1),   // New Year's Day (Friday)
+        (2027, 1, 18),  // MLK Day (3rd Monday of January)
+        (2027, 2, 15),  // Presidents' Day (3rd Monday of February)
+        (2027, 3, 26),  // Good Friday (Easter = March 28)
+        (2027, 5, 31),  // Memorial Day (last Monday of May)
+        (2027, 6, 18),  // Juneteenth (observed Fri — June 19 falls on Saturday)
+        (2027, 7, 5),   // Independence Day (observed Mon — July 4 falls on Sunday)
+        (2027, 9, 6),   // Labor Day (1st Monday of September)
+        (2027, 11, 25), // Thanksgiving (4th Thursday of November)
+        (2027, 12, 24), // Christmas (observed Fri — December 25 falls on Saturday)
+        (2027, 12, 31), // New Year's Day 2028 (observed Fri — January 1 2028 falls on Saturday)
+        // ── 2028 ─────────────────────────────────────────────────────────
+        // Jan 1 = Saturday (observed Dec 31 2027, above). 2028 is a leap year.
+        // Easter = April 16 (Gregorian algorithm).
+        (2028, 1, 17),  // MLK Day (3rd Monday of January)
+        (2028, 2, 21),  // Presidents' Day (3rd Monday of February)
+        (2028, 4, 14),  // Good Friday (Easter = April 16)
+        (2028, 5, 29),  // Memorial Day (last Monday of May)
+        (2028, 6, 19),  // Juneteenth (Monday — June 19 falls on Monday)
+        (2028, 7, 4),   // Independence Day (Wednesday)
+        (2028, 9, 4),   // Labor Day (1st Monday of September)
+        (2028, 11, 23), // Thanksgiving (4th Thursday of November)
+        (2028, 12, 25), // Christmas (Monday)
     ];
     HOLIDAYS.contains(&(year, month, day))
 }
@@ -412,6 +455,32 @@ pub fn epoch_secs_to_ymd(epoch_secs: i64) -> (i64, i64, i64) {
     let y = if m <= 2 { y + 1 } else { y };
     let d = doy - (153 * mp + 2) / 5 + 1;
     (y, m, d)
+}
+
+// ---------------------------------------------------------------------------
+// ET timezone helper (NYSE-CALENDAR-EXTENSION-AND-EXCHANGE-PROVIDER-01)
+// ---------------------------------------------------------------------------
+
+/// Returns `(year, month, day, et_secs_since_midnight, is_weekday)` for a UTC
+/// epoch-seconds timestamp, converted to Eastern Time (DST-aware via
+/// `chrono_tz::America::New_York`).
+///
+/// Returns `None` on out-of-range or ambiguous timestamps.
+///
+/// Exported so `mqk-daemon::state::market_calendar` can classify dates
+/// without adding `chrono_tz` as a direct dependency of the daemon crate.
+pub fn utc_to_et_components(ts: i64) -> Option<(i64, i64, i64, i64, bool)> {
+    let utc_dt: DateTime<Utc> = match Utc.timestamp_opt(ts, 0) {
+        LocalResult::Single(dt) => dt,
+        _ => return None,
+    };
+    let et_dt = utc_dt.with_timezone(&New_York);
+    let year = et_dt.year() as i64;
+    let month = et_dt.month() as i64;
+    let day = et_dt.day() as i64;
+    let et_secs = et_dt.hour() as i64 * 3600 + et_dt.minute() as i64 * 60 + et_dt.second() as i64;
+    let is_weekday = !matches!(et_dt.weekday(), Weekday::Sat | Weekday::Sun);
+    Some((year, month, day, et_secs, is_weekday))
 }
 
 // ---------------------------------------------------------------------------
