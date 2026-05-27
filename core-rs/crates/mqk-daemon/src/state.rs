@@ -11,6 +11,7 @@ mod deadman;
 mod env;
 mod lifecycle;
 mod loop_runner;
+pub mod market_calendar;
 mod orchestrator_build;
 mod session_controller;
 mod signal_intake;
@@ -51,6 +52,10 @@ use broker::{
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
 pub use loop_runner::spawn_reconcile_tick;
+pub use market_calendar::{
+    FixedWindowOverrideProvider, MarketCalendarProvider, MarketSessionState, MarketSessionTruth,
+    NyseWeekdaysProvider,
+};
 pub use session_controller::{
     autonomous_session_schedule_from_env, run_session_controller_tick, session_window_from_env,
     spawn_autonomous_session_controller, AutonomousSessionSchedule, SessionWindow,

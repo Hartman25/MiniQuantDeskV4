@@ -5,8 +5,8 @@
 //!
 //! | Test     | Claim                                                                              |
 //! |----------|------------------------------------------------------------------------------------|
-//! | OBS-SW-01 | Env-configured fixed window → source="env", correct raw values, start/stop UTC   |
-//! | OBS-SW-02 | Env vars absent → source="default", null raw values, null start/stop UTC         |
+//! | OBS-SW-01 | Env-configured fixed window → source="fixed_window_override", raw values, UTC    |
+//! | OBS-SW-02 | Env vars absent → source="nyse_weekdays", null raw values, null start/stop UTC   |
 //! | OBS-SW-03 | Diagnostic fields do not alter overall_ready, session_in_window, or blockers     |
 //! | OBS-SW-04 | now_utc is present and parses as valid RFC 3339                                  |
 //! | OBS-SW-05 | Invalid env var (bad format) → source="default", raw shows bad value             |
@@ -90,7 +90,7 @@ fn nyse_regular_ts() -> i64 {
 
 /// Proves that when both `MQK_SESSION_START_HH_MM` and `MQK_SESSION_STOP_HH_MM`
 /// are set to valid values, the readiness response exposes:
-/// - `session_window_source = "env"`
+/// - `session_window_source = "fixed_window_override"` (SCSP06)
 /// - `session_start_env_raw` and `session_stop_env_raw` matching the env values
 /// - `session_start_utc` and `session_stop_utc` as `"HH:MM UTC"` strings
 /// - `session_window_basis = "UTC"`
@@ -109,8 +109,8 @@ async fn obs_sw_01_env_window_exposes_source_and_derived_times() {
     std::env::remove_var("MQK_SESSION_STOP_HH_MM");
 
     assert_eq!(
-        v["session_window_source"], "env",
-        "OBS-SW-01: env vars present + valid → session_window_source must be 'env'"
+        v["session_window_source"], "fixed_window_override",
+        "OBS-SW-01: env vars present + valid → session_window_source must be 'fixed_window_override' (SCSP06)"
     );
     assert_eq!(
         v["session_start_env_raw"], "13:30",
@@ -141,7 +141,7 @@ async fn obs_sw_01_env_window_exposes_source_and_derived_times() {
 /// Proves that when `MQK_SESSION_START_HH_MM` and `MQK_SESSION_STOP_HH_MM` are
 /// absent (the default autonomous-session seam uses NYSE regular-session truth),
 /// the readiness response exposes:
-/// - `session_window_source = "default"`
+/// - `session_window_source = "nyse_weekdays"` (SCSP06)
 /// - `session_start_env_raw = null`
 /// - `session_stop_env_raw = null`
 /// - `session_start_utc = null`
@@ -156,8 +156,8 @@ async fn obs_sw_02_absent_env_exposes_default_source_and_null_times() {
     let v = call_readiness(st).await;
 
     assert_eq!(
-        v["session_window_source"], "default",
-        "OBS-SW-02: absent env vars → session_window_source must be 'default'"
+        v["session_window_source"], "nyse_weekdays",
+        "OBS-SW-02: absent env vars → session_window_source must be 'nyse_weekdays' (SCSP06)"
     );
     assert!(
         v["session_start_env_raw"].is_null(),
@@ -258,7 +258,7 @@ async fn obs_sw_04_now_utc_is_valid_rfc3339() {
 // ---------------------------------------------------------------------------
 
 /// Proves that an unparseable env value causes the seam to fall back to the
-/// NYSE-default schedule (source="default"), while still surfacing the raw
+/// NYSE-default schedule (source="nyse_weekdays"), while still surfacing the raw
 /// bad value so the operator can identify the misconfiguration.
 #[tokio::test]
 async fn obs_sw_05_invalid_env_falls_back_to_default_with_raw_visible() {
@@ -272,8 +272,8 @@ async fn obs_sw_05_invalid_env_falls_back_to_default_with_raw_visible() {
     std::env::remove_var("MQK_SESSION_STOP_HH_MM");
 
     assert_eq!(
-        v["session_window_source"], "default",
-        "OBS-SW-05: invalid env value → fallback to 'default'"
+        v["session_window_source"], "nyse_weekdays",
+        "OBS-SW-05: invalid env value → fallback to 'nyse_weekdays' (SCSP06)"
     );
     assert_eq!(
         v["session_start_env_raw"], "bad-value",
@@ -321,8 +321,8 @@ async fn obs_sw_06_not_applicable_path_includes_diagnostic_fields() {
         "OBS-SW-06: now_utc must be present on not_applicable path"
     );
     assert_eq!(
-        v["session_window_source"], "env",
-        "OBS-SW-06: env vars visible even on not_applicable path"
+        v["session_window_source"], "fixed_window_override",
+        "OBS-SW-06: env vars visible even on not_applicable path (SCSP06)"
     );
     assert_eq!(
         v["session_start_env_raw"], "13:30",

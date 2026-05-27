@@ -229,7 +229,12 @@ fn nyse_classify_session(now_ts: i64) -> &'static str {
 
     let et_secs = et_dt.hour() as i64 * 3600 + et_dt.minute() as i64 * 60 + et_dt.second() as i64;
     let open = 9 * 3600 + 30 * 60; //  9:30:00 ET
-    let close = 16 * 3600; // 16:00:00 ET
+
+    // Use shortened session close on early-close days; otherwise normal 16:00 ET close.
+    let close = match nyse_early_close_et(year, month, day) {
+        Some((eh, em)) => (eh as i64) * 3600 + (em as i64) * 60,
+        None => 16 * 3600, // 16:00:00 ET
+    };
 
     if et_secs <= open {
         "premarket"
@@ -264,6 +269,61 @@ fn nyse_classify_exchange(now_ts: i64) -> &'static str {
         return "holiday";
     }
     "open"
+}
+
+// ---------------------------------------------------------------------------
+// Early-close table 2023–2026 (SMART-CALENDAR-SESSION-PROVIDER-01)
+// ---------------------------------------------------------------------------
+
+/// NYSE early-close dates: (year, month, day, close_hour_ET, close_min_ET).
+///
+/// NYSE closes at 13:00 ET on these dates.  Session hours are
+/// 09:30–13:00 ET rather than the normal 09:30–16:00 ET.
+const EARLY_CLOSE_DATES: &[(i64, i64, i64, u32, u32)] = &[
+    // ── 2023 ─────────────────────────────────────────────────────────
+    (2023, 11, 24, 13, 0), // Day after Thanksgiving (Nov 23)
+    // ── 2024 ─────────────────────────────────────────────────────────
+    (2024, 7, 3, 13, 0),   // Independence Day Eve (July 4 = Thursday)
+    (2024, 11, 29, 13, 0), // Day after Thanksgiving (Nov 28)
+    (2024, 12, 24, 13, 0), // Christmas Eve (Tuesday)
+    // ── 2025 ─────────────────────────────────────────────────────────
+    (2025, 11, 28, 13, 0), // Day after Thanksgiving (Nov 27)
+    (2025, 12, 24, 13, 0), // Christmas Eve (Wednesday)
+    // ── 2026 ─────────────────────────────────────────────────────────
+    (2026, 11, 27, 13, 0), // Day after Thanksgiving (Nov 26)
+    (2026, 12, 24, 13, 0), // Christmas Eve (Thursday)
+];
+
+/// Returns the early-close time `(hour, min)` in Eastern Time for the given
+/// calendar date, or `None` if it is a full-length trading day.
+///
+/// Used by [`nyse_classify_session`] and by the `NyseWeekdaysProvider` in
+/// `mqk-daemon` to distinguish `EarlyClose` from normal `AfterHours`.
+pub fn nyse_early_close_et(year: i64, month: i64, day: i64) -> Option<(u32, u32)> {
+    for &(y, m, d, h, mi) in EARLY_CLOSE_DATES {
+        if y == year && m == month && d == day {
+            return Some((h, mi));
+        }
+    }
+    None
+}
+
+/// Returns `true` if `ts` (epoch seconds, UTC) falls on a NYSE early-close day.
+///
+/// The date lookup is performed in Eastern Time (DST-aware via `chrono_tz`)
+/// so the result is correct across the full calendar day regardless of UTC offset.
+pub fn nyse_is_early_close_today(ts: i64) -> bool {
+    let utc_dt: DateTime<Utc> = match Utc.timestamp_opt(ts, 0) {
+        LocalResult::Single(dt) => dt,
+        _ => return false,
+    };
+    let et_dt = utc_dt.with_timezone(&New_York);
+    nyse_early_close_et(
+        et_dt.year() as i64,
+        et_dt.month() as i64,
+        et_dt.day() as i64,
+    )
+    .is_some()
 }
 
 // ---------------------------------------------------------------------------

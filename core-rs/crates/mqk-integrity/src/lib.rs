@@ -16,6 +16,6 @@ mod engine;
 mod types;
 
 pub use arm_state::{ArmState, DisarmReason}; // Patch L7
-pub use calendar::CalendarSpec; // Patch B3
+pub use calendar::{nyse_early_close_et, nyse_is_early_close_today, CalendarSpec}; // Patch B3, SCSP-01
 pub use engine::{evaluate_bar, tick_feed};
 pub use types::*;

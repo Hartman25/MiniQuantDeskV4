@@ -551,13 +551,16 @@ fn session_window_diagnostics(now: chrono::DateTime<chrono::Utc>) -> SessionWind
         .filter(|s| !s.is_empty());
 
     let window_opt = session_window_from_env();
+    // SCSP06: label "fixed_window_override" so operators can distinguish an
+    // env-var override from the authoritative exchange-calendar path.
+    // When no env override is configured, "nyse_weekdays" names the actual seam.
     let (source, start_utc, stop_utc) = match &window_opt {
         Some(w) => (
-            "env".to_string(),
+            "fixed_window_override".to_string(),
             Some(format!("{:02}:{:02} UTC", w.start_hh, w.start_mm)),
             Some(format!("{:02}:{:02} UTC", w.stop_hh, w.stop_mm)),
         ),
-        None => ("default".to_string(), None, None),
+        None => ("nyse_weekdays".to_string(), None, None),
     };
 
     SessionWindowDiagnostics {
