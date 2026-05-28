@@ -172,9 +172,12 @@ const PENDING_FILL_PROPAGATION_GRACE_SECS: i64 = 30;
 /// pre-fill position.  Phase 0c defers RECONCILE_DRIFT for this window to
 /// allow the broker snapshot to catch up.
 ///
-/// 60 seconds covers the typical broker snapshot refresh cadence (60 ticks)
-/// plus headroom.  After this window, RECONCILE_DRIFT fires regardless.
-const TERMINAL_FILL_SETTLE_GRACE_SECS: i64 = 60;
+/// Alpaca paper REST may be temporarily unavailable for up to ~2 minutes after
+/// a fill (observed in live smoke: broker=stale for ~2 min after terminal fill).
+/// 180 seconds provides headroom above the observed 120s worst-case outage
+/// window.  The eager refresh (has_recent_terminal_fill) retries every tick so
+/// the snapshot clears as soon as Alpaca REST recovers.
+const TERMINAL_FILL_SETTLE_GRACE_SECS: i64 = 180;
 
 /// Maximum recent terminal fills to track in memory.
 const RECENT_FILLS_RING_CAP: usize = 50;
