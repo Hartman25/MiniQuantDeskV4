@@ -149,6 +149,13 @@ pub struct ExecutionSnapshot {
     /// This is authoritative: `[]` means genuinely zero denials this session,
     /// not "source not wired."  Overlaid by the orchestrator after DB snapshot.
     pub recent_risk_denials: Vec<RiskDenialRecord>,
+    /// True when at least one terminal fill was applied within the
+    /// TERMINAL_FILL_SETTLE_GRACE_SECS window.
+    ///
+    /// Used by the execution loop to force an eager external broker REST
+    /// snapshot refresh so the post-fill position is confirmed before the
+    /// grace window expires (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01).
+    pub has_recent_terminal_fill: bool,
     /// UTC timestamp at which this snapshot was taken.
     pub snapshot_at_utc: DateTime<Utc>,
 }
@@ -335,6 +342,8 @@ pub async fn collect_db_snapshot(
         system_block_state,
         // Overlaid by the caller with the orchestrator's denial ring buffer.
         recent_risk_denials: vec![],
+        // Overlaid by the caller from the orchestrator's recently_applied_fills ring buffer.
+        has_recent_terminal_fill: false,
         snapshot_at_utc: now,
     })
 }

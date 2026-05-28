@@ -1212,11 +1212,20 @@ where
         // observer; the VecDeque is not moved.
         let recent_denials: Vec<crate::observability::RiskDenialRecord> =
             self.recent_denials.iter().cloned().collect();
+        // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01: expose whether any terminal fill
+        // is within the settle grace window so the execution loop can force an eager
+        // external broker REST refresh.  Extracted before the await so &self is not
+        // live across the suspension point.
+        let has_recent_terminal_fill = self.recently_applied_fills.iter().any(|f| {
+            let elapsed = (now - f.applied_at).num_seconds();
+            (0..TERMINAL_FILL_SETTLE_GRACE_SECS).contains(&elapsed)
+        });
         // `self` is no longer borrowed here - safe to `.await` without Sync.
         let mut snap = crate::observability::collect_db_snapshot(&pool, run_id, now).await?;
         snap.active_orders = active_orders;
         snap.portfolio = portfolio;
         snap.recent_risk_denials = recent_denials;
+        snap.has_recent_terminal_fill = has_recent_terminal_fill;
         // B2: overlay risk denial if no higher-priority block state already exists.
         //
         // Priority (matches gateway evaluation order):

@@ -316,12 +316,12 @@ pub(super) fn spawn_execution_loop(
                     // external broker snapshot refresh this tick so Phase 0c on the next
                     // tick compares against a current Alpaca order list.
                     if broker_snapshot_source == BrokerSnapshotTruthSource::External {
-                        let has_active_orders = snapshot_cache
+                        let (has_active_orders, has_recent_terminal_fill) = snapshot_cache
                             .read()
                             .await
                             .as_ref()
                             .map(|s| {
-                                s.active_orders.iter().any(|o| {
+                                let active = s.active_orders.iter().any(|o| {
                                     matches!(
                                         o.status.as_str(),
                                         "Open"
@@ -329,11 +329,16 @@ pub(super) fn spawn_execution_loop(
                                             | "CancelPending"
                                             | "ReplacePending"
                                     )
-                                })
+                                });
+                                (active, s.has_recent_terminal_fill)
                             })
-                            .unwrap_or(false);
-                        if has_active_orders {
+                            .unwrap_or((false, false));
+                        if has_active_orders || has_recent_terminal_fill {
                             // Force refresh this tick — do NOT wait for the 60-tick cadence.
+                            // has_active_orders: order is in-flight, need current broker order list.
+                            // has_recent_terminal_fill (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01):
+                            // fill just applied locally; broker REST snapshot needs to reflect the
+                            // updated position before the grace window expires.
                             external_refresh_ticks = super::EXTERNAL_SNAPSHOT_REFRESH_TICKS;
                         }
                         external_refresh_ticks += 1;
