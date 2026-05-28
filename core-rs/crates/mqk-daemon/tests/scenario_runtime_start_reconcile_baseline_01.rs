@@ -318,6 +318,7 @@ fn fresh_exec_snapshot() -> ExecutionSnapshot {
         system_block_state: None,
         recent_risk_denials: vec![],
         snapshot_at_utc: chrono::Utc::now(),
+        has_recent_terminal_fill: false,
     }
 }
 

@@ -810,6 +810,7 @@ async fn api_execution_summary_derives_counts_from_execution_snapshot() {
             system_block_state: None,
             recent_risk_denials: vec![],
             snapshot_at_utc: chrono::Utc::now(),
+            has_recent_terminal_fill: false,
         });
     }
 
@@ -2618,6 +2619,7 @@ async fn risk_denials_route_active_with_pool_returns_only_db_rows() {
             severity: "critical".to_string(),
         }],
         snapshot_at_utc: DateTime::from_timestamp(1_700_000_600, 0).expect("valid unix timestamp"),
+        has_recent_terminal_fill: false,
     };
     *st.execution_snapshot.write().await = Some(snap);
 
@@ -3590,6 +3592,7 @@ async fn a2_t02_transport_with_snapshot_returns_active_and_depths() {
         system_block_state: None,
         recent_risk_denials: vec![],
         snapshot_at_utc: now,
+        has_recent_terminal_fill: false,
     };
 
     *st.execution_snapshot.write().await = Some(snapshot);

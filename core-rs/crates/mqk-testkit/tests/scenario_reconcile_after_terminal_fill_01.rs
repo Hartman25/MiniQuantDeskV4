@@ -20,7 +20,7 @@
 //! Phase 3 now records each terminal fill in an in-memory ring buffer
 //! (`recently_applied_fills`).  Phase 0c checks this buffer when the
 //! SENT+mapped guard does not cover the drift: if a fill was applied within
-//! `TERMINAL_FILL_SETTLE_GRACE_SECS` (60s) and the drift is directionally
+//! `TERMINAL_FILL_SETTLE_GRACE_SECS` (180s) and the drift is directionally
 //! consistent with that fill, the check is deferred until the broker snapshot
 //! refreshes.
 //!
@@ -29,7 +29,7 @@
 //! | ID      | Scenario                                                    | Expected       |
 //! |---------|-------------------------------------------------------------|----------------|
 //! | RTF-01  | Stale broker snapshot immediately after terminal fill       | tick() Ok      |
-//! | RTF-02  | Same but grace expired (applied_at beyond 60s window)       | tick() Err     |
+//! | RTF-02  | Same but grace expired (applied_at beyond 180s window)      | tick() Err     |
 //! | RTF-03  | Fresh broker snapshot shows unexpected qty → halt           | tick() Err     |
 //! | RTF-04  | No recent fills, unexplained drift → halt (fail-closed)     | tick() Err     |
 //! | RTF-05  | Fresh matching broker snapshot → clean reconcile → Ok       | tick() Ok      |
@@ -281,7 +281,7 @@ fn make_orchestrator(
 /// Core regression test.  Proves that Phase 0c defers RECONCILE_DRIFT when:
 ///   - local portfolio shows AAPL=7 (fill applied: baseline 6 + fill +1)
 ///   - broker snapshot still shows AAPL=6 (stale, not yet refreshed)
-///   - recently_applied_fills has a buy AAPL +1 applied < 60s ago
+///   - recently_applied_fills has a buy AAPL +1 applied < 180s ago
 ///
 /// This is the exact failure from the 2026-05-27 live smoke run.
 #[tokio::test(flavor = "multi_thread")]
@@ -311,7 +311,7 @@ async fn rtf01_deferred_when_terminal_fill_within_grace_and_consistent() -> Resu
     let clock = FixedClock::new(Utc::now());
     let mut orch = make_orchestrator(pool.clone(), run_id, clock, local, broker);
 
-    // Inject the terminal fill as if Phase 3 just applied it (< 60s ago).
+    // Inject the terminal fill as if Phase 3 just applied it (< 180s ago).
     orch.inject_recent_terminal_fill_for_test("AAPL", 1, Utc::now());
 
     let result = orch.tick().await;
@@ -336,7 +336,7 @@ async fn rtf01_deferred_when_terminal_fill_within_grace_and_consistent() -> Resu
 // RTF-02: grace expired → RECONCILE_DRIFT fires
 // ---------------------------------------------------------------------------
 
-/// After the 60-second settle window expires, RECONCILE_DRIFT fires even when
+/// After the 180-second settle window expires, RECONCILE_DRIFT fires even when
 /// a recent terminal fill is present.  Proves the deferral is bounded.
 #[tokio::test(flavor = "multi_thread")]
 async fn rtf02_halts_when_settle_grace_expired() -> Result<()> {
@@ -360,11 +360,11 @@ async fn rtf02_halts_when_settle_grace_expired() -> Result<()> {
     let mut broker = BrokerSnapshot::empty_at(2_000_000_000);
     broker.positions.insert("AAPL".to_string(), 6);
 
-    // Clock is now+61s so the fill appears 61s old (> 60s grace).
-    let clock = FixedClock::new(Utc::now() + Duration::seconds(61));
+    // Clock is now+181s so the fill appears 181s old (> 180s grace).
+    let clock = FixedClock::new(Utc::now() + Duration::seconds(181));
     let mut orch = make_orchestrator(pool.clone(), run_id, clock, local, broker);
 
-    // Fill was applied 61s ago (outside grace).
+    // Fill was applied 181s ago (outside grace).
     orch.inject_recent_terminal_fill_for_test("AAPL", 1, Utc::now());
 
     let result = orch.tick().await;
