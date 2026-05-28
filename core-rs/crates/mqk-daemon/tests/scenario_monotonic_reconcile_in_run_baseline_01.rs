@@ -73,6 +73,7 @@ fn fresh_exec_snapshot() -> ExecutionSnapshot {
         },
         system_block_state: None,
         recent_risk_denials: vec![],
+        has_recent_terminal_fill: false,
         snapshot_at_utc: chrono::Utc::now(),
     }
 }
@@ -198,6 +199,7 @@ async fn mrir02_matching_baseline_and_broker_with_fresh_exec_snap_stays_armed() 
         Arc::clone(&st),
         local_fn,
         broker_fn,
+        || false,
         Duration::from_millis(10),
     );
 
@@ -329,6 +331,7 @@ async fn mrir05_stale_broker_snapshot_not_false_proven_dirty() {
         Arc::clone(&st),
         local_fn,
         broker_fn,
+        || false,
         Duration::from_millis(10),
     );
 
@@ -408,6 +411,7 @@ async fn mrir07_spawn_reconcile_tick_fresh_exec_snap_matching_baseline_stays_ok(
         Arc::clone(&st),
         local_fn,
         broker_fn,
+        || false,
         Duration::from_millis(10),
     );
 

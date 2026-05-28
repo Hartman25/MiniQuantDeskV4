@@ -794,6 +794,8 @@ impl AppState {
 
         {
             let snap_arc = Arc::clone(&self.execution_snapshot);
+            // Separate clone for the settle closure — snap_arc is moved into local_fn.
+            let snap_arc_settle = Arc::clone(&self.execution_snapshot);
             let sides_arc = Arc::clone(&self.local_order_sides);
             let broker_arc = Arc::clone(&self.broker_snapshot);
             // BROKER-POSITION-BASELINE-ADOPTION-01: when no execution run is active,
@@ -829,10 +831,20 @@ impl AppState {
                 let schema = broker_arc.try_read().ok().and_then(|g| g.clone())?;
                 reconcile_broker_snapshot_from_schema(&schema).ok()
             };
+            // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01: defer background reconcile
+            // disarm when the execution snapshot signals a recent terminal fill.
+            let settle_fn = move || {
+                snap_arc_settle
+                    .try_read()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|s| s.has_recent_terminal_fill))
+                    .unwrap_or(false)
+            };
             spawn_reconcile_tick(
                 Arc::clone(self),
                 local_fn,
                 broker_fn,
+                settle_fn,
                 RECONCILE_TICK_INTERVAL,
             );
         }

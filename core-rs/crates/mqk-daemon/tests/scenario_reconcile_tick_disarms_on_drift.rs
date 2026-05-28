@@ -53,6 +53,7 @@ async fn daemon_or_runtime_path_uses_monotonic_reconcile() {
         Arc::clone(&st),
         local_fn,
         broker_fn,
+        || false,
         Duration::from_millis(10),
     );
 
@@ -81,6 +82,7 @@ async fn reconcile_tick_does_not_disarm_on_clean_fresh_snapshot() {
         Arc::clone(&st),
         local_fn,
         broker_fn,
+        || false,
         Duration::from_millis(10),
     );
 
@@ -127,6 +129,7 @@ async fn stale_snapshot_cannot_reenable_dispatch() {
         Arc::clone(&st),
         local_fn,
         broker_fn,
+        || false,
         Duration::from_millis(10),
     );
 
@@ -158,6 +161,7 @@ async fn placeholder_snapshot_path_fails_closed() {
         Arc::clone(&st),
         local_fn,
         broker_fn,
+        || false,
         Duration::from_millis(10),
     );
 
@@ -195,6 +199,7 @@ async fn missing_broker_snapshot_fails_closed() {
         Arc::clone(&st),
         local_fn,
         broker_fn,
+        || false,
         Duration::from_millis(10),
     );
 

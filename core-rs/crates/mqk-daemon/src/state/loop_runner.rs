@@ -585,14 +585,21 @@ fn drop_outside_async_context<T: Send + 'static>(val: T) {
 // ---------------------------------------------------------------------------
 
 /// Spawn a background task that periodically runs a reconcile tick (R3-1).
-pub fn spawn_reconcile_tick<L, B>(
+///
+/// `settle_fn` — returns `true` when a terminal-fill broker-snapshot settle
+/// window is active (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01).  When true and
+/// reconcile is dirty, the background tick defers the disarm rather than
+/// immediately halting, mirroring the orchestrator's Phase 0c deferral.
+pub fn spawn_reconcile_tick<L, B, S>(
     state: Arc<AppState>,
     local_fn: L,
     broker_fn: B,
+    settle_fn: S,
     interval: Duration,
 ) where
     L: Fn() -> mqk_reconcile::LocalSnapshot + Send + 'static,
     B: Fn() -> Option<mqk_reconcile::BrokerSnapshot> + Send + 'static,
+    S: Fn() -> bool + Send + 'static,
 {
     tokio::spawn(async move {
         let start = tokio::time::Instant::now() + interval;
@@ -631,12 +638,26 @@ pub fn spawn_reconcile_tick<L, B>(
                         .await;
                 }
                 Ok(report) => {
-                    publish_reconcile_failure(
-                        &state,
-                        reconcile_status_from_report(&report, &broker, &watermark),
-                        "reconcile drift detected - system disarmed (REC-01R)",
-                    )
-                    .await;
+                    // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01: if a terminal fill
+                    // was applied within the settle grace window, defer this tick's
+                    // disarm rather than halting immediately.  The orchestrator's
+                    // Phase 0c carries the same deferral; both must agree to avoid
+                    // the background tick racing ahead and halting first.
+                    if settle_fn() {
+                        tracing::debug!(
+                            "reconcile_tick_deferred_terminal_fill_settle: \
+                             dirty reconcile within fill settle window; \
+                             skipping disarm this tick \
+                             (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01)"
+                        );
+                    } else {
+                        publish_reconcile_failure(
+                            &state,
+                            reconcile_status_from_report(&report, &broker, &watermark),
+                            "reconcile drift detected - system disarmed (REC-01R)",
+                        )
+                        .await;
+                    }
                 }
                 Err(stale) => {
                     let previous = state.current_reconcile_snapshot().await;
