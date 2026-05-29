@@ -809,6 +809,24 @@ Reason: Previous runtime lease issue was fixed by increasing lease TTL, but reqw
 
 Constraint: Do not touch broker behavior until current paper/autonomous path is stable or this becomes the first proven blocker.
 
+### STRATEGY-EQUITY-PERCENT-SIZING-01 — OPEN
+
+**Purpose:** Add percent-of-equity sizing to `intraday_scalper` so position size scales with account equity/buying power rather than a fixed share count.
+
+**Prerequisite:** Account equity or buying power must be surfaced in the strategy execution context (`StrategyContext` or an injected snapshot) before any percent-of-equity math is safe. That wiring does not currently exist.
+
+**Dependency:** Account snapshot (equity or buying_power field from Alpaca REST) must be available to the strategy engine at `on_bar` call time.
+
+**Background:** `STRATEGY-POSITION-SIZING-01` (commit f83ca51, 2026-05-29) added static sizing caps via `MQK_STRATEGY_MAX_TARGET_QTY` and `MQK_STRATEGY_MAX_POSITION_NOTIONAL_USD`. Those caps are config-driven and do not use live account balance. Percent-of-equity sizing requires a live or cached account balance query that is not yet wired.
+
+**Hard rules for implementation:**
+- Hard max notional cap and hard max share cap must still apply even when percent sizing is active.
+- Percent sizing must be testable without broker/API calls (injected snapshot or env-overridable mock).
+- Default behavior (no percent config set) must remain the existing static sizing.
+- Fail-closed: if equity is unavailable or zero, fall back to static target_qty (do not guess or optimistically size up).
+
+**Status:** OPEN — do not start until account equity is provably available in the strategy context.
+
 ---
 
 ## 14. DB / Migration Failure Tracking
