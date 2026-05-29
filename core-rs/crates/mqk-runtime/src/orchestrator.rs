@@ -154,6 +154,18 @@ where
     /// has already been applied and the broker snapshot will refresh within
     /// `TERMINAL_FILL_SETTLE_GRACE_SECS`; if not, genuine drift fires normally.
     recently_applied_fills: VecDeque<RecentTerminalFill>,
+    /// RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01: Injectable
+    /// broker snapshot refresher called when the terminal-fill settle grace
+    /// has expired and drift remains.  Returns a fresh `BrokerSnapshot` for
+    /// immediate re-evaluation in Phase 0c, or `None` when the adapter is
+    /// unavailable or the fetch fails.
+    ///
+    /// `None` by default (no refresh is attempted; fail-closed).  Set via
+    /// `set_terminal_fill_expiry_refresher` after construction.  The production
+    /// wiring in `orchestrator_build.rs` captures an `Arc<AlpacaBrokerAdapter>`
+    /// and also updates `AppState::broker_snapshot` as a cache side-effect so
+    /// subsequent ticks and the background reconcile see the fresh data.
+    terminal_fill_expiry_refresher: Option<Box<dyn Fn() -> Option<BrokerSnapshot> + Send + Sync>>,
 }
 /// Grace window for the pending-fill-propagation deferral in Phase 0c.
 ///
@@ -181,6 +193,13 @@ const TERMINAL_FILL_SETTLE_GRACE_SECS: i64 = 180;
 
 /// Maximum recent terminal fills to track in memory.
 const RECENT_FILLS_RING_CAP: usize = 50;
+/// Extended lookback window for the terminal-fill expiry refresher.
+///
+/// When `TERMINAL_FILL_SETTLE_GRACE_SECS` has expired, Phase 0c calls the
+/// refresher if any fill within this wider window still direction-explains
+/// the drift.  2× the grace window bounds the search while covering the
+/// case where the broker REST snapshot lags by more than the grace window.
+const TERMINAL_FILL_EXPIRY_LOOKAHEAD_SECS: i64 = TERMINAL_FILL_SETTLE_GRACE_SECS * 2;
 
 /// Record of a recently applied terminal fill.
 ///
@@ -352,6 +371,60 @@ fn drift_is_consistent_with_recent_terminal_fills(
     true
 }
 
+/// Returns `true` if any fill that has JUST expired from the settle grace
+/// window still direction-explains the current drift.
+///
+/// Used by Phase 0c to decide whether to attempt a final broker snapshot
+/// refresh before firing RECONCILE_DRIFT.  Unlike
+/// `drift_is_consistent_with_recent_terminal_fills`, this function accepts
+/// fills whose elapsed time is in `[TERMINAL_FILL_SETTLE_GRACE_SECS,
+/// TERMINAL_FILL_EXPIRY_LOOKAHEAD_SECS)` — i.e. fills that have recently
+/// expired from the grace window.
+///
+/// Returns `false` if no qualifying fills exist or the drift direction /
+/// magnitude is inconsistent with the expired fills.
+fn has_expired_terminal_fill_explaining_drift(
+    recent_fills: &std::collections::VecDeque<RecentTerminalFill>,
+    local: &LocalSnapshot,
+    broker: &BrokerSnapshot,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let mut expected: BTreeMap<String, i64> = BTreeMap::new();
+    let mut any_in_lookahead = false;
+    for fill in recent_fills {
+        let elapsed = (now - fill.applied_at).num_seconds();
+        if (TERMINAL_FILL_SETTLE_GRACE_SECS..TERMINAL_FILL_EXPIRY_LOOKAHEAD_SECS).contains(&elapsed)
+        {
+            any_in_lookahead = true;
+            *expected.entry(fill.symbol.clone()).or_default() += fill.signed_delta;
+        }
+    }
+    if !any_in_lookahead {
+        return false;
+    }
+    let mut all_syms: BTreeSet<String> = BTreeSet::new();
+    all_syms.extend(local.positions.keys().cloned());
+    all_syms.extend(broker.positions.keys().cloned());
+    for sym in &all_syms {
+        let lq = local.positions.get(sym).copied().unwrap_or(0);
+        let bq = broker.positions.get(sym).copied().unwrap_or(0);
+        let actual = lq - bq;
+        if actual != 0 {
+            let exp = expected.get(sym).copied().unwrap_or(0);
+            if exp == 0 {
+                return false;
+            }
+            if (exp > 0) != (actual > 0) {
+                return false;
+            }
+            if actual.abs() > exp.abs() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[derive(Debug)]
 enum MonotonicReconcileError {
     Dirty,
@@ -424,8 +497,22 @@ where
             last_risk_denial: None,
             recent_denials: VecDeque::new(),
             recently_applied_fills: VecDeque::new(),
+            terminal_fill_expiry_refresher: None,
         }
     }
+
+    /// Set the terminal-fill expiry refresher.
+    ///
+    /// Called after construction in production to wire the Alpaca REST adapter.
+    /// Tests that exercise the forced-refresh path inject a pure closure here.
+    /// (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01)
+    pub fn set_terminal_fill_expiry_refresher(
+        &mut self,
+        f: Box<dyn Fn() -> Option<BrokerSnapshot> + Send + Sync>,
+    ) {
+        self.terminal_fill_expiry_refresher = Some(f);
+    }
+
     /// Execute one orchestrator tick.
     ///
     /// Phases:
@@ -640,14 +727,137 @@ where
                                  (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01)"
                             );
                         } else {
-                            // Mandatory halt + disarm - same fail-closed contract as
-                            // Phase 0b.  Grace either expired or drift is unexplained.
-                            persist_halt_and_disarm(&self.pool, self.run_id, now, "ReconcileDrift")
+                            // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01:
+                            // Grace expired or drift direction is not explained by
+                            // in-grace fills.  Before halting, check if a recently-
+                            // expired terminal fill (within the lookahead window) still
+                            // direction-explains the drift.  If so, force one final
+                            // broker snapshot refresh and re-evaluate:
+                            //
+                            //   - Clean after refresh → broker finally caught up; no halt.
+                            //   - Still dirty after refresh → halt with fresh evidence.
+                            //   - Refresh unavailable/failed → fail closed (halt).
+                            //   - No explaining expired fill → genuine drift; halt.
+                            let should_try_refresh = has_expired_terminal_fill_explaining_drift(
+                                &self.recently_applied_fills,
+                                &local,
+                                &broker,
+                                now,
+                            );
+                            if should_try_refresh {
+                                match self.terminal_fill_expiry_refresher.as_ref().map(|f| f()) {
+                                    Some(Some(fresh_broker)) => {
+                                        tracing::info!(
+                                            run_id = %self.run_id,
+                                            "terminal_fill_expiry_refresh_attempted: \
+                                             grace expired; re-evaluating with fresh \
+                                             broker snapshot \
+                                             (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01)"
+                                        );
+                                        match evaluate_monotonic_reconcile(
+                                            &mut self.reconcile_watermark,
+                                            &local,
+                                            &fresh_broker,
+                                        ) {
+                                            Ok(()) => {
+                                                tracing::info!(
+                                                    run_id = %self.run_id,
+                                                    "terminal_fill_expiry_refresh_resolved: \
+                                                     fresh broker snapshot matches local \
+                                                     position; RECONCILE_DRIFT suppressed \
+                                                     (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01)"
+                                                );
+                                                // Fresh snapshot is clean — continue.
+                                            }
+                                            Err(MonotonicReconcileError::Dirty) => {
+                                                tracing::error!(
+                                                    run_id = %self.run_id,
+                                                    "terminal_fill_expiry_refresh_still_dirty: \
+                                                     fresh broker snapshot still mismatches; \
+                                                     RECONCILE_DRIFT confirmed \
+                                                     (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01)"
+                                                );
+                                                persist_halt_and_disarm(
+                                                    &self.pool,
+                                                    self.run_id,
+                                                    now,
+                                                    "ReconcileDrift",
+                                                )
+                                                .await?;
+                                                return Err(anyhow!(
+                                                    "RECONCILE_DRIFT: run {} halted and disarmed; \
+                                                     fresh broker snapshot still mismatches after \
+                                                     terminal-fill expiry refresh; dispatch refused",
+                                                    self.run_id
+                                                ));
+                                            }
+                                            Err(MonotonicReconcileError::Stale(stale)) => {
+                                                tracing::error!(
+                                                    run_id = %self.run_id,
+                                                    stale = %stale,
+                                                    "terminal_fill_expiry_refresh_stale: \
+                                                     refreshed snapshot rejected as stale \
+                                                     (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01)"
+                                                );
+                                                persist_halt_and_disarm(
+                                                    &self.pool,
+                                                    self.run_id,
+                                                    now,
+                                                    "ReconcileDrift",
+                                                )
+                                                .await?;
+                                                return Err(anyhow!(
+                                                    "RECONCILE_SNAPSHOT_STALE: run {} halted; \
+                                                     refreshed snapshot stale after \
+                                                     terminal-fill expiry: {}",
+                                                    self.run_id,
+                                                    stale
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Some(None) | None => {
+                                        // Refresher absent or fetch failed — fail closed.
+                                        tracing::error!(
+                                            run_id = %self.run_id,
+                                            refresher_configured =
+                                                self.terminal_fill_expiry_refresher.is_some(),
+                                            "terminal_fill_expiry_refresh_unavailable: \
+                                             terminal-fill settle grace expired; broker \
+                                             snapshot refresh unavailable or failed; \
+                                             halting fail-closed \
+                                             (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01)"
+                                        );
+                                        persist_halt_and_disarm(
+                                            &self.pool,
+                                            self.run_id,
+                                            now,
+                                            "ReconcileDrift",
+                                        )
+                                        .await?;
+                                        return Err(anyhow!(
+                                            "RECONCILE_DRIFT: run {} halted and disarmed; \
+                                             terminal-fill settle grace expired and broker \
+                                             snapshot refresh unavailable; dispatch refused",
+                                            self.run_id
+                                        ));
+                                    }
+                                }
+                            } else {
+                                // No explaining fills in lookahead window — genuine drift.
+                                persist_halt_and_disarm(
+                                    &self.pool,
+                                    self.run_id,
+                                    now,
+                                    "ReconcileDrift",
+                                )
                                 .await?;
-                            return Err(anyhow!(
-                                "RECONCILE_DRIFT: run {} halted and disarmed; dispatch refused",
-                                self.run_id
-                            ));
+                                return Err(anyhow!(
+                                    "RECONCILE_DRIFT: run {} halted and disarmed; \
+                                     dispatch refused",
+                                    self.run_id
+                                ));
+                            }
                         }
                     }
                     Err(MonotonicReconcileError::Stale(stale)) => {

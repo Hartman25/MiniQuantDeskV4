@@ -334,7 +334,7 @@ impl AppState {
                 .unwrap_or_else(|_| broker_seed_reconcile.clone())
         };
 
-        Ok(mqk_runtime::orchestrator::ExecutionOrchestrator::new(
+        let mut orch = mqk_runtime::orchestrator::ExecutionOrchestrator::new(
             db,
             gateway,
             order_map,
@@ -347,7 +347,41 @@ impl AppState {
             mqk_runtime::orchestrator::WallClock,
             Box::new(local_snapshot_provider),
             Box::new(broker_snapshot_provider),
-        ))
+        );
+
+        // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01: wire the
+        // terminal-fill expiry refresher for the External-source path so
+        // Phase 0c forces a final broker REST fetch before halting on grace
+        // expiry.  Uses the same adapter as the periodic snapshot refresh.
+        if self.broker_snapshot_source == BrokerSnapshotTruthSource::External {
+            let expiry_adapter: Option<std::sync::Arc<mqk_broker_alpaca::AlpacaBrokerAdapter>> = {
+                let guard = self.external_snapshot_refresher.read().await;
+                guard.as_ref().cloned()
+            };
+            if let Some(adapter) = expiry_adapter {
+                let expiry_broker_snapshots = Arc::clone(&self.broker_snapshot);
+                orch.set_terminal_fill_expiry_refresher(Box::new(move || {
+                    let now = chrono::Utc::now();
+                    let schema_fresh = match tokio::task::block_in_place(|| {
+                        adapter.fetch_broker_snapshot(now)
+                    }) {
+                        Ok(s) => s,
+                        Err(err) => {
+                            tracing::warn!("terminal_fill_expiry_refresh_fetch_failed error={err}");
+                            return None;
+                        }
+                    };
+                    // Update AppState cache so subsequent ticks and the
+                    // background reconcile see the fresh data without re-fetching.
+                    if let Ok(mut guard) = expiry_broker_snapshots.try_write() {
+                        *guard = Some(schema_fresh.clone());
+                    }
+                    reconcile_broker_snapshot_from_schema(&schema_fresh).ok()
+                }));
+            }
+        }
+
+        Ok(orch)
     }
 }
 
