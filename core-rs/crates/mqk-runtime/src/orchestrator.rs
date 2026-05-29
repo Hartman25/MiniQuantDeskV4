@@ -866,6 +866,21 @@ where
         for (_inbox_id, msg_id, event, fill_received_at_utc) in apply_queue {
             self.refresh_or_acquire_runtime_leadership().await?;
             let internal_id = event.internal_order_id().to_string();
+            // WS-REB-01: fills that reached the inbox via WS ingest for orders
+            // with no run ownership.  The Phase 2 REB-01 guard only covers
+            // REST-polled events; WS-ingested fills for orphan orders bypass
+            // that guard and must be intercepted here before Section C halts.
+            if is_historical_fill_no_run_ownership(&event, &self.oms_orders) {
+                tracing::info!(
+                    run_id = %self.run_id,
+                    broker_message_id = %msg_id,
+                    internal_order_id = %internal_id,
+                    "exec_broker_fill_skipped_no_run_ownership_phase3"
+                );
+                let now = self.time_source.now_utc();
+                mqk_db::inbox_mark_applied(&self.pool, self.run_id, &msg_id, now).await?;
+                continue;
+            }
             // Steps 6+7: OMS context guard → portfolio apply (Section C).
             //
             // apply_fill_step enforces that fill events cannot reach portfolio
