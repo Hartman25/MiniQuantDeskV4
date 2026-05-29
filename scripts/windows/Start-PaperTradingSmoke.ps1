@@ -86,6 +86,85 @@ Write-Step "Repo root: $RepoRoot"
 
 $DaemonBaseUrl = "http://127.0.0.1:$DaemonPort"
 
+# Script-scope log vars -- set properly in STEP 7; pre-declared for StrictMode.
+$stdoutLog     = $null
+$stderrLog     = $null
+$logDir        = $null
+$operatorToken = $null
+
+# ---------------------------------------------------------------------------
+# Helper: Get-PaperMdBarSummary
+# Queries md_bars for a symbol/timeframe and returns a summary object with
+# completed_count, min_time, max_time, latest_bar. Robust against multiline
+# psql output by using -t -A -q flags and numeric-line filtering.
+# Returns $null on query failure.
+# ---------------------------------------------------------------------------
+function Get-PaperMdBarSummary {
+    param([string]$Symbol, [string]$Timeframe)
+    $result = [pscustomobject]@{
+        completed_count = 0
+        min_time        = $null
+        max_time        = $null
+        latest_bar      = $null
+        query_ok        = $false
+    }
+    try {
+        $countQ = "SELECT count(*) FROM md_bars WHERE symbol='$Symbol' AND timeframe='$Timeframe' AND is_complete=true"
+        $rawC   = docker exec mqk-paper-postgres psql -U postgres -d miniquantdesk_paper -t -A -q -c $countQ 2>$null
+        $numC   = ($rawC -join '') -replace '\s',''
+        if ($numC -match '^\d+$') { $result.completed_count = [int]$numC } else { return $result }
+
+        $detailQ = "SELECT min(bar_time_utc)::text, max(bar_time_utc)::text FROM md_bars WHERE symbol='$Symbol' AND timeframe='$Timeframe' AND is_complete=true"
+        $rawD    = docker exec mqk-paper-postgres psql -U postgres -d miniquantdesk_paper -t -A -q -F'|' -c $detailQ 2>$null
+        $lineD   = ($rawD -join '').Trim()
+        if ($lineD -match '\|') {
+            $parts = $lineD -split '\|'
+            if ($parts.Count -ge 2) {
+                $result.min_time  = $parts[0].Trim()
+                $result.max_time  = $parts[1].Trim()
+                $result.latest_bar = $parts[1].Trim()
+            }
+        }
+        $result.query_ok = $true
+    } catch {
+        # query failure -- return with query_ok=false
+    }
+    return $result
+}
+
+# ---------------------------------------------------------------------------
+# Helper: Write-EvidenceCapture
+# On startup failure, captures daemon log paths and (if daemon is up) dumps
+# status endpoints to an evidence folder under exports\smoke\evidence_*.
+# Never prints secrets.
+# ---------------------------------------------------------------------------
+function Write-EvidenceCapture {
+    param([string]$Reason)
+    Write-Fail "Evidence capture triggered: $Reason"
+    $evStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $evDir   = Join-Path $RepoRoot "exports\smoke\evidence_$evStamp"
+    try { New-Item -ItemType Directory -Force -Path $evDir | Out-Null } catch {}
+
+    if ($null -ne $script:stdoutLog -and (Test-Path $script:stdoutLog)) {
+        try { Copy-Item $script:stdoutLog (Join-Path $evDir 'daemon.stdout.log') -ErrorAction SilentlyContinue } catch {}
+        Write-Fail "  daemon stdout: $($script:stdoutLog)"
+    }
+    if ($null -ne $script:stderrLog -and (Test-Path $script:stderrLog)) {
+        try { Copy-Item $script:stderrLog (Join-Path $evDir 'daemon.stderr.log') -ErrorAction SilentlyContinue } catch {}
+        Write-Fail "  daemon stderr: $($script:stderrLog)"
+    }
+    # Best-effort status dumps if daemon is reachable
+    try {
+        $evStatus = Invoke-WebRequest -Uri "$DaemonBaseUrl/api/v1/system/status" -Method GET -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
+        $evStatus.Content | Set-Content (Join-Path $evDir 'system_status.json') -Encoding ASCII -ErrorAction SilentlyContinue
+    } catch {}
+    try {
+        $evReady = Invoke-WebRequest -Uri "$DaemonBaseUrl/api/v1/autonomous/readiness" -Method GET -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
+        $evReady.Content | Set-Content (Join-Path $evDir 'readiness.json') -Encoding ASCII -ErrorAction SilentlyContinue
+    } catch {}
+    Write-Fail "  evidence folder: $evDir"
+}
+
 # ---------------------------------------------------------------------------
 # CHECK-ONLY mode: verify prerequisites without starting anything
 # ---------------------------------------------------------------------------
@@ -118,6 +197,32 @@ if ($CheckOnly) {
         Write-Ok "Daemon binary present at core-rs\target\release\mqk-daemon.exe"
     } else {
         Write-Warn "Daemon binary not yet built. It will be built on first full run."
+    }
+
+    # STEP 5B dry-check: query md_bars bar count without ingesting (read-only)
+    $coSymbol    = if ($env:MQK_STRATEGY_SYMBOL)    { $env:MQK_STRATEGY_SYMBOL }    else { 'AAPL' }
+    $coTimeframe = if ($env:MQK_STRATEGY_MD_TIMEFRAME) { $env:MQK_STRATEGY_MD_TIMEFRAME } else { '1D' }
+    try {
+        $null = Get-Command 'docker' -ErrorAction Stop
+        $coPgCheck = docker exec mqk-paper-postgres pg_isready -U postgres -d miniquantdesk_paper 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $coSummary = Get-PaperMdBarSummary -Symbol $coSymbol -Timeframe $coTimeframe
+            if ($coSummary.query_ok) {
+                Write-Ok ("STEP 5B dry-check: md_bars completed rows for ${coSymbol}/${coTimeframe} = " + $coSummary.completed_count)
+                if ($null -ne $coSummary.min_time) {
+                    Write-Ok ("  bar range: min=$($coSummary.min_time)  max=$($coSummary.max_time)")
+                }
+                if ($coSummary.completed_count -lt 5) {
+                    Write-Warn "Fewer than 5 completed bars -- ingest needed before full run."
+                }
+            } else {
+                Write-Warn "STEP 5B dry-check: could not query md_bars (DB may be unavailable in CheckOnly)."
+            }
+        } else {
+            Write-Warn "STEP 5B dry-check: paper Postgres container not ready -- skipping bar count."
+        }
+    } catch {
+        Write-Warn "STEP 5B dry-check: docker not available -- skipping bar count."
     }
 
     Write-Section "CHECK-ONLY complete"
@@ -340,7 +445,7 @@ if ($null -ne $sqlxCmd) {
 Write-Ok "DB migrations applied."
 
 # ---------------------------------------------------------------------------
-# STEP 5B: Market-data context prep — AAPL/1D bars for strategy lookback
+# STEP 5B: Market-data context prep -- AAPL/1D bars for strategy lookback
 # ---------------------------------------------------------------------------
 # The intraday_scalper requires LOOKBACK=5 completed AAPL/1D bars from md_bars.
 # This step loads from the backup CSV (no API credit) then tops off via TwelveData
@@ -365,13 +470,17 @@ if ($env:MQK_DATABASE_URL -notmatch "5440") {
 }
 
 # Check how many completed bars already exist for this symbol/timeframe.
-$mdCountQuery = "select count(*) from md_bars where symbol='$mdSymbol' and timeframe='$mdTimeframe' and is_complete=true;"
-$mdCurrentRows = 0
-try {
-    $mdCurrentRows = [int](docker exec mqk-paper-postgres psql -U postgres -d miniquantdesk_paper -t -c $mdCountQuery 2>&1).Trim()
-} catch { $mdCurrentRows = 0 }
+# Uses Get-PaperMdBarSummary (psql -t -A -q) to avoid multiline/notice parse failures.
+$mdSummaryBefore = Get-PaperMdBarSummary -Symbol $mdSymbol -Timeframe $mdTimeframe
+$mdCurrentRows   = $mdSummaryBefore.completed_count
+if (-not $mdSummaryBefore.query_ok) {
+    Write-Warn "md_bars count query failed -- assuming 0 rows. Will attempt ingest."
+}
 
 Write-Step "md_bars current completed rows for ${mdSymbol}/${mdTimeframe}: $mdCurrentRows"
+if ($mdSummaryBefore.query_ok -and $null -ne $mdSummaryBefore.min_time) {
+    Write-Step "  bar range: min=$($mdSummaryBefore.min_time)  max=$($mdSummaryBefore.max_time)"
+}
 
 $mdBackupCsv = Join-Path $RepoRoot "exports\md_backup\$mdTimeframe\${mdSymbol}_${mdTimeframe}.csv"
 $coreRs      = Join-Path $RepoRoot "core-rs"
@@ -416,16 +525,21 @@ if ($env:TWELVEDATA_API_KEY) {
     Write-Warn "TWELVEDATA_API_KEY not set; skipping provider sync top-off."
 }
 
-# Final row count proof.
-try {
-    $mdFinalRows = [int](docker exec mqk-paper-postgres psql -U postgres -d miniquantdesk_paper -t -c $mdCountQuery 2>&1).Trim()
+# Final row count proof using robust helper.
+$mdSummaryAfter = Get-PaperMdBarSummary -Symbol $mdSymbol -Timeframe $mdTimeframe
+if ($mdSummaryAfter.query_ok) {
+    $mdFinalRows = $mdSummaryAfter.completed_count
     Write-Ok "md_bars completed rows after prep: $mdFinalRows (${mdSymbol}/${mdTimeframe})"
+    if ($null -ne $mdSummaryAfter.min_time) {
+        Write-Ok "  bar range: min=$($mdSummaryAfter.min_time)  max=$($mdSummaryAfter.max_time)  latest=$($mdSummaryAfter.latest_bar)"
+    }
     if ($mdFinalRows -lt 5) {
+        Write-EvidenceCapture "STEP 5B: insufficient bars (have $mdFinalRows, need >= 5)"
         Write-Fail "Insufficient bars for strategy lookback (need >= 5, have $mdFinalRows). Ingest historical data before smoke."
         exit 1
     }
-} catch {
-    Write-Warn "Could not verify md_bars row count. Proceeding."
+} else {
+    Write-Warn "Could not verify md_bars row count after prep. Proceeding with caution."
 }
 
 # ---------------------------------------------------------------------------
@@ -555,11 +669,15 @@ function Wait-DaemonReachable {
 # ---------------------------------------------------------------------------
 Write-Section "STEP 7: Start daemon from current HEAD"
 
-$logDir = Join-Path $RepoRoot 'exports\smoke'
+$logDir    = Join-Path $RepoRoot 'exports\smoke'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-$stamp      = Get-Date -Format 'yyyyMMdd_HHmmss'
-$stdoutLog  = Join-Path $logDir "daemon_$stamp.stdout.log"
-$stderrLog  = Join-Path $logDir "daemon_$stamp.stderr.log"
+$stamp     = Get-Date -Format 'yyyyMMdd_HHmmss'
+$stdoutLog = Join-Path $logDir "daemon_$stamp.stdout.log"
+$stderrLog = Join-Path $logDir "daemon_$stamp.stderr.log"
+# Also set script-scope vars so Write-EvidenceCapture (called from any step) can reference them.
+$script:stdoutLog = $stdoutLog
+$script:stderrLog = $stderrLog
+$script:logDir    = $logDir
 
 Write-Step "Starting: $daemonBin"
 Write-Step "stdout -> $stdoutLog"
@@ -684,10 +802,23 @@ $adoptResp = Invoke-DaemonPost `
 if ($adoptResp.StatusCode -eq 200) {
     Write-Ok "Broker position baseline adopted: adopted=$($adoptResp.Body.adopted)  baseline_id=$($adoptResp.Body.baseline_id)"
 } elseif ($adoptResp.StatusCode -eq 409) {
-    Write-Ok "Broker position baseline already adopted (409 conflict - idempotent path): $($adoptResp.RawBody)"
+    # 409 means a baseline was already adopted for this run snapshot.
+    # Prior fills may have dirtied reconcile since that adoption; verify reconcile before proceeding.
+    Write-Warn "Baseline adoption returned 409 (already adopted for current snapshot): $($adoptResp.RawBody)"
+    Write-Warn "Verifying reconcile is clean after prior adoption..."
+    $adoptCheckRec = $null
+    try { $adoptCheckRec = Invoke-DaemonGet -Path '/api/v1/reconcile/status' } catch {}
+    if ($null -ne $adoptCheckRec -and $adoptCheckRec.status -eq 'dirty') {
+        Write-Fail "Reconcile is dirty after 409 baseline (prior fills changed positions). Manual operator action required."
+        Write-Fail "Review: GET /api/v1/reconcile/mismatches  then re-run this script to force fresh adoption."
+        Write-EvidenceCapture "STEP 11: reconcile dirty after 409 baseline adoption"
+        exit 1
+    }
+    Write-Ok "Reconcile clean after 409 baseline (idempotent path confirmed)."
 } else {
     Write-Fail "adopt-broker-position-baseline failed (HTTP $($adoptResp.StatusCode))."
     if ($adoptResp.RawBody) { Write-Fail "Response: $($adoptResp.RawBody)" }
+    Write-EvidenceCapture "STEP 11: baseline adoption failed HTTP $($adoptResp.StatusCode)"
     exit 1
 }
 
@@ -772,6 +903,14 @@ if ($null -ne $preflight) {
     $preflightBlockers = if ($null -ne $preflight.PSObject.Properties['blockers']) { @($preflight.blockers) } else { @() }
     if ($preflightBlockers.Count -gt 0) {
         Write-Warn "Preflight blockers: $($preflightBlockers -join '; ')"
+    }
+    # Hard-gate: if deployment_start_allowed=false, refuse to proceed to start-system.
+    # Off-hours session_not_in_window is expected; operator may use -NoStartRuntime.
+    if ($preflight.deployment_start_allowed -eq $false) {
+        Write-Fail "deployment_start_allowed=false -- startup gated. Blockers above must be resolved."
+        Write-Fail "If the only blocker is session timing, use -NoStartRuntime to prep without starting."
+        Write-EvidenceCapture "STEP 14: deployment_start_allowed=false"
+        exit 1
     }
 }
 

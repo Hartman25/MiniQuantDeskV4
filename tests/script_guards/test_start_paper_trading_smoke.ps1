@@ -239,7 +239,9 @@ if (Test-Path $TargetScript) {
     if ($opr10High.Count -eq 0) {
         Pass 'OPR10' ("Script is ASCII-safe (no non-ASCII bytes after BOM; BOM offset=" + $opr10Offset + ")")
     } else {
-        Fail 'OPR10' ("Found " + $opr10High.Count + " non-ASCII byte(s) at positions: " + ($opr10High[0..4] -join ', '))
+        # Limit preview to available elements to avoid StrictMode array-bounds throw.
+        $opr10Preview = if ($opr10High.Count -gt 5) { $opr10High[0..4] } else { $opr10High[0..($opr10High.Count - 1)] }
+        Fail 'OPR10' ("Found " + $opr10High.Count + " non-ASCII byte(s) at positions: " + ($opr10Preview -join ', '))
     }
 } else {
     Fail 'OPR10' 'Cannot run ASCII check - script file not found (see OPR01)'
@@ -278,6 +280,56 @@ if ($scriptText -match '\[switch\]\$CheckOnly') {
     Pass 'OPR12' 'Script declares -CheckOnly switch parameter'
 } else {
     Fail 'OPR12' 'Script must declare -CheckOnly switch parameter'
+}
+
+# ---------------------------------------------------------------------------
+# OPR13: STEP 5B uses robust psql count extraction (not bare [int](...2>&1).Trim())
+# Requires -A (unaligned) flag or Get-PaperMdBarSummary helper to avoid multiline failures.
+# ---------------------------------------------------------------------------
+$hasRobustCount = (
+    ($scriptText -match 'Get-PaperMdBarSummary') -or
+    ($scriptText -match 'psql.*-A.*-q|-A.*-t.*psql|psql.*-t.*-A')
+)
+if ($hasRobustCount) {
+    Pass 'OPR13' 'STEP 5B uses robust psql count extraction (Get-PaperMdBarSummary or -A -q flags)'
+} else {
+    Fail 'OPR13' 'STEP 5B must use Get-PaperMdBarSummary or psql with -A -q flags to avoid multiline parse failures'
+}
+
+# ---------------------------------------------------------------------------
+# OPR14: STEP 5B gates on minimum completed bars threshold (>= 5)
+# ---------------------------------------------------------------------------
+if ($scriptText -match 'mdFinalRows.*-lt.*5|-lt.*5.*mdFinalRows|Insufficient bars') {
+    Pass 'OPR14' 'STEP 5B gates on minimum completed bars threshold'
+} else {
+    Fail 'OPR14' 'STEP 5B must gate on minimum completed bars (need >= 5)'
+}
+
+# ---------------------------------------------------------------------------
+# OPR15: Script gates on deployment_start_allowed=false before start-system
+# ---------------------------------------------------------------------------
+if ($scriptText -match 'deployment_start_allowed.*false|deployment_start_allowed.*eq.*false') {
+    Pass 'OPR15' 'Script hard-gates on deployment_start_allowed=false'
+} else {
+    Fail 'OPR15' 'Script must hard-stop if deployment_start_allowed=false (STEP 14)'
+}
+
+# ---------------------------------------------------------------------------
+# OPR16: Script contains Write-EvidenceCapture or equivalent evidence pattern on failure
+# ---------------------------------------------------------------------------
+if ($scriptText -match 'Write-EvidenceCapture|evidence.folder|evidence_capture|EvidenceCapture') {
+    Pass 'OPR16' 'Script contains Write-EvidenceCapture evidence capture on failure'
+} else {
+    Fail 'OPR16' 'Script must include Write-EvidenceCapture or equivalent evidence capture on failure paths'
+}
+
+# ---------------------------------------------------------------------------
+# OPR17: CheckOnly mode covers STEP 5B bar count dry-check
+# ---------------------------------------------------------------------------
+if ($scriptText -match 'STEP 5B dry-check|5B.*dry.check|dry.check.*5B|Get-PaperMdBarSummary') {
+    Pass 'OPR17' 'CheckOnly mode covers STEP 5B bar count dry-check'
+} else {
+    Fail 'OPR17' 'CheckOnly mode must include STEP 5B bar count dry-check (read-only query)'
 }
 
 # ---------------------------------------------------------------------------
