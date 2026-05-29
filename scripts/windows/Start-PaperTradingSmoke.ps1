@@ -340,6 +340,95 @@ if ($null -ne $sqlxCmd) {
 Write-Ok "DB migrations applied."
 
 # ---------------------------------------------------------------------------
+# STEP 5B: Market-data context prep — AAPL/1D bars for strategy lookback
+# ---------------------------------------------------------------------------
+# The intraday_scalper requires LOOKBACK=5 completed AAPL/1D bars from md_bars.
+# This step loads from the backup CSV (no API credit) then tops off via TwelveData
+# sync-provider so the strategy has a full lookback window at session open.
+#
+# Safe: touches md_bars only. No orders/fills/outbox/inbox are created.
+# DB guard: MQK_DATABASE_URL must point to paper DB (port 5440).
+# ---------------------------------------------------------------------------
+Write-Section "STEP 5B: Market-data context prep (AAPL/1D bars)"
+
+$mdSymbol    = $env:MQK_STRATEGY_SYMBOL
+$mdTimeframe = $env:MQK_STRATEGY_MD_TIMEFRAME
+if ([string]::IsNullOrWhiteSpace($mdSymbol))    { $mdSymbol    = "AAPL" }
+if ([string]::IsNullOrWhiteSpace($mdTimeframe)) { $mdTimeframe = "1D"   }
+
+Write-Step "Market-data context: symbol=$mdSymbol timeframe=$mdTimeframe"
+
+# Safety guard: refuse if DATABASE_URL does not contain port 5440 (paper DB).
+if ($env:MQK_DATABASE_URL -notmatch "5440") {
+    Write-Fail "MQK_DATABASE_URL does not appear to be the paper DB (expected port 5440). Aborting market-data prep to prevent live/test DB mutation."
+    exit 1
+}
+
+# Check how many completed bars already exist for this symbol/timeframe.
+$mdCountQuery = "select count(*) from md_bars where symbol='$mdSymbol' and timeframe='$mdTimeframe' and is_complete=true;"
+$mdCurrentRows = 0
+try {
+    $mdCurrentRows = [int](docker exec mqk-paper-postgres psql -U postgres -d miniquantdesk_paper -t -c $mdCountQuery 2>&1).Trim()
+} catch { $mdCurrentRows = 0 }
+
+Write-Step "md_bars current completed rows for ${mdSymbol}/${mdTimeframe}: $mdCurrentRows"
+
+$mdBackupCsv = Join-Path $RepoRoot "exports\md_backup\$mdTimeframe\${mdSymbol}_${mdTimeframe}.csv"
+$coreRs      = Join-Path $RepoRoot "core-rs"
+$mqkCli      = "cargo"
+
+if ($mdCurrentRows -ge 30) {
+    Write-Ok "md_bars already has $mdCurrentRows completed bars for ${mdSymbol}/${mdTimeframe}. Running sync top-off only."
+} elseif (Test-Path $mdBackupCsv) {
+    Write-Step "Loading backup CSV: $mdBackupCsv"
+    Push-Location $coreRs
+    try {
+        & $mqkCli run -p mqk-cli --bin mqk-cli -- md ingest-csv `
+            --path $mdBackupCsv `
+            --timeframe $mdTimeframe `
+            --source db_backup 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "md ingest-csv failed (exit $LASTEXITCODE)."
+            exit 1
+        }
+    } finally { Pop-Location }
+    Write-Ok "Backup CSV ingest complete."
+} else {
+    Write-Warn "Backup CSV not found at $mdBackupCsv. Will attempt full sync from provider (requires TWELVEDATA_API_KEY)."
+}
+
+# Top-off via sync-provider (idempotent: skips symbols already current).
+if ($env:TWELVEDATA_API_KEY) {
+    Write-Step "Running sync-provider top-off for ${mdSymbol}/${mdTimeframe} ..."
+    Push-Location $coreRs
+    try {
+        & $mqkCli run -p mqk-cli --bin mqk-cli -- md sync-provider `
+            --source twelvedata `
+            --symbols $mdSymbol `
+            --timeframe $mdTimeframe `
+            --full-start "2024-01-01" 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "sync-provider top-off failed (exit $LASTEXITCODE). Proceeding with existing bars."
+        }
+    } finally { Pop-Location }
+    Write-Ok "sync-provider top-off complete."
+} else {
+    Write-Warn "TWELVEDATA_API_KEY not set; skipping provider sync top-off."
+}
+
+# Final row count proof.
+try {
+    $mdFinalRows = [int](docker exec mqk-paper-postgres psql -U postgres -d miniquantdesk_paper -t -c $mdCountQuery 2>&1).Trim()
+    Write-Ok "md_bars completed rows after prep: $mdFinalRows (${mdSymbol}/${mdTimeframe})"
+    if ($mdFinalRows -lt 5) {
+        Write-Fail "Insufficient bars for strategy lookback (need >= 5, have $mdFinalRows). Ingest historical data before smoke."
+        exit 1
+    }
+} catch {
+    Write-Warn "Could not verify md_bars row count. Proceeding."
+}
+
+# ---------------------------------------------------------------------------
 # STEP 6: Build daemon from current HEAD (if binary is missing or stale)
 # ---------------------------------------------------------------------------
 Write-Section "STEP 6: Ensure daemon binary"
