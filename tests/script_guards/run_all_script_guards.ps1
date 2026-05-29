@@ -18,6 +18,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 $Guards = @(
     'test_start_paper_trading_smoke.ps1',
+    'test_premarket_market_data_prep.ps1',
     'test_check_unsafe_patterns_ps1.ps1',
     'test_deprecated_scripts_retired.ps1',
     'test_db_proof_bootstrap_coverage.ps1'

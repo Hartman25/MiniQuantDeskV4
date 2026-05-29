@@ -114,7 +114,7 @@ function Get-PaperMdBarSummary {
         $numC   = ($rawC -join '') -replace '\s',''
         if ($numC -match '^\d+$') { $result.completed_count = [int]$numC } else { return $result }
 
-        $detailQ = "SELECT min(bar_time_utc)::text, max(bar_time_utc)::text FROM md_bars WHERE symbol='$Symbol' AND timeframe='$Timeframe' AND is_complete=true"
+        $detailQ = "SELECT to_timestamp(min(end_ts))::date::text, to_timestamp(max(end_ts))::date::text FROM md_bars WHERE symbol='$Symbol' AND timeframe='$Timeframe' AND is_complete=true"
         $rawD    = docker exec mqk-paper-postgres psql -U postgres -d miniquantdesk_paper -t -A -q -F'|' -c $detailQ 2>$null
         $lineD   = ($rawD -join '').Trim()
         if ($lineD -match '\|') {
@@ -454,7 +454,7 @@ Write-Ok "DB migrations applied."
 # Safe: touches md_bars only. No orders/fills/outbox/inbox are created.
 # DB guard: MQK_DATABASE_URL must point to paper DB (port 5440).
 # ---------------------------------------------------------------------------
-Write-Section "STEP 5B: Market-data context prep (AAPL/1D bars)"
+Write-Section "STEP 5B: Market-data context prep (delegates to Prep-PremarketMarketData.ps1)"
 
 $mdSymbol    = $env:MQK_STRATEGY_SYMBOL
 $mdTimeframe = $env:MQK_STRATEGY_MD_TIMEFRAME
@@ -469,77 +469,39 @@ if ($env:MQK_DATABASE_URL -notmatch "5440") {
     exit 1
 }
 
-# Check how many completed bars already exist for this symbol/timeframe.
-# Uses Get-PaperMdBarSummary (psql -t -A -q) to avoid multiline/notice parse failures.
-$mdSummaryBefore = Get-PaperMdBarSummary -Symbol $mdSymbol -Timeframe $mdTimeframe
-$mdCurrentRows   = $mdSummaryBefore.completed_count
-if (-not $mdSummaryBefore.query_ok) {
-    Write-Warn "md_bars count query failed -- assuming 0 rows. Will attempt ingest."
-}
-
-Write-Step "md_bars current completed rows for ${mdSymbol}/${mdTimeframe}: $mdCurrentRows"
-if ($mdSummaryBefore.query_ok -and $null -ne $mdSummaryBefore.min_time) {
-    Write-Step "  bar range: min=$($mdSummaryBefore.min_time)  max=$($mdSummaryBefore.max_time)"
-}
-
-$mdBackupCsv = Join-Path $RepoRoot "exports\md_backup\$mdTimeframe\${mdSymbol}_${mdTimeframe}.csv"
-$coreRs      = Join-Path $RepoRoot "core-rs"
-$mqkCli      = "cargo"
-
-if ($mdCurrentRows -ge 30) {
-    Write-Ok "md_bars already has $mdCurrentRows completed bars for ${mdSymbol}/${mdTimeframe}. Running sync top-off only."
-} elseif (Test-Path $mdBackupCsv) {
-    Write-Step "Loading backup CSV: $mdBackupCsv"
-    Push-Location $coreRs
-    try {
-        & $mqkCli run -p mqk-cli --bin mqk-cli -- md ingest-csv `
-            --path $mdBackupCsv `
-            --timeframe $mdTimeframe `
-            --source db_backup 2>&1 | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            Write-Fail "md ingest-csv failed (exit $LASTEXITCODE)."
-            exit 1
-        }
-    } finally { Pop-Location }
-    Write-Ok "Backup CSV ingest complete."
-} else {
-    Write-Warn "Backup CSV not found at $mdBackupCsv. Will attempt full sync from provider (requires TWELVEDATA_API_KEY)."
-}
-
-# Top-off via sync-provider (idempotent: skips symbols already current).
-if ($env:TWELVEDATA_API_KEY) {
-    Write-Step "Running sync-provider top-off for ${mdSymbol}/${mdTimeframe} ..."
-    Push-Location $coreRs
-    try {
-        & $mqkCli run -p mqk-cli --bin mqk-cli -- md sync-provider `
-            --source twelvedata `
-            --symbols $mdSymbol `
-            --timeframe $mdTimeframe `
-            --full-start "2024-01-01" 2>&1 | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "sync-provider top-off failed (exit $LASTEXITCODE). Proceeding with existing bars."
-        }
-    } finally { Pop-Location }
-    Write-Ok "sync-provider top-off complete."
-} else {
-    Write-Warn "TWELVEDATA_API_KEY not set; skipping provider sync top-off."
-}
-
-# Final row count proof using robust helper.
-$mdSummaryAfter = Get-PaperMdBarSummary -Symbol $mdSymbol -Timeframe $mdTimeframe
-if ($mdSummaryAfter.query_ok) {
-    $mdFinalRows = $mdSummaryAfter.completed_count
-    Write-Ok "md_bars completed rows after prep: $mdFinalRows (${mdSymbol}/${mdTimeframe})"
-    if ($null -ne $mdSummaryAfter.min_time) {
-        Write-Ok "  bar range: min=$($mdSummaryAfter.min_time)  max=$($mdSummaryAfter.max_time)  latest=$($mdSummaryAfter.latest_bar)"
-    }
-    if ($mdFinalRows -lt 5) {
-        Write-EvidenceCapture "STEP 5B: insufficient bars (have $mdFinalRows, need >= 5)"
-        Write-Fail "Insufficient bars for strategy lookback (need >= 5, have $mdFinalRows). Ingest historical data before smoke."
+$prepScript = Join-Path $RepoRoot 'scripts\windows\Prep-PremarketMarketData.ps1'
+if (Test-Path $prepScript) {
+    Write-Step "Delegating to Prep-PremarketMarketData.ps1 ..."
+    & powershell.exe -ExecutionPolicy Bypass -NonInteractive -File $prepScript `
+        -Symbols $mdSymbol `
+        -Timeframe $mdTimeframe `
+        -MinCompletedBars 30 `
+        -MaxStalenessDays 4 `
+        -PaperDbUrl $PaperDbUrl `
+        -RepoRoot $RepoRoot
+    if ($LASTEXITCODE -ne 0) {
+        Write-EvidenceCapture "STEP 5B: Prep-PremarketMarketData.ps1 failed (exit $LASTEXITCODE)"
+        Write-Fail "Market-data prep failed. Resolve above before continuing smoke."
         exit 1
     }
+    Write-Ok "Market-data prep passed."
 } else {
-    Write-Warn "Could not verify md_bars row count after prep. Proceeding with caution."
+    Write-Warn "Prep-PremarketMarketData.ps1 not found at $prepScript. Falling back to inline bar count check."
+    $mdSummary = Get-PaperMdBarSummary -Symbol $mdSymbol -Timeframe $mdTimeframe
+    if ($mdSummary.query_ok) {
+        $mdRows = $mdSummary.completed_count
+        Write-Ok "md_bars completed rows: $mdRows (${mdSymbol}/${mdTimeframe})"
+        if ($null -ne $mdSummary.min_time) {
+            Write-Ok "  bar range: min=$($mdSummary.min_time)  max=$($mdSummary.max_time)"
+        }
+        if ($mdRows -lt 5) {
+            Write-EvidenceCapture "STEP 5B fallback: insufficient bars (have $mdRows, need >= 5)"
+            Write-Fail "Insufficient bars for strategy lookback (need >= 5, have $mdRows)."
+            exit 1
+        }
+    } else {
+        Write-Warn "Could not verify md_bars row count. Proceeding with caution."
+    }
 }
 
 # ---------------------------------------------------------------------------
