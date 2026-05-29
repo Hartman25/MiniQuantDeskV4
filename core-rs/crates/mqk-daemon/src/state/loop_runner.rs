@@ -493,6 +493,28 @@ pub(super) fn spawn_execution_loop(
                             );
                             continue;
                         };
+                        // STRATEGY-SIZING-AND-EXIT-AUDIT-01: log target vs current
+                        // position diagnostics before computing decisions.  This surfaces
+                        // the no_order_reason=already_at_target case in operator logs.
+                        for t in &bar_result.intents.output.targets {
+                            let current = current_positions.get(&t.symbol).copied().unwrap_or(0);
+                            let delta = t.qty - current;
+                            tracing::info!(
+                                run_id = %run_id,
+                                symbol = %t.symbol,
+                                strategy_target_qty = t.qty,
+                                current_position_qty = current,
+                                computed_delta_qty = delta,
+                                no_order_reason = if delta == 0 {
+                                    "already_at_target"
+                                } else if delta < 0 && (current <= 0 || (-delta) > current) {
+                                    "b5_short_sale_guard"
+                                } else {
+                                    "order_will_be_submitted"
+                                },
+                                "b1c_position_delta_diagnostic"
+                            );
+                        }
                         let decisions = crate::decision::bar_result_to_decisions(
                             &bar_result,
                             run_id,
@@ -510,7 +532,7 @@ pub(super) fn spawn_execution_loop(
                                 bar_tick_count = state_arc.bar_tick_dispatch_count(),
                                 "b1c_bar_tick_no_decisions: strategy returned no admissible \
                                  decisions this tick (signal_qty={raw_signal_qty}; \
-                                 check bar lookback, is_complete, and price availability)"
+                                 check b1c_position_delta_diagnostic for no_order_reason)"
                             );
                         }
                         for decision in decisions {
