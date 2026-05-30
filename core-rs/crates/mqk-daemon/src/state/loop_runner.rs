@@ -496,24 +496,64 @@ pub(super) fn spawn_execution_loop(
                         // STRATEGY-SIZING-AND-EXIT-AUDIT-01: log target vs current
                         // position diagnostics before computing decisions.  This surfaces
                         // the no_order_reason=already_at_target case in operator logs.
+                        // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: fire one Discord alert
+                        // per (run, symbol) when B5 short-sale guard blocks a sell.
                         for t in &bar_result.intents.output.targets {
                             let current = current_positions.get(&t.symbol).copied().unwrap_or(0);
                             let delta = t.qty - current;
+                            let no_order_reason = if delta == 0 {
+                                "already_at_target"
+                            } else if delta < 0 && (current <= 0 || (-delta) > current) {
+                                "b5_short_sale_guard"
+                            } else {
+                                "order_will_be_submitted"
+                            };
                             tracing::info!(
                                 run_id = %run_id,
                                 symbol = %t.symbol,
                                 strategy_target_qty = t.qty,
                                 current_position_qty = current,
                                 computed_delta_qty = delta,
-                                no_order_reason = if delta == 0 {
-                                    "already_at_target"
-                                } else if delta < 0 && (current <= 0 || (-delta) > current) {
-                                    "b5_short_sale_guard"
-                                } else {
-                                    "order_will_be_submitted"
-                                },
+                                no_order_reason,
                                 "b1c_position_delta_diagnostic"
                             );
+                            if no_order_reason == "b5_short_sale_guard"
+                                && state_arc.try_claim_b5_alert(&t.symbol).await
+                            {
+                                let notifier = state_arc.discord_notifier.clone();
+                                let env = Some(
+                                    state_arc.deployment_mode().as_api_label().to_string(),
+                                );
+                                let symbol = t.symbol.clone();
+                                let run_id_short = format!("{:.8}", run_id.to_string());
+                                let qty_to_sell = -delta;
+                                let ts = chrono::Utc::now().to_rfc3339(); // allow: ops-metadata notification timestamp
+                                tokio::spawn(async move {
+                                    notifier
+                                        .notify_trade_event(&crate::notify::TradeEventPayload {
+                                            stage: "signal.blocked".to_string(),
+                                            run_id: Some(run_id_short.clone()),
+                                            symbol: Some(symbol.clone()),
+                                            side: Some("sell".to_string()),
+                                            qty: Some(qty_to_sell),
+                                            price_micros: None,
+                                            order_id: None,
+                                            detail: Some(format!(
+                                                "gate=b5_short_sale_guard \
+                                                 current={current} target_delta={delta}"
+                                            )),
+                                            environment: env,
+                                            summary: format!(
+                                                "signal.blocked [b5_short_sale_guard] \
+                                                 symbol={symbol} run={run_id_short} \
+                                                 qty_to_sell={qty_to_sell} current={current} \
+                                                 (no long position to sell against)"
+                                            ),
+                                            ts_utc: ts,
+                                        })
+                                        .await;
+                                });
+                            }
                         }
                         let decisions = crate::decision::bar_result_to_decisions(
                             &bar_result,

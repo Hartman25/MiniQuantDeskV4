@@ -395,6 +395,37 @@ pub async fn submit_internal_strategy_decision(
                     "internal decision unavailable: capital policy evaluation failed".to_string(),
                 ),
             };
+            // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: alert on budget denial from
+            // the internal (B1C loop) path — same high-value signal as Gate 1e.
+            if disposition == "budget_denied" {
+                let notifier = state.discord_notifier.clone();
+                let env = Some(state.deployment_mode().as_api_label().to_string());
+                let blocker_copy = blocker.clone();
+                let sid_copy = sid.clone();
+                tokio::spawn(async move {
+                    notifier
+                        .notify_trade_event(&crate::notify::TradeEventPayload {
+                            stage: "signal.blocked".to_string(),
+                            run_id: None,
+                            symbol: None,
+                            side: None,
+                            qty: None,
+                            price_micros: None,
+                            order_id: None,
+                            detail: Some(format!(
+                                "gate=gate_1e_budget path=internal_decision \
+                                 strategy={sid_copy} reason={blocker_copy}"
+                            )),
+                            environment: env,
+                            summary: format!(
+                                "signal.blocked [budget_denied] internal decision \
+                                 strategy={sid_copy} | {blocker_copy}"
+                            ),
+                            ts_utc: chrono::Utc::now().to_rfc3339(), // allow: ops-metadata notification timestamp
+                        })
+                        .await;
+                });
+            }
             return outcome(false, disposition, &did, &sid, None, vec![blocker]);
         }
     }

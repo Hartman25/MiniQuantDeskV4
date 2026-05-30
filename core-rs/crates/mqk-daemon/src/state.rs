@@ -19,7 +19,7 @@ mod snapshot;
 mod types;
 pub mod ws_gap_recovery;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -321,6 +321,17 @@ pub struct AppState {
     /// `None` when credentials are absent or broker kind is not Alpaca.
     /// Tests inject a fake implementation via `set_snapshot_fetcher_for_test`.
     pub snapshot_fetcher: Option<Arc<dyn BrokerSnapshotFetcher>>,
+    /// DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: Per-run set of symbols for which a
+    /// B5 short-sale guard Discord alert has already been fired.
+    ///
+    /// Dedup: at most one alert per (run, symbol).  Prevents every-tick spam when
+    /// the strategy repeatedly targets a short that the guard rejects.  Reset at
+    /// run start alongside `day_signal_count`.
+    b5_alerted_symbols: Arc<RwLock<HashSet<String>>>,
+    /// DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: Flag set on the first Discord alert
+    /// for day-signal-limit-reached.  Prevents repeated alerts when multiple
+    /// signals arrive after the limit is hit.  Reset at run start.
+    day_limit_alert_fired: Arc<AtomicBool>,
 }
 
 /// BROKER-FILL-REST-RECOVERY-01: Injectable abstraction over Alpaca REST activity fetch.
@@ -839,6 +850,8 @@ impl AppState {
             ws_gap_fill_fetcher,
             broker_baseline: Arc::new(RwLock::new(None)),
             snapshot_fetcher,
+            b5_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
+            day_limit_alert_fired: Arc::new(AtomicBool::new(false)),
         }
     }
 

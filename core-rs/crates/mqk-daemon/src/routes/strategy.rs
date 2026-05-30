@@ -214,6 +214,35 @@ pub(crate) async fn strategy_signal(
                     "strategy signal unavailable: capital policy evaluation failed".to_string(),
                 ),
             };
+            // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: alert on capital budget denial
+            // (high-value: strategy is actively blocked from executing).
+            if disposition == "budget_denied" {
+                let notifier = st.discord_notifier.clone();
+                let env = Some(st.deployment_mode().as_api_label().to_string());
+                let blocker_copy = blocker.clone();
+                let summary = format!(
+                    "signal.blocked [budget_denied] strategy={} symbol={} | {}",
+                    validated.strategy_id, validated.symbol, blocker_copy
+                );
+                let ts = Utc::now().to_rfc3339(); // allow: ops-metadata notification timestamp
+                tokio::spawn(async move {
+                    notifier
+                        .notify_trade_event(&crate::notify::TradeEventPayload {
+                            stage: "signal.blocked".to_string(),
+                            run_id: None,
+                            symbol: None,
+                            side: None,
+                            qty: None,
+                            price_micros: None,
+                            order_id: None,
+                            detail: Some(format!("gate=gate_1e_budget reason={blocker_copy}")),
+                            environment: env,
+                            summary,
+                            ts_utc: ts,
+                        })
+                        .await;
+                });
+            }
             return refused_signal_response(
                 status,
                 "gate_1e_budget",
@@ -274,6 +303,34 @@ pub(crate) async fn strategy_signal(
                     "strategy signal unavailable: position sizing evaluation failed".to_string(),
                 ),
             };
+            // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: alert on position sizing denial.
+            if disposition == "sizing_denied" {
+                let notifier = st.discord_notifier.clone();
+                let env = Some(st.deployment_mode().as_api_label().to_string());
+                let blocker_copy = blocker.clone();
+                let summary = format!(
+                    "signal.blocked [sizing_denied] strategy={} symbol={} | {}",
+                    validated.strategy_id, validated.symbol, blocker_copy
+                );
+                let ts = Utc::now().to_rfc3339(); // allow: ops-metadata notification timestamp
+                tokio::spawn(async move {
+                    notifier
+                        .notify_trade_event(&crate::notify::TradeEventPayload {
+                            stage: "signal.blocked".to_string(),
+                            run_id: None,
+                            symbol: None,
+                            side: None,
+                            qty: None,
+                            price_micros: None,
+                            order_id: None,
+                            detail: Some(format!("gate=gate_1f_sizing reason={blocker_copy}")),
+                            environment: env,
+                            summary,
+                            ts_utc: ts,
+                        })
+                        .await;
+                });
+            }
             return refused_signal_response(
                 status,
                 "gate_1f_sizing",
@@ -339,6 +396,38 @@ pub(crate) async fn strategy_signal(
                     "strategy signal unavailable: portfolio risk evaluation failed".to_string(),
                 ),
             };
+            // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: alert on portfolio risk denial
+            // (exposure or exhaustion blocked; high-value operator signal).
+            if matches!(disposition, "exposure_denied" | "exhaustion_denied") {
+                let notifier = st.discord_notifier.clone();
+                let env = Some(st.deployment_mode().as_api_label().to_string());
+                let blocker_copy = blocker.clone();
+                let disp = disposition.to_string();
+                let summary = format!(
+                    "signal.blocked [{}] strategy={} symbol={} | {}",
+                    disp, validated.strategy_id, validated.symbol, blocker_copy
+                );
+                let ts = Utc::now().to_rfc3339(); // allow: ops-metadata notification timestamp
+                tokio::spawn(async move {
+                    notifier
+                        .notify_trade_event(&crate::notify::TradeEventPayload {
+                            stage: "signal.blocked".to_string(),
+                            run_id: None,
+                            symbol: None,
+                            side: None,
+                            qty: None,
+                            price_micros: None,
+                            order_id: None,
+                            detail: Some(format!(
+                                "gate=gate_1g_risk disposition={disp} reason={blocker_copy}"
+                            )),
+                            environment: env,
+                            summary,
+                            ts_utc: ts,
+                        })
+                        .await;
+                });
+            }
             return refused_signal_response(
                 status,
                 "gate_1g_risk",
@@ -592,6 +681,34 @@ pub(crate) async fn strategy_signal(
     // without DB, even in tests.  409/day_limit_reached tells the signal
     // producer to stop for the remainder of this run.
     if st.day_signal_limit_exceeded() {
+        // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: alert once per run when the day
+        // signal limit is hit.  Deduped: only the first refusal sends Discord.
+        if st.try_claim_day_limit_alert() {
+            let notifier = st.discord_notifier.clone();
+            let env = Some(st.deployment_mode().as_api_label().to_string());
+            let count = st.day_signal_count();
+            let ts = Utc::now().to_rfc3339(); // allow: ops-metadata notification timestamp
+            tokio::spawn(async move {
+                notifier
+                    .notify_trade_event(&crate::notify::TradeEventPayload {
+                        stage: "signal.blocked".to_string(),
+                        run_id: None,
+                        symbol: None,
+                        side: None,
+                        qty: None,
+                        price_micros: None,
+                        order_id: None,
+                        detail: Some(format!("gate=gate_1d_day_limit count={count}")),
+                        environment: env,
+                        summary: format!(
+                            "signal.blocked [day_limit_reached] {count} signals accepted \
+                             this run; no further signals until next run start"
+                        ),
+                        ts_utc: ts,
+                    })
+                    .await;
+            });
+        }
         return refused_signal_response(
             StatusCode::CONFLICT,
             "gate_1d_day_limit",
@@ -774,7 +891,7 @@ pub(crate) async fn strategy_signal(
                     "strategy signal refused: strategy '{}' is suppressed ({}): {}",
                     validated.strategy_id, sup.trigger_domain, sup.trigger_reason
                 );
-                let blockers = vec![blocker];
+                let blockers = vec![blocker.clone()];
                 write_signal_refusal_event(
                     &st,
                     active_run_id,
@@ -788,6 +905,36 @@ pub(crate) async fn strategy_signal(
                     },
                 )
                 .await;
+                // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: alert when a strategy is
+                // suppressed.  Suppression is an operator-set condition and requires
+                // explicit resolution — surfacing it on Discord helps diagnosis.
+                {
+                    let notifier = st.discord_notifier.clone();
+                    let env = Some(st.deployment_mode().as_api_label().to_string());
+                    let run_id_short = format!("{:.8}", active_run_id.to_string());
+                    let summary = format!(
+                        "signal.blocked [suppressed] strategy={} symbol={} run={} | {}",
+                        validated.strategy_id, validated.symbol, run_id_short, blocker
+                    );
+                    let ts = Utc::now().to_rfc3339(); // allow: ops-metadata notification timestamp
+                    tokio::spawn(async move {
+                        notifier
+                            .notify_trade_event(&crate::notify::TradeEventPayload {
+                                stage: "signal.blocked".to_string(),
+                                run_id: Some(run_id_short),
+                                symbol: None,
+                                side: None,
+                                qty: None,
+                                price_micros: None,
+                                order_id: None,
+                                detail: Some(format!("gate=gate_6_suppressed reason={blocker}")),
+                                environment: env,
+                                summary,
+                                ts_utc: ts,
+                            })
+                            .await;
+                    });
+                }
                 return refused_signal_response(
                     StatusCode::CONFLICT,
                     "gate_6_suppressed",
