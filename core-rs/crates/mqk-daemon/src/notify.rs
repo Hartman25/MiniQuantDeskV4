@@ -374,4 +374,89 @@ impl DiscordNotifier {
             );
         }
     }
+
+    /// Best-effort delivery of a trade lifecycle event (DISCORD-TRADE-LIFECYCLE-ALERTS-01).
+    ///
+    /// Covers: order submitted, order ACKed, fill applied (partial/terminal),
+    /// reconcile drift halt, recovery quarantine.  Called from the orchestrator
+    /// alert sink after each durable DB write — primary execution path has
+    /// already completed before this is invoked.
+    ///
+    /// Same delivery contract: no-op when unconfigured, errors logged as
+    /// `warn!` and swallowed, 3-second timeout.
+    pub async fn notify_trade_event(&self, payload: &TradeEventPayload) {
+        let (Some(url), Some(client)) = (&self.webhook_url, &self.client) else {
+            return;
+        };
+
+        let content = format!(
+            "[mqk-daemon] `{}` | env: `{}` | run: `{}` | {}",
+            payload.stage,
+            payload.environment.as_deref().unwrap_or("unknown"),
+            payload.run_id.as_deref().unwrap_or("none"),
+            payload.summary,
+        );
+
+        let body = serde_json::json!({
+            "content": content,
+            "stage": payload.stage,
+            "run_id": payload.run_id,
+            "symbol": payload.symbol,
+            "side": payload.side,
+            "qty": payload.qty,
+            "price_micros": payload.price_micros,
+            "order_id": payload.order_id,
+            "detail": payload.detail,
+            "environment": payload.environment,
+            "ts_utc": payload.ts_utc,
+        });
+
+        if let Err(err) = client
+            .post(url.as_str())
+            .json(&body)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+        {
+            warn!(
+                error = %err,
+                stage = %payload.stage,
+                "discord trade-event delivery failed (best-effort; trading path unaffected)"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trade lifecycle payload (DISCORD-TRADE-LIFECYCLE-ALERTS-01)
+// ---------------------------------------------------------------------------
+
+/// Payload for a trade lifecycle event notification.
+///
+/// Carries enough context for an operator to identify the affected order
+/// without reading daemon logs.  No secrets or internal auth state included.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeEventPayload {
+    /// Lifecycle stage (e.g. `"order.submitted"`, `"order.acked"`, `"fill.terminal"`).
+    pub stage: String,
+    /// Short run_id (first 8 hex chars) for operator readability.
+    pub run_id: Option<String>,
+    /// Affected symbol, if applicable.
+    pub symbol: Option<String>,
+    /// Order side (`"Buy"` / `"Sell"`), if applicable.
+    pub side: Option<String>,
+    /// Quantity (shares), if applicable.
+    pub qty: Option<i64>,
+    /// Fill price in micros (price × 1_000_000), if applicable.
+    pub price_micros: Option<i64>,
+    /// Internal order ID, if applicable.
+    pub order_id: Option<String>,
+    /// Additional operator-facing detail (reason, blocker, etc.).
+    pub detail: Option<String>,
+    /// Daemon deployment mode label.
+    pub environment: Option<String>,
+    /// Human-readable summary line (included in Discord `content`).
+    pub summary: String,
+    /// RFC 3339 timestamp of the event.
+    pub ts_utc: String,
 }

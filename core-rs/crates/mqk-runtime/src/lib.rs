@@ -11,6 +11,9 @@ pub mod native_strategy;
 pub mod observability;
 pub mod orchestrator;
 pub mod runtime_risk;
+pub mod trade_alert;
+
+pub use trade_alert::TradeLifecycleEvent;
 
 // Patch 1: PassGate wiring must never exist in production builds.
 // Only available to tests / explicit testkit builds.

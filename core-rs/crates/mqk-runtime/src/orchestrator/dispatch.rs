@@ -207,6 +207,13 @@ where
         );
         self.oms_orders
             .insert(order_id.clone(), OmsOrder::new(&order_id, &symbol, qty));
+        // DISCORD-TRADE-LIFECYCLE-ALERTS-01: best-effort alert after durable SENT.
+        self.fire_alert(crate::TradeLifecycleEvent::OrderSubmitted {
+            run_id: self.run_id,
+            order_id: order_id.clone(),
+            symbol: symbol.clone(),
+            qty,
+        });
         Ok(())
     }
 

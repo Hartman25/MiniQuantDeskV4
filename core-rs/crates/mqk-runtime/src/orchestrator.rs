@@ -166,6 +166,17 @@ where
     /// and also updates `AppState::broker_snapshot` as a cache side-effect so
     /// subsequent ticks and the background reconcile see the fresh data.
     terminal_fill_expiry_refresher: Option<Box<dyn Fn() -> Option<BrokerSnapshot> + Send + Sync>>,
+    /// DISCORD-TRADE-LIFECYCLE-ALERTS-01: optional best-effort alert sink.
+    ///
+    /// Injected via `set_alert_sink` after construction.  The production wiring
+    /// in `orchestrator_build.rs` captures a `DiscordNotifier` clone and spawns
+    /// an async delivery task for each event.  All other callsites (tests, CLI)
+    /// leave this as `None` — no alerts are emitted.
+    ///
+    /// The sink is a sync `Fn` so it can be called from the tick loop without
+    /// changing any `async` boundaries.  Callers spawn async work internally.
+    /// Failure inside the sink must never propagate into the trading path.
+    alert_fn: Option<std::sync::Arc<dyn Fn(crate::TradeLifecycleEvent) + Send + Sync>>,
 }
 /// Grace window for the pending-fill-propagation deferral in Phase 0c.
 ///
@@ -498,6 +509,40 @@ where
             recent_denials: VecDeque::new(),
             recently_applied_fills: VecDeque::new(),
             terminal_fill_expiry_refresher: None,
+            alert_fn: None,
+        }
+    }
+
+    /// Inject a best-effort trade lifecycle alert sink (DISCORD-TRADE-LIFECYCLE-ALERTS-01).
+    ///
+    /// The sink is called synchronously inside `tick()` *after* each durable
+    /// DB write completes.  It must never panic and must never propagate errors
+    /// into the trading path.  The production implementation spawns an async
+    /// Discord delivery task; tests inject a recording closure.
+    ///
+    /// Calling this is optional.  When not set, all lifecycle events are
+    /// silently dropped (no-op).
+    pub fn set_alert_sink(
+        &mut self,
+        f: std::sync::Arc<dyn Fn(crate::TradeLifecycleEvent) + Send + Sync>,
+    ) {
+        self.alert_fn = Some(f);
+    }
+
+    /// Fire a lifecycle alert via the injected sink (no-op when not set).
+    ///
+    /// Errors inside the sink are swallowed here — the trading path must not
+    /// be affected by alert delivery failures.
+    pub(super) fn fire_alert(&self, event: crate::TradeLifecycleEvent) {
+        if let Some(ref f) = self.alert_fn {
+            // Catch panics inside the sink so a broken alert implementation
+            // cannot crash the orchestrator tick loop.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(event)));
+            if result.is_err() {
+                tracing::warn!(
+                    "trade_lifecycle_alert_sink_panicked (best-effort; trading unaffected)"
+                );
+            }
         }
     }
 
@@ -575,6 +620,9 @@ where
                 // any orchestrator instance for this run_id.
                 // A4: use "RecoveryQuarantine" (added in migration 0017 for this purpose).
                 persist_halt_and_disarm(&self.pool, self.run_id, now, "RecoveryQuarantine").await?;
+                self.fire_alert(crate::TradeLifecycleEvent::RecoveryQuarantine {
+                    run_id: self.run_id,
+                });
                 let details = summarize_ambiguous_outbox(&ambiguous);
                 return Err(anyhow!(
                     "RECOVERY_QUARANTINE: run {} has {} ambiguous outbox row(s); \
@@ -784,6 +832,10 @@ where
                                                     "ReconcileDrift",
                                                 )
                                                 .await?;
+                                                self.fire_alert(crate::TradeLifecycleEvent::ReconcileDriftHalt {
+                                                    run_id: self.run_id,
+                                                    reason: "fresh_snapshot_still_mismatches".to_string(),
+                                                });
                                                 return Err(anyhow!(
                                                     "RECONCILE_DRIFT: run {} halted and disarmed; \
                                                      fresh broker snapshot still mismatches after \
@@ -806,6 +858,10 @@ where
                                                     "ReconcileDrift",
                                                 )
                                                 .await?;
+                                                self.fire_alert(crate::TradeLifecycleEvent::ReconcileDriftHalt {
+                                                    run_id: self.run_id,
+                                                    reason: "reconcile_snapshot_stale_after_refresh".to_string(),
+                                                });
                                                 return Err(anyhow!(
                                                     "RECONCILE_SNAPSHOT_STALE: run {} halted; \
                                                      refreshed snapshot stale after \
@@ -835,6 +891,13 @@ where
                                             "ReconcileDrift",
                                         )
                                         .await?;
+                                        self.fire_alert(
+                                            crate::TradeLifecycleEvent::ReconcileDriftHalt {
+                                                run_id: self.run_id,
+                                                reason: "settle_grace_expired_refresh_unavailable"
+                                                    .to_string(),
+                                            },
+                                        );
                                         return Err(anyhow!(
                                             "RECONCILE_DRIFT: run {} halted and disarmed; \
                                              terminal-fill settle grace expired and broker \
@@ -852,6 +915,10 @@ where
                                     "ReconcileDrift",
                                 )
                                 .await?;
+                                self.fire_alert(crate::TradeLifecycleEvent::ReconcileDriftHalt {
+                                    run_id: self.run_id,
+                                    reason: "genuine_drift".to_string(),
+                                });
                                 return Err(anyhow!(
                                     "RECONCILE_DRIFT: run {} halted and disarmed; \
                                      dispatch refused",
@@ -865,6 +932,10 @@ where
                         // Mandatory halt + disarm - same fail-closed contract as Phase 0b.
                         persist_halt_and_disarm(&self.pool, self.run_id, now, "ReconcileDrift")
                             .await?;
+                        self.fire_alert(crate::TradeLifecycleEvent::ReconcileDriftHalt {
+                            run_id: self.run_id,
+                            reason: "reconcile_snapshot_stale".to_string(),
+                        });
                         return Err(anyhow!(
                             "RECONCILE_SNAPSHOT_STALE: run {} halted and disarmed; \
                              dispatch refused: {}",
@@ -1330,6 +1401,56 @@ where
                 self.time_source.now_utc(),
             )
             .await?;
+            // DISCORD-TRADE-LIFECYCLE-ALERTS-01: best-effort alert after durable apply.
+            // Fires only for Ack and Fill/PartialFill — the events operators care about.
+            match &event {
+                BrokerEvent::Ack {
+                    broker_order_id,
+                    internal_order_id,
+                    ..
+                } => {
+                    // Derive symbol from OMS order if available (it is — Ack is applied
+                    // before the order map entry is removed).
+                    let sym = self
+                        .oms_orders
+                        .get(internal_order_id.as_str())
+                        .map(|o| o.symbol.clone());
+                    self.fire_alert(crate::TradeLifecycleEvent::OrderAcked {
+                        run_id: self.run_id,
+                        order_id: internal_order_id.clone(),
+                        broker_order_id: broker_order_id.clone(),
+                        symbol: sym,
+                    });
+                }
+                BrokerEvent::Fill {
+                    symbol,
+                    side,
+                    delta_qty,
+                    price_micros,
+                    internal_order_id,
+                    ..
+                }
+                | BrokerEvent::PartialFill {
+                    symbol,
+                    side,
+                    delta_qty,
+                    price_micros,
+                    internal_order_id,
+                    ..
+                } => {
+                    let partial = matches!(&event, BrokerEvent::PartialFill { .. });
+                    self.fire_alert(crate::TradeLifecycleEvent::FillApplied {
+                        run_id: self.run_id,
+                        order_id: internal_order_id.clone(),
+                        symbol: symbol.clone(),
+                        side: format!("{:?}", side),
+                        qty: *delta_qty,
+                        price_micros: *price_micros,
+                        terminal: !partial,
+                    });
+                }
+                _ => {}
+            }
         }
         Ok(())
     }

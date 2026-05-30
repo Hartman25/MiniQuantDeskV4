@@ -26,6 +26,7 @@ use super::helpers::{
 };
 use crate::notify::CriticalAlertPayload;
 use crate::state::{AlpacaWsContinuityState, AppState, StrategyBarInput, StrategyMarketDataSource};
+use chrono::Utc;
 
 // ---------------------------------------------------------------------------
 // RTS-07: Outbox provenance mark
@@ -874,6 +875,36 @@ pub(crate) async fn strategy_signal(
                 validated.qty,
             )
             .await;
+            // DISCORD-TRADE-LIFECYCLE-ALERTS-01: signal admitted → outbox queued.
+            // Fired after durable outbox write — best-effort, non-fatal.
+            {
+                let notifier = st.discord_notifier.clone();
+                let env = st.deployment_mode().as_db_mode().to_string();
+                let symbol = validated.symbol.clone();
+                let side = format!("{:?}", validated.side);
+                let qty = validated.qty;
+                let signal_id = validated.signal_id.clone();
+                let run_id_short = format!("{:.8}", active_run_id.to_string());
+                tokio::spawn(async move {
+                    notifier
+                        .notify_trade_event(&crate::notify::TradeEventPayload {
+                            stage: "signal.admitted".to_string(),
+                            run_id: Some(run_id_short),
+                            symbol: Some(symbol.clone()),
+                            side: Some(side.clone()),
+                            qty: Some(qty),
+                            price_micros: None,
+                            order_id: None,
+                            detail: Some(signal_id.clone()),
+                            environment: Some(env),
+                            summary: format!(
+                                "signal admitted → outbox queued: {side} {symbol} qty={qty} signal={signal_id}"
+                            ),
+                            ts_utc: Utc::now().to_rfc3339(),
+                        })
+                        .await;
+                });
+            }
             signal_response(
                 StatusCode::OK,
                 true,

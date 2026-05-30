@@ -381,6 +381,134 @@ impl AppState {
             }
         }
 
+        // DISCORD-TRADE-LIFECYCLE-ALERTS-01: inject best-effort alert sink.
+        //
+        // The sink is a sync closure that spawns an async Discord delivery task
+        // for each `TradeLifecycleEvent`.  Panics inside the closure are caught
+        // by `fire_alert` so they cannot crash the orchestrator tick loop.
+        //
+        // The closure captures a cloned `DiscordNotifier` (cheap Arc clone) and
+        // the deployment mode label.  No secrets are captured; no webhook URL
+        // is included in event payloads.
+        {
+            let notifier = self.discord_notifier.clone();
+            let env_label = self.deployment_mode().as_db_mode().to_string();
+            orch.set_alert_sink(std::sync::Arc::new(move |ev| {
+                use crate::notify::TradeEventPayload;
+                use mqk_runtime::TradeLifecycleEvent;
+
+                let notifier = notifier.clone();
+                let env = env_label.clone();
+
+                let payload: TradeEventPayload = match ev {
+                    TradeLifecycleEvent::OrderSubmitted {
+                        run_id,
+                        order_id,
+                        symbol,
+                        qty,
+                    } => TradeEventPayload {
+                        stage: "order.submitted".to_string(),
+                        run_id: Some(format!("{:.8}", run_id.to_string())),
+                        symbol: Some(symbol.clone()),
+                        side: None,
+                        qty: Some(qty),
+                        price_micros: None,
+                        order_id: Some(order_id.clone()),
+                        detail: None,
+                        environment: Some(env),
+                        summary: format!("submitted {symbol} qty={qty} order_id={:.8}", order_id),
+                        ts_utc: chrono::Utc::now().to_rfc3339(),
+                    },
+                    TradeLifecycleEvent::OrderAcked {
+                        run_id,
+                        order_id,
+                        broker_order_id,
+                        symbol,
+                    } => TradeEventPayload {
+                        stage: "order.acked".to_string(),
+                        run_id: Some(format!("{:.8}", run_id.to_string())),
+                        symbol,
+                        side: None,
+                        qty: None,
+                        price_micros: None,
+                        order_id: Some(order_id.clone()),
+                        detail: broker_order_id.clone(),
+                        environment: Some(env),
+                        summary: format!(
+                            "acked order_id={:.8} broker={}",
+                            order_id,
+                            broker_order_id.as_deref().unwrap_or("none")
+                        ),
+                        ts_utc: chrono::Utc::now().to_rfc3339(),
+                    },
+                    TradeLifecycleEvent::FillApplied {
+                        run_id,
+                        order_id,
+                        symbol,
+                        side,
+                        qty,
+                        price_micros,
+                        terminal,
+                    } => {
+                        let stage = if terminal {
+                            "fill.terminal"
+                        } else {
+                            "fill.partial"
+                        }
+                        .to_string();
+                        let price_usd = price_micros as f64 / 1_000_000.0;
+                        TradeEventPayload {
+                            stage: stage.clone(),
+                            run_id: Some(format!("{:.8}", run_id.to_string())),
+                            symbol: Some(symbol.clone()),
+                            side: Some(side.clone()),
+                            qty: Some(qty),
+                            price_micros: Some(price_micros),
+                            order_id: Some(order_id.clone()),
+                            detail: None,
+                            environment: Some(env),
+                            summary: format!(
+                                "{stage} {side} {symbol} qty={qty} price=${price_usd:.4}"
+                            ),
+                            ts_utc: chrono::Utc::now().to_rfc3339(),
+                        }
+                    }
+                    TradeLifecycleEvent::ReconcileDriftHalt { run_id, reason } => {
+                        TradeEventPayload {
+                            stage: "halt.reconcile_drift".to_string(),
+                            run_id: Some(format!("{:.8}", run_id.to_string())),
+                            symbol: None,
+                            side: None,
+                            qty: None,
+                            price_micros: None,
+                            order_id: None,
+                            detail: Some(reason.clone()),
+                            environment: Some(env),
+                            summary: format!("RECONCILE_DRIFT halt — reason: {reason}"),
+                            ts_utc: chrono::Utc::now().to_rfc3339(),
+                        }
+                    }
+                    TradeLifecycleEvent::RecoveryQuarantine { run_id } => TradeEventPayload {
+                        stage: "halt.recovery_quarantine".to_string(),
+                        run_id: Some(format!("{:.8}", run_id.to_string())),
+                        symbol: None,
+                        side: None,
+                        qty: None,
+                        price_micros: None,
+                        order_id: None,
+                        detail: None,
+                        environment: Some(env),
+                        summary: "RECOVERY_QUARANTINE: ambiguous outbox on restart".to_string(),
+                        ts_utc: chrono::Utc::now().to_rfc3339(),
+                    },
+                };
+
+                tokio::spawn(async move {
+                    notifier.notify_trade_event(&payload).await;
+                });
+            }));
+        }
+
         Ok(orch)
     }
 }
