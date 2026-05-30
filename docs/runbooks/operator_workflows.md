@@ -469,3 +469,122 @@ Verify:
 The artifact chain confirms minimum research viability and records available
 shadow evidence.  It does NOT prove edge, profitability, or live execution trust.
 The `live_trust_gaps` list in parity_evidence.json makes the remaining gaps explicit.
+
+---
+
+## 10. Premarket market-data refresh (PREMARKET-DATA-SCHEDULER-01)
+
+Required market data must be fresh before the readiness gate allows `start-system`.
+This section covers the operator workflow for automated premarket data refresh.
+
+### What the scheduler does
+
+The scheduled task calls **only** `Prep-PremarketMarketData.ps1` on weekdays
+before market open.  It does NOT start the daemon, the runtime, or trading.
+It does NOT call `Start-PaperTradingSmoke.ps1`.
+
+### Register the scheduled task (one-time setup)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Register-PremarketDataRefreshTask.ps1
+```
+
+Default behavior:
+- Task name: `MiniQuantDesk-PremarketDataRefresh`
+- Runs Mon-Fri at 08:30 local machine time
+- Calls `Prep-PremarketMarketData.ps1 -Symbols AAPL -Timeframe 1D -MinCompletedBars 30`
+- Transcripts written to `exports\market_data\scheduled\refresh_YYYYMMDD_HHMMSS.log`
+- Registration record written to `exports\market_data\scheduled\task_registration.json`
+
+**TIMEZONE NOTE:** The trigger fires at 08:30 **local machine time**.
+If your machine is not in ET, adjust `-TriggerTimeLocal` so the refresh
+completes at least 30 minutes before your intended market-open window.
+
+Custom parameters example:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Register-PremarketDataRefreshTask.ps1 `
+    -Symbols AAPL,AMD `
+    -TriggerTimeLocal '07:45' `
+    -MinCompletedBars 60
+```
+
+### Preview what would be registered (CheckOnly -- no changes)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Register-PremarketDataRefreshTask.ps1 -CheckOnly
+```
+
+Outputs: task name, trigger, symbols, timeframe, evidence path, task action argument.
+Exits 0.  No task is created, updated, or removed.
+
+### Run a one-time manual refresh (outside of scheduled task)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Prep-PremarketMarketData.ps1
+```
+
+Or with custom symbols:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Prep-PremarketMarketData.ps1 `
+    -Symbols AAPL,AMD -Timeframe 1D -MinCompletedBars 30
+```
+
+### Check data readiness without mutations
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Prep-PremarketMarketData.ps1 -CheckOnly
+```
+
+Reports: completed bar count, date range, staleness in days, key presence.
+No data is written to the database.
+
+### Unregister the scheduled task
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Register-PremarketDataRefreshTask.ps1 -Unregister
+```
+
+### Verify the task is registered
+
+```powershell
+Get-ScheduledTask -TaskName 'MiniQuantDesk-PremarketDataRefresh'
+```
+
+### Monday premarket operator workflow
+
+Before market open on Mondays (or after any long weekend):
+
+1. Verify the scheduled task ran:
+   - Open Task Scheduler -> `MiniQuantDesk-PremarketDataRefresh` -> History tab
+   - Or check `exports\market_data\scheduled\` for a recent `.log` file
+2. Confirm data is fresh:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\windows\Prep-PremarketMarketData.ps1 -CheckOnly
+   ```
+3. If data is stale or the task did not run, run a manual refresh:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\windows\Prep-PremarketMarketData.ps1
+   ```
+4. Confirm readiness via the daemon preflight:
+   ```
+   GET /api/v1/system/preflight
+   ```
+   Verify `market_data_freshness.gate == "PASS"` and `start_allowed == true`.
+5. Proceed with normal startup workflow (Section 1).
+
+### Evidence files
+
+| File | Contents |
+|------|----------|
+| `exports\market_data\scheduled\task_registration.json` | Task config at registration time |
+| `exports\market_data\scheduled\refresh_YYYYMMDD_HHMMSS.log` | Transcript per scheduled run |
+| `exports\market_data\premarket_prep_YYYYMMDD_HHMMSS.json` | Per-run bar-count and freshness evidence |
+
+### Safety constraints
+
+- The scheduled task calls `Prep-PremarketMarketData.ps1` only.
+- It targets the paper DB (port 5440) only.
+- It does not start the daemon, runtime, or any trading path.
+- It does not enqueue orders or touch `oms_outbox`, `oms_inbox`, or `runs`.
+- Guard tests in `tests/script_guards/test_premarket_data_scheduler.ps1` enforce
+  these invariants statically on every CI run.
