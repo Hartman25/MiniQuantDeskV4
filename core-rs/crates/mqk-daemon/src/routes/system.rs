@@ -28,6 +28,7 @@ use crate::api_types::{
     RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
     SystemMetadataResponse, SystemStatusResponse,
 };
+use crate::market_data_freshness::evaluate_md_freshness_status;
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::{
     autonomous_session_schedule_from_env, session_window_from_env, AppState,
@@ -433,6 +434,22 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         _ => None,
     };
 
+    // DATA-FRESHNESS-READINESS-GATE-01: Market-data freshness on preflight.
+    //
+    // Evaluate freshness only for Paper+Alpaca.  DB pointer is borrowed from
+    // AppState (same pool used by all other DB-backed preflight checks).
+    let pf_md_freshness = if is_paper_alpaca {
+        let sym = std::env::var("MQK_STRATEGY_SYMBOL")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        let tf = std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        Some(evaluate_md_freshness_status(st.db.as_ref(), &sym, &tf, Utc::now().timestamp()).await)
+    } else {
+        None
+    };
+
     let mut warnings = Vec::new();
     if status.notes.is_some() {
         warnings.push("Daemon status contains notes; verify runtime state.".to_string());
@@ -452,6 +469,12 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
     // preflight gate shows them as first-class startup blockers.
     for b in &autonomous_blockers {
         blockers.push(b.clone());
+    }
+    // DATA-FRESHNESS-READINESS-GATE-01: surface freshness blocker in preflight.
+    if let Some(ref mdf) = pf_md_freshness {
+        if mdf.is_start_blocker() {
+            blockers.push(mdf.reason.clone());
+        }
     }
 
     (
@@ -479,6 +502,7 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
             session_in_window,
             parity_evidence_state,
             live_trust_complete,
+            market_data_freshness: pf_md_freshness,
         }),
     )
         .into_response()
@@ -627,6 +651,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                 session_window_basis: diag.session_window_basis,
                 session_start_env_raw: diag.session_start_env_raw,
                 session_stop_env_raw: diag.session_stop_env_raw,
+                market_data_freshness: None,
             }),
         )
             .into_response();
@@ -901,13 +926,34 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
         }
     }
 
+    // DATA-FRESHNESS-READINESS-GATE-01: Evaluate market-data freshness pre-dispatch.
+    //
+    // Unlike the INCOMPLETE_BAR_CONTEXT/NO_SIGNAL_GENERATED checks above (which
+    // fire post-dispatch), this check is evaluated before any bar has been
+    // dispatched.  It surfaces a blocker when md_bars is missing, insufficient,
+    // or stale for the configured symbol/timeframe so the operator knows to
+    // ingest data before the session opens — not only after the first bar tick.
+    let ar_sym = std::env::var("MQK_STRATEGY_SYMBOL")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    let ar_tf = std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    let md_freshness =
+        evaluate_md_freshness_status(st.db.as_ref(), &ar_sym, &ar_tf, now.timestamp()).await;
+    if md_freshness.is_start_blocker() {
+        blockers.push(md_freshness.reason.clone());
+    }
+    let md_freshness_not_ok = md_freshness.is_start_blocker();
+
     let overall_ready = ws_continuity_ready
         && reconcile_ready
         && arm_ready
         && signal_ingestion_configured
         && session_in_window
         && runtime_start_allowed
-        && !strategy_fleet_empty;
+        && !strategy_fleet_empty
+        && !md_freshness_not_ok;
 
     let autonomous_history_degraded = st.autonomous_history_degraded();
 
@@ -945,6 +991,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
             session_window_basis: diag.session_window_basis,
             session_start_env_raw: diag.session_start_env_raw,
             session_stop_env_raw: diag.session_stop_env_raw,
+            market_data_freshness: Some(md_freshness),
         }),
     )
         .into_response()

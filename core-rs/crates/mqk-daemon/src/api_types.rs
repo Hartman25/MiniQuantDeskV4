@@ -334,6 +334,52 @@ pub struct FaultSignal {
     pub detail: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// DATA-FRESHNESS-READINESS-GATE-01: Market-data freshness status
+// ---------------------------------------------------------------------------
+
+/// Market-data freshness status for the configured strategy symbol/timeframe.
+///
+/// Surfaced on `autonomous/readiness` and `system/preflight` so operators can
+/// verify that sufficient fresh bars exist before paper trading starts.
+///
+/// `freshness_state` values:
+/// - `"ok"` — enough completed bars exist and latest bar is within the staleness threshold.
+/// - `"stale"` — enough rows but latest bar is older than the staleness threshold.
+/// - `"missing"` — 0 completed bars in `md_bars` for this symbol/timeframe.
+/// - `"insufficient"` — completed rows exist but fewer than `min_required_rows`.
+/// - `"unavailable"` — DB not reachable; freshness cannot be verified (not a blocker).
+/// - `"not_applicable"` — symbol or timeframe not configured; gate not applicable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketDataFreshnessStatus {
+    pub symbol: String,
+    pub timeframe: String,
+    pub completed_rows: u64,
+    pub min_required_rows: u64,
+    /// RFC 3339 timestamp of the latest completed bar, or `null`.
+    pub latest_complete_bar_ts: Option<String>,
+    pub freshness_state: String,
+    pub reason: String,
+}
+
+impl MarketDataFreshnessStatus {
+    /// True when freshness is `"ok"` — all checks pass, start is not blocked.
+    pub fn is_ok(&self) -> bool {
+        self.freshness_state == "ok"
+    }
+
+    /// True when this status should block startup.
+    ///
+    /// `"missing"`, `"insufficient"`, and `"stale"` are blockers.
+    /// `"unavailable"` and `"not_applicable"` are not blockers (no DB evidence).
+    pub fn is_start_blocker(&self) -> bool {
+        matches!(
+            self.freshness_state.as_str(),
+            "missing" | "insufficient" | "stale"
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeErrorResponse {
     pub error: String,
@@ -414,6 +460,15 @@ pub struct PreflightStatusResponse {
     /// `None` for every non-Present outcome — null is never a positive trust
     /// claim on this surface.
     pub live_trust_complete: Option<bool>,
+    // DATA-FRESHNESS-READINESS-GATE-01: market-data freshness.
+    //
+    // Populated only for Paper+Alpaca deployments where both MQK_STRATEGY_SYMBOL
+    // and MQK_STRATEGY_MD_TIMEFRAME are configured.  `null` for other deployments
+    // or when env vars are absent.
+    /// Market-data freshness status for the configured strategy symbol/timeframe.
+    ///
+    /// `null` when not applicable (non-paper+alpaca or env vars absent).
+    pub market_data_freshness: Option<MarketDataFreshnessStatus>,
 }
 
 // ---------------------------------------------------------------------------
@@ -553,6 +608,11 @@ pub struct AutonomousPaperReadinessResponse {
     /// Raw value of `MQK_SESSION_STOP_HH_MM` as read from the environment, or
     /// `null` if the variable is absent or empty.
     pub session_stop_env_raw: Option<String>,
+    // DATA-FRESHNESS-READINESS-GATE-01: market-data freshness.
+    /// Market-data freshness status for the configured strategy symbol/timeframe.
+    ///
+    /// `null` when not applicable (non-paper+alpaca or env vars absent).
+    pub market_data_freshness: Option<MarketDataFreshnessStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

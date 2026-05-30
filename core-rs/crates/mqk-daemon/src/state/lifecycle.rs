@@ -19,6 +19,7 @@ use crate::capital_policy::{
     evaluate_capital_policy_from_env, evaluate_deployment_economics_from_env, CapitalPolicyOutcome,
     DeploymentEconomicsOutcome,
 };
+use crate::market_data_freshness::evaluate_md_freshness_status;
 use crate::parity_evidence::{evaluate_parity_evidence_from_env, ParityEvidenceOutcome};
 
 use super::loop_runner::spawn_execution_loop;
@@ -29,9 +30,9 @@ use super::{
 };
 use super::{
     AcceptedArtifactProvenance, BrokerKind, DeploymentMode, OperatorAuthMode,
-    RuntimeLifecycleError, StatusSnapshot,
+    RuntimeLifecycleError, StatusSnapshot, StrategyMarketDataSource,
 };
-use super::{AppState, DAEMON_ENGINE_ID, RECONCILE_TICK_INTERVAL};
+use super::{AppState, DAEMON_ENGINE_ID, RECONCILE_TICK_INTERVAL, STRATEGY_MD_TIMEFRAME_ENV};
 
 use mqk_runtime::native_strategy::{build_daemon_plugin_registry, NativeStrategyBootstrap};
 
@@ -578,6 +579,49 @@ impl AppState {
                         err,
                     ));
                 }
+            }
+        }
+
+        // DATA-FRESHNESS-READINESS-GATE-01: Market-data freshness start gate.
+        //
+        // For the Paper+Alpaca path only: verify that md_bars contains sufficient
+        // fresh completed bars for the configured strategy symbol/timeframe before
+        // any execution run is created.
+        //
+        // Contract:
+        //   not_applicable — symbol/timeframe env vars absent; gate not applicable; pass.
+        //   unavailable    — DB query failed; cannot assert missing; pass (honest).
+        //   ok             — sufficient fresh bars exist; pass.
+        //   missing        — 0 completed bars; fail-closed.
+        //   insufficient   — fewer than MD_FRESHNESS_MIN_BARS completed bars; fail-closed.
+        //   stale          — latest bar older than MD_FRESHNESS_STALE_SECS; fail-closed.
+        //
+        // Placed after db_pool() (requires DB) and before insert_run / lease acquisition
+        // so a freshness refusal leaves no dangling run rows.
+        if self.deployment_mode() == DeploymentMode::Paper
+            && self.strategy_market_data_source()
+                == StrategyMarketDataSource::ExternalSignalIngestion
+        {
+            let sym = std::env::var("MQK_STRATEGY_SYMBOL")
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default();
+            let tf = std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default();
+            let freshness =
+                evaluate_md_freshness_status(Some(&db), &sym, &tf, Utc::now().timestamp()).await;
+            if freshness.is_start_blocker() {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.market_data_not_fresh",
+                    "market_data_freshness",
+                    format!(
+                        "market-data freshness gate failed \
+                         (freshness_state='{}'): {} \
+                         Run Prep-PremarketMarketData.ps1 before starting \
+                         (DATA-FRESHNESS-READINESS-GATE-01)",
+                        freshness.freshness_state, freshness.reason,
+                    ),
+                ));
             }
         }
 

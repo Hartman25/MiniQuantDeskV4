@@ -14,6 +14,7 @@ pub mod dev_gate;
 pub mod earnings_calendar;
 pub mod event_risk_blackout;
 pub mod ingest_jobs;
+pub mod market_data_freshness;
 pub mod mode_transition;
 pub mod notify;
 pub mod parity_evidence;
