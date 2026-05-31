@@ -305,7 +305,10 @@ async fn dis03_t09_alert_sink_noop_when_notifier_unconfigured() {
     // so notify_trade_event will not deliver.  This proves the sink itself
     // can fire while delivery is suppressed.
     let _notifier = DiscordNotifier::noop();
-    assert!(!_notifier.is_configured(), "DIS03-T09: noop must not be configured");
+    assert!(
+        !_notifier.is_configured(),
+        "DIS03-T09: noop must not be configured"
+    );
 
     // The sink fires (because we call it directly) but notifier.notify_trade_event
     // is a no-op.

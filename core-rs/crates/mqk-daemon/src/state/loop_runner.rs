@@ -29,6 +29,8 @@ use super::types::{
     BrokerSnapshotTruthSource, BusMsg, DaemonOrchestrator, ExecutionLoopCommand, ExecutionLoopExit,
     ExecutionLoopHandle, ReconcileStatusSnapshot, StatusSnapshot,
 };
+use crate::notify::CriticalAlertPayload;
+
 use super::{AppState, DEADMAN_TTL_SECONDS, EXECUTION_LOOP_INTERVAL};
 
 // ---------------------------------------------------------------------------
@@ -77,6 +79,36 @@ pub(super) fn spawn_execution_loop(
                                     ig.disarmed = true;
                                     ig.halted = true;
                                 }
+                                // DISCORD-DEADMAN-ALERTS-01: fire-and-forget alert after
+                                // durable halt/disarm; must never block the exit path.
+                                {
+                                    let notifier = state_arc.discord_notifier.clone();
+                                    let env = Some(
+                                        state_arc.deployment_mode().as_api_label().to_string(),
+                                    );
+                                    let run_id_short = format!("{:.8}", run_id);
+                                    let ts = chrono::Utc::now().to_rfc3339(); // allow: alert timestamp
+                                    tokio::spawn(async move {
+                                        notifier
+                                            .notify_critical_alert(&CriticalAlertPayload {
+                                                alert_class: "halt.deadman_expired".to_string(),
+                                                severity: "critical".to_string(),
+                                                summary: format!(
+                                                    "Deadman TTL expired — run halted and \
+                                                     disarmed | run={run_id_short}"
+                                                ),
+                                                detail: Some(
+                                                    "disarm_reason=DeadmanExpired \
+                                                     phase=pre_tick"
+                                                        .to_string(),
+                                                ),
+                                                environment: env,
+                                                run_id: Some(run_id_short),
+                                                ts_utc: ts,
+                                            })
+                                            .await;
+                                    });
+                                }
                                 if let Err(release_err) = orchestrator.release_runtime_leadership().await {
                                     tracing::warn!("runtime_lease_release_failed error={release_err}");
                                 }
@@ -105,6 +137,36 @@ pub(super) fn spawn_execution_loop(
                                     let mut ig = integrity.write().await;
                                     ig.disarmed = true;
                                     ig.halted = true;
+                                }
+                                // DISCORD-DEADMAN-ALERTS-01: supervisor failure alert.
+                                {
+                                    let notifier = state_arc.discord_notifier.clone();
+                                    let env = Some(
+                                        state_arc.deployment_mode().as_api_label().to_string(),
+                                    );
+                                    let run_id_short = format!("{:.8}", run_id);
+                                    let err_str = err.to_string();
+                                    let ts = chrono::Utc::now().to_rfc3339(); // allow: alert timestamp
+                                    tokio::spawn(async move {
+                                        notifier
+                                            .notify_critical_alert(&CriticalAlertPayload {
+                                                alert_class: "halt.deadman_supervisor_failure"
+                                                    .to_string(),
+                                                severity: "critical".to_string(),
+                                                summary: format!(
+                                                    "Deadman supervisor check failed — run \
+                                                     halted and disarmed | run={run_id_short}"
+                                                ),
+                                                detail: Some(format!(
+                                                    "disarm_reason=DeadmanSupervisorFailure \
+                                                     error={err_str}"
+                                                )),
+                                                environment: env,
+                                                run_id: Some(run_id_short),
+                                                ts_utc: ts,
+                                            })
+                                            .await;
+                                    });
                                 }
                                 if let Err(release_err) = orchestrator.release_runtime_leadership().await {
                                     tracing::warn!("runtime_lease_release_failed error={release_err}");
@@ -205,6 +267,35 @@ pub(super) fn spawn_execution_loop(
                                 ig.disarmed = true;
                                 ig.halted = true;
                             }
+                            // DISCORD-DEADMAN-ALERTS-01: post-tick deadman expiry alert.
+                            {
+                                let notifier = state_arc.discord_notifier.clone();
+                                let env = Some(
+                                    state_arc.deployment_mode().as_api_label().to_string(),
+                                );
+                                let run_id_short = format!("{:.8}", run_id);
+                                let ts = chrono::Utc::now().to_rfc3339(); // allow: alert timestamp
+                                tokio::spawn(async move {
+                                    notifier
+                                        .notify_critical_alert(&CriticalAlertPayload {
+                                            alert_class: "halt.deadman_expired".to_string(),
+                                            severity: "critical".to_string(),
+                                            summary: format!(
+                                                "Deadman TTL exceeded during tick — run halted \
+                                                 and disarmed | run={run_id_short}"
+                                            ),
+                                            detail: Some(
+                                                "disarm_reason=DeadmanExpired \
+                                                 phase=post_tick (tick blocked beyond TTL)"
+                                                    .to_string(),
+                                            ),
+                                            environment: env,
+                                            run_id: Some(run_id_short),
+                                            ts_utc: ts,
+                                        })
+                                        .await;
+                                });
+                            }
                             if let Err(release_err) =
                                 orchestrator.release_runtime_leadership().await
                             {
@@ -236,6 +327,36 @@ pub(super) fn spawn_execution_loop(
                                 let mut ig = integrity.write().await;
                                 ig.disarmed = true;
                                 ig.halted = true;
+                            }
+                            // DISCORD-DEADMAN-ALERTS-01: heartbeat persist failure alert.
+                            {
+                                let notifier = state_arc.discord_notifier.clone();
+                                let env = Some(
+                                    state_arc.deployment_mode().as_api_label().to_string(),
+                                );
+                                let run_id_short = format!("{:.8}", run_id);
+                                let err_str = err.to_string();
+                                let ts = chrono::Utc::now().to_rfc3339(); // allow: alert timestamp
+                                tokio::spawn(async move {
+                                    notifier
+                                        .notify_critical_alert(&CriticalAlertPayload {
+                                            alert_class: "halt.deadman_heartbeat_failed"
+                                                .to_string(),
+                                            severity: "critical".to_string(),
+                                            summary: format!(
+                                                "Deadman heartbeat persist failed — run halted \
+                                                 and disarmed | run={run_id_short}"
+                                            ),
+                                            detail: Some(format!(
+                                                "disarm_reason=DeadmanHeartbeatPersistFailed \
+                                                 error={err_str}"
+                                            )),
+                                            environment: env,
+                                            run_id: Some(run_id_short),
+                                            ts_utc: ts,
+                                        })
+                                        .await;
+                                });
                             }
                             if let Err(release_err) = orchestrator.release_runtime_leadership().await {
                                 tracing::warn!("runtime_lease_release_failed error={release_err}");
