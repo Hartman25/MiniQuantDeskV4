@@ -5,7 +5,7 @@ use std::path::PathBuf;
 mod commands;
 
 use commands::{
-    bkt::{run_backtest_csv, run_backtest_db},
+    bkt::{run_backtest_csv, run_backtest_db, run_sweep_csv},
     load_payload,
     md::{md_ingest_csv, md_ingest_provider, md_sync_provider},
     run::{
@@ -132,6 +132,66 @@ enum BacktestCmd {
         /// Optional output directory for deterministic artifacts (fills/equity/metrics).
         #[arg(long)]
         out_dir: Option<String>,
+    },
+
+    /// Run a deterministic parameter sweep over a CSV bars file.
+    ///
+    /// Generates the Cartesian product of target-qty × slippage-bps × volatility-mult-bps,
+    /// runs each combination, and writes sweep_summary.csv + sweep_summary.json + sweep_report.md.
+    CsvSweep {
+        /// Path to bars CSV file.
+        #[arg(long)]
+        bars: String,
+
+        /// Strategy name to run.
+        #[arg(long, default_value = "swing_momentum")]
+        strategy: String,
+
+        /// Primary symbol for the strategy.
+        #[arg(long, default_value = "SPY")]
+        symbol: String,
+
+        /// Timeframe seconds (must match strategy spec).
+        #[arg(long, default_value_t = 60)]
+        timeframe_secs: i64,
+
+        /// Initial cash in micros.
+        #[arg(long, default_value_t = 100_000_000_000)]
+        initial_cash_micros: i64,
+
+        /// Enable integrity checks.
+        #[arg(long, default_value_t = true)]
+        integrity_enabled: bool,
+
+        /// Integrity stale threshold in ticks.
+        #[arg(long, default_value_t = 120)]
+        integrity_stale_threshold_ticks: u64,
+
+        /// Integrity gap tolerance (missing bars).
+        #[arg(long, default_value_t = 0)]
+        integrity_gap_tolerance_bars: u32,
+
+        /// Comma-separated target_qty values to sweep (e.g. "1,3,5").
+        #[arg(long)]
+        target_qty: String,
+
+        /// Comma-separated slippage_bps values to sweep (e.g. "5,10").
+        #[arg(long)]
+        slippage_bps: String,
+
+        /// Comma-separated volatility_mult_bps values to sweep.
+        /// If omitted, uses the base config default (5000).
+        #[arg(long, default_value = "")]
+        volatility_mult_bps: String,
+
+        /// Output directory for individual run artifacts and sweep summary.
+        #[arg(long)]
+        out_dir: Option<String>,
+
+        /// Override the maximum combinations limit (default: 100).
+        /// Use with caution: large sweeps take proportionally longer.
+        #[arg(long)]
+        max_combinations: Option<usize>,
     },
 
     /// Load canonical bars from Postgres md_bars and run a deterministic backtest.
@@ -579,6 +639,38 @@ async fn main() -> Result<()> {
                     max_target_qty,
                     max_position_notional_usd,
                     out_dir,
+                )
+                .await?;
+            }
+            BacktestCmd::CsvSweep {
+                bars,
+                strategy,
+                symbol,
+                timeframe_secs,
+                initial_cash_micros,
+                integrity_enabled,
+                integrity_stale_threshold_ticks,
+                integrity_gap_tolerance_bars,
+                target_qty,
+                slippage_bps,
+                volatility_mult_bps,
+                out_dir,
+                max_combinations,
+            } => {
+                run_sweep_csv(
+                    bars,
+                    strategy,
+                    symbol,
+                    timeframe_secs,
+                    initial_cash_micros,
+                    integrity_enabled,
+                    integrity_stale_threshold_ticks,
+                    integrity_gap_tolerance_bars,
+                    target_qty,
+                    slippage_bps,
+                    volatility_mult_bps,
+                    out_dir,
+                    max_combinations,
                 )
                 .await?;
             }

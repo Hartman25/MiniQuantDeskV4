@@ -307,7 +307,15 @@ impl BacktestEngine {
             // 3. Build strategy context and feed bar
             self.bar_count += 1;
 
-            let stub = BarStub::new(bar.end_ts, bar.is_complete, bar.close_micros, bar.volume);
+            let stub = BarStub::with_ohlcv(
+                bar.end_ts,
+                bar.is_complete,
+                bar.open_micros,
+                bar.high_micros,
+                bar.low_micros,
+                bar.close_micros,
+                bar.volume,
+            );
             self.recent_bars.push(stub);
             let max_len = self.config.bar_history_len;
             if self.recent_bars.len() > max_len {

@@ -2,7 +2,10 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::Path;
 
-use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine, StrategySizingConfig};
+use mqk_backtest::{
+    BacktestBar, BacktestConfig, BacktestEngine, StrategySizingConfig, SweepGrid, SweepRowResult,
+    SWEEP_MAX_COMBINATIONS,
+};
 use mqk_strategy::{engines::register_builtin_strategies_with_sizing, PluginRegistry};
 
 // ---------------------------------------------------------------------------
@@ -316,6 +319,327 @@ pub async fn run_backtest_db(
         println!("halt_reason={}", r);
     }
     println!("final_equity_micros={}", final_equity);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CSV sweep runner
+// ---------------------------------------------------------------------------
+
+/// Parse a comma-separated list of i64 values (e.g. "1,3,5").
+fn parse_i64_list(s: &str) -> Result<Vec<i64>> {
+    s.split(',')
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| {
+            v.parse::<i64>()
+                .with_context(|| format!("invalid integer: '{v}'"))
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_sweep_csv(
+    bars_path: String,
+    strategy: String,
+    symbol: String,
+    timeframe_secs: i64,
+    initial_cash_micros: i64,
+    integrity_enabled: bool,
+    integrity_stale_threshold_ticks: u64,
+    integrity_gap_tolerance_bars: u32,
+    target_qty_list: String,
+    slippage_bps_list: String,
+    volatility_mult_bps_list: String,
+    out_dir: Option<String>,
+    max_combinations_override: Option<usize>,
+) -> Result<()> {
+    if timeframe_secs <= 0 {
+        anyhow::bail!("--timeframe-secs must be > 0");
+    }
+    if initial_cash_micros <= 0 {
+        anyhow::bail!("--initial-cash-micros must be > 0");
+    }
+
+    let bars = mqk_backtest::load_csv_file(&bars_path)
+        .with_context(|| format!("load bars csv failed: {}", bars_path))?;
+
+    let target_qty_vals = parse_i64_list(&target_qty_list)?;
+    let slippage_bps_vals = parse_i64_list(&slippage_bps_list)?;
+    let vol_mult_vals = parse_i64_list(&volatility_mult_bps_list)?;
+
+    if target_qty_vals.is_empty() {
+        anyhow::bail!("--target-qty must contain at least one value");
+    }
+    if slippage_bps_vals.is_empty() {
+        anyhow::bail!("--slippage-bps must contain at least one value");
+    }
+
+    let limit = max_combinations_override.unwrap_or(SWEEP_MAX_COMBINATIONS);
+
+    let mut base_cfg = BacktestConfig::conservative_defaults();
+    base_cfg.timeframe_secs = timeframe_secs;
+    base_cfg.initial_cash_micros = initial_cash_micros;
+    base_cfg.integrity_enabled = integrity_enabled;
+    base_cfg.integrity_stale_threshold_ticks = integrity_stale_threshold_ticks;
+    base_cfg.integrity_gap_tolerance_bars = integrity_gap_tolerance_bars;
+
+    let grid = SweepGrid {
+        target_qty: target_qty_vals,
+        slippage_bps: slippage_bps_vals,
+        volatility_mult_bps: vol_mult_vals,
+        max_target_qty: vec![],
+        max_position_notional_usd: vec![],
+    };
+
+    let combo_count = grid.combination_count(&base_cfg);
+    println!("sweep_combinations={}", combo_count);
+
+    if combo_count == 0 {
+        anyhow::bail!("sweep grid is empty — at least one combination required");
+    }
+    if combo_count > limit {
+        anyhow::bail!(
+            "sweep grid has {} combinations which exceeds the limit of {} (use --max-combinations to override)",
+            combo_count, limit
+        );
+    }
+
+    let combos = grid.combinations(&base_cfg);
+    let mut results: Vec<SweepRowResult> = Vec::with_capacity(combos.len());
+
+    for (i, pt) in combos.iter().enumerate() {
+        let mut reg = PluginRegistry::new();
+        register_builtin_strategies_with_sizing(
+            &mut reg,
+            &symbol,
+            pt.target_qty,
+            pt.max_target_qty,
+            pt.max_position_notional_usd,
+        )
+        .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
+        let strategy_instance = reg.instantiate(&strategy).with_context(|| {
+            let available: Vec<_> = reg.list().iter().map(|m| m.name.as_str()).collect();
+            format!(
+                "unknown strategy '{}'; available: {}",
+                strategy,
+                available.join(", ")
+            )
+        })?;
+
+        let mut cfg = base_cfg.clone();
+        cfg.sizing = StrategySizingConfig {
+            target_qty: pt.target_qty,
+            max_target_qty: pt.max_target_qty,
+            max_position_notional_usd: pt.max_position_notional_usd,
+        };
+        cfg.stress = mqk_backtest::StressProfile {
+            slippage_bps: pt.slippage_bps,
+            volatility_mult_bps: pt.volatility_mult_bps,
+        };
+
+        let mut engine = BacktestEngine::new(cfg);
+        engine
+            .add_strategy(strategy_instance)
+            .with_context(|| format!("add_strategy failed for '{}'", strategy))?;
+
+        let report = engine.run(&bars).context("backtest run failed")?;
+
+        // Write individual run artifacts if out_dir provided.
+        let artifact_path = if let Some(ref dir) = out_dir {
+            let config_hash = report.config_id.to_string();
+            let git_hash = bkt_git_hash();
+            let host_fp = bkt_host_fingerprint();
+            let init_result =
+                mqk_artifacts::init_run_artifacts(mqk_artifacts::InitRunArtifactsArgs {
+                    exports_root: Path::new(dir),
+                    schema_version: 1,
+                    run_id: report.run_id,
+                    strategy_name: &report.strategy_name,
+                    engine_id: "mqk-backtest",
+                    mode: "backtest-sweep",
+                    git_hash: &git_hash,
+                    config_hash: &config_hash,
+                    host_fingerprint: &host_fp,
+                    now_utc: Utc::now(), // allow: operational manifest timestamp
+                })
+                .with_context(|| format!("init run artifacts failed for sweep point {}", i))?;
+
+            mqk_artifacts::write_backtest_report(
+                &init_result.run_dir,
+                &report,
+                initial_cash_micros,
+            )
+            .with_context(|| format!("write backtest artifacts failed for sweep point {}", i))?;
+
+            Some(init_result.run_dir.display().to_string())
+        } else {
+            None
+        };
+
+        let row = mqk_backtest::sweep_row_from_report(&report, pt, artifact_path);
+        results.push(row);
+        println!(
+            "sweep_run={}/{} tq={} slip={} vol={} return={:.2}% halted={}",
+            i + 1,
+            combos.len(),
+            pt.target_qty,
+            pt.slippage_bps,
+            pt.volatility_mult_bps,
+            results.last().unwrap().total_return_pct,
+            results.last().unwrap().halted,
+        );
+    }
+
+    mqk_backtest::rank_sweep_results(&mut results);
+
+    // Write sweep summary artifacts.
+    if let Some(ref dir) = out_dir {
+        write_sweep_artifacts(Path::new(dir), &results)?;
+        println!("sweep_artifacts_written=true");
+        println!("sweep_dir={}", dir);
+    }
+
+    println!("sweep_ok=true");
+    println!("sweep_total_runs={}", results.len());
+    if let Some(best) = results.first() {
+        println!(
+            "sweep_best_run_id={} tq={} slip={} vol={} return={:.2}% alpha={:.2}% dd={:.2}%",
+            best.run_id,
+            best.target_qty,
+            best.slippage_bps,
+            best.volatility_mult_bps,
+            best.total_return_pct,
+            best.alpha_pct.unwrap_or(f64::NAN),
+            best.max_drawdown_pct,
+        );
+    }
+
+    Ok(())
+}
+
+/// Write sweep summary CSV, JSON, and Markdown to the sweep root directory.
+fn write_sweep_artifacts(sweep_dir: &Path, rows: &[SweepRowResult]) -> Result<()> {
+    use std::fmt::Write as FmtWrite;
+
+    std::fs::create_dir_all(sweep_dir)
+        .with_context(|| format!("create sweep dir failed: {}", sweep_dir.display()))?;
+
+    // --- sweep_summary.csv ---
+    let csv_path = sweep_dir.join("sweep_summary.csv");
+    let mut csv = String::from(
+        "rank,run_id,config_id,target_qty,max_target_qty,max_position_notional_usd,\
+         slippage_bps,volatility_mult_bps,total_return_pct,buy_and_hold_return_pct,\
+         alpha_pct,max_drawdown_pct,fill_count,trade_count,win_rate_pct,profit_factor,\
+         halted,artifact_path\n",
+    );
+    for r in rows {
+        writeln!(
+            csv,
+            "{},{},{},{},{},{},{},{},{:.4},{},{},{:.4},{},{},{},{},{},{}",
+            r.rank,
+            r.run_id,
+            r.config_id,
+            r.target_qty,
+            r.max_target_qty.map(|v| v.to_string()).unwrap_or_default(),
+            r.max_position_notional_usd
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            r.slippage_bps,
+            r.volatility_mult_bps,
+            r.total_return_pct,
+            r.buy_and_hold_return_pct
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_default(),
+            r.alpha_pct.map(|v| format!("{v:.4}")).unwrap_or_default(),
+            r.max_drawdown_pct,
+            r.fill_count,
+            r.trade_count,
+            r.win_rate_pct
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_default(),
+            r.profit_factor
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_default(),
+            r.halted,
+            r.artifact_path.as_deref().unwrap_or(""),
+        )
+        .unwrap();
+    }
+    std::fs::write(&csv_path, &csv)
+        .with_context(|| format!("write sweep_summary.csv failed: {}", csv_path.display()))?;
+
+    // --- sweep_summary.json ---
+    let json_path = sweep_dir.join("sweep_summary.json");
+    let json_rows: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "rank": r.rank,
+                "run_id": r.run_id,
+                "config_id": r.config_id,
+                "target_qty": r.target_qty,
+                "max_target_qty": r.max_target_qty,
+                "max_position_notional_usd": r.max_position_notional_usd,
+                "slippage_bps": r.slippage_bps,
+                "volatility_mult_bps": r.volatility_mult_bps,
+                "total_return_pct": r.total_return_pct,
+                "buy_and_hold_return_pct": r.buy_and_hold_return_pct,
+                "alpha_pct": r.alpha_pct,
+                "max_drawdown_pct": r.max_drawdown_pct,
+                "fill_count": r.fill_count,
+                "trade_count": r.trade_count,
+                "win_rate_pct": r.win_rate_pct,
+                "profit_factor": r.profit_factor,
+                "halted": r.halted,
+                "artifact_path": r.artifact_path,
+            })
+        })
+        .collect();
+    let json_obj = serde_json::json!({
+        "schema_version": "sweep-summary-v1",
+        "total_runs": rows.len(),
+        "ranking_note": "sorted by alpha_pct desc (or total_return_pct if no benchmark), then max_drawdown_pct asc, then run_id asc",
+        "rows": json_rows,
+    });
+    let json_str =
+        serde_json::to_string_pretty(&json_obj).context("serialize sweep_summary.json failed")?;
+    std::fs::write(&json_path, format!("{json_str}\n"))
+        .with_context(|| format!("write sweep_summary.json failed: {}", json_path.display()))?;
+
+    // --- sweep_report.md ---
+    let md_path = sweep_dir.join("sweep_report.md");
+    let mut md = String::from("# Sweep Summary\n\n");
+    writeln!(md, "Total runs: {}\n", rows.len()).unwrap();
+    writeln!(md, "| Rank | target_qty | slippage_bps | vol_mult_bps | return% | alpha% | dd% | fills | wins | halted |").unwrap();
+    writeln!(md, "|------|-----------|-------------|--------------|---------|--------|-----|-------|------|--------|").unwrap();
+    for r in rows {
+        writeln!(
+            md,
+            "| {} | {} | {} | {} | {:.2} | {} | {:.2} | {} | {} | {} |",
+            r.rank,
+            r.target_qty,
+            r.slippage_bps,
+            r.volatility_mult_bps,
+            r.total_return_pct,
+            r.alpha_pct
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            r.max_drawdown_pct,
+            r.fill_count,
+            r.win_rate_pct
+                .map(|v| format!("{v:.1}%"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            if r.halted { "YES" } else { "no" },
+        )
+        .unwrap();
+    }
+    md.push_str("\n> **Warning:** Sweep rankings reflect in-sample performance only. ");
+    md.push_str("Higher alpha on training data does not predict live performance. ");
+    md.push_str("Use sweeps to compare hypotheses, not to blindly select a configuration.\n");
+    std::fs::write(&md_path, &md)
+        .with_context(|| format!("write sweep_report.md failed: {}", md_path.display()))?;
 
     Ok(())
 }

@@ -17,11 +17,16 @@
 pub mod corporate_actions; // Patch B4
 mod engine;
 pub mod loader;
+pub mod sweep;
 pub mod types;
 
 pub use corporate_actions::{CorporateActionPolicy, ForbidEntry}; // Patch B4
 pub use engine::{BacktestEngine, BacktestError};
 pub use loader::{load_csv_file, parse_csv_bars, LoadError};
+pub use sweep::{
+    rank_sweep_results, run_sweep, sweep_row_from_report, SweepError, SweepGrid, SweepPoint,
+    SweepRowResult, SWEEP_MAX_COMBINATIONS,
+};
 pub use types::{
     derive_input_data_hash, derive_run_id, BacktestBar, BacktestConfig, BacktestFill,
     BacktestOrder, BacktestOrderSide, BacktestReport, CommissionModel, OrderStatus,

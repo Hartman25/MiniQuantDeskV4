@@ -20,19 +20,57 @@ impl StrategySpec {
 
 /// A minimal, deterministic bar stub for context.
 /// (No broker/DB access. Real bar schema can be unified later with mqk-integrity.)
+///
+/// OHLCV fields: `open_micros`, `high_micros`, `low_micros`, `close_micros`, `volume`.
+/// Live bar loaders that only have close+volume use `BarStub::new`, which sets
+/// open=high=low=close (conservative documented fallback). Backtest loaders use
+/// `BarStub::with_ohlcv` to carry the full OHLCV from the bar source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BarStub {
     pub end_ts: i64,
     pub is_complete: bool,
+    pub open_micros: i64,
+    pub high_micros: i64,
+    pub low_micros: i64,
     pub close_micros: i64,
     pub volume: i64,
 }
 
 impl BarStub {
+    /// Backward-compatible constructor for live/paper loaders that only carry close + volume.
+    ///
+    /// Sets `open_micros = high_micros = low_micros = close_micros`. This is the correct
+    /// conservative fallback when the source does not provide OHLC separately.
     pub fn new(end_ts: i64, is_complete: bool, close_micros: i64, volume: i64) -> Self {
         Self {
             end_ts,
             is_complete,
+            open_micros: close_micros,
+            high_micros: close_micros,
+            low_micros: close_micros,
+            close_micros,
+            volume,
+        }
+    }
+
+    /// Full OHLCV constructor. Use when the bar source provides open/high/low explicitly.
+    ///
+    /// Backtest engine uses this so strategies can access the full bar spread.
+    pub fn with_ohlcv(
+        end_ts: i64,
+        is_complete: bool,
+        open_micros: i64,
+        high_micros: i64,
+        low_micros: i64,
+        close_micros: i64,
+        volume: i64,
+    ) -> Self {
+        Self {
+            end_ts,
+            is_complete,
+            open_micros,
+            high_micros,
+            low_micros,
             close_micros,
             volume,
         }

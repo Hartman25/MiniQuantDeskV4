@@ -166,6 +166,99 @@ live fill quality means real P&L could exceed the backtest — but never assume 
 
 ---
 
+## Parameter sweeps
+
+A sweep runs the same bar sequence under multiple config combinations and ranks the results.
+Use sweeps to **compare hypotheses**, not to blindly pick the highest-return config.
+
+### When to use a sweep
+
+- You have a hypothesis about how slippage or sizing affects strategy behavior.
+- You want to compare a small number of discrete configs without guessing.
+- You need a summary table for operator review before committing to a config.
+
+**Do not use sweeps to auto-optimize a strategy.** Selecting the best sweep result and
+deploying it is data snooping — you have trained the parameter on the same data you are
+evaluating it on.
+
+### Running a CSV sweep
+
+```
+mqk backtest csv-sweep \
+  --bars <path/to/bars.csv> \
+  --strategy intraday_scalper \
+  --symbol SPY \
+  --target-qty "1,3,5" \
+  --slippage-bps "5,10" \
+  --out-dir exports/sweeps/2026-05-30/
+```
+
+This runs 2×3 = 6 combinations and writes artifacts to `exports/sweeps/2026-05-30/`.
+
+The sweep refuses grids larger than 100 combinations (use `--max-combinations` to override
+if you understand the risk). An empty grid is also refused.
+
+### Sweep artifact tree
+
+```
+exports/sweeps/2026-05-30/
+├── sweep_summary.csv         — ranked table of all runs (one row per combination)
+├── sweep_summary.json        — same data in JSON (schema_version: "sweep-summary-v1")
+├── sweep_report.md           — Markdown table with key metrics and overfitting warning
+└── <run_id>/                 — individual run artifacts (one directory per combination)
+    ├── manifest.json
+    ├── metrics.json
+    ├── report.md
+    ├── orders.csv
+    ├── fills.csv
+    └── equity_curve.csv
+```
+
+### Reading `sweep_summary.csv`
+
+| Column | Meaning |
+|---|---|
+| `rank` | 1-based rank (1 = best by alpha then drawdown) |
+| `run_id` | Deterministic UUID for this combination |
+| `config_id` | Deterministic UUID for the config parameters |
+| `target_qty` | Target share count for this combination |
+| `slippage_bps` | Flat slippage floor in basis points |
+| `volatility_mult_bps` | Spread-volatility multiplier |
+| `total_return_pct` | Strategy net return |
+| `alpha_pct` | Strategy return minus buy-and-hold (positive = outperformed) |
+| `max_drawdown_pct` | Largest peak-to-trough decline |
+| `fill_count` | Number of fills executed |
+| `trade_count` | Completed FIFO round-trip trades |
+| `win_rate_pct` | % of round trips with positive PnL |
+| `halted` | Whether the run halted early |
+| `artifact_path` | Path to the individual run artifact directory |
+
+### Ranking method
+
+Results are ranked by:
+1. `alpha_pct` descending (higher alpha = better rank)
+2. `max_drawdown_pct` ascending (lower drawdown = better rank on ties)
+3. `run_id` ascending (deterministic tie-breaker)
+
+If buy-and-hold benchmark is unavailable (< 2 valid bars), ranking falls back to
+`total_return_pct` descending.
+
+### Overfitting and data snooping warnings
+
+- **A high-ranked sweep result is not predictive.** It tells you which config worked
+  best on this specific historical period. It does not tell you which will work best
+  on future data.
+- Never select a config solely because it ranks first in a sweep.
+- Use sweeps to **falsify hypotheses** (e.g., "higher slippage should reduce returns")
+  not to maximize historical returns.
+- If you run multiple sweeps on the same data, the probability of finding a spurious
+  winner increases with each sweep. Treat each additional sweep as increasing
+  your data-snooping risk.
+- Always validate the selected config in a separate paper trading session before
+  committing any live capital.
+
+---
+
 ## Recommended pre-live workflow
 
 1. **Refresh data** — run the premarket data refresh or ingest script.
