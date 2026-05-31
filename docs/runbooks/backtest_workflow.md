@@ -20,22 +20,47 @@ prove future profitability.
 - Strategy registered in `config/strategies/` or the default MQK strategy path.
 - Daemon is **not running** — backtests are offline; they do not connect to brokers.
 
+## Strategy timeframe reference
+
+Each strategy enforces a specific timeframe.  Pass the matching `--timeframe-secs`
+and use bar data at that interval.
+
+| Strategy | `--timeframe-secs` | `--timeframe` (DB) | Notes |
+|---|---|---|---|
+| `swing_momentum` | `86400` | `1D` | Daily bars; set stale threshold ≥ 345600 |
+| `mean_reversion` | `3600` | `1h` | 1-hour bars |
+| `volatility_breakout` | `3600` | `1h` | 1-hour bars |
+| `intraday_scalper` | `300` | `5m` | 5-minute bars |
+
+Passing a mismatched `--timeframe-secs` causes an immediate `TimeframeMismatch` error.
+
 ---
 
 ## Running a CSV backtest
 
 ```
-mqk backtest csv --bars <path/to/bars.csv> [--output <exports-dir>]
+mqk backtest csv --bars <path/to/bars.csv> [--out-dir <exports-dir>]
 ```
 
-Example:
+Example (swing_momentum, daily bars):
 
 ```
-mqk backtest csv --bars data/bars/SPY_1min.csv --output exports/
+mqk backtest csv `
+  --bars tests\fixtures\bars\smoke_1D_SPY.csv `
+  --strategy swing_momentum `
+  --symbol SPY `
+  --timeframe-secs 86400 `
+  --integrity-stale-threshold-ticks 345600 `
+  --out-dir exports\backtests\
 ```
 
 The engine reads every row from the CSV, runs the strategy bar-by-bar, and
-writes artifacts under `exports/<run_id>/`.
+writes artifacts under `exports\backtests\<run_id>\`.
+
+**Note on `--integrity-stale-threshold-ticks`:**  For daily bars, weekend gaps
+are up to 259 200 s (3 calendar days).  Use at least `345600` (4 days) so that
+normal weekend gaps do not trigger the stale-feed disarm.  The default of `120`
+is correct for intraday bars only.
 
 ### CSV format
 
@@ -53,10 +78,41 @@ SPY,1700000060,450000000,452000000,449000000,451000000,1200,1
 ## Running a DB backtest
 
 ```
-mqk backtest db --symbols SPY,QQQ --start <YYYY-MM-DD> --end <YYYY-MM-DD> [--output <exports-dir>]
+mqk backtest db `
+  --timeframe <TF> `
+  --start-end-ts <epoch_seconds> `
+  --end-end-ts <epoch_seconds> `
+  [--symbols <SYM1,SYM2>] `
+  --strategy <name> `
+  --symbol <primary_symbol> `
+  --timeframe-secs <secs> `
+  [--integrity-stale-threshold-ticks <ticks>] `
+  [--out-dir <exports-dir>]
 ```
 
-Loads bars from the market-data DB for the specified symbols and date range.
+- `--timeframe`: bar timeframe as stored in `md_bars` (e.g. `1D`, `1m`, `5m`).
+- `--start-end-ts` / `--end-end-ts`: **epoch seconds** (UTC), inclusive.  
+  Convert a date like `2023-11-19` with: `[DateTimeOffset]::Parse("2023-11-19").ToUnixTimeSeconds()`  
+  or Python: `import datetime; int(datetime.datetime(2023,11,19).timestamp())`
+- `--symbols`: optional filter; if omitted all symbols in range are loaded.
+- `MQK_DATABASE_URL` must be set.
+
+Example (swing_momentum, AAPL daily, 2023-11-19 to 2023-12-14):
+
+```
+mqk backtest db `
+  --timeframe 1D `
+  --start-end-ts 1700352000 `
+  --end-end-ts 1702512000 `
+  --symbols AAPL `
+  --strategy swing_momentum `
+  --symbol AAPL `
+  --timeframe-secs 86400 `
+  --integrity-stale-threshold-ticks 345600 `
+  --out-dir exports\backtests\
+```
+
+Loads bars from the market-data DB for the specified timeframe and epoch range.
 Requires `MQK_DATABASE_URL` to be set.
 
 ---
@@ -183,17 +239,20 @@ evaluating it on.
 
 ### Running a CSV sweep
 
-```
-mqk backtest csv-sweep \
-  --bars <path/to/bars.csv> \
-  --strategy intraday_scalper \
-  --symbol SPY \
-  --target-qty "1,3,5" \
-  --slippage-bps "5,10" \
-  --out-dir exports/sweeps/2026-05-30/
+PowerShell (use backtick `` ` `` for line continuation):
+
+```powershell
+mqk backtest csv-sweep `
+  --bars tests\fixtures\bars\smoke_5m_SPY.csv `
+  --strategy intraday_scalper `
+  --symbol SPY `
+  --timeframe-secs 300 `
+  --target-qty "1,3,5" `
+  --slippage-bps "5,10" `
+  --out-dir exports\sweeps\2026-05-31\
 ```
 
-This runs 2×3 = 6 combinations and writes artifacts to `exports/sweeps/2026-05-30/`.
+This runs 2×3 = 6 combinations and writes artifacts to `exports\sweeps\2026-05-31\`.
 
 The sweep refuses grids larger than 100 combinations (use `--max-combinations` to override
 if you understand the risk). An empty grid is also refused.
