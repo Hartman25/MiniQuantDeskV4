@@ -62,7 +62,7 @@ function Write-Section { param([string]$M) Write-Host "" ; Write-Host "=== $M ==
 $SECRET_NAMES = @(
     'ALPACA_API_KEY_PAPER', 'ALPACA_API_SECRET_PAPER',
     'ALPACA_API_KEY_LIVE',  'ALPACA_API_SECRET_LIVE',
-    'MQK_OPERATOR_TOKEN',   'MQK_DISCORD_WEBHOOK_URL',
+    'MQK_OPERATOR_TOKEN',   'DISCORD_WEBHOOK_URL',
     'POSTGRES_PASSWORD',    'DATABASE_URL'
 )
 
