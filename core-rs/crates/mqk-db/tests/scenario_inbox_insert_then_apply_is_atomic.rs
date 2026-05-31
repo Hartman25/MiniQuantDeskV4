@@ -362,6 +362,11 @@ async fn economic_fill_identity_is_durably_deduped() -> Result<()> {
         "same broker_message_id must dedupe transport duplicate"
     );
 
+    // For events without broker_fill_id, only transport deduplication applies.
+    // Use event_kind="partial_fill" here: partial fills are explicitly excluded
+    // from uq_inbox_run_order_single_fill (migration 0040), so multiple partial
+    // fills for the same order are allowed. This proves that broker_message_id
+    // is the sole dedup key when broker_fill_id is None.
     let no_fill_first = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
         run_id,
@@ -369,7 +374,7 @@ async fn economic_fill_identity_is_durably_deduped() -> Result<()> {
         None,
         internal_order_id,
         broker_order_id,
-        event_kind,
+        "partial_fill",
         &json!({"msg": 3}),
         event_ts_ms + 2,
         received_at,
@@ -384,7 +389,7 @@ async fn economic_fill_identity_is_durably_deduped() -> Result<()> {
         None,
         internal_order_id,
         broker_order_id,
-        event_kind,
+        "partial_fill",
         &json!({"msg": 4}),
         event_ts_ms + 3,
         received_at,

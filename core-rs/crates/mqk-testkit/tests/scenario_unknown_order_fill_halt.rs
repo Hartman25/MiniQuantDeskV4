@@ -1,26 +1,22 @@
-//! Scenario: Unknown-Order Fill → Halt + Disarm — Section C
+//! Scenario: Unknown-Order WS Fill → Skip (WS-REB-01) + Halt Sticky (C-2)
 //!
 //! # Mission
 //!
-//! Prove that `tick()` → inbox `Fill` for an `internal_order_id` not present in
-//! the OMS order map → mandatory halt + disarm, with the halt visible to a brand-
-//! new orchestrator instance that reads DB state on the subsequent tick.
+//! Prove two invariants introduced by ORPHAN-WS-FILL-HALT-01 and Section C:
 //!
-//! # Invariants under test
-//!
-//! **C-1** — Unknown-order fill halts and disarms:
+//! **C-1** — Unknown-order WS fill is skipped, not halted (WS-REB-01):
 //!   When the inbox contains a `Fill` event whose `internal_order_id` is absent
-//!   from the orchestrator's OMS order map, `tick()` must:
-//!   1. Call `persist_halt_and_disarm` (mandatory, not best-effort).
-//!   2. Write `runs.status = 'HALTED'`, `halted_at_utc IS NOT NULL`.
-//!   3. Write `sys_arm_state = 'DISARMED'`, reason `'IntegrityViolation'`.
-//!   4. Return `Err(…)` whose string representation contains `"UNKNOWN_ORDER_FILL"`.
+//!   from the orchestrator's OMS order map, Phase 3b applies the WS-REB-01 guard:
+//!   the fill is treated as an orphan from a prior run, marked applied, and the
+//!   tick succeeds.  The run remains RUNNING.  (Prior behaviour — UNKNOWN_ORDER_FILL
+//!   halt — was changed by ORPHAN-WS-FILL-HALT-01 to prevent spurious halts on
+//!   historical fills from prior runs.)
 //!
 //! **C-2** — Halt is sticky across restart:
-//!   A fresh `ExecutionOrchestrator` constructed for the same `run_id` — with
-//!   all in-process gates passing — is refused at Phase 0 (HALT_GUARD) before
-//!   any outbox claim, gateway call, or inbox apply.  This proves the guard reads
-//!   from DB on every tick, not from in-memory state.
+//!   A fresh `ExecutionOrchestrator` constructed for the same `run_id` — after the
+//!   run has been halted via DB write — is refused at Phase 0 (HALT_GUARD) before
+//!   any lease acquisition, outbox claim, gateway call, or inbox apply.  This proves
+//!   the guard reads from DB on every tick, not from in-memory state.
 //!
 //! # Test matrix
 //!
@@ -29,15 +25,13 @@
 //! | `c1_c2_unknown_fill_halts_disarms_and_refuses_restart` | C-1, C-2 | Yes (skip) |
 //!
 //! Tests skip gracefully when `MQK_DATABASE_URL` is absent or DB is unreachable.
-//! If `MQK_DATABASE_URL` is set but the DB cannot be reached, the test skips
-//! (same policy as other scenario tests).
 //!
 //! # Design notes
 //!
-//! The OMS order map (`BTreeMap::new()`) is intentionally empty so that
-//! every Fill event targets an unknown order.  All three gates use `BoolGate(true)`
-//! so the only path to halt is the unknown-order-fill detector in the inbox apply
-//! loop (Phase 3b, Section C).  This isolates the variable under test.
+//! The OMS order map (`BTreeMap::new()`) is intentionally empty so that every Fill
+//! event targets an unknown order and is handled by WS-REB-01 (skip, not halt).
+//! C-2 halts the run directly via `mqk_db::halt_run` + `mqk_db::persist_arm_state`
+//! to isolate the Phase 0 HALT_GUARD from the fill-processing path.
 
 use std::collections::BTreeMap;
 
@@ -204,6 +198,11 @@ async fn cleanup_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
         .bind(run_id)
         .execute(pool)
         .await?;
+    // Clear the runtime leader lease so a subsequent test run of the same
+    // fixed run_id is not refused with RUNTIME_LEASE_UNAVAILABLE.
+    sqlx::query("delete from runtime_leader_lease where id = 1")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -246,30 +245,28 @@ fn make_clean_orch(
 // ---------------------------------------------------------------------------
 
 /// C-1: `tick()` → inbox `Fill` for unknown `internal_order_id` →
-///      `UNKNOWN_ORDER_FILL` halt with mandatory DB writes.
+///      WS-REB-01 guard skips the fill, marks it applied, run stays RUNNING.
 ///
 /// C-2: A fresh `ExecutionOrchestrator` (all gates pass, no in-memory halt
-///      state) for the same `run_id` is refused at Phase 0 (HALT_GUARD).
+///      state) for the same `run_id` is refused at Phase 0 (HALT_GUARD) after
+///      the run is directly halted via DB write.
 ///
 /// Sequence:
 ///
 /// 1. Seed a RUNNING run.  Clear `sys_arm_state` so assertions are unambiguous.
 /// 2. Insert one unapplied inbox `Fill` row.  The `internal_order_id`
 ///    (`"cuf-ord-unknown"`) is absent from the empty OMS order map.
-/// 3. `tick()` → Phase 3b apply loop → `apply_fill_step` returns `Err` for
-///    the unknown order → `persist_halt_and_disarm("IntegrityViolation")` is
-///    called mandatorily → `tick()` returns `Err`.
-/// 4. Assert error string contains `"UNKNOWN_ORDER_FILL"`.
-/// 5. Assert `runs.status = HALTED`, `halted_at_utc IS NOT NULL`.
-/// 6. Assert `sys_arm_state = ('DISARMED', 'IntegrityViolation')`.
+/// 3. `tick()` → Phase 3b apply loop → WS-REB-01 guard fires (order absent
+///    from OMS map → historical orphan fill) → fill marked applied → tick
+///    returns `Ok(())`.
+/// 4. Assert `runs.status = RUNNING` (no halt triggered).
+/// 5. Assert inbox is empty (fill was marked applied by WS-REB-01).
+/// 6. Directly halt + disarm the run via DB to set up the C-2 precondition.
 /// 7. Construct a BRAND-NEW orchestrator (all gates pass — `BoolGate(true)` —
-///    no shared in-memory state with the first orchestrator).
+///    no shared in-memory state).
 /// 8. `tick()` → Phase 0 HALT_GUARD reads `runs.status` from DB → sees
-///    `HALTED` → returns `Err` before any outbox claim, gateway call, or inbox
-///    apply.
-///
-/// Step 8 is only possible because step 3's `halt_run` write succeeded —
-/// proving the write is mandatory and not best-effort.
+///    `HALTED` → returns `Err("HALT_GUARD: ...")` before any lease acquisition,
+///    outbox claim, gateway call, or inbox apply.
 ///
 /// Requires `MQK_DATABASE_URL`.  Skips gracefully if absent or unreachable.
 #[tokio::test]
@@ -297,7 +294,8 @@ async fn c1_c2_unknown_fill_halts_disarms_and_refuses_restart() -> Result<()> {
     // ── 2. Insert an unapplied Fill for an unknown internal_order_id ──────
     //
     // The BTreeMap in make_clean_orch is empty, so "cuf-ord-unknown" has no
-    // matching entry.  apply_fill_step returns Err → Phase 3b halt path.
+    // matching entry.  WS-REB-01 (ORPHAN-WS-FILL-HALT-01) treats this as a
+    // historical orphan fill and skips it rather than halting.
     //
     // JSON format mirrors BrokerEvent::Fill (serde tag = "snake_case"):
     //   type, broker_message_id, internal_order_id, broker_order_id (null),
@@ -319,61 +317,40 @@ async fn c1_c2_unknown_fill_halts_disarms_and_refuses_restart() -> Result<()> {
         "C1: Fill inbox row must be inserted (dedup returned false)"
     );
 
-    // ── 3. tick() must fail — unknown-order fill triggers mandatory halt ───
+    // ── 3. tick() must SUCCEED — WS-REB-01 skips unknown-order fills ──────
     let mut orch = make_clean_orch(pool.clone(), run_id);
-    let err = orch
-        .tick()
+    orch.tick()
         .await
-        .expect_err("C1: tick() must return Err on unknown-order fill");
+        .expect("C1: tick() must return Ok — WS-REB-01 skips orphan fills, does not halt");
 
-    // ── 4. Error string must identify the halt reason ─────────────────────
-    let err_str = err.to_string();
-    assert!(
-        err_str.contains("UNKNOWN_ORDER_FILL") || err_str.contains("BROKER_EVENT_APPLY_FAILED"),
-        "C1: error must contain 'UNKNOWN_ORDER_FILL' or 'BROKER_EVENT_APPLY_FAILED'; got: {err_str}"
-    );
-
-    // ── 5. DB: run must be HALTED with halted_at_utc set ─────────────────
-    //
-    // If halt_run() had been best-effort (let _ = ...) and silently failed,
-    // runs.status would still be RUNNING here and this assertion would fail.
+    // ── 4. Run must remain RUNNING — no halt was triggered ───────────────
     let run = mqk_db::fetch_run(&pool, run_id).await?;
     assert!(
-        matches!(run.status, mqk_db::RunStatus::Halted),
-        "C1: runs.status must be HALTED after unknown-order fill — \
-         proves halt_run() write succeeded (mandatory, not best-effort)"
-    );
-    assert!(
-        run.halted_at_utc.is_some(),
-        "C1: halted_at_utc must be non-NULL after halt"
+        matches!(run.status, mqk_db::RunStatus::Running),
+        "C1: runs.status must remain RUNNING after WS-REB-01 skips orphan fill"
     );
 
-    // ── 6. DB: arm state must be DISARMED / IntegrityViolation ───────────
+    // ── 5. Inbox must be empty — fill was marked applied by WS-REB-01 ─────
+    let unapplied = mqk_db::inbox_load_unapplied_for_run(&pool, run_id).await?;
+    assert!(
+        unapplied.is_empty(),
+        "C1: inbox must be empty after WS-REB-01 marks orphan fill as applied"
+    );
+
+    // ── 6. Directly halt + disarm the run to set up C-2 precondition ─────
     //
-    // If persist_arm_state() had been best-effort and silently failed,
-    // load_arm_state would return None here and the assertion would fail.
-    let arm = mqk_db::load_arm_state(&pool)
-        .await?
-        .expect("C1: sys_arm_state must have a row after halt");
-    assert_eq!(
-        arm.0, "DISARMED",
-        "C1: arm state must be DISARMED — proves persist_arm_state() write succeeded"
-    );
-    assert_eq!(
-        arm.1.as_deref(),
-        Some("IntegrityViolation"),
-        "C1: disarm reason must be 'IntegrityViolation' to match the production halt path"
-    );
+    // C-2 proves that Phase 0 HALT_GUARD reads DB on every tick.  We create
+    // the HALTED state directly (simulating a halt from a capital invariant
+    // violation or other orthogonal mechanism) rather than via the fill path.
+    let now = Utc::now();
+    mqk_db::halt_run(&pool, run_id, now).await?;
+    mqk_db::persist_arm_state(&pool, "DISARMED", Some("IntegrityViolation")).await?;
 
     // ── 7+8. Fresh orchestrator for same run_id is refused by HALT_GUARD ─
     //
     // All gates pass (BoolGate(true)) — the ONLY thing that can block tick()
-    // here is the DB-backed Phase 0 HALT_GUARD.  This simulates a daemon
-    // restart: process B has no shared in-memory state with process A.
-    //
-    // If halt_run() had been best-effort and failed silently, runs.status
-    // would still be RUNNING in DB and tick() would proceed past Phase 0,
-    // potentially re-executing the halted run.
+    // is the DB-backed Phase 0 HALT_GUARD.  Phase 0 runs before any lease
+    // acquisition, so the first orchestrator's held lease is irrelevant here.
     let mut orch_fresh = make_clean_orch(pool.clone(), run_id);
     let fresh_err = orch_fresh
         .tick()
@@ -389,5 +366,8 @@ async fn c1_c2_unknown_fill_halts_disarms_and_refuses_restart() -> Result<()> {
 
     // ── Post-test cleanup ─────────────────────────────────────────────────
     cleanup_run(&pool, run_id).await?;
+    sqlx::query("delete from sys_arm_state where sentinel_id = 1")
+        .execute(&pool)
+        .await?;
     Ok(())
 }

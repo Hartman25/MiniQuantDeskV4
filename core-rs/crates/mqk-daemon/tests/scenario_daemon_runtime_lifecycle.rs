@@ -832,6 +832,14 @@ async fn status_does_not_overstate_running_on_local_handle_without_durable_activ
         "state must be 'unknown', 'halted', or 'idle'; got: {state:?}"
     );
 
+    // Stop the loop explicitly before checking `run_owned_locally`.  There is a
+    // narrow race between halt_run (called by the loop on heartbeat failure) writing
+    // HALTED to DB and the tokio task actually completing — during that window the
+    // status snapshot shows HALTED (active_run_id = Some) while the handle is still
+    // set (local_owned_run_id = Some), giving run_owned_locally = true transiently.
+    // Shutting down first makes the assertion deterministic.
+    st.stop_for_shutdown().await;
+
     let control = control_status(&st).await;
     let run_state = control["run_state"].as_str().unwrap_or("");
     assert_ne!(
@@ -840,10 +848,8 @@ async fn status_does_not_overstate_running_on_local_handle_without_durable_activ
     );
     assert_eq!(
         control["run_owned_locally"], false,
-        "loop must not be locally owned after external stop + self-halt"
+        "loop must not be locally owned after external stop + shutdown"
     );
-
-    st.stop_for_shutdown().await;
 }
 
 #[tokio::test]
