@@ -24,5 +24,6 @@ pub use engine::{BacktestEngine, BacktestError};
 pub use loader::{load_csv_file, parse_csv_bars, LoadError};
 pub use types::{
     derive_input_data_hash, derive_run_id, BacktestBar, BacktestConfig, BacktestFill,
-    BacktestOrder, BacktestOrderSide, BacktestReport, CommissionModel, OrderStatus, StressProfile,
+    BacktestOrder, BacktestOrderSide, BacktestReport, CommissionModel, OrderStatus,
+    StrategySizingConfig, StressProfile,
 };

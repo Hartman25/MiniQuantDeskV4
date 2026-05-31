@@ -31,6 +31,7 @@ fn fails_when_below_multiple_thresholds() {
         execution_blocked: false,
         first_bar_open_micros: None,
         last_bar_close_micros: None,
+        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
     };
 
     let config = PromotionConfig {
@@ -100,6 +101,7 @@ fn fails_with_large_drawdown() {
         execution_blocked: false,
         first_bar_open_micros: None,
         last_bar_close_micros: None,
+        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
     };
 
     let config = PromotionConfig {

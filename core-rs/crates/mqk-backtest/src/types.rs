@@ -258,6 +258,61 @@ impl CommissionModel {
 }
 
 // ---------------------------------------------------------------------------
+// StrategySizingConfig
+// ---------------------------------------------------------------------------
+
+/// Strategy position-sizing parameters captured in backtest config identity.
+///
+/// Two backtests with different sizing settings produce different `config_id`
+/// values, closing the reproducibility gap where `MQK_STRATEGY_*` env vars
+/// could silently change behavior without affecting artifact identity.
+///
+/// # Defaults
+///
+/// `target_qty = 1`, `max_target_qty = None`, `max_position_notional_usd = None`.
+/// These match the live-strategy conservative defaults so a zero-config backtest
+/// is directly comparable to default live behavior.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StrategySizingConfig {
+    /// Absolute target share count on a bullish signal (must be ≥ 1).
+    /// Default: 1 (conservative single-share sizing).
+    pub target_qty: i64,
+
+    /// Hard cap on target share count (None = no share cap).
+    pub max_target_qty: Option<i64>,
+
+    /// Hard cap on position notional in whole USD (None = no notional cap).
+    pub max_position_notional_usd: Option<i64>,
+}
+
+impl StrategySizingConfig {
+    /// Default conservative sizing: 1 share, no caps.
+    pub const fn default_sizing() -> Self {
+        Self {
+            target_qty: 1,
+            max_target_qty: None,
+            max_position_notional_usd: None,
+        }
+    }
+
+    /// Canonical string used as part of `BacktestConfig::config_id()`.
+    pub fn canonical_str(&self) -> String {
+        format!(
+            "sz_tgt={sz_tgt}|sz_max_tgt={sz_max_tgt}|sz_max_notional={sz_max_notional}",
+            sz_tgt = self.target_qty,
+            sz_max_tgt = self
+                .max_target_qty
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            sz_max_notional = self
+                .max_position_notional_usd
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BacktestConfig
 // ---------------------------------------------------------------------------
 
@@ -330,6 +385,14 @@ pub struct BacktestConfig {
     /// (`Allow`) or declares which (symbol, period) pairs are forbidden
     /// (`ForbidPeriods`). Defaults to `Allow` for backward compatibility.
     pub corporate_action_policy: CorporateActionPolicy,
+
+    // --- BACKTEST-CONFIG-DETERMINISM-SIZING-01: strategy sizing ---
+    /// Strategy position-sizing configuration.
+    ///
+    /// Captured in `config_id()` so two backtests with different sizing settings
+    /// produce different identity hashes.  Defaults to `target_qty=1` with no caps,
+    /// which matches live-strategy conservative defaults.
+    pub sizing: StrategySizingConfig,
 }
 
 impl BacktestConfig {
@@ -370,6 +433,8 @@ impl BacktestConfig {
             integrity_calendar: CalendarSpec::AlwaysOn,
             // Patch B4: Allow preserves pre-B4 behavior
             corporate_action_policy: CorporateActionPolicy::Allow,
+            // BACKTEST-CONFIG-DETERMINISM-SIZING-01: default 1 share, no caps
+            sizing: StrategySizingConfig::default_sizing(),
         }
     }
 
@@ -441,6 +506,8 @@ impl BacktestConfig {
             // ForbidPeriods(empty): no active exclusions yet, but the policy is set
             // for the caller to extend with known corporate-action windows.
             corporate_action_policy: CorporateActionPolicy::ForbidPeriods(vec![]),
+            // BACKTEST-CONFIG-DETERMINISM-SIZING-01: default 1 share, no caps
+            sizing: StrategySizingConfig::default_sizing(),
         }
     }
 
@@ -472,11 +539,12 @@ impl BacktestConfig {
         };
         // CalendarSpec derives Debug; format! gives stable enum variant names.
         let cal_str = format!("{:?}", self.integrity_calendar);
+        let sizing_str = self.sizing.canonical_str();
         let canonical = format!(
-            "v1|ts={ts}|hist={hist}|cash={cash}|shadow={shadow}|dll={dll}|mdd={mdd}|\
+            "v2|ts={ts}|hist={hist}|cash={cash}|shadow={shadow}|dll={dll}|mdd={mdd}|\
              rs={rs}|pdt={pdt}|ks={ks}|exp={exp}|slip={slip}|vol={vol}|\
              comm_ps={comm_ps}|comm_bps={comm_bps}|\
-             int={int}|stale={stale}|gap={gap}|disagree={disagree}|cal={cal}|{ca}",
+             int={int}|stale={stale}|gap={gap}|disagree={disagree}|cal={cal}|{ca}|{sz}",
             ts = self.timeframe_secs,
             hist = self.bar_history_len,
             cash = self.initial_cash_micros,
@@ -497,6 +565,7 @@ impl BacktestConfig {
             disagree = self.integrity_enforce_feed_disagreement as u8,
             cal = cal_str,
             ca = ca_str,
+            sz = sizing_str,
         );
         Uuid::new_v5(&BACKTEST_CONFIG_NS, canonical.as_bytes())
     }
@@ -682,4 +751,10 @@ pub struct BacktestReport {
     /// Close price of the last complete bar processed (micros). None if no bars ran.
     /// Used by the artifact writer to compute buy-and-hold benchmark return.
     pub last_bar_close_micros: Option<i64>,
+    /// BACKTEST-CONFIG-DETERMINISM-SIZING-01: resolved sizing config for this run.
+    ///
+    /// Copied from `BacktestConfig.sizing` at run time. Carried in the report so
+    /// artifact writers can surface sizing values in metrics.json and report.md
+    /// without needing access to the original config struct.
+    pub sizing: StrategySizingConfig,
 }

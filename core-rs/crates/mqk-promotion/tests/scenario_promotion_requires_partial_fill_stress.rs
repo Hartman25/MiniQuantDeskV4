@@ -87,6 +87,7 @@ fn good_report() -> BacktestReport {
         execution_blocked: false,
         first_bar_open_micros: None,
         last_bar_close_micros: None,
+        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
     }
 }
 
@@ -259,6 +260,7 @@ fn partial_fills_profit_factor_computed_correctly() {
         execution_blocked: false,
         first_bar_open_micros: None,
         last_bar_close_micros: None,
+        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
     };
 
     let config = PromotionConfig {
@@ -334,6 +336,7 @@ fn cancel_after_partial_fill_no_phantom_pnl() {
         execution_blocked: false,
         first_bar_open_micros: None,
         last_bar_close_micros: None,
+        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
     };
 
     let config = PromotionConfig {

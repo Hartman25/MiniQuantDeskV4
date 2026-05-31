@@ -539,6 +539,7 @@ impl BacktestEngine {
             execution_blocked: self.execution_blocked,
             first_bar_open_micros: self.first_bar_open_micros,
             last_bar_close_micros: self.last_bar_close_micros,
+            sizing: self.config.sizing.clone(),
         })
     }
 

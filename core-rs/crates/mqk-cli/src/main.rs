@@ -116,6 +116,19 @@ enum BacktestCmd {
         #[arg(long, default_value_t = 0)]
         integrity_gap_tolerance_bars: u32,
 
+        /// Target share count for intraday_scalper strategy (default: 1).
+        /// Captured in config_id — different values produce different run identities.
+        #[arg(long, default_value_t = 1)]
+        target_qty: i64,
+
+        /// Hard cap on target share count for intraday_scalper (optional; absent = no cap).
+        #[arg(long)]
+        max_target_qty: Option<i64>,
+
+        /// Hard cap on position notional in whole USD for intraday_scalper (optional; absent = no cap).
+        #[arg(long)]
+        max_position_notional_usd: Option<i64>,
+
         /// Optional output directory for deterministic artifacts (fills/equity/metrics).
         #[arg(long)]
         out_dir: Option<String>,
@@ -168,6 +181,19 @@ enum BacktestCmd {
         /// For daily bars (timeframe_secs=86400), use at least 172800.
         #[arg(long, default_value_t = 120)]
         integrity_stale_threshold_ticks: u64,
+
+        /// Target share count for intraday_scalper strategy (default: 1).
+        /// Captured in config_id — different values produce different run identities.
+        #[arg(long, default_value_t = 1)]
+        target_qty: i64,
+
+        /// Hard cap on target share count for intraday_scalper (optional; absent = no cap).
+        #[arg(long)]
+        max_target_qty: Option<i64>,
+
+        /// Hard cap on position notional in whole USD for intraday_scalper (optional; absent = no cap).
+        #[arg(long)]
+        max_position_notional_usd: Option<i64>,
 
         /// Optional output directory for deterministic artifacts (fills/equity/metrics/manifest).
         #[arg(long)]
@@ -534,6 +560,9 @@ async fn main() -> Result<()> {
                 integrity_enabled,
                 integrity_stale_threshold_ticks,
                 integrity_gap_tolerance_bars,
+                target_qty,
+                max_target_qty,
+                max_position_notional_usd,
                 out_dir,
             } => {
                 run_backtest_csv(
@@ -546,6 +575,9 @@ async fn main() -> Result<()> {
                     integrity_enabled,
                     integrity_stale_threshold_ticks,
                     integrity_gap_tolerance_bars,
+                    target_qty,
+                    max_target_qty,
+                    max_position_notional_usd,
                     out_dir,
                 )
                 .await?;
@@ -562,6 +594,9 @@ async fn main() -> Result<()> {
                 shadow,
                 integrity_enabled,
                 integrity_stale_threshold_ticks,
+                target_qty,
+                max_target_qty,
+                max_position_notional_usd,
                 out_dir,
             } => {
                 run_backtest_db(
@@ -576,6 +611,9 @@ async fn main() -> Result<()> {
                     shadow,
                     integrity_enabled,
                     integrity_stale_threshold_ticks,
+                    target_qty,
+                    max_target_qty,
+                    max_position_notional_usd,
                     out_dir,
                 )
                 .await?;

@@ -99,6 +99,7 @@ fn alignment_config(initial_cash_micros: i64, daily_loss_limit_micros: i64) -> B
         integrity_enforce_feed_disagreement: false,
         integrity_calendar: CalendarSpec::AlwaysOn,
         corporate_action_policy: mqk_backtest::CorporateActionPolicy::Allow,
+        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
     }
 }
 

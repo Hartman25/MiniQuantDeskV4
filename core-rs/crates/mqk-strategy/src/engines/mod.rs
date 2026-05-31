@@ -45,3 +45,51 @@ pub fn register_builtin_strategies(
 
     Ok(())
 }
+
+/// Register built-in strategies with explicit sizing parameters for deterministic backtests.
+///
+/// BACKTEST-CONFIG-DETERMINISM-SIZING-01: backtest callers must use this variant
+/// so the strategy is constructed from `BacktestConfig.sizing` rather than ambient
+/// env vars. This ensures `config_id` and strategy behavior are consistent.
+///
+/// For live/paper runtime use, continue calling `register_builtin_strategies` which
+/// reads from env vars at strategy construction time (correct live behavior).
+pub fn register_builtin_strategies_with_sizing(
+    registry: &mut PluginRegistry,
+    symbol: impl Into<String>,
+    target_qty: i64,
+    max_target_qty: Option<i64>,
+    max_notional_usd: Option<i64>,
+) -> Result<(), RegistryError> {
+    let symbol = symbol.into();
+
+    // Non-scalper strategies do not yet have configurable sizing; they are
+    // registered with their default env-reading constructors. When they gain
+    // explicit sizing support, add parameters here.
+    let swing_symbol = symbol.clone();
+    registry.register(swing_momentum::meta(), move || {
+        Box::new(SwingMomentumStrategy::new(swing_symbol.clone())) as Box<dyn Strategy>
+    })?;
+
+    let mr_symbol = symbol.clone();
+    registry.register(mean_reversion::meta(), move || {
+        Box::new(MeanReversionStrategy::new(mr_symbol.clone())) as Box<dyn Strategy>
+    })?;
+
+    let vb_symbol = symbol.clone();
+    registry.register(volatility_breakout::meta(), move || {
+        Box::new(VolatilityBreakoutStrategy::new(vb_symbol.clone())) as Box<dyn Strategy>
+    })?;
+
+    let scalp_symbol = symbol;
+    registry.register(intraday_scalper::meta(), move || {
+        Box::new(IntradayScalperStrategy::with_caps(
+            scalp_symbol.clone(),
+            target_qty,
+            max_target_qty,
+            max_notional_usd,
+        )) as Box<dyn Strategy>
+    })?;
+
+    Ok(())
+}

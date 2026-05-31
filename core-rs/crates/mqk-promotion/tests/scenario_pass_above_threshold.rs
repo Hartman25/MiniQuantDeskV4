@@ -74,6 +74,7 @@ fn passes_all_thresholds() {
         execution_blocked: false,
         first_bar_open_micros: None,
         last_bar_close_micros: None,
+        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
     };
 
     // Set thresholds that the above data should comfortably clear

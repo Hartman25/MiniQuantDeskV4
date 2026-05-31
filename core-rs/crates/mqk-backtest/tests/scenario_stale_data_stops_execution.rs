@@ -103,6 +103,7 @@ fn config_with_integrity(stale_threshold_ticks: u64) -> BacktestConfig {
         integrity_enforce_feed_disagreement: false,
         integrity_calendar: mqk_integrity::CalendarSpec::AlwaysOn, // Patch B3
         corporate_action_policy: mqk_backtest::CorporateActionPolicy::Allow, // Patch B4
+        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
     }
 }
 

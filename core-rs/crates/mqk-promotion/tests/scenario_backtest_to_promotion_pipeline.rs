@@ -57,6 +57,7 @@ fn make_report_with_provenance(
         execution_blocked: false,
         first_bar_open_micros: None,
         last_bar_close_micros: None,
+        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
     }
 }
 

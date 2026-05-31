@@ -245,6 +245,20 @@ struct BacktestMetrics<'a> {
     /// Buy-and-hold benchmark. None if fewer than 2 bars or invalid prices.
     #[serde(skip_serializing_if = "Option::is_none")]
     benchmark: Option<BenchmarkSection>,
+
+    // --- BACKTEST-CONFIG-DETERMINISM-SIZING-01: strategy sizing ---
+    strategy_sizing: SizingSection,
+}
+
+/// Strategy sizing configuration as captured in the backtest run.
+///
+/// Included in metrics.json so artifact consumers can verify the sizing
+/// parameters used without needing to re-derive from config_id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SizingSection {
+    target_qty: i64,
+    max_target_qty: Option<i64>,
+    max_position_notional_usd: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -699,6 +713,11 @@ pub fn write_backtest_report(
             report.last_bar_close_micros,
             total_return_pct,
         ),
+        strategy_sizing: SizingSection {
+            target_qty: report.sizing.target_qty,
+            max_target_qty: report.sizing.max_target_qty,
+            max_position_notional_usd: report.sizing.max_position_notional_usd,
+        },
     };
 
     let metrics_path = run_dir.join("metrics.json");
@@ -761,6 +780,29 @@ fn build_report_md(
     if m.execution_blocked {
         out.push_str("| Execution Blocked | true (integrity disarm/halt) |\n");
     }
+    out.push('\n');
+
+    // BACKTEST-CONFIG-DETERMINISM-SIZING-01: sizing section
+    out.push_str("## Strategy Sizing\n\n");
+    out.push_str("| Parameter | Value |\n|---|---|\n");
+    out.push_str(&format!(
+        "| Target Qty | {} |\n",
+        m.strategy_sizing.target_qty
+    ));
+    out.push_str(&format!(
+        "| Max Target Qty | {} |\n",
+        m.strategy_sizing
+            .max_target_qty
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none (no cap)".to_string())
+    ));
+    out.push_str(&format!(
+        "| Max Position Notional USD | {} |\n",
+        m.strategy_sizing
+            .max_position_notional_usd
+            .map(|v| format!("${}", v))
+            .unwrap_or_else(|| "none (no cap)".to_string())
+    ));
     out.push('\n');
 
     out.push_str("## Equity Performance\n\n");
@@ -952,6 +994,7 @@ mod tests {
             execution_blocked: false,
             first_bar_open_micros: Some(150_000_000),
             last_bar_close_micros: Some(151_000_000),
+            sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
         }
     }
 
@@ -1144,6 +1187,7 @@ mod tests {
             execution_blocked: false,
             first_bar_open_micros: None,
             last_bar_close_micros: None,
+            sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
         }
     }
 

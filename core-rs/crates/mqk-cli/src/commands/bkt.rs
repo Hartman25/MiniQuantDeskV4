@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::Path;
 
-use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine};
-use mqk_strategy::{engines::register_builtin_strategies, PluginRegistry};
+use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine, StrategySizingConfig};
+use mqk_strategy::{engines::register_builtin_strategies_with_sizing, PluginRegistry};
 
 // ---------------------------------------------------------------------------
 // CSV backtest runner
@@ -20,6 +20,9 @@ pub async fn run_backtest_csv(
     integrity_enabled: bool,
     integrity_stale_threshold_ticks: u64,
     integrity_gap_tolerance_bars: u32,
+    target_qty: i64,
+    max_target_qty: Option<i64>,
+    max_position_notional_usd: Option<i64>,
     out_dir: Option<String>,
 ) -> Result<()> {
     let bars = mqk_backtest::load_csv_file(&bars_path)
@@ -31,6 +34,9 @@ pub async fn run_backtest_csv(
     if initial_cash_micros <= 0 {
         anyhow::bail!("--initial-cash-micros must be > 0");
     }
+    if target_qty <= 0 {
+        anyhow::bail!("--target-qty must be > 0");
+    }
 
     let mut cfg = BacktestConfig::conservative_defaults();
     cfg.timeframe_secs = timeframe_secs;
@@ -39,11 +45,23 @@ pub async fn run_backtest_csv(
     cfg.integrity_enabled = integrity_enabled;
     cfg.integrity_stale_threshold_ticks = integrity_stale_threshold_ticks;
     cfg.integrity_gap_tolerance_bars = integrity_gap_tolerance_bars;
+    cfg.sizing = StrategySizingConfig {
+        target_qty,
+        max_target_qty,
+        max_position_notional_usd,
+    };
 
-    // BKT-06P: resolve strategy from built-in plugin registry.
+    // BACKTEST-CONFIG-DETERMINISM-SIZING-01: use sizing-aware registration so
+    // the strategy is constructed from cfg.sizing, not ambient env vars.
     let mut reg = PluginRegistry::new();
-    register_builtin_strategies(&mut reg, &symbol)
-        .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
+    register_builtin_strategies_with_sizing(
+        &mut reg,
+        &symbol,
+        cfg.sizing.target_qty,
+        cfg.sizing.max_target_qty,
+        cfg.sizing.max_position_notional_usd,
+    )
+    .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
     let strategy_instance = reg.instantiate(&strategy).with_context(|| {
         let available: Vec<_> = reg.list().iter().map(|m| m.name.as_str()).collect();
         format!(
@@ -142,6 +160,9 @@ pub async fn run_backtest_db(
     shadow: bool,
     integrity_enabled: bool,
     integrity_stale_threshold_ticks: u64,
+    target_qty: i64,
+    max_target_qty: Option<i64>,
+    max_position_notional_usd: Option<i64>,
     out_dir: Option<String>,
 ) -> Result<()> {
     if timeframe_secs <= 0 {
@@ -149,6 +170,9 @@ pub async fn run_backtest_db(
     }
     if initial_cash_micros <= 0 {
         anyhow::bail!("--initial-cash-micros must be > 0");
+    }
+    if target_qty <= 0 {
+        anyhow::bail!("--target-qty must be > 0");
     }
     if end_end_ts < start_end_ts {
         anyhow::bail!("--end-end-ts must be >= --start-end-ts");
@@ -198,11 +222,22 @@ pub async fn run_backtest_db(
     cfg.shadow_mode = shadow;
     cfg.integrity_enabled = integrity_enabled;
     cfg.integrity_stale_threshold_ticks = integrity_stale_threshold_ticks;
+    cfg.sizing = StrategySizingConfig {
+        target_qty,
+        max_target_qty,
+        max_position_notional_usd,
+    };
 
-    // BKT-06P: resolve strategy from built-in plugin registry.
+    // BACKTEST-CONFIG-DETERMINISM-SIZING-01: use sizing-aware registration.
     let mut reg = PluginRegistry::new();
-    register_builtin_strategies(&mut reg, &symbol)
-        .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
+    register_builtin_strategies_with_sizing(
+        &mut reg,
+        &symbol,
+        cfg.sizing.target_qty,
+        cfg.sizing.max_target_qty,
+        cfg.sizing.max_position_notional_usd,
+    )
+    .with_context(|| format!("register_builtin_strategies failed for symbol={}", symbol))?;
     let strategy_instance = reg.instantiate(&strategy).with_context(|| {
         let available: Vec<_> = reg.list().iter().map(|m| m.name.as_str()).collect();
         format!(
