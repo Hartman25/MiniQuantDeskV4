@@ -14,6 +14,7 @@ function checkpointStatusClass(status: string): string {
 
 export function RuntimeScreen({ model }: { model: SystemModel }) {
   const runtime = model.runtimeLeadership;
+  const { status } = model;
   const truthState = panelTruthRenderState(model, "runtime");
 
   // Hard-close on any compromised truth state: degraded recovery state shown as clean
@@ -102,8 +103,22 @@ export function RuntimeScreen({ model }: { model: SystemModel }) {
           </div>
         </Panel>
 
-        <Panel title="Restart and recovery" subtitle="Restart count, last restart, and post-restart recovery progress.">
+        <Panel title="Restart and recovery" subtitle="Restart count, last restart, post-restart recovery progress, and deadman watchdog state.">
           <div className="metric-list">
+            <div>
+              <span>Deadman watchdog</span>
+              <strong className={
+                status.deadman_status === "ok" ? "state-ok" :
+                status.deadman_status === "expired" ? "state-warning" :
+                "val-muted"
+              }>
+                {status.deadman_status}
+              </strong>
+            </div>
+            <div>
+              <span>Last watchdog heartbeat</span>
+              <strong>{formatDateTime(status.deadman_last_heartbeat_utc)}</strong>
+            </div>
             <div>
               <span>Restarts (24h)</span>
               <strong className={hasRestarts ? "state-warning" : undefined}>

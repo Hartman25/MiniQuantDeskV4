@@ -105,6 +105,12 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
             <div><span>Mismatched orders</span><strong>{reconcileSummary.mismatched_orders}</strong></div>
             <div><span>Unmatched broker events</span><strong>{reconcileSummary.unmatched_broker_events}</strong></div>
             <div><span>Kill switch</span><strong>{status.kill_switch_active ? "Active" : "Inactive"}</strong></div>
+            <div>
+              <span>Deadman watchdog</span>
+              <strong className={status.deadman_status === "ok" ? "val-ok" : status.deadman_status === "expired" ? "val-warn" : "val-muted"}>
+                {status.deadman_status}
+              </strong>
+            </div>
           </div>
         </Panel>
       </div>

@@ -378,6 +378,9 @@ export function mapLegacyStatusToSystemStatus(legacy: LegacyDaemonStatusSnapshot
     // C1: legacy path has no parity evidence; default to not_configured.
     parity_evidence_state: "not_configured",
     live_trust_complete: null,
+    // DEADMAN-GUI-01: legacy path has no deadman state; default to unknown.
+    deadman_status: "unknown",
+    deadman_last_heartbeat_utc: null,
   };
 }
 

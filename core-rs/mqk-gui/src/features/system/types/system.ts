@@ -86,6 +86,18 @@ export interface SystemStatus {
    * Always false in current builds. Null elsewhere is not a positive trust claim.
    */
   live_trust_complete: boolean | null;
+  /**
+   * Deadman heartbeat status from the daemon's self-watchdog loop.
+   * "ok" — heartbeat is current; "expired" — timer fired (daemon may have been stuck or restarted);
+   * "unknown" — state not yet determined.
+   * "expired" does not necessarily mean the system is unsafe — it indicates the watchdog
+   * timer lapsed and the operator should verify continuity before resuming.
+   */
+  deadman_status: string;
+  /**
+   * UTC timestamp of the last recorded deadman heartbeat, or null if never set / not applicable.
+   */
+  deadman_last_heartbeat_utc: string | null;
 }
 
 export interface PreflightStatus {
@@ -246,6 +258,10 @@ export const DEFAULT_STATUS: SystemStatus = {
   // C1: fail-closed defaults. "not_configured" when daemon is unreachable; null trust.
   parity_evidence_state: "not_configured",
   live_trust_complete: null,
+  // DEADMAN-GUI-01: fail-closed default. "unknown" when daemon is unreachable — do not
+  // render "ok" before the daemon has confirmed the watchdog state.
+  deadman_status: "unknown",
+  deadman_last_heartbeat_utc: null,
 };
 
 export const DEFAULT_PREFLIGHT: PreflightStatus = {

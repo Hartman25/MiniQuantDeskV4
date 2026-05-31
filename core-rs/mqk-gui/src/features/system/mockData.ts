@@ -77,6 +77,9 @@ export const MOCK_STATUS: SystemStatus = {
   // C1: mock shows not_configured (no artifact path in dev/paper context).
   parity_evidence_state: "not_configured",
   live_trust_complete: null,
+  // DEADMAN-GUI-01: mock reflects a clean watchdog state for test scenarios.
+  deadman_status: "ok",
+  deadman_last_heartbeat_utc: iso(0),
 };
 
 export const MOCK_PREFLIGHT: PreflightStatus = {
