@@ -114,6 +114,10 @@ pub struct BacktestEngine {
     /// Whether execution is blocked due to integrity disarm/halt.
     /// Once true, no new orders are submitted for the rest of the run.
     execution_blocked: bool,
+    /// Open price of the first complete bar processed (for benchmark computation).
+    first_bar_open_micros: Option<i64>,
+    /// Close price of the last complete bar processed (for benchmark computation).
+    last_bar_close_micros: Option<i64>,
 }
 
 impl BacktestEngine {
@@ -161,6 +165,8 @@ impl BacktestEngine {
             integrity_state: IntegrityState::new(),
             integrity_enabled,
             execution_blocked: false,
+            first_bar_open_micros: None,
+            last_bar_close_micros: None,
         }
     }
 
@@ -245,6 +251,12 @@ impl BacktestEngine {
                 ));
                 break;
             }
+
+            // Benchmark price tracking: record first open and update last close each bar.
+            if self.first_bar_open_micros.is_none() {
+                self.first_bar_open_micros = Some(bar.open_micros);
+            }
+            self.last_bar_close_micros = Some(bar.close_micros);
 
             // PATCH 22: Integrity gate.
             if self.integrity_enabled {
@@ -525,6 +537,8 @@ impl BacktestEngine {
             fills: self.fills.clone(),
             last_prices: self.last_prices.clone(),
             execution_blocked: self.execution_blocked,
+            first_bar_open_micros: self.first_bar_open_micros,
+            last_bar_close_micros: self.last_bar_close_micros,
         })
     }
 

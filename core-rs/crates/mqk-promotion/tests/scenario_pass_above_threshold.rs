@@ -72,6 +72,8 @@ fn passes_all_thresholds() {
         fills,
         last_prices: BTreeMap::new(),
         execution_blocked: false,
+        first_bar_open_micros: None,
+        last_bar_close_micros: None,
     };
 
     // Set thresholds that the above data should comfortably clear

@@ -29,6 +29,8 @@ fn fails_when_below_multiple_thresholds() {
         fills: vec![],
         last_prices: BTreeMap::new(),
         execution_blocked: false,
+        first_bar_open_micros: None,
+        last_bar_close_micros: None,
     };
 
     let config = PromotionConfig {
@@ -96,6 +98,8 @@ fn fails_with_large_drawdown() {
         fills: vec![],
         last_prices: BTreeMap::new(),
         execution_blocked: false,
+        first_bar_open_micros: None,
+        last_bar_close_micros: None,
     };
 
     let config = PromotionConfig {

@@ -106,6 +106,8 @@ fn good_report() -> BacktestReport {
         fills: vec![],
         last_prices: BTreeMap::new(),
         execution_blocked: false,
+        first_bar_open_micros: None,
+        last_bar_close_micros: None,
     }
 }
 

@@ -85,6 +85,8 @@ fn good_report() -> BacktestReport {
         fills: good_fills(),
         last_prices: BTreeMap::new(),
         execution_blocked: false,
+        first_bar_open_micros: None,
+        last_bar_close_micros: None,
     }
 }
 
@@ -255,6 +257,8 @@ fn partial_fills_profit_factor_computed_correctly() {
         fills,
         last_prices: BTreeMap::new(),
         execution_blocked: false,
+        first_bar_open_micros: None,
+        last_bar_close_micros: None,
     };
 
     let config = PromotionConfig {
@@ -328,6 +332,8 @@ fn cancel_after_partial_fill_no_phantom_pnl() {
         fills,
         last_prices: BTreeMap::new(),
         execution_blocked: false,
+        first_bar_open_micros: None,
+        last_bar_close_micros: None,
     };
 
     let config = PromotionConfig {

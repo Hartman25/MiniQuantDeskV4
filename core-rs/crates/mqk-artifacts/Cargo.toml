@@ -14,3 +14,5 @@ mqk-backtest = { path = "../mqk-backtest" }
 mqk-portfolio = { path = "../mqk-portfolio" }
 
 [dev-dependencies]
+mqk-strategy = { path = "../mqk-strategy" }
+serde_json = "1"

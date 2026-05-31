@@ -676,4 +676,10 @@ pub struct BacktestReport {
     pub last_prices: BTreeMap<String, i64>,
     /// PATCH 22: Whether integrity disarmed (stale feed / gap blocked execution).
     pub execution_blocked: bool,
+    /// Open price of the first complete bar processed (micros). None if no bars ran.
+    /// Used by the artifact writer to compute buy-and-hold benchmark return.
+    pub first_bar_open_micros: Option<i64>,
+    /// Close price of the last complete bar processed (micros). None if no bars ran.
+    /// Used by the artifact writer to compute buy-and-hold benchmark return.
+    pub last_bar_close_micros: Option<i64>,
 }

@@ -1,0 +1,4 @@
+﻿symbol,end_ts,open_micros,high_micros,low_micros,close_micros,volume,is_complete
+TEST,60,995000,1010000,990000,1000000,1000,1
+TEST,120,1000000,1030000,1010000,1020000,1100,1
+TEST,180,1020000,1020000,1000000,1015000,900,1

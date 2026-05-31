@@ -117,6 +117,48 @@ fn ensure_file_exists_with(path: &Path, contents_if_create: &str) -> Result<()> 
 // Backtest report writer (deterministic outputs)
 // ---------------------------------------------------------------------------
 
+/// Buy-and-hold benchmark comparison fields.
+///
+/// Computed from the first and last bar prices recorded by the engine.
+/// None if fewer than 2 bars were processed or prices are invalid.
+#[derive(Debug, Clone, Serialize)]
+struct BenchmarkSection {
+    /// Open price of the first bar (micros). Basis for benchmark entry price.
+    first_bar_open_micros: i64,
+    /// Close price of the last bar (micros). Basis for benchmark exit price.
+    last_bar_close_micros: i64,
+    /// Buy-and-hold return: ((last_close / first_open) - 1) * 100.
+    buy_and_hold_return_pct: f64,
+    /// Strategy total return percent (same as top-level total_return_pct).
+    strategy_total_return_pct: f64,
+    /// Alpha: strategy_total_return_pct - buy_and_hold_return_pct.
+    alpha_pct: f64,
+    /// Assumption note for transparency.
+    assumption: &'static str,
+}
+
+/// Compute benchmark section. Returns None if prices are absent or first_open <= 0.
+fn compute_benchmark(
+    first_open: Option<i64>,
+    last_close: Option<i64>,
+    strategy_return_pct: f64,
+) -> Option<BenchmarkSection> {
+    let first = first_open?;
+    let last = last_close?;
+    if first <= 0 {
+        return None;
+    }
+    let bah = (last as f64 / first as f64 - 1.0) * 100.0;
+    Some(BenchmarkSection {
+        first_bar_open_micros: first,
+        last_bar_close_micros: last,
+        buy_and_hold_return_pct: bah,
+        strategy_total_return_pct: strategy_return_pct,
+        alpha_pct: strategy_return_pct - bah,
+        assumption: "single-symbol buy-and-hold; first bar open → last bar close; no commissions",
+    })
+}
+
 /// Deep performance metrics fields, computed by pure helper functions.
 #[derive(Debug, Clone, Serialize)]
 struct BacktestMetrics<'a> {
@@ -198,6 +240,11 @@ struct BacktestMetrics<'a> {
     exposure_bars: usize,
     /// exposure_bars / bars * 100. E.g. 50.0 means 50%.
     exposure_time_pct: f64,
+
+    // --- Benchmark comparison ---
+    /// Buy-and-hold benchmark. None if fewer than 2 bars or invalid prices.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    benchmark: Option<BenchmarkSection>,
 }
 
 // ---------------------------------------------------------------------------
@@ -647,6 +694,11 @@ pub fn write_backtest_report(
         sortino_ratio,
         exposure_bars,
         exposure_time_pct,
+        benchmark: compute_benchmark(
+            report.first_bar_open_micros,
+            report.last_bar_close_micros,
+            total_return_pct,
+        ),
     };
 
     let metrics_path = run_dir.join("metrics.json");
@@ -654,7 +706,192 @@ pub fn write_backtest_report(
     fs::write(&metrics_path, format!("{json}\n"))
         .with_context(|| format!("write metrics.json failed: {}", metrics_path.display()))?;
 
+    // report.md — human-readable operator summary.
+    let report_md = build_report_md(&metrics, report, initial_cash_micros);
+    let report_md_path = run_dir.join("report.md");
+    fs::write(&report_md_path, report_md)
+        .with_context(|| format!("write report.md failed: {}", report_md_path.display()))?;
+
     Ok(())
+}
+
+/// Build a deterministic Markdown operator summary from computed metrics.
+fn build_report_md(
+    m: &BacktestMetrics<'_>,
+    report: &mqk_backtest::BacktestReport,
+    initial_cash_micros: i64,
+) -> String {
+    fn micros_to_dollars(v: i64) -> String {
+        format!("${:.2}", v as f64 / 1_000_000.0)
+    }
+    fn opt_micros(v: Option<i64>) -> String {
+        match v {
+            Some(x) => micros_to_dollars(x),
+            None => "N/A".to_string(),
+        }
+    }
+    fn opt_pct(v: Option<f64>) -> String {
+        match v {
+            Some(x) => format!("{:.4}%", x),
+            None => "N/A".to_string(),
+        }
+    }
+    fn opt_f64(v: Option<f64>) -> String {
+        match v {
+            Some(x) => format!("{:.4}", x),
+            None => "N/A".to_string(),
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("# Backtest Report\n\n");
+    out.push_str("## Identity\n\n");
+    out.push_str("| Field | Value |\n|---|---|\n");
+    out.push_str(&format!("| Strategy | {} |\n", m.strategy_name));
+    out.push_str(&format!("| Run ID | {} |\n", m.run_id));
+    out.push_str(&format!("| Config ID | {} |\n", report.config_id));
+    out.push_str(&format!(
+        "| Input Data Hash | {} |\n",
+        report.input_data_hash
+    ));
+    out.push_str(&format!("| Halted | {} |\n", m.halted));
+    if let Some(r) = m.halt_reason {
+        out.push_str(&format!("| Halt Reason | {} |\n", r));
+    }
+    if m.execution_blocked {
+        out.push_str("| Execution Blocked | true (integrity disarm/halt) |\n");
+    }
+    out.push('\n');
+
+    out.push_str("## Equity Performance\n\n");
+    out.push_str("| Metric | Value |\n|---|---|\n");
+    out.push_str(&format!(
+        "| Starting Equity | {} |\n",
+        micros_to_dollars(initial_cash_micros)
+    ));
+    out.push_str(&format!(
+        "| Ending Equity | {} |\n",
+        micros_to_dollars(m.ending_equity_micros)
+    ));
+    out.push_str(&format!(
+        "| Total Return | {} ({:.4}%) |\n",
+        micros_to_dollars(m.total_return_micros),
+        m.total_return_pct
+    ));
+    out.push_str(&format!(
+        "| High Water Mark | {} |\n",
+        micros_to_dollars(m.equity_high_water_mark_micros)
+    ));
+    out.push_str(&format!(
+        "| Max Drawdown | {} ({:.4}%) |\n",
+        micros_to_dollars(m.max_drawdown_micros),
+        m.max_drawdown_pct
+    ));
+    out.push_str(&format!(
+        "| Total Commission | {} |\n",
+        micros_to_dollars(m.total_commission_micros)
+    ));
+    out.push('\n');
+
+    out.push_str("## Benchmark Comparison\n\n");
+    match &m.benchmark {
+        Some(b) => {
+            out.push_str("| Metric | Value |\n|---|---|\n");
+            out.push_str(&format!(
+                "| Buy-and-Hold Return | {:.4}% |\n",
+                b.buy_and_hold_return_pct
+            ));
+            out.push_str(&format!(
+                "| Strategy Total Return | {:.4}% |\n",
+                b.strategy_total_return_pct
+            ));
+            out.push_str(&format!("| Alpha vs Benchmark | {:.4}% |\n", b.alpha_pct));
+            out.push_str(&format!(
+                "| First Bar Open | {} |\n",
+                micros_to_dollars(b.first_bar_open_micros)
+            ));
+            out.push_str(&format!(
+                "| Last Bar Close | {} |\n",
+                micros_to_dollars(b.last_bar_close_micros)
+            ));
+            out.push_str(&format!("| Assumption | {} |\n", b.assumption));
+        }
+        None => {
+            out.push_str("Benchmark not available (fewer than 2 bars or invalid prices).\n");
+        }
+    }
+    out.push('\n');
+
+    out.push_str("## Trade Statistics\n\n");
+    out.push_str("| Metric | Value |\n|---|---|\n");
+    out.push_str(&format!("| Bars Processed | {} |\n", m.bars));
+    out.push_str(&format!("| Orders Submitted | {} |\n", m.orders));
+    out.push_str(&format!("| Orders Filled | {} |\n", m.orders_filled));
+    out.push_str(&format!("| Orders Rejected | {} |\n", m.orders_rejected));
+    out.push_str(&format!("| Fills | {} |\n", m.fills));
+    out.push_str(&format!(
+        "| Completed Trades (FIFO) | {} |\n",
+        m.trade_count
+    ));
+    out.push_str(&format!("| Winning Trades | {} |\n", m.winning_trade_count));
+    out.push_str(&format!("| Losing Trades | {} |\n", m.losing_trade_count));
+    out.push_str(&format!("| Win Rate | {} |\n", opt_pct(m.win_rate_pct)));
+    out.push_str(&format!(
+        "| Profit Factor | {} |\n",
+        opt_f64(m.profit_factor)
+    ));
+    out.push_str(&format!(
+        "| Gross Profit | {} |\n",
+        micros_to_dollars(m.gross_profit_micros)
+    ));
+    out.push_str(&format!(
+        "| Gross Loss | {} |\n",
+        micros_to_dollars(m.gross_loss_micros)
+    ));
+    out.push_str(&format!(
+        "| Best Trade | {} |\n",
+        opt_micros(m.best_trade_micros)
+    ));
+    out.push_str(&format!(
+        "| Worst Trade | {} |\n",
+        opt_micros(m.worst_trade_micros)
+    ));
+    out.push_str(&format!(
+        "| Expectancy | {} |\n",
+        opt_micros(m.expectancy_micros)
+    ));
+    out.push('\n');
+
+    out.push_str("## Risk-Adjusted Ratios\n\n");
+    out.push_str("| Metric | Value |\n|---|---|\n");
+    out.push_str(&format!(
+        "| Sharpe Ratio (per-bar) | {} |\n",
+        opt_f64(m.sharpe_ratio)
+    ));
+    out.push_str(&format!(
+        "| Sortino Ratio (per-bar) | {} |\n",
+        opt_f64(m.sortino_ratio)
+    ));
+    out.push('\n');
+
+    out.push_str("## Exposure\n\n");
+    out.push_str("| Metric | Value |\n|---|---|\n");
+    out.push_str(&format!("| Exposure Bars | {} |\n", m.exposure_bars));
+    out.push_str(&format!(
+        "| Time in Market | {:.4}% |\n",
+        m.exposure_time_pct
+    ));
+    out.push('\n');
+
+    out.push_str("## Assumptions & Disclaimers\n\n");
+    out.push_str("- Fill model: conservative worst-case (BUY@HIGH, SELL@LOW).\n");
+    out.push_str("- Slippage and commission are applied per fill as configured.\n");
+    out.push_str("- Benchmark uses first bar open and last bar close for a single symbol.\n");
+    out.push_str("- Ratios are per-bar (non-annualized); interpret with caution.\n");
+    out.push_str("- **Backtest results do not guarantee future profitability.**\n");
+    out.push_str("- Past performance is not indicative of future results.\n");
+
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -713,6 +950,8 @@ mod tests {
                 m
             },
             execution_blocked: false,
+            first_bar_open_micros: Some(150_000_000),
+            last_bar_close_micros: Some(151_000_000),
         }
     }
 
@@ -903,6 +1142,8 @@ mod tests {
             fills: vec![],
             last_prices: BTreeMap::new(),
             execution_blocked: false,
+            first_bar_open_micros: None,
+            last_bar_close_micros: None,
         }
     }
 
