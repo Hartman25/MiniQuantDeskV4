@@ -730,11 +730,16 @@ if ($wsContinuity -eq 'live') {
 Write-Section "STEP 10: Clear halted run if present"
 
 try {
-    $readiness = Invoke-DaemonGet -Path '/api/v1/autonomous/readiness'
-    $armState  = $readiness.arm_state
+    $readiness     = Invoke-DaemonGet -Path '/api/v1/autonomous/readiness'
+    $armState      = $readiness.arm_state
+    $sysStatus     = Invoke-DaemonGet -Path '/api/v1/system/status'
+    $runtimeStatus = $sysStatus.runtime_status
 
-    if ($armState -eq 'halted') {
-        Write-Warn "arm_state=halted. Clearing via disarm-execution then clear-halted-run."
+    # arm_state may remain "armed" even when a durable run is halted; check both.
+    $needClear = ($armState -eq 'halted') -or ($runtimeStatus -eq 'halted')
+
+    if ($needClear) {
+        Write-Warn "Halted lifecycle detected (arm_state=$armState runtime_status=$runtimeStatus). Clearing via disarm-execution then clear-halted-run."
 
         $disarm = Invoke-DaemonPost -Path '/api/v1/ops/action' -Body @{ action_key = 'disarm-execution' }
         if ($null -ne $disarm.Error -and $disarm.StatusCode -ne 200) {
@@ -750,7 +755,7 @@ try {
         }
         Write-Ok "clear-halted-run accepted."
     } else {
-        Write-Ok "arm_state=$armState - no halted run to clear."
+        Write-Ok "arm_state=$armState runtime_status=$runtimeStatus - no halted run to clear."
     }
 } catch {
     Write-Warn "Could not read autonomous readiness for halt check: $_"
@@ -763,10 +768,10 @@ Write-Section "STEP 11: Adopt broker position baseline"
 
 $adoptResp = Invoke-DaemonPost `
     -Path '/api/v1/ops/repair/adopt-broker-position-baseline' `
-    -Body @{ confirm = 'ADOPT_BROKER_POSITION_BASELINE' }
+    -Body @{ confirmation = 'ADOPT_BROKER_POSITION_BASELINE' }
 
 if ($adoptResp.StatusCode -eq 200) {
-    Write-Ok "Broker position baseline adopted: adopted=$($adoptResp.Body.adopted)  baseline_id=$($adoptResp.Body.baseline_id)"
+    Write-Ok "Broker position baseline adopted: accepted=$($adoptResp.Body.accepted)  positions=$($adoptResp.Body.baseline_position_count)  orders=$($adoptResp.Body.baseline_order_count)  reconcile_after=$($adoptResp.Body.reconcile_status_after)"
 } elseif ($adoptResp.StatusCode -eq 409) {
     # 409 means a baseline was already adopted for this run snapshot.
     # Prior fills may have dirtied reconcile since that adoption; verify reconcile before proceeding.
