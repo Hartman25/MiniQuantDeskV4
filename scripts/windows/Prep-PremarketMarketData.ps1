@@ -329,6 +329,10 @@ foreach ($sym in $symbolList) {
         Write-Step "Provider sync top-off for $sym / $Timeframe ..."
         Push-Location $coreRs
         try {
+            # PS7 with $ErrorActionPreference='Stop' can promote cargo stderr (compilation
+            # messages) to NativeCommandError. Suppress via local Continue so the exit-code
+            # check below handles failures non-fatally.
+            $local:ErrorActionPreference = 'Continue'
             cargo run -p mqk-cli --bin mqk-cli -- md sync-provider `
                 --source twelvedata `
                 --symbols $sym `
@@ -339,6 +343,8 @@ foreach ($sym in $symbolList) {
             } else {
                 Write-Ok "Provider sync top-off complete for $sym."
             }
+        } catch {
+            Write-Warn "Provider sync top-off threw exception for $sym ($_). Using existing bars."
         } finally { Pop-Location }
     } else {
         Write-Warn "Skipping provider sync for $sym (TWELVEDATA_API_KEY not set)."
