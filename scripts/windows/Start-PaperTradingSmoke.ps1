@@ -435,6 +435,7 @@ if ($null -ne $sqlxCmd) {
     $cargo = (Get-Command 'cargo' -ErrorAction Stop).Source
     Push-Location (Join-Path $RepoRoot 'core-rs')
     try {
+        $local:ErrorActionPreference = 'Continue'
         & $cargo run --quiet --bin sqlx -- migrate run --database-url $env:MQK_DATABASE_URL --source $migrationsPath 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Write-Fail "cargo sqlx migrate run failed (exit $LASTEXITCODE)."
@@ -535,6 +536,9 @@ if ($needBuild) {
     $cargo = (Get-Command 'cargo' -ErrorAction Stop).Source
     Push-Location (Join-Path $RepoRoot 'core-rs')
     try {
+        # PS7 with ErrorActionPreference=Stop promotes cargo stderr (compilation messages)
+        # to NativeCommandError. Use local Continue so the exit-code check governs failure.
+        $local:ErrorActionPreference = 'Continue'
         & $cargo build -p mqk-daemon --release 2>&1 | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Write-Fail "cargo build mqk-daemon --release failed."
