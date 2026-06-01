@@ -741,15 +741,18 @@ try {
     if ($needClear) {
         Write-Warn "Halted lifecycle detected (arm_state=$armState runtime_status=$runtimeStatus). Clearing via disarm-execution then clear-halted-run."
 
+        # Invoke-DaemonPost returns {StatusCode, Body} on success and {StatusCode, Body, RawBody, Error}
+        # on error. With Set-StrictMode -Version Latest, accessing .Error on a success object throws.
+        # Check StatusCode only.
         $disarm = Invoke-DaemonPost -Path '/api/v1/ops/action' -Body @{ action_key = 'disarm-execution' }
-        if ($null -ne $disarm.Error -and $disarm.StatusCode -ne 200) {
+        if ($disarm.StatusCode -ne 200) {
             Write-Warn "disarm-execution returned HTTP $($disarm.StatusCode): $($disarm.RawBody)"
         } else {
             Write-Ok "disarm-execution accepted."
         }
 
         $clear = Invoke-DaemonPost -Path '/api/v1/ops/action' -Body @{ action_key = 'clear-halted-run' }
-        if ($null -ne $clear.Error -and $clear.StatusCode -ne 200) {
+        if ($clear.StatusCode -ne 200) {
             Write-Fail "clear-halted-run failed (HTTP $($clear.StatusCode)): $($clear.RawBody)"
             exit 1
         }
