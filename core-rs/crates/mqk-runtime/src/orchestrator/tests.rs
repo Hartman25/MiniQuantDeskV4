@@ -922,28 +922,77 @@ fn known_order_fill_succeeds_and_returns_fill() {
     assert_eq!(oms["ord-1"].filled_qty, 100);
 }
 /// Section C - T4.
-/// An OMS-level transition error (fill would overflow total_qty) must
+/// An OMS-level undercomplete terminal fill (proposed < total_qty) must
 /// surface as Err containing "OMS transition error" and must NOT advance
 /// filled_qty, preventing any downstream portfolio mutation.
+///
+/// Note: overfill from PartiallyFilled is now ACCEPTED (capped at total_qty)
+/// to handle Alpaca paper WS behavior.  This test uses the undercomplete case
+/// which remains an error in both old and new OMS semantics.
 #[test]
-fn oms_rejection_blocks_portfolio_fill() {
+fn oms_undercomplete_fill_rejection_blocks_portfolio_fill() {
     let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
     let mut order = OmsOrder::new("ord-2", "SPY", 100);
-    // Pre-fill 60 so that any further 60-unit fill overflows.
+    // Pre-fill 60.
     order
         .apply(&OmsEvent::PartialFill { delta_qty: 60 }, Some("pf-setup"))
         .unwrap();
     oms.insert("ord-2".to_string(), order);
-    // Fill(60) when filled=60, total=100 → 60+60=120 ≠ 100 → TransitionError.
-    let ev = make_fill_event("ord-2", "fill-overflow", 60);
-    let result = apply_fill_step(&mut oms, "ord-2", &ev, "fill-overflow");
+    // Fill(30) when filled=60, total=100 → 60+30=90 < 100 → undercomplete, TransitionError.
+    let ev = make_fill_event("ord-2", "fill-undercomplete", 30);
+    let result = apply_fill_step(&mut oms, "ord-2", &ev, "fill-undercomplete");
     let err = result.unwrap_err();
     assert!(
         err.to_string().contains("OMS transition error"),
-        "expected OMS transition error, got: {err}"
+        "expected OMS transition error for undercomplete terminal fill, got: {err}"
     );
     // filled_qty must NOT have advanced on rejection.
     assert_eq!(oms["ord-2"].filled_qty, 60);
+}
+
+/// Section C - T4b (ALPACA-PAPER-TERMINAL-FILL-REGRESSION).
+/// Alpaca paper WS sends the terminal `fill` event with `delta_qty` equal to
+/// the prior cumulative filled qty rather than the remaining incremental qty.
+/// This produces proposed > total_qty from PartiallyFilled state.
+///
+/// Expected: apply_fill_step accepts the event (OMS caps at total_qty) and
+/// returns a portfolio fill for the EFFECTIVE delta (total_qty - prior_filled),
+/// NOT the broker-reported delta_qty.  This prevents over-crediting the portfolio.
+///
+/// Regression for: BROKER_EVENT_APPLY_FAILED: Section C halt observed in
+/// supervised paper smoke on 2026-06-01 (AAPL, qty=3, partial=2, fill=2).
+#[test]
+fn alpaca_paper_terminal_fill_cumulative_qty_uses_effective_delta() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    let mut order = OmsOrder::new("ord-alpaca", "SPY", 3);
+    order
+        .apply(&OmsEvent::PartialFill { delta_qty: 2 }, Some("pf-1"))
+        .unwrap();
+    oms.insert("ord-alpaca".to_string(), order);
+
+    // Alpaca sends Fill(delta_qty=2) as the terminal fill, but only 1 share
+    // was actually remaining (total=3, prior=2).
+    let ev = make_fill_event("ord-alpaca", "fill-1", 2);
+    let result = apply_fill_step(&mut oms, "ord-alpaca", &ev, "fill-1");
+
+    // Must succeed — no Section C halt.
+    let fill = result
+        .unwrap()
+        .expect("terminal fill must return Some(fill)");
+
+    // Portfolio fill must use effective delta (1), not broker delta (2).
+    assert_eq!(
+        fill.qty, 1,
+        "portfolio fill must use effective delta (total_qty - prior_filled = 1), \
+         not broker-reported delta_qty (2)"
+    );
+
+    // OMS state must be Filled at total_qty=3.
+    assert_eq!(oms["ord-alpaca"].filled_qty, 3);
+    assert_eq!(
+        oms["ord-alpaca"].state,
+        mqk_execution::oms::state_machine::OrderState::Filled
+    );
 }
 /// Section C - T5.
 /// A duplicate fill replay (same msg_id applied twice to the same order)
@@ -1035,10 +1084,17 @@ fn optr_label_01_oms_transition_error_not_labeled_unknown_fill() {
         .unwrap();
     oms.insert("ord-overflow-optr".to_string(), order);
 
-    // Fill(60) when filled=60, total=100 → 120 > 100 → OMS rejects.
-    let ev = make_fill_event("ord-overflow-optr", "fill-overflow-optr", 60);
-    let err = apply_broker_event_step(&mut oms, "ord-overflow-optr", &ev, "fill-overflow-optr")
-        .unwrap_err();
+    // Fill(30) when filled=60, total=100 → proposed=90 < 100 → undercomplete terminal
+    // fill, OMS rejects.  (Overfill from PartiallyFilled is now ACCEPTED and capped;
+    // use undercomplete which remains an error to prove the "OMS transition error" label.)
+    let ev = make_fill_event("ord-overflow-optr", "fill-undercomplete-optr", 30);
+    let err = apply_broker_event_step(
+        &mut oms,
+        "ord-overflow-optr",
+        &ev,
+        "fill-undercomplete-optr",
+    )
+    .unwrap_err();
 
     assert!(
         err.to_string().contains("OMS transition error"),

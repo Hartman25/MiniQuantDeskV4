@@ -184,6 +184,13 @@ pub(super) fn apply_broker_event_step(
 ///   on a terminal order). `Ok(None)` is returned to prevent a double
 ///   portfolio mutation.
 ///
+/// - Portfolio fill quantity uses the OMS-derived effective delta
+///   (`order.filled_qty - pre_qty`) rather than `event.delta_qty`.  This
+///   handles Alpaca paper WS behavior where the terminal `fill` event carries
+///   the prior cumulative filled qty instead of the remaining incremental qty.
+///   The OMS state machine caps `filled_qty` at `total_qty`; reading the delta
+///   from OMS state ensures the portfolio and OMS are always in agreement.
+///
 /// The caller is responsible for halting and disarming on `Err`.
 pub(super) fn apply_fill_step(
     oms_orders: &mut BTreeMap<String, OmsOrder>,
@@ -210,6 +217,16 @@ pub(super) fn apply_fill_step(
             if is_fill && order.filled_qty == pre_qty {
                 return Ok(None);
             }
+            // For fill events, build the portfolio Fill from the OMS effective
+            // delta (order.filled_qty - pre_qty) rather than event.delta_qty.
+            // When Alpaca sends a terminal `fill` event with cumulative/overfill
+            // qty (observed with Alpaca paper WS), the OMS caps filled_qty at
+            // total_qty.  Using the OMS delta prevents over-crediting the
+            // portfolio (e.g. effective delta=1 vs broker-reported delta_qty=2).
+            if is_fill {
+                let effective_delta = order.filled_qty - pre_qty;
+                return Ok(build_effective_fill(event, effective_delta));
+            }
         }
         None if is_fill => {
             // Section C invariant: fill events must not reach portfolio without
@@ -228,6 +245,46 @@ pub(super) fn apply_fill_step(
         }
     }
     Ok(broker_event_to_fill(event))
+}
+
+/// Build a portfolio `Fill` from a broker fill event, using `effective_delta`
+/// instead of `event.delta_qty`.
+///
+/// Called by `apply_fill_step` when the OMS effective delta differs from the
+/// broker-reported delta (e.g. Alpaca paper WS terminal fill overfill cap).
+fn build_effective_fill(event: &BrokerEvent, effective_delta: i64) -> Option<Fill> {
+    if effective_delta <= 0 {
+        return None;
+    }
+    match event {
+        BrokerEvent::Fill {
+            symbol,
+            side,
+            price_micros,
+            fee_micros,
+            ..
+        }
+        | BrokerEvent::PartialFill {
+            symbol,
+            side,
+            price_micros,
+            fee_micros,
+            ..
+        } => {
+            let portfolio_side = match side {
+                mqk_execution::Side::Buy => mqk_portfolio::Side::Buy,
+                mqk_execution::Side::Sell => mqk_portfolio::Side::Sell,
+            };
+            Some(Fill::new(
+                symbol.clone(),
+                portfolio_side,
+                effective_delta,
+                *price_micros,
+                *fee_micros,
+            ))
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

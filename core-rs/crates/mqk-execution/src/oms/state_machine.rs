@@ -262,7 +262,56 @@ impl OmsOrder {
             }
 
             // ------------------------------------------------------------------
-            // Final fill: accepted from any live state for the same reason.
+            // Final fill from PartiallyFilled: accepted when proposed >= total_qty.
+            //
+            // Alpaca paper WS sends the terminal `fill` event with `delta_qty`
+            // equal to the prior cumulative filled qty (not the remaining
+            // incremental qty).  For a 3-share order with a prior partial_fill
+            // of 2 shares, Alpaca sends Fill(delta_qty=2) rather than
+            // Fill(delta_qty=1), producing proposed=4 > total_qty=3.
+            //
+            // Invariants enforced before mutation:
+            //   1. delta_qty must be positive.
+            //   2. proposed must be >= total_qty (underfill on terminal fill is
+            //      still an error; the broker must complete the order).
+            //   3. filled_qty is capped at total_qty so the order closes exactly.
+            //
+            // The caller (apply_fill_step) reads `order.filled_qty - pre_qty`
+            // as the effective portfolio delta; this is 1 (= total_qty - prior)
+            // not 2 (the broker-reported delta_qty), preventing over-crediting.
+            // ------------------------------------------------------------------
+            (PartiallyFilled, Fill { delta_qty }) => {
+                if *delta_qty <= 0 {
+                    return Err(TransitionError {
+                        from: self.state.clone(),
+                        event: format!(
+                            "Fill(delta_qty={}) — delta_qty must be positive",
+                            delta_qty
+                        ),
+                    });
+                }
+                let proposed = self.filled_qty + delta_qty;
+                if proposed < self.total_qty {
+                    return Err(TransitionError {
+                        from: self.state.clone(),
+                        event: format!(
+                            "Fill(delta_qty={}) — proposed_filled={} < total_qty={} \
+                             (filled={}); terminal fill must complete the order",
+                            delta_qty, proposed, self.total_qty, self.filled_qty
+                        ),
+                    });
+                }
+                // Cap at total_qty: handles Alpaca sending cumulative or
+                // overfill qty for the terminal fill event.
+                self.filled_qty = self.total_qty;
+                self.state = Filled;
+            }
+
+            // ------------------------------------------------------------------
+            // Final fill from Open/CancelPending/ReplacePending: exact balance.
+            //
+            // For orders with no prior partial fills, the broker's delta_qty
+            // must equal total_qty exactly (no cumulative ambiguity exists).
             //
             // Invariants enforced before any mutation:
             //   1. delta_qty must be positive.
@@ -273,7 +322,7 @@ impl OmsOrder {
             // A violation returns TransitionError; state and filled_qty are
             // unchanged and the event_id is NOT recorded.
             // ------------------------------------------------------------------
-            (Open | PartiallyFilled | CancelPending | ReplacePending, Fill { delta_qty }) => {
+            (Open | CancelPending | ReplacePending, Fill { delta_qty }) => {
                 if *delta_qty <= 0 {
                     return Err(TransitionError {
                         from: self.state.clone(),
@@ -959,27 +1008,24 @@ mod tests {
 
     /// A rejected fill must not poison its event_id.
     /// Scenario: order at filled_qty=90, Fill(E1, delta=20) rejected because
-    /// 90+20=110 overflows total_qty=100. The same event_id E1 must then be
-    /// accepted when submitted with a corrected delta of 10 (90+10=100).
+    /// A rejected event_id must not be recorded, so it remains usable for a
+    /// corrected re-submission.  Uses Open-state overfill (still rejected after
+    /// the PartiallyFilled relaxation introduced for Alpaca paper WS fills).
     #[test]
     fn rejected_fill_does_not_poison_event_identity() {
-        let mut o = open_order(); // total_qty = 100
+        let mut o = open_order(); // total_qty = 100, state = Open
 
-        // Bring order to filled_qty = 90.
-        o.apply(&OmsEvent::PartialFill { delta_qty: 90 }, Some("E0"))
-            .unwrap();
-        assert_eq!(o.filled_qty, 90);
-
-        // Fill(E1, 20): 90 + 20 = 110 > 100 — overflow, rejected.
+        // Fill(E1, 101) from Open: 0 + 101 = 101 ≠ 100 — strict exact-balance
+        // required in Open state; rejected.
         let err = o
-            .apply(&OmsEvent::Fill { delta_qty: 20 }, Some("E1"))
+            .apply(&OmsEvent::Fill { delta_qty: 101 }, Some("E1"))
             .unwrap_err();
-        assert_eq!(err.from, OrderState::PartiallyFilled);
-        assert_eq!(o.filled_qty, 90, "rejected fill must not mutate filled_qty");
+        assert_eq!(err.from, OrderState::Open);
+        assert_eq!(o.filled_qty, 0, "rejected fill must not mutate filled_qty");
 
-        // Fill(E1, 10): same event_id, corrected delta. 90 + 10 = 100 == total_qty.
+        // Fill(E1, 100): same event_id, corrected delta. 0 + 100 == total_qty.
         // If E1 had been poisoned on rejection this call would silently skip.
-        o.apply(&OmsEvent::Fill { delta_qty: 10 }, Some("E1"))
+        o.apply(&OmsEvent::Fill { delta_qty: 100 }, Some("E1"))
             .unwrap();
         assert_eq!(
             o.state,
@@ -987,5 +1033,88 @@ mod tests {
             "valid fill with previously-rejected event_id must be accepted"
         );
         assert_eq!(o.filled_qty, 100);
+    }
+
+    // -----------------------------------------------------------------------
+    // Section C — Alpaca paper WS terminal fill: cumulative-qty regression
+    //
+    // Alpaca paper WS sends the terminal `fill` event with `delta_qty` equal
+    // to the prior cumulative filled qty rather than the remaining incremental
+    // qty (observed in supervised paper smoke 2026-06-01).
+    //
+    // Scenario: order qty=3, partial_fill(2) → fill(2) where the fill's
+    // delta_qty=2 matches the prior partial fill, not the remaining 1 share.
+    // The OMS must cap filled_qty at total_qty and mark the order Filled.
+    // -----------------------------------------------------------------------
+
+    /// PartialFill(2) then Fill(2) on a 3-share order (Alpaca sends prior
+    /// cumulative as terminal fill qty).  The OMS must accept and cap at 3.
+    #[test]
+    fn alpaca_paper_terminal_fill_cumulative_qty_is_accepted() {
+        let mut o = OmsOrder::new("ord-alpaca", "AAPL", 3);
+        o.apply(&OmsEvent::Ack, Some("ack-1")).unwrap();
+
+        // partial_fill: 2 shares filled, 1 remaining.
+        o.apply(&OmsEvent::PartialFill { delta_qty: 2 }, Some("pf-1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 2);
+        assert_eq!(o.state, OrderState::PartiallyFilled);
+
+        // terminal fill: Alpaca sends delta_qty=2 (prior cumulative, not remaining 1).
+        // Must be accepted and capped at total_qty=3.
+        o.apply(&OmsEvent::Fill { delta_qty: 2 }, Some("fill-1"))
+            .unwrap();
+        assert_eq!(
+            o.state,
+            OrderState::Filled,
+            "terminal fill with cumulative qty must close the order"
+        );
+        assert_eq!(
+            o.filled_qty, 3,
+            "filled_qty must be capped at total_qty, not overflowed"
+        );
+        assert!(o.state.is_terminal());
+    }
+
+    /// Undercomplete terminal fill from PartiallyFilled is still rejected.
+    /// (proposed < total_qty remains an error even after the overfill relaxation)
+    #[test]
+    fn alpaca_paper_undercomplete_terminal_fill_is_still_rejected() {
+        let mut o = OmsOrder::new("ord-test", "AAPL", 10);
+        o.apply(&OmsEvent::PartialFill { delta_qty: 5 }, Some("pf-1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 5);
+
+        // Terminal fill where proposed=5+3=8 < total=10 — undercomplete, rejected.
+        let err = o
+            .apply(&OmsEvent::Fill { delta_qty: 3 }, Some("fill-bad"))
+            .unwrap_err();
+        assert_eq!(err.from, OrderState::PartiallyFilled);
+        assert_eq!(
+            o.state,
+            OrderState::PartiallyFilled,
+            "state must not change on undercomplete terminal fill"
+        );
+        assert_eq!(
+            o.filled_qty, 5,
+            "filled_qty must not be mutated on undercomplete terminal fill"
+        );
+    }
+
+    /// Fill(delta_qty=total_qty) from PartiallyFilled where Alpaca sends the
+    /// order's total qty as the terminal fill qty.  Must be accepted and capped.
+    #[test]
+    fn alpaca_paper_terminal_fill_total_qty_is_accepted() {
+        let mut o = OmsOrder::new("ord-test", "AAPL", 5);
+        o.apply(&OmsEvent::PartialFill { delta_qty: 3 }, Some("pf-1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 3);
+
+        // Alpaca sends delta_qty=5 (full order qty) for terminal fill.
+        // proposed=3+5=8 > total=5 → cap at 5.
+        o.apply(&OmsEvent::Fill { delta_qty: 5 }, Some("fill-1"))
+            .unwrap();
+        assert_eq!(o.state, OrderState::Filled);
+        assert_eq!(o.filled_qty, 5);
     }
 }
