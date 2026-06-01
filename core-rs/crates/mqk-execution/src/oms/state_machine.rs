@@ -350,6 +350,14 @@ impl OmsOrder {
             // Late-duplicate fill on an already-Filled order: silently ignored.
             (Filled, Fill { .. } | PartialFill { .. }) => {}
 
+            // Late Ack arriving on a terminal order: silently ignored.
+            //
+            // B14: Broker WS events can arrive out of order (e.g. Ack after Fill
+            // on reconnect/replay). A late Ack on Filled/Cancelled/Rejected is
+            // not an OMS inconsistency — the order reached its terminal state
+            // legitimately. Treat identically to late fills on Filled.
+            (Filled | Cancelled | Rejected, Ack) => {}
+
             // ------------------------------------------------------------------
             // Cancel flow
             // ------------------------------------------------------------------
@@ -1104,6 +1112,157 @@ mod tests {
         );
         assert_eq!(o.filled_qty, 3, "filled_qty must be capped at total_qty=3");
         assert!(o.state.is_terminal());
+    }
+
+    // -----------------------------------------------------------------------
+    // B14 — Late ACK after terminal fill
+    // -----------------------------------------------------------------------
+
+    /// B14-1: Ack arriving on a Filled order with a new event_id must be a
+    /// silent noop. Broker WS can replay or deliver Ack out of order after
+    /// the order has already filled; this must not trigger a halt.
+    #[test]
+    fn b14_late_ack_after_filled_is_noop() {
+        let mut o = open_order(); // total_qty = 100
+        o.apply(&OmsEvent::Ack, Some("ack-1")).unwrap();
+        o.apply(&OmsEvent::Fill { delta_qty: 100 }, Some("fill-1"))
+            .unwrap();
+        assert_eq!(o.state, OrderState::Filled);
+        assert_eq!(o.filled_qty, 100);
+
+        // Late Ack with a fresh event_id arriving after the order is Filled.
+        // Must be a silent noop — not a TransitionError/halt.
+        o.apply(&OmsEvent::Ack, Some("ack-late")).unwrap();
+        assert_eq!(
+            o.state,
+            OrderState::Filled,
+            "B14: late Ack on Filled must leave state unchanged"
+        );
+        assert_eq!(o.filled_qty, 100, "B14: filled_qty must not change");
+    }
+
+    /// B14-2: Ack on Cancelled (after partial fill + cancel) must also be noop.
+    #[test]
+    fn b14_late_ack_after_cancelled_is_noop() {
+        let mut o = open_order();
+        o.apply(&OmsEvent::PartialFill { delta_qty: 40 }, Some("f1"))
+            .unwrap();
+        o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
+        o.apply(&OmsEvent::CancelAck, Some("c2")).unwrap();
+        assert_eq!(o.state, OrderState::Cancelled);
+
+        // Late Ack on Cancelled — must be noop.
+        o.apply(&OmsEvent::Ack, Some("ack-late")).unwrap();
+        assert_eq!(
+            o.state,
+            OrderState::Cancelled,
+            "B14: late Ack on Cancelled must leave state unchanged"
+        );
+        assert_eq!(
+            o.filled_qty, 40,
+            "B14: filled_qty must not change on late Ack after Cancelled"
+        );
+    }
+
+    /// B14-3: Ack on Rejected must also be noop.
+    #[test]
+    fn b14_late_ack_after_rejected_is_noop() {
+        let mut o = open_order();
+        o.apply(&OmsEvent::Reject, Some("r1")).unwrap();
+        assert_eq!(o.state, OrderState::Rejected);
+
+        o.apply(&OmsEvent::Ack, Some("ack-late")).unwrap();
+        assert_eq!(
+            o.state,
+            OrderState::Rejected,
+            "B14: late Ack on Rejected must leave state unchanged"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // C17 — Fill after CancelAck
+    //
+    // Fill after confirmed cancel IS an OMS inconsistency that warrants halt.
+    // Unlike late fills on Filled (benign duplicate), a fill after CancelAck
+    // means the broker filled an order it had already confirmed cancelling.
+    // The state machine must return TransitionError so callers halt and alert.
+    // -----------------------------------------------------------------------
+
+    /// C17-1: Fill(new event_id) arriving after CancelAck must be TransitionError.
+    /// This is NOT a noop — it is a genuine broker/OMS inconsistency.
+    #[test]
+    fn c17_fill_after_cancel_ack_is_transition_error() {
+        let mut o = open_order(); // total_qty = 100
+        o.apply(&OmsEvent::Ack, Some("ack-1")).unwrap();
+        o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
+        o.apply(&OmsEvent::CancelAck, Some("c2")).unwrap();
+        assert_eq!(o.state, OrderState::Cancelled);
+
+        // Fill arriving after confirmed cancel — must be TransitionError (halt).
+        let err = o
+            .apply(&OmsEvent::Fill { delta_qty: 100 }, Some("fill-late"))
+            .unwrap_err();
+        assert_eq!(
+            err.from,
+            OrderState::Cancelled,
+            "C17: TransitionError.from must be Cancelled"
+        );
+        // State and accounting must be unchanged after rejection.
+        assert_eq!(
+            o.state,
+            OrderState::Cancelled,
+            "C17: state must remain Cancelled — fill after cancel is an error"
+        );
+        assert_eq!(
+            o.filled_qty, 0,
+            "C17: filled_qty must not change on fill after CancelAck"
+        );
+    }
+
+    /// C17-2: PartialFill after CancelAck is also TransitionError.
+    #[test]
+    fn c17_partial_fill_after_cancel_ack_is_transition_error() {
+        let mut o = open_order();
+        o.apply(&OmsEvent::PartialFill { delta_qty: 40 }, Some("f1"))
+            .unwrap();
+        o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
+        o.apply(&OmsEvent::CancelAck, Some("c2")).unwrap();
+        assert_eq!(o.state, OrderState::Cancelled);
+        assert_eq!(o.filled_qty, 40);
+
+        // PartialFill arriving after confirmed cancel — must be TransitionError.
+        let err = o
+            .apply(&OmsEvent::PartialFill { delta_qty: 10 }, Some("pf-late"))
+            .unwrap_err();
+        assert_eq!(err.from, OrderState::Cancelled);
+        assert_eq!(
+            o.state,
+            OrderState::Cancelled,
+            "C17: state must remain Cancelled"
+        );
+        assert_eq!(
+            o.filled_qty, 40,
+            "C17: filled_qty must not change on PartialFill after CancelAck"
+        );
+    }
+
+    /// C17-3: Contrast with CancelPending — PartialFill DURING pending is still accepted.
+    /// This confirms the C17 gate fires only after the cancel is CONFIRMED (CancelAck),
+    /// not while still pending.
+    #[test]
+    fn c17_fill_during_cancel_pending_is_accepted() {
+        let mut o = open_order();
+        o.apply(&OmsEvent::CancelRequest, Some("c1")).unwrap();
+        assert_eq!(o.state, OrderState::CancelPending);
+
+        // Fill arrives before cancel is processed — still accepted.
+        o.apply(&OmsEvent::Fill { delta_qty: 100 }, Some("f1"))
+            .unwrap();
+        assert_eq!(
+            o.state,
+            OrderState::Filled,
+            "C17-contrast: fill during CancelPending is accepted (not yet confirmed cancel)"
+        );
     }
 
     /// Undercomplete terminal fill from PartiallyFilled is still rejected.

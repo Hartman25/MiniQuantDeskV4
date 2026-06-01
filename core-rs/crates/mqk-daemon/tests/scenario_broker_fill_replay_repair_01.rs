@@ -1046,3 +1046,78 @@ async fn a08_cursor_only_no_inbox_row_never_marked_applied() {
     clear_broker_map(pool, &internal_id).await;
     clear_outbox(pool, &internal_id).await;
 }
+
+// ---------------------------------------------------------------------------
+// A09 — E29: no_fill_evidence + apply → refused, no mutation
+//
+// Proves Gate 7 in the apply route: when neither inbox nor broker cursor has
+// evidence for an order, the route refuses regardless of confirmation token.
+// This ensures repair cannot be forced on an order with no broker-side truth.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a09_no_fill_evidence_apply_is_refused_no_mutation() {
+    let state = require_db!("A09");
+    let pool = state.db.as_ref().expect("DB pool");
+
+    let run_id = seed_halted_run(pool, "a09").await;
+    let (internal_id, broker_id) = seed_sent_outbox_and_broker_map(pool, run_id, "a09").await;
+
+    // Remove cursor so there is no fill evidence (no inbox row, no cursor reference).
+    let saved_cursor = save_broker_cursor(pool, "alpaca").await;
+    restore_broker_cursor(pool, "alpaca", None).await;
+
+    let router = routes::build_router(Arc::clone(&state));
+    let body = serde_json::json!({
+        "run_id": run_id.to_string(),
+        "internal_order_id": internal_id,
+        "broker_order_id": broker_id,
+        "dry_run": false,
+        "confirmation": "APPLY_HALTED_FILL_REPAIR"
+    });
+    let (status, resp_body) = call(router, apply_req_json(body)).await;
+
+    // Gate 7 refuses no_fill_evidence — expect 409 Conflict.
+    let j = parse_json(resp_body);
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "A09: no_fill_evidence must be refused (409); body={j}"
+    );
+    // Gate 7 returns decision="noop" for no_fill_evidence (nothing to apply).
+    // 409 status is the refusal signal; "noop" accurately describes the action taken.
+    assert_eq!(
+        j["decision"].as_str().unwrap_or(""),
+        "noop",
+        "A09: decision must be 'noop' — no_fill_evidence means nothing to apply"
+    );
+    assert_eq!(
+        j["classification"].as_str().unwrap_or(""),
+        "no_fill_evidence",
+        "A09: classification must be 'no_fill_evidence'"
+    );
+    // mutated may be absent (null) for the noop path — the DB assertion below
+    // is the authoritative proof of no mutation.
+    assert!(
+        j["mutated"].as_bool() != Some(true),
+        "A09: mutated must not be true"
+    );
+
+    // Authoritative proof: confirm no inbox row was created.
+    let row_count: (i64,) = sqlx::query_as(
+        "select count(*) from oms_inbox where run_id = $1 and internal_order_id = $2",
+    )
+    .bind(run_id)
+    .bind(&internal_id)
+    .fetch_one(pool)
+    .await
+    .expect("A09: count query");
+    assert_eq!(
+        row_count.0, 0,
+        "A09: no inbox rows must exist — no_fill_evidence must not insert any row"
+    );
+
+    restore_broker_cursor(pool, "alpaca", saved_cursor.as_deref()).await;
+    clear_broker_map(pool, &internal_id).await;
+    clear_outbox(pool, &internal_id).await;
+}
