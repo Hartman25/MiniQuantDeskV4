@@ -1076,6 +1076,36 @@ mod tests {
         assert!(o.state.is_terminal());
     }
 
+    /// Two partial fills followed by an Alpaca-style cumulative terminal fill.
+    /// Scenario mirrors N=2 partial fills before the terminal fill event, which
+    /// is possible when Alpaca splits a 3-share order into two 1-share partials.
+    ///
+    /// PartialFill(1) + PartialFill(1) → filled_qty=2, then Fill(delta_qty=2)
+    /// where Alpaca sends the prior cumulative as the terminal fill qty.
+    /// proposed = 2 + 2 = 4 > total=3 → cap at 3, Filled.
+    #[test]
+    fn alpaca_paper_two_partials_then_cumulative_terminal_fill_is_accepted() {
+        let mut o = OmsOrder::new("ord-multi", "AAPL", 3);
+        o.apply(&OmsEvent::PartialFill { delta_qty: 1 }, Some("pf-1"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 1);
+        o.apply(&OmsEvent::PartialFill { delta_qty: 1 }, Some("pf-2"))
+            .unwrap();
+        assert_eq!(o.filled_qty, 2);
+        assert_eq!(o.state, OrderState::PartiallyFilled);
+
+        // Alpaca terminal fill sends delta_qty=2 (prior cumulative), not remaining 1.
+        o.apply(&OmsEvent::Fill { delta_qty: 2 }, Some("fill-1"))
+            .unwrap();
+        assert_eq!(
+            o.state,
+            OrderState::Filled,
+            "two partials + cumulative terminal fill must close the order"
+        );
+        assert_eq!(o.filled_qty, 3, "filled_qty must be capped at total_qty=3");
+        assert!(o.state.is_terminal());
+    }
+
     /// Undercomplete terminal fill from PartiallyFilled is still rejected.
     /// (proposed < total_qty remains an error even after the overfill relaxation)
     #[test]

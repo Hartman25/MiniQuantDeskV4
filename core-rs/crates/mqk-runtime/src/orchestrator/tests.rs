@@ -1062,6 +1062,68 @@ fn unknown_order_non_fill_is_silently_skipped() {
     );
 }
 
+/// Section C - T4c (ALPACA-PAPER-MULTI-PARTIAL-TERMINAL-FILL-REGRESSION).
+///
+/// Two partial fills followed by an Alpaca-style cumulative terminal fill.
+/// Scenario: total=3, PartialFill(1), PartialFill(1), Fill(delta_qty=2).
+///
+/// Alpaca paper WS may send the terminal `fill` event with `delta_qty` equal
+/// to the prior cumulative filled qty (2) rather than the remaining qty (1).
+/// With two prior partials, proposed = filled_qty(2) + delta_qty(2) = 4 > total=3.
+///
+/// Expected:
+///   - OMS caps filled_qty at total_qty=3.
+///   - apply_fill_step returns a portfolio fill with effective_delta=1
+///     (total_qty - prior_filled = 3 - 2 = 1), NOT the broker-reported delta_qty=2.
+///   - OMS state = Filled, filled_qty = 3.
+///
+/// This covers the N=2-partials-before-terminal-fill path, complementing T4b
+/// which proved the N=1-partial path.
+#[test]
+fn alpaca_paper_two_partials_then_cumulative_terminal_fill_uses_effective_delta() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    let mut order = OmsOrder::new("ord-multi-partial", "AAPL", 3);
+    // First partial fill: 1 of 3 shares.
+    order
+        .apply(&OmsEvent::PartialFill { delta_qty: 1 }, Some("pf-1"))
+        .unwrap();
+    assert_eq!(order.filled_qty, 1);
+    // Second partial fill: another 1 of 3 shares.
+    order
+        .apply(&OmsEvent::PartialFill { delta_qty: 1 }, Some("pf-2"))
+        .unwrap();
+    assert_eq!(order.filled_qty, 2);
+    oms.insert("ord-multi-partial".to_string(), order);
+
+    // Alpaca sends Fill(delta_qty=2) as the terminal fill — the prior cumulative
+    // qty (2) rather than the remaining 1 share.  proposed = 2 + 2 = 4 > total=3.
+    let ev = make_fill_event("ord-multi-partial", "fill-terminal", 2);
+    let result = apply_fill_step(&mut oms, "ord-multi-partial", &ev, "fill-terminal");
+
+    // Must succeed — no Section C halt.
+    let fill = result
+        .unwrap()
+        .expect("T4c: terminal fill after two partials must return Some(fill)");
+
+    // Portfolio fill must use effective delta (1 = total - prior_filled), not broker delta (2).
+    assert_eq!(
+        fill.qty, 1,
+        "T4c: portfolio fill must use effective_delta=1 (total_qty - prior_filled = 3 - 2), \
+         not broker-reported delta_qty=2"
+    );
+
+    // OMS state must be Filled at total_qty=3.
+    assert_eq!(
+        oms["ord-multi-partial"].filled_qty, 3,
+        "T4c: OMS filled_qty must be capped at total_qty=3"
+    );
+    assert_eq!(
+        oms["ord-multi-partial"].state,
+        mqk_execution::oms::state_machine::OrderState::Filled,
+        "T4c: OMS state must be Filled after cumulative terminal fill"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // OPTR-LABEL-01: Error taxonomy proof
 // ---------------------------------------------------------------------------
