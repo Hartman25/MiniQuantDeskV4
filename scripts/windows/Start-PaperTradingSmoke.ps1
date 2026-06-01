@@ -899,18 +899,40 @@ if ($null -ne $readiness4) {
 Write-Section "STEP 15: Start runtime"
 
 if ($NoStartRuntime) {
-    Write-Warn "-NoStartRuntime set. Skipping start-system call."
-    Write-Warn "When ready: POST /api/v1/ops/action {action_key: 'start-system'} with Bearer token."
+    Write-Warn "-NoStartRuntime set. Skipping runtime start wait."
+    Write-Warn "Autonomous session controller will start the run when in-window + armed + WS live."
 } else {
-    $startResp = Invoke-DaemonPost -Path '/api/v1/ops/action' -Body @{ action_key = 'start-system' }
-    if ($startResp.StatusCode -eq 200 -and $startResp.Body.accepted -eq $true) {
-        Write-Ok "start-system accepted. disposition=$($startResp.Body.disposition)"
-    } elseif ($startResp.StatusCode -eq 503) {
-        Write-Warn "start-system returned 503 - may be waiting for session window or WS continuity."
-        if ($startResp.RawBody) { Write-Warn "Response: $($startResp.RawBody)" }
-    } else {
-        Write-Warn "start-system returned HTTP $($startResp.StatusCode)."
-        if ($startResp.RawBody) { Write-Warn "Response: $($startResp.RawBody)" }
+    # Do NOT call start-system operator action. The autonomous session controller owns the start.
+    # Calling start-system races with the session controller: start-system blocks the HTTP handler
+    # for ~30s during the initial REST recovery tick; within that window the session_controller
+    # sees no local ownership and also calls start_execution_runtime → durable_active_without_local_owner.
+    # The deadman then halts the orphaned run, setting integrity.halted=true and blocking re-arm.
+    #
+    # Correct flow: let the session controller fire (every 30s) and start autonomously.
+    # Poll until runtime_status=running (timeout ~90s to cover 30s session_controller delay
+    # + ~35s initial REST recovery tick).
+    Write-Step "Waiting for autonomous session controller to start runtime (up to 90s)..."
+    $runtimeStarted = $false
+    $local:ErrorActionPreference = 'Continue'
+    $startPollDeadline = (Get-Date).AddSeconds(90)
+    while ((Get-Date) -lt $startPollDeadline) {
+        $stsCheck = $null
+        try { $stsCheck = Invoke-DaemonGet -Path '/api/v1/system/status' } catch {}
+        if ($null -ne $stsCheck -and $stsCheck.runtime_status -eq 'running') {
+            Write-Ok "runtime_status=running — autonomous session controller started the run."
+            $runtimeStarted = $true
+            break
+        }
+        $rtNow = if ($null -ne $stsCheck) { $stsCheck.runtime_status } else { 'unreachable' }
+        Write-Step "  ...runtime_status=$rtNow (polling again in 5s)"
+        Start-Sleep -Seconds 5
+    }
+    if (-not $runtimeStarted) {
+        $rdCheck = $null
+        try { $rdCheck = Invoke-DaemonGet -Path '/api/v1/autonomous/readiness' } catch {}
+        $blocker = if ($null -ne $rdCheck) { $rdCheck.blockers | ConvertTo-Json -Compress } else { 'unavailable' }
+        Write-Warn "runtime_status not 'running' after 90s. Proceeding to watcher for diagnosis."
+        Write-Warn "autonomous/readiness blockers: $blocker"
     }
 }
 
