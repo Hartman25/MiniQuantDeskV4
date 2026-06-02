@@ -64,8 +64,10 @@ Use these labels precisely:
 | Mode | Current posture | Meaning |
 |---|---|---|
 | **Supervised Paper + Alpaca** | Candidate / operator-watched | Credible current path after a clean proof run, valid env, live Alpaca paper auth, and operator supervision. |
-| **Autonomous Paper + Alpaca** | Partial | Strong architecture exists, but unattended operation still depends on closing broker-gap recovery, retry budgets, and repair workflows. |
+| **Autonomous Paper + Alpaca** | Mechanically ready — live-paper evidence pending | Long-only single-symbol path is mechanically proven. Remaining blockers are operational evidence: live-paper lifecycle, reconcile after real fill, and repeated autonomous cycle proof. |
 | **Live / live-capital** | Not ready | Typed support and gates exist, but this repo should not be treated as safe for unattended live trading yet. |
+
+**Proof status (2026-06-01):** `full_repo_proof.ps1 -ProofProfile full -LowMemory` passed 18/18 lanes. The repo is proof-clean for current scope. Proof-clean is not the same as live-ready. Proof-clean is not the same as safe-capital-deployment.
 
 The proof harness can prove the current locked repo scope. It does **not** mean the system is profitable, broker-proof, or live-ready.
 
@@ -220,6 +222,24 @@ Be honest about the open edges.
 - portfolio realism and capital-allocation realism still need further hardening
 - some deeper GUI detail surfaces are intentionally deferred or unmounted rather than faked
 - desktop bootstrap exists, but the primary documented operator path remains daemon + browser GUI
+
+## Open live-paper proof items
+
+The long-only single-symbol Paper + Alpaca MVP is mechanically ready. The following items are required before the MVP is fully closed:
+
+| Item | Status |
+|---|---|
+| PAPER-TRADE-LIFECYCLE-01 | Open — market-hours paper smoke with real fills |
+| RECONCILE-AFTER-REAL-FILL-01 | Open — reconcile pass after a real paper fill |
+| DISCORD-TRADE-LIFECYCLE-REAL-01 | Open — Discord notification evidence from a real cycle |
+| REPEATED-AUTONOMOUS-TRADE-CYCLE-01 | Open — multiple autonomous cycles without operator intervention |
+| PAPER-SMOKE-EVIDENCE-REVIEW-01 | Open — operator review of captured smoke evidence |
+
+### Evidence capture workflow
+
+Evidence is captured using `scripts/windows/Capture-PaperSmokeEvidence.ps1` before and after a paper smoke session. The full workflow is documented in `docs/runbooks/paper_smoke_evidence_pack.md`. Evidence folders are stored under `evidence/` in timestamped run folders and are gitignored by default.
+
+Live trading remains locked until repeated clean paper evidence and live-capital readiness gates are satisfied.
 
 ## Local setup model
 
@@ -433,6 +453,19 @@ Veritas Ledger is engineered primarily to address the second.
 - host-level security
 - fully hardened secret management
 - safe unattended live deployment without stronger parity evidence, deeper runbooks, and additional controls
+
+## Roadmap
+
+Items beyond the current long-only single-symbol MVP scope, in rough priority order:
+
+- full data ingestion expansion (additional providers, bar types, tick data)
+- trading methods expansion beyond long-only single-symbol
+- multi-symbol universe support
+- multi-asset expansion
+- trade journal and forensic review surface
+- regime attribution and strategy decay detection
+- GUI reskin and multi-monitor operator polish
+- live-capital readiness lock (gated on repeated clean paper evidence and all live-capital gates)
 
 ## Read next
 
