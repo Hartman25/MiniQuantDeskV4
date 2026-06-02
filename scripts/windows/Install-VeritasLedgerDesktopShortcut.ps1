@@ -34,8 +34,8 @@ if (-not (Test-Path $psExe)) {
 # Command strings
 # ---------------------------------------------------------------------------
 $rebuildSuffix     = if ($Rebuild.IsPresent) { ' -Rebuild' } else { '' }
-$observeCommand    = "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -File `"$launcher`" -Mode Observe$rebuildSuffix"
-$tradeReadyCommand = "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -File `"$launcher`" -Mode TradeReady$rebuildSuffix"
+$observeCommand    = "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -File `"$launcher`" -Mode Observe -PrepMarketData$rebuildSuffix"
+$tradeReadyCommand = "`"$psExe`" -NoProfile -ExecutionPolicy Bypass -File `"$launcher`" -Mode TradeReady -PrepMarketData$rebuildSuffix"
 $iconLocation      = if (Test-Path $iconPath) { "$iconPath,0" } else { "$psExe,0" }
 
 # ---------------------------------------------------------------------------

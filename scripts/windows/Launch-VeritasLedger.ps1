@@ -29,7 +29,19 @@ param(
     [int]$MinCompletedBars = 30,
     # -MaxStalenessDays: maximum calendar days since latest complete bar.
     #   Default: auto-derived from timeframe (1 for 5m; 4 for 1D and others).
-    [int]$MaxStalenessDays = -1
+    [int]$MaxStalenessDays = -1,
+
+    # -ArmPaper: arm the paper execution gate after daemon identity is verified.
+    #   Requires paper mode, adapter alpaca, live_routing_enabled=false, and a
+    #   trade-ready backend (reconcile clean, ws_continuity_ready, arm_ready).
+    #   Does NOT start the runtime. Does NOT submit orders. Fail-closed.
+    [switch]$ArmPaper,
+
+    # -CaptureStartupEvidence: capture a startup evidence bundle after the daemon
+    #   is verified and the GUI is launched.
+    #   Calls Capture-PaperSmokeEvidence.ps1 -Label launcher_startup.
+    #   Non-fatal: a capture failure warns but does not abort the launcher.
+    [switch]$CaptureStartupEvidence
 )
 
 Set-StrictMode -Version Latest
@@ -968,6 +980,95 @@ function Invoke-MarketDataGate {
     Write-LauncherSuccess "$verb2 (${resolvedSymbols}/${resolvedTimeframe})"
 }
 
+function Invoke-ArmPaper {
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseUrl,
+        [Parameter(Mandatory = $true)][string]$OperatorToken,
+        [Parameter(Mandatory = $true)]$Probe
+    )
+
+    # Fail-closed pre-checks before touching any mutating route.
+    if ($Probe.Status.live_routing_enabled -eq $true) {
+        throw '-ArmPaper refused: live_routing_enabled=true. Paper arm requires live routing disabled.'
+    }
+
+    if ($Probe.Status.daemon_mode -ne 'paper') {
+        throw ("-ArmPaper refused: daemon_mode='{0}'; paper arm requires mode=paper." -f $Probe.Status.daemon_mode)
+    }
+
+    if ($Probe.Status.adapter_id -ne 'alpaca') {
+        throw ("-ArmPaper refused: adapter_id='{0}'; paper arm requires adapter=alpaca." -f $Probe.Status.adapter_id)
+    }
+
+    if (-not $Probe.TradeReady) {
+        $armReasons = Join-Reasons -Reasons $Probe.TradeReadinessReasons
+        throw "-ArmPaper refused: backend is not trade-ready. $armReasons"
+    }
+
+    Write-LauncherStep 'Arming paper execution (POST /api/v1/ops/action arm-execution)'
+
+    $armStatusCode = $null
+    $armRespData   = $null
+
+    try {
+        $armRaw = Invoke-JsonRequest `
+            -Method 'POST' `
+            -Url ($BaseUrl.TrimEnd('/') + '/api/v1/ops/action') `
+            -Headers @{ Authorization = "Bearer $OperatorToken" } `
+            -Body @{ action_key = 'arm-execution' }
+        $armStatusCode = $armRaw.StatusCode
+        $armRespData   = $armRaw.Json
+    }
+    catch {
+        $armDetails    = Get-HttpFailureDetails -ErrorRecord $_
+        $armStatusCode = $armDetails.StatusCode
+        $armRespData   = $armDetails.Json
+        if ($null -eq $armStatusCode) {
+            throw "-ArmPaper: arm-execution request failed (no HTTP response): $($armDetails.Message)"
+        }
+    }
+
+    if ($armStatusCode -ne 200 -or $null -eq $armRespData -or $armRespData.accepted -ne $true) {
+        $disp = if ($null -ne $armRespData -and $null -ne $armRespData.PSObject.Properties['disposition']) { $armRespData.disposition } else { 'unknown' }
+        throw "-ArmPaper: arm-execution was not accepted (status=$armStatusCode disposition=$disp). Arm refused; runtime not started."
+    }
+
+    # Post-arm read-only verification — autonomous readiness reflects new arm state.
+    try {
+        $arCheck   = Invoke-JsonRequest -Method 'GET' -Url ($BaseUrl.TrimEnd('/') + '/api/v1/autonomous/readiness')
+        $arArmState = if ($null -ne $arCheck.Json -and $null -ne $arCheck.Json.PSObject.Properties['arm_state']) { $arCheck.Json.arm_state } else { 'unknown' }
+        if ($arArmState -eq 'armed') {
+            Write-LauncherSuccess "Arm verified: arm_state=armed. ARMED ONLY -- runtime not started, no orders submitted."
+        }
+        else {
+            Write-LauncherWarn "Arm action accepted but arm_state='$arArmState' (expected 'armed'). Verify via GUI before proceeding."
+        }
+    }
+    catch {
+        Write-LauncherWarn 'Could not verify arm state via autonomous readiness; check GUI or GET /api/v1/autonomous/readiness.'
+    }
+}
+
+function Invoke-StartupEvidenceCapture {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    $captureScript = Join-Path $RepoRoot 'scripts\windows\Capture-PaperSmokeEvidence.ps1'
+    if (-not (Test-Path $captureScript)) {
+        Write-LauncherWarn "Startup evidence capture requested but script not found: $captureScript"
+        return
+    }
+
+    Write-LauncherStep 'Capturing startup evidence (label=launcher_startup)'
+    $captureArgs = @(
+        '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-File', $captureScript,
+        '-Label', 'launcher_startup'
+    )
+    & powershell.exe @captureArgs | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Write-LauncherWarn "Startup evidence capture exited with code $LASTEXITCODE; launcher continues."
+    }
+}
+
 function Get-ModeDisplayName {
     param([Parameter(Mandatory = $true)][string]$LauncherMode)
 
@@ -1179,6 +1280,10 @@ try {
 
         Write-BackendSummary -Probe $verified -LauncherMode $Mode
 
+        if ($ArmPaper.IsPresent) {
+            Invoke-ArmPaper -BaseUrl $env:MQK_GUI_DAEMON_URL -OperatorToken $operatorToken -Probe $verified
+        }
+
         Write-LauncherStep 'Resolving desktop GUI binary'
         $guiExe = Ensure-GuiBinary -RepoRoot $repoRoot -ForceRebuild:$forceRebuildGui
 
@@ -1204,6 +1309,10 @@ try {
         }
         else {
             Write-LauncherSuccess 'GUI opened in observe/attach mode against the verified canonical backend. No runtime auto-start was performed.'
+        }
+
+        if ($CaptureStartupEvidence.IsPresent) {
+            Invoke-StartupEvidenceCapture -RepoRoot $repoRoot
         }
     }
     finally {

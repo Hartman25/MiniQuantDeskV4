@@ -482,9 +482,10 @@ the runtime, or submit orders.  It is separate from the smoke harness.
 
 | Script | Purpose |
 |--------|---------|
-| `Launch-VeritasLedger.ps1` | Normal desktop startup — daemon + GUI, no trading |
+| `Launch-VeritasLedger.ps1` | Normal desktop startup — daemon + GUI, optional arm, no runtime auto-start |
 | `Start-PaperTradingSmoke.ps1` | Proof / smoke harness — full lifecycle including arm and autonomous runtime start |
 | `Prep-PremarketMarketData.ps1` | Standalone market-data prep or check — no daemon, no orders |
+| `Capture-PaperSmokeEvidence.ps1` | Read-only evidence bundle capture — API snapshots, DB snapshots, operator notes |
 
 ### Canonical desktop launcher commands
 
@@ -498,27 +499,40 @@ Calls `Prep-PremarketMarketData.ps1 -CheckOnly`.  Read-only — no DB writes.
 Fails launcher with a clear message if bar count or freshness gates are not met.
 Does not start the daemon or GUI.  Safe to run anytime, including off-hours.
 
-**2. Normal observe startup — prep data, then open daemon + GUI**
+**2. Normal observe startup — prep data, start daemon + GUI, capture evidence**
 
 ```powershell
-.\scripts\windows\Launch-VeritasLedger.ps1 -Mode Observe -PrepMarketData
+.\scripts\windows\Launch-VeritasLedger.ps1 -Mode Observe -PrepMarketData -CaptureStartupEvidence
 ```
 
-Calls `Prep-PremarketMarketData.ps1` (CSV ingest + provider top-off if
-`TWELVEDATA_API_KEY` is set), then verifies gates, then starts daemon + GUI.
-No auto-arm.  No runtime start.  Operator opens the GUI and observes.
+Calls `Prep-PremarketMarketData.ps1`, then starts daemon + GUI, then captures a
+`launcher_startup` evidence bundle under `evidence/`.  No arm.  No runtime start.
 
-**3. Trade-ready startup — prep data, then open daemon + GUI in trade-ready mode**
+**3. Trade-ready startup — prep data, start daemon + GUI in trade-ready mode, capture evidence**
 
 ```powershell
-.\scripts\windows\Launch-VeritasLedger.ps1 -Mode TradeReady -PrepMarketData
+.\scripts\windows\Launch-VeritasLedger.ps1 -Mode TradeReady -PrepMarketData -CaptureStartupEvidence
 ```
 
-Same as above but requires the backend to report `overall_ready=true` before
-the launcher attaches the GUI.  Still does **not** auto-start the runtime.
-Operator must arm and start explicitly via the GUI or smoke script.
+Requires the backend to report `overall_ready=true` before attaching the GUI.
+Still does **not** arm or start the runtime.  Operator arms and starts explicitly.
 
-**4. Smoke harness (separate — not the normal launcher)**
+**4. Explicit paper arm — trade-ready startup with operator arm**
+
+```powershell
+.\scripts\windows\Launch-VeritasLedger.ps1 -Mode TradeReady -PrepMarketData -CaptureStartupEvidence -ArmPaper
+```
+
+After verifying trade-ready backend, calls `POST /api/v1/ops/action arm-execution`
+with Bearer auth and confirms arm via `GET /api/v1/autonomous/readiness`.
+- Does **not** start the execution runtime.
+- Does **not** submit orders.
+- Fails closed on any pre-check failure (live routing, mode mismatch, not trade-ready).
+- Requires `MQK_OPERATOR_TOKEN` to be configured.
+
+To start the runtime after arming, use the GUI or the smoke harness explicitly.
+
+**5. Smoke harness (separate — not the normal launcher)**
 
 ```powershell
 .\scripts\windows\Start-PaperTradingSmoke.ps1 -WatchSeconds 900
@@ -550,6 +564,11 @@ Example with explicit overrides:
 - Neither flag enables live routing, submits orders, or arms the system.
 - Both flags fail closed: launcher exits with a clear error if gates are not met.
 - `-CheckMarketData` and `-PrepMarketData` are mutually exclusive.
+- `-ArmPaper` is fail-closed: refuses if live_routing_enabled=true, mode≠paper,
+  adapter≠alpaca, or backend is not trade-ready (reconcile, WS, arm checks).
+  It calls only `arm-execution` — no runtime start, no order submission.
+- `-CaptureStartupEvidence` is non-fatal: a capture failure warns but does not
+  abort the launcher.  It never mutates DB or prints secrets.
 
 ---
 
