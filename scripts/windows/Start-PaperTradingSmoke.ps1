@@ -446,9 +446,20 @@ if ($null -ne $sqlxCmd) {
 Write-Ok "DB migrations applied."
 
 # ---------------------------------------------------------------------------
-# STEP 5B: Market-data context prep -- AAPL/1D bars for strategy lookback
+# STEP 5B: Market-data context prep -- bars for strategy lookback
 # ---------------------------------------------------------------------------
-# The intraday_scalper requires LOOKBACK=5 completed AAPL/1D bars from md_bars.
+# The intraday_scalper requires LOOKBACK=5 completed bars from md_bars for its
+# 5-bar close-displacement signal.  The symbol and timeframe are driven by
+# MQK_STRATEGY_SYMBOL (default: AAPL) and MQK_STRATEGY_MD_TIMEFRAME (default: 1D).
+#
+# Note on timeframe:  intraday_scalper declares TIMEFRAME_SECS=300 (5-minute)
+# in its engine spec.  When MQK_STRATEGY_MD_TIMEFRAME=1D the strategy evaluates
+# daily close displacement (slower signal, trades infrequently).  When set to
+# "5m" it evaluates intraday 5-minute displacement (fires more often intraday).
+# Either is valid; the operator chooses which bars to ingest and which timeframe
+# to configure.  Without a matching timeframe in md_bars the daemon falls back
+# to a stub context and signal_qty=0 on every tick.
+#
 # This step loads from the backup CSV (no API credit) then tops off via TwelveData
 # sync-provider so the strategy has a full lookback window at session open.
 #
