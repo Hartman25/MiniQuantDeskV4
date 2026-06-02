@@ -199,6 +199,31 @@ if ($CheckOnly) {
         Write-Warn "Daemon binary not yet built. It will be built on first full run."
     }
 
+    # Load .env.local before reading strategy env vars so CheckOnly resolves the
+    # same timeframe the full startup path would use. Process env overrides win;
+    # .env.local fills gaps; fallback default applies if neither is present.
+    $coEnvLocalPath = Join-Path $RepoRoot '.env.local'
+    if (Test-Path $coEnvLocalPath) {
+        foreach ($coLine in Get-Content -Path $coEnvLocalPath) {
+            if ([string]::IsNullOrWhiteSpace($coLine)) { continue }
+            $coTrimmed = $coLine.Trim()
+            if ($coTrimmed.StartsWith('#')) { continue }
+            $coIdx = $coTrimmed.IndexOf('=')
+            if ($coIdx -lt 1) { continue }
+            $coVarName  = $coTrimmed.Substring(0, $coIdx).Trim()
+            $coVarValue = $coTrimmed.Substring($coIdx + 1).Trim()
+            if (($coVarValue.StartsWith('"') -and $coVarValue.EndsWith('"')) -or
+                ($coVarValue.StartsWith("'") -and $coVarValue.EndsWith("'"))) {
+                if ($coVarValue.Length -ge 2) { $coVarValue = $coVarValue.Substring(1, $coVarValue.Length - 2) }
+            }
+            if ([string]::IsNullOrWhiteSpace($coVarName)) { continue }
+            $coExisting = [Environment]::GetEnvironmentVariable($coVarName, 'Process')
+            if ([string]::IsNullOrWhiteSpace($coExisting)) {
+                Set-Item -Path "Env:$coVarName" -Value $coVarValue
+            }
+        }
+    }
+
     # STEP 5B dry-check: query md_bars bar count without ingesting (read-only)
     $coSymbol    = if ($env:MQK_STRATEGY_SYMBOL)    { $env:MQK_STRATEGY_SYMBOL }    else { 'AAPL' }
     $coTimeframe = if ($env:MQK_STRATEGY_MD_TIMEFRAME) { $env:MQK_STRATEGY_MD_TIMEFRAME } else { '1D' }
