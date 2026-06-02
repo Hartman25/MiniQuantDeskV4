@@ -90,6 +90,13 @@ build/
 continue/
 
 # -----------------------------
+# Evidence packs (smoke run captures)
+# Keep the folder and .gitkeep; ignore timestamped run subfolders.
+# Commit specific evidence packs manually if desired.
+# -----------------------------
+evidence/paper_smoke_*/
+
+# -----------------------------
 # Local archives / dumps
 # -----------------------------
 *.zip

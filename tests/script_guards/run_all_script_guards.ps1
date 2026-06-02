@@ -22,7 +22,8 @@ $Guards = @(
     'test_premarket_data_scheduler.ps1',
     'test_check_unsafe_patterns_ps1.ps1',
     'test_deprecated_scripts_retired.ps1',
-    'test_db_proof_bootstrap_coverage.ps1'
+    'test_db_proof_bootstrap_coverage.ps1',
+    'test_capture_paper_smoke_evidence.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()
