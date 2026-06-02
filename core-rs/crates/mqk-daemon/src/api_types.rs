@@ -996,6 +996,54 @@ pub struct RuntimeLeadershipResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/system/metadata — asset capability matrix (ASSET-CAPABILITY-MATRIX-01)
+// ---------------------------------------------------------------------------
+
+/// Per-asset-class capability record.  All fields are static (compile-time
+/// truth); none are derived from runtime state or broker connectivity.
+///
+/// `live_ready` is `false` for every asset class, including US equities, until
+/// a dedicated live-readiness review patch explicitly promotes it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetCapabilityEntry {
+    /// Asset class identifier (snake_case, e.g. "us_equities").
+    pub asset_class: String,
+    /// `true` only if this asset class is wired for execution.  All non-equity
+    /// classes are `false` by default and must not be enabled without a named
+    /// promotion gate patch.
+    pub enabled: bool,
+    /// `true` only if paper execution for this asset class has been proven.
+    pub paper_ready: bool,
+    /// `false` for every class until a live-readiness review explicitly sets it.
+    pub live_ready: bool,
+    /// Broker adapter identifier, or `"none"` when no adapter is wired.
+    pub broker_adapter: String,
+    /// Human-readable status note for operator surfaces.
+    pub notes: String,
+}
+
+/// Static asset capability matrix returned in `/api/v1/system/metadata`.
+///
+/// This is read-only metadata; it is never used for order routing or dispatch.
+/// The matrix is built from compile-time constants — it never reads env vars,
+/// DB state, or runtime flags.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetCapabilityMatrix {
+    /// Schema version for forward-compatibility parsing.
+    pub schema_version: String,
+    /// Source label confirming this matrix is statically defined.
+    pub static_source: String,
+    /// `false` globally — live capital requires a separate named review patch.
+    pub live_capital_ready: bool,
+    /// Asset classes where `enabled == true` in this build.
+    pub default_enabled_asset_classes: Vec<String>,
+    /// Asset classes where `enabled == false` in this build.
+    pub disabled_asset_classes: Vec<String>,
+    /// Full per-class capability records.
+    pub entries: Vec<AssetCapabilityEntry>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/system/metadata
 // ---------------------------------------------------------------------------
 
@@ -1015,6 +1063,9 @@ pub struct SystemMetadataResponse {
     pub daemon_mode: String,
     /// Adapter ID — mirrors broker_adapter for GUI convenience.
     pub adapter_id: String,
+    /// Static asset capability matrix (ASSET-CAPABILITY-MATRIX-01).
+    /// Read-only metadata; not used for routing or dispatch.
+    pub asset_capability_matrix: AssetCapabilityMatrix,
 }
 
 // ---------------------------------------------------------------------------

@@ -196,6 +196,82 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
                     .is_some_and(|v| !v.is_empty()),
                 "/api/v1/system/metadata build_version must be a non-empty string"
             );
+
+            // ── ASSET-CAPABILITY-MATRIX-01 contract assertions ──────────────
+            let matrix = &json["asset_capability_matrix"];
+            assert_eq!(
+                matrix["schema_version"].as_str().unwrap_or(""),
+                "asset-capability-v1",
+                "asset_capability_matrix schema_version must be asset-capability-v1"
+            );
+            // live_capital_ready must always be false — no asset class is live-ready.
+            assert_eq!(
+                matrix["live_capital_ready"].as_bool(),
+                Some(false),
+                "asset_capability_matrix live_capital_ready must be false"
+            );
+            // Only us_equities must appear in default_enabled_asset_classes.
+            let enabled = &matrix["default_enabled_asset_classes"];
+            assert!(enabled.is_array(), "default_enabled_asset_classes must be an array");
+            let enabled_arr = enabled.as_array().unwrap();
+            assert_eq!(
+                enabled_arr.len(),
+                1,
+                "exactly one asset class must be enabled (us_equities); got {:?}",
+                enabled_arr
+            );
+            assert_eq!(
+                enabled_arr[0].as_str().unwrap_or(""),
+                "us_equities",
+                "only us_equities must be in default_enabled_asset_classes"
+            );
+            // Non-equity classes must all appear in disabled_asset_classes.
+            let disabled = matrix["disabled_asset_classes"].as_array().unwrap();
+            for cls in &["crypto", "futures", "options", "forex"] {
+                assert!(
+                    disabled.iter().any(|v| v.as_str() == Some(cls)),
+                    "disabled_asset_classes must contain {cls}"
+                );
+            }
+            // Per-entry checks on the entries array.
+            let entries = matrix["entries"].as_array().unwrap();
+            for entry in entries {
+                let cls = entry["asset_class"].as_str().unwrap_or("");
+                // live_ready must be false for every class.
+                assert_eq!(
+                    entry["live_ready"].as_bool(),
+                    Some(false),
+                    "live_ready must be false for asset class {cls}"
+                );
+                if cls == "us_equities" {
+                    assert_eq!(
+                        entry["enabled"].as_bool(),
+                        Some(true),
+                        "us_equities must be enabled"
+                    );
+                    assert_eq!(
+                        entry["paper_ready"].as_bool(),
+                        Some(true),
+                        "us_equities must be paper_ready"
+                    );
+                } else {
+                    assert_eq!(
+                        entry["enabled"].as_bool(),
+                        Some(false),
+                        "{cls} must not be enabled"
+                    );
+                    assert_eq!(
+                        entry["paper_ready"].as_bool(),
+                        Some(false),
+                        "{cls} must not be paper_ready"
+                    );
+                    assert_eq!(
+                        entry["broker_adapter"].as_str().unwrap_or(""),
+                        "none",
+                        "{cls} broker_adapter must be none"
+                    );
+                }
+            }
         }
 
         if uri == "/api/v1/system/runtime-leadership" {

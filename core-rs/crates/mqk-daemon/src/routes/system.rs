@@ -24,9 +24,9 @@ use axum::{
 use chrono::Utc;
 
 use crate::api_types::{
-    AutonomousPaperReadinessResponse, HealthResponse, PreflightStatusResponse,
-    RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
-    SystemMetadataResponse, SystemStatusResponse,
+    AssetCapabilityEntry, AssetCapabilityMatrix, AutonomousPaperReadinessResponse, HealthResponse,
+    PreflightStatusResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
+    SessionStateResponse, SystemMetadataResponse, SystemStatusResponse,
 };
 use crate::market_data_freshness::evaluate_md_freshness_status;
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
@@ -1007,6 +1007,81 @@ fn bar_ticker_gate_from_session(nyse_session: &str) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/v1/system/metadata — static capability matrix
+// ---------------------------------------------------------------------------
+
+/// Build the static asset capability matrix (ASSET-CAPABILITY-MATRIX-01).
+///
+/// All values are compile-time constants.  This function never reads env vars,
+/// DB state, or runtime flags, and is never used for order routing.
+fn static_asset_capability_matrix() -> AssetCapabilityMatrix {
+    let entries = vec![
+        AssetCapabilityEntry {
+            asset_class: "us_equities".to_string(),
+            enabled: true,
+            paper_ready: true,
+            live_ready: false,
+            broker_adapter: "alpaca".to_string(),
+            notes: "current Paper+Alpaca equity path; live locked pending future review"
+                .to_string(),
+        },
+        AssetCapabilityEntry {
+            asset_class: "crypto".to_string(),
+            enabled: false,
+            paper_ready: false,
+            live_ready: false,
+            broker_adapter: "none".to_string(),
+            notes: "BACKLOG — CRYPTO-SCAFFOLD-01; no adapter wired".to_string(),
+        },
+        AssetCapabilityEntry {
+            asset_class: "futures".to_string(),
+            enabled: false,
+            paper_ready: false,
+            live_ready: false,
+            broker_adapter: "none".to_string(),
+            notes: "BACKLOG — FUTURES-SCAFFOLD-01; no adapter wired".to_string(),
+        },
+        AssetCapabilityEntry {
+            asset_class: "options".to_string(),
+            enabled: false,
+            paper_ready: false,
+            live_ready: false,
+            broker_adapter: "none".to_string(),
+            notes: "BACKLOG — OPTIONS-SCAFFOLD-01; no adapter wired".to_string(),
+        },
+        AssetCapabilityEntry {
+            asset_class: "forex".to_string(),
+            enabled: false,
+            paper_ready: false,
+            live_ready: false,
+            broker_adapter: "none".to_string(),
+            notes: "BACKLOG — FOREX-SCAFFOLD-01; no adapter wired".to_string(),
+        },
+    ];
+
+    let default_enabled: Vec<String> = entries
+        .iter()
+        .filter(|e| e.enabled)
+        .map(|e| e.asset_class.clone())
+        .collect();
+
+    let disabled: Vec<String> = entries
+        .iter()
+        .filter(|e| !e.enabled)
+        .map(|e| e.asset_class.clone())
+        .collect();
+
+    AssetCapabilityMatrix {
+        schema_version: "asset-capability-v1".to_string(),
+        static_source: "mqk-daemon/routes/system.rs::static_asset_capability_matrix".to_string(),
+        live_capital_ready: false,
+        default_enabled_asset_classes: default_enabled,
+        disabled_asset_classes: disabled,
+        entries,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/system/metadata
 // ---------------------------------------------------------------------------
 
@@ -1026,6 +1101,7 @@ pub(crate) async fn system_metadata(State(st): State<Arc<AppState>>) -> impl Int
             endpoint_status,
             daemon_mode: st.deployment_mode().as_api_label().to_string(),
             adapter_id: st.adapter_id().to_string(),
+            asset_capability_matrix: static_asset_capability_matrix(),
         }),
     )
         .into_response()
