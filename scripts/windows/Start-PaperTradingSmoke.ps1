@@ -905,7 +905,7 @@ if ($NoStartRuntime) {
     # Do NOT call start-system operator action. The autonomous session controller owns the start.
     # Calling start-system races with the session controller: start-system blocks the HTTP handler
     # for ~30s during the initial REST recovery tick; within that window the session_controller
-    # sees no local ownership and also calls start_execution_runtime → durable_active_without_local_owner.
+    # sees no local ownership and also calls start_execution_runtime -> durable_active_without_local_owner.
     # The deadman then halts the orphaned run, setting integrity.halted=true and blocking re-arm.
     #
     # Correct flow: let the session controller fire (every 30s) and start autonomously.
@@ -919,7 +919,7 @@ if ($NoStartRuntime) {
         $stsCheck = $null
         try { $stsCheck = Invoke-DaemonGet -Path '/api/v1/system/status' } catch {}
         if ($null -ne $stsCheck -and $stsCheck.runtime_status -eq 'running') {
-            Write-Ok "runtime_status=running — autonomous session controller started the run."
+            Write-Ok "runtime_status=running -- autonomous session controller started the run."
             $runtimeStarted = $true
             break
         }
