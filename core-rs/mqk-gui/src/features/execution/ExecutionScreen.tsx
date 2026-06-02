@@ -109,7 +109,7 @@ export function ExecutionScreen({
       )}
 
       <div className="metrics-grid desk-panel-row">
-        {model.metrics.execution.series.map((series) => (
+        {(model.metrics.execution?.series ?? []).map((series) => (
           <MetricStripChart key={series.key} series={series} />
         ))}
       </div>

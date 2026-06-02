@@ -79,7 +79,12 @@ test("renders no_snapshot when required panel endpoints are absent in partial mo
   assert.equal(state, "no_snapshot");
 });
 
-test("no_snapshot fires for reconcile when status resolves but mismatches are missing in partial mode", () => {
+// "all" mode: status ok + stale/absent mismatches → page renders with available summary.
+// During a running paper smoke /reconcile/mismatches returns truth_state:"stale" (becomes a
+// failed probe) while /reconcile/status returns authoritative ok. Blocking the entire page
+// in that case hid the valid reconcile summary from the operator. With "all" mode the page
+// renders and the operator sees reconcile ok + the stale mismatch detail via inline notice.
+test("null (renders) for reconcile when status resolves but mismatches are missing in partial mode", () => {
   const state = panelTruthRenderState(
     buildModel({
       dataSource: {
@@ -92,10 +97,10 @@ test("no_snapshot fires for reconcile when status resolves but mismatches are mi
     }),
     "reconcile",
   );
-  assert.equal(state, "no_snapshot");
+  assert.equal(state, null);
 });
 
-test("no_snapshot fires for reconcile when mismatches resolve but status is missing in partial mode", () => {
+test("null (renders) for reconcile when mismatches resolve but status is missing in partial mode", () => {
   const state = panelTruthRenderState(
     buildModel({
       dataSource: {
@@ -108,7 +113,8 @@ test("no_snapshot fires for reconcile when mismatches resolve but status is miss
     }),
     "reconcile",
   );
-  assert.equal(state, "no_snapshot");
+  // status fallback is status:"unknown" (honest); mismatch rows are real. Panel renders.
+  assert.equal(state, null);
 });
 
 test("no_snapshot fires for portfolio panel when portfolio/positions is missing in partial mode", () => {

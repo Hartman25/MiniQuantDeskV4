@@ -254,7 +254,7 @@ export function AppShell() {
               </div>
             )}
             {activeScreen === "dashboard" && (
-              <PreflightGate preflight={model.preflight} />
+              <PreflightGate preflight={model.preflight} runtimeStatus={model.status.runtime_status} />
             )}
 
             <WorkspaceFrame

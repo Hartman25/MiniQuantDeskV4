@@ -2,6 +2,7 @@ import type { PreflightStatus } from "../../features/system/types";
 
 interface PreflightGateProps {
   preflight: PreflightStatus;
+  runtimeStatus?: string;
 }
 
 // Format an RFC 3339 UTC timestamp as "HH:MM UTC" for compact display.
@@ -60,8 +61,9 @@ function armStateLabel(state: string | undefined): string {
   }
 }
 
-export function PreflightGate({ preflight }: PreflightGateProps) {
+export function PreflightGate({ preflight, runtimeStatus }: PreflightGateProps) {
   const showAutonomous = Boolean(preflight.autonomous_readiness_applicable);
+  const runtimeActive = runtimeStatus === "running" || runtimeStatus === "starting";
 
   return (
     <section className="panel preflight-panel">
@@ -71,6 +73,14 @@ export function PreflightGate({ preflight }: PreflightGateProps) {
           <h2>Preflight gate</h2>
         </div>
       </div>
+      {runtimeActive && (
+        <div className="preflight-runtime-notice">
+          <strong>Runtime is active.</strong> These pre-start checks reflect conditions required
+          before a new run can be started. Some checks (runtime idle, strategy disarmed, execution
+          disarmed) are expected to show &ldquo;review required&rdquo; while execution is running —
+          that is correct operator state, not a fault.
+        </div>
+      )}
       <div className="checklist-grid">
         {CHECKS.map((check) => {
           const ok = Boolean(preflight[check.key]);

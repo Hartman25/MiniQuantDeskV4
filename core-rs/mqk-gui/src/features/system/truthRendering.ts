@@ -33,7 +33,11 @@ const PANEL_TRUTH_REQUIREMENTS: Partial<Record<CorePanelKey, PanelTruthRequireme
   // A single-item hint collapses every() to a simple "is this endpoint missing?" check.
   risk: { hints: ["/risk/denials"] },
   // Daemon mounts /reconcile/status — not /reconcile/summary.
-  reconcile: { hints: ["/reconcile/status", "/reconcile/mismatches"], missingMode: "any" },
+  // "all" mode: block only when BOTH status and mismatches are absent.
+  // When status is authoritative (reconcile_status ok, mismatch counts known) but
+  // mismatch detail is stale, the page renders with the available summary rather than
+  // hard-blocking. Stale mismatch detail is surfaced via TruthStateBanner.
+  reconcile: { hints: ["/reconcile/status", "/reconcile/mismatches"], missingMode: "all" },
   // Portfolio row truth is gated on /portfolio/positions, not /portfolio/summary.
   // portfolio/summary returns HTTP 200 even when broker_snapshot is absent (has_snapshot:false),
   // so it never appears in missingEndpoints and cannot drive the no_snapshot gate.
@@ -154,7 +158,7 @@ export function truthStateCopy(state: TruthRenderState): { title: string; detail
     case "no_snapshot":
       return {
         title: "No snapshot",
-        detail: "No execution snapshot available — the runtime loop has not yet started or the broker snapshot is absent. Values will populate once the execution loop is running.",
+        detail: "Snapshot data unavailable — the execution loop may not be running, the broker snapshot may be absent, or broker WS continuity has not been established. Values will populate once the execution loop is running with a proven WS connection.",
       };
     case "degraded":
       return {
