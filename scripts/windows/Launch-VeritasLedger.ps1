@@ -9,7 +9,27 @@ param(
     # -RebuildAll: force rebuild of both daemon and GUI
     [switch]$RebuildAll,
     # -Rebuild: legacy alias for -RebuildAll (backward compatibility)
-    [switch]$Rebuild
+    [switch]$Rebuild,
+
+    # Market-data gate parameters
+    # -CheckMarketData: verify data meets bar-count/freshness gates; fail launcher if not met.
+    #   Does not ingest data. Safe to run anytime.
+    [switch]$CheckMarketData,
+    # -PrepMarketData: ingest backup CSV + provider top-off, then verify gates.
+    #   Requires TWELVEDATA_API_KEY for provider top-off (warns but does not fail if absent).
+    [switch]$PrepMarketData,
+    # -Symbols: comma-separated ticker list for market-data gate.
+    #   Default: MQK_STRATEGY_SYMBOL env var, or 'AAPL'.
+    [string]$Symbols = '',
+    # -Timeframe: bar timeframe for market-data gate.
+    #   Default: MQK_STRATEGY_MD_TIMEFRAME env var, or '1D'.
+    [string]$Timeframe = '',
+    # -MinCompletedBars: minimum completed bars required per symbol.
+    #   Default: 30.
+    [int]$MinCompletedBars = 30,
+    # -MaxStalenessDays: maximum calendar days since latest complete bar.
+    #   Default: auto-derived from timeframe (1 for 5m; 4 for 1D and others).
+    [int]$MaxStalenessDays = -1
 )
 
 Set-StrictMode -Version Latest
@@ -881,6 +901,73 @@ function Wait-ForBackendState {
     throw "Timed out waiting for backend state at $BaseUrl"
 }
 
+function Invoke-MarketDataGate {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][bool]$CheckOnly,
+        [string]$Symbols,
+        [string]$Timeframe,
+        [int]$MinCompletedBars,
+        [int]$MaxStalenessDays
+    )
+
+    # Resolve symbol from param -> env -> default
+    $resolvedSymbols = if (-not [string]::IsNullOrWhiteSpace($Symbols)) {
+        $Symbols
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:MQK_STRATEGY_SYMBOL)) {
+        $env:MQK_STRATEGY_SYMBOL
+    } else {
+        'AAPL'
+    }
+
+    # Resolve timeframe from param -> env -> default
+    $resolvedTimeframe = if (-not [string]::IsNullOrWhiteSpace($Timeframe)) {
+        $Timeframe
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:MQK_STRATEGY_MD_TIMEFRAME)) {
+        $env:MQK_STRATEGY_MD_TIMEFRAME
+    } else {
+        '1D'
+    }
+
+    # Resolve staleness threshold: explicit param wins; otherwise derive from timeframe
+    $resolvedStaleness = if ($MaxStalenessDays -ge 0) {
+        $MaxStalenessDays
+    } elseif ($resolvedTimeframe -eq '5m' -or $resolvedTimeframe -eq '5min') {
+        1
+    } else {
+        4
+    }
+
+    $modeLabel = if ($CheckOnly) { 'check-only' } else { 'prep' }
+    Write-LauncherStep "Market-data gate ($modeLabel): symbols=$resolvedSymbols timeframe=$resolvedTimeframe minBars=$MinCompletedBars maxStale=${resolvedStaleness}d"
+
+    $prepScript = Join-Path $RepoRoot 'scripts\windows\Prep-PremarketMarketData.ps1'
+    if (-not (Test-Path $prepScript)) {
+        throw "Market-data gate requested but Prep-PremarketMarketData.ps1 not found at: $prepScript"
+    }
+
+    $args = @(
+        '-ExecutionPolicy', 'Bypass', '-NonInteractive', '-File', $prepScript,
+        '-Symbols', $resolvedSymbols,
+        '-Timeframe', $resolvedTimeframe,
+        '-MinCompletedBars', $MinCompletedBars,
+        '-MaxStalenessDays', $resolvedStaleness
+    )
+    if ($CheckOnly) {
+        $args += '-CheckOnly'
+    }
+
+    $result = & powershell.exe @args
+    $result | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        $verb = if ($CheckOnly) { 'Market-data check' } else { 'Market-data prep' }
+        throw "$verb failed (exit $LASTEXITCODE). Resolve bar count / freshness issues before launching."
+    }
+
+    $verb2 = if ($CheckOnly) { 'Market-data check passed' } else { 'Market-data prep passed' }
+    Write-LauncherSuccess "$verb2 (${resolvedSymbols}/${resolvedTimeframe})"
+}
+
 function Get-ModeDisplayName {
     param([Parameter(Mandatory = $true)][string]$LauncherMode)
 
@@ -1057,6 +1144,33 @@ try {
         $forceRebuildGui = $RebuildGui.IsPresent -or $rebuildAll
 
         Write-LauncherStep "Launcher mode: $(Get-ModeDisplayName -LauncherMode $Mode)"
+
+        # Market-data gate — runs before daemon binary resolution so failures are fast.
+        # -CheckMarketData: read-only bar-count/freshness check; fails launcher if not met.
+        # -PrepMarketData: ingest + sync then check; fails launcher if gates not met.
+        # Both flags may not be combined.
+        if ($CheckMarketData.IsPresent -and $PrepMarketData.IsPresent) {
+            throw '-CheckMarketData and -PrepMarketData are mutually exclusive. Use one at a time.'
+        }
+        if ($CheckMarketData.IsPresent) {
+            Invoke-MarketDataGate `
+                -RepoRoot $repoRoot `
+                -CheckOnly $true `
+                -Symbols $Symbols `
+                -Timeframe $Timeframe `
+                -MinCompletedBars $MinCompletedBars `
+                -MaxStalenessDays $MaxStalenessDays
+        }
+        if ($PrepMarketData.IsPresent) {
+            Invoke-MarketDataGate `
+                -RepoRoot $repoRoot `
+                -CheckOnly $false `
+                -Symbols $Symbols `
+                -Timeframe $Timeframe `
+                -MinCompletedBars $MinCompletedBars `
+                -MaxStalenessDays $MaxStalenessDays
+        }
+
         Write-LauncherStep 'Resolving daemon binary'
         $daemonExe = Ensure-DaemonBinary -RepoRoot $repoRoot -ForceRebuild:$forceRebuildDaemon
 

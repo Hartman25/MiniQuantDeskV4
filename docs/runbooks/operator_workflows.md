@@ -472,7 +472,88 @@ The `live_trust_gaps` list in parity_evidence.json makes the remaining gaps expl
 
 ---
 
-## 10. Premarket market-data refresh (PREMARKET-DATA-SCHEDULER-01)
+## 10. Normal Desktop Launcher (LAUNCHER-MD-01)
+
+`Launch-VeritasLedger.ps1` is the canonical **normal operator startup** path.
+It starts the daemon and native desktop GUI but does **not** auto-arm, auto-start
+the runtime, or submit orders.  It is separate from the smoke harness.
+
+### Script role separation
+
+| Script | Purpose |
+|--------|---------|
+| `Launch-VeritasLedger.ps1` | Normal desktop startup — daemon + GUI, no trading |
+| `Start-PaperTradingSmoke.ps1` | Proof / smoke harness — full lifecycle including arm and autonomous runtime start |
+| `Prep-PremarketMarketData.ps1` | Standalone market-data prep or check — no daemon, no orders |
+
+### Canonical desktop launcher commands
+
+**1. Data-check only — verify bar count and freshness, do not start launcher**
+
+```powershell
+.\scripts\windows\Launch-VeritasLedger.ps1 -Mode Observe -CheckMarketData
+```
+
+Calls `Prep-PremarketMarketData.ps1 -CheckOnly`.  Read-only — no DB writes.
+Fails launcher with a clear message if bar count or freshness gates are not met.
+Does not start the daemon or GUI.  Safe to run anytime, including off-hours.
+
+**2. Normal observe startup — prep data, then open daemon + GUI**
+
+```powershell
+.\scripts\windows\Launch-VeritasLedger.ps1 -Mode Observe -PrepMarketData
+```
+
+Calls `Prep-PremarketMarketData.ps1` (CSV ingest + provider top-off if
+`TWELVEDATA_API_KEY` is set), then verifies gates, then starts daemon + GUI.
+No auto-arm.  No runtime start.  Operator opens the GUI and observes.
+
+**3. Trade-ready startup — prep data, then open daemon + GUI in trade-ready mode**
+
+```powershell
+.\scripts\windows\Launch-VeritasLedger.ps1 -Mode TradeReady -PrepMarketData
+```
+
+Same as above but requires the backend to report `overall_ready=true` before
+the launcher attaches the GUI.  Still does **not** auto-start the runtime.
+Operator must arm and start explicitly via the GUI or smoke script.
+
+**4. Smoke harness (separate — not the normal launcher)**
+
+```powershell
+.\scripts\windows\Start-PaperTradingSmoke.ps1 -WatchSeconds 900
+```
+
+Full proof lifecycle.  Starts daemon, arms, waits for autonomous runtime start,
+runs watcher.  Use for smoke sessions, not for normal daily desktop startup.
+
+### Market-data parameters (optional overrides)
+
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| `-Symbols` | `MQK_STRATEGY_SYMBOL` or `AAPL` | Comma-separated ticker list |
+| `-Timeframe` | `MQK_STRATEGY_MD_TIMEFRAME` or `1D` | Bar timeframe |
+| `-MinCompletedBars` | `30` | Minimum completed bars required |
+| `-MaxStalenessDays` | `1` for `5m`; `4` for `1D` and others | Auto-derived from timeframe unless specified |
+
+Example with explicit overrides:
+```powershell
+.\scripts\windows\Launch-VeritasLedger.ps1 -Mode Observe -CheckMarketData `
+    -Symbols AAPL -Timeframe 5m -MinCompletedBars 30 -MaxStalenessDays 1
+```
+
+### Safety guarantees
+
+- `-CheckMarketData` never writes to the DB.
+- `-PrepMarketData` touches `md_bars` only; never touches `oms_outbox`,
+  `oms_inbox`, `runs`, `arm_state`, or any execution table.
+- Neither flag enables live routing, submits orders, or arms the system.
+- Both flags fail closed: launcher exits with a clear error if gates are not met.
+- `-CheckMarketData` and `-PrepMarketData` are mutually exclusive.
+
+---
+
+## 11. Premarket market-data refresh (PREMARKET-DATA-SCHEDULER-01)
 
 Required market data must be fresh before the readiness gate allows `start-system`.
 This section covers the operator workflow for automated premarket data refresh.
