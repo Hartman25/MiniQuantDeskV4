@@ -34,6 +34,7 @@
 //! | RTF-04  | No recent fills, unexplained drift → halt (fail-closed)     | tick() Err     |
 //! | RTF-05  | Fresh matching broker snapshot → clean reconcile → Ok       | tick() Ok      |
 //! | RTF-06  | Sell fill: local behind broker correctly defers             | tick() Ok      |
+//! | RTF-07  | Partial (+2) + terminal (+1) fill: cumulative drift deferred | tick() Ok     |
 //!
 //! All tests require `MQK_DATABASE_URL`. Skipped gracefully when absent.
 
@@ -66,6 +67,7 @@ const RTF03_RUN: &str = "f3f30003-0003-0000-0000-000000000003";
 const RTF04_RUN: &str = "f4f40004-0004-0000-0000-000000000004";
 const RTF05_RUN: &str = "f5f50005-0005-0000-0000-000000000005";
 const RTF06_RUN: &str = "f6f60006-0006-0000-0000-000000000006";
+const RTF07_RUN: &str = "f7f70007-0007-0000-0000-000000000007";
 
 // ---------------------------------------------------------------------------
 // Serialization guard
@@ -608,6 +610,70 @@ async fn rtf06_deferred_for_sell_fill_within_grace() -> Result<()> {
     assert!(
         matches!(run.status, mqk_db::RunStatus::Running),
         "RTF-06: run must remain RUNNING; got: {:?}",
+        run.status
+    );
+
+    cleanup_run(&pool, run_id).await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// RTF-07: partial fill (+2) + terminal fill (+1) → cumulative drift of +3 deferred
+// ---------------------------------------------------------------------------
+
+/// Regression proof for RECONCILE-DRIFT-PARTIAL-FILL-TRACKING-01.
+///
+/// Before the fix: only the terminal fill (+1) was tracked in
+/// `recently_applied_fills`.  A stale broker snapshot with drift of +3
+/// (partial+terminal cumulative) exceeded the expected delta of +1, causing
+/// `drift_is_consistent_with_recent_terminal_fills` to return false →
+/// genuine_drift → false-positive halt.
+///
+/// After the fix: both partial (+2) and terminal (+1) are tracked.
+/// expected["AAPL"] = 3, actual drift = 3, 3 <= 3 → deferred.
+#[tokio::test(flavor = "multi_thread")]
+async fn rtf07_partial_plus_terminal_fill_cumulative_drift_deferred() -> Result<()> {
+    let _guard = test_guard().await;
+    let Some(url) = db_url_or_skip() else {
+        return Ok(());
+    };
+    let Some(pool) = try_pool_or_skip(&url).await? else {
+        return Ok(());
+    };
+    mqk_db::migrate(&pool).await?;
+
+    let run_id: Uuid = RTF07_RUN.parse().unwrap();
+    cleanup_run(&pool, run_id).await?;
+    clear_runtime_lease_rows(&pool).await?;
+    clear_arm_state(&pool).await?;
+    seed_running_run(&pool, run_id, "rtf07").await?;
+
+    // Local: AAPL=6 (baseline 3 + partial fill +2 + terminal fill +1 applied)
+    // Broker: AAPL=3 (stale, pre-fill snapshot)
+    // Drift: local(6) - broker(3) = +3 (cumulative partial+terminal)
+    let mut local = LocalSnapshot::empty();
+    local.positions.insert("AAPL".to_string(), 6);
+    let mut broker = BrokerSnapshot::empty_at(2_000_000_000);
+    broker.positions.insert("AAPL".to_string(), 3);
+
+    let clock = FixedClock::new(Utc::now());
+    let mut orch = make_orchestrator(pool.clone(), run_id, clock, local, broker);
+
+    // Both partial fill (+2) and terminal fill (+1) are now tracked by the fixed apply path.
+    orch.inject_recent_terminal_fill_for_test("AAPL", 2, Utc::now());
+    orch.inject_recent_terminal_fill_for_test("AAPL", 1, Utc::now());
+
+    let result = orch.tick().await;
+    assert!(
+        result.is_ok(),
+        "RTF-07: tick() must defer when partial+terminal fills explain cumulative +3 drift; got: {:?}",
+        result.err()
+    );
+
+    let run = mqk_db::fetch_run(&pool, run_id).await?;
+    assert!(
+        matches!(run.status, mqk_db::RunStatus::Running),
+        "RTF-07: run must remain RUNNING after partial+terminal fill drift deferral; got: {:?}",
         run.status
     );
 

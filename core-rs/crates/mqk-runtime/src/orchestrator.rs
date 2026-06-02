@@ -1315,39 +1315,40 @@ where
             // before the inbox row is marked applied. If a crash occurs after
             // mark_applied but before cleanup, the durable inbox fence would
             // suppress replay and strand a stale broker mapping permanently.
+            // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01: track fill delta so Phase 0c
+            // can defer RECONCILE_DRIFT during broker snapshot settlement.
+            // Track both partial and terminal fills: a partial+terminal sequence
+            // contributes cumulative position drift that the broker snapshot may
+            // not yet reflect.  Tracking only the terminal fill understates the
+            // expected delta and produces a false-positive genuine_drift halt.
+            if let BrokerEvent::Fill {
+                symbol,
+                side,
+                delta_qty,
+                ..
+            }
+            | BrokerEvent::PartialFill {
+                symbol,
+                side,
+                delta_qty,
+                ..
+            } = &event
+            {
+                let signed = if matches!(side, mqk_execution::Side::Buy) {
+                    *delta_qty
+                } else {
+                    -*delta_qty
+                };
+                if self.recently_applied_fills.len() >= RECENT_FILLS_RING_CAP {
+                    self.recently_applied_fills.pop_front();
+                }
+                self.recently_applied_fills.push_back(RecentTerminalFill {
+                    symbol: symbol.clone(),
+                    signed_delta: signed,
+                    applied_at: self.time_source.now_utc(),
+                });
+            }
             if apply_outcome.terminal_apply_succeeded {
-                // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01: record fill so Phase 0c
-                // can defer RECONCILE_DRIFT during broker snapshot settlement.
-                // Only fill events carry a position delta; non-fill terminal events
-                // (Reject, CancelAck) don't change position so there's nothing to
-                // defer.
-                if let BrokerEvent::Fill {
-                    symbol,
-                    side,
-                    delta_qty,
-                    ..
-                }
-                | BrokerEvent::PartialFill {
-                    symbol,
-                    side,
-                    delta_qty,
-                    ..
-                } = &event
-                {
-                    let signed = if matches!(side, mqk_execution::Side::Buy) {
-                        *delta_qty
-                    } else {
-                        -*delta_qty
-                    };
-                    if self.recently_applied_fills.len() >= RECENT_FILLS_RING_CAP {
-                        self.recently_applied_fills.pop_front();
-                    }
-                    self.recently_applied_fills.push_back(RecentTerminalFill {
-                        symbol: symbol.clone(),
-                        signed_delta: signed,
-                        applied_at: self.time_source.now_utc(),
-                    });
-                }
                 mqk_db::outbox_mark_acked(&self.pool, &internal_id).await?;
                 mqk_db::broker_map_remove(&self.pool, &internal_id).await?;
                 remove_broker_mapping_from_memory(&mut self.order_map, &internal_id);
