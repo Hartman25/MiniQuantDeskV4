@@ -1,0 +1,210 @@
+# =============================================================================
+# INTRADAY-5M-LIVE-BAR-INGESTION-01 -- Script static invariant tests
+#
+# Reads Refresh-IntradayMarketData.ps1 as text and asserts IMR01-IMR14.
+# No daemon, no DB, no live calls, no .env.local, no secrets printed.
+#
+# Usage:
+#   powershell -ExecutionPolicy Bypass -File tests\script_guards\test_intraday_market_data_refresh.ps1
+#
+# Exit codes: 0 = all pass, 1 = one or more failures.
+# =============================================================================
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+$ScriptDir    = Split-Path -Parent $MyInvocation.MyCommand.Definition
+$RepoRoot     = (Resolve-Path (Join-Path $ScriptDir '..\..')).Path.TrimEnd('\')
+$TargetScript = Join-Path $RepoRoot 'scripts\windows\Refresh-IntradayMarketData.ps1'
+
+$Failures = 0
+
+function Pass { param([string]$Id, [string]$Msg) Write-Host "  PASS  [$Id] $Msg" -ForegroundColor Green }
+function Fail { param([string]$Id, [string]$Msg) Write-Host "  FAIL  [$Id] $Msg" -ForegroundColor Red ; $script:Failures++ }
+
+Write-Host ""
+Write-Host "=== Refresh-IntradayMarketData.ps1 static invariant tests ==="
+Write-Host "    Target: $TargetScript"
+Write-Host ""
+
+# ---------------------------------------------------------------------------
+# IMR01: Script exists
+# ---------------------------------------------------------------------------
+if (Test-Path $TargetScript) {
+    Pass 'IMR01' "Script exists at scripts\windows\Refresh-IntradayMarketData.ps1"
+} else {
+    Fail 'IMR01' "Script NOT found at: $TargetScript"
+}
+
+$scriptText = ''
+if (Test-Path $TargetScript) {
+    $scriptText = Get-Content -Path $TargetScript -Raw
+}
+
+# ---------------------------------------------------------------------------
+# IMR02: Script is ASCII-safe
+# ---------------------------------------------------------------------------
+$nonAscii = [regex]::Matches($scriptText, '[^\x00-\x7E]')
+if ($nonAscii.Count -eq 0) {
+    Pass 'IMR02' "Script is ASCII-safe."
+} else {
+    Fail 'IMR02' "Script contains $($nonAscii.Count) non-ASCII character(s)."
+}
+
+# ---------------------------------------------------------------------------
+# IMR03: Paper DB port 5440 guard present
+# ---------------------------------------------------------------------------
+if ($scriptText -match '5440') {
+    Pass 'IMR03' "Paper DB port 5440 guard present."
+} else {
+    Fail 'IMR03' "Missing paper DB port 5440 guard."
+}
+
+# ---------------------------------------------------------------------------
+# IMR04: TWELVEDATA_API_KEY presence checked; value not printed
+# ---------------------------------------------------------------------------
+$keyCheck = $scriptText -match 'TWELVEDATA_API_KEY'
+$keyPrint = $scriptText -match 'Write-Host[^#]*\$env:TWELVEDATA_API_KEY'
+if ($keyCheck -and -not $keyPrint) {
+    Pass 'IMR04' "TWELVEDATA_API_KEY presence checked; value not printed."
+} elseif (-not $keyCheck) {
+    Fail 'IMR04' "TWELVEDATA_API_KEY not referenced."
+} else {
+    Fail 'IMR04' "Script appears to print TWELVEDATA_API_KEY value."
+}
+
+# ---------------------------------------------------------------------------
+# IMR05: -CheckOnly parameter present
+# ---------------------------------------------------------------------------
+if ($scriptText -match '\[switch\]\s*\$CheckOnly') {
+    Pass 'IMR05' "-CheckOnly parameter present."
+} else {
+    Fail 'IMR05' "-CheckOnly parameter missing."
+}
+
+# ---------------------------------------------------------------------------
+# IMR06: -Once parameter present (single-run protection)
+# ---------------------------------------------------------------------------
+if ($scriptText -match '\[switch\]\s*\$Once') {
+    Pass 'IMR06' "-Once parameter present."
+} else {
+    Fail 'IMR06' "-Once parameter missing."
+}
+
+# ---------------------------------------------------------------------------
+# IMR07: -IntervalSeconds and -DurationSeconds present (loop protection)
+# ---------------------------------------------------------------------------
+$hasInterval  = $scriptText -match '\[int\]\s*\$IntervalSeconds'
+$hasDuration  = $scriptText -match '\[int\]\s*\$DurationSeconds'
+if ($hasInterval -and $hasDuration) {
+    Pass 'IMR07' "-IntervalSeconds and -DurationSeconds parameters present."
+} else {
+    Fail 'IMR07' "Missing interval/duration protection parameters."
+}
+
+# ---------------------------------------------------------------------------
+# IMR08: -MinCompletedBars parameter present
+# ---------------------------------------------------------------------------
+if ($scriptText -match '\[int\]\s*\$MinCompletedBars') {
+    Pass 'IMR08' "-MinCompletedBars parameter present."
+} else {
+    Fail 'IMR08' "-MinCompletedBars parameter missing."
+}
+
+# ---------------------------------------------------------------------------
+# IMR09: No broker order submission calls on non-comment lines
+# Forbidden executable patterns: /v2/orders, submit_order, place.*order
+# (comment lines that mention these for documentation are acceptable)
+# ---------------------------------------------------------------------------
+$nonCommentLines = ($scriptText -split "`n") | Where-Object { $_ -notmatch '^\s*#' }
+$nonCommentText  = $nonCommentLines -join "`n"
+$brokerOrderPatterns = @('/v2/orders', 'submit_order', 'place.*order', 'Invoke-.*[Oo]rder')
+$brokerViolation = $false
+foreach ($pat in $brokerOrderPatterns) {
+    if ($nonCommentText -match $pat) {
+        $brokerViolation = $true
+        break
+    }
+}
+if (-not $brokerViolation) {
+    Pass 'IMR09' "No broker order submission calls found on non-comment lines."
+} else {
+    Fail 'IMR09' "Forbidden broker order pattern found on non-comment lines."
+}
+
+# ---------------------------------------------------------------------------
+# IMR10: No OMS/outbox mutation calls on non-comment lines
+# Forbidden: oms_outbox, oms_inbox, outbox_enqueue
+# (arm_state and broker_order_map may appear in comments as safety documentation)
+# ---------------------------------------------------------------------------
+$omsPatterns = @('oms_outbox', 'oms_inbox', 'outbox_enqueue')
+$omsViolation = $false
+foreach ($pat in $omsPatterns) {
+    if ($nonCommentText -match $pat) {
+        $omsViolation = $true
+        break
+    }
+}
+if (-not $omsViolation) {
+    Pass 'IMR10' "No OMS/outbox mutation patterns found on non-comment lines."
+} else {
+    Fail 'IMR10' "Forbidden OMS/outbox pattern found on non-comment lines."
+}
+
+# ---------------------------------------------------------------------------
+# IMR11: No live-routing enabling patterns
+# Forbidden: live_routing_enabled=true, MQK_DAEMON_ADAPTER_ID.*live, LiveCapital
+# ---------------------------------------------------------------------------
+$livePatterns = @('live_routing_enabled\s*=\s*true', 'MQK_DAEMON_ADAPTER_ID.*live', 'LiveCapital')
+$liveViolation = $false
+foreach ($pat in $livePatterns) {
+    if ($scriptText -match $pat) {
+        $liveViolation = $true
+        break
+    }
+}
+if (-not $liveViolation) {
+    Pass 'IMR11' "No live routing enabling patterns found."
+} else {
+    Fail 'IMR11' "Forbidden live routing pattern found in script."
+}
+
+# ---------------------------------------------------------------------------
+# IMR12: Uses mqk-cli md sync-provider (existing ingestion path)
+# ---------------------------------------------------------------------------
+if ($scriptText -match 'md sync-provider') {
+    Pass 'IMR12' "Uses existing mqk-cli md sync-provider ingestion path."
+} else {
+    Fail 'IMR12' "Expected 'md sync-provider' call not found."
+}
+
+# ---------------------------------------------------------------------------
+# IMR13: Evidence file written to exports/market_data/
+# ---------------------------------------------------------------------------
+if ($scriptText -match 'exports.market_data') {
+    Pass 'IMR13' "Evidence written to exports/market_data/."
+} else {
+    Fail 'IMR13' "Expected exports/market_data evidence path not found."
+}
+
+# ---------------------------------------------------------------------------
+# IMR14: Symbols driven by parameter, not hardcoded-only
+# (Script must reference $sym or $symbolList, not just hardcoded 'AAPL')
+# ---------------------------------------------------------------------------
+if ($scriptText -match '\$sym\b' -or $scriptText -match '\$symbolList') {
+    Pass 'IMR14' 'Symbols driven by parameter ($sym / $symbolList), not hardcoded-only.'
+} else {
+    Fail 'IMR14' 'Symbols do not appear to be parameterized.'
+}
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+Write-Host ""
+if ($Failures -eq 0) {
+    Write-Host "  ALL PASS  (14/14 assertions)" -ForegroundColor Green
+    exit 0
+} else {
+    Write-Host "  $Failures FAILURE(S)  -- see FAIL lines above" -ForegroundColor Red
+    exit 1
+}
