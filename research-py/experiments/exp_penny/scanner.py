@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from experiments.exp_engine.candidate_journal import build_candidate_record
 from experiments.exp_engine.scanner_base import ScannerBase
+from experiments.exp_penny.penny_config import PennyScannerConfig
 
 ENGINE_ID = "exp-engine-core-01"
 LANE_ID = "exp-penny-01a"
@@ -159,9 +160,15 @@ class PennyBreakoutScanner(ScannerBase):
         self,
         universe: list[dict[str, Any]],
         config: Optional[PennyBreakoutConfig] = None,
+        scanner_config: Optional[PennyScannerConfig] = None,
     ) -> None:
         self._universe = universe
-        self._config = config or PennyBreakoutConfig()
+        if config is not None:
+            self._config = config
+        elif scanner_config is not None:
+            self._config = PennyBreakoutConfig(**scanner_config.to_breakout_config_kwargs())
+        else:
+            self._config = PennyBreakoutConfig()
 
     @property
     def engine_id(self) -> str:

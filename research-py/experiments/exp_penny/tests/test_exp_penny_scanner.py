@@ -1616,5 +1616,180 @@ class TestIndicatorEnrichmentNoForbiddenStrings(unittest.TestCase):
                              f"indicator_enrichment.py must not contain '{mod}'")
 
 
+# ---------------------------------------------------------------------------
+# T50 — PennyScannerConfig: defaults, safety gates, and scanner wiring
+# ---------------------------------------------------------------------------
+
+class TestPennyScannerConfig(unittest.TestCase):
+    """T50: PennyScannerConfig env-var loading, validation, and scanner wiring."""
+
+    def _clean_env(self):
+        """Return a dict of MQK_EXP_PENNY_* keys currently set, for restore."""
+        return {k: v for k, v in os.environ.items() if k.startswith("MQK_EXP_PENNY_")}
+
+    def _remove_penny_env(self):
+        for k in list(os.environ):
+            if k.startswith("MQK_EXP_PENNY_"):
+                del os.environ[k]
+
+    def setUp(self):
+        self._saved = self._clean_env()
+        self._remove_penny_env()
+
+    def tearDown(self):
+        self._remove_penny_env()
+        os.environ.update(self._saved)
+
+    # T50-D1: defaults match .env.local.example
+    def test_defaults_match_env_example(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig
+        cfg = PennyScannerConfig()
+        self.assertAlmostEqual(cfg.min_price, 0.50)
+        self.assertAlmostEqual(cfg.max_price, 20.00)
+        self.assertTrue(cfg.exclude_otc)
+        self.assertEqual(cfg.allowed_exchanges, ["NASDAQ", "NYSE", "AMEX"])
+        self.assertAlmostEqual(cfg.min_adv_usd, 500_000.0)
+        self.assertEqual(cfg.min_daily_volume_shares, 200_000)
+        self.assertEqual(cfg.min_current_volume_shares, 300_000)
+        self.assertAlmostEqual(cfg.max_spread_pct, 1.0)
+        self.assertAlmostEqual(cfg.min_rvol, 2.0)
+        self.assertAlmostEqual(cfg.min_breakout_rvol, 2.0)
+        self.assertAlmostEqual(cfg.max_consolidation_range_pct, 15.0)
+        self.assertTrue(cfg.require_breakout_above_level)
+        self.assertTrue(cfg.require_ma50_slope_positive)
+        self.assertTrue(cfg.require_ma200_slope_positive)
+        self.assertAlmostEqual(cfg.min_distance_above_support_pct, 0.0)
+        self.assertAlmostEqual(cfg.max_chase_above_breakout_pct, 8.0)
+        self.assertEqual(cfg.min_float_shares, 5_000_000)
+        self.assertEqual(cfg.max_float_shares, 100_000_000)
+        self.assertTrue(cfg.reject_recent_reverse_split)
+        self.assertTrue(cfg.reject_active_offering)
+        self.assertTrue(cfg.reject_recent_dilution)
+        self.assertTrue(cfg.reject_promotion_risk)
+        self.assertFalse(cfg.require_catalyst)
+        self.assertIn("earnings", cfg.allowed_catalyst_types)
+        self.assertTrue(cfg.reject_unverified_social_hype)
+        self.assertAlmostEqual(cfg.max_position_notional_usd, 500.0)
+        self.assertAlmostEqual(cfg.max_daily_loss_usd, 100.0)
+        self.assertEqual(cfg.max_open_positions, 1)
+        self.assertEqual(cfg.max_trades_per_day, 3)
+        self.assertAlmostEqual(cfg.min_risk_reward, 2.0)
+        self.assertFalse(cfg.allow_shorts)
+        self.assertEqual(cfg.order_mode, "scanner_only")
+        self.assertFalse(cfg.live_allowed)
+
+    # T50-S1: live_allowed=true rejects
+    def test_live_allowed_true_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig, PennyScannerConfigError
+        with self.assertRaises(PennyScannerConfigError) as ctx:
+            PennyScannerConfig(live_allowed=True)
+        self.assertIn("LIVE_ALLOWED", str(ctx.exception))
+
+    # T50-S2: order_mode != scanner_only rejects
+    def test_order_mode_paper_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig, PennyScannerConfigError
+        with self.assertRaises(PennyScannerConfigError) as ctx:
+            PennyScannerConfig(order_mode="paper")
+        self.assertIn("ORDER_MODE", str(ctx.exception))
+
+    # T50-S3: allow_shorts=true rejects
+    def test_allow_shorts_true_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig, PennyScannerConfigError
+        with self.assertRaises(PennyScannerConfigError) as ctx:
+            PennyScannerConfig(allow_shorts=True)
+        self.assertIn("ALLOW_SHORTS", str(ctx.exception))
+
+    # T50-S4: from_env reads MQK_EXP_PENNY_LIVE_ALLOWED=true and rejects
+    def test_from_env_live_allowed_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig, PennyScannerConfigError
+        os.environ["MQK_EXP_PENNY_LIVE_ALLOWED"] = "true"
+        with self.assertRaises(PennyScannerConfigError):
+            PennyScannerConfig.from_env()
+
+    # T50-S5: from_env reads MQK_EXP_PENNY_ORDER_MODE=paper and rejects
+    def test_from_env_order_mode_paper_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig, PennyScannerConfigError
+        os.environ["MQK_EXP_PENNY_ORDER_MODE"] = "paper"
+        with self.assertRaises(PennyScannerConfigError):
+            PennyScannerConfig.from_env()
+
+    # T50-G1: config values flow into scanner gates (spread gate)
+    def test_tight_spread_config_rejects_wider_candidates(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig
+        from experiments.exp_penny.scanner import PennyBreakoutConfig, PennyBreakoutScanner
+        cfg = PennyScannerConfig(max_spread_pct=0.3)
+        row = _passing_row()
+        # spread = (ask-bid)/mid * 100; bid=9.90 ask=10.10 → spread=2.0%
+        row["bid"] = 9.90
+        row["ask"] = 10.10
+        scanner = PennyBreakoutScanner([row], scanner_config=cfg)
+        results = scanner.scan()
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]["would_trade"])
+        self.assertIn("spread_too_wide", results[0]["rejection_reason"])
+
+    # T50-G2: higher RVOL config rejects weaker candidates
+    def test_higher_rvol_config_rejects_weaker_candidates(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        cfg = PennyScannerConfig(min_breakout_rvol=5.0)
+        row = _passing_row()
+        row["breakout_rvol"] = 2.5  # below new threshold
+        scanner = PennyBreakoutScanner([row], scanner_config=cfg)
+        results = scanner.scan()
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]["would_trade"])
+        self.assertIn("breakout_rvol_weak", results[0]["rejection_reason"])
+
+    # T50-G3: risk vars parsed and retained but do not create orders
+    def test_risk_vars_parsed_and_no_orders(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        cfg = PennyScannerConfig(
+            max_position_notional_usd=250.0,
+            max_daily_loss_usd=50.0,
+            max_open_positions=2,
+            max_trades_per_day=5,
+            min_risk_reward=3.0,
+        )
+        self.assertAlmostEqual(cfg.max_position_notional_usd, 250.0)
+        self.assertAlmostEqual(cfg.max_daily_loss_usd, 50.0)
+        self.assertEqual(cfg.max_open_positions, 2)
+        self.assertEqual(cfg.max_trades_per_day, 5)
+        self.assertAlmostEqual(cfg.min_risk_reward, 3.0)
+        row = _passing_row()
+        scanner = PennyBreakoutScanner([row], scanner_config=cfg)
+        results = scanner.scan()
+        self.assertEqual(len(results), 1)
+        self.assertIsNone(results[0].get("paper_order_id"))
+        self.assertIsNone(results[0].get("live_order_id"))
+
+    # T50-G4: scanner_config kwarg wires min_price gate
+    def test_scanner_config_min_price_gates_scanner(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        cfg = PennyScannerConfig(min_price=5.00, max_price=20.00)
+        row = _passing_row()
+        row["price"] = 3.00  # below new min
+        scanner = PennyBreakoutScanner([row], scanner_config=cfg)
+        results = scanner.scan()
+        self.assertFalse(results[0]["would_trade"])
+        self.assertIn("price_below_min", results[0]["rejection_reason"])
+
+    # T50-N1: penny_config.py has no forbidden strings
+    def test_penny_config_no_forbidden_strings(self) -> None:
+        src = Path(__file__).parent.parent / "penny_config.py"
+        self.assertTrue(src.exists(), "penny_config.py must exist")
+        content = src.read_text(encoding="utf-8")
+        forbidden = [
+            "oms_outbox", "oms_inbox", "BrokerGateway", "broker_adapter",
+            "alpaca", "Start-PaperTradingSmoke",
+        ]
+        for f in forbidden:
+            self.assertNotIn(f, content, f"penny_config.py must not reference '{f}'")
+        for net in ["import requests", "import urllib", "import http.client", "import aiohttp"]:
+            self.assertNotIn(net, content, f"penny_config.py must not contain '{net}'")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -183,6 +183,32 @@ This is the authoritative journal record even before any paper order exists.
 
 ---
 
+## Scanner Philosophy
+
+The candidate criteria in this scanner reflect two complementary approaches to
+small-cap trading, used here as conceptual frameworks — not as endorsements or
+guarantees of profitability.
+
+**Catalyst + risk-control framing** — focus on unusual volume relative to float,
+verifiable catalysts (earnings, FDA, contract, sector sympathy), strict loss
+controls, and rejection of dilution/promotion/reverse-split risk. A stock with
+a legitimate catalyst and thin float can move fast; without one, the same
+characteristics become a trap. The scanner records catalyst presence but does
+not verify authenticity; that is a human review step.
+
+**Trend + breakout confirmation framing** — focus on MA slope direction as a
+trend filter, defined support/resistance levels as an entry anchor, breakout
+confirmation above a consolidation range with volume, and explicit risk/reward
+ratio tracking. Chasing entries above the breakout level by more than
+`max_chase_above_breakout_pct` is rejected as too late.
+
+**Repo rule** — the scanner records candidates only. It does not evaluate edge.
+It does not place orders. It does not provide a guarantee that any candidate
+is profitable, tradeable, or suitable for any purpose. All scanner output
+requires human review before any paper or live execution is considered.
+
+---
+
 ## Explicit Non-Goals
 
 - Does not affect AAPL/5m intraday_scalper.

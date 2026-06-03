@@ -204,6 +204,55 @@ if (Test-Path $enrichmentPath) {
     Fail "indicator_enrichment.py not found at $enrichmentPath"
 }
 
+# G14: .env.local.example must have required safety values
+Write-Host ''
+Write-Host '--- G14: .env.local.example must lock EXP_PENNY safety vars ---'
+$EnvExamplePath = Join-Path $RepoRoot '.env.local.example'
+if (Test-Path $EnvExamplePath) {
+    $envContent = Get-Content $EnvExamplePath -Raw
+    $SafetyChecks = [ordered]@{
+        'MQK_EXP_PENNY_LIVE_ALLOWED=false'   = 'MQK_EXP_PENNY_LIVE_ALLOWED=false'
+        'MQK_EXP_PENNY_ORDER_MODE=scanner_only' = 'MQK_EXP_PENNY_ORDER_MODE=scanner_only'
+        'MQK_EXP_PENNY_ALLOW_SHORTS=false'   = 'MQK_EXP_PENNY_ALLOW_SHORTS=false'
+    }
+    foreach ($check in $SafetyChecks.Keys) {
+        $expected = $SafetyChecks[$check]
+        if ($envContent -match [regex]::Escape($expected)) {
+            Pass ".env.local.example contains '$expected'"
+        } else {
+            Fail ".env.local.example must contain '$expected'"
+        }
+    }
+} else {
+    Fail ".env.local.example not found at $EnvExamplePath"
+}
+
+# G15: penny_config.py must exist and be clean
+Write-Host ''
+Write-Host '--- G15: penny_config.py must exist and be clean ---'
+$pennyConfigPath = Join-Path $ExpPennyDir 'penny_config.py'
+if (Test-Path $pennyConfigPath) {
+    Pass "penny_config.py exists"
+    $configContent = Get-Content $pennyConfigPath -Raw
+    foreach ($key in $ForbiddenPatterns.Keys) {
+        $pattern = $ForbiddenPatterns[$key]
+        if ($configContent -match [regex]::Escape($pattern)) {
+            Fail "penny_config.py references '$pattern'"
+        } else {
+            Pass "penny_config.py does not reference '$pattern'"
+        }
+    }
+    foreach ($netImport in $NetworkModules) {
+        if ($configContent -match [regex]::Escape($netImport)) {
+            Fail "penny_config.py contains forbidden network import '$netImport'"
+        } else {
+            Pass "penny_config.py does not contain '$netImport'"
+        }
+    }
+} else {
+    Fail "penny_config.py not found at $pennyConfigPath"
+}
+
 # Summary
 Write-Host ''
 Write-Host '============================================================'
