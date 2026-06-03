@@ -76,6 +76,8 @@ pub(super) fn build_validated_submit_request(
     let time_in_force = validated_order_time_in_force(order_json)?;
     let limit_price = validated_limit_price_for_order_type(order_json, &order_type)?;
 
+    let asset_class = validated_asset_class(order_json)?;
+
     Ok(BrokerSubmitRequest {
         order_id: order_id.to_string(),
         symbol,
@@ -84,7 +86,7 @@ pub(super) fn build_validated_submit_request(
         order_type,
         limit_price,
         time_in_force,
-        asset_class: AssetClass::Equity,
+        asset_class,
     })
 }
 
@@ -323,6 +325,34 @@ fn parse_positive_i64_field(name: &str, value: &serde_json::Value) -> anyhow::Re
     Ok(parsed)
 }
 
+fn validated_asset_class(order_json: &serde_json::Value) -> anyhow::Result<AssetClass> {
+    // Absent asset_class: default to Equity for backward compatibility with
+    // pre-DISABLED-ASSET-GATE-TESTS-01 payloads that predate the field.
+    let Some(value) = order_json.get("asset_class") else {
+        return Ok(AssetClass::Equity);
+    };
+
+    let cls = value
+        .as_str()
+        .map(str::trim)
+        .ok_or_else(|| anyhow!("invalid submit payload: asset_class present but not a string"))?
+        .to_ascii_lowercase();
+
+    match cls.as_str() {
+        "equity" => Ok(AssetClass::Equity),
+        // Non-equity asset classes are disabled. Explicit payload values must not
+        // be silently converted to equity — reject so the caller quarantines the row.
+        "crypto" | "future" | "futures" | "option" | "options" | "forex" => Err(anyhow!(
+            "invalid submit payload: asset_class '{}' is not enabled for execution",
+            cls
+        )),
+        _ => Err(anyhow!(
+            "invalid submit payload: unknown asset_class '{}'",
+            cls
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Ambiguous outbox summary
 // ---------------------------------------------------------------------------
@@ -335,4 +365,134 @@ pub(super) fn summarize_ambiguous_outbox(rows: &[mqk_db::AmbiguousOutboxRow]) ->
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+// ---------------------------------------------------------------------------
+// DISABLED-ASSET-GATE-TESTS-01 — outbox payload asset_class guard
+// ---------------------------------------------------------------------------
+//
+// Proves that the outbox JSON parser rejects disabled asset classes before
+// a BrokerSubmitRequest is constructed, so no disabled class can reach
+// BrokerGateway::submit.
+//
+// O01  absent asset_class field → defaults to Equity (backward compat)
+// O02  explicit "equity" → Equity
+// O03  explicit "crypto" → parser Err, not panic
+// O04  explicit "future" → parser Err
+// O05  explicit "futures" (alias) → parser Err
+// O06  explicit "option" → parser Err
+// O07  explicit "options" (alias) → parser Err
+// O08  explicit "forex" → parser Err
+// O09  unknown string → parser Err
+// O10  asset_class present but not a string → parser Err
+// O11  case-insensitive: "CRYPTO" → parser Err (same gate)
+// O12  production path: absent asset_class in a well-formed equity payload
+//      produces a valid BrokerSubmitRequest with asset_class=Equity
+#[cfg(test)]
+mod disabled_asset_gate_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn equity_payload() -> serde_json::Value {
+        json!({
+            "symbol": "AAPL",
+            "qty": 10,
+            "side": "buy",
+            "order_type": "market",
+            "time_in_force": "day"
+        })
+    }
+
+    fn with_asset_class(cls: serde_json::Value) -> serde_json::Value {
+        let mut v = equity_payload();
+        v["asset_class"] = cls;
+        v
+    }
+
+    // O01 — absent asset_class defaults to Equity
+    #[test]
+    fn o01_absent_asset_class_defaults_to_equity() {
+        let result = validated_asset_class(&equity_payload());
+        assert!(matches!(result, Ok(AssetClass::Equity)));
+    }
+
+    // O02 — explicit "equity" is accepted
+    #[test]
+    fn o02_explicit_equity_passes() {
+        let result = validated_asset_class(&with_asset_class(json!("equity")));
+        assert!(matches!(result, Ok(AssetClass::Equity)));
+    }
+
+    // O03 — "crypto" rejects
+    #[test]
+    fn o03_crypto_rejects() {
+        let err = validated_asset_class(&with_asset_class(json!("crypto"))).unwrap_err();
+        assert!(err.to_string().contains("not enabled"), "{err}");
+    }
+
+    // O04 — "future" rejects
+    #[test]
+    fn o04_future_rejects() {
+        let err = validated_asset_class(&with_asset_class(json!("future"))).unwrap_err();
+        assert!(err.to_string().contains("not enabled"), "{err}");
+    }
+
+    // O05 — "futures" (alias) rejects
+    #[test]
+    fn o05_futures_alias_rejects() {
+        let err = validated_asset_class(&with_asset_class(json!("futures"))).unwrap_err();
+        assert!(err.to_string().contains("not enabled"), "{err}");
+    }
+
+    // O06 — "option" rejects
+    #[test]
+    fn o06_option_rejects() {
+        let err = validated_asset_class(&with_asset_class(json!("option"))).unwrap_err();
+        assert!(err.to_string().contains("not enabled"), "{err}");
+    }
+
+    // O07 — "options" (alias) rejects
+    #[test]
+    fn o07_options_alias_rejects() {
+        let err = validated_asset_class(&with_asset_class(json!("options"))).unwrap_err();
+        assert!(err.to_string().contains("not enabled"), "{err}");
+    }
+
+    // O08 — "forex" rejects
+    #[test]
+    fn o08_forex_rejects() {
+        let err = validated_asset_class(&with_asset_class(json!("forex"))).unwrap_err();
+        assert!(err.to_string().contains("not enabled"), "{err}");
+    }
+
+    // O09 — unknown string rejects
+    #[test]
+    fn o09_unknown_string_rejects() {
+        let err = validated_asset_class(&with_asset_class(json!("bond"))).unwrap_err();
+        assert!(err.to_string().contains("unknown asset_class"), "{err}");
+    }
+
+    // O10 — non-string value rejects
+    #[test]
+    fn o10_non_string_value_rejects() {
+        let err = validated_asset_class(&with_asset_class(json!(42))).unwrap_err();
+        assert!(err.to_string().contains("not a string"), "{err}");
+    }
+
+    // O11 — case-insensitive: "CRYPTO" is caught by the same gate
+    #[test]
+    fn o11_uppercase_crypto_rejects() {
+        let err = validated_asset_class(&with_asset_class(json!("CRYPTO"))).unwrap_err();
+        assert!(err.to_string().contains("not enabled"), "{err}");
+    }
+
+    // O12 — full build_validated_submit_request: absent asset_class → Equity
+    #[test]
+    fn o12_full_parser_absent_asset_class_produces_equity_submit_request() {
+        let req = build_validated_submit_request("test-order-id", &equity_payload())
+            .expect("valid equity payload must parse successfully");
+        assert_eq!(req.asset_class, AssetClass::Equity);
+        assert_eq!(req.symbol, "AAPL");
+        assert_eq!(req.quantity, 10);
+    }
 }

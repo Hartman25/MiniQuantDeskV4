@@ -116,6 +116,7 @@ fn submit_uses_claim_idempotency_key_not_req_order_id() {
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),
+        asset_class: mqk_execution::AssetClass::Equity,
     };
 
     let resp = all_clear().submit(&claim, req).unwrap();
@@ -140,6 +141,7 @@ fn submit_when_req_order_id_matches_claim_key_succeeds_unchanged() {
         order_type: "limit".to_string(),
         limit_price: Some(300_000_000),
         time_in_force: "gtc".to_string(),
+        asset_class: mqk_execution::AssetClass::Equity,
     };
 
     let resp = all_clear().submit(&claim, req).unwrap();
@@ -158,6 +160,7 @@ fn submit_other_fields_from_req_are_preserved() {
         order_type: "limit".to_string(),
         limit_price: Some(200_000_000), // $200 in micros
         time_in_force: "ioc".to_string(),
+        asset_class: mqk_execution::AssetClass::Equity,
     };
 
     // Just verify submit succeeds — the EchoBroker doesn't validate fields,
