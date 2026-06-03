@@ -209,6 +209,72 @@ requires human review before any paper or live execution is considered.
 
 ---
 
+## Candidate journal review
+
+**Lane: EXP-PENNY-01A-JOURNAL-REVIEW**
+
+The review tool (`research-py/experiments/exp_penny/review_journal.py`) reads
+JSONL files written by the scanner and produces pass/reject counts, rejection
+reason tallies, top candidate ranking, safety checks, and optional summaries.
+It is read-only. It does not call brokers, touch OMS, write to DB, or place orders.
+
+### Command examples
+
+```powershell
+$env:PYTHONPATH="research-py"
+
+# Review the latest journal in the default output directory
+python -m experiments.exp_penny.review_journal --latest
+
+# Review a specific journal file
+python -m experiments.exp_penny.review_journal --journal exports\experimental\candidates\<file>.jsonl
+
+# Review and write markdown + JSON summary to exports\experimental\reviews\
+python -m experiments.exp_penny.review_journal --journal-dir exports\experimental\candidates --latest --write-summary
+
+# Show top 20 candidates with minimum confidence
+python -m experiments.exp_penny.review_journal --latest --top 20 --min-confidence 0.5
+```
+
+### What pass/reject means
+
+- **would_trade = true** — all scanner gates passed for this symbol at scan time.
+  This is a candidate signal, not a trade order. No orders are placed.
+- **would_trade = false** — at least one gate rejected the symbol. The
+  `rejection_reason` field names the first failing gate.
+
+A CLOSED-SCANNER-ONLY-PASS classification means the journal file is valid,
+contains at least one candidate row, all order-ID fields are null, and no
+malformed lines were found. It does not prove that any candidate is profitable.
+
+### Why non-null order IDs are a safety failure
+
+`paper_order_id` and `live_order_id` are enforced null in `build_candidate_record`
+(Stage 1 hard invariant). If either field is non-null in a journal file, it means
+an order was placed outside the expected boundary — this is classified
+`OPEN-SAFETY-FAIL` and must be investigated before any further work proceeds.
+
+### Review classifications
+
+| Classification | Meaning |
+|---------------|---------|
+| `CLOSED-SCANNER-ONLY-PASS` | Valid journal, ≥1 candidate, no order IDs, no malformed lines |
+| `CLOSED-NO-CANDIDATES` | Valid journal, zero would_trade=True, all rejects explained |
+| `OPEN-SAFETY-FAIL` | Non-null order ID, malformed rows, or schema error |
+| `OPEN-EMPTY-JOURNAL` | No rows in journal |
+| `PARTIAL` | Some rows valid but warnings or incomplete fields present |
+
+### This review does not prove profitability
+
+A CLOSED-SCANNER-ONLY-PASS journal confirms the scanner ran cleanly and logged
+candidates without placing orders. It does not validate strategy edge, backtest
+results, risk/reward quality, or execution readiness.
+
+**This review is required before backtest/paper execution lanes begin (Stage 2+).
+A CLOSED-SCANNER-ONLY-PASS is the minimum gate from Stage 1 to Stage 2.**
+
+---
+
 ## Explicit Non-Goals
 
 - Does not affect AAPL/5m intraday_scalper.

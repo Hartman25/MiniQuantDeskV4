@@ -253,6 +253,101 @@ if (Test-Path $pennyConfigPath) {
     Fail "penny_config.py not found at $pennyConfigPath"
 }
 
+# G16: review_journal.py must exist
+Write-Host ''
+Write-Host '--- G16: review_journal.py must exist ---'
+$reviewPath = Join-Path $ExpPennyDir 'review_journal.py'
+if (Test-Path $reviewPath) {
+    Pass "review_journal.py exists"
+} else {
+    Fail "review_journal.py not found at $reviewPath"
+}
+
+# G17: review_journal.py must not contain forbidden network imports
+Write-Host ''
+Write-Host '--- G17: review_journal.py must not import network modules ---'
+if (Test-Path $reviewPath) {
+    $reviewContent = Get-Content $reviewPath -Raw
+    foreach ($netImport in $NetworkModules) {
+        if ($reviewContent -match [regex]::Escape($netImport)) {
+            Fail "review_journal.py contains forbidden network import '$netImport'"
+        } else {
+            Pass "review_journal.py does not contain '$netImport'"
+        }
+    }
+    # Also check psycopg / sqlalchemy
+    foreach ($dbImport in @('psycopg', 'sqlalchemy')) {
+        if ($reviewContent -match [regex]::Escape($dbImport)) {
+            Fail "review_journal.py contains forbidden DB import '$dbImport'"
+        } else {
+            Pass "review_journal.py does not contain '$dbImport'"
+        }
+    }
+} else {
+    Fail "review_journal.py not found (G17 skipped)"
+}
+
+# G18: review_journal.py must not reference broker/OMS/execution patterns
+Write-Host ''
+Write-Host '--- G18: review_journal.py must not reference broker/OMS/execution patterns ---'
+$ReviewForbidden = [ordered]@{
+    'G18a' = 'BrokerGateway'
+    'G18b' = 'broker_adapter'
+    'G18c' = 'alpaca'
+    'G18d' = 'oms_outbox'
+    'G18e' = 'oms_inbox'
+    'G18f' = '/v2/orders'
+    'G18g' = 'Start-PaperTradingSmoke'
+}
+if (Test-Path $reviewPath) {
+    $reviewContent = Get-Content $reviewPath -Raw
+    foreach ($key in $ReviewForbidden.Keys) {
+        $pattern = $ReviewForbidden[$key]
+        if ($reviewContent -match [regex]::Escape($pattern)) {
+            Fail "review_journal.py references forbidden pattern '$pattern'"
+        } else {
+            Pass "review_journal.py does not reference '$pattern'"
+        }
+    }
+} else {
+    Fail "review_journal.py not found (G18 skipped)"
+}
+
+# G19: review_journal.py must check paper_order_id and live_order_id
+Write-Host ''
+Write-Host '--- G19: review_journal.py must check paper_order_id and live_order_id ---'
+if (Test-Path $reviewPath) {
+    $reviewContent = Get-Content $reviewPath -Raw
+    if ($reviewContent -match 'paper_order_id') {
+        Pass "review_journal.py references paper_order_id"
+    } else {
+        Fail "review_journal.py does not check paper_order_id"
+    }
+    if ($reviewContent -match 'live_order_id') {
+        Pass "review_journal.py references live_order_id"
+    } else {
+        Fail "review_journal.py does not check live_order_id"
+    }
+} else {
+    Fail "review_journal.py not found (G19 skipped)"
+}
+
+# G20: review_journal.py must include scanner-only classification constants
+Write-Host ''
+Write-Host '--- G20: review_journal.py must include scanner-only classification constants ---'
+if (Test-Path $reviewPath) {
+    $reviewContent = Get-Content $reviewPath -Raw
+    foreach ($cls in @('CLOSED-SCANNER-ONLY-PASS', 'CLOSED-NO-CANDIDATES', 'OPEN-SAFETY-FAIL', 'OPEN-EMPTY-JOURNAL')) {
+        if ($reviewContent -match [regex]::Escape($cls)) {
+            Pass "review_journal.py contains classification '$cls'"
+        } else {
+            Fail "review_journal.py missing classification '$cls'"
+        }
+    }
+} else {
+    Fail "review_journal.py not found (G20 skipped)"
+}
+
 # Summary
 Write-Host ''
 Write-Host '============================================================'
