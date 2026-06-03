@@ -333,6 +333,45 @@ if ($scriptText -match 'STEP 5B dry-check|5B.*dry.check|dry.check.*5B|Get-PaperM
 }
 
 # ---------------------------------------------------------------------------
+# OPR18: STEP 10 reads kill_switch_active from fresh daemon state
+# The check must include kill_switch_active in the halt-detection condition so
+# a daemon that restarted with arm_state=disarmed but kill_switch_active=true
+# still triggers the clear path.
+# ---------------------------------------------------------------------------
+if ($scriptText -match 'kill_switch_active' -and $scriptText -match 'STEP 10|Clear halted run') {
+    Pass 'OPR18' 'STEP 10 reads kill_switch_active from fresh daemon state'
+} else {
+    Fail 'OPR18' 'STEP 10 must read and check kill_switch_active from system/status on the fresh daemon'
+}
+
+# ---------------------------------------------------------------------------
+# OPR19: Script verifies kill_switch_active=false before proceeding to runtime
+# Must appear after the arm call (STEP 13) to catch residual kill_switch state.
+# ---------------------------------------------------------------------------
+$step10KsIdx  = $scriptText.IndexOf('kill_switch_active')
+$step13ArmIdx = $scriptText.IndexOf('arm-execution')
+$step13KsIdx  = $scriptText.IndexOf('kill_switch_active', $step13ArmIdx)
+
+if ($step13ArmIdx -ge 0 -and $step13KsIdx -gt $step13ArmIdx) {
+    Pass 'OPR19' 'Script verifies kill_switch_active=false after arm-execution (STEP 13)'
+} else {
+    Fail 'OPR19' 'Script must verify kill_switch_active=false after arm-execution (STEP 13)'
+}
+
+# ---------------------------------------------------------------------------
+# OPR20: Post-arm verification checks live_routing_enabled=false
+# Prevents the smoke from proceeding if live routing was accidentally enabled
+# between STEP 8 (initial check) and STEP 13 (post-arm).
+# ---------------------------------------------------------------------------
+$armIdx    = $scriptText.IndexOf('arm-execution')
+$lrArmIdx  = $scriptText.IndexOf('live_routing_enabled', $armIdx)
+if ($armIdx -ge 0 -and $lrArmIdx -gt $armIdx) {
+    Pass 'OPR20' 'Post-arm verification checks live_routing_enabled=false'
+} else {
+    Fail 'OPR20' 'Script must verify live_routing_enabled=false in post-arm verification block (STEP 13)'
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Write-Host ""

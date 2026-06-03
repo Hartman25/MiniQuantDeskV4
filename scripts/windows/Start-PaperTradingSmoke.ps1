@@ -771,11 +771,20 @@ try {
     $sysStatus     = Invoke-DaemonGet -Path '/api/v1/system/status'
     $runtimeStatus = $sysStatus.runtime_status
 
-    # arm_state may remain "armed" even when a durable run is halted; check both.
-    $needClear = ($armState -eq 'halted') -or ($runtimeStatus -eq 'halted')
+    # kill_switch_active persists across daemon restart when a run ended in integrity halt.
+    # After restart the new daemon may report arm_state=disarmed + runtime_status=idle
+    # while kill_switch_active=true is still set from the prior halted run -- check it explicitly.
+    $killSwitchActive = ($null -ne $sysStatus.PSObject.Properties['kill_switch_active']) -and ($sysStatus.kill_switch_active -eq $true)
+
+    # Log fresh daemon state explicitly so the operator can see what DB truth was loaded.
+    Write-Step "Fresh daemon state (loaded from DB truth): arm_state=$armState  runtime_status=$runtimeStatus  kill_switch_active=$killSwitchActive"
+
+    # Clear if ANY halted indicator is present: arm_state halted, runtime halted, or kill_switch active.
+    $needClear = ($armState -eq 'halted') -or ($runtimeStatus -eq 'halted') -or $killSwitchActive
 
     if ($needClear) {
-        Write-Warn "Halted lifecycle detected (arm_state=$armState runtime_status=$runtimeStatus). Clearing via disarm-execution then clear-halted-run."
+        Write-Warn "Halted/kill-switch state detected on fresh daemon (arm_state=$armState runtime_status=$runtimeStatus kill_switch_active=$killSwitchActive)."
+        Write-Warn "Clearing via disarm-execution then clear-halted-run."
 
         # Invoke-DaemonPost returns {StatusCode, Body} on success and {StatusCode, Body, RawBody, Error}
         # on error. With Set-StrictMode -Version Latest, accessing .Error on a success object throws.
@@ -790,11 +799,23 @@ try {
         $clear = Invoke-DaemonPost -Path '/api/v1/ops/action' -Body @{ action_key = 'clear-halted-run' }
         if ($clear.StatusCode -ne 200) {
             Write-Fail "clear-halted-run failed (HTTP $($clear.StatusCode)): $($clear.RawBody)"
+            Write-EvidenceCapture "STEP 10: clear-halted-run failed HTTP $($clear.StatusCode)"
             exit 1
         }
         Write-Ok "clear-halted-run accepted."
+
+        # Verify kill_switch_active=false after clearing. If it persists, the run cannot start.
+        Start-Sleep -Milliseconds 400
+        $stsAfterClear = Invoke-DaemonGet -Path '/api/v1/system/status'
+        $ksAfterClear  = ($null -ne $stsAfterClear.PSObject.Properties['kill_switch_active']) -and ($stsAfterClear.kill_switch_active -eq $true)
+        if ($ksAfterClear) {
+            Write-Fail "kill_switch_active=true persists after clear-halted-run. Manual operator action required before smoke can proceed."
+            Write-EvidenceCapture "STEP 10: kill_switch_active still true after clear-halted-run"
+            exit 1
+        }
+        Write-Ok "kill_switch_active=false confirmed after halt clear."
     } else {
-        Write-Ok "arm_state=$armState runtime_status=$runtimeStatus - no halted run to clear."
+        Write-Ok "arm_state=$armState  runtime_status=$runtimeStatus  kill_switch_active=$killSwitchActive  -- no halted run to clear."
     }
 } catch {
     Write-Warn "Could not read autonomous readiness for halt check: $_"
@@ -869,30 +890,54 @@ Write-Step "arm_state=$armState2  reconcile_ready=$($readiness2.reconcile_ready)
 if ($armState2 -eq 'armed') {
     Write-Ok "Execution is already ARMED."
 } elseif ($armState2 -eq 'disarmed' -or $armState2 -eq 'stopped') {
-    Write-Step "arm_state=$armState2. Calling arm-execution..."
+    Write-Step "arm_state=$armState2. Calling arm-execution via POST /api/v1/ops/action..."
     $armResp = Invoke-DaemonPost -Path '/api/v1/ops/action' -Body @{ action_key = 'arm-execution' }
     if ($armResp.StatusCode -eq 200 -and $armResp.Body.accepted -eq $true) {
         Write-Ok "arm-execution accepted. disposition=$($armResp.Body.disposition)"
     } else {
         Write-Fail "arm-execution failed (HTTP $($armResp.StatusCode))."
         if ($armResp.RawBody) { Write-Fail "Response: $($armResp.RawBody)" }
+        Write-EvidenceCapture "STEP 13: arm-execution failed HTTP $($armResp.StatusCode)"
         exit 1
     }
+} elseif ($armState2 -eq 'halted') {
+    # halted at this point means STEP 10 did not clear it -- fail closed rather than warn.
+    Write-Fail "arm_state=halted persists after STEP 10 clear attempt. Cannot arm for runtime."
+    Write-EvidenceCapture "STEP 13: arm_state=halted after STEP 10 clear"
+    exit 1
 } else {
     Write-Warn "Unexpected arm_state='$armState2'. Check /api/v1/autonomous/readiness manually."
 }
 
-# Verify arm state is now ARMED
+# Verify arm state is now ARMED, kill_switch_active=false, and live_routing_enabled=false.
 Start-Sleep -Milliseconds 500
 $readiness3 = $null
 try { $readiness3 = Invoke-DaemonGet -Path '/api/v1/autonomous/readiness' } catch {}
+$stsPostArm = $null
+try { $stsPostArm = Invoke-DaemonGet -Path '/api/v1/system/status' } catch {}
 
 if ($null -ne $readiness3) {
     if ($readiness3.arm_state -eq 'armed') {
-        Write-Ok "Durable arm state confirmed: ARMED."
+        Write-Ok "Durable arm state confirmed: arm_state=ARMED."
     } else {
         Write-Warn "arm_state=$($readiness3.arm_state) after arm attempt. Verify manually."
     }
+}
+
+if ($null -ne $stsPostArm) {
+    $ksPostArm = ($null -ne $stsPostArm.PSObject.Properties['kill_switch_active']) -and ($stsPostArm.kill_switch_active -eq $true)
+    $lrPostArm = $stsPostArm.live_routing_enabled -eq $true
+
+    if ($ksPostArm) {
+        Write-Fail "kill_switch_active=true after arm-execution. Runtime cannot start while kill_switch is set."
+        Write-EvidenceCapture "STEP 13: kill_switch_active=true after arm"
+        exit 1
+    }
+    if ($lrPostArm) {
+        Write-Fail "live_routing_enabled=true after arm-execution. This script is paper-only. Refusing to continue."
+        exit 1
+    }
+    Write-Ok "Post-arm verification: kill_switch_active=false  live_routing_enabled=false"
 }
 
 # ---------------------------------------------------------------------------
