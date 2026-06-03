@@ -1,0 +1,137 @@
+# =============================================================================
+# EXP-PENNY-01A static guard
+#
+# Proves:
+#   G1. exp_penny source files do not reference oms_outbox
+#   G2. exp_penny source files do not reference oms_inbox
+#   G3. exp_penny source files do not reference BrokerGateway
+#   G4. exp_penny source files do not reference broker_adapter
+#   G5. exp_penny source files do not reference alpaca
+#   G6. exp_penny source files do not reference Start-PaperTradingSmoke
+#   G7. scanner.py sets paper_order_id via build_candidate_record (null enforced upstream)
+#   G8. scanner.py does not assign non-null paper_order_id or live_order_id
+#   G9. run_scanner.py requires --dry-run (not optional)
+#
+# Exit codes: 0 = all guards pass, 1 = one or more guards failed.
+# =============================================================================
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Continue'
+
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$ExpPennyDir = Join-Path $RepoRoot 'research-py\experiments\exp_penny'
+
+$Failures = [System.Collections.Generic.List[string]]::new()
+
+function Fail([string]$msg) {
+    $Failures.Add("  FAIL: $msg")
+    Write-Host "  FAIL: $msg" -ForegroundColor Red
+}
+
+function Pass([string]$msg) {
+    Write-Host "  PASS: $msg" -ForegroundColor Green
+}
+
+Write-Host ''
+Write-Host '============================================================'
+Write-Host 'EXP-PENNY-01A static guard'
+Write-Host '============================================================'
+
+# Guard dir exists
+if (-not (Test-Path $ExpPennyDir)) {
+    Fail "exp_penny directory not found: $ExpPennyDir"
+    Write-Host ''
+    Write-Host "EXP-PENNY guard: 1 FAILURE(S)" -ForegroundColor Red
+    exit 1
+}
+
+$SourceFiles = Get-ChildItem -Path $ExpPennyDir -Recurse -Include '*.py' |
+    Where-Object { $_.Name -notmatch '^test_' }
+
+# G1-G6: forbidden patterns in source files
+$ForbiddenPatterns = [ordered]@{
+    'G1' = 'oms_outbox'
+    'G2' = 'oms_inbox'
+    'G3' = 'BrokerGateway'
+    'G4' = 'broker_adapter'
+    'G5' = 'alpaca'
+    'G6' = 'Start-PaperTradingSmoke'
+}
+
+foreach ($key in $ForbiddenPatterns.Keys) {
+    $pattern = $ForbiddenPatterns[$key]
+    Write-Host ''
+    Write-Host "--- $key`: exp_penny source must not reference '$pattern' ---"
+    $hits = $SourceFiles | Where-Object {
+        (Get-Content $_.FullName -Raw) -match [regex]::Escape($pattern)
+    }
+    if ($hits) {
+        foreach ($hit in $hits) {
+            Fail "$($hit.Name) references '$pattern'"
+        }
+    } else {
+        Pass "No exp_penny source file references '$pattern'"
+    }
+}
+
+# G7: scanner.py must use build_candidate_record (null order IDs enforced upstream)
+Write-Host ''
+Write-Host '--- G7: scanner.py must call build_candidate_record ---'
+$scannerPath = Join-Path $ExpPennyDir 'scanner.py'
+if (Test-Path $scannerPath) {
+    $scannerContent = Get-Content $scannerPath -Raw
+    if ($scannerContent -match 'build_candidate_record') {
+        Pass "scanner.py calls build_candidate_record"
+    } else {
+        Fail "scanner.py does not call build_candidate_record"
+    }
+} else {
+    Fail "scanner.py not found at $scannerPath"
+}
+
+# G8: scanner.py must not set paper_order_id or live_order_id to a non-null value
+Write-Host ''
+Write-Host '--- G8: scanner.py must not assign non-null paper_order_id or live_order_id ---'
+if (Test-Path $scannerPath) {
+    $scannerContent = Get-Content $scannerPath -Raw
+    # Disallow any assignment like paper_order_id = <something other than None>
+    if ($scannerContent -match '"paper_order_id"\s*:\s*(?!None)[^,\n]') {
+        Fail "scanner.py assigns non-null paper_order_id"
+    } else {
+        Pass "scanner.py does not assign non-null paper_order_id"
+    }
+    if ($scannerContent -match '"live_order_id"\s*:\s*(?!None)[^,\n]') {
+        Fail "scanner.py assigns non-null live_order_id"
+    } else {
+        Pass "scanner.py does not assign non-null live_order_id"
+    }
+}
+
+# G9: run_scanner.py must declare --dry-run as required
+Write-Host ''
+Write-Host '--- G9: run_scanner.py must require --dry-run ---'
+$runnerPath = Join-Path $ExpPennyDir 'run_scanner.py'
+if (Test-Path $runnerPath) {
+    $runnerContent = Get-Content $runnerPath -Raw
+    if ($runnerContent -match 'required\s*=\s*True' -and $runnerContent -match 'dry.run') {
+        Pass "run_scanner.py declares --dry-run as required"
+    } else {
+        Fail "run_scanner.py does not declare --dry-run as required"
+    }
+} else {
+    Fail "run_scanner.py not found at $runnerPath"
+}
+
+# Summary
+Write-Host ''
+Write-Host '============================================================'
+$fileCount = $SourceFiles.Count
+$failCount = $Failures.Count
+if ($failCount -eq 0) {
+    Write-Host "EXP-PENNY guard: ALL PASS ($fileCount source files checked)" -ForegroundColor Green
+    exit 0
+} else {
+    Write-Host "EXP-PENNY guard: $failCount FAILURE(S)" -ForegroundColor Red
+    foreach ($f in $Failures) { Write-Host $f }
+    exit 1
+}

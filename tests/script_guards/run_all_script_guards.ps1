@@ -25,7 +25,8 @@ $Guards = @(
     'test_db_proof_bootstrap_coverage.ps1',
     'test_capture_paper_smoke_evidence.ps1',
     'test_launcher_arm_paper.ps1',
-    'test_exp_engine_guard.ps1'
+    'test_exp_engine_guard.ps1',
+    'test_exp_penny_guard.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()

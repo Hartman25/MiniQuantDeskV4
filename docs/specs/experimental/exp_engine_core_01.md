@@ -51,7 +51,7 @@ exist in this foundation and are not wired anywhere in the codebase.
 | `research-py/experiments/exp_engine/scanner_base.py` | Abstract base class for scanner lanes |
 | `research-py/experiments/exp_engine/scanner_runner.py` | Disabled-by-default runner; requires `--dry-run` |
 | `research-py/experiments/exp_engine/tests/test_exp_engine_safety.py` | 12 safety + unit tests; static import guard |
-| `exports/experimental/candidates/.gitkeep` | Output directory for candidate JSONL files |
+| `exports/experimental/candidates/` | Output directory for JSONL files; created at runtime by `CandidateJournalWriter` |
 | `docs/specs/experimental/exp_engine_core_01.md` | This document |
 | `tests/script_guards/test_exp_engine_guard.ps1` | PowerShell static guard |
 | `.env.local.example` | Added `MQK_EXPERIMENTAL_ENGINE_*` flags (all disabled) |
@@ -110,8 +110,8 @@ exports/experimental/candidates/<engine_id>_<YYYYMMDD_HHMMSS>.jsonl
 ```
 
 The `exports/` directory is gitignored. Candidate journals are local only and are
-not committed to the repo. The `.gitkeep` file ensures the directory path exists
-in the repo without committing runtime output.
+not committed to the repo. `CandidateJournalWriter` calls `mkdir(parents=True)`
+so the directory is created automatically on first scan run.
 
 ---
 
