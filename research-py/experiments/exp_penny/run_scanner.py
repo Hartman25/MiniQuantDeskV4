@@ -10,17 +10,19 @@ Usage (requires explicit --dry-run and MQK_EXPERIMENTAL_ENGINE_ENABLED=true):
     $env:MQK_EXPERIMENTAL_JOURNAL_DIR="exports/experimental/candidates"
 
     python -m experiments.exp_penny.run_scanner --dry-run --universe research-py/experiments/exp_penny/sample_universe.json
+    python -m experiments.exp_penny.run_scanner --dry-run --universe research-py/experiments/exp_penny/sample_universe.csv
 
 Scanner-only. No orders. No broker calls. No OMS writes.
+Supports .json and .csv universe files via universe_loader.
 """
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 
 from experiments.exp_engine.scanner_runner import run
 from experiments.exp_penny.scanner import PennyBreakoutScanner
+from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -38,26 +40,17 @@ def main(argv: list[str] | None = None) -> int:
         "--universe",
         required=True,
         metavar="PATH",
-        help="Path to a JSON file containing the universe array.",
+        help="Path to a .json or .csv file containing the universe.",
     )
     args, remaining = parser.parse_known_args(argv)
 
-    universe_path = args.universe
     try:
-        with open(universe_path, encoding="utf-8") as fh:
-            raw = json.load(fh)
-    except FileNotFoundError:
-        print(f"ERROR: universe file not found: {universe_path}", file=sys.stderr)
-        return 1
-    except json.JSONDecodeError as exc:
-        print(f"ERROR: universe file is not valid JSON: {exc}", file=sys.stderr)
+        universe = load_universe(args.universe)
+    except UniverseLoadError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
-    if not isinstance(raw, list):
-        print("ERROR: universe file must be a JSON array of objects.", file=sys.stderr)
-        return 1
-
-    scanner = PennyBreakoutScanner(universe=raw)
+    scanner = PennyBreakoutScanner(universe=universe)
 
     # Pass --dry-run through to the base runner (required by scanner_runner.run).
     runner_argv = ["--dry-run"] + remaining

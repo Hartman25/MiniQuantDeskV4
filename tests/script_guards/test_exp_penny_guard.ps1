@@ -11,6 +11,7 @@
 #   G7. scanner.py sets paper_order_id via build_candidate_record (null enforced upstream)
 #   G8. scanner.py does not assign non-null paper_order_id or live_order_id
 #   G9. run_scanner.py requires --dry-run (not optional)
+#   G10. universe_loader.py exists and does not reference forbidden strings
 #
 # Exit codes: 0 = all guards pass, 1 = one or more guards failed.
 # =============================================================================
@@ -48,7 +49,7 @@ if (-not (Test-Path $ExpPennyDir)) {
 $SourceFiles = Get-ChildItem -Path $ExpPennyDir -Recurse -Include '*.py' |
     Where-Object { $_.Name -notmatch '^test_' }
 
-# G1-G6: forbidden patterns in source files
+# G1-G6: forbidden patterns in source files (excludes test files)
 $ForbiddenPatterns = [ordered]@{
     'G1' = 'oms_outbox'
     'G2' = 'oms_inbox'
@@ -120,6 +121,25 @@ if (Test-Path $runnerPath) {
     }
 } else {
     Fail "run_scanner.py not found at $runnerPath"
+}
+
+# G10: universe_loader.py must exist and must not reference forbidden patterns
+Write-Host ''
+Write-Host '--- G10: universe_loader.py must exist and be clean ---'
+$loaderPath = Join-Path $ExpPennyDir 'universe_loader.py'
+if (Test-Path $loaderPath) {
+    Pass "universe_loader.py exists"
+    $loaderContent = Get-Content $loaderPath -Raw
+    foreach ($key in $ForbiddenPatterns.Keys) {
+        $pattern = $ForbiddenPatterns[$key]
+        if ($loaderContent -match [regex]::Escape($pattern)) {
+            Fail "universe_loader.py references '$pattern'"
+        } else {
+            Pass "universe_loader.py does not reference '$pattern'"
+        }
+    }
+} else {
+    Fail "universe_loader.py not found at $loaderPath"
 }
 
 # Summary

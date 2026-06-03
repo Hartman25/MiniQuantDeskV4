@@ -19,9 +19,8 @@ from typing import Any
 # Helpers
 # ---------------------------------------------------------------------------
 
-SAMPLE_UNIVERSE_PATH = (
-    Path(__file__).parent.parent / "sample_universe.json"
-)
+SAMPLE_UNIVERSE_JSON = Path(__file__).parent.parent / "sample_universe.json"
+SAMPLE_UNIVERSE_CSV = Path(__file__).parent.parent / "sample_universe.csv"
 
 
 def _passing_row(**overrides: Any) -> dict[str, Any]:
@@ -337,7 +336,7 @@ class TestSampleUniverseFile(unittest.TestCase):
     def test_sample_universe_produces_one_pass_and_multiple_rejects(self) -> None:
         from experiments.exp_penny.scanner import PennyBreakoutScanner
 
-        with open(SAMPLE_UNIVERSE_PATH, encoding="utf-8") as fh:
+        with open(SAMPLE_UNIVERSE_JSON, encoding="utf-8") as fh:
             universe = json.load(fh)
 
         scanner = PennyBreakoutScanner(universe=universe)
@@ -352,6 +351,377 @@ class TestSampleUniverseFile(unittest.TestCase):
 
         passing_symbols = [r["symbol"] for r in passing]
         self.assertIn("ACME", passing_symbols, "ACME should pass all gates")
+
+
+# ---------------------------------------------------------------------------
+# T11 — universe_loader: JSON sample loads 7 rows
+# ---------------------------------------------------------------------------
+
+class TestLoaderJsonLoads7Rows(unittest.TestCase):
+    def test_json_sample_loads_7_rows(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_UNIVERSE_JSON)
+        self.assertEqual(len(rows), 7)
+
+    def test_json_symbols_present(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_UNIVERSE_JSON)
+        symbols = {r["symbol"] for r in rows}
+        self.assertIn("ACME", symbols)
+        self.assertIn("HLTD", symbols)
+
+
+# ---------------------------------------------------------------------------
+# T12 — universe_loader: CSV sample loads 7 rows
+# ---------------------------------------------------------------------------
+
+class TestLoaderCsvLoads7Rows(unittest.TestCase):
+    def test_csv_sample_loads_7_rows(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_UNIVERSE_CSV)
+        self.assertEqual(len(rows), 7)
+
+    def test_csv_symbols_present(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_UNIVERSE_CSV)
+        symbols = {r["symbol"] for r in rows}
+        self.assertIn("ACME", symbols)
+        self.assertIn("HLTD", symbols)
+
+
+# ---------------------------------------------------------------------------
+# T13 — JSON and CSV produce the same pass/reject counts
+# ---------------------------------------------------------------------------
+
+class TestLoaderJsonCsvParity(unittest.TestCase):
+    def test_json_csv_same_pass_reject_counts(self) -> None:
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        from experiments.exp_penny.universe_loader import load_universe
+
+        json_rows = load_universe(SAMPLE_UNIVERSE_JSON)
+        csv_rows = load_universe(SAMPLE_UNIVERSE_CSV)
+
+        json_records = PennyBreakoutScanner(universe=json_rows).scan()
+        csv_records = PennyBreakoutScanner(universe=csv_rows).scan()
+
+        json_pass = sum(1 for r in json_records if r["would_trade"])
+        csv_pass = sum(1 for r in csv_records if r["would_trade"])
+        json_reject = sum(1 for r in json_records if not r["would_trade"])
+        csv_reject = sum(1 for r in csv_records if not r["would_trade"])
+
+        self.assertEqual(json_pass, csv_pass, "Pass count must match between JSON and CSV")
+        self.assertEqual(json_reject, csv_reject, "Reject count must match between JSON and CSV")
+        self.assertEqual(json_pass, 1)
+        self.assertEqual(json_reject, 6)
+
+
+# ---------------------------------------------------------------------------
+# T14 — CSV booleans parse correctly
+# ---------------------------------------------------------------------------
+
+class TestLoaderCsvBooleans(unittest.TestCase):
+    def _make_csv(self, halt_val: str, gap_val: str) -> str:
+        header = (
+            "symbol,price,bid,ask,volume,adv_20d_usd,ma200_slope_20d,"
+            "ma50_slope_20d,consolidation_range_pct,breakout_level,"
+            "breakout_rvol,gap_flag,halt_flag"
+        )
+        row = (
+            f"TST,4.85,4.83,4.87,850000,2975000.0,0.012,"
+            f"0.025,9.6,4.80,2.8,{gap_val},{halt_val}"
+        )
+        return f"{header}\n{row}\n"
+
+    def _load_csv_text(self, text: str) -> list[dict]:
+        import io
+        import csv as csv_mod
+        from experiments.exp_penny.universe_loader import _coerce_csv_row, _validate_row, REQUIRED_FIELDS
+        reader = csv_mod.DictReader(io.StringIO(text))
+        rows = []
+        for i, raw in enumerate(reader, start=2):
+            coerced = _coerce_csv_row(dict(raw), i)
+            _validate_row(coerced, i)
+            rows.append(coerced)
+        return rows
+
+    def test_true_values(self) -> None:
+        for val in ("true", "1", "yes", "y"):
+            rows = self._load_csv_text(self._make_csv(halt_val=val, gap_val="false"))
+            self.assertIs(rows[0]["halt_flag"], True, f"halt_flag should be True for '{val}'")
+
+    def test_false_values(self) -> None:
+        for val in ("false", "0", "no", "n", ""):
+            rows = self._load_csv_text(self._make_csv(halt_val=val, gap_val="false"))
+            self.assertIs(rows[0]["halt_flag"], False, f"halt_flag should be False for '{val}'")
+
+    def test_halt_flag_true_from_sample_csv(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_UNIVERSE_CSV)
+        hltd = next(r for r in rows if r["symbol"] == "HLTD")
+        self.assertIs(hltd["halt_flag"], True)
+
+    def test_gap_flag_true_from_sample_csv(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_UNIVERSE_CSV)
+        gapr = next(r for r in rows if r["symbol"] == "GAPR")
+        self.assertIs(gapr["gap_flag"], True)
+
+
+# ---------------------------------------------------------------------------
+# T15 — numeric strings parse correctly
+# ---------------------------------------------------------------------------
+
+class TestLoaderCsvNumericConversion(unittest.TestCase):
+    def test_price_is_float_from_csv(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_UNIVERSE_CSV)
+        acme = next(r for r in rows if r["symbol"] == "ACME")
+        self.assertIsInstance(acme["price"], float)
+        self.assertAlmostEqual(acme["price"], 4.85)
+
+    def test_volume_is_int_from_csv(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_UNIVERSE_CSV)
+        acme = next(r for r in rows if r["symbol"] == "ACME")
+        self.assertIsInstance(acme["volume"], int)
+        self.assertEqual(acme["volume"], 850000)
+
+    def test_adv_20d_usd_is_float_from_csv(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_UNIVERSE_CSV)
+        acme = next(r for r in rows if r["symbol"] == "ACME")
+        self.assertIsInstance(acme["adv_20d_usd"], float)
+
+
+# ---------------------------------------------------------------------------
+# T16 — missing required CSV column raises UniverseLoadError
+# ---------------------------------------------------------------------------
+
+class TestLoaderMissingRequiredColumn(unittest.TestCase):
+    def test_missing_column_raises(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+        import io, csv as csv_mod, tempfile
+
+        # CSV without 'halt_flag'
+        text = (
+            "symbol,price,bid,ask,volume,adv_20d_usd,ma200_slope_20d,"
+            "ma50_slope_20d,consolidation_range_pct,breakout_level,breakout_rvol,gap_flag\n"
+            "TST,4.85,4.83,4.87,850000,2975000.0,0.012,0.025,9.6,4.80,2.8,false\n"
+        )
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, encoding="utf-8") as f:
+            f.write(text)
+            tmp_path = f.name
+
+        try:
+            with self.assertRaises(UniverseLoadError) as ctx:
+                load_universe(tmp_path)
+            self.assertIn("halt_flag", str(ctx.exception))
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# T17 — invalid numeric value raises UniverseLoadError
+# ---------------------------------------------------------------------------
+
+class TestLoaderInvalidNumeric(unittest.TestCase):
+    def test_invalid_numeric_raises(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+        import tempfile
+
+        text = (
+            "symbol,price,bid,ask,volume,adv_20d_usd,ma200_slope_20d,"
+            "ma50_slope_20d,consolidation_range_pct,breakout_level,breakout_rvol,gap_flag,halt_flag\n"
+            "TST,NOT_A_NUMBER,4.83,4.87,850000,2975000.0,0.012,0.025,9.6,4.80,2.8,false,false\n"
+        )
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, encoding="utf-8") as f:
+            f.write(text)
+            tmp_path = f.name
+
+        try:
+            with self.assertRaises(UniverseLoadError) as ctx:
+                load_universe(tmp_path)
+            self.assertIn("price", str(ctx.exception))
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# T18 — invalid boolean value raises UniverseLoadError
+# ---------------------------------------------------------------------------
+
+class TestLoaderInvalidBoolean(unittest.TestCase):
+    def test_invalid_bool_raises(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+        import tempfile
+
+        text = (
+            "symbol,price,bid,ask,volume,adv_20d_usd,ma200_slope_20d,"
+            "ma50_slope_20d,consolidation_range_pct,breakout_level,breakout_rvol,gap_flag,halt_flag\n"
+            "TST,4.85,4.83,4.87,850000,2975000.0,0.012,0.025,9.6,4.80,2.8,MAYBE,false\n"
+        )
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, encoding="utf-8") as f:
+            f.write(text)
+            tmp_path = f.name
+
+        try:
+            with self.assertRaises(UniverseLoadError) as ctx:
+                load_universe(tmp_path)
+            self.assertIn("gap_flag", str(ctx.exception))
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# T19 — unsupported extension raises UniverseLoadError
+# ---------------------------------------------------------------------------
+
+class TestLoaderUnsupportedExtension(unittest.TestCase):
+    def test_unsupported_ext_raises(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", mode="w", delete=False, encoding="utf-8") as f:
+            f.write("dummy")
+            tmp_path = f.name
+
+        try:
+            with self.assertRaises(UniverseLoadError) as ctx:
+                load_universe(tmp_path)
+            self.assertIn(".xlsx", str(ctx.exception))
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# T20 — empty file / empty universe raises UniverseLoadError
+# ---------------------------------------------------------------------------
+
+class TestLoaderEmptyFile(unittest.TestCase):
+    def test_empty_json_raises(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False, encoding="utf-8") as f:
+            f.write("[]")
+            tmp_path = f.name
+
+        try:
+            with self.assertRaises(UniverseLoadError):
+                load_universe(tmp_path)
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+    def test_empty_csv_raises(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, encoding="utf-8") as f:
+            f.write("")
+            tmp_path = f.name
+
+        try:
+            with self.assertRaises(UniverseLoadError):
+                load_universe(tmp_path)
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+    def test_csv_header_only_raises(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+        import tempfile
+
+        text = (
+            "symbol,price,bid,ask,volume,adv_20d_usd,ma200_slope_20d,"
+            "ma50_slope_20d,consolidation_range_pct,breakout_level,breakout_rvol,gap_flag,halt_flag\n"
+        )
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, encoding="utf-8") as f:
+            f.write(text)
+            tmp_path = f.name
+
+        try:
+            with self.assertRaises(UniverseLoadError):
+                load_universe(tmp_path)
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# T21 — runner works with CSV input under enabled dry-run config
+# ---------------------------------------------------------------------------
+
+class TestRunnerWithCsvInput(unittest.TestCase):
+    def test_runner_csv_produces_records(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+
+        rows = load_universe(SAMPLE_UNIVERSE_CSV)
+        scanner = PennyBreakoutScanner(universe=rows)
+        records = scanner.scan()
+
+        self.assertEqual(len(records), 7)
+        passing = [r for r in records if r["would_trade"]]
+        self.assertEqual(len(passing), 1)
+        self.assertEqual(passing[0]["symbol"], "ACME")
+
+
+# ---------------------------------------------------------------------------
+# T22 — generated JSONL has null paper/live order IDs from CSV input
+# ---------------------------------------------------------------------------
+
+class TestJsonlNullOrderIdsFromCsv(unittest.TestCase):
+    def test_csv_jsonl_null_order_ids(self) -> None:
+        from experiments.exp_engine.candidate_journal import CandidateJournalWriter
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        from experiments.exp_penny.universe_loader import load_universe
+
+        rows = load_universe(SAMPLE_UNIVERSE_CSV)
+        scanner = PennyBreakoutScanner(universe=rows)
+        records = scanner.scan()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with CandidateJournalWriter(journal_dir=tmpdir, engine_id="exp-engine-core-01") as writer:
+                for rec in records:
+                    writer.append(rec)
+
+            files = list(Path(tmpdir).glob("*.jsonl"))
+            self.assertEqual(len(files), 1)
+            lines = files[0].read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(lines), 7)
+
+            for line in lines:
+                obj = json.loads(line)
+                self.assertIsNone(obj["paper_order_id"])
+                self.assertIsNone(obj["live_order_id"])
+
+
+# ---------------------------------------------------------------------------
+# T23 — no forbidden strings in exp_penny source including new loader file
+# ---------------------------------------------------------------------------
+
+class TestNoForbiddenStringsIncludingLoader(unittest.TestCase):
+    _FORBIDDEN = [
+        "oms_outbox",
+        "oms_inbox",
+        "BrokerGateway",
+        "broker_adapter",
+        "alpaca",
+        "Start-PaperTradingSmoke",
+    ]
+    _EXP_PENNY_DIR = Path(__file__).parent.parent
+
+    def test_universe_loader_has_no_forbidden_strings(self) -> None:
+        loader = self._EXP_PENNY_DIR / "universe_loader.py"
+        self.assertTrue(loader.exists(), "universe_loader.py must exist")
+        content = loader.read_text(encoding="utf-8")
+        for forbidden in self._FORBIDDEN:
+            self.assertNotIn(forbidden, content, f"universe_loader.py must not reference '{forbidden}'")
 
 
 if __name__ == "__main__":
