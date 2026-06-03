@@ -291,13 +291,19 @@ impl DiscordNotifier {
             return;
         };
 
+        let detail_suffix = payload
+            .detail
+            .as_deref()
+            .map(|d| format!(" | reason: {d}"))
+            .unwrap_or_default();
         let content = format!(
-            "[mqk-daemon] ALERT `{}` | severity: `{}` | env: `{}` | ts: `{}` | {}",
+            "[mqk-daemon] ALERT `{}` | severity: `{}` | env: `{}` | ts: `{}` | {}{}",
             payload.alert_class,
             payload.severity,
             payload.environment.as_deref().unwrap_or("unknown"),
             payload.ts_utc,
             payload.summary,
+            detail_suffix,
         );
 
         let body = serde_json::json!({
