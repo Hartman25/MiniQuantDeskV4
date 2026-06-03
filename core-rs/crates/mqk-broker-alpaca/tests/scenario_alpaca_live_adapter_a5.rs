@@ -27,7 +27,7 @@ use mqk_broker_alpaca::{
     AlpacaBrokerAdapter, AlpacaConfig,
 };
 use mqk_execution::{
-    BrokerAdapter, BrokerError, BrokerEvent, BrokerInvokeToken, BrokerReplaceRequest,
+    AssetClass, BrokerAdapter, BrokerError, BrokerEvent, BrokerInvokeToken, BrokerReplaceRequest,
     BrokerSubmitRequest, Side,
 };
 // ---------------------------------------------------------------------------
@@ -60,6 +60,7 @@ fn make_submit_req(
         order_type: order_type.to_string(),
         limit_price,
         time_in_force: "day".to_string(),
+        asset_class: AssetClass::Equity,
     }
 }
 #[allow(clippy::too_many_arguments)]

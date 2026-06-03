@@ -89,6 +89,7 @@ pub enum AssetClass {
     Option,
     Future,
     Crypto,
+    Forex,
 }
 
 /// A deterministic fixed-point quantity type at 1e-6 scale.

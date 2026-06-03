@@ -259,7 +259,9 @@ pub fn paper_gateway_for_testkit_validation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mqk_execution::{BrokerSubmitRequest, GateRefusal, OutboxClaimToken, Side, SubmitError};
+    use mqk_execution::{
+        AssetClass, BrokerSubmitRequest, GateRefusal, OutboxClaimToken, Side, SubmitError,
+    };
 
     fn make_claim() -> OutboxClaimToken {
         OutboxClaimToken::for_test(1, "paper-risk")
@@ -274,6 +276,7 @@ mod tests {
             order_type: "market".to_string(),
             limit_price: None,
             time_in_force: "day".to_string(),
+            asset_class: AssetClass::Equity,
         }
     }
 

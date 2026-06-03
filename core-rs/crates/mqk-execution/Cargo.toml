@@ -39,3 +39,7 @@ required-features = ["testkit"]
 [[test]]
 name = "prover_gateway_for_test_rt2"
 required-features = ["testkit"]
+
+[[test]]
+name = "scenario_asset_class_guard_multi_asset_routing_guard_01"
+required-features = ["testkit"]

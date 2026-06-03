@@ -23,7 +23,9 @@
 use mqk_broker_alpaca::{
     encode_fetch_cursor, types::AlpacaFetchCursor, AlpacaBrokerAdapter, AlpacaConfig,
 };
-use mqk_execution::{BrokerAdapter, BrokerError, BrokerInvokeToken, BrokerSubmitRequest, Side};
+use mqk_execution::{
+    AssetClass, BrokerAdapter, BrokerError, BrokerInvokeToken, BrokerSubmitRequest, Side,
+};
 
 fn unreachable_adapter() -> AlpacaBrokerAdapter {
     AlpacaBrokerAdapter::new(AlpacaConfig {
@@ -58,6 +60,7 @@ async fn bk01_submit_order_from_async_multi_thread_returns_transport_not_panic()
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),
+        asset_class: AssetClass::Equity,
     };
     // Calling the sync adapter method directly from an async task body.
     // run_async uses block_in_place → handle.block_on internally.

@@ -23,7 +23,7 @@ use mqk_broker_alpaca::{
     build_replace_body, build_submit_body, format_alpaca_price, format_alpaca_qty,
     micros_to_price_str,
 };
-use mqk_execution::{BrokerSubmitRequest, Side};
+use mqk_execution::{AssetClass, BrokerSubmitRequest, Side};
 
 fn submit_req(
     order_id: &str,
@@ -41,6 +41,7 @@ fn submit_req(
         order_type: order_type.to_string(),
         limit_price,
         time_in_force: "day".to_string(),
+        asset_class: AssetClass::Equity,
     }
 }
 

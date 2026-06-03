@@ -34,7 +34,7 @@
 use crate::broker_error::BrokerError;
 use crate::id_map::BrokerOrderMap;
 use crate::order_router::{
-    BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
+    AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerReplaceRequest, BrokerReplaceResponse,
     BrokerSubmitRequest, BrokerSubmitResponse, OrderRouter,
 };
 use crate::risk_decision::{RiskDecision, RiskDenial};
@@ -94,6 +94,14 @@ pub enum GateRefusal {
     /// structured reason code and supporting evidence.
     RiskBlocked(RiskDenial),
     ReconcileNotClean,
+    /// The order's asset class is not enabled for broker dispatch.
+    ///
+    /// Only `AssetClass::Equity` is supported on the canonical MAIN path.
+    /// All other asset classes are rejected here before any broker adapter
+    /// is invoked (MULTI-ASSET-ROUTING-GUARD-01).
+    AssetClassDisabled {
+        asset_class: AssetClass,
+    },
 }
 impl std::fmt::Display for GateRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -111,6 +119,13 @@ impl std::fmt::Display for GateRefusal {
             }
             GateRefusal::ReconcileNotClean => {
                 write!(f, "GATE_REFUSED: reconcile is not clean")
+            }
+            GateRefusal::AssetClassDisabled { asset_class } => {
+                write!(
+                    f,
+                    "GATE_REFUSED: asset class {:?} is disabled — only Equity is supported on the canonical dispatch path",
+                    asset_class
+                )
             }
         }
     }
@@ -285,6 +300,13 @@ where
         claim: &OutboxClaimToken,
         req: BrokerSubmitRequest,
     ) -> Result<BrokerSubmitResponse, SubmitError> {
+        // MULTI-ASSET-ROUTING-GUARD-01: reject disabled asset classes before
+        // any gate evaluation or broker adapter invocation.
+        if req.asset_class != AssetClass::Equity {
+            return Err(SubmitError::Gate(GateRefusal::AssetClassDisabled {
+                asset_class: req.asset_class,
+            }));
+        }
         self.enforce_gates().map_err(SubmitError::Gate)?;
         // EB-3: idempotency_key from the claimed outbox row is the authoritative
         // broker-side order_id. This prevents callers from submitting free-form
@@ -480,6 +502,7 @@ mod tests {
             order_type: "market".to_string(),
             limit_price: None,
             time_in_force: "day".to_string(),
+            asset_class: AssetClass::Equity,
         }
     }
     /// Stub claim token for unit tests. Uses the test escape hatch (FC-2).

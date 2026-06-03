@@ -241,6 +241,7 @@ fn broker_submit_request_limit_price_is_integer_micros() {
         order_type: "limit".to_string(),
         limit_price: Some(150_000_000), // $150.00 in micros
         time_in_force: "day".to_string(),
+        asset_class: mqk_execution::AssetClass::Equity,
     };
 
     // Type is Option<i64> — no f64 on the decision surface.
@@ -258,6 +259,7 @@ fn broker_submit_request_market_order_has_no_limit_price() {
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),
+        asset_class: mqk_execution::AssetClass::Equity,
     };
     assert_eq!(req.limit_price, None);
 }

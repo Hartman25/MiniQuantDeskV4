@@ -13,7 +13,7 @@
 //! - `summarize_ambiguous_outbox` — human-readable summary for quarantine errors.
 
 use anyhow::anyhow;
-use mqk_execution::BrokerSubmitRequest;
+use mqk_execution::{AssetClass, BrokerSubmitRequest};
 
 // ---------------------------------------------------------------------------
 // ClaimedOutboxRequest
@@ -84,6 +84,7 @@ pub(super) fn build_validated_submit_request(
         order_type,
         limit_price,
         time_in_force,
+        asset_class: AssetClass::Equity,
     })
 }
 

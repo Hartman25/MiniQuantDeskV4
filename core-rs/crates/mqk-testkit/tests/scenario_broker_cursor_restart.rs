@@ -37,7 +37,7 @@ use anyhow::Result;
 use chrono::Utc;
 use mqk_db::FixedClock;
 use mqk_execution::{
-    BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
+    AssetClass, BrokerAdapter, BrokerCancelResponse, BrokerError, BrokerGateway, BrokerInvokeToken,
     BrokerOrderMap, BrokerReplaceRequest, BrokerReplaceResponse, BrokerSubmitRequest,
     BrokerSubmitResponse, IntegrityGate, ReconcileGate, RiskGate, Side,
 };
@@ -240,6 +240,7 @@ fn a1_paper_broker_cursor_filters_events() {
         order_type: "limit".to_string(),
         limit_price: Some(price),
         time_in_force: "day".to_string(),
+        asset_class: AssetClass::Equity,
     };
     broker
         .submit_order(submit("ord-1", 150_000_000), &token)

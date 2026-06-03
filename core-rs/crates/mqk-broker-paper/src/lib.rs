@@ -337,6 +337,7 @@ impl BrokerAdapter for LockedPaperBroker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mqk_execution::AssetClass;
 
     #[test]
     fn submit_order_uses_explicit_side_and_positive_quantity() {
@@ -352,6 +353,7 @@ mod tests {
                     order_type: "market".to_string(),
                     limit_price: None,
                     time_in_force: "day".to_string(),
+                    asset_class: AssetClass::Equity,
                 },
                 &token,
             )
@@ -379,6 +381,7 @@ mod tests {
                     order_type: "market".to_string(),
                     limit_price: None,
                     time_in_force: "day".to_string(),
+                    asset_class: AssetClass::Equity,
                 },
                 &token,
             )

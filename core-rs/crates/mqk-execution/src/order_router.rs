@@ -8,6 +8,7 @@
 //! constructed or called from outside `mqk-execution`.
 
 use crate::broker_error::BrokerError;
+pub use mqk_schemas::AssetClass;
 
 /// Convenience alias used throughout this module.
 type Result<T> = std::result::Result<T, BrokerError>;
@@ -282,6 +283,11 @@ pub struct BrokerSubmitRequest {
     /// Limit price in integer micros (1 unit = 1_000_000). `None` for market orders.
     pub limit_price: Option<i64>,
     pub time_in_force: String,
+    /// Asset class for this order. Only `Equity` is currently supported on the
+    /// canonical MAIN dispatch path. Non-equity values are rejected by
+    /// `BrokerGateway::submit` before any broker adapter is invoked
+    /// (MULTI-ASSET-ROUTING-GUARD-01).
+    pub asset_class: AssetClass,
 }
 
 /// Broker-agnostic order submission response.
@@ -520,6 +526,7 @@ mod tests {
             order_type: "limit".to_string(),
             limit_price: Some(150_000_000), // $150.00 in micros
             time_in_force: "day".to_string(),
+            asset_class: AssetClass::Equity,
         };
         let resp = router.route_submit(req).unwrap();
         assert_eq!(resp.broker_order_id, "broker-ord-1");

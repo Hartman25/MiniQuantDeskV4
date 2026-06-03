@@ -105,6 +105,7 @@ fn submit_req() -> BrokerSubmitRequest {
         order_type: "market".to_string(),
         limit_price: None,
         time_in_force: "day".to_string(),
+        asset_class: mqk_execution::AssetClass::Equity,
     }
 }
 
