@@ -1089,5 +1089,532 @@ class TestScreenerProfilesModule(unittest.TestCase):
         self.assertEqual(result[1], "price")
 
 
+# ---------------------------------------------------------------------------
+# Helpers shared by enrichment tests
+# ---------------------------------------------------------------------------
+
+SAMPLES_OHLCV_DIR = Path(__file__).parent.parent / "samples" / "ohlcv"
+SAMPLE_ENRICH_PASS_OHLCV = SAMPLES_OHLCV_DIR / "ENRICH_PASS.csv"
+SAMPLE_ENRICHMENT_UNIVERSE = Path(__file__).parent.parent / "samples" / "sample_enrichment_universe.csv"
+
+
+def _make_ohlcv_csv(tmpdir: str, symbol: str, n_bars: int = 220) -> str:
+    """Generate a deterministic OHLCV CSV in tmpdir with n_bars rows."""
+    from datetime import date, timedelta
+    path = Path(tmpdir) / f"{symbol}.csv"
+    lines = ["date,open,high,low,close,volume"]
+    start = date(2024, 1, 2)
+    for i in range(n_bars - 1):
+        d = (start + timedelta(days=i)).isoformat()
+        c = round(2.65 + i * 0.01, 2)
+        lines.append(f"{d},{round(c - 0.01, 2)},{round(c + 0.05, 2)},{round(c - 0.05, 2)},{c},300000")
+    # Final breakout bar
+    lines.append("2024-08-08,4.90,5.15,4.95,5.10,700000")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _enrichment_passing_base_row(**overrides: Any) -> dict[str, Any]:
+    """Return a partial universe row (no computed fields) that enriches to a passing candidate."""
+    base = {
+        "symbol": "ENRICH_PASS",
+        "price": 5.10,
+        "bid": 5.08,
+        "ask": 5.12,
+        "volume": 700_000,
+        "gap_flag": False,
+        "halt_flag": False,
+    }
+    base.update(overrides)
+    return base
+
+
+# ---------------------------------------------------------------------------
+# T36 — load_ohlcv_csv parses a valid OHLCV CSV
+# ---------------------------------------------------------------------------
+
+class TestLoadOhlcvCsv(unittest.TestCase):
+    def test_committed_fixture_loads_220_bars(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import load_ohlcv_csv
+        bars = load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV)
+        self.assertEqual(len(bars), 220)
+
+    def test_bars_have_required_keys(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import load_ohlcv_csv
+        bars = load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV)
+        for key in ("date", "open", "high", "low", "close", "volume"):
+            self.assertIn(key, bars[0], f"bar must have '{key}'")
+
+    def test_close_is_float(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import load_ohlcv_csv
+        bars = load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV)
+        self.assertIsInstance(bars[0]["close"], float)
+
+    def test_volume_is_int(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import load_ohlcv_csv
+        bars = load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV)
+        self.assertIsInstance(bars[0]["volume"], int)
+
+    def test_latest_bar_is_breakout(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import load_ohlcv_csv
+        bars = load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV)
+        self.assertAlmostEqual(bars[-1]["close"], 5.10)
+        self.assertEqual(bars[-1]["volume"], 700_000)
+
+
+# ---------------------------------------------------------------------------
+# T37 — invalid OHLCV numeric raises IndicatorEnrichmentError
+# ---------------------------------------------------------------------------
+
+class TestOhlcvInvalidNumeric(unittest.TestCase):
+    def test_non_numeric_close_raises(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import IndicatorEnrichmentError, load_ohlcv_csv
+        text = "date,open,high,low,close,volume\n2024-01-02,2.64,2.70,2.60,NOT_A_NUMBER,300000\n"
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, encoding="utf-8") as f:
+            f.write(text)
+            tmp = f.name
+        try:
+            with self.assertRaises(IndicatorEnrichmentError) as ctx:
+                load_ohlcv_csv(tmp)
+            self.assertIn("close", str(ctx.exception))
+        finally:
+            os.unlink(tmp)
+
+    def test_zero_close_raises(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import IndicatorEnrichmentError, load_ohlcv_csv
+        text = "date,open,high,low,close,volume\n2024-01-02,2.64,2.70,2.60,0.00,300000\n"
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, encoding="utf-8") as f:
+            f.write(text)
+            tmp = f.name
+        try:
+            with self.assertRaises(IndicatorEnrichmentError):
+                load_ohlcv_csv(tmp)
+        finally:
+            os.unlink(tmp)
+
+    def test_missing_column_raises(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import IndicatorEnrichmentError, load_ohlcv_csv
+        text = "date,open,high,low,volume\n2024-01-02,2.64,2.70,2.60,300000\n"
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, encoding="utf-8") as f:
+            f.write(text)
+            tmp = f.name
+        try:
+            with self.assertRaises(IndicatorEnrichmentError) as ctx:
+                load_ohlcv_csv(tmp)
+            self.assertIn("close", str(ctx.exception))
+        finally:
+            os.unlink(tmp)
+
+    def test_empty_file_raises(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import IndicatorEnrichmentError, load_ohlcv_csv
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, encoding="utf-8") as f:
+            f.write("")
+            tmp = f.name
+        try:
+            with self.assertRaises(IndicatorEnrichmentError):
+                load_ohlcv_csv(tmp)
+        finally:
+            os.unlink(tmp)
+
+    def test_missing_file_raises(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import IndicatorEnrichmentError, load_ohlcv_csv
+        with self.assertRaises(IndicatorEnrichmentError) as ctx:
+            load_ohlcv_csv("/nonexistent/path/ZZZZ.csv")
+        self.assertIn("not found", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# T38 — insufficient bars raises IndicatorEnrichmentError
+# ---------------------------------------------------------------------------
+
+class TestInsufficientBars(unittest.TestCase):
+    def test_50_bars_raises(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import (
+            IndicatorEnrichmentError,
+            compute_symbol_features,
+            load_ohlcv_csv,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_ohlcv_csv(tmpdir, "WEAK", n_bars=50)
+            bars = load_ohlcv_csv(Path(tmpdir) / "WEAK.csv")
+        with self.assertRaises(IndicatorEnrichmentError) as ctx:
+            compute_symbol_features(bars)
+        self.assertIn("Insufficient bars", str(ctx.exception))
+
+    def test_219_bars_raises(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import (
+            IndicatorEnrichmentError,
+            compute_symbol_features,
+            load_ohlcv_csv,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_ohlcv_csv(tmpdir, "NEAR", n_bars=219)
+            bars = load_ohlcv_csv(Path(tmpdir) / "NEAR.csv")
+        with self.assertRaises(IndicatorEnrichmentError) as ctx:
+            compute_symbol_features(bars)
+        self.assertIn("Insufficient bars", str(ctx.exception))
+
+    def test_220_bars_succeeds(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        bars = load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV)
+        self.assertEqual(len(bars), 220)
+        features = compute_symbol_features(bars)
+        self.assertIn("ma50", features)
+
+
+# ---------------------------------------------------------------------------
+# T39 — MA50 and MA200 are deterministic
+# ---------------------------------------------------------------------------
+
+class TestMaDeterminism(unittest.TestCase):
+    def test_ma50_ma200_deterministic(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        bars = load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV)
+        f1 = compute_symbol_features(bars)
+        f2 = compute_symbol_features(bars)
+        self.assertEqual(f1["ma50"], f2["ma50"])
+        self.assertEqual(f1["ma200"], f2["ma200"])
+
+    def test_ma50_is_float(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        bars = load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV)
+        f = compute_symbol_features(bars)
+        self.assertIsInstance(f["ma50"], float)
+        self.assertGreater(f["ma50"], 0.0)
+
+    def test_ma200_is_float(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        bars = load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV)
+        f = compute_symbol_features(bars)
+        self.assertIsInstance(f["ma200"], float)
+        self.assertGreater(f["ma200"], 0.0)
+
+    def test_ma50_greater_than_ma200_for_uptrend(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        bars = load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV)
+        f = compute_symbol_features(bars)
+        self.assertGreater(f["ma50"], f["ma200"])
+
+
+# ---------------------------------------------------------------------------
+# T40 — slope fields are present and positive for rising data
+# ---------------------------------------------------------------------------
+
+class TestSlopeFields(unittest.TestCase):
+    def test_ma50_slope_present(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        f = compute_symbol_features(load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV))
+        self.assertIn("ma50_slope_20d", f)
+
+    def test_ma200_slope_present(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        f = compute_symbol_features(load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV))
+        self.assertIn("ma200_slope_20d", f)
+
+    def test_slopes_positive_for_uptrend(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        f = compute_symbol_features(load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV))
+        self.assertGreater(f["ma50_slope_20d"], 0.0)
+        self.assertGreater(f["ma200_slope_20d"], 0.0)
+
+    def test_slopes_are_float(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        f = compute_symbol_features(load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV))
+        self.assertIsInstance(f["ma50_slope_20d"], float)
+        self.assertIsInstance(f["ma200_slope_20d"], float)
+
+
+# ---------------------------------------------------------------------------
+# T41 — consolidation high/low/range are present and sane
+# ---------------------------------------------------------------------------
+
+class TestConsolidationFields(unittest.TestCase):
+    def setUp(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        self.f = compute_symbol_features(load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV))
+
+    def test_consolidation_high_present(self) -> None:
+        self.assertIn("consolidation_high", self.f)
+        self.assertIsInstance(self.f["consolidation_high"], float)
+
+    def test_consolidation_low_present(self) -> None:
+        self.assertIn("consolidation_low", self.f)
+        self.assertIsInstance(self.f["consolidation_low"], float)
+
+    def test_consolidation_range_pct_present(self) -> None:
+        self.assertIn("consolidation_range_pct", self.f)
+        self.assertIsInstance(self.f["consolidation_range_pct"], float)
+
+    def test_high_greater_than_low(self) -> None:
+        self.assertGreater(self.f["consolidation_high"], self.f["consolidation_low"])
+
+    def test_range_pct_positive(self) -> None:
+        self.assertGreater(self.f["consolidation_range_pct"], 0.0)
+
+    def test_breakout_level_equals_consolidation_high(self) -> None:
+        self.assertAlmostEqual(self.f["breakout_level"], self.f["consolidation_high"])
+
+
+# ---------------------------------------------------------------------------
+# T42 — breakout_rvol present and > 0
+# ---------------------------------------------------------------------------
+
+class TestBreakoutRvol(unittest.TestCase):
+    def test_breakout_rvol_present(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        f = compute_symbol_features(load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV))
+        self.assertIn("breakout_rvol", f)
+
+    def test_breakout_rvol_positive(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        f = compute_symbol_features(load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV))
+        self.assertGreater(f["breakout_rvol"], 0.0)
+
+    def test_breakout_rvol_exceeds_scanner_minimum(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        f = compute_symbol_features(load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV))
+        # Latest vol=700k / adv=300k ≈ 2.33 — must exceed scanner min of 2.0
+        self.assertGreater(f["breakout_rvol"], 2.0)
+
+
+# ---------------------------------------------------------------------------
+# T43 — adv_20d_shares and adv_20d_usd present
+# ---------------------------------------------------------------------------
+
+class TestAdvFields(unittest.TestCase):
+    def setUp(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import compute_symbol_features, load_ohlcv_csv
+        self.f = compute_symbol_features(load_ohlcv_csv(SAMPLE_ENRICH_PASS_OHLCV))
+
+    def test_adv_20d_shares_present(self) -> None:
+        self.assertIn("adv_20d_shares", self.f)
+        self.assertIsInstance(self.f["adv_20d_shares"], int)
+        self.assertGreater(self.f["adv_20d_shares"], 0)
+
+    def test_adv_20d_usd_present(self) -> None:
+        self.assertIn("adv_20d_usd", self.f)
+        self.assertIsInstance(self.f["adv_20d_usd"], float)
+        self.assertGreater(self.f["adv_20d_usd"], 0.0)
+
+    def test_adv_20d_usd_meets_scanner_minimum(self) -> None:
+        # adv_20d_shares=300k * latest_close=5.10 = 1.53M ≥ 500k scanner minimum
+        self.assertGreater(self.f["adv_20d_usd"], 500_000.0)
+
+
+# ---------------------------------------------------------------------------
+# T44 — enrich_universe_rows fills missing computed fields
+# ---------------------------------------------------------------------------
+
+class TestEnrichUniverseRows(unittest.TestCase):
+    def test_enrich_fills_missing_fields(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import enrich_universe_rows
+        rows = [_enrichment_passing_base_row()]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_ohlcv_csv(tmpdir, "ENRICH_PASS")
+            enriched = enrich_universe_rows(rows, ohlcv_dir=tmpdir)
+        self.assertEqual(len(enriched), 1)
+        r = enriched[0]
+        for field in ("ma50", "ma200", "ma50_slope_20d", "ma200_slope_20d",
+                      "consolidation_high", "consolidation_low", "consolidation_range_pct",
+                      "breakout_level", "breakout_rvol", "adv_20d_shares", "adv_20d_usd"):
+            self.assertIn(field, r, f"Enriched row must have '{field}'")
+            self.assertIsNotNone(r[field], f"Enriched row field '{field}' must not be None")
+
+    def test_enrich_does_not_overwrite_existing_field(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import enrich_universe_rows
+        row = _enrichment_passing_base_row()
+        row["ma50"] = 99.0  # pre-set
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_ohlcv_csv(tmpdir, "ENRICH_PASS")
+            enriched = enrich_universe_rows([row], ohlcv_dir=tmpdir)
+        # Pre-set value preserved
+        self.assertAlmostEqual(enriched[0]["ma50"], 99.0)
+
+    def test_base_fields_preserved_after_enrichment(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import enrich_universe_rows
+        row = _enrichment_passing_base_row()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_ohlcv_csv(tmpdir, "ENRICH_PASS")
+            enriched = enrich_universe_rows([row], ohlcv_dir=tmpdir)
+        r = enriched[0]
+        self.assertEqual(r["symbol"], "ENRICH_PASS")
+        self.assertAlmostEqual(r["price"], 5.10)
+        self.assertAlmostEqual(r["bid"], 5.08)
+        self.assertAlmostEqual(r["ask"], 5.12)
+        self.assertFalse(r["gap_flag"])
+        self.assertFalse(r["halt_flag"])
+
+
+# ---------------------------------------------------------------------------
+# T45 — enriched row passes PennyBreakoutScanner
+# ---------------------------------------------------------------------------
+
+class TestEnrichedRowPassesScanner(unittest.TestCase):
+    def test_enriched_row_would_trade_true(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import enrich_universe_rows
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        rows = [_enrichment_passing_base_row()]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_ohlcv_csv(tmpdir, "ENRICH_PASS")
+            enriched = enrich_universe_rows(rows, ohlcv_dir=tmpdir)
+        records = PennyBreakoutScanner(universe=enriched).scan()
+        self.assertEqual(len(records), 1)
+        self.assertTrue(records[0]["would_trade"], f"Rejection: {records[0].get('rejection_reason')}")
+
+    def test_enriched_record_null_order_ids(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import enrich_universe_rows
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        rows = [_enrichment_passing_base_row()]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_ohlcv_csv(tmpdir, "ENRICH_PASS")
+            enriched = enrich_universe_rows(rows, ohlcv_dir=tmpdir)
+        records = PennyBreakoutScanner(universe=enriched).scan()
+        self.assertIsNone(records[0]["paper_order_id"])
+        self.assertIsNone(records[0]["live_order_id"])
+
+    def test_committed_fixture_enrichment_passes_scanner(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import enrich_universe_rows
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        from experiments.exp_penny.universe_loader import load_universe_for_enrichment
+        rows = load_universe_for_enrichment(SAMPLE_ENRICHMENT_UNIVERSE)
+        enriched = enrich_universe_rows(rows, ohlcv_dir=SAMPLES_OHLCV_DIR)
+        records = PennyBreakoutScanner(universe=enriched).scan()
+        passing = [r for r in records if r["would_trade"]]
+        self.assertGreaterEqual(len(passing), 1, "Expected at least one passing candidate from enrichment")
+        self.assertIn("ENRICH_PASS", [r["symbol"] for r in passing])
+
+
+# ---------------------------------------------------------------------------
+# T46 — runner works with --ohlcv-dir
+# ---------------------------------------------------------------------------
+
+class TestRunnerWithOhlcvDir(unittest.TestCase):
+    def test_runner_ohlcv_dir_succeeds(self) -> None:
+        from experiments.exp_engine.scanner_runner import run
+        from experiments.exp_penny.indicator_enrichment import enrich_universe_rows
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        from experiments.exp_penny.universe_loader import load_universe_for_enrichment
+
+        rows = load_universe_for_enrichment(SAMPLE_ENRICHMENT_UNIVERSE)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_ohlcv_csv(tmpdir, "ENRICH_PASS")
+            enriched = enrich_universe_rows(rows, ohlcv_dir=tmpdir)
+            scanner = PennyBreakoutScanner(universe=enriched)
+
+            old = os.environ.pop("MQK_EXPERIMENTAL_ENGINE_ENABLED", None)
+            try:
+                os.environ["MQK_EXPERIMENTAL_ENGINE_ENABLED"] = "true"
+                os.environ["MQK_EXPERIMENTAL_ENGINE_MODE"] = "scanner_only"
+                os.environ["MQK_EXPERIMENTAL_ENGINE_LIVE_ALLOWED"] = "false"
+                os.environ["MQK_EXPERIMENTAL_JOURNAL_DIR"] = tmpdir
+                exit_code = run(scanners=[scanner], argv=["--dry-run"])
+            finally:
+                if old is not None:
+                    os.environ["MQK_EXPERIMENTAL_ENGINE_ENABLED"] = old
+                else:
+                    os.environ.pop("MQK_EXPERIMENTAL_ENGINE_ENABLED", None)
+
+        self.assertEqual(exit_code, 0)
+
+    def test_runner_ohlcv_jsonl_null_order_ids(self) -> None:
+        from experiments.exp_engine.candidate_journal import CandidateJournalWriter
+        from experiments.exp_penny.indicator_enrichment import enrich_universe_rows
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        from experiments.exp_penny.universe_loader import load_universe_for_enrichment
+
+        rows = load_universe_for_enrichment(SAMPLE_ENRICHMENT_UNIVERSE)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _make_ohlcv_csv(tmpdir, "ENRICH_PASS")
+            enriched = enrich_universe_rows(rows, ohlcv_dir=tmpdir)
+            records = PennyBreakoutScanner(universe=enriched).scan()
+            with CandidateJournalWriter(journal_dir=tmpdir, engine_id="exp-engine-core-01") as writer:
+                for rec in records:
+                    writer.append(rec)
+            files = list(Path(tmpdir).glob("*.jsonl"))
+            self.assertEqual(len(files), 1)
+            for line in files[0].read_text(encoding="utf-8").strip().splitlines():
+                obj = json.loads(line)
+                self.assertIsNone(obj["paper_order_id"])
+                self.assertIsNone(obj["live_order_id"])
+
+
+# ---------------------------------------------------------------------------
+# T47 — missing OHLCV file raises clear IndicatorEnrichmentError
+# ---------------------------------------------------------------------------
+
+class TestMissingOhlcvFile(unittest.TestCase):
+    def test_missing_symbol_file_raises_with_symbol_name(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import IndicatorEnrichmentError, enrich_universe_rows
+        rows = [_enrichment_passing_base_row(symbol="NOSUCHSYM")]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(IndicatorEnrichmentError) as ctx:
+                enrich_universe_rows(rows, ohlcv_dir=tmpdir)
+        self.assertIn("NOSUCHSYM", str(ctx.exception))
+
+    def test_missing_ohlcv_dir_raises(self) -> None:
+        from experiments.exp_penny.indicator_enrichment import IndicatorEnrichmentError, enrich_universe_rows
+        rows = [_enrichment_passing_base_row()]
+        with self.assertRaises(IndicatorEnrichmentError):
+            enrich_universe_rows(rows, ohlcv_dir="/nonexistent/ohlcv/dir")
+
+
+# ---------------------------------------------------------------------------
+# T48 — load_universe_for_enrichment: base fields required, computed not
+# ---------------------------------------------------------------------------
+
+class TestLoadUniverseForEnrichment(unittest.TestCase):
+    def test_enrichment_loader_accepts_partial_universe(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe_for_enrichment
+        rows = load_universe_for_enrichment(SAMPLE_ENRICHMENT_UNIVERSE)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["symbol"], "ENRICH_PASS")
+
+    def test_enrichment_loader_rejects_missing_base_field(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe_for_enrichment
+        text = "symbol,price,bid,ask,volume,gap_flag\nTST,5.10,5.08,5.12,700000,false\n"
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, encoding="utf-8") as f:
+            f.write(text)
+            tmp = f.name
+        try:
+            with self.assertRaises(UniverseLoadError) as ctx:
+                load_universe_for_enrichment(tmp)
+            self.assertIn("halt_flag", str(ctx.exception))
+        finally:
+            os.unlink(tmp)
+
+    def test_strict_load_universe_still_requires_computed_fields(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+        # Partial file without ma200_slope_20d must fail strict load_universe
+        with self.assertRaises(UniverseLoadError):
+            load_universe(SAMPLE_ENRICHMENT_UNIVERSE)
+
+
+# ---------------------------------------------------------------------------
+# T49 — no forbidden strings in indicator_enrichment.py
+# ---------------------------------------------------------------------------
+
+class TestIndicatorEnrichmentNoForbiddenStrings(unittest.TestCase):
+    _FORBIDDEN = [
+        "oms_outbox", "oms_inbox", "BrokerGateway", "broker_adapter",
+        "alpaca", "Start-PaperTradingSmoke",
+    ]
+    _NETWORK_MODS = ["import requests", "import urllib", "import http.client", "import aiohttp"]
+
+    def test_no_forbidden_strings_in_indicator_enrichment(self) -> None:
+        src = Path(__file__).parent.parent / "indicator_enrichment.py"
+        self.assertTrue(src.exists(), "indicator_enrichment.py must exist")
+        content = src.read_text(encoding="utf-8")
+        for forbidden in self._FORBIDDEN:
+            self.assertNotIn(forbidden, content,
+                             f"indicator_enrichment.py must not reference '{forbidden}'")
+
+    def test_no_network_imports_in_indicator_enrichment(self) -> None:
+        src = Path(__file__).parent.parent / "indicator_enrichment.py"
+        content = src.read_text(encoding="utf-8")
+        for mod in self._NETWORK_MODS:
+            self.assertNotIn(mod, content,
+                             f"indicator_enrichment.py must not contain '{mod}'")
+
+
 if __name__ == "__main__":
     unittest.main()

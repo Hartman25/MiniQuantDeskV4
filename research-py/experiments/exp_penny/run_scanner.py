@@ -24,9 +24,14 @@ import argparse
 import sys
 
 from experiments.exp_engine.scanner_runner import run
+from experiments.exp_penny.indicator_enrichment import IndicatorEnrichmentError, enrich_universe_rows
 from experiments.exp_penny.scanner import PennyBreakoutScanner
 from experiments.exp_penny.screener_profiles import SUPPORTED_PROFILES
-from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+from experiments.exp_penny.universe_loader import (
+    UniverseLoadError,
+    load_universe,
+    load_universe_for_enrichment,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,11 +57,25 @@ def main(argv: list[str] | None = None) -> int:
         choices=list(SUPPORTED_PROFILES),
         help="CSV column alias profile. Default: generic (canonical headers).",
     )
+    parser.add_argument(
+        "--ohlcv-dir",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Directory containing per-symbol OHLCV CSV files (<SYMBOL>.csv). "
+            "When supplied, computed technical fields are derived from local "
+            "OHLCV bars instead of requiring them in the universe file."
+        ),
+    )
     args, remaining = parser.parse_known_args(argv)
 
     try:
-        universe = load_universe(args.universe, profile=args.profile)
-    except UniverseLoadError as exc:
+        if args.ohlcv_dir is not None:
+            universe = load_universe_for_enrichment(args.universe, profile=args.profile)
+            universe = enrich_universe_rows(universe, ohlcv_dir=args.ohlcv_dir)
+        else:
+            universe = load_universe(args.universe, profile=args.profile)
+    except (UniverseLoadError, IndicatorEnrichmentError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 

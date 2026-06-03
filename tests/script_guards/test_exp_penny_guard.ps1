@@ -178,6 +178,32 @@ foreach ($netImport in $NetworkModules) {
     }
 }
 
+# G13: indicator_enrichment.py must exist and must not reference forbidden patterns
+Write-Host ''
+Write-Host '--- G13: indicator_enrichment.py must exist and be clean ---'
+$enrichmentPath = Join-Path $ExpPennyDir 'indicator_enrichment.py'
+if (Test-Path $enrichmentPath) {
+    Pass "indicator_enrichment.py exists"
+    $enrichmentContent = Get-Content $enrichmentPath -Raw
+    foreach ($key in $ForbiddenPatterns.Keys) {
+        $pattern = $ForbiddenPatterns[$key]
+        if ($enrichmentContent -match [regex]::Escape($pattern)) {
+            Fail "indicator_enrichment.py references '$pattern'"
+        } else {
+            Pass "indicator_enrichment.py does not reference '$pattern'"
+        }
+    }
+    foreach ($netImport in $NetworkModules) {
+        if ($enrichmentContent -match [regex]::Escape($netImport)) {
+            Fail "indicator_enrichment.py contains forbidden network import '$netImport'"
+        } else {
+            Pass "indicator_enrichment.py does not contain '$netImport'"
+        }
+    }
+} else {
+    Fail "indicator_enrichment.py not found at $enrichmentPath"
+}
+
 # Summary
 Write-Host ''
 Write-Host '============================================================'

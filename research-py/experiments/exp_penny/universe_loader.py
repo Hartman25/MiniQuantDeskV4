@@ -21,21 +21,27 @@ from typing import Any
 from experiments.exp_penny.screener_profiles import SUPPORTED_PROFILES, apply_profile
 
 
-REQUIRED_FIELDS: tuple[str, ...] = (
+REQUIRED_BASE_FIELDS: tuple[str, ...] = (
     "symbol",
     "price",
     "bid",
     "ask",
     "volume",
+    "gap_flag",
+    "halt_flag",
+)
+
+REQUIRED_COMPUTED_FIELDS: tuple[str, ...] = (
     "adv_20d_usd",
     "ma200_slope_20d",
     "ma50_slope_20d",
     "consolidation_range_pct",
     "breakout_level",
     "breakout_rvol",
-    "gap_flag",
-    "halt_flag",
 )
+
+# Default: all fields required. Use load_universe_for_enrichment for partial loads.
+REQUIRED_FIELDS: tuple[str, ...] = REQUIRED_BASE_FIELDS + REQUIRED_COMPUTED_FIELDS
 
 FLOAT_FIELDS: frozenset[str] = frozenset(
     (
@@ -131,11 +137,15 @@ def _coerce_csv_row(raw: dict[str, str], row_num: int) -> dict[str, Any]:
     return out
 
 
-def _validate_row(row: dict[str, Any], row_num: int) -> None:
+def _validate_row(
+    row: dict[str, Any],
+    row_num: int,
+    required_fields: tuple[str, ...] = REQUIRED_FIELDS,
+) -> None:
     symbol = row.get("symbol")
     if not symbol or (isinstance(symbol, str) and not symbol.strip()):
         raise UniverseLoadError(f"Row {row_num}: 'symbol' is blank or missing.")
-    for field in REQUIRED_FIELDS:
+    for field in required_fields:
         if field not in row:
             raise UniverseLoadError(
                 f"Row {row_num} (symbol={symbol!r}): required field '{field}' is missing."
@@ -169,7 +179,11 @@ def _load_json(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _load_csv(path: Path, profile: str = "generic") -> list[dict[str, Any]]:
+def _load_csv(
+    path: Path,
+    profile: str = "generic",
+    required_fields: tuple[str, ...] = REQUIRED_FIELDS,
+) -> list[dict[str, Any]]:
     if profile not in SUPPORTED_PROFILES:
         raise UniverseLoadError(
             f"Unsupported profile '{profile}'. "
@@ -195,7 +209,7 @@ def _load_csv(path: Path, profile: str = "generic") -> list[dict[str, Any]]:
     mapped_headers = apply_profile(raw_headers, profile)
     header_map = dict(zip(raw_headers, mapped_headers))
 
-    for req in REQUIRED_FIELDS:
+    for req in required_fields:
         if req not in mapped_headers:
             raise UniverseLoadError(
                 f"CSV is missing required column '{req}' (profile={profile!r}). "
@@ -210,7 +224,7 @@ def _load_csv(path: Path, profile: str = "generic") -> list[dict[str, Any]]:
             if k is not None
         }
         coerced = _coerce_csv_row(remapped, i)
-        _validate_row(coerced, i)
+        _validate_row(coerced, i, required_fields=required_fields)
         rows.append(coerced)
 
     if not rows:
@@ -242,6 +256,60 @@ def load_universe(path: str | Path, profile: str = "generic") -> list[dict[str, 
         return _load_json(p)
     if suffix == ".csv":
         return _load_csv(p, profile=profile)
+
+    raise UniverseLoadError(
+        f"Unsupported universe file extension '{suffix}'. Supported: .json, .csv"
+    )
+
+
+def load_universe_for_enrichment(
+    path: str | Path,
+    profile: str = "generic",
+) -> list[dict[str, Any]]:
+    """
+    Load a universe file for the OHLCV enrichment path.
+
+    Only base fields (symbol, price, bid, ask, volume, gap_flag, halt_flag) are
+    required. Computed technical fields (ma200_slope_20d, breakout_rvol, etc.) are
+    NOT required — they will be filled in by enrich_universe_rows.
+
+    After enrichment, the resulting rows must be validated against the full scanner
+    gate set. This function intentionally relaxes only the computed-field requirement;
+    all base fields and coercion rules still apply.
+
+    Raises UniverseLoadError on file I/O or validation failure.
+    """
+    p = Path(path)
+
+    if not p.exists():
+        raise UniverseLoadError(f"Universe file not found: {p}")
+
+    suffix = p.suffix.lower()
+    if suffix == ".json":
+        # JSON: load normally then drop computed-field requirement from validation
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise UniverseLoadError(f"Cannot read file: {exc}") from exc
+        try:
+            import json as _json
+            raw = _json.loads(text)
+        except Exception as exc:
+            raise UniverseLoadError(f"File is not valid JSON: {exc}") from exc
+        if not isinstance(raw, list):
+            raise UniverseLoadError("JSON universe file must be an array at the root level.")
+        rows: list[dict[str, Any]] = []
+        for i, item in enumerate(raw, start=1):
+            if not isinstance(item, dict):
+                raise UniverseLoadError(f"Row {i}: expected a JSON object.")
+            _validate_row(item, i, required_fields=REQUIRED_BASE_FIELDS)
+            rows.append(item)
+        if not rows:
+            raise UniverseLoadError("Universe file is empty — no rows found.")
+        return rows
+
+    if suffix == ".csv":
+        return _load_csv(p, profile=profile, required_fields=REQUIRED_BASE_FIELDS)
 
     raise UniverseLoadError(
         f"Unsupported universe file extension '{suffix}'. Supported: .json, .csv"
