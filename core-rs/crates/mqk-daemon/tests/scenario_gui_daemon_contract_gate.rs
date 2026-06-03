@@ -212,7 +212,10 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
             );
             // Only us_equities must appear in default_enabled_asset_classes.
             let enabled = &matrix["default_enabled_asset_classes"];
-            assert!(enabled.is_array(), "default_enabled_asset_classes must be an array");
+            assert!(
+                enabled.is_array(),
+                "default_enabled_asset_classes must be an array"
+            );
             let enabled_arr = enabled.as_array().unwrap();
             assert_eq!(
                 enabled_arr.len(),
