@@ -724,5 +724,370 @@ class TestNoForbiddenStringsIncludingLoader(unittest.TestCase):
             self.assertNotIn(forbidden, content, f"universe_loader.py must not reference '{forbidden}'")
 
 
+# ---------------------------------------------------------------------------
+# Sample file paths for screener profile tests
+# ---------------------------------------------------------------------------
+
+SAMPLES_DIR = Path(__file__).parent.parent / "samples"
+SAMPLE_GENERIC = SAMPLES_DIR / "sample_generic_universe.csv"
+SAMPLE_FINVIZ = SAMPLES_DIR / "sample_finviz_export.csv"
+SAMPLE_TRADINGVIEW = SAMPLES_DIR / "sample_tradingview_export.csv"
+
+
+# ---------------------------------------------------------------------------
+# T24 — generic profile: canonical headers load correctly
+# ---------------------------------------------------------------------------
+
+class TestGenericProfileLoad(unittest.TestCase):
+    def test_generic_sample_loads_2_rows(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_GENERIC, profile="generic")
+        self.assertEqual(len(rows), 2)
+
+    def test_generic_sample_symbols(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_GENERIC, profile="generic")
+        symbols = {r["symbol"] for r in rows}
+        self.assertIn("GPASS", symbols)
+        self.assertIn("GFAIL", symbols)
+
+    def test_generic_no_profile_arg_same_result(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows_default = load_universe(SAMPLE_GENERIC)
+        rows_explicit = load_universe(SAMPLE_GENERIC, profile="generic")
+        self.assertEqual(len(rows_default), len(rows_explicit))
+
+
+# ---------------------------------------------------------------------------
+# T25 — generic profile: produces 1 pass, 1 reject from sample
+# ---------------------------------------------------------------------------
+
+class TestGenericProfilePassReject(unittest.TestCase):
+    def test_generic_sample_pass_reject_counts(self) -> None:
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        from experiments.exp_penny.universe_loader import load_universe
+
+        rows = load_universe(SAMPLE_GENERIC, profile="generic")
+        records = PennyBreakoutScanner(universe=rows).scan()
+
+        passing = [r for r in records if r["would_trade"]]
+        rejected = [r for r in records if not r["would_trade"]]
+
+        self.assertEqual(len(passing), 1, "Expected exactly 1 passing candidate in generic sample")
+        self.assertEqual(len(rejected), 1, "Expected exactly 1 rejected candidate in generic sample")
+        self.assertEqual(passing[0]["symbol"], "GPASS")
+
+
+# ---------------------------------------------------------------------------
+# T26 — finviz profile: alias mapping produces canonical rows
+# ---------------------------------------------------------------------------
+
+class TestFinvizProfileAliasMapping(unittest.TestCase):
+    def test_finviz_sample_loads_2_rows(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_FINVIZ, profile="finviz")
+        self.assertEqual(len(rows), 2)
+
+    def test_finviz_symbol_mapped_from_ticker(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_FINVIZ, profile="finviz")
+        symbols = {r["symbol"] for r in rows}
+        self.assertIn("FVPASS", symbols)
+        self.assertIn("FVFAIL", symbols)
+
+    def test_finviz_price_mapped_from_Price(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_FINVIZ, profile="finviz")
+        fvpass = next(r for r in rows if r["symbol"] == "FVPASS")
+        self.assertAlmostEqual(fvpass["price"], 4.85)
+
+    def test_finviz_breakout_rvol_mapped_from_rel_volume(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_FINVIZ, profile="finviz")
+        fvpass = next(r for r in rows if r["symbol"] == "FVPASS")
+        self.assertAlmostEqual(fvpass["breakout_rvol"], 2.8)
+
+
+# ---------------------------------------------------------------------------
+# T27 — finviz profile: produces 1 pass, 1 reject from sample
+# ---------------------------------------------------------------------------
+
+class TestFinvizProfilePassReject(unittest.TestCase):
+    def test_finviz_sample_pass_reject_counts(self) -> None:
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        from experiments.exp_penny.universe_loader import load_universe
+
+        rows = load_universe(SAMPLE_FINVIZ, profile="finviz")
+        records = PennyBreakoutScanner(universe=rows).scan()
+
+        passing = [r for r in records if r["would_trade"]]
+        rejected = [r for r in records if not r["would_trade"]]
+
+        self.assertEqual(len(passing), 1, "Expected exactly 1 passing candidate in finviz sample")
+        self.assertEqual(len(rejected), 1, "Expected exactly 1 rejected candidate in finviz sample")
+        self.assertEqual(passing[0]["symbol"], "FVPASS")
+        self.assertEqual(rejected[0]["symbol"], "FVFAIL")
+
+    def test_finviz_rejected_reason_halt_flag(self) -> None:
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        from experiments.exp_penny.universe_loader import load_universe
+
+        rows = load_universe(SAMPLE_FINVIZ, profile="finviz")
+        records = PennyBreakoutScanner(universe=rows).scan()
+        fvfail = next(r for r in records if r["symbol"] == "FVFAIL")
+        self.assertEqual(fvfail["rejection_reason"], "halt_flag_set")
+
+
+# ---------------------------------------------------------------------------
+# T28 — tradingview profile: alias mapping produces canonical rows
+# ---------------------------------------------------------------------------
+
+class TestTradingviewProfileAliasMapping(unittest.TestCase):
+    def test_tradingview_sample_loads_2_rows(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_TRADINGVIEW, profile="tradingview")
+        self.assertEqual(len(rows), 2)
+
+    def test_tradingview_symbol_mapped_from_Symbol(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_TRADINGVIEW, profile="tradingview")
+        symbols = {r["symbol"] for r in rows}
+        self.assertIn("TVPASS", symbols)
+        self.assertIn("TVFAIL", symbols)
+
+    def test_tradingview_price_mapped_from_Last(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_TRADINGVIEW, profile="tradingview")
+        tvpass = next(r for r in rows if r["symbol"] == "TVPASS")
+        self.assertAlmostEqual(tvpass["price"], 4.85)
+
+    def test_tradingview_breakout_rvol_mapped_from_relative_volume(self) -> None:
+        from experiments.exp_penny.universe_loader import load_universe
+        rows = load_universe(SAMPLE_TRADINGVIEW, profile="tradingview")
+        tvpass = next(r for r in rows if r["symbol"] == "TVPASS")
+        self.assertAlmostEqual(tvpass["breakout_rvol"], 2.8)
+
+
+# ---------------------------------------------------------------------------
+# T29 — tradingview profile: produces 1 pass, 1 reject from sample
+# ---------------------------------------------------------------------------
+
+class TestTradingviewProfilePassReject(unittest.TestCase):
+    def test_tradingview_sample_pass_reject_counts(self) -> None:
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        from experiments.exp_penny.universe_loader import load_universe
+
+        rows = load_universe(SAMPLE_TRADINGVIEW, profile="tradingview")
+        records = PennyBreakoutScanner(universe=rows).scan()
+
+        passing = [r for r in records if r["would_trade"]]
+        rejected = [r for r in records if not r["would_trade"]]
+
+        self.assertEqual(len(passing), 1, "Expected exactly 1 passing candidate in tradingview sample")
+        self.assertEqual(len(rejected), 1, "Expected exactly 1 rejected candidate in tradingview sample")
+        self.assertEqual(passing[0]["symbol"], "TVPASS")
+        self.assertEqual(rejected[0]["symbol"], "TVFAIL")
+
+    def test_tradingview_rejected_reason_price_below_min(self) -> None:
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        from experiments.exp_penny.universe_loader import load_universe
+
+        rows = load_universe(SAMPLE_TRADINGVIEW, profile="tradingview")
+        records = PennyBreakoutScanner(universe=rows).scan()
+        tvfail = next(r for r in records if r["symbol"] == "TVFAIL")
+        self.assertIn("price_below_min", tvfail["rejection_reason"])
+
+
+# ---------------------------------------------------------------------------
+# T30 — unsupported profile raises UniverseLoadError
+# ---------------------------------------------------------------------------
+
+class TestUnsupportedProfile(unittest.TestCase):
+    def test_unknown_profile_raises(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+        with self.assertRaises(UniverseLoadError) as ctx:
+            load_universe(SAMPLE_GENERIC, profile="bloomberg")
+        self.assertIn("bloomberg", str(ctx.exception))
+
+    def test_error_mentions_supported_profiles(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+        with self.assertRaises(UniverseLoadError) as ctx:
+            load_universe(SAMPLE_GENERIC, profile="unknown_xyz")
+        msg = str(ctx.exception)
+        self.assertIn("generic", msg)
+
+
+# ---------------------------------------------------------------------------
+# T31 — missing required field after profile mapping raises UniverseLoadError
+# ---------------------------------------------------------------------------
+
+class TestMissingFieldAfterProfileMapping(unittest.TestCase):
+    def test_finviz_profile_missing_halt_flag_raises(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+        import tempfile
+
+        # CSV using Finviz aliases but omitting halt_flag
+        text = (
+            "Ticker,Price,bid,ask,Volume,adv_20d_usd,Rel Volume,"
+            "ma200_slope_20d,ma50_slope_20d,consolidation_range_pct,breakout_level,gap_flag\n"
+            "TST,4.85,4.83,4.87,850000,2975000.0,2.8,0.012,0.025,9.6,4.80,false\n"
+        )
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, encoding="utf-8") as f:
+            f.write(text)
+            tmp_path = f.name
+
+        try:
+            with self.assertRaises(UniverseLoadError) as ctx:
+                load_universe(tmp_path, profile="finviz")
+            self.assertIn("halt_flag", str(ctx.exception))
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+    def test_generic_profile_missing_required_column_raises(self) -> None:
+        from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
+        import tempfile
+
+        text = (
+            "symbol,price,bid,ask,volume,adv_20d_usd,ma200_slope_20d,"
+            "ma50_slope_20d,consolidation_range_pct,breakout_level,breakout_rvol,gap_flag\n"
+            "TST,4.85,4.83,4.87,850000,2975000.0,0.012,0.025,9.6,4.80,2.8,false\n"
+        )
+        with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, encoding="utf-8") as f:
+            f.write(text)
+            tmp_path = f.name
+
+        try:
+            with self.assertRaises(UniverseLoadError) as ctx:
+                load_universe(tmp_path, profile="generic")
+            self.assertIn("halt_flag", str(ctx.exception))
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# T32 — runner accepts --profile finviz and --profile tradingview
+# ---------------------------------------------------------------------------
+
+class TestRunnerAcceptsProfileArg(unittest.TestCase):
+    def _run_with_env(self, path: str, profile: str) -> int:
+        from experiments.exp_engine.scanner_runner import run
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        from experiments.exp_penny.universe_loader import load_universe
+
+        rows = load_universe(path, profile=profile)
+        scanner = PennyBreakoutScanner(universe=rows)
+        old = os.environ.pop("MQK_EXPERIMENTAL_ENGINE_ENABLED", None)
+        try:
+            os.environ["MQK_EXPERIMENTAL_ENGINE_ENABLED"] = "true"
+            os.environ["MQK_EXPERIMENTAL_ENGINE_MODE"] = "scanner_only"
+            os.environ["MQK_EXPERIMENTAL_ENGINE_LIVE_ALLOWED"] = "false"
+            with tempfile.TemporaryDirectory() as tmpdir:
+                os.environ["MQK_EXPERIMENTAL_JOURNAL_DIR"] = tmpdir
+                exit_code = run(scanners=[scanner], argv=["--dry-run"])
+        finally:
+            if old is not None:
+                os.environ["MQK_EXPERIMENTAL_ENGINE_ENABLED"] = old
+            else:
+                os.environ.pop("MQK_EXPERIMENTAL_ENGINE_ENABLED", None)
+        return exit_code
+
+    def test_runner_finviz_profile_succeeds(self) -> None:
+        exit_code = self._run_with_env(str(SAMPLE_FINVIZ), "finviz")
+        self.assertEqual(exit_code, 0)
+
+    def test_runner_tradingview_profile_succeeds(self) -> None:
+        exit_code = self._run_with_env(str(SAMPLE_TRADINGVIEW), "tradingview")
+        self.assertEqual(exit_code, 0)
+
+
+# ---------------------------------------------------------------------------
+# T33 — JSONL output from finviz profile has null paper/live order IDs
+# ---------------------------------------------------------------------------
+
+class TestJsonlNullOrderIdsFromFinvizProfile(unittest.TestCase):
+    def test_finviz_jsonl_null_order_ids(self) -> None:
+        from experiments.exp_engine.candidate_journal import CandidateJournalWriter
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        from experiments.exp_penny.universe_loader import load_universe
+
+        rows = load_universe(SAMPLE_FINVIZ, profile="finviz")
+        records = PennyBreakoutScanner(universe=rows).scan()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with CandidateJournalWriter(journal_dir=tmpdir, engine_id="exp-engine-core-01") as writer:
+                for rec in records:
+                    writer.append(rec)
+
+            files = list(Path(tmpdir).glob("*.jsonl"))
+            self.assertEqual(len(files), 1)
+            lines = files[0].read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(lines), 2)
+
+            for line in lines:
+                obj = json.loads(line)
+                self.assertIsNone(obj["paper_order_id"])
+                self.assertIsNone(obj["live_order_id"])
+
+
+# ---------------------------------------------------------------------------
+# T34 — no network import modules in exp_penny source
+# ---------------------------------------------------------------------------
+
+class TestNoNetworkImports(unittest.TestCase):
+    _NETWORK_MODULES = ["requests", "urllib", "http.client", "aiohttp"]
+    _EXP_PENNY_DIR = Path(__file__).parent.parent
+
+    def test_no_network_imports_in_exp_penny_source(self) -> None:
+        py_files = [p for p in self._EXP_PENNY_DIR.rglob("*.py") if "test_" not in p.name]
+        self.assertGreater(len(py_files), 0)
+        for src in py_files:
+            content = src.read_text(encoding="utf-8")
+            for mod in self._NETWORK_MODULES:
+                self.assertNotIn(
+                    f"import {mod}",
+                    content,
+                    f"{src.name} must not import network module '{mod}'",
+                )
+
+
+# ---------------------------------------------------------------------------
+# T35 — screener_profiles module: apply_profile is pure and correct
+# ---------------------------------------------------------------------------
+
+class TestScreenerProfilesModule(unittest.TestCase):
+    def test_generic_no_remapping(self) -> None:
+        from experiments.exp_penny.screener_profiles import apply_profile
+        headers = ["symbol", "price", "bid", "ask"]
+        self.assertEqual(apply_profile(headers, "generic"), headers)
+
+    def test_finviz_ticker_becomes_symbol(self) -> None:
+        from experiments.exp_penny.screener_profiles import apply_profile
+        result = apply_profile(["Ticker", "Price", "bid"], "finviz")
+        self.assertEqual(result, ["symbol", "price", "bid"])
+
+    def test_tradingview_last_becomes_price(self) -> None:
+        from experiments.exp_penny.screener_profiles import apply_profile
+        result = apply_profile(["Symbol", "Last", "bid"], "tradingview")
+        self.assertEqual(result, ["symbol", "price", "bid"])
+
+    def test_tradingview_close_becomes_price(self) -> None:
+        from experiments.exp_penny.screener_profiles import apply_profile
+        result = apply_profile(["Symbol", "Close", "bid"], "tradingview")
+        self.assertEqual(result, ["symbol", "price", "bid"])
+
+    def test_unknown_profile_raises_key_error(self) -> None:
+        from experiments.exp_penny.screener_profiles import apply_profile
+        with self.assertRaises(KeyError):
+            apply_profile(["symbol"], "bloomberg")
+
+    def test_passthrough_unknown_headers(self) -> None:
+        from experiments.exp_penny.screener_profiles import apply_profile
+        result = apply_profile(["SomeUnknownCol", "Price"], "finviz")
+        self.assertEqual(result[0], "SomeUnknownCol")
+        self.assertEqual(result[1], "price")
+
+
 if __name__ == "__main__":
     unittest.main()

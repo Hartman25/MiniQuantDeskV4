@@ -9,11 +9,14 @@ Usage (requires explicit --dry-run and MQK_EXPERIMENTAL_ENGINE_ENABLED=true):
     $env:MQK_EXPERIMENTAL_ENGINE_LIVE_ALLOWED="false"
     $env:MQK_EXPERIMENTAL_JOURNAL_DIR="exports/experimental/candidates"
 
-    python -m experiments.exp_penny.run_scanner --dry-run --universe research-py/experiments/exp_penny/sample_universe.json
-    python -m experiments.exp_penny.run_scanner --dry-run --universe research-py/experiments/exp_penny/sample_universe.csv
+    python -m experiments.exp_penny.run_scanner --dry-run --universe sample_universe.json
+    python -m experiments.exp_penny.run_scanner --dry-run --universe sample_universe.csv
+    python -m experiments.exp_penny.run_scanner --dry-run --universe samples/sample_finviz_export.csv --profile finviz
+    python -m experiments.exp_penny.run_scanner --dry-run --universe samples/sample_tradingview_export.csv --profile tradingview
 
 Scanner-only. No orders. No broker calls. No OMS writes.
 Supports .json and .csv universe files via universe_loader.
+Profile controls CSV column alias mapping (default: generic).
 """
 from __future__ import annotations
 
@@ -22,6 +25,7 @@ import sys
 
 from experiments.exp_engine.scanner_runner import run
 from experiments.exp_penny.scanner import PennyBreakoutScanner
+from experiments.exp_penny.screener_profiles import SUPPORTED_PROFILES
 from experiments.exp_penny.universe_loader import UniverseLoadError, load_universe
 
 
@@ -42,10 +46,16 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="Path to a .json or .csv file containing the universe.",
     )
+    parser.add_argument(
+        "--profile",
+        default="generic",
+        choices=list(SUPPORTED_PROFILES),
+        help="CSV column alias profile. Default: generic (canonical headers).",
+    )
     args, remaining = parser.parse_known_args(argv)
 
     try:
-        universe = load_universe(args.universe)
+        universe = load_universe(args.universe, profile=args.profile)
     except UniverseLoadError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

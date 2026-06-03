@@ -8,6 +8,8 @@ Usage:
     from experiments.exp_penny.universe_loader import load_universe
     rows = load_universe("sample_universe.json")
     rows = load_universe("sample_universe.csv")
+    rows = load_universe("finviz_export.csv", profile="finviz")
+    rows = load_universe("tv_export.csv", profile="tradingview")
 """
 from __future__ import annotations
 
@@ -15,6 +17,8 @@ import csv
 import json
 from pathlib import Path
 from typing import Any
+
+from experiments.exp_penny.screener_profiles import SUPPORTED_PROFILES, apply_profile
 
 
 REQUIRED_FIELDS: tuple[str, ...] = (
@@ -165,7 +169,13 @@ def _load_json(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _load_csv(path: Path) -> list[dict[str, Any]]:
+def _load_csv(path: Path, profile: str = "generic") -> list[dict[str, Any]]:
+    if profile not in SUPPORTED_PROFILES:
+        raise UniverseLoadError(
+            f"Unsupported profile '{profile}'. "
+            f"Supported profiles: {', '.join(SUPPORTED_PROFILES)}"
+        )
+
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -181,18 +191,25 @@ def _load_csv(path: Path) -> list[dict[str, Any]]:
     if reader.fieldnames is None:
         raise UniverseLoadError("Universe CSV file has no header row.")
 
-    headers = [h.strip() for h in reader.fieldnames if h is not None]
+    raw_headers = [h.strip() for h in reader.fieldnames if h is not None]
+    mapped_headers = apply_profile(raw_headers, profile)
+    header_map = dict(zip(raw_headers, mapped_headers))
 
     for req in REQUIRED_FIELDS:
-        if req not in headers:
+        if req not in mapped_headers:
             raise UniverseLoadError(
-                f"CSV is missing required column '{req}'. "
-                f"Found columns: {headers}"
+                f"CSV is missing required column '{req}' (profile={profile!r}). "
+                f"Found columns after profile mapping: {mapped_headers}"
             )
 
     rows: list[dict[str, Any]] = []
     for i, raw_row in enumerate(reader, start=2):  # row 1 is header
-        coerced = _coerce_csv_row(dict(raw_row), i)
+        remapped = {
+            header_map.get(k.strip(), k.strip()): v
+            for k, v in raw_row.items()
+            if k is not None
+        }
+        coerced = _coerce_csv_row(remapped, i)
         _validate_row(coerced, i)
         rows.append(coerced)
 
@@ -202,11 +219,18 @@ def _load_csv(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def load_universe(path: str | Path) -> list[dict[str, Any]]:
+def load_universe(path: str | Path, profile: str = "generic") -> list[dict[str, Any]]:
     """
     Load a universe file (.json or .csv) and return a list of row dicts.
 
-    Raises UniverseLoadError on any validation failure.
+    profile controls CSV column alias mapping:
+      "generic"     — canonical headers only (default, backward-compatible)
+      "finviz"      — maps Finviz screener export column names
+      "tradingview" — maps TradingView screener export column names
+
+    profile is ignored for .json files (JSON must already use canonical keys).
+
+    Raises UniverseLoadError on any validation or profile failure.
     """
     p = Path(path)
 
@@ -217,7 +241,7 @@ def load_universe(path: str | Path) -> list[dict[str, Any]]:
     if suffix == ".json":
         return _load_json(p)
     if suffix == ".csv":
-        return _load_csv(p)
+        return _load_csv(p, profile=profile)
 
     raise UniverseLoadError(
         f"Unsupported universe file extension '{suffix}'. Supported: .json, .csv"

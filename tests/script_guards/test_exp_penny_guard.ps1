@@ -142,6 +142,42 @@ if (Test-Path $loaderPath) {
     Fail "universe_loader.py not found at $loaderPath"
 }
 
+# G11: screener_profiles.py must exist and must not reference forbidden patterns
+Write-Host ''
+Write-Host '--- G11: screener_profiles.py must exist and be clean ---'
+$profilerPath = Join-Path $ExpPennyDir 'screener_profiles.py'
+if (Test-Path $profilerPath) {
+    Pass "screener_profiles.py exists"
+    $profilerContent = Get-Content $profilerPath -Raw
+    foreach ($key in $ForbiddenPatterns.Keys) {
+        $pattern = $ForbiddenPatterns[$key]
+        if ($profilerContent -match [regex]::Escape($pattern)) {
+            Fail "screener_profiles.py references '$pattern'"
+        } else {
+            Pass "screener_profiles.py does not reference '$pattern'"
+        }
+    }
+} else {
+    Fail "screener_profiles.py not found at $profilerPath"
+}
+
+# G12: no network import modules in exp_penny source files
+Write-Host ''
+Write-Host '--- G12: exp_penny source must not import network modules ---'
+$NetworkModules = @('import requests', 'import urllib', 'import http.client', 'import aiohttp')
+foreach ($netImport in $NetworkModules) {
+    $hits = $SourceFiles | Where-Object {
+        (Get-Content $_.FullName -Raw) -match [regex]::Escape($netImport)
+    }
+    if ($hits) {
+        foreach ($hit in $hits) {
+            Fail "$($hit.Name) contains forbidden network import '$netImport'"
+        }
+    } else {
+        Pass "No exp_penny source file contains '$netImport'"
+    }
+}
+
 # Summary
 Write-Host ''
 Write-Host '============================================================'

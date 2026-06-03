@@ -1,0 +1,3 @@
+Ticker,Price,bid,ask,Volume,Average Volume,adv_20d_usd,Rel Volume,ma200,ma200_slope_20d,ma50,ma50_slope_20d,consolidation_high,consolidation_low,consolidation_range_pct,breakout_level,gap_flag,halt_flag,news_flag
+FVPASS,4.85,4.83,4.87,850000,620000,2975000.0,2.8,3.90,0.012,4.50,0.025,4.80,4.35,9.6,4.80,false,false,
+FVFAIL,7.20,7.18,7.22,900000,800000,5760000.0,3.0,6.50,0.015,7.00,0.020,7.15,6.80,5.0,7.15,false,true,
