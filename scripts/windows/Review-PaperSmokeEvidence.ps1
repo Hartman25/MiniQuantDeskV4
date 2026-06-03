@@ -92,32 +92,86 @@ $FolderName = Split-Path -Leaf $EvidencePath
 
 # ---------------------------------------------------------------------------
 # Secret scan helper  --  warn on likely secrets, never print values
+#
+# Test-SecretLeakLine: inspects one line for actual secret leakage.
+# Returns a result object (PatternName/Reason/FilePath/LineNo) or $null.
+# Never returns or prints the secret value itself.
 # ---------------------------------------------------------------------------
-$SecretPatterns = @(
-    'ALPACA_API_SECRET',
-    'MQK_OPERATOR_TOKEN',
-    'DISCORD',
-    'Bearer ',
-    # Long alphanumeric strings that look like API keys (20+ chars with no spaces)
-    '[A-Za-z0-9_\-]{32,}'
-)
+
+# Values that are redacted placeholders -- do not flag these.
+$RedactedPlaceholders = @('[REDACTED]', '<redacted>', '***', '')
+
+function Test-SecretLeakLine {
+    param([string]$Line, [string]$FilePath, [int]$LineNo)
+
+    # Env-var style assignments: KEY=value where value is non-empty and non-redacted.
+    # Each entry: Name and the regex that captures the value in group 1.
+    $envPatterns = @(
+        @{ Name = 'ALPACA_API_SECRET_PAPER'; Pattern = 'ALPACA_API_SECRET_PAPER\s*=\s*(.+)' },
+        @{ Name = 'ALPACA_API_KEY_PAPER';    Pattern = 'ALPACA_API_KEY_PAPER\s*=\s*(.+)'    },
+        @{ Name = 'ALPACA_API_SECRET';       Pattern = 'ALPACA_API_SECRET\s*=\s*(.+)'       },
+        @{ Name = 'ALPACA_API_KEY';          Pattern = 'ALPACA_API_KEY\s*=\s*(.+)'          },
+        @{ Name = 'MQK_OPERATOR_TOKEN';      Pattern = 'MQK_OPERATOR_TOKEN\s*=\s*(.+)'      },
+        @{ Name = 'DISCORD_WEBHOOK_URL';     Pattern = 'DISCORD_WEBHOOK_URL\s*=\s*(.+)'     },
+        @{ Name = 'DISCORD_BOT_TOKEN';       Pattern = 'DISCORD_BOT_TOKEN\s*=\s*(.+)'       }
+    )
+
+    foreach ($ep in $envPatterns) {
+        if ($Line -match $ep.Pattern) {
+            $val = $Matches[1].Trim()
+            if ($val -ne '' -and $val -notin $script:RedactedPlaceholders) {
+                return [PSCustomObject]@{
+                    PatternName = $ep.Name
+                    Reason      = 'env-var assignment with non-empty value'
+                    FilePath    = $FilePath
+                    LineNo      = $LineNo
+                }
+            }
+        }
+    }
+
+    # Authorization: Bearer <token>  -- only flag when followed by a real token (>8 non-whitespace chars).
+    if ($Line -match 'Authorization\s*:\s*Bearer\s+(\S+)') {
+        $token = $Matches[1].Trim()
+        if ($token.Length -gt 8 -and $token -notin $script:RedactedPlaceholders) {
+            return [PSCustomObject]@{
+                PatternName = 'Authorization-Bearer'
+                Reason      = 'Authorization header with non-trivial Bearer token'
+                FilePath    = $FilePath
+                LineNo      = $LineNo
+            }
+        }
+    } elseif ($Line -match 'Bearer\s+([A-Za-z0-9_\-\.]{20,})') {
+        # Bare "Bearer <long-token>" outside of an Authorization header.
+        $token = $Matches[1].Trim()
+        if ($token -notin $script:RedactedPlaceholders) {
+            return [PSCustomObject]@{
+                PatternName = 'Bearer-long-token'
+                Reason      = 'Bearer token (long value, >=20 chars)'
+                FilePath    = $FilePath
+                LineNo      = $LineNo
+            }
+        }
+    }
+
+    return $null
+}
 
 $SecretWarnings = [System.Collections.Generic.List[string]]::new()
 
 function Invoke-SecretScan {
     param([string]$FilePath)
-    $content = Get-Content $FilePath -Raw -ErrorAction SilentlyContinue
-    if (-not $content) { return }
-    foreach ($pat in @('ALPACA_API_SECRET', 'MQK_OPERATOR_TOKEN', 'DISCORD', 'Bearer ')) {
-        if ($content -match [regex]::Escape($pat)) {
-            $script:SecretWarnings.Add("POSSIBLE SECRET in $FilePath  --  pattern: $pat")
-        }
-    }
-    # Check for suspiciously long tokens only in non-JSON non-log non-summary files
-    $ext = [System.IO.Path]::GetExtension($FilePath).ToLower()
-    if ($ext -notin @('.json', '.md', '.txt')) {
-        if ($content -match '[A-Za-z0-9_\-]{40,}') {
-            $script:SecretWarnings.Add("POSSIBLE LONG KEY in $FilePath  --  review manually")
+    $lines = Get-Content $FilePath -ErrorAction SilentlyContinue
+    if (-not $lines) { return }
+    $lineNo = 0
+    foreach ($line in $lines) {
+        $lineNo++
+        $hit = Test-SecretLeakLine -Line $line -FilePath $FilePath -LineNo $lineNo
+        if ($null -ne $hit) {
+            # Report pattern, location, and reason -- never the value.
+            $script:SecretWarnings.Add(
+                "POSSIBLE SECRET: pattern=$($hit.PatternName)  reason=$($hit.Reason)  file=$(Split-Path -Leaf $hit.FilePath)  line=$($hit.LineNo)"
+            )
         }
     }
 }

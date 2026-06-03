@@ -85,6 +85,53 @@ Assert-True ($Content -match 'review_summary\.md') 'WriteSummary writes review_s
 # 13. Schema version present (review-v1)
 Assert-True ($Content -match 'review-v1') 'JSON output includes schema_version review-v1'
 
+# 14. Secret scan uses Test-SecretLeakLine helper (targeted patterns, not bare words)
+Assert-True ($Content -match 'Test-SecretLeakLine') 'Contains Test-SecretLeakLine helper function'
+
+# 15. Standalone word DISCORD is NOT a bare scan pattern (avoids false-positives on template headers)
+#     The old offending line was: @('ALPACA_API_SECRET', 'MQK_OPERATOR_TOKEN', 'DISCORD', 'Bearer ')
+#     Verify the bare-word match against 'DISCORD' is gone.
+Assert-False ($Content -match "'DISCORD'") "Does not use bare 'DISCORD' as a secret pattern"
+
+# 16. Script contains DISCORD_WEBHOOK_URL as a targeted pattern (real secret detection preserved)
+Assert-True ($Content -match 'DISCORD_WEBHOOK_URL') 'Contains DISCORD_WEBHOOK_URL targeted pattern'
+
+# 17. Script contains DISCORD_BOT_TOKEN as a targeted pattern
+Assert-True ($Content -match 'DISCORD_BOT_TOKEN') 'Contains DISCORD_BOT_TOKEN targeted pattern'
+
+# 18. Secret scan requires non-empty/non-redacted value before flagging (value filtering present)
+Assert-True ($Content -match 'RedactedPlaceholders|notin.*RedactedPlaceholders|val.*-ne.*""') 'Secret scan filters out redacted/empty values'
+
+# 19. Bearer detection requires a minimum token length (not just the word "Bearer")
+Assert-True ($Content -match 'token\.Length -gt') 'Bearer detection checks token.Length before flagging'
+
+# 20-22. Runtime: load Test-SecretLeakLine from production source and exercise it inline.
+#   Extract the helper block (RedactedPlaceholders + Test-SecretLeakLine + Invoke-SecretScan)
+#   then Invoke-Expression it into this scope.  No subprocess needed.
+$_rtSrc   = Get-Content $Target -Raw
+$_rtLines = $_rtSrc -split '\r?\n'
+$_rtStart = ($_rtLines | Select-String -Pattern '^\$RedactedPlaceholders\s*=' |
+    Select-Object -First 1).LineNumber - 1
+$_rtEnd   = ($_rtLines | Select-String -Pattern '^\}' |
+    Where-Object { $_.LineNumber -gt ($_rtStart + 30) } |
+    Select-Object -First 1).LineNumber - 1
+$_rtBlock = ($_rtLines[$_rtStart..$_rtEnd]) -join "`n"
+
+try {
+    Invoke-Expression $_rtBlock
+
+    $rt1 = Test-SecretLeakLine -Line 'Discord observation: smoke passed' -FilePath 'note.txt' -LineNo 1
+    $rt2 = Test-SecretLeakLine -Line 'DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123/realtoken' -FilePath 'note.txt' -LineNo 2
+    $rt3 = Test-SecretLeakLine -Line 'Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.longtoken123456' -FilePath 'note.txt' -LineNo 3
+
+    Assert-True  ($null -eq $rt1)                                       'Test-SecretLeakLine does not flag standalone Discord text'
+    Assert-True  ($null -ne $rt2 -and $rt2.PatternName -eq 'DISCORD_WEBHOOK_URL') 'Test-SecretLeakLine detects DISCORD_WEBHOOK_URL=<url>'
+    Assert-True  ($null -ne $rt3 -and $rt3.PatternName -eq 'Authorization-Bearer') 'Test-SecretLeakLine detects Authorization: Bearer <token>'
+} catch {
+    Write-Host "  FAIL: Runtime Test-SecretLeakLine test threw: $_" -ForegroundColor Red
+    $script:Failures += 3
+}
+
 Write-Host ''
 if ($Failures -eq 0) {
     Write-Host '  ALL ASSERTIONS PASSED (test_paper_smoke_evidence_review)' -ForegroundColor Green
