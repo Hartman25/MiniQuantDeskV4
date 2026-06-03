@@ -3,6 +3,7 @@
 **Status: EXPERIMENTAL / NOT LIVE-READY**
 **Lane: EXP (research only; not operational truth)**
 **Promotion gate: NONE YET — scanner-only phase required before paper execution**
+**Foundation: EXP-ENGINE-CORE-01 (DONE) — scanner base, candidate journal, and config gate exist**
 
 ---
 
@@ -169,15 +170,16 @@ This is the authoritative journal record even before any paper order exists.
 
 ---
 
-## Future Patch Lane IDs (not yet created)
+## Future Patch Lane IDs
 
-| ID | Description |
-|----|-------------|
-| EXP-PENNY-01A | Scanner-only implementation (Stage 1 journal, no orders) |
-| EXP-PENNY-01B | Backtest replay harness (Stage 2) |
-| EXP-PENNY-01C | Paper execution wiring (Stage 3; requires Stage 2 gate pass) |
-| EXP-PENNY-01D | Evidence review tooling and promotion checklist |
-| EXP-PENNY-01-LIVE | Live promotion (blocked until Stage 4 operator sign-off) |
+| ID | Description | Status |
+|----|-------------|--------|
+| EXP-ENGINE-CORE-01 | Experimental engine foundation (scanner base, config gate, candidate journal) | DONE |
+| EXP-PENNY-01A | Scanner-only implementation (Stage 1 journal, no orders) | OPEN |
+| EXP-PENNY-01B | Backtest replay harness (Stage 2) | OPEN |
+| EXP-PENNY-01C | Paper execution wiring (Stage 3; requires Stage 2 gate pass) | OPEN |
+| EXP-PENNY-01D | Evidence review tooling and promotion checklist | OPEN |
+| EXP-PENNY-01-LIVE | Live promotion (blocked until Stage 4 operator sign-off) | OPEN |
 
 ---
 
