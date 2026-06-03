@@ -688,3 +688,53 @@ Before market open on Mondays (or after any long weekend):
 - It does not enqueue orders or touch `oms_outbox`, `oms_inbox`, or `runs`.
 - Guard tests in `tests/script_guards/test_premarket_data_scheduler.ps1` enforce
   these invariants statically on every CI run.
+
+---
+
+## 10. Tomorrow market smoke — AAPL/5m (Paper+Alpaca)
+
+Single operator command for the AAPL/5m Paper+Alpaca market-hours smoke.
+Script: `scripts\windows\Run-AAPL5mMarketSmoke.ps1`
+
+### CheckOnly (run any time — no mutations)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Run-AAPL5mMarketSmoke.ps1 -CheckOnly
+```
+
+Checks: bar count/freshness, smoke prerequisites, launcher market-data gate.
+No daemon start, no env mutation, no trading path.
+
+### Full smoke (run during market hours)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Run-AAPL5mMarketSmoke.ps1 -WatchSeconds 1800
+```
+
+What it does in order:
+1. Refreshes AAPL/5m bars from Alpaca (`Refresh-IntradayMarketData.ps1 -Source alpaca -Once`).
+2. Runs `Start-PaperTradingSmoke.ps1 -CheckOnly` — aborts if prerequisites fail.
+3. Sets conservative strategy env vars (`MQK_STRATEGY_MD_TIMEFRAME=5m`, qty=3, notional=$1000).
+4. Runs `Start-PaperTradingSmoke.ps1 -WatchSeconds 1800`.
+5. Captures evidence via `Capture-PaperSmokeEvidence.ps1 -Label aapl5m_market_smoke`
+   (always attempted even if smoke exits nonzero).
+6. Writes `logs\aapl5m_market_smoke\latest_result.txt`.
+
+### Log and evidence output locations
+
+| Path | Contents |
+|------|----------|
+| `logs\aapl5m_market_smoke\<timestamp>\transcript.log` | Full session transcript |
+| `logs\aapl5m_market_smoke\latest_result.txt` | Final verdict marker |
+| `evidence\paper_smoke_<timestamp>_aapl5m_market_smoke\` | API/DB snapshots, lifecycle checklist |
+
+### Safety notes
+
+- Paper+Alpaca only. No live routing enabled or reachable through this script.
+- No signal injection. Signals enter only via the normal smoke path inside `Start-PaperTradingSmoke.ps1`.
+- No manual broker orders submitted outside the normal smoke path.
+- No fake bars. Refresh calls `Refresh-IntradayMarketData.ps1` (Alpaca `md sync-provider`).
+- No DB schema changes.
+- `.env.local` is never committed by this script.
+- No secrets printed (API keys, operator token, DB credentials).
+- Guard: `tests\script_guards\test_aapl5m_market_smoke_runner.ps1` (14 assertions, runs in CI).
