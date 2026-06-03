@@ -1791,5 +1791,126 @@ class TestPennyScannerConfig(unittest.TestCase):
             self.assertNotIn(net, content, f"penny_config.py must not contain '{net}'")
 
 
+# ---------------------------------------------------------------------------
+# T51 — new config validations and gate wiring (EXP-PENNY-SCANNER-CONFIG-VARS-01)
+# ---------------------------------------------------------------------------
+
+class TestNewConfigValidationsAndGates(unittest.TestCase):
+    """T51: missing validations and new scanner gates wired from PennyScannerConfig."""
+
+    # --- Validation: min_breakout_rvol=0 rejects ---
+    def test_min_breakout_rvol_zero_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig, PennyScannerConfigError
+        with self.assertRaises(PennyScannerConfigError) as ctx:
+            PennyScannerConfig(min_breakout_rvol=0.0)
+        self.assertIn("min_breakout_rvol", str(ctx.exception))
+
+    # --- Validation: min_current_volume_shares=0 rejects ---
+    def test_min_current_volume_shares_zero_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig, PennyScannerConfigError
+        with self.assertRaises(PennyScannerConfigError) as ctx:
+            PennyScannerConfig(min_current_volume_shares=0)
+        self.assertIn("min_current_volume_shares", str(ctx.exception))
+
+    # --- Validation: max_open_positions=0 rejects ---
+    def test_max_open_positions_zero_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig, PennyScannerConfigError
+        with self.assertRaises(PennyScannerConfigError) as ctx:
+            PennyScannerConfig(max_open_positions=0)
+        self.assertIn("max_open_positions", str(ctx.exception))
+
+    # --- Validation: max_trades_per_day=0 rejects ---
+    def test_max_trades_per_day_zero_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig, PennyScannerConfigError
+        with self.assertRaises(PennyScannerConfigError) as ctx:
+            PennyScannerConfig(max_trades_per_day=0)
+        self.assertIn("max_trades_per_day", str(ctx.exception))
+
+    # --- Validation: min_rvol=0 rejects ---
+    def test_min_rvol_zero_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig, PennyScannerConfigError
+        with self.assertRaises(PennyScannerConfigError) as ctx:
+            PennyScannerConfig(min_rvol=0.0)
+        self.assertIn("min_rvol", str(ctx.exception))
+
+    # --- Validation: max_chase_above_breakout_pct=-1 rejects ---
+    def test_max_chase_above_breakout_pct_negative_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig, PennyScannerConfigError
+        with self.assertRaises(PennyScannerConfigError) as ctx:
+            PennyScannerConfig(max_chase_above_breakout_pct=-1.0)
+        self.assertIn("max_chase_above_breakout_pct", str(ctx.exception))
+
+    # --- Gate: min_current_volume_shares rejects low-volume row ---
+    def test_current_volume_below_min_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        # volume=250_000 > min_daily=200_000 (passes daily gate) but < min_current=300_000
+        cfg = PennyScannerConfig(min_daily_volume_shares=200_000, min_current_volume_shares=300_000)
+        row = _passing_row(volume=250_000)
+        records = PennyBreakoutScanner([row], scanner_config=cfg).scan()
+        self.assertFalse(records[0]["would_trade"])
+        self.assertIn("current_volume_below_min", records[0]["rejection_reason"])
+
+    # --- Gate: min_rvol rejects row with weak rvol ---
+    def test_rvol_below_min_rejects(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        cfg = PennyScannerConfig(min_rvol=3.0)
+        row = _passing_row(rvol=1.5)  # below threshold
+        records = PennyBreakoutScanner([row], scanner_config=cfg).scan()
+        self.assertFalse(records[0]["would_trade"])
+        self.assertIn("rvol_below_min", records[0]["rejection_reason"])
+
+    # --- Gate: require_breakout_above_level=False allows price below breakout ---
+    def test_require_breakout_false_allows_below_breakout(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        cfg = PennyScannerConfig(require_breakout_above_level=False)
+        # price=4.50 < breakout_level=4.80 — would normally be rejected
+        row = _passing_row(price=4.50, breakout_level=4.80)
+        # Adjust bid/ask to keep price consistent and within price range
+        row["bid"] = 4.48
+        row["ask"] = 4.52
+        records = PennyBreakoutScanner([row], scanner_config=cfg).scan()
+        self.assertTrue(records[0]["would_trade"], f"Rejection: {records[0].get('rejection_reason')}")
+
+    # --- Gate: require_breakout_above_level=True (default) still rejects below breakout ---
+    def test_require_breakout_true_rejects_below_breakout(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        cfg = PennyScannerConfig(require_breakout_above_level=True)
+        row = _passing_row(price=4.50, breakout_level=4.80)
+        records = PennyBreakoutScanner([row], scanner_config=cfg).scan()
+        self.assertFalse(records[0]["would_trade"])
+        self.assertIn("price_below_breakout_level", records[0]["rejection_reason"])
+
+    # --- Gate: max_chase_above_breakout_pct rejects overextended price ---
+    def test_max_chase_above_breakout_rejects_overextended(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        cfg = PennyScannerConfig(max_chase_above_breakout_pct=5.0)
+        # price=5.30, breakout=4.80 → chase=(5.30-4.80)/4.80*100≈10.4% > 5.0%
+        row = _passing_row(price=5.30, breakout_level=4.80)
+        row["bid"] = 5.28
+        row["ask"] = 5.32
+        records = PennyBreakoutScanner([row], scanner_config=cfg).scan()
+        self.assertFalse(records[0]["would_trade"])
+        self.assertIn("price_too_far_above_breakout", records[0]["rejection_reason"])
+
+    # --- Null order IDs still null after new gates ---
+    def test_null_order_ids_with_new_gates(self) -> None:
+        from experiments.exp_penny.penny_config import PennyScannerConfig
+        from experiments.exp_penny.scanner import PennyBreakoutScanner
+        cfg = PennyScannerConfig(
+            min_current_volume_shares=300_000,
+            min_rvol=2.0,
+            require_breakout_above_level=True,
+            max_chase_above_breakout_pct=8.0,
+        )
+        records = PennyBreakoutScanner([_passing_row()], scanner_config=cfg).scan()
+        self.assertIsNone(records[0]["paper_order_id"])
+        self.assertIsNone(records[0]["live_order_id"])
+
+
 if __name__ == "__main__":
     unittest.main()

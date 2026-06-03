@@ -149,6 +149,22 @@ class PennyScannerConfig:
             raise PennyScannerConfigError("max_position_notional_usd must be > 0")
         if self.max_daily_loss_usd <= 0:
             raise PennyScannerConfigError("max_daily_loss_usd must be > 0")
+        if self.min_breakout_rvol <= 0:
+            raise PennyScannerConfigError("min_breakout_rvol must be > 0")
+        if self.min_rvol <= 0:
+            raise PennyScannerConfigError("min_rvol must be > 0")
+        if self.min_current_volume_shares <= 0:
+            raise PennyScannerConfigError("min_current_volume_shares must be > 0")
+        if self.max_open_positions <= 0:
+            raise PennyScannerConfigError("max_open_positions must be > 0")
+        if self.max_trades_per_day <= 0:
+            raise PennyScannerConfigError("max_trades_per_day must be > 0")
+        if self.max_chase_above_breakout_pct < 0:
+            raise PennyScannerConfigError("max_chase_above_breakout_pct must be >= 0")
+        if self.max_float_shares <= self.min_float_shares:
+            raise PennyScannerConfigError("max_float_shares must be > min_float_shares")
+        if not self.allowed_exchanges:
+            raise PennyScannerConfigError("allowed_exchanges must not be empty")
 
     @classmethod
     def from_env(cls) -> "PennyScannerConfig":
@@ -217,9 +233,13 @@ class PennyScannerConfig:
             "max_price": self.max_price,
             "min_adv_usd": self.min_adv_usd,
             "min_daily_vol_shares": self.min_daily_volume_shares,
+            "min_current_vol_shares": self.min_current_volume_shares,
             "max_spread_pct": self.max_spread_pct,
             "ma200_slope_min": 0.0 if self.require_ma200_slope_positive else -1e9,
             "ma50_slope_min": 0.0 if self.require_ma50_slope_positive else -1e9,
             "max_consolidation_range_pct": self.max_consolidation_range_pct,
             "breakout_rvol_min": self.min_breakout_rvol,
+            "rvol_min": self.min_rvol,
+            "require_breakout_above_level": self.require_breakout_above_level,
+            "max_chase_above_breakout_pct": self.max_chase_above_breakout_pct,
         }

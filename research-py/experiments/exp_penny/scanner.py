@@ -34,21 +34,29 @@ class PennyBreakoutConfig:
         max_price: float = 20.00,
         min_adv_usd: float = 500_000.0,
         min_daily_vol_shares: int = 200_000,
+        min_current_vol_shares: int = 300_000,
         max_spread_pct: float = 1.0,
         ma200_slope_min: float = 0.0,
         ma50_slope_min: float = 0.0,
         max_consolidation_range_pct: float = 15.0,
         breakout_rvol_min: float = 2.0,
+        rvol_min: float = 2.0,
+        require_breakout_above_level: bool = True,
+        max_chase_above_breakout_pct: float = 8.0,
     ) -> None:
         self.min_price = min_price
         self.max_price = max_price
         self.min_adv_usd = min_adv_usd
         self.min_daily_vol_shares = min_daily_vol_shares
+        self.min_current_vol_shares = min_current_vol_shares
         self.max_spread_pct = max_spread_pct
         self.ma200_slope_min = ma200_slope_min
         self.ma50_slope_min = ma50_slope_min
         self.max_consolidation_range_pct = max_consolidation_range_pct
         self.breakout_rvol_min = breakout_rvol_min
+        self.rvol_min = rvol_min
+        self.require_breakout_above_level = require_breakout_above_level
+        self.max_chase_above_breakout_pct = max_chase_above_breakout_pct
 
 
 def _spread_pct(row: dict[str, Any]) -> Optional[float]:
@@ -102,6 +110,10 @@ def _evaluate_gates(
     if volume < cfg.min_daily_vol_shares:
         return f"volume_below_min ({volume} < {cfg.min_daily_vol_shares})"
 
+    # Gate: current volume shares (scan-time observed volume)
+    if volume < cfg.min_current_vol_shares:
+        return f"current_volume_below_min ({volume} < {cfg.min_current_vol_shares})"
+
     # Gate: spread
     spread = _spread_pct(row)
     if spread is None:
@@ -123,6 +135,11 @@ def _evaluate_gates(
     if ma50_slope <= cfg.ma50_slope_min:
         return f"ma50_slope_not_rising ({ma50_slope} <= {cfg.ma50_slope_min})"
 
+    # Gate: rvol (enforced only when present in row; absence is not a rejection)
+    rvol = row.get("rvol")
+    if rvol is not None and rvol < cfg.rvol_min:
+        return f"rvol_below_min ({rvol} < {cfg.rvol_min})"
+
     # Gate: consolidation range
     consol_range_pct = row.get("consolidation_range_pct")
     if consol_range_pct is None:
@@ -137,12 +154,22 @@ def _evaluate_gates(
     if breakout_rvol < cfg.breakout_rvol_min:
         return f"breakout_rvol_weak ({breakout_rvol} < {cfg.breakout_rvol_min})"
 
-    # Gate: price must be at or above breakout level
+    # Gate: price vs breakout level (conditional on require_breakout_above_level)
     breakout_level = row.get("breakout_level")
     if breakout_level is None:
         return "missing_breakout_level"
-    if price < breakout_level:
+    if breakout_level <= 0:
+        return "invalid_breakout_level"
+    if cfg.require_breakout_above_level and price < breakout_level:
         return f"price_below_breakout_level ({price} < {breakout_level})"
+
+    # Gate: max chase above breakout level (only when price is above breakout)
+    if price > breakout_level:
+        chase_pct = ((price - breakout_level) / breakout_level) * 100.0
+        if chase_pct > cfg.max_chase_above_breakout_pct:
+            return (
+                f"price_too_far_above_breakout ({chase_pct:.2f}% > {cfg.max_chase_above_breakout_pct}%)"
+            )
 
     return None  # all gates passed
 
