@@ -691,7 +691,7 @@ Before market open on Mondays (or after any long weekend):
 
 ---
 
-## 10. Tomorrow market smoke — AAPL/5m (Paper+Alpaca)
+## 12. Tomorrow market smoke — AAPL/5m (Paper+Alpaca)
 
 Single operator command for the AAPL/5m Paper+Alpaca market-hours smoke.
 Script: `scripts\windows\Run-AAPL5mMarketSmoke.ps1`
@@ -738,3 +738,35 @@ What it does in order:
 - `.env.local` is never committed by this script.
 - No secrets printed (API keys, operator token, DB credentials).
 - Guard: `tests\script_guards\test_aapl5m_market_smoke_runner.ps1` (14 assertions, runs in CI).
+
+### After the run — review evidence
+
+After `Run-AAPL5mMarketSmoke.ps1` completes, review the captured evidence bundle:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Review-PaperSmokeEvidence.ps1 -Latest -WriteSummary
+```
+
+This produces `evidence\paper_smoke_<timestamp>_aapl5m_market_smoke\review_summary.md`.
+
+**Classification meanings:**
+
+| Verdict | Meaning |
+|---------|---------|
+| `TRADE-LIFECYCLE-CLOSED` | Full lifecycle proven: runtime ran, signal fired, order submitted, ACK received, fill applied, reconcile clean, no fault. |
+| `READINESS-CLOSED-NO-TRADE` | Runtime ran, bars loaded, strategy evaluated — but no signal or order. Reconcile clean, no fault. Correct when market conditions did not trigger a signal. |
+| `PARTIAL` | Some lifecycle steps completed but not all. Check `notes/smoke_lifecycle_checklist.txt` and `api/events_feed.json` for details. |
+| `OPEN` | Active blocker present: halt, kill switch, missing bars, dirty reconcile, or DB unavailable. Resolve blocker and re-run. |
+| `FALSE-CLOSED` | Live routing was enabled, secrets detected in evidence, or no proof files exist. Do **not** record as a passed smoke. |
+
+**Review with explicit path:**
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Review-PaperSmokeEvidence.ps1 `
+    -EvidencePath evidence\paper_smoke_<timestamp>_aapl5m_market_smoke -WriteSummary
+```
+
+**Send for ledger update:**
+After reviewing, send `review_summary.md` to ChatGPT (or your ledger session) with the prompt:
+> "Here is a paper smoke evidence review. Classify the run and update the session ledger."
+
+The reviewer will use the `classification` field and `classification_reasons` to update patch and smoke tracking.
