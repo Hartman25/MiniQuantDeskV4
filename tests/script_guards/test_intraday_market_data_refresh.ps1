@@ -198,11 +198,55 @@ if ($scriptText -match '\$sym\b' -or $scriptText -match '\$symbolList') {
 }
 
 # ---------------------------------------------------------------------------
+# IMR15: -Source parameter present (CURRENT-SESSION-5M-BAR-PROVIDER-01)
+# ---------------------------------------------------------------------------
+if ($scriptText -match '\[ValidateSet\(.*twelvedata.*alpaca') {
+    Pass 'IMR15' "-Source parameter with ValidateSet(twelvedata, alpaca) present."
+} else {
+    Fail 'IMR15' "-Source ValidateSet parameter missing (expected twelvedata|alpaca)."
+}
+
+# ---------------------------------------------------------------------------
+# IMR16: Alpaca key presence checked; value not printed
+# (CURRENT-SESSION-5M-BAR-PROVIDER-01)
+# ---------------------------------------------------------------------------
+$alpacaKeyCheck = $scriptText -match 'ALPACA_API_KEY_PAPER'
+$alpacaSecretCheck = $scriptText -match 'ALPACA_API_SECRET_PAPER'
+$alpacaKeyPrint = $scriptText -match 'Write-Host[^#]*\$env:ALPACA_API_KEY_PAPER'
+$alpacaSecretPrint = $scriptText -match 'Write-Host[^#]*\$env:ALPACA_API_SECRET_PAPER'
+if ($alpacaKeyCheck -and $alpacaSecretCheck -and -not $alpacaKeyPrint -and -not $alpacaSecretPrint) {
+    Pass 'IMR16' "ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER presence checked; values not printed."
+} elseif (-not $alpacaKeyCheck -or -not $alpacaSecretCheck) {
+    Fail 'IMR16' "Alpaca paper credentials not referenced in script."
+} else {
+    Fail 'IMR16' "Script appears to print Alpaca credential values."
+}
+
+# ---------------------------------------------------------------------------
+# IMR17: Alpaca data endpoint only (no order endpoints) — non-comment lines
+# (CURRENT-SESSION-5M-BAR-PROVIDER-01)
+# Forbidden on non-comment lines: /v2/positions, broker.*submit, cancel.*order
+# ---------------------------------------------------------------------------
+$alpacaOrderPatterns = @('/v2/positions', 'broker.*submit', 'cancel.*order')
+$alpacaOrderViolation = $false
+foreach ($pat in $alpacaOrderPatterns) {
+    if ($nonCommentText -match $pat) {
+        $alpacaOrderViolation = $true
+        break
+    }
+}
+if (-not $alpacaOrderViolation) {
+    Pass 'IMR17' "No Alpaca order/position endpoint calls on non-comment lines."
+} else {
+    Fail 'IMR17' "Forbidden Alpaca order/position endpoint pattern on non-comment lines."
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Write-Host ""
 if ($Failures -eq 0) {
-    Write-Host "  ALL PASS  (14/14 assertions)" -ForegroundColor Green
+    Write-Host "  ALL PASS  (17/17 assertions)" -ForegroundColor Green
     exit 0
 } else {
     Write-Host "  $Failures FAILURE(S)  -- see FAIL lines above" -ForegroundColor Red

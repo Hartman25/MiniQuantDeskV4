@@ -233,11 +233,12 @@ pub async fn md_ingest_provider(
     start: String,
     end: String,
 ) -> Result<()> {
-    use mqk_md::HistoricalProvider;
-
     let source_lc = source.trim().to_ascii_lowercase();
-    if source_lc != "twelvedata" {
-        anyhow::bail!("unsupported --source '{}'. supported: twelvedata", source);
+    if source_lc != "twelvedata" && source_lc != "alpaca" {
+        anyhow::bail!(
+            "unsupported --source '{}'. supported: twelvedata, alpaca",
+            source
+        );
     }
 
     let syms = resolve_symbols(symbols.as_deref(), symbols_from_registry.as_deref())?;
@@ -250,9 +251,6 @@ pub async fn md_ingest_provider(
     if end_d < start_d {
         anyhow::bail!("--end must be >= --start");
     }
-
-    let api_key = std::env::var(ENV_TWELVEDATA_API_KEY)
-        .with_context(|| format!("missing env var {ENV_TWELVEDATA_API_KEY}"))?;
 
     // D1-5: deterministic UUIDv5 from (source, timeframe, symbols, date range).
     let ingest_id = Uuid::new_v5(
@@ -268,7 +266,14 @@ pub async fn md_ingest_provider(
         .as_bytes(),
     );
 
-    let provider = mqk_md::TwelveDataHistoricalProvider::new(api_key);
+    let provider: Box<dyn mqk_md::HistoricalProvider> = if source_lc == "alpaca" {
+        let (key, secret) = mqk_md::load_alpaca_paper_credentials()?;
+        Box::new(mqk_md::AlpacaHistoricalProvider::new(key, secret))
+    } else {
+        let api_key = std::env::var(ENV_TWELVEDATA_API_KEY)
+            .with_context(|| format!("missing env var {ENV_TWELVEDATA_API_KEY}"))?;
+        Box::new(mqk_md::TwelveDataHistoricalProvider::new(api_key))
+    };
 
     // Determine chunk window size based on timeframe to stay under TwelveData's
     // per-request bar cap (~5 000 bars) on deep-history backfills.
@@ -397,11 +402,12 @@ pub async fn md_sync_provider(
     end: Option<String>,
     overlap_days: Option<u32>,
 ) -> Result<()> {
-    use mqk_md::HistoricalProvider;
-
     let source_lc = source.trim().to_ascii_lowercase();
-    if source_lc != "twelvedata" {
-        anyhow::bail!("unsupported --source '{}'. supported: twelvedata", source);
+    if source_lc != "twelvedata" && source_lc != "alpaca" {
+        anyhow::bail!(
+            "unsupported --source '{}'. supported: twelvedata, alpaca",
+            source
+        );
     }
 
     let syms = resolve_symbols(symbols.as_deref(), symbols_from_registry.as_deref())?;
@@ -476,9 +482,14 @@ pub async fn md_sync_provider(
         .as_bytes(),
     );
 
-    let api_key = std::env::var(ENV_TWELVEDATA_API_KEY)
-        .with_context(|| format!("missing env var {ENV_TWELVEDATA_API_KEY}"))?;
-    let provider = mqk_md::TwelveDataHistoricalProvider::new(api_key);
+    let provider: Box<dyn mqk_md::HistoricalProvider> = if source_lc == "alpaca" {
+        let (key, secret) = mqk_md::load_alpaca_paper_credentials()?;
+        Box::new(mqk_md::AlpacaHistoricalProvider::new(key, secret))
+    } else {
+        let api_key = std::env::var(ENV_TWELVEDATA_API_KEY)
+            .with_context(|| format!("missing env var {ENV_TWELVEDATA_API_KEY}"))?;
+        Box::new(mqk_md::TwelveDataHistoricalProvider::new(api_key))
+    };
 
     // --- Fetch per-symbol, collect all bars into one batch ---
     let mut all_bars: Vec<mqk_db::md::ProviderBar> = Vec::new();

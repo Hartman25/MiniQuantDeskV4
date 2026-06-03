@@ -5,10 +5,15 @@
 //! This crate owns the provider abstraction and concrete historical providers.
 //! It does **not** write to the DB; callers (CLI) fetch bars and hand them to mqk-db ingestion.
 
+pub mod alpaca_provider;
 pub mod instrument_registry;
 pub mod normalizer;
 pub mod provider;
 pub mod provider_registry;
+
+pub use alpaca_provider::{
+    load_alpaca_paper_credentials, AlpacaHistoricalProvider, ALPACA_DATA_BASE_URL,
+};
 pub mod quality;
 
 use anyhow::{anyhow, Context, Result};

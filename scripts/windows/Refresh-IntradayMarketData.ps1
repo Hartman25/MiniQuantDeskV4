@@ -20,6 +20,7 @@
 #       -IntervalSeconds 300 -DurationSeconds 1800
 #
 # Parameters:
+#   -Source               Market-data provider: twelvedata | alpaca. Default: twelvedata
 #   -Symbols              Comma-separated ticker list. Default: AAPL
 #   -Timeframe            Bar timeframe. Default: 5m
 #   -IntervalSeconds      Seconds between refreshes in loop mode. Default: 300
@@ -42,6 +43,8 @@
 
 [CmdletBinding()]
 param(
+    [ValidateSet('twelvedata', 'alpaca')]
+    [string] $Source              = 'twelvedata',
     [string] $Symbols             = 'AAPL',
     [string] $Timeframe           = '5m',
     [int]    $IntervalSeconds     = 300,
@@ -121,14 +124,28 @@ Write-Ok "Paper DB guard passed (port 5440 confirmed)."
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# TWELVEDATA_API_KEY presence check (never print value)
+# Provider key presence check (never print values)
 # ---------------------------------------------------------------------------
+Write-Step "Provider source: $Source"
+
 $twelvekeyPresent = -not [string]::IsNullOrWhiteSpace($env:TWELVEDATA_API_KEY)
-if ($twelvekeyPresent) {
-    Write-Ok "TWELVEDATA_API_KEY is configured (value not printed)."
+$alpacaKeyPresent = (-not [string]::IsNullOrWhiteSpace($env:ALPACA_API_KEY_PAPER)) -and `
+                   (-not [string]::IsNullOrWhiteSpace($env:ALPACA_API_SECRET_PAPER))
+
+if ($Source -eq 'alpaca') {
+    if ($alpacaKeyPresent) {
+        Write-Ok "ALPACA_API_KEY_PAPER and ALPACA_API_SECRET_PAPER are configured (values not printed)."
+    } else {
+        Write-Warn "ALPACA_API_KEY_PAPER or ALPACA_API_SECRET_PAPER is not set. Provider sync top-off will be skipped."
+        Write-Warn "Add ALPACA_API_KEY_PAPER and ALPACA_API_SECRET_PAPER to .env.local to enable Alpaca sync."
+    }
 } else {
-    Write-Warn "TWELVEDATA_API_KEY is not set. Provider sync top-off will be skipped."
-    Write-Warn "Add TWELVEDATA_API_KEY to .env.local to enable live sync."
+    if ($twelvekeyPresent) {
+        Write-Ok "TWELVEDATA_API_KEY is configured (value not printed)."
+    } else {
+        Write-Warn "TWELVEDATA_API_KEY is not set. Provider sync top-off will be skipped."
+        Write-Warn "Add TWELVEDATA_API_KEY to .env.local to enable live sync."
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -267,8 +284,13 @@ if ($CheckOnly) {
         }
     }
 
-    if ($twelvekeyPresent) { Write-Ok "TWELVEDATA_API_KEY configured." }
-    else { Write-Warn "TWELVEDATA_API_KEY not configured -- sync unavailable." }
+    if ($Source -eq 'alpaca') {
+        if ($alpacaKeyPresent) { Write-Ok "ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER configured." }
+        else { Write-Warn "ALPACA_API_KEY_PAPER or ALPACA_API_SECRET_PAPER not configured -- Alpaca sync unavailable." }
+    } else {
+        if ($twelvekeyPresent) { Write-Ok "TWELVEDATA_API_KEY configured." }
+        else { Write-Warn "TWELVEDATA_API_KEY not configured -- sync unavailable." }
+    }
 
     Write-Evidence -SymbolResults $checkResults -AllPassed $true -Reason 'check-only' -Mode 'check_only'
     Write-Sect "CHECK-ONLY complete (no mutations)"
@@ -293,13 +315,14 @@ function Invoke-OneRefresh {
             Write-Warn "  could not query md_bars before refresh."
         }
 
-        if ($twelvekeyPresent) {
-            Write-Step "[$sym/$Timeframe] Running provider sync top-off..."
+        $providerKeyReady = if ($Source -eq 'alpaca') { $alpacaKeyPresent } else { $twelvekeyPresent }
+        if ($providerKeyReady) {
+            Write-Step "[$sym/$Timeframe] Running provider sync top-off (source=$Source)..."
             Push-Location $coreRs
             try {
                 $local:ErrorActionPreference = 'Continue'
                 cargo run -p mqk-cli --bin mqk-cli -- md sync-provider `
-                    --source twelvedata `
+                    --source $Source `
                     --symbols $sym `
                     --timeframe $Timeframe `
                     --full-start "2024-01-01" 2>&1 | Out-Host
@@ -312,7 +335,8 @@ function Invoke-OneRefresh {
                 Write-Warn "[$sym/$Timeframe] Provider sync threw exception ($_). Using existing bars."
             } finally { Pop-Location }
         } else {
-            Write-Warn "[$sym/$Timeframe] Skipping provider sync (TWELVEDATA_API_KEY not set)."
+            $missingVar = if ($Source -eq 'alpaca') { 'ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER' } else { 'TWELVEDATA_API_KEY' }
+            Write-Warn "[$sym/$Timeframe] Skipping provider sync ($missingVar not set)."
         }
 
         $after = Get-MdBarSummary -Sym $sym -Tf $Timeframe
