@@ -191,11 +191,20 @@ if ($signalViolations.Count -eq 0) {
 }
 
 # ---------------------------------------------------------------------------
+# AMR15: Sets MQK_STRATEGY_SYMBOL from -Symbol parameter
+# ---------------------------------------------------------------------------
+if ($scriptText -match 'MQK_STRATEGY_SYMBOL\s*=\s*\$Symbol') {
+    Pass 'AMR15' "Script sets MQK_STRATEGY_SYMBOL to `$Symbol so smoke uses the correct symbol."
+} else {
+    Fail 'AMR15' "Script does NOT set MQK_STRATEGY_SYMBOL -- smoke will always evaluate the .env.local default instead of the selected symbol."
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Write-Host ""
 if ($Failures -eq 0) {
-    Write-Host "ALL AMR GUARDS PASSED (14/14)" -ForegroundColor Green
+    Write-Host "ALL AMR GUARDS PASSED (15/15)" -ForegroundColor Green
     exit 0
 } else {
     Write-Host "FAILED: $Failures AMR guard(s) did not pass." -ForegroundColor Red

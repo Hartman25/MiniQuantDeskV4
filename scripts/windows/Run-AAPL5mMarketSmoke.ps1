@@ -149,6 +149,9 @@ if ($CheckOnly) {
         Write-Ok "Bar check passed."
     }
 
+    # Set MQK_STRATEGY_SYMBOL so smoke script's CheckOnly bar count reflects the selected symbol
+    $env:MQK_STRATEGY_SYMBOL = $Symbol
+
     # Smoke prerequisite check
     Write-Sect "Step C2: smoke prerequisite check (CheckOnly)"
     & powershell.exe -ExecutionPolicy Bypass -NonInteractive -File $SmokeScript -CheckOnly
@@ -245,10 +248,12 @@ try {
     # Step 3: Set strategy env vars (conservative, paper-safe)
     # -----------------------------------------------------------------------
     Write-Sect "Step 3: set strategy env vars"
+    $env:MQK_STRATEGY_SYMBOL                    = $Symbol
     $env:MQK_STRATEGY_MD_TIMEFRAME              = $Timeframe
     $env:MQK_STRATEGY_TARGET_QTY               = "$TargetQty"
     $env:MQK_STRATEGY_MAX_TARGET_QTY           = "$MaxTargetQty"
     $env:MQK_STRATEGY_MAX_POSITION_NOTIONAL_USD = "$MaxPositionNotionalUsd"
+    Write-Ok "MQK_STRATEGY_SYMBOL=$Symbol"
     Write-Ok "MQK_STRATEGY_MD_TIMEFRAME=$Timeframe"
     Write-Ok "MQK_STRATEGY_TARGET_QTY=$TargetQty  MQK_STRATEGY_MAX_TARGET_QTY=$MaxTargetQty"
     Write-Ok "MQK_STRATEGY_MAX_POSITION_NOTIONAL_USD=$MaxPositionNotionalUsd"
