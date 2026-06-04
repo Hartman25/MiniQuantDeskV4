@@ -233,11 +233,15 @@ The long-only single-symbol Paper + Alpaca MVP is mechanically ready. The follow
 | RECONCILE-AFTER-REAL-FILL-01 | Open — reconcile pass after a real paper fill |
 | DISCORD-TRADE-LIFECYCLE-REAL-01 | Open — Discord notification evidence from a real cycle |
 | REPEATED-AUTONOMOUS-TRADE-CYCLE-01 | Open — multiple autonomous cycles without operator intervention |
-| PAPER-SMOKE-EVIDENCE-REVIEW-01 | Open — operator review of captured smoke evidence |
+| PAPER-SMOKE-EVIDENCE-REVIEW-02 | Closed — review tool exists; next market smoke must still be reviewed |
+
+These proof items are operational evidence gates, not necessarily code gaps.
 
 ### Evidence capture workflow
 
 Evidence is captured using `scripts/windows/Capture-PaperSmokeEvidence.ps1` before and after a paper smoke session. The full workflow is documented in `docs/runbooks/paper_smoke_evidence_pack.md`. Evidence folders are stored under `evidence/` in timestamped run folders and are gitignored by default.
+
+For the current AAPL/5m Paper+Alpaca smoke, use `scripts/windows/Run-AAPL5mMarketSmoke.ps1` and then `Review-PaperSmokeEvidence.ps1 -Latest -WriteSummary`.
 
 Live trading remains locked until repeated clean paper evidence and live-capital readiness gates are satisfied.
 
