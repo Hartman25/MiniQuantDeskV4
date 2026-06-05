@@ -372,6 +372,113 @@ if ($armIdx -ge 0 -and $lrArmIdx -gt $armIdx) {
 }
 
 # ---------------------------------------------------------------------------
+# OPR21: Script checks deadman_status field (reads it from system/status)
+# DEADMAN-EXPIRY-HALT-ON-RESTART-01 -- confirms the watcher observes deadman.
+# ---------------------------------------------------------------------------
+if ($scriptText -match 'deadman_status') {
+    Pass 'OPR21' 'Script reads deadman_status from system/status'
+} else {
+    Fail 'OPR21' 'Script must read deadman_status from system/status for deadman-expiry detection'
+}
+
+# ---------------------------------------------------------------------------
+# OPR22: Script contains Invoke-DeadmanRepair function
+# DEADMAN-EXPIRY-HALT-ON-RESTART-01 -- proves the repair helper is present.
+# ---------------------------------------------------------------------------
+if ($scriptText -match 'Invoke-DeadmanRepair') {
+    Pass 'OPR22' 'Script contains Invoke-DeadmanRepair function (DEADMAN-EXPIRY-HALT-ON-RESTART-01)'
+} else {
+    Fail 'OPR22' 'Script must contain Invoke-DeadmanRepair for stale-deadman halt recovery'
+}
+
+# ---------------------------------------------------------------------------
+# OPR23: Deadman repair is bounded (max repair attempts counter present)
+# Prevents an infinite repair loop if the daemon is genuinely stuck.
+# ---------------------------------------------------------------------------
+if ($scriptText -match 'dmRepairAttempts|repair.*attempt.*of.*1|attempt.*1.*of.*1') {
+    Pass 'OPR23' 'Deadman repair is bounded (attempt counter present)'
+} else {
+    Fail 'OPR23' 'Deadman repair must be bounded (max 1 attempt -- prevent infinite repair loop)'
+}
+
+# ---------------------------------------------------------------------------
+# OPR24: Deadman repair verifies kill_switch_active=false after repair
+# ---------------------------------------------------------------------------
+$repairFnIdx = $scriptText.IndexOf('Invoke-DeadmanRepair')
+$ksRepairIdx = $scriptText.IndexOf('kill_switch_active', $repairFnIdx)
+if ($repairFnIdx -ge 0 -and $ksRepairIdx -gt $repairFnIdx) {
+    Pass 'OPR24' 'Deadman repair verifies kill_switch_active=false after repair'
+} else {
+    Fail 'OPR24' 'Invoke-DeadmanRepair must verify kill_switch_active=false after repair sequence'
+}
+
+# ---------------------------------------------------------------------------
+# OPR25: Deadman repair verifies arm_state=armed after repair
+# ---------------------------------------------------------------------------
+$repairFnBodyIdx = $scriptText.IndexOf('function Invoke-DeadmanRepair')
+$armRepairIdx    = $scriptText.IndexOf('armed', $repairFnBodyIdx)
+if ($repairFnBodyIdx -ge 0 -and $armRepairIdx -gt $repairFnBodyIdx) {
+    Pass 'OPR25' 'Deadman repair verifies arm_state=armed after repair'
+} else {
+    Fail 'OPR25' 'Invoke-DeadmanRepair must verify arm_state=armed before returning success'
+}
+
+# ---------------------------------------------------------------------------
+# OPR26: Deadman repair verifies live_routing_enabled=false after repair
+# ---------------------------------------------------------------------------
+$lrRepairIdx = $scriptText.IndexOf('live_routing_enabled', $repairFnBodyIdx)
+if ($repairFnBodyIdx -ge 0 -and $lrRepairIdx -gt $repairFnBodyIdx) {
+    Pass 'OPR26' 'Deadman repair verifies live_routing_enabled=false after repair'
+} else {
+    Fail 'OPR26' 'Invoke-DeadmanRepair must verify live_routing_enabled=false (paper-only invariant)'
+}
+
+# ---------------------------------------------------------------------------
+# OPR27: Script does not disable deadman generally
+# Repair must not contain patterns that would suppress or globally disable the deadman timer.
+# ---------------------------------------------------------------------------
+# Check line by line to avoid false positives from comment lines.
+$disablePatterns = @(
+    'MQK_DEADMAN_ENABLED.*false',
+    'deadman_enabled.*=.*false',
+    '\$env:.*deadman.*=.*false'
+)
+$disableFound = $false
+foreach ($dp in $disablePatterns) {
+    foreach ($line in ($scriptText -split "`n")) {
+        $trimmed = $line.Trim()
+        if ($trimmed.StartsWith('#')) { continue }
+        if ($trimmed -match $dp) { $disableFound = $true }
+    }
+}
+if (-not $disableFound) {
+    Pass 'OPR27' 'Script does not disable deadman globally (no env-var override patterns found)'
+} else {
+    Fail 'OPR27' 'Script must not disable or bypass deadman -- repair clears stale state only'
+}
+
+# ---------------------------------------------------------------------------
+# OPR28: Script does not call broker trading endpoints (no orders/fills/flatten)
+# ---------------------------------------------------------------------------
+$tradingEndpoints = @(
+    '/api/v1/orders/submit',
+    '/api/v1/orders/cancel',
+    '/api/v1/orders/replace',
+    '/api/v1/positions/flatten',
+    'submit.*order',
+    'cancel.*order'
+)
+$tradingFound = @()
+foreach ($tp in $tradingEndpoints) {
+    if ($scriptText -match $tp) { $tradingFound += $tp }
+}
+if ($tradingFound.Count -eq 0) {
+    Pass 'OPR28' 'Script does not call broker trading endpoints (no order submit/cancel/replace/flatten)'
+} else {
+    Fail 'OPR28' "Script must not call broker trading endpoints. Found: $($tradingFound -join ', ')"
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Write-Host ""

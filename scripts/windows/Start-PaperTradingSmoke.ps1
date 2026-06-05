@@ -667,6 +667,66 @@ function Wait-DaemonReachable {
 }
 
 # ---------------------------------------------------------------------------
+# Helper: Invoke-DeadmanRepair
+# DEADMAN-EXPIRY-HALT-ON-RESTART-01
+# Called when arm_state=halted or kill_switch_active=true is detected after
+# daemon restart. On restart the prior process's deadman timer fires against
+# the orphaned run, producing a stale halt. Repair: disarm -> clear-halted-run
+# -> arm-execution. Does NOT disable deadman. Does NOT bypass risk/reconcile
+# gates. Does NOT enable live routing. Returns $true when arm_state=armed and
+# safety invariants hold; $false if repair was incomplete.
+# ---------------------------------------------------------------------------
+function Invoke-DeadmanRepair {
+    param([string]$ContextLabel)
+    Write-Warn "[$ContextLabel] Deadman-repair: calling disarm-execution..."
+    $r1 = Invoke-DaemonPost -Path '/api/v1/ops/action' -Body @{ action_key = 'disarm-execution' }
+    if ($r1.StatusCode -ne 200) {
+        Write-Warn "[$ContextLabel] disarm-execution returned HTTP $($r1.StatusCode)"
+    } else {
+        Write-Ok "[$ContextLabel] disarm-execution accepted."
+    }
+
+    Write-Warn "[$ContextLabel] Deadman-repair: calling clear-halted-run..."
+    $r2 = Invoke-DaemonPost -Path '/api/v1/ops/action' -Body @{ action_key = 'clear-halted-run' }
+    if ($r2.StatusCode -ne 200) {
+        Write-Warn "[$ContextLabel] clear-halted-run returned HTTP $($r2.StatusCode) -- repair incomplete"
+        return $false
+    }
+    Write-Ok "[$ContextLabel] clear-halted-run accepted."
+    Start-Sleep -Milliseconds 400
+
+    Write-Warn "[$ContextLabel] Deadman-repair: calling arm-execution..."
+    $r3 = Invoke-DaemonPost -Path '/api/v1/ops/action' -Body @{ action_key = 'arm-execution' }
+    if ($r3.StatusCode -ne 200) {
+        Write-Warn "[$ContextLabel] arm-execution returned HTTP $($r3.StatusCode) after repair"
+        return $false
+    }
+    Write-Ok "[$ContextLabel] arm-execution accepted."
+    Start-Sleep -Milliseconds 400
+
+    # Verify safety invariants: kill_switch_active=false, live_routing_enabled=false, arm_state=armed.
+    $stsR = $null
+    $rdR  = $null
+    try { $stsR = Invoke-DaemonGet -Path '/api/v1/system/status' }          catch {}
+    try { $rdR  = Invoke-DaemonGet -Path '/api/v1/autonomous/readiness' }   catch {}
+
+    $ksR  = ($null -ne $stsR) -and ($null -ne $stsR.PSObject.Properties['kill_switch_active']) -and ($stsR.kill_switch_active -eq $true)
+    $lrR  = ($null -ne $stsR) -and ($stsR.live_routing_enabled -eq $true)
+    $armR = if ($null -ne $rdR) { $rdR.arm_state } else { 'unknown' }
+
+    if ($ksR) {
+        Write-Fail "[$ContextLabel] kill_switch_active=true persists after deadman repair. Manual operator action required."
+        return $false
+    }
+    if ($lrR) {
+        Write-Fail "[$ContextLabel] live_routing_enabled=true after repair -- paper-only violation. Halting."
+        exit 1
+    }
+    Write-Ok "[$ContextLabel] Repair verified: arm_state=$armR  kill_switch_active=false  live_routing_enabled=false"
+    return ($armR -eq 'armed')
+}
+
+# ---------------------------------------------------------------------------
 # STEP 7: Start daemon
 # ---------------------------------------------------------------------------
 Write-Section "STEP 7: Start daemon from current HEAD"
@@ -995,6 +1055,8 @@ if ($NoStartRuntime) {
     Write-Step "Waiting for autonomous session controller to start runtime (up to 90s)..."
     $runtimeStarted = $false
     $local:ErrorActionPreference = 'Continue'
+    # DEADMAN-EXPIRY-HALT-ON-RESTART-01: Track repair attempts in this phase (max 1).
+    $dmRepairAttempts15 = 0
     $startPollDeadline = (Get-Date).AddSeconds(90)
     while ((Get-Date) -lt $startPollDeadline) {
         $stsCheck = $null
@@ -1004,8 +1066,31 @@ if ($NoStartRuntime) {
             $runtimeStarted = $true
             break
         }
+
+        # DEADMAN-EXPIRY-HALT-ON-RESTART-01: Detect stale-deadman halt during autonomous start wait.
+        # The orphaned run from the prior daemon process may get deadman-halted 10-15 minutes after
+        # restart; when that happens arm_state flips to halted mid-poll. Repair once, fail closed.
+        $rdCheck15 = $null
+        try { $rdCheck15 = Invoke-DaemonGet -Path '/api/v1/autonomous/readiness' } catch {}
+        $armNow15 = if ($null -ne $rdCheck15) { $rdCheck15.arm_state } else { $null }
+        $dmNow15  = if ($null -ne $stsCheck)  { $stsCheck.deadman_status }         else { 'unknown' }
+        $ksNow15  = ($null -ne $stsCheck) -and ($null -ne $stsCheck.PSObject.Properties['kill_switch_active']) -and ($stsCheck.kill_switch_active -eq $true)
+
+        if ($dmRepairAttempts15 -lt 1 -and ($armNow15 -eq 'halted' -or $ksNow15)) {
+            $dmRepairAttempts15++
+            Write-Warn ("STEP 15: deadman/halt detected (arm_state=$armNow15 deadman_status=$dmNow15 " +
+                        "kill_switch_active=$ksNow15). Running repair (attempt $dmRepairAttempts15 of 1).")
+            $repaired15 = Invoke-DeadmanRepair -ContextLabel 'STEP-15'
+            if (-not $repaired15) {
+                Write-Warn "STEP 15: deadman repair did not confirm armed. Proceeding to watcher for diagnosis."
+                break
+            }
+            Write-Ok "STEP 15: deadman repair succeeded. Continuing to wait for runtime start."
+            continue
+        }
+
         $rtNow = if ($null -ne $stsCheck) { $stsCheck.runtime_status } else { 'unreachable' }
-        Write-Step "  ...runtime_status=$rtNow (polling again in 5s)"
+        Write-Step "  ...runtime_status=$rtNow arm=$armNow15 deadman=$dmNow15 (polling again in 5s)"
         Start-Sleep -Seconds 5
     }
     if (-not $runtimeStarted) {
@@ -1028,6 +1113,8 @@ Write-Host ""
 $watchStart  = Get-Date
 $watchEnd    = $watchStart.AddSeconds($WatchSeconds)
 $tickCounter = 0
+# DEADMAN-EXPIRY-HALT-ON-RESTART-01: bounded repair in watcher (max 1 attempt).
+$dmRepairAttempts16 = 0
 
 while ((Get-Date) -lt $watchEnd) {
     $tickCounter++
@@ -1083,6 +1170,17 @@ while ((Get-Date) -lt $watchEnd) {
     # Alert if live routing somehow got enabled
     if ($w_live_routing -eq 'TRUE-DANGER') {
         Write-Fail "LIVE ROUTING IS ENABLED. This is a paper-only session. Halt immediately."
+    }
+
+    # DEADMAN-EXPIRY-HALT-ON-RESTART-01: Detect stale-deadman halt in watcher and repair.
+    # The orphaned run from the prior daemon process may be halted by deadman 10-15 minutes after
+    # restart; when detected here, run one repair cycle: disarm -> clear-halted-run -> arm-execution.
+    # Bounded to 1 attempt; fails closed if repair does not confirm armed.
+    if ($dmRepairAttempts16 -lt 1 -and $w_arm -eq 'halted') {
+        $dmRepairAttempts16++
+        Write-Warn ("STEP 16: arm_state=halted detected (deadman=$w_deadman). " +
+                    "Running deadman repair (attempt $dmRepairAttempts16 of 1).")
+        $null = Invoke-DeadmanRepair -ContextLabel 'STEP-16'
     }
 
     $line = ("[+{0,4}s] rt={1,-10} ws={2,-20} db={3,-12} rec={4,-10} dm={5,-10} arm={6,-8} sess={7,-15} bars={8,-6} sig={9,-5} alerts={10,-3} ord_act={11} ord_pend={12} live_routing={13}" -f
