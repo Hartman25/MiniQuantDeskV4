@@ -218,6 +218,18 @@ Computed from the 5m bar lookback (default: 78 bars = ~1 trading day):
 
 Only symbols with `regime_label != unclassified` and `regime_score >= min_regime_score` (default: 0.5) proceed to strategy selection.
 
+### Implementation note (SCANNER-REGIME-01)
+
+- MAIN module: `research-py/src/mqk_research/scanner/regime.py`
+- Entry point: `evaluate_regime(symbol, bars, config)` → `RegimeResult`
+- Rejection helper: `build_regime_rejection_candidate(...)` → `scanner-candidate-v1` record
+- Helper: `apply_regime_to_candidate_fields(result)` → dict of regime-derived candidate fields (no writes; for SCANNER-SCORE-01)
+- Stable rejection reason constants: `regime_unclassified`, `regime_score_below_min`
+- Regime labels: `trending_up`, `trending_down`, `range_bound`, `high_volatility`, `low_volatility`, `gapping`, `unclassified`
+- Classification priority: gapping → high_volatility → low_volatility → trending_up → trending_down → range_bound → unclassified
+- Rejection records use `scanner-candidate-v1` schema with all eligibility flags False; `eligible_for_live` is always False
+- EXP penny scanner (`exp-candidate-v1`) is separate and unaffected
+
 ---
 
 ## 9. Candidate Schema
