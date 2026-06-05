@@ -18,7 +18,7 @@ use mqk_execution::{
     oms::state_machine::{OmsEvent, OmsOrder, OrderState},
     BrokerEvent,
 };
-use mqk_portfolio::{apply_entry, LedgerEntry, PortfolioState};
+use mqk_portfolio::{apply_entry, LedgerEntry, Lot, PortfolioState, PositionState};
 use mqk_reconcile::{ReconcileDiff, SnapshotFreshness, SnapshotWatermark};
 
 use super::initial_reconcile_status;
@@ -522,6 +522,38 @@ pub(crate) fn preserve_fail_closed_reconcile_status(
     preserved
 }
 
+/// Seed a portfolio with broker baseline positions inherited from prior sessions.
+///
+/// Baseline positions represent broker holdings from runs prior to this one.
+/// They are inserted as synthetic lots (`price_micros=1`; no cash adjustment)
+/// because the original cost basis was accounted for in a prior run.
+///
+/// Double-count safety: `recover_oms_and_portfolio` replays only fills from
+/// the *current* run_id into `portfolio` before this is called.  Baseline
+/// adds only the inherited prior-run qty; no fill from this run is counted twice.
+///
+/// Zero-qty entries in the baseline are skipped.  If `portfolio` already has
+/// a position for a symbol (e.g. partial fills this run), baseline qty is
+/// appended as an additional lot — total qty = current_run_delta + baseline.
+pub(crate) fn seed_portfolio_from_baseline(
+    portfolio: &mut PortfolioState,
+    baseline: &mqk_reconcile::LocalSnapshot,
+) {
+    for (sym, &bl_qty) in &baseline.positions {
+        if bl_qty == 0 {
+            continue;
+        }
+        let pos = portfolio
+            .positions
+            .entry(sym.clone())
+            .or_insert_with(|| PositionState::new(sym.clone()));
+        pos.lots.push(Lot {
+            qty_signed: bl_qty,
+            entry_price_micros: 1,
+        });
+    }
+}
+
 /// Recover OMS orders, side cache, and portfolio from durable DB truth.
 pub(crate) async fn recover_oms_and_portfolio(
     db: &sqlx::PgPool,
@@ -789,5 +821,154 @@ mod reconcile_status_map_tests {
     fn case_insensitive_open() {
         assert_eq!(oms_execution_status_to_reconcile("open"), OrderStatus::New);
         assert_eq!(oms_execution_status_to_reconcile("OPEN"), OrderStatus::New);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RUNTIME-POSITION-SEED-ON-START-01 unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod position_seed_tests {
+    use super::{seed_portfolio_from_baseline, PortfolioState};
+    use mqk_portfolio::apply_entry;
+    use mqk_reconcile::LocalSnapshot;
+
+    fn flat_portfolio() -> PortfolioState {
+        PortfolioState::new(100_000_000_000) // $100k initial equity
+    }
+
+    fn baseline_with(positions: &[(&str, i64)]) -> LocalSnapshot {
+        let mut s = LocalSnapshot::empty();
+        for &(sym, qty) in positions {
+            s.positions.insert(sym.to_string(), qty);
+        }
+        s
+    }
+
+    // P01: no baseline positions → portfolio remains flat
+    #[test]
+    fn p01_empty_baseline_leaves_portfolio_flat() {
+        let mut pf = flat_portfolio();
+        let baseline = LocalSnapshot::empty();
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+        assert!(
+            pf.positions.is_empty(),
+            "empty baseline must leave portfolio flat"
+        );
+    }
+
+    // P02: baseline AAPL=1 → portfolio has AAPL qty=1
+    #[test]
+    fn p02_aapl_baseline_seeds_qty_one() {
+        let mut pf = flat_portfolio();
+        let baseline = baseline_with(&[("AAPL", 1)]);
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+        let qty = pf
+            .positions
+            .get("AAPL")
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        assert_eq!(qty, 1, "AAPL qty must be 1 after seeding from baseline");
+    }
+
+    // P03: target=0 minus seeded AAPL qty=1 → delta=-1 (sell signal)
+    #[test]
+    fn p03_target_zero_vs_seeded_one_is_negative_delta() {
+        let mut pf = flat_portfolio();
+        let baseline = baseline_with(&[("AAPL", 1)]);
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+        let current = pf
+            .positions
+            .get("AAPL")
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        let target: i64 = 0;
+        let delta = target - current;
+        assert_eq!(
+            delta, -1,
+            "delta must be -1 (sell) when target=0 and seeded position=1"
+        );
+    }
+
+    // P04: target=1 minus seeded AAPL qty=1 → delta=0 (already_at_target)
+    #[test]
+    fn p04_target_one_vs_seeded_one_is_zero_delta() {
+        let mut pf = flat_portfolio();
+        let baseline = baseline_with(&[("AAPL", 1)]);
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+        let current = pf
+            .positions
+            .get("AAPL")
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        let target: i64 = 1;
+        let delta = target - current;
+        assert_eq!(
+            delta, 0,
+            "delta must be 0 (already_at_target) when target=1 and seeded position=1"
+        );
+    }
+
+    // P05: current-run fill AAPL=1 + baseline AAPL=1 → total qty=2 (no double-count)
+    #[test]
+    fn p05_current_run_fill_plus_baseline_no_double_count() {
+        use mqk_portfolio::{Fill, LedgerEntry, Side};
+        let mut pf = flat_portfolio();
+        // Simulate a fill that happened in this run (price > 0 required by apply_fill).
+        apply_entry(
+            &mut pf,
+            LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 1, 313_000_000, 0)),
+        );
+        // Now seed from baseline (prior run had AAPL=1 already).
+        let baseline = baseline_with(&[("AAPL", 1)]);
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+        let qty = pf
+            .positions
+            .get("AAPL")
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        assert_eq!(
+            qty, 2,
+            "total qty must be 2: 1 from current-run fill + 1 from baseline"
+        );
+    }
+
+    // P06: multi-symbol baseline seeds all symbols correctly
+    #[test]
+    fn p06_multi_symbol_baseline_seeds_all_positions() {
+        let mut pf = flat_portfolio();
+        let baseline = baseline_with(&[("AAPL", 2), ("NVDA", 3)]);
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+        let aapl = pf
+            .positions
+            .get("AAPL")
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        let nvda = pf
+            .positions
+            .get("NVDA")
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        assert_eq!(aapl, 2, "AAPL must be 2 from multi-symbol baseline");
+        assert_eq!(nvda, 3, "NVDA must be 3 from multi-symbol baseline");
+    }
+
+    // P07: zero-qty entries in baseline are skipped
+    #[test]
+    fn p07_zero_qty_baseline_entry_skipped() {
+        let mut pf = flat_portfolio();
+        let baseline = baseline_with(&[("AAPL", 0), ("NVDA", 1)]);
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+        assert!(
+            !pf.positions.contains_key("AAPL"),
+            "AAPL with qty=0 in baseline must not create a position"
+        );
+        let nvda = pf
+            .positions
+            .get("NVDA")
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        assert_eq!(nvda, 1, "NVDA=1 must still be seeded when AAPL=0 is skipped");
     }
 }

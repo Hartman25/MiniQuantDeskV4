@@ -20,7 +20,7 @@ use uuid::Uuid;
 use super::broker::{build_daemon_broker, DaemonBroker};
 use super::snapshot::{
     reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,
-    recover_oms_and_portfolio, synthesize_paper_broker_snapshot,
+    recover_oms_and_portfolio, seed_portfolio_from_baseline, synthesize_paper_broker_snapshot,
 };
 use super::types::{
     AlpacaWsContinuityState, BrokerSnapshotTruthSource, DaemonOrchestrator, ReconcileTruthGate,
@@ -84,8 +84,26 @@ impl AppState {
             .and_then(|value| value.as_i64())
             .unwrap_or(0);
 
-        let (oms_orders, recovered_sides, portfolio) =
+        let (oms_orders, recovered_sides, mut portfolio) =
             recover_oms_and_portfolio(&db, run_id, initial_equity_micros).await?;
+
+        // RUNTIME-POSITION-SEED-ON-START-01: seed portfolio with adopted broker
+        // baseline so current_position_qty reflects positions inherited from prior
+        // runs immediately at run start.
+        //
+        // Without this, the execution loop reads qty=0 for symbols held in a prior
+        // run (e.g. AAPL bought last session), and delta = target(0) - current(0) = 0
+        // produces no sell order when the strategy wants to flatten.
+        //
+        // The reconcile local_snapshot_provider already incorporates the baseline for
+        // drift detection; this seeds the same qty into the execution portfolio so
+        // both reconcile and delta calculation agree on current holdings.
+        //
+        // Double-count safety: recover_oms_and_portfolio replays only fills from the
+        // current run_id; baseline adds only inherited prior-run qty.
+        if let Some(baseline) = self.broker_baseline.read().await.clone() {
+            seed_portfolio_from_baseline(&mut portfolio, &baseline);
+        }
 
         {
             let mut sides_lock = self.local_order_sides.write().await;
