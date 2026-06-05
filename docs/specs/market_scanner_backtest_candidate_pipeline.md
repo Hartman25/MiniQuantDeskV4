@@ -167,6 +167,14 @@ Spread, slippage, and round-trip cost estimates are computed from bar data; they
 - Derived from distance-to-threshold across ADV, RVOL, spread, and cost gates.
 - Only symbols with `liquidity_score >= min_liquidity_score` (default: 0.6) proceed to regime classification.
 
+### Implementation note (SCANNER-LIQUIDITY-01)
+
+- MAIN module: `research-py/src/mqk_research/scanner/liquidity.py`
+- Stable rejection reason names: `price_below_min`, `adv_usd_below_min`, `relative_volume_below_min`,
+  `spread_too_wide`, `round_trip_cost_too_high`, `slippage_too_high`, `liquidity_score_below_min`
+- Liquidity rejection candidates use `scanner-candidate-v1` schema via `build_liquidity_rejection_candidate`
+- EXP penny scanner remains separate on `exp-candidate-v1`; this module does not affect EXP
+
 ---
 
 ## 8. Volatility / Regime Classification
