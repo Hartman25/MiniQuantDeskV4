@@ -330,6 +330,21 @@ Scores are advisory. Final selection is operator-reviewed in v1.
 - `recommended_strategy` is advisory only; default is `"intraday_scalper"`.
 - EXP penny scanner (`exp-candidate-v1`) is not affected by this module.
 
+### Implementation note (SCANNER-SELECTOR-01)
+
+- MAIN selector module: `research-py/src/mqk_research/scanner/selector.py`
+- Public API: `SelectorConfig`, `RankedCandidate`, `RankedCandidateExport`, `WatchlistArtifact`, `select_ranked_candidates`, `build_ranked_candidate_export`, `build_watchlist_artifact`, `write_ranked_candidate_export`, `write_watchlist_artifact`
+- Ranked export schema: `ranked-candidates-v1`; written under `exports/watchlist/YYYYMMDD/`
+- Watchlist artifact schema: `watchlist-v1`; written under `exports/watchlist/YYYYMMDD/`
+- `approved_for_autonomous_paper=False` always in this patch — requires future promotion gate.
+- `approved_for_live=False` always — hard invariant, not overrideable by config or caller.
+- `max_symbols_to_trade=1` and `max_concurrent_positions=1` forced in v1; config is ignored.
+- Candidates with `eligible_for_live=True` are always excluded.
+- Ranking: `total_score` desc → `liquidity_score` desc → `regime_score` desc → `symbol` asc (deterministic tie-break).
+- Deduplicates by symbol; keeps highest-ranked record per symbol.
+- EXP penny scanner (`exp-candidate-v1`) is not affected; this module is MAIN-only.
+- No broker/OMS/execution imports; no network/DB imports; no orders placed.
+
 ---
 
 ## 11. Off-Hours Backtest Stage
