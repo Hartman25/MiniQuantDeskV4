@@ -645,6 +645,28 @@ A symbol/strategy pair is eligible for the next-day paper watchlist only when AL
 
 `approved_for_autonomous_paper` is set to `true` only after operator review in v1.
 
+### Implementation Note (WATCHLIST-PROMO-01)
+
+- MAIN promotion module: `research-py/src/mqk_research/scanner/watchlist_promotion.py`
+- Public API: `WatchlistPromotionConfig`, `PromotionInput`, `PromotionDecision`,
+  `evaluate_watchlist_promotion(watchlist, strategy_fit_artifacts, config)`,
+  `apply_watchlist_promotion(watchlist, decision, config)`,
+  `write_promoted_watchlist(watchlist, path)`
+- Promotion gates evaluated in order: `watchlist_schema_valid`, `watchlist_mode_paper`,
+  `watchlist_live_locked`, `has_ranked_candidates`, `strategy_fit_present`,
+  `strategy_fit_recommended_for_paper`, `risk_simulation_passed`, `operator_review_approved`,
+  `premarket_revalidation_deferred`
+- `operator_review_approved` defaults `False` — fail closed until explicit operator sign-off.
+- `risk_simulation_passed` defaults `False` — lightweight placeholder; fail closed until passed.
+- `premarket_revalidation_required` defaults `True` — fail closed; cleared by WATCHLIST-PREMARKET-01.
+- `approved_for_autonomous_paper=False` unless every gate passes.
+- `approved_for_live=False` always — hard invariant, not overrideable by caller or config.
+- `max_symbols_to_trade=1` and `max_concurrent_positions=1` forced in v1.
+- Input `approved_for_live=True` is forced `False` and adds `live_approval_forbidden` reason.
+- Output goes to `exports/watchlist/`; never writes to `config/watchlists`.
+- No daemon integration in this patch. Daemon reads the promoted artifact at startup (§21).
+- EXP penny scanner (`exp-candidate-v1`) is separate and not affected by this module.
+
 ### 18.2 Demotion from Watchlist
 
 A symbol is removed from the watchlist if ANY:
