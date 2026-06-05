@@ -513,6 +513,23 @@ Failure on any gate:
 - Appends all failed gate names to `failure_reasons`.
 - Still writes the artifact (rejected artifacts are kept as evidence).
 
+### Implementation Note (BACKTEST-GATES-01)
+
+- MAIN gate module: `research-py/src/mqk_research/scanner/backtest_gates.py`
+- Public API: `BacktestGateConfig`, `BacktestGateResult`, `evaluate_strategy_fit(artifact, config)`,
+  `apply_backtest_gates(artifact, config)`, `write_evaluated_strategy_fit_artifact(artifact, path)`
+- Blocked/null-metric artifacts are fail-closed: `status == "blocked_no_backtest_interface"` or any
+  null required metric → all gates False, `recommended_for_paper=False`.
+- `recommended_for_paper=True` only if all 7 required gates pass AND sample_quality,
+  parameter_stability, and no_single_trade_dependency additional checks pass.
+- `recommended_for_live=False` always (hard invariant; not overrideable by caller or config).
+- Additional gates (sample_quality, parameter_stability, single_trade_dependency) tracked in
+  `failure_reasons` only — no new `passed_*` schema fields added (schema-compatible).
+- Out-of-sample gate uses `validation_profit_factor` + `validation_trades` if present; fails closed
+  if absent (these fields are not in the current blocked-runner artifact).
+- Does not execute backtest runs; evaluates existing artifacts only.
+- EXP penny scanner (`exp-candidate-v1`) is separate and not affected by this module.
+
 ---
 
 ## 15. Walk-Forward Validation
