@@ -349,6 +349,19 @@ Scores are advisory. Final selection is operator-reviewed in v1.
 
 ## 11. Off-Hours Backtest Stage
 
+### 11.0 Implementation Note (BACKTEST-QUEUE-01)
+
+Backtest queue writer: `research-py/src/mqk_research/scanner/backtest_queue.py`
+
+- Schema: `backtest-queue-v1`
+- Strategy compatibility matrix is defined in `backtest_queue.py` (`_COMPATIBILITY` dict);
+  maps each `strategy_id` to a frozenset of compatible `regime_label` values.
+- Queue does **not** run backtests; entries are consumed by BACKTEST-RUNNER-01.
+- `recommended_for_live=False` is a hard invariant enforced in code, not configuration.
+- EXP penny scanner (`exp-candidate-v1`) is separate and not affected by this module.
+- Queue ordering: source_rank ascending → approved_strategy_ids order → symbol ascending.
+- Queue limit: `max_queue_entries=25` (configurable via `BacktestQueueConfig`).
+
 ### 11.1 Trigger
 
 Triggered after market close, after the ranked candidate export is written. The backtest queue is a file: `exports/backtest_queue/YYYYMMDD_queue.json`. The queue lists candidate artifact paths and strategy IDs to test.
