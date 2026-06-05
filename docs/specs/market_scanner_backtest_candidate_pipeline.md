@@ -134,6 +134,18 @@ Rejection reason must be written to the candidate journal with the specific chec
 - < 1.0 = partial issues that did not hard-reject but reduce confidence
 - 0.0 = hard rejection (gate failed)
 
+### Implementation (SCANNER-DQ-01)
+
+- Module: `research-py/src/mqk_research/scanner/data_quality.py`
+- Entry point: `evaluate_data_quality(symbol, timeframe, bars, config, now_utc)` → `DataQualityResult`
+- Rejection helper: `build_data_quality_rejection_candidate(...)` → `scanner-candidate-v1` record
+- Stable rejection reason constants: `REASON_NO_BARS`, `REASON_INSUFFICIENT_COMPLETED_BARS`,
+  `REASON_LATEST_BAR_STALE`, `REASON_DUPLICATE_BAR_TIMESTAMP`, `REASON_TOO_MANY_ZERO_VOLUME_BARS`,
+  `REASON_ZERO_PRICE_BAR`, `REASON_INVERTED_OHLC`, `REASON_CLOSE_OUTSIDE_OHLC_RANGE`,
+  `REASON_MISSING_BAR_GAP`, `REASON_LATEST_BAR_INCOMPLETE`
+- Rejection records use `scanner-candidate-v1` schema with all eligibility flags False
+- EXP penny scanner (`exp-candidate-v1`) is separate and unaffected
+
 ---
 
 ## 7. Liquidity / Execution-Cost Gate
