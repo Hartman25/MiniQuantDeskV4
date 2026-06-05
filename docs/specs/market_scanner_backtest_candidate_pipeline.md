@@ -320,6 +320,16 @@ Default weights (v1):
 
 Scores are advisory. Final selection is operator-reviewed in v1.
 
+### Implementation note (SCANNER-SCORE-01)
+
+- MAIN scoring module: `research-py/src/mqk_research/scanner/scoring.py`
+- Public API: `ScoringConfig`, `ScoringInputs`, `ScoringResult`, `score_candidate`, `build_scored_scanner_candidate`
+- Accepted candidates (`eligible_for_scan=True`, `eligible_for_backtest=True`) are produced only after DQ + liquidity + regime all pass.
+- `eligible_for_live=False` always — enforced by `build_scanner_candidate`; not overrideable by caller.
+- `eligible_for_paper=False` until a watchlist/promotion gate is added (future patch).
+- `recommended_strategy` is advisory only; default is `"intraday_scalper"`.
+- EXP penny scanner (`exp-candidate-v1`) is not affected by this module.
+
 ---
 
 ## 11. Off-Hours Backtest Stage
