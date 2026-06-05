@@ -472,6 +472,51 @@ pub struct PreflightStatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// STRATEGY-DECISION-OBSERVABILITY-01: strategy diagnostic snapshot
+// ---------------------------------------------------------------------------
+
+/// Read-only diagnostic snapshot exposing the exact intraday scalper signal
+/// decision from the most recent bar dispatch.
+///
+/// Operators can check `move_bps`, `threshold_bps`, and `gap_to_threshold_bps`
+/// when `last_bar_signal_qty == 0` to understand why no signal fired.
+///
+/// All price values are in micros (1 USD = 1_000_000).  `None` fields indicate
+/// the value was not computable (e.g. insufficient bars).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyDecisionDiagnostics {
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe: String,
+    /// Number of lookback bars required for a valid signal.
+    pub lookback_bars: u64,
+    /// Minimum absolute displacement in basis points required for a signal.
+    pub threshold_bps: i64,
+    /// Unix-second timestamp of the latest bar used in the dispatch.
+    pub latest_bar_ts: Option<i64>,
+    /// Close price of the latest bar in micros (1 USD = 1_000_000).
+    pub latest_close_micros: Option<i64>,
+    /// Unix-second timestamp of the lookback anchor bar.
+    pub lookback_bar_ts: Option<i64>,
+    /// Close price of the lookback anchor bar in micros.
+    pub lookback_close_micros: Option<i64>,
+    /// Signed displacement in basis points: `(latest_close - lookback_close) * 10_000 / lookback_close`.
+    pub move_bps: Option<i64>,
+    /// Absolute value of `move_bps`.
+    pub abs_move_bps: Option<i64>,
+    /// `threshold_bps - abs_move_bps`.  Positive = still below threshold.
+    /// Zero or negative = threshold met or exceeded.
+    pub gap_to_threshold_bps: Option<i64>,
+    /// Raw strategy direction: `+1` (bullish), `0` (neutral), `-1` (bearish).
+    pub raw_direction: i64,
+    /// One of: `"signal_long"` | `"flat_due_to_negative_direction"` |
+    /// `"flat_below_threshold"` | `"insufficient_bars"`.
+    pub decision: String,
+    /// Human-readable reason for the decision.
+    pub reason: String,
+}
+
+// ---------------------------------------------------------------------------
 // AUTON-TRUTH-01: GET /api/v1/autonomous/readiness
 // ---------------------------------------------------------------------------
 
@@ -613,6 +658,13 @@ pub struct AutonomousPaperReadinessResponse {
     ///
     /// `null` when not applicable (non-paper+alpaca or env vars absent).
     pub market_data_freshness: Option<MarketDataFreshnessStatus>,
+    // STRATEGY-DECISION-OBSERVABILITY-01: signal decision diagnostics.
+    /// Read-only diagnostic snapshot from the most recent native strategy bar dispatch.
+    ///
+    /// `null` when no bar has been dispatched this session or the deployment is
+    /// not paper+alpaca.  Non-null exposes the exact decision path: move_bps,
+    /// threshold_bps, gap_to_threshold_bps, and decision reason.
+    pub strategy_decision_diagnostics: Option<StrategyDecisionDiagnostics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

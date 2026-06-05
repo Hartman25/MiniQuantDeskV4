@@ -5,7 +5,10 @@ pub mod mean_reversion;
 pub mod swing_momentum;
 pub mod volatility_breakout;
 
-pub use intraday_scalper::IntradayScalperStrategy;
+pub use intraday_scalper::{
+    compute_diagnostics as intraday_scalper_compute_diagnostics, IntradayScalperDiagnostics,
+    IntradayScalperStrategy,
+};
 pub use mean_reversion::MeanReversionStrategy;
 pub use swing_momentum::SwingMomentumStrategy;
 pub use volatility_breakout::VolatilityBreakoutStrategy;

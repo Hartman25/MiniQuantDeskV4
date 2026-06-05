@@ -22,3 +22,9 @@ pub use types::*;
 // Re-export execution-facing output types so engine modules and downstream
 // callers can use mqk-strategy as the main strategy-layer boundary.
 pub use mqk_execution::{StrategyOutput, TargetPosition};
+
+// STRATEGY-DECISION-OBSERVABILITY-01: re-export diagnostics so daemon can store
+// and surface them without a direct dependency on the engine sub-module.
+pub use engines::{
+    intraday_scalper_compute_diagnostics, IntradayScalperDiagnostics,
+};

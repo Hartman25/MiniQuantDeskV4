@@ -752,3 +752,152 @@ async fn ar14_active_run_blocks_readiness_and_start() {
         "fault_class must identify the active-run conflict: {fault}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// STRATEGY-DECISION-OBSERVABILITY-01: strategy_decision_diagnostics contract
+// ---------------------------------------------------------------------------
+
+/// OBS-AR01: not_applicable path has strategy_decision_diagnostics = null.
+#[tokio::test]
+async fn obs_ar01_not_applicable_diagnostics_is_null() {
+    let st = make_paper_paper();
+    let (status, body) = call(
+        routes::build_router(Arc::clone(&st)),
+        Request::builder()
+            .uri("/api/v1/autonomous/readiness")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(body);
+    assert_eq!(v["truth_state"], "not_applicable", "OBS-AR01: pp is not_applicable");
+    assert!(
+        v["strategy_decision_diagnostics"].is_null(),
+        "OBS-AR01: strategy_decision_diagnostics must be null for not_applicable"
+    );
+}
+
+/// OBS-AR02: active path (paper+alpaca, no dispatch yet) has diagnostics = null.
+#[tokio::test]
+async fn obs_ar02_active_no_dispatch_diagnostics_is_null() {
+    let st = make_paper_alpaca();
+    let (status, body) = call(
+        routes::build_router(Arc::clone(&st)),
+        Request::builder()
+            .uri("/api/v1/autonomous/readiness")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(body);
+    assert_eq!(v["truth_state"], "active", "OBS-AR02: pa is active");
+    assert!(
+        v["strategy_decision_diagnostics"].is_null(),
+        "OBS-AR02: strategy_decision_diagnostics is null before first dispatch"
+    );
+}
+
+/// OBS-AR03: after a bar dispatch, diagnostics are non-null with correct shape.
+#[tokio::test]
+async fn obs_ar03_after_dispatch_diagnostics_non_null_with_correct_shape() {
+    use mqk_strategy::{engines::intraday_scalper, BarStub};
+
+    let st = make_paper_alpaca();
+
+    // Inject a diagnostic snapshot directly (simulates what tick_strategy_dispatch does).
+    let base = 200_000_000i64;
+    let bars: Vec<BarStub> = vec![
+        BarStub::new(1000, true, base, 1),
+        BarStub::new(1001, true, base, 1),
+        BarStub::new(1002, true, base, 1),
+        BarStub::new(1003, true, base, 1),
+        BarStub::new(1004, true, base + base / 400, 1), // +25 bps → signal_long
+    ];
+    let diag = intraday_scalper::compute_diagnostics(&bars);
+    st.set_strategy_diagnostics_for_test(diag).await;
+
+    let (status, body) = call(
+        routes::build_router(Arc::clone(&st)),
+        Request::builder()
+            .uri("/api/v1/autonomous/readiness")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(body);
+    let d = &v["strategy_decision_diagnostics"];
+    assert!(!d.is_null(), "OBS-AR03: diagnostics non-null after dispatch");
+
+    // Shape assertions.
+    assert!(
+        d["lookback_bars"].as_u64().is_some(),
+        "OBS-AR03: lookback_bars present"
+    );
+    assert!(
+        d["threshold_bps"].as_i64().is_some(),
+        "OBS-AR03: threshold_bps present"
+    );
+    assert_eq!(d["decision"], "signal_long", "OBS-AR03: decision=signal_long for bullish bars");
+    assert_eq!(d["raw_direction"], 1, "OBS-AR03: raw_direction=+1");
+    assert!(
+        d["move_bps"].as_i64().is_some(),
+        "OBS-AR03: move_bps present"
+    );
+    assert!(
+        d["abs_move_bps"].as_i64().is_some(),
+        "OBS-AR03: abs_move_bps present"
+    );
+    assert!(
+        d["gap_to_threshold_bps"].as_i64().is_some(),
+        "OBS-AR03: gap_to_threshold_bps present"
+    );
+    assert!(
+        d["latest_close_micros"].as_i64().is_some(),
+        "OBS-AR03: latest_close_micros present"
+    );
+    assert!(
+        d["lookback_close_micros"].as_i64().is_some(),
+        "OBS-AR03: lookback_close_micros present"
+    );
+}
+
+/// OBS-AR04: flat_below_threshold decision surfaced correctly in readiness response.
+#[tokio::test]
+async fn obs_ar04_flat_below_threshold_surfaces_in_readiness() {
+    use mqk_strategy::{engines::intraday_scalper, BarStub};
+
+    let st = make_paper_alpaca();
+
+    // 1 bps move — below 20 bps threshold.
+    let base = 530_570_000i64;
+    let latest = 530_640_000i64;
+    let bars: Vec<BarStub> = vec![
+        BarStub::new(1000, true, base, 1),
+        BarStub::new(1001, true, base, 1),
+        BarStub::new(1002, true, base, 1),
+        BarStub::new(1003, true, base, 1),
+        BarStub::new(1004, true, latest, 1),
+    ];
+    let diag = intraday_scalper::compute_diagnostics(&bars);
+    st.set_strategy_diagnostics_for_test(diag).await;
+
+    let (_, body) = call(
+        routes::build_router(Arc::clone(&st)),
+        Request::builder()
+            .uri("/api/v1/autonomous/readiness")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let v = parse_json(body);
+    let d = &v["strategy_decision_diagnostics"];
+    assert_eq!(
+        d["decision"], "flat_below_threshold",
+        "OBS-AR04: below-threshold decision surfaced"
+    );
+    let gap = d["gap_to_threshold_bps"].as_i64().unwrap();
+    assert!(gap > 0, "OBS-AR04: gap_to_threshold_bps > 0 when below threshold");
+}

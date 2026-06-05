@@ -26,7 +26,8 @@ use chrono::Utc;
 use crate::api_types::{
     AssetCapabilityEntry, AssetCapabilityMatrix, AutonomousPaperReadinessResponse, HealthResponse,
     PreflightStatusResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
-    SessionStateResponse, SystemMetadataResponse, SystemStatusResponse,
+    SessionStateResponse, StrategyDecisionDiagnostics, SystemMetadataResponse,
+    SystemStatusResponse,
 };
 use crate::market_data_freshness::evaluate_md_freshness_status;
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
@@ -652,6 +653,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                 session_start_env_raw: diag.session_start_env_raw,
                 session_stop_env_raw: diag.session_stop_env_raw,
                 market_data_freshness: None,
+                strategy_decision_diagnostics: None,
             }),
         )
             .into_response();
@@ -957,6 +959,37 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
 
     let autonomous_history_degraded = st.autonomous_history_degraded();
 
+    // STRATEGY-DECISION-OBSERVABILITY-01: map strategy diagnostics to API type.
+    let strategy_decision_diagnostics: Option<StrategyDecisionDiagnostics> =
+        st.last_strategy_diagnostics().await.map(|d| {
+            let strategy_id = std::env::var("MQK_STRATEGY_IDS")
+                .map(|v| v.trim().split(',').next().unwrap_or("intraday_scalper").trim().to_string())
+                .unwrap_or_else(|_| "intraday_scalper".to_string());
+            let symbol = std::env::var("MQK_STRATEGY_SYMBOL")
+                .map(|v| v.trim().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            let timeframe = std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
+                .map(|v| v.trim().to_string())
+                .unwrap_or_else(|_| "5m".to_string());
+            StrategyDecisionDiagnostics {
+                strategy_id,
+                symbol,
+                timeframe,
+                lookback_bars: d.lookback_bars as u64,
+                threshold_bps: d.threshold_bps,
+                latest_bar_ts: d.latest_bar_ts,
+                latest_close_micros: d.latest_close_micros,
+                lookback_bar_ts: d.lookback_bar_ts,
+                lookback_close_micros: d.lookback_close_micros,
+                move_bps: d.move_bps,
+                abs_move_bps: d.abs_move_bps,
+                gap_to_threshold_bps: d.gap_to_threshold_bps,
+                raw_direction: d.raw_direction,
+                decision: d.decision.to_string(),
+                reason: d.reason.to_string(),
+            }
+        });
+
     (
         StatusCode::OK,
         Json(AutonomousPaperReadinessResponse {
@@ -992,6 +1025,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
             session_start_env_raw: diag.session_start_env_raw,
             session_stop_env_raw: diag.session_stop_env_raw,
             market_data_freshness: Some(md_freshness),
+            strategy_decision_diagnostics,
         }),
     )
         .into_response()

@@ -53,6 +53,136 @@ use crate::{
     BarStub, Strategy, StrategyContext, StrategyMeta, StrategyOutput, StrategySpec, TargetPosition,
 };
 
+// ── Decision vocabulary (STRATEGY-DECISION-OBSERVABILITY-01) ─────────────────
+pub const DECISION_SIGNAL_LONG: &str = "signal_long";
+pub const DECISION_FLAT_NEGATIVE: &str = "flat_due_to_negative_direction";
+pub const DECISION_FLAT_BELOW_THRESHOLD: &str = "flat_below_threshold";
+pub const DECISION_INSUFFICIENT_BARS: &str = "insufficient_bars";
+
+/// Read-only diagnostic snapshot produced by `compute_diagnostics`.
+///
+/// All fields are derived purely from the bar window with no side-effects on
+/// the strategy decision path.  `decision` is one of the `DECISION_*` constants.
+#[derive(Clone, Debug)]
+pub struct IntradayScalperDiagnostics {
+    pub lookback_bars: usize,
+    pub threshold_bps: i64,
+    /// Unix-second timestamp of the latest bar (`recent.last().end_ts`), or `None`
+    /// when the bar window is empty.
+    pub latest_bar_ts: Option<i64>,
+    /// Close price of the latest bar in micros, or `None` when empty.
+    pub latest_close_micros: Option<i64>,
+    /// Unix-second timestamp of the lookback anchor bar, or `None` when
+    /// `recent.len() < LOOKBACK`.
+    pub lookback_bar_ts: Option<i64>,
+    /// Close price of the lookback anchor bar in micros, or `None` when
+    /// `recent.len() < LOOKBACK` or anchor `close_micros <= 0`.
+    pub lookback_close_micros: Option<i64>,
+    /// Signed displacement in basis points: `(latest - lookback) * 10_000 /
+    /// lookback`.  `None` when insufficient bars or anchor price is invalid.
+    pub move_bps: Option<i64>,
+    /// Absolute value of `move_bps`. `None` in the same cases.
+    pub abs_move_bps: Option<i64>,
+    /// `threshold_bps - abs_move_bps`.  Positive means move is still below
+    /// threshold (gap remaining).  Zero or negative means threshold was met.
+    /// `None` when `abs_move_bps` is `None`.
+    pub gap_to_threshold_bps: Option<i64>,
+    /// Raw direction as returned by `signal_from_recent`: `+1`, `0`, or `-1`.
+    pub raw_direction: i64,
+    /// One of `DECISION_*` constants.
+    pub decision: &'static str,
+    /// Human-readable reason for the decision.
+    pub reason: &'static str,
+}
+
+/// Compute a read-only diagnostic snapshot from a bar window.
+///
+/// Pure function — does not modify strategy state or affect the decision path.
+/// Safe to call on any bar slice; returns `decision = "insufficient_bars"` when
+/// the window is too small rather than panicking.
+pub fn compute_diagnostics(recent: &[BarStub]) -> IntradayScalperDiagnostics {
+    let latest = recent.last();
+    let latest_bar_ts = latest.map(|b| b.end_ts);
+    let latest_close_micros = latest.map(|b| b.close_micros);
+
+    // Insufficient bars: window too small or last bar not complete.
+    if recent.len() < LOOKBACK || !latest.map(|b| b.is_complete).unwrap_or(false) {
+        return IntradayScalperDiagnostics {
+            lookback_bars: LOOKBACK,
+            threshold_bps: MICRO_MOVE_BPS,
+            latest_bar_ts,
+            latest_close_micros,
+            lookback_bar_ts: None,
+            lookback_close_micros: None,
+            move_bps: None,
+            abs_move_bps: None,
+            gap_to_threshold_bps: None,
+            raw_direction: 0,
+            decision: DECISION_INSUFFICIENT_BARS,
+            reason: "fewer than LOOKBACK complete bars in window",
+        };
+    }
+
+    let anchor = &recent[recent.len() - LOOKBACK];
+    let lookback_bar_ts = Some(anchor.end_ts);
+
+    if anchor.close_micros <= 0 {
+        return IntradayScalperDiagnostics {
+            lookback_bars: LOOKBACK,
+            threshold_bps: MICRO_MOVE_BPS,
+            latest_bar_ts,
+            latest_close_micros,
+            lookback_bar_ts,
+            lookback_close_micros: Some(anchor.close_micros),
+            move_bps: None,
+            abs_move_bps: None,
+            gap_to_threshold_bps: None,
+            raw_direction: 0,
+            decision: DECISION_INSUFFICIENT_BARS,
+            reason: "lookback anchor close_micros is zero or negative",
+        };
+    }
+
+    let lookback_close_micros = Some(anchor.close_micros);
+    let last_close = latest.unwrap().close_micros; // safe: checked len >= LOOKBACK above
+    let diff = last_close as i128 - anchor.close_micros as i128;
+    let bps_i128 = (diff * 10_000) / anchor.close_micros as i128;
+    let move_bps = bps_i128.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+    let abs_move_bps = move_bps.unsigned_abs() as i64;
+    let gap_to_threshold_bps = MICRO_MOVE_BPS - abs_move_bps;
+
+    let (raw_direction, decision, reason) = if bps_i128 >= MICRO_MOVE_BPS as i128 {
+        (1i64, DECISION_SIGNAL_LONG, "move_bps >= threshold_bps")
+    } else if bps_i128 <= -(MICRO_MOVE_BPS as i128) {
+        (
+            -1i64,
+            DECISION_FLAT_NEGATIVE,
+            "bearish displacement; long-only strategy maps to flat",
+        )
+    } else {
+        (
+            0i64,
+            DECISION_FLAT_BELOW_THRESHOLD,
+            "abs move_bps below threshold; insufficient displacement for signal",
+        )
+    };
+
+    IntradayScalperDiagnostics {
+        lookback_bars: LOOKBACK,
+        threshold_bps: MICRO_MOVE_BPS,
+        latest_bar_ts,
+        latest_close_micros: Some(last_close),
+        lookback_bar_ts,
+        lookback_close_micros,
+        move_bps: Some(move_bps),
+        abs_move_bps: Some(abs_move_bps),
+        gap_to_threshold_bps: Some(gap_to_threshold_bps),
+        raw_direction,
+        decision,
+        reason,
+    }
+}
+
 const NAME: &str = "intraday_scalper";
 const VERSION: &str = "0.1.0";
 const TIMEFRAME_SECS: i64 = 300; // 5m
@@ -267,6 +397,186 @@ impl Strategy for IntradayScalperStrategy {
 mod tests {
     use super::*;
     use crate::{BarStub, RecentBarsWindow, StrategyContext};
+
+    // ── STRATEGY-DECISION-OBSERVABILITY-01: compute_diagnostics unit tests ──────
+
+    /// OBS-D01: bullish displacement → decision=signal_long, move_bps >= threshold.
+    #[test]
+    fn obs_d01_bullish_displacement_is_signal_long() {
+        // base=$200, last close = base + base/400 = +25 bps
+        let base = 200_000_000i64;
+        let last_close = base + base / 400; // 200_500_000 (+25 bps)
+        let bars: Vec<BarStub> = vec![
+            BarStub::new(1000, true, base, 1),
+            BarStub::new(1001, true, base, 1),
+            BarStub::new(1002, true, base, 1),
+            BarStub::new(1003, true, base, 1),
+            BarStub::new(1004, true, last_close, 1),
+        ];
+        let d = compute_diagnostics(&bars);
+        assert_eq!(d.decision, DECISION_SIGNAL_LONG, "OBS-D01: decision=signal_long");
+        assert_eq!(d.raw_direction, 1, "OBS-D01: raw_direction=+1");
+        let move_bps = d.move_bps.expect("OBS-D01: move_bps must be Some");
+        let abs_move_bps = d.abs_move_bps.expect("OBS-D01: abs_move_bps must be Some");
+        assert!(move_bps >= MICRO_MOVE_BPS, "OBS-D01: move_bps >= threshold");
+        assert_eq!(abs_move_bps, move_bps, "OBS-D01: positive displacement, abs==move");
+        let gap = d.gap_to_threshold_bps.expect("OBS-D01: gap must be Some");
+        assert!(gap <= 0, "OBS-D01: gap <= 0 means threshold was met");
+        assert_eq!(d.threshold_bps, MICRO_MOVE_BPS, "OBS-D01: threshold matches constant");
+        assert_eq!(d.lookback_bars, LOOKBACK, "OBS-D01: lookback_bars matches constant");
+    }
+
+    /// OBS-D02: below-threshold move → decision=flat_below_threshold, gap positive.
+    #[test]
+    fn obs_d02_below_threshold_is_flat_below_threshold() {
+        // base=$530.57, last close = $530.64 → ~1 bps (below 20 bps threshold)
+        let base = 530_570_000i64; // $530.57 in micros
+        let last_close = 530_640_000i64; // $530.64 in micros → ~1.3 bps above
+        let bars: Vec<BarStub> = vec![
+            BarStub::new(1000, true, base, 1),
+            BarStub::new(1001, true, base, 1),
+            BarStub::new(1002, true, base, 1),
+            BarStub::new(1003, true, base, 1),
+            BarStub::new(1004, true, last_close, 1),
+        ];
+        let d = compute_diagnostics(&bars);
+        assert_eq!(
+            d.decision, DECISION_FLAT_BELOW_THRESHOLD,
+            "OBS-D02: decision=flat_below_threshold"
+        );
+        assert_eq!(d.raw_direction, 0, "OBS-D02: raw_direction=0");
+        let abs_bps = d.abs_move_bps.expect("OBS-D02: abs_move_bps must be Some");
+        assert!(
+            abs_bps < MICRO_MOVE_BPS,
+            "OBS-D02: abs_move_bps below threshold"
+        );
+        let gap = d.gap_to_threshold_bps.expect("OBS-D02: gap must be Some");
+        assert!(gap > 0, "OBS-D02: gap > 0 means below threshold");
+    }
+
+    /// OBS-D03: AMD pull-back scenario — 15 bps move stays flat_below_threshold.
+    #[test]
+    fn obs_d03_amd_pullback_scenario_flat_below_threshold() {
+        // AMD: lookback $523.57, latest $530.64 at 15:35; then pulled back to +15 bps
+        let lookback_micros = 523_570_000i64; // $523.57
+        // +15 bps on $523.57 ≈ $524.35
+        let latest_micros = 524_354_550i64; // ~$524.35 ≈ +15 bps
+        let bars: Vec<BarStub> = vec![
+            BarStub::new(1000, true, lookback_micros, 1),
+            BarStub::new(1001, true, lookback_micros, 1),
+            BarStub::new(1002, true, lookback_micros, 1),
+            BarStub::new(1003, true, lookback_micros, 1),
+            BarStub::new(1004, true, latest_micros, 1),
+        ];
+        let d = compute_diagnostics(&bars);
+        assert_eq!(
+            d.decision, DECISION_FLAT_BELOW_THRESHOLD,
+            "OBS-D03: AMD +15bps pullback stays flat"
+        );
+        let gap = d.gap_to_threshold_bps.expect("OBS-D03: gap must be Some");
+        assert!(gap > 0, "OBS-D03: gap_to_threshold_bps > 0");
+        assert_eq!(
+            d.lookback_close_micros,
+            Some(lookback_micros),
+            "OBS-D03: lookback_close_micros correct"
+        );
+        assert_eq!(
+            d.latest_close_micros,
+            Some(latest_micros),
+            "OBS-D03: latest_close_micros correct"
+        );
+    }
+
+    /// OBS-D04: negative displacement → decision=flat_due_to_negative_direction.
+    #[test]
+    fn obs_d04_negative_displacement_is_flat_due_to_negative_direction() {
+        let base = 200_000_000i64;
+        let last_close = base - base / 400; // -25 bps
+        let bars: Vec<BarStub> = vec![
+            BarStub::new(1000, true, base, 1),
+            BarStub::new(1001, true, base, 1),
+            BarStub::new(1002, true, base, 1),
+            BarStub::new(1003, true, base, 1),
+            BarStub::new(1004, true, last_close, 1),
+        ];
+        let d = compute_diagnostics(&bars);
+        assert_eq!(
+            d.decision, DECISION_FLAT_NEGATIVE,
+            "OBS-D04: decision=flat_due_to_negative_direction"
+        );
+        assert_eq!(d.raw_direction, -1, "OBS-D04: raw_direction=-1");
+        let move_bps = d.move_bps.expect("OBS-D04: move_bps must be Some");
+        assert!(move_bps < 0, "OBS-D04: move_bps is negative");
+    }
+
+    /// OBS-D05: insufficient bars → no panic, decision=insufficient_bars.
+    #[test]
+    fn obs_d05_insufficient_bars_no_panic() {
+        // Only 3 bars (< LOOKBACK=5)
+        let bars: Vec<BarStub> = vec![
+            BarStub::new(1000, true, 200_000_000, 1),
+            BarStub::new(1001, true, 200_500_000, 1),
+            BarStub::new(1002, true, 201_000_000, 1),
+        ];
+        let d = compute_diagnostics(&bars);
+        assert_eq!(
+            d.decision, DECISION_INSUFFICIENT_BARS,
+            "OBS-D05: insufficient bars → no panic"
+        );
+        assert!(d.move_bps.is_none(), "OBS-D05: move_bps is None");
+        assert!(
+            d.gap_to_threshold_bps.is_none(),
+            "OBS-D05: gap_to_threshold_bps is None"
+        );
+    }
+
+    /// OBS-D06: empty bars → no panic, decision=insufficient_bars.
+    #[test]
+    fn obs_d06_empty_bars_no_panic() {
+        let d = compute_diagnostics(&[]);
+        assert_eq!(d.decision, DECISION_INSUFFICIENT_BARS, "OBS-D06: empty → no panic");
+        assert!(d.latest_bar_ts.is_none(), "OBS-D06: latest_bar_ts is None");
+    }
+
+    /// OBS-D07: incomplete last bar → decision=insufficient_bars.
+    #[test]
+    fn obs_d07_incomplete_last_bar_is_insufficient() {
+        let base = 200_000_000i64;
+        let bars: Vec<BarStub> = vec![
+            BarStub::new(1000, true, base, 1),
+            BarStub::new(1001, true, base, 1),
+            BarStub::new(1002, true, base, 1),
+            BarStub::new(1003, true, base, 1),
+            BarStub::new(1004, false, 0, 0), // incomplete last bar
+        ];
+        let d = compute_diagnostics(&bars);
+        assert_eq!(
+            d.decision, DECISION_INSUFFICIENT_BARS,
+            "OBS-D07: incomplete last bar → insufficient_bars"
+        );
+    }
+
+    /// OBS-D08: AMD 135 bps candidate → decision=signal_long.
+    #[test]
+    fn obs_d08_amd_valid_signal_candidate_is_signal_long() {
+        // AMD 15:35 scenario: lookback $523.57, latest $530.64 → +135 bps
+        let lookback_micros = 523_570_000i64;
+        let latest_micros = 530_640_000i64;
+        let bars: Vec<BarStub> = vec![
+            BarStub::new(1000, true, lookback_micros, 1),
+            BarStub::new(1001, true, lookback_micros, 1),
+            BarStub::new(1002, true, lookback_micros, 1),
+            BarStub::new(1003, true, lookback_micros, 1),
+            BarStub::new(1004, true, latest_micros, 1),
+        ];
+        let d = compute_diagnostics(&bars);
+        assert_eq!(d.decision, DECISION_SIGNAL_LONG, "OBS-D08: AMD 135bps → signal_long");
+        let move_bps = d.move_bps.unwrap();
+        // (530_640_000 - 523_570_000) * 10_000 / 523_570_000 ≈ 135
+        assert!((130..=140).contains(&move_bps), "OBS-D08: move_bps ~135");
+        let gap = d.gap_to_threshold_bps.unwrap();
+        assert!(gap < 0, "OBS-D08: gap < 0 (threshold exceeded by large margin)");
+    }
 
     fn bar(close_micros: i64, is_complete: bool) -> BarStub {
         BarStub::new(0, is_complete, close_micros, 1)

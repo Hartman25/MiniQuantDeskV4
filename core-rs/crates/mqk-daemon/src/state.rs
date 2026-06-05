@@ -258,6 +258,12 @@ pub struct AppState {
     ///
     /// Surfaced in `/api/v1/autonomous/readiness` as `bar_context_bars_loaded`.
     last_bar_context_bars: Arc<AtomicI64>,
+    /// STRATEGY-DECISION-OBSERVABILITY-01: Diagnostic snapshot from the most
+    /// recent native strategy bar dispatch.
+    ///
+    /// `None` until the first bar is dispatched.  Replaced atomically on each
+    /// dispatch.  Read-only; does not affect the decision path.
+    last_strategy_diagnostics: Arc<Mutex<Option<mqk_strategy::IntradayScalperDiagnostics>>>,
     /// AUTON-PAPER-RISK-03: Alpaca adapter retained exclusively for periodic broker
     /// snapshot refresh on the External-source path.  Set once in
     /// `build_execution_orchestrator`; `None` for Synthetic source or before
@@ -838,6 +844,7 @@ impl AppState {
             last_bar_signal_qty: Arc::new(AtomicI64::new(i64::MIN)),
             bar_tick_dispatch_count: Arc::new(AtomicU64::new(0)),
             last_bar_context_bars: Arc::new(AtomicI64::new(-1)),
+            last_strategy_diagnostics: Arc::new(Mutex::new(None)),
             external_snapshot_refresher: Arc::new(RwLock::new(None)),
             execution_last_tick_at: Arc::new(AtomicI64::new(0)),
             backtest_jobs: new_job_store(),
@@ -1466,6 +1473,25 @@ operator_reconcile_or_repair_required"
         self.last_bar_context_bars.load(Ordering::SeqCst)
     }
 
+    /// STRATEGY-DECISION-OBSERVABILITY-01: Clone the most recent strategy diagnostic
+    /// snapshot, or `None` if no bar has been dispatched this session.
+    pub async fn last_strategy_diagnostics(
+        &self,
+    ) -> Option<mqk_strategy::IntradayScalperDiagnostics> {
+        self.last_strategy_diagnostics.lock().await.clone()
+    }
+
+    /// STRATEGY-DECISION-OBSERVABILITY-01: Inject a diagnostic snapshot for tests.
+    ///
+    /// Allows test scenarios to simulate a post-dispatch state without running
+    /// the full execution loop.
+    pub async fn set_strategy_diagnostics_for_test(
+        &self,
+        diag: mqk_strategy::IntradayScalperDiagnostics,
+    ) {
+        *self.last_strategy_diagnostics.lock().await = Some(diag);
+    }
+
     /// B1B/AUTON-SIGNAL-CONTEXT-01: Execution loop dispatch seam.
     ///
     /// Called exclusively by the execution loop on each tick.  The loop is the
@@ -1519,6 +1545,10 @@ operator_reconcile_or_repair_required"
                             )
                         })
                         .collect();
+                    // STRATEGY-DECISION-OBSERVABILITY-01: compute diagnostic snapshot
+                    // from the bar window before consuming stubs into the strategy context.
+                    let diagnostics = mqk_strategy::intraday_scalper_compute_diagnostics(&stubs);
+                    *self.last_strategy_diagnostics.lock().await = Some(diagnostics);
                     let window = mqk_strategy::RecentBarsWindow::new(bars_loaded.max(1), stubs);
                     self.last_bar_context_bars
                         .store(bars_loaded as i64, Ordering::SeqCst);
@@ -1571,6 +1601,14 @@ operator_reconcile_or_repair_required"
         // Fallback: single-stub context (B1B legacy path).
         // limit_price=None → is_complete=false → strategies return signal=0.
         // Correct conservative behaviour when no DB context is available.
+        //
+        // STRATEGY-DECISION-OBSERVABILITY-01: store a stub diagnostic showing
+        // insufficient_bars so operators can see why no signal fired on this path.
+        {
+            let stub_bars: &[mqk_strategy::BarStub] = &[];
+            let diagnostics = mqk_strategy::intraday_scalper_compute_diagnostics(stub_bars);
+            *self.last_strategy_diagnostics.lock().await = Some(diagnostics);
+        }
         self.invoke_native_strategy_on_bar_from_signal(
             bar.now_tick,
             bar.end_ts,
