@@ -349,7 +349,24 @@ Scores are advisory. Final selection is operator-reviewed in v1.
 
 ## 11. Off-Hours Backtest Stage
 
-### 11.0 Implementation Note (BACKTEST-QUEUE-01)
+### 11.0 Implementation Note (BACKTEST-RUNNER-01)
+
+Backtest runner: `research-py/src/mqk_research/scanner/backtest_runner.py`
+
+- Schema written: `strategy-fit-v1`
+- Current mode: **dry-run blocked** — `mqk-backtest` CLI exists in `core-rs/crates/mqk-backtest`
+  but requires a compiled binary and does not emit strategy-fit metrics (profit_factor, win_rate,
+  expectancy_bps, etc.) in a parseable form from Python.  Every queue entry produces a blocked
+  artifact with `status="blocked_no_backtest_interface"`.
+- Runner does **not** promote candidates and does **not** call any watchlist route.
+- `recommended_for_live=False` is a hard invariant enforced in code.
+- `recommended_for_paper=False` in this patch; BACKTEST-GATES-01 will evaluate metrics and may
+  set this field based on gate results.
+- EXP penny scanner (`exp-candidate-v1`) is separate and not affected by this module.
+- Artifact paths are deterministic: `_artifact_filename(queue_id)` = SHA-256-prefixed filename.
+- Next patch: BACKTEST-GATES-01 — evaluate metrics against pass/fail thresholds.
+
+### 11.0a Implementation Note (BACKTEST-QUEUE-01)
 
 Backtest queue writer: `research-py/src/mqk_research/scanner/backtest_queue.py`
 

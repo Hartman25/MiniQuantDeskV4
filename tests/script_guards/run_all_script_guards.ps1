@@ -36,7 +36,8 @@ $Guards = @(
     'test_scanner_regime.ps1',
     'test_scanner_scoring.ps1',
     'test_scanner_selector.ps1',
-    'test_scanner_backtest_queue.ps1'
+    'test_scanner_backtest_queue.ps1',
+    'test_scanner_backtest_runner.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()
