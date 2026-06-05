@@ -29,7 +29,8 @@ $Guards = @(
     'test_exp_penny_guard.ps1',
     'test_intraday_market_data_refresh.ps1',
     'test_aapl5m_market_smoke_runner.ps1',
-    'test_paper_smoke_evidence_review.ps1'
+    'test_paper_smoke_evidence_review.ps1',
+    'test_scanner_candidate_artifacts.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()
