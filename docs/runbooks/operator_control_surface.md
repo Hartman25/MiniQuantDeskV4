@@ -1,0 +1,412 @@
+# Operator Control Surface — MiniQuantDesk V4 (OPERATOR-CONTROL-SURFACE-BUNDLE-01)
+
+## Purpose
+
+This document is the single reference for every operator action available on
+the paper + autonomous paper trading surface.  It covers:
+
+- Operator action matrix (every action, endpoint, safety gates, evidence)
+- Monday AAPL smoke quick checklist
+- Safe flatten instructions
+- Emergency abort rules
+- Evidence capture and review rules
+- GUI and Discord observation checklist
+- Status endpoint first-line triage
+- Remaining market proof blockers
+
+**Scope:** Paper + Alpaca autonomous path.  Non-autonomous manual paths are
+documented in `operator_workflows.md`.  LiveShadow / LiveCapital are in
+`live_shadow_operational_proof.md`.
+
+**Claim boundary:** Autonomous paper session hygiene is code-proven (AUTONOMOUS-PAPER-SESSION-HYGIENE-BUNDLE-01, commit `1d77a72`).  Full market lifecycle proof is still pending.  Do not claim CLOSED on any smoke item until evidence is reviewed and classified `NATURAL-TRADE-LIFECYCLE-CLOSED`.
+
+---
+
+## 1. First-Line Status Check
+
+Before any operator action, run the read-only status script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Get-PaperOperatorStatus.ps1
+```
+
+This calls five read-only endpoints and prints a compact summary:
+- `readiness_classification` — is the system ready, blocked, or proof-pending?
+- `next_operator_action` — what the system recommends next
+- `live_routing_enabled` — must always be `false` on paper path
+- `runtime_status`, `arm_state`, `ws_continuity`, `reconcile_status`
+- Open positions and open orders
+
+No daemon call is required before running this script; it fails soft if the
+daemon is offline.
+
+For raw endpoint triage:
+
+```
+GET /v1/health                             → daemon reachable?
+GET /api/v1/system/status                  → mode, arm, runtime, DB, WS, deadman
+GET /api/v1/autonomous/readiness           → overall_ready, gates, blockers
+GET /api/v1/autonomous/paper-status        → compact paper readiness summary
+GET /api/v1/reconcile/status               → dirty or ok?
+GET /api/v1/alerts/active                  → active fault signals
+GET /api/v1/ops/catalog                    → which actions are enabled/disabled
+```
+
+---
+
+## 2. Operator Action Matrix
+
+Every operator action available on the paper control surface.
+
+### Read-Only Status Endpoints (no auth required)
+
+| Action | Endpoint | When to use | Expected response | Market must be open? | Submits order? |
+|--------|----------|-------------|-------------------|----------------------|----------------|
+| Check status | `GET /api/v1/autonomous/paper-status` | Pre-session, any time | `readiness_classification`, `next_operator_action` | No | No |
+| System status | `GET /api/v1/system/status` | Ongoing monitoring | `runtime_status`, `arm_state`, `ws_continuity` | No | No |
+| Check readiness | `GET /api/v1/autonomous/readiness` | Before arm / start | `overall_ready`, `blockers` list | No | No |
+| Check reconcile | `GET /api/v1/reconcile/status` | Before arm, after fill | `status` (ok / dirty) | No | No |
+| Reconcile mismatches | `GET /api/v1/reconcile/mismatches` | When status=dirty | Mismatch rows | No | No |
+| Active alerts | `GET /api/v1/alerts/active` | Before arm / any alert | `fault_signals`, alert rows | No | No |
+| Action catalog | `GET /api/v1/ops/catalog` | When action is refused | Enabled/disabled action list | No | No |
+| Preflight check | `GET /api/v1/system/preflight` | Before start | `deployment_start_allowed` | No | No |
+| Portfolio positions | `GET /api/v1/portfolio/positions` | After fill, before flatten | Position rows | No | No |
+| Open orders | `GET /api/v1/portfolio/orders/open` | To check pending orders | Open order rows | No | No |
+| Execution orders | `GET /api/v1/execution/orders` | OMS state check | Order list with status | No | No |
+| OMS overview | `GET /api/v1/oms/overview` | Full OMS snapshot | Orders, fills, positions | No | No |
+| Events feed | `GET /api/v1/events/feed` | Session timeline | Runtime transitions, signals | No | No |
+| Watchlist status | `GET /api/v1/watchlist/status` | Scanner intake check | Watchlist truth_state | No | No |
+| Mode-change guidance | `GET /api/v1/ops/mode-change-guidance` | Before mode switch | 7-step operator workflow | No | No |
+| Health check | `GET /v1/health` | Daemon reachable? | `ok=true`, `service=mqk-daemon` | No | No |
+
+### Operator Mutating Routes (Bearer token required)
+
+**Auth header:** `Authorization: Bearer <MQK_OPERATOR_TOKEN>`
+
+| Action | Endpoint / body | When to use | Safety gates | Success response | Failure response | Evidence it worked | Market must be open? | Submits order? |
+|--------|----------------|-------------|-------------|-----------------|------------------|--------------------|----------------------|----------------|
+| Arm paper | `POST /api/v1/ops/action` `{action_key: "arm-execution"}` | Pre-session, after halt recovery | DB available, not halted, not already armed | `accepted=true, disposition=applied` | 403 gate=integrity_armed | `autonomous/readiness arm_state=armed` | No | No |
+| Disarm | `POST /api/v1/ops/action` `{action_key: "disarm-execution"}` | Before mode change, before clear-halted | Not required | `accepted=true` | 503 (DB unavailable) | `arm_state=disarmed` | No | No |
+| Clear halted run | `POST /api/v1/ops/action` `{action_key: "clear-halted-run"}` | After halt investigation (step 3 of recovery) | Active run must be in HALTED state | `accepted=true` | 409 (no halted run) | Run record HALTED→STOPPED; `kill_switch_active=false` | No | No |
+| Stop runtime | `POST /api/v1/ops/action` `{action_key: "stop-system"}` | Clean session end, manual override | Run must be active | `accepted=true` | 409 (no active run) | `runtime_status=idle` | No | No |
+| Halt (kill-switch) | `POST /api/v1/ops/action` `{action_key: "kill-switch"}` | Emergency, invariant violation | DB available | `accepted=true` | 503 (DB unavailable) | `kill_switch_active=true`, `runtime_status=halted` | No | No |
+| Flatten paper positions | `POST /api/v1/ops/action` `{action_key: "flatten-paper-positions"}` | After smoke, EOD cleanup, risk control | `flatten_available=true`, `live_routing_enabled=false`, arm+run active | `accepted=true`, symbols list | `flatten_available=false` or blockers | Position qty→0, reconcile clean, Discord `flatten.requested` | Yes (market hours for fill) | Yes (paper flatten order) |
+| Adopt broker baseline | `POST /api/v1/ops/repair/adopt-broker-position-baseline` `{confirmation: "ADOPT_BROKER_POSITION_BASELINE"}` | On fresh daemon start to sync positions | Not halted | `accepted=true`, position_count | 409 (already adopted) | `reconcile_status=ok` | No | No |
+| Submit signal | `POST /api/v1/strategy/signal` | Operator signal injection (paper smoke) | 7 gates: ingestion, DB, arm, active run, running state, not suppressed, outbox enqueue | `intent_placed=true` | 409/503 with gate name | Outbox row written, order submitted via WS path | Yes (for fill) | Yes (paper order via outbox) |
+
+### Halt Recovery Sequence (4-step — mandatory in order)
+
+```
+1. POST /api/v1/ops/action {"action_key": "disarm-execution"}
+2. Investigate halt reason: GET /api/v1/audit/operator-actions
+                            GET /control/status  (deadman_reason)
+3. POST /api/v1/ops/action {"action_key": "clear-halted-run"}
+4. POST /api/v1/ops/action {"action_key": "arm-execution"}
+```
+
+Do not skip step 3.  Without clearing the halted run record the daemon will
+find the prior run in HALTED state and refuse a new start.
+
+---
+
+## 3. Monday AAPL Smoke Quick Checklist
+
+Run these steps in order before and during the Monday market smoke.
+
+### Pre-smoke (any time, including weekend)
+
+```powershell
+# 1. Verify prerequisites (read-only, no mutations)
+powershell -ExecutionPolicy Bypass -File scripts\windows\Run-AAPL5mMarketSmoke.ps1 -CheckOnly
+
+# 2. Verify bar count and freshness
+powershell -ExecutionPolicy Bypass -File scripts\windows\Prep-PremarketMarketData.ps1 -CheckOnly
+
+# 3. Quick operator status check
+powershell -ExecutionPolicy Bypass -File scripts\windows\Get-PaperOperatorStatus.ps1
+```
+
+Expected in CheckOnly:
+- `bar_check_exit: 0` (≥30 completed AAPL/5m bars)
+- `smoke_check_exit: 0` (.env.local present, docker available)
+- `readiness_classification` is not `blocked`
+
+### Day-of smoke (market hours — 09:30–16:00 ET)
+
+```powershell
+# Full market smoke — 30-minute watch window
+powershell -ExecutionPolicy Bypass -File scripts\windows\Run-AAPL5mMarketSmoke.ps1 -WatchSeconds 1800
+```
+
+### During smoke — monitor
+
+```powershell
+# Every 5–10 minutes during the watch window
+powershell -ExecutionPolicy Bypass -File scripts\windows\Get-PaperOperatorStatus.ps1
+```
+
+Confirm:
+- `runtime_status=running`
+- `ws_continuity=live`
+- `kill_switch_active=false`
+- `live_routing_enabled=false`
+
+### After smoke — capture and review evidence
+
+```powershell
+# Capture evidence bundle
+powershell -ExecutionPolicy Bypass -File scripts\windows\Capture-PaperSmokeEvidence.ps1 -Label aapl5m_post_smoke
+
+# Review and classify
+powershell -ExecutionPolicy Bypass -File scripts\windows\Review-PaperSmokeEvidence.ps1 -Latest -WriteSummary
+```
+
+Target classification: `NATURAL-TRADE-LIFECYCLE-CLOSED`
+
+---
+
+## 4. Safe Flatten Instructions
+
+Flatten is the only operator action that submits a paper order.  Use only when:
+- A position exists after market hours (risk management)
+- EOD cleanup after a smoke run
+- Reconcile shows an unexpected position
+
+### Before flattening
+
+1. Confirm flatten is available:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\windows\Get-PaperOperatorStatus.ps1
+   ```
+   Field `flatten_available` must be `True`.
+   Field `flatten_blockers` must be empty.
+
+2. Confirm market is open (flatten order requires a live market to fill on paper).
+
+3. Confirm `live_routing_enabled=false` (printed in status output).
+
+### Flatten command
+
+```powershell
+# Using curl / Invoke-RestMethod (requires Bearer token):
+$body = @{ action_key = 'flatten-paper-positions' } | ConvertTo-Json
+Invoke-RestMethod -Uri 'http://127.0.0.1:8899/api/v1/ops/action' `
+    -Method POST -ContentType 'application/json' -Body $body `
+    -Headers @{ Authorization = "Bearer $env:MQK_OPERATOR_TOKEN" }
+```
+
+### After flattening
+
+1. Check `GET /api/v1/portfolio/positions` — expect empty or zero qty.
+2. Check `GET /api/v1/reconcile/status` — expect `status=ok` after fill settles.
+3. Confirm Discord fired `flatten.requested` alert with `live_routing_enabled=false`.
+4. Capture evidence:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\windows\Capture-PaperSmokeEvidence.ps1 -Label post_flatten
+   ```
+
+### Flatten blockers
+
+| Blocker | Meaning | Resolution |
+|---------|---------|------------|
+| `live_routing_enabled=true` | Safety gate — flatten refused | **Stop immediately.** Paper-only invariant violated. |
+| `daemon_mode != paper` | Wrong mode | Verify `MQK_DAEMON_DEPLOYMENT_MODE=paper` |
+| `arm_state != armed` | Not armed | Arm first, then flatten |
+| `runtime_status != running` | Runtime not active | Start runtime, then flatten |
+| `ws_continuity != live` | WS gap | Wait for WS re-establishment; GapDetected blocks flatten |
+
+---
+
+## 5. Emergency Abort Rules
+
+Use halt when there is unexpected behavior, invariant violation, or loss of control.
+
+### Halt command
+
+```powershell
+$body = @{ action_key = 'kill-switch' } | ConvertTo-Json
+Invoke-RestMethod -Uri 'http://127.0.0.1:8899/api/v1/ops/action' `
+    -Method POST -ContentType 'application/json' -Body $body `
+    -Headers @{ Authorization = "Bearer $env:MQK_OPERATOR_TOKEN" }
+```
+
+Or kill the daemon process directly:
+```powershell
+Stop-Process -Name 'mqk-daemon' -Force
+```
+
+### When to halt (not just stop)
+
+- `live_routing_enabled=true` appears (should never happen on paper path)
+- `kill_switch_active=true` observed unexpectedly mid-session
+- Unexpected fills from Alpaca that don't match outbox
+- Reconcile drift persists after multiple ticks
+- Discord alerts show `halt.reconcile_drift` or WS gap with open orders
+- Any security anomaly
+
+### After an emergency halt
+
+1. Do NOT re-arm immediately.
+2. Capture evidence: `Capture-PaperSmokeEvidence.ps1 -Label emergency_halt`
+3. Inspect halt reason: `GET /api/v1/audit/operator-actions`
+4. Follow 4-step halt recovery sequence (Section 2) only after investigation.
+5. Restart daemon cleanly before re-arming.
+
+---
+
+## 6. Evidence Capture and Review Rules
+
+### Capture evidence
+
+```powershell
+# Standard capture (label describes the moment)
+powershell -ExecutionPolicy Bypass -File scripts\windows\Capture-PaperSmokeEvidence.ps1 -Label <label>
+```
+
+Common labels: `pre_smoke`, `post_smoke`, `post_flatten`, `emergency_halt`, `eod_snapshot`
+
+Evidence folder: `evidence\paper_smoke_<YYYYMMDD_HHMMSS>_<label>\`
+
+Contents:
+- `api/` — JSON snapshots from all daemon endpoints
+- `db/` — SELECT-only DB snapshots (runs, outbox, inbox, fill_quality)
+- `notes/` — Operator-fillable lifecycle checklist, Discord/GUI observation, final verdict
+
+### Review and classify
+
+```powershell
+# Review latest evidence bundle
+powershell -ExecutionPolicy Bypass -File scripts\windows\Review-PaperSmokeEvidence.ps1 -Latest -WriteSummary
+
+# Review specific folder
+powershell -ExecutionPolicy Bypass -File scripts\windows\Review-PaperSmokeEvidence.ps1 `
+    -EvidencePath evidence\paper_smoke_<timestamp>_<label> -WriteSummary
+```
+
+### Classification meanings
+
+| Verdict | Meaning | What it proves |
+|---------|---------|---------------|
+| `NATURAL-TRADE-LIFECYCLE-CLOSED` | Full lifecycle: running → signal → outbox → broker submit → ACK → fill → portfolio → reconcile clean | Order submitted, filled, reconcile clean |
+| `READINESS-CLOSED-NO-TRADE` | Runtime ran, bars loaded, no trade signal/order, reconcile clean | Strategy evaluated, no signal, system healthy |
+| `PARTIAL` | Some lifecycle steps completed, not all | Further smoke needed |
+| `OPEN` | Active blocker: halt, kill switch, dirty reconcile | Resolve blocker first |
+| `FALSE-CLOSED` | Live routing enabled, secrets in evidence, no proof files | Do NOT record as passed |
+
+### Smoke is not closed until
+
+- Classification is `NATURAL-TRADE-LIFECYCLE-CLOSED` (for trade lifecycle)
+- OR `READINESS-CLOSED-NO-TRADE` (for no-trade sessions)
+- AND evidence bundle is present and durable
+- AND `live_routing_enabled=false` is confirmed in the evidence
+
+---
+
+## 7. GUI Observation Checklist
+
+Before recording GUI observation as complete, confirm each item:
+
+- [ ] GUI launched (`Launch-VeritasLedger.ps1` or Tauri app)
+- [ ] Runtime status shows `running` in the GUI status bar
+- [ ] WS continuity shows `live` (not `cold_start_unproven`)
+- [ ] Order appears in OMS order list after signal injection
+- [ ] Fill appears in OMS / portfolio after broker fill
+- [ ] Reconcile panel shows `ok` (not `dirty`)
+- [ ] No red alert banners in the GUI during the smoke window
+- [ ] GUI data matches backend (`GET /api/v1/oms/overview` matches GUI display)
+- [ ] Screenshot captured and saved in evidence `notes/gui_observation.txt`
+
+---
+
+## 8. Discord Observation Checklist
+
+Configure `DISCORD_WEBHOOK_URL` in `.env.local` to enable paper trade alerts.
+Discord is observability only — delivery failure never blocks trading.
+
+For a complete AAPL sell/flatten smoke, confirm these Discord messages appeared:
+
+| Stage | Discord stage key | Expected content |
+|-------|-------------------|-----------------|
+| Run start | `autonomous.run.start` | run_id, session window |
+| Signal admitted | `signal.admitted` | symbol=AAPL, side, qty |
+| Order submitted | `order.submitted` | order_id, symbol, side |
+| Broker ACK | `order.acked` | broker confirmation |
+| Fill | `fill.terminal` or `fill.partial` | fill_qty, fill_price |
+| Operator flatten | `flatten.requested` | `live_routing_enabled=false`, symbols |
+| Reconcile clean | `reconcile.clean` | transition to clean state |
+
+**Discord lifecycle is PARTIAL until market observation confirms all messages.**
+
+**Discord is NOT the source of truth** — it is observability only.  An order is real when the DB outbox row, inbox row, and broker_order_map row all exist.
+
+---
+
+## 9. Shutdown Checklist (Clean Process Shutdown)
+
+To shut down the daemon cleanly at end-of-day:
+
+```powershell
+# 1. Stop the execution runtime (if running)
+$body = @{ action_key = 'stop-system' } | ConvertTo-Json
+Invoke-RestMethod -Uri 'http://127.0.0.1:8899/api/v1/ops/action' `
+    -Method POST -ContentType 'application/json' -Body $body `
+    -Headers @{ Authorization = "Bearer $env:MQK_OPERATOR_TOKEN" }
+
+# 2. Verify stopped
+Invoke-RestMethod -Uri 'http://127.0.0.1:8899/api/v1/system/status' -Method Get
+
+# 3. Disarm (prevents accidental restart)
+$body = @{ action_key = 'disarm-execution' } | ConvertTo-Json
+Invoke-RestMethod -Uri 'http://127.0.0.1:8899/api/v1/ops/action' `
+    -Method POST -ContentType 'application/json' -Body $body `
+    -Headers @{ Authorization = "Bearer $env:MQK_OPERATOR_TOKEN" }
+
+# 4. Capture end-of-day evidence
+powershell -ExecutionPolicy Bypass -File scripts\windows\Capture-PaperSmokeEvidence.ps1 -Label eod_shutdown
+
+# 5. Kill daemon process
+Stop-Process -Name 'mqk-daemon' -ErrorAction SilentlyContinue
+```
+
+The Postgres container can remain running between sessions:
+```powershell
+# Stop paper DB container when done for the day
+docker stop mqk-paper-postgres
+```
+
+---
+
+## 10. Remaining Market Proof Blockers
+
+These items are **open** and require market-hours observation to close.
+
+| Item | Status | Required evidence |
+|------|--------|------------------|
+| AAPL natural sell lifecycle | OPEN | `NATURAL-TRADE-LIFECYCLE-CLOSED` evidence from live smoke |
+| Full buy→sell lifecycle | OPEN | Signal→fill→sell signal→fill evidence |
+| Safe flatten market proof | OPEN | `flatten.requested` Discord + positions→0 + reconcile clean |
+| GUI market observation | OPEN | Screenshot with filled order visible in GUI |
+| Discord market observation | OPEN | All 7 stage messages confirmed in Discord channel |
+| Repeated autonomous cycle proof | OPEN | Two consecutive sessions auto-starting and stopping cleanly |
+
+**Until all six items are proven:**
+- `autonomous_paper_status.readiness_classification` will remain `market_proof_pending`
+- Claim autonomous paper is PARTIAL, not CLOSED
+
+---
+
+## 11. Script Reference
+
+| Script | Purpose | Mutates? |
+|--------|---------|---------|
+| `Get-PaperOperatorStatus.ps1` | Compact read-only status (this runbook's first step) | No |
+| `Start-PaperTradingSmoke.ps1` | Full smoke harness: daemon start, arm, runtime, watcher | Yes (arm, start) |
+| `Run-AAPL5mMarketSmoke.ps1` | AAPL/5m smoke orchestrator | Yes (via smoke) |
+| `Capture-PaperSmokeEvidence.ps1` | Evidence bundle capture (API + DB snapshots) | No |
+| `Review-PaperSmokeEvidence.ps1` | Evidence classification and summary | No |
+| `Launch-VeritasLedger.ps1` | Normal desktop startup (daemon + GUI) | No (unless -ArmPaper) |
+| `Prep-PremarketMarketData.ps1` | Market data bar prep (md_bars only) | Yes (md_bars only) |
+| `Refresh-IntradayMarketData.ps1` | Intraday 5m bar refresh | Yes (md_bars only) |
+| `Register-PremarketDataRefreshTask.ps1` | Windows scheduled task for premarket data | Yes (task only) |
+
+Guard script: `tests\script_guards\test_paper_operator_status.ps1` (OPS01-OPS11)
