@@ -36,6 +36,9 @@ SCHEMA_VERSION = "strategy-fit-v1"
 STATUS_BLOCKED = "blocked_no_backtest_interface"
 FAILURE_REASON_NO_INTERFACE = "backtest_interface_missing"
 
+# Status written when real-mode backtest completes with metrics.
+STATUS_COMPLETE = "complete"
+
 # Expected schema version for input queue artifacts.
 QUEUE_SCHEMA_VERSION = "backtest-queue-v1"
 
@@ -144,26 +147,35 @@ def build_strategy_fit_artifact(
     config: BacktestRunnerConfig,
     generated_at_utc: Optional[str] = None,
     source_queue_artifact: Optional[str] = None,
+    extra_failure_reasons: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """
     Build a strategy-fit-v1 artifact dict from a queue entry and run result.
 
     recommended_for_live is always False.
-    recommended_for_paper is always False in this patch.
+    recommended_for_paper is always False until apply_backtest_gates() is called.
+    extra_failure_reasons: bridge-specific reasons injected into the artifact.
     """
     ts = generated_at_utc or _utcnow_iso()
 
-    # Blocked pass — no metrics available.
+    # Blocked when dry-run or no metrics produced.
     is_blocked = config.mode == "dry_run" or result.trades is None
 
     failure_reasons: list[str] = []
     status: str
     if is_blocked:
         status = STATUS_BLOCKED
-        failure_reasons.append(FAILURE_REASON_NO_INTERFACE)
+        if config.mode == "dry_run":
+            # Dry-run always uses the generic blocked reason.
+            failure_reasons.append(FAILURE_REASON_NO_INTERFACE)
+        # In real mode with no metrics, extra_failure_reasons carries the reason.
     else:
-        # Future path when a real interface is wired.
-        status = "complete"
+        status = STATUS_COMPLETE
+
+    # Merge extra failure reasons (dedup, preserve order).
+    for r in (extra_failure_reasons or []):
+        if r not in failure_reasons:
+            failure_reasons.append(r)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -231,13 +243,20 @@ def run_backtest_queue(
     output_dir: Optional[str] = None,
     generated_at_utc: Optional[str] = None,
     source_queue_artifact_path: Optional[str] = None,
+    bridge_config: Optional[Any] = None,
 ) -> BacktestRunResult:
     """
     Process every entry in a backtest-queue-v1 dict and write strategy-fit-v1
     artifacts.
 
-    Current mode: dry_run — every entry is written as blocked.
+    mode="dry_run" (default): every entry is written as blocked.
+    mode="real" + bridge_config: invokes the Rust backtest CLI per entry,
+        parses metrics.json, maps to strategy-fit-v1, and applies gates.
+        Subprocess is called only inside backtest_bridge.run_backtest_for_entry.
+
     output_dir defaults to config.strategy_fit_dir.
+    bridge_config: BacktestBridgeConfig instance (from backtest_bridge module).
+        Ignored when config.mode != "real".
     """
     cfg = config or BacktestRunnerConfig()
     # Enforce hard invariants even if caller mutated after construction.
@@ -249,30 +268,80 @@ def run_backtest_queue(
 
     entries: list[dict[str, Any]] = queue.get("entries", [])
     written = 0
+    real_mode = cfg.mode == "real" and bridge_config is not None
 
     for entry in entries:
-        result = StrategyFitResult()  # all None — blocked
-        artifact = build_strategy_fit_artifact(
-            entry=entry,
-            result=result,
-            config=cfg,
-            generated_at_utc=ts,
-            source_queue_artifact=source_queue_artifact_path,
-        )
+        if real_mode:
+            # Real mode: invoke Rust CLI, parse metrics, apply gates.
+            from mqk_research.scanner.backtest_bridge import (  # lazy import
+                run_backtest_for_entry,
+                map_metrics_to_strategy_fit,
+            )
+            from mqk_research.scanner.backtest_gates import (  # lazy import
+                apply_backtest_gates,
+            )
+
+            metrics_dict, bridge_reasons = run_backtest_for_entry(entry, bridge_config)
+
+            if metrics_dict is not None:
+                mapped, map_reasons = map_metrics_to_strategy_fit(
+                    entry, metrics_dict, bridge_config
+                )
+                result = StrategyFitResult(**mapped)
+                extra_reasons = bridge_reasons + map_reasons
+            else:
+                result = StrategyFitResult()  # all None — command failed
+                extra_reasons = bridge_reasons
+
+            artifact = build_strategy_fit_artifact(
+                entry=entry,
+                result=result,
+                config=cfg,
+                generated_at_utc=ts,
+                source_queue_artifact=source_queue_artifact_path,
+                extra_failure_reasons=extra_reasons,
+            )
+
+            # Apply gates if we got real metrics (status will be "complete").
+            if metrics_dict is not None:
+                artifact = apply_backtest_gates(artifact)
+
+        else:
+            # Dry-run path (existing): produce a blocked artifact.
+            result = StrategyFitResult()  # all None
+            artifact = build_strategy_fit_artifact(
+                entry=entry,
+                result=result,
+                config=cfg,
+                generated_at_utc=ts,
+                source_queue_artifact=source_queue_artifact_path,
+            )
+
         queue_id = str(entry.get("queue_id") or "unknown")
         filename = _artifact_filename(queue_id)
         dest = out_root / filename
         write_strategy_fit_artifact(artifact, str(dest))
         written += 1
 
+    if real_mode:
+        run_status = "real_complete" if written > 0 or len(entries) == 0 else "error"
+        notes = (
+            f"real-mode runner; {written} strategy-fit-v1 artifacts written; "
+            "gates applied; validation_metrics_missing until walk-forward exists; "
+            "recommended_for_live=False always"
+        )
+    else:
+        run_status = "dry_run_complete" if written > 0 or len(entries) == 0 else "error"
+        notes = (
+            f"dry-run blocked runner; {written} strategy-fit-v1 artifacts written; "
+            "all status=blocked_no_backtest_interface; "
+            "recommended_for_live=False always"
+        )
+
     return BacktestRunResult(
         queue_artifact_path=source_queue_artifact_path,
         queue_id_processed=len(entries),
         artifacts_written=written,
-        status="dry_run_complete" if written > 0 or len(entries) == 0 else "error",
-        notes=(
-            f"dry-run blocked runner; {written} strategy-fit-v1 artifacts written; "
-            "all status=blocked_no_backtest_interface; "
-            "recommended_for_live=False always"
-        ),
+        status=run_status,
+        notes=notes,
     )

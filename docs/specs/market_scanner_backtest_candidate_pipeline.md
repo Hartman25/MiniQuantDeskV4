@@ -349,22 +349,61 @@ Scores are advisory. Final selection is operator-reviewed in v1.
 
 ## 11. Off-Hours Backtest Stage
 
-### 11.0 Implementation Note (BACKTEST-RUNNER-01)
+### 11.0 Implementation Note (BACKTEST-BRIDGE-BUNDLE-01)
 
+Backtest bridge: `research-py/src/mqk_research/scanner/backtest_bridge.py`
 Backtest runner: `research-py/src/mqk_research/scanner/backtest_runner.py`
 
-- Schema written: `strategy-fit-v1`
-- Current mode: **dry-run blocked** — `mqk-backtest` CLI exists in `core-rs/crates/mqk-backtest`
-  but requires a compiled binary and does not emit strategy-fit metrics (profit_factor, win_rate,
-  expectancy_bps, etc.) in a parseable form from Python.  Every queue entry produces a blocked
-  artifact with `status="blocked_no_backtest_interface"`.
-- Runner does **not** promote candidates and does **not** call any watchlist route.
-- `recommended_for_live=False` is a hard invariant enforced in code.
-- `recommended_for_paper=False` in this patch; BACKTEST-GATES-01 will evaluate metrics and may
-  set this field based on gate results.
-- EXP penny scanner (`exp-candidate-v1`) is separate and not affected by this module.
-- Artifact paths are deterministic: `_artifact_filename(queue_id)` = SHA-256-prefixed filename.
-- Next patch: BACKTEST-GATES-01 — evaluate metrics against pass/fail thresholds.
+**Python bridge to Rust `mqk-backtest` CLI output (CLOSED — BACKTEST-BRIDGE-BUNDLE-01)**
+
+- Bridge module: `backtest_bridge.py` — parses `metrics.json` written by `mqk backtest csv --out-dir <dir>`.
+- Runner default: **`mode="dry_run"`** — never executes subprocess, produces `status="blocked_no_backtest_interface"`.
+- Runner real mode: **`mode="real"` + `BacktestBridgeConfig`** — invokes local Rust binary, reads `metrics.json`, maps to `strategy-fit-v1`, applies gates.
+- Real execution is **local/offline only**. Never contacts broker, OMS, daemon, or production DB.
+- Subprocess is imported inside `run_backtest_for_entry()` only — NOT at module level.
+
+**Metric mapping (Rust metrics.json → strategy-fit-v1):**
+
+| Rust field | Python field | Conversion |
+|---|---|---|
+| `win_rate_pct` | `win_rate` | If > 1.0: divide by 100; if ≤ 1.0: as-is |
+| `profit_factor` | `profit_factor` | Direct pass-through |
+| `sharpe_ratio` | `sharpe` | Direct pass-through |
+| `sortino_ratio` | `sortino` | Direct pass-through |
+| `max_drawdown_pct` | `max_drawdown_bps` | If > 1.0: × 100; if ≤ 1.0: × 10 000 |
+| `expectancy_micros` | `expectancy_bps` | micros / (price × qty) × 10 000; `expectancy_basis_missing` if no price |
+| `bars` | `bars_used` | Direct pass-through |
+| `trade_count` | `trades` | Direct pass-through |
+| `exposure_time_pct` | `exposure_time_pct` | Direct pass-through |
+| `net_expectancy_after_cost_bps` | computed | (expectancy − commission/trade) / notional × 10 000 |
+
+**Failure reasons (stable string constants):**
+
+- `metrics_file_missing` — `metrics.json` not found at expected path
+- `metrics_schema_invalid` — JSON parse error or wrong `schema_version`
+- `backtest_command_failed` — CLI non-zero exit or subprocess error
+- `expectancy_basis_missing` — cannot derive notional for expectancy conversion
+- `validation_metrics_missing` — always appended until walk-forward validation exists
+- `bars_file_missing` — bars CSV not found for symbol/timeframe
+- `binary_not_found` — compiled mqk binary not at configured path
+- `command_build_failed` — missing config (no binary or bars root)
+
+**Gate behavior:**
+- Gates are applied after metric mapping via `apply_backtest_gates()`.
+- `recommended_for_live=False` always — hard invariant.
+- `recommended_for_paper=True` only if ALL required + additional gates pass.
+- Out-of-sample gate always fails until `validation_profit_factor` + `validation_trades` are added (walk-forward not yet implemented).
+- Existing `mode="dry_run"` behavior is unchanged.
+
+**Remaining open:**
+- Walk-forward validation metrics (out-of-sample gate currently fails on all real runs).
+- `sample_quality` and `parameter_stability_score` not yet computed from Rust output.
+- `recommended_for_paper=True` blocked until those additional gate inputs exist.
+
+Schema written: `strategy-fit-v1`
+`recommended_for_live=False` — hard invariant enforced in code.
+EXP penny scanner (`exp-candidate-v1`) is separate and not affected by this module.
+Artifact paths are deterministic: `_artifact_filename(queue_id)` = SHA-256-prefixed filename.
 
 ### 11.0a Implementation Note (BACKTEST-QUEUE-01)
 
