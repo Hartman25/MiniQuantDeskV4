@@ -814,11 +814,37 @@ pub fn spawn_reconcile_tick<L, B, S>(
 
             match mqk_reconcile::reconcile_monotonic(&mut watermark, &local, &broker) {
                 Ok(report) if report.is_clean() => {
+                    // DISCORD-TRADE-LIFECYCLE-ALERTS-01: alert on dirty→clean transition only.
+                    // Read previous status before publishing so we can detect the transition.
+                    let prev_status = state.current_reconcile_snapshot().await.status;
                     state
                         .publish_reconcile_snapshot(reconcile_status_from_report(
                             &report, &broker, &watermark,
                         ))
                         .await;
+                    if prev_status != "ok" {
+                        let notifier = state.discord_notifier.clone();
+                        let env = Some(state.deployment_mode().as_api_label().to_string());
+                        let prior = prev_status.clone();
+                        let ts = chrono::Utc::now().to_rfc3339();
+                        tokio::spawn(async move {
+                            notifier
+                                .notify_trade_event(&crate::notify::TradeEventPayload {
+                                    stage: "reconcile.clean".to_string(),
+                                    run_id: None,
+                                    symbol: None,
+                                    side: None,
+                                    qty: None,
+                                    price_micros: None,
+                                    order_id: None,
+                                    detail: Some(format!("transitioned_from={prior}")),
+                                    environment: env,
+                                    summary: format!("reconcile clean after {prior}"),
+                                    ts_utc: ts,
+                                })
+                                .await;
+                        });
+                    }
                 }
                 Ok(report) => {
                     // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01: if a terminal fill

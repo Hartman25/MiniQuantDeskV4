@@ -27,6 +27,7 @@ use crate::api_types::{
 use crate::mode_transition::{evaluate_mode_transition, ModeTransitionVerdict};
 use crate::notify::{
     CriticalAlertPayload, OperatorNotifyPayload, RunStatusPayload, TestAlertPayload,
+    TradeEventPayload,
 };
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::DeploymentMode;
@@ -1518,6 +1519,49 @@ pub(crate) async fn ops_action(
                     .flatten();
 
             let accepted = !enqueued_symbols.is_empty() || !already_pending_symbols.is_empty();
+
+            // DISCORD-TRADE-LIFECYCLE-ALERTS-01: best-effort alert when flatten is accepted.
+            // Fires when at least one symbol was enqueued or already pending.
+            // Does not fire on refusals — those are covered by gate-level blockers.
+            if accepted {
+                let notifier = st.discord_notifier.clone();
+                let run_str = Some(format!("{:.8}", active_run_id.to_string()));
+                let env = Some(env_label.clone());
+                let enqueued_str = enqueued_symbols.join(",");
+                let already_str = already_pending_symbols.join(",");
+                let audit_ref = flatten_audit_uuid
+                    .map(|u| u.to_string())
+                    .unwrap_or_else(|| "none".to_string());
+                let ts = chrono::Utc::now().to_rfc3339();
+                tokio::spawn(async move {
+                    notifier
+                        .notify_trade_event(&TradeEventPayload {
+                            stage: "flatten.requested".to_string(),
+                            run_id: run_str,
+                            symbol: if enqueued_str.is_empty() {
+                                None
+                            } else {
+                                Some(enqueued_str.clone())
+                            },
+                            side: Some("sell".to_string()),
+                            qty: None,
+                            price_micros: None,
+                            order_id: None,
+                            detail: Some(format!(
+                                "live_routing_enabled=false enqueued=[{enqueued_str}] \
+                                 already_pending=[{already_str}] audit={audit_ref}"
+                            )),
+                            environment: env,
+                            summary: format!(
+                                "paper flatten requested: enqueued=[{enqueued_str}] \
+                                 live_routing_enabled=false"
+                            ),
+                            ts_utc: ts,
+                        })
+                        .await;
+                });
+            }
+
             let disposition = if !failed_symbols.is_empty() && enqueued_symbols.is_empty() && already_pending_symbols.is_empty() {
                 "all_enqueue_failed".to_string()
             } else if !failed_symbols.is_empty() {

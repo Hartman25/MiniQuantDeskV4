@@ -572,6 +572,56 @@ Example with explicit overrides:
 
 ---
 
+## Discord Observability — Paper Trade Lifecycle
+
+Configure `DISCORD_WEBHOOK_URL` in the environment to enable best-effort Discord
+alerts.  Discord is an outbound signal rail only — it is NOT the source of truth.
+Delivery failure never blocks trading.
+
+### Expected Discord messages during AAPL sell/flatten smoke
+
+| Stage | Discord stage key | When fired |
+|-------|-------------------|------------|
+| Run start | `autonomous.run.start` (operator action) | Autonomous controller starts execution runtime |
+| Signal admitted | `signal.admitted` | Signal passes all 7 gates and is queued to outbox |
+| Signal blocked | `signal.blocked` (with gate name) | Any gate refusal (budget, sizing, risk, session, suppression, WS gap) |
+| Order submitted | `order.submitted` | Outbox row marked SENT and broker map written (Phase 1) |
+| Broker ACK | `order.acked` | ACK event applied from broker inbox (Phase 3) |
+| Fill terminal | `fill.terminal` | Terminal fill applied from broker inbox (Phase 3) |
+| Fill partial | `fill.partial` | Partial fill applied from broker inbox (Phase 3) |
+| Reconcile drift halt | `halt.reconcile_drift` | Phase 0c detects irrecoverable drift |
+| Reconcile clean | `reconcile.clean` | Background reconcile tick transitions from a non-ok state to clean (fires once per dirty→clean transition) |
+| Operator flatten | `flatten.requested` | `flatten-paper-positions` action accepted; outbox enqueued; includes `live_routing_enabled=false` and enqueued symbols |
+| WS gap | `paper.ws_continuity.gap_detected` (critical alert) | WS transport drops and gap is detected |
+| Deadman halt | critical alert | Deadman expired, supervisor failure, or heartbeat persist failure |
+| Recovery quarantine | `halt.recovery_quarantine` | Ambiguous outbox rows detected on restart |
+
+### Secret safety
+
+- Webhook URL is never logged, printed, or included in any alert payload.
+- Alert payloads include: stage, symbol, side, qty, price (if fill), run_id (short), environment, detail.
+- Secrets (`DISCORD_WEBHOOK_URL`, API keys, account numbers) are never serialised into payloads.
+- `live_routing_enabled=false` is explicitly included in `flatten.requested` alerts to confirm paper mode.
+
+### If Discord is not configured
+
+- `DISCORD_WEBHOOK_URL` absent or empty → all `notify_*` calls are silent no-ops.
+- No error is raised; no trading behavior is affected.
+- Visibility classification: **PARTIAL** (lifecycle events are still in daemon logs and DB audit trail).
+- Discord absence is NOT a trading failure; it is an observability gap only.
+
+### Proving lifecycle closure via Discord
+
+To claim AAPL sell/flatten smoke is Discord-closed:
+1. Observe `signal.admitted` → `order.submitted` → `order.acked` → `fill.terminal` in Discord.
+2. Observe `flatten.requested` with `live_routing_enabled=false` and symbol=AAPL.
+3. Observe `reconcile.clean` after the fill/flatten settle window.
+4. Confirm no `halt.*` or `paper.ws_continuity.gap_detected` alerts during the window.
+
+Until market observation confirms these messages, Discord lifecycle visibility remains **PARTIAL**.
+
+---
+
 ## 11. Premarket market-data refresh (PREMARKET-DATA-SCHEDULER-01)
 
 Required market data must be fresh before the readiness gate allows `start-system`.
