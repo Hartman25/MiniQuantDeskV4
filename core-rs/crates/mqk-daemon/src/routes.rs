@@ -191,7 +191,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         trading_positions, trading_snapshot, trading_snapshot_clear, trading_snapshot_set,
     };
     use transport_quality::{execution_transport, market_data_coverage, market_data_quality};
-    use watchlist::watchlist_status;
+    use watchlist::{watchlist_admission_check, watchlist_status};
     use autonomous_paper_status::autonomous_paper_status;
 
     // --- Public (unauthenticated) routes — read-only telemetry & data. ---
@@ -318,7 +318,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         // PAPER-HANDOFF-READONLY-01: read-only watchlist artifact status (public, no auth).
         // No broker calls, no DB mutations, no orders. approved_for_live always false.
-        .route("/api/v1/watchlist/status", get(watchlist_status));
+        .route("/api/v1/watchlist/status", get(watchlist_status))
+        // PAPER-HANDOFF-ENFORCE-DESIGN-ONLY-01: dry-run admission check (public, no auth).
+        // Pure read-only. No broker, no DB, no orders, no outbox/inbox writes.
+        // approved_for_live always false. note always "dry_run_only_not_enforced".
+        // NOT wired into POST /api/v1/strategy/signal — enforcement deferred to PAPER-HANDOFF-ENFORCE-01.
+        .route(
+            "/api/v1/watchlist/admission-check",
+            get(watchlist_admission_check),
+        );
 
     // --- Operator (authenticated) routes — mutating state changes. ---
     let operator = Router::new()

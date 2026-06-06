@@ -3618,3 +3618,50 @@ pub struct WatchlistStatusResponse {
     /// UTC timestamp when the status check was performed.
     pub checked_at_utc: String,
 }
+
+// ---------------------------------------------------------------------------
+// /api/v1/watchlist/admission-check — PAPER-HANDOFF-ENFORCE-DESIGN-ONLY-01
+// ---------------------------------------------------------------------------
+
+/// Dry-run watchlist signal admission check response.
+///
+/// Returned by `GET /api/v1/watchlist/admission-check?symbol=<sym>&strategy_id=<id>`.
+///
+/// # Invariants
+/// - `approved_for_live` is ALWAYS `false`.  No outcome authorizes live trading.
+/// - `note` is ALWAYS `"dry_run_only_not_enforced"`.  This check is advisory only.
+/// - This endpoint is read-only: no broker calls, no DB mutations, no orders,
+///   no outbox writes, no inbox writes.
+/// - The real `POST /api/v1/strategy/signal` route is NOT modified by this patch.
+///   Watchlist admission is not enforced in the live signal path (PAPER-HANDOFF-ENFORCE-01).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchlistAdmissionCheckResponse {
+    /// Whether the (symbol, strategy_id) pair would be admitted under the current watchlist.
+    pub allowed: bool,
+    /// Reason string.  One of:
+    ///   `"watchlist_not_configured"` | `"watchlist_missing"` | `"watchlist_invalid"` |
+    ///   `"watchlist_not_approved"` | `"symbol_not_approved"` |
+    ///   `"strategy_not_assigned"` | `"allowed"`.
+    pub reason: String,
+    /// Watchlist intake status.  One of: `"not_configured"` | `"missing"` | `"invalid"` |
+    ///   `"loaded_not_approved"` | `"loaded_approved"`.
+    pub status: String,
+    /// Whether the watchlist artifact approved autonomous paper trading.
+    pub approved_for_autonomous_paper: bool,
+    /// Always `false` — hard live-lock invariant.
+    pub approved_for_live: bool,
+    /// Symbol that was checked.
+    pub symbol: String,
+    /// Strategy ID that was checked.
+    pub strategy_id: String,
+    /// Top-ranked symbol in the watchlist artifact (if loaded).
+    pub top_symbol: Option<String>,
+    /// Strategy assignment map: symbol → strategy_id (if artifact loaded).
+    pub strategy_assignments: serde_json::Value,
+    /// Always `"dry_run_only_not_enforced"`.
+    /// This check does not enforce admission in the live signal path.
+    /// PAPER-HANDOFF-ENFORCE-01 will wire watchlist admission into the real signal gate.
+    pub note: String,
+    /// UTC timestamp when the check was performed.
+    pub checked_at_utc: String,
+}

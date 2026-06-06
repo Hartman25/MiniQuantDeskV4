@@ -877,6 +877,63 @@ Integration contract:
 
 ---
 
+## 22. Autonomous Paper Handoff — Enforcement Design Contract
+
+### PAPER-HANDOFF-ENFORCE-DESIGN-ONLY-01 (CLOSED — b committed after this patch)
+
+**Status: Design-only. Enforcement NOT active. Dry-run surface available.**
+
+#### What is implemented (this patch)
+
+- `GET /api/v1/watchlist/admission-check?symbol=<sym>&strategy_id=<id>` — dry-run admission check.
+  - Returns whether a (symbol, strategy_id) pair would be admitted under the current watchlist.
+  - Response always includes `note: "dry_run_only_not_enforced"`.
+  - `approved_for_live` is always `false`.
+  - Pure read-only: no broker calls, no DB mutations, no orders, no outbox/inbox writes.
+- `WatchlistAdmissionCheckResponse` in `api_types.rs`.
+- 14 proof tests (AD01–AD14) in `scenario_watchlist_admission_dryrun_01.rs`.
+- Script guard `test_watchlist_admission_dryrun.ps1`.
+
+#### What is NOT implemented (deferred to PAPER-HANDOFF-ENFORCE-01)
+
+- Watchlist admission is **not** wired into `POST /api/v1/strategy/signal`.
+- The live signal path is unmodified in this patch.
+- No orders are gated on the watchlist in this patch.
+
+#### Future enforcement wiring contract (PAPER-HANDOFF-ENFORCE-01)
+
+When enforcement is wired, the admission gate must be inserted into `strategy_signal()` in `routes/strategy.rs` **before the outbox enqueue step (Gate 7)** and **after the existing gate sequence**.
+
+The future gate must:
+1. Call `evaluate_watchlist_intake_from_env()` to load the artifact.
+2. Call `evaluate_watchlist_signal_admission(&outcome, &signal.symbol, &signal.strategy_id)`.
+3. If `allowed == false`, refuse with a structured 403/409 response — same pattern as existing gates.
+4. Must not bypass arm/halt/WS-continuity/session/reconcile/risk gates already in the chain.
+5. Must fail closed when watchlist is missing or invalid (`watchlist_not_configured` → 503, `watchlist_missing` → 503, `watchlist_invalid` → 503, `watchlist_not_approved` → 409).
+6. Must preserve `approved_for_live=false` — the watchlist gate must never authorize live trading.
+7. Symbol-level and strategy-level checks must pass independently.
+
+#### Enforcement prerequisite conditions
+
+Enforcement (PAPER-HANDOFF-ENFORCE-01) must not be wired until ALL of:
+- AAPL sell/flatten market proof is complete and evidenced.
+- At least one full autonomous paper cycle (open → fill → close → reconcile-clean) is observed.
+- The dry-run admission check endpoint has been exercised in live market conditions.
+- Monday smoke evidence confirms stable operation.
+
+#### approved_for_live invariant (permanent)
+
+`approved_for_live=false` is a hard invariant in all watchlist-related code paths.
+It must never be set to `true` by any watchlist, admission check, or scanner artifact.
+This invariant is enforced at multiple layers:
+- `evaluate_watchlist_intake` — `approved_for_live=true` in artifact → `Invalid`.
+- `WatchlistIntakeOutcome::approved_for_live()` — always returns `false`.
+- `WatchlistStatusResponse.approved_for_live` — always `false`.
+- `WatchlistAdmissionCheckResponse.approved_for_live` — always `false`.
+- Script guards verify the literal `false` assignment in all route response builders.
+
+---
+
 ## 22. Autonomous Paper Handoff
 
 The handoff is a one-way read:

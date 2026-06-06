@@ -48,7 +48,8 @@ $Guards = @(
     'test_autonomous_paper_status.ps1',
     'test_paper_smoke_automation_status.ps1',
     'test_paper_operator_status.ps1',
-    'test_scanner_walkforward_runner.ps1'
+    'test_scanner_walkforward_runner.ps1',
+    'test_watchlist_admission_dryrun.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()
