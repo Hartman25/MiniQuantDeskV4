@@ -42,7 +42,8 @@ $Guards = @(
     'test_scanner_watchlist_promotion.ps1',
     'test_paper_smoke_evidence_trade_flow.ps1',
     'test_scanner_backtest_runner_real.ps1',
-    'test_scanner_backtest_validation.ps1'
+    'test_scanner_backtest_validation.ps1',
+    'test_scanner_risk_premarket.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()

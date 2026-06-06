@@ -632,6 +632,33 @@ Before any symbol reaches the watchlist, a lightweight risk simulation is run:
 
 Risk simulation is not a live risk check. It is a pre-screening sanity check on the strategy-fit artifact before watchlist promotion.
 
+### Implementation Note (RISK-SIM-01 — CLOSED)
+
+- MAIN risk module: `research-py/src/mqk_research/scanner/risk_simulation.py`
+- Public API: `RiskSimulationConfig`, `RiskSimulationResult`,
+  `evaluate_watchlist_risk(watchlist, strategy_fit_artifacts, config)`,
+  `apply_risk_simulation_to_watchlist(watchlist, result)`,
+  `write_risk_simulation_artifact(result, path)`
+- Output schema: `risk-simulation-v1`
+- Risk checks evaluated in order: `live_lock`, `has_candidates`, `strategy_fit_present`,
+  `concentration`, `max_position_notional`, `max_daily_loss`, `drawdown_stress`,
+  `regime_consistency`, `cost_adjusted_edge`
+- `max_drawdown_bps` from the strategy-fit artifact is used as the daily-loss proxy (no separate
+  daily-loss field exists in the strategy-fit schema v1).
+- `drawdown_stress` check: `max_drawdown_bps × slippage_stress_multiplier <= max_stressed_drawdown_bps`
+  (default stress multiplier = 2.0; threshold = 1000 bps).
+- `regime_consistency` uses inline copy of the backtest_queue compatibility matrix — self-contained.
+- Fail-closed: missing `max_drawdown_bps` or `net_expectancy_after_cost_bps` → early exit, passes=False.
+- `approved_for_live=True` in input is forced False; adds `risk_live_approval_forbidden` reason.
+- No broker/OMS/execution imports; no network/DB imports; no subprocess; artifact-only.
+- `approved_for_live=False` always enforced in `apply_risk_simulation_to_watchlist` output.
+- Result dict integrates with `evaluate_watchlist_promotion` via `risk_simulation_result` parameter.
+
+**Failure reason constants:** `risk_no_candidates`, `risk_strategy_fit_missing`,
+`risk_notional_limit_failed`, `risk_daily_loss_failed`, `risk_drawdown_stress_failed`,
+`risk_concentration_failed`, `risk_regime_mismatch`, `risk_cost_adjusted_edge_failed`,
+`risk_live_approval_forbidden`, `risk_missing_required_metric`
+
 ---
 
 ## 17. Watchlist Schema
@@ -709,16 +736,20 @@ A symbol/strategy pair is eligible for the next-day paper watchlist only when AL
 
 - MAIN promotion module: `research-py/src/mqk_research/scanner/watchlist_promotion.py`
 - Public API: `WatchlistPromotionConfig`, `PromotionInput`, `PromotionDecision`,
-  `evaluate_watchlist_promotion(watchlist, strategy_fit_artifacts, config)`,
+  `evaluate_watchlist_promotion(watchlist, strategy_fit_artifacts, config,
+  risk_simulation_result=None, premarket_revalidation_result=None)`,
   `apply_watchlist_promotion(watchlist, decision, config)`,
   `write_promoted_watchlist(watchlist, path)`
 - Promotion gates evaluated in order: `watchlist_schema_valid`, `watchlist_mode_paper`,
   `watchlist_live_locked`, `has_ranked_candidates`, `strategy_fit_present`,
   `strategy_fit_recommended_for_paper`, `risk_simulation_passed`, `operator_review_approved`,
-  `premarket_revalidation_deferred`
+  `premarket_revalidation`
 - `operator_review_approved` defaults `False` — fail closed until explicit operator sign-off.
-- `risk_simulation_passed` defaults `False` — lightweight placeholder; fail closed until passed.
-- `premarket_revalidation_required` defaults `True` — fail closed; cleared by WATCHLIST-PREMARKET-01.
+- `risk_simulation_passed` defaults `False` in config; overridden by `risk_simulation_result["passed"]`
+  when the result dict is supplied (RISK-SIM-01).
+- `premarket_revalidation_required` defaults `True` in config; overridden by
+  `not premarket_revalidation_result["passed"]` when the result dict is supplied (WATCHLIST-PREMARKET-01).
+- Config booleans remain supported for backward compatibility and direct testing.
 - `approved_for_autonomous_paper=False` unless every gate passes.
 - `approved_for_live=False` always — hard invariant, not overrideable by caller or config.
 - `max_symbols_to_trade=1` and `max_concurrent_positions=1` forced in v1.
@@ -726,6 +757,38 @@ A symbol/strategy pair is eligible for the next-day paper watchlist only when AL
 - Output goes to `exports/watchlist/`; never writes to `config/watchlists`.
 - No daemon integration in this patch. Daemon reads the promoted artifact at startup (§21).
 - EXP penny scanner (`exp-candidate-v1`) is separate and not affected by this module.
+
+### Implementation Note (WATCHLIST-PREMARKET-01 — CLOSED)
+
+- MAIN premarket module: `research-py/src/mqk_research/scanner/premarket_revalidation.py`
+- Public API: `PremarketRevalidationConfig`, `PremarketRevalidationResult`,
+  `evaluate_premarket_watchlist(watchlist, symbol_inputs, config, reference_utc=None)`,
+  `apply_premarket_revalidation_to_watchlist(watchlist, result)`,
+  `write_premarket_revalidation_artifact(result, path)`
+- Output schema: `premarket-revalidation-v1`
+- All inputs are artifact/dict-based — no broker calls, no live market data API, no DB.
+- Checks evaluated per top symbol: `watchlist_schema_valid`, `mode_paper`, `live_lock`,
+  `symbol_input_present`, `symbol_not_suppressed`, `data_quality_passed`, `liquidity_passed`,
+  `regime_compatible`, `bar_freshness`, `spread_limit`, `slippage_limit`, `rvol_threshold`,
+  `price_threshold`
+- Spread/slippage/rvol/price checks only fire when the field is present in `symbol_inputs`; absent
+  means not checked (not failed). Bar freshness is fail-closed: absent `latest_bar_ts` fails.
+- `reference_utc` parameter allows deterministic time-based testing without mocking datetime.
+- Regime compatibility uses inline copy of the backtest_queue compatibility matrix — self-contained.
+- `approved_for_live=True` in watchlist input forces False; adds `premarket_live_approval_forbidden`.
+- No broker/OMS/execution imports; no network/DB imports; no subprocess; artifact-only.
+- `approved_for_live=False` always enforced in `apply_premarket_revalidation_to_watchlist` output.
+- Result dict integrates with `evaluate_watchlist_promotion` via `premarket_revalidation_result` parameter.
+- Requires fresh `symbol_inputs` from a premarket data refresh runner to be operationally useful;
+  that runner is future work (PAPER-HANDOFF-01 / premarket data runner).
+- Does NOT prove that scanner-driven autonomous paper is ready — daemon handoff remains future work.
+- Does NOT submit orders or enable live routing.
+
+**Failure reason constants:** `premarket_watchlist_schema_invalid`, `premarket_mode_not_paper`,
+`premarket_live_approval_forbidden`, `premarket_symbol_input_missing`, `premarket_symbol_suppressed`,
+`premarket_data_quality_failed`, `premarket_liquidity_failed`, `premarket_regime_incompatible`,
+`premarket_bar_stale`, `premarket_spread_too_wide`, `premarket_slippage_too_high`,
+`premarket_rvol_too_low`, `premarket_price_too_low`
 
 ### 18.2 Demotion from Watchlist
 

@@ -813,5 +813,172 @@ class TestDefaultConfigFailClosed(unittest.TestCase):
         self.assertIn(REASON_PREMARKET_REVALIDATION_REQUIRED, decision.failure_reasons)
 
 
+# ---------------------------------------------------------------------------
+# Integration tests: risk_simulation_result and premarket_revalidation_result
+# ---------------------------------------------------------------------------
+
+class TestRiskAndPremarketResultIntegration(unittest.TestCase):
+    """
+    WATCHLIST-PREMKT-RISK-BUNDLE-01 integration tests.
+    Verifies that evaluate_watchlist_promotion accepts result dicts from
+    risk_simulation and premarket_revalidation modules and applies them correctly.
+    """
+
+    def _make_passing_risk_result(self) -> dict:
+        return {"schema_version": "risk-simulation-v1", "passed": True, "failure_reasons": []}
+
+    def _make_failing_risk_result(self) -> dict:
+        return {
+            "schema_version": "risk-simulation-v1",
+            "passed": False,
+            "failure_reasons": ["risk_cost_adjusted_edge_failed"],
+        }
+
+    def _make_passing_premarket_result(self) -> dict:
+        return {
+            "schema_version": "premarket-revalidation-v1",
+            "passed": True,
+            "failure_reasons": [],
+        }
+
+    def _make_failing_premarket_result(self) -> dict:
+        return {
+            "schema_version": "premarket-revalidation-v1",
+            "passed": False,
+            "failure_reasons": ["premarket_bar_stale"],
+        }
+
+    def test_int01_risk_result_pass_and_premarket_pass_with_operator_review(self):
+        """INT01: passing risk + premarket results + operator review → approved."""
+        wl = _make_watchlist()
+        fits = {"AAPL": _make_passing_fit()}
+        cfg = WatchlistPromotionConfig(
+            operator_review_approved=True,
+            risk_simulation_passed=False,   # overridden by result dict
+            premarket_revalidation_required=True,  # overridden by result dict
+        )
+        decision = evaluate_watchlist_promotion(
+            wl, fits, cfg,
+            risk_simulation_result=self._make_passing_risk_result(),
+            premarket_revalidation_result=self._make_passing_premarket_result(),
+        )
+        self.assertTrue(decision.approved_for_autonomous_paper)
+        self.assertTrue(decision.passed)
+        self.assertEqual(decision.failure_reasons, [])
+        self.assertFalse(decision.approved_for_live)
+
+    def test_int02_failing_risk_result_blocks_promotion(self):
+        """INT02: failing risk result dict blocks promotion even when config.risk_simulation_passed=True."""
+        wl = _make_watchlist()
+        fits = {"AAPL": _make_passing_fit()}
+        cfg = WatchlistPromotionConfig(
+            operator_review_approved=True,
+            risk_simulation_passed=True,    # would pass without result dict
+            premarket_revalidation_required=False,
+        )
+        decision = evaluate_watchlist_promotion(
+            wl, fits, cfg,
+            risk_simulation_result=self._make_failing_risk_result(),
+        )
+        self.assertFalse(decision.approved_for_autonomous_paper)
+        self.assertIn(REASON_RISK_SIMULATION_REQUIRED, decision.failure_reasons)
+
+    def test_int03_failing_premarket_result_blocks_promotion(self):
+        """INT03: failing premarket result dict blocks promotion even when config says not required."""
+        wl = _make_watchlist()
+        fits = {"AAPL": _make_passing_fit()}
+        cfg = WatchlistPromotionConfig(
+            operator_review_approved=True,
+            risk_simulation_passed=True,
+            premarket_revalidation_required=False,  # would pass without result dict
+        )
+        decision = evaluate_watchlist_promotion(
+            wl, fits, cfg,
+            premarket_revalidation_result=self._make_failing_premarket_result(),
+        )
+        self.assertFalse(decision.approved_for_autonomous_paper)
+        self.assertIn(REASON_PREMARKET_REVALIDATION_REQUIRED, decision.failure_reasons)
+
+    def test_int04_existing_config_boolean_behavior_unchanged(self):
+        """INT04: without result dicts, existing config boolean behavior is preserved."""
+        wl = _make_watchlist()
+        fits = {"AAPL": _make_passing_fit()}
+        # Original API: no result dicts, config.risk_simulation_passed=True,
+        # premarket_revalidation_required=False → should pass
+        cfg = _make_passing_config()
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertTrue(decision.approved_for_autonomous_paper)
+        self.assertFalse(decision.approved_for_live)
+
+    def test_int05_approved_for_live_remains_false_with_passing_results(self):
+        """INT05: approved_for_live is always False even when both results pass."""
+        wl = _make_watchlist()
+        fits = {"AAPL": _make_passing_fit()}
+        cfg = WatchlistPromotionConfig(operator_review_approved=True)
+        decision = evaluate_watchlist_promotion(
+            wl, fits, cfg,
+            risk_simulation_result=self._make_passing_risk_result(),
+            premarket_revalidation_result=self._make_passing_premarket_result(),
+        )
+        self.assertFalse(decision.approved_for_live)
+
+    def test_int06_risk_result_passed_false_missing_key(self):
+        """INT06: risk result dict with missing 'passed' key defaults to False (fail closed)."""
+        wl = _make_watchlist()
+        fits = {"AAPL": _make_passing_fit()}
+        cfg = WatchlistPromotionConfig(
+            operator_review_approved=True,
+            premarket_revalidation_required=False,
+        )
+        decision = evaluate_watchlist_promotion(
+            wl, fits, cfg,
+            risk_simulation_result={},   # no 'passed' key → defaults False → fail
+        )
+        self.assertFalse(decision.approved_for_autonomous_paper)
+        self.assertIn(REASON_RISK_SIMULATION_REQUIRED, decision.failure_reasons)
+
+    def test_int07_real_risk_simulation_module_integration(self):
+        """INT07: real risk_simulation module result integrates end-to-end."""
+        from mqk_research.scanner.risk_simulation import evaluate_watchlist_risk
+
+        watchlist_with_regime = dict(_make_watchlist())
+        watchlist_with_regime["notional_limits"] = {"AAPL": 1000.0}
+        watchlist_with_regime["ranked_candidates"] = [
+            {
+                "rank": 1,
+                "symbol": "AAPL",
+                "strategy_id": "intraday_scalper",
+                "regime_label": "trending_up",
+                "regime_score": 0.75,
+            }
+        ]
+        risk_fit = {
+            "schema_version": "strategy-fit-v1",
+            "symbol": "AAPL",
+            "strategy_id": "intraday_scalper",
+            "recommended_for_paper": True,
+            "recommended_for_live": False,
+            "max_drawdown_bps": 150.0,
+            "net_expectancy_after_cost_bps": 10.0,
+            "failure_reasons": [],
+        }
+        risk_result = evaluate_watchlist_risk(
+            watchlist_with_regime, {"AAPL": risk_fit}
+        )
+        self.assertTrue(risk_result.passed)
+
+        cfg = WatchlistPromotionConfig(
+            operator_review_approved=True,
+            premarket_revalidation_required=False,
+        )
+        promotion_fits = {"AAPL": _make_passing_fit()}
+        decision = evaluate_watchlist_promotion(
+            watchlist_with_regime, promotion_fits, cfg,
+            risk_simulation_result=risk_result.to_dict(),
+        )
+        self.assertTrue(decision.approved_for_autonomous_paper)
+        self.assertFalse(decision.approved_for_live)
+
+
 if __name__ == "__main__":
     unittest.main()

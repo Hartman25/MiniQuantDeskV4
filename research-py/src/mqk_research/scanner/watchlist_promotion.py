@@ -133,11 +133,17 @@ def evaluate_watchlist_promotion(
     watchlist: dict[str, Any],
     strategy_fit_artifacts: dict[str, dict[str, Any]],
     config: Optional[WatchlistPromotionConfig] = None,
+    risk_simulation_result: Optional[dict[str, Any]] = None,
+    premarket_revalidation_result: Optional[dict[str, Any]] = None,
 ) -> PromotionDecision:
     """
     Evaluate a watchlist-v1 artifact against all promotion gates.
 
     Returns a PromotionDecision; does not modify the input artifacts.
+
+    risk_simulation_result: if provided, its "passed" bool overrides config.risk_simulation_passed.
+    premarket_revalidation_result: if provided, its "passed" bool determines whether
+      premarket revalidation is still required (not passed → required=True).
 
     Fail-closed: any gate failure → approved_for_autonomous_paper=False.
     approved_for_live is always False.
@@ -145,6 +151,18 @@ def evaluate_watchlist_promotion(
     """
     cfg = config or WatchlistPromotionConfig()
     failure_reasons: list[str] = []
+
+    # Resolve effective gate states from result dicts (override config booleans when provided).
+    effective_risk_passed = (
+        bool(risk_simulation_result.get("passed", False))
+        if risk_simulation_result is not None
+        else cfg.risk_simulation_passed
+    )
+    effective_premarket_required = (
+        not bool(premarket_revalidation_result.get("passed", False))
+        if premarket_revalidation_result is not None
+        else cfg.premarket_revalidation_required
+    )
 
     # Gate 1: schema version must be watchlist-v1
     if watchlist.get("schema_version") != SCHEMA_VERSION_WATCHLIST:
@@ -181,16 +199,16 @@ def evaluate_watchlist_promotion(
                 or (watchlist.get("strategy_assignments") or {}).get(top_symbol)
             )
 
-    # Gate 7: risk simulation placeholder
-    if not cfg.risk_simulation_passed:
+    # Gate 7: risk simulation — driven by result dict if provided, else config boolean
+    if not effective_risk_passed:
         failure_reasons.append(REASON_RISK_SIMULATION_REQUIRED)
 
     # Gate 8: operator review sign-off
     if not cfg.operator_review_approved:
         failure_reasons.append(REASON_OPERATOR_REVIEW_REQUIRED)
 
-    # Gate 9: premarket revalidation (deferred to WATCHLIST-PREMARKET-01)
-    if cfg.premarket_revalidation_required:
+    # Gate 9: premarket revalidation — driven by result dict if provided, else config boolean
+    if effective_premarket_required:
         failure_reasons.append(REASON_PREMARKET_REVALIDATION_REQUIRED)
 
     failure_reasons = _deduplicate_reasons(failure_reasons)
