@@ -413,12 +413,23 @@ The config option `metrics_pct_scale` controls this conversion:
 
 **Walk-forward execution (WALKFORWARD-SPLIT-01 / WALKFORWARD-RUNNER-01):**
 - `walkforward.py` provides a pure Python split planner: `WalkForwardConfig`, `WalkForwardSplit`, `build_date_splits(start_date, end_date, config)`.
-- The Rust CLI does not yet support date-window filtering. WALKFORWARD-RUNNER-01 remains OPEN — running the backtest engine over individual splits is deferred.
+- `walkforward_runner.py` is the walk-forward runner (WALKFORWARD-RUNNER-01 — CLOSED). It filters the bars CSV to per-split validation windows using Python (the Rust CLI has no date-window filtering flag) and optionally invokes the Rust CLI on each window.
 - `recommended_for_live=False` always, regardless of walk-forward results.
 
+**WALKFORWARD-RUNNER-01 implementation note (CLOSED):**
+- Module: `research-py/src/mqk_research/scanner/walkforward_runner.py`
+- Runner is offline/local. No broker, daemon, OMS, or DB access of any kind.
+- `mode="dry_run"` is the default. Split CSV files are written but no subprocess is invoked.
+- `mode="real"` is opt-in. subprocess is deferred inside `_run_single_split()` only.
+- Real subprocess is mocked in all tests — never actually executed in CI.
+- Aggregation is conservative: `validation_profit_factor` = minimum across splits; `validation_trades` = sum; `parameter_stability_score` = passed/total; `sample_quality` = clamp(trades/min_required, 0, 1).
+- Validation split CSVs are written under `exports/backtests/walkforward/<queue_id>/`.
+- `map_walkforward_to_validation_metrics()` maps the aggregate to the fields consumed by `evaluate_strategy_fit()` and `apply_backtest_gates()`.
+- Scanner-driven paper still requires operator review and paper proof after walk-forward completion.
+- No live recommendation is produced at any stage of walk-forward validation.
+
 **Remaining open:**
-- WALKFORWARD-RUNNER-01: executing Rust backtest over train/validation splits (Rust CLI date-window support required).
-- Rust `metrics.json` does not yet emit `validation_profit_factor`, `validation_trades`, `sample_quality`, or `parameter_stability_score`; these must be supplied externally or computed outside the CLI.
+- Rust `metrics.json` does not yet emit `validation_profit_factor`, `validation_trades`, `sample_quality`, or `parameter_stability_score`; these are now supplied by the walk-forward runner's aggregation layer.
 - `recommended_for_paper=True` requires all gate fields to be present and passing.
 
 Schema written: `strategy-fit-v1`
