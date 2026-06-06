@@ -639,3 +639,138 @@ test("DESKTOP-12: WS continuity pill present with info tone for live (proven con
   assert.match(html, /WS Continuity/i, "live: WS Continuity pill must be present");
   assert.match(html, /tone-info/, "live: pill must carry info tone (proven state)");
 });
+
+// ---------------------------------------------------------------------------
+// STRATEGY-DECISION-OBSERVABILITY-01: strategy decision diagnostics wired through model
+// ---------------------------------------------------------------------------
+
+test("SDOBS-01: strategy_decision_diagnostics from autonomous/readiness is surfaced in model", async () => {
+  const originalFetch = globalThis.fetch;
+
+  const diagFixture = {
+    strategy_id: "intraday_scalper",
+    symbol: "AAPL",
+    timeframe: "5m",
+    lookback_bars: 5,
+    threshold_bps: 20,
+    latest_bar_ts: 1780688700,
+    latest_close_micros: 308110000,
+    lookback_bar_ts: 1780687500,
+    lookback_close_micros: 308870000,
+    move_bps: -24,
+    abs_move_bps: 24,
+    gap_to_threshold_bps: -4,
+    raw_direction: -1,
+    decision: "flat_due_to_negative_direction",
+    reason: "bearish displacement; long-only strategy maps to flat",
+  };
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({ ...DEFAULT_STATUS, daemon_reachable: true, last_heartbeat: new Date().toISOString() });
+    }
+    if (path === "/api/v1/system/preflight") {
+      return jsonResponse({ ...DEFAULT_PREFLIGHT, daemon_reachable: true });
+    }
+    if (path === "/api/v1/autonomous/readiness") {
+      return jsonResponse({
+        truth_state: "active",
+        session_in_window: true,
+        session_window_state: "in_window",
+        now_utc: new Date().toISOString(),
+        session_start_utc: "13:30 UTC",
+        session_stop_utc: "20:00 UTC",
+        session_window_source: "fixed_window_override",
+        arm_state: "armed",
+        nyse_market_session: "regular",
+        bar_ticker_gate: "open",
+        bar_tick_dispatch_count: 1,
+        last_bar_signal_qty: 0,
+        bar_context_source: "db_loaded",
+        bar_context_bars_loaded: 30,
+        blockers: ["NO_SIGNAL_GENERATED: strategy conditions not met"],
+        overall_ready: false,
+        strategy_decision_diagnostics: diagFixture,
+      });
+    }
+    // Provide enough for StrategyScreen to pass truthRendering check.
+    if (path === "/api/v1/strategy/summary") {
+      return jsonResponse({ truth_state: "active", backend: "runtime", rows: [] });
+    }
+    if (path === "/api/v1/strategy/suppressions") {
+      return jsonResponse({ truth_state: "active", backend: "postgres", rows: [] });
+    }
+    return notFoundResponse();
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    // Decision diagnostics must be wired through the model.
+    assert.ok(model.strategyDecisionDiagnostics !== null, "strategyDecisionDiagnostics must be non-null when readiness is active");
+    assert.equal(model.strategyDecisionDiagnostics?.strategy_id, "intraday_scalper");
+    assert.equal(model.strategyDecisionDiagnostics?.symbol, "AAPL");
+    assert.equal(model.strategyDecisionDiagnostics?.decision, "flat_due_to_negative_direction");
+    assert.equal(model.strategyDecisionDiagnostics?.move_bps, -24);
+    assert.equal(model.strategyDecisionDiagnostics?.threshold_bps, 20);
+    assert.equal(model.strategyDecisionDiagnostics?.gap_to_threshold_bps, -4);
+
+    // Bar dispatch context must be wired.
+    assert.equal(model.autonomousBarTickCount, 1);
+    assert.equal(model.autonomousLastSignalQty, 0);
+    assert.equal(model.autonomousBarContextSource, "db_loaded");
+
+    // Blockers must be wired.
+    assert.equal(model.autonomousBlockers.length, 1);
+    assert.ok(model.autonomousBlockers[0].includes("NO_SIGNAL_GENERATED"), "blocker must include NO_SIGNAL_GENERATED");
+
+    // StrategyScreen must render the decision panel when autonomousBarTickCount is non-null.
+    const strategyHtml = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+    assert.match(strategyHtml, /Last bar signal decision/i, "decision panel title must appear");
+    assert.match(strategyHtml, /flat_due_to_negative_direction/i, "decision value must render");
+    assert.match(strategyHtml, /AAPL/i, "symbol must render in decision panel");
+    assert.match(strategyHtml, /Autonomous readiness blockers/i, "blockers panel title must appear");
+    assert.match(strategyHtml, /NO_SIGNAL_GENERATED/i, "blocker text must render");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("SDOBS-02: absent autonomous/readiness keeps strategyDecisionDiagnostics null and hides panel", async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({ ...DEFAULT_STATUS, daemon_reachable: true, last_heartbeat: new Date().toISOString() });
+    }
+    if (path === "/api/v1/system/preflight") {
+      return jsonResponse({ ...DEFAULT_PREFLIGHT, daemon_reachable: true });
+    }
+    // autonomous/readiness intentionally absent (not paper+alpaca) — returns 404.
+    return notFoundResponse();
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    // When readiness is unavailable, all fields must be null/empty.
+    assert.equal(model.strategyDecisionDiagnostics, null, "strategyDecisionDiagnostics must be null when readiness is absent");
+    assert.equal(model.autonomousBarTickCount, null, "autonomousBarTickCount must be null");
+    assert.equal(model.autonomousLastSignalQty, null);
+    assert.equal(model.autonomousBarContextSource, null);
+    assert.deepEqual(model.autonomousBlockers, [], "autonomousBlockers must be empty");
+
+    // StrategyScreen must NOT render the decision panel when autonomousBarTickCount is null.
+    const strategyHtml = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+    assert.doesNotMatch(strategyHtml, /Last bar signal decision/i, "decision panel must not appear when readiness is absent");
+    assert.doesNotMatch(strategyHtml, /Autonomous readiness blockers/i, "blockers panel must not appear when readiness is absent");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

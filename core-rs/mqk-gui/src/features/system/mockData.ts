@@ -731,6 +731,11 @@ export const MOCK_MODEL: SystemModel = {
   executionOutbox: { truth_state: "unavailable" as const, run_id: null, rows: [] },
   fillQualityTelemetry: { truth_state: "unavailable" as const, rows: [] },
   paperJournal: { run_id: null, fills_truth_state: "unavailable" as const, fills: [], admissions_truth_state: "unavailable" as const, admissions: [] },
+  strategyDecisionDiagnostics: null,
+  autonomousBarTickCount: null,
+  autonomousLastSignalQty: null,
+  autonomousBarContextSource: null,
+  autonomousBlockers: [],
   dataSource: {
     state: "mock",
     reachable: true,

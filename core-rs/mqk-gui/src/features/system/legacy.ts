@@ -629,6 +629,33 @@ export interface AutonomousReadinessPartial {
   session_start_utc: string | null;
   session_stop_utc: string | null;
   session_window_source: string;
+  // STRATEGY-DECISION-OBSERVABILITY-01: bar dispatch and decision diagnostics.
+  arm_state?: string;
+  nyse_market_session?: string;
+  bar_ticker_gate?: string;
+  bar_tick_dispatch_count?: number | null;
+  last_bar_signal_qty?: number | null;
+  bar_context_source?: string;
+  bar_context_bars_loaded?: number | null;
+  blockers?: string[];
+  overall_ready?: boolean;
+  strategy_decision_diagnostics?: {
+    strategy_id: string;
+    symbol: string;
+    timeframe: string;
+    lookback_bars: number;
+    threshold_bps: number;
+    latest_bar_ts: number | null;
+    latest_close_micros: number | null;
+    lookback_bar_ts: number | null;
+    lookback_close_micros: number | null;
+    move_bps: number | null;
+    abs_move_bps: number | null;
+    gap_to_threshold_bps: number | null;
+    raw_direction: number;
+    decision: string;
+    reason: string;
+  } | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -99,6 +99,11 @@ const FALLBACK_MODEL: SystemModel = {
   executionOutbox: { truth_state: "unavailable", run_id: null, rows: [] },
   fillQualityTelemetry: { truth_state: "unavailable", rows: [] },
   paperJournal: { run_id: null, fills_truth_state: "unavailable", fills: [], admissions_truth_state: "unavailable", admissions: [] },
+  strategyDecisionDiagnostics: null,
+  autonomousBarTickCount: null,
+  autonomousLastSignalQty: null,
+  autonomousBarContextSource: null,
+  autonomousBlockers: [],
   dataSource: {
     state: "disconnected",
     reachable: false,

@@ -4,7 +4,23 @@ import { StatCard } from "../../components/common/StatCard";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime } from "../../lib/format";
 import { panelTruthRenderState } from "../system/truthRendering";
-import type { SystemModel } from "../system/types";
+import type { StrategyDecisionDiagnostics, SystemModel } from "../system/types";
+
+function decisionTone(decision: string): "good" | "warn" | "neutral" {
+  if (decision === "signal_long") return "good";
+  if (decision === "insufficient_bars") return "warn";
+  return "neutral";
+}
+
+function formatMicrosAsPrice(micros: number | null): string {
+  if (micros == null) return "—";
+  return (micros / 1_000_000).toLocaleString(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  });
+}
 
 export function StrategyScreen({ model }: { model: SystemModel }) {
   const armed = model.strategies.filter((s) => s.armed).length;
@@ -132,6 +148,93 @@ export function StrategyScreen({ model }: { model: SystemModel }) {
           />
         )}
       </Panel>
+
+      {/* STRATEGY-DECISION-OBSERVABILITY-01: Last bar signal decision diagnostics.
+          Read-only. Source: GET /api/v1/autonomous/readiness → strategy_decision_diagnostics.
+          Only rendered when paper+alpaca and at least one bar has been dispatched. */}
+      {model.autonomousBarTickCount != null && (
+        <div className="desk-panel-grid desk-panel-grid-secondary">
+          <Panel
+            title="Last bar signal decision"
+            subtitle="Read-only diagnostic from the most recent native strategy bar dispatch (autonomous/readiness)."
+          >
+            {model.strategyDecisionDiagnostics == null ? (
+              <div className="empty-state">
+                {model.autonomousBarTickCount === 0
+                  ? "No bar dispatched yet this session — decision context will appear after the first tick."
+                  : "Decision diagnostics unavailable."}
+              </div>
+            ) : (
+              <SignalDecisionPanel
+                diag={model.strategyDecisionDiagnostics}
+                barTickCount={model.autonomousBarTickCount}
+                lastSignalQty={model.autonomousLastSignalQty}
+                barContextSource={model.autonomousBarContextSource}
+              />
+            )}
+          </Panel>
+
+          <Panel
+            title="Autonomous readiness blockers"
+            subtitle="Active blockers from GET /api/v1/autonomous/readiness. Empty when all gates pass."
+          >
+            {model.autonomousBlockers.length === 0 ? (
+              <div className="empty-state">No blockers — all autonomous readiness gates pass.</div>
+            ) : (
+              <ul className="blocker-list">
+                {model.autonomousBlockers.map((b, i) => (
+                  // blockers are a stable ordered list — index is safe as key here
+                  // eslint-disable-next-line react/no-array-index-key
+                  <li key={i} className="blocker-item">{b}</li>
+                ))}
+              </ul>
+            )}
+          </Panel>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SignalDecisionPanel({
+  diag,
+  barTickCount,
+  lastSignalQty,
+  barContextSource,
+}: {
+  diag: StrategyDecisionDiagnostics;
+  barTickCount: number | null;
+  lastSignalQty: number | null;
+  barContextSource: string | null;
+}) {
+  return (
+    <div className="metric-list">
+      <div><span>Strategy</span><strong>{diag.strategy_id}</strong></div>
+      <div><span>Symbol</span><strong>{diag.symbol}</strong></div>
+      <div><span>Timeframe</span><strong>{diag.timeframe}</strong></div>
+      <div>
+        <span>Decision</span>
+        <strong className={decisionTone(diag.decision) === "good" ? "val-positive" : decisionTone(diag.decision) === "warn" ? "val-warn" : undefined}>
+          {diag.decision}
+        </strong>
+      </div>
+      <div><span>Reason</span><strong>{diag.reason}</strong></div>
+      <div><span>move_bps</span><strong>{diag.move_bps != null ? `${diag.move_bps} bps` : "—"}</strong></div>
+      <div><span>abs_move_bps</span><strong>{diag.abs_move_bps != null ? `${diag.abs_move_bps} bps` : "—"}</strong></div>
+      <div><span>threshold_bps</span><strong>{diag.threshold_bps} bps</strong></div>
+      <div>
+        <span>gap_to_threshold_bps</span>
+        <strong className={diag.gap_to_threshold_bps != null && diag.gap_to_threshold_bps <= 0 ? "val-positive" : undefined}>
+          {diag.gap_to_threshold_bps != null ? `${diag.gap_to_threshold_bps} bps` : "—"}
+        </strong>
+      </div>
+      <div><span>raw_direction</span><strong>{diag.raw_direction === 1 ? "+1 (bullish)" : diag.raw_direction === -1 ? "-1 (bearish)" : "0 (neutral)"}</strong></div>
+      <div><span>lookback_bars</span><strong>{diag.lookback_bars}</strong></div>
+      <div><span>latest_close</span><strong>{formatMicrosAsPrice(diag.latest_close_micros)}</strong></div>
+      <div><span>lookback_close</span><strong>{formatMicrosAsPrice(diag.lookback_close_micros)}</strong></div>
+      <div><span>Bar ticks dispatched</span><strong>{barTickCount ?? "—"}</strong></div>
+      <div><span>Last signal qty</span><strong>{lastSignalQty != null ? String(lastSignalQty) : "—"}</strong></div>
+      <div><span>Bar context source</span><strong>{barContextSource ?? "—"}</strong></div>
     </div>
   );
 }

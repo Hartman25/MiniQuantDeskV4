@@ -896,6 +896,15 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     autonomousReadinessR.ok && autonomousReadinessR.data?.truth_state === "active"
       ? autonomousReadinessR.data
       : null;
+
+  // STRATEGY-DECISION-OBSERVABILITY-01: Extract bar dispatch and decision context.
+  // These fields are read-only diagnostics — never used to place or modify orders.
+  const strategyDecisionDiagnostics = autonomousReadinessDiag?.strategy_decision_diagnostics ?? null;
+  const autonomousBarTickCount = autonomousReadinessDiag?.bar_tick_dispatch_count ?? null;
+  const autonomousLastSignalQty = autonomousReadinessDiag?.last_bar_signal_qty ?? null;
+  const autonomousBarContextSource = autonomousReadinessDiag?.bar_context_source ?? null;
+  const autonomousBlockers = autonomousReadinessDiag?.blockers ?? [];
+
   const sessionWindowMerge: Partial<PreflightStatus> = autonomousReadinessDiag
     ? {
         now_utc: autonomousReadinessDiag.now_utc,
@@ -964,6 +973,12 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     executionOutbox,
     fillQualityTelemetry,
     paperJournal,
+    // STRATEGY-DECISION-OBSERVABILITY-01: read-only decision diagnostics.
+    strategyDecisionDiagnostics,
+    autonomousBarTickCount,
+    autonomousLastSignalQty,
+    autonomousBarContextSource,
+    autonomousBlockers,
     dataSource,
     connected,
     lastUpdatedAt: nowIso(),

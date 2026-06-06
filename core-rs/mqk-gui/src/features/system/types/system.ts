@@ -8,7 +8,7 @@ import type { ExecutionOrderRow, ExecutionOutboxSurface, ExecutionSummary, FillQ
 import type { ArtifactRegistrySummary, ConfigFingerprintSummary, MarketDataQualitySummary, RuntimeLeadershipSummary, ServiceTopology, SessionStateSummary, SystemMetrics, TransportSummary } from "./infra";
 import type { AuditActionRow, AlertTriageRow, FeedEvent, IncidentCase, OperatorActionDefinition, OperatorAlert, OperatorTimelineEvent, PaperJournalAdmissionRow, PaperJournalTruthState, ReplaceCancelChainRow } from "./ops";
 import type { FillRow, OpenOrderRow, PortfolioSummary, PositionRow, ReconcileMismatchRow, RiskDenialRow, RiskSummary } from "./portfolio";
-import type { ConfigDiffRow, StrategyRow, StrategySuppressionRow } from "./strategy";
+import type { ConfigDiffRow, StrategyDecisionDiagnostics, StrategyRow, StrategySuppressionRow } from "./strategy";
 
 export interface SystemStatus {
   environment: EnvironmentMode;
@@ -212,6 +212,20 @@ export interface SystemModel {
   fillQualityTelemetry: FillQualitySurface;
   /** GUI-OPS-01: Paper journal — fills and signal admissions for the active run. */
   paperJournal: PaperJournalSurface;
+  /**
+   * STRATEGY-DECISION-OBSERVABILITY-01: Read-only decision diagnostics from the most
+   * recent native strategy bar dispatch. Null when not paper+alpaca or no bar dispatched.
+   * Source: GET /api/v1/autonomous/readiness → strategy_decision_diagnostics.
+   */
+  strategyDecisionDiagnostics: StrategyDecisionDiagnostics | null;
+  /** Bar tick dispatch count this session. Null when not paper+alpaca. */
+  autonomousBarTickCount: number | null;
+  /** Signal qty from the last bar dispatch. Null when no bar dispatched. */
+  autonomousLastSignalQty: number | null;
+  /** Bar context source: "db_loaded" | "stub_no_price" | "no_dispatch_yet" | "not_applicable". */
+  autonomousBarContextSource: string | null;
+  /** Autonomous readiness blockers. Empty when not applicable or all gates pass. */
+  autonomousBlockers: string[];
   dataSource: DataSourceDetail;
   panelSources: PanelSourceMap;
   connected: boolean;
