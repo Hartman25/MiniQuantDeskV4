@@ -667,6 +667,99 @@ pub struct AutonomousPaperReadinessResponse {
     pub strategy_decision_diagnostics: Option<StrategyDecisionDiagnostics>,
 }
 
+// ---------------------------------------------------------------------------
+// PAPER-AUTONOMOUS-COMPLETION-BUNDLE-01: GET /api/v1/autonomous/paper-status
+// ---------------------------------------------------------------------------
+
+/// Comprehensive autonomous paper trading status summary.
+///
+/// Single surface for operator and Claude to inspect all relevant gate state
+/// in one request.  Read-only, no DB mutations, no broker calls, no orders.
+///
+/// `truth_state`:
+/// - `"active"` — deployment is Paper+Alpaca; all fields are authoritative.
+/// - `"not_applicable"` — deployment is not Paper+Alpaca.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutonomousPaperStatusResponse {
+    pub canonical_route: String,
+    /// `"active"` for paper+alpaca; `"not_applicable"` otherwise.
+    pub truth_state: String,
+    /// Deployment mode: `"paper"` | `"live_shadow"` | `"live_capital"`.
+    pub mode: String,
+    /// Always `false` for paper mode.  Surfaced explicitly so operator can
+    /// confirm live routing is not active before starting a paper session.
+    pub live_routing_enabled: bool,
+    /// Runtime state: `"idle"` | `"running"` | `"halted"` | `"unknown"`.
+    pub runtime_status: String,
+    /// Arm state: `"armed"` | `"arm_pending"` | `"halted"` | `"disarmed_db"`.
+    pub arm_state: String,
+    /// `true` when the kill-switch is active (integrity halted).
+    pub kill_switch_active: bool,
+    /// Deadman heartbeat status: `"healthy"` | `"expired"` | `"inactive"` | `"unavailable"`.
+    pub deadman_status: String,
+    /// Alpaca WS continuity: `"live"` | `"cold_start_unproven"` | `"gap_detected"`.
+    pub ws_continuity: String,
+    /// Reconcile status: `"ok"` | `"dirty"` | `"stale"` | `"unknown"`.
+    pub reconcile_status: String,
+    /// Total mismatch count (positions + orders + fills + unmatched broker events).
+    pub mismatch_count: usize,
+    /// Live OMS order count from in-memory execution snapshot.
+    /// `0` when no execution snapshot is loaded.
+    pub open_order_count: usize,
+    /// Portfolio position count from in-memory execution snapshot.
+    /// `0` when no execution snapshot is loaded.
+    pub position_count: usize,
+    /// Configured strategy symbol (`MQK_STRATEGY_SYMBOL`).
+    /// `null` when the env var is absent or empty.
+    pub current_symbol: Option<String>,
+    /// Net quantity held for `current_symbol` from the in-memory portfolio snapshot.
+    /// `null` when no snapshot is loaded or the symbol has no position.
+    pub current_position_qty: Option<i64>,
+    /// Target quantity from the most recent strategy bar dispatch.
+    /// `null` when no bar has been dispatched this session.
+    pub target_qty: Option<i64>,
+    /// `target_qty - current_position_qty`.  `null` when either is absent.
+    pub computed_delta_qty: Option<i64>,
+    /// Why the last bar dispatch did not produce an order.
+    /// `null` — not persisted in AppState; available in daemon logs only.
+    pub no_order_reason: Option<String>,
+    /// Decision from the most recent strategy diagnostic:
+    /// `"signal_long"` | `"flat_due_to_negative_direction"` |
+    /// `"flat_below_threshold"` | `"insufficient_bars"` | `null`.
+    pub last_strategy_decision: Option<String>,
+    /// `true` when the flatten-paper-positions route gates would all pass.
+    pub flatten_available: bool,
+    /// Reasons flatten is blocked, in gate order.  Empty when `flatten_available`.
+    pub flatten_blockers: Vec<String>,
+    /// `true` — evidence capture routes exist (EVIDENCE-CAPTURE-TRADE-FLOW-01).
+    pub evidence_ready: bool,
+    /// `true` — GUI trade lifecycle visibility exists (GUI-TRADE-LIFECYCLE-VISIBILITY-01).
+    pub gui_visibility_ready: bool,
+    /// `true` — Discord lifecycle alerts exist (DISCORD-TRADE-LIFECYCLE-REAL-01).
+    pub discord_visibility_ready: bool,
+    /// Watchlist intake outcome for the configured artifact:
+    /// `"not_configured"` | `"missing"` | `"invalid"` | `"loaded_not_approved"` | `"loaded_approved"`.
+    pub watchlist_outcome: String,
+    /// `true` when the watchlist artifact is approved for autonomous paper trading.
+    pub watchlist_approved: bool,
+    /// Readiness classification:
+    /// - `"ready_for_market_smoke"` — all start gates pass now.
+    /// - `"market_proof_pending"` — code-complete; only outside session window or run active.
+    /// - `"blocked"` — one or more hard blockers prevent autonomous start.
+    pub readiness_classification: String,
+    /// Active start blockers in gate order.  Empty when ready_for_market_smoke.
+    pub blockers: Vec<String>,
+    /// Recommended operator action given current state.
+    pub next_operator_action: String,
+    /// Autonomous supervisory state from the session controller:
+    /// `"clear"` | `"start_refused"` | `"recovery_retrying"` | `"recovery_succeeded"`
+    /// | `"recovery_failed"` | `"ws_gap_partial_recovery"` | `"run_ended_unexpectedly"`
+    /// | `"stop_failed"` | `"stopped_at_boundary"` | `"not_applicable"`.
+    pub autonomous_session_state: String,
+    /// RFC 3339 timestamp when this response was generated (UTC).
+    pub now_utc: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionSummaryResponse {
     pub has_snapshot: bool,

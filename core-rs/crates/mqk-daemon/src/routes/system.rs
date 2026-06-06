@@ -514,7 +514,7 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
 // ---------------------------------------------------------------------------
 
 /// Converts `AutonomousSessionTruth` to a (state_str, detail) pair for API surfaces.
-fn autonomous_session_truth_to_api(truth: &AutonomousSessionTruth) -> (String, Option<String>) {
+pub(crate) fn autonomous_session_truth_to_api(truth: &AutonomousSessionTruth) -> (String, Option<String>) {
     match truth {
         AutonomousSessionTruth::Clear => ("clear".to_string(), None),
         AutonomousSessionTruth::StartRefused { detail } => {
