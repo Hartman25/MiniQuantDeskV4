@@ -43,7 +43,8 @@ $Guards = @(
     'test_paper_smoke_evidence_trade_flow.ps1',
     'test_scanner_backtest_runner_real.ps1',
     'test_scanner_backtest_validation.ps1',
-    'test_scanner_risk_premarket.ps1'
+    'test_scanner_risk_premarket.ps1',
+    'test_watchlist_readonly_handoff.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()

@@ -883,6 +883,30 @@ First-version behavior:
 - If the watchlist has multiple candidates, the daemon picks the top-ranked `approved_for_autonomous_paper = true` entry.
 - During the session, the intraday re-ranking produces updated scores (observe-only; no live position changes based on re-ranking).
 
+### Implementation Note — PAPER-HANDOFF-READONLY-01 (DONE, 2026-06-06)
+
+`PAPER-HANDOFF-READONLY-01` adds daemon-side read-only watchlist artifact intake and a
+status surface at `GET /api/v1/watchlist/status`.
+
+**What this patch does:**
+- Loads a `watchlist-v1` JSON artifact from `MQK_PAPER_WATCHLIST_PATH`.
+- Validates schema_version, mode=paper, approved_for_live=false, symbols, strategy_assignments, max_symbols_to_trade=1, max_concurrent_positions=1.
+- Returns one of: `not_configured`, `missing`, `invalid`, `loaded_not_approved`, `loaded_approved`.
+- Exposes a pure dry signal-admission contract (`evaluate_watchlist_signal_admission`) for future use.
+- Hard live lock: any artifact with `approved_for_live=true` → `invalid` outcome.
+
+**What this patch does NOT do:**
+- Does NOT submit orders.
+- Does NOT call broker endpoints.
+- Does NOT mutate production DB.
+- Does NOT bypass arm/halt/WS-continuity/reconcile/risk gates.
+- Does NOT wire `evaluate_watchlist_signal_admission` into the live strategy signal path.
+- Does NOT make scanner-driven autonomous paper ready.
+- `approved_for_live` is always `false` in every response.
+
+**Next step:** `PAPER-HANDOFF-ENFORCE-01` will wire signal admission into the strategy signal
+route (after market smoke proof for Monday AAPL sell/flatten).
+
 ---
 
 ## 23. Live-Trading Lock

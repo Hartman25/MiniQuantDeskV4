@@ -3482,3 +3482,46 @@ pub struct AdoptBrokerPositionBaselineResponse {
     #[serde(default)]
     pub reconcile_mismatched_fills: usize,
 }
+
+// ---------------------------------------------------------------------------
+// /api/v1/watchlist/status — PAPER-HANDOFF-READONLY-01
+// ---------------------------------------------------------------------------
+
+/// Read-only watchlist artifact status response.
+///
+/// Returned by `GET /api/v1/watchlist/status`.  Exposes the outcome of loading
+/// the `watchlist-v1` artifact configured at `MQK_PAPER_WATCHLIST_PATH`.
+///
+/// # Invariants
+/// - `approved_for_live` is ALWAYS `false`.  There is no outcome in which live
+///   trading is authorized from the scanner watchlist path.
+/// - `approved_for_autonomous_paper` is `true` only when `status == "loaded_approved"`.
+/// - This endpoint is read-only: no broker calls, no DB mutations, no orders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchlistStatusResponse {
+    /// Path configured in `MQK_PAPER_WATCHLIST_PATH`.  `null` when not configured.
+    pub configured_path: Option<String>,
+    /// One of: `"not_configured"` | `"missing"` | `"invalid"` |
+    ///         `"loaded_not_approved"` | `"loaded_approved"`.
+    pub status: String,
+    /// Whether the scanner-level promotion approved autonomous paper trading.
+    /// Always `false` except when `status == "loaded_approved"`.
+    pub approved_for_autonomous_paper: bool,
+    /// Always `false` — hard live-lock invariant.
+    pub approved_for_live: bool,
+    /// Approved symbols list.  Empty unless `status == "loaded_approved"`.
+    pub symbols: Vec<String>,
+    /// Top-ranked symbol (`symbols[0]`) if present.  `null` otherwise.
+    pub top_symbol: Option<String>,
+    /// Strategy assignment map: symbol → strategy_id.
+    /// Empty unless `status == "loaded_approved"`.
+    pub strategy_assignments: serde_json::Value,
+    /// `max_symbols_to_trade` from artifact.  `null` when not loaded.
+    pub max_symbols_to_trade: Option<u64>,
+    /// `max_concurrent_positions` from artifact.  `null` when not loaded.
+    pub max_concurrent_positions: Option<u64>,
+    /// Validation failure reasons.  Non-empty only when `status == "invalid"`.
+    pub failure_reasons: Vec<String>,
+    /// UTC timestamp when the status check was performed.
+    pub checked_at_utc: String,
+}

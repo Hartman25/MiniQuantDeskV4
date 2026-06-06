@@ -46,6 +46,7 @@ pub(crate) mod system;
 pub(crate) mod system_artifact;
 pub(crate) mod trading;
 pub(crate) mod transport_quality;
+pub(crate) mod watchlist;
 
 use std::sync::Arc;
 
@@ -189,6 +190,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         trading_positions, trading_snapshot, trading_snapshot_clear, trading_snapshot_set,
     };
     use transport_quality::{execution_transport, market_data_coverage, market_data_quality};
+    use watchlist::watchlist_status;
 
     // --- Public (unauthenticated) routes — read-only telemetry & data. ---
     let public = Router::new()
@@ -308,7 +310,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/ingest/tracked-equities",
             get(tracked_equities_list),
-        );
+        )
+        // PAPER-HANDOFF-READONLY-01: read-only watchlist artifact status (public, no auth).
+        // No broker calls, no DB mutations, no orders. approved_for_live always false.
+        .route("/api/v1/watchlist/status", get(watchlist_status));
 
     // --- Operator (authenticated) routes — mutating state changes. ---
     let operator = Router::new()

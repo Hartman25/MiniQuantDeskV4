@@ -22,3 +22,4 @@ pub mod pre_event_flatten;
 pub mod routes;
 pub mod state;
 pub mod suppression;
+pub mod watchlist_intake;
