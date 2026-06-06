@@ -1114,6 +1114,456 @@ pub(crate) async fn ops_action(
                 .into_response()
         }
 
+        // PAPER-SAFE-FLATTEN-ROUTE-01: Operator paper flatten route.
+        //
+        // Submits reduce-to-zero sell orders for open long positions via the
+        // normal OMS/outbox/broker adapter path.  Paper mode only.
+        //
+        // Gate sequence (fail-closed):
+        //   1. deployment_mode == Paper   — non-paper rejected (covers live_routing gate)
+        //   2. DB required                — cannot submit without durable outbox
+        //   3. reconcile_status == "ok"   — dirty reconcile blocks flatten
+        //   4. durable_arm_state == ARMED — not armed, halt, or disarmed → block
+        //   5. active_run_id present      — no active run → block
+        //   6. runtime_state == "running" — not running → block
+        //   7. execution_snapshot present — position truth unavailable → block
+        //   8. target positions non-empty — nothing to flatten → block
+        //   9. no short positions (v1)    — net_qty < 0 → block (unsupported)
+        //  10. outbox_enqueue per symbol  — normal path; idempotent by UUIDv5 key
+        "flatten-paper-positions" => {
+            let env_label = st.deployment_mode().as_api_label().to_string();
+
+            // Gate 1: paper mode only.
+            if !matches!(st.deployment_mode(), DeploymentMode::Paper) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(OperatorActionResponse {
+                        requested_action: "flatten-paper-positions".to_string(),
+                        accepted: false,
+                        disposition: "not_paper_mode".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "flatten-paper-positions is paper-only; \
+                             current mode is '{}' — live routing is not blocked here",
+                            env_label
+                        )],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            // Gate 2: DB required for durable outbox write.
+            let Some(db) = st.db.as_ref() else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(OperatorActionResponse {
+                        requested_action: "flatten-paper-positions".to_string(),
+                        accepted: false,
+                        disposition: "db_unavailable".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![
+                            "flatten-paper-positions requires a DB connection for \
+                             durable outbox writes"
+                                .to_string(),
+                        ],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            };
+
+            // Gate 3: reconcile must be ok.
+            let reconcile = st.current_reconcile_snapshot().await;
+            if reconcile.status != "ok" {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(OperatorActionResponse {
+                        requested_action: "flatten-paper-positions".to_string(),
+                        accepted: false,
+                        disposition: "reconcile_not_ok".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "flatten-paper-positions refused: reconcile status is '{}' \
+                             (expected 'ok'); resolve mismatches before flattening",
+                            reconcile.status
+                        )],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            // Gate 4: durable arm state must be ARMED.
+            let (durable_arm_state, _durable_arm_reason) = match mqk_db::load_arm_state(db).await {
+                Ok(Some((state, reason))) => (state, reason),
+                Ok(None) => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(OperatorActionResponse {
+                            requested_action: "flatten-paper-positions".to_string(),
+                            accepted: false,
+                            disposition: "not_armed".to_string(),
+                            resulting_integrity_state: None,
+                            resulting_desired_armed: None,
+                            blockers: vec![
+                                "flatten-paper-positions refused: durable arm state is absent; \
+                                 arm the system before flattening"
+                                    .to_string(),
+                            ],
+                            warnings: vec![],
+                            environment: Some(env_label),
+                            scope: Some("daemon_instance".to_string()),
+                            audit: OperatorActionAuditFields {
+                                durable_db_write: false,
+                                durable_targets: vec![],
+                                audit_event_id: None,
+                            },
+                            pending_restart_intent: None,
+                        }),
+                    )
+                        .into_response();
+                }
+                Err(err) => {
+                    return runtime_error_response(RuntimeLifecycleError::Internal {
+                        fault_class: "ops.flatten.arm_state_load",
+                        message: format!(
+                            "flatten-paper-positions: arm state load failed: {err}"
+                        ),
+                    });
+                }
+            };
+            if durable_arm_state != "ARMED" {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(OperatorActionResponse {
+                        requested_action: "flatten-paper-positions".to_string(),
+                        accepted: false,
+                        disposition: "not_armed".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "flatten-paper-positions refused: durable arm state is '{}'; \
+                             arm the system before flattening",
+                            durable_arm_state
+                        )],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            // Gates 5 & 6: active run + running state.
+            let status = match st.current_status_snapshot().await {
+                Ok(s) => s,
+                Err(err) => return runtime_error_response(err),
+            };
+            let Some(active_run_id) = status.active_run_id else {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "flatten-paper-positions".to_string(),
+                        accepted: false,
+                        disposition: "no_active_run".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![
+                            "flatten-paper-positions refused: no active durable run; \
+                             start the system before flattening"
+                                .to_string(),
+                        ],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            };
+            if status.state != "running" {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "flatten-paper-positions".to_string(),
+                        accepted: false,
+                        disposition: "not_running".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "flatten-paper-positions refused: runtime state is '{}'; \
+                             system must be running to flatten",
+                            status.state
+                        )],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            // Gate 7: execution snapshot must be present for position truth.
+            let Some(exec_snap) = st.current_execution_snapshot().await else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(OperatorActionResponse {
+                        requested_action: "flatten-paper-positions".to_string(),
+                        accepted: false,
+                        disposition: "no_position_truth".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![
+                            "flatten-paper-positions refused: execution snapshot is unavailable; \
+                             position truth cannot be determined"
+                                .to_string(),
+                        ],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            };
+
+            // Collect non-flat positions, filtered by symbol if provided.
+            let symbol_filter = body.symbol.as_deref().map(|s| s.trim().to_uppercase());
+            let positions_to_flatten: Vec<(String, i64)> = exec_snap
+                .portfolio
+                .positions
+                .iter()
+                .filter(|p| p.net_qty != 0)
+                .filter(|p| {
+                    symbol_filter
+                        .as_deref()
+                        .map_or(true, |f| p.symbol.to_uppercase() == f)
+                })
+                .map(|p| (p.symbol.clone(), p.net_qty))
+                .collect();
+
+            // Gate 8: must have at least one non-flat position to flatten.
+            if positions_to_flatten.is_empty() {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "flatten-paper-positions".to_string(),
+                        accepted: false,
+                        disposition: "no_positions".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![match symbol_filter.as_deref() {
+                            Some(sym) => format!(
+                                "flatten-paper-positions refused: no non-flat position found for '{sym}'"
+                            ),
+                            None => "flatten-paper-positions refused: no non-flat positions found".to_string(),
+                        }],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            // Gate 9 (v1): short positions are not supported.
+            let short_symbols: Vec<String> = positions_to_flatten
+                .iter()
+                .filter(|(_, qty)| *qty < 0)
+                .map(|(sym, _)| sym.clone())
+                .collect();
+            if !short_symbols.is_empty() {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(OperatorActionResponse {
+                        requested_action: "flatten-paper-positions".to_string(),
+                        accepted: false,
+                        disposition: "short_positions_not_supported_v1".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "flatten-paper-positions (v1) does not support short positions; \
+                             short symbols: {}",
+                            short_symbols.join(", ")
+                        )],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            // Gate 10: submit sell orders for all long positions via normal outbox path.
+            let ts_secs = Utc::now().timestamp();
+            let mut enqueued_symbols: Vec<String> = vec![];
+            let mut already_pending_symbols: Vec<String> = vec![];
+            let mut failed_symbols: Vec<String> = vec![];
+            let mut warnings: Vec<String> = vec![];
+
+            for (symbol, net_qty) in &positions_to_flatten {
+                let (key, order_json) =
+                    crate::pre_event_flatten::build_operator_flatten_close_order_json(
+                        symbol, *net_qty, ts_secs, active_run_id,
+                    );
+                match mqk_db::outbox_enqueue(db, active_run_id, &key, order_json).await {
+                    Ok(true) => {
+                        info!(
+                            run_id = %active_run_id,
+                            symbol = %symbol,
+                            net_qty = %net_qty,
+                            idempotency_key = %key,
+                            "operator_flatten_close_enqueued"
+                        );
+                        enqueued_symbols.push(symbol.clone());
+                        warnings.push(format!(
+                            "enqueued: symbol={symbol} qty={} side=sell key={key}",
+                            net_qty.abs()
+                        ));
+                    }
+                    Ok(false) => {
+                        info!(
+                            run_id = %active_run_id,
+                            symbol = %symbol,
+                            idempotency_key = %key,
+                            "operator_flatten_close_already_pending"
+                        );
+                        already_pending_symbols.push(symbol.clone());
+                        warnings.push(format!(
+                            "already_pending: symbol={symbol} key={key}"
+                        ));
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            run_id = %active_run_id,
+                            symbol = %symbol,
+                            error = %err,
+                            "operator_flatten_close_enqueue_failed"
+                        );
+                        failed_symbols.push(symbol.clone());
+                        warnings.push(format!(
+                            "enqueue_failed: symbol={symbol} error={err}"
+                        ));
+                    }
+                }
+            }
+
+            // Write durable audit event for the flatten action (best-effort, non-fatal).
+            let flatten_audit_uuid =
+                write_operator_audit_event(&st, Some(active_run_id), "ops.flatten_paper", "FLATTEN_SUBMITTED")
+                    .await
+                    .ok()
+                    .flatten();
+
+            let accepted = !enqueued_symbols.is_empty() || !already_pending_symbols.is_empty();
+            let disposition = if !failed_symbols.is_empty() && enqueued_symbols.is_empty() && already_pending_symbols.is_empty() {
+                "all_enqueue_failed".to_string()
+            } else if !failed_symbols.is_empty() {
+                "partial_enqueue_failed".to_string()
+            } else if !already_pending_symbols.is_empty() && enqueued_symbols.is_empty() {
+                "all_already_pending".to_string()
+            } else {
+                "enqueued".to_string()
+            };
+
+            let mut final_blockers = vec![];
+            if !failed_symbols.is_empty() {
+                final_blockers.push(format!(
+                    "enqueue failed for: {}",
+                    failed_symbols.join(", ")
+                ));
+            }
+
+            let mut durable_targets = vec!["oms_outbox".to_string()];
+            if flatten_audit_uuid.is_some() {
+                durable_targets.push("audit_events".to_string());
+            }
+
+            (
+                if accepted { StatusCode::OK } else { StatusCode::INTERNAL_SERVER_ERROR },
+                Json(OperatorActionResponse {
+                    requested_action: "flatten-paper-positions".to_string(),
+                    accepted,
+                    disposition,
+                    resulting_integrity_state: None,
+                    resulting_desired_armed: None,
+                    blockers: final_blockers,
+                    warnings,
+                    environment: Some(env_label),
+                    scope: Some("daemon_instance".to_string()),
+                    audit: OperatorActionAuditFields {
+                        durable_db_write: accepted,
+                        durable_targets,
+                        audit_event_id: flatten_audit_uuid.map(|id| id.to_string()),
+                    },
+                    pending_restart_intent: None,
+                }),
+            )
+                .into_response()
+        }
+
         _ => (
             StatusCode::BAD_REQUEST,
             Json(OperatorActionResponse {
@@ -1126,7 +1576,7 @@ pub(crate) async fn ops_action(
                     "Unknown action_key '{}'; accepted keys: arm-execution, arm-strategy, \
                      disarm-execution, disarm-strategy, start-system, stop-system, kill-switch, \
                      request-mode-change, cancel-mode-transition, clear-halted-run, \
-                     test-discord-alert",
+                     test-discord-alert, flatten-paper-positions",
                     body.action_key
                 )],
                 warnings: vec![],
@@ -1360,6 +1810,34 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
                 } else {
                     Some("No halted run found; nothing to clear.".to_string())
                 }
+            } else {
+                None
+            },
+        },
+        // PAPER-SAFE-FLATTEN-ROUTE-01: Paper-only operator flatten path.
+        ActionCatalogEntry {
+            action_key: "flatten-paper-positions".to_string(),
+            label: "Flatten Paper Positions".to_string(),
+            level: 3,
+            description: "Submit market sell orders for all open long paper positions \
+                           via the normal OMS/outbox/broker adapter path. \
+                           Paper mode only. Requires armed + running + reconcile ok. \
+                           Provide symbol in body to flatten a single position."
+                .to_string(),
+            requires_reason: true,
+            confirm_text: "Confirm: submit flatten orders for open paper positions".to_string(),
+            enabled: running && armed && matches!(st.deployment_mode(), DeploymentMode::Paper),
+            disabled_reason: if !matches!(st.deployment_mode(), DeploymentMode::Paper) {
+                Some(format!(
+                    "flatten-paper-positions is paper-only; current mode is '{}'",
+                    st.deployment_mode().as_api_label()
+                ))
+            } else if halted {
+                Some("Cannot flatten while system is halted.".to_string())
+            } else if !armed {
+                Some("System must be armed to flatten positions.".to_string())
+            } else if !running {
+                Some("System must be running to flatten positions.".to_string())
             } else {
                 None
             },

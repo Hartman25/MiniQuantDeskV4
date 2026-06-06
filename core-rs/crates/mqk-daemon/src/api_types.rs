@@ -1132,13 +1132,18 @@ pub struct OpsActionRequest {
     /// "disarm-strategy", "start-system", "stop-system", "kill-switch",
     /// "request-mode-change" (persists restart intent when admissible),
     /// "cancel-mode-transition" (cancels a pending restart intent),
-    /// "change-system-mode" (returns 409 — guidance only, preserved for compat).
+    /// "change-system-mode" (returns 409 — guidance only, preserved for compat),
+    /// "flatten-paper-positions" (paper-only operator flatten via OMS/outbox path).
     pub action_key: String,
     /// Optional reason string for audit trail. Not required by the dispatcher.
     pub reason: Option<String>,
     /// Required for "request-mode-change": target deployment mode label.
     /// One of: "paper", "live-shadow", "live-capital", "backtest".
     pub target_mode: Option<String>,
+    /// Optional symbol filter for "flatten-paper-positions".
+    /// When present, only that symbol is flattened.
+    /// When absent, all non-flat positions are flattened.
+    pub symbol: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

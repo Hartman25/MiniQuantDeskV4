@@ -23,7 +23,7 @@
 //!
 //! | Test   | What it proves                                                              |
 //! |--------|-----------------------------------------------------------------------------|
-//! | OC-20  | catalog has exactly 7 entries                                               |
+//! | OC-20  | catalog has exactly 9 entries (updated: 8→9 for flatten-paper-positions)    |
 //! | OC-21  | catalog contains request-mode-change with required fields                   |
 //! | OC-22  | catalog contains cancel-mode-transition with required fields                |
 //! | OC-23  | request-mode-change is enabled when not halted (no-DB state)                |
@@ -359,15 +359,15 @@ async fn oc_09_change_system_mode_legacy_still_returns_409() {
 // OPS-CONTROL-02 catalog tests (pure in-process)
 // ---------------------------------------------------------------------------
 
-/// OC-20: catalog has exactly 8 entries after AUTON-PAPER-OPS-04 adds clear-halted-run.
+/// OC-20: catalog has exactly 9 entries after PAPER-SAFE-FLATTEN-ROUTE-01 adds flatten-paper-positions.
 #[tokio::test]
-async fn oc_20_catalog_has_exactly_8_entries() {
+async fn oc_20_catalog_has_exactly_9_entries() {
     let j = get_catalog(no_db_router()).await;
     let actions = j["actions"].as_array().expect("actions must be an array");
     assert_eq!(
         actions.len(),
-        8,
-        "OC-20: catalog must have exactly 8 entries; got: {:?}",
+        9,
+        "OC-20: catalog must have exactly 9 entries; got: {:?}",
         actions
             .iter()
             .filter_map(|a| a["action_key"].as_str())

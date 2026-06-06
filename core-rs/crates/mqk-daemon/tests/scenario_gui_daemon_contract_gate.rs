@@ -766,11 +766,11 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         .as_array()
         .expect("/api/v1/ops/catalog must have an 'actions' array");
 
-    // Exactly 8 entries (AUTON-PAPER-OPS-04: clear-halted-run added).
+    // Exactly 9 entries (PAPER-SAFE-FLATTEN-ROUTE-01: flatten-paper-positions added).
     assert_eq!(
         actions.len(),
-        8,
-        "catalog must have exactly 8 entries; got: {actions:?}"
+        9,
+        "catalog must have exactly 9 entries; got: {actions:?}"
     );
 
     // Collect action_key values.
@@ -779,7 +779,7 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         .filter_map(|a| a["action_key"].as_str())
         .collect();
 
-    // All 8 supported keys must be present.
+    // All 9 supported keys must be present.
     for expected_key in &[
         "arm-execution",
         "disarm-execution",
@@ -789,6 +789,7 @@ async fn gui_ops_catalog_endpoint_is_daemon_authoritative() {
         "request-mode-change",
         "cancel-mode-transition",
         "clear-halted-run",
+        "flatten-paper-positions",
     ] {
         assert!(
             keys.contains(expected_key),

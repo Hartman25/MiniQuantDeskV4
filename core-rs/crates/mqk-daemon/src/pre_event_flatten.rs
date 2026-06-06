@@ -381,6 +381,10 @@ struct EarningsEntry {
 /// flatten path.  Carried in `order_json["signal_source"]`.
 pub const FLATTEN_SIGNAL_SOURCE: &str = "pre_event_flatten";
 
+/// Provenance value written into every outbox row sourced from the operator
+/// flatten route.  Carried in `order_json["signal_source"]`.
+pub const OPERATOR_FLATTEN_SIGNAL_SOURCE: &str = "operator_flatten";
+
 /// Build the outbox `order_json` and idempotency key for a flatten close order.
 ///
 /// Parameters:
@@ -420,6 +424,40 @@ pub fn build_flatten_close_order_json(
         "side": side,
         "order_type": "market",
         "signal_source": FLATTEN_SIGNAL_SOURCE,
+        "request_type": "submit",
+    });
+
+    (idempotency_key, order_json)
+}
+
+/// Build the outbox `order_json` and idempotency key for an operator-flatten
+/// close order.
+///
+/// Identical to `build_flatten_close_order_json` except:
+/// - Uses a distinct key namespace `"mqk-op-flatten.v1."` so operator-flatten
+///   keys never collide with pre-event flatten keys for the same symbol/minute.
+/// - Uses `OPERATOR_FLATTEN_SIGNAL_SOURCE` (`"operator_flatten"`) so the
+///   signal source is distinguishable in order flow analysis.
+pub fn build_operator_flatten_close_order_json(
+    symbol: &str,
+    net_qty_signed: i64,
+    ts_secs: i64,
+    run_id: uuid::Uuid,
+) -> (String, serde_json::Value) {
+    let ts_minute = ts_secs / 60;
+    let side = if net_qty_signed > 0 { "sell" } else { "buy" };
+    let qty = net_qty_signed.abs();
+
+    let key_input = format!("mqk-op-flatten.v1.{run_id}.{symbol}.{ts_minute}");
+    let idempotency_key =
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, key_input.as_bytes()).to_string();
+
+    let order_json = serde_json::json!({
+        "symbol": symbol,
+        "qty": qty,
+        "side": side,
+        "order_type": "market",
+        "signal_source": OPERATOR_FLATTEN_SIGNAL_SOURCE,
         "request_type": "submit",
     });
 
