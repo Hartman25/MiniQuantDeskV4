@@ -23,6 +23,8 @@ from mqk_research.scanner.backtest_bridge import (
     REASON_VALIDATION_METRICS_MISSING,
     REASON_COMMAND_BUILD_FAILED,
     REASON_BINARY_NOT_FOUND,
+    PCT_SCALE_PERCENT_0_100,
+    PCT_SCALE_AUTO,
     BacktestBridgeConfig,
     build_mqk_backtest_command,
     parse_mqk_metrics_json,
@@ -317,37 +319,79 @@ class TestMetricsParser(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestWinRateNormalization(unittest.TestCase):
+    """Tests for _normalize_pct_to_fraction under percent_0_100 (default) and auto scales."""
+
+    # --- percent_0_100 (default, Rust-compatible) ---
 
     def test_win_rate_pct_60_maps_to_0_60(self):
-        """win_rate_pct=60.0 (percentage) normalizes to win_rate=0.60."""
+        """win_rate_pct=60.0 under percent_0_100 → 0.60."""
         self.assertAlmostEqual(_normalize_pct_to_fraction(60.0), 0.60)
 
-    def test_win_rate_pct_0_60_maps_to_0_60(self):
-        """win_rate_pct=0.60 (fraction) is preserved as win_rate=0.60."""
-        self.assertAlmostEqual(_normalize_pct_to_fraction(0.60), 0.60)
+    def test_win_rate_pct_0_60_maps_to_0_006_under_default_scale(self):
+        """win_rate_pct=0.60 under percent_0_100 → 0.006 (0.6% win rate from Rust)."""
+        self.assertAlmostEqual(_normalize_pct_to_fraction(0.60), 0.006)
 
     def test_win_rate_pct_100_maps_to_1_0(self):
-        """win_rate_pct=100.0 normalizes to win_rate=1.0."""
+        """win_rate_pct=100.0 → 1.0."""
         self.assertAlmostEqual(_normalize_pct_to_fraction(100.0), 1.0)
 
     def test_win_rate_pct_0_maps_to_0(self):
-        """win_rate_pct=0.0 normalizes to win_rate=0.0."""
+        """win_rate_pct=0.0 → 0.0."""
         self.assertAlmostEqual(_normalize_pct_to_fraction(0.0), 0.0)
+
+    def test_win_rate_explicit_percent_0_100_scale(self):
+        """Explicit percent_0_100 scale matches default."""
+        self.assertAlmostEqual(
+            _normalize_pct_to_fraction(60.0, PCT_SCALE_PERCENT_0_100), 0.60
+        )
+
+    # --- auto (legacy, not for production) ---
+
+    def test_win_rate_auto_above_1_divides_by_100(self):
+        """auto scale: 60.0 → 0.60 (>1.0 heuristic)."""
+        self.assertAlmostEqual(_normalize_pct_to_fraction(60.0, PCT_SCALE_AUTO), 0.60)
+
+    def test_win_rate_auto_at_or_below_1_preserved(self):
+        """auto scale: 0.60 → 0.60 (≤1.0 treated as fraction)."""
+        self.assertAlmostEqual(_normalize_pct_to_fraction(0.60, PCT_SCALE_AUTO), 0.60)
 
 
 class TestDrawdownNormalization(unittest.TestCase):
+    """Tests for _normalize_drawdown_to_bps under percent_0_100 (default) and auto scales."""
+
+    # --- percent_0_100 (default, Rust-compatible) ---
 
     def test_max_drawdown_pct_5_maps_to_500_bps(self):
-        """max_drawdown_pct=5.0 (percentage) → 500 bps."""
+        """max_drawdown_pct=5.0 under percent_0_100 → 500 bps."""
         self.assertAlmostEqual(_normalize_drawdown_to_bps(5.0), 500.0)
 
-    def test_max_drawdown_pct_fraction_maps_to_500_bps(self):
-        """max_drawdown_pct=0.05 (fraction) → 500 bps."""
-        self.assertAlmostEqual(_normalize_drawdown_to_bps(0.05), 500.0)
+    def test_max_drawdown_pct_0_5_maps_to_50_bps(self):
+        """max_drawdown_pct=0.5 under percent_0_100 → 50 bps (0.5% drawdown)."""
+        self.assertAlmostEqual(_normalize_drawdown_to_bps(0.5), 50.0)
+
+    def test_max_drawdown_pct_0_05_maps_to_5_bps_under_default_scale(self):
+        """max_drawdown_pct=0.05 under percent_0_100 → 5 bps (0.05% drawdown from Rust)."""
+        self.assertAlmostEqual(_normalize_drawdown_to_bps(0.05), 5.0)
 
     def test_max_drawdown_pct_10_maps_to_1000_bps(self):
         """max_drawdown_pct=10.0 → 1000 bps."""
         self.assertAlmostEqual(_normalize_drawdown_to_bps(10.0), 1000.0)
+
+    def test_max_drawdown_explicit_percent_0_100_scale(self):
+        """Explicit percent_0_100 scale matches default."""
+        self.assertAlmostEqual(
+            _normalize_drawdown_to_bps(5.0, PCT_SCALE_PERCENT_0_100), 500.0
+        )
+
+    # --- auto (legacy, not for production) ---
+
+    def test_max_drawdown_auto_above_1_multiplies_by_100(self):
+        """auto scale: 5.0 → 500 bps (>1.0 heuristic)."""
+        self.assertAlmostEqual(_normalize_drawdown_to_bps(5.0, PCT_SCALE_AUTO), 500.0)
+
+    def test_max_drawdown_auto_at_or_below_1_multiplies_by_10000(self):
+        """auto scale: 0.05 → 500 bps (≤1.0 treated as fraction * 10000)."""
+        self.assertAlmostEqual(_normalize_drawdown_to_bps(0.05, PCT_SCALE_AUTO), 500.0)
 
 
 class TestMetricMapping(unittest.TestCase):
@@ -412,8 +456,8 @@ class TestMetricMapping(unittest.TestCase):
         mapped, _ = self._map()
         self.assertIsNone(mapped["avg_trade_bps"])
 
-    def test_validation_metrics_missing_always_in_reasons(self):
-        """REASON_VALIDATION_METRICS_MISSING is always appended."""
+    def test_validation_metrics_missing_when_validation_fields_absent(self):
+        """REASON_VALIDATION_METRICS_MISSING is appended when validation fields absent."""
         _, reasons = self._map()
         self.assertIn(REASON_VALIDATION_METRICS_MISSING, reasons)
 
@@ -421,6 +465,177 @@ class TestMetricMapping(unittest.TestCase):
         """net_expectancy_after_cost_bps is set when notional and commissions present."""
         mapped, _ = self._map()
         self.assertIsNotNone(mapped["net_expectancy_after_cost_bps"])
+
+
+# ---------------------------------------------------------------------------
+# Tests: validation field mapping (BACKTEST-METRIC-NORMALIZATION-AUDIT-01 /
+#        BACKTEST-VALIDATION-METRICS-01)
+# ---------------------------------------------------------------------------
+
+class TestValidationFieldMapping(unittest.TestCase):
+    """Validation and additional gate field mapping from metrics.json."""
+
+    def _map_with_metrics(self, extra: dict) -> tuple:
+        m = _make_metrics_dict()
+        m.update(extra)
+        e = _make_queue_entry()
+        cfg = BacktestBridgeConfig()
+        return map_metrics_to_strategy_fit(e, m, cfg)
+
+    def test_validation_metrics_missing_absent_when_validation_fields_present(self):
+        """validation_metrics_missing NOT in reasons when both validation fields present."""
+        mapped, reasons = self._map_with_metrics({
+            "validation_profit_factor": 1.2,
+            "validation_trades": 15,
+        })
+        self.assertNotIn(REASON_VALIDATION_METRICS_MISSING, reasons)
+
+    def test_validation_metrics_missing_present_when_pf_absent(self):
+        """validation_metrics_missing present when validation_profit_factor absent."""
+        mapped, reasons = self._map_with_metrics({"validation_trades": 15})
+        self.assertIn(REASON_VALIDATION_METRICS_MISSING, reasons)
+
+    def test_validation_metrics_missing_present_when_trades_absent(self):
+        """validation_metrics_missing present when validation_trades absent."""
+        mapped, reasons = self._map_with_metrics({"validation_profit_factor": 1.2})
+        self.assertIn(REASON_VALIDATION_METRICS_MISSING, reasons)
+
+    def test_validation_profit_factor_maps_correctly(self):
+        """validation_profit_factor from metrics.json maps to mapped dict."""
+        mapped, _ = self._map_with_metrics({
+            "validation_profit_factor": 1.35,
+            "validation_trades": 12,
+        })
+        self.assertAlmostEqual(mapped["validation_profit_factor"], 1.35)
+
+    def test_validation_trades_maps_correctly(self):
+        """validation_trades from metrics.json maps to mapped dict."""
+        mapped, _ = self._map_with_metrics({
+            "validation_profit_factor": 1.2,
+            "validation_trades": 18,
+        })
+        self.assertEqual(mapped["validation_trades"], 18)
+
+    def test_largest_trade_profit_fraction_maps_directly_if_present(self):
+        """largest_trade_profit_fraction passed directly from metrics if present."""
+        mapped, _ = self._map_with_metrics({"largest_trade_profit_fraction": 0.12})
+        self.assertAlmostEqual(mapped["largest_trade_profit_fraction"], 0.12)
+
+    def test_largest_trade_profit_fraction_derived_from_best_and_gross(self):
+        """largest_trade_profit_fraction derived from best_trade_micros / gross_profit_micros."""
+        # Default fixture: best_trade_micros=500_000_000, gross_profit_micros=10_000_000_000
+        # → 500_000_000 / 10_000_000_000 = 0.05
+        mapped, _ = self._map_with_metrics({})
+        self.assertIsNotNone(mapped["largest_trade_profit_fraction"])
+        self.assertAlmostEqual(mapped["largest_trade_profit_fraction"], 0.05, places=5)
+
+    def test_largest_trade_profit_fraction_none_when_gross_zero(self):
+        """largest_trade_profit_fraction is None when gross_profit_micros is 0."""
+        mapped, _ = self._map_with_metrics({"gross_profit_micros": 0})
+        self.assertIsNone(mapped["largest_trade_profit_fraction"])
+
+    def test_sample_quality_maps_correctly(self):
+        """sample_quality from metrics.json maps to mapped dict."""
+        mapped, _ = self._map_with_metrics({"sample_quality": 0.82})
+        self.assertAlmostEqual(mapped["sample_quality"], 0.82)
+
+    def test_sample_quality_none_when_absent(self):
+        """sample_quality is None when not present in metrics.json."""
+        mapped, _ = self._map_with_metrics({})
+        self.assertIsNone(mapped["sample_quality"])
+
+    def test_parameter_stability_score_maps_correctly(self):
+        """parameter_stability_score from metrics.json maps to mapped dict."""
+        mapped, _ = self._map_with_metrics({"parameter_stability_score": 0.75})
+        self.assertAlmostEqual(mapped["parameter_stability_score"], 0.75)
+
+    def test_parameter_stability_score_none_when_absent(self):
+        """parameter_stability_score is None when not present in metrics.json."""
+        mapped, _ = self._map_with_metrics({})
+        self.assertIsNone(mapped["parameter_stability_score"])
+
+    def test_artifact_with_all_validation_fields_can_pass_oos_gate(self):
+        """Full validation fields + passing thresholds → out-of-sample gate passes."""
+        from mqk_research.scanner.backtest_gates import apply_backtest_gates, REASON_OUT_OF_SAMPLE
+        from mqk_research.scanner.backtest_runner import build_strategy_fit_artifact
+
+        full_overrides = {
+            "schema_version": "strategy-fit-v1",
+            "status": "complete",
+            "bars_used": 300,
+            "trades": 50,
+            "win_rate": 0.60,
+            "profit_factor": 1.5,
+            "expectancy_bps": 10.0,
+            "max_drawdown_bps": 500.0,
+            "net_expectancy_after_cost_bps": 8.0,
+            "validation_profit_factor": 1.2,
+            "validation_trades": 15,
+            "sample_quality": 0.8,
+            "parameter_stability_score": 0.9,
+            "largest_trade_profit_fraction": 0.10,
+            "failure_reasons": [],
+        }
+        artifact = apply_backtest_gates(full_overrides)
+        self.assertNotIn(REASON_OUT_OF_SAMPLE, artifact["failure_reasons"])
+        self.assertTrue(artifact["passed_out_of_sample_check"])
+        self.assertTrue(artifact["recommended_for_paper"])
+        self.assertFalse(artifact["recommended_for_live"])
+
+    def test_recommended_for_live_remains_false_with_validation_fields(self):
+        """recommended_for_live is always False even when all gates pass."""
+        from mqk_research.scanner.backtest_gates import apply_backtest_gates
+        full_overrides = {
+            "status": "complete",
+            "bars_used": 300,
+            "trades": 50,
+            "profit_factor": 1.5,
+            "expectancy_bps": 10.0,
+            "max_drawdown_bps": 500.0,
+            "net_expectancy_after_cost_bps": 8.0,
+            "validation_profit_factor": 1.2,
+            "validation_trades": 15,
+            "sample_quality": 0.8,
+            "parameter_stability_score": 0.9,
+            "largest_trade_profit_fraction": 0.10,
+            "failure_reasons": [],
+        }
+        artifact = apply_backtest_gates(full_overrides)
+        self.assertFalse(artifact["recommended_for_live"])
+
+    def test_validation_fields_in_strategy_fit_result(self):
+        """StrategyFitResult carries validation fields."""
+        from mqk_research.scanner.backtest_runner import StrategyFitResult
+        r = StrategyFitResult(
+            validation_profit_factor=1.2,
+            validation_trades=15,
+            largest_trade_profit_fraction=0.10,
+        )
+        self.assertAlmostEqual(r.validation_profit_factor, 1.2)
+        self.assertEqual(r.validation_trades, 15)
+        self.assertAlmostEqual(r.largest_trade_profit_fraction, 0.10)
+
+    def test_validation_fields_in_built_artifact(self):
+        """build_strategy_fit_artifact includes validation fields in output dict."""
+        from mqk_research.scanner.backtest_runner import (
+            build_strategy_fit_artifact, StrategyFitResult, BacktestRunnerConfig,
+        )
+        entry = _make_queue_entry()
+        result = StrategyFitResult(
+            bars_used=300, trades=50,
+            validation_profit_factor=1.3,
+            validation_trades=12,
+            largest_trade_profit_fraction=0.08,
+        )
+        artifact = build_strategy_fit_artifact(
+            entry=entry,
+            result=result,
+            config=BacktestRunnerConfig(mode="real"),
+            generated_at_utc="2026-06-05T19:00:00+00:00",
+        )
+        self.assertAlmostEqual(artifact["validation_profit_factor"], 1.3)
+        self.assertEqual(artifact["validation_trades"], 12)
+        self.assertAlmostEqual(artifact["largest_trade_profit_fraction"], 0.08)
 
 
 # ---------------------------------------------------------------------------

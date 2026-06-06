@@ -10,7 +10,7 @@
 #  6. parser handles metrics.json (parse_mqk_metrics_json present)
 #  7. backtest failure reasons are stable string constants
 #  8. live routing is never enabled
-#  9. validation_metrics_missing reason always appended (no false out-of-sample pass)
+#  9. validation_metrics_missing reason constant present (now conditional per BT-WALKFORWARD-VALIDATION-BUNDLE-01)
 #
 # Also verifies backtest_runner.py has not grown forbidden patterns from bridging:
 #  - subprocess still not at module level

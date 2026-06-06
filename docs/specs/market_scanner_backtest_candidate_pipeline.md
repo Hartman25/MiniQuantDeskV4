@@ -362,20 +362,35 @@ Backtest runner: `research-py/src/mqk_research/scanner/backtest_runner.py`
 - Real execution is **local/offline only**. Never contacts broker, OMS, daemon, or production DB.
 - Subprocess is imported inside `run_backtest_for_entry()` only — NOT at module level.
 
+**Metric scale convention (BT-WALKFORWARD-VALIDATION-BUNDLE-01):**
+
+Rust `metrics.json` pct fields use a 0–100 percentage scale (not 0–1 fractions):
+- `win_rate_pct = 60.0` means 60%; Python divides by 100 to get fraction `0.60`.
+- `max_drawdown_pct = 5.0` means 5%; Python multiplies by 100 to get `500 bps`.
+
+The config option `metrics_pct_scale` controls this conversion:
+- `"percent_0_100"` (default, Rust-compatible): always divide/multiply by 100. Unambiguous.
+- `"auto"` (legacy fixture testing only): heuristic > 1.0 check. Not for production.
+
 **Metric mapping (Rust metrics.json → strategy-fit-v1):**
 
 | Rust field | Python field | Conversion |
 |---|---|---|
-| `win_rate_pct` | `win_rate` | If > 1.0: divide by 100; if ≤ 1.0: as-is |
+| `win_rate_pct` | `win_rate` | ÷ 100 (percent_0_100 default). 60.0 → 0.60. |
 | `profit_factor` | `profit_factor` | Direct pass-through |
 | `sharpe_ratio` | `sharpe` | Direct pass-through |
 | `sortino_ratio` | `sortino` | Direct pass-through |
-| `max_drawdown_pct` | `max_drawdown_bps` | If > 1.0: × 100; if ≤ 1.0: × 10 000 |
+| `max_drawdown_pct` | `max_drawdown_bps` | × 100 (percent_0_100 default). 5.0 → 500 bps. |
 | `expectancy_micros` | `expectancy_bps` | micros / (price × qty) × 10 000; `expectancy_basis_missing` if no price |
 | `bars` | `bars_used` | Direct pass-through |
 | `trade_count` | `trades` | Direct pass-through |
 | `exposure_time_pct` | `exposure_time_pct` | Direct pass-through |
 | `net_expectancy_after_cost_bps` | computed | (expectancy − commission/trade) / notional × 10 000 |
+| `validation_profit_factor` | `validation_profit_factor` | Direct (if present in metrics.json) |
+| `validation_trades` | `validation_trades` | Direct (if present in metrics.json) |
+| `largest_trade_profit_fraction` | `largest_trade_profit_fraction` | Direct or derived from best_trade_micros / gross_profit_micros |
+| `sample_quality` | `sample_quality` | Direct (if present in metrics.json) |
+| `parameter_stability_score` | `parameter_stability_score` | Direct (if present in metrics.json) |
 
 **Failure reasons (stable string constants):**
 
@@ -383,7 +398,7 @@ Backtest runner: `research-py/src/mqk_research/scanner/backtest_runner.py`
 - `metrics_schema_invalid` — JSON parse error or wrong `schema_version`
 - `backtest_command_failed` — CLI non-zero exit or subprocess error
 - `expectancy_basis_missing` — cannot derive notional for expectancy conversion
-- `validation_metrics_missing` — always appended until walk-forward validation exists
+- `validation_metrics_missing` — appended when `validation_profit_factor` or `validation_trades` absent from metrics.json; conditional, not always-appended
 - `bars_file_missing` — bars CSV not found for symbol/timeframe
 - `binary_not_found` — compiled mqk binary not at configured path
 - `command_build_failed` — missing config (no binary or bars root)
@@ -392,13 +407,19 @@ Backtest runner: `research-py/src/mqk_research/scanner/backtest_runner.py`
 - Gates are applied after metric mapping via `apply_backtest_gates()`.
 - `recommended_for_live=False` always — hard invariant.
 - `recommended_for_paper=True` only if ALL required + additional gates pass.
-- Out-of-sample gate always fails until `validation_profit_factor` + `validation_trades` are added (walk-forward not yet implemented).
+- Out-of-sample gate passes when both `validation_profit_factor` and `validation_trades` are present and meet thresholds. Fails closed when either is absent.
+- `sample_quality`, `parameter_stability_score`, and `largest_trade_profit_fraction` gates fail closed when fields are absent.
 - Existing `mode="dry_run"` behavior is unchanged.
 
+**Walk-forward execution (WALKFORWARD-SPLIT-01 / WALKFORWARD-RUNNER-01):**
+- `walkforward.py` provides a pure Python split planner: `WalkForwardConfig`, `WalkForwardSplit`, `build_date_splits(start_date, end_date, config)`.
+- The Rust CLI does not yet support date-window filtering. WALKFORWARD-RUNNER-01 remains OPEN — running the backtest engine over individual splits is deferred.
+- `recommended_for_live=False` always, regardless of walk-forward results.
+
 **Remaining open:**
-- Walk-forward validation metrics (out-of-sample gate currently fails on all real runs).
-- `sample_quality` and `parameter_stability_score` not yet computed from Rust output.
-- `recommended_for_paper=True` blocked until those additional gate inputs exist.
+- WALKFORWARD-RUNNER-01: executing Rust backtest over train/validation splits (Rust CLI date-window support required).
+- Rust `metrics.json` does not yet emit `validation_profit_factor`, `validation_trades`, `sample_quality`, or `parameter_stability_score`; these must be supplied externally or computed outside the CLI.
+- `recommended_for_paper=True` requires all gate fields to be present and passing.
 
 Schema written: `strategy-fit-v1`
 `recommended_for_live=False` — hard invariant enforced in code.

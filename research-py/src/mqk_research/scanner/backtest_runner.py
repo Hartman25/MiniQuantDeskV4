@@ -85,6 +85,9 @@ class StrategyFitResult:
     net_expectancy_after_cost_bps: Optional[float] = None
     sample_quality: Optional[float] = None
     parameter_stability_score: Optional[float] = None
+    validation_profit_factor: Optional[float] = None
+    validation_trades: Optional[int] = None
+    largest_trade_profit_fraction: Optional[float] = None
 
 
 @dataclass
@@ -203,6 +206,9 @@ def build_strategy_fit_artifact(
         "net_expectancy_after_cost_bps": result.net_expectancy_after_cost_bps,
         "sample_quality": result.sample_quality,
         "parameter_stability_score": result.parameter_stability_score,
+        "validation_profit_factor": result.validation_profit_factor,
+        "validation_trades": result.validation_trades,
+        "largest_trade_profit_fraction": result.largest_trade_profit_fraction,
         "passed_min_bars": False,
         "passed_min_trades": False,
         "passed_max_drawdown": False,

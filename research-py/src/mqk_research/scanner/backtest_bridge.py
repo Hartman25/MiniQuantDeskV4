@@ -14,8 +14,17 @@ Fail-closed rules:
 - mode="real": subprocess is imported INSIDE run_backtest_for_entry() only,
   never at module level.
 - expectancy_basis_missing when no notional can be derived.
-- validation_metrics_missing is always appended (no walk-forward yet).
+- validation_metrics_missing is appended when validation_profit_factor or
+  validation_trades are absent from metrics.json (conditional, not always).
 - recommended_for_live is always False — enforced by BacktestBridgeConfig.
+
+Metric scale (percent_0_100, default):
+- win_rate_pct from Rust is on a 0-100 scale (60.0 = 60%). Always divide by
+  100 to convert to fraction. Do not use auto-detect heuristics in production.
+- max_drawdown_pct from Rust is on a 0-100 scale (5.0 = 5%). Always multiply
+  by 100 to convert to basis points.
+- Scale "auto" is provided for legacy fixture compatibility only and must not
+  be used in production config.
 
 Hard invariants:
 - recommended_for_live is ALWAYS False
@@ -44,6 +53,13 @@ REASON_VALIDATION_METRICS_MISSING = "validation_metrics_missing"
 REASON_BARS_FILE_MISSING = "bars_file_missing"
 REASON_BINARY_NOT_FOUND = "binary_not_found"
 REASON_COMMAND_BUILD_FAILED = "command_build_failed"
+
+# ---------------------------------------------------------------------------
+# Metric scale constants
+# ---------------------------------------------------------------------------
+
+PCT_SCALE_PERCENT_0_100 = "percent_0_100"
+PCT_SCALE_AUTO = "auto"
 
 # ---------------------------------------------------------------------------
 # Schema / mapping constants
@@ -91,6 +107,11 @@ class BacktestBridgeConfig:
     integrity_stale_threshold_ticks: safe value for daily-bar gaps is 172800.
         The default 120 in the CLI triggers execution_blocked for daily data.
     integrity_gap_tolerance_bars: tolerated missing bar count.
+    metrics_pct_scale: scale convention for Rust pct fields.
+        "percent_0_100" (default): Rust always outputs 0-100 scale; divide by
+            100 for fraction, multiply by 100 for bps. Unambiguous for all values.
+        "auto": legacy heuristic (>1.0→percentage, ≤1.0→fraction). Not for
+            production; only for old fixture compatibility.
     recommended_for_live: hard invariant; always forced to False.
     """
     mode: str = "dry_run"
@@ -101,6 +122,7 @@ class BacktestBridgeConfig:
     target_qty: int = 1
     integrity_stale_threshold_ticks: int = 172_800
     integrity_gap_tolerance_bars: int = 0
+    metrics_pct_scale: str = PCT_SCALE_PERCENT_0_100
     recommended_for_live: bool = False
 
     def __post_init__(self) -> None:
@@ -217,37 +239,41 @@ def parse_mqk_metrics_json(path: str) -> dict[str, Any]:
 # Metric normalization helpers
 # ---------------------------------------------------------------------------
 
-def _normalize_pct_to_fraction(value: float) -> float:
+def _normalize_pct_to_fraction(value: float, scale: str = PCT_SCALE_PERCENT_0_100) -> float:
     """
-    Normalize a win_rate value to a 0-1 fraction.
+    Normalize a win_rate percentage to a 0-1 fraction.
 
-    If value > 1.0: treat as percentage (e.g. 60.0 → 0.60).
-    If value <= 1.0: treat as already a fraction (e.g. 0.60 → 0.60).
-
-    Note: values in (0, 1) are ambiguous — this convention treats them as
-    fractions. Rust always outputs 0-100 (multiply by 100 before storing),
-    so Rust values < 1.0 represent < 1% win rates (extremely rare).
+    scale="percent_0_100" (default, Rust-compatible):
+        Always treats value as 0-100 percentage. 60.0 → 0.60, 0.60 → 0.006.
+        Rust outputs win_rate_pct = winning/total * 100, so this is always correct.
+    scale="auto" (legacy, not for production):
+        Heuristic: if value > 1.0 divide by 100; else treat as fraction.
+        Ambiguous for values near 0 from Rust (e.g. 0.6% win rate outputs 0.60,
+        indistinguishable from a fraction of 0.60 = 60%).
     """
-    if value > 1.0:
-        return value / 100.0
-    return value
+    if scale == PCT_SCALE_AUTO:
+        if value > 1.0:
+            return value / 100.0
+        return value
+    return value / 100.0
 
 
-def _normalize_drawdown_to_bps(value: float) -> float:
+def _normalize_drawdown_to_bps(value: float, scale: str = PCT_SCALE_PERCENT_0_100) -> float:
     """
-    Normalize a drawdown value to basis points.
+    Normalize a drawdown percentage to basis points.
 
-    If value > 1.0: treat as percentage (e.g. 5.0 → 500 bps).
-    If value <= 1.0: treat as fraction (e.g. 0.05 → 500 bps).
-
-    Note: Rust outputs max_drawdown_pct as a percentage (0-100 scale).
-    Values < 1.0 from Rust are drawdowns < 1% and are treated as fractions
-    here, which will over-estimate their bps value. Use fixtures with values
-    > 1.0 for predictable test behavior.
+    scale="percent_0_100" (default, Rust-compatible):
+        Always treats value as 0-100 percentage. 5.0 → 500 bps, 0.5 → 50 bps.
+        Rust outputs max_drawdown_pct = max_dd_micros / hwm * 100.
+    scale="auto" (legacy, not for production):
+        Heuristic: if value > 1.0 multiply by 100; else multiply by 10000.
+        Misclassifies small Rust drawdowns (e.g. 0.5% → 5000 bps instead of 50).
     """
-    if value > 1.0:
-        return value * 100.0    # 5.0% → 500 bps
-    return value * 10_000.0     # 0.05 fraction → 500 bps
+    if scale == PCT_SCALE_AUTO:
+        if value > 1.0:
+            return value * 100.0
+        return value * 10_000.0
+    return value * 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -265,10 +291,12 @@ def map_metrics_to_strategy_fit(
     Returns (mapped_dict, failure_reasons).
 
     mapped_dict keys match StrategyFitResult fields in backtest_runner.py.
-    validation_metrics_missing is always appended (no walk-forward exists yet).
+    validation_metrics_missing is appended only when validation_profit_factor
+    or validation_trades are absent from metrics — not unconditionally.
     expectancy_basis_missing is appended when no notional basis can be derived.
     """
     failure_reasons: list[str] = []
+    scale = config.metrics_pct_scale
 
     bars = metrics.get("bars")
     trade_count = metrics.get("trade_count")
@@ -281,13 +309,28 @@ def map_metrics_to_strategy_fit(
     exposure_time_pct = metrics.get("exposure_time_pct")
     total_commission_micros: int = metrics.get("total_commission_micros") or 0
 
+    # Validation and additional gate fields — optional; read if present in metrics
+    validation_profit_factor = metrics.get("validation_profit_factor")
+    validation_trades = metrics.get("validation_trades")
+    largest_trade_profit_fraction = metrics.get("largest_trade_profit_fraction")
+    sample_quality = metrics.get("sample_quality")
+    parameter_stability_score = metrics.get("parameter_stability_score")
+
+    # Derive largest_trade_profit_fraction from best_trade / gross_profit if not directly provided
+    if largest_trade_profit_fraction is None:
+        best_trade = metrics.get("best_trade_micros")
+        gross_profit = metrics.get("gross_profit_micros")
+        if (best_trade is not None and gross_profit is not None
+                and gross_profit > 0 and best_trade >= 0):
+            largest_trade_profit_fraction = float(best_trade) / float(gross_profit)
+
     win_rate: Optional[float] = None
     if win_rate_pct_raw is not None:
-        win_rate = _normalize_pct_to_fraction(float(win_rate_pct_raw))
+        win_rate = _normalize_pct_to_fraction(float(win_rate_pct_raw), scale)
 
     max_drawdown_bps: Optional[float] = None
     if max_drawdown_pct_raw is not None:
-        max_drawdown_bps = _normalize_drawdown_to_bps(float(max_drawdown_pct_raw))
+        max_drawdown_bps = _normalize_drawdown_to_bps(float(max_drawdown_pct_raw), scale)
 
     # expectancy_micros → expectancy_bps requires notional basis.
     expectancy_bps: Optional[float] = None
@@ -315,8 +358,9 @@ def map_metrics_to_strategy_fit(
     elif expectancy_micros is not None:
         failure_reasons.append(REASON_EXPECTANCY_BASIS_MISSING)
 
-    # Validation metrics absent — fail-closed until walk-forward validation exists.
-    failure_reasons.append(REASON_VALIDATION_METRICS_MISSING)
+    # Validation metrics: conditional — only absent when fields not in metrics.json.
+    if validation_profit_factor is None or validation_trades is None:
+        failure_reasons.append(REASON_VALIDATION_METRICS_MISSING)
 
     mapped: dict[str, Any] = {
         "bars_used": bars,
@@ -330,6 +374,11 @@ def map_metrics_to_strategy_fit(
         "sortino": sortino_ratio,
         "exposure_time_pct": exposure_time_pct,
         "net_expectancy_after_cost_bps": net_expectancy_after_cost_bps,
+        "sample_quality": sample_quality,
+        "parameter_stability_score": parameter_stability_score,
+        "validation_profit_factor": validation_profit_factor,
+        "validation_trades": validation_trades,
+        "largest_trade_profit_fraction": largest_trade_profit_fraction,
     }
     return mapped, failure_reasons
 
