@@ -67,11 +67,11 @@ Assert-False ($Content -match 'Write-Host.*ALPACA_API_SECRET') 'Does not print A
 Assert-False ($Content -match 'Write-Host.*MQK_OPERATOR_TOKEN') 'Does not print MQK_OPERATOR_TOKEN value'
 
 # 9. Contains all five classification strings
-Assert-True ($Content -match 'TRADE-LIFECYCLE-CLOSED')    'Contains classification TRADE-LIFECYCLE-CLOSED'
-Assert-True ($Content -match 'READINESS-CLOSED-NO-TRADE') 'Contains classification READINESS-CLOSED-NO-TRADE'
-Assert-True ($Content -match 'PARTIAL')                   'Contains classification PARTIAL'
-Assert-True ($Content -match "'OPEN'")                    "Contains classification OPEN"
-Assert-True ($Content -match 'FALSE-CLOSED')              'Contains classification FALSE-CLOSED'
+Assert-True ($Content -match 'NATURAL-TRADE-LIFECYCLE-CLOSED') 'Contains classification NATURAL-TRADE-LIFECYCLE-CLOSED'
+Assert-True ($Content -match 'READINESS-CLOSED-NO-TRADE')      'Contains classification READINESS-CLOSED-NO-TRADE'
+Assert-True ($Content -match 'PARTIAL')                        'Contains classification PARTIAL'
+Assert-True ($Content -match "'OPEN'")                         "Contains classification OPEN"
+Assert-True ($Content -match 'FALSE-CLOSED')                   'Contains classification FALSE-CLOSED'
 
 # 10. Contains secret scan logic
 Assert-True ($Content -match 'SecretWarnings|SecretScan|secret.*scan') 'Contains secret scan logic'
@@ -82,8 +82,8 @@ Assert-False ($Content -match 'Invoke-WebRequest|Invoke-RestMethod') 'Does not m
 # 12. WriteSummary writes review_summary.md
 Assert-True ($Content -match 'review_summary\.md') 'WriteSummary writes review_summary.md'
 
-# 13. Schema version present (review-v1)
-Assert-True ($Content -match 'review-v1') 'JSON output includes schema_version review-v1'
+# 13. Schema version present (review-v2)
+Assert-True ($Content -match 'review-v2') 'JSON output includes schema_version review-v2'
 
 # 14. Secret scan uses Test-SecretLeakLine helper (targeted patterns, not bare words)
 Assert-True ($Content -match 'Test-SecretLeakLine') 'Contains Test-SecretLeakLine helper function'

@@ -1,5 +1,5 @@
 # =============================================================================
-# PAPER-SMOKE-EVIDENCE-01
+# PAPER-SMOKE-EVIDENCE-01 / EVIDENCE-CAPTURE-TRADE-FLOW-01
 # Capture-PaperSmokeEvidence.ps1
 #
 # Read-only evidence capture for MiniQuantDesk V4 Paper + Alpaca smoke runs.
@@ -42,6 +42,17 @@
 #       oms_overview.json
 #       risk_summary.json
 #       reconcile_status.json
+#       reconcile_mismatches.json  -- EVIDENCE-CAPTURE-TRADE-FLOW-01
+#       execution_flow.json        -- EVIDENCE-CAPTURE-TRADE-FLOW-01
+#       fill_quality.json          -- EVIDENCE-CAPTURE-TRADE-FLOW-01
+#       execution_summary.json     -- EVIDENCE-CAPTURE-TRADE-FLOW-01
+#       execution_orders.json      -- EVIDENCE-CAPTURE-TRADE-FLOW-01
+#       execution_outbox.json      -- EVIDENCE-CAPTURE-TRADE-FLOW-01
+#       portfolio_summary.json     -- EVIDENCE-CAPTURE-TRADE-FLOW-01
+#       portfolio_positions.json   -- EVIDENCE-CAPTURE-TRADE-FLOW-01
+#       portfolio_open_orders.json -- EVIDENCE-CAPTURE-TRADE-FLOW-01
+#       portfolio_fills.json       -- EVIDENCE-CAPTURE-TRADE-FLOW-01
+#       paper_journal.json         -- EVIDENCE-CAPTURE-TRADE-FLOW-01
 #     db/                 -- SELECT-only DB snapshots (if DB reachable)
 #       runs_recent.txt
 #       oms_outbox_recent.txt
@@ -183,6 +194,21 @@ if (-not $SkipDaemon) {
     $null = Save-DaemonJson '/api/v1/oms/overview'         'oms_overview.json'
     $null = Save-DaemonJson '/api/v1/risk/summary'         'risk_summary.json'
     $null = Save-DaemonJson '/api/v1/reconcile/status'     'reconcile_status.json'
+
+    # --- Trade-flow endpoints (EVIDENCE-CAPTURE-TRADE-FLOW-01) ---
+    # Read-only snapshots required to classify natural order/fill lifecycle vs no-trade.
+    # All fail-soft: if endpoint is unavailable, writes <name>_unavailable.txt and continues.
+    $null = Save-DaemonJson '/api/v1/reconcile/mismatches'   'reconcile_mismatches.json'
+    $null = Save-DaemonJson '/api/v1/execution/flow'         'execution_flow.json'
+    $null = Save-DaemonJson '/api/v1/execution/fill-quality' 'fill_quality.json'
+    $null = Save-DaemonJson '/api/v1/execution/summary'      'execution_summary.json'
+    $null = Save-DaemonJson '/api/v1/execution/orders'       'execution_orders.json'
+    $null = Save-DaemonJson '/api/v1/execution/outbox'       'execution_outbox.json'
+    $null = Save-DaemonJson '/api/v1/portfolio/summary'      'portfolio_summary.json'
+    $null = Save-DaemonJson '/api/v1/portfolio/positions'    'portfolio_positions.json'
+    $null = Save-DaemonJson '/api/v1/portfolio/orders/open'  'portfolio_open_orders.json'
+    $null = Save-DaemonJson '/api/v1/portfolio/fills'        'portfolio_fills.json'
+    $null = Save-DaemonJson '/api/v1/paper/journal'          'paper_journal.json'
 } else {
     "SKIPPED: -SkipDaemon flag was set" | Set-Content -Path (Join-Path $EvidenceDir 'api\skipped.txt') -Encoding UTF8
     Write-Host "  [--] daemon snapshots skipped (-SkipDaemon)" -ForegroundColor Yellow

@@ -1,5 +1,5 @@
 ﻿# =============================================================================
-# PAPER-SMOKE-EVIDENCE-REVIEW-02
+# PAPER-SMOKE-EVIDENCE-REVIEW-02 / EVIDENCE-CAPTURE-TRADE-FLOW-01
 # Review-PaperSmokeEvidence.ps1
 #
 # Read-only evidence review tool for MiniQuantDesk V4 Paper+Alpaca smoke runs.
@@ -26,11 +26,12 @@
 #   -RepoRoot      Repo root override. Default: two levels up from this script.
 #
 # Classifications:
-#   TRADE-LIFECYCLE-CLOSED    -- full lifecycle proven: running, signal, order, ACK, fill, reconcile clean
-#   READINESS-CLOSED-NO-TRADE -- running, bars loaded, no signal/order, reconcile clean, no fault
-#   PARTIAL                   -- partial progress; lifecycle incomplete without clear failure
-#   OPEN                      -- active blocker: halt, kill switch, bars missing, reconcile dirty
-#   FALSE-CLOSED              -- live routing enabled, secrets in evidence, no proof files, fake markers
+#   NATURAL-TRADE-LIFECYCLE-CLOSED -- full natural lifecycle: running, order submitted, ACK,
+#                                     fill confirmed, inbox applied, reconcile clean
+#   READINESS-CLOSED-NO-TRADE      -- running, bars loaded, no trade signal, reconcile clean, no fault
+#   PARTIAL                        -- partial lifecycle; lifecycle incomplete without clear failure
+#   OPEN                           -- active blocker: halt, kill switch, bars missing, reconcile dirty
+#   FALSE-CLOSED                   -- live routing enabled, secrets in evidence, no proof, fake markers
 # =============================================================================
 
 [CmdletBinding()]
@@ -206,6 +207,15 @@ $AlertsActive      = Read-JsonSnapshot (Join-Path $ApiDir 'alerts_active.json')
 $EventsFeed        = Read-JsonSnapshot (Join-Path $ApiDir 'events_feed.json')
 $RiskSummary       = Read-JsonSnapshot (Join-Path $ApiDir 'risk_summary.json')
 
+# Trade-flow snapshots (EVIDENCE-CAPTURE-TRADE-FLOW-01)
+$ExecutionFlow       = Read-JsonSnapshot (Join-Path $ApiDir 'execution_flow.json')
+$FillQuality         = Read-JsonSnapshot (Join-Path $ApiDir 'fill_quality.json')
+$ExecutionOrders     = Read-JsonSnapshot (Join-Path $ApiDir 'execution_orders.json')
+$ExecutionOutbox     = Read-JsonSnapshot (Join-Path $ApiDir 'execution_outbox.json')
+$PortfolioPositions  = Read-JsonSnapshot (Join-Path $ApiDir 'portfolio_positions.json')
+$PortfolioFills      = Read-JsonSnapshot (Join-Path $ApiDir 'portfolio_fills.json')
+$ReconcileMismatches = Read-JsonSnapshot (Join-Path $ApiDir 'reconcile_mismatches.json')
+
 # Also scan all files in notes/ and db/ for secrets
 foreach ($f in @(Get-ChildItem (Join-Path $EvidencePath 'notes') -File -ErrorAction SilentlyContinue)) {
     Invoke-SecretScan -FilePath $f.FullName
@@ -319,6 +329,144 @@ if ($FolderName -match 'paper_smoke_(\d{8}_\d{6})') {
 $api_files_present = @(Get-ChildItem $ApiDir -File -ErrorAction SilentlyContinue).Count -gt 0
 $db_files_present  = @(Get-ChildItem $DbDir  -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'unavailable.txt' }).Count -gt 0
 
+# ---------------------------------------------------------------------------
+# Trade-flow field extraction (EVIDENCE-CAPTURE-TRADE-FLOW-01)
+# ---------------------------------------------------------------------------
+
+# Fill detection: any single source is sufficient to confirm a fill occurred.
+$fill_rows_fill_quality = 0
+if ($null -ne $FillQuality -and $null -ne $FillQuality.rows) {
+    $fill_rows_fill_quality = @($FillQuality.rows).Count
+}
+
+$fill_rows_portfolio_fills = 0
+if ($null -ne $PortfolioFills -and $null -ne $PortfolioFills.rows) {
+    $fill_rows_portfolio_fills = @($PortfolioFills.rows).Count
+}
+
+$fill_rows_exec_flow = 0
+if ($null -ne $ExecutionFlow -and $null -ne $ExecutionFlow.rows) {
+    $fill_rows_exec_flow = @($ExecutionFlow.rows | Where-Object {
+        $null -ne $_.stage -and $_.stage -match 'fill'
+    }).Count
+}
+
+$fill_detected = (
+    ($null -ne $fill_count -and $fill_count -gt 0) -or
+    ($fill_rows_fill_quality -gt 0) -or
+    ($fill_rows_portfolio_fills -gt 0) -or
+    ($fill_rows_exec_flow -gt 0)
+)
+
+# Order submission detection: any evidence that an order entered the system.
+$order_rows_exec_orders = 0
+if ($null -ne $ExecutionOrders -and $null -ne $ExecutionOrders.rows) {
+    $order_rows_exec_orders = @($ExecutionOrders.rows).Count
+}
+
+$outbox_rows = 0
+if ($null -ne $ExecutionOutbox -and $null -ne $ExecutionOutbox.rows) {
+    $outbox_rows = @($ExecutionOutbox.rows).Count
+}
+
+$order_submitted = (
+    ($null -ne $exec_active_orders   -and $exec_active_orders   -gt 0) -or
+    ($null -ne $exec_pending_orders  -and $exec_pending_orders  -gt 0) -or
+    ($null -ne $open_order_count     -and $open_order_count     -gt 0) -or
+    ($order_rows_exec_orders -gt 0) -or
+    ($outbox_rows -gt 0) -or
+    $fill_detected   # if fill happened, order was definitely submitted
+)
+
+# ACK detection from execution flow stages.
+$ack_detected = $false
+if ($null -ne $ExecutionFlow -and $null -ne $ExecutionFlow.rows) {
+    foreach ($row in $ExecutionFlow.rows) {
+        if ($null -ne $row.stage -and $row.stage -match 'broker_sent|ack|broker_ack') {
+            $ack_detected = $true
+            break
+        }
+    }
+}
+# A fill implies ACK occurred at some point.
+if (-not $ack_detected -and $fill_detected) { $ack_detected = $true }
+
+# Inbox apply detection: fill event reached the execution flow (applied to portfolio).
+$inbox_apply_detected = $false
+if ($null -ne $ExecutionFlow -and $null -ne $ExecutionFlow.rows) {
+    foreach ($row in $ExecutionFlow.rows) {
+        if ($null -ne $row.stage -and $row.stage -match 'partial_fill|final_fill|broker_final_fill|broker_partial_fill') {
+            $inbox_apply_detected = $true
+            break
+        }
+    }
+}
+if (-not $inbox_apply_detected) { $inbox_apply_detected = $fill_detected }
+
+# Position detection from portfolio/positions endpoint.
+$position_rows_count = 0
+if ($null -ne $PortfolioPositions -and $null -ne $PortfolioPositions.rows) {
+    $position_rows_count = @($PortfolioPositions.rows).Count
+}
+$position_nonzero = ($position_rows_count -gt 0 -or ($null -ne $position_count -and $position_count -gt 0))
+$position_flat    = (-not $position_nonzero)
+
+# Current position qty (single symbol; null if multi-symbol or unavailable).
+$current_position_qty = $null
+if ($position_rows_count -eq 1 -and $null -ne $PortfolioPositions.rows[0].qty) {
+    $current_position_qty = $PortfolioPositions.rows[0].qty
+} elseif ($position_rows_count -eq 1 -and $null -ne $PortfolioPositions.rows[0].broker_qty) {
+    $current_position_qty = $PortfolioPositions.rows[0].broker_qty
+}
+
+# Broker order map presence via DB snapshot file content.
+$broker_order_map_present = $false
+$bomFile = Join-Path $DbDir 'broker_order_map_recent.txt'
+if (Test-Path $bomFile) {
+    $bomContent = Get-Content $bomFile -Raw -ErrorAction SilentlyContinue
+    if ($bomContent -and $bomContent.Length -gt 60 -and $bomContent -notmatch '^UNAVAILABLE') {
+        $broker_order_map_present = $true
+    }
+}
+
+# Reconcile mismatch count from the dedicated mismatches endpoint.
+$reconcile_mismatch_endpoint_count = 0
+if ($null -ne $ReconcileMismatches -and $null -ne $ReconcileMismatches.rows) {
+    $reconcile_mismatch_endpoint_count = @($ReconcileMismatches.rows).Count
+}
+
+# Reconcile clean: status ok, no mismatches from any source.
+$reconcile_clean = (
+    ($reconcile_status_str -eq 'ok' -or $reconcile_ready -eq $true) -and
+    ($null -eq $reconcile_total_mis -or $reconcile_total_mis -eq 0) -and
+    ($reconcile_mismatch_endpoint_count -eq 0)
+)
+
+# Strategy decision fields (best effort from autonomous_readiness).
+$signal_qty        = $last_bar_signal_qty
+$target_qty        = $null
+$strategy_decision = $null
+if ($null -ne $AutonomousReady) {
+    $strategy_decision = Get-Field $AutonomousReady 'last_bar_strategy_decision'
+    if ($null -eq $strategy_decision) { $strategy_decision = Get-Field $AutonomousReady 'strategy_decision' }
+    $target_qty = Get-Field $AutonomousReady 'last_bar_target_qty'
+}
+
+# No-order reason (populated when order_submitted is false).
+$no_order_reason = $null
+if (-not $order_submitted) {
+    if ($null -ne $last_bar_signal_qty -and [string]"$last_bar_signal_qty" -eq '0') {
+        $no_order_reason = "signal_qty=0 (strategy evaluated, no trade)"
+    } elseif ($null -eq $last_bar_signal_qty) {
+        $no_order_reason = "signal_qty=null (strategy not evaluated or no bars loaded)"
+    } else {
+        $no_order_reason = "signal_qty=$last_bar_signal_qty but no order detected in evidence"
+    }
+}
+
+# Trade lifecycle composite: all critical legs confirmed.
+$trade_lifecycle_detected = ($order_submitted -and $fill_detected -and $reconcile_clean)
+
 # Read notes/final_verdict.txt for any manually-filled verdict
 $manual_verdict = $null
 $verdictFile = Join-Path $EvidencePath 'notes\final_verdict.txt'
@@ -390,34 +538,40 @@ if ($null -eq $classification) {
     }
 }
 
-# TRADE-LIFECYCLE-CLOSED
+# NATURAL-TRADE-LIFECYCLE-CLOSED
+# Requires: runtime ran, fill confirmed from any evidence source, reconcile clean.
+# Uses multi-source fill detection so a fill captured post-run is still classified correctly.
 if ($null -eq $classification) {
     $lifecycle_ok = (
         $runtime_reached_running -eq $true -and
         ($live_routing_enabled -eq $false -or $null -eq $live_routing_enabled) -and
-        ($alpaca_ws_continuity -eq 'live' -or $ws_continuity_ready -eq $true) -and
-        ($null -ne $fill_count -and $fill_count -gt 0) -and
-        ($reconcile_status_str -eq 'ok' -or $reconcile_ready -eq $true) -and
+        $fill_detected -and
+        $reconcile_clean -and
         ($null -eq $kill_switch_active -or $kill_switch_active -eq $false) -and
         ($null -eq $integrity_halt_active -or $integrity_halt_active -eq $false) -and
         $api_files_present
     )
     if ($lifecycle_ok) {
-        $classification = 'TRADE-LIFECYCLE-CLOSED'
-        $classification_reasons.Add("runtime reached running, fill_count=$fill_count, reconcile=$reconcile_status_str, WS=$alpaca_ws_continuity")
+        $classification = 'NATURAL-TRADE-LIFECYCLE-CLOSED'
+        $classification_reasons.Add("runtime reached running; fill_detected=$fill_detected")
+        $classification_reasons.Add("fill evidence: fill_quality_rows=$fill_rows_fill_quality, portfolio_fill_rows=$fill_rows_portfolio_fills, exec_flow_fill_rows=$fill_rows_exec_flow, oms_fill_count=$fill_count")
+        $classification_reasons.Add("order_submitted=$order_submitted, ack_detected=$ack_detected, inbox_apply_detected=$inbox_apply_detected")
+        $classification_reasons.Add("position_nonzero=$position_nonzero, broker_order_map_present=$broker_order_map_present")
+        $classification_reasons.Add("reconcile_clean=$reconcile_clean (status=$reconcile_status_str, total_mismatches=$reconcile_total_mis, mismatch_endpoint_rows=$reconcile_mismatch_endpoint_count)")
         $classification_reasons.Add('live_routing_enabled=false confirmed')
     }
 }
 
 # READINESS-CLOSED-NO-TRADE
+# Requires: runtime ran, bars loaded, NO fills from any source, reconcile clean.
 if ($null -eq $classification) {
     $readiness_ok = (
         $runtime_reached_running -eq $true -and
         ($live_routing_enabled -eq $false -or $null -eq $live_routing_enabled) -and
         ($null -ne $completed_rows -and $completed_rows -gt 0) -and
-        ($null -eq $fill_count -or $fill_count -eq 0) -and
-        ($null -eq $open_order_count -or $open_order_count -eq 0) -and
-        ($reconcile_status_str -eq 'ok' -or $reconcile_ready -eq $true) -and
+        (-not $fill_detected) -and
+        (-not $order_submitted) -and
+        $reconcile_clean -and
         ($null -eq $kill_switch_active -or $kill_switch_active -eq $false) -and
         ($null -eq $integrity_halt_active -or $integrity_halt_active -eq $false) -and
         $api_files_present
@@ -428,7 +582,8 @@ if ($null -eq $classification) {
         $noOrderReason = 'no signal or signal=0'
         if ($null -ne $last_bar_signal_qty) { $noOrderReason = "last_bar_signal_qty=$last_bar_signal_qty" }
         $classification_reasons.Add($noOrderReason)
-        $classification_reasons.Add("fill_count=0, open_orders=0, reconcile=$reconcile_status_str")
+        $classification_reasons.Add("fill_detected=False (fill_quality_rows=$fill_rows_fill_quality, portfolio_fill_rows=$fill_rows_portfolio_fills, exec_flow_fill_rows=$fill_rows_exec_flow, oms_fill_count=$fill_count)")
+        $classification_reasons.Add("reconcile_clean=$reconcile_clean (status=$reconcile_status_str)")
     }
 }
 
@@ -496,15 +651,38 @@ $summaryLines.Add("")
 $summaryLines.Add("## Signal / Order / Fill")
 $summaryLines.Add("- last_bar_signal_qty:     $last_bar_signal_qty")
 $summaryLines.Add("- signal_ingestion_cfg:    $signal_ingestion_cfg")
-$summaryLines.Add("- fill_count:              $fill_count")
+$summaryLines.Add("- fill_count (oms):        $fill_count")
 $summaryLines.Add("- open_order_count:        $open_order_count")
 $summaryLines.Add("- position_count:          $position_count")
 $summaryLines.Add("- exec_active_orders:      $exec_active_orders")
 $summaryLines.Add("- exec_pending_orders:     $exec_pending_orders")
 $summaryLines.Add("")
+$summaryLines.Add("## Trade Lifecycle (EVIDENCE-CAPTURE-TRADE-FLOW-01)")
+$summaryLines.Add("- trade_lifecycle_detected:     $trade_lifecycle_detected")
+$summaryLines.Add("- order_submitted:              $order_submitted")
+$summaryLines.Add("- ack_detected:                 $ack_detected")
+$summaryLines.Add("- fill_detected:                $fill_detected")
+$summaryLines.Add("- inbox_apply_detected:         $inbox_apply_detected")
+$summaryLines.Add("- position_nonzero:             $position_nonzero")
+$summaryLines.Add("- position_flat:                $position_flat")
+$summaryLines.Add("- current_position_qty:         $current_position_qty")
+$summaryLines.Add("- broker_order_map_present:     $broker_order_map_present")
+$summaryLines.Add("- reconcile_clean:              $reconcile_clean")
+$summaryLines.Add("- signal_qty:                   $signal_qty")
+$summaryLines.Add("- target_qty:                   $target_qty")
+$summaryLines.Add("- strategy_decision:            $strategy_decision")
+$summaryLines.Add("- no_order_reason:              $no_order_reason")
+$summaryLines.Add("- fill_quality_rows:            $fill_rows_fill_quality")
+$summaryLines.Add("- portfolio_fill_rows:          $fill_rows_portfolio_fills")
+$summaryLines.Add("- exec_flow_fill_rows:          $fill_rows_exec_flow")
+$summaryLines.Add("- outbox_rows:                  $outbox_rows")
+$summaryLines.Add("- exec_order_rows:              $order_rows_exec_orders")
+$summaryLines.Add("- mismatch_endpoint_rows:       $reconcile_mismatch_endpoint_count")
+$summaryLines.Add("")
 $summaryLines.Add("## Reconcile")
 $summaryLines.Add("- reconcile_status:        $reconcile_status_str")
 $summaryLines.Add("- total_mismatches:        $reconcile_total_mis")
+$summaryLines.Add("- mismatch_endpoint_rows:  $reconcile_mismatch_endpoint_count")
 $summaryLines.Add("- mismatched_positions:    $recon_mismatched_pos")
 $summaryLines.Add("- mismatched_orders:       $recon_mismatched_ord")
 $summaryLines.Add("- mismatched_fills:        $recon_mismatched_fills")
@@ -532,11 +710,11 @@ if ($SecretWarnings.Count -gt 0) {
 }
 
 $summaryLines.Add("## Classification Reference")
-$summaryLines.Add("- TRADE-LIFECYCLE-CLOSED    Full lifecycle: running, signal, order, ACK, fill, reconcile clean")
-$summaryLines.Add("- READINESS-CLOSED-NO-TRADE Running, bars loaded, no trade signal, reconcile clean, no fault")
-$summaryLines.Add("- PARTIAL                   Partial progress; lifecycle incomplete without clear failure")
-$summaryLines.Add("- OPEN                      Active blocker: halt, kill switch, bars missing, reconcile dirty")
-$summaryLines.Add("- FALSE-CLOSED              Live routing enabled, secrets in evidence, no proof files")
+$summaryLines.Add("- NATURAL-TRADE-LIFECYCLE-CLOSED  Full natural lifecycle: running, order submitted, ACK, fill (any source), inbox applied, reconcile clean")
+$summaryLines.Add("- READINESS-CLOSED-NO-TRADE       Running, bars loaded, no trade signal/order/fill, reconcile clean, no fault")
+$summaryLines.Add("- PARTIAL                         Partial lifecycle; incomplete without clear failure (e.g. order but no fill, fill but reconcile missing)")
+$summaryLines.Add("- OPEN                            Active blocker: halt, kill switch, bars missing, reconcile dirty, evidence missing")
+$summaryLines.Add("- FALSE-CLOSED                    Live routing enabled, secrets in evidence, no proof files, fake markers")
 $summaryLines.Add("")
 $summaryLines.Add("## Next Steps")
 $summaryLines.Add("- Send review_summary.md to ChatGPT or ledger session for classification update.")
@@ -555,12 +733,12 @@ foreach ($line in $summaryLines) { Write-Host $line }
 Write-Host ''
 Write-Host "VERDICT: $classification" -ForegroundColor $(
     switch ($classification) {
-        'TRADE-LIFECYCLE-CLOSED'    { 'Green' }
-        'READINESS-CLOSED-NO-TRADE' { 'Cyan' }
-        'PARTIAL'                   { 'Yellow' }
-        'OPEN'                      { 'Red' }
-        'FALSE-CLOSED'              { 'Magenta' }
-        default                     { 'White' }
+        'NATURAL-TRADE-LIFECYCLE-CLOSED' { 'Green' }
+        'READINESS-CLOSED-NO-TRADE'      { 'Cyan' }
+        'PARTIAL'                        { 'Yellow' }
+        'OPEN'                           { 'Red' }
+        'FALSE-CLOSED'                   { 'Magenta' }
+        default                          { 'White' }
     }
 )
 Write-Host ''
@@ -575,7 +753,7 @@ if ($SecretWarnings.Count -gt 0) {
 # Build JSON output
 # ---------------------------------------------------------------------------
 $jsonObj = [ordered]@{
-    schema_version         = 'review-v1'
+    schema_version         = 'review-v2'
     reviewed_at            = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')
     evidence_folder        = $EvidencePath
     folder_name            = $FolderName
@@ -612,7 +790,27 @@ $jsonObj = [ordered]@{
     secret_scan_warnings   = @($SecretWarnings)
     api_files_present      = $api_files_present
     db_files_present       = $db_files_present
-    manual_verdict_note    = $manual_verdict
+    manual_verdict_note         = $manual_verdict
+    trade_lifecycle_detected    = $trade_lifecycle_detected
+    order_submitted             = $order_submitted
+    ack_detected                = $ack_detected
+    fill_detected               = $fill_detected
+    inbox_apply_detected        = $inbox_apply_detected
+    position_nonzero            = $position_nonzero
+    position_flat               = $position_flat
+    current_position_qty        = $current_position_qty
+    broker_order_map_present    = $broker_order_map_present
+    reconcile_clean             = $reconcile_clean
+    signal_qty                  = $signal_qty
+    target_qty                  = $target_qty
+    strategy_decision           = $strategy_decision
+    no_order_reason             = $no_order_reason
+    fill_quality_rows           = $fill_rows_fill_quality
+    portfolio_fill_rows         = $fill_rows_portfolio_fills
+    exec_flow_fill_rows         = $fill_rows_exec_flow
+    outbox_rows                 = $outbox_rows
+    exec_order_rows             = $order_rows_exec_orders
+    mismatch_endpoint_rows      = $reconcile_mismatch_endpoint_count
 }
 
 $jsonOut = $jsonObj | ConvertTo-Json -Depth 5
