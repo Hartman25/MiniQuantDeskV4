@@ -54,6 +54,7 @@ param(
     [int]    $MaxTargetQty             = 3,
     [int]    $MaxPositionNotionalUsd   = 1000,
     [string] $EvidenceLabel            = 'aapl5m_market_smoke',
+    [int]    $DaemonPort               = 8899,
     [switch] $SkipRefresh,
     [switch] $CheckOnly
 )
@@ -69,6 +70,53 @@ function Write-Ok   { param([string]$M) Write-Host "[SMOKE-RUNNER] OK: $M"      
 function Write-Warn { param([string]$M) Write-Host "[SMOKE-RUNNER] WARN: $M"    -ForegroundColor Yellow }
 function Write-Fail { param([string]$M) Write-Host "[SMOKE-RUNNER] FAIL: $M"    -ForegroundColor Red    }
 function Write-Sect { param([string]$M) Write-Host ""; Write-Host "=== $M ===" -ForegroundColor Magenta }
+
+# PAPER-SMOKE-AUTOMATION-BUNDLE-01: pre-smoke paper status check (fail-soft).
+# Queries /api/v1/autonomous/paper-status if a daemon is already running.
+# Prints compact triage summary and warns on blocked (informational before daemon restart).
+function Invoke-PaperStatusPrecheck {
+    param([int]$Port = 8899)
+    $base = "http://127.0.0.1:$Port"
+    $data = $null
+    try {
+        $data = Invoke-RestMethod -Uri "$base/api/v1/autonomous/paper-status" `
+            -Method Get -TimeoutSec 4 -ErrorAction Stop
+    } catch {
+        Write-Warn "autonomous/paper-status not reachable on port $Port (daemon not yet started -- expected)."
+        return
+    }
+    $readiness_classification = if ($null -ne $data.PSObject.Properties['readiness_classification']) { $data.readiness_classification } else { 'unknown' }
+    $next_operator_action     = if ($null -ne $data.PSObject.Properties['next_operator_action'])     { $data.next_operator_action }     else { 'unknown' }
+    $live_routing_enabled     = if ($null -ne $data.PSObject.Properties['live_routing_enabled'])     { $data.live_routing_enabled }     else { 'unknown' }
+    $reconcile_status         = if ($null -ne $data.PSObject.Properties['reconcile_status'])         { $data.reconcile_status }         else { 'unknown' }
+    $ws_continuity            = if ($null -ne $data.PSObject.Properties['ws_continuity'])            { $data.ws_continuity }            else { 'unknown' }
+    $flatten_available        = if ($null -ne $data.PSObject.Properties['flatten_available'])        { $data.flatten_available }        else { 'unknown' }
+    $current_position_qty     = if ($null -ne $data.PSObject.Properties['current_position_qty'])     { $data.current_position_qty }     else { 'null' }
+    $target_qty               = if ($null -ne $data.PSObject.Properties['target_qty'])               { $data.target_qty }               else { 'null' }
+    $computed_delta_qty       = if ($null -ne $data.PSObject.Properties['computed_delta_qty'])       { $data.computed_delta_qty }       else { 'null' }
+    $no_order_reason          = if ($null -ne $data.PSObject.Properties['no_order_reason'])          { $data.no_order_reason }          else { 'null' }
+
+    Write-Step "readiness_classification : $readiness_classification"
+    Write-Step "next_operator_action     : $next_operator_action"
+    Write-Step "live_routing_enabled     : $live_routing_enabled"
+    Write-Step "reconcile_status         : $reconcile_status"
+    Write-Step "ws_continuity            : $ws_continuity"
+    Write-Step "flatten_available        : $flatten_available"
+    Write-Step "current_position_qty     : $current_position_qty"
+    Write-Step "target_qty               : $target_qty"
+    Write-Step "computed_delta_qty       : $computed_delta_qty"
+    Write-Step "no_order_reason          : $no_order_reason"
+
+    # Warn on blocked (daemon will be restarted by Start-PaperTradingSmoke so this is informational).
+    if ($readiness_classification -eq 'blocked') {
+        Write-Warn "Existing daemon reports readiness_classification=blocked. Start-PaperTradingSmoke will restart and re-establish state."
+        Write-Warn "If this is unexpected, resolve before proceeding. next_operator_action: $next_operator_action"
+    } elseif ($readiness_classification -eq 'market_proof_pending') {
+        Write-Ok "Existing daemon readiness_classification=market_proof_pending."
+    } elseif ($readiness_classification -eq 'ready_for_market_smoke') {
+        Write-Ok "Existing daemon readiness_classification=ready_for_market_smoke."
+    }
+}
 
 # ---------------------------------------------------------------------------
 # 1. Repo root
@@ -257,6 +305,14 @@ try {
     Write-Ok "MQK_STRATEGY_MD_TIMEFRAME=$Timeframe"
     Write-Ok "MQK_STRATEGY_TARGET_QTY=$TargetQty  MQK_STRATEGY_MAX_TARGET_QTY=$MaxTargetQty"
     Write-Ok "MQK_STRATEGY_MAX_POSITION_NOTIONAL_USD=$MaxPositionNotionalUsd"
+
+    # -----------------------------------------------------------------------
+    # Step 3b: Pre-smoke autonomous paper status check (PAPER-SMOKE-AUTOMATION-BUNDLE-01)
+    # Informational: queries existing daemon if running before Start-PaperTradingSmoke
+    # restarts it. Fail-soft -- daemon likely not yet running at this point.
+    # -----------------------------------------------------------------------
+    Write-Sect "Step 3b: pre-smoke autonomous paper status check (fail-soft)"
+    Invoke-PaperStatusPrecheck -Port $DaemonPort
 
     # -----------------------------------------------------------------------
     # Step 4: Run smoke

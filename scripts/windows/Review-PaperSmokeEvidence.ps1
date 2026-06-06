@@ -201,6 +201,7 @@ $DbDir  = Join-Path $EvidencePath 'db'
 $SystemStatus      = Read-JsonSnapshot (Join-Path $ApiDir 'system_status.json')
 $Preflight         = Read-JsonSnapshot (Join-Path $ApiDir 'system_preflight.json')
 $AutonomousReady   = Read-JsonSnapshot (Join-Path $ApiDir 'autonomous_readiness.json')
+$AutonomousPaperStatus = Read-JsonSnapshot (Join-Path $ApiDir 'autonomous_paper_status.json')
 $OmsOverview       = Read-JsonSnapshot (Join-Path $ApiDir 'oms_overview.json')
 $ReconcileStatus   = Read-JsonSnapshot (Join-Path $ApiDir 'reconcile_status.json')
 $AlertsActive      = Read-JsonSnapshot (Join-Path $ApiDir 'alerts_active.json')
@@ -452,6 +453,21 @@ if ($null -ne $AutonomousReady) {
     $target_qty = Get-Field $AutonomousReady 'last_bar_target_qty'
 }
 
+# Autonomous paper status fields (PAPER-SMOKE-AUTOMATION-BUNDLE-01).
+$ps_status_present           = ($null -ne $AutonomousPaperStatus -and
+                                $null -ne $AutonomousPaperStatus.PSObject.Properties['readiness_classification'])
+$ps_readiness_classification = Get-Field $AutonomousPaperStatus 'readiness_classification'
+$ps_next_operator_action     = Get-Field $AutonomousPaperStatus 'next_operator_action'
+$ps_flatten_available        = Get-Field $AutonomousPaperStatus 'flatten_available'
+$ps_flatten_blockers_raw     = Get-Field $AutonomousPaperStatus 'flatten_blockers'
+$ps_current_position_qty     = Get-Field $AutonomousPaperStatus 'current_position_qty'
+$ps_target_qty               = Get-Field $AutonomousPaperStatus 'target_qty'
+$ps_computed_delta_qty       = Get-Field $AutonomousPaperStatus 'computed_delta_qty'
+$ps_no_order_reason          = Get-Field $AutonomousPaperStatus 'no_order_reason'
+$ps_flatten_blockers_str     = if ($null -ne $ps_flatten_blockers_raw) {
+    ($ps_flatten_blockers_raw | ForEach-Object { "$_" }) -join '; '
+} else { $null }
+
 # No-order reason (populated when order_submitted is false).
 $no_order_reason = $null
 if (-not $order_submitted) {
@@ -532,6 +548,13 @@ if ($null -eq $classification) {
         $open_reasons.Add('No API snapshot files  --  daemon was not reachable or evidence not captured')
     }
 
+    # Supplement: blocked autonomous paper status without trade lifecycle → OPEN.
+    # Does not override trade lifecycle evidence; only adds a reason when lifecycle is not closed.
+    if ($ps_status_present -and $ps_readiness_classification -eq 'blocked' -and -not $trade_lifecycle_detected) {
+        $open_reasons.Add("autonomous_paper_status: readiness_classification=blocked  next_operator_action=$ps_next_operator_action")
+        if ($ps_flatten_blockers_str) { $open_reasons.Add("  flatten_blockers: $ps_flatten_blockers_str") }
+    }
+
     if ($open_reasons.Count -gt 0) {
         $classification = 'OPEN'
         foreach ($r in $open_reasons) { $classification_reasons.Add($r) }
@@ -585,6 +608,11 @@ if ($null -eq $classification) {
         $classification_reasons.Add("fill_detected=False (fill_quality_rows=$fill_rows_fill_quality, portfolio_fill_rows=$fill_rows_portfolio_fills, exec_flow_fill_rows=$fill_rows_exec_flow, oms_fill_count=$fill_count)")
         $classification_reasons.Add("reconcile_clean=$reconcile_clean (status=$reconcile_status_str)")
     }
+}
+
+# Supplement: note market_proof_pending regardless of classification (does not change classification).
+if ($ps_status_present -and $ps_readiness_classification -eq 'market_proof_pending') {
+    $classification_reasons.Add("autonomous_paper_status: market_proof_pending (market proof cycle not yet complete)")
 }
 
 # PARTIAL  --  catch-all for anything that partially worked
@@ -656,6 +684,17 @@ $summaryLines.Add("- open_order_count:        $open_order_count")
 $summaryLines.Add("- position_count:          $position_count")
 $summaryLines.Add("- exec_active_orders:      $exec_active_orders")
 $summaryLines.Add("- exec_pending_orders:     $exec_pending_orders")
+$summaryLines.Add("")
+$summaryLines.Add("## Autonomous Paper Status (PAPER-SMOKE-AUTOMATION-BUNDLE-01)")
+$summaryLines.Add("- autonomous_paper_status_present:  $ps_status_present")
+$summaryLines.Add("- readiness_classification:         $ps_readiness_classification")
+$summaryLines.Add("- next_operator_action:             $ps_next_operator_action")
+$summaryLines.Add("- flatten_available:                $ps_flatten_available")
+$summaryLines.Add("- flatten_blockers:                 $ps_flatten_blockers_str")
+$summaryLines.Add("- current_position_qty:             $ps_current_position_qty")
+$summaryLines.Add("- target_qty:                       $ps_target_qty")
+$summaryLines.Add("- computed_delta_qty:               $ps_computed_delta_qty")
+$summaryLines.Add("- no_order_reason:                  $ps_no_order_reason")
 $summaryLines.Add("")
 $summaryLines.Add("## Trade Lifecycle (EVIDENCE-CAPTURE-TRADE-FLOW-01)")
 $summaryLines.Add("- trade_lifecycle_detected:     $trade_lifecycle_detected")
@@ -811,6 +850,15 @@ $jsonObj = [ordered]@{
     outbox_rows                 = $outbox_rows
     exec_order_rows             = $order_rows_exec_orders
     mismatch_endpoint_rows      = $reconcile_mismatch_endpoint_count
+    autonomous_paper_status_present  = $ps_status_present
+    autonomous_readiness_classification = $ps_readiness_classification
+    autonomous_next_operator_action  = $ps_next_operator_action
+    autonomous_flatten_available     = $ps_flatten_available
+    autonomous_flatten_blockers      = $ps_flatten_blockers_str
+    autonomous_current_position_qty  = $ps_current_position_qty
+    autonomous_target_qty            = $ps_target_qty
+    autonomous_computed_delta_qty    = $ps_computed_delta_qty
+    autonomous_no_order_reason       = $ps_no_order_reason
 }
 
 $jsonOut = $jsonObj | ConvertTo-Json -Depth 5

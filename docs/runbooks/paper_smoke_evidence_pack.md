@@ -88,6 +88,7 @@ This captures live daemon API snapshots while state is fresh:
 - `/api/v1/system/status`
 - `/api/v1/system/preflight`
 - `/api/v1/autonomous/readiness`
+- `/api/v1/autonomous/paper-status` — **first-line smoke triage** (PAPER-SMOKE-AUTOMATION-BUNDLE-01)
 - `/api/v1/alerts/active`
 - `/api/v1/events/feed`
 - `/api/v1/oms/overview`
@@ -100,6 +101,39 @@ And read-only DB snapshots:
 - `oms_inbox_recent.txt`
 - `broker_order_map_recent.txt`
 - `fill_quality_recent.txt`
+
+---
+
+## 5b. Autonomous paper status — first-line smoke triage (PAPER-SMOKE-AUTOMATION-BUNDLE-01)
+
+`GET /api/v1/autonomous/paper-status` is the primary smoke triage endpoint.  It is
+automatically captured as `api/autonomous_paper_status.json` in every evidence pack.
+
+**Interpreting `readiness_classification`:**
+
+| Value | Meaning | Action |
+|---|---|---|
+| `ready_for_market_smoke` | All gates pass, WS live, reconcile clean, positions flat | Proceed |
+| `market_proof_pending` | Session healthy but no full buy→sell cycle proven yet | Proceed (expected during first smokes) |
+| `blocked` | Hard blocker present (gap detected, halt, dirty reconcile, etc.) | Stop — resolve `flatten_blockers` first |
+
+**Key fields in the response:**
+- `readiness_classification` — top-level triage verdict
+- `next_operator_action` — explicit next step for the operator
+- `flatten_available` / `flatten_blockers` — whether a safe flatten can proceed
+- `current_position_qty` / `target_qty` / `computed_delta_qty` — position state
+- `no_order_reason` — why no order was generated (if any)
+- `ws_continuity` — Alpaca WS state (must be `live` before run starts)
+- `reconcile_status` — must be `clean` for healthy run
+
+**Pre-run gate in Start-PaperTradingSmoke.ps1 (STEP 14b):**
+After the daemon is up, armed, and WS is live, STEP 14b queries the paper-status
+endpoint and hard-blocks if `readiness_classification == blocked`.  The operator must
+resolve the stated blockers before the smoke can proceed.
+
+**Important:** `readiness_classification` alone cannot mark a trade lifecycle closed.
+Trade lifecycle closure still requires fill evidence, inbox apply, and reconcile clean
+from the evidence pack.
 
 ---
 
@@ -140,6 +174,7 @@ evidence folder:
 - Full lifecycle from signal to OMS terminal state.
 - `reconcile_status.json` shows clean (no dirty positions).
 - `autonomous_readiness.json` shows `overall_ready = true` (or `outside_window` after stop).
+- `autonomous_paper_status.json` shows `readiness_classification` != `blocked`.
 - `alerts_active.json` shows no `gap_detected` or unresolved fault signals.
 - Discord trade alert fired.
 - GUI showed filled order matching backend.
@@ -174,6 +209,19 @@ powershell -ExecutionPolicy Bypass -File tests\script_guards\test_capture_paper_
 This guard (CPE01-CPE10) proves the script is read-only, prints no secrets,
 does not mutate the DB, does not call broker endpoints, and handles offline
 daemon gracefully.
+
+The smoke automation integration is covered by:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tests\script_guards\test_paper_smoke_automation_status.ps1
+```
+
+This guard (SA01-SA15) proves that:
+- The capture script fetches and saves `autonomous_paper_status.json`.
+- Both smoke runner scripts reference `readiness_classification` and `next_operator_action`.
+- Both runners handle `blocked` and `market_proof_pending` classifications.
+- The review script reads the status file and writes `computed_delta_qty` and `flatten_available`.
+- No raw broker endpoints, order submission, live routing, DB mutation, or secret printing.
 
 ---
 

@@ -1035,6 +1035,58 @@ if ($null -ne $readiness4) {
 }
 
 # ---------------------------------------------------------------------------
+# STEP 14b: Autonomous paper status pre-run triage
+# PAPER-SMOKE-AUTOMATION-BUNDLE-01
+# Read-only. Blocks on readiness_classification=blocked. Warns on others.
+# Endpoint: GET /api/v1/autonomous/paper-status (public, no auth required).
+# ---------------------------------------------------------------------------
+Write-Section "STEP 14b: Autonomous paper status pre-run triage"
+
+$paperStatus14b = $null
+try { $paperStatus14b = Invoke-DaemonGet -Path '/api/v1/autonomous/paper-status' } catch {}
+
+if ($null -ne $paperStatus14b) {
+    $ps14b_class    = if ($null -ne $paperStatus14b.PSObject.Properties['readiness_classification']) { $paperStatus14b.readiness_classification } else { 'unknown' }
+    $ps14b_next     = if ($null -ne $paperStatus14b.PSObject.Properties['next_operator_action'])     { $paperStatus14b.next_operator_action }     else { 'unknown' }
+    $ps14b_live_rt  = if ($null -ne $paperStatus14b.PSObject.Properties['live_routing_enabled'])     { $paperStatus14b.live_routing_enabled }     else { 'unknown' }
+    $ps14b_recon    = if ($null -ne $paperStatus14b.PSObject.Properties['reconcile_status'])         { $paperStatus14b.reconcile_status }         else { 'unknown' }
+    $ps14b_ws       = if ($null -ne $paperStatus14b.PSObject.Properties['ws_continuity'])            { $paperStatus14b.ws_continuity }            else { 'unknown' }
+    $ps14b_flat_avl = if ($null -ne $paperStatus14b.PSObject.Properties['flatten_available'])        { $paperStatus14b.flatten_available }        else { 'unknown' }
+    $ps14b_cur_qty  = if ($null -ne $paperStatus14b.PSObject.Properties['current_position_qty'])     { $paperStatus14b.current_position_qty }     else { 'null' }
+    $ps14b_tgt_qty  = if ($null -ne $paperStatus14b.PSObject.Properties['target_qty'])               { $paperStatus14b.target_qty }               else { 'null' }
+    $ps14b_delta    = if ($null -ne $paperStatus14b.PSObject.Properties['computed_delta_qty'])       { $paperStatus14b.computed_delta_qty }       else { 'null' }
+    $ps14b_no_ord   = if ($null -ne $paperStatus14b.PSObject.Properties['no_order_reason'])          { $paperStatus14b.no_order_reason }          else { 'null' }
+
+    Write-Step "readiness_classification : $ps14b_class"
+    Write-Step "next_operator_action     : $ps14b_next"
+    Write-Step "live_routing_enabled     : $ps14b_live_rt"
+    Write-Step "reconcile_status         : $ps14b_recon"
+    Write-Step "ws_continuity            : $ps14b_ws"
+    Write-Step "flatten_available        : $ps14b_flat_avl"
+    Write-Step "current_position_qty     : $ps14b_cur_qty"
+    Write-Step "target_qty               : $ps14b_tgt_qty"
+    Write-Step "computed_delta_qty       : $ps14b_delta"
+    Write-Step "no_order_reason          : $ps14b_no_ord"
+
+    if ($ps14b_class -eq 'blocked') {
+        $ps14b_blockers = if ($null -ne $paperStatus14b.PSObject.Properties['flatten_blockers']) { @($paperStatus14b.flatten_blockers) } else { @() }
+        Write-Fail "autonomous paper-status readiness_classification=blocked. Cannot proceed to runtime start."
+        foreach ($b in $ps14b_blockers) { Write-Fail "  blocker: $b" }
+        Write-Fail "Resolve blockers then retry. next_operator_action: $ps14b_next"
+        Write-EvidenceCapture "STEP 14b: readiness_classification=blocked"
+        exit 1
+    } elseif ($ps14b_class -eq 'market_proof_pending') {
+        Write-Ok "readiness_classification=market_proof_pending -- proceeding (market proof cycle pending)."
+    } elseif ($ps14b_class -eq 'ready_for_market_smoke') {
+        Write-Ok "readiness_classification=ready_for_market_smoke -- proceeding."
+    } else {
+        Write-Warn "readiness_classification=$ps14b_class -- continuing with caution."
+    }
+} else {
+    Write-Warn "autonomous/paper-status endpoint unavailable (older daemon build or daemon not yet ready). Continuing with existing readiness checks."
+}
+
+# ---------------------------------------------------------------------------
 # STEP 15: Start runtime (unless -NoStartRuntime)
 # ---------------------------------------------------------------------------
 Write-Section "STEP 15: Start runtime"

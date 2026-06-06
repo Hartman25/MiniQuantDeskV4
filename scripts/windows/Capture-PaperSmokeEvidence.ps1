@@ -37,6 +37,7 @@
 #       system_status.json
 #       system_preflight.json
 #       autonomous_readiness.json
+#       autonomous_paper_status.json   -- PAPER-SMOKE-AUTOMATION-BUNDLE-01
 #       alerts_active.json
 #       events_feed.json
 #       oms_overview.json
@@ -188,8 +189,9 @@ if (-not $SkipDaemon) {
 
     $null = Save-DaemonJson '/api/v1/system/status'        'system_status.json'
     $null = Save-DaemonJson '/api/v1/system/preflight'     'system_preflight.json'
-    $null = Save-DaemonJson '/api/v1/autonomous/readiness' 'autonomous_readiness.json'
-    $null = Save-DaemonJson '/api/v1/alerts/active'        'alerts_active.json'
+    $null = Save-DaemonJson '/api/v1/autonomous/readiness'    'autonomous_readiness.json'
+    $null = Save-DaemonJson '/api/v1/autonomous/paper-status' 'autonomous_paper_status.json'
+    $null = Save-DaemonJson '/api/v1/alerts/active'           'alerts_active.json'
     $null = Save-DaemonJson '/api/v1/events/feed'          'events_feed.json'
     $null = Save-DaemonJson '/api/v1/oms/overview'         'oms_overview.json'
     $null = Save-DaemonJson '/api/v1/risk/summary'         'risk_summary.json'
