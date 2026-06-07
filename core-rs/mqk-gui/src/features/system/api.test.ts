@@ -774,3 +774,505 @@ test("SDOBS-02: absent autonomous/readiness keeps strategyDecisionDiagnostics nu
     globalThis.fetch = originalFetch;
   }
 });
+
+// ---------------------------------------------------------------------------
+// GUI-PAPER-STATUS-VISIBILITY-01: Read-only visibility for autonomous paper
+// status, watchlist status, and watchlist admission-check (dry-run advisory).
+// ---------------------------------------------------------------------------
+
+const PSV_STRATEGY_FIXTURES: Record<string, unknown> = {
+  "/api/v1/strategy/summary": { truth_state: "active", backend: "runtime", rows: [] },
+  "/api/v1/strategy/suppressions": { truth_state: "active", backend: "postgres", rows: [] },
+};
+
+test("PSV-01: autonomous paper status surfaces readiness/next-action/flatten/live-routing/watchlist honestly (no fabricated truth)", async () => {
+  const originalFetch = globalThis.fetch;
+  const nowUtc = new Date().toISOString();
+
+  const paperStatusFixture = {
+    canonical_route: "/api/v1/autonomous/paper-status",
+    truth_state: "active",
+    mode: "paper",
+    live_routing_enabled: false,
+    runtime_status: "running",
+    arm_state: "armed",
+    kill_switch_active: false,
+    deadman_status: "ok",
+    ws_continuity: "live",
+    reconcile_status: "clean",
+    mismatch_count: 0,
+    open_order_count: 0,
+    position_count: 0,
+    current_symbol: null,
+    current_position_qty: null,
+    target_qty: null,
+    computed_delta_qty: null,
+    no_order_reason: "NO_SIGNAL_GENERATED: strategy conditions not met",
+    last_strategy_decision: "flat",
+    flatten_available: false,
+    flatten_blockers: [
+      "NO_OPEN_POSITION: position_count is zero — nothing to flatten",
+      "RUNTIME_NOT_ARMED_FOR_FLATTEN: flatten requires running+armed+paper",
+    ],
+    watchlist_outcome: "approved",
+    watchlist_approved: true,
+    readiness_classification: "READY_FOR_SUPERVISED_PAPER",
+    blockers: [],
+    next_operator_action: "Monitor for first signal-driven order this session.",
+    autonomous_session_state: "active",
+    now_utc: nowUtc,
+  };
+
+  const watchlistStatusFixture = {
+    configured_path: "research-py/watchlists/active.json",
+    status: "approved",
+    approved_for_autonomous_paper: true,
+    approved_for_live: false,
+    symbols: ["MSFT", "NVDA"],
+    top_symbol: "MSFT",
+    strategy_assignments: { MSFT: "intraday_scalper", NVDA: "intraday_scalper" },
+    max_symbols_to_trade: 2,
+    max_concurrent_positions: 1,
+    failure_reasons: [],
+    checked_at_utc: nowUtc,
+  };
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({ ...DEFAULT_STATUS, daemon_reachable: true, last_heartbeat: new Date().toISOString() });
+    }
+    if (path === "/api/v1/system/preflight") {
+      return jsonResponse({ ...DEFAULT_PREFLIGHT, daemon_reachable: true });
+    }
+    if (path === "/api/v1/autonomous/paper-status") {
+      return jsonResponse(paperStatusFixture);
+    }
+    if (path === "/api/v1/watchlist/status") {
+      return jsonResponse(watchlistStatusFixture);
+    }
+    if (path in PSV_STRATEGY_FIXTURES) {
+      return jsonResponse(PSV_STRATEGY_FIXTURES[path]);
+    }
+    // autonomous/readiness intentionally absent — no strategy_id source, so
+    // admission-check must land in "not_checked" (never invents a default pair).
+    return notFoundResponse();
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    // Proof point 1: readiness_classification + next_operator_action render.
+    assert.equal(model.autonomousPaperStatus.truth_state, "active");
+    assert.equal(model.autonomousPaperStatus.readiness_classification, "READY_FOR_SUPERVISED_PAPER");
+    assert.equal(model.autonomousPaperStatus.next_operator_action, "Monitor for first signal-driven order this session.");
+
+    // Proof point 2: flatten_available=false + blockers visible.
+    assert.equal(model.autonomousPaperStatus.flatten_available, false);
+    assert.deepEqual(model.autonomousPaperStatus.flatten_blockers, paperStatusFixture.flatten_blockers);
+
+    // Proof point 3: live_routing_enabled=false visible (not rendered as an error).
+    assert.equal(model.autonomousPaperStatus.live_routing_enabled, false);
+
+    // Proof point 4 (part 1): watchlist status honest "active" state with real fields.
+    assert.equal(model.watchlistStatus.truth_state, "active");
+    assert.equal(model.watchlistStatus.status, "approved");
+    assert.deepEqual(model.watchlistStatus.symbols, ["MSFT", "NVDA"]);
+    assert.equal(model.watchlistStatus.strategy_assignment_count, 2);
+
+    // Proof point 5: approved_for_live=false visible on the watchlist status surface.
+    assert.equal(model.watchlistStatus.approved_for_live, false);
+
+    // No real strategy_id source (autonomous/readiness absent) → admission-check must
+    // be "not_checked" and must NOT invent a default symbol/strategy pair.
+    assert.equal(model.admissionCheck.state, "not_checked");
+    assert.equal(model.admissionCheck.symbol, null);
+    assert.equal(model.admissionCheck.strategy_id, null);
+
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    // Readiness/next-action render as text (proof point 1).
+    assert.match(html, /READY_FOR_SUPERVISED_PAPER/);
+    assert.match(html, /Monitor for first signal-driven order this session\./);
+
+    // Flatten availability + blockers render, explicitly marked visibility-only (proof point 2).
+    assert.match(html, /Flatten availability \(visibility only\)/);
+    assert.match(html, /Flatten available/);
+    assert.match(html, /NO_OPEN_POSITION: position_count is zero/);
+    assert.match(html, /cannot invoke flatten-paper-positions/);
+
+    // live_routing_enabled=false renders as an honest positive-tone fact, not an
+    // "unavailable"/error notice (proof point 3).
+    assert.match(html, /Live routing enabled/);
+    assert.doesNotMatch(html, /Autonomous paper status is currently unavailable/);
+    assert.doesNotMatch(html, /Autonomous paper status is not applicable/);
+
+    // Watchlist status renders honest "active" data, including approved_for_live=false
+    // (proof points 4 + 5).
+    assert.match(html, /Watchlist status/);
+    assert.match(html, /Approved for live/);
+    assert.doesNotMatch(html, /Watchlist status is currently unavailable/);
+
+    // Admission-check renders the "not_checked" honest state — never a fabricated default.
+    assert.match(html, /Admission-check not run/);
+    assert.match(html, /never substitutes a default symbol or strategy/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("PSV-02: watchlist admission-check runs against a real backend-sourced symbol/strategy pair and renders the dry-run advisory note (never hardcodes a default symbol)", async () => {
+  const originalFetch = globalThis.fetch;
+  const nowUtc = new Date().toISOString();
+  let admissionCheckRequested: URL | null = null;
+
+  const paperStatusFixture = {
+    canonical_route: "/api/v1/autonomous/paper-status",
+    truth_state: "active",
+    mode: "paper",
+    live_routing_enabled: false,
+    runtime_status: "running",
+    arm_state: "armed",
+    kill_switch_active: false,
+    deadman_status: "ok",
+    ws_continuity: "live",
+    reconcile_status: "clean",
+    mismatch_count: 0,
+    open_order_count: 1,
+    position_count: 1,
+    // Deliberately NOT "AAPL" — proves the GUI derives the symbol from real backend
+    // truth (current_symbol) rather than any hardcoded default.
+    current_symbol: "MSFT",
+    current_position_qty: 10,
+    target_qty: 10,
+    computed_delta_qty: 0,
+    no_order_reason: null,
+    last_strategy_decision: "signal_long",
+    flatten_available: true,
+    flatten_blockers: [],
+    watchlist_outcome: "approved",
+    watchlist_approved: true,
+    readiness_classification: "READY_FOR_SUPERVISED_PAPER",
+    blockers: [],
+    next_operator_action: "Continue monitoring the active paper session.",
+    autonomous_session_state: "active",
+    now_utc: nowUtc,
+  };
+
+  const watchlistStatusFixture = {
+    configured_path: "research-py/watchlists/active.json",
+    status: "approved",
+    approved_for_autonomous_paper: true,
+    approved_for_live: false,
+    symbols: ["MSFT"],
+    top_symbol: "MSFT",
+    strategy_assignments: { MSFT: "intraday_scalper" },
+    max_symbols_to_trade: 1,
+    max_concurrent_positions: 1,
+    failure_reasons: [],
+    checked_at_utc: nowUtc,
+  };
+
+  const admissionCheckFixture = {
+    allowed: true,
+    reason: "symbol_and_strategy_approved",
+    status: "approved",
+    approved_for_autonomous_paper: true,
+    approved_for_live: false,
+    symbol: "MSFT",
+    strategy_id: "intraday_scalper",
+    top_symbol: "MSFT",
+    strategy_assignments: { MSFT: "intraday_scalper" },
+    note: "dry_run_only_not_enforced",
+    checked_at_utc: nowUtc,
+  };
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url = new URL(raw);
+    const path = url.pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({ ...DEFAULT_STATUS, daemon_reachable: true, last_heartbeat: new Date().toISOString() });
+    }
+    if (path === "/api/v1/system/preflight") {
+      return jsonResponse({ ...DEFAULT_PREFLIGHT, daemon_reachable: true });
+    }
+    if (path === "/api/v1/autonomous/paper-status") {
+      return jsonResponse(paperStatusFixture);
+    }
+    if (path === "/api/v1/watchlist/status") {
+      return jsonResponse(watchlistStatusFixture);
+    }
+    if (path === "/api/v1/autonomous/readiness") {
+      return jsonResponse({
+        truth_state: "active",
+        session_in_window: true,
+        session_window_state: "in_window",
+        now_utc: nowUtc,
+        session_start_utc: "13:30 UTC",
+        session_stop_utc: "20:00 UTC",
+        session_window_source: "fixed_window_override",
+        arm_state: "armed",
+        nyse_market_session: "regular",
+        bar_ticker_gate: "open",
+        bar_tick_dispatch_count: 3,
+        last_bar_signal_qty: 10,
+        bar_context_source: "db_loaded",
+        bar_context_bars_loaded: 30,
+        blockers: [],
+        overall_ready: true,
+        strategy_decision_diagnostics: {
+          strategy_id: "intraday_scalper",
+          symbol: "MSFT",
+          timeframe: "5m",
+          lookback_bars: 5,
+          threshold_bps: 20,
+          latest_bar_ts: 1780688700,
+          latest_close_micros: 308110000,
+          lookback_bar_ts: 1780687500,
+          lookback_close_micros: 308870000,
+          move_bps: 28,
+          abs_move_bps: 28,
+          gap_to_threshold_bps: 8,
+          raw_direction: 1,
+          decision: "signal_long",
+          reason: "bullish displacement exceeds threshold",
+        },
+      });
+    }
+    if (path === "/api/v1/watchlist/admission-check") {
+      admissionCheckRequested = url;
+      return jsonResponse(admissionCheckFixture);
+    }
+    if (path in PSV_STRATEGY_FIXTURES) {
+      return jsonResponse(PSV_STRATEGY_FIXTURES[path]);
+    }
+    return notFoundResponse();
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    // The admission-check fetch must have been made against the real backend-sourced
+    // pair (current_symbol + strategy_decision_diagnostics.strategy_id) — never AAPL,
+    // never an invented default.
+    assert.ok(admissionCheckRequested !== null, "admission-check must be invoked when a real symbol/strategy pair exists");
+    assert.equal(admissionCheckRequested?.searchParams.get("symbol"), "MSFT");
+    assert.equal(admissionCheckRequested?.searchParams.get("strategy_id"), "intraday_scalper");
+
+    assert.equal(model.admissionCheck.state, "checked");
+    assert.equal(model.admissionCheck.symbol, "MSFT");
+    assert.equal(model.admissionCheck.strategy_id, "intraday_scalper");
+    assert.equal(model.admissionCheck.note, "dry_run_only_not_enforced");
+    assert.equal(model.admissionCheck.approved_for_live, false);
+
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    // Proof point 6: admission-check dry_run note is visible, with the symbol/strategy
+    // sourced from real backend truth (MSFT/intraday_scalper — not a hardcoded "AAPL").
+    assert.match(html, /Watchlist admission-check \(dry-run, advisory only\)/);
+    assert.match(html, /dry_run_only_not_enforced/);
+    assert.match(html, /advisory dry-run only/);
+    assert.match(html, /must never be used to trigger trading behavior/);
+    assert.match(html, />MSFT</);
+    assert.match(html, />intraday_scalper</);
+    assert.doesNotMatch(html, />AAPL</, "admission-check must never render a hardcoded AAPL default");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("PSV-03: flatten-paper-positions stays excluded from the invokable action catalog and StrategyScreen renders zero invocation controls", async () => {
+  const originalFetch = globalThis.fetch;
+  const nowUtc = new Date().toISOString();
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({ ...DEFAULT_STATUS, daemon_reachable: true, last_heartbeat: new Date().toISOString() });
+    }
+    if (path === "/api/v1/system/preflight") {
+      return jsonResponse({ ...DEFAULT_PREFLIGHT, daemon_reachable: true });
+    }
+    if (path === "/api/v1/autonomous/paper-status") {
+      return jsonResponse({
+        canonical_route: "/api/v1/autonomous/paper-status",
+        truth_state: "active",
+        mode: "paper",
+        live_routing_enabled: false,
+        runtime_status: "running",
+        arm_state: "armed",
+        kill_switch_active: false,
+        deadman_status: "ok",
+        ws_continuity: "live",
+        reconcile_status: "clean",
+        mismatch_count: 0,
+        open_order_count: 0,
+        position_count: 1,
+        current_symbol: "MSFT",
+        current_position_qty: 10,
+        target_qty: 0,
+        computed_delta_qty: -10,
+        no_order_reason: null,
+        last_strategy_decision: "signal_flat",
+        // Daemon truth: flatten IS available here — proves the GUI hides the
+        // invocation control regardless of backend availability state.
+        flatten_available: true,
+        flatten_blockers: [],
+        watchlist_outcome: "approved",
+        watchlist_approved: true,
+        readiness_classification: "READY_FOR_SUPERVISED_PAPER",
+        blockers: [],
+        next_operator_action: "Operator may flatten via the authorized control surface.",
+        autonomous_session_state: "active",
+        now_utc: nowUtc,
+      });
+    }
+    if (path === "/api/v1/watchlist/status") {
+      return notFoundResponse();
+    }
+    if (path === "/api/v1/ops/catalog") {
+      return jsonResponse({
+        canonical_route: "/api/v1/ops/catalog",
+        actions: [
+          {
+            action_key: "arm-execution",
+            label: "Arm execution",
+            level: 1,
+            description: "Arm the execution engine.",
+            requires_reason: false,
+            confirm_text: "Arm execution?",
+            enabled: true,
+          },
+          {
+            // Confirmed present in the daemon catalog (routes/control_plane.rs); the GUI
+            // must keep it out of the invokable action set in this patch.
+            action_key: "flatten-paper-positions",
+            label: "Flatten paper positions",
+            level: 3,
+            description: "Flatten all open paper positions immediately.",
+            requires_reason: true,
+            confirm_text: "Flatten all open paper positions?",
+            enabled: true,
+          },
+        ],
+      });
+    }
+    if (path in PSV_STRATEGY_FIXTURES) {
+      return jsonResponse(PSV_STRATEGY_FIXTURES[path]);
+    }
+    return notFoundResponse();
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    // Proof point 7: flatten-paper-positions must never reach the invokable catalog,
+    // even though the daemon-authoritative catalog includes it.
+    assert.equal(
+      model.actionCatalog.some((a) => (a.action_key as string) === "flatten-paper-positions"),
+      false,
+      "flatten-paper-positions must never appear in the invokable action catalog",
+    );
+    assert.equal(model.autonomousPaperStatus.flatten_available, true, "fixture sanity: backend truth says flatten IS available");
+
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    // StrategyScreen is a read-only visibility screen — it must render zero buttons,
+    // so there is structurally no path by which it could invoke flatten (or anything else).
+    // (The action key string itself MAY appear in the panel's own disclosure text — see below —
+    // so the proof is the absence of any control element, not the absence of the name.)
+    assert.doesNotMatch(html, /<button/i, "StrategyScreen must render no invocation controls of any kind");
+    assert.doesNotMatch(html, /onClick/i, "StrategyScreen must wire no click handlers");
+
+    // The visibility panel still honestly reports that flatten is available per backend truth —
+    // it just provides no way to invoke it, and says so by name.
+    assert.match(html, /Flatten available/);
+    assert.match(html, /cannot invoke flatten-paper-positions/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("PSV-04: watchlist status renders an honest unavailable notice when the backend probe fails (never a fake healthy default)", async () => {
+  const originalFetch = globalThis.fetch;
+  const nowUtc = new Date().toISOString();
+
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({ ...DEFAULT_STATUS, daemon_reachable: true, last_heartbeat: new Date().toISOString() });
+    }
+    if (path === "/api/v1/system/preflight") {
+      return jsonResponse({ ...DEFAULT_PREFLIGHT, daemon_reachable: true });
+    }
+    if (path === "/api/v1/autonomous/paper-status") {
+      return jsonResponse({
+        canonical_route: "/api/v1/autonomous/paper-status",
+        truth_state: "not_applicable",
+        mode: "paper",
+        live_routing_enabled: false,
+        runtime_status: "unknown",
+        arm_state: "unknown",
+        kill_switch_active: false,
+        deadman_status: "unknown",
+        ws_continuity: "not_applicable",
+        reconcile_status: "unknown",
+        mismatch_count: 0,
+        open_order_count: 0,
+        position_count: 0,
+        current_symbol: null,
+        current_position_qty: null,
+        target_qty: null,
+        computed_delta_qty: null,
+        no_order_reason: "NOT_PAPER_ALPACA_DEPLOYMENT",
+        last_strategy_decision: null,
+        flatten_available: false,
+        flatten_blockers: ["NOT_APPLICABLE: deployment is not paper+alpaca"],
+        watchlist_outcome: "not_applicable",
+        watchlist_approved: false,
+        readiness_classification: "not_applicable",
+        blockers: ["NOT_APPLICABLE: deployment is not paper+alpaca"],
+        next_operator_action: "No action — autonomous paper trading is not applicable to this deployment.",
+        autonomous_session_state: "not_applicable",
+        now_utc: nowUtc,
+      });
+    }
+    // watchlist/status mounted but unreachable in this scenario (e.g. network error / 404).
+    if (path === "/api/v1/watchlist/status") {
+      return notFoundResponse();
+    }
+    if (path in PSV_STRATEGY_FIXTURES) {
+      return jsonResponse(PSV_STRATEGY_FIXTURES[path]);
+    }
+    return notFoundResponse();
+  }) as typeof fetch;
+
+  try {
+    const model = await fetchOperatorModel();
+
+    assert.equal(model.autonomousPaperStatus.truth_state, "not_applicable");
+    assert.equal(model.watchlistStatus.truth_state, "unavailable");
+    // Unavailable must never collapse into fabricated "approved"/healthy defaults.
+    assert.equal(model.watchlistStatus.approved_for_autonomous_paper, false);
+    assert.equal(model.watchlistStatus.approved_for_live, false);
+    assert.equal(model.watchlistStatus.status, "unknown");
+
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    // Honest "not_applicable" rendering for paper status — distinct from "active" or "unavailable".
+    assert.match(html, /Autonomous paper status is not applicable for the current deployment mode/);
+    // Honest "unavailable" rendering for watchlist status — never a fake healthy table.
+    assert.match(html, /Watchlist status is currently unavailable/);
+    assert.doesNotMatch(html, /MSFT|NVDA|AAPL/, "no symbol data should render when watchlist status is unavailable");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

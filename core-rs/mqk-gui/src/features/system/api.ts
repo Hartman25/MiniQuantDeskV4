@@ -22,11 +22,16 @@ import {
   deriveDataSourceDetail,
   deriveExecutionSummaryFromOrders,
   mapActiveAlertsResponse,
+  mapAutonomousPaperStatusWrapper,
   mapDaemonCatalog,
   mapEventsFeedResponse,
   mapExecutionOutboxWrapper,
   mapFillQualityWrapper,
   mapPaperJournalWrapper,
+  mapWatchlistAdmissionCheckWrapper,
+  mapWatchlistStatusWrapper,
+  notCheckedAdmissionCheck,
+  unavailableAdmissionCheck,
   mapLegacyPortfolioSummary,
   mapLegacyPositionsResponse,
   mapLegacyTradingFillsToRows,
@@ -35,6 +40,7 @@ import {
   mapLegacyStatusToSystemStatus,
   nowIso,
   type ActiveAlertsWrapper,
+  type AutonomousPaperStatusWrapper,
   type ConfigDiffsWrapper,
   type DaemonActionCatalogResponse,
   type DaemonAuditActionsWrapper,
@@ -62,8 +68,11 @@ import {
   type ReplaceCancelChainsWrapper,
   type AlertTriageWrapper,
   type AutonomousReadinessPartial,
+  type WatchlistAdmissionCheckWrapper,
+  type WatchlistStatusWrapper,
 } from "./legacy";
 import type {
+  AdmissionCheckSurface,
   AlertTriageRow,
   ArtifactRegistrySummary,
   ArtifactRow,
@@ -476,6 +485,13 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     fetchJsonCandidates<FillQualityWrapper>(["/api/v1/execution/fill-quality"]),
     // GUI-OPS-01: Paper journal — fills_lane + admissions_lane with independent truth_states.
     fetchJsonCandidates<PaperJournalWrapper>(["/api/v1/paper/journal"]),
+    // GUI-PAPER-STATUS-VISIBILITY-01: Autonomous paper status — composite truth surface
+    // (runtime/arm/reconcile/flatten/watchlist/readiness). Always returns a full struct,
+    // even truth_state "not_applicable" (non-paper+alpaca deployments).
+    fetchJsonCandidates<AutonomousPaperStatusWrapper>(["/api/v1/autonomous/paper-status"]),
+    // GUI-PAPER-STATUS-VISIBILITY-01: Watchlist status — read-only configured-watchlist
+    // truth (no truth_state field on the backend response; GUI derives reachability).
+    fetchJsonCandidates<WatchlistStatusWrapper>(["/api/v1/watchlist/status"]),
     ]),
     fetchJsonCandidate<AutonomousReadinessPartial>("/api/v1/autonomous/readiness"),
   ]);
@@ -515,6 +531,8 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     outboxR,
     fillQualityR,
     paperJournalR,
+    autonomousPaperStatusR,
+    watchlistStatusR,
   ] = probes;
 
   const daemonReachable = statusProbe.ok || healthProbe.ok || Boolean(legacyStatusFromProbe) || probes.some((p) => p.ok);
@@ -721,6 +739,20 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const fillQualityTelemetry = mapFillQualityWrapper(fillQualityR.ok && fillQualityR.data != null ? fillQualityR.data as FillQualityWrapper : null);
   // GUI-OPS-01: Paper journal surface — dual-lane via extracted mapper.
   const paperJournal = mapPaperJournalWrapper(paperJournalR.ok && paperJournalR.data != null ? paperJournalR.data as PaperJournalWrapper : null);
+  // GUI-PAPER-STATUS-VISIBILITY-01: Autonomous paper status — composite read-only truth
+  // surface (runtime/arm/reconcile/flatten/watchlist/readiness). Visibility only — no
+  // action invocation is derived from this surface.
+  const autonomousPaperStatus = mapAutonomousPaperStatusWrapper(
+    autonomousPaperStatusR.ok && autonomousPaperStatusR.data != null
+      ? (autonomousPaperStatusR.data as AutonomousPaperStatusWrapper)
+      : null,
+  );
+  // GUI-PAPER-STATUS-VISIBILITY-01: Watchlist status — read-only configured-watchlist truth.
+  const watchlistStatus = mapWatchlistStatusWrapper(
+    watchlistStatusR.ok && watchlistStatusR.data != null
+      ? (watchlistStatusR.data as WatchlistStatusWrapper)
+      : null,
+  );
 
   const allProbeResults = [statusProbe, healthProbe, ...probes];
   // Detect 401/403 auth rejections — surface specific message so AppShell can
@@ -918,6 +950,28 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     ? { ...(preflightR.data as PreflightStatus), ...sessionWindowMerge }
     : unavailablePreflight;
 
+  // GUI-PAPER-STATUS-VISIBILITY-01: Watchlist admission-check — read-only dry-run advisory.
+  // Two-phase fetch: only invoked when BOTH a real symbol (autonomousPaperStatus.current_symbol,
+  // sourced from the active run's portfolio truth) AND a real strategy_id
+  // (strategyDecisionDiagnostics.strategy_id, sourced from the most recent native strategy bar
+  // dispatch) are present. Never invents a default symbol or strategy (no hardcoded "AAPL"),
+  // and the result is rendered as advisory-only — it must never auto-trigger trading behavior.
+  const admissionCheckSymbol = autonomousPaperStatus.current_symbol;
+  const admissionCheckStrategyId = strategyDecisionDiagnostics?.strategy_id ?? null;
+  let admissionCheck: AdmissionCheckSurface;
+  if (admissionCheckSymbol == null || admissionCheckStrategyId == null) {
+    admissionCheck = notCheckedAdmissionCheck(
+      "no real symbol/strategy pair available from backend truth (current_symbol or strategy_id is null)",
+    );
+  } else {
+    const admissionCheckR = await fetchJsonCandidate<WatchlistAdmissionCheckWrapper>(
+      `/api/v1/watchlist/admission-check?symbol=${encodeURIComponent(admissionCheckSymbol)}&strategy_id=${encodeURIComponent(admissionCheckStrategyId)}`,
+    );
+    admissionCheck = admissionCheckR.ok && admissionCheckR.data != null
+      ? mapWatchlistAdmissionCheckWrapper(admissionCheckR.data as WatchlistAdmissionCheckWrapper)
+      : unavailableAdmissionCheck(admissionCheckSymbol, admissionCheckStrategyId);
+  }
+
   return withClassifiedPanelSources({
     status: resolvedStatus,
     // Preflight is fail-closed: require structural completeness before accepting
@@ -973,6 +1027,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     executionOutbox,
     fillQualityTelemetry,
     paperJournal,
+    // GUI-PAPER-STATUS-VISIBILITY-01: Read-only autonomous paper status / watchlist /
+    // admission-check truth surfaces. Visibility only — no invocation paths derived here.
+    autonomousPaperStatus,
+    watchlistStatus,
+    admissionCheck,
     // STRATEGY-DECISION-OBSERVABILITY-01: read-only decision diagnostics.
     strategyDecisionDiagnostics,
     autonomousBarTickCount,

@@ -164,6 +164,82 @@ export interface PaperJournalSurface {
   admissions: PaperJournalAdmissionRow[];
 }
 
+// ---------------------------------------------------------------------------
+// GUI-PAPER-STATUS-VISIBILITY-01: Read-only surfaces for the autonomous paper
+// status, watchlist status, and watchlist admission-check truth surfaces.
+// These are visibility-only — no action invocation paths are derived here.
+// ---------------------------------------------------------------------------
+
+export type AutonomousPaperStatusTruthState = "active" | "not_applicable" | "unavailable";
+
+export interface AutonomousPaperStatusSurface {
+  truth_state: AutonomousPaperStatusTruthState;
+  mode: string;
+  live_routing_enabled: boolean;
+  runtime_status: string;
+  arm_state: string;
+  kill_switch_active: boolean;
+  deadman_status: string;
+  ws_continuity: string;
+  reconcile_status: string;
+  mismatch_count: number | null;
+  open_order_count: number | null;
+  position_count: number | null;
+  current_symbol: string | null;
+  current_position_qty: number | null;
+  target_qty: number | null;
+  computed_delta_qty: number | null;
+  no_order_reason: string | null;
+  last_strategy_decision: string | null;
+  flatten_available: boolean;
+  flatten_blockers: string[];
+  watchlist_outcome: string;
+  watchlist_approved: boolean;
+  readiness_classification: string;
+  blockers: string[];
+  next_operator_action: string | null;
+  autonomous_session_state: string;
+  now_utc: string | null;
+}
+
+export type WatchlistStatusTruthState = "active" | "unavailable";
+
+export interface WatchlistStatusSurface {
+  truth_state: WatchlistStatusTruthState;
+  configured_path: string | null;
+  status: string;
+  approved_for_autonomous_paper: boolean;
+  approved_for_live: boolean;
+  symbols: string[];
+  top_symbol: string | null;
+  strategy_assignment_count: number | null;
+  max_symbols_to_trade: number | null;
+  max_concurrent_positions: number | null;
+  failure_reasons: string[];
+  checked_at_utc: string | null;
+}
+
+/**
+ * "not_checked" — no safe symbol/strategy pair available; admission-check was not invoked.
+ * "checked" — backend returned an admission-check result for a real symbol/strategy pair.
+ * "unavailable" — backend was reachable but returned an unusable/malformed response.
+ */
+export type AdmissionCheckState = "not_checked" | "checked" | "unavailable";
+
+export interface AdmissionCheckSurface {
+  state: AdmissionCheckState;
+  reason_unchecked: string | null;
+  symbol: string | null;
+  strategy_id: string | null;
+  allowed: boolean | null;
+  reason_code: string | null;
+  status: string | null;
+  approved_for_autonomous_paper: boolean | null;
+  approved_for_live: boolean | null;
+  note: string | null;
+  checked_at_utc: string | null;
+}
+
 export interface SystemModel {
   status: SystemStatus;
   preflight: PreflightStatus;
@@ -212,6 +288,12 @@ export interface SystemModel {
   fillQualityTelemetry: FillQualitySurface;
   /** GUI-OPS-01: Paper journal — fills and signal admissions for the active run. */
   paperJournal: PaperJournalSurface;
+  /** GUI-PAPER-STATUS-VISIBILITY-01: Autonomous paper status truth surface (read-only). */
+  autonomousPaperStatus: AutonomousPaperStatusSurface;
+  /** GUI-PAPER-STATUS-VISIBILITY-01: Watchlist status truth surface (read-only). */
+  watchlistStatus: WatchlistStatusSurface;
+  /** GUI-PAPER-STATUS-VISIBILITY-01: Watchlist admission-check dry-run surface (read-only, advisory only). */
+  admissionCheck: AdmissionCheckSurface;
   /**
    * STRATEGY-DECISION-OBSERVABILITY-01: Read-only decision diagnostics from the most
    * recent native strategy bar dispatch. Null when not paper+alpaca or no bar dispatched.

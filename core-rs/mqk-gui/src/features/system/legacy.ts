@@ -12,6 +12,8 @@
 
 import type { EndpointFetchResult } from "./http";
 import type {
+  AdmissionCheckSurface,
+  AutonomousPaperStatusSurface,
   ConfigDiffRow,
   DataSourceDetail,
   ExecutionOrderRow,
@@ -34,6 +36,7 @@ import type {
   StrategyRow,
   StrategySuppressionRow,
   SystemStatus,
+  WatchlistStatusSurface,
 } from "./types";
 import type { OrderTimelineSurface } from "./types/execution";
 
@@ -935,6 +938,272 @@ export function mapPaperJournalWrapper(wrapper: PaperJournalWrapper | null | und
     fills: wrapper.fills_lane.rows ?? [],
     admissions_truth_state: ats,
     admissions: wrapper.admissions_lane.rows ?? [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// GUI-PAPER-STATUS-VISIBILITY-01: Autonomous paper status wrapper → surface
+//
+// GET /api/v1/autonomous/paper-status (PAPER-AUTONOMOUS-COMPLETION-BUNDLE-01).
+// Backend truth_state: "active" (paper+alpaca, all fields authoritative) |
+// "not_applicable" (deployment is not paper+alpaca — every field still present
+// but carries sentinel "not_applicable" values). Read-only visibility surface;
+// never used to place, modify, or flatten orders.
+// ---------------------------------------------------------------------------
+
+export interface AutonomousPaperStatusWrapper {
+  canonical_route: string;
+  truth_state: string;
+  mode: string;
+  live_routing_enabled: boolean;
+  runtime_status: string;
+  arm_state: string;
+  kill_switch_active: boolean;
+  deadman_status: string;
+  ws_continuity: string;
+  reconcile_status: string;
+  mismatch_count: number;
+  open_order_count: number;
+  position_count: number;
+  current_symbol: string | null;
+  current_position_qty: number | null;
+  target_qty: number | null;
+  computed_delta_qty: number | null;
+  no_order_reason: string | null;
+  last_strategy_decision: string | null;
+  flatten_available: boolean;
+  flatten_blockers: string[];
+  watchlist_outcome: string;
+  watchlist_approved: boolean;
+  readiness_classification: string;
+  blockers: string[];
+  next_operator_action: string;
+  autonomous_session_state: string;
+  now_utc: string;
+}
+
+const AUTONOMOUS_PAPER_STATUS_VALID_TRUTH_STATES = new Set(["active", "not_applicable"]);
+
+const UNAVAILABLE_AUTONOMOUS_PAPER_STATUS: AutonomousPaperStatusSurface = {
+  truth_state: "unavailable",
+  mode: "unknown",
+  live_routing_enabled: false,
+  runtime_status: "unknown",
+  arm_state: "unknown",
+  kill_switch_active: false,
+  deadman_status: "unknown",
+  ws_continuity: "unknown",
+  reconcile_status: "unknown",
+  mismatch_count: null,
+  open_order_count: null,
+  position_count: null,
+  current_symbol: null,
+  current_position_qty: null,
+  target_qty: null,
+  computed_delta_qty: null,
+  no_order_reason: null,
+  last_strategy_decision: null,
+  flatten_available: false,
+  flatten_blockers: [],
+  watchlist_outcome: "unknown",
+  watchlist_approved: false,
+  readiness_classification: "unknown",
+  blockers: [],
+  next_operator_action: null,
+  autonomous_session_state: "unknown",
+  now_utc: null,
+};
+
+// Read-only mapper: preserves the daemon's truth_state verbatim ("active" |
+// "not_applicable"). Any other shape (probe failure, structurally invalid
+// body, unrecognized truth_state) maps to the explicit "unavailable" sentinel
+// — empty/zero fields must never be displayed as if they were authoritative.
+export function mapAutonomousPaperStatusWrapper(
+  wrapper: AutonomousPaperStatusWrapper | null | undefined,
+): AutonomousPaperStatusSurface {
+  if (wrapper == null || typeof wrapper.truth_state !== "string") {
+    return UNAVAILABLE_AUTONOMOUS_PAPER_STATUS;
+  }
+  if (!AUTONOMOUS_PAPER_STATUS_VALID_TRUTH_STATES.has(wrapper.truth_state)) {
+    return UNAVAILABLE_AUTONOMOUS_PAPER_STATUS;
+  }
+  return {
+    truth_state: wrapper.truth_state as AutonomousPaperStatusSurface["truth_state"],
+    mode: wrapper.mode,
+    live_routing_enabled: wrapper.live_routing_enabled,
+    runtime_status: wrapper.runtime_status,
+    arm_state: wrapper.arm_state,
+    kill_switch_active: wrapper.kill_switch_active,
+    deadman_status: wrapper.deadman_status,
+    ws_continuity: wrapper.ws_continuity,
+    reconcile_status: wrapper.reconcile_status,
+    mismatch_count: wrapper.mismatch_count,
+    open_order_count: wrapper.open_order_count,
+    position_count: wrapper.position_count,
+    current_symbol: wrapper.current_symbol ?? null,
+    current_position_qty: wrapper.current_position_qty ?? null,
+    target_qty: wrapper.target_qty ?? null,
+    computed_delta_qty: wrapper.computed_delta_qty ?? null,
+    no_order_reason: wrapper.no_order_reason ?? null,
+    last_strategy_decision: wrapper.last_strategy_decision ?? null,
+    flatten_available: wrapper.flatten_available,
+    flatten_blockers: wrapper.flatten_blockers ?? [],
+    watchlist_outcome: wrapper.watchlist_outcome,
+    watchlist_approved: wrapper.watchlist_approved,
+    readiness_classification: wrapper.readiness_classification,
+    blockers: wrapper.blockers ?? [],
+    next_operator_action: wrapper.next_operator_action,
+    autonomous_session_state: wrapper.autonomous_session_state,
+    now_utc: wrapper.now_utc,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// GUI-PAPER-STATUS-VISIBILITY-01: Watchlist status wrapper → surface
+//
+// GET /api/v1/watchlist/status (PAPER-HANDOFF-READONLY-01). The daemon route
+// always returns HTTP 200 with an explicit `status` outcome — there is no
+// backend truth_state field. The GUI adds its own truth_state purely to
+// distinguish "we reached the endpoint and have its answer" (active) from
+// "we could not reach/parse the endpoint" (unavailable). approved_for_live
+// is a hard daemon invariant (always false) and is passed through verbatim.
+// ---------------------------------------------------------------------------
+
+export interface WatchlistStatusWrapper {
+  configured_path: string | null;
+  status: string;
+  approved_for_autonomous_paper: boolean;
+  approved_for_live: boolean;
+  symbols: string[];
+  top_symbol: string | null;
+  strategy_assignments: unknown;
+  max_symbols_to_trade: number | null;
+  max_concurrent_positions: number | null;
+  failure_reasons: string[];
+  checked_at_utc: string;
+}
+
+const UNAVAILABLE_WATCHLIST_STATUS: WatchlistStatusSurface = {
+  truth_state: "unavailable",
+  configured_path: null,
+  status: "unknown",
+  approved_for_autonomous_paper: false,
+  approved_for_live: false,
+  symbols: [],
+  top_symbol: null,
+  strategy_assignment_count: null,
+  max_symbols_to_trade: null,
+  max_concurrent_positions: null,
+  failure_reasons: [],
+  checked_at_utc: null,
+};
+
+function strategyAssignmentCount(value: unknown): number | null {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return null;
+  return Object.keys(value as Record<string, unknown>).length;
+}
+
+// Read-only mapper. A failed/missing probe maps to the explicit "unavailable"
+// surface — an empty symbol list must never be displayed as if the watchlist
+// were authoritatively loaded-and-empty.
+export function mapWatchlistStatusWrapper(
+  wrapper: WatchlistStatusWrapper | null | undefined,
+): WatchlistStatusSurface {
+  if (wrapper == null || typeof wrapper.status !== "string") {
+    return UNAVAILABLE_WATCHLIST_STATUS;
+  }
+  return {
+    truth_state: "active",
+    configured_path: wrapper.configured_path ?? null,
+    status: wrapper.status,
+    approved_for_autonomous_paper: wrapper.approved_for_autonomous_paper,
+    approved_for_live: wrapper.approved_for_live,
+    symbols: wrapper.symbols ?? [],
+    top_symbol: wrapper.top_symbol ?? null,
+    strategy_assignment_count: strategyAssignmentCount(wrapper.strategy_assignments),
+    max_symbols_to_trade: wrapper.max_symbols_to_trade ?? null,
+    max_concurrent_positions: wrapper.max_concurrent_positions ?? null,
+    failure_reasons: wrapper.failure_reasons ?? [],
+    checked_at_utc: wrapper.checked_at_utc ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// GUI-PAPER-STATUS-VISIBILITY-01: Watchlist admission-check wrapper → surface
+//
+// GET /api/v1/watchlist/admission-check?symbol=&strategy_id=
+// (PAPER-HANDOFF-ENFORCE-DESIGN-ONLY-01). Pure dry-run advisory check — the
+// GUI must never invent a symbol/strategy to probe with. The surface carries
+// an explicit `state`:
+//   "not_checked"  — no safe (symbol, strategy_id) pair exists in GUI truth.
+//   "checked"      — the daemon answered for the exact pair the GUI checked.
+//   "unavailable"  — a safe pair existed but the probe failed.
+// ---------------------------------------------------------------------------
+
+export interface WatchlistAdmissionCheckWrapper {
+  allowed: boolean;
+  reason: string;
+  status: string;
+  approved_for_autonomous_paper: boolean;
+  approved_for_live: boolean;
+  symbol: string;
+  strategy_id: string;
+  top_symbol: string | null;
+  strategy_assignments: unknown;
+  note: string;
+  checked_at_utc: string;
+}
+
+export function notCheckedAdmissionCheck(reason: string): AdmissionCheckSurface {
+  return {
+    state: "not_checked",
+    reason_unchecked: reason,
+    symbol: null,
+    strategy_id: null,
+    allowed: null,
+    reason_code: null,
+    status: null,
+    approved_for_autonomous_paper: null,
+    approved_for_live: null,
+    note: null,
+    checked_at_utc: null,
+  };
+}
+
+export function unavailableAdmissionCheck(symbol: string, strategyId: string): AdmissionCheckSurface {
+  return {
+    state: "unavailable",
+    reason_unchecked: null,
+    symbol,
+    strategy_id: strategyId,
+    allowed: null,
+    reason_code: null,
+    status: null,
+    approved_for_autonomous_paper: null,
+    approved_for_live: null,
+    note: null,
+    checked_at_utc: null,
+  };
+}
+
+// Read-only mapper. Only called when the GUI has already confirmed it is
+// looking at a response for the exact (symbol, strategy_id) pair it checked —
+// see the checkedSymbol/checkedStrategyId guard in fetchOperatorModel.
+export function mapWatchlistAdmissionCheckWrapper(
+  wrapper: WatchlistAdmissionCheckWrapper,
+): AdmissionCheckSurface {
+  return {
+    state: "checked",
+    reason_unchecked: null,
+    symbol: wrapper.symbol,
+    strategy_id: wrapper.strategy_id,
+    allowed: wrapper.allowed,
+    reason_code: wrapper.reason,
+    status: wrapper.status,
+    approved_for_autonomous_paper: wrapper.approved_for_autonomous_paper,
+    approved_for_live: wrapper.approved_for_live,
+    note: wrapper.note,
+    checked_at_utc: wrapper.checked_at_utc ?? null,
   };
 }
 
