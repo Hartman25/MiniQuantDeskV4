@@ -53,14 +53,14 @@ Assert-True ($Content -match '\[switch\]\$Latest') 'Supports -Latest switch'
 Assert-True ($Content -match '\[switch\]\$WriteSummary') 'Supports -WriteSummary switch'
 
 # 5. Does not call broker order endpoints (/v2/orders)
-Assert-False ($Content -match '/v2/orders') 'Does not reference /v2/orders broker endpoint'
+Assert-False ($Content -match '(?im)^\s*(Invoke-WebRequest|Invoke-RestMethod|curl|iwr|irm)\b.*\/v2\/orders') 'Does not call /v2/orders broker endpoint'
 
 # 6. Does not invoke Start-PaperTradingSmoke
 Assert-False ($Content -match 'Start-PaperTradingSmoke') 'Does not call Start-PaperTradingSmoke'
 
 # 7. Does not mutate DB (no SQL mutation patterns — uppercase keywords in code context)
 Assert-False ($Content -match '\bINSERT INTO\b|\bUPDATE .* SET\b|\bDELETE FROM\b|\bDROP TABLE\b') 'Does not contain DB mutation SQL (INSERT INTO/UPDATE SET/DELETE FROM/DROP TABLE)'
-Assert-False ($Content -match '(?i)psql.*-c.*(INSERT|DELETE FROM|DROP TABLE)') 'Does not invoke psql with mutating SQL'
+Assert-False ($Content -match '(?im)^\s*&?\s*psql\b.*-c.*(INSERT|DELETE FROM|DROP TABLE)') 'Does not invoke psql with mutating SQL'
 
 # 8. Does not print secret values
 Assert-False ($Content -match 'Write-Host.*ALPACA_API_SECRET') 'Does not print ALPACA_API_SECRET value'
@@ -130,6 +130,212 @@ try {
 } catch {
     Write-Host "  FAIL: Runtime Test-SecretLeakLine test threw: $_" -ForegroundColor Red
     $script:Failures += 3
+}
+
+function Write-FixtureJson {
+    param([string]$Path, $Value)
+    $parent = Split-Path -Parent $Path
+    if (-not (Test-Path $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    $Value | ConvertTo-Json -Depth 10 | Set-Content -Path $Path -Encoding UTF8
+}
+
+function Write-FixtureText {
+    param([string]$Path, [string]$Value)
+    $parent = Split-Path -Parent $Path
+    if (-not (Test-Path $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    $Value | Set-Content -Path $Path -Encoding UTF8
+}
+
+function New-StrictLifecycleFixture {
+    param(
+        [string]$Name,
+        [bool]$IncludeAck = $true,
+        [bool]$IncludeApply = $true,
+        [bool]$FinalFlat = $true,
+        [bool]$ReconcileClean = $true,
+        [bool]$LiveRoutingEnabled = $false,
+        [string[]]$UnsafeMarkers = @()
+    )
+
+    $casePath = Join-Path $script:ReviewFixtureRoot $Name
+    New-Item -ItemType Directory -Path (Join-Path $casePath 'api') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $casePath 'db') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $casePath 'notes') -Force | Out-Null
+
+    $reconcileStatus = if ($ReconcileClean) { 'ok' } else { 'dirty' }
+    $mismatchRows = [System.Collections.ArrayList]::new()
+    if (-not $ReconcileClean) {
+        [void]$mismatchRows.Add([pscustomobject]@{ kind = 'position'; symbol = 'AAPL' })
+    }
+    $positionRows = [System.Collections.ArrayList]::new()
+    if (-not $FinalFlat) {
+        [void]$positionRows.Add([pscustomobject]@{ symbol = 'AAPL'; qty = 1 })
+    }
+    $positionCount = if ($FinalFlat) { 0 } else { 1 }
+
+    $flowRows = @(
+        [ordered]@{ stage = 'outbox_enqueued'; source_table = 'oms_outbox'; symbol = 'AAPL'; side = 'sell'; message = 'Sell order enqueued through normal path' },
+        [ordered]@{ stage = 'broker_sent'; source_table = 'oms_outbox'; symbol = 'AAPL'; side = 'sell'; message = 'Sell order submitted to broker' },
+        [ordered]@{ stage = 'broker_final_fill'; source_table = 'fill_quality_telemetry'; symbol = 'AAPL'; message = 'Final fill received for AAPL' }
+    )
+    if ($IncludeAck) {
+        $flowRows += [ordered]@{ stage = 'broker_ack'; source_table = 'oms_inbox'; symbol = 'AAPL'; side = 'sell'; message = 'Broker ACK accepted' }
+    }
+    if ($IncludeApply) {
+        $flowRows += [ordered]@{ stage = 'fill_applied'; source_table = 'oms_inbox'; symbol = 'AAPL'; message = 'Fill applied to durable execution state' }
+    }
+
+    Write-FixtureJson (Join-Path $casePath 'api\system_status.json') ([ordered]@{
+        daemon_mode = 'paper'
+        runtime_status = 'running'
+        strategy_armed = $true
+        execution_armed = $true
+        kill_switch_active = $false
+        live_routing_enabled = $LiveRoutingEnabled
+        integrity_halt_active = $false
+        risk_halt_active = $false
+        reconcile_status = $reconcileStatus
+        fault_signals = @()
+    })
+    Write-FixtureJson (Join-Path $casePath 'api\system_preflight.json') ([ordered]@{
+        live_routing_disabled = (-not $LiveRoutingEnabled)
+    })
+    Write-FixtureJson (Join-Path $casePath 'api\autonomous_readiness.json') ([ordered]@{
+        arm_state = 'armed'
+        reconcile_ready = $ReconcileClean
+        signal_ingestion_configured = $true
+        last_bar_signal_qty = -1
+        market_data_freshness = [ordered]@{
+            completed_rows = 5
+            freshness_state = 'ok'
+        }
+    })
+    Write-FixtureJson (Join-Path $casePath 'api\events_feed.json') ([ordered]@{
+        rows = @([ordered]@{ kind = 'runtime_transition'; detail = 'RUNNING'; run_id = 'strict-fixture-run' })
+    })
+    Write-FixtureJson (Join-Path $casePath 'api\oms_overview.json') ([ordered]@{
+        run_id = 'strict-fixture-run'
+        position_count = $positionCount
+        open_order_count = 0
+        fill_count = 1
+        execution_active_orders = 0
+        execution_pending_orders = 0
+        reconcile_total_mismatches = $(if ($ReconcileClean) { 0 } else { 1 })
+    })
+    Write-FixtureJson (Join-Path $casePath 'api\reconcile_status.json') ([ordered]@{
+        status = $reconcileStatus
+        mismatched_positions = $(if ($ReconcileClean) { 0 } else { 1 })
+        mismatched_orders = 0
+        mismatched_fills = 0
+        unmatched_broker_events = 0
+    })
+    Write-FixtureJson (Join-Path $casePath 'api\reconcile_mismatches.json') ([ordered]@{ rows = @($mismatchRows.ToArray()) })
+    Write-FixtureJson (Join-Path $casePath 'api\execution_flow.json') ([ordered]@{ rows = $flowRows })
+    Write-FixtureJson (Join-Path $casePath 'api\execution_orders.json') ([ordered]@{
+        rows = @([ordered]@{ symbol = 'AAPL'; side = 'sell'; status = 'submitted' })
+    })
+    Write-FixtureJson (Join-Path $casePath 'api\execution_outbox.json') ([ordered]@{
+        rows = @([ordered]@{ symbol = 'AAPL'; side = 'sell'; status = 'sent' })
+    })
+    Write-FixtureJson (Join-Path $casePath 'api\fill_quality.json') ([ordered]@{
+        rows = @([ordered]@{ symbol = 'AAPL'; fill_qty = 1 })
+    })
+    Write-FixtureJson (Join-Path $casePath 'api\portfolio_fills.json') ([ordered]@{
+        rows = @([ordered]@{ symbol = 'AAPL'; qty = 1 })
+    })
+    Write-FixtureJson (Join-Path $casePath 'api\portfolio_positions.json') ([ordered]@{ rows = @($positionRows.ToArray()) })
+
+    $ackLine = if ($IncludeAck) { '1 | order-1 | broker_ack | t | 2026-06-07T00:00:01Z' } else { '' }
+    $applyLine = if ($IncludeApply) { '2 | order-1 | final_fill | t | 2026-06-07T00:00:02Z' } else { '2 | order-1 | final_fill | f | 2026-06-07T00:00:02Z' }
+    Write-FixtureText (Join-Path $casePath 'db\oms_inbox_recent.txt') @"
+ id | order_id | event_type | applied | created_at
+$ackLine
+$applyLine
+"@
+    Write-FixtureText (Join-Path $casePath 'db\broker_order_map_recent.txt') @"
+ order_id | broker_order_id | created_at
+ order-1 | broker-1 | 2026-06-07T00:00:00Z
+(1 row)
+"@
+    Write-FixtureText (Join-Path $casePath 'notes\smoke_lifecycle_checklist.txt') '# [YES] Broker position baseline adopted (positions=1, orders=0, reconcile_after=ok)'
+    if ($UnsafeMarkers.Count -gt 0) {
+        Write-FixtureText (Join-Path $casePath 'notes\unsafe_markers.txt') (($UnsafeMarkers | ForEach-Object { "$_=true" }) -join "`n")
+    }
+
+    return $casePath
+}
+
+function Invoke-ReviewFixture {
+    param([string]$Path)
+    $output = & powershell.exe -ExecutionPolicy Bypass -NonInteractive -File $Target -EvidencePath $Path -WriteSummary 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  FAIL: Review fixture exited $LASTEXITCODE for $Path" -ForegroundColor Red
+        Write-Host ($output | Out-String) -ForegroundColor Red
+        $script:Failures++
+        return $null
+    }
+    $summaryPath = Join-Path $Path 'review_summary.json'
+    if (-not (Test-Path $summaryPath)) {
+        Write-Host "  FAIL: Review fixture did not write $summaryPath" -ForegroundColor Red
+        $script:Failures++
+        return $null
+    }
+    return (Get-Content $summaryPath -Raw | ConvertFrom-Json)
+}
+
+function Assert-NotLifecycleClosed {
+    param($Review, [string]$Message, [string]$ExpectedMissing)
+    Assert-True ($null -ne $Review) "$Message produced review output"
+    if ($null -eq $Review) { return }
+    Assert-False ($Review.classification -eq 'NATURAL-TRADE-LIFECYCLE-CLOSED') $Message
+    if ($ExpectedMissing) {
+        Assert-True (@($Review.lifecycle_missing_requirements) -contains $ExpectedMissing) "$Message reports missing $ExpectedMissing"
+    }
+}
+
+$script:ReviewFixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("mqk_review_guard_" + [guid]::NewGuid().ToString('N'))
+try {
+    Write-Host ''
+    Write-Host '  -- strict lifecycle false-close fixture tests --'
+
+    $positive = Invoke-ReviewFixture (New-StrictLifecycleFixture -Name 'positive_complete')
+    Assert-True ($null -ne $positive -and $positive.classification -eq 'NATURAL-TRADE-LIFECYCLE-CLOSED') 'Complete strict lifecycle fixture closes'
+    Assert-True ($null -ne $positive -and @($positive.lifecycle_missing_requirements).Count -eq 0) 'Complete strict lifecycle fixture has no missing requirements'
+    Assert-False ($null -ne $positive -and $positive.classification -match 'GUI|DISCORD') 'Reviewer does not emit GUI/Discord lifecycle closure without GUI/Discord evidence'
+
+    Assert-NotLifecycleClosed (Invoke-ReviewFixture (New-StrictLifecycleFixture -Name 'missing_ack' -IncludeAck:$false)) `
+        'Fill exists but ACK missing does not close lifecycle' 'has_order_ack'
+
+    Assert-NotLifecycleClosed (Invoke-ReviewFixture (New-StrictLifecycleFixture -Name 'missing_apply' -IncludeApply:$false)) `
+        'ACK/fill exist but inbox apply missing does not close lifecycle' 'has_inbox_apply_or_durable_applied_state'
+
+    $notFlat = Invoke-ReviewFixture (New-StrictLifecycleFixture -Name 'not_flat' -FinalFlat:$false)
+    Assert-NotLifecycleClosed $notFlat `
+        'ACK/fill/apply exist but final position not flat does not close lifecycle' `
+        'final_position_flat'
+
+    Assert-NotLifecycleClosed (Invoke-ReviewFixture (New-StrictLifecycleFixture -Name 'reconcile_dirty' -ReconcileClean:$false)) `
+        'Final flat but reconcile dirty does not close lifecycle' 'reconcile_clean'
+
+    Assert-NotLifecycleClosed (Invoke-ReviewFixture (New-StrictLifecycleFixture -Name 'live_routing_enabled' -LiveRoutingEnabled:$true)) `
+        'live_routing_enabled=true does not close lifecycle' 'live_routing_enabled=false'
+
+    $unsafe = Invoke-ReviewFixture (New-StrictLifecycleFixture -Name 'unsafe_markers' `
+        -UnsafeMarkers @('direct_broker_shortcut', 'fake_fill', 'fake_bar', 'signal_injection', 'manual_db_mutation'))
+    Assert-NotLifecycleClosed $unsafe 'Unsafe evidence markers do not close lifecycle' 'no_direct_broker_shortcut_marker'
+    Assert-True ($null -ne $unsafe -and $unsafe.classification -eq 'FALSE-CLOSED') 'Unsafe evidence markers classify as FALSE-CLOSED'
+    Assert-True ($null -ne $unsafe -and @($unsafe.unsafe_marker_hits).Count -ge 5) 'Unsafe evidence marker details are reported'
+} catch {
+    Write-Host "  FAIL: Strict lifecycle fixture tests threw: $_" -ForegroundColor Red
+    $script:Failures++
+} finally {
+    if (Test-Path $script:ReviewFixtureRoot) {
+        Remove-Item -LiteralPath $script:ReviewFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Host ''

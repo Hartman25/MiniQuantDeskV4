@@ -211,6 +211,7 @@ $RiskSummary       = Read-JsonSnapshot (Join-Path $ApiDir 'risk_summary.json')
 # Trade-flow snapshots (EVIDENCE-CAPTURE-TRADE-FLOW-01)
 $ExecutionFlow       = Read-JsonSnapshot (Join-Path $ApiDir 'execution_flow.json')
 $FillQuality         = Read-JsonSnapshot (Join-Path $ApiDir 'fill_quality.json')
+$ExecutionSummary    = Read-JsonSnapshot (Join-Path $ApiDir 'execution_summary.json')
 $ExecutionOrders     = Read-JsonSnapshot (Join-Path $ApiDir 'execution_orders.json')
 $ExecutionOutbox     = Read-JsonSnapshot (Join-Path $ApiDir 'execution_outbox.json')
 $PortfolioPositions  = Read-JsonSnapshot (Join-Path $ApiDir 'portfolio_positions.json')
@@ -234,6 +235,43 @@ function Get-Field {
     $val = $Obj.PSObject.Properties[$Field]
     if ($null -eq $val) { return $Default }
     return $val.Value
+}
+
+function Test-QuantityZero {
+    param($Qty)
+    if ($null -eq $Qty) { return $false }
+    try {
+        return ([decimal]::Parse([string]$Qty, [System.Globalization.CultureInfo]::InvariantCulture) -eq [decimal]0)
+    } catch {
+        return $false
+    }
+}
+
+function Test-QuantityNonZero {
+    param($Qty)
+    if ($null -eq $Qty) { return $false }
+    try {
+        return ([decimal]::Parse([string]$Qty, [System.Globalization.CultureInfo]::InvariantCulture) -ne [decimal]0)
+    } catch {
+        return $false
+    }
+}
+
+function Test-RowFieldMatch {
+    param($Row, [string[]]$Fields, [string]$Pattern)
+    if ($null -eq $Row) { return $false }
+    foreach ($field in $Fields) {
+        $value = Get-Field $Row $field
+        if ($null -ne $value -and [string]$value -match $Pattern) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-NegatedUnsafeLine {
+    param([string]$Line)
+    return ($Line -match '(?i)\b(no|not|without)\s+(\/v2\/orders|raw\s+alpaca|direct[_ -]?broker|fake[_ -]?fills?|fake[_ -]?bars?|signal[_ -]?injection|manual[_ -]?db[_ -]?mutation)')
 }
 
 $run_id                  = Get-Field $OmsOverview 'run_id'
@@ -334,7 +372,42 @@ $db_files_present  = @(Get-ChildItem $DbDir  -File -ErrorAction SilentlyContinue
 # Trade-flow field extraction (EVIDENCE-CAPTURE-TRADE-FLOW-01)
 # ---------------------------------------------------------------------------
 
-# Fill detection: any single source is sufficient to confirm a fill occurred.
+# DB proof snapshots.
+$oms_inbox_snapshot_present = $false
+$oms_inbox_ack_present      = $false
+$oms_inbox_apply_present    = $false
+$omsInboxFile = Join-Path $DbDir 'oms_inbox_recent.txt'
+if (Test-Path $omsInboxFile) {
+    $omsInboxContent = Get-Content $omsInboxFile -Raw -ErrorAction SilentlyContinue
+    if ($omsInboxContent -and $omsInboxContent -notmatch '^\s*(UNAVAILABLE|SKIPPED)') {
+        $oms_inbox_snapshot_present = $true
+        $oms_inbox_ack_present = ($omsInboxContent -match '(?i)\b(ack|broker_ack|order_ack|accepted|new)\b')
+        $oms_inbox_apply_present = (
+            $omsInboxContent -match '(?i)\b(fill|partial_fill|final_fill|broker_final_fill|broker_partial_fill)\b' -and
+            $omsInboxContent -match '(?i)\b(applied\s*\|\s*t|applied\s*[:=]\s*(true|t|1)|\|\s*(true|t|1)\s*\|)'
+        )
+    }
+}
+
+# Baseline/long-position proof must come from explicit evidence, not a final fill.
+$existing_long_position_detected = $false
+$prior_position_baseline_present = $false
+$baselineScanFiles = @(Get-ChildItem $EvidencePath -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -in @('.json', '.txt', '.md', '.log') -and $_.Name -notin @('review_summary.md', 'review_summary.json') })
+foreach ($f in $baselineScanFiles) {
+    $lines = Get-Content $f.FullName -ErrorAction SilentlyContinue
+    foreach ($line in $lines) {
+        if ($line -match '(?i)\bexisting long position\b|\bprior long\b|\bstarting position\b.*\bAAPL\b.*\b(long|qty\s*[=:]\s*[1-9])') {
+            $existing_long_position_detected = $true
+        }
+        if ($line -match '(?i)\bbroker position baseline adopted\b|\bprior position baseline\b|\bbaseline_position_count\s*[:=]\s*[1-9]') {
+            $prior_position_baseline_present = $true
+        }
+    }
+}
+$existing_long_or_prior_baseline_present = ($existing_long_position_detected -or $prior_position_baseline_present)
+
+# Fill detection: any real fill source is sufficient to confirm a fill occurred.
 $fill_rows_fill_quality = 0
 if ($null -ne $FillQuality -and $null -ne $FillQuality.rows) {
     $fill_rows_fill_quality = @($FillQuality.rows).Count
@@ -358,8 +431,9 @@ $fill_detected = (
     ($fill_rows_portfolio_fills -gt 0) -or
     ($fill_rows_exec_flow -gt 0)
 )
+$has_fill = $fill_detected
 
-# Order submission detection: any evidence that an order entered the system.
+# Order submission detection: only explicit normal-path evidence counts.
 $order_rows_exec_orders = 0
 if ($null -ne $ExecutionOrders -and $null -ne $ExecutionOrders.rows) {
     $order_rows_exec_orders = @($ExecutionOrders.rows).Count
@@ -370,75 +444,153 @@ if ($null -ne $ExecutionOutbox -and $null -ne $ExecutionOutbox.rows) {
     $outbox_rows = @($ExecutionOutbox.rows).Count
 }
 
+$order_rows_exec_flow_submit = 0
+if ($null -ne $ExecutionFlow -and $null -ne $ExecutionFlow.rows) {
+    $order_rows_exec_flow_submit = @($ExecutionFlow.rows | Where-Object {
+        Test-RowFieldMatch $_ @('stage', 'message', 'source_table') '(?i)\b(outbox_enqueued|outbox_claimed|outbox_dispatching|broker_sent|order_submitted|submitted|dispatching|oms_outbox)\b'
+    }).Count
+}
+
 $order_submitted = (
     ($null -ne $exec_active_orders   -and $exec_active_orders   -gt 0) -or
     ($null -ne $exec_pending_orders  -and $exec_pending_orders  -gt 0) -or
     ($null -ne $open_order_count     -and $open_order_count     -gt 0) -or
     ($order_rows_exec_orders -gt 0) -or
     ($outbox_rows -gt 0) -or
-    $fill_detected   # if fill happened, order was definitely submitted
+    ($order_rows_exec_flow_submit -gt 0)
 )
+$has_order_submit = $order_submitted
 
-# ACK detection from execution flow stages.
+$sell_order_detected = $false
+foreach ($rowSet in @(
+    @{ Rows = $(if ($null -ne $ExecutionOrders -and $null -ne $ExecutionOrders.rows) { $ExecutionOrders.rows } else { @() }) },
+    @{ Rows = $(if ($null -ne $ExecutionOutbox -and $null -ne $ExecutionOutbox.rows) { $ExecutionOutbox.rows } else { @() }) },
+    @{ Rows = $(if ($null -ne $ExecutionFlow -and $null -ne $ExecutionFlow.rows) { $ExecutionFlow.rows } else { @() }) }
+)) {
+    foreach ($row in @($rowSet.Rows)) {
+        if (Test-RowFieldMatch $row @('side', 'order_side', 'action', 'intent', 'message', 'stage') '(?i)\b(sell|flatten|close)\b') {
+            $sell_order_detected = $true
+            break
+        }
+    }
+    if ($sell_order_detected) { break }
+}
+
+# ACK detection from explicit ACK/accepted evidence only. A fill does not imply ACK proof.
 $ack_detected = $false
+$ack_rows_exec_flow = 0
 if ($null -ne $ExecutionFlow -and $null -ne $ExecutionFlow.rows) {
     foreach ($row in $ExecutionFlow.rows) {
-        if ($null -ne $row.stage -and $row.stage -match 'broker_sent|ack|broker_ack') {
+        if (Test-RowFieldMatch $row @('stage', 'message') '(?i)\b(ack|broker_ack|order_ack|accepted)\b') {
             $ack_detected = $true
+            $ack_rows_exec_flow++
             break
         }
     }
 }
-# A fill implies ACK occurred at some point.
-if (-not $ack_detected -and $fill_detected) { $ack_detected = $true }
+if (-not $ack_detected -and $oms_inbox_ack_present) { $ack_detected = $true }
+$has_order_ack = $ack_detected
 
-# Inbox apply detection: fill event reached the execution flow (applied to portfolio).
+# Inbox apply/durable application detection. A fill alone is not applied-state proof.
 $inbox_apply_detected = $false
+$inbox_apply_rows_exec_flow = 0
 if ($null -ne $ExecutionFlow -and $null -ne $ExecutionFlow.rows) {
     foreach ($row in $ExecutionFlow.rows) {
-        if ($null -ne $row.stage -and $row.stage -match 'partial_fill|final_fill|broker_final_fill|broker_partial_fill') {
+        if (Test-RowFieldMatch $row @('stage', 'message') '(?i)\b(inbox_applied|fill_applied|applied_fill|oms_applied|portfolio_updated|position_updated|execution_state_applied)\b') {
             $inbox_apply_detected = $true
+            $inbox_apply_rows_exec_flow++
             break
         }
     }
 }
-if (-not $inbox_apply_detected) { $inbox_apply_detected = $fill_detected }
+if (-not $inbox_apply_detected -and $oms_inbox_apply_present) { $inbox_apply_detected = $true }
+
+$execution_summary_fill_applied = $false
+if ($null -ne $ExecutionSummary) {
+    foreach ($field in @('fills_applied', 'applied_fills', 'durable_fills_applied')) {
+        $val = Get-Field $ExecutionSummary $field
+        if ($val -eq $true -or (Test-QuantityNonZero $val)) {
+            $execution_summary_fill_applied = $true
+            break
+        }
+    }
+}
+if (-not $inbox_apply_detected -and $execution_summary_fill_applied) { $inbox_apply_detected = $true }
+$has_inbox_apply = $inbox_apply_detected
 
 # Position detection from portfolio/positions endpoint.
+$portfolio_positions_snapshot_present = ($null -ne $PortfolioPositions -and $null -ne $PortfolioPositions.PSObject.Properties['rows'])
+$portfolio_position_rows = @()
+if ($portfolio_positions_snapshot_present -and $null -ne $PortfolioPositions.rows) {
+    $portfolio_position_rows = @(@($PortfolioPositions.rows) | Where-Object { $null -ne $_ })
+}
 $position_rows_count = 0
-if ($null -ne $PortfolioPositions -and $null -ne $PortfolioPositions.rows) {
-    $position_rows_count = @($PortfolioPositions.rows).Count
+if ($portfolio_positions_snapshot_present) {
+    $position_rows_count = $portfolio_position_rows.Count
 }
-$position_nonzero = ($position_rows_count -gt 0 -or ($null -ne $position_count -and $position_count -gt 0))
-$position_flat    = (-not $position_nonzero)
 
-# Current position qty (single symbol; null if multi-symbol or unavailable).
 $current_position_qty = $null
-if ($position_rows_count -eq 1 -and $null -ne $PortfolioPositions.rows[0].qty) {
-    $current_position_qty = $PortfolioPositions.rows[0].qty
-} elseif ($position_rows_count -eq 1 -and $null -ne $PortfolioPositions.rows[0].broker_qty) {
-    $current_position_qty = $PortfolioPositions.rows[0].broker_qty
+$aapl_position_qty = $null
+$position_qty_unknown = $false
+$nonzero_position_rows = 0
+if ($portfolio_positions_snapshot_present) {
+    if ($position_rows_count -eq 0) {
+        $current_position_qty = 0
+        $aapl_position_qty = 0
+    }
+    foreach ($row in $portfolio_position_rows) {
+        $qty = Get-Field $row 'qty'
+        if ($null -eq $qty) { $qty = Get-Field $row 'broker_qty' }
+        if ($null -eq $qty) { $qty = Get-Field $row 'quantity' }
+
+        $symbol = Get-Field $row 'symbol'
+        if ($null -ne $symbol -and [string]$symbol -eq 'AAPL') {
+            $aapl_position_qty = $qty
+            $current_position_qty = $qty
+        } elseif ($position_rows_count -eq 1) {
+            $current_position_qty = $qty
+        }
+
+        if ($null -eq $qty) {
+            $position_qty_unknown = $true
+        } elseif (Test-QuantityNonZero $qty) {
+            $nonzero_position_rows++
+        }
+    }
 }
+$position_nonzero = ($nonzero_position_rows -gt 0)
+$position_flat = ($portfolio_positions_snapshot_present -and -not $position_qty_unknown -and $nonzero_position_rows -eq 0)
+$final_position_flat = $position_flat
 
 # Broker order map presence via DB snapshot file content.
 $broker_order_map_present = $false
 $bomFile = Join-Path $DbDir 'broker_order_map_recent.txt'
 if (Test-Path $bomFile) {
     $bomContent = Get-Content $bomFile -Raw -ErrorAction SilentlyContinue
-    if ($bomContent -and $bomContent.Length -gt 60 -and $bomContent -notmatch '^UNAVAILABLE') {
+    if ($bomContent -and
+        $bomContent -notmatch '^\s*(UNAVAILABLE|SKIPPED)' -and
+        $bomContent -notmatch '\(0 rows\)' -and
+        $bomContent -match '(?i)(broker_order_id|broker order|[0-9a-f]{8}-[0-9a-f]{4}-)') {
         $broker_order_map_present = $true
     }
 }
 
 # Reconcile mismatch count from the dedicated mismatches endpoint.
 $reconcile_mismatch_endpoint_count = 0
-if ($null -ne $ReconcileMismatches -and $null -ne $ReconcileMismatches.rows) {
-    $reconcile_mismatch_endpoint_count = @($ReconcileMismatches.rows).Count
+$reconcile_mismatch_rows = @()
+if ($null -ne $ReconcileMismatches -and
+    $null -ne $ReconcileMismatches.PSObject.Properties['rows'] -and
+    $null -ne $ReconcileMismatches.rows) {
+    $reconcile_mismatch_rows = @(@($ReconcileMismatches.rows) | Where-Object { $null -ne $_ })
+    $reconcile_mismatch_endpoint_count = $reconcile_mismatch_rows.Count
 }
 
-# Reconcile clean: status ok, no mismatches from any source.
+# Reconcile clean: explicit clean/ok status, no mismatches from any source.
+$reconcile_status_api_str = Get-Field $ReconcileStatus 'status'
+if ($null -eq $reconcile_status_api_str) { $reconcile_status_api_str = Get-Field $ReconcileStatus 'reconcile_status' }
 $reconcile_clean = (
-    ($reconcile_status_str -eq 'ok' -or $reconcile_ready -eq $true) -and
+    ($reconcile_status_str -eq 'ok' -or $reconcile_status_str -eq 'clean' -or
+     $reconcile_status_api_str -eq 'ok' -or $reconcile_status_api_str -eq 'clean') -and
     ($null -eq $reconcile_total_mis -or $reconcile_total_mis -eq 0) -and
     ($reconcile_mismatch_endpoint_count -eq 0)
 )
@@ -480,8 +632,83 @@ if (-not $order_submitted) {
     }
 }
 
-# Trade lifecycle composite: all critical legs confirmed.
-$trade_lifecycle_detected = ($order_submitted -and $fill_detected -and $reconcile_clean)
+# Unsafe evidence markers: fail closed if evidence shows shortcuts or synthetic proof.
+$unsafe_marker_flags = @{
+    direct_broker_shortcut = $false
+    fake_fill              = $false
+    fake_bar               = $false
+    signal_injection       = $false
+    manual_db_mutation     = $false
+}
+$unsafe_marker_hits = [System.Collections.Generic.List[string]]::new()
+$unsafeMarkerSpecs = @(
+    @{ Name = 'direct_broker_shortcut'; Pattern = '(?i)\b(direct[_ -]?broker[_ -]?shortcut|raw[_ -]?alpaca|\/v2\/orders)\b' },
+    @{ Name = 'fake_fill';              Pattern = '(?i)\b(fake[_ -]?fills?|synthetic[_ -]?fills?|simulated[_ -]?fills?)\b\s*(:|=|\b)\s*(true|yes|present|created|used)?' },
+    @{ Name = 'fake_bar';               Pattern = '(?i)\b(fake[_ -]?bars?|synthetic[_ -]?bars?|simulated[_ -]?bars?)\b\s*(:|=|\b)\s*(true|yes|present|created|used)?' },
+    @{ Name = 'signal_injection';       Pattern = '(?i)\b(signal[_ -]?injection\s*(:|=)?\s*(true|yes|present|used|admitted)|signal injection admitted|injected signal|\/api\/v1\/strategy\/signal)\b' },
+    @{ Name = 'manual_db_mutation';     Pattern = '(?i)\b(manual[_ -]?db[_ -]?mutation\s*(:|=)?\s*(true|yes|present|used)|manual\s+(INSERT|UPDATE|DELETE|DROP)|psql.*-c.*(INSERT|UPDATE|DELETE|DROP))\b' }
+)
+$unsafeScanFiles = @(Get-ChildItem $EvidencePath -Recurse -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -in @('.json', '.txt', '.md', '.log', '.csv') -and $_.Name -notin @('review_summary.md', 'review_summary.json') })
+foreach ($f in $unsafeScanFiles) {
+    $relPath = $f.FullName
+    if ($relPath.StartsWith($EvidencePath)) {
+        $relPath = $relPath.Substring($EvidencePath.Length).TrimStart([char[]]@('\', '/'))
+    }
+    $lines = Get-Content $f.FullName -ErrorAction SilentlyContinue
+    foreach ($line in $lines) {
+        if (Test-NegatedUnsafeLine -Line $line) { continue }
+        foreach ($spec in $unsafeMarkerSpecs) {
+            if ($line -match $spec.Pattern) {
+                $unsafe_marker_flags[$spec.Name] = $true
+                $hit = "marker=$($spec.Name) file=$relPath"
+                if (-not $unsafe_marker_hits.Contains($hit)) {
+                    $unsafe_marker_hits.Add($hit)
+                }
+            }
+        }
+    }
+}
+
+$direct_broker_shortcut_detected = $unsafe_marker_flags['direct_broker_shortcut']
+$fake_fill_detected              = $unsafe_marker_flags['fake_fill']
+$fake_bar_detected               = $unsafe_marker_flags['fake_bar']
+$signal_injection_detected       = $unsafe_marker_flags['signal_injection']
+$manual_db_mutation_detected     = $unsafe_marker_flags['manual_db_mutation']
+
+$no_direct_broker_shortcut = (-not $direct_broker_shortcut_detected)
+$no_fake_fills             = (-not $fake_fill_detected)
+$no_fake_bars              = (-not $fake_bar_detected)
+$no_signal_injection       = (-not $signal_injection_detected)
+$no_manual_db_mutation     = (-not $manual_db_mutation_detected)
+$no_unsafe_markers         = ($unsafe_marker_hits.Count -eq 0)
+$live_routing_disabled     = ($live_routing_enabled -eq $false -and ($null -eq $live_routing_confirmed_off -or $live_routing_confirmed_off -eq $true))
+
+$lifecycle_missing_requirements = [System.Collections.Generic.List[string]]::new()
+if (-not $api_files_present) { $lifecycle_missing_requirements.Add('api_files_present') }
+if (-not $runtime_reached_running) { $lifecycle_missing_requirements.Add('runtime_reached_running=true') }
+if (-not $existing_long_or_prior_baseline_present) { $lifecycle_missing_requirements.Add('existing_long_position_or_prior_baseline_present') }
+if (-not $has_order_submit) { $lifecycle_missing_requirements.Add('has_order_submit') }
+if (-not $sell_order_detected) { $lifecycle_missing_requirements.Add('sell_side_or_flatten_order_detected') }
+if (-not $has_order_ack) { $lifecycle_missing_requirements.Add('has_order_ack') }
+if (-not $has_fill) { $lifecycle_missing_requirements.Add('has_fill') }
+if (-not $has_inbox_apply) { $lifecycle_missing_requirements.Add('has_inbox_apply_or_durable_applied_state') }
+if (-not $portfolio_positions_snapshot_present) { $lifecycle_missing_requirements.Add('portfolio_positions_snapshot_present') }
+if (-not $final_position_flat) { $lifecycle_missing_requirements.Add('final_position_flat') }
+if (-not $broker_order_map_present) { $lifecycle_missing_requirements.Add('broker_order_map_present') }
+if (-not $reconcile_clean) { $lifecycle_missing_requirements.Add('reconcile_clean') }
+if (-not $live_routing_disabled) { $lifecycle_missing_requirements.Add('live_routing_enabled=false') }
+if ($kill_switch_active -eq $true) { $lifecycle_missing_requirements.Add('kill_switch_active=false') }
+if ($integrity_halt_active -eq $true) { $lifecycle_missing_requirements.Add('integrity_halt_active=false') }
+if ($risk_halt_active -eq $true) { $lifecycle_missing_requirements.Add('risk_halt_active=false') }
+if (-not $no_direct_broker_shortcut) { $lifecycle_missing_requirements.Add('no_direct_broker_shortcut_marker') }
+if (-not $no_fake_fills) { $lifecycle_missing_requirements.Add('no_fake_fill_marker') }
+if (-not $no_fake_bars) { $lifecycle_missing_requirements.Add('no_fake_bar_marker') }
+if (-not $no_signal_injection) { $lifecycle_missing_requirements.Add('no_signal_injection_marker') }
+if (-not $no_manual_db_mutation) { $lifecycle_missing_requirements.Add('no_manual_db_mutation_marker') }
+
+# Trade lifecycle composite: all strict market-proof requirements confirmed.
+$trade_lifecycle_detected = ($lifecycle_missing_requirements.Count -eq 0)
 
 # Read notes/final_verdict.txt for any manually-filled verdict
 $manual_verdict = $null
@@ -518,6 +745,11 @@ if ($null -ne (Get-Content $verdictFile -Raw -ErrorAction SilentlyContinue)) {
 }
 if ($SecretWarnings.Count -gt 0) {
     $false_closed_reasons.Add("Possible secrets detected in evidence  --  review before sharing ($($SecretWarnings.Count) warning(s))")
+}
+if ($unsafe_marker_hits.Count -gt 0) {
+    foreach ($hit in $unsafe_marker_hits) {
+        $false_closed_reasons.Add("Unsafe evidence marker detected: $hit")
+    }
 }
 
 $classification = $null
@@ -562,26 +794,18 @@ if ($null -eq $classification) {
 }
 
 # NATURAL-TRADE-LIFECYCLE-CLOSED
-# Requires: runtime ran, fill confirmed from any evidence source, reconcile clean.
-# Uses multi-source fill detection so a fill captured post-run is still classified correctly.
+# Requires explicit market-proof lifecycle evidence. Missing evidence fails closed.
 if ($null -eq $classification) {
-    $lifecycle_ok = (
-        $runtime_reached_running -eq $true -and
-        ($live_routing_enabled -eq $false -or $null -eq $live_routing_enabled) -and
-        $fill_detected -and
-        $reconcile_clean -and
-        ($null -eq $kill_switch_active -or $kill_switch_active -eq $false) -and
-        ($null -eq $integrity_halt_active -or $integrity_halt_active -eq $false) -and
-        $api_files_present
-    )
+    $lifecycle_ok = ($lifecycle_missing_requirements.Count -eq 0)
     if ($lifecycle_ok) {
         $classification = 'NATURAL-TRADE-LIFECYCLE-CLOSED'
-        $classification_reasons.Add("runtime reached running; fill_detected=$fill_detected")
+        $classification_reasons.Add("runtime reached running; strict lifecycle requirements satisfied")
         $classification_reasons.Add("fill evidence: fill_quality_rows=$fill_rows_fill_quality, portfolio_fill_rows=$fill_rows_portfolio_fills, exec_flow_fill_rows=$fill_rows_exec_flow, oms_fill_count=$fill_count")
-        $classification_reasons.Add("order_submitted=$order_submitted, ack_detected=$ack_detected, inbox_apply_detected=$inbox_apply_detected")
-        $classification_reasons.Add("position_nonzero=$position_nonzero, broker_order_map_present=$broker_order_map_present")
+        $classification_reasons.Add("has_order_submit=$has_order_submit, sell_order_detected=$sell_order_detected, has_order_ack=$has_order_ack, has_inbox_apply=$has_inbox_apply")
+        $classification_reasons.Add("existing_long_or_prior_baseline_present=$existing_long_or_prior_baseline_present, final_position_flat=$final_position_flat, broker_order_map_present=$broker_order_map_present")
         $classification_reasons.Add("reconcile_clean=$reconcile_clean (status=$reconcile_status_str, total_mismatches=$reconcile_total_mis, mismatch_endpoint_rows=$reconcile_mismatch_endpoint_count)")
         $classification_reasons.Add('live_routing_enabled=false confirmed')
+        $classification_reasons.Add('no unsafe evidence markers detected')
     }
 }
 
@@ -590,7 +814,7 @@ if ($null -eq $classification) {
 if ($null -eq $classification) {
     $readiness_ok = (
         $runtime_reached_running -eq $true -and
-        ($live_routing_enabled -eq $false -or $null -eq $live_routing_enabled) -and
+        $live_routing_disabled -and
         ($null -ne $completed_rows -and $completed_rows -gt 0) -and
         (-not $fill_detected) -and
         (-not $order_submitted) -and
@@ -631,6 +855,10 @@ if ($null -eq $classification) {
     if ($null -eq $SystemStatus) { $classification_reasons.Add('system_status.json absent  --  evidence incomplete') }
     if ($runtime_halted) { $classification_reasons.Add('runtime halted at some point during session') }
     $classification_reasons.Add('lifecycle not fully proven; review notes/ and events_feed for details')
+}
+
+if ($classification -ne 'NATURAL-TRADE-LIFECYCLE-CLOSED' -and $lifecycle_missing_requirements.Count -gt 0) {
+    $classification_reasons.Add("lifecycle closure withheld; missing requirements: $($lifecycle_missing_requirements -join ', ')")
 }
 
 # ---------------------------------------------------------------------------
@@ -698,15 +926,36 @@ $summaryLines.Add("- no_order_reason:                  $ps_no_order_reason")
 $summaryLines.Add("")
 $summaryLines.Add("## Trade Lifecycle (EVIDENCE-CAPTURE-TRADE-FLOW-01)")
 $summaryLines.Add("- trade_lifecycle_detected:     $trade_lifecycle_detected")
+$summaryLines.Add("- has_order_submit:             $has_order_submit")
+$summaryLines.Add("- sell_order_detected:          $sell_order_detected")
+$summaryLines.Add("- has_order_ack:                $has_order_ack")
+$summaryLines.Add("- has_fill:                     $has_fill")
+$summaryLines.Add("- has_inbox_apply:              $has_inbox_apply")
+$summaryLines.Add("- final_position_flat:          $final_position_flat")
+$summaryLines.Add("- live_routing_disabled:        $live_routing_disabled")
+$summaryLines.Add("- no_unsafe_markers:            $no_unsafe_markers")
+$summaryLines.Add("- existing_long_detected:       $existing_long_position_detected")
+$summaryLines.Add("- prior_baseline_present:       $prior_position_baseline_present")
+$summaryLines.Add("- baseline_or_long_present:     $existing_long_or_prior_baseline_present")
 $summaryLines.Add("- order_submitted:              $order_submitted")
 $summaryLines.Add("- ack_detected:                 $ack_detected")
 $summaryLines.Add("- fill_detected:                $fill_detected")
 $summaryLines.Add("- inbox_apply_detected:         $inbox_apply_detected")
+$summaryLines.Add("- oms_inbox_snapshot_present:   $oms_inbox_snapshot_present")
+$summaryLines.Add("- oms_inbox_ack_present:        $oms_inbox_ack_present")
+$summaryLines.Add("- oms_inbox_apply_present:      $oms_inbox_apply_present")
 $summaryLines.Add("- position_nonzero:             $position_nonzero")
 $summaryLines.Add("- position_flat:                $position_flat")
+$summaryLines.Add("- positions_snapshot_present:   $portfolio_positions_snapshot_present")
 $summaryLines.Add("- current_position_qty:         $current_position_qty")
+$summaryLines.Add("- aapl_position_qty:            $aapl_position_qty")
 $summaryLines.Add("- broker_order_map_present:     $broker_order_map_present")
 $summaryLines.Add("- reconcile_clean:              $reconcile_clean")
+$summaryLines.Add("- direct_broker_shortcut:       $direct_broker_shortcut_detected")
+$summaryLines.Add("- fake_fill_marker:             $fake_fill_detected")
+$summaryLines.Add("- fake_bar_marker:              $fake_bar_detected")
+$summaryLines.Add("- signal_injection_marker:      $signal_injection_detected")
+$summaryLines.Add("- manual_db_mutation_marker:    $manual_db_mutation_detected")
 $summaryLines.Add("- signal_qty:                   $signal_qty")
 $summaryLines.Add("- target_qty:                   $target_qty")
 $summaryLines.Add("- strategy_decision:            $strategy_decision")
@@ -717,6 +966,13 @@ $summaryLines.Add("- exec_flow_fill_rows:          $fill_rows_exec_flow")
 $summaryLines.Add("- outbox_rows:                  $outbox_rows")
 $summaryLines.Add("- exec_order_rows:              $order_rows_exec_orders")
 $summaryLines.Add("- mismatch_endpoint_rows:       $reconcile_mismatch_endpoint_count")
+$summaryLines.Add("")
+$summaryLines.Add("## Lifecycle Missing Requirements")
+if ($lifecycle_missing_requirements.Count -gt 0) {
+    foreach ($missing in $lifecycle_missing_requirements) { $summaryLines.Add("- $missing") }
+} else {
+    $summaryLines.Add("- (none)")
+}
 $summaryLines.Add("")
 $summaryLines.Add("## Reconcile")
 $summaryLines.Add("- reconcile_status:        $reconcile_status_str")
@@ -749,8 +1005,8 @@ if ($SecretWarnings.Count -gt 0) {
 }
 
 $summaryLines.Add("## Classification Reference")
-$summaryLines.Add("- NATURAL-TRADE-LIFECYCLE-CLOSED  Full natural lifecycle: running, order submitted, ACK, fill (any source), inbox applied, reconcile clean")
-$summaryLines.Add("- READINESS-CLOSED-NO-TRADE       Running, bars loaded, no trade signal/order/fill, reconcile clean, no fault")
+$summaryLines.Add("- NATURAL-TRADE-LIFECYCLE-CLOSED  Strict lifecycle: prior long/baseline, sell submit, ACK, fill, apply, final flat, broker map, reconcile clean, live routing off, no unsafe markers")
+$summaryLines.Add("- READINESS-CLOSED-NO-TRADE       Running, bars loaded, no trade signal/order/fill, reconcile clean, live routing off, no fault")
 $summaryLines.Add("- PARTIAL                         Partial lifecycle; incomplete without clear failure (e.g. order but no fill, fill but reconcile missing)")
 $summaryLines.Add("- OPEN                            Active blocker: halt, kill switch, bars missing, reconcile dirty, evidence missing")
 $summaryLines.Add("- FALSE-CLOSED                    Live routing enabled, secrets in evidence, no proof files, fake markers")
@@ -831,15 +1087,38 @@ $jsonObj = [ordered]@{
     db_files_present       = $db_files_present
     manual_verdict_note         = $manual_verdict
     trade_lifecycle_detected    = $trade_lifecycle_detected
+    lifecycle_missing_requirements = @($lifecycle_missing_requirements)
+    has_order_submit          = $has_order_submit
+    sell_order_detected       = $sell_order_detected
+    has_order_ack             = $has_order_ack
+    has_fill                  = $has_fill
+    has_inbox_apply           = $has_inbox_apply
+    final_position_flat       = $final_position_flat
+    live_routing_disabled     = $live_routing_disabled
+    no_unsafe_markers         = $no_unsafe_markers
+    existing_long_position_detected = $existing_long_position_detected
+    prior_position_baseline_present = $prior_position_baseline_present
+    existing_long_or_prior_baseline_present = $existing_long_or_prior_baseline_present
     order_submitted             = $order_submitted
     ack_detected                = $ack_detected
     fill_detected               = $fill_detected
     inbox_apply_detected        = $inbox_apply_detected
+    oms_inbox_snapshot_present  = $oms_inbox_snapshot_present
+    oms_inbox_ack_present       = $oms_inbox_ack_present
+    oms_inbox_apply_present     = $oms_inbox_apply_present
     position_nonzero            = $position_nonzero
     position_flat               = $position_flat
+    portfolio_positions_snapshot_present = $portfolio_positions_snapshot_present
     current_position_qty        = $current_position_qty
+    aapl_position_qty           = $aapl_position_qty
     broker_order_map_present    = $broker_order_map_present
     reconcile_clean             = $reconcile_clean
+    direct_broker_shortcut_detected = $direct_broker_shortcut_detected
+    fake_fill_detected          = $fake_fill_detected
+    fake_bar_detected           = $fake_bar_detected
+    signal_injection_detected   = $signal_injection_detected
+    manual_db_mutation_detected = $manual_db_mutation_detected
+    unsafe_marker_hits          = @($unsafe_marker_hits)
     signal_qty                  = $signal_qty
     target_qty                  = $target_qty
     strategy_decision           = $strategy_decision
