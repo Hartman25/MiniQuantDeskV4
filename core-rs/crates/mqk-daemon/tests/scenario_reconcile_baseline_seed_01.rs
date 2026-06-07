@@ -1,34 +1,50 @@
-//! RECONCILE-DRIFT-BASELINE-SEED-01 proof tests.
+//! RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01 proof tests.
 //!
-//! Root cause: after an order was ACK'd (active_orders non-empty), the prior
-//! `has_local_activity` guard switched the local snapshot provider from the
-//! adopted broker baseline to the execution snapshot.  The execution snapshot
-//! had empty positions (no fills yet), but the broker still held the adopted
-//! baseline position (AAPL qty=4 in the live smoke).  Result: local=0 vs
-//! broker=4 => RECONCILE_DRIFT halt before any fill.
+//! # Root cause
 //!
-//! Fix: remove the `has_local_activity` guard in both `local_snapshot_provider`
-//! (`orchestrator_build.rs`) and `local_fn` (`lifecycle.rs`).  Instead, always
-//! merge adopted baseline positions into the local portfolio positions:
-//!   total_local_position = baseline_position + portfolio_fill_delta
+//! `seed_portfolio_from_baseline` (RUNTIME-POSITION-SEED-ON-START-01, commit
+//! 16209ba) mutates the live `PortfolioState` directly at run start, so
+//! `execution_snapshot.portfolio.positions` already carries
+//! `adopted_baseline + same_run_fill_delta`.
 //!
-//! This is correct at every stage of the run:
-//!   - before any dispatch: delta=0, total = baseline (broker has baseline) => clean
-//!   - after ACK (no fill): delta=0, total = baseline, broker still has baseline => clean
-//!   - after fills: delta = fill qty, total = baseline + delta => broker should match => clean
-//!   - unexplained broker change: total != broker => drift => halt (correct)
+//! The prior `local_snapshot_provider` (`orchestrator_build.rs`) and `local_fn`
+//! (`lifecycle.rs`) — written under the older RECONCILE-DRIFT-BASELINE-SEED-01
+//! model, before the portfolio was seeded directly — additionally merged the
+//! adopted baseline back into the derived local snapshot:
+//!
+//!   local_truth = (baseline + delta)        [from the already-seeded snapshot]
+//!               + baseline                  [redundant re-merge]
+//!               = fills + 2 x baseline
+//!
+//! while broker truth = fills + baseline.  Any adopted baseline position
+//! therefore guaranteed a `PositionQtyMismatch` → `ReconcileDrift` →
+//! disarm/halt (REC-01R), even with a perfectly healthy broker.
+//!
+//! # Fix
+//!
+//! `seed_portfolio_from_baseline` is the SOLE baseline-entry point.  Downstream
+//! reconcile derives local truth directly from the seeded execution snapshot via
+//! `reconcile_local_snapshot_from_runtime_with_sides` — no re-merge.  The merge
+//! blocks were removed from both `local_snapshot_provider` and `local_fn`.
 //!
 //! # Test matrix
 //!
-//! | Test   | Scenario                                                           | Expected |
-//! |--------|--------------------------------------------------------------------|----------|
-//! | RBS01  | baseline AAPL=4 + no fills + broker AAPL=4                        | clean    |
-//! | RBS02  | baseline AAPL=4 + buy fill +1 + broker AAPL=5                     | clean    |
-//! | RBS03  | baseline AAPL=4 + no fills + broker AAPL=5 (unexplained drift)    | dirty    |
-//! | RBS04  | no baseline + broker AAPL=4                                       | dirty    |
-//! | RBS05  | baseline AAPL=4 + pending ACK'd order + broker {AAPL=4, order}    | clean    |
-//! | RBS06  | baseline AAPL=4 + sell fill -4 (close out) + broker flat          | clean    |
-//! | RBS07  | structural: merge is read-only, no synthetic fill rows            | proof    |
+//! All scenarios model the snapshot positions as they appear AFTER seeding
+//! (i.e. `seeded_qty = baseline_qty + same_run_fill_delta`), matching what
+//! `reconcile_local_snapshot_from_runtime_with_sides` actually reads off a
+//! live `execution_snapshot` post-fix — no second baseline addition.
+//!
+//! | Test   | Scenario                                                            | Expected |
+//! |--------|---------------------------------------------------------------------|----------|
+//! | RBS01  | seeded AAPL=4 (baseline only, no fills) + broker AAPL=4             | clean    |
+//! | RBS02  | seeded AAPL=5 (baseline=4 + buy fill +1) + broker AAPL=5            | clean    |
+//! | RBS03  | seeded AAPL=4 (baseline only) + broker AAPL=5 (unexplained drift)   | dirty    |
+//! | RBS04  | no baseline, no fills (flat) + broker AAPL=4                        | dirty    |
+//! | RBS05  | seeded AAPL=4 (baseline, no fill delta yet) + ACK'd order + broker  | no pos.  |
+//! |        | stale at AAPL=4                                                     | mismatch |
+//! | RBS06  | seeded AAPL=0 (baseline=4 fully sold, delta=-4) + broker flat       | clean    |
+//! | RBS07  | structural: derivation is a pure read of the seeded snapshot — no   | proof    |
+//! |        | re-merge step, no synthetic fill rows                               |          |
 
 use mqk_reconcile::{
     reconcile_monotonic, BrokerSnapshot, LocalSnapshot, OrderSnapshot, OrderStatus, ReconcileDiff,
@@ -38,12 +54,6 @@ use mqk_reconcile::{
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn baseline_with_position(symbol: &str, qty: i64) -> LocalSnapshot {
-    let mut s = LocalSnapshot::empty();
-    s.positions.insert(symbol.to_string(), qty);
-    s
-}
 
 fn broker_with_position(symbol: &str, qty: i64, ts_ms: i64) -> BrokerSnapshot {
     let mut s = BrokerSnapshot::empty_at(ts_ms);
@@ -55,166 +65,161 @@ fn ts() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// Simulate the patched local_snapshot_provider / local_fn merge logic.
+/// Simulate the PATCHED `local_snapshot_provider` / `local_fn` derivation
+/// (RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01).
 ///
-/// `portfolio_delta`: (symbol, qty) pairs from fills applied during the run.
-/// `baseline`: the adopted broker baseline LocalSnapshot, if any.
+/// `seeded_positions` represents `execution_snapshot.portfolio.positions` AS IT
+/// APPEARS IN PRODUCTION POST-FIX: `seed_portfolio_from_baseline` has already
+/// folded the adopted baseline into the live `PortfolioState` (once, at run
+/// start), and any same-run fills have been applied on top via `apply_entry`.
+/// So `seeded_qty = baseline_qty + same_run_fill_delta` — already final.
 ///
-/// Returns the merged local snapshot: total_position = baseline + delta.
-fn merged_local(
-    portfolio_delta: &[(&str, i64)],
-    baseline: Option<&LocalSnapshot>,
-) -> LocalSnapshot {
+/// This mirrors `reconcile_local_snapshot_from_runtime_with_sides`: a direct,
+/// read-only extraction of `(symbol, net_qty)` pairs.  No baseline is added a
+/// second time — that is precisely the bug this patch removes.
+fn local_from_seeded_snapshot(seeded_positions: &[(&str, i64)]) -> LocalSnapshot {
     let mut local = LocalSnapshot::empty();
-    for &(sym, qty) in portfolio_delta {
+    for &(sym, qty) in seeded_positions {
         if qty != 0 {
-            *local.positions.entry(sym.to_string()).or_insert(0) += qty;
+            local.positions.insert(sym.to_string(), qty);
         }
     }
-    if let Some(bl) = baseline {
-        for (sym, &bl_qty) in &bl.positions {
-            *local.positions.entry(sym.clone()).or_insert(0) += bl_qty;
-        }
-    }
-    local.positions.retain(|_, qty| *qty != 0);
     local
 }
 
 // ---------------------------------------------------------------------------
-// RBS01 — baseline AAPL=4 + no fills + broker AAPL=4 → clean
+// RBS01 — seeded AAPL=4 (baseline only, no fills) + broker AAPL=4 → clean
 //
-// Proves: with no fills yet (portfolio delta=0), the adopted baseline is the
-// entire local truth.  Broker has the same baseline position → clean.
-// This is the pre-dispatch phase that was already handled by the old guard.
+// Proves: before any same-run fills, the seeded snapshot already equals the
+// adopted baseline (seed_portfolio_from_baseline ran once at start).  Reading
+// it directly gives local=4, matching broker=4.  A re-merge would have produced
+// local=8 and a false PositionQtyMismatch.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rbs01_baseline_no_fills_matching_broker_is_clean() {
-    let baseline = baseline_with_position("AAPL", 4);
+fn rbs01_seeded_baseline_no_fills_matching_broker_is_clean() {
     let broker = broker_with_position("AAPL", 4, ts());
 
-    let local = merged_local(&[], Some(&baseline));
+    // execution_snapshot.portfolio.positions already shows AAPL=4 (seeded once).
+    let local = local_from_seeded_snapshot(&[("AAPL", 4)]);
 
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(4),
-        "RBS01: baseline(AAPL=4) + no fills must give local AAPL=4"
+        "RBS01: seeded snapshot AAPL=4 must read through as local AAPL=4 (not re-merged to 8)"
     );
 
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         result.is_clean(),
-        "RBS01: baseline(4) + no fills vs broker(4) must be clean; diffs={:?}",
+        "RBS01: local(4) vs broker(4) must be clean; diffs={:?}",
         result.diffs
     );
 }
 
 // ---------------------------------------------------------------------------
-// RBS02 — baseline AAPL=4 + buy fill +1 + broker AAPL=5 → clean
+// RBS02 — seeded AAPL=5 (baseline=4 + buy fill +1) + broker AAPL=5 → clean
 //
-// Proves: after a fill, the merged total (baseline + delta) matches the broker.
-// Broker should show baseline + fill = 5.  local = 4 + 1 = 5 → clean.
+// Proves: after a same-run fill, the seeded snapshot already shows
+// baseline + delta = 5 (apply_entry ran on top of the seeded portfolio).
+// Reading it directly gives local=5, matching broker=5.  A re-merge would have
+// produced local=9 (5 + baseline 4) and a false PositionQtyMismatch.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rbs02_baseline_plus_fill_matches_broker_is_clean() {
-    let baseline = baseline_with_position("AAPL", 4);
+fn rbs02_seeded_baseline_plus_fill_matches_broker_is_clean() {
     let broker = broker_with_position("AAPL", 5, ts());
 
-    // Portfolio delta: +1 buy fill.
-    let local = merged_local(&[("AAPL", 1)], Some(&baseline));
+    // execution_snapshot.portfolio.positions already shows AAPL=5
+    // (4 baseline + 1 same-run buy fill, folded in by seed + apply_entry).
+    let local = local_from_seeded_snapshot(&[("AAPL", 5)]);
 
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(5),
-        "RBS02: portfolio(+1) + baseline(4) must give local AAPL=5"
+        "RBS02: seeded snapshot AAPL=5 (baseline 4 + fill 1) must read through as local AAPL=5"
     );
 
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         result.is_clean(),
-        "RBS02: merged(5) vs broker(5) must be clean; diffs={:?}",
+        "RBS02: local(5) vs broker(5) must be clean; diffs={:?}",
         result.diffs
     );
 }
 
 // ---------------------------------------------------------------------------
-// RBS03 — baseline AAPL=4 + no fills + broker AAPL=5 → dirty
+// RBS03 — seeded AAPL=4 (baseline only) + broker AAPL=5 → dirty
 //
-// Proves: an unexplained broker position increase (broker > baseline, no
-// matching local fills) still halts.  The fix must not mask real drift.
+// Proves: an unexplained broker position increase (broker > seeded local, no
+// matching same-run fill) still halts.  The fix must not mask real drift —
+// removing the redundant merge does not weaken genuine drift detection.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rbs03_baseline_with_unexplained_broker_drift_is_dirty() {
-    let baseline = baseline_with_position("AAPL", 4);
+fn rbs03_seeded_baseline_with_unexplained_broker_drift_is_dirty() {
     let broker = broker_with_position("AAPL", 5, ts()); // broker increased unexpectedly
 
-    let local = merged_local(&[], Some(&baseline));
+    let local = local_from_seeded_snapshot(&[("AAPL", 4)]);
 
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         !result.is_clean(),
-        "RBS03: baseline(4) vs broker(5) must be dirty — unexplained drift must halt"
+        "RBS03: local(4) vs broker(5) must be dirty — unexplained drift must still halt"
     );
 }
 
 // ---------------------------------------------------------------------------
-// RBS04 — no baseline + broker AAPL=4 → dirty (fail-closed)
+// RBS04 — no baseline, no fills (flat seeded snapshot) + broker AAPL=4 → dirty
 //
-// Proves: without an adopted baseline, a broker position causes dirty reconcile.
-// The operator must explicitly adopt a baseline before starting with broker
-// pre-existing positions.
+// Proves: without an adopted baseline, seed_portfolio_from_baseline is a no-op
+// and the snapshot stays flat.  A broker position with no corresponding local
+// truth is dirty (fail-closed) — the operator must adopt a baseline before
+// starting with broker pre-existing positions.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rbs04_no_baseline_with_broker_position_is_dirty() {
+fn rbs04_no_baseline_flat_snapshot_with_broker_position_is_dirty() {
     let broker = broker_with_position("AAPL", 4, ts());
-    let local = merged_local(&[], None);
+    let local = local_from_seeded_snapshot(&[]);
 
     assert!(
         local.positions.is_empty(),
-        "RBS04: no baseline = empty local"
+        "RBS04: no baseline, no fills => flat seeded snapshot => empty local"
     );
 
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         !result.is_clean(),
-        "RBS04: no baseline, broker AAPL=4 must be dirty (fail-closed)"
+        "RBS04: flat local, broker AAPL=4 must be dirty (fail-closed)"
     );
 }
 
 // ---------------------------------------------------------------------------
-// RBS05 — baseline AAPL=4 + ACK'd order (no fill yet) + broker has baseline
-//          position (stale snapshot, order not yet visible) → clean
+// RBS05 — seeded AAPL=4 (baseline, no fill delta yet) + ACK'd order + broker
+//          stale at AAPL=4 → no PositionQtyMismatch
 //
-// This is the exact live smoke failure scenario.  After the AAPL buy order was
-// ACK'd by Alpaca, active_orders became non-empty.  The broker snapshot is
-// typically stale at this point (refreshed less frequently than the reconcile
-// tick) — it still shows the pre-order position without the new order.
+// This is the live-smoke scenario that originally motivated baseline inclusion:
+// the AAPL buy order is ACK'd (active_orders non-empty) but not yet filled, so
+// the seeded snapshot still shows only the baseline (4).  The broker snapshot
+// is typically stale at this point (refreshed less often than the reconcile
+// tick) — it still shows the pre-order position.
 //
-// Old code: has_local_activity=true (active_orders non-empty) → switched to
-// exec_snap (positions empty) → local AAPL=0 vs broker AAPL=4 → RECONCILE_DRIFT.
-//
-// With the merge fix: local positions = {} (no fills) + baseline {AAPL:4} = {AAPL:4}.
-// Broker positions = {AAPL:4} (stale, no order yet).  Position comparison: 4==4.
-// local.orders has the new order; broker.orders is empty.
-// LocalOrderMissingAtBroker fires for the new order — that is a separate concern
-// (broker snapshot staleness) and is handled by the grace-window path.
-// The KEY proof here is that the POSITION mismatch (the RECONCILE_DRIFT root cause)
-// is eliminated by the baseline merge.
+// Reading the seeded snapshot directly gives local AAPL=4 == broker AAPL=4 — no
+// PositionQtyMismatch.  (A LocalOrderMissingAtBroker diff may still appear for
+// the new order; that is a separate, expected staleness concern handled by the
+// grace-window path — not the double-count bug under test here.)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rbs05_baseline_with_ackd_order_no_position_drift() {
-    let baseline = baseline_with_position("AAPL", 4);
-
-    // local: no fill delta yet; pending buy order in active_orders.
-    let mut local = merged_local(&[], Some(&baseline));
+fn rbs05_seeded_baseline_with_ackd_order_no_position_mismatch() {
+    // local: seeded snapshot shows AAPL=4 (baseline; no fill delta yet),
+    // plus a pending buy order in active_orders.
+    let mut local = local_from_seeded_snapshot(&[("AAPL", 4)]);
     local.orders.insert(
         "order-aapl-smoke-001".to_string(),
         OrderSnapshot::new(
@@ -230,9 +235,6 @@ fn rbs05_baseline_with_ackd_order_no_position_drift() {
     // broker: stale snapshot — only the baseline position, order not yet visible.
     let broker = broker_with_position("AAPL", 4, ts());
 
-    // Proves: no PositionQtyMismatch (the RECONCILE_DRIFT root cause is gone).
-    // A LocalOrderMissingAtBroker diff may be present (stale broker snapshot),
-    // but position drift is eliminated by the baseline merge.
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
 
@@ -242,37 +244,37 @@ fn rbs05_baseline_with_ackd_order_no_position_drift() {
         .any(|d| matches!(d, ReconcileDiff::PositionQtyMismatch { .. }));
     assert!(
         !has_position_mismatch,
-        "RBS05: baseline(AAPL=4) + ACK'd order must NOT produce PositionQtyMismatch; \
-        diffs={:?}",
+        "RBS05: seeded local(AAPL=4) vs broker(AAPL=4) must NOT produce PositionQtyMismatch \
+         (a re-merge would have produced local=8, a guaranteed mismatch); diffs={:?}",
         result.diffs
     );
 
-    // Position comparison: local AAPL=4 (baseline+0 delta) == broker AAPL=4.
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(4),
-        "RBS05: merged local must carry AAPL=4 (baseline, no fill delta)"
+        "RBS05: seeded local must read AAPL=4 (baseline, no fill delta) — not re-merged to 8"
     );
 }
 
 // ---------------------------------------------------------------------------
-// RBS06 — baseline AAPL=4 + sell fill -4 (close out) + broker flat → clean
+// RBS06 — seeded AAPL=0 (baseline=4 fully sold, delta=-4) + broker flat → clean
 //
-// Proves: selling the entire baseline position results in total_local=0.
-// Broker also shows 0 (flat).  Zero-sum entries are removed from positions.
+// Proves: selling the entire inherited baseline position leaves the seeded
+// portfolio flat for that symbol (4 baseline + (-4) sell = 0; zero-qty entries
+// are not positions).  Reading the seeded snapshot directly gives an empty
+// local, matching the broker's flat state.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rbs06_baseline_plus_full_sell_to_flat_is_clean() {
-    let baseline = baseline_with_position("AAPL", 4);
+fn rbs06_seeded_baseline_fully_sold_to_flat_is_clean() {
+    // execution_snapshot.portfolio.positions: baseline(4) + sell(-4) = 0 →
+    // build_portfolio_snapshot / reconcile_local_snapshot_from_runtime_with_sides
+    // do not emit zero-qty positions.
+    let local = local_from_seeded_snapshot(&[]);
 
-    // Portfolio delta: -4 sell (close out all inherited baseline shares).
-    let local = merged_local(&[("AAPL", -4)], Some(&baseline));
-
-    // 4 (baseline) + (-4) (sell) = 0 → removed from positions.
     assert!(
         local.positions.is_empty(),
-        "RBS06: baseline(4) + sell(-4) = 0; positions must be empty (no 0-qty entry)"
+        "RBS06: seeded baseline(4) fully sold (-4) must leave local positions empty"
     );
 
     let broker = BrokerSnapshot::empty_at(ts()); // broker flat after close
@@ -281,34 +283,37 @@ fn rbs06_baseline_plus_full_sell_to_flat_is_clean() {
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         result.is_clean(),
-        "RBS06: baseline(4)+sell(-4) vs broker(flat) must be clean; diffs={:?}",
+        "RBS06: flat local vs flat broker must be clean; diffs={:?}",
         result.diffs
     );
 }
 
 // ---------------------------------------------------------------------------
-// RBS07 — structural: merge is read-only, no synthetic fill rows
+// RBS07 — structural: derivation is a pure read, no re-merge, no synthetic fills
 //
-// Proves: the merged_local helper (which mirrors the production merge logic)
-// is a pure function — no DB writes, no oms_inbox insertions, no outbox rows.
-// The position arithmetic operates entirely on in-memory LocalSnapshot values.
+// Proves: `local_from_seeded_snapshot` (mirroring the patched production
+// closures) performs a direct, read-only extraction of `(symbol, net_qty)`
+// pairs from the already-seeded snapshot — no baseline lookup, no arithmetic
+// merge, no DB access, no synthetic oms_inbox/outbox rows.  The seeded qty IS
+// the local truth; nothing is added downstream.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rbs07_merge_is_read_only_no_synthetic_fills() {
-    let baseline = baseline_with_position("AAPL", 4);
+fn rbs07_derivation_is_pure_read_no_remerge_no_synthetic_fills() {
+    // Seeded snapshot already reflects baseline(4) + fill(+1) = 5 (folded in
+    // once, upstream, by seed_portfolio_from_baseline + apply_entry).
+    let local = local_from_seeded_snapshot(&[("AAPL", 5)]);
 
-    // Simulate a fill delta of +1 (one buy fill applied during the run).
-    let local = merged_local(&[("AAPL", 1)], Some(&baseline));
-
-    // Total: 4 (baseline) + 1 (fill) = 5.
+    // The derivation reads the seeded total through unchanged — no second
+    // baseline addition occurs (that re-merge is exactly what was removed).
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(5),
-        "RBS07: baseline(4) + fill(+1) = 5"
+        "RBS07: seeded total(5) must pass through unchanged — no re-merge"
     );
 
-    // No database access occurred: merged_local is a pure in-memory function.
-    // The production path (reconcile_local_snapshot_from_runtime_with_sides + merge)
-    // is equally read-only — it derives from the in-memory execution_snapshot only.
+    // No database access occurred: local_from_seeded_snapshot is a pure
+    // in-memory function, mirroring reconcile_local_snapshot_from_runtime_with_sides
+    // (which reads only execution_snapshot.portfolio.positions + active_orders).
+    // The production path is equally read-only and free of synthetic fill rows.
 }

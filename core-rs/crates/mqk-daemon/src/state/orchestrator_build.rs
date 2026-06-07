@@ -95,9 +95,15 @@ impl AppState {
         // run (e.g. AAPL bought last session), and delta = target(0) - current(0) = 0
         // produces no sell order when the strategy wants to flatten.
         //
-        // The reconcile local_snapshot_provider already incorporates the baseline for
-        // drift detection; this seeds the same qty into the execution portfolio so
-        // both reconcile and delta calculation agree on current holdings.
+        // RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01: this is now the SOLE entry point
+        // for baseline inclusion in PortfolioState. seed_portfolio_from_baseline
+        // mutates the live portfolio directly, so execution_snapshot.portfolio
+        // .positions already carries baseline + same-run fill delta. Downstream
+        // reconcile (local_snapshot_provider below, and local_fn in lifecycle.rs)
+        // MUST derive local truth directly from the execution snapshot via
+        // reconcile_local_snapshot_from_runtime_with_sides — re-merging the
+        // baseline there would double-count it (local = fills + 2x baseline while
+        // broker = fills + baseline), producing false ReconcileDrift halts.
         //
         // Double-count safety: recover_oms_and_portfolio replays only fills from the
         // current run_id; baseline adds only inherited prior-run qty.
@@ -316,27 +322,16 @@ impl AppState {
                 .try_read()
                 .map(|g| g.clone())
                 .unwrap_or_default();
-            let mut local = reconcile_local_snapshot_from_runtime_with_sides(&snapshot, &sides);
 
-            // RECONCILE-DRIFT-BASELINE-SEED-01: merge adopted broker baseline
-            // positions into local portfolio positions.  The baseline represents
-            // broker positions inherited from prior sessions (adopted by the operator
-            // before this run started); portfolio positions represent the delta
-            // accumulated via fills during this run.  Total local position =
-            // baseline + delta, at every stage of the run lifecycle:
-            //   - before any fills: delta=0, local = baseline (broker matches)
-            //   - after order ACK (no fill yet): delta=0, local = baseline, broker
-            //     still holds baseline → clean (the live smoke failure case)
-            //   - after fills: delta=filled qty, local = baseline + delta → broker
-            //     should also have baseline + delta for clean reconcile
-            // Real broker drift (broker qty != baseline + delta) continues to halt.
-            if let Some(bl) = baseline_for_runtime.try_read().ok().and_then(|g| g.clone()) {
-                for (sym, bl_qty) in &bl.positions {
-                    *local.positions.entry(sym.clone()).or_insert(0) += bl_qty;
-                }
-                local.positions.retain(|_, qty| *qty != 0);
-            }
-            local
+            // RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01: execution_snapshot.portfolio
+            // .positions already carries the adopted broker baseline (seeded once
+            // at run start by seed_portfolio_from_baseline — see the comment above
+            // the seeding call in build_execution_orchestrator) plus any same-run
+            // fill delta. Re-merging baseline_for_runtime here would double-count
+            // it: local = fills + 2x baseline, while broker truth = fills +
+            // baseline, producing a false ReconcileDrift halt/disarm. Derive local
+            // truth directly from the seeded snapshot — no merge.
+            reconcile_local_snapshot_from_runtime_with_sides(&snapshot, &sides)
         };
 
         let broker_snapshot_provider = move || {

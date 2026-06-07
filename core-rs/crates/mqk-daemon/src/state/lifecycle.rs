@@ -853,18 +853,17 @@ impl AppState {
                 let snapshot = snap_arc.try_read().ok().and_then(|g| g.clone());
                 if let Some(snapshot) = snapshot {
                     let sides = sides_arc.try_read().map(|g| g.clone()).unwrap_or_default();
-                    let mut local =
-                        reconcile_local_snapshot_from_runtime_with_sides(&snapshot, &sides);
-                    // RECONCILE-DRIFT-BASELINE-SEED-01: merge adopted broker baseline
-                    // positions into local portfolio positions.  See the matching
-                    // comment in build_execution_orchestrator for rationale.
-                    if let Some(bl) = baseline_arc.try_read().ok().and_then(|g| g.clone()) {
-                        for (sym, bl_qty) in &bl.positions {
-                            *local.positions.entry(sym.clone()).or_insert(0) += bl_qty;
-                        }
-                        local.positions.retain(|_, qty| *qty != 0);
-                    }
-                    local
+                    // RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01: execution_snapshot
+                    // .portfolio.positions already carries the adopted broker
+                    // baseline (seeded once at run start by
+                    // seed_portfolio_from_baseline — see the comment above the
+                    // seeding call in build_execution_orchestrator) plus any
+                    // same-run fill delta. Re-merging baseline_arc here would
+                    // double-count it: local = fills + 2x baseline, while broker
+                    // truth = fills + baseline, producing a false ReconcileDrift
+                    // halt/disarm. Derive local truth directly from the seeded
+                    // snapshot — no merge.
+                    reconcile_local_snapshot_from_runtime_with_sides(&snapshot, &sides)
                 } else {
                     // No active run: use adopted baseline if present, else empty.
                     baseline_arc

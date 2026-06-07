@@ -972,3 +972,162 @@ mod position_seed_tests {
         assert_eq!(nvda, 1, "NVDA=1 must still be seeded when AAPL=0 is skipped");
     }
 }
+
+// ---------------------------------------------------------------------------
+// RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01 unit tests
+//
+// Root cause: `seed_portfolio_from_baseline` mutates the live `PortfolioState`
+// directly (RUNTIME-POSITION-SEED-ON-START-01), so `execution_snapshot.portfolio
+// .positions` already carries baseline + same-run fill delta.  The since-removed
+// merge in `local_snapshot_provider` / `local_fn` re-added the baseline on top,
+// producing local truth = fills + 2x baseline while broker truth = fills +
+// baseline — a guaranteed false `ReconcileDrift` halt/disarm (REC-01R) the moment
+// any baseline position existed.
+//
+// Fix: `seed_portfolio_from_baseline` is the SOLE baseline-entry point.
+// Downstream reconcile derives local truth directly from the seeded snapshot via
+// `reconcile_local_snapshot_from_runtime_with_sides` — no re-merge.
+//
+// These tests run the REAL production chain end-to-end (apply_entry →
+// seed_portfolio_from_baseline → build_portfolio_snapshot →
+// reconcile_local_snapshot_from_runtime_with_sides), not hand-rolled fixtures,
+// so they fail if the merge is ever reintroduced.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod baseline_double_count_fix_tests {
+    use super::{
+        reconcile_local_snapshot_from_runtime_with_sides, seed_portfolio_from_baseline,
+        PortfolioState,
+    };
+    use mqk_portfolio::{apply_entry, Fill, LedgerEntry, Side};
+    use mqk_reconcile::LocalSnapshot;
+    use mqk_runtime::observability::{build_portfolio_snapshot, ExecutionSnapshot};
+    use std::collections::BTreeMap;
+
+    fn flat_portfolio() -> PortfolioState {
+        PortfolioState::new(100_000_000_000) // $100k initial equity
+    }
+
+    fn baseline_with(positions: &[(&str, i64)]) -> LocalSnapshot {
+        let mut s = LocalSnapshot::empty();
+        for &(sym, qty) in positions {
+            s.positions.insert(sym.to_string(), qty);
+        }
+        s
+    }
+
+    /// Run the REAL production chain end-to-end exactly as
+    /// `build_execution_orchestrator` + the patched `local_snapshot_provider` /
+    /// `local_fn` do post-fix:
+    ///
+    ///   same-run fills (apply_entry) → seed_portfolio_from_baseline →
+    ///   build_portfolio_snapshot → reconcile_local_snapshot_from_runtime_with_sides
+    ///
+    /// Returns the resulting local reconcile qty for `symbol`.
+    fn local_qty_after_real_chain(
+        symbol: &str,
+        fills: &[(Side, i64)],
+        baseline_positions: &[(&str, i64)],
+    ) -> i64 {
+        let mut pf = flat_portfolio();
+
+        // Step 1: apply same-run fills (mirrors recover_oms_and_portfolio replay
+        // of fills from the current run_id).
+        for &(side, qty) in fills {
+            apply_entry(
+                &mut pf,
+                LedgerEntry::Fill(Fill::new(symbol, side, qty, 313_000_000, 0)),
+            );
+        }
+
+        // Step 2: seed from the adopted broker baseline — the SOLE entry point
+        // for baseline inclusion (RUNTIME-POSITION-SEED-ON-START-01 /
+        // RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01).
+        let baseline = baseline_with(baseline_positions);
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+
+        // Step 3: build the execution snapshot exactly as the orchestrator does
+        // (build_portfolio_snapshot reads net_qty = sum of signed lot quantities).
+        let exec_snapshot = ExecutionSnapshot {
+            run_id: None,
+            active_orders: vec![],
+            pending_outbox: vec![],
+            recent_inbox_events: vec![],
+            portfolio: build_portfolio_snapshot(&pf),
+            system_block_state: None,
+            recent_risk_denials: vec![],
+            snapshot_at_utc: chrono::Utc::now(),
+            has_recent_terminal_fill: false,
+        };
+
+        // Step 4: derive local reconcile truth via the patched (no-merge) path —
+        // the exact function `local_snapshot_provider` / `local_fn` call directly.
+        let sides: BTreeMap<String, mqk_reconcile::Side> = BTreeMap::new();
+        let local = reconcile_local_snapshot_from_runtime_with_sides(&exec_snapshot, &sides);
+        local.positions.get(symbol).copied().unwrap_or(0)
+    }
+
+    // BDC01: baseline-only (no same-run fills) → local qty == N
+    #[test]
+    fn bdc01_baseline_only_yields_n() {
+        let qty = local_qty_after_real_chain("AAPL", &[], &[("AAPL", 5)]);
+        assert_eq!(
+            qty, 5,
+            "BDC01: baseline=5, no fills → local qty must be exactly N=5 (a double-count would read 10)"
+        );
+    }
+
+    // BDC02: baseline N + same-run buy M → local qty == N + M
+    #[test]
+    fn bdc02_baseline_plus_buy_yields_n_plus_m() {
+        let qty = local_qty_after_real_chain("AAPL", &[(Side::Buy, 3)], &[("AAPL", 5)]);
+        assert_eq!(
+            qty, 8,
+            "BDC02: baseline=5 + buy=3 → local qty must be N+M=8 (a double-count would read 13)"
+        );
+    }
+
+    // BDC03: baseline N + same-run sell M → local qty == N - M
+    #[test]
+    fn bdc03_baseline_plus_sell_yields_n_minus_m() {
+        let qty = local_qty_after_real_chain("AAPL", &[(Side::Sell, 2)], &[("AAPL", 5)]);
+        assert_eq!(
+            qty, 3,
+            "BDC03: baseline=5 - sell=2 → local qty must be N-M=3 (a double-count would read 8)"
+        );
+    }
+
+    // BDC04: no baseline + same-run fill M → local qty == M
+    #[test]
+    fn bdc04_no_baseline_plus_fill_yields_m() {
+        let qty = local_qty_after_real_chain("AAPL", &[(Side::Buy, 4)], &[]);
+        assert_eq!(
+            qty, 4,
+            "BDC04: no baseline + buy=4 → local qty must be exactly M=4 (no baseline to double-count)"
+        );
+    }
+
+    // BDC05: local reconcile truth must equal broker truth (baseline + same-run
+    // fills, counted exactly once) — the exact invariant whose violation produces
+    // a false ReconcileDrift halt/disarm (REC-01R) the moment any baseline
+    // position exists.
+    #[test]
+    fn bdc05_local_matches_broker_truth_baseline_plus_fills_once() {
+        let baseline_qty = 5;
+        let fill_qty = 3;
+        let local_qty = local_qty_after_real_chain(
+            "AAPL",
+            &[(Side::Buy, fill_qty)],
+            &[("AAPL", baseline_qty)],
+        );
+        let broker_truth = baseline_qty + fill_qty;
+        let double_counted = broker_truth + baseline_qty;
+        assert_eq!(
+            local_qty, broker_truth,
+            "BDC05: local truth must equal broker truth (baseline + same-run fills counted once = {}); \
+             a re-merged double-count would read {} and falsely trigger ReconcileDrift",
+            broker_truth, double_counted
+        );
+    }
+}

@@ -1,35 +1,57 @@
 //! MONOTONIC-RECONCILE-DIRTY-IN-RUN-01 proof tests.
 //!
-//! # Root cause
+//! # Original root cause (MONOTONIC-RECONCILE-DIRTY-IN-RUN-01)
 //!
 //! The `local_fn` closure passed to `spawn_reconcile_tick` in `lifecycle.rs` did
-//! not apply the `has_local_activity` guard.  When the execution loop set
-//! `execution_snapshot = Some(initial_snapshot)` after the first tick, the
-//! background reconcile tick immediately used the empty runtime portfolio as
-//! local truth (no fills applied yet in this run).  The broker snapshot still
-//! reflected the adopted baseline position (e.g. AAPL qty=1).
+//! not account for the adopted broker baseline at all.  When the execution loop
+//! set `execution_snapshot = Some(initial_snapshot)` after the first tick, the
+//! background reconcile tick immediately used the runtime portfolio as local
+//! truth — which (at the time) did not yet include inherited prior-run positions.
+//! The broker snapshot still reflected the adopted baseline position
+//! (e.g. AAPL qty=1).  Result: local={} vs broker={AAPL:1} → false dirty →
+//! DISARMED reason=ReconcileDrift.
 //!
-//! Result: local={} vs broker={AAPL:1} → false dirty → DISARMED reason=ReconcileDrift.
+//! # Supersession (RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01)
 //!
-//! # Fix (MONOTONIC-RECONCILE-DIRTY-IN-RUN-01 patch)
+//! `seed_portfolio_from_baseline` (RUNTIME-POSITION-SEED-ON-START-01, commit
+//! 16209ba) now mutates the live `PortfolioState` directly at run start, so
+//! `execution_snapshot.portfolio.positions` ALREADY carries
+//! `baseline + same_run_fill_delta` from the very first snapshot.  An
+//! intermediate fix layer that additionally merged the adopted baseline back
+//! into the derived local snapshot therefore double-counted it: local =
+//! fills + 2x baseline, while broker = fills + baseline — a guaranteed
+//! `PositionQtyMismatch` → `ReconcileDrift` halt/disarm the moment any baseline
+//! position existed.  HOSTILE-AUDIT-REPO-STATE-01 found this; the merge has
+//! been removed from `local_fn`.
 //!
-//! The `local_fn` in `lifecycle.rs` now applies the same `has_local_activity`
-//! guard used by the `local_snapshot_provider` in `build_execution_orchestrator`:
-//! when `execution_snapshot` is `Some` but has no positions, no realized P&L,
-//! and no active OMS orders, fall back to the adopted broker baseline as local
-//! truth.  Once real local activity exists, the execution snapshot is authoritative.
+//! # Fix (current production behavior)
+//!
+//! `local_fn` derives local truth directly from the seeded execution snapshot
+//! via `reconcile_local_snapshot_from_runtime_with_sides` — a pure, read-only
+//! extraction of `(symbol, net_qty)` pairs — with NO re-merge of the baseline.
+//! The snapshot itself already reflects the correct total at every stage:
+//!   - before any fills: snapshot shows baseline (seeded once at run start)
+//!   - after order ACK (no fill yet): snapshot still shows baseline only
+//!   - after fills: snapshot shows baseline + delta (apply_entry folds the
+//!     fill onto the same already-seeded live PortfolioState)
+//! Real broker drift (broker != seeded snapshot total) continues to halt.
+//!
+//! These tests model `exec_snap` fixtures as they REALISTICALLY appear post-fix:
+//! once a baseline is adopted, even the first ("fresh") snapshot already shows
+//! the seeded qty — a snapshot with empty positions is only realistic when NO
+//! baseline was adopted (seeding is then a no-op).
 //!
 //! # Test matrix
 //!
 //! | Test   | Type | What it proves                                                              |
 //! |--------|------|-----------------------------------------------------------------------------|
-//! | MRIR01 | pure | exec_snap Some+empty + matching baseline + broker → reconcile clean         |
-//! | MRIR02 | pure | exec_snap Some+empty + matching baseline + broker → arm state NOT disarmed  |
-//! | MRIR03 | pure | exec_snap Some+empty + baseline(1) + broker(2) → dirty (real mismatch)      |
-//! | MRIR04 | tick | exec_snap Some with positions (activity) → exec_snap used; real drift halts  |
+//! | MRIR01 | pure | seeded exec_snap (baseline=1, no fills) + broker=1 → reconcile clean        |
+//! | MRIR02 | tick | seeded exec_snap (baseline=1) + matching broker → arm state NOT disarmed   |
+//! | MRIR03 | pure | seeded exec_snap (baseline=1) + broker drifted to 2 → dirty (real mismatch)|
+//! | MRIR04 | pure | exec_snap with fill position, no baseline adopted → read through; drift halts|
 //! | MRIR05 | tick | stale broker snapshot classified truthfully (status=stale/unknown, not dirty)|
-//! | MRIR06 | tick | no outbox rows created by reconcile fallback path                            |
-//! | MRIR07 | tick | exec_snap Some+empty + matching baseline + broker → tick stays ok            |
+//! | MRIR06 | tick | local_fn derivation is read-only — no outbox rows created                    |
+//! | MRIR07 | tick | seeded exec_snap (baseline=1) + matching broker → tick stays ok             |
 
 use std::{sync::Arc, time::Duration};
 
@@ -90,32 +112,33 @@ fn exec_snapshot_with_position(symbol: &str, qty: i64) -> ExecutionSnapshot {
     snap
 }
 
-/// Simulate the `local_fn` closure logic as applied in lifecycle.rs after
-/// RECONCILE-DRIFT-BASELINE-SEED-01.
+/// Simulate the PATCHED `local_fn` closure logic in `lifecycle.rs`
+/// (RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01).
 ///
-/// Merges adopted baseline positions into the exec_snap portfolio positions.
-/// total_local = baseline + portfolio_delta.
+/// `exec_snap.portfolio.positions` already reflects `seed_portfolio_from_baseline`
+/// having folded the adopted baseline into the live `PortfolioState` ONCE at run
+/// start (RUNTIME-POSITION-SEED-ON-START-01), plus any same-run fill delta
+/// applied via `apply_entry` on top.  The function derives local truth directly
+/// from the snapshot — re-merging `baseline` here would double-count it.
 fn patched_in_run_local_fn(
     exec_snap: Option<&ExecutionSnapshot>,
     baseline: Option<&LocalSnapshot>,
 ) -> LocalSnapshot {
     if let Some(snapshot) = exec_snap {
-        // RECONCILE-DRIFT-BASELINE-SEED-01: merge baseline into exec_snap positions.
+        // RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01: read the seeded snapshot
+        // directly — no baseline re-merge.  The snapshot already carries
+        // baseline + same_run_fill_delta (folded in once, upstream, by
+        // seed_portfolio_from_baseline + apply_entry).
         let mut local = LocalSnapshot::empty();
         for pos in &snapshot.portfolio.positions {
             if pos.net_qty != 0 {
-                *local.positions.entry(pos.symbol.clone()).or_insert(0) += pos.net_qty;
+                local.positions.insert(pos.symbol.clone(), pos.net_qty);
             }
         }
-        if let Some(bl) = baseline {
-            for (sym, &bl_qty) in &bl.positions {
-                *local.positions.entry(sym.clone()).or_insert(0) += bl_qty;
-            }
-        }
-        local.positions.retain(|_, qty| *qty != 0);
         local
     } else {
-        // No active run.
+        // No active run: use adopted baseline if present, else empty
+        // (unchanged — baseline has not yet been folded into any portfolio).
         baseline.cloned().unwrap_or_else(LocalSnapshot::empty)
     }
 }
@@ -136,17 +159,22 @@ async fn armed_state() -> Arc<AppState> {
 }
 
 // ---------------------------------------------------------------------------
-// MRIR01 — exec_snap Some+empty + matching baseline + broker → clean
+// MRIR01 — seeded exec_snap (baseline=1, no fills yet) + matching broker → clean
 //
-// Proves: when execution_snapshot is set (Some) but reflects fresh-run state
-// (no positions, no P&L, no orders), and the baseline matches the broker,
-// the patched local_fn returns the baseline as local truth, reconcile is clean.
+// Proves: once a baseline is adopted, `seed_portfolio_from_baseline` folds it
+// into the portfolio BEFORE the first execution snapshot is taken — so even the
+// "fresh" (no-fills-yet) snapshot already shows the baseline qty.  The patched
+// local_fn reads it through directly (no re-merge): local == baseline == broker
+// → clean.  Passing `Some(&baseline)` here proves the baseline is correctly
+// IGNORED once exec_snap is present — re-merging it would double the qty to 2.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn mrir01_fresh_exec_snap_matching_baseline_broker_is_clean() {
+fn mrir01_seeded_exec_snap_matching_broker_is_clean() {
     let baseline = local_with_position("AAPL", 1);
-    let exec_snap = fresh_exec_snapshot();
+    // Baseline AAPL=1 was adopted and folded into the portfolio at run start;
+    // the first snapshot already shows AAPL=1 (no same-run fills yet).
+    let exec_snap = exec_snapshot_with_position("AAPL", 1);
     let broker = broker_with_position("AAPL", 1, ts());
 
     let local = patched_in_run_local_fn(Some(&exec_snap), Some(&baseline));
@@ -154,32 +182,38 @@ fn mrir01_fresh_exec_snap_matching_baseline_broker_is_clean() {
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(1),
-        "MRIR01: patched local_fn must return baseline AAPL=1 when exec_snap is fresh"
+        "MRIR01: local_fn must read the seeded snapshot's AAPL=1 directly \
+         (re-merging baseline would double it to 2)"
     );
 
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         result.is_clean(),
-        "MRIR01: fresh exec_snap + matching baseline + broker(AAPL=1) must be clean; diffs={:?}",
+        "MRIR01: seeded exec_snap(AAPL=1) vs broker(AAPL=1) must be clean; diffs={:?}",
         result.diffs
     );
 }
 
 // ---------------------------------------------------------------------------
-// MRIR02 — matching baseline + broker with fresh exec_snap → arm state stays ok
+// MRIR02 — seeded exec_snap (baseline=1) + matching broker → arm state stays ok
 //
 // Proves: the patched path does not produce a Halt/dirty result, meaning no
 // DISARMED signal is emitted for this scenario.  Uses spawn_reconcile_tick.
+// The injected exec_snap already shows the seeded baseline qty (realistic
+// post-seed state), proving the live tick path stays clean without any
+// downstream re-merge.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn mrir02_matching_baseline_and_broker_with_fresh_exec_snap_stays_armed() {
+async fn mrir02_seeded_exec_snap_matching_broker_stays_armed() {
     let st = armed_state().await;
 
-    // Inject exec_snap = Some(fresh) and baseline matching broker.
+    // Inject exec_snap already seeded with the adopted baseline (AAPL=1) and
+    // a baseline arc holding the same — proving local_fn ignores baseline_arc
+    // once exec_snap is present (no re-merge).
     let exec_snap_arc: Arc<RwLock<Option<ExecutionSnapshot>>> =
-        Arc::new(RwLock::new(Some(fresh_exec_snapshot())));
+        Arc::new(RwLock::new(Some(exec_snapshot_with_position("AAPL", 1))));
     let baseline_arc: Arc<RwLock<Option<LocalSnapshot>>> =
         Arc::new(RwLock::new(Some(local_with_position("AAPL", 1))));
 
@@ -215,7 +249,7 @@ async fn mrir02_matching_baseline_and_broker_with_fresh_exec_snap_stays_armed() 
     let ig = st.integrity.read().await;
     assert!(
         !ig.disarmed,
-        "MRIR02: integrity must remain armed when baseline matches broker and exec_snap is fresh"
+        "MRIR02: integrity must remain armed when the seeded exec_snap matches the broker"
     );
     assert!(
         !ig.halted,
@@ -224,17 +258,19 @@ async fn mrir02_matching_baseline_and_broker_with_fresh_exec_snap_stays_armed() 
 }
 
 // ---------------------------------------------------------------------------
-// MRIR03 — baseline(qty=1) + broker(qty=2) → dirty (real mismatch halts)
+// MRIR03 — seeded exec_snap (baseline=1, no fills) + broker drifted to 2 → dirty
 //
-// Proves: when the broker has drifted from the adopted baseline since adoption,
-// the patched path still detects real drift and halts.  The guard must NOT
-// mask genuine mismatches.
+// Proves: the no-merge derivation does NOT mask genuine drift.  The snapshot
+// already shows the seeded baseline qty=1 (no same-run fills yet); if the
+// broker has drifted to qty=2 since adoption, reconcile still halts — real
+// drift detection is preserved.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn mrir03_baseline_mismatch_is_dirty_real_drift_still_halts() {
+fn mrir03_seeded_exec_snap_broker_drift_is_dirty_real_drift_still_halts() {
     let baseline = local_with_position("AAPL", 1);
-    let exec_snap = fresh_exec_snapshot();
+    // Seeded snapshot already shows AAPL=1 (baseline folded in at run start).
+    let exec_snap = exec_snapshot_with_position("AAPL", 1);
     let broker = broker_with_position("AAPL", 2, ts()); // broker drifted to qty=2
 
     let local = patched_in_run_local_fn(Some(&exec_snap), Some(&baseline));
@@ -242,48 +278,50 @@ fn mrir03_baseline_mismatch_is_dirty_real_drift_still_halts() {
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(1),
-        "MRIR03: local must carry baseline qty=1"
+        "MRIR03: local_fn must read the seeded snapshot's AAPL=1 directly"
     );
 
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         !result.is_clean(),
-        "MRIR03: baseline(AAPL=1) vs broker(AAPL=2) must be dirty — real drift must halt"
+        "MRIR03: seeded local(AAPL=1) vs broker(AAPL=2) must be dirty — real drift must halt"
     );
 }
 
 // ---------------------------------------------------------------------------
-// MRIR04 — exec_snap with fill position + empty baseline → fill wins; real drift halts
+// MRIR04 — exec_snap with fill position, no baseline adopted → read through correctly
 //
-// Proves: when the portfolio has a fill-applied position (AAPL=1) and the
-// baseline is empty, the merged result is AAPL=1 (portfolio delta only).
-// A genuine local-vs-broker mismatch continues to block correctly.
+// Proves: when no baseline was adopted (seed_portfolio_from_baseline is then a
+// no-op), a same-run fill is the entire local truth.  The snapshot shows
+// AAPL=1 (fill delta only, no baseline folded in — there is none).  The
+// no-merge derivation reads it through as-is.  A genuine local-vs-broker
+// mismatch continues to block correctly.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn mrir04_fill_position_with_empty_baseline_is_used_correctly() {
-    // Baseline: empty (no position adopted before the run).
+fn mrir04_fill_position_no_baseline_is_read_through_correctly() {
+    // Baseline: none adopted (seeding was a no-op; nothing to fold in).
     let baseline = LocalSnapshot::empty();
-    // Exec snap: fill applied for AAPL qty=1.
+    // Exec snap: same-run fill applied for AAPL qty=1 (no baseline to add).
     let exec_snap = exec_snapshot_with_position("AAPL", 1);
     // Broker: also shows AAPL=1 (matching the fill).
     let broker = broker_with_position("AAPL", 1, ts());
 
     let local = patched_in_run_local_fn(Some(&exec_snap), Some(&baseline));
 
-    // Merge: portfolio AAPL=1 + baseline empty = AAPL=1.
+    // Direct read: snapshot AAPL=1 (fill only) → local AAPL=1. No baseline to add.
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(1),
-        "MRIR04: portfolio(AAPL=1) + baseline(empty) must give AAPL=1"
+        "MRIR04: snapshot(AAPL=1, fill only) must read through as local AAPL=1"
     );
 
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         result.is_clean(),
-        "MRIR04: merged(AAPL=1) vs broker(AAPL=1) must be clean; diffs={:?}",
+        "MRIR04: local(AAPL=1) vs broker(AAPL=1) must be clean; diffs={:?}",
         result.diffs
     );
 
@@ -294,7 +332,7 @@ fn mrir04_fill_position_with_empty_baseline_is_used_correctly() {
         reconcile_monotonic(&mut wm2, &local, &broker_drifted).expect("watermark must pass");
     assert!(
         !result2.is_clean(),
-        "MRIR04: merged(AAPL=1) vs broker(AAPL=2) must be dirty — fail-closed preserved"
+        "MRIR04: local(AAPL=1) vs broker(AAPL=2) must be dirty — fail-closed preserved"
     );
 }
 
@@ -303,7 +341,10 @@ fn mrir04_fill_position_with_empty_baseline_is_used_correctly() {
 //
 // Proves: when the broker snapshot has no valid timestamp (fetched_at_ms=0),
 // the reconcile tick correctly classifies this as stale/unknown rather than
-// writing a false proven-dirty mismatch.
+// writing a false proven-dirty mismatch.  The injected exec_snap is seeded
+// (AAPL=1, matching the adopted baseline) — the realistic post-seed state —
+// to keep this fixture consistent with the corrected model; the staleness
+// classification under test is independent of local position content.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -312,7 +353,7 @@ async fn mrir05_stale_broker_snapshot_not_false_proven_dirty() {
 
     let baseline = local_with_position("AAPL", 1);
     let exec_snap_arc: Arc<RwLock<Option<ExecutionSnapshot>>> =
-        Arc::new(RwLock::new(Some(fresh_exec_snapshot())));
+        Arc::new(RwLock::new(Some(exec_snapshot_with_position("AAPL", 1))));
     let baseline_arc: Arc<RwLock<Option<LocalSnapshot>>> = Arc::new(RwLock::new(Some(baseline)));
 
     let local_fn = {
@@ -354,44 +395,49 @@ async fn mrir05_stale_broker_snapshot_not_false_proven_dirty() {
 }
 
 // ---------------------------------------------------------------------------
-// MRIR06 — no outbox rows created by reconcile baseline merge path
+// MRIR06 — local_fn derivation is read-only — no outbox rows created
 //
-// Proves: the patched local_fn baseline merge is read-only.  No DB writes
-// occur on the reconcile path; in particular, no outbox rows are created.
-// Validated structurally: spawn_reconcile_tick has no outbox write paths.
+// Proves: the patched local_fn derivation (direct read of the seeded snapshot,
+// no baseline re-merge) is read-only.  No DB writes occur on the reconcile
+// path; in particular, no outbox rows are created.  Validated structurally:
+// patched_in_run_local_fn only reads state, and spawn_reconcile_tick has no
+// outbox write paths.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn mrir06_reconcile_baseline_merge_is_read_only_no_outbox() {
+fn mrir06_local_fn_derivation_is_read_only_no_outbox() {
     // Structural proof: patched_in_run_local_fn only reads state; it never
     // writes to DB, outbox, or any mutable data structure.
     let baseline = local_with_position("AAPL", 1);
-    let exec_snap = fresh_exec_snapshot();
+    // Seeded snapshot already shows AAPL=1 (baseline folded in at run start).
+    let exec_snap = exec_snapshot_with_position("AAPL", 1);
 
     let local = patched_in_run_local_fn(Some(&exec_snap), Some(&baseline));
 
-    // Merge: portfolio positions={} + baseline AAPL=1 = AAPL=1.
+    // Direct read: snapshot AAPL=1 → local AAPL=1. No re-merge, no writes.
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(1),
-        "MRIR06: baseline merge must return AAPL=1 — only read ops occurred"
+        "MRIR06: derivation must return AAPL=1 — only read ops occurred, no re-merge"
     );
     // No assertions on external state: patched_in_run_local_fn is a pure function.
 }
 
 // ---------------------------------------------------------------------------
-// MRIR07 — spawn_reconcile_tick with fresh exec_snap + matching baseline → ok
+// MRIR07 — spawn_reconcile_tick with seeded exec_snap + matching baseline → ok
 //
 // End-to-end proof through the real spawn_reconcile_tick seam.  Uses the
 // patched local_fn pattern.  The tick must publish status=ok and not disarm.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn mrir07_spawn_reconcile_tick_fresh_exec_snap_matching_baseline_stays_ok() {
+async fn mrir07_spawn_reconcile_tick_seeded_exec_snap_matching_baseline_stays_ok() {
     let st = armed_state().await;
 
+    // Seeded snapshot already shows AAPL=1 (baseline folded in at run start) —
+    // the realistic post-seed state once a baseline has been adopted.
     let exec_snap_arc: Arc<RwLock<Option<ExecutionSnapshot>>> =
-        Arc::new(RwLock::new(Some(fresh_exec_snapshot())));
+        Arc::new(RwLock::new(Some(exec_snapshot_with_position("AAPL", 1))));
     let baseline_arc: Arc<RwLock<Option<LocalSnapshot>>> =
         Arc::new(RwLock::new(Some(local_with_position("AAPL", 1))));
 
@@ -420,7 +466,7 @@ async fn mrir07_spawn_reconcile_tick_fresh_exec_snap_matching_baseline_stays_ok(
     let reconcile = st.current_reconcile_snapshot().await;
     assert_eq!(
         reconcile.status, "ok",
-        "MRIR07: fresh exec_snap + matching baseline/broker must publish ok; \
+        "MRIR07: seeded exec_snap + matching baseline/broker must publish ok; \
          status={} note={:?} mismatched_positions={}",
         reconcile.status, reconcile.note, reconcile.mismatched_positions
     );

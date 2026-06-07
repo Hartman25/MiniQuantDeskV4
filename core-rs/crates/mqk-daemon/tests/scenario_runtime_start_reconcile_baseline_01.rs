@@ -10,19 +10,29 @@
 //! and the live-closure fallback in `build_execution_orchestrator` now read from
 //! `AppState::broker_baseline` before falling through to empty.
 //!
-//! RECONCILE-DRIFT-BASELINE-SEED-01 extension:
+//! RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01 supersession (formerly
+//! RECONCILE-DRIFT-BASELINE-SEED-01 / RECONCILE-DRIFT-LIVE-01):
 //!
-//! Third blocker: after an order is ACK'd by the broker, `active_orders` becomes
-//! non-empty.  The prior RDL guard (RECONCILE-DRIFT-LIVE-01) switched to using
-//! the execution snapshot at this point, which has empty positions (no fills yet).
-//! The broker still holds the adopted baseline position (e.g. AAPL=4) → local=0
-//! vs broker=4 → RECONCILE_DRIFT.
+//! A third blocker was identified by HOSTILE-AUDIT-REPO-STATE-01:
+//! `seed_portfolio_from_baseline` (RUNTIME-POSITION-SEED-ON-START-01, commit
+//! 16209ba) now mutates the live `PortfolioState` directly at run start, so
+//! `execution_snapshot.portfolio.positions` ALREADY carries
+//! `baseline + same_run_fill_delta`.  The RECONCILE-DRIFT-BASELINE-SEED-01 merge
+//! (re-adding `baseline` on top of the already-seeded snapshot) therefore
+//! double-counted it: local = fills + 2x baseline, while broker = fills +
+//! baseline — a guaranteed `PositionQtyMismatch` → `ReconcileDrift` halt/disarm
+//! the moment any baseline position existed.
 //!
-//! Fix (RECONCILE-DRIFT-BASELINE-SEED-01): remove the `has_local_activity` guard.
-//! Instead, always merge adopted baseline positions into the local portfolio
-//! positions: total_local = baseline + portfolio_delta.  This is correct at every
-//! stage — before fills (delta=0), after ACK (delta=0), after fills (delta>0).
-//! Real broker drift (broker != baseline + delta) continues to halt.
+//! Fix (RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01): `seed_portfolio_from_baseline`
+//! is the SOLE baseline-entry point.  `local_snapshot_provider` /
+//! `local_fn` now derive local truth directly from the seeded execution
+//! snapshot via `reconcile_local_snapshot_from_runtime_with_sides` — no
+//! re-merge.  This remains correct at every stage of the run lifecycle:
+//!   - before any fills: snapshot already shows baseline (seeded once at start)
+//!   - after order ACK (no fill yet): snapshot still shows baseline only
+//!   - after fills: snapshot shows baseline + delta (folded by apply_entry on
+//!     top of the seeded portfolio)
+//! Real broker drift (broker != seeded snapshot total) continues to halt.
 //!
 //! # Test matrix
 //!
@@ -35,12 +45,12 @@
 //! | RSB05  | pure  | Baseline closure: live-arc reading matches static-seed reading              |
 //! | RSB06  | pure  | Broker with order only (no position): empty baseline → dirty                |
 //! | RSB07  | pure  | Baseline with order + position matching broker → clean                      |
-//! | RDL01  | pure  | exec_snap Some+empty + matching baseline + broker → clean (no false drift)  |
-//! | RDL02  | pure  | exec_snap Some+empty + absent baseline + broker-with-position → dirty       |
-//! | RDL03  | pure  | exec_snap Some+empty + baseline(1) + broker(2) → dirty (mismatch)          |
-//! | RDL04  | pure  | exec_snap with fill (+1) + baseline(1) → merged total=2; broker=2 → clean  |
+//! | RDL01  | pure  | seeded exec_snap (baseline=1, no fills) + broker=1 → clean (read-through)   |
+//! | RDL02  | pure  | exec_snap Some+empty (no baseline) + broker-with-position → dirty           |
+//! | RDL03  | pure  | seeded exec_snap (baseline=1) + broker drifted to 2 → dirty (mismatch)      |
+//! | RDL04  | pure  | seeded exec_snap (baseline=1 + fill=1, folded=2) + broker=2 → clean         |
 //! | RDL05  | pure  | exec_snap with realized_pnl (no positions) + no baseline + broker flat→clean|
-//! | RDL06  | pure  | exec_snap with active_orders + empty baseline + broker order → empty pos    |
+//! | RDL06  | pure  | exec_snap with active_orders, no baseline → empty positions (no seed)       |
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -293,13 +303,21 @@ fn rsb07_baseline_with_order_and_position_matching_broker_is_clean() {
 }
 
 // ===========================================================================
-// RECONCILE-DRIFT-LIVE-01 tests
+// RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01 tests (formerly RECONCILE-DRIFT-LIVE-01)
 //
 // These prove the patched `local_snapshot_provider` behavior when
-// `execution_snapshot` is `Some` (the case that caused the second live blocker).
+// `execution_snapshot` is `Some`.
 //
-// The helper `patched_local_provider` simulates the exact logic of the
-// patched closure in `build_execution_orchestrator`.
+// Updated model (post RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01): once a baseline
+// is adopted, `seed_portfolio_from_baseline` (RUNTIME-POSITION-SEED-ON-START-01,
+// commit 16209ba) folds it into the live `PortfolioState` ONCE, before the run
+// loop starts — so `exec_snap.portfolio.positions` already shows
+// `baseline + same_run_fill_delta`.  A "fresh" snapshot with empty positions is
+// only realistic when NO baseline was adopted (seeding is then a no-op).
+//
+// The helper `patched_local_provider` mirrors the corrected closure: a direct,
+// read-only extraction of `(symbol, net_qty)` from the snapshot — no baseline
+// re-merge (that re-merge is exactly the double-count bug this patch removes).
 // ===========================================================================
 
 /// Build an `ExecutionSnapshot` representing a fresh run state:
@@ -358,70 +376,72 @@ fn exec_snapshot_with_active_order(order_id: &str) -> ExecutionSnapshot {
     snap
 }
 
-/// Simulate the `local_snapshot_provider` closure logic after
-/// RECONCILE-DRIFT-BASELINE-SEED-01.
+/// Simulate the PATCHED `local_snapshot_provider` closure
+/// (RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01).
 ///
-/// This mirrors the production behavior in `build_execution_orchestrator`:
-/// when an execution snapshot is present, merge the adopted baseline positions
-/// into the portfolio positions (baseline = starting position; portfolio = delta).
+/// `exec_snap.portfolio.positions` already reflects `seed_portfolio_from_baseline`
+/// having folded the adopted baseline into the live `PortfolioState` ONCE at run
+/// start (RUNTIME-POSITION-SEED-ON-START-01), plus any same-run fill delta
+/// applied via `apply_entry` on top.  The provider derives local truth directly
+/// from the snapshot — re-merging `baseline` here would double-count it.
 fn patched_local_provider(
     exec_snap: Option<&ExecutionSnapshot>,
     baseline: Option<&LocalSnapshot>,
     fallback_seed: &LocalSnapshot,
 ) -> LocalSnapshot {
     let Some(snapshot) = exec_snap else {
-        // RSB01 path: no execution snapshot → use baseline or seed.
+        // RSB01 path (execution_snapshot is None): use baseline, else seed.
+        // Unaffected by this fix — baseline has not yet been folded into any
+        // portfolio because no run/snapshot exists yet.
         return baseline.cloned().unwrap_or_else(|| fallback_seed.clone());
     };
 
-    // RECONCILE-DRIFT-BASELINE-SEED-01: always merge baseline positions into
-    // exec_snap portfolio positions.  baseline = starting broker position;
-    // portfolio = delta accumulated via fills during the run.
+    // RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01: read the seeded snapshot directly
+    // — no baseline re-merge.  The snapshot already carries
+    // `baseline + same_run_fill_delta` (folded in once, upstream, by
+    // seed_portfolio_from_baseline + apply_entry).
     let mut local = LocalSnapshot::empty();
     for pos in &snapshot.portfolio.positions {
         if pos.net_qty != 0 {
-            *local.positions.entry(pos.symbol.clone()).or_insert(0) += pos.net_qty;
+            local.positions.insert(pos.symbol.clone(), pos.net_qty);
         }
     }
-    if let Some(bl) = baseline {
-        for (sym, &bl_qty) in &bl.positions {
-            *local.positions.entry(sym.clone()).or_insert(0) += bl_qty;
-        }
-    }
-    local.positions.retain(|_, qty| *qty != 0);
     local
 }
 
 // ---------------------------------------------------------------------------
-// RDL01 — exec_snap Some+empty + matching baseline + broker → clean
+// RDL01 — exec_snap Some, seeded with adopted baseline + broker matching → clean
 //
-// Proves: when the execution snapshot is present but fresh (no activity),
-// and the baseline matches the broker, Phase-0c does NOT fire ReconcileDrift.
+// Proves: once a baseline is adopted, `seed_portfolio_from_baseline` folds it
+// into the portfolio BEFORE the first execution snapshot is taken — so even a
+// "fresh" (no-fills-yet) snapshot already shows the baseline qty.  Reading it
+// directly (no re-merge) gives local == baseline == broker → clean.
 //
-// This is the live-smoke failure: loop tick 2 (exec_snap is Some after the
-// initial lifecycle tick) caused a false halt.
+// This is the live-smoke scenario: the first post-seed snapshot must already
+// agree with the broker without any further arithmetic.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rdl01_fresh_exec_snap_with_matching_baseline_is_clean() {
-    let baseline = local_with_position("AAPL", 1);
-    let exec_snap = fresh_exec_snapshot();
+fn rdl01_seeded_exec_snap_with_matching_baseline_is_clean() {
+    // Baseline AAPL=1 was adopted and folded into the portfolio at run start;
+    // the snapshot taken at the first tick already shows AAPL=1 (no fills yet).
+    let exec_snap = exec_snapshot_with_position("AAPL", 1);
     let broker = broker_with_position("AAPL", 1, ts());
     let seed = LocalSnapshot::empty();
 
-    let local = patched_local_provider(Some(&exec_snap), Some(&baseline), &seed);
+    let local = patched_local_provider(Some(&exec_snap), None, &seed);
 
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(1),
-        "RDL01: local provider must return baseline position when exec_snap is fresh"
+        "RDL01: provider must read the seeded snapshot's AAPL=1 directly (a re-merge would yield 2)"
     );
 
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         result.is_clean(),
-        "RDL01: fresh exec_snap + matching baseline must be clean; diffs={:?}",
+        "RDL01: seeded exec_snap(AAPL=1) vs broker(AAPL=1) must be clean; diffs={:?}",
         result.diffs
     );
 }
@@ -429,9 +449,10 @@ fn rdl01_fresh_exec_snap_with_matching_baseline_is_clean() {
 // ---------------------------------------------------------------------------
 // RDL02 — exec_snap Some+empty + absent baseline + broker-with-position → dirty
 //
-// Proves: when the execution snapshot is fresh AND no baseline has been adopted,
-// the provider returns empty local truth.  If the broker has a position, the
-// reconcile correctly halts (fail-closed — no baseline, no free pass).
+// Proves: when no baseline was adopted, `seed_portfolio_from_baseline` is a
+// no-op and the snapshot genuinely stays flat.  The provider then returns an
+// empty local truth.  If the broker has a position, reconcile correctly halts
+// (fail-closed — no baseline, no free pass).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -444,7 +465,7 @@ fn rdl02_fresh_exec_snap_absent_baseline_broker_position_is_dirty() {
 
     assert!(
         local.positions.is_empty(),
-        "RDL02: no baseline → provider must return empty local"
+        "RDL02: no baseline (no-op seeding) → provider must return empty local"
     );
 
     let mut wm = SnapshotWatermark::new();
@@ -456,67 +477,75 @@ fn rdl02_fresh_exec_snap_absent_baseline_broker_position_is_dirty() {
 }
 
 // ---------------------------------------------------------------------------
-// RDL03 — exec_snap Some+empty + baseline(qty=1) + broker(qty=2) → dirty
+// RDL03 — seeded exec_snap (baseline=1, no fill delta yet) + broker drifted to 2 → dirty
 //
-// Proves: the baseline fallback does NOT bypass genuine mismatches.  If the
-// broker has drifted from the baseline since adoption, reconcile still halts.
+// Proves: the no-merge provider does NOT mask genuine drift.  The snapshot
+// already shows the seeded baseline qty=1 (no fills yet); if the broker has
+// drifted to qty=2 since adoption, reconcile still halts.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rdl03_fresh_exec_snap_baseline_mismatch_is_dirty() {
-    let baseline = local_with_position("AAPL", 1);
-    let exec_snap = fresh_exec_snapshot();
-    let broker = broker_with_position("AAPL", 2, ts()); // qty=2 but baseline=1
+fn rdl03_seeded_exec_snap_broker_drift_is_dirty() {
+    // Baseline AAPL=1 was adopted and seeded; snapshot shows AAPL=1 (no fills yet).
+    let exec_snap = exec_snapshot_with_position("AAPL", 1);
+    let broker = broker_with_position("AAPL", 2, ts()); // broker drifted to 2 since adoption
     let seed = LocalSnapshot::empty();
 
-    let local = patched_local_provider(Some(&exec_snap), Some(&baseline), &seed);
+    let local = patched_local_provider(Some(&exec_snap), None, &seed);
 
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(1),
-        "RDL03: local must carry baseline qty=1"
+        "RDL03: provider must read the seeded snapshot's AAPL=1 directly"
     );
 
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         !result.is_clean(),
-        "RDL03: baseline(1) vs broker(2) must be dirty; fix must not bypass real mismatches"
+        "RDL03: seeded local(1) vs broker(2) must be dirty; fix must not bypass real mismatches"
     );
 }
 
 // ---------------------------------------------------------------------------
-// RDL04 — exec_snap with fill (+1) + baseline (AAPL=1) → merged total=2; broker=2 → clean
+// RDL04 — seeded exec_snap (baseline=1 + same-run fill +1 = 2) + broker=2 → clean
 //
-// Proves: after a fill is applied, baseline positions are merged into the
-// portfolio delta.  Total local = baseline(1) + fill(+1) = 2.  Broker also
-// has 2 (1 inherited + 1 from fill).  Reconcile must be clean.
+// Proves: once a same-run fill is applied on top of the seeded baseline, the
+// snapshot shows the FOLDED total `baseline + delta = 1 + 1 = 2`
+// (seed_portfolio_from_baseline ran once at start; apply_entry added the fill
+// on top of the same live PortfolioState).  Reading it directly — no re-merge
+// — gives local=2, matching broker=2.
 //
-// This is the correct behaviour replacing the old "exec_snap is authoritative
-// and ignores baseline" guard from RECONCILE-DRIFT-LIVE-01.
+// RECONCILE-BASELINE-DOUBLE-COUNT-FIX-01: the prior model treated the snapshot
+// as carrying only the same-run delta (+1) and merged the baseline (+1) back
+// in to reach 2 — but the snapshot already contained 2.  The merge produced
+// local=3 (delta 1 + baseline 1 + re-merged baseline 1), a guaranteed
+// PositionQtyMismatch against broker=2.  Fixed fixture: `exec_snapshot_with_
+// position("AAPL", 2)` — the realistic post-seed-and-fill snapshot total —
+// proves the corrected (no-merge) provider reads it through cleanly.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rdl04_fill_plus_baseline_merges_to_correct_total() {
-    let baseline = local_with_position("AAPL", 1); // adopted before run
-    let exec_snap = exec_snapshot_with_position("AAPL", 1); // +1 fill applied
+fn rdl04_seeded_baseline_plus_fill_reads_through_to_correct_total() {
+    let exec_snap = exec_snapshot_with_position("AAPL", 2); // seeded baseline(1) + fill(+1), folded
     let broker = broker_with_position("AAPL", 2, ts()); // 1 baseline + 1 fill
     let seed = LocalSnapshot::empty();
 
-    let local = patched_local_provider(Some(&exec_snap), Some(&baseline), &seed);
+    let local = patched_local_provider(Some(&exec_snap), None, &seed);
 
-    // Merge: portfolio AAPL=1 + baseline AAPL=1 = 2.
+    // Direct read: snapshot already shows the folded total = 2. No re-merge.
     assert_eq!(
         local.positions.get("AAPL").copied(),
         Some(2),
-        "RDL04: portfolio(AAPL=1) + baseline(AAPL=1) must merge to total=2"
+        "RDL04: seeded snapshot AAPL=2 (baseline 1 + fill 1, folded) must read through as local=2 \
+         (a re-merge would have produced local=3)"
     );
 
     let mut wm = SnapshotWatermark::new();
     let result = reconcile_monotonic(&mut wm, &local, &broker).expect("watermark must pass");
     assert!(
         result.is_clean(),
-        "RDL04: merged(AAPL=2) vs broker(AAPL=2) must be clean; diffs={:?}",
+        "RDL04: local(AAPL=2) vs broker(AAPL=2) must be clean; diffs={:?}",
         result.diffs
     );
 }
@@ -526,7 +555,8 @@ fn rdl04_fill_plus_baseline_merges_to_correct_total() {
 //
 // Proves: when no baseline is adopted and the portfolio shows realized P&L
 // (position was opened and closed, now flat), the local snapshot is empty
-// and the broker is also flat.  Reconcile must be clean.
+// and the broker is also flat.  Reconcile must be clean.  Unaffected by this
+// fix — there is no baseline to double-count.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -553,23 +583,23 @@ fn rdl05_realized_pnl_no_baseline_flat_broker_is_clean() {
 }
 
 // ---------------------------------------------------------------------------
-// RDL06 — exec_snap with active_orders + empty baseline → empty positions
+// RDL06 — exec_snap with active_orders, no baseline adopted → no positions
 //
-// Proves: with an empty baseline and a pending (unfilled) order, the merged
-// local snapshot has no positions (portfolio delta=0, baseline=empty).
+// Proves: with no baseline adopted (seeding is a no-op) and a pending
+// (unfilled) order, the snapshot's portfolio positions stay empty, and the
+// provider — reading directly, no merge — returns an empty local truth.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rdl06_active_order_with_empty_baseline_has_no_positions() {
-    let baseline = LocalSnapshot::empty(); // no baseline adopted
+fn rdl06_active_order_no_baseline_has_no_positions() {
     let exec_snap = exec_snapshot_with_active_order("order-abc-001");
     let seed = LocalSnapshot::empty();
 
-    let local = patched_local_provider(Some(&exec_snap), Some(&baseline), &seed);
+    let local = patched_local_provider(Some(&exec_snap), None, &seed);
 
-    // portfolio positions empty + baseline empty → merged positions empty.
+    // portfolio positions empty (no baseline to seed, no fill yet) → empty local.
     assert!(
         local.positions.is_empty(),
-        "RDL06: empty baseline + unfilled order must produce empty positions"
+        "RDL06: no baseline + unfilled order must produce empty positions"
     );
 }
