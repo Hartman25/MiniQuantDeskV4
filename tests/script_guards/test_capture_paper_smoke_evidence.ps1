@@ -268,6 +268,65 @@ if (Test-Path $TargetScript) {
 }
 
 # ---------------------------------------------------------------------------
+# CPE11: Watchlist evidence capture (PAPER-SMOKE-EVIDENCE-WATCHLIST-ADMISSION-01)
+# Proves the watchlist status + dry-run admission-check capture is read-only,
+# resolves symbol/strategy_id from daemon truth (never hardcoded/invented),
+# and writes an explicit SKIPPED marker when that truth is unavailable.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "  -- CPE11: watchlist evidence capture (read-only, dry-run, no enforcement) --"
+
+if ($scriptText -match "Save-DaemonJson\s+'/api/v1/watchlist/status'\s+'watchlist_status\.json'") {
+    Pass 'CPE11a' "watchlist_status.json captured via Save-DaemonJson (GET-only helper)"
+} else {
+    Fail 'CPE11a' "watchlist_status.json capture not found via Save-DaemonJson"
+}
+
+if ($scriptText -match [regex]::Escape('/api/v1/watchlist/admission-check') -and
+    $scriptText -match [regex]::Escape('watchlist_admission_check.json')) {
+    Pass 'CPE11b' "watchlist_admission_check.json capture present"
+} else {
+    Fail 'CPE11b' "watchlist_admission_check.json capture not found"
+}
+
+if ($scriptText -match [regex]::Escape('$admissionData = Invoke-DaemonGet -Path $admissionPath')) {
+    Pass 'CPE11c' "Admission-check fetch uses GET-only helper (Invoke-DaemonGet), not a mutating call"
+} else {
+    Fail 'CPE11c' "Admission-check fetch does not appear to use Invoke-DaemonGet"
+}
+
+if ($scriptText -match [regex]::Escape('current_symbol')) {
+    Pass 'CPE11d' "Symbol resolved from daemon truth (current_symbol on autonomous/paper-status), not hardcoded"
+} else {
+    Fail 'CPE11d' "current_symbol resolution not found -- symbol may be hardcoded"
+}
+
+# The literal 'AAPL' must not appear anywhere near the admission-resolution logic --
+# only the resolved $admissionSymbol variable may be used.
+$admissionSection = [regex]::Match($scriptText, '(?s)\$admissionSkipReason\s*=\s*\$null.*?\$admissionDest\s*=')
+if ($admissionSection.Success) {
+    if ($admissionSection.Value -notmatch "(?i)['""]AAPL['""]") {
+        Pass 'CPE11e' "No hardcoded 'AAPL' literal in admission symbol/strategy_id resolution block"
+    } else {
+        Fail 'CPE11e' "Hardcoded 'AAPL' literal found in admission symbol/strategy_id resolution block"
+    }
+} else {
+    Fail 'CPE11e' "Could not isolate admission resolution block to check for hardcoded symbol"
+}
+
+if ($scriptText -match [regex]::Escape('$env:MQK_STRATEGY_IDS')) {
+    Pass 'CPE11f' "strategy_id resolved from MQK_STRATEGY_IDS env var, not invented"
+} else {
+    Fail 'CPE11f' "MQK_STRATEGY_IDS resolution not found -- strategy_id may be invented"
+}
+
+if ($scriptText -match [regex]::Escape('"SKIPPED: $admissionSkipReason"')) {
+    Pass 'CPE11g' "Explicit SKIPPED marker written when symbol/strategy_id cannot be resolved from truth"
+} else {
+    Fail 'CPE11g' "SKIPPED marker for unresolved symbol/strategy_id not found"
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Write-Host ""

@@ -38,6 +38,10 @@
 #       system_preflight.json
 #       autonomous_readiness.json
 #       autonomous_paper_status.json   -- PAPER-SMOKE-AUTOMATION-BUNDLE-01
+#       watchlist_status.json          -- PAPER-SMOKE-EVIDENCE-WATCHLIST-ADMISSION-01
+#       watchlist_admission_check.json -- PAPER-SMOKE-EVIDENCE-WATCHLIST-ADMISSION-01
+#                                         (dry-run only; SKIPPED: <reason> if symbol/strategy_id
+#                                          cannot be resolved from daemon truth + MQK_STRATEGY_IDS)
 #       alerts_active.json
 #       events_feed.json
 #       oms_overview.json
@@ -211,6 +215,56 @@ if (-not $SkipDaemon) {
     $null = Save-DaemonJson '/api/v1/portfolio/orders/open'  'portfolio_open_orders.json'
     $null = Save-DaemonJson '/api/v1/portfolio/fills'        'portfolio_fills.json'
     $null = Save-DaemonJson '/api/v1/paper/journal'          'paper_journal.json'
+
+    # --- Watchlist status + dry-run admission check (PAPER-SMOKE-EVIDENCE-WATCHLIST-ADMISSION-01) ---
+    # Read-only GET-only snapshots of the dry-run watchlist surfaces (PAPER-HANDOFF-READONLY-01 /
+    # PAPER-HANDOFF-ENFORCE-DESIGN-ONLY-01). Pure operator visibility -- no enforcement, no POSTs.
+    $null = Save-DaemonJson '/api/v1/watchlist/status' 'watchlist_status.json'
+
+    # Resolve symbol from daemon truth (current_symbol on autonomous/paper-status), never hardcoded.
+    # Resolve strategy_id from MQK_STRATEGY_IDS (first comma-separated entry); never invented.
+    $admissionSkipReason = $null
+    $admissionSymbol     = $null
+    $admissionStrategyId = $null
+
+    $paperStatusForAdmission = Invoke-DaemonGet -Path '/api/v1/autonomous/paper-status'
+    if ($null -ne $paperStatusForAdmission -and
+        $null -ne $paperStatusForAdmission.PSObject.Properties['current_symbol'] -and
+        -not [string]::IsNullOrWhiteSpace([string]$paperStatusForAdmission.current_symbol)) {
+        $admissionSymbol = [string]$paperStatusForAdmission.current_symbol
+    } else {
+        $admissionSkipReason = 'current_symbol not available from /api/v1/autonomous/paper-status'
+    }
+
+    if ($null -eq $admissionSkipReason) {
+        $strategyIdsEnv = $env:MQK_STRATEGY_IDS
+        if (-not [string]::IsNullOrWhiteSpace($strategyIdsEnv)) {
+            $candidateStrategyId = ($strategyIdsEnv -split '[,;]')[0].Trim()
+            if (-not [string]::IsNullOrWhiteSpace($candidateStrategyId)) {
+                $admissionStrategyId = $candidateStrategyId
+            } else {
+                $admissionSkipReason = 'MQK_STRATEGY_IDS is set but first entry is empty'
+            }
+        } else {
+            $admissionSkipReason = 'MQK_STRATEGY_IDS not set in environment -- cannot resolve strategy_id without inventing one'
+        }
+    }
+
+    $admissionDest = Join-Path $EvidenceDir 'api\watchlist_admission_check.json'
+    if ($null -eq $admissionSkipReason) {
+        $admissionPath = "/api/v1/watchlist/admission-check?symbol=$([Uri]::EscapeDataString($admissionSymbol))&strategy_id=$([Uri]::EscapeDataString($admissionStrategyId))"
+        $admissionData = Invoke-DaemonGet -Path $admissionPath
+        if ($null -ne $admissionData) {
+            $admissionData | ConvertTo-Json -Depth 20 | Set-Content -Path $admissionDest -Encoding UTF8
+            Write-Host "  [API OK ] $admissionPath --> api\watchlist_admission_check.json" -ForegroundColor Green
+        } else {
+            "UNAVAILABLE: daemon did not respond to GET $admissionPath" | Set-Content -Path $admissionDest -Encoding UTF8
+            Write-Host "  [API --] $admissionPath unavailable" -ForegroundColor Yellow
+        }
+    } else {
+        "SKIPPED: $admissionSkipReason" | Set-Content -Path $admissionDest -Encoding UTF8
+        Write-Host "  [API skip] watchlist/admission-check skipped: $admissionSkipReason" -ForegroundColor Yellow
+    }
 } else {
     "SKIPPED: -SkipDaemon flag was set" | Set-Content -Path (Join-Path $EvidenceDir 'api\skipped.txt') -Encoding UTF8
     Write-Host "  [--] daemon snapshots skipped (-SkipDaemon)" -ForegroundColor Yellow

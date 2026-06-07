@@ -299,6 +299,17 @@ if ($CheckOnly) {
 
 # ---------------------------------------------------------------------------
 # Run one refresh for all symbols, return $true if all passed gates
+#
+# PAPER-SMOKE-MD-REFRESH-FAIL-CLOSED-01: smoke readiness ($allPassed -- the
+# -Once mode exit code and the all_passed evidence field) fails closed when
+# ANY of the following occur for ANY symbol:
+#   - provider sync fails or throws
+#   - provider key/config is missing
+#   - completed bar count is below -MinCompletedBars
+#   - latest completed bar is staler than -MaxStalenessMinutes
+# This does not change interval-loop behavior -- the loop discards
+# Invoke-OneRefresh's return value (`$null = Invoke-OneRefresh`) and keeps
+# refreshing on its own schedule regardless of readiness outcome.
 # ---------------------------------------------------------------------------
 function Invoke-OneRefresh {
     $coreRs    = Join-Path $RepoRoot 'core-rs'
@@ -306,6 +317,9 @@ function Invoke-OneRefresh {
     $anyFailed  = $false
 
     foreach ($sym in $symbolList) {
+        $symFailed  = $false
+        $symReasons = @()
+
         Write-Step "[$sym/$Timeframe] Before refresh..."
         $before = Get-MdBarSummary -Sym $sym -Tf $Timeframe
         if ($before.query_ok) {
@@ -328,27 +342,35 @@ function Invoke-OneRefresh {
                     --full-start "2024-01-01" 2>&1 | Out-Host
                 if ($LASTEXITCODE -ne 0) {
                     Write-Warn "[$sym/$Timeframe] Provider sync failed (exit $LASTEXITCODE). Using existing bars."
+                    $symFailed = $true
+                    $symReasons += "provider sync failed (exit $LASTEXITCODE)"
                 } else {
                     Write-Ok "[$sym/$Timeframe] Provider sync complete."
                 }
             } catch {
                 Write-Warn "[$sym/$Timeframe] Provider sync threw exception ($_). Using existing bars."
+                $symFailed = $true
+                $symReasons += "provider sync threw exception"
             } finally { Pop-Location }
         } else {
             $missingVar = if ($Source -eq 'alpaca') { 'ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER' } else { 'TWELVEDATA_API_KEY' }
             Write-Warn "[$sym/$Timeframe] Skipping provider sync ($missingVar not set)."
+            $symFailed = $true
+            $symReasons += "provider key/config missing ($missingVar)"
         }
 
         $after = Get-MdBarSummary -Sym $sym -Tf $Timeframe
         if (-not $after.query_ok) {
             Write-Fail "[$sym/$Timeframe] Could not query md_bars after refresh."
             $anyFailed = $true
+            $symReasons += "could not query md_bars after refresh"
             $symResults += [pscustomobject]@{
                 symbol          = $sym
                 gate            = 'FAIL'
                 completed_count = 0
                 max_ts_iso      = $null
                 staleness_min   = -1
+                fail_reasons    = $symReasons
             }
             continue
         }
@@ -356,17 +378,23 @@ function Invoke-OneRefresh {
         $staleMinAfter = Get-StalenessMinutes -MaxTsUnix $after.max_ts_unix
         Write-Ok "[$sym/$Timeframe] After refresh: completed=$($after.completed_count)  latest_bar=$($after.max_ts_iso)  staleness=${staleMinAfter}min"
 
-        $gate = 'PASS'
         if ($after.completed_count -lt $MinCompletedBars) {
             Write-Warn "[$sym/$Timeframe] Below MinCompletedBars ($($after.completed_count) < $MinCompletedBars)."
-            $gate = 'WARN'
+            $symFailed = $true
+            $symReasons += "completed_count $($after.completed_count) below MinCompletedBars $MinCompletedBars"
         }
         if ($staleMinAfter -gt $MaxStalenessMinutes) {
             Write-Warn "[$sym/$Timeframe] Still stale by ${staleMinAfter}min (threshold=${MaxStalenessMinutes}min)."
             Write-Warn "  This is expected outside market hours or when no new 5m bars have completed."
+            Write-Warn "  Smoke readiness fails closed on stale data regardless of cause (PAPER-SMOKE-MD-REFRESH-FAIL-CLOSED-01)."
+            $symFailed = $true
+            $symReasons += "stale by ${staleMinAfter}min (threshold=${MaxStalenessMinutes}min)"
         } else {
             Write-Ok "[$sym/$Timeframe] Freshness OK (${staleMinAfter}min <= ${MaxStalenessMinutes}min)."
         }
+
+        if ($symFailed) { $anyFailed = $true }
+        $gate = if ($symFailed) { 'FAIL' } else { 'PASS' }
 
         $symResults += [pscustomobject]@{
             symbol          = $sym
@@ -374,11 +402,19 @@ function Invoke-OneRefresh {
             completed_count = $after.completed_count
             max_ts_iso      = $after.max_ts_iso
             staleness_min   = $staleMinAfter
+            fail_reasons    = $symReasons
         }
     }
 
-    $allPassed   = (-not $anyFailed)
-    $reason      = if ($allPassed) { "refresh complete" } else { "one or more symbols failed post-refresh query" }
+    $allPassed = (-not $anyFailed)
+    $reason    = if ($allPassed) {
+        "refresh complete; all symbols passed fail-closed readiness gates"
+    } else {
+        $failingSymbols = (($symResults | Where-Object { $_.gate -eq 'FAIL' }) | ForEach-Object {
+            "$($_.symbol) [$($_.fail_reasons -join '; ')]"
+        }) -join ' | '
+        "fail-closed: $failingSymbols"
+    }
     $refreshMode = if ($Once) { 'once' } else { 'interval' }
     Write-Evidence -SymbolResults $symResults -AllPassed $allPassed -Reason $reason -Mode $refreshMode
     return $allPassed

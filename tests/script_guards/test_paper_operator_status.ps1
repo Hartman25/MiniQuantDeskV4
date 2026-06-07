@@ -103,6 +103,42 @@ Assert-True 'OPS11' 'Script handles daemon unavailable (ErrorAction Stop in try/
     ($Content -match '-ErrorAction\s+Stop' -or $Content -match 'catch\s*\{' )
 
 # ---------------------------------------------------------------------------
+# PAPER-SMOKE-EVIDENCE-WATCHLIST-ADMISSION-01: read-only watchlist surfaces
+# ---------------------------------------------------------------------------
+
+# OPS12: Script calls /api/v1/watchlist/status via the GET-only helper
+Assert-True 'OPS12' 'Script calls /api/v1/watchlist/status via Invoke-DaemonGet (GET-only)' `
+    ($Content -match [regex]::Escape("Invoke-DaemonGet '/api/v1/watchlist/status'"))
+
+# OPS13: Script calls /api/v1/watchlist/admission-check (dry-run, GET-only)
+Assert-True 'OPS13' 'Script calls /api/v1/watchlist/admission-check via Invoke-DaemonGet (GET-only)' `
+    ($Content -match [regex]::Escape('/api/v1/watchlist/admission-check') -and
+     $Content -match [regex]::Escape('$Admission = Invoke-DaemonGet $admissionPath'))
+
+# OPS14: Symbol resolved from daemon truth (current_symbol), never hardcoded
+$admissionResolutionBlock = [regex]::Match($Content, '(?s)\$candidateSymbol\s*=.*?\$strategyIdsEnv\s*=\s*\$env:MQK_STRATEGY_IDS')
+Assert-True 'OPS14' 'Admission-check symbol resolved from current_symbol (daemon truth), no hardcoded AAPL literal' `
+    ($Content -match [regex]::Escape('current_symbol') -and
+     $admissionResolutionBlock.Success -and
+     $admissionResolutionBlock.Value -notmatch "(?i)['""]AAPL['""]")
+
+# OPS15: strategy_id resolved from MQK_STRATEGY_IDS env var, never invented
+Assert-True 'OPS15' 'Admission-check strategy_id resolved from $env:MQK_STRATEGY_IDS, not invented' `
+    ($Content -match [regex]::Escape('$env:MQK_STRATEGY_IDS'))
+
+# OPS16: explicit skip-with-reason when symbol/strategy_id cannot be resolved
+Assert-True 'OPS16' 'Script surfaces an explicit skip reason when symbol/strategy_id is unavailable' `
+    ($Content -match [regex]::Escape('$admissionSkipReasons') -and
+     $Content -match [regex]::Escape('Admission check skipped:'))
+
+# OPS17: approved_for_live surfaced for both watchlist surfaces with a DANGER alert if true
+$dangerAlertCount = [regex]::Matches($Content, 'DANGER: (watchlist|admission-check) approved_for_live=true').Count
+Assert-True 'OPS17' 'Script surfaces approved_for_live for watchlist status + admission-check with DANGER alert on true' `
+    ($Content -match [regex]::Escape("Get-FieldSafe `$Watchlist 'approved_for_live'") -and
+     $Content -match [regex]::Escape("Get-FieldSafe `$Admission 'approved_for_live'") -and
+     $dangerAlertCount -eq 2)
+
+# ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "=== Results ===" -ForegroundColor Cyan
 Write-Host "  Passed: $Passed" -ForegroundColor Green

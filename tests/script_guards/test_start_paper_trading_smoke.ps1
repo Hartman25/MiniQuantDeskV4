@@ -479,6 +479,85 @@ if ($tradingFound.Count -eq 0) {
 }
 
 # ---------------------------------------------------------------------------
+# OPR29-OPR32: PAPER-SMOKE-STARTUP-RECONCILE-HARD-GATE-01
+# STEP 12 must be a hard fail-closed gate -- the final pre-start check that
+# refuses to start (exit 1 + evidence capture) on dirty/unknown/stale/
+# unavailable reconcile truth, not an informational warn-and-continue.
+# ---------------------------------------------------------------------------
+$step12Block = [regex]::Match($scriptText, '(?s)# STEP 12: Verify reconcile status.*?(?=#[^\r\n]*STEP 13)')
+
+if ($step12Block.Success) {
+    $step12Text = $step12Block.Value
+
+    $exitOnUnavailable = $step12Text -match ([regex]::Escape('Could not GET /api/v1/reconcile/status: $_') + '[\s\S]*?exit 1')
+    $exitOnNull        = $step12Text -match ([regex]::Escape('$null -eq $reconcile') + '[\s\S]*?exit 1')
+    $exitOnDirty       = $step12Text -match ([regex]::Escape("-eq 'dirty'") + '[\s\S]*?exit 1')
+    $exitOnNeverRun    = $step12Text -match ([regex]::Escape("-eq 'never_run'") + '[\s\S]*?exit 1')
+    $exitOnStale       = $step12Text -match ([regex]::Escape("truth_state -eq 'stale' -or") + '[\s\S]*?exit 1')
+    $exitOnUnknown     = $step12Text -match ([regex]::Escape('Unrecognized reconcile state') + '[\s\S]*?exit 1')
+
+    if ($exitOnUnavailable) { Pass 'OPR29a' 'STEP 12 exits 1 when GET /api/v1/reconcile/status fails (truth unavailable)' }
+    else                    { Fail 'OPR29a' 'STEP 12 does not exit 1 when reconcile status GET fails' }
+
+    if ($exitOnNull) { Pass 'OPR29b' 'STEP 12 exits 1 when reconcile status response is null/empty' }
+    else             { Fail 'OPR29b' 'STEP 12 does not exit 1 on a null reconcile status response' }
+
+    if ($exitOnDirty) { Pass 'OPR29c' 'STEP 12 exits 1 when reconcile status is dirty' }
+    else              { Fail 'OPR29c' 'STEP 12 does not exit 1 on dirty reconcile status' }
+
+    if ($exitOnNeverRun) { Pass 'OPR29d' 'STEP 12 exits 1 when reconcile truth_state is never_run/unknown' }
+    else                 { Fail 'OPR29d' 'STEP 12 does not exit 1 on never_run/unknown reconcile truth' }
+
+    if ($exitOnStale) { Pass 'OPR29e' 'STEP 12 exits 1 when reconcile truth_state/status is stale' }
+    else              { Fail 'OPR29e' 'STEP 12 does not exit 1 on stale reconcile truth' }
+
+    if ($exitOnUnknown) { Pass 'OPR29f' 'STEP 12 exits 1 on any unrecognized reconcile state (fail-closed default branch)' }
+    else                { Fail 'OPR29f' 'STEP 12 does not fail closed on an unrecognized reconcile state' }
+
+    # OPR30: STEP 12 must contain no fail-open "continue/continuing" language on
+    # executable lines (the prior version warned and continued past a dirty gate).
+    $continueLines = ($step12Text -split "`n") | Where-Object {
+        $_ -match '(?i)continu' -and $_ -notmatch '^\s*#'
+    }
+    if (-not $continueLines) {
+        Pass 'OPR30' 'STEP 12 contains no fail-open "continue/continuing" language on executable lines (hard gate, not advisory)'
+    } else {
+        Fail 'OPR30' "STEP 12 still contains fail-open continue language: $($continueLines -join ' | ')"
+    }
+
+    # OPR31: every refusal path captures evidence before exiting (evidence-on-refusal).
+    # Count only executable lines -- the section's doc-comment describes the gate
+    # using the phrase "exit 1", which must not be counted as a real exit call.
+    $step12ExecText = (($step12Text -split "`n") | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+    $evidenceCalls  = [regex]::Matches($step12ExecText, 'Write-EvidenceCapture').Count
+    $exitCalls      = [regex]::Matches($step12ExecText, 'exit 1\b').Count
+    if ($evidenceCalls -ge 5 -and $exitCalls -ge 5 -and $evidenceCalls -eq $exitCalls) {
+        Pass 'OPR31' "STEP 12 calls Write-EvidenceCapture before every refusal exit ($evidenceCalls capture(s) / $exitCalls exit(s))"
+    } else {
+        Fail 'OPR31' "STEP 12 evidence-capture/exit pairing mismatch (captures=$evidenceCalls, exits=$exitCalls -- expected >=5 and equal)"
+    }
+
+    # OPR32: STEP 12 proceeds (no exit) only on the explicit clean condition:
+    # status=ok AND truth_state=active. No optimistic default-pass branch.
+    if ($step12Text -match [regex]::Escape("`$reconcile.status -eq 'ok' -and `$reconcile.truth_state -eq 'active'") -and
+        $step12Text -match '(?i)Reconcile is clean') {
+        Pass 'OPR32' 'STEP 12 proceeds only on the explicit clean condition (status=ok AND truth_state=active)'
+    } else {
+        Fail 'OPR32' 'STEP 12 does not gate the proceed-path on an explicit status=ok AND truth_state=active check'
+    }
+} else {
+    Fail 'OPR29a' 'Could not isolate STEP 12 reconcile-gate block (between STEP 12 and STEP 13 headers)'
+    Fail 'OPR29b' 'Could not isolate STEP 12 reconcile-gate block'
+    Fail 'OPR29c' 'Could not isolate STEP 12 reconcile-gate block'
+    Fail 'OPR29d' 'Could not isolate STEP 12 reconcile-gate block'
+    Fail 'OPR29e' 'Could not isolate STEP 12 reconcile-gate block'
+    Fail 'OPR29f' 'Could not isolate STEP 12 reconcile-gate block'
+    Fail 'OPR30'  'Could not isolate STEP 12 reconcile-gate block'
+    Fail 'OPR31'  'Could not isolate STEP 12 reconcile-gate block'
+    Fail 'OPR32'  'Could not isolate STEP 12 reconcile-gate block'
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Write-Host ""

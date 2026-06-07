@@ -914,23 +914,54 @@ if ($adoptResp.StatusCode -eq 200) {
 }
 
 # ---------------------------------------------------------------------------
-# STEP 12: Verify reconcile ok
+# STEP 12: Verify reconcile status -- HARD GATE (PAPER-SMOKE-STARTUP-RECONCILE-HARD-GATE-01)
+#
+# This is the final pre-start gate. Reconcile must be provably clean
+# (status=ok, truth_state=active) before the smoke run is allowed to start.
+# Fail closed -- exit 1 -- on dirty, never-run/unknown, stale, unavailable,
+# or any unrecognized state. Do not optimistically continue and do not rely
+# solely on later preflight/paper-status checks to catch this.
 # ---------------------------------------------------------------------------
-Write-Section "STEP 12: Verify reconcile status"
+Write-Section "STEP 12: Verify reconcile status (hard gate)"
 
 $reconcile = $null
 try { $reconcile = Invoke-DaemonGet -Path '/api/v1/reconcile/status' } catch {
-    Write-Warn "Could not GET /api/v1/reconcile/status: $_"
+    Write-Fail "Could not GET /api/v1/reconcile/status: $_"
+    Write-Fail "Reconcile truth is unavailable. Refusing to start (fail-closed)."
+    Write-EvidenceCapture "STEP 12: reconcile status unavailable -- $_"
+    exit 1
 }
 
-if ($null -ne $reconcile) {
-    Write-Ok "reconcile truth_state=$($reconcile.truth_state)  status=$($reconcile.status)"
-    if ($reconcile.status -eq 'dirty') {
-        Write-Warn "Reconcile is dirty. Review mismatches: GET /api/v1/reconcile/mismatches"
-        Write-Warn "Continuing (operator must decide whether to proceed)."
-    }
+if ($null -eq $reconcile) {
+    Write-Fail "Reconcile status response was empty/null. Refusing to start (fail-closed)."
+    Write-EvidenceCapture "STEP 12: reconcile status response null"
+    exit 1
+}
+
+Write-Step "reconcile truth_state=$($reconcile.truth_state)  status=$($reconcile.status)"
+
+if ($reconcile.status -eq 'ok' -and $reconcile.truth_state -eq 'active') {
+    Write-Ok "Reconcile is clean (status=ok, truth_state=active). Safe to proceed."
+} elseif ($reconcile.status -eq 'dirty') {
+    Write-Fail "Reconcile is DIRTY. Review mismatches: GET /api/v1/reconcile/mismatches"
+    Write-Fail "Manual operator action required before smoke can proceed. Refusing to start (fail-closed)."
+    Write-EvidenceCapture "STEP 12: reconcile dirty -- refusing to start"
+    exit 1
+} elseif ($reconcile.truth_state -eq 'never_run' -or $reconcile.status -eq 'unknown') {
+    Write-Fail "Reconcile has never completed a tick (truth_state=never_run, status=unknown)."
+    Write-Fail "Reconcile truth is not yet established. Refusing to start (fail-closed)."
+    Write-EvidenceCapture "STEP 12: reconcile truth_state=never_run -- refusing to start"
+    exit 1
+} elseif ($reconcile.truth_state -eq 'stale' -or $reconcile.status -eq 'stale') {
+    Write-Fail "Reconcile truth is stale (truth_state=$($reconcile.truth_state), status=$($reconcile.status))."
+    Write-Fail "Reconcile truth is not current. Refusing to start (fail-closed)."
+    Write-EvidenceCapture "STEP 12: reconcile stale -- refusing to start"
+    exit 1
 } else {
-    Write-Warn "Reconcile status unavailable - continuing."
+    Write-Fail "Unrecognized reconcile state (truth_state=$($reconcile.truth_state), status=$($reconcile.status))."
+    Write-Fail "Cannot prove reconcile is clean. Refusing to start (fail-closed)."
+    Write-EvidenceCapture "STEP 12: reconcile state unrecognized -- refusing to start"
+    exit 1
 }
 
 # ---------------------------------------------------------------------------

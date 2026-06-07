@@ -242,11 +242,84 @@ if (-not $alpacaOrderViolation) {
 }
 
 # ---------------------------------------------------------------------------
+# IMR18: PAPER-SMOKE-MD-REFRESH-FAIL-CLOSED-01 -- $allPassed fails closed on
+# provider sync failure / missing key / low bar count / staleness, not just
+# on post-refresh query failure.
+# ---------------------------------------------------------------------------
+$invokeOneRefreshBlock = [regex]::Match($scriptText, '(?s)function Invoke-OneRefresh \{.*?\n\}')
+if ($invokeOneRefreshBlock.Success) {
+    $refreshBody = $invokeOneRefreshBlock.Value
+
+    $setsFailedOnSyncFailure  = $refreshBody -match "Provider sync failed[\s\S]*?\`$symFailed = \`$true"
+    $setsFailedOnSyncThrow    = $refreshBody -match "Provider sync threw exception[\s\S]*?\`$symFailed = \`$true"
+    $setsFailedOnMissingKey   = $refreshBody -match "Skipping provider sync[\s\S]*?\`$symFailed = \`$true"
+    $setsFailedOnLowBarCount  = $refreshBody -match "Below MinCompletedBars[\s\S]*?\`$symFailed = \`$true"
+    $setsFailedOnStaleness    = $refreshBody -match "Still stale by[\s\S]*?\`$symFailed = \`$true"
+    $propagatesToAnyFailed    = $refreshBody -match '\$anyFailed = \$true'
+    $allPassedDerivedFromFail = $refreshBody -match '\$allPassed\s*=\s*\(-not \$anyFailed\)'
+
+    if ($setsFailedOnSyncFailure) {
+        Pass 'IMR18a' "Provider sync failure (non-zero exit) marks readiness failed."
+    } else {
+        Fail 'IMR18a' "Provider sync failure does not mark readiness failed."
+    }
+    if ($setsFailedOnSyncThrow) {
+        Pass 'IMR18b' "Provider sync exception marks readiness failed."
+    } else {
+        Fail 'IMR18b' "Provider sync exception does not mark readiness failed."
+    }
+    if ($setsFailedOnMissingKey) {
+        Pass 'IMR18c' "Missing provider key/config marks readiness failed."
+    } else {
+        Fail 'IMR18c' "Missing provider key/config does not mark readiness failed."
+    }
+    if ($setsFailedOnLowBarCount) {
+        Pass 'IMR18d' "Bar count below -MinCompletedBars marks readiness failed."
+    } else {
+        Fail 'IMR18d' "Low bar count does not mark readiness failed."
+    }
+    if ($setsFailedOnStaleness) {
+        Pass 'IMR18e' "Staleness above -MaxStalenessMinutes marks readiness failed."
+    } else {
+        Fail 'IMR18e' "Staleness above threshold does not mark readiness failed."
+    }
+    if ($propagatesToAnyFailed -and $allPassedDerivedFromFail) {
+        Pass 'IMR18f' 'Per-symbol failures propagate to $anyFailed and $allPassed = (-not $anyFailed).'
+    } else {
+        Fail 'IMR18f' 'Per-symbol failure does not provably propagate to $allPassed.'
+    }
+} else {
+    Fail 'IMR18a' "Could not isolate Invoke-OneRefresh function body."
+    Fail 'IMR18b' "Could not isolate Invoke-OneRefresh function body."
+    Fail 'IMR18c' "Could not isolate Invoke-OneRefresh function body."
+    Fail 'IMR18d' "Could not isolate Invoke-OneRefresh function body."
+    Fail 'IMR18e' "Could not isolate Invoke-OneRefresh function body."
+    Fail 'IMR18f' "Could not isolate Invoke-OneRefresh function body."
+}
+
+# ---------------------------------------------------------------------------
+# IMR19: -Once mode exit code derives from Invoke-OneRefresh's $allPassed
+# (the smoke-readiness gate); interval loop discards it (unchanged behavior).
+# ---------------------------------------------------------------------------
+$onceUsesReturn   = $scriptText -match '\$ok\s*=\s*Invoke-OneRefresh' -and $scriptText -match 'exit \$exitCode'
+$loopDiscardsRet  = $scriptText -match '\$null\s*=\s*Invoke-OneRefresh'
+if ($onceUsesReturn) {
+    Pass 'IMR19a' "-Once mode derives its exit code from Invoke-OneRefresh's `$allPassed return value."
+} else {
+    Fail 'IMR19a' "-Once mode does not appear to gate its exit code on Invoke-OneRefresh's return value."
+}
+if ($loopDiscardsRet) {
+    Pass 'IMR19b' "Interval loop discards Invoke-OneRefresh's return value (informational continue-on-warn preserved)."
+} else {
+    Fail 'IMR19b' "Interval loop does not discard Invoke-OneRefresh's return value -- loop behavior may have changed."
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Write-Host ""
 if ($Failures -eq 0) {
-    Write-Host "  ALL PASS  (17/17 assertions)" -ForegroundColor Green
+    Write-Host "  ALL PASS  (25/25 assertions)" -ForegroundColor Green
     exit 0
 } else {
     Write-Host "  $Failures FAILURE(S)  -- see FAIL lines above" -ForegroundColor Red

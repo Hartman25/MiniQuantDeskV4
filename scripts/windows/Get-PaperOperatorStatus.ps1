@@ -9,6 +9,11 @@
 #   GET /api/v1/autonomous/paper-status
 #   GET /api/v1/system/status
 #   GET /api/v1/reconcile/status
+#   GET /api/v1/watchlist/status            -- PAPER-SMOKE-EVIDENCE-WATCHLIST-ADMISSION-01
+#   GET /api/v1/watchlist/admission-check   -- PAPER-SMOKE-EVIDENCE-WATCHLIST-ADMISSION-01
+#                                              (dry-run only; symbol from current_symbol,
+#                                               strategy_id from MQK_STRATEGY_IDS -- skipped
+#                                               with reason if either cannot be resolved)
 #   GET /api/v1/portfolio/positions
 #   GET /api/v1/portfolio/orders/open
 #
@@ -81,6 +86,7 @@ Write-Host ""
 $PaperStatus  = Invoke-DaemonGet '/api/v1/autonomous/paper-status'
 $SystemStatus = Invoke-DaemonGet '/api/v1/system/status'
 $Reconcile    = Invoke-DaemonGet '/api/v1/reconcile/status'
+$Watchlist    = Invoke-DaemonGet '/api/v1/watchlist/status'
 $Positions    = Invoke-DaemonGet '/api/v1/portfolio/positions'
 $OpenOrders   = Invoke-DaemonGet '/api/v1/portfolio/orders/open'
 
@@ -196,6 +202,82 @@ if ($null -ne $Reconcile) {
 }
 
 # ---------------------------------------------------------------------------
+# 3b. Watchlist status (PAPER-SMOKE-EVIDENCE-WATCHLIST-ADMISSION-01)
+# ---------------------------------------------------------------------------
+Write-Header "WATCHLIST STATUS (read-only)"
+if ($null -ne $Watchlist) {
+    $wl_status = Get-FieldSafe $Watchlist 'status'
+    $wl_apap   = Get-FieldSafe $Watchlist 'approved_for_autonomous_paper'
+    $wl_afl    = Get-FieldSafe $Watchlist 'approved_for_live'
+    $wl_top    = Get-FieldSafe $Watchlist 'top_symbol'
+    $wl_path   = Get-FieldSafe $Watchlist 'configured_path'
+
+    Write-Field 'status'                       $wl_status $(if ($wl_status -eq 'ok') { 'Green' } elseif ($wl_status -eq 'invalid') { 'Red' } else { 'Yellow' })
+    Write-Field 'approved_for_autonomous_paper' $wl_apap   $(if ($wl_apap -eq 'True') { 'Green' } else { 'Yellow' })
+    Write-Field 'approved_for_live'             $wl_afl    $(if ($wl_afl -eq 'True') { 'Red' } else { 'Green' })
+    Write-Field 'top_symbol'                    $wl_top
+    Write-Field 'configured_path'               $wl_path
+
+    if ($wl_afl -eq 'True') {
+        Write-Host ""
+        Write-Host "  !!! DANGER: watchlist approved_for_live=true — this should never occur !!!" -ForegroundColor Red
+    }
+} else {
+    Write-Unavail "/api/v1/watchlist/status"
+}
+
+# ---------------------------------------------------------------------------
+# 3c. Watchlist admission check -- dry-run only, NOT enforced
+# (PAPER-HANDOFF-ENFORCE-DESIGN-ONLY-01: not wired into strategy/signal route)
+# Symbol comes from current_symbol (daemon truth). strategy_id comes from
+# MQK_STRATEGY_IDS (first entry). Skipped with an explicit reason if either
+# cannot be resolved -- never invented.
+# ---------------------------------------------------------------------------
+Write-Header "WATCHLIST ADMISSION CHECK (dry-run, NOT enforced)"
+$admissionSymbol = $null
+if ($null -ne $PaperStatus -and $null -ne $PaperStatus.PSObject.Properties['current_symbol']) {
+    $candidateSymbol = [string]$PaperStatus.current_symbol
+    if (-not [string]::IsNullOrWhiteSpace($candidateSymbol)) { $admissionSymbol = $candidateSymbol }
+}
+$admissionStrategyId = $null
+$strategyIdsEnv = $env:MQK_STRATEGY_IDS
+if (-not [string]::IsNullOrWhiteSpace($strategyIdsEnv)) {
+    $candidateStrategyId = ($strategyIdsEnv -split '[,;]')[0].Trim()
+    if (-not [string]::IsNullOrWhiteSpace($candidateStrategyId)) { $admissionStrategyId = $candidateStrategyId }
+}
+
+$Admission = $null
+if ($null -ne $admissionSymbol -and $null -ne $admissionStrategyId) {
+    $admissionPath = "/api/v1/watchlist/admission-check?symbol=$([Uri]::EscapeDataString($admissionSymbol))&strategy_id=$([Uri]::EscapeDataString($admissionStrategyId))"
+    $Admission = Invoke-DaemonGet $admissionPath
+    if ($null -ne $Admission) {
+        $adm_allowed = Get-FieldSafe $Admission 'allowed'
+        $adm_reason  = Get-FieldSafe $Admission 'reason'
+        $adm_afl     = Get-FieldSafe $Admission 'approved_for_live'
+        $adm_note    = Get-FieldSafe $Admission 'note'
+
+        Write-Field 'symbol'            $admissionSymbol
+        Write-Field 'strategy_id'       $admissionStrategyId
+        Write-Field 'allowed'           $adm_allowed $(if ($adm_allowed -eq 'True') { 'Green' } else { 'Yellow' })
+        Write-Field 'reason'            $adm_reason
+        Write-Field 'approved_for_live' $adm_afl     $(if ($adm_afl -eq 'True') { 'Red' } else { 'Green' })
+        Write-Field 'note'              $adm_note
+
+        if ($adm_afl -eq 'True') {
+            Write-Host ""
+            Write-Host "  !!! DANGER: admission-check approved_for_live=true — this should never occur !!!" -ForegroundColor Red
+        }
+    } else {
+        Write-Unavail "/api/v1/watchlist/admission-check"
+    }
+} else {
+    $admissionSkipReasons = @()
+    if ($null -eq $admissionSymbol)     { $admissionSkipReasons += 'current_symbol not available from /api/v1/autonomous/paper-status' }
+    if ($null -eq $admissionStrategyId) { $admissionSkipReasons += 'MQK_STRATEGY_IDS not set in environment' }
+    Write-Warn "Admission check skipped: $($admissionSkipReasons -join '; ')"
+}
+
+# ---------------------------------------------------------------------------
 # 4. Portfolio positions
 # ---------------------------------------------------------------------------
 Write-Header "PORTFOLIO POSITIONS"
@@ -281,11 +363,13 @@ if ($Json) {
         schema_version          = 'ops-status-v1'
         captured_at             = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ')
         daemon_online           = $DaemonOnline
-        autonomous_paper_status = if ($null -ne $PaperStatus)  { $PaperStatus  } else { $null }
-        system_status           = if ($null -ne $SystemStatus) { $SystemStatus } else { $null }
-        reconcile_status        = if ($null -ne $Reconcile)    { $Reconcile    } else { $null }
-        portfolio_positions     = if ($null -ne $Positions)    { $Positions    } else { $null }
-        portfolio_open_orders   = if ($null -ne $OpenOrders)   { $OpenOrders   } else { $null }
+        autonomous_paper_status  = if ($null -ne $PaperStatus)  { $PaperStatus  } else { $null }
+        system_status            = if ($null -ne $SystemStatus) { $SystemStatus } else { $null }
+        reconcile_status         = if ($null -ne $Reconcile)    { $Reconcile    } else { $null }
+        watchlist_status         = if ($null -ne $Watchlist)    { $Watchlist    } else { $null }
+        watchlist_admission_check = if ($null -ne $Admission)   { $Admission    } else { $null }
+        portfolio_positions      = if ($null -ne $Positions)    { $Positions    } else { $null }
+        portfolio_open_orders    = if ($null -ne $OpenOrders)   { $OpenOrders   } else { $null }
     }
     $summary | ConvertTo-Json -Depth 10
 }
