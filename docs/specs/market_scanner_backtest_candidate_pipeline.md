@@ -1278,6 +1278,7 @@ One patch per turn. No bundling.
 | 10 | BACKTEST-GATES-01 | Strategy-fit pass/fail gates and walk-forward validation |
 | 11 | WATCHLIST-PROMO-01 | Watchlist promotion gate: all criteria, operator review hook |
 | 12 | WATCHLIST-PREMARKET-01 | Premarket revalidation runner |
+| 12b | PAPER-READINESS-RUNNER-01 | Operational composite runner (`paper_readiness_runner.py`): composes symbol-inputs → risk-sim → premarket → promotion into a single toggle-controlled, fail-closed entry point; 28 tests + 14 script-guard assertions; market-data bridge gap documented below |
 | 13 | PAPER-HANDOFF-01 | Autonomous paper handoff: daemon reads watchlist, signal filter |
 | 14 | GUI-SCANNER-01 | GUI/Discord surfaces for scanner/watchlist state |
 | 15 | EVIDENCE-REVIEW-01 | Post-session evidence review integration |
@@ -1285,6 +1286,16 @@ One patch per turn. No bundling.
 | 17 | LIVE-SHADOW-LATER | Live-shadow promotion path — future; not started in this roadmap |
 
 Patches 2–13 target the `research-py` layer and script runners. Patches 14–16 touch the daemon GUI and evidence tooling. Patch 17 is deferred.
+
+### PAPER-READINESS-RUNNER-01 — Market-Data Bridge Gap (Outcome C)
+
+`paper_readiness_runner.py` reads **local JSON/CSV bar files** from a `bars_root` directory (matching `<SYMBOL>_<TIMEFRAME>.{json,csv}`) via `symbol_inputs_runner.py`. The `Refresh-IntradayMarketData.ps1` script writes refreshed bars into the **Postgres `md_bars` table** (paper DB, port 5440) via `mqk-cli md sync-provider` — there is **no existing writer** that exports `md_bars` rows to local files in the format the scanner expects.
+
+This gap is **Outcome C** (market-data bridge not yet written):
+- The scanner bar format and the DB-resident `md_bars` format are compatible at the CSV level (`open_micros` auto-detected by `symbol_inputs_runner.normalize_bars_csv`).
+- A future `MARKET-DATA-EXPORT-01` patch must add an `mqk-cli` or script that exports `md_bars` rows to the `bars_root` tree before the pipeline runs.
+- Until that bridge exists, `bars_root` must be populated by the operator manually or via a separate export tool before invoking the paper-readiness runner.
+- The runner itself is fail-closed on a missing/non-directory `bars_root` (`paper_readiness_bars_root_missing`); it never silently infers an empty-bar state as healthy.
 
 ---
 
