@@ -150,6 +150,63 @@ def _resolve_bars_path(bars_root: str, symbol: str, timeframe: str) -> Optional[
     return None
 
 
+def _build_command_or_reason(
+    entry: dict[str, Any],
+    config: BacktestBridgeConfig,
+) -> tuple[Optional[list[str]], Optional[str]]:
+    """
+    Build the CLI command list for a queue entry, or report why it could not
+    be built.
+
+    Returns (command, None) on success, or (None, reason) on failure where
+    reason distinguishes:
+    - REASON_BARS_FILE_MISSING: binary/strategy/symbol/timeframe are all valid
+      but no bars CSV exists for (symbol, timeframe) under bars_root_dir.
+    - REASON_COMMAND_BUILD_FAILED: any other missing/invalid input (no binary,
+      no bars_root_dir, missing/unknown symbol or strategy_id, unknown
+      timeframe).
+
+    Single source of truth for build_mqk_backtest_command() (which exposes
+    only the command for dry-run-safe callers) and run_backtest_for_entry()
+    (which needs the specific reason for fail-closed reporting).
+    """
+    if not config.cli_binary or not config.bars_root_dir:
+        return None, REASON_COMMAND_BUILD_FAILED
+
+    symbol = entry.get("symbol") or ""
+    strategy_id = entry.get("strategy_id") or ""
+    timeframe = entry.get("timeframe") or "5m"
+
+    if not symbol or not strategy_id:
+        return None, REASON_COMMAND_BUILD_FAILED
+    if strategy_id not in KNOWN_STRATEGY_IDS:
+        return None, REASON_COMMAND_BUILD_FAILED
+
+    timeframe_secs = TIMEFRAME_TO_SECS.get(timeframe)
+    if not timeframe_secs:
+        return None, REASON_COMMAND_BUILD_FAILED
+
+    bars_path = _resolve_bars_path(config.bars_root_dir, symbol, timeframe)
+    if not bars_path:
+        return None, REASON_BARS_FILE_MISSING
+
+    out_dir = config.out_dir or "exports/backtest_runs"
+
+    return [
+        config.cli_binary,
+        "backtest", "csv",
+        "--bars", bars_path,
+        "--strategy", strategy_id,
+        "--symbol", symbol,
+        "--timeframe-secs", str(timeframe_secs),
+        "--initial-cash-micros", str(config.initial_cash_micros),
+        "--target-qty", str(config.target_qty),
+        "--integrity-stale-threshold-ticks", str(config.integrity_stale_threshold_ticks),
+        "--integrity-gap-tolerance-bars", str(config.integrity_gap_tolerance_bars),
+        "--out-dir", out_dir,
+    ], None
+
+
 def build_mqk_backtest_command(
     entry: dict[str, Any],
     config: BacktestBridgeConfig,
@@ -167,41 +224,8 @@ def build_mqk_backtest_command(
             --integrity-gap-tolerance-bars <n>
             --out-dir <dir>
     """
-    if not config.cli_binary or not config.bars_root_dir:
-        return None
-
-    symbol = entry.get("symbol") or ""
-    strategy_id = entry.get("strategy_id") or ""
-    timeframe = entry.get("timeframe") or "5m"
-
-    if not symbol or not strategy_id:
-        return None
-    if strategy_id not in KNOWN_STRATEGY_IDS:
-        return None
-
-    timeframe_secs = TIMEFRAME_TO_SECS.get(timeframe)
-    if not timeframe_secs:
-        return None
-
-    bars_path = _resolve_bars_path(config.bars_root_dir, symbol, timeframe)
-    if not bars_path:
-        return None
-
-    out_dir = config.out_dir or "exports/backtest_runs"
-
-    return [
-        config.cli_binary,
-        "backtest", "csv",
-        "--bars", bars_path,
-        "--strategy", strategy_id,
-        "--symbol", symbol,
-        "--timeframe-secs", str(timeframe_secs),
-        "--initial-cash-micros", str(config.initial_cash_micros),
-        "--target-qty", str(config.target_qty),
-        "--integrity-stale-threshold-ticks", str(config.integrity_stale_threshold_ticks),
-        "--integrity-gap-tolerance-bars", str(config.integrity_gap_tolerance_bars),
-        "--out-dir", out_dir,
-    ]
+    cmd, _reason = _build_command_or_reason(entry, config)
+    return cmd
 
 
 # ---------------------------------------------------------------------------
@@ -405,9 +429,9 @@ def run_backtest_for_entry(
     """
     failure_reasons: list[str] = []
 
-    cmd = build_mqk_backtest_command(entry, config)
+    cmd, build_failure_reason = _build_command_or_reason(entry, config)
     if cmd is None:
-        failure_reasons.append(REASON_COMMAND_BUILD_FAILED)
+        failure_reasons.append(build_failure_reason or REASON_COMMAND_BUILD_FAILED)
         return None, failure_reasons
 
     binary = cmd[0]

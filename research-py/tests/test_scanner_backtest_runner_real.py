@@ -23,6 +23,7 @@ from mqk_research.scanner.backtest_bridge import (
     REASON_VALIDATION_METRICS_MISSING,
     REASON_COMMAND_BUILD_FAILED,
     REASON_BINARY_NOT_FOUND,
+    REASON_BARS_FILE_MISSING,
     PCT_SCALE_PERCENT_0_100,
     PCT_SCALE_AUTO,
     BacktestBridgeConfig,
@@ -807,6 +808,28 @@ class TestFailedSubprocessConvertedToFailedArtifact(unittest.TestCase):
         metrics_dict, reasons = run_backtest_for_entry(entry, cfg)
         self.assertIsNone(metrics_dict)
         self.assertIn(REASON_COMMAND_BUILD_FAILED, reasons)
+
+    def test_missing_bars_file_yields_bars_file_missing_not_command_build_failed(self):
+        """
+        Valid binary/strategy/symbol/timeframe but no bars CSV on disk →
+        bars_file_missing specifically, distinct from command_build_failed
+        (which covers missing binary/bars_root_dir/strategy/timeframe config).
+        """
+        entry = _make_queue_entry()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # bars_root_dir exists but contains no AAPL_5m.csv (or any AAPL variant)
+            fake_binary = str(Path(tmpdir) / "mqk")
+            Path(fake_binary).write_text("", encoding="utf-8")
+            cfg = BacktestBridgeConfig(
+                mode="real",
+                cli_binary=fake_binary,
+                bars_root_dir=tmpdir,
+                out_dir=tmpdir,
+            )
+            metrics_dict, reasons = run_backtest_for_entry(entry, cfg)
+        self.assertIsNone(metrics_dict)
+        self.assertIn(REASON_BARS_FILE_MISSING, reasons)
+        self.assertNotIn(REASON_COMMAND_BUILD_FAILED, reasons)
 
     def test_failed_subprocess_returns_failure_reason_not_crash(self):
         """subprocess.run non-zero returncode → backtest_command_failed, no exception."""
