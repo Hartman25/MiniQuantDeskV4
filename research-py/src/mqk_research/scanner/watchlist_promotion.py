@@ -9,7 +9,9 @@ Promotion gates (evaluated in order):
 2. watchlist_mode_paper       — mode == "paper"
 3. watchlist_live_locked      — approved_for_live != True in input
 4. has_ranked_candidates      — at least one symbol present
-5. strategy_fit_present       — strategy-fit artifact exists for top symbol
+5. strategy_fit_present       — strategy-fit artifact exists for top symbol, and its
+                                 symbol/strategy_id match the watchlist's top-symbol
+                                 identity and assignment (fail-closed on mismatch)
 6. strategy_fit_recommended   — artifact has recommended_for_paper == True
 7. risk_simulation_passed     — config.risk_simulation_passed == True
 8. operator_review_approved   — config.operator_review_approved == True
@@ -51,6 +53,8 @@ REASON_WATCHLIST_MODE_NOT_PAPER = "watchlist_mode_not_paper"
 REASON_WATCHLIST_LIVE_NOT_LOCKED = "watchlist_live_not_locked"
 REASON_NO_RANKED_CANDIDATES = "no_ranked_candidates"
 REASON_STRATEGY_FIT_MISSING = "strategy_fit_missing"
+REASON_STRATEGY_FIT_SYMBOL_MISMATCH = "strategy_fit_symbol_mismatch"
+REASON_STRATEGY_FIT_STRATEGY_MISMATCH = "strategy_fit_strategy_mismatch"
 REASON_STRATEGY_FIT_NOT_RECOMMENDED_FOR_PAPER = "strategy_fit_not_recommended_for_paper"
 REASON_RISK_SIMULATION_REQUIRED = "risk_simulation_required"
 REASON_OPERATOR_REVIEW_REQUIRED = "operator_review_required"
@@ -182,22 +186,31 @@ def evaluate_watchlist_promotion(
     if not symbols:
         failure_reasons.append(REASON_NO_RANKED_CANDIDATES)
 
-    # Gates 5-6: strategy-fit artifact for top symbol
+    # Gates 5-6: strategy-fit artifact for top symbol — presence, identity binding
+    # (symbol/strategy_id must match the watchlist's top-symbol assignment; a
+    # mismatched or forged identity fails closed rather than silently adopting
+    # a strategy/symbol the watchlist never assigned), and paper recommendation.
     top_symbol: Optional[str] = symbols[0] if symbols else None
     top_strategy_id: Optional[str] = None
 
     if top_symbol is not None:
         fit_artifact = strategy_fit_artifacts.get(top_symbol)
+        assigned_strategy_id = (watchlist.get("strategy_assignments") or {}).get(top_symbol)
         if fit_artifact is None:
             failure_reasons.append(REASON_STRATEGY_FIT_MISSING)
+        elif fit_artifact.get("symbol") not in (None, top_symbol):
+            failure_reasons.append(REASON_STRATEGY_FIT_SYMBOL_MISMATCH)
+        elif (
+            assigned_strategy_id is not None
+            and fit_artifact.get("strategy_id") is not None
+            and fit_artifact.get("strategy_id") != assigned_strategy_id
+        ):
+            failure_reasons.append(REASON_STRATEGY_FIT_STRATEGY_MISMATCH)
         elif not fit_artifact.get("recommended_for_paper"):
             failure_reasons.append(REASON_STRATEGY_FIT_NOT_RECOMMENDED_FOR_PAPER)
         else:
             # Prefer strategy_id from the validated fit artifact; fall back to watchlist.
-            top_strategy_id = (
-                fit_artifact.get("strategy_id")
-                or (watchlist.get("strategy_assignments") or {}).get(top_symbol)
-            )
+            top_strategy_id = fit_artifact.get("strategy_id") or assigned_strategy_id
 
     # Gate 7: risk simulation — driven by result dict if provided, else config boolean
     if not effective_risk_passed:

@@ -52,7 +52,8 @@ $Guards = @(
     'test_scanner_walkforward_runner.ps1',
     'test_watchlist_admission_dryrun.ps1',
     'test_scanner_symbol_inputs.ps1',
-    'test_scanner_symbol_inputs_runner.ps1'
+    'test_scanner_symbol_inputs_runner.ps1',
+    'test_scanner_watchlist_promotion_end_to_end.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()

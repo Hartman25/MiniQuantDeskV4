@@ -954,6 +954,76 @@ A symbol/strategy pair is eligible for the next-day paper watchlist only when AL
 - Does NOT submit orders, enable live routing, change live eligibility, fetch market
   data, or call any broker/daemon/API.
 
+### Implementation Note (WATCHLIST-PROMOTION-END-TO-END-ARTIFACT-CHAIN-01)
+
+- **Proof module (test-only, no new production module)**:
+  `research-py/tests/test_scanner_watchlist_promotion_end_to_end_artifact_chain.py`
+- **Purpose**: closes the remaining trust-chain gap by proving — with real
+  evaluator functions and deterministic fixtures, never hand-forged derived
+  fields — that the full research-layer artifact chain wires together honestly
+  end to end:
+
+  ```
+  ranked/scanner candidate (watchlist-v1)
+    -> backtest queue (regime/strategy compatibility, strategy_ids_for_regime)
+    -> strategy-fit-v1 (evaluated through the real backtest_gates evaluator)
+    -> backtest gates (recommended_for_paper derived honestly via apply_backtest_gates)
+    -> risk simulation (evaluate_watchlist_risk)
+    -> symbol-inputs runner (run_symbol_inputs_producer, real temp-dir bars + liquidity sidecar)
+    -> premarket revalidation (evaluate_premarket_watchlist)
+    -> watchlist promotion (evaluate_watchlist_promotion / apply_watchlist_promotion)
+    -> promoted paper watchlist artifact (written + reloaded from a temp dir)
+  ```
+
+- **Scenario A (passing chain)**: a single comprehensive walk asserts, at every
+  stage, that `approved_for_live=False`/`recommended_for_live=False` hold, that
+  `recommended_for_paper` and `data_quality_passed`/`liquidity_passed`/
+  `regime_label` are *derived* by the real evaluators (not asserted into the
+  fixture), and that the final promoted-and-reloaded artifact carries
+  `approved_for_autonomous_paper=True`, `approved_for_live=False`,
+  `max_symbols_to_trade=1`, `max_concurrent_positions=1`.
+- **Scenarios B1-B10 (fail-closed)**: each blocks promotion via a distinct,
+  real gate failure and asserts `approved_for_autonomous_paper=False` /
+  `approved_for_live=False` propagate through to the applied artifact:
+  - B1 `TestFailClosedMissingStrategyFit` — no strategy-fit artifact for the top symbol
+  - B2 `TestFailClosedStrategyFitNotRecommended` — fit genuinely fails backtest gates (too few trades)
+  - B3 `TestFailClosedRiskSimulationFails` — passes backtest gates but fails risk daily-loss check
+  - B4 `TestFailClosedOperatorReviewMissing` — `operator_review_approved` left at its fail-closed default
+  - B5 `TestFailClosedPremarketMissingSymbolInput` — symbol absent from the symbol-inputs map (and entirely missing artifact)
+  - B6 `TestFailClosedPremarketStaleBar` — bar was fresh when the symbol-inputs producer ran but is stale by the time premarket revalidation re-checks it against a later `reference_utc` (the realistic "time has passed since the artifact was produced" revalidation case — distinct from B5's missing-input case)
+  - B7 `TestFailClosedForgedLiveFlag` — input watchlist forges `approved_for_live=true`; every downstream artifact (risk, premarket, promotion, applied, written-and-reloaded) is asserted to force it back to `False` and record `*_live_approval_forbidden`
+  - B8 `TestFailClosedMismatchedStrategy` — strategy-fit `strategy_id` does not match the watchlist's `strategy_assignments` entry for the top symbol
+  - B9 `TestFailClosedMismatchedSymbol` — strategy-fit `symbol` field does not match the watchlist's top-ranked symbol (including the case where the fit artifact is keyed entirely to a different symbol)
+  - B10 `TestFailClosedMissingOrMalformedSymbolInputs` — symbol-inputs artifact file absent (`load_symbol_inputs_artifact` raises, fails closed) or malformed (`extract_symbol_inputs_map` returns an empty map, fails closed)
+- **Real integration gap closed in `watchlist_promotion.py`** (minimal,
+  additive — no existing gate weakened): gate 5 (`strategy_fit_present`)
+  previously checked only artifact *presence* and `recommended_for_paper`,
+  trusting the `strategy_fit_artifacts[top_symbol]` dict key and the artifact's
+  self-reported `symbol`/`strategy_id` fields without verifying they actually
+  match the watchlist's top-symbol identity and `strategy_assignments` entry.
+  A forged or mismatched fit artifact (wrong symbol, or a strategy_id the
+  watchlist never assigned) would have silently passed. Two new fail-closed
+  reasons close this gap:
+  - `strategy_fit_symbol_mismatch` — fit artifact's `symbol` ≠ watchlist's top symbol
+  - `strategy_fit_strategy_mismatch` — fit artifact's `strategy_id` ≠ watchlist's assigned `strategy_id` for that symbol
+  (`strategy_fit_missing` and `strategy_fit_not_recommended_for_paper` were
+  already present; both are now named reason constants alongside the two new
+  ones.) Existing `test_scanner_watchlist_promotion.py` fixtures already use
+  matching symbol/strategy identities, so this patch only *adds* coverage —
+  it does not change any existing passing/failing outcome.
+- **Artifact-only / no-wiring boundary (unchanged)**: deterministic in-memory
+  and temp-dir fixtures only; no daemon/broker/DB/network/subprocess imports;
+  no order submission; no strategy-signal injection; no live routing. This
+  proof does NOT establish market/live/paper truth — it proves the research
+  modules wire together honestly and fail closed at every link. Daemon
+  enforcement wiring remains explicitly open (§22).
+- Script guard: `tests/script_guards/test_scanner_watchlist_promotion_end_to_end.ps1`
+  (asserts presence of all eleven scenario classes, all five chain schema
+  strings, and that `approved_for_live=True`/`recommended_for_live=True`/
+  `eligible_for_live=True` never appear as constructed or asserted values
+  anywhere in the proof — except the single deliberate forged-input fixture
+  call exercised by B7).
+
 ### 18.2 Demotion from Watchlist
 
 A symbol is removed from the watchlist if ANY:
