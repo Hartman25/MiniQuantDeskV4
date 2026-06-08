@@ -869,6 +869,91 @@ A symbol/strategy pair is eligible for the next-day paper watchlist only when AL
   produced artifacts). Script guard: `tests/script_guards/test_scanner_symbol_inputs.ps1`.
 - Does NOT submit orders, enable live routing, or change live eligibility.
 
+### Implementation Note (SYMBOL-INPUTS-RUNNER-01)
+
+- MAIN runner module: `research-py/src/mqk_research/scanner/symbol_inputs_runner.py`
+- Public API: `SymbolInputsRunnerConfig`, `SymbolInputsRunnerResult`,
+  `run_symbol_inputs_producer(config)`, plus pure helpers `load_symbols_from_watchlist`,
+  `resolve_bars_path`, `load_bars_for_symbol`, `load_liquidity_metrics_for_symbol`,
+  `normalize_bars_json`, `normalize_bars_csv`; CLI entry point via `main(argv)`.
+- **Runner role**: this module is the *operational* counterpart to
+  `SYMBOL-INPUTS-PRODUCER-01` — it resolves a symbol list (from a `watchlist-v1`
+  artifact or an explicit `--symbols` list), loads caller-local bar files (and an
+  optional liquidity sidecar) from disk, builds `SymbolInputSpec` records, and
+  delegates assembly/persistence entirely to the existing
+  `build_symbol_inputs` / `write_symbol_inputs_artifact` producer functions. It
+  invents no producer/gate logic of its own.
+- **Artifact-only / local-only boundary**: the runner reads only local files supplied
+  by the caller (`--bars-root`, `--liquidity-root`, `--watchlist`) and writes only the
+  local `symbol-inputs-v1` artifact at `--output`. It does not fetch market data, does
+  not call any broker/API/daemon, does not derive liquidity from bars, and does not
+  write to any MAIN-operational location. No broker/OMS/daemon/runtime/network/DB
+  imports; no subprocess; no order or strategy-signal endpoint references.
+- **Bars file conventions** under `bars_root` (first match wins):
+  `<SYMBOL>_<TIMEFRAME>.json`, `<SYMBOL>_<TIMEFRAME>.csv`, `<SYMBOL>.json`, `<SYMBOL>.csv`.
+  JSON bars may be a top-level list or a dict with a `bars` list (passed through as-is,
+  already in the scanner-style shape `symbol_inputs` accepts). CSV bars support both
+  scanner-style headers (`ts,open,high,low,close,volume[,is_complete]`) and
+  backtest-style micros headers (`symbol,end_ts,open_micros,high_micros,low_micros,
+  close_micros,volume,is_complete`), auto-detected from the header row; backtest-style
+  micros are converted to decimal dollars (`value / 1_000_000`) and `end_ts` (Unix epoch
+  seconds, UTC) is converted to an ISO-8601 `ts` string.
+- **Liquidity sidecar convention** (new, minimal — no prior repo convention existed):
+  `<SYMBOL>.json` or `<SYMBOL>_liquidity.json` under `--liquidity-root`, a flat JSON
+  object carrying the seven `LiquidityMetrics` fields. Absent sidecar →
+  `liquidity_metrics=None` (producer fail-closes liquidity honestly, same as no
+  liquidity supplied at all); malformed sidecar → also `None`, plus a per-symbol
+  `symbol_inputs_runner_liquidity_sidecar_malformed:<symbol>` reason. The runner never
+  derives liquidity from bars.
+- **Fail-closed cases** (every one surfaces an explicit, stable reason string —
+  never silent omission, never a fabricated healthy result):
+  - no watchlist/symbol input supplied → blocked, `symbol_inputs_runner_no_input_source`
+  - watchlist fails to load/parse → blocked, `symbol_inputs_runner_watchlist_load_failed`
+  - resolved symbol list is empty → blocked, `symbol_inputs_runner_no_symbols_resolved`
+  - bars root missing/not a directory → blocked, `symbol_inputs_runner_bars_root_missing`
+  - no bars file found for a symbol → symbol still written via the producer's own
+    no-bars fail-closed record; symbol listed in `missing_bars`
+  - malformed bars file for a symbol → same fail-closed record; symbol listed in
+    `failed_symbols` with `symbol_inputs_runner_malformed_bars_file:<symbol>`
+  - output artifact cannot be written → blocked, `symbol_inputs_runner_output_write_failed`
+- **Forged live-approval handling**: a watchlist carrying `approved_for_live: true` is
+  read for its `symbols` list only — the forged flag never propagates into the runner
+  config, result, or output artifact. It is instead reported via
+  `watchlist_live_approval_forbidden=True` and the reason
+  `symbol_inputs_runner_watchlist_live_approval_forbidden`, so the forgery is visible to
+  the operator rather than silently dropped or silently honored.
+- **Result shape** (`SymbolInputsRunnerResult.to_dict()`): `symbols_requested,
+  symbols_written, output_path, missing_bars, failed_symbols, failure_reasons,
+  watchlist_live_approval_forbidden, approved_for_live, status, notes`. `status` is
+  `"complete"` (all symbols resolved cleanly), `"partial"` (artifact written but some
+  symbols missing/failed), or `"blocked"` (nothing written).
+- `approved_for_live=False` is a hard invariant enforced independently at both the
+  config and result layers via `__post_init__` + `object.__setattr__` (the same pattern
+  used by `WalkForwardRunnerConfig`/`BacktestBridgeConfig`/`PremarketRevalidationConfig`),
+  in addition to the four independent layers already enforced inside the
+  `symbol_inputs` producer itself.
+- No broker/OMS/execution imports; no network/DB imports; no subprocess; no
+  daemon/runtime imports — matching the `symbol_inputs` / `premarket_revalidation`
+  artifact-only boundary.
+- **Required-before-trust note**: this runner makes `symbol_inputs` *operationally
+  reachable* from a watchlist or symbol list plus local bar files — closing the
+  "how does an operator actually produce this artifact" gap left open by
+  `SYMBOL-INPUTS-PRODUCER-01`. It does NOT wire watchlist enforcement into the daemon,
+  does NOT fetch live/broker market data, and does NOT make scanner-driven autonomous
+  paper trading trustworthy on its own. Daemon handoff and live market-data sourcing
+  remain explicitly open.
+- Runner-local reason constants: `symbol_inputs_runner_no_input_source`,
+  `symbol_inputs_runner_watchlist_load_failed`, `symbol_inputs_runner_no_symbols_resolved`,
+  `symbol_inputs_runner_bars_root_missing`, `symbol_inputs_runner_malformed_bars_file`,
+  `symbol_inputs_runner_liquidity_sidecar_malformed`, `symbol_inputs_runner_output_write_failed`,
+  `symbol_inputs_runner_watchlist_live_approval_forbidden`.
+- Tests: `research-py/tests/test_scanner_symbol_inputs_runner.py` (symbol resolution,
+  bars loading incl. micros conversion, artifact output incl. premarket-consumption
+  proof, liquidity handling, safety-import checks, hard-invariant checks). Script guard:
+  `tests/script_guards/test_scanner_symbol_inputs_runner.ps1`.
+- Does NOT submit orders, enable live routing, change live eligibility, fetch market
+  data, or call any broker/daemon/API.
+
 ### 18.2 Demotion from Watchlist
 
 A symbol is removed from the watchlist if ANY:
