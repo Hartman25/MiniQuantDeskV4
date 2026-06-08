@@ -3,17 +3,26 @@ BACKTEST-RUNNER-01 — MAIN scanner backtest runner.
 
 Reads a backtest-queue-v1 artifact and writes strategy-fit-v1 artifacts.
 
-Current mode: DRY-RUN BLOCKED.
-The mqk-backtest CLI exists in core-rs/crates/mqk-backtest but requires a
-compiled binary and outputs key=value metrics that do not include strategy-fit
-fields (profit_factor, win_rate, expectancy_bps, etc.).  Until a proven
-read-only invocation path exists, every queue entry produces a blocked artifact:
-  status = "blocked_no_backtest_interface"
+Two modes:
+- mode="dry_run" (default): no backtest interface is invoked; every queue
+  entry produces a blocked artifact: status = "blocked_no_backtest_interface".
+- mode="real" + bridge_config (BacktestBridgeConfig, BACKTEST-BRIDGE-BUNDLE-01):
+  invokes the compiled mqk-cli binary per entry via backtest_bridge, parses
+  metrics.json, maps it to strategy-fit-v1 fields, optionally merges
+  walk-forward validation (enable_walkforward_validation, opt-in, fail-closed),
+  and applies BACKTEST-GATES-01 gate evaluation. Status = "complete" with
+  real metrics, or remains blocked when the bridge cannot produce metrics.
+  Subprocess invocation happens only inside backtest_bridge.run_backtest_for_entry
+  and walkforward_runner._run_single_split — never directly in this module.
 
 Hard invariants:
 - recommended_for_live is ALWAYS False
-- recommended_for_paper is ALWAYS False in this patch
-- Does NOT invoke mqk-backtest or any external subprocess
+- recommended_for_paper is a hard-coded constructor invariant on
+  BacktestRunnerConfig (always False); the per-artifact recommended_for_paper
+  field is populated only by apply_backtest_gates() in real mode, and remains
+  False on every dry-run / blocked artifact
+- Does NOT invoke mqk-backtest or any external subprocess directly — only via
+  the lazily-imported backtest_bridge / walkforward_runner seams in real mode
 - Does NOT submit orders or mutate DB
 - Does NOT import broker adapters, OMS, execution orchestrator, or DB
 - Does NOT import network libraries (requests, urllib, http.client, aiohttp,
