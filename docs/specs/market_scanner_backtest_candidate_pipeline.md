@@ -1287,15 +1287,40 @@ One patch per turn. No bundling.
 
 Patches 2–13 target the `research-py` layer and script runners. Patches 14–16 touch the daemon GUI and evidence tooling. Patch 17 is deferred.
 
-### PAPER-READINESS-RUNNER-01 — Market-Data Bridge Gap (Outcome C)
+### MARKET-DATA-EXPORT-01 - md_bars to bars_root Bridge
 
-`paper_readiness_runner.py` reads **local JSON/CSV bar files** from a `bars_root` directory (matching `<SYMBOL>_<TIMEFRAME>.{json,csv}`) via `symbol_inputs_runner.py`. The `Refresh-IntradayMarketData.ps1` script writes refreshed bars into the **Postgres `md_bars` table** (paper DB, port 5440) via `mqk-cli md sync-provider` — there is **no existing writer** that exports `md_bars` rows to local files in the format the scanner expects.
+`paper_readiness_runner.py` reads **local JSON/CSV bar files** from a `bars_root` directory (matching `<SYMBOL>_<TIMEFRAME>.{json,csv}`) via `symbol_inputs_runner.py`. `Refresh-IntradayMarketData.ps1` writes refreshed bars into the **Postgres `md_bars` table** (paper DB, port 5440) via `mqk-cli md sync-provider`.
 
-This gap is **Outcome C** (market-data bridge not yet written):
-- The scanner bar format and the DB-resident `md_bars` format are compatible at the CSV level (`open_micros` auto-detected by `symbol_inputs_runner.normalize_bars_csv`).
-- A future `MARKET-DATA-EXPORT-01` patch must add an `mqk-cli` or script that exports `md_bars` rows to the `bars_root` tree before the pipeline runs.
-- Until that bridge exists, `bars_root` must be populated by the operator manually or via a separate export tool before invoking the paper-readiness runner.
-- The runner itself is fail-closed on a missing/non-directory `bars_root` (`paper_readiness_bars_root_missing`); it never silently infers an empty-bar state as healthy.
+`MARKET-DATA-EXPORT-01` adds a read-only Python export bridge:
+
+```powershell
+cd research-py
+python -m mqk_research.scanner.market_data_export `
+  --database-url "<paper/test postgres url>" `
+  --symbols AAPL,MSFT `
+  --timeframe 5m `
+  --start-utc 2026-06-08T13:30:00Z `
+  --end-utc 2026-06-08T20:00:00Z `
+  --bars-root ..\exports\scanner\bars\20260608 `
+  --trade-date 2026-06-08
+```
+
+The exporter reads existing completed `md_bars` rows only. It writes one CSV per requested symbol/timeframe:
+
+- `<bars_root>/<SYMBOL>_<TIMEFRAME>.csv`
+- Example: `exports/scanner/bars/20260608/AAPL_5m.csv`
+
+The CSV schema is the scanner-supported backtest-style micros format:
+
+```text
+symbol,end_ts,open_micros,high_micros,low_micros,close_micros,volume,is_complete
+```
+
+`end_ts` is Unix epoch seconds UTC; OHLC prices remain integer micros; `volume` remains the canonical integer volume; `is_complete` is emitted as a parseable boolean. `symbol_inputs_runner.normalize_bars_csv()` auto-detects this header and converts it into scanner-style bar dictionaries for the symbol-inputs stage.
+
+This unblocks `paper_readiness_runner.py` only after refreshed `md_bars` rows already exist and the operator provides an explicit `bars_root`. The bridge does not fetch market data, does not write to Postgres, does not call a daemon, does not submit orders, does not call broker APIs, and does not wire daemon enforcement. Live routing remains hard-disabled; paper-readiness output still requires the existing runner gates and operator review before any paper handoff is considered.
+
+This patch does not by itself prove real refreshed market data exists. Real-data proof requires a separate DB-gated run against a populated paper/test `md_bars` table and review of the resulting local bar files.
 
 ---
 
