@@ -798,8 +798,8 @@ A symbol/strategy pair is eligible for the next-day paper watchlist only when AL
 - No broker/OMS/execution imports; no network/DB imports; no subprocess; artifact-only.
 - `approved_for_live=False` always enforced in `apply_premarket_revalidation_to_watchlist` output.
 - Result dict integrates with `evaluate_watchlist_promotion` via `premarket_revalidation_result` parameter.
-- Requires fresh `symbol_inputs` from a premarket data refresh runner to be operationally useful;
-  that runner is future work (PAPER-HANDOFF-01 / premarket data runner).
+- Previously required fresh `symbol_inputs` from a premarket data refresh runner to be
+  operationally useful — that producer now exists (see SYMBOL-INPUTS-PRODUCER-01 below).
 - Does NOT prove that scanner-driven autonomous paper is ready — daemon handoff remains future work.
 - Does NOT submit orders or enable live routing.
 
@@ -808,6 +808,66 @@ A symbol/strategy pair is eligible for the next-day paper watchlist only when AL
 `premarket_data_quality_failed`, `premarket_liquidity_failed`, `premarket_regime_incompatible`,
 `premarket_bar_stale`, `premarket_spread_too_wide`, `premarket_slippage_too_high`,
 `premarket_rvol_too_low`, `premarket_price_too_low`
+
+### Implementation Note (SYMBOL-INPUTS-PRODUCER-01)
+
+- MAIN producer module: `research-py/src/mqk_research/scanner/symbol_inputs.py`
+- Public API: `SymbolInputSpec`, `build_symbol_input_record(spec, ...)`,
+  `build_symbol_inputs(specs, *, trade_date, source, ...)`,
+  `write_symbol_inputs_artifact(artifact, path)`, `load_symbol_inputs_artifact(path)`,
+  `extract_symbol_inputs_map(artifact)`
+- Output schema: `symbol-inputs-v1` — `{schema_version, generated_at_utc, trade_date, source,
+  symbols: {symbol: record}, approved_for_live: false, notes}`
+- **Producer role**: converts in-memory bar history (plus optional precomputed liquidity
+  metrics) into the `symbol_inputs` artifact that `evaluate_premarket_watchlist` consumes.
+  It is an artifact *assembler*, not a gate author — it delegates honestly to the existing
+  MAIN scanner gates (`evaluate_data_quality`, `evaluate_liquidity`, `evaluate_regime`) and
+  reports their output verbatim per symbol.
+- **Artifact-only boundary**: caller supplies bars (and, optionally, `LiquidityMetrics`); this
+  module does not fetch market data, does not derive ADV/spread/slippage from intraday bars,
+  and does not write to any MAIN-operational location. No broker/OMS/daemon/runtime/network/DB
+  imports; no subprocess; no order or strategy-signal endpoint references.
+- **Fail-closed per-symbol records** (never silently disappear — always represented via
+  `rejection_reason`/`reason_tags`): no bars (`no_bars`), insufficient bars
+  (`insufficient_completed_bars`), stale latest bar (`latest_bar_stale`), other data-quality
+  failures (gate-native reason), liquidity metrics absent
+  (`symbol_input_liquidity_metrics_missing`), liquidity gate failure (gate-native reason),
+  regime unclassified/incompatible (gate-native reason, e.g. `regime_unclassified`), and
+  missing/invalid latest price (`symbol_input_missing_latest_price`).
+- Liquidity/regime are evaluated only once `data_quality_passed=True` (both gates assume
+  DQ-clean bars); when DQ fails, liquidity/regime are honestly reported as not evaluated
+  (`liquidity_passed=False`, `regime_label=None`) rather than fabricated as healthy.
+- "Strategy compatibility" of a regime is intentionally NOT decided here — it requires the
+  watchlist's `strategy_assignments`, which is a premarket-level concern. The producer reports
+  `regime_label`/`regime_score` honestly; compatibility is judged downstream by
+  `evaluate_premarket_watchlist`.
+- **How premarket consumes it**: `extract_symbol_inputs_map(artifact)` adapts a
+  `symbol-inputs-v1` artifact into the flat `dict[symbol, record]` shape
+  `evaluate_premarket_watchlist` expects (or callers may pass `artifact["symbols"]` directly,
+  since per-symbol record field names already match what premarket revalidation reads). A
+  malformed or schema-mismatched artifact yields an empty map — the same honest
+  `premarket_symbol_input_missing` failure as a genuinely absent artifact; never a
+  fabricated/partial map.
+- `approved_for_live=False` is a hard invariant enforced at four independent layers: forced at
+  artifact assembly (not overrideable by caller), forced again on the persisted copy in
+  `write_symbol_inputs_artifact` (defense-in-depth against a tampered in-memory artifact),
+  forced again on the returned copy in `load_symbol_inputs_artifact` (defense-in-depth against
+  a forged on-disk artifact), and never read or propagated by `extract_symbol_inputs_map`
+  (premarket revalidation only consults the watchlist's own `approved_for_live`).
+- No broker/OMS/execution imports; no network/DB imports; no subprocess; no daemon/runtime
+  imports; artifact-only, matching the `premarket_revalidation` boundary.
+- **Required-before-trust note**: a `symbol_inputs` artifact produced by this module is a
+  necessary input for `evaluate_premarket_watchlist` to be operationally meaningful (rather
+  than perpetually reporting `premarket_symbol_input_missing`), but its presence alone does
+  NOT make scanner-driven autonomous paper trustworthy. That requires watchlist promotion +
+  premarket revalidation + operator review + daemon handoff to all be proven together — this
+  patch closes one link in that chain, not the chain itself.
+- Producer-local reason constants: `symbol_input_liquidity_metrics_missing`,
+  `symbol_input_missing_latest_price`.
+- Tests: `research-py/tests/test_scanner_symbol_inputs.py` (builder unit tests SI01-SI12 plus
+  premarket-integration tests SI13-SI18 exercising `evaluate_premarket_watchlist` against
+  produced artifacts). Script guard: `tests/script_guards/test_scanner_symbol_inputs.ps1`.
+- Does NOT submit orders, enable live routing, or change live eligibility.
 
 ### 18.2 Demotion from Watchlist
 
