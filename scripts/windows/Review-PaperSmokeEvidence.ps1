@@ -862,6 +862,262 @@ if ($classification -ne 'NATURAL-TRADE-LIFECYCLE-CLOSED' -and $lifecycle_missing
 }
 
 # ---------------------------------------------------------------------------
+# Ledger-specific classification labels (PAPER-SMOKE-LEDGER-SPECIFIC-CLASSIFIER-01)
+#
+# These are EMITTED IN ADDITION to $classification above -- they never replace
+# or weaken the strict NATURAL-TRADE-LIFECYCLE-CLOSED gate from commit 0b0bc93.
+# Each ledger label below is its own independently-strict, fail-closed gate:
+# every one of them requires the SAME underlying strict lifecycle proof
+# ($trade_lifecycle_detected, i.e. $lifecycle_missing_requirements.Count -eq 0,
+# or an equally strict parallel requirement set) PLUS additional ledger-specific
+# evidence. Missing proof never produces a *-CLOSED label -- it withholds to
+# MARKET-PROOF-PENDING / PARTIAL / OPEN, matching the overall evidence posture.
+# ---------------------------------------------------------------------------
+
+# Withheld status mirrors the overall evidence posture for this folder: an
+# evidence pull that is itself OPEN/FALSE-CLOSED cannot produce a "pending"
+# ledger item (that would overstate it); one in market_proof_pending stays
+# market_proof_pending; anything else that is merely incomplete is PARTIAL.
+$ledger_withheld_status = 'PARTIAL'
+if ($classification -eq 'OPEN' -or $classification -eq 'FALSE-CLOSED') {
+    $ledger_withheld_status = 'OPEN'
+} elseif ($ps_status_present -and $ps_readiness_classification -eq 'market_proof_pending') {
+    $ledger_withheld_status = 'MARKET-PROOF-PENDING'
+}
+
+function New-LedgerVerdict {
+    param(
+        [string]$ClosedLabel,
+        [bool]$Closed,
+        [string[]]$Missing
+    )
+    if ($Closed) {
+        return [pscustomobject]@{ label = $ClosedLabel; status = $ClosedLabel; closed = $true;  missing_requirements = @() }
+    }
+    return [pscustomobject]@{ label = $ClosedLabel; status = $ledger_withheld_status; closed = $false; missing_requirements = @($Missing) }
+}
+
+# --- AAPL-NATURAL-SELL-LIFECYCLE-CLOSED -----------------------------------
+# Strict NATURAL-TRADE-LIFECYCLE-CLOSED gate, narrowed to confirm the traded
+# symbol was specifically AAPL (not just "some symbol"). Symbol confirmation
+# requires an explicit AAPL row in trade evidence (orders/fills/flow), an
+# AAPL row in the final positions snapshot, or the existing AAPL-baseline text
+# match already used for $existing_long_position_detected.
+$aapl_symbol_in_trade_evidence = $false
+foreach ($rowSet in @(
+    @(if ($null -ne $ExecutionOrders  -and $null -ne $ExecutionOrders.rows)  { $ExecutionOrders.rows }  else { @() }),
+    @(if ($null -ne $PortfolioFills   -and $null -ne $PortfolioFills.rows)   { $PortfolioFills.rows }   else { @() }),
+    @(if ($null -ne $ExecutionFlow    -and $null -ne $ExecutionFlow.rows)    { $ExecutionFlow.rows }    else { @() })
+)) {
+    foreach ($row in @($rowSet)) {
+        $rowSymbol = Get-Field $row 'symbol'
+        if ($null -ne $rowSymbol -and [string]$rowSymbol -eq 'AAPL') { $aapl_symbol_in_trade_evidence = $true; break }
+    }
+    if ($aapl_symbol_in_trade_evidence) { break }
+}
+$aapl_position_row_confirmed = $false
+if ($portfolio_positions_snapshot_present -and $position_rows_count -gt 0) {
+    $aapl_position_row_confirmed = (@($portfolio_position_rows | Where-Object {
+        ([string](Get-Field $_ 'symbol')) -eq 'AAPL'
+    }).Count -gt 0)
+}
+$aapl_symbol_confirmed = ($aapl_symbol_in_trade_evidence -or $aapl_position_row_confirmed -or $existing_long_position_detected)
+
+$aapl_sell_missing = [System.Collections.Generic.List[string]]::new()
+$aapl_sell_missing.AddRange([string[]]@($lifecycle_missing_requirements))
+if (-not $aapl_symbol_confirmed) { $aapl_sell_missing.Add('aapl_symbol_confirmed_in_trade_evidence') }
+$aapl_sell_proven = ($aapl_sell_missing.Count -eq 0)
+
+# --- PAPER-SAFE-FLATTEN-ROUTE-MARKET-PROOF-CLOSED --------------------------
+# Requires explicit flatten.requested evidence (events feed / active alerts /
+# Discord observation note, all positively matched -- not inferred from a flat
+# position alone), routed through the real broker path end to end, settling
+# clean. A flat position with no flatten.requested evidence proves nothing
+# about the *flatten route* specifically (it could be a natural sell).
+$flatten_requested_evidence_detected = $false
+foreach ($rowSet in @(
+    @(if ($null -ne $EventsFeed   -and $null -ne $EventsFeed.rows)   { $EventsFeed.rows }   else { @() }),
+    @(if ($null -ne $AlertsActive -and $null -ne $AlertsActive.rows) { $AlertsActive.rows } else { @() })
+)) {
+    foreach ($row in @($rowSet)) {
+        if (Test-RowFieldMatch $row @('kind', 'detail', 'event_type', 'alert_type', 'message', 'summary', 'stage') '(?i)flatten[\.\-_ ]?requested') {
+            $flatten_requested_evidence_detected = $true; break
+        }
+    }
+    if ($flatten_requested_evidence_detected) { break }
+}
+if (-not $flatten_requested_evidence_detected) {
+    $discordObsFileFlatten = Join-Path $EvidencePath 'notes\discord_observation.txt'
+    if (Test-Path $discordObsFileFlatten) {
+        $dcontentFlatten = Get-Content $discordObsFileFlatten -Raw -ErrorAction SilentlyContinue
+        if ($dcontentFlatten -and
+            $dcontentFlatten -match '(?i)flatten\.requested' -and
+            $dcontentFlatten -match '(?i)\b(confirmed|observed|received|posted)\b' -and
+            $dcontentFlatten -notmatch '(?i)\bnot\s+(yet\s+)?(observed|confirmed|received|posted)\b') {
+            $flatten_requested_evidence_detected = $true
+        }
+    }
+}
+
+$safe_flatten_missing = [System.Collections.Generic.List[string]]::new()
+if (-not $flatten_requested_evidence_detected) { $safe_flatten_missing.Add('flatten_requested_evidence_detected (events_feed/alerts_active/discord_observation)') }
+if (-not $has_order_ack)           { $safe_flatten_missing.Add('has_order_ack') }
+if (-not $has_fill)                { $safe_flatten_missing.Add('has_fill') }
+if (-not $has_inbox_apply)         { $safe_flatten_missing.Add('has_inbox_apply_or_durable_applied_state') }
+if (-not $broker_order_map_present){ $safe_flatten_missing.Add('broker_order_map_present') }
+if (-not $final_position_flat)     { $safe_flatten_missing.Add('final_position_flat') }
+if (-not $reconcile_clean)         { $safe_flatten_missing.Add('reconcile_clean') }
+if (-not $live_routing_disabled)   { $safe_flatten_missing.Add('live_routing_enabled=false') }
+if (-not $no_unsafe_markers)       { $safe_flatten_missing.Add('no_unsafe_evidence_markers') }
+$safe_flatten_proven = ($safe_flatten_missing.Count -eq 0)
+
+# --- PAPER-FULL-BUY-SELL-LIFECYCLE-CLOSED ----------------------------------
+# A full round trip OBSERVED within this evidence window: a buy/long order
+# AND a sell/close order, both submitted-acked-filled-applied, ending flat.
+# This is intentionally NOT the same gate as NATURAL-TRADE-LIFECYCLE-CLOSED:
+# that gate is satisfied by a PRE-EXISTING position being sold (no buy
+# required). Proving the *full* buy->sell cycle requires the buy leg to be
+# directly observed in this evidence, not inherited from a prior baseline.
+$buy_order_detected = $false
+foreach ($rowSet in @(
+    @(if ($null -ne $ExecutionOrders -and $null -ne $ExecutionOrders.rows) { $ExecutionOrders.rows } else { @() }),
+    @(if ($null -ne $ExecutionOutbox -and $null -ne $ExecutionOutbox.rows) { $ExecutionOutbox.rows } else { @() }),
+    @(if ($null -ne $ExecutionFlow   -and $null -ne $ExecutionFlow.rows)   { $ExecutionFlow.rows }   else { @() })
+)) {
+    foreach ($row in @($rowSet)) {
+        if (Test-RowFieldMatch $row @('side', 'order_side', 'action', 'intent', 'message', 'stage') '(?i)\b(buy|long)\b') {
+            $buy_order_detected = $true; break
+        }
+    }
+    if ($buy_order_detected) { break }
+}
+
+$full_cycle_missing_requirements = [System.Collections.Generic.List[string]]::new()
+if (-not $api_files_present)          { $full_cycle_missing_requirements.Add('api_files_present') }
+if (-not $runtime_reached_running)    { $full_cycle_missing_requirements.Add('runtime_reached_running=true') }
+if (-not $buy_order_detected)         { $full_cycle_missing_requirements.Add('buy_or_long_order_detected_in_evidence') }
+if (-not $sell_order_detected)        { $full_cycle_missing_requirements.Add('sell_side_or_flatten_order_detected') }
+if (-not $has_order_submit)           { $full_cycle_missing_requirements.Add('has_order_submit') }
+if (-not $has_order_ack)              { $full_cycle_missing_requirements.Add('has_order_ack') }
+if (-not $has_fill)                   { $full_cycle_missing_requirements.Add('has_fill') }
+if (-not $has_inbox_apply)            { $full_cycle_missing_requirements.Add('has_inbox_apply_or_durable_applied_state') }
+if (-not $portfolio_positions_snapshot_present) { $full_cycle_missing_requirements.Add('portfolio_positions_snapshot_present') }
+if (-not $final_position_flat)        { $full_cycle_missing_requirements.Add('final_position_flat') }
+if (-not $broker_order_map_present)   { $full_cycle_missing_requirements.Add('broker_order_map_present') }
+if (-not $reconcile_clean)            { $full_cycle_missing_requirements.Add('reconcile_clean') }
+if (-not $live_routing_disabled)      { $full_cycle_missing_requirements.Add('live_routing_enabled=false') }
+if ($kill_switch_active -eq $true)    { $full_cycle_missing_requirements.Add('kill_switch_active=false') }
+if ($integrity_halt_active -eq $true) { $full_cycle_missing_requirements.Add('integrity_halt_active=false') }
+if ($risk_halt_active -eq $true)      { $full_cycle_missing_requirements.Add('risk_halt_active=false') }
+if (-not $no_unsafe_markers)          { $full_cycle_missing_requirements.Add('no_unsafe_evidence_markers') }
+$full_buy_sell_cycle_proven = ($full_cycle_missing_requirements.Count -eq 0)
+
+# --- GUI-TRADE-LIFECYCLE-VISIBILITY-CLOSED ---------------------------------
+# Requires the strict trade lifecycle gate PLUS an explicit, affirmative
+# operator note in notes/gui_observation.txt naming a screenshot AND
+# confirming a filled order was visibly observed in the GUI. File presence
+# alone is not proof -- the file is created as a template by the capture
+# script; only explicit affirmative content (with no "not yet" / TODO /
+# placeholder language) counts.
+$gui_observation_confirmed = $false
+$guiObsFile = Join-Path $EvidencePath 'notes\gui_observation.txt'
+if (Test-Path $guiObsFile) {
+    $guiContent = Get-Content $guiObsFile -Raw -ErrorAction SilentlyContinue
+    if ($guiContent -and
+        $guiContent -match '(?i)\bscreenshot\b' -and
+        $guiContent -match '(?i)\b(filled order|order fill|fill)\b' -and
+        $guiContent -match '(?i)\b(visible|confirmed|observed|verified)\b' -and
+        $guiContent -notmatch '(?i)\bnot\s+(yet\s+)?(observed|confirmed|visible|captured|taken)\b' -and
+        $guiContent -notmatch '(?i)\b(TODO|TBD|pending|placeholder|fill[_ -]?in|template)\b') {
+        $gui_observation_confirmed = $true
+    }
+}
+$gui_visibility_missing = [System.Collections.Generic.List[string]]::new()
+if (-not $trade_lifecycle_detected)   { $gui_visibility_missing.Add('strict_trade_lifecycle_proven (see lifecycle_missing_requirements)') }
+if (-not $gui_observation_confirmed)  { $gui_visibility_missing.Add('notes/gui_observation.txt explicit affirmative confirmation (screenshot + filled order + visible/confirmed, no placeholder language)') }
+$gui_visibility_proven = ($gui_visibility_missing.Count -eq 0)
+
+# --- DISCORD-TRADE-LIFECYCLE-REAL-CLOSED -----------------------------------
+# Requires the strict trade lifecycle gate PLUS an explicit, affirmative
+# operator note in notes/discord_observation.txt naming all 7 lifecycle stage
+# keys (operator_control_surface.md section 8) and explicitly confirming all
+# were observed -- not file presence alone, and not a partial subset.
+$DISCORD_STAGE_KEYS_REQUIRED = @(
+    'autonomous.run.start', 'signal.admitted', 'order.submitted',
+    'order.acked', 'flatten.requested', 'reconcile.clean'
+)
+$discord_observation_confirmed = $false
+$discordObsFile = Join-Path $EvidencePath 'notes\discord_observation.txt'
+if (Test-Path $discordObsFile) {
+    $discordContent = Get-Content $discordObsFile -Raw -ErrorAction SilentlyContinue
+    if ($discordContent) {
+        $allStagesPresent = $true
+        foreach ($stageKey in $DISCORD_STAGE_KEYS_REQUIRED) {
+            if ($discordContent -notmatch [regex]::Escape($stageKey)) { $allStagesPresent = $false }
+        }
+        $fillStagePresent = ($discordContent -match [regex]::Escape('fill.terminal') -or $discordContent -match [regex]::Escape('fill.partial'))
+        $explicitAllConfirmed = (
+            $discordContent -match '(?i)\ball\s*7\b.*\b(confirmed|observed|present|received)\b' -or
+            $discordContent -match '(?i)\b(confirmed|observed|present|received)\b.*\ball\s*7\b' -or
+            $discordContent -match '(?i)\ball\s+(seven|stage)s?\s+(messages?\s+)?(confirmed|observed|present|received)\b'
+        )
+        $negativeMarkers = ($discordContent -match '(?i)\b(not\s+(yet\s+)?(observed|confirmed|present|received)|missing|pending|TODO|TBD|placeholder)\b')
+        if ($allStagesPresent -and $fillStagePresent -and $explicitAllConfirmed -and -not $negativeMarkers) {
+            $discord_observation_confirmed = $true
+        }
+    }
+}
+$discord_lifecycle_missing = [System.Collections.Generic.List[string]]::new()
+if (-not $trade_lifecycle_detected)        { $discord_lifecycle_missing.Add('strict_trade_lifecycle_proven (see lifecycle_missing_requirements)') }
+if (-not $discord_observation_confirmed)   { $discord_lifecycle_missing.Add('notes/discord_observation.txt explicit affirmative confirmation of all 7 stage messages (no placeholder language)') }
+$discord_lifecycle_proven = ($discord_lifecycle_missing.Count -eq 0)
+
+# --- REPEATED-AUTONOMOUS-TRADE-CYCLE-CLOSED --------------------------------
+# A single evidence-folder review cannot, by itself, observe two consecutive
+# sessions -- that is inherently cross-session proof. This label therefore
+# requires the strict trade lifecycle gate PLUS an explicit, affirmative,
+# structured operator note in notes/repeated_cycle_confirmation.txt that
+# names two distinct sessions and confirms each started AND stopped cleanly.
+# Absent that artifact, this label is withheld -- it is expected to remain
+# withheld for the overwhelming majority of evidence pulls, by design.
+$repeated_cycle_confirmed = $false
+$repeatedCycleFile = Join-Path $EvidencePath 'notes\repeated_cycle_confirmation.txt'
+if (Test-Path $repeatedCycleFile) {
+    $rcContent = Get-Content $repeatedCycleFile -Raw -ErrorAction SilentlyContinue
+    if ($rcContent) {
+        $sessionRefCount     = (@([regex]::Matches($rcContent, '(?i)\bsession\s*(#|number)?\s*[12]\b') |
+                                  ForEach-Object { $_.Value.ToLower() -replace '\s+', ' ' } | Select-Object -Unique)).Count
+        $startedCleanlyCount = (@([regex]::Matches($rcContent, '(?i)\bstart(ed)?\s+cleanly\b'))).Count
+        $stoppedCleanlyCount = (@([regex]::Matches($rcContent, '(?i)\bstop(ped)?\s+cleanly\b'))).Count
+        $explicitTwoSessions = (
+            $rcContent -match '(?i)\b(two|2)\s+consecutive\s+sessions?\b.*\b(confirmed|proven|verified)\b' -or
+            $rcContent -match '(?i)\b(confirmed|proven|verified)\b.*\b(two|2)\s+consecutive\s+sessions?\b'
+        )
+        $negativeMarkers = (
+            $rcContent -match '(?i)\b(not\s+(yet\s+)?(observed|confirmed|proven)|missing|pending|TODO|TBD|placeholder|only\s+(one|1)\s+session)\b'
+        )
+        if ($sessionRefCount -ge 2 -and $startedCleanlyCount -ge 2 -and $stoppedCleanlyCount -ge 2 -and
+            $explicitTwoSessions -and -not $negativeMarkers) {
+            $repeated_cycle_confirmed = $true
+        }
+    }
+}
+$repeated_cycle_missing = [System.Collections.Generic.List[string]]::new()
+if (-not $trade_lifecycle_detected)    { $repeated_cycle_missing.Add('strict_trade_lifecycle_proven (see lifecycle_missing_requirements)') }
+if (-not $repeated_cycle_confirmed)    { $repeated_cycle_missing.Add('notes/repeated_cycle_confirmation.txt explicit confirmation naming two distinct sessions, each started AND stopped cleanly (cross-session proof; rarely satisfiable from a single evidence pull)') }
+$repeated_cycle_proven = ($repeated_cycle_missing.Count -eq 0)
+
+# --- Compose the ledger verdict table --------------------------------------
+$ledger_verdicts = [ordered]@{
+    aapl_natural_sell_lifecycle     = New-LedgerVerdict -ClosedLabel 'AAPL-NATURAL-SELL-LIFECYCLE-CLOSED'        -Closed $aapl_sell_proven           -Missing $aapl_sell_missing
+    paper_safe_flatten_route        = New-LedgerVerdict -ClosedLabel 'PAPER-SAFE-FLATTEN-ROUTE-MARKET-PROOF-CLOSED' -Closed $safe_flatten_proven      -Missing $safe_flatten_missing
+    paper_full_buy_sell_lifecycle   = New-LedgerVerdict -ClosedLabel 'PAPER-FULL-BUY-SELL-LIFECYCLE-CLOSED'      -Closed $full_buy_sell_cycle_proven  -Missing $full_cycle_missing_requirements
+    gui_trade_lifecycle_visibility  = New-LedgerVerdict -ClosedLabel 'GUI-TRADE-LIFECYCLE-VISIBILITY-CLOSED'     -Closed $gui_visibility_proven       -Missing $gui_visibility_missing
+    discord_trade_lifecycle_real    = New-LedgerVerdict -ClosedLabel 'DISCORD-TRADE-LIFECYCLE-REAL-CLOSED'       -Closed $discord_lifecycle_proven    -Missing $discord_lifecycle_missing
+    repeated_autonomous_trade_cycle = New-LedgerVerdict -ClosedLabel 'REPEATED-AUTONOMOUS-TRADE-CYCLE-CLOSED'    -Closed $repeated_cycle_proven       -Missing $repeated_cycle_missing
+}
+
+# ---------------------------------------------------------------------------
 # Build human-readable summary lines
 # ---------------------------------------------------------------------------
 $summaryLines = [System.Collections.Generic.List[string]]::new()
@@ -972,6 +1228,24 @@ if ($lifecycle_missing_requirements.Count -gt 0) {
     foreach ($missing in $lifecycle_missing_requirements) { $summaryLines.Add("- $missing") }
 } else {
     $summaryLines.Add("- (none)")
+}
+$summaryLines.Add("")
+$summaryLines.Add("## Ledger-Specific Classifications (PAPER-SMOKE-LEDGER-SPECIFIC-CLASSIFIER-01)")
+$summaryLines.Add("# Emitted IN ADDITION to VERDICT above. Each *-CLOSED label below requires its")
+$summaryLines.Add("# own independently-strict, fail-closed proof -- never weakened from 0b0bc93.")
+$summaryLines.Add("# Withheld items show status (MARKET-PROOF-PENDING / PARTIAL / OPEN) plus the")
+$summaryLines.Add("# specific missing requirements that keep them from closing.")
+foreach ($ledgerKey in $ledger_verdicts.Keys) {
+    $lv = $ledger_verdicts[$ledgerKey]
+    $summaryLines.Add("")
+    $summaryLines.Add("### $($lv.label)")
+    $summaryLines.Add("- status: $($lv.status)")
+    if ($lv.closed) {
+        $summaryLines.Add("- all strict requirements satisfied")
+    } else {
+        $summaryLines.Add("- missing requirements:")
+        foreach ($m in $lv.missing_requirements) { $summaryLines.Add("  - $m") }
+    }
 }
 $summaryLines.Add("")
 $summaryLines.Add("## Reconcile")
@@ -1138,6 +1412,8 @@ $jsonObj = [ordered]@{
     autonomous_target_qty            = $ps_target_qty
     autonomous_computed_delta_qty    = $ps_computed_delta_qty
     autonomous_no_order_reason       = $ps_no_order_reason
+    ledger_classifications      = $ledger_verdicts
+    ledger_closed_labels        = @($ledger_verdicts.Values | Where-Object { $_.closed } | ForEach-Object { $_.label })
 }
 
 $jsonOut = $jsonObj | ConvertTo-Json -Depth 5

@@ -18,6 +18,26 @@ the paper + autonomous paper trading surface.  It covers:
 documented in `operator_workflows.md`.  LiveShadow / LiveCapital are in
 `live_shadow_operational_proof.md`.
 
+**Normal operation vs. smoke / proof harness — read this first:** This
+document is oriented around the **smoke / proof-harness workflow** (§3 Monday
+AAPL Smoke Quick Checklist, §6 Evidence Capture and Review, §10 Remaining
+Market Proof Blockers) — supervised, evidence-gathering runs used to *prove*
+whether autonomous paper trading can be trusted to operate unattended. Smoke
+runs are **not** the way this system is meant to run forever; they are
+time-boxed proof exercises with extra capture/review overhead layered on top
+of the same underlying operator surface.
+
+The **canonical normal day-to-day autonomous paper operation runbook** is
+`autonomous_paper_ops.md` (`AUTON-OPS-01`) — start there for ordinary session
+startup, monitoring, and end-of-day shutdown. The pieces of *this* document
+that are shared infrastructure — the status check (§1), operator action
+matrix (§2), safe-flatten instructions (§4), emergency abort rules (§5), and
+shutdown checklist (§9) — apply equally to normal sessions and smoke sessions.
+The underlying authorized actions and evidence surfaces are identical between
+the two contexts; only the evidence `-Label` and the surrounding review rigor
+differ (smoke runs require full strict-lifecycle evidence review per §6;
+normal sessions do not).
+
 **Claim boundary:** Autonomous paper session hygiene is code-proven (AUTONOMOUS-PAPER-SESSION-HYGIENE-BUNDLE-01, commit `1d77a72`).  Full market lifecycle proof is still pending.  Do not claim CLOSED on any smoke item until evidence is reviewed and classified `NATURAL-TRADE-LIFECYCLE-CLOSED`.
 
 ---
@@ -343,32 +363,82 @@ For a complete AAPL sell/flatten smoke, confirm these Discord messages appeared:
 
 ## 9. Shutdown Checklist (Clean Process Shutdown)
 
-To shut down the daemon cleanly at end-of-day:
+This checklist closes out **any** paper session — a normal autonomous
+operating day (`autonomous_paper_ops.md` §10) or a smoke / proof-harness run
+(§3 above). The sequence and the evidence surfaces captured are identical
+either way; only the evidence `-Label` differs. The guiding rule
+(`PAPER-SMOKE-CLEAN-SHUTDOWN-CAPTURE-01`) is: **capture useful evidence before
+you stop anything, and capture it again after**, so the final state of the
+session is provable rather than asserted.
+
+### 9.1 Recommended: orchestrated clean-shutdown script
 
 ```powershell
-# 1. Stop the execution runtime (if running)
+powershell -ExecutionPolicy Bypass -File scripts\windows\Stop-PaperTradingClean.ps1 -Label eod_shutdown
+```
+
+`Stop-PaperTradingClean.ps1` runs the six phases below in strict order. It
+uses **only existing authorized action keys** (`stop-system`,
+`disarm-execution`) through the canonical `/api/v1/ops/action` route, and
+**only existing read-only tooling** (`Capture-PaperSmokeEvidence.ps1`,
+`Get-PaperOperatorStatus.ps1`) for evidence and verification. It never
+introduces a new mutating route, never submits/cancels/replaces an order, and
+never talks to the broker directly.
+
+| Phase | Step | Mutates? | Purpose |
+|-------|------|----------|---------|
+| 1 | Pre-stop capture: `Capture-PaperSmokeEvidence.ps1 -Label <Label>_pre_stop` | No | Captures paper-status, reconcile, positions, orders, fills, alerts, watchlist status, and admission-check **while the runtime is still live** — the only point where in-flight state is observable |
+| 2 | Stop: `ops/action` `stop-system` | Yes (pre-existing authorized action) | Stops the execution runtime |
+| 3 | Verify stopped: `GET /api/v1/system/status` (read-only) | No | Confirms `runtime_status` reflects stopped before continuing — refuses to proceed blindly |
+| 4 | Disarm: `ops/action` `disarm-execution` | Yes (pre-existing authorized action) | Prevents accidental restart |
+| 5 | Post-stop capture: `Capture-PaperSmokeEvidence.ps1 -Label <Label>_post_stop` | No | Re-captures the same surfaces to record the final settled state (positions/orders/reconcile after stop+disarm) |
+| 6 | Summary: prints manual daemon-process / DB-container steps | No | Operator decides whether to kill the daemon process or stop the DB container — intentionally **not** automated (see 9.3) |
+
+If the daemon is unreachable at any phase, the script records
+`UNAVAILABLE: ...` in the captured evidence (matching
+`Capture-PaperSmokeEvidence.ps1`'s existing fail-soft convention) and
+continues to the next phase rather than aborting. The goal is to capture as
+much honest evidence as possible — never to fabricate a clean result, and
+never to skip capture because the daemon looked unhealthy.
+
+### 9.2 Manual sequence (fallback / reference)
+
+If the script is unavailable, run the same six phases by hand, in this order:
+
+```powershell
+# 1. Pre-stop evidence capture (while the runtime is still live)
+powershell -ExecutionPolicy Bypass -File scripts\windows\Capture-PaperSmokeEvidence.ps1 -Label eod_shutdown_pre_stop
+
+# 2. Stop the execution runtime (if running)
 $body = @{ action_key = 'stop-system' } | ConvertTo-Json
 Invoke-RestMethod -Uri 'http://127.0.0.1:8899/api/v1/ops/action' `
     -Method POST -ContentType 'application/json' -Body $body `
     -Headers @{ Authorization = "Bearer $env:MQK_OPERATOR_TOKEN" }
 
-# 2. Verify stopped
+# 3. Verify stopped
 Invoke-RestMethod -Uri 'http://127.0.0.1:8899/api/v1/system/status' -Method Get
 
-# 3. Disarm (prevents accidental restart)
+# 4. Disarm (prevents accidental restart)
 $body = @{ action_key = 'disarm-execution' } | ConvertTo-Json
 Invoke-RestMethod -Uri 'http://127.0.0.1:8899/api/v1/ops/action' `
     -Method POST -ContentType 'application/json' -Body $body `
     -Headers @{ Authorization = "Bearer $env:MQK_OPERATOR_TOKEN" }
 
-# 4. Capture end-of-day evidence
-powershell -ExecutionPolicy Bypass -File scripts\windows\Capture-PaperSmokeEvidence.ps1 -Label eod_shutdown
+# 5. Post-stop evidence capture (final settled state, after stop+disarm)
+powershell -ExecutionPolicy Bypass -File scripts\windows\Capture-PaperSmokeEvidence.ps1 -Label eod_shutdown_post_stop
 
-# 5. Kill daemon process
+# 6. Kill daemon process (manual operator decision)
 Stop-Process -Name 'mqk-daemon' -ErrorAction SilentlyContinue
 ```
 
-The Postgres container can remain running between sessions:
+### 9.3 Postgres container
+
+Killing the daemon process and stopping the DB container are deliberately left
+as manual operator decisions (not scripted) — the container holds the durable
+DB truth that the next session's restart-safety depends on, and the operator
+should confirm capture succeeded before tearing anything down. The Postgres
+container can remain running between sessions:
+
 ```powershell
 # Stop paper DB container when done for the day
 docker stop mqk-paper-postgres
@@ -400,6 +470,7 @@ These items are **open** and require market-hours observation to close.
 | Script | Purpose | Mutates? |
 |--------|---------|---------|
 | `Get-PaperOperatorStatus.ps1` | Compact read-only status (this runbook's first step) | No |
+| `Stop-PaperTradingClean.ps1` | Orchestrated clean shutdown: pre-stop capture → stop → verify → disarm → post-stop capture (§9) | Yes (stop-system, disarm-execution only) |
 | `Start-PaperTradingSmoke.ps1` | Full smoke harness: daemon start, arm, runtime, watcher | Yes (arm, start) |
 | `Run-AAPL5mMarketSmoke.ps1` | AAPL/5m smoke orchestrator | Yes (via smoke) |
 | `Capture-PaperSmokeEvidence.ps1` | Evidence bundle capture (API + DB snapshots) | No |
