@@ -428,8 +428,16 @@ The config option `metrics_pct_scale` controls this conversion:
 - Scanner-driven paper still requires operator review and paper proof after walk-forward completion.
 - No live recommendation is produced at any stage of walk-forward validation.
 
+**BACKTEST-WALKFORWARD-VALIDATION-INTEGRATION-01 implementation note (wiring, opt-in):**
+- `BacktestRunnerConfig.enable_walkforward_validation` (default `False`) and `BacktestRunnerConfig.walkforward_config` (default `None`) added to `backtest_runner.py`.
+- Disabled by default: real-mode behavior is byte-for-byte identical to before — `validation_profit_factor`/`validation_trades`/`sample_quality`/`parameter_stability_score` remain whatever `metrics.json` provided (`None` today) and `validation_metrics_missing` is appended exactly as before.
+- When enabled (and `mode="real"` with metrics already produced), `_run_and_merge_walkforward_validation()` resolves the entry's bars CSV via `resolve_bars_csv_path()` (public wrapper added to `backtest_bridge.py`), runs `run_walkforward_entry()`, and merges the aggregate via the pure adapter `merge_walkforward_validation_into_mapped()` (added to `walkforward_runner.py`).
+- The merge only fills fields that are currently `None` (never overrides a real `metrics.json` value), and removes `validation_metrics_missing` only when the merged result carries non-`None` `validation_profit_factor` AND `validation_trades`.
+- Subprocess invocation remains independently double-gated: `enable_walkforward_validation=True` alone never authorizes a subprocess — `walkforward_config.mode` must also be `"real"`. The default `WalkForwardRunnerConfig()` is `dry_run`, so enabling the flag with default config plans splits but never executes the CLI.
+- Fail-closed paths: an unresolvable bars CSV, a blocked/incomplete walk-forward run, or a missing `validation_profit_factor`/`validation_trades` in the aggregate all append `walkforward_validation_blocked` (new constant in `walkforward_runner.py`) and never fabricate values.
+
 **Remaining open:**
-- Rust `metrics.json` does not yet emit `validation_profit_factor`, `validation_trades`, `sample_quality`, or `parameter_stability_score`; these are now supplied by the walk-forward runner's aggregation layer.
+- Rust `metrics.json` does not yet emit `validation_profit_factor`, `validation_trades`, `sample_quality`, or `parameter_stability_score` natively; these can now be supplied by the opt-in walk-forward integration above when explicitly enabled and successful — they are not populated by default.
 - `recommended_for_paper=True` requires all gate fields to be present and passing.
 
 Schema written: `strategy-fit-v1`

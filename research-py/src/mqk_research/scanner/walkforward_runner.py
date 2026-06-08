@@ -54,6 +54,11 @@ REASON_MISSING_DATE_RANGE = "missing_date_range_in_entry"
 REASON_COMMAND_BUILD_FAILED = "command_build_failed"
 REASON_BINARY_NOT_FOUND = "binary_not_found"
 
+# Appended to a strategy-fit artifact's failure_reasons when walk-forward
+# validation was explicitly enabled but did not produce a usable aggregate
+# (no splits, blocked splits, missing bars CSV, incomplete aggregate, etc).
+REASON_WALKFORWARD_VALIDATION_BLOCKED = "walkforward_validation_blocked"
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -638,6 +643,70 @@ def map_walkforward_to_validation_metrics(
         "all_splits_have_metrics": aggregate.all_splits_have_metrics,
         "recommended_for_live": False,
     }
+
+
+# Strategy-fit fields that walk-forward aggregates may fill — never overrides
+# a value already derived from the Rust metrics.json mapping.
+_MERGEABLE_VALIDATION_FIELDS: tuple[str, ...] = (
+    "validation_profit_factor",
+    "validation_trades",
+    "sample_quality",
+    "parameter_stability_score",
+)
+
+
+def merge_walkforward_validation_into_mapped(
+    mapped: dict[str, Any],
+    extra_reasons: list[str],
+    wf_result: WalkForwardRunResult,
+) -> tuple[dict[str, Any], list[str]]:
+    """
+    Merge a completed walk-forward run's aggregate validation metrics into a
+    mapped strategy-fit field dict (as produced by map_metrics_to_strategy_fit).
+
+    Pure / no I/O — operates only on the already-computed WalkForwardRunResult.
+
+    Merge rules (fail-closed):
+    - Only merges when wf_result.status == "complete" AND its validation_metrics
+      carries non-None validation_profit_factor AND validation_trades — a
+      partial or blocked walk-forward run never contributes fabricated values.
+    - Only fills fields that are currently None in `mapped`; real values already
+      mapped from metrics.json (should the Rust CLI ever emit them) are never
+      overridden.
+    - "validation_metrics_missing" is removed from the reasons list only when
+      both validation_profit_factor and validation_trades are present in the
+      merged result — never unconditionally.
+    - "walkforward_validation_blocked" is appended whenever the walk-forward
+      run did not yield a usable aggregate — an explicit, honest record that
+      validation was enabled but did not succeed.
+
+    Returns (merged_mapped, merged_reasons); does not mutate inputs.
+    """
+    from mqk_research.scanner.backtest_bridge import REASON_VALIDATION_METRICS_MISSING
+
+    merged = dict(mapped)
+    reasons = list(extra_reasons)
+
+    vm = wf_result.validation_metrics
+    wf_succeeded = (
+        wf_result.status == "complete"
+        and vm is not None
+        and vm.get("validation_profit_factor") is not None
+        and vm.get("validation_trades") is not None
+    )
+
+    if wf_succeeded:
+        for field_name in _MERGEABLE_VALIDATION_FIELDS:
+            if merged.get(field_name) is None and vm.get(field_name) is not None:
+                merged[field_name] = vm[field_name]
+    elif REASON_WALKFORWARD_VALIDATION_BLOCKED not in reasons:
+        reasons.append(REASON_WALKFORWARD_VALIDATION_BLOCKED)
+
+    if (merged.get("validation_profit_factor") is not None
+            and merged.get("validation_trades") is not None):
+        reasons = [r for r in reasons if r != REASON_VALIDATION_METRICS_MISSING]
+
+    return merged, reasons
 
 
 # ---------------------------------------------------------------------------

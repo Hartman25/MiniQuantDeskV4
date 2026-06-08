@@ -150,6 +150,18 @@ def _resolve_bars_path(bars_root: str, symbol: str, timeframe: str) -> Optional[
     return None
 
 
+def resolve_bars_csv_path(bars_root_dir: str, symbol: str, timeframe: str) -> Optional[str]:
+    """
+    Public resolver for a bars CSV path given (bars_root_dir, symbol, timeframe).
+
+    Thin wrapper around the candidate-path search that backs
+    _build_command_or_reason — exposed so other modules (e.g. the walk-forward
+    validation integration in backtest_runner) can resolve the same bars file
+    without duplicating the candidate list. Returns None if no candidate exists.
+    """
+    return _resolve_bars_path(bars_root_dir, symbol, timeframe)
+
+
 def _build_command_or_reason(
     entry: dict[str, Any],
     config: BacktestBridgeConfig,

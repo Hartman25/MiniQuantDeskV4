@@ -56,6 +56,19 @@ class BacktestRunnerConfig:
     recommended_for_paper: bool = False
     minimum_bars: int = 200
     minimum_trades: int = 30
+    # Walk-forward validation integration — disabled by default (fail-closed).
+    # When False, real-mode behavior is byte-for-byte identical to before this
+    # patch: validation_profit_factor/validation_trades/sample_quality/
+    # parameter_stability_score remain whatever metrics.json provided (None
+    # today) and validation_metrics_missing is appended as before.
+    # When True (and mode == "real"), the runner resolves a bars CSV for the
+    # entry and runs walk-forward validation (walkforward_config), merging the
+    # resulting aggregate into the strategy-fit fields only when it actually
+    # completed with real values. Subprocess invocation remains independently
+    # gated by walkforward_config.mode == "real" — enabling this flag alone
+    # does not authorize subprocess execution.
+    enable_walkforward_validation: bool = False
+    walkforward_config: Optional[Any] = None
 
     def __post_init__(self) -> None:
         # Enforce hard invariants regardless of what caller passes.
@@ -240,6 +253,61 @@ def write_strategy_fit_artifact(artifact: dict[str, Any], path: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Walk-forward validation integration (real mode, explicitly opt-in)
+# ---------------------------------------------------------------------------
+
+def _run_and_merge_walkforward_validation(
+    entry: dict[str, Any],
+    mapped: dict[str, Any],
+    extra_reasons: list[str],
+    config: BacktestRunnerConfig,
+    bridge_config: Any,
+) -> tuple[dict[str, Any], list[str]]:
+    """
+    Resolve the bars CSV for `entry`, run walk-forward validation, and merge
+    the resulting aggregate into the mapped strategy-fit fields.
+
+    Only reached when config.enable_walkforward_validation is True and the
+    runner is in real mode with metrics already produced. Lazily imports the
+    walk-forward runner — never at module level, matching the existing
+    bridge/gates lazy-import pattern in run_backtest_queue.
+
+    Subprocess invocation is independently gated by walkforward_config.mode:
+    passing the (default) dry-run WalkForwardRunnerConfig here will plan splits
+    but never execute the CLI, leaving validation fields None and the artifact
+    fail-closed via REASON_WALKFORWARD_VALIDATION_BLOCKED.
+
+    When the bars CSV cannot be resolved, returns the inputs unchanged plus
+    REASON_WALKFORWARD_VALIDATION_BLOCKED — fail-closed, never fabricated.
+    """
+    from mqk_research.scanner.backtest_bridge import resolve_bars_csv_path
+    from mqk_research.scanner.walkforward_runner import (
+        REASON_WALKFORWARD_VALIDATION_BLOCKED,
+        WalkForwardRunnerConfig,
+        merge_walkforward_validation_into_mapped,
+        run_walkforward_entry,
+    )
+
+    bars_root = getattr(bridge_config, "bars_root_dir", None)
+    symbol = str(entry.get("symbol") or "")
+    timeframe = str(entry.get("timeframe") or "5m")
+
+    bars_csv = (
+        resolve_bars_csv_path(bars_root, symbol, timeframe)
+        if bars_root and symbol else None
+    )
+    if bars_csv is None:
+        reasons = list(extra_reasons)
+        if REASON_WALKFORWARD_VALIDATION_BLOCKED not in reasons:
+            reasons.append(REASON_WALKFORWARD_VALIDATION_BLOCKED)
+        return mapped, reasons
+
+    wf_cfg = config.walkforward_config or WalkForwardRunnerConfig()
+    wf_result = run_walkforward_entry(entry, bars_csv, wf_cfg, bridge_config)
+    return merge_walkforward_validation_into_mapped(mapped, extra_reasons, wf_result)
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -293,8 +361,14 @@ def run_backtest_queue(
                 mapped, map_reasons = map_metrics_to_strategy_fit(
                     entry, metrics_dict, bridge_config
                 )
-                result = StrategyFitResult(**mapped)
                 extra_reasons = bridge_reasons + map_reasons
+
+                if cfg.enable_walkforward_validation:
+                    mapped, extra_reasons = _run_and_merge_walkforward_validation(
+                        entry, mapped, extra_reasons, cfg, bridge_config
+                    )
+
+                result = StrategyFitResult(**mapped)
             else:
                 result = StrategyFitResult()  # all None — command failed
                 extra_reasons = bridge_reasons
@@ -331,9 +405,15 @@ def run_backtest_queue(
 
     if real_mode:
         run_status = "real_complete" if written > 0 or len(entries) == 0 else "error"
+        validation_note = (
+            "walk-forward validation enabled; validation_metrics_missing removed "
+            "only when walk-forward aggregate completes with real values"
+            if cfg.enable_walkforward_validation
+            else "validation_metrics_missing until walk-forward validation is enabled and succeeds"
+        )
         notes = (
             f"real-mode runner; {written} strategy-fit-v1 artifacts written; "
-            "gates applied; validation_metrics_missing until walk-forward exists; "
+            f"gates applied; {validation_note}; "
             "recommended_for_live=False always"
         )
     else:
