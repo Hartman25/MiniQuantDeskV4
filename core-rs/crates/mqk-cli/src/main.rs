@@ -5,7 +5,7 @@ use std::path::PathBuf;
 mod commands;
 
 use commands::{
-    bkt::{run_backtest_csv, run_backtest_db, run_sweep_csv},
+    bkt::{run_backtest_csv, run_backtest_db, run_sweep_csv, IntegrityCalendarArg},
     load_payload,
     md::{md_ingest_csv, md_ingest_provider, md_sync_provider},
     run::{
@@ -115,6 +115,10 @@ enum BacktestCmd {
         /// Integrity gap tolerance (missing bars).
         #[arg(long, default_value_t = 0)]
         integrity_gap_tolerance_bars: u32,
+
+        /// Integrity calendar for gap detection.
+        #[arg(long, value_enum, default_value = "always-on")]
+        integrity_calendar: IntegrityCalendarArg,
 
         /// Target share count for intraday_scalper strategy (default: 1).
         /// Captured in config_id — different values produce different run identities.
@@ -620,6 +624,7 @@ async fn main() -> Result<()> {
                 integrity_enabled,
                 integrity_stale_threshold_ticks,
                 integrity_gap_tolerance_bars,
+                integrity_calendar,
                 target_qty,
                 max_target_qty,
                 max_position_notional_usd,
@@ -635,6 +640,7 @@ async fn main() -> Result<()> {
                     integrity_enabled,
                     integrity_stale_threshold_ticks,
                     integrity_gap_tolerance_bars,
+                    integrity_calendar,
                     target_qty,
                     max_target_qty,
                     max_position_notional_usd,

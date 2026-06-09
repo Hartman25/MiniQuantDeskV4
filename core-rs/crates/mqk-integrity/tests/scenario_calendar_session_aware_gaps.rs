@@ -48,6 +48,15 @@ fn always_on_cfg() -> IntegrityConfig {
     }
 }
 
+fn nyse_start_anchored_cfg() -> IntegrityConfig {
+    IntegrityConfig {
+        gap_tolerance_bars: 0,
+        stale_threshold_ticks: 0,
+        enforce_feed_disagreement: false,
+        calendar: CalendarSpec::NyseWeekdaysStartAnchored,
+    }
+}
+
 fn feed() -> FeedId {
     FeedId::new("main")
 }
@@ -118,6 +127,32 @@ fn weekend_gap_always_on_halts() {
     assert!(st.halted);
 }
 
+/// Scanner CSV bars can be start-anchored: Friday 15:55 ET to Monday 09:30 ET.
+/// The start-anchored NYSE calendar must treat that as an expected weekend gap.
+#[test]
+fn weekend_gap_start_anchored_nyse_does_not_halt() {
+    let friday_last: i64 = 1_772_225_700; // 2026-02-27 15:55 ET
+    let monday_open: i64 = 1_772_461_800; // 2026-03-02 09:30 ET
+
+    let mut st = IntegrityState::new();
+    let cfg = nyse_start_anchored_cfg();
+
+    let d1 = evaluate_bar(&cfg, &mut st, &feed(), 1, &bar(friday_last));
+    assert_eq!(d1.action, IntegrityAction::Allow);
+
+    let d2 = evaluate_bar(&cfg, &mut st, &feed(), 2, &bar(monday_open));
+    assert_eq!(
+        d2.action,
+        IntegrityAction::Allow,
+        "Start-anchored scanner weekend gap must NOT trigger halt; got reason {:?}",
+        d2.reason
+    );
+    assert!(
+        !st.halted,
+        "halted flag must not be set for scanner weekend gap"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Holiday gap → NOT a missing bar (NyseWeekdays)
 // ---------------------------------------------------------------------------
@@ -175,6 +210,28 @@ fn intra_session_gap_nyse_still_halts() {
         d2.action,
         IntegrityAction::Halt,
         "Intra-session gap must still halt with NYSE calendar"
+    );
+    assert_eq!(d2.reason, IntegrityReason::GapDetected);
+    assert!(st.halted);
+}
+
+/// A missing 5-minute slot inside the start-anchored regular session still halts.
+#[test]
+fn intra_session_gap_start_anchored_nyse_still_halts() {
+    let bar_10_00: i64 = 1_704_726_000; // 2024-01-08 10:00 ET
+    let bar_10_25: i64 = 1_704_727_500; // skips 10:05, 10:10, 10:15, 10:20
+
+    let mut st = IntegrityState::new();
+    let cfg = nyse_start_anchored_cfg();
+
+    let d1 = evaluate_bar(&cfg, &mut st, &feed(), 1, &bar(bar_10_00));
+    assert_eq!(d1.action, IntegrityAction::Allow);
+
+    let d2 = evaluate_bar(&cfg, &mut st, &feed(), 2, &bar(bar_10_25));
+    assert_eq!(
+        d2.action,
+        IntegrityAction::Halt,
+        "Intra-session gap must still halt with start-anchored NYSE calendar"
     );
     assert_eq!(d2.reason, IntegrityReason::GapDetected);
     assert!(st.halted);
@@ -262,5 +319,21 @@ fn nyse_missing_bars_weekend_is_zero() {
     assert_eq!(
         missing, 0,
         "NyseWeekdays: weekend gap should have 0 missing trading bars, got {missing}"
+    );
+}
+
+/// `NyseWeekdaysStartAnchored.missing_bars_between` over scanner weekend labels returns 0.
+#[test]
+fn nyse_start_anchored_missing_bars_weekend_is_zero() {
+    let friday_last: i64 = 1_772_225_700;
+    let monday_open: i64 = 1_772_461_800;
+    let missing = CalendarSpec::NyseWeekdaysStartAnchored.missing_bars_between(
+        friday_last,
+        monday_open,
+        INTERVAL,
+    );
+    assert_eq!(
+        missing, 0,
+        "NyseWeekdaysStartAnchored: scanner weekend gap should have 0 missing trading bars, got {missing}"
     );
 }

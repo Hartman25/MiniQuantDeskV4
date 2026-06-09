@@ -15,6 +15,9 @@
 //! - [`CalendarSpec::NyseWeekdays`] — NYSE-style equities: weekdays 09:30–16:00
 //!   Eastern (DST-aware via chrono-tz America/New_York), excluding a hardcoded
 //!   set of US market holidays for 2023–2028.
+//! - [`CalendarSpec::NyseWeekdaysStartAnchored`] — same NYSE regular session,
+//!   but for CSV/provider bars whose timestamp slot is anchored at 09:30 through
+//!   15:55 ET for 5-minute data.
 
 use chrono::{DateTime, Datelike, LocalResult, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::America::New_York;
@@ -43,6 +46,17 @@ pub enum CalendarSpec {
     /// A bar whose `end_ts` falls outside these windows is treated as a
     /// non-trading slot and is **not** counted as a missing bar.
     NyseWeekdays,
+
+    /// NYSE-style equities for start-anchored scanner CSV/provider bars:
+    /// - Weekdays only (Monday-Friday).
+    /// - Regular session timestamp slots: 09:30 ET <= ts < close ET.
+    ///   Normal close is 16:00 ET; early-close days end before 13:00 ET.
+    /// - Hardcoded US market holidays 2023-2028.
+    ///
+    /// This intentionally does not change [`CalendarSpec::NyseWeekdays`],
+    /// which remains the close-labeled 09:35-through-close calendar used by
+    /// existing live/session surfaces.
+    NyseWeekdaysStartAnchored,
 }
 
 impl CalendarSpec {
@@ -55,6 +69,7 @@ impl CalendarSpec {
         match self {
             CalendarSpec::AlwaysOn => true,
             CalendarSpec::NyseWeekdays => is_nyse_session_end(end_ts),
+            CalendarSpec::NyseWeekdaysStartAnchored => is_nyse_start_anchored_bar_ts(end_ts),
         }
     }
 
@@ -66,6 +81,7 @@ impl CalendarSpec {
         match self {
             CalendarSpec::AlwaysOn => "always_on",
             CalendarSpec::NyseWeekdays => "nyse_weekdays",
+            CalendarSpec::NyseWeekdaysStartAnchored => "nyse_weekdays_start_anchored",
         }
     }
 
@@ -80,7 +96,9 @@ impl CalendarSpec {
     pub fn classify_market_session(&self, now_ts: i64) -> &'static str {
         match self {
             CalendarSpec::AlwaysOn => "regular",
-            CalendarSpec::NyseWeekdays => nyse_classify_session(now_ts),
+            CalendarSpec::NyseWeekdays | CalendarSpec::NyseWeekdaysStartAnchored => {
+                nyse_classify_session(now_ts)
+            }
         }
     }
 
@@ -94,7 +112,9 @@ impl CalendarSpec {
     pub fn classify_exchange_calendar(&self, now_ts: i64) -> &'static str {
         match self {
             CalendarSpec::AlwaysOn => "open",
-            CalendarSpec::NyseWeekdays => nyse_classify_exchange(now_ts),
+            CalendarSpec::NyseWeekdays | CalendarSpec::NyseWeekdaysStartAnchored => {
+                nyse_classify_exchange(now_ts)
+            }
         }
     }
 
@@ -110,6 +130,9 @@ impl CalendarSpec {
             }
             CalendarSpec::NyseWeekdays => {
                 "session_truth: heuristic from NYSE weekday calendar (not exchange-sourced)"
+            }
+            CalendarSpec::NyseWeekdaysStartAnchored => {
+                "session_truth: heuristic from NYSE weekday start-anchored bar calendar (not exchange-sourced)"
             }
         }
     }
@@ -142,13 +165,13 @@ impl CalendarSpec {
                 let steps = delta / interval_secs;
                 steps.saturating_sub(1).max(0) as u32
             }
-            CalendarSpec::NyseWeekdays => {
+            CalendarSpec::NyseWeekdays | CalendarSpec::NyseWeekdaysStartAnchored => {
                 // Walk every slot in (prev_end_ts, next_end_ts) and count
                 // those that fall within the trading session.
                 let mut count = 0u32;
                 let mut ts = prev_end_ts + interval_secs;
                 while ts < next_end_ts {
-                    if is_nyse_session_end(ts) {
+                    if self.is_session_bar_end(ts) {
                         count += 1;
                     }
                     ts += interval_secs;
@@ -208,6 +231,41 @@ fn is_nyse_session_end(end_ts: i64) -> bool {
         None => 16 * 3600, // 16:00:00 ET
     };
     et_secs > open && et_secs <= close
+}
+
+/// Returns `true` if `ts` is a valid NYSE regular-session timestamp for
+/// start-anchored scanner CSV/provider bars.
+///
+/// Some providers label 5-minute regular-session bars at 09:30, 09:35, ...,
+/// 15:55 ET instead of close labels 09:35, 09:40, ..., 16:00 ET. For those CSVs,
+/// the expected overnight/weekend gap is 15:55 -> next session 09:30.
+fn is_nyse_start_anchored_bar_ts(ts: i64) -> bool {
+    let utc_dt: DateTime<Utc> = match Utc.timestamp_opt(ts, 0) {
+        LocalResult::Single(dt) => dt,
+        _ => return false,
+    };
+    let et_dt = utc_dt.with_timezone(&New_York);
+
+    if matches!(et_dt.weekday(), Weekday::Sat | Weekday::Sun) {
+        return false;
+    }
+
+    let (year, month, day) = (
+        et_dt.year() as i64,
+        et_dt.month() as i64,
+        et_dt.day() as i64,
+    );
+    if is_nyse_holiday(year, month, day) {
+        return false;
+    }
+
+    let et_secs = et_dt.hour() as i64 * 3600 + et_dt.minute() as i64 * 60 + et_dt.second() as i64;
+    let open = 9 * 3600 + 30 * 60;
+    let close = match nyse_early_close_et(year, month, day) {
+        Some((eh, em)) => (eh as i64) * 3600 + (em as i64) * 60,
+        None => 16 * 3600,
+    };
+    et_secs >= open && et_secs < close
 }
 
 /// Classify the market session type for a given wall-clock timestamp on the

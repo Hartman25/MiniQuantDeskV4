@@ -26,6 +26,7 @@ from mqk_research.scanner.backtest_bridge import (
     REASON_BARS_FILE_MISSING,
     PCT_SCALE_PERCENT_0_100,
     PCT_SCALE_AUTO,
+    INTEGRITY_CALENDAR_US_EQUITY_REGULAR,
     BacktestBridgeConfig,
     build_mqk_backtest_command,
     parse_mqk_metrics_json,
@@ -263,6 +264,35 @@ class TestCommandBuilder(unittest.TestCase):
         self.assertIsNotNone(cmd)
         idx = cmd.index("--timeframe-secs")
         self.assertEqual(cmd[idx + 1], "300")
+
+    def test_command_builder_passes_equity_calendar_without_changing_inputs_or_gates(self):
+        """Scanner real-mode command opts into session-aware equity integrity."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bars_path = Path(tmpdir) / "AAPL_5m.csv"
+            bars_path.write_text("ts\n", encoding="utf-8")
+            cfg = BacktestBridgeConfig(
+                mode="real",
+                cli_binary="/fake/mqk",
+                bars_root_dir=tmpdir,
+                out_dir=tmpdir,
+                integrity_stale_threshold_ticks=172_800,
+                integrity_gap_tolerance_bars=0,
+            )
+            entry = _make_queue_entry()
+            cmd = build_mqk_backtest_command(entry, cfg)
+
+        self.assertIsNotNone(cmd)
+        self.assertEqual(cmd[cmd.index("--bars") + 1], str(bars_path))
+        self.assertEqual(cmd[cmd.index("--strategy") + 1], "intraday_scalper")
+        self.assertEqual(cmd[cmd.index("--symbol") + 1], "AAPL")
+        self.assertEqual(cmd[cmd.index("--integrity-stale-threshold-ticks") + 1], "172800")
+        self.assertEqual(cmd[cmd.index("--integrity-gap-tolerance-bars") + 1], "0")
+        self.assertEqual(
+            cmd[cmd.index("--integrity-calendar") + 1],
+            INTEGRITY_CALENDAR_US_EQUITY_REGULAR,
+        )
+        self.assertNotIn("eligible_for_live=true", cmd)
+        self.assertNotIn("recommended_for_live=true", cmd)
 
 
 # ---------------------------------------------------------------------------

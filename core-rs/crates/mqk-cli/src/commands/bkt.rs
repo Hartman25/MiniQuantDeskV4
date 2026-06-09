@@ -1,12 +1,32 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
+use clap::ValueEnum;
 use std::path::Path;
 
 use mqk_backtest::{
     BacktestBar, BacktestConfig, BacktestEngine, StrategySizingConfig, SweepGrid, SweepRowResult,
     SWEEP_MAX_COMBINATIONS,
 };
+use mqk_integrity::CalendarSpec;
 use mqk_strategy::{engines::register_builtin_strategies_with_sizing, PluginRegistry};
+
+/// CLI-facing integrity calendar selector for CSV backtests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum IntegrityCalendarArg {
+    /// Preserve existing 24/7 gap detection semantics.
+    AlwaysOn,
+    /// NYSE-style regular equity session calendar.
+    UsEquityRegular,
+}
+
+impl From<IntegrityCalendarArg> for CalendarSpec {
+    fn from(value: IntegrityCalendarArg) -> Self {
+        match value {
+            IntegrityCalendarArg::AlwaysOn => CalendarSpec::AlwaysOn,
+            IntegrityCalendarArg::UsEquityRegular => CalendarSpec::NyseWeekdaysStartAnchored,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CSV backtest runner
@@ -23,6 +43,7 @@ pub async fn run_backtest_csv(
     integrity_enabled: bool,
     integrity_stale_threshold_ticks: u64,
     integrity_gap_tolerance_bars: u32,
+    integrity_calendar: IntegrityCalendarArg,
     target_qty: i64,
     max_target_qty: Option<i64>,
     max_position_notional_usd: Option<i64>,
@@ -48,6 +69,7 @@ pub async fn run_backtest_csv(
     cfg.integrity_enabled = integrity_enabled;
     cfg.integrity_stale_threshold_ticks = integrity_stale_threshold_ticks;
     cfg.integrity_gap_tolerance_bars = integrity_gap_tolerance_bars;
+    cfg.integrity_calendar = integrity_calendar.into();
     cfg.sizing = StrategySizingConfig {
         target_qty,
         max_target_qty,

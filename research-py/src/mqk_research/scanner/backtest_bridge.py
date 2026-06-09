@@ -4,7 +4,7 @@ BACKTEST-BRIDGE-BUNDLE-01 — Python bridge to Rust mqk-backtest CLI output.
 Parses metrics.json artifacts produced by:
   mqk backtest csv --bars <path> --strategy <name> --symbol <sym>
       --timeframe-secs <n> --initial-cash-micros <n> --target-qty <n>
-      --out-dir <dir>
+      --integrity-calendar us-equity-regular --out-dir <dir>
 
 Maps fields to strategy-fit-v1 for gate evaluation.
 
@@ -62,6 +62,17 @@ PCT_SCALE_PERCENT_0_100 = "percent_0_100"
 PCT_SCALE_AUTO = "auto"
 
 # ---------------------------------------------------------------------------
+# Integrity calendar constants
+# ---------------------------------------------------------------------------
+
+INTEGRITY_CALENDAR_ALWAYS_ON = "always-on"
+INTEGRITY_CALENDAR_US_EQUITY_REGULAR = "us-equity-regular"
+ALLOWED_INTEGRITY_CALENDARS: frozenset[str] = frozenset({
+    INTEGRITY_CALENDAR_ALWAYS_ON,
+    INTEGRITY_CALENDAR_US_EQUITY_REGULAR,
+})
+
+# ---------------------------------------------------------------------------
 # Schema / mapping constants
 # ---------------------------------------------------------------------------
 
@@ -107,6 +118,8 @@ class BacktestBridgeConfig:
     integrity_stale_threshold_ticks: safe value for daily-bar gaps is 172800.
         The default 120 in the CLI triggers execution_blocked for daily data.
     integrity_gap_tolerance_bars: tolerated missing bar count.
+    integrity_calendar: scanner MAIN equity bars use the NYSE-style regular
+        session calendar so expected overnight/weekend gaps do not block.
     metrics_pct_scale: scale convention for Rust pct fields.
         "percent_0_100" (default): Rust always outputs 0-100 scale; divide by
             100 for fraction, multiply by 100 for bps. Unambiguous for all values.
@@ -122,6 +135,7 @@ class BacktestBridgeConfig:
     target_qty: int = 1
     integrity_stale_threshold_ticks: int = 172_800
     integrity_gap_tolerance_bars: int = 0
+    integrity_calendar: str = INTEGRITY_CALENDAR_US_EQUITY_REGULAR
     metrics_pct_scale: str = PCT_SCALE_PERCENT_0_100
     recommended_for_live: bool = False
 
@@ -203,6 +217,9 @@ def _build_command_or_reason(
         return None, REASON_BARS_FILE_MISSING
 
     out_dir = config.out_dir or "exports/backtest_runs"
+    integrity_calendar = config.integrity_calendar
+    if integrity_calendar not in ALLOWED_INTEGRITY_CALENDARS:
+        return None, REASON_COMMAND_BUILD_FAILED
 
     return [
         config.cli_binary,
@@ -215,6 +232,7 @@ def _build_command_or_reason(
         "--target-qty", str(config.target_qty),
         "--integrity-stale-threshold-ticks", str(config.integrity_stale_threshold_ticks),
         "--integrity-gap-tolerance-bars", str(config.integrity_gap_tolerance_bars),
+        "--integrity-calendar", integrity_calendar,
         "--out-dir", out_dir,
     ], None
 
@@ -234,6 +252,7 @@ def build_mqk_backtest_command(
             --timeframe-secs <n> --initial-cash-micros <n> --target-qty <n>
             --integrity-stale-threshold-ticks <n>
             --integrity-gap-tolerance-bars <n>
+            --integrity-calendar us-equity-regular
             --out-dir <dir>
     """
     cmd, _reason = _build_command_or_reason(entry, config)

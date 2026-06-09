@@ -39,6 +39,7 @@ mqk-config = { path = "../mqk-config" }
 mqk-db = { path = "../mqk-db" }
 mqk-backtest = { path = "../mqk-backtest" }
 mqk-execution = { path = "../mqk-execution" }
+mqk-integrity = { path = "../mqk-integrity" }
 mqk-strategy = { path = "../mqk-strategy" }
 mqk-md = { path = "../mqk-md" }
 mqk-testkit = { path = "../mqk-testkit", optional = true }

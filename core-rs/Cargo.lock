@@ -1799,6 +1799,7 @@ dependencies = [
  "mqk-config",
  "mqk-db",
  "mqk-execution",
+ "mqk-integrity",
  "mqk-md",
  "mqk-portfolio",
  "mqk-reconcile",
