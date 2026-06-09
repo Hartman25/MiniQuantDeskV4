@@ -1322,6 +1322,52 @@ This unblocks `paper_readiness_runner.py` only after refreshed `md_bars` rows al
 
 This patch does not by itself prove real refreshed market data exists. Real-data proof requires a separate DB-gated run against a populated paper/test `md_bars` table and review of the resulting local bar files.
 
+### MARKET-DATA-EXPORT-DB-PROOF-01 - Operator DB Proof Harness
+
+`MARKET-DATA-EXPORT-DB-PROOF-01` adds an operator-run proof harness for the existing `MARKET-DATA-EXPORT-01` bridge. It connects to a caller-provided paper/test Postgres URL, runs the existing read-only exporter, inspects the generated `<SYMBOL>_<TIMEFRAME>.csv` files, proves those CSV files parse through `symbol_inputs_runner.normalize_bars_csv()`, and writes a local JSON proof report.
+
+Required command shape:
+
+```powershell
+cd research-py
+python scripts/prove_market_data_export_db.py `
+  --database-url "<redacted paper/test db url>" `
+  --symbols AAPL `
+  --timeframe 5m `
+  --start-utc 2026-06-08T13:30:00Z `
+  --end-utc 2026-06-08T20:00:00Z `
+  --bars-root ..\exports\scanner\bars\20260608 `
+  --trade-date 2026-06-08 `
+  --proof-report-path ..\exports\scanner\proofs\20260608\market_data_export_db_proof.json
+```
+
+The database URL may also be supplied through `MQK_PAPER_DB_URL`; the proof output redacts the URL and never documents credentials.
+
+The proof report schema is `market-data-export-db-proof-v1`. It records requested/exported symbols, bars root, output paths, row counts, first/last `end_ts`, CSV parse pass/fail by symbol, optional downstream runner statuses, failure reasons, and fixed safety flags:
+
+- `approved_for_live: false`
+- `daemon_enforcement_executed: false`
+- `broker_calls_executed: false`
+- `db_writes_executed: false`
+
+To additionally prove the exported bars can feed the existing symbol-inputs runner, add:
+
+```powershell
+--run-symbol-inputs
+```
+
+To additionally run the existing paper-readiness artifact chain, provide the required local artifacts:
+
+```powershell
+--run-paper-readiness `
+  --watchlist-path <path> `
+  --strategy-fit-dir <path>
+```
+
+`--operator-review-approved` is off by default. Without it, a valid paper-readiness run may stop at `ready_for_operator_review`; with it, the existing runner may report `ready_for_paper_handoff`. In both cases this proof remains artifact-only.
+
+This proof does not trade, does not start a daemon, does not arm paper trading, does not submit orders, does not call broker APIs, does not inject strategy signals, does not write to Postgres, does not wire watchlist enforcement, and does not prove live readiness. Live remains hard-disabled.
+
 ---
 
 ## Appendix A: Relationship to Existing Specs
