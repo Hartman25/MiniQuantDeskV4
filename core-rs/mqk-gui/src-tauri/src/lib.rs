@@ -9,6 +9,7 @@ const ALLOWED_ARTIFACT_FILES: &[&str] = &[
     "fills.csv",
     "audit.jsonl",
     "strategy_fit.json",
+    "readiness_report.json",
 ];
 
 #[derive(Debug, Clone, Serialize)]

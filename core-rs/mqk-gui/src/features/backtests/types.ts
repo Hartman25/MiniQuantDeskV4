@@ -100,6 +100,7 @@ export interface ArtifactBundle {
   orders: FileResult<ParsedCsvResult<OrderRow>>;
   fills: FileResult<ParsedCsvResult<FillRow>>;
   strategyFit: FileResult<StrategyFitParseResult>;
+  paperReadiness: FileResult<PaperReadinessParseResult>;
 }
 
 // ---------------------------------------------------------------------------

@@ -7,11 +7,17 @@ import {
   formatMicrosAsDollars,
   formatNullableNumber,
   formatNullablePercent,
+  PAPER_READINESS_SCHEMA_VERSION,
+  PAPER_READINESS_STATUS_BLOCKED,
+  PAPER_READINESS_STATUS_PARTIAL,
+  PAPER_READINESS_STATUS_READY_FOR_OPERATOR_REVIEW,
+  PAPER_READINESS_STATUS_READY_FOR_PAPER_HANDOFF,
   parseEquityCurve,
   parseFills,
   parseManifest,
   parseMetrics,
   parseOrders,
+  parsePaperReadiness,
   parseStrategyFit,
   STRATEGY_FIT_SCHEMA_VERSION,
 } from "./parsers.ts";
@@ -35,6 +41,7 @@ import type {
   FileResult,
   FillRow,
   OrderRow,
+  PaperReadinessParseResult,
   ParsedCsvResult,
   StrategyFitGateFlags,
   StrategyFitParseResult,
@@ -71,15 +78,16 @@ async function loadFileResult<T>(
 }
 
 async function loadBundle(folder: string): Promise<ArtifactBundle> {
-  const [manifest, metrics, equityCurve, orders, fills, strategyFit] = await Promise.all([
+  const [manifest, metrics, equityCurve, orders, fills, strategyFit, paperReadiness] = await Promise.all([
     loadFileResult(folder, "manifest.json", parseManifest),
     loadFileResult(folder, "metrics.json", parseMetrics),
     loadFileResult(folder, "equity_curve.csv", parseEquityCurve),
     loadFileResult(folder, "orders.csv", parseOrders),
     loadFileResult(folder, "fills.csv", parseFills),
     loadFileResult(folder, "strategy_fit.json", parseStrategyFit),
+    loadFileResult(folder, "readiness_report.json", parsePaperReadiness),
   ]);
-  return { manifest, metrics, equityCurve, orders, fills, strategyFit };
+  return { manifest, metrics, equityCurve, orders, fills, strategyFit, paperReadiness };
 }
 
 // ---------------------------------------------------------------------------
@@ -502,6 +510,272 @@ function StrategyFitContent({ fit }: { fit: StrategyFitParseResult }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Paper readiness chain panel
+// ---------------------------------------------------------------------------
+
+const PAPER_READINESS_MAX_REASONS = 10;
+
+function paperReadinessStatusLabel(status: string): string {
+  switch (status) {
+    case PAPER_READINESS_STATUS_BLOCKED:
+      return "Blocked";
+    case PAPER_READINESS_STATUS_PARTIAL:
+      return "Partial";
+    case PAPER_READINESS_STATUS_READY_FOR_OPERATOR_REVIEW:
+      return "Ready for operator review";
+    case PAPER_READINESS_STATUS_READY_FOR_PAPER_HANDOFF:
+      return "Ready for paper handoff";
+    default:
+      return status;
+  }
+}
+
+function paperReadinessStatusTone(status: string): "good" | "bad" | "warn" | "neutral" {
+  switch (status) {
+    case PAPER_READINESS_STATUS_READY_FOR_PAPER_HANDOFF:
+      return "good";
+    case PAPER_READINESS_STATUS_READY_FOR_OPERATOR_REVIEW:
+    case PAPER_READINESS_STATUS_PARTIAL:
+      return "warn";
+    case PAPER_READINESS_STATUS_BLOCKED:
+      return "bad";
+    default:
+      return "neutral";
+  }
+}
+
+function gateLabel(passed: boolean | null): string {
+  if (passed === null) return "—";
+  return passed ? "PASS" : "FAIL";
+}
+
+function gateTone(passed: boolean | null): "good" | "bad" | "neutral" {
+  if (passed === null) return "neutral";
+  return passed ? "good" : "bad";
+}
+
+function PaperReadinessPanel({ result }: { result: FileResult<PaperReadinessParseResult> }) {
+  if (result.kind === "idle" || result.kind === "loading") return null;
+
+  return (
+    <Panel
+      title="Paper readiness chain"
+      subtitle="Watchlist promotion / paper-readiness chain result from readiness_report.json (research-py PAPER-READINESS-RUNNER-01)."
+    >
+      {result.kind === "missing" && (
+        <div className="empty-state">
+          Paper readiness report not found for this artifact folder.
+        </div>
+      )}
+      {result.kind === "read_error" && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>readiness_report.json read error:</strong> {result.message}
+        </div>
+      )}
+      {result.kind === "parse_error" && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>readiness_report.json parse error:</strong> {result.message}
+        </div>
+      )}
+      {result.kind === "ok" && <PaperReadinessContent report={result.data} />}
+    </Panel>
+  );
+}
+
+function PaperReadinessContent({ report }: { report: PaperReadinessParseResult }) {
+  if (report.kind === "unsupported_schema") {
+    return (
+      <div className="unavailable-notice">
+        <strong>Unsupported paper-readiness schema:</strong>{" "}
+        {report.schemaVersion ? `'${report.schemaVersion}'` : "schema_version missing"} — expected{" "}
+        '{PAPER_READINESS_SCHEMA_VERSION}'.
+      </div>
+    );
+  }
+
+  if (report.kind === "malformed") {
+    return (
+      <div className="unavailable-notice unavailable-critical">
+        <strong>Invalid readiness_report.json:</strong> {report.message}
+      </div>
+    );
+  }
+
+  if (report.kind === "missing_fields") {
+    return (
+      <div className="unavailable-notice unavailable-critical">
+        <strong>readiness_report.json missing required fields:</strong> {report.message}
+      </div>
+    );
+  }
+
+  const r = report.data;
+  const visibleReasons = r.reasons.slice(0, PAPER_READINESS_MAX_REASONS);
+  const hiddenReasonCount = r.reasons.length - visibleReasons.length;
+  const artifactRows = [
+    ...Object.entries(r.artifacts_read).map(([key, value]) => ({ io: "Read", key, value })),
+    ...Object.entries(r.artifacts_written).map(([key, value]) => ({ io: "Written", key, value })),
+  ];
+  const toggleRows = Object.entries(r.upstream_pipeline_toggles).map(([key, value]) => ({ key, value }));
+
+  return (
+    <>
+      <div className="timeline-meta-grid">
+        <div>
+          <span>Schema</span>
+          <strong style={{ fontFamily: "monospace" }}>{r.schema_version}</strong>
+        </div>
+        <div>
+          <span>Status</span>
+          <strong>{paperReadinessStatusLabel(r.status)}</strong>
+        </div>
+        <div>
+          <span>Top symbol</span>
+          <strong>{r.top_symbol ?? "—"}</strong>
+        </div>
+        <div>
+          <span>Symbol inputs status</span>
+          <strong>{r.symbol_inputs_status ?? "—"}</strong>
+        </div>
+      </div>
+
+      <div className="summary-grid summary-grid-five">
+        <StatCard
+          title="Chain status"
+          value={paperReadinessStatusLabel(r.status)}
+          tone={paperReadinessStatusTone(r.status)}
+        />
+        <StatCard
+          title="Risk simulation"
+          value={gateLabel(r.risk_simulation_passed)}
+          tone={gateTone(r.risk_simulation_passed)}
+        />
+        <StatCard
+          title="Premarket revalidation"
+          value={gateLabel(r.premarket_revalidation_passed)}
+          tone={gateTone(r.premarket_revalidation_passed)}
+        />
+        <StatCard
+          title="Promotion"
+          value={gateLabel(r.promotion_passed)}
+          tone={gateTone(r.promotion_passed)}
+        />
+        <StatCard
+          title="Approved for autonomous paper"
+          value={r.approved_for_autonomous_paper ? "YES" : "NO"}
+          tone={r.approved_for_autonomous_paper ? "good" : "neutral"}
+        />
+      </div>
+
+      <div className="summary-grid summary-grid-five">
+        <StatCard
+          title="Approved for live"
+          value={r.approved_for_live ? "YES" : "NO"}
+          tone={r.approved_for_live ? "bad" : "neutral"}
+        />
+        <StatCard
+          title="Live locked"
+          value={r.live_locked ? "YES" : "NO"}
+          tone={r.live_locked ? "good" : "bad"}
+        />
+        <StatCard
+          title="Daemon enforcement executed"
+          value={r.daemon_enforcement_executed ? "YES" : "NO"}
+          tone={r.daemon_enforcement_executed ? "bad" : "neutral"}
+        />
+        <StatCard
+          title="Paper handoff requested"
+          value={r.paper_handoff_requested ? "YES" : "NO"}
+          tone="neutral"
+        />
+        <StatCard
+          title="Paper handoff executed"
+          value={r.paper_handoff_executed ? "YES" : "NO"}
+          tone={r.paper_handoff_executed ? "bad" : "neutral"}
+        />
+      </div>
+
+      {r.hardInvariantAnomalies.length > 0 && (
+        <div className="unavailable-notice unavailable-critical" style={{ marginTop: 12 }}>
+          <strong>Anomaly:</strong> this artifact reports unexpected hard-invariant value(s):{" "}
+          {r.hardInvariantAnomalies.join(", ")}. approved_for_live, live_locked,
+          daemon_enforcement_executed, and paper_handoff_executed are normally forced to
+          false/true/false/false — verify the source artifact.
+        </div>
+      )}
+
+      {visibleReasons.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Reasons ({r.reasons.length})</span>
+          <ul>
+            {visibleReasons.map((reason, i) => (
+              <li key={`${reason}-${i}`} style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>
+                {reason}
+              </li>
+            ))}
+          </ul>
+          {hiddenReasonCount > 0 && (
+            <div className="unavailable-notice">
+              + {hiddenReasonCount} more reason(s) not shown.
+            </div>
+          )}
+        </div>
+      )}
+
+      {toggleRows.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Upstream pipeline toggles</span>
+          <DataTable
+            rows={toggleRows}
+            rowKey={(row) => row.key}
+            columns={[
+              { key: "toggle", title: "Toggle", render: (row) => row.key },
+              {
+                key: "value",
+                title: "Enabled",
+                render: (row) => (
+                  <span style={{ color: row.value ? "var(--success)" : "var(--muted)" }}>
+                    {row.value ? "YES" : "NO"}
+                  </span>
+                ),
+              },
+            ]}
+          />
+        </div>
+      )}
+
+      {artifactRows.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Artifact chain</span>
+          <DataTable
+            rows={artifactRows}
+            rowKey={(row) => `${row.io}-${row.key}`}
+            columns={[
+              { key: "io", title: "I/O", render: (row) => row.io },
+              { key: "name", title: "Artifact", render: (row) => row.key },
+              {
+                key: "path",
+                title: "Path",
+                render: (row) => (
+                  <span style={{ fontFamily: "monospace", fontSize: "0.78rem" }}>{row.value ?? "—"}</span>
+                ),
+              },
+            ]}
+          />
+        </div>
+      )}
+
+      {r.notes && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Notes</span>
+          <p style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{r.notes}</p>
+        </div>
+      )}
+    </>
+  );
+}
+
 function EquityCurveSection({
   result,
 }: {
@@ -755,6 +1029,7 @@ function ArtifactDisplay({ bundle }: { bundle: ArtifactBundle }) {
       )}
 
       <StrategyFitPanel result={bundle.strategyFit} />
+      <PaperReadinessPanel result={bundle.paperReadiness} />
 
       <EquityCurveSection result={bundle.equityCurve} />
       <OrdersSection result={bundle.orders} />
