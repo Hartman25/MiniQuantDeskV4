@@ -127,6 +127,48 @@ pub struct DiscordNotifierStatus {
     pub delivery_enabled: bool,
 }
 
+/// URL-free summary of a Discord delivery failure.
+///
+/// This intentionally omits the raw `reqwest::Error` text because reqwest can
+/// format request URL context, which would expose the webhook token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordDeliveryErrorSummary {
+    pub kind: &'static str,
+    pub status_code: Option<u16>,
+    pub is_timeout: bool,
+    pub is_connect: bool,
+}
+
+pub fn discord_delivery_error_summary(err: &reqwest::Error) -> DiscordDeliveryErrorSummary {
+    let status_code = err.status().map(|status| status.as_u16());
+    let kind = if err.is_timeout() {
+        "timeout"
+    } else if err.is_connect() {
+        "connect"
+    } else if status_code.is_some() {
+        "status"
+    } else if err.is_request() {
+        "request"
+    } else if err.is_body() {
+        "body"
+    } else if err.is_decode() {
+        "decode"
+    } else if err.is_builder() {
+        "builder"
+    } else if err.is_redirect() {
+        "redirect"
+    } else {
+        "unknown"
+    };
+
+    DiscordDeliveryErrorSummary {
+        kind,
+        status_code,
+        is_timeout: err.is_timeout(),
+        is_connect: err.is_connect(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Notifier
 // ---------------------------------------------------------------------------
@@ -223,8 +265,13 @@ impl DiscordNotifier {
         {
             Ok(_) => true,
             Err(err) => {
+                let summary = discord_delivery_error_summary(&err);
                 warn!(
-                    error = %err,
+                    error_kind = summary.kind,
+                    is_timeout = summary.is_timeout,
+                    is_connect = summary.is_connect,
+                    has_status = summary.status_code.is_some(),
+                    status_code = summary.status_code.unwrap_or(0),
                     "discord test-alert delivery failed (best-effort; operator action truth unaffected)"
                 );
                 false
@@ -271,8 +318,13 @@ impl DiscordNotifier {
             .send()
             .await
         {
+            let summary = discord_delivery_error_summary(&err);
             warn!(
-                error = %err,
+                error_kind = summary.kind,
+                is_timeout = summary.is_timeout,
+                is_connect = summary.is_connect,
+                has_status = summary.status_code.is_some(),
+                status_code = summary.status_code.unwrap_or(0),
                 action_key = %payload.action_key,
                 "discord webhook delivery failed (best-effort; primary action truth unaffected)"
             );
@@ -324,8 +376,13 @@ impl DiscordNotifier {
             .send()
             .await
         {
+            let summary = discord_delivery_error_summary(&err);
             warn!(
-                error = %err,
+                error_kind = summary.kind,
+                is_timeout = summary.is_timeout,
+                is_connect = summary.is_connect,
+                has_status = summary.status_code.is_some(),
+                status_code = summary.status_code.unwrap_or(0),
                 alert_class = %payload.alert_class,
                 "discord alert delivery failed (best-effort; daemon fault truth unaffected)"
             );
@@ -373,8 +430,13 @@ impl DiscordNotifier {
             .send()
             .await
         {
+            let summary = discord_delivery_error_summary(&err);
             warn!(
-                error = %err,
+                error_kind = summary.kind,
+                is_timeout = summary.is_timeout,
+                is_connect = summary.is_connect,
+                has_status = summary.status_code.is_some(),
+                status_code = summary.status_code.unwrap_or(0),
                 event = %payload.event,
                 "discord run-status delivery failed (best-effort; daemon lifecycle truth unaffected)"
             );
@@ -424,8 +486,13 @@ impl DiscordNotifier {
             .send()
             .await
         {
+            let summary = discord_delivery_error_summary(&err);
             warn!(
-                error = %err,
+                error_kind = summary.kind,
+                is_timeout = summary.is_timeout,
+                is_connect = summary.is_connect,
+                has_status = summary.status_code.is_some(),
+                status_code = summary.status_code.unwrap_or(0),
                 stage = %payload.stage,
                 "discord trade-event delivery failed (best-effort; trading path unaffected)"
             );
