@@ -12,6 +12,8 @@
 //! # Delivery contract
 //!
 //! - Primary daemon action/result completes before any `notify_*` call.
+//! - HTTP 2xx (including 204 No Content) is delivery success.
+//! - HTTP non-2xx is classified as a sanitized, best-effort delivery failure.
 //! - Delivery failure is logged as `warn!` and swallowed — it does not propagate.
 //! - A 3-second timeout caps worst-case latency impact on the calling handler.
 //! - All methods are no-ops when unconfigured.
@@ -169,6 +171,38 @@ pub fn discord_delivery_error_summary(err: &reqwest::Error) -> DiscordDeliveryEr
     }
 }
 
+/// Broad classification of an HTTP response status code for sanitized
+/// logging. Never derived from headers, body, or URL — status code only.
+pub fn discord_status_class(status: reqwest::StatusCode) -> &'static str {
+    if status.is_redirection() {
+        "redirection"
+    } else if status.is_client_error() {
+        "client_error"
+    } else if status.is_server_error() {
+        "server_error"
+    } else {
+        "unknown"
+    }
+}
+
+/// URL-free, body-free summary of a non-2xx Discord HTTP response, suitable
+/// for sanitized logging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiscordDeliveryStatusSummary {
+    pub status_code: u16,
+    pub status_class: &'static str,
+}
+
+/// Build a [`DiscordDeliveryStatusSummary`] from a non-2xx response status.
+pub fn discord_delivery_status_summary(
+    status: reqwest::StatusCode,
+) -> DiscordDeliveryStatusSummary {
+    DiscordDeliveryStatusSummary {
+        status_code: status.as_u16(),
+        status_class: discord_status_class(status),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Notifier
 // ---------------------------------------------------------------------------
@@ -230,9 +264,9 @@ impl DiscordNotifier {
     /// Best-effort delivery of an operator test alert (OBS-SESSION-DISCORD-01).
     ///
     /// Used by `POST /api/v1/ops/action {"action_key":"test-discord-alert"}`.
-    /// Returns `true` when delivery was attempted and the HTTP response was
-    /// received (any status), `false` when unconfigured or when a transport
-    /// error prevented delivery.  Never panics.
+    /// Returns `true` when the HTTP response status was 2xx (including 204 No
+    /// Content), `false` when unconfigured, the response was non-2xx, or a
+    /// transport error prevented delivery.  Never panics.
     ///
     /// The payload is clearly labelled `"[TEST]"` so operators can distinguish
     /// it from production fault alerts.  No trading state is mutated.
@@ -263,7 +297,16 @@ impl DiscordNotifier {
             .send()
             .await
         {
-            Ok(_) => true,
+            Ok(resp) if resp.status().is_success() => true,
+            Ok(resp) => {
+                let summary = discord_delivery_status_summary(resp.status());
+                warn!(
+                    status_code = summary.status_code,
+                    status_class = summary.status_class,
+                    "discord test-alert delivery failed (best-effort; operator action truth unaffected)"
+                );
+                false
+            }
             Err(err) => {
                 let summary = discord_delivery_error_summary(&err);
                 warn!(
@@ -311,23 +354,35 @@ impl DiscordNotifier {
             "run_id": payload.run_id,
         });
 
-        if let Err(err) = client
+        match client
             .post(url.as_str())
             .json(&body)
             .timeout(Duration::from_secs(3))
             .send()
             .await
         {
-            let summary = discord_delivery_error_summary(&err);
-            warn!(
-                error_kind = summary.kind,
-                is_timeout = summary.is_timeout,
-                is_connect = summary.is_connect,
-                has_status = summary.status_code.is_some(),
-                status_code = summary.status_code.unwrap_or(0),
-                action_key = %payload.action_key,
-                "discord webhook delivery failed (best-effort; primary action truth unaffected)"
-            );
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(resp) => {
+                let summary = discord_delivery_status_summary(resp.status());
+                warn!(
+                    status_code = summary.status_code,
+                    status_class = summary.status_class,
+                    action_key = %payload.action_key,
+                    "discord webhook delivery failed (best-effort; primary action truth unaffected)"
+                );
+            }
+            Err(err) => {
+                let summary = discord_delivery_error_summary(&err);
+                warn!(
+                    error_kind = summary.kind,
+                    is_timeout = summary.is_timeout,
+                    is_connect = summary.is_connect,
+                    has_status = summary.status_code.is_some(),
+                    status_code = summary.status_code.unwrap_or(0),
+                    action_key = %payload.action_key,
+                    "discord webhook delivery failed (best-effort; primary action truth unaffected)"
+                );
+            }
         }
     }
 
@@ -369,23 +424,35 @@ impl DiscordNotifier {
             "ts_utc": payload.ts_utc,
         });
 
-        if let Err(err) = client
+        match client
             .post(url.as_str())
             .json(&body)
             .timeout(Duration::from_secs(3))
             .send()
             .await
         {
-            let summary = discord_delivery_error_summary(&err);
-            warn!(
-                error_kind = summary.kind,
-                is_timeout = summary.is_timeout,
-                is_connect = summary.is_connect,
-                has_status = summary.status_code.is_some(),
-                status_code = summary.status_code.unwrap_or(0),
-                alert_class = %payload.alert_class,
-                "discord alert delivery failed (best-effort; daemon fault truth unaffected)"
-            );
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(resp) => {
+                let summary = discord_delivery_status_summary(resp.status());
+                warn!(
+                    status_code = summary.status_code,
+                    status_class = summary.status_class,
+                    alert_class = %payload.alert_class,
+                    "discord alert delivery failed (best-effort; daemon fault truth unaffected)"
+                );
+            }
+            Err(err) => {
+                let summary = discord_delivery_error_summary(&err);
+                warn!(
+                    error_kind = summary.kind,
+                    is_timeout = summary.is_timeout,
+                    is_connect = summary.is_connect,
+                    has_status = summary.status_code.is_some(),
+                    status_code = summary.status_code.unwrap_or(0),
+                    alert_class = %payload.alert_class,
+                    "discord alert delivery failed (best-effort; daemon fault truth unaffected)"
+                );
+            }
         }
     }
 
@@ -423,23 +490,35 @@ impl DiscordNotifier {
             "ts_utc": payload.ts_utc,
         });
 
-        if let Err(err) = client
+        match client
             .post(url.as_str())
             .json(&body)
             .timeout(Duration::from_secs(3))
             .send()
             .await
         {
-            let summary = discord_delivery_error_summary(&err);
-            warn!(
-                error_kind = summary.kind,
-                is_timeout = summary.is_timeout,
-                is_connect = summary.is_connect,
-                has_status = summary.status_code.is_some(),
-                status_code = summary.status_code.unwrap_or(0),
-                event = %payload.event,
-                "discord run-status delivery failed (best-effort; daemon lifecycle truth unaffected)"
-            );
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(resp) => {
+                let summary = discord_delivery_status_summary(resp.status());
+                warn!(
+                    status_code = summary.status_code,
+                    status_class = summary.status_class,
+                    event = %payload.event,
+                    "discord run-status delivery failed (best-effort; daemon lifecycle truth unaffected)"
+                );
+            }
+            Err(err) => {
+                let summary = discord_delivery_error_summary(&err);
+                warn!(
+                    error_kind = summary.kind,
+                    is_timeout = summary.is_timeout,
+                    is_connect = summary.is_connect,
+                    has_status = summary.status_code.is_some(),
+                    status_code = summary.status_code.unwrap_or(0),
+                    event = %payload.event,
+                    "discord run-status delivery failed (best-effort; daemon lifecycle truth unaffected)"
+                );
+            }
         }
     }
 
@@ -479,23 +558,35 @@ impl DiscordNotifier {
             "ts_utc": payload.ts_utc,
         });
 
-        if let Err(err) = client
+        match client
             .post(url.as_str())
             .json(&body)
             .timeout(Duration::from_secs(3))
             .send()
             .await
         {
-            let summary = discord_delivery_error_summary(&err);
-            warn!(
-                error_kind = summary.kind,
-                is_timeout = summary.is_timeout,
-                is_connect = summary.is_connect,
-                has_status = summary.status_code.is_some(),
-                status_code = summary.status_code.unwrap_or(0),
-                stage = %payload.stage,
-                "discord trade-event delivery failed (best-effort; trading path unaffected)"
-            );
+            Ok(resp) if resp.status().is_success() => {}
+            Ok(resp) => {
+                let summary = discord_delivery_status_summary(resp.status());
+                warn!(
+                    status_code = summary.status_code,
+                    status_class = summary.status_class,
+                    stage = %payload.stage,
+                    "discord trade-event delivery failed (best-effort; trading path unaffected)"
+                );
+            }
+            Err(err) => {
+                let summary = discord_delivery_error_summary(&err);
+                warn!(
+                    error_kind = summary.kind,
+                    is_timeout = summary.is_timeout,
+                    is_connect = summary.is_connect,
+                    has_status = summary.status_code.is_some(),
+                    status_code = summary.status_code.unwrap_or(0),
+                    stage = %payload.stage,
+                    "discord trade-event delivery failed (best-effort; trading path unaffected)"
+                );
+            }
         }
     }
 }
