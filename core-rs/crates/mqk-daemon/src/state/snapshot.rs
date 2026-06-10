@@ -18,7 +18,7 @@ use mqk_execution::{
     oms::state_machine::{OmsEvent, OmsOrder, OrderState},
     BrokerEvent,
 };
-use mqk_portfolio::{apply_entry, LedgerEntry, Lot, PortfolioState, PositionState};
+use mqk_portfolio::{apply_entry, Fill, LedgerEntry, PortfolioState, Side};
 use mqk_reconcile::{ReconcileDiff, SnapshotFreshness, SnapshotWatermark};
 
 use super::initial_reconcile_status;
@@ -525,16 +525,25 @@ pub(crate) fn preserve_fail_closed_reconcile_status(
 /// Seed a portfolio with broker baseline positions inherited from prior sessions.
 ///
 /// Baseline positions represent broker holdings from runs prior to this one.
-/// They are inserted as synthetic lots (`price_micros=1`; no cash adjustment)
-/// because the original cost basis was accounted for in a prior run.
+/// Each non-zero baseline quantity is applied as an equivalent
+/// `LedgerEntry::Fill` (`price_micros=1`, `fee_micros=0`) via `apply_entry`,
+/// so the seeded position is ledger-replayable: `recompute_from_ledger`
+/// reproduces the same `positions`, `cash_micros`, and `realized_pnl_micros`
+/// that this function produces. This keeps `check_capital_invariants`
+/// satisfied immediately after baseline seeding (BASELINE-LEDGER-PARITY-01).
+///
+/// Side is derived from the sign of the baseline quantity: a positive
+/// (long) baseline applies a `Buy` fill; a negative (short) baseline
+/// applies a `Sell` fill, both for `qty = bl_qty.abs()`.
 ///
 /// Double-count safety: `recover_oms_and_portfolio` replays only fills from
 /// the *current* run_id into `portfolio` before this is called.  Baseline
 /// adds only the inherited prior-run qty; no fill from this run is counted twice.
 ///
 /// Zero-qty entries in the baseline are skipped.  If `portfolio` already has
-/// a position for a symbol (e.g. partial fills this run), baseline qty is
-/// appended as an additional lot — total qty = current_run_delta + baseline.
+/// a position for a symbol (e.g. partial fills this run), the baseline fill
+/// is applied on top via the same FIFO lot accounting as any other fill —
+/// total qty = current_run_delta + baseline.
 pub(crate) fn seed_portfolio_from_baseline(
     portfolio: &mut PortfolioState,
     baseline: &mqk_reconcile::LocalSnapshot,
@@ -543,14 +552,9 @@ pub(crate) fn seed_portfolio_from_baseline(
         if bl_qty == 0 {
             continue;
         }
-        let pos = portfolio
-            .positions
-            .entry(sym.clone())
-            .or_insert_with(|| PositionState::new(sym.clone()));
-        pos.lots.push(Lot {
-            qty_signed: bl_qty,
-            entry_price_micros: 1,
-        });
+        let side = if bl_qty > 0 { Side::Buy } else { Side::Sell };
+        let fill = Fill::new(sym.clone(), side, bl_qty.abs(), 1, 0);
+        apply_entry(portfolio, LedgerEntry::Fill(fill));
     }
 }
 
@@ -1129,5 +1133,214 @@ mod baseline_double_count_fix_tests {
              a re-merged double-count would read {} and falsely trigger ReconcileDrift",
             broker_truth, double_counted
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BASELINE-LEDGER-PARITY-01 unit tests
+//
+// Root cause: `seed_portfolio_from_baseline` mutated `portfolio.positions`
+// directly via a manually-pushed `Lot`, without appending an equivalent
+// `LedgerEntry` to `portfolio.ledger`. `check_capital_invariants` (Phase 3b,
+// mqk-runtime/src/orchestrator/apply.rs) recomputes `positions`/`cash_micros`/
+// `realized_pnl_micros` from `portfolio.ledger` via `recompute_from_ledger`
+// and compares against live state. For any non-flat baseline, the recompute
+// saw `{}` for that symbol while `portfolio.positions` carried the seeded
+// baseline lot, producing `INVARIANT_VIOLATED: positions map mismatch between
+// ledger recompute and state` — halting the run on the very first `oms_inbox`
+// event (even a non-fill ACK), since Phase 3b runs the invariant check after
+// every inbox-apply pass regardless of whether that event itself touched the
+// portfolio.
+//
+// Fix: `seed_portfolio_from_baseline` now applies an equivalent
+// `LedgerEntry::Fill` via `apply_entry` (Buy for a long baseline, Sell for a
+// short baseline; price_micros=1, fee_micros=0) — appending to
+// `portfolio.ledger` so `recompute_from_ledger` reproduces the same
+// `positions`/`cash_micros`/`realized_pnl_micros` immediately.
+//
+// `check_capital_invariants` itself is `pub(super)` inside
+// `mqk_runtime::orchestrator::apply` and not reachable from this crate.
+// `assert_capital_invariants_hold` below reproduces the identical
+// ledger-recompute comparison via the public
+// `mqk_portfolio::recompute_from_ledger` API, so these tests exercise the
+// exact invariant Phase 3b enforces.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod baseline_ledger_parity_tests {
+    use super::{
+        broker_event_to_oms_event, broker_event_to_portfolio_fill, seed_portfolio_from_baseline,
+        BrokerEvent, OmsEvent, PortfolioState,
+    };
+    use mqk_reconcile::LocalSnapshot;
+
+    fn flat_portfolio() -> PortfolioState {
+        PortfolioState::new(100_000_000_000) // $100k initial equity
+    }
+
+    fn baseline_with(positions: &[(&str, i64)]) -> LocalSnapshot {
+        let mut s = LocalSnapshot::empty();
+        for &(sym, qty) in positions {
+            s.positions.insert(sym.to_string(), qty);
+        }
+        s
+    }
+
+    /// Mirrors `mqk_runtime::orchestrator::apply::check_capital_invariants`
+    /// (`pub(super)`, not reachable from mqk-daemon) using the public
+    /// `mqk_portfolio::recompute_from_ledger` API. Same three comparisons,
+    /// same fail-closed semantics — this is the exact check Phase 3b runs
+    /// after every inbox-apply pass.
+    fn assert_capital_invariants_hold(pf: &PortfolioState) {
+        let (recomputed_cash, recomputed_pnl, recomputed_positions) =
+            mqk_portfolio::recompute_from_ledger(pf.initial_cash_micros, &pf.ledger);
+        assert_eq!(
+            recomputed_cash, pf.cash_micros,
+            "INVARIANT_VIOLATED: cash_micros mismatch: recomputed={} state={}",
+            recomputed_cash, pf.cash_micros
+        );
+        assert_eq!(
+            recomputed_pnl, pf.realized_pnl_micros,
+            "INVARIANT_VIOLATED: realized_pnl_micros mismatch: recomputed={} state={}",
+            recomputed_pnl, pf.realized_pnl_micros
+        );
+        assert_eq!(
+            recomputed_positions, pf.positions,
+            "INVARIANT_VIOLATED: positions map mismatch between ledger recompute and state"
+        );
+    }
+
+    // BLP01: long broker baseline (AAPL=1) is ledger-replayable and invariant-safe.
+    #[test]
+    fn blp01_long_baseline_is_invariant_safe() {
+        let mut pf = flat_portfolio();
+        let baseline = baseline_with(&[("AAPL", 1)]);
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+
+        let qty = pf
+            .positions
+            .get("AAPL")
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        assert_eq!(qty, 1, "AAPL position qty must be 1 after seeding");
+        assert!(!pf.ledger.is_empty(), "seeding must append a ledger entry");
+        assert_capital_invariants_hold(&pf);
+    }
+
+    // BLP02: multi-symbol broker baseline (AAPL=1, MSFT=2) is invariant-safe.
+    #[test]
+    fn blp02_multi_symbol_baseline_is_invariant_safe() {
+        let mut pf = flat_portfolio();
+        let baseline = baseline_with(&[("AAPL", 1), ("MSFT", 2)]);
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+
+        let aapl = pf
+            .positions
+            .get("AAPL")
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        let msft = pf
+            .positions
+            .get("MSFT")
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        assert_eq!(aapl, 1, "AAPL must be 1 from multi-symbol baseline");
+        assert_eq!(msft, 2, "MSFT must be 2 from multi-symbol baseline");
+        assert!(!pf.ledger.is_empty(), "seeding must append ledger entries");
+        assert_capital_invariants_hold(&pf);
+    }
+
+    // BLP03: short/negative broker baseline (AAPL=-3) is invariant-safe.
+    //
+    // Shorts ARE supported by `apply_fill` / `recompute_from_ledger` FIFO lot
+    // accounting (`Lot::short`). A negative baseline qty seeds a `Sell` fill
+    // against an empty position, opening a short lot, so
+    // `qty_signed() == bl_qty`.
+    #[test]
+    fn blp03_short_baseline_is_invariant_safe() {
+        let mut pf = flat_portfolio();
+        let baseline = baseline_with(&[("AAPL", -3)]);
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+
+        let qty = pf
+            .positions
+            .get("AAPL")
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        assert_eq!(qty, -3, "AAPL short position qty must be -3 after seeding");
+        assert!(!pf.ledger.is_empty(), "seeding must append a ledger entry");
+        assert_capital_invariants_hold(&pf);
+    }
+
+    // BLP04: current-run fill (AAPL Buy=1) plus baseline (AAPL=1) does not
+    // double-count and remains ledger-replayable / invariant-safe (mirrors P05).
+    #[test]
+    fn blp04_current_run_fill_plus_baseline_no_double_count_invariant_safe() {
+        use mqk_portfolio::{apply_entry, Fill, LedgerEntry, Side};
+        let mut pf = flat_portfolio();
+        apply_entry(
+            &mut pf,
+            LedgerEntry::Fill(Fill::new("AAPL", Side::Buy, 1, 313_000_000, 0)),
+        );
+
+        let baseline = baseline_with(&[("AAPL", 1)]);
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+
+        let qty = pf
+            .positions
+            .get("AAPL")
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        assert_eq!(
+            qty, 2,
+            "total qty must be 2: 1 from current-run fill + 1 from baseline"
+        );
+        assert_capital_invariants_hold(&pf);
+    }
+
+    // BLP05: production-style ACK after baseline seeding does not halt /
+    // invariant-fail.
+    //
+    // Phase 3b applies inbox events to `portfolio` only when
+    // `broker_event_to_portfolio_fill` returns `Some(..)` (Fill/PartialFill).
+    // A non-fill `Ack` event maps to `OmsEvent::Ack` (OMS-only — no portfolio
+    // mutation), and `broker_event_to_portfolio_fill` returns `None`, so
+    // `portfolio` is byte-for-byte unchanged by the ACK. The production
+    // failure was therefore entirely a property of the seeded portfolio
+    // state itself: `check_capital_invariants` ran (as it does after every
+    // inbox-apply pass) against a `portfolio` whose `positions` already
+    // diverged from `recompute_from_ledger(&portfolio.ledger)` *before* the
+    // ACK arrived. Proving the seeded portfolio is invariant-safe — and that
+    // the ACK is a portfolio no-op — is sufficient to prove the production
+    // halt sequence (seed baseline -> broker ACK -> Phase 3b invariant check)
+    // no longer fires.
+    #[test]
+    fn blp05_seeded_baseline_survives_non_fill_ack_invariant_check() {
+        let mut pf = flat_portfolio();
+        let baseline = baseline_with(&[("AAPL", 1)]);
+        seed_portfolio_from_baseline(&mut pf, &baseline);
+
+        // Invariant must hold immediately after seeding (this is what
+        // production violated before the fix).
+        assert_capital_invariants_hold(&pf);
+
+        // Simulate the production ACK: BrokerEvent::Ack for the new BUY order.
+        let ack = BrokerEvent::Ack {
+            broker_message_id: "alpaca:ord-1:new:1".to_string(),
+            internal_order_id: "ord-1".to_string(),
+            broker_order_id: Some("broker-ord-1".to_string()),
+        };
+
+        // ACK maps to an OMS-only event...
+        assert_eq!(broker_event_to_oms_event(&ack), OmsEvent::Ack);
+        // ...and produces no portfolio fill, so `pf` is untouched by Phase 3b
+        // for this event.
+        assert!(
+            broker_event_to_portfolio_fill(&ack).is_none(),
+            "a non-fill Ack must not produce a portfolio mutation"
+        );
+
+        // `pf` is unchanged by the ACK — invariant must still hold.
+        assert_capital_invariants_hold(&pf);
     }
 }
