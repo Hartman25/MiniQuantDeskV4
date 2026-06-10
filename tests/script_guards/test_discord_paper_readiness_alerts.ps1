@@ -57,6 +57,23 @@ $ControlSurfaceDoc = Read-TextFile $ControlSurfaceDocPath
 $OperatorWorkflowsDoc = Read-TextFile $OperatorWorkflowsDocPath
 
 # ---------------------------------------------------------------------------
+# Parser correctness (DISCORD-PAPER-READINESS-ALERT-SCRIPT-PARSE-FIX-01)
+#
+# This script previously contained an invalid single-quoted regex literal
+# (["\']?) which is not valid PowerShell escaping and caused a parser-error
+# cascade across the whole file. Assert the file actually parses, that the
+# invalid literal is gone, and that the corrected doubled-single-quote form
+# is present.
+# ---------------------------------------------------------------------------
+Assert-False ($AlertScript -match '\["\\''\]\?') 'Send-PaperReadinessDiscordAlert.ps1 does not contain the invalid ["\'']? single-quoted regex literal'
+Assert-True ($AlertScript -match '\["''''\]\?') 'Send-PaperReadinessDiscordAlert.ps1 uses the PowerShell-safe ["'''']? doubled-single-quote regex literal'
+
+$ParseErrors = $null
+$ParseTokens = $null
+[System.Management.Automation.Language.Parser]::ParseFile($AlertScriptPath, [ref]$ParseTokens, [ref]$ParseErrors) | Out-Null
+Assert-True ($ParseErrors.Count -eq 0) "Send-PaperReadinessDiscordAlert.ps1 parses with zero errors via [System.Management.Automation.Language.Parser]::ParseFile (found $($ParseErrors.Count))"
+
+# ---------------------------------------------------------------------------
 # Parameters: -ArtifactPath (mandatory), -CheckOnly, -Title
 # ---------------------------------------------------------------------------
 Assert-True (

@@ -89,7 +89,7 @@ $AnyDiscordWebhookUrlPattern = '(?i)discord(?:app)?\.com/api/webhooks/'
 $ForgedLiveFlagPattern = '"(recommended_for_live|approved_for_live|eligible_for_live)"\s*:\s*true'
 
 # Obvious embedded secrets / tokens.
-$EnvVarSecretAssignmentPattern = '(?i)(ALPACA_API_SECRET_PAPER|ALPACA_API_KEY_PAPER|ALPACA_API_SECRET_LIVE|ALPACA_API_KEY_LIVE|ALPACA_API_SECRET|ALPACA_API_KEY|MQK_OPERATOR_TOKEN|DISCORD_WEBHOOK_URL|DISCORD_BOT_TOKEN)["\s]*[:=]\s*["\']?[A-Za-z0-9/_\-\.]{8,}'
+$EnvVarSecretAssignmentPattern = '(?i)(ALPACA_API_SECRET_PAPER|ALPACA_API_KEY_PAPER|ALPACA_API_SECRET_LIVE|ALPACA_API_KEY_LIVE|ALPACA_API_SECRET|ALPACA_API_KEY|MQK_OPERATOR_TOKEN|DISCORD_WEBHOOK_URL|DISCORD_BOT_TOKEN)["\s]*[:=]\s*["'']?[A-Za-z0-9/_\-\.]{8,}'
 $BearerTokenPattern = '(?i)Bearer\s+[A-Za-z0-9\-\._~\+/]{8,}'
 
 Write-Host ''
