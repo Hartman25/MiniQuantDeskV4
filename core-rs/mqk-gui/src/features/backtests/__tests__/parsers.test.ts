@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  deriveStrategyFitGateFlags,
   formatMicrosAsDollars,
   formatNullableNumber,
   formatNullablePercent,
@@ -11,6 +12,7 @@ import {
   parseManifest,
   parseMetrics,
   parseOrders,
+  parseStrategyFit,
 } from "../parsers.ts";
 
 // --- microsToUsd ---
@@ -347,4 +349,232 @@ test("parseMetrics throws on missing run_id", () => {
 test("parseMetrics throws on missing bars", () => {
   const json = JSON.stringify({ schema_version: 1, run_id: "x" });
   assert.throws(() => parseMetrics(json), /missing bars/);
+});
+
+// --- deriveStrategyFitGateFlags ---
+
+test("deriveStrategyFitGateFlags: known failure reasons map to true", () => {
+  const flags = deriveStrategyFitGateFlags([
+    "validation_metrics_missing",
+    "profit_factor_failed",
+    "expectancy_failed",
+    "cost_adjusted_edge_failed",
+    "out_of_sample_failed",
+    "sample_quality_failed",
+    "parameter_stability_failed",
+  ]);
+  assert.equal(flags.profit_factor_failed, true);
+  assert.equal(flags.expectancy_failed, true);
+  assert.equal(flags.cost_adjusted_edge_failed, true);
+  assert.equal(flags.out_of_sample_failed, true);
+  assert.equal(flags.sample_quality_failed, true);
+  assert.equal(flags.parameter_stability_failed, true);
+  assert.equal(flags.validation_metrics_missing, true);
+});
+
+test("deriveStrategyFitGateFlags: empty failure reasons map to all-false", () => {
+  const flags = deriveStrategyFitGateFlags([]);
+  assert.equal(flags.profit_factor_failed, false);
+  assert.equal(flags.expectancy_failed, false);
+  assert.equal(flags.cost_adjusted_edge_failed, false);
+  assert.equal(flags.out_of_sample_failed, false);
+  assert.equal(flags.sample_quality_failed, false);
+  assert.equal(flags.parameter_stability_failed, false);
+  assert.equal(flags.validation_metrics_missing, false);
+});
+
+test("deriveStrategyFitGateFlags: unrelated failure reasons do not set known flags", () => {
+  const flags = deriveStrategyFitGateFlags(["min_bars_failed", "min_trades_failed"]);
+  assert.equal(flags.profit_factor_failed, false);
+  assert.equal(flags.expectancy_failed, false);
+  assert.equal(flags.validation_metrics_missing, false);
+});
+
+// --- parseStrategyFit ---
+
+test("parseStrategyFit: valid rejected artifact (real AAPL strategy-fit-v1 shape)", () => {
+  const json = JSON.stringify({
+    schema_version: "strategy-fit-v1",
+    generated_at_utc: "2026-06-10T02:59:52+00:00",
+    source_queue_id: "bq-11eb5b628bb08a4e5825d4fb6be1f98c",
+    symbol: "AAPL",
+    strategy_id: "intraday_scalper",
+    timeframe: "5m",
+    regime_label: "trending_up",
+    bars_used: 5342,
+    trades: 380,
+    win_rate: 0.06315789473684211,
+    profit_factor: 0.04966283909815413,
+    expectancy_bps: -41.6610626075103,
+    max_drawdown_bps: 48.78588379157287,
+    net_expectancy_after_cost_bps: -41.98562201811041,
+    recommended_for_paper: false,
+    recommended_for_live: false,
+    failure_reasons: [
+      "validation_metrics_missing",
+      "profit_factor_failed",
+      "expectancy_failed",
+      "cost_adjusted_edge_failed",
+      "out_of_sample_failed",
+      "sample_quality_failed",
+      "parameter_stability_failed",
+    ],
+    status: "complete",
+  });
+  const result = parseStrategyFit(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.symbol, "AAPL");
+  assert.equal(result.data.strategy_id, "intraday_scalper");
+  assert.equal(result.data.timeframe, "5m");
+  assert.equal(result.data.trades, 380);
+  assert.equal(result.data.profit_factor, 0.04966283909815413);
+  assert.equal(result.data.recommended_for_paper, false);
+  assert.equal(result.data.recommended_for_live, false);
+  assert.equal(result.data.recommended_for_live_present, true);
+  assert.equal(result.data.failure_reasons.length, 7);
+  assert.equal(result.data.gateFlags.profit_factor_failed, true);
+  assert.equal(result.data.gateFlags.expectancy_failed, true);
+  assert.equal(result.data.gateFlags.cost_adjusted_edge_failed, true);
+  assert.equal(result.data.gateFlags.out_of_sample_failed, true);
+  assert.equal(result.data.gateFlags.sample_quality_failed, true);
+  assert.equal(result.data.gateFlags.parameter_stability_failed, true);
+  assert.equal(result.data.gateFlags.validation_metrics_missing, true);
+});
+
+test("parseStrategyFit: valid passing/recommended artifact", () => {
+  const json = JSON.stringify({
+    schema_version: "strategy-fit-v1",
+    symbol: "MSFT",
+    strategy_id: "swing_momentum",
+    timeframe: "1d",
+    trades: 45,
+    profit_factor: 1.8,
+    expectancy_bps: 12.5,
+    net_expectancy_after_cost_bps: 8.2,
+    recommended_for_paper: true,
+    recommended_for_live: false,
+    failure_reasons: [],
+  });
+  const result = parseStrategyFit(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.recommended_for_paper, true);
+  assert.equal(result.data.recommended_for_live, false);
+  assert.equal(result.data.recommended_for_live_present, true);
+  assert.equal(result.data.failure_reasons.length, 0);
+  assert.equal(result.data.gateFlags.profit_factor_failed, false);
+});
+
+test("parseStrategyFit: missing recommended_for_live stays safe (not invented as true)", () => {
+  const json = JSON.stringify({
+    schema_version: "strategy-fit-v1",
+    symbol: "TSLA",
+    strategy_id: "mean_reversion",
+    recommended_for_paper: false,
+    failure_reasons: ["profit_factor_failed"],
+  });
+  const result = parseStrategyFit(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.recommended_for_live, false);
+  assert.equal(result.data.recommended_for_live_present, false);
+});
+
+test("parseStrategyFit: explicit recommended_for_live true is passed through honestly (never suppressed)", () => {
+  const json = JSON.stringify({
+    schema_version: "strategy-fit-v1",
+    symbol: "AAPL",
+    strategy_id: "intraday_scalper",
+    recommended_for_paper: true,
+    recommended_for_live: true,
+    failure_reasons: [],
+  });
+  const result = parseStrategyFit(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.recommended_for_live, true);
+  assert.equal(result.data.recommended_for_live_present, true);
+});
+
+test("parseStrategyFit: missing failure_reasons handled safely (defaults to empty, all flags false)", () => {
+  const json = JSON.stringify({
+    schema_version: "strategy-fit-v1",
+    symbol: "NVDA",
+    strategy_id: "trend_follow",
+    recommended_for_paper: false,
+  });
+  const result = parseStrategyFit(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.deepEqual(result.data.failure_reasons, []);
+  assert.equal(result.data.gateFlags.profit_factor_failed, false);
+  assert.equal(result.data.gateFlags.validation_metrics_missing, false);
+  assert.equal(result.data.recommended_for_live, false);
+  assert.equal(result.data.recommended_for_live_present, false);
+});
+
+test("parseStrategyFit: unsupported schema_version is explicit", () => {
+  const json = JSON.stringify({
+    schema_version: "gate-v1",
+    symbol: "AAPL",
+    strategy_id: "intraday_scalper",
+    recommended_for_paper: false,
+  });
+  const result = parseStrategyFit(json);
+  assert.equal(result.kind, "unsupported_schema");
+  if (result.kind !== "unsupported_schema") return;
+  assert.equal(result.schemaVersion, "gate-v1");
+});
+
+test("parseStrategyFit: missing schema_version is unsupported (not assumed)", () => {
+  const json = JSON.stringify({
+    symbol: "AAPL",
+    strategy_id: "intraday_scalper",
+    recommended_for_paper: false,
+  });
+  const result = parseStrategyFit(json);
+  assert.equal(result.kind, "unsupported_schema");
+  if (result.kind !== "unsupported_schema") return;
+  assert.equal(result.schemaVersion, null);
+});
+
+test("parseStrategyFit: malformed JSON is explicit", () => {
+  const result = parseStrategyFit("{bad json}");
+  assert.equal(result.kind, "malformed");
+});
+
+test("parseStrategyFit: non-object JSON is malformed", () => {
+  const result = parseStrategyFit("[1,2,3]");
+  assert.equal(result.kind, "malformed");
+});
+
+test("parseStrategyFit: missing symbol is missing_fields", () => {
+  const json = JSON.stringify({
+    schema_version: "strategy-fit-v1",
+    strategy_id: "intraday_scalper",
+    recommended_for_paper: false,
+  });
+  const result = parseStrategyFit(json);
+  assert.equal(result.kind, "missing_fields");
+});
+
+test("parseStrategyFit: missing strategy_id is missing_fields", () => {
+  const json = JSON.stringify({
+    schema_version: "strategy-fit-v1",
+    symbol: "AAPL",
+    recommended_for_paper: false,
+  });
+  const result = parseStrategyFit(json);
+  assert.equal(result.kind, "missing_fields");
+});
+
+test("parseStrategyFit: missing recommended_for_paper is missing_fields", () => {
+  const json = JSON.stringify({
+    schema_version: "strategy-fit-v1",
+    symbol: "AAPL",
+    strategy_id: "intraday_scalper",
+  });
+  const result = parseStrategyFit(json);
+  assert.equal(result.kind, "missing_fields");
 });

@@ -102,6 +102,43 @@ export interface ArtifactBundle {
 }
 
 // ---------------------------------------------------------------------------
+// GUI-STRATEGY-FIT-REJECTION-SURFACE-BUNDLE-01: strategy-fit-v1 gate result types
+// ---------------------------------------------------------------------------
+
+export interface StrategyFitGateFlags {
+  profit_factor_failed: boolean;
+  expectancy_failed: boolean;
+  cost_adjusted_edge_failed: boolean;
+  out_of_sample_failed: boolean;
+  sample_quality_failed: boolean;
+  parameter_stability_failed: boolean;
+  validation_metrics_missing: boolean;
+}
+
+export interface StrategyFitArtifact {
+  schema_version: string;
+  artifact_id: string | null;
+  symbol: string;
+  strategy_id: string;
+  timeframe: string | null;
+  trades: number | null;
+  profit_factor: number | null;
+  expectancy_bps: number | null;
+  net_expectancy_after_cost_bps: number | null;
+  recommended_for_paper: boolean;
+  recommended_for_live: boolean;
+  recommended_for_live_present: boolean;
+  failure_reasons: string[];
+  gateFlags: StrategyFitGateFlags;
+}
+
+export type StrategyFitParseResult =
+  | { kind: "ok"; data: StrategyFitArtifact }
+  | { kind: "unsupported_schema"; schemaVersion: string | null }
+  | { kind: "malformed"; message: string }
+  | { kind: "missing_fields"; message: string };
+
+// ---------------------------------------------------------------------------
 // BACKTEST-GUI-RUNNER-01: Daemon backtest job API types
 // ---------------------------------------------------------------------------
 
