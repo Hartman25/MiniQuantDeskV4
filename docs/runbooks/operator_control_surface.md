@@ -359,6 +359,29 @@ For a complete AAPL sell/flatten smoke, confirm these Discord messages appeared:
 
 **Discord is NOT the source of truth** — it is observability only.  An order is real when the DB outbox row, inbox row, and broker_order_map row all exist.
 
+### Sending a Test Alert (Safe, Offline)
+
+Use `scripts\windows\Test-DiscordAlert.ps1` to verify Discord alert delivery
+configuration without starting the daemon trading runtime, arming paper
+trading, submitting orders, or touching broker/Alpaca endpoints.
+
+```powershell
+# Check configuration only -- does NOT send a Discord alert
+powershell -ExecutionPolicy Bypass -File scripts\windows\Test-DiscordAlert.ps1 -CheckOnly
+
+# Send one [TEST] alert via the daemon (requires daemon running + MQK_OPERATOR_TOKEN)
+powershell -ExecutionPolicy Bypass -File scripts\windows\Test-DiscordAlert.ps1
+```
+
+- `-CheckOnly` reports daemon reachability and whether `DISCORD_WEBHOOK_URL` /
+  `MQK_OPERATOR_TOKEN` are configured (presence only -- values are never
+  printed). It never calls `/api/v1/ops/action`.
+- Normal mode calls only `POST /api/v1/ops/action {"action_key":"test-discord-alert"}`,
+  which the daemon documents as not mutating trading/arm/integrity state.
+  It fails closed if the daemon is unreachable or `MQK_OPERATOR_TOKEN` is not set.
+- `DISCORD_WEBHOOK_URL` must live only in `.env.local` (gitignored) or the
+  process environment -- never paste it into tracked files, scripts, or docs.
+
 ---
 
 ## 9. Shutdown Checklist (Clean Process Shutdown)

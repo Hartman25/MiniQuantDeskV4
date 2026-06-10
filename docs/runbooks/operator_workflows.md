@@ -620,6 +620,31 @@ To claim AAPL sell/flatten smoke is Discord-closed:
 
 Until market observation confirms these messages, Discord lifecycle visibility remains **PARTIAL**.
 
+### Sending a one-off Discord test alert (safe, offline)
+
+`scripts\windows\Test-DiscordAlert.ps1` lets an operator verify Discord alert
+delivery configuration in isolation -- no daemon trading runtime start, no
+paper arm, no order submission, no broker/Alpaca calls, no direct DB writes.
+
+```powershell
+# Configuration check only -- no alert is sent, no POST issued
+powershell -ExecutionPolicy Bypass -File scripts\windows\Test-DiscordAlert.ps1 -CheckOnly
+
+# Send one [TEST] Discord alert via the daemon's test-discord-alert action
+powershell -ExecutionPolicy Bypass -File scripts\windows\Test-DiscordAlert.ps1
+```
+
+- `-CheckOnly` reports `daemon_reachable`, `discord_webhook_configured`, and
+  `operator_token_configured` (presence checks only -- secret values are never
+  printed) and exits without issuing any request to `/api/v1/ops/action`.
+- Normal mode fails closed (exits 1) if the daemon is unreachable at
+  `/v1/health` or `MQK_OPERATOR_TOKEN` is not configured.
+- Normal mode calls only `POST /api/v1/ops/action {"action_key":"test-discord-alert"}`.
+  The disposition (`delivery_attempted` / `noop_unconfigured` / `delivery_failed`)
+  is reported without ever printing the webhook URL or operator token.
+- `DISCORD_WEBHOOK_URL` must be set only in `.env.local` (gitignored) -- never
+  commit or paste a real webhook URL into any tracked file.
+
 ---
 
 ## 11. Premarket market-data refresh (PREMARKET-DATA-SCHEDULER-01)
