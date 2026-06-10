@@ -682,6 +682,49 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\Send-PaperReadinessDisc
 - `DISCORD_WEBHOOK_URL` must be set only in `.env.local` (gitignored) -- never
   commit or paste a real webhook URL into any tracked file.
 
+### Sending a paper smoke evidence review alert (safe, offline)
+
+`scripts\windows\Send-PaperSmokeReviewDiscordAlert.ps1` lets an operator send
+an optional Discord summary of a `review-v2` evidence review produced by
+`Review-PaperSmokeEvidence.ps1` (`review_summary.json` / `review_summary.md`
+in an `evidence/paper_smoke_*` folder). It is observability only, never
+changes evidence classification logic, and is never invoked automatically.
+
+```powershell
+# Classification + configuration check only -- no alert is sent, no POST issued
+powershell -ExecutionPolicy Bypass -File scripts\windows\Send-PaperSmokeReviewDiscordAlert.ps1 -ReviewPath <path-to-evidence-folder-or-review_summary.json> -CheckOnly
+
+# Send one sanitized summary alert for the review
+powershell -ExecutionPolicy Bypass -File scripts\windows\Send-PaperSmokeReviewDiscordAlert.ps1 -ReviewPath <path-to-evidence-folder-or-review_summary.json>
+```
+
+- `-ReviewPath` accepts a direct path to `review_summary.json` or
+  `review_summary.md`, or an evidence folder containing one of those files
+  (`review_summary.json` is preferred when both are present).
+- `-CheckOnly` reports `classification`, `evidence_folder_name`,
+  `discord_webhook_configured`, `refusal_reason` (if any), and `sendable`
+  (presence checks only -- secret values are never printed) and exits without
+  issuing any webhook POST.
+- Normal mode POSTs directly to `$env:DISCORD_WEBHOOK_URL` (the daemon is
+  never contacted) and fails closed (sends nothing) if:
+  - `DISCORD_WEBHOOK_URL` is not configured,
+  - the review file is missing, or (for `review_summary.json`) not valid JSON
+    or has an unsupported `schema_version`,
+  - a classification cannot be determined or is not one of
+    `NATURAL-TRADE-LIFECYCLE-CLOSED`, `READINESS-CLOSED-NO-TRADE`, `PARTIAL`,
+    `OPEN`, `FALSE-CLOSED`,
+  - the review file contains `recommended_for_live=true`,
+    `approved_for_live=true`, or `eligible_for_live=true`,
+  - the review file contains a Discord webhook URL or an embedded secret/token.
+- The Discord summary includes only the evidence FOLDER NAME and review FILE
+  NAME (never the local path), the classification/VERDICT, up to the first 8
+  classification reasons, and key runtime/lifecycle/reconcile fields. The raw
+  review JSON or Markdown contents are never sent.
+- This workflow is operator-triggered only -- `Review-PaperSmokeEvidence.ps1`
+  never calls it automatically.
+- `DISCORD_WEBHOOK_URL` must be set only in `.env.local` (gitignored) -- never
+  commit or paste a real webhook URL into any tracked file.
+
 ---
 
 ## 11. Premarket market-data refresh (PREMARKET-DATA-SCHEDULER-01)

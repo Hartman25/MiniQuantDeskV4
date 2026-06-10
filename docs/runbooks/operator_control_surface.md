@@ -422,6 +422,51 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\Send-PaperReadinessDisc
 - `DISCORD_WEBHOOK_URL` must live only in `.env.local` (gitignored) or the
   process environment -- never paste it into tracked files, scripts, or docs.
 
+### Sending a Paper Smoke Evidence Review Alert (Safe, Offline)
+
+Use `scripts\windows\Send-PaperSmokeReviewDiscordAlert.ps1` to send an
+optional, operator-triggered Discord summary of a `review-v2` evidence review
+produced by `Review-PaperSmokeEvidence.ps1` (`review_summary.json` /
+`review_summary.md`). This is observability only -- it never starts the
+daemon trading runtime, arms paper trading, submits orders, calls
+broker/Alpaca endpoints, writes to the database, or changes evidence
+classification logic. The daemon is never contacted; the script POSTs
+directly to `$env:DISCORD_WEBHOOK_URL`.
+
+```powershell
+# Check configuration + classification only -- does NOT send a Discord alert
+powershell -ExecutionPolicy Bypass -File scripts\windows\Send-PaperSmokeReviewDiscordAlert.ps1 -ReviewPath <path-to-evidence-folder-or-review_summary.json> -CheckOnly
+
+# Send one sanitized summary alert for the review
+powershell -ExecutionPolicy Bypass -File scripts\windows\Send-PaperSmokeReviewDiscordAlert.ps1 -ReviewPath <path-to-evidence-folder-or-review_summary.json>
+
+# Optional: prefix the Discord message with a short title
+powershell -ExecutionPolicy Bypass -File scripts\windows\Send-PaperSmokeReviewDiscordAlert.ps1 -ReviewPath <path-to-evidence-folder-or-review_summary.json> -Title "Overnight smoke"
+```
+
+- `-ReviewPath` accepts a direct path to `review_summary.json` or
+  `review_summary.md`, or an evidence folder containing one of those files
+  (`review_summary.json` is preferred when both are present).
+- `-CheckOnly` parses and classifies the review, prints a sanitized summary,
+  reports whether `DISCORD_WEBHOOK_URL` appears configured (presence only --
+  values are never printed), and reports whether the review is `sendable`.
+  It never issues a webhook POST.
+- Normal mode sends exactly ONE sanitized summary message directly to
+  `$env:DISCORD_WEBHOOK_URL` -- the daemon is never contacted. It fails
+  closed (sends nothing) if `DISCORD_WEBHOOK_URL` is not configured, the
+  review file is missing/invalid/unsupported, the classification cannot be
+  determined or is not one of the known `Review-PaperSmokeEvidence.ps1`
+  values (`NATURAL-TRADE-LIFECYCLE-CLOSED`, `READINESS-CLOSED-NO-TRADE`,
+  `PARTIAL`, `OPEN`, `FALSE-CLOSED`), or the review file contains a forged
+  `recommended_for_live` / `approved_for_live` / `eligible_for_live` flag, a
+  Discord webhook URL, or an embedded secret/token.
+- Only the evidence FOLDER NAME and review FILE NAME are sent -- never the
+  local file path, and never the raw review JSON or Markdown contents.
+- This workflow is operator-triggered only. It is never invoked automatically
+  by `Review-PaperSmokeEvidence.ps1` or any evidence review pipeline.
+- `DISCORD_WEBHOOK_URL` must live only in `.env.local` (gitignored) or the
+  process environment -- never paste it into tracked files, scripts, or docs.
+
 ---
 
 ## 9. Shutdown Checklist (Clean Process Shutdown)
