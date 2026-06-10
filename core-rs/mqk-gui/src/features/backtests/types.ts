@@ -99,6 +99,7 @@ export interface ArtifactBundle {
   equityCurve: FileResult<ParsedCsvResult<EquityCurveRow>>;
   orders: FileResult<ParsedCsvResult<OrderRow>>;
   fills: FileResult<ParsedCsvResult<FillRow>>;
+  strategyFit: FileResult<StrategyFitParseResult>;
 }
 
 // ---------------------------------------------------------------------------

@@ -12,6 +12,8 @@ import {
   parseManifest,
   parseMetrics,
   parseOrders,
+  parseStrategyFit,
+  STRATEGY_FIT_SCHEMA_VERSION,
 } from "./parsers.ts";
 import { getBacktestJob, isTerminalJobStatus, normalizeJobStatus, submitBacktestJob } from "./api.ts";
 import {
@@ -34,6 +36,8 @@ import type {
   FillRow,
   OrderRow,
   ParsedCsvResult,
+  StrategyFitGateFlags,
+  StrategyFitParseResult,
 } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -67,14 +71,15 @@ async function loadFileResult<T>(
 }
 
 async function loadBundle(folder: string): Promise<ArtifactBundle> {
-  const [manifest, metrics, equityCurve, orders, fills] = await Promise.all([
+  const [manifest, metrics, equityCurve, orders, fills, strategyFit] = await Promise.all([
     loadFileResult(folder, "manifest.json", parseManifest),
     loadFileResult(folder, "metrics.json", parseMetrics),
     loadFileResult(folder, "equity_curve.csv", parseEquityCurve),
     loadFileResult(folder, "orders.csv", parseOrders),
     loadFileResult(folder, "fills.csv", parseFills),
+    loadFileResult(folder, "strategy_fit.json", parseStrategyFit),
   ]);
-  return { manifest, metrics, equityCurve, orders, fills };
+  return { manifest, metrics, equityCurve, orders, fills, strategyFit };
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +324,180 @@ function MetricsSection({ m }: { m: BacktestMetrics }) {
         detail={m.halt_reason ?? "Normal completion"}
         tone={haltTone}
       />
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Strategy fit / promotion gate panel
+// ---------------------------------------------------------------------------
+
+const STRATEGY_FIT_MAX_FAILURE_REASONS = 10;
+
+const STRATEGY_FIT_GATE_ROWS: { key: keyof StrategyFitGateFlags; label: string }[] = [
+  { key: "profit_factor_failed", label: "Profit factor" },
+  { key: "expectancy_failed", label: "Expectancy" },
+  { key: "cost_adjusted_edge_failed", label: "Cost-adjusted edge" },
+  { key: "out_of_sample_failed", label: "Out-of-sample validation" },
+  { key: "sample_quality_failed", label: "Sample quality" },
+  { key: "parameter_stability_failed", label: "Parameter stability" },
+  { key: "validation_metrics_missing", label: "Validation metrics" },
+];
+
+function StrategyFitPanel({ result }: { result: FileResult<StrategyFitParseResult> }) {
+  if (result.kind === "idle" || result.kind === "loading") return null;
+
+  return (
+    <Panel
+      title="Strategy fit / promotion gate"
+      subtitle="Backtest gate evaluation from strategy_fit.json (research-py BACKTEST-GATES-01)."
+    >
+      {result.kind === "missing" && (
+        <div className="empty-state">
+          Strategy-fit / promotion gate result not found for this artifact folder.
+        </div>
+      )}
+      {result.kind === "read_error" && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>strategy_fit.json read error:</strong> {result.message}
+        </div>
+      )}
+      {result.kind === "parse_error" && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>strategy_fit.json parse error:</strong> {result.message}
+        </div>
+      )}
+      {result.kind === "ok" && <StrategyFitContent fit={result.data} />}
+    </Panel>
+  );
+}
+
+function StrategyFitContent({ fit }: { fit: StrategyFitParseResult }) {
+  if (fit.kind === "unsupported_schema") {
+    return (
+      <div className="unavailable-notice">
+        <strong>Unsupported strategy-fit schema:</strong>{" "}
+        {fit.schemaVersion ? `'${fit.schemaVersion}'` : "schema_version missing"} — expected{" "}
+        '{STRATEGY_FIT_SCHEMA_VERSION}'.
+      </div>
+    );
+  }
+
+  if (fit.kind === "malformed") {
+    return (
+      <div className="unavailable-notice unavailable-critical">
+        <strong>Invalid strategy_fit.json:</strong> {fit.message}
+      </div>
+    );
+  }
+
+  if (fit.kind === "missing_fields") {
+    return (
+      <div className="unavailable-notice unavailable-critical">
+        <strong>strategy_fit.json missing required fields:</strong> {fit.message}
+      </div>
+    );
+  }
+
+  const a = fit.data;
+  const visibleReasons = a.failure_reasons.slice(0, STRATEGY_FIT_MAX_FAILURE_REASONS);
+  const hiddenReasonCount = a.failure_reasons.length - visibleReasons.length;
+
+  return (
+    <>
+      <div className="timeline-meta-grid">
+        <div>
+          <span>Schema</span>
+          <strong style={{ fontFamily: "monospace" }}>{a.schema_version}</strong>
+        </div>
+        <div>
+          <span>Symbol</span>
+          <strong>{a.symbol}</strong>
+        </div>
+        <div>
+          <span>Strategy</span>
+          <strong>{a.strategy_id}</strong>
+        </div>
+        <div>
+          <span>Timeframe</span>
+          <strong>{a.timeframe ?? "—"}</strong>
+        </div>
+      </div>
+
+      <div className="summary-grid summary-grid-five">
+        <StatCard
+          title="Recommended for paper"
+          value={a.recommended_for_paper ? "YES" : "NO"}
+          tone={a.recommended_for_paper ? "good" : "bad"}
+        />
+        <StatCard
+          title="Recommended for live"
+          value={a.recommended_for_live ? "YES" : "NO"}
+          detail={a.recommended_for_live_present ? undefined : "not reported by artifact"}
+          tone={a.recommended_for_live ? "bad" : "neutral"}
+        />
+        <StatCard title="Trades" value={a.trades != null ? String(a.trades) : "—"} />
+        <StatCard title="Profit factor" value={formatNullableNumber(a.profit_factor, 2)} />
+        <StatCard title="Expectancy (bps)" value={formatNullableNumber(a.expectancy_bps, 2)} />
+      </div>
+
+      <div className="summary-grid summary-grid-five">
+        <StatCard
+          title="Net expectancy after cost (bps)"
+          value={formatNullableNumber(a.net_expectancy_after_cost_bps, 2)}
+          tone={
+            a.net_expectancy_after_cost_bps != null
+              ? a.net_expectancy_after_cost_bps > 0
+                ? "good"
+                : "bad"
+              : "neutral"
+          }
+        />
+      </div>
+
+      {a.recommended_for_live && (
+        <div className="unavailable-notice unavailable-critical" style={{ marginTop: 12 }}>
+          <strong>Anomaly:</strong> this artifact reports recommended_for_live=true. Live
+          recommendations are never authorized by this system — verify the source artifact.
+        </div>
+      )}
+
+      {visibleReasons.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Failure reasons ({a.failure_reasons.length})</span>
+          <ul>
+            {visibleReasons.map((reason) => (
+              <li key={reason} style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>
+                {reason}
+              </li>
+            ))}
+          </ul>
+          {hiddenReasonCount > 0 && (
+            <div className="unavailable-notice">
+              + {hiddenReasonCount} more reason(s) not shown.
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ marginTop: 12 }}>
+        <DataTable
+          rows={STRATEGY_FIT_GATE_ROWS}
+          rowKey={(row) => row.key}
+          columns={[
+            { key: "gate", title: "Gate", render: (row) => row.label },
+            {
+              key: "result",
+              title: "Result",
+              render: (row) => (
+                <span style={{ color: a.gateFlags[row.key] ? "var(--critical)" : "var(--success)" }}>
+                  {a.gateFlags[row.key] ? "FAIL" : "PASS"}
+                </span>
+              ),
+            },
+          ]}
+        />
+      </div>
     </>
   );
 }
@@ -574,6 +753,8 @@ function ArtifactDisplay({ bundle }: { bundle: ArtifactBundle }) {
       {bundle.metrics.kind === "ok" && (
         <MetricsSection m={bundle.metrics.data} />
       )}
+
+      <StrategyFitPanel result={bundle.strategyFit} />
 
       <EquityCurveSection result={bundle.equityCurve} />
       <OrdersSection result={bundle.orders} />
