@@ -382,6 +382,46 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\Test-DiscordAlert.ps1
 - `DISCORD_WEBHOOK_URL` must live only in `.env.local` (gitignored) or the
   process environment -- never paste it into tracked files, scripts, or docs.
 
+### Sending a Paper-Readiness / Strategy-Fit Artifact Alert (Safe, Offline)
+
+Use `scripts\windows\Send-PaperReadinessDiscordAlert.ps1` to send an optional,
+operator-triggered Discord summary of an offline `paper-readiness-v1` or
+`strategy-fit-v1` artifact JSON file. This is observability only -- it never
+starts the daemon trading runtime, arms paper trading, submits orders, calls
+broker/Alpaca endpoints, or writes to the database. The daemon is never
+contacted; the script POSTs directly to `$env:DISCORD_WEBHOOK_URL`.
+
+```powershell
+# Check configuration + classification only -- does NOT send a Discord alert
+powershell -ExecutionPolicy Bypass -File scripts\windows\Send-PaperReadinessDiscordAlert.ps1 -ArtifactPath <path-to-artifact.json> -CheckOnly
+
+# Send one sanitized summary alert for the artifact
+powershell -ExecutionPolicy Bypass -File scripts\windows\Send-PaperReadinessDiscordAlert.ps1 -ArtifactPath <path-to-artifact.json>
+
+# Optional: prefix the Discord message with a short title
+powershell -ExecutionPolicy Bypass -File scripts\windows\Send-PaperReadinessDiscordAlert.ps1 -ArtifactPath <path-to-artifact.json> -Title "Overnight scan"
+```
+
+- Supports `paper-readiness-v1` (from `paper_readiness_runner.py`) and
+  `strategy-fit-v1` (from `backtest_gates.py` / `backtest_runner.py`)
+  artifacts. Any other or missing `schema_version` is refused (fail-closed).
+- `-CheckOnly` parses and classifies the artifact, prints a sanitized summary,
+  reports whether `DISCORD_WEBHOOK_URL` appears configured (presence only --
+  values are never printed), and reports whether the artifact is `sendable`.
+  It never issues a webhook POST.
+- Normal mode sends exactly ONE sanitized summary message directly to
+  `$env:DISCORD_WEBHOOK_URL` -- the daemon is never contacted. It fails
+  closed (sends nothing) if `DISCORD_WEBHOOK_URL` is not configured, the
+  artifact is missing/invalid/unsupported, or the artifact contains a forged
+  `recommended_for_live` / `approved_for_live` / `eligible_for_live` flag, a
+  Discord webhook URL, or an embedded secret/token.
+- Only the artifact's FILE NAME is sent -- never the local file path, and
+  never the raw artifact JSON.
+- This workflow is operator-triggered only. It is never invoked automatically
+  by the paper-readiness pipeline.
+- `DISCORD_WEBHOOK_URL` must live only in `.env.local` (gitignored) or the
+  process environment -- never paste it into tracked files, scripts, or docs.
+
 ---
 
 ## 9. Shutdown Checklist (Clean Process Shutdown)

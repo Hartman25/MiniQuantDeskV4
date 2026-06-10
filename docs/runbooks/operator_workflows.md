@@ -645,6 +645,43 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\Test-DiscordAlert.ps1
 - `DISCORD_WEBHOOK_URL` must be set only in `.env.local` (gitignored) -- never
   commit or paste a real webhook URL into any tracked file.
 
+### Sending a paper-readiness / strategy-fit artifact alert (safe, offline)
+
+`scripts\windows\Send-PaperReadinessDiscordAlert.ps1` lets an operator send an
+optional Discord summary of an offline paper-readiness or strategy-fit
+artifact JSON file produced by the research pipeline (e.g.
+`exports/scanner/proofs/.../paper_readiness/paper_readiness_first_report.json`
+or `.../strategy_fit/strategy_fit_*.json`). It is observability only and is
+never invoked automatically.
+
+```powershell
+# Classification + configuration check only -- no alert is sent, no POST issued
+powershell -ExecutionPolicy Bypass -File scripts\windows\Send-PaperReadinessDiscordAlert.ps1 -ArtifactPath <path-to-artifact.json> -CheckOnly
+
+# Send one sanitized summary alert for the artifact
+powershell -ExecutionPolicy Bypass -File scripts\windows\Send-PaperReadinessDiscordAlert.ps1 -ArtifactPath <path-to-artifact.json>
+```
+
+- `-CheckOnly` reports `artifact_type` (`paper-readiness` / `strategy-fit` /
+  `unknown`), `category`, `discord_webhook_configured`, `refusal_reason` (if
+  any), and `sendable` (presence checks only -- secret values are never
+  printed) and exits without issuing any webhook POST.
+- Normal mode POSTs directly to `$env:DISCORD_WEBHOOK_URL` (the daemon is
+  never contacted) and fails closed (sends nothing) if:
+  - `DISCORD_WEBHOOK_URL` is not configured,
+  - the artifact file is missing, not valid JSON, or has an unsupported
+    `schema_version`,
+  - the artifact contains `recommended_for_live=true`,
+    `approved_for_live=true`, or `eligible_for_live=true`,
+  - the artifact contains a Discord webhook URL or an embedded secret/token.
+- The Discord summary includes only the artifact's FILE NAME (never the local
+  path), its classification, status, and up to the first 8 reasons /
+  failure_reasons. The raw artifact JSON is never sent.
+- This workflow is operator-triggered only -- the paper-readiness pipeline
+  never calls it automatically.
+- `DISCORD_WEBHOOK_URL` must be set only in `.env.local` (gitignored) -- never
+  commit or paste a real webhook URL into any tracked file.
+
 ---
 
 ## 11. Premarket market-data refresh (PREMARKET-DATA-SCHEDULER-01)
