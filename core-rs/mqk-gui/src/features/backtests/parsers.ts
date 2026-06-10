@@ -4,6 +4,8 @@ import type {
   EquityCurveRow,
   FillRow,
   OrderRow,
+  PaperReadinessParseResult,
+  PaperReadinessReport,
   ParsedCsvResult,
   StrategyFitArtifact,
   StrategyFitGateFlags,
@@ -226,6 +228,123 @@ export function parseStrategyFit(json: string): StrategyFitParseResult {
     recommended_for_live_present: recommendedForLivePresent,
     failure_reasons: failureReasons,
     gateFlags: deriveStrategyFitGateFlags(failureReasons),
+  };
+
+  return { kind: "ok", data };
+}
+
+// ---------------------------------------------------------------------------
+// WATCHLIST-PROMOTION-GUI-SURFACE-BUNDLE-01: paper-readiness-v1 chain result parser
+// ---------------------------------------------------------------------------
+
+export const PAPER_READINESS_SCHEMA_VERSION = "paper-readiness-v1";
+
+// Status vocabulary — must match research-py/src/mqk_research/scanner/paper_readiness_runner.py
+export const PAPER_READINESS_STATUS_BLOCKED = "blocked";
+export const PAPER_READINESS_STATUS_PARTIAL = "partial";
+export const PAPER_READINESS_STATUS_READY_FOR_OPERATOR_REVIEW = "ready_for_operator_review";
+export const PAPER_READINESS_STATUS_READY_FOR_PAPER_HANDOFF = "ready_for_paper_handoff";
+
+// Hard-invariant anomaly ids — surfaced when a loaded artifact reports an
+// unsafe value for a field the producer's to_dict() always forces safe.
+export const ANOMALY_APPROVED_FOR_LIVE_TRUE = "approved_for_live_true";
+export const ANOMALY_LIVE_LOCKED_FALSE = "live_locked_false";
+export const ANOMALY_DAEMON_ENFORCEMENT_EXECUTED_TRUE = "daemon_enforcement_executed_true";
+export const ANOMALY_PAPER_HANDOFF_EXECUTED_TRUE = "paper_handoff_executed_true";
+
+function asNullableStringRecord(value: unknown): Record<string, string | null> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string | null> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === "string" || v === null) out[k] = v;
+  }
+  return out;
+}
+
+function asBooleanRecord(value: unknown): Record<string, boolean> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, boolean> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === "boolean") out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Parse a readiness_report.json artifact (paper-readiness-v1 schema).
+ *
+ * Never throws. Returns one of: ok / unsupported_schema / malformed / missing_fields.
+ * Hard-invariant fields (approved_for_live, live_locked,
+ * daemon_enforcement_executed, paper_handoff_executed) default to their safe
+ * value if absent or of the wrong type. If an artifact explicitly reports an
+ * unsafe value (approved_for_live=true, live_locked=false,
+ * daemon_enforcement_executed=true, paper_handoff_executed=true), the unsafe
+ * value is passed through unchanged and recorded in hardInvariantAnomalies so
+ * an invariant violation in the artifact is visible, not hidden.
+ */
+export function parsePaperReadiness(json: string): PaperReadinessParseResult {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(json);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { kind: "malformed", message: `readiness_report.json: invalid JSON (${message})` };
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+    return { kind: "malformed", message: "readiness_report.json: expected a JSON object" };
+  }
+  const a = obj as Record<string, unknown>;
+
+  const schemaVersion = typeof a.schema_version === "string" ? a.schema_version : null;
+  if (schemaVersion !== PAPER_READINESS_SCHEMA_VERSION) {
+    return { kind: "unsupported_schema", schemaVersion };
+  }
+
+  const status = a.status;
+  if (typeof status !== "string") {
+    return { kind: "missing_fields", message: "readiness_report.json: missing status" };
+  }
+
+  if (!Array.isArray(a.reasons)) {
+    return { kind: "missing_fields", message: "readiness_report.json: missing reasons" };
+  }
+  const reasons = a.reasons.filter((r): r is string => typeof r === "string");
+
+  const hardInvariantAnomalies: string[] = [];
+
+  const approvedForLive = a.approved_for_live === true;
+  if (approvedForLive) hardInvariantAnomalies.push(ANOMALY_APPROVED_FOR_LIVE_TRUE);
+
+  const liveLocked = a.live_locked !== false;
+  if (a.live_locked === false) hardInvariantAnomalies.push(ANOMALY_LIVE_LOCKED_FALSE);
+
+  const daemonEnforcementExecuted = a.daemon_enforcement_executed === true;
+  if (daemonEnforcementExecuted) hardInvariantAnomalies.push(ANOMALY_DAEMON_ENFORCEMENT_EXECUTED_TRUE);
+
+  const paperHandoffExecuted = a.paper_handoff_executed === true;
+  if (paperHandoffExecuted) hardInvariantAnomalies.push(ANOMALY_PAPER_HANDOFF_EXECUTED_TRUE);
+
+  const data: PaperReadinessReport = {
+    schema_version: schemaVersion,
+    status,
+    reasons,
+    top_symbol: typeof a.top_symbol === "string" ? a.top_symbol : null,
+    symbol_inputs_status: typeof a.symbol_inputs_status === "string" ? a.symbol_inputs_status : null,
+    risk_simulation_passed: typeof a.risk_simulation_passed === "boolean" ? a.risk_simulation_passed : null,
+    premarket_revalidation_passed:
+      typeof a.premarket_revalidation_passed === "boolean" ? a.premarket_revalidation_passed : null,
+    promotion_passed: typeof a.promotion_passed === "boolean" ? a.promotion_passed : null,
+    approved_for_autonomous_paper: a.approved_for_autonomous_paper === true,
+    approved_for_live: approvedForLive,
+    live_locked: liveLocked,
+    daemon_enforcement_executed: daemonEnforcementExecuted,
+    paper_handoff_requested: a.paper_handoff_requested === true,
+    paper_handoff_executed: paperHandoffExecuted,
+    upstream_pipeline_toggles: asBooleanRecord(a.upstream_pipeline_toggles),
+    artifacts_read: asNullableStringRecord(a.artifacts_read),
+    artifacts_written: asNullableStringRecord(a.artifacts_written),
+    notes: typeof a.notes === "string" ? a.notes : "",
+    hardInvariantAnomalies,
   };
 
   return { kind: "ok", data };

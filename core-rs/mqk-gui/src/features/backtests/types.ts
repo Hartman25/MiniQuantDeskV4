@@ -140,6 +140,45 @@ export type StrategyFitParseResult =
   | { kind: "missing_fields"; message: string };
 
 // ---------------------------------------------------------------------------
+// WATCHLIST-PROMOTION-GUI-SURFACE-BUNDLE-01: paper-readiness-v1 chain result types
+// ---------------------------------------------------------------------------
+
+export interface PaperReadinessReport {
+  schema_version: string;
+  status: string;
+  reasons: string[];
+  top_symbol: string | null;
+  symbol_inputs_status: string | null;
+  risk_simulation_passed: boolean | null;
+  premarket_revalidation_passed: boolean | null;
+  promotion_passed: boolean | null;
+  approved_for_autonomous_paper: boolean;
+  approved_for_live: boolean;
+  live_locked: boolean;
+  daemon_enforcement_executed: boolean;
+  paper_handoff_requested: boolean;
+  paper_handoff_executed: boolean;
+  upstream_pipeline_toggles: Record<string, boolean>;
+  artifacts_read: Record<string, string | null>;
+  artifacts_written: Record<string, string | null>;
+  notes: string;
+  /**
+   * Hard-invariant fields (approved_for_live, live_locked,
+   * daemon_enforcement_executed, paper_handoff_executed) are forced to safe
+   * values by the producer's to_dict(). If a loaded artifact reports an
+   * unsafe value for any of these, it is passed through honestly and its
+   * anomaly id is recorded here rather than silently corrected or hidden.
+   */
+  hardInvariantAnomalies: string[];
+}
+
+export type PaperReadinessParseResult =
+  | { kind: "ok"; data: PaperReadinessReport }
+  | { kind: "unsupported_schema"; schemaVersion: string | null }
+  | { kind: "malformed"; message: string }
+  | { kind: "missing_fields"; message: string };
+
+// ---------------------------------------------------------------------------
 // BACKTEST-GUI-RUNNER-01: Daemon backtest job API types
 // ---------------------------------------------------------------------------
 

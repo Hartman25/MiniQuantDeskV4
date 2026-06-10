@@ -12,6 +12,7 @@ import {
   parseManifest,
   parseMetrics,
   parseOrders,
+  parsePaperReadiness,
   parseStrategyFit,
 } from "../parsers.ts";
 
@@ -577,4 +578,303 @@ test("parseStrategyFit: missing recommended_for_paper is missing_fields", () => 
   });
   const result = parseStrategyFit(json);
   assert.equal(result.kind, "missing_fields");
+});
+
+// --- parsePaperReadiness ---
+
+test("parsePaperReadiness: valid blocked artifact (real AAPL paper-readiness-v1 shape)", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "blocked",
+    reasons: [
+      "paper_readiness_risk_simulation_failed",
+      "paper_readiness_premarket_revalidation_failed",
+      "strategy_fit_not_recommended_for_paper",
+      "risk_simulation_required",
+      "operator_review_required",
+      "premarket_revalidation_required",
+    ],
+    top_symbol: "AAPL",
+    symbol_inputs_status: "complete",
+    risk_simulation_passed: false,
+    premarket_revalidation_passed: false,
+    promotion_passed: false,
+    approved_for_autonomous_paper: false,
+    approved_for_live: false,
+    live_locked: true,
+    daemon_enforcement_executed: false,
+    paper_handoff_requested: false,
+    paper_handoff_executed: false,
+    upstream_pipeline_toggles: { scanner_pipeline_enabled: false, backtest_pipeline_enabled: false },
+    artifacts_read: {
+      watchlist_path: "C:\\repo\\watchlist.json",
+      bars_root: "C:\\repo\\bars",
+      strategy_fit_dir: "C:\\repo\\strategy_fit",
+      liquidity_root: null,
+    },
+    artifacts_written: {
+      symbol_inputs_output_path: "C:\\repo\\symbol_inputs.json",
+      readiness_report_output_path: "C:\\repo\\readiness_report.json",
+    },
+    notes: "blocked: blocked: strategy_fit_not_recommended_for_paper; risk_simulation_required",
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.status, "blocked");
+  assert.equal(result.data.reasons.length, 6);
+  assert.equal(result.data.top_symbol, "AAPL");
+  assert.equal(result.data.symbol_inputs_status, "complete");
+  assert.equal(result.data.risk_simulation_passed, false);
+  assert.equal(result.data.premarket_revalidation_passed, false);
+  assert.equal(result.data.promotion_passed, false);
+  assert.equal(result.data.approved_for_autonomous_paper, false);
+  assert.equal(result.data.approved_for_live, false);
+  assert.equal(result.data.live_locked, true);
+  assert.deepEqual(result.data.hardInvariantAnomalies, []);
+  assert.equal(result.data.upstream_pipeline_toggles.scanner_pipeline_enabled, false);
+  assert.equal(result.data.artifacts_read.liquidity_root, null);
+  assert.equal(result.data.artifacts_written.readiness_report_output_path, "C:\\repo\\readiness_report.json");
+});
+
+test("parsePaperReadiness: valid ready_for_paper_handoff artifact (all gates pass)", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "ready_for_paper_handoff",
+    reasons: [],
+    top_symbol: "MSFT",
+    symbol_inputs_status: "complete",
+    risk_simulation_passed: true,
+    premarket_revalidation_passed: true,
+    promotion_passed: true,
+    approved_for_autonomous_paper: true,
+    approved_for_live: false,
+    live_locked: true,
+    daemon_enforcement_executed: false,
+    paper_handoff_requested: true,
+    paper_handoff_executed: false,
+    upstream_pipeline_toggles: { scanner_pipeline_enabled: true, backtest_pipeline_enabled: true },
+    artifacts_read: {},
+    artifacts_written: {},
+    notes: "",
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.status, "ready_for_paper_handoff");
+  assert.equal(result.data.approved_for_autonomous_paper, true);
+  assert.equal(result.data.risk_simulation_passed, true);
+  assert.equal(result.data.premarket_revalidation_passed, true);
+  assert.equal(result.data.promotion_passed, true);
+  assert.equal(result.data.paper_handoff_requested, true);
+  assert.equal(result.data.paper_handoff_executed, false);
+  assert.deepEqual(result.data.hardInvariantAnomalies, []);
+});
+
+test("parsePaperReadiness: missing approved_for_live stays safe (defaults false, no anomaly)", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "blocked",
+    reasons: ["paper_readiness_watchlist_path_missing"],
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.approved_for_live, false);
+  assert.deepEqual(result.data.hardInvariantAnomalies, []);
+});
+
+test("parsePaperReadiness: explicit approved_for_live=true is passed through and flagged as anomaly", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "ready_for_paper_handoff",
+    reasons: [],
+    approved_for_live: true,
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.approved_for_live, true);
+  assert.ok(result.data.hardInvariantAnomalies.includes("approved_for_live_true"));
+});
+
+test("parsePaperReadiness: missing live_locked defaults to true (safe), no anomaly", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "blocked",
+    reasons: [],
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.live_locked, true);
+  assert.deepEqual(result.data.hardInvariantAnomalies, []);
+});
+
+test("parsePaperReadiness: explicit live_locked=false is passed through and flagged as anomaly", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "ready_for_paper_handoff",
+    reasons: [],
+    live_locked: false,
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.live_locked, false);
+  assert.ok(result.data.hardInvariantAnomalies.includes("live_locked_false"));
+});
+
+test("parsePaperReadiness: explicit daemon_enforcement_executed=true is passed through and flagged as anomaly", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "ready_for_paper_handoff",
+    reasons: [],
+    daemon_enforcement_executed: true,
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.daemon_enforcement_executed, true);
+  assert.ok(result.data.hardInvariantAnomalies.includes("daemon_enforcement_executed_true"));
+});
+
+test("parsePaperReadiness: explicit paper_handoff_executed=true is passed through and flagged as anomaly", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "ready_for_paper_handoff",
+    reasons: [],
+    paper_handoff_executed: true,
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.paper_handoff_executed, true);
+  assert.ok(result.data.hardInvariantAnomalies.includes("paper_handoff_executed_true"));
+});
+
+test("parsePaperReadiness: unsupported schema_version is explicit", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v0",
+    status: "blocked",
+    reasons: [],
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "unsupported_schema");
+  if (result.kind !== "unsupported_schema") return;
+  assert.equal(result.schemaVersion, "paper-readiness-v0");
+});
+
+test("parsePaperReadiness: missing schema_version is unsupported (not assumed)", () => {
+  const json = JSON.stringify({
+    status: "blocked",
+    reasons: [],
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "unsupported_schema");
+  if (result.kind !== "unsupported_schema") return;
+  assert.equal(result.schemaVersion, null);
+});
+
+test("parsePaperReadiness: malformed JSON is explicit", () => {
+  const result = parsePaperReadiness("{bad json}");
+  assert.equal(result.kind, "malformed");
+});
+
+test("parsePaperReadiness: non-object JSON is malformed", () => {
+  const result = parsePaperReadiness("[1,2,3]");
+  assert.equal(result.kind, "malformed");
+});
+
+test("parsePaperReadiness: missing status is missing_fields", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    reasons: [],
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "missing_fields");
+});
+
+test("parsePaperReadiness: missing reasons is missing_fields", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "blocked",
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "missing_fields");
+});
+
+test("parsePaperReadiness: empty reasons array on ready_for_operator_review parses ok", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "ready_for_operator_review",
+    reasons: [],
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.status, "ready_for_operator_review");
+  assert.deepEqual(result.data.reasons, []);
+});
+
+test("parsePaperReadiness: mixed gate pass/fail/null parsed independently", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "partial",
+    reasons: ["paper_readiness_symbol_inputs_partial"],
+    risk_simulation_passed: true,
+    premarket_revalidation_passed: false,
+    // promotion_passed intentionally omitted
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.risk_simulation_passed, true);
+  assert.equal(result.data.premarket_revalidation_passed, false);
+  assert.equal(result.data.promotion_passed, null);
+});
+
+test("parsePaperReadiness: non-boolean toggle values and non-string/null artifact paths are filtered out", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "blocked",
+    reasons: [],
+    upstream_pipeline_toggles: { scanner_pipeline_enabled: true, weird: "not-a-bool" },
+    artifacts_read: { watchlist_path: "C:\\repo\\watchlist.json", weird: 123 },
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.deepEqual(result.data.upstream_pipeline_toggles, { scanner_pipeline_enabled: true });
+  assert.deepEqual(result.data.artifacts_read, { watchlist_path: "C:\\repo\\watchlist.json" });
+});
+
+test("parsePaperReadiness: non-string entries in reasons are filtered out", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "blocked",
+    reasons: ["paper_readiness_watchlist_path_missing", 42, null, "operator_review_required"],
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.deepEqual(result.data.reasons, [
+    "paper_readiness_watchlist_path_missing",
+    "operator_review_required",
+  ]);
+});
+
+test("parsePaperReadiness: null top_symbol and symbol_inputs_status handled", () => {
+  const json = JSON.stringify({
+    schema_version: "paper-readiness-v1",
+    status: "blocked",
+    reasons: ["paper_readiness_watchlist_path_missing"],
+    top_symbol: null,
+    symbol_inputs_status: null,
+  });
+  const result = parsePaperReadiness(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.top_symbol, null);
+  assert.equal(result.data.symbol_inputs_status, null);
 });
