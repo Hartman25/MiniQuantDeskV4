@@ -101,6 +101,8 @@ export interface ArtifactBundle {
   fills: FileResult<ParsedCsvResult<FillRow>>;
   strategyFit: FileResult<StrategyFitParseResult>;
   paperReadiness: FileResult<PaperReadinessParseResult>;
+  watchlistPromotion: FileResult<WatchlistPromotionParseResult>;
+  premarketRevalidation: FileResult<PremarketRevalidationParseResult>;
 }
 
 // ---------------------------------------------------------------------------

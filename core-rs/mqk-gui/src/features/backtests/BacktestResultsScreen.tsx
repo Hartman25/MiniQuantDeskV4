@@ -18,8 +18,12 @@ import {
   parseMetrics,
   parseOrders,
   parsePaperReadiness,
+  parsePremarketRevalidation,
   parseStrategyFit,
+  parseWatchlistPromotion,
+  PREMARKET_REVALIDATION_SCHEMA_VERSION,
   STRATEGY_FIT_SCHEMA_VERSION,
+  WATCHLIST_PROMOTION_SCHEMA_VERSION,
 } from "./parsers.ts";
 import { getBacktestJob, isTerminalJobStatus, normalizeJobStatus, submitBacktestJob } from "./api.ts";
 import {
@@ -43,8 +47,10 @@ import type {
   OrderRow,
   PaperReadinessParseResult,
   ParsedCsvResult,
+  PremarketRevalidationParseResult,
   StrategyFitGateFlags,
   StrategyFitParseResult,
+  WatchlistPromotionParseResult,
 } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -78,7 +84,17 @@ async function loadFileResult<T>(
 }
 
 async function loadBundle(folder: string): Promise<ArtifactBundle> {
-  const [manifest, metrics, equityCurve, orders, fills, strategyFit, paperReadiness] = await Promise.all([
+  const [
+    manifest,
+    metrics,
+    equityCurve,
+    orders,
+    fills,
+    strategyFit,
+    paperReadiness,
+    watchlistPromotion,
+    premarketRevalidation,
+  ] = await Promise.all([
     loadFileResult(folder, "manifest.json", parseManifest),
     loadFileResult(folder, "metrics.json", parseMetrics),
     loadFileResult(folder, "equity_curve.csv", parseEquityCurve),
@@ -86,8 +102,20 @@ async function loadBundle(folder: string): Promise<ArtifactBundle> {
     loadFileResult(folder, "fills.csv", parseFills),
     loadFileResult(folder, "strategy_fit.json", parseStrategyFit),
     loadFileResult(folder, "readiness_report.json", parsePaperReadiness),
+    loadFileResult(folder, "promoted_watchlist.json", parseWatchlistPromotion),
+    loadFileResult(folder, "premarket_revalidation.json", parsePremarketRevalidation),
   ]);
-  return { manifest, metrics, equityCurve, orders, fills, strategyFit, paperReadiness };
+  return {
+    manifest,
+    metrics,
+    equityCurve,
+    orders,
+    fills,
+    strategyFit,
+    paperReadiness,
+    watchlistPromotion,
+    premarketRevalidation,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -776,6 +804,378 @@ function PaperReadinessContent({ report }: { report: PaperReadinessParseResult }
   );
 }
 
+// ---------------------------------------------------------------------------
+// Watchlist promotion panel
+// ---------------------------------------------------------------------------
+
+const WATCHLIST_PROMOTION_MAX_FAILURE_REASONS = 10;
+
+function WatchlistPromotionPanel({ result }: { result: FileResult<WatchlistPromotionParseResult> }) {
+  if (result.kind === "idle" || result.kind === "loading") return null;
+
+  return (
+    <Panel
+      title="Watchlist promotion"
+      subtitle="Promotion-chain decision from promoted_watchlist.json (research-py WATCHLIST-PROMO-01)."
+    >
+      {result.kind === "missing" && (
+        <div className="empty-state">
+          Promoted watchlist not found for this artifact folder.
+        </div>
+      )}
+      {result.kind === "read_error" && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>promoted_watchlist.json read error:</strong> {result.message}
+        </div>
+      )}
+      {result.kind === "parse_error" && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>promoted_watchlist.json parse error:</strong> {result.message}
+        </div>
+      )}
+      {result.kind === "ok" && <WatchlistPromotionContent artifact={result.data} />}
+    </Panel>
+  );
+}
+
+function WatchlistPromotionContent({ artifact }: { artifact: WatchlistPromotionParseResult }) {
+  if (artifact.kind === "unsupported_schema") {
+    return (
+      <div className="unavailable-notice">
+        <strong>Unsupported watchlist schema:</strong>{" "}
+        {artifact.schemaVersion ? `'${artifact.schemaVersion}'` : "schema_version missing"} — expected{" "}
+        '{WATCHLIST_PROMOTION_SCHEMA_VERSION}'.
+      </div>
+    );
+  }
+
+  if (artifact.kind === "malformed") {
+    return (
+      <div className="unavailable-notice unavailable-critical">
+        <strong>Invalid promoted_watchlist.json:</strong> {artifact.message}
+      </div>
+    );
+  }
+
+  if (artifact.kind === "missing_fields") {
+    return (
+      <div className="unavailable-notice unavailable-critical">
+        <strong>promoted_watchlist.json missing required fields:</strong> {artifact.message}
+      </div>
+    );
+  }
+
+  const a = artifact.data;
+  const decision = a.promotion_decision;
+  const failureReasons = decision?.failure_reasons ?? [];
+  const visibleReasons = failureReasons.slice(0, WATCHLIST_PROMOTION_MAX_FAILURE_REASONS);
+  const hiddenReasonCount = failureReasons.length - visibleReasons.length;
+
+  const symbolRows = a.symbols.map((symbol) => ({
+    symbol,
+    strategy: a.strategy_assignments[symbol] ?? null,
+    paperQtyLimit: a.paper_qty_limits[symbol] ?? null,
+    notionalLimit: a.notional_limits[symbol] ?? null,
+  }));
+
+  return (
+    <>
+      <div className="timeline-meta-grid">
+        <div>
+          <span>Schema</span>
+          <strong style={{ fontFamily: "monospace" }}>{a.schema_version}</strong>
+        </div>
+        <div>
+          <span>Mode</span>
+          <strong>{a.mode ?? "—"}</strong>
+        </div>
+        <div>
+          <span>Trade date</span>
+          <strong>{a.trade_date ?? "—"}</strong>
+        </div>
+        <div>
+          <span>Top symbol</span>
+          <strong>{a.top_symbol ?? "—"}</strong>
+        </div>
+      </div>
+
+      <div className="summary-grid summary-grid-five">
+        <StatCard
+          title="Approved for autonomous paper"
+          value={a.approved_for_autonomous_paper ? "YES" : "NO"}
+          tone={a.approved_for_autonomous_paper ? "good" : "neutral"}
+        />
+        <StatCard
+          title="Approved for live"
+          value={a.approved_for_live ? "YES" : "NO"}
+          tone={a.approved_for_live ? "bad" : "neutral"}
+        />
+        <StatCard
+          title="Promotion decision"
+          value={decision ? (decision.passed ? "PASS" : "FAIL") : "—"}
+          tone={decision ? (decision.passed ? "good" : "bad") : "neutral"}
+        />
+        <StatCard
+          title="Max symbols to trade"
+          value={a.max_symbols_to_trade != null ? String(a.max_symbols_to_trade) : "—"}
+        />
+        <StatCard
+          title="Max concurrent positions"
+          value={a.max_concurrent_positions != null ? String(a.max_concurrent_positions) : "—"}
+        />
+      </div>
+
+      {a.hardInvariantAnomalies.length > 0 && (
+        <div className="unavailable-notice unavailable-critical" style={{ marginTop: 12 }}>
+          <strong>Anomaly:</strong> this artifact reports unexpected hard-invariant value(s):{" "}
+          {a.hardInvariantAnomalies.join(", ")}. approved_for_live is normally forced to false by
+          apply_watchlist_promotion() — verify the source artifact.
+        </div>
+      )}
+
+      {visibleReasons.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Promotion failure reasons ({failureReasons.length})</span>
+          <ul>
+            {visibleReasons.map((reason, i) => (
+              <li key={`${reason}-${i}`} style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>
+                {reason}
+              </li>
+            ))}
+          </ul>
+          {hiddenReasonCount > 0 && (
+            <div className="unavailable-notice">
+              + {hiddenReasonCount} more reason(s) not shown.
+            </div>
+          )}
+        </div>
+      )}
+
+      {symbolRows.length > 0 ? (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Approved symbols ({symbolRows.length})</span>
+          <DataTable
+            rows={symbolRows}
+            rowKey={(row) => row.symbol}
+            columns={[
+              { key: "symbol", title: "Symbol", render: (row) => row.symbol },
+              { key: "strategy", title: "Strategy", render: (row) => row.strategy ?? "—" },
+              {
+                key: "paperQtyLimit",
+                title: "Paper qty limit",
+                render: (row) => (row.paperQtyLimit != null ? String(row.paperQtyLimit) : "—"),
+              },
+              {
+                key: "notionalLimit",
+                title: "Notional limit",
+                render: (row) => formatNullableNumber(row.notionalLimit, 2),
+              },
+            ]}
+          />
+        </div>
+      ) : (
+        <div className="empty-state" style={{ marginTop: 12 }}>
+          No symbols approved for paper trading.
+        </div>
+      )}
+
+      {a.ranked_candidates.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Ranked candidates ({a.ranked_candidates.length})</span>
+          <DataTable
+            rows={a.ranked_candidates}
+            rowKey={(row) => `${row.rank ?? "—"}-${row.symbol ?? "unknown"}-${row.strategy_id ?? "—"}`}
+            columns={[
+              { key: "rank", title: "Rank", render: (row) => (row.rank != null ? String(row.rank) : "—") },
+              { key: "symbol", title: "Symbol", render: (row) => row.symbol ?? "—" },
+              { key: "strategy", title: "Strategy", render: (row) => row.strategy_id ?? "—" },
+              { key: "timeframe", title: "Timeframe", render: (row) => row.timeframe ?? "—" },
+              { key: "regime", title: "Regime", render: (row) => row.regime_label ?? "—" },
+              {
+                key: "regimeScore",
+                title: "Regime score",
+                render: (row) => formatNullableNumber(row.regime_score, 2),
+              },
+              {
+                key: "netExpectancy",
+                title: "Net expectancy (bps)",
+                render: (row) => formatNullableNumber(row.net_expectancy_after_cost_bps, 2),
+              },
+            ]}
+          />
+        </div>
+      )}
+
+      {a.selection_reason && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Selection reason</span>
+          <p style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{a.selection_reason}</p>
+        </div>
+      )}
+
+      {decision?.notes && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Promotion notes</span>
+          <p style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{decision.notes}</p>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Premarket revalidation panel
+// ---------------------------------------------------------------------------
+
+const PREMARKET_REVALIDATION_MAX_FAILURE_REASONS = 10;
+
+function PremarketRevalidationPanel({ result }: { result: FileResult<PremarketRevalidationParseResult> }) {
+  if (result.kind === "idle" || result.kind === "loading") return null;
+
+  return (
+    <Panel
+      title="Premarket revalidation"
+      subtitle="Premarket gate result from premarket_revalidation.json (research-py WATCHLIST-PREMKT-RISK-BUNDLE-01)."
+    >
+      {result.kind === "missing" && (
+        <div className="empty-state">
+          Premarket revalidation result not found for this artifact folder.
+        </div>
+      )}
+      {result.kind === "read_error" && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>premarket_revalidation.json read error:</strong> {result.message}
+        </div>
+      )}
+      {result.kind === "parse_error" && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>premarket_revalidation.json parse error:</strong> {result.message}
+        </div>
+      )}
+      {result.kind === "ok" && <PremarketRevalidationContent artifact={result.data} />}
+    </Panel>
+  );
+}
+
+function PremarketRevalidationContent({ artifact }: { artifact: PremarketRevalidationParseResult }) {
+  if (artifact.kind === "unsupported_schema") {
+    return (
+      <div className="unavailable-notice">
+        <strong>Unsupported premarket-revalidation schema:</strong>{" "}
+        {artifact.schemaVersion ? `'${artifact.schemaVersion}'` : "schema_version missing"} — expected{" "}
+        '{PREMARKET_REVALIDATION_SCHEMA_VERSION}'.
+      </div>
+    );
+  }
+
+  if (artifact.kind === "malformed") {
+    return (
+      <div className="unavailable-notice unavailable-critical">
+        <strong>Invalid premarket_revalidation.json:</strong> {artifact.message}
+      </div>
+    );
+  }
+
+  if (artifact.kind === "missing_fields") {
+    return (
+      <div className="unavailable-notice unavailable-critical">
+        <strong>premarket_revalidation.json missing required fields:</strong> {artifact.message}
+      </div>
+    );
+  }
+
+  const a = artifact.data;
+  const visibleReasons = a.failure_reasons.slice(0, PREMARKET_REVALIDATION_MAX_FAILURE_REASONS);
+  const hiddenReasonCount = a.failure_reasons.length - visibleReasons.length;
+  const symbolRows = Object.entries(a.symbol_results).map(([symbol, r]) => ({ symbol, ...r }));
+
+  return (
+    <>
+      <div className="timeline-meta-grid">
+        <div>
+          <span>Schema</span>
+          <strong style={{ fontFamily: "monospace" }}>{a.schema_version}</strong>
+        </div>
+        <div>
+          <span>Top symbol</span>
+          <strong>{a.top_symbol ?? "—"}</strong>
+        </div>
+      </div>
+
+      <div className="summary-grid summary-grid-five">
+        <StatCard
+          title="Premarket revalidation"
+          value={a.passed ? "PASS" : "FAIL"}
+          tone={a.passed ? "good" : "bad"}
+        />
+      </div>
+
+      {visibleReasons.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Failure reasons ({a.failure_reasons.length})</span>
+          <ul>
+            {visibleReasons.map((reason, i) => (
+              <li key={`${reason}-${i}`} style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>
+                {reason}
+              </li>
+            ))}
+          </ul>
+          {hiddenReasonCount > 0 && (
+            <div className="unavailable-notice">
+              + {hiddenReasonCount} more reason(s) not shown.
+            </div>
+          )}
+        </div>
+      )}
+
+      {symbolRows.length > 0 ? (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Per-symbol results ({symbolRows.length})</span>
+          <DataTable
+            rows={symbolRows}
+            rowKey={(row) => row.symbol}
+            columns={[
+              { key: "symbol", title: "Symbol", render: (row) => row.symbol },
+              {
+                key: "passed",
+                title: "Result",
+                render: (row) => (
+                  <span style={{ color: row.passed ? "var(--success)" : "var(--critical)" }}>
+                    {row.passed ? "PASS" : "FAIL"}
+                  </span>
+                ),
+              },
+              {
+                key: "reasons",
+                title: "Failure reasons",
+                render: (row) =>
+                  row.failure_reasons.length > 0 ? (
+                    <span style={{ fontFamily: "monospace", fontSize: "0.78rem" }}>
+                      {row.failure_reasons.join(", ")}
+                    </span>
+                  ) : (
+                    "—"
+                  ),
+              },
+            ]}
+          />
+        </div>
+      ) : (
+        <div className="empty-state" style={{ marginTop: 12 }}>
+          No per-symbol premarket results recorded.
+        </div>
+      )}
+
+      {a.notes && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Notes</span>
+          <p style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{a.notes}</p>
+        </div>
+      )}
+    </>
+  );
+}
+
 function EquityCurveSection({
   result,
 }: {
@@ -1030,6 +1430,8 @@ function ArtifactDisplay({ bundle }: { bundle: ArtifactBundle }) {
 
       <StrategyFitPanel result={bundle.strategyFit} />
       <PaperReadinessPanel result={bundle.paperReadiness} />
+      <WatchlistPromotionPanel result={bundle.watchlistPromotion} />
+      <PremarketRevalidationPanel result={bundle.premarketRevalidation} />
 
       <EquityCurveSection result={bundle.equityCurve} />
       <OrdersSection result={bundle.orders} />
