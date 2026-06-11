@@ -8,6 +8,7 @@ import {
   microsToUsd,
   parseCsvRows,
   parseEquityCurve,
+  parseEvidenceReview,
   parseFills,
   parseManifest,
   parseMetrics,
@@ -1375,6 +1376,202 @@ test("parsePremarketRevalidation: non-string entries in failure_reasons are filt
   assert.equal(result.kind, "ok");
   if (result.kind !== "ok") return;
   assert.deepEqual(result.data.failure_reasons, ["premarket_rvol_too_low", "premarket_price_too_low"]);
+});
+
+// --- parseEvidenceReview ---
+
+test("parseEvidenceReview: valid OPEN classification (real AAPL review-v2 shape)", () => {
+  const json = JSON.stringify({
+    schema_version: "review-v2",
+    reviewed_at: "2026-06-10T08:53:35Z",
+    folder_name: "paper_smoke_20260610_085209_aapl5m_market_smoke_shutdown_post_stop",
+    capture_ts: "2026-06-10 08:52:09 UTC",
+    classification: "OPEN",
+    classification_reasons: ["kill_switch_active=true", "integrity_halt_active=true"],
+    runtime_status: "halted",
+    arm_state: "halted",
+    kill_switch_active: true,
+    integrity_halt_active: true,
+    risk_halt_active: false,
+    live_routing_enabled: false,
+    deadman_status: "expired",
+    reconcile_status: "ok",
+    reconcile_total_mismatches: 0,
+    fill_count: 0,
+    open_order_count: 0,
+    position_count: 1,
+    autonomous_flatten_available: false,
+    autonomous_flatten_blockers: "flatten blocked: arm state is 'halted' (gate=not_armed)",
+    autonomous_next_operator_action: "Kill switch is active. Clear the halted run, then re-arm",
+  });
+  const result = parseEvidenceReview(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.classification, "OPEN");
+  assert.equal(result.data.folder_name, "paper_smoke_20260610_085209_aapl5m_market_smoke_shutdown_post_stop");
+  assert.equal(result.data.kill_switch_active, true);
+  assert.equal(result.data.integrity_halt_active, true);
+  assert.equal(result.data.live_routing_enabled, false);
+  assert.equal(result.data.reconcile_status, "ok");
+  assert.equal(result.data.reconcile_total_mismatches, 0);
+  assert.equal(result.data.position_count, 1);
+  assert.equal(result.data.autonomous_flatten_available, false);
+});
+
+test("parseEvidenceReview: valid NATURAL-TRADE-LIFECYCLE-CLOSED classification is passed through honestly", () => {
+  const json = JSON.stringify({
+    schema_version: "review-v2",
+    classification: "NATURAL-TRADE-LIFECYCLE-CLOSED",
+    classification_reasons: [],
+    folder_name: "paper_smoke_closed_example",
+    runtime_status: "running",
+    kill_switch_active: false,
+    integrity_halt_active: false,
+    live_routing_enabled: false,
+    reconcile_status: "ok",
+    reconcile_total_mismatches: 0,
+    fill_count: 2,
+    open_order_count: 0,
+    position_count: 0,
+    autonomous_flatten_available: true,
+    autonomous_flatten_blockers: null,
+    autonomous_next_operator_action: null,
+  });
+  const result = parseEvidenceReview(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.classification, "NATURAL-TRADE-LIFECYCLE-CLOSED");
+  assert.equal(result.data.fill_count, 2);
+  assert.equal(result.data.autonomous_flatten_available, true);
+  assert.equal(result.data.autonomous_flatten_blockers, null);
+});
+
+test("parseEvidenceReview: kill_switch_active=true is passed through honestly (critical)", () => {
+  const json = JSON.stringify({
+    schema_version: "review-v2",
+    classification: "OPEN",
+    classification_reasons: ["kill_switch_active=true"],
+    kill_switch_active: true,
+  });
+  const result = parseEvidenceReview(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.kill_switch_active, true);
+});
+
+test("parseEvidenceReview: live_routing_enabled=true is passed through honestly (critical)", () => {
+  const json = JSON.stringify({
+    schema_version: "review-v2",
+    classification: "FALSE-CLOSED",
+    classification_reasons: ["live_routing_enabled=true"],
+    live_routing_enabled: true,
+  });
+  const result = parseEvidenceReview(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.live_routing_enabled, true);
+});
+
+test("parseEvidenceReview: missing classification is missing_fields", () => {
+  const json = JSON.stringify({
+    schema_version: "review-v2",
+    classification_reasons: [],
+  });
+  const result = parseEvidenceReview(json);
+  assert.equal(result.kind, "missing_fields");
+});
+
+test("parseEvidenceReview: unsupported schema_version is explicit", () => {
+  const json = JSON.stringify({
+    schema_version: "review-v1",
+    classification: "OPEN",
+    classification_reasons: [],
+  });
+  const result = parseEvidenceReview(json);
+  assert.equal(result.kind, "unsupported_schema");
+  if (result.kind !== "unsupported_schema") return;
+  assert.equal(result.schemaVersion, "review-v1");
+});
+
+test("parseEvidenceReview: missing schema_version is unsupported (not assumed)", () => {
+  const json = JSON.stringify({
+    classification: "OPEN",
+    classification_reasons: [],
+  });
+  const result = parseEvidenceReview(json);
+  assert.equal(result.kind, "unsupported_schema");
+  if (result.kind !== "unsupported_schema") return;
+  assert.equal(result.schemaVersion, null);
+});
+
+test("parseEvidenceReview: malformed JSON is explicit", () => {
+  const result = parseEvidenceReview("{bad json}");
+  assert.equal(result.kind, "malformed");
+});
+
+test("parseEvidenceReview: non-object JSON is malformed", () => {
+  const result = parseEvidenceReview("[1,2,3]");
+  assert.equal(result.kind, "malformed");
+});
+
+test("parseEvidenceReview: missing classification_reasons degrades safely to empty array", () => {
+  const json = JSON.stringify({
+    schema_version: "review-v2",
+    classification: "PARTIAL",
+  });
+  const result = parseEvidenceReview(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.deepEqual(result.data.classification_reasons, []);
+  assert.equal(result.data.kill_switch_active, null);
+  assert.equal(result.data.reconcile_total_mismatches, null);
+});
+
+test("parseEvidenceReview: classification_reasons preserved in order, non-strings filtered", () => {
+  const json = JSON.stringify({
+    schema_version: "review-v2",
+    classification: "OPEN",
+    classification_reasons: ["kill_switch_active=true", 42, null, "integrity_halt_active=true"],
+  });
+  const result = parseEvidenceReview(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.deepEqual(result.data.classification_reasons, [
+    "kill_switch_active=true",
+    "integrity_halt_active=true",
+  ]);
+});
+
+test("parseEvidenceReview: autonomous_flatten_available=false and autonomous_flatten_blockers preserved", () => {
+  const json = JSON.stringify({
+    schema_version: "review-v2",
+    classification: "OPEN",
+    classification_reasons: [],
+    autonomous_flatten_available: false,
+    autonomous_flatten_blockers: "flatten blocked: no active run (gate=no_active_run)",
+    autonomous_next_operator_action: "Clear the halted run, then re-arm",
+  });
+  const result = parseEvidenceReview(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.autonomous_flatten_available, false);
+  assert.equal(result.data.autonomous_flatten_blockers, "flatten blocked: no active run (gate=no_active_run)");
+  assert.equal(result.data.autonomous_next_operator_action, "Clear the halted run, then re-arm");
+});
+
+test("parseEvidenceReview: non-boolean kill_switch_active and non-number reconcile_total_mismatches default to null", () => {
+  const json = JSON.stringify({
+    schema_version: "review-v2",
+    classification: "PARTIAL",
+    classification_reasons: [],
+    kill_switch_active: "true",
+    reconcile_total_mismatches: "0",
+  });
+  const result = parseEvidenceReview(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.kill_switch_active, null);
+  assert.equal(result.data.reconcile_total_mismatches, null);
 });
 
 test("parsePremarketRevalidation: missing notes defaults to empty string", () => {

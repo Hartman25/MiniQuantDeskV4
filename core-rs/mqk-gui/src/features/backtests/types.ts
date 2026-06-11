@@ -103,6 +103,7 @@ export interface ArtifactBundle {
   paperReadiness: FileResult<PaperReadinessParseResult>;
   watchlistPromotion: FileResult<WatchlistPromotionParseResult>;
   premarketRevalidation: FileResult<PremarketRevalidationParseResult>;
+  evidenceReview: FileResult<EvidenceReviewParseResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +268,40 @@ export interface PremarketRevalidationArtifact {
 
 export type PremarketRevalidationParseResult =
   | { kind: "ok"; data: PremarketRevalidationArtifact }
+  | { kind: "unsupported_schema"; schemaVersion: string | null }
+  | { kind: "malformed"; message: string }
+  | { kind: "missing_fields"; message: string };
+
+// ---------------------------------------------------------------------------
+// GUI-EVIDENCE-DISCORD-LINKS-SURFACE-BUNDLE-01: review-v2 evidence review artifact types
+// ---------------------------------------------------------------------------
+
+export interface EvidenceReviewArtifact {
+  schema_version: string;
+  classification: string;
+  classification_reasons: string[];
+  folder_name: string | null;
+  reviewed_at: string | null;
+  capture_ts: string | null;
+  runtime_status: string | null;
+  arm_state: string | null;
+  kill_switch_active: boolean | null;
+  integrity_halt_active: boolean | null;
+  risk_halt_active: boolean | null;
+  live_routing_enabled: boolean | null;
+  deadman_status: string | null;
+  reconcile_status: string | null;
+  reconcile_total_mismatches: number | null;
+  fill_count: number | null;
+  open_order_count: number | null;
+  position_count: number | null;
+  autonomous_flatten_available: boolean | null;
+  autonomous_flatten_blockers: string | null;
+  autonomous_next_operator_action: string | null;
+}
+
+export type EvidenceReviewParseResult =
+  | { kind: "ok"; data: EvidenceReviewArtifact }
   | { kind: "unsupported_schema"; schemaVersion: string | null }
   | { kind: "malformed"; message: string }
   | { kind: "missing_fields"; message: string };

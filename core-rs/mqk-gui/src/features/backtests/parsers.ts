@@ -2,6 +2,8 @@ import type {
   BacktestManifest,
   BacktestMetrics,
   EquityCurveRow,
+  EvidenceReviewArtifact,
+  EvidenceReviewParseResult,
   FillRow,
   OrderRow,
   PaperReadinessParseResult,
@@ -585,6 +587,82 @@ export function parsePremarketRevalidation(json: string): PremarketRevalidationP
     top_symbol: typeof a.top_symbol === "string" ? a.top_symbol : null,
     symbol_results: asSymbolPremarketResults(a.symbol_results),
     notes: typeof a.notes === "string" ? a.notes : "",
+  };
+
+  return { kind: "ok", data };
+}
+
+// ---------------------------------------------------------------------------
+// GUI-EVIDENCE-DISCORD-LINKS-SURFACE-BUNDLE-01: review-v2 evidence review parser
+// ---------------------------------------------------------------------------
+
+export const EVIDENCE_REVIEW_SCHEMA_VERSION = "review-v2";
+
+/**
+ * Parse a review_summary.json artifact (review-v2 schema, produced by
+ * scripts/windows/Review-PaperSmokeEvidence.ps1).
+ *
+ * Never throws. Returns one of: ok / unsupported_schema / malformed / missing_fields.
+ *
+ * `classification` is passed through exactly as reported (e.g.
+ * NATURAL-TRADE-LIFECYCLE-CLOSED, READINESS-CLOSED-NO-TRADE, PARTIAL, OPEN,
+ * FALSE-CLOSED) -- never fabricated, inferred, or upgraded toward a closed
+ * state. Safety-relevant fields (kill_switch_active, integrity_halt_active,
+ * risk_halt_active, live_routing_enabled, autonomous_flatten_available)
+ * default to null ("not reported by this review") when absent or of the
+ * wrong type, rather than a fabricated false/healthy default.
+ */
+export function parseEvidenceReview(json: string): EvidenceReviewParseResult {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(json);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { kind: "malformed", message: `review_summary.json: invalid JSON (${message})` };
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+    return { kind: "malformed", message: "review_summary.json: expected a JSON object" };
+  }
+  const a = obj as Record<string, unknown>;
+
+  const schemaVersion = typeof a.schema_version === "string" ? a.schema_version : null;
+  if (schemaVersion !== EVIDENCE_REVIEW_SCHEMA_VERSION) {
+    return { kind: "unsupported_schema", schemaVersion };
+  }
+
+  const classification = a.classification;
+  if (typeof classification !== "string") {
+    return { kind: "missing_fields", message: "review_summary.json: missing classification" };
+  }
+
+  const classificationReasons = Array.isArray(a.classification_reasons)
+    ? a.classification_reasons.filter((r): r is string => typeof r === "string")
+    : [];
+
+  const nullableBoolean = (value: unknown): boolean | null => (typeof value === "boolean" ? value : null);
+
+  const data: EvidenceReviewArtifact = {
+    schema_version: schemaVersion,
+    classification,
+    classification_reasons: classificationReasons,
+    folder_name: nullableString(a.folder_name),
+    reviewed_at: nullableString(a.reviewed_at),
+    capture_ts: nullableString(a.capture_ts),
+    runtime_status: nullableString(a.runtime_status),
+    arm_state: nullableString(a.arm_state),
+    kill_switch_active: nullableBoolean(a.kill_switch_active),
+    integrity_halt_active: nullableBoolean(a.integrity_halt_active),
+    risk_halt_active: nullableBoolean(a.risk_halt_active),
+    live_routing_enabled: nullableBoolean(a.live_routing_enabled),
+    deadman_status: nullableString(a.deadman_status),
+    reconcile_status: nullableString(a.reconcile_status),
+    reconcile_total_mismatches: nullableNumber(a.reconcile_total_mismatches),
+    fill_count: nullableNumber(a.fill_count),
+    open_order_count: nullableNumber(a.open_order_count),
+    position_count: nullableNumber(a.position_count),
+    autonomous_flatten_available: nullableBoolean(a.autonomous_flatten_available),
+    autonomous_flatten_blockers: nullableString(a.autonomous_flatten_blockers),
+    autonomous_next_operator_action: nullableString(a.autonomous_next_operator_action),
   };
 
   return { kind: "ok", data };

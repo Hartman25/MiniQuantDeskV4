@@ -13,6 +13,7 @@ import {
   PAPER_READINESS_STATUS_READY_FOR_OPERATOR_REVIEW,
   PAPER_READINESS_STATUS_READY_FOR_PAPER_HANDOFF,
   parseEquityCurve,
+  parseEvidenceReview,
   parseFills,
   parseManifest,
   parseMetrics,
@@ -94,6 +95,7 @@ async function loadBundle(folder: string): Promise<ArtifactBundle> {
     paperReadiness,
     watchlistPromotion,
     premarketRevalidation,
+    evidenceReview,
   ] = await Promise.all([
     loadFileResult(folder, "manifest.json", parseManifest),
     loadFileResult(folder, "metrics.json", parseMetrics),
@@ -104,6 +106,7 @@ async function loadBundle(folder: string): Promise<ArtifactBundle> {
     loadFileResult(folder, "readiness_report.json", parsePaperReadiness),
     loadFileResult(folder, "promoted_watchlist.json", parseWatchlistPromotion),
     loadFileResult(folder, "premarket_revalidation.json", parsePremarketRevalidation),
+    loadFileResult(folder, "review_summary.json", parseEvidenceReview),
   ]);
   return {
     manifest,
@@ -115,6 +118,7 @@ async function loadBundle(folder: string): Promise<ArtifactBundle> {
     paperReadiness,
     watchlistPromotion,
     premarketRevalidation,
+    evidenceReview,
   };
 }
 
