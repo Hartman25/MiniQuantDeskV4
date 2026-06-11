@@ -60,6 +60,24 @@ This calls five read-only endpoints and prints a compact summary:
 No daemon call is required before running this script; it fails soft if the
 daemon is offline.
 
+**Before the daemon is started at all** (e.g. first thing in the morning,
+before double-clicking the desktop icon), run the desktop launcher's own
+read-only preflight instead:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Launch-VeritasLedger.ps1 -CheckOnly
+```
+
+This reports repo root, `.env.local` presence (never its contents), Docker
+and paper-DB-container status, daemon binary / GUI binary presence, AAPL/5m
+`md_bars` count and freshness, the persisted `sys_arm_state`, and -- if a
+daemon happens to already be reachable -- `live_routing_enabled`,
+`runtime_status`, `kill_switch_active`, and reconcile status, plus a "Next
+action" recommendation. It does not start, build, arm, or call the daemon,
+GUI, broker, or Discord, and does not require `.env.local` or
+`MQK_OPERATOR_TOKEN` to be present. The desktop shortcut is unaffected --
+double-clicking it (no `-CheckOnly`) still performs the normal startup.
+
 For raw endpoint triage:
 
 ```
@@ -649,9 +667,11 @@ These items are **open** and require market-hours observation to close.
 | `Run-AAPL5mMarketSmoke.ps1` | AAPL/5m smoke orchestrator | Yes (via smoke) |
 | `Capture-PaperSmokeEvidence.ps1` | Evidence bundle capture (API + DB snapshots) | No |
 | `Review-PaperSmokeEvidence.ps1` | Evidence classification and summary | No |
-| `Launch-VeritasLedger.ps1` | Normal desktop startup (daemon + GUI) | No (unless -ArmPaper) |
+| `Launch-VeritasLedger.ps1` | Normal desktop startup (daemon + GUI). `-CheckOnly` prints a read-only startup status report and exits -- no start/build/arm | No (unless -ArmPaper); `-CheckOnly` is always read-only |
 | `Prep-PremarketMarketData.ps1` | Market data bar prep (md_bars only) | Yes (md_bars only) |
 | `Refresh-IntradayMarketData.ps1` | Intraday 5m bar refresh | Yes (md_bars only) |
 | `Register-PremarketDataRefreshTask.ps1` | Windows scheduled task for premarket data | Yes (task only) |
 
-Guard script: `tests\script_guards\test_paper_operator_status.ps1` (OPS01-OPS11)
+Guard scripts:
+- `tests\script_guards\test_paper_operator_status.ps1` (OPS01-OPS11)
+- `tests\script_guards\test_launch_veritas_ledger.ps1` (LVL01-LVL17)

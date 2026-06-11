@@ -156,6 +156,22 @@ Do not skip step 3.  Without it the daemon will find the prior run in HALTED sta
 
 Run these before the session window opens on any new paper day.
 
+**Before the daemon is started at all** (e.g. before double-clicking the
+desktop icon), an optional read-only preflight is available:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Launch-VeritasLedger.ps1 -CheckOnly
+```
+
+This reports `.env.local` presence (never its contents), Docker / paper-DB
+status, daemon and GUI binary presence, AAPL/5m `md_bars` freshness, the
+persisted `sys_arm_state`, and -- if a daemon is already reachable --
+`live_routing_enabled` / `runtime_status` / `kill_switch_active` / reconcile
+status, plus a "Next action" recommendation. It does not start, build, arm,
+or call the daemon, GUI, broker, or Discord. The desktop shortcut itself is
+unchanged -- double-clicking it (no `-CheckOnly`) still performs the normal
+startup. See `operator_control_surface.md` §1 for the full field list.
+
 ### 5a. Health
 
 ```

@@ -41,7 +41,14 @@ param(
     #   is verified and the GUI is launched.
     #   Calls Capture-PaperSmokeEvidence.ps1 -Label launcher_startup.
     #   Non-fatal: a capture failure warns but does not abort the launcher.
-    [switch]$CaptureStartupEvidence
+    [switch]$CaptureStartupEvidence,
+
+    # -CheckOnly: read-only startup status report (PAPER-OPERATOR-STARTUP-LAUNCHER-01).
+    #   Prints repo/.env.local/Docker/paper-DB/daemon/GUI/AAPL bars/sys_arm_state/
+    #   live-daemon-truth status and a "Next action" recommendation, then exits.
+    #   Does not start, build, arm, or call the daemon, GUI, broker, or Discord.
+    #   Does not require .env.local or MQK_OPERATOR_TOKEN to be present.
+    [switch]$CheckOnly
 )
 
 Set-StrictMode -Version Latest
@@ -1229,12 +1236,327 @@ throw "Verified canonical backend is not trade-ready. $existingReasonText"
     }
 }
 
+# =============================================================================
+# PAPER-OPERATOR-STARTUP-LAUNCHER-01: -CheckOnly read-only status report.
+#
+# Helpers below are read-only: no docker start/exec mutations beyond
+# read-only `pg_isready`/`psql SELECT`, no daemon mutating routes, no
+# broker calls, no Discord, no .env.local contents printed.
+# =============================================================================
+
+function Write-CheckField {
+    param([string]$Label, $Value)
+    Write-Host ("  {0,-34} {1}" -f "${Label}:", $Value)
+}
+
+function Get-JsonField {
+    param($Obj, [string]$Field, $Default = 'unknown')
+    if ($null -eq $Obj) { return $Default }
+    $prop = $Obj.PSObject.Properties[$Field]
+    if ($null -eq $prop -or $null -eq $prop.Value) { return $Default }
+    return $prop.Value
+}
+
+function Format-CheckOnlyBoolField {
+    param($Value)
+    if ($Value -is [bool]) {
+        if ($Value) { return 'true' } else { return 'false' }
+    }
+    return $Value
+}
+
+function Get-PaperDbContainerStatus {
+    param([Parameter(Mandatory = $true)][string]$ContainerName)
+    try {
+        $null = Get-Command 'docker' -ErrorAction Stop
+    } catch {
+        return 'docker_unavailable'
+    }
+    try {
+        $inspect = docker inspect $ContainerName 2>&1
+        if ($LASTEXITCODE -ne 0) { return 'missing' }
+        $inspectJson = $inspect | ConvertFrom-Json
+        $status = $inspectJson[0].State.Status
+        if ($status -eq 'running') { return 'running' }
+        return "stopped:$status"
+    } catch {
+        return 'unreachable'
+    }
+}
+
+function Get-CheckOnlyMdBarSummary {
+    param(
+        [Parameter(Mandatory = $true)][string]$ContainerName,
+        [Parameter(Mandatory = $true)][string]$Symbol,
+        [Parameter(Mandatory = $true)][string]$Timeframe
+    )
+    $result = [pscustomobject]@{ completed_count = $null; latest_bar = $null; query_ok = $false }
+    try {
+        $countQ = "SELECT count(*) FROM md_bars WHERE symbol='$Symbol' AND timeframe='$Timeframe' AND is_complete=true"
+        $rawC = docker exec $ContainerName psql -U postgres -d miniquantdesk_paper -t -A -q -c $countQ 2>$null
+        $numC = ($rawC -join '') -replace '\s', ''
+        if ($numC -notmatch '^\d+$') { return $result }
+        $result.completed_count = [int]$numC
+
+        $maxQ = "SELECT to_char(to_timestamp(max(end_ts)) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') FROM md_bars WHERE symbol='$Symbol' AND timeframe='$Timeframe' AND is_complete=true"
+        $rawM = docker exec $ContainerName psql -U postgres -d miniquantdesk_paper -t -A -q -c $maxQ 2>$null
+        $lineM = ($rawM -join '').Trim()
+        if (-not [string]::IsNullOrWhiteSpace($lineM)) { $result.latest_bar = (($lineM -replace ' ', 'T') + 'Z') }
+
+        $result.query_ok = $true
+    } catch {}
+    return $result
+}
+
+function Get-CheckOnlyArmStateSummary {
+    param([Parameter(Mandatory = $true)][string]$ContainerName)
+    $result = [pscustomobject]@{ state = $null; reason = $null; query_ok = $false }
+    try {
+        $armQ = "SELECT state, coalesce(reason, '') FROM sys_arm_state WHERE sentinel_id = 1"
+        $rawA = docker exec $ContainerName psql -U postgres -d miniquantdesk_paper -t -A -q -F'|' -c $armQ 2>$null
+        $lineA = ($rawA -join '').Trim()
+        if ($lineA -match '\|') {
+            $parts = $lineA -split '\|'
+            if ($parts.Count -ge 2) {
+                $result.state  = $parts[0].Trim()
+                $result.reason = $parts[1].Trim()
+                if ([string]::IsNullOrWhiteSpace($result.reason)) { $result.reason = $null }
+            }
+        }
+        $result.query_ok = $true
+    } catch {}
+    return $result
+}
+
+function Invoke-CheckOnlyDaemonGet {
+    param([Parameter(Mandatory = $true)][string]$BaseUrl, [Parameter(Mandatory = $true)][string]$Path)
+    try {
+        $resp = Invoke-JsonRequest -Method 'GET' -Url ($BaseUrl.TrimEnd('/') + $Path)
+        return $resp.Json
+    } catch {
+        return $null
+    }
+}
+
+function Invoke-StartupCheckOnly {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    $PaperDbContainerName = 'mqk-paper-postgres'
+    $DaemonBaseUrl = 'http://127.0.0.1:8899'
+
+    Write-Host ''
+    Write-Host '=== Veritas Ledger Startup -- CheckOnly ===' -ForegroundColor Cyan
+    Write-Host '    Read-only status report. No daemon/GUI start, no build, no arm,' -ForegroundColor DarkGray
+    Write-Host '    no broker calls, no DB writes, no Discord alerts.' -ForegroundColor DarkGray
+    Write-Host ''
+
+    $hardFailure = $false
+
+    # 1. Repo root
+    Write-CheckField 'Repo root detected' $RepoRoot
+
+    # 2. .env.local present (presence only -- contents never read or printed)
+    $envLocalPath = Join-Path $RepoRoot '.env.local'
+    $envLocalPresent = Test-Path $envLocalPath
+    if ($envLocalPresent) {
+        Write-CheckField '.env.local present' 'yes (contents not read or printed)'
+    } else {
+        Write-CheckField '.env.local present' 'no'
+        $hardFailure = $true
+    }
+
+    # 3. Docker available
+    $dockerAvailable = $false
+    try {
+        $null = Get-Command 'docker' -ErrorAction Stop
+        $dockerAvailable = $true
+        Write-CheckField 'Docker available' 'yes'
+    } catch {
+        Write-CheckField 'Docker available' 'no'
+        $hardFailure = $true
+    }
+
+    # 4. Paper DB container (read-only `docker inspect`)
+    $dbStatus = Get-PaperDbContainerStatus -ContainerName $PaperDbContainerName
+    $dbStatusDisplay = switch -Regex ($dbStatus) {
+        '^running$'            { 'RUNNING' }
+        '^missing$'            { 'MISSING (container not created)' }
+        '^stopped:'            { "STOPPED ($($dbStatus.Substring(8)))" }
+        '^docker_unavailable$' { 'UNKNOWN (docker unavailable)' }
+        default                { 'UNREACHABLE' }
+    }
+    Write-CheckField "Paper DB container ($PaperDbContainerName)" $dbStatusDisplay
+
+    # 5. Paper DB port (cross-checked against MQK_DATABASE_URL if loaded)
+    $dbUrl = $env:MQK_DATABASE_URL
+    if (-not [string]::IsNullOrWhiteSpace($dbUrl) -and $dbUrl -match ':5440') {
+        Write-CheckField 'Paper DB port' 'expected localhost:5440 (confirmed in MQK_DATABASE_URL)'
+    } elseif (-not [string]::IsNullOrWhiteSpace($dbUrl)) {
+        Write-CheckField 'Paper DB port' 'expected localhost:5440 (MQK_DATABASE_URL set but does not match -- verify)'
+    } else {
+        Write-CheckField 'Paper DB port' 'expected localhost:5440 (MQK_DATABASE_URL not set)'
+    }
+
+    # 6. mqk-daemon binary (Test-Path only -- Resolve-DaemonBinary throws if missing)
+    $daemonExePath = Join-Path $RepoRoot 'core-rs\target\release\mqk-daemon.exe'
+    if (Test-Path $daemonExePath) {
+        Write-CheckField 'mqk-daemon binary exists' "yes ($daemonExePath)"
+    } else {
+        Write-CheckField 'mqk-daemon binary exists' 'no (will build on launch)'
+    }
+
+    # 7. Daemon health endpoint (fail-soft GET, no auth required)
+    $health = Invoke-CheckOnlyDaemonGet -BaseUrl $DaemonBaseUrl -Path '/v1/health'
+    $daemonReachable = $null -ne $health
+    if ($daemonReachable) {
+        $serviceName = Get-JsonField -Obj $health -Field 'service' -Default '(unknown)'
+        Write-CheckField 'Daemon health endpoint reachable' "yes (service=$serviceName)"
+    } else {
+        Write-CheckField 'Daemon health endpoint reachable' 'no (expected before startup)'
+    }
+
+    # 8. GUI package
+    $guiPackagePath = Join-Path $RepoRoot 'core-rs\mqk-gui\package.json'
+    if (Test-Path $guiPackagePath) {
+        Write-CheckField 'GUI package exists' "yes ($guiPackagePath)"
+    } else {
+        Write-CheckField 'GUI package exists' 'no'
+    }
+
+    # 9. GUI node_modules
+    $guiNodeModulesPath = Join-Path $RepoRoot 'core-rs\mqk-gui\node_modules'
+    if (Test-Path $guiNodeModulesPath) {
+        Write-CheckField 'GUI node_modules present' 'yes'
+    } else {
+        Write-CheckField 'GUI node_modules present' 'no (npm ci will run on launch)'
+    }
+
+    # 10. GUI desktop binary (Resolve-GuiBinary is non-throwing / non-mutating)
+    $guiExePath = Resolve-GuiBinary -RepoRoot $RepoRoot
+    if ($null -ne $guiExePath) {
+        Write-CheckField 'GUI desktop binary built' "yes ($guiExePath)"
+    } else {
+        Write-CheckField 'GUI desktop binary built' 'no (will build on launch)'
+    }
+
+    # 11. AAPL/5m bars (symbol/timeframe resolved from env, default AAPL/5m)
+    $barSymbol = if (-not [string]::IsNullOrWhiteSpace($env:MQK_STRATEGY_SYMBOL)) { $env:MQK_STRATEGY_SYMBOL } else { 'AAPL' }
+    $barTimeframe = if (-not [string]::IsNullOrWhiteSpace($env:MQK_STRATEGY_MD_TIMEFRAME)) { $env:MQK_STRATEGY_MD_TIMEFRAME } else { '5m' }
+    $barsLabel = "$barSymbol/$barTimeframe bars"
+    if ($dbStatus -eq 'running') {
+        $pgReady = $false
+        try {
+            $null = docker exec $PaperDbContainerName pg_isready -U postgres -d miniquantdesk_paper 2>$null
+            $pgReady = ($LASTEXITCODE -eq 0)
+        } catch {}
+        if ($pgReady) {
+            $barSummary = Get-CheckOnlyMdBarSummary -ContainerName $PaperDbContainerName -Symbol $barSymbol -Timeframe $barTimeframe
+            if ($barSummary.query_ok) {
+                $latestText = if ($null -ne $barSummary.latest_bar) { $barSummary.latest_bar } else { '(none)' }
+                Write-CheckField $barsLabel "$($barSummary.completed_count) rows, latest $latestText"
+            } else {
+                Write-CheckField $barsLabel 'UNKNOWN (md_bars query failed)'
+            }
+        } else {
+            Write-CheckField $barsLabel 'UNKNOWN (paper DB not ready)'
+        }
+    } else {
+        Write-CheckField $barsLabel 'UNKNOWN (paper DB container not running)'
+    }
+
+    # 12. Persisted sys_arm_state (read-only SELECT against the durable singleton row)
+    $armState = $null
+    $armReason = $null
+    if ($dbStatus -eq 'running') {
+        $armSummary = Get-CheckOnlyArmStateSummary -ContainerName $PaperDbContainerName
+        if ($armSummary.query_ok -and $null -ne $armSummary.state) {
+            $armState = $armSummary.state
+            $armReason = $armSummary.reason
+            $armDisplay = if ($null -ne $armReason) { "$armState, reason=$armReason" } else { $armState }
+            Write-CheckField 'Persisted sys_arm_state' $armDisplay
+        } else {
+            Write-CheckField 'Persisted sys_arm_state' 'UNKNOWN (sys_arm_state query failed or empty)'
+        }
+    } else {
+        Write-CheckField 'Persisted sys_arm_state' 'UNKNOWN (paper DB container not running)'
+    }
+
+    # 13-16. Live daemon truth (fail-soft GETs, only if daemon reachable)
+    $liveRoutingEnabled = $null
+    $runtimeStatus = 'unknown'
+    $killSwitchActive = $null
+    $reconcileStatus = 'unknown'
+    if ($daemonReachable) {
+        $sysStatus = Invoke-CheckOnlyDaemonGet -BaseUrl $DaemonBaseUrl -Path '/api/v1/system/status'
+        $liveRoutingEnabled = Get-JsonField -Obj $sysStatus -Field 'live_routing_enabled' -Default 'unknown'
+        $runtimeStatus = Get-JsonField -Obj $sysStatus -Field 'runtime_status' -Default 'unknown'
+        $killSwitchActive = Get-JsonField -Obj $sysStatus -Field 'kill_switch_active' -Default 'unknown'
+
+        $reconcile = Invoke-CheckOnlyDaemonGet -BaseUrl $DaemonBaseUrl -Path '/api/v1/reconcile/status'
+        $reconcileStatus = Get-JsonField -Obj $reconcile -Field 'status' -Default 'unknown'
+
+        Write-CheckField 'Live routing' (Format-CheckOnlyBoolField $liveRoutingEnabled)
+        Write-CheckField 'Runtime status' $runtimeStatus
+        Write-CheckField 'Kill switch' (Format-CheckOnlyBoolField $killSwitchActive)
+        Write-CheckField 'Reconcile' $reconcileStatus
+    } else {
+        Write-CheckField 'Live routing' 'unknown (daemon offline)'
+        Write-CheckField 'Runtime status' 'unknown (daemon offline)'
+        Write-CheckField 'Kill switch' 'unknown (daemon offline)'
+        Write-CheckField 'Reconcile' 'unknown (daemon offline)'
+    }
+
+    if ($liveRoutingEnabled -eq $true) {
+        Write-Host ''
+        Write-Host '  DANGER: live_routing_enabled=true on a reachable daemon.' -ForegroundColor Red
+        Write-Host '  Investigate before proceeding. Do not start, arm, or trade.' -ForegroundColor Red
+    }
+
+    # 17. Next safe operator action (priority order, most urgent first)
+    Write-Host ''
+    if (-not $envLocalPresent) {
+        $nextAction = 'Copy .env.local.example to .env.local and fill in credentials, then re-run -CheckOnly.'
+    } elseif (-not $dockerAvailable) {
+        $nextAction = 'Start Docker Desktop, then re-run -CheckOnly.'
+    } elseif ($liveRoutingEnabled -eq $true) {
+        $nextAction = 'DANGER: live_routing_enabled=true. Investigate immediately. Do not start, arm, or trade.'
+    } elseif ($daemonReachable -and $armState -eq 'HALTED') {
+        $nextAction = "Persisted arm state is HALTED (reason=$armReason). Do not manually clear or arm. Run Get-PaperOperatorStatus.ps1 for full halt context first."
+    } elseif ($daemonReachable -and $reconcileStatus -eq 'dirty') {
+        $nextAction = 'Reconcile status is dirty. Run Get-PaperOperatorStatus.ps1 to review the mismatch before proceeding.'
+    } elseif ($daemonReachable) {
+        $nextAction = 'Daemon is already reachable. Run Get-PaperOperatorStatus.ps1 for full live status, or run Launch-VeritasLedger.ps1 (no -CheckOnly) to attach the GUI.'
+    } elseif ($dbStatus -ne 'running') {
+        $nextAction = "Paper DB container ($PaperDbContainerName) is not running. Start Docker Desktop / the container, then re-run -CheckOnly."
+    } elseif ($armState -eq 'DISARMED') {
+        $nextAction = "Persisted arm state is DISARMED (reason=$armReason). Do not manually clear or arm -- normal startup re-verifies fresh daemon state. If market is open, run Run-AAPL5mMarketSmoke.ps1 -CheckOnly before smoke."
+    } else {
+        $nextAction = 'Prerequisites look OK. If market is open, run Run-AAPL5mMarketSmoke.ps1 -CheckOnly before a smoke run, otherwise run Launch-VeritasLedger.ps1 (no -CheckOnly) for a normal startup.'
+    }
+    Write-CheckField 'Next action' $nextAction
+
+    Write-Host ''
+    if ($hardFailure) {
+        Write-Host '=== CheckOnly: prerequisite check FAILED (see above) ===' -ForegroundColor Red
+        return 1
+    } else {
+        Write-Host '=== CheckOnly complete ===' -ForegroundColor Cyan
+        return 0
+    }
+}
+
 # DESKTOP-LAUNCH-01: Outer catch surfaces any startup failure in the console
 # window before it closes, so the operator can read the error instead of
 # seeing a flash-and-close with no diagnostic information.
 try {
     $repoRoot = Get-RepoRoot
     Import-LauncherEnvironmentFiles -RepoRoot $repoRoot
+
+    if ($CheckOnly.IsPresent) {
+        $checkOnlyExitCode = Invoke-StartupCheckOnly -RepoRoot $repoRoot
+        exit $checkOnlyExitCode
+    }
+
     $operatorToken = Resolve-RequiredOperatorToken
     $envSnapshot = Set-LauncherEnvironment -OperatorToken $operatorToken -RepoRoot $repoRoot
 
@@ -1245,6 +1567,7 @@ try {
         $forceRebuildGui = $RebuildGui.IsPresent -or $rebuildAll
 
         Write-LauncherStep "Launcher mode: $(Get-ModeDisplayName -LauncherMode $Mode)"
+        Write-LauncherStep 'Tip: run with -CheckOnly first for a read-only startup status summary (no daemon/GUI start).'
 
         # Market-data gate — runs before daemon binary resolution so failures are fast.
         # -CheckMarketData: read-only bar-count/freshness check; fails launcher if not met.
