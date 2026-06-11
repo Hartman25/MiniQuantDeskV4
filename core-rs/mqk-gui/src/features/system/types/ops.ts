@@ -20,6 +20,11 @@ export interface FeedEvent {
   severity: Severity;
   source: string;
   text: string;
+  // GUI-HALT-CAUSE-TIMELINE-SURFACE-01: present on rows backed by audit_events
+  // (e.g. orchestrator_halt, operator_action, signal_admission); null for
+  // rows derived from runs/autonomous-session tables that carry no run/audit linkage.
+  run_id: string | null;
+  audit_event_id: string | null;
 }
 
 export interface AuditActionRow {

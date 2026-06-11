@@ -114,10 +114,10 @@ export const MOCK_ALERTS: OperatorAlert[] = [
 ];
 
 export const MOCK_FEED: FeedEvent[] = [
-  { id: "f1", at: iso(1), severity: "info", source: "runtime", text: "Heartbeat received. Runtime loop latency 186 ms." },
-  { id: "f2", at: iso(2), severity: "warning", source: "reconcile", text: "Order drift detected on NVDA internal order O-240308-001." },
-  { id: "f3", at: iso(3), severity: "info", source: "risk", text: "No active hard breaches. Loss-limit utilization 41.8%." },
-  { id: "f4", at: iso(4), severity: "warning", source: "market-data", text: "Quote staleness crossed soft threshold for AMD." },
+  { id: "f1", at: iso(1), severity: "info", source: "runtime", text: "Heartbeat received. Runtime loop latency 186 ms.", run_id: null, audit_event_id: null },
+  { id: "f2", at: iso(2), severity: "warning", source: "reconcile", text: "Order drift detected on NVDA internal order O-240308-001.", run_id: null, audit_event_id: null },
+  { id: "f3", at: iso(3), severity: "info", source: "risk", text: "No active hard breaches. Loss-limit utilization 41.8%.", run_id: null, audit_event_id: null },
+  { id: "f4", at: iso(4), severity: "warning", source: "market-data", text: "Quote staleness crossed soft threshold for AMD.", run_id: null, audit_event_id: null },
 ];
 
 export const MOCK_EXECUTION_SUMMARY: ExecutionSummary = {

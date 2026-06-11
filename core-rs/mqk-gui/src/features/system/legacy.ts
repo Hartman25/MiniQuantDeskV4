@@ -846,6 +846,8 @@ export function mapEventsFeedResponse(wrapper: EventsFeedWrapper): FeedEvent[] {
     severity: "info" as const,
     source: row.kind,
     text: row.detail,
+    run_id: row.run_id ?? null,
+    audit_event_id: row.audit_event_id ?? null,
   }));
 }
 
