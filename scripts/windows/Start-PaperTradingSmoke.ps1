@@ -133,6 +133,39 @@ function Get-PaperMdBarSummary {
 }
 
 # ---------------------------------------------------------------------------
+# Helper: Get-PaperArmStateSummary
+# PAPER-SMOKE-RETEST-PREP-BUNDLE-01: Queries the persisted sys_arm_state
+# singleton row (state, reason) read-only via docker exec psql. This is the
+# durable arm/halt state written by persist_arm_state_canonical and survives
+# daemon restarts. Returns $null fields on query failure.
+# Does NOT call clear-halted-run, arm-execution, or any mutating route.
+# ---------------------------------------------------------------------------
+function Get-PaperArmStateSummary {
+    $result = [pscustomobject]@{
+        state    = $null
+        reason   = $null
+        query_ok = $false
+    }
+    try {
+        $armQ  = "SELECT state, coalesce(reason, '') FROM sys_arm_state WHERE sentinel_id = 1"
+        $rawA  = docker exec mqk-paper-postgres psql -U postgres -d miniquantdesk_paper -t -A -q -F'|' -c $armQ 2>$null
+        $lineA = ($rawA -join '').Trim()
+        if ($lineA -match '\|') {
+            $parts = $lineA -split '\|'
+            if ($parts.Count -ge 2) {
+                $result.state  = $parts[0].Trim()
+                $result.reason = $parts[1].Trim()
+                if ([string]::IsNullOrWhiteSpace($result.reason)) { $result.reason = $null }
+            }
+        }
+        $result.query_ok = $true
+    } catch {
+        # query failure -- return with query_ok=false
+    }
+    return $result
+}
+
+# ---------------------------------------------------------------------------
 # Helper: Write-EvidenceCapture
 # On startup failure, captures daemon log paths and (if daemon is up) dumps
 # status endpoints to an evidence folder under exports\smoke\evidence_*.
@@ -248,6 +281,36 @@ if ($CheckOnly) {
         }
     } catch {
         Write-Warn "STEP 5B dry-check: docker not available -- skipping bar count."
+    }
+
+    # STEP 5C dry-check: query persisted sys_arm_state (read-only, no clear/arm)
+    # PAPER-SMOKE-RETEST-PREP-BUNDLE-01: surfaces the durable arm/halt state
+    # left over from the prior session so the operator knows what STEP 10 of
+    # the full run will see. This check NEVER calls clear-halted-run or
+    # arm-execution -- it only reports the persisted DB row.
+    try {
+        $null = Get-Command 'docker' -ErrorAction Stop
+        $coPgCheck2 = docker exec mqk-paper-postgres pg_isready -U postgres -d miniquantdesk_paper 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $coArm = Get-PaperArmStateSummary
+            if ($coArm.query_ok -and $null -ne $coArm.state) {
+                $coArmReason = if ($null -ne $coArm.reason) { $coArm.reason } else { '(none)' }
+                Write-Ok ("STEP 5C dry-check: persisted sys_arm_state = $($coArm.state)  reason=$coArmReason")
+                if ($coArm.state -eq 'DISARMED') {
+                    Write-Warn "Persisted arm state is DISARMED. This reflects the prior session's halt/disarm reason."
+                    Write-Warn "STEP 10 of the full run reads kill_switch_active / arm_state / runtime_status from the FRESH daemon and automatically runs disarm-execution -> clear-halted-run -> arm-execution if a halted state is detected."
+                    Write-Warn "No manual clear-halted-run or arm-execution call is required before running the full smoke."
+                } else {
+                    Write-Ok "Persisted sys_arm_state = ARMED. STEP 10 still re-verifies kill_switch_active / runtime_status on the fresh daemon before proceeding."
+                }
+            } else {
+                Write-Warn "STEP 5C dry-check: could not query sys_arm_state (table may be empty or DB unavailable in CheckOnly)."
+            }
+        } else {
+            Write-Warn "STEP 5C dry-check: paper Postgres container not ready -- skipping arm-state check."
+        }
+    } catch {
+        Write-Warn "STEP 5C dry-check: docker not available -- skipping arm-state check."
     }
 
     Write-Section "CHECK-ONLY complete"

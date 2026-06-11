@@ -558,6 +558,18 @@ if ($step12Block.Success) {
 }
 
 # ---------------------------------------------------------------------------
+# OPR33: CheckOnly mode covers STEP 5C persisted arm-state dry-check
+# PAPER-SMOKE-RETEST-PREP-BUNDLE-01 -- read-only sys_arm_state visibility so
+# CheckOnly can tell the operator whether STEP 10 will need to auto-recover
+# a halted run, without requiring a daemon to be running.
+# ---------------------------------------------------------------------------
+if ($scriptText -match 'STEP 5C dry-check' -and $scriptText -match 'sys_arm_state' -and $scriptText -match 'Get-PaperArmStateSummary') {
+    Pass 'OPR33' 'CheckOnly mode covers STEP 5C persisted arm-state dry-check (sys_arm_state)'
+} else {
+    Fail 'OPR33' 'CheckOnly mode must include STEP 5C persisted arm-state dry-check via Get-PaperArmStateSummary/sys_arm_state'
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Write-Host ""
