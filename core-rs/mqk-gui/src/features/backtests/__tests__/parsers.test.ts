@@ -14,6 +14,7 @@ import {
   parseOrders,
   parsePaperReadiness,
   parseStrategyFit,
+  parseWatchlistPromotion,
 } from "../parsers.ts";
 
 // --- microsToUsd ---
@@ -877,4 +878,326 @@ test("parsePaperReadiness: null top_symbol and symbol_inputs_status handled", ()
   if (result.kind !== "ok") return;
   assert.equal(result.data.top_symbol, null);
   assert.equal(result.data.symbol_inputs_status, null);
+});
+
+// --- parseWatchlistPromotion ---
+
+test("parseWatchlistPromotion: valid approved artifact (real AAPL watchlist-v1 shape)", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v1",
+    generated_at_utc: "2026-06-05T00:00:00+00:00",
+    trade_date: "2026-06-08",
+    mode: "paper",
+    approved_for_autonomous_paper: true,
+    approved_for_live: false,
+    max_symbols_to_trade: 1,
+    max_concurrent_positions: 1,
+    symbols: ["AAPL"],
+    strategy_assignments: { AAPL: "intraday_scalper" },
+    paper_qty_limits: { AAPL: 1 },
+    notional_limits: { AAPL: 1000.0 },
+    ranked_candidates: [
+      {
+        rank: 1,
+        symbol: "AAPL",
+        strategy_id: "intraday_scalper",
+        regime_label: "trending_up",
+        regime_score: 0.82,
+        net_expectancy_after_cost_bps: 7.0,
+      },
+    ],
+    selection_reason: "ranked_candidate_artifact_chain_proof",
+    promotion_decision: {
+      passed: true,
+      failure_reasons: [],
+      approved_symbols: ["AAPL"],
+      strategy_assignments: { AAPL: "intraday_scalper" },
+      notes: "promotion_passed",
+    },
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.mode, "paper");
+  assert.equal(result.data.approved_for_autonomous_paper, true);
+  assert.equal(result.data.approved_for_live, false);
+  assert.deepEqual(result.data.symbols, ["AAPL"]);
+  assert.deepEqual(result.data.strategy_assignments, { AAPL: "intraday_scalper" });
+  assert.deepEqual(result.data.paper_qty_limits, { AAPL: 1 });
+  assert.deepEqual(result.data.notional_limits, { AAPL: 1000.0 });
+  assert.equal(result.data.ranked_candidates.length, 1);
+  assert.equal(result.data.ranked_candidates[0].symbol, "AAPL");
+  assert.equal(result.data.ranked_candidates[0].rank, 1);
+  assert.equal(result.data.promotion_decision?.passed, true);
+  assert.deepEqual(result.data.promotion_decision?.approved_symbols, ["AAPL"]);
+  assert.equal(result.data.top_symbol, "AAPL");
+  assert.deepEqual(result.data.hardInvariantAnomalies, []);
+});
+
+test("parseWatchlistPromotion: valid blocked artifact (no symbols approved, ranked_candidates still present)", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v1",
+    mode: "paper",
+    approved_for_autonomous_paper: false,
+    approved_for_live: false,
+    max_symbols_to_trade: 1,
+    max_concurrent_positions: 1,
+    symbols: [],
+    strategy_assignments: {},
+    ranked_candidates: [
+      { rank: 1, symbol: "MSFT", strategy_id: "intraday_scalper", regime_label: "choppy", regime_score: 0.41 },
+    ],
+    selection_reason: "blocked_by_promotion_gate",
+    promotion_decision: {
+      passed: false,
+      failure_reasons: ["strategy_fit_not_recommended_for_paper", "operator_review_required"],
+      approved_symbols: [],
+      strategy_assignments: {},
+      notes: "blocked: strategy_fit_not_recommended_for_paper; operator_review_required",
+    },
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.approved_for_autonomous_paper, false);
+  assert.deepEqual(result.data.symbols, []);
+  assert.equal(result.data.promotion_decision?.passed, false);
+  assert.deepEqual(result.data.promotion_decision?.failure_reasons, [
+    "strategy_fit_not_recommended_for_paper",
+    "operator_review_required",
+  ]);
+  assert.equal(result.data.top_symbol, "MSFT");
+  assert.deepEqual(result.data.hardInvariantAnomalies, []);
+});
+
+test("parseWatchlistPromotion: unsupported schema_version is explicit", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v0",
+    symbols: [],
+    approved_for_autonomous_paper: false,
+    promotion_decision: {
+      passed: false,
+      failure_reasons: [],
+      approved_symbols: [],
+      strategy_assignments: {},
+      notes: "",
+    },
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "unsupported_schema");
+  if (result.kind !== "unsupported_schema") return;
+  assert.equal(result.schemaVersion, "watchlist-v0");
+});
+
+test("parseWatchlistPromotion: missing schema_version is unsupported (not assumed)", () => {
+  const json = JSON.stringify({
+    symbols: [],
+    approved_for_autonomous_paper: false,
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "unsupported_schema");
+  if (result.kind !== "unsupported_schema") return;
+  assert.equal(result.schemaVersion, null);
+});
+
+test("parseWatchlistPromotion: malformed JSON is explicit", () => {
+  const result = parseWatchlistPromotion("{bad json}");
+  assert.equal(result.kind, "malformed");
+});
+
+test("parseWatchlistPromotion: non-object JSON is malformed", () => {
+  const result = parseWatchlistPromotion("[1,2,3]");
+  assert.equal(result.kind, "malformed");
+});
+
+test("parseWatchlistPromotion: missing symbols is missing_fields", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v1",
+    approved_for_autonomous_paper: false,
+    promotion_decision: {
+      passed: false,
+      failure_reasons: [],
+      approved_symbols: [],
+      strategy_assignments: {},
+      notes: "",
+    },
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "missing_fields");
+});
+
+test("parseWatchlistPromotion: missing approved_for_autonomous_paper is missing_fields", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v1",
+    symbols: [],
+    promotion_decision: {
+      passed: false,
+      failure_reasons: [],
+      approved_symbols: [],
+      strategy_assignments: {},
+      notes: "",
+    },
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "missing_fields");
+});
+
+test("parseWatchlistPromotion: missing promotion_decision is missing_fields", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v1",
+    symbols: ["AAPL"],
+    approved_for_autonomous_paper: true,
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "missing_fields");
+});
+
+test("parseWatchlistPromotion: explicit approved_for_live=true is passed through and flagged as anomaly", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v1",
+    symbols: ["AAPL"],
+    approved_for_autonomous_paper: true,
+    approved_for_live: true,
+    promotion_decision: {
+      passed: true,
+      failure_reasons: ["live_approval_forbidden"],
+      approved_symbols: ["AAPL"],
+      strategy_assignments: {},
+      notes: "",
+    },
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.approved_for_live, true);
+  assert.ok(result.data.hardInvariantAnomalies.includes("watchlist_approved_for_live_true"));
+});
+
+test("parseWatchlistPromotion: missing approved_for_live defaults false, no anomaly", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v1",
+    symbols: [],
+    approved_for_autonomous_paper: false,
+    promotion_decision: {
+      passed: false,
+      failure_reasons: [],
+      approved_symbols: [],
+      strategy_assignments: {},
+      notes: "",
+    },
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.approved_for_live, false);
+  assert.deepEqual(result.data.hardInvariantAnomalies, []);
+});
+
+test("parseWatchlistPromotion: top_symbol falls back to symbols[0] when no rank-1 candidate present", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v1",
+    symbols: ["TSLA"],
+    approved_for_autonomous_paper: true,
+    ranked_candidates: [{ rank: 2, symbol: "NVDA" }],
+    promotion_decision: {
+      passed: true,
+      failure_reasons: [],
+      approved_symbols: ["TSLA"],
+      strategy_assignments: {},
+      notes: "",
+    },
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.top_symbol, "TSLA");
+});
+
+test("parseWatchlistPromotion: top_symbol is null when symbols and ranked_candidates are both empty", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v1",
+    symbols: [],
+    approved_for_autonomous_paper: false,
+    promotion_decision: {
+      passed: false,
+      failure_reasons: [],
+      approved_symbols: [],
+      strategy_assignments: {},
+      notes: "",
+    },
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.top_symbol, null);
+});
+
+test("parseWatchlistPromotion: ranked_candidates with partial fields parsed leniently (missing fields default to null)", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v1",
+    symbols: ["AAPL"],
+    approved_for_autonomous_paper: true,
+    ranked_candidates: [{ rank: 1, symbol: "AAPL", strategy_id: "intraday_scalper" }],
+    promotion_decision: {
+      passed: true,
+      failure_reasons: [],
+      approved_symbols: ["AAPL"],
+      strategy_assignments: {},
+      notes: "",
+    },
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  const candidate = result.data.ranked_candidates[0];
+  assert.equal(candidate.rank, 1);
+  assert.equal(candidate.symbol, "AAPL");
+  assert.equal(candidate.strategy_id, "intraday_scalper");
+  assert.equal(candidate.timeframe, null);
+  assert.equal(candidate.total_score, null);
+  assert.equal(candidate.liquidity_score, null);
+  assert.equal(candidate.regime_label, null);
+  assert.equal(candidate.net_expectancy_after_cost_bps, null);
+});
+
+test("parseWatchlistPromotion: non-string entries in symbols and non-string values in strategy_assignments are filtered out", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v1",
+    symbols: ["AAPL", 42, null, "MSFT"],
+    approved_for_autonomous_paper: true,
+    strategy_assignments: { AAPL: "intraday_scalper", MSFT: 7 },
+    promotion_decision: {
+      passed: true,
+      failure_reasons: [],
+      approved_symbols: ["AAPL", "MSFT"],
+      strategy_assignments: {},
+      notes: "",
+    },
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.deepEqual(result.data.symbols, ["AAPL", "MSFT"]);
+  assert.deepEqual(result.data.strategy_assignments, { AAPL: "intraday_scalper" });
+});
+
+test("parseWatchlistPromotion: non-object entries in ranked_candidates are skipped", () => {
+  const json = JSON.stringify({
+    schema_version: "watchlist-v1",
+    symbols: ["AAPL"],
+    approved_for_autonomous_paper: true,
+    ranked_candidates: ["not-an-object", { rank: 1, symbol: "AAPL" }, 42],
+    promotion_decision: {
+      passed: true,
+      failure_reasons: [],
+      approved_symbols: ["AAPL"],
+      strategy_assignments: {},
+      notes: "",
+    },
+  });
+  const result = parseWatchlistPromotion(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.ranked_candidates.length, 1);
+  assert.equal(result.data.ranked_candidates[0].symbol, "AAPL");
 });

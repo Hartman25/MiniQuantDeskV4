@@ -7,9 +7,13 @@ import type {
   PaperReadinessParseResult,
   PaperReadinessReport,
   ParsedCsvResult,
+  RankedCandidate,
   StrategyFitArtifact,
   StrategyFitGateFlags,
   StrategyFitParseResult,
+  WatchlistPromotionArtifact,
+  WatchlistPromotionDecision,
+  WatchlistPromotionParseResult,
 } from "./types.ts";
 
 export function parseManifest(json: string): BacktestManifest {
@@ -344,6 +348,166 @@ export function parsePaperReadiness(json: string): PaperReadinessParseResult {
     artifacts_read: asNullableStringRecord(a.artifacts_read),
     artifacts_written: asNullableStringRecord(a.artifacts_written),
     notes: typeof a.notes === "string" ? a.notes : "",
+    hardInvariantAnomalies,
+  };
+
+  return { kind: "ok", data };
+}
+
+// ---------------------------------------------------------------------------
+// WATCHLIST-PROMOTION-DETAIL-GUI-SURFACE-BUNDLE-02: watchlist-v1 promotion artifact parser
+// ---------------------------------------------------------------------------
+
+export const WATCHLIST_PROMOTION_SCHEMA_VERSION = "watchlist-v1";
+
+// Hard-invariant anomaly id — surfaced when a loaded promoted_watchlist.json
+// reports an unsafe value for a field apply_watchlist_promotion() always forces.
+export const ANOMALY_WATCHLIST_APPROVED_FOR_LIVE_TRUE = "watchlist_approved_for_live_true";
+
+function asStringRecord(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === "string") out[k] = v;
+  }
+  return out;
+}
+
+function asNumberRecord(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v === "number") out[k] = v;
+  }
+  return out;
+}
+
+function nullableString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function nullableNumber(value: unknown): number | null {
+  return typeof value === "number" ? value : null;
+}
+
+function asRankedCandidates(value: unknown): RankedCandidate[] {
+  if (!Array.isArray(value)) return [];
+  const out: RankedCandidate[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const c = item as Record<string, unknown>;
+    out.push({
+      rank: nullableNumber(c.rank),
+      symbol: nullableString(c.symbol),
+      strategy_id: nullableString(c.strategy_id),
+      timeframe: nullableString(c.timeframe),
+      total_score: nullableNumber(c.total_score),
+      liquidity_score: nullableNumber(c.liquidity_score),
+      regime_label: nullableString(c.regime_label),
+      regime_score: nullableNumber(c.regime_score),
+      risk_score: nullableNumber(c.risk_score),
+      net_expectancy_after_cost_bps: nullableNumber(c.net_expectancy_after_cost_bps),
+      paper_qty_limit: nullableNumber(c.paper_qty_limit),
+      notional_limit_usd: nullableNumber(c.notional_limit_usd),
+      selection_reason: nullableString(c.selection_reason),
+      source_candidate_artifact: nullableString(c.source_candidate_artifact),
+    });
+  }
+  return out;
+}
+
+function asPromotionDecision(value: unknown): WatchlistPromotionDecision | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const d = value as Record<string, unknown>;
+  if (typeof d.passed !== "boolean") return null;
+  const failureReasons = Array.isArray(d.failure_reasons)
+    ? d.failure_reasons.filter((r): r is string => typeof r === "string")
+    : [];
+  const approvedSymbols = Array.isArray(d.approved_symbols)
+    ? d.approved_symbols.filter((s): s is string => typeof s === "string")
+    : [];
+  return {
+    passed: d.passed,
+    failure_reasons: failureReasons,
+    approved_symbols: approvedSymbols,
+    strategy_assignments: asStringRecord(d.strategy_assignments),
+    notes: typeof d.notes === "string" ? d.notes : "",
+  };
+}
+
+function deriveTopSymbol(rankedCandidates: RankedCandidate[], symbols: string[]): string | null {
+  const rankOne = rankedCandidates.find((c) => c.rank === 1 && c.symbol !== null);
+  if (rankOne) return rankOne.symbol;
+  return symbols.length > 0 ? symbols[0] : null;
+}
+
+/**
+ * Parse a promoted_watchlist.json artifact (watchlist-v1 schema).
+ *
+ * Never throws. Returns one of: ok / unsupported_schema / malformed / missing_fields.
+ * approved_for_live is a hard invariant always forced false by the producer
+ * (apply_watchlist_promotion). If a loaded artifact reports true, the value is
+ * passed through unchanged and recorded in hardInvariantAnomalies rather than
+ * silently corrected or hidden.
+ *
+ * top_symbol is not a literal field in this artifact — it is derived from the
+ * rank-1 entry of ranked_candidates, falling back to symbols[0].
+ */
+export function parseWatchlistPromotion(json: string): WatchlistPromotionParseResult {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(json);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { kind: "malformed", message: `promoted_watchlist.json: invalid JSON (${message})` };
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+    return { kind: "malformed", message: "promoted_watchlist.json: expected a JSON object" };
+  }
+  const a = obj as Record<string, unknown>;
+
+  const schemaVersion = typeof a.schema_version === "string" ? a.schema_version : null;
+  if (schemaVersion !== WATCHLIST_PROMOTION_SCHEMA_VERSION) {
+    return { kind: "unsupported_schema", schemaVersion };
+  }
+
+  if (!Array.isArray(a.symbols)) {
+    return { kind: "missing_fields", message: "promoted_watchlist.json: missing symbols" };
+  }
+  const symbols = a.symbols.filter((s): s is string => typeof s === "string");
+
+  if (typeof a.approved_for_autonomous_paper !== "boolean") {
+    return { kind: "missing_fields", message: "promoted_watchlist.json: missing approved_for_autonomous_paper" };
+  }
+
+  const promotionDecision = asPromotionDecision(a.promotion_decision);
+  if (promotionDecision === null) {
+    return { kind: "missing_fields", message: "promoted_watchlist.json: missing promotion_decision" };
+  }
+
+  const hardInvariantAnomalies: string[] = [];
+  const approvedForLive = a.approved_for_live === true;
+  if (approvedForLive) hardInvariantAnomalies.push(ANOMALY_WATCHLIST_APPROVED_FOR_LIVE_TRUE);
+
+  const rankedCandidates = asRankedCandidates(a.ranked_candidates);
+
+  const data: WatchlistPromotionArtifact = {
+    schema_version: schemaVersion,
+    mode: nullableString(a.mode),
+    generated_at_utc: nullableString(a.generated_at_utc),
+    trade_date: nullableString(a.trade_date),
+    approved_for_autonomous_paper: a.approved_for_autonomous_paper,
+    approved_for_live: approvedForLive,
+    max_symbols_to_trade: nullableNumber(a.max_symbols_to_trade),
+    max_concurrent_positions: nullableNumber(a.max_concurrent_positions),
+    symbols,
+    strategy_assignments: asStringRecord(a.strategy_assignments),
+    paper_qty_limits: asNumberRecord(a.paper_qty_limits),
+    notional_limits: asNumberRecord(a.notional_limits),
+    ranked_candidates: rankedCandidates,
+    selection_reason: nullableString(a.selection_reason),
+    promotion_decision: promotionDecision,
+    top_symbol: deriveTopSymbol(rankedCandidates, symbols),
     hardInvariantAnomalies,
   };
 

@@ -180,6 +180,72 @@ export type PaperReadinessParseResult =
   | { kind: "missing_fields"; message: string };
 
 // ---------------------------------------------------------------------------
+// WATCHLIST-PROMOTION-DETAIL-GUI-SURFACE-BUNDLE-02: watchlist-v1 promotion artifact types
+// ---------------------------------------------------------------------------
+
+export interface RankedCandidate {
+  rank: number | null;
+  symbol: string | null;
+  strategy_id: string | null;
+  timeframe: string | null;
+  total_score: number | null;
+  liquidity_score: number | null;
+  regime_label: string | null;
+  regime_score: number | null;
+  risk_score: number | null;
+  net_expectancy_after_cost_bps: number | null;
+  paper_qty_limit: number | null;
+  notional_limit_usd: number | null;
+  selection_reason: string | null;
+  source_candidate_artifact: string | null;
+}
+
+export interface WatchlistPromotionDecision {
+  passed: boolean;
+  failure_reasons: string[];
+  approved_symbols: string[];
+  strategy_assignments: Record<string, string>;
+  notes: string;
+}
+
+export interface WatchlistPromotionArtifact {
+  schema_version: string;
+  mode: string | null;
+  generated_at_utc: string | null;
+  trade_date: string | null;
+  approved_for_autonomous_paper: boolean;
+  approved_for_live: boolean;
+  max_symbols_to_trade: number | null;
+  max_concurrent_positions: number | null;
+  symbols: string[];
+  strategy_assignments: Record<string, string>;
+  paper_qty_limits: Record<string, number>;
+  notional_limits: Record<string, number>;
+  ranked_candidates: RankedCandidate[];
+  selection_reason: string | null;
+  promotion_decision: WatchlistPromotionDecision | null;
+  /**
+   * Not a literal field in promoted_watchlist.json. Derived from the rank-1
+   * entry of ranked_candidates, falling back to symbols[0] if no rank-1
+   * candidate is present. Null if neither is available.
+   */
+  top_symbol: string | null;
+  /**
+   * approved_for_live is forced to false by the producer's
+   * apply_watchlist_promotion(). If a loaded artifact reports true, it is
+   * passed through honestly and its anomaly id is recorded here rather than
+   * silently corrected or hidden.
+   */
+  hardInvariantAnomalies: string[];
+}
+
+export type WatchlistPromotionParseResult =
+  | { kind: "ok"; data: WatchlistPromotionArtifact }
+  | { kind: "unsupported_schema"; schemaVersion: string | null }
+  | { kind: "malformed"; message: string }
+  | { kind: "missing_fields"; message: string };
+
+// ---------------------------------------------------------------------------
 // BACKTEST-GUI-RUNNER-01: Daemon backtest job API types
 // ---------------------------------------------------------------------------
 
