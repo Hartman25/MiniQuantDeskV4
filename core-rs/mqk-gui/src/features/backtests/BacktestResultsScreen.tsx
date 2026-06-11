@@ -4,6 +4,7 @@ import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
 import { formatDateTime } from "../../lib/format";
 import {
+  DISCORD_WORKFLOWS,
   EVIDENCE_REVIEW_SCHEMA_VERSION,
   formatMicrosAsDollars,
   formatNullableNumber,
@@ -1389,6 +1390,50 @@ function EvidenceReviewContent({ artifact }: { artifact: EvidenceReviewParseResu
   );
 }
 
+// ---------------------------------------------------------------------------
+// Discord observability workflow guidance (static, read-only reference)
+// ---------------------------------------------------------------------------
+
+function DiscordWorkflowsPanel() {
+  return (
+    <Panel
+      title="Discord observability workflows"
+      subtitle="Reference guidance for offline, operator-triggered Discord alert workflows. See docs/runbooks/operator_control_surface.md section 8 'Discord Observation Checklist'."
+    >
+      <div className="unavailable-notice">
+        Static reference only -- the GUI does not read .env.local, send Discord alerts, call any
+        Discord webhook, or invoke these scripts.
+      </div>
+      {DISCORD_WORKFLOWS.map((workflow) => (
+        <div key={workflow.name} style={{ marginTop: 12 }}>
+          <span className="eyebrow">{workflow.name}</span>
+          <p style={{ fontSize: "0.85rem" }}>{workflow.purpose}</p>
+          <div className="timeline-meta-grid">
+            <div>
+              <span>Check-only command</span>
+              <strong style={{ fontFamily: "monospace", fontSize: "0.78rem", wordBreak: "break-all" }}>
+                {workflow.checkOnlyCommand}
+              </strong>
+            </div>
+            <div>
+              <span>Required env (presence only)</span>
+              <strong style={{ fontFamily: "monospace" }}>{workflow.requiredEnv.join(", ")}</strong>
+            </div>
+          </div>
+          <p style={{ fontFamily: "monospace", fontSize: "0.78rem" }}>{workflow.sendsInNormalMode}</p>
+          <ul>
+            {workflow.safetyNotes.map((note, i) => (
+              <li key={i} style={{ fontSize: "0.8rem" }}>
+                {note}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </Panel>
+  );
+}
+
 function EquityCurveSection({
   result,
 }: {
@@ -1646,6 +1691,7 @@ function ArtifactDisplay({ bundle }: { bundle: ArtifactBundle }) {
       <WatchlistPromotionPanel result={bundle.watchlistPromotion} />
       <PremarketRevalidationPanel result={bundle.premarketRevalidation} />
       <EvidenceReviewPanel result={bundle.evidenceReview} />
+      <DiscordWorkflowsPanel />
 
       <EquityCurveSection result={bundle.equityCurve} />
       <OrdersSection result={bundle.orders} />

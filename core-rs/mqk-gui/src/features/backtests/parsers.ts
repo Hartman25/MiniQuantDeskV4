@@ -667,3 +667,76 @@ export function parseEvidenceReview(json: string): EvidenceReviewParseResult {
 
   return { kind: "ok", data };
 }
+
+// ---------------------------------------------------------------------------
+// GUI-EVIDENCE-DISCORD-LINKS-SURFACE-BUNDLE-01: static Discord workflow guidance
+//
+// This is reference documentation only. It does not read .env.local, send
+// Discord alerts, call any webhook, or invoke these scripts. Commands and
+// safety notes mirror the verbatim behavior documented in the corresponding
+// scripts/windows/*.ps1 headers and docs/runbooks/operator_control_surface.md
+// section 8 ("Discord Observation Checklist").
+// ---------------------------------------------------------------------------
+
+export interface DiscordWorkflowGuidance {
+  name: string;
+  purpose: string;
+  checkOnlyCommand: string;
+  sendsInNormalMode: string;
+  requiredEnv: string[];
+  safetyNotes: string[];
+}
+
+export const DISCORD_WORKFLOWS: DiscordWorkflowGuidance[] = [
+  {
+    name: "Test-DiscordAlert.ps1",
+    purpose:
+      "Verify Discord alert delivery configuration without starting the daemon trading runtime, arming paper trading, or touching broker/Alpaca endpoints.",
+    checkOnlyCommand: "powershell -ExecutionPolicy Bypass -File scripts\\windows\\Test-DiscordAlert.ps1 -CheckOnly",
+    sendsInNormalMode:
+      "Normal mode sends one [TEST] Discord alert via the daemon route POST /api/v1/ops/action {\"action_key\":\"test-discord-alert\"}. -CheckOnly never issues this request.",
+    requiredEnv: ["DISCORD_WEBHOOK_URL", "MQK_OPERATOR_TOKEN"],
+    safetyNotes: [
+      "Does not start the daemon trading runtime or arm paper trading.",
+      "Does not submit, cancel, or replace any order.",
+      "Does not call any broker or market-data endpoint, and does not write to the database.",
+      "Only checks whether DISCORD_WEBHOOK_URL and MQK_OPERATOR_TOKEN are configured (presence only) -- values are never printed.",
+    ],
+  },
+  {
+    name: "Send-PaperReadinessDiscordAlert.ps1",
+    purpose:
+      "Send a sanitized Discord summary for one offline paper-readiness-v1 or strategy-fit-v1 artifact JSON file.",
+    checkOnlyCommand:
+      "powershell -ExecutionPolicy Bypass -File scripts\\windows\\Send-PaperReadinessDiscordAlert.ps1 -ArtifactPath <path> -CheckOnly",
+    sendsInNormalMode:
+      "Normal mode sends exactly one sanitized summary directly to DISCORD_WEBHOOK_URL (the daemon is never contacted). -CheckOnly never issues this POST.",
+    requiredEnv: ["DISCORD_WEBHOOK_URL"],
+    safetyNotes: [
+      "Operator-triggered only; never invoked automatically by any pipeline.",
+      "Does not start the daemon trading runtime, arm paper trading, or submit/cancel/replace any order.",
+      "Does not call any broker or market-data endpoint, and does not write to the database.",
+      "Sends the artifact file name only -- never the local path -- and never sends raw artifact JSON.",
+      "Refuses to send (fail-closed) if the artifact reports recommended_for_live, approved_for_live, or eligible_for_live = true, or appears to contain a webhook URL or secret/token.",
+      "DISCORD_WEBHOOK_URL value is never printed.",
+    ],
+  },
+  {
+    name: "Send-PaperSmokeReviewDiscordAlert.ps1",
+    purpose:
+      "Send a sanitized Discord summary for one offline paper-smoke evidence review (review_summary.json, preferred, or review_summary.md).",
+    checkOnlyCommand:
+      "powershell -ExecutionPolicy Bypass -File scripts\\windows\\Send-PaperSmokeReviewDiscordAlert.ps1 -ReviewPath <path> -CheckOnly",
+    sendsInNormalMode:
+      "Normal mode sends exactly one sanitized summary directly to DISCORD_WEBHOOK_URL (the daemon is never contacted). -CheckOnly never issues this POST.",
+    requiredEnv: ["DISCORD_WEBHOOK_URL"],
+    safetyNotes: [
+      "Operator-triggered only; never invoked automatically by any pipeline.",
+      "Does not start the daemon trading runtime, arm paper trading, or submit/cancel/replace any order.",
+      "Does not call any broker or market-data endpoint, write to the database, or change evidence classification logic / paper-readiness gates.",
+      "Sends the evidence folder name and review file name only -- never the local path -- and never sends raw review contents.",
+      "Refuses to send (fail-closed) if recommended_for_live, approved_for_live, or eligible_for_live = true is present, a webhook URL or secret/token appears in the review, or the classification is missing/unrecognized.",
+      "DISCORD_WEBHOOK_URL value is never printed.",
+    ],
+  },
+];

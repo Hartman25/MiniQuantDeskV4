@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   deriveStrategyFitGateFlags,
+  DISCORD_WORKFLOWS,
   formatMicrosAsDollars,
   formatNullableNumber,
   formatNullablePercent,
@@ -1586,4 +1587,55 @@ test("parsePremarketRevalidation: missing notes defaults to empty string", () =>
   assert.equal(result.kind, "ok");
   if (result.kind !== "ok") return;
   assert.equal(result.data.notes, "");
+});
+
+// --- DISCORD_WORKFLOWS (static guidance data) ---
+
+test("DISCORD_WORKFLOWS: covers exactly the three offline Discord scripts", () => {
+  const names = DISCORD_WORKFLOWS.map((w) => w.name);
+  assert.deepEqual(names, [
+    "Test-DiscordAlert.ps1",
+    "Send-PaperReadinessDiscordAlert.ps1",
+    "Send-PaperSmokeReviewDiscordAlert.ps1",
+  ]);
+});
+
+test("DISCORD_WORKFLOWS: every check-only command targets the matching script with -CheckOnly", () => {
+  for (const workflow of DISCORD_WORKFLOWS) {
+    assert.ok(
+      workflow.checkOnlyCommand.includes(`scripts\\windows\\${workflow.name}`),
+      `${workflow.name}: command does not reference its own script`,
+    );
+    assert.ok(
+      workflow.checkOnlyCommand.includes("-CheckOnly"),
+      `${workflow.name}: command is missing -CheckOnly`,
+    );
+  }
+});
+
+test("DISCORD_WORKFLOWS: every workflow declares DISCORD_WEBHOOK_URL as a required env var", () => {
+  for (const workflow of DISCORD_WORKFLOWS) {
+    assert.ok(
+      workflow.requiredEnv.includes("DISCORD_WEBHOOK_URL"),
+      `${workflow.name}: DISCORD_WEBHOOK_URL missing from requiredEnv`,
+    );
+  }
+});
+
+test("DISCORD_WORKFLOWS: every workflow has non-empty purpose, sendsInNormalMode, and safety notes", () => {
+  for (const workflow of DISCORD_WORKFLOWS) {
+    assert.ok(workflow.purpose.length > 0, `${workflow.name}: empty purpose`);
+    assert.ok(workflow.sendsInNormalMode.length > 0, `${workflow.name}: empty sendsInNormalMode`);
+    assert.ok(workflow.safetyNotes.length > 0, `${workflow.name}: empty safetyNotes`);
+  }
+});
+
+test("DISCORD_WORKFLOWS: no command or note references .env.local or a webhook URL value", () => {
+  for (const workflow of DISCORD_WORKFLOWS) {
+    const text = [workflow.purpose, workflow.checkOnlyCommand, workflow.sendsInNormalMode, ...workflow.safetyNotes].join(
+      "\n",
+    );
+    assert.ok(!text.includes(".env.local"), `${workflow.name}: references .env.local`);
+    assert.ok(!/discord(?:app)?\.com\/api\/webhooks\//i.test(text), `${workflow.name}: references a webhook URL`);
+  }
 });
