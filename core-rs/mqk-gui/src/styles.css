@@ -2159,6 +2159,16 @@ ul {
   color: rgba(245, 165, 35, 0.88);
 }
 
+.panel-notice-critical {
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.05);
+  color: var(--critical);
+}
+
+.panel-notice-critical strong {
+  color: var(--critical);
+}
+
 /* --- Ops: section sub-headings within the mode-transition panel --- */
 
 .check-list-heading {

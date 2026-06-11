@@ -6,6 +6,7 @@ import type { SystemModel } from "../system/types";
 import { formatDateTime, formatLatency } from "../../lib/format";
 import { MetricStripChart } from "../execution/components/MetricStripChart";
 import { panelTruthRenderState } from "../system/truthRendering";
+import { deriveLatestHaltSummary, type HaltSummaryStatus } from "../system/haltSummary";
 
 type DashTab = "posture" | "snapshots" | "desk";
 
@@ -14,6 +15,34 @@ const TABS: { key: DashTab; label: string }[] = [
   { key: "snapshots", label: "Snapshots" },
   { key: "desk", label: "Desk setup" },
 ];
+
+const HALT_STATUS_LABELS: Record<HaltSummaryStatus, string> = {
+  active_halt: "Active halt",
+  recent_halt: "Recent halt (not currently halted)",
+  no_halt: "No halt",
+  unknown: "Unknown",
+};
+
+function severityToneClass(severity: "info" | "warning" | "critical"): string {
+  switch (severity) {
+    case "critical":
+      return "val-critical";
+    case "warning":
+      return "val-warn";
+    default:
+      return "val-ok";
+  }
+}
+
+function boolLabel(value: boolean | null, whenTrue: string, whenFalse: string): string {
+  if (value === null) return "Unknown";
+  return value ? whenTrue : whenFalse;
+}
+
+function boolToneClass(value: boolean | null, whenTrueClass: string): string {
+  if (value === null) return "val-muted";
+  return value ? whenTrueClass : "val-ok";
+}
 
 export function DashboardScreen({ model }: { model: SystemModel }) {
   const [activeTab, setActiveTab] = useState<DashTab>("posture");
@@ -37,6 +66,8 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
     openOrders,
     fills,
   } = model;
+
+  const haltSummary = deriveLatestHaltSummary(model);
 
   return (
     <div className="screen-grid desk-screen-grid">
@@ -76,6 +107,75 @@ export function DashboardScreen({ model }: { model: SystemModel }) {
           tone={preflight.blockers.length > 0 ? "bad" : preflight.warnings.length > 0 ? "warn" : "good"}
         />
       </div>
+
+      {/* Halt cause & timeline — always visible. Derived from system/status,
+          autonomous/paper-status, and events/feed; never fabricates a
+          healthy/closed state when halt fields are missing or unknown. */}
+      <Panel title="Halt cause & timeline" subtitle="Latest halt reason, run, and recovery posture.">
+        <div className="metric-list">
+          <div>
+            <span>Halt status</span>
+            <strong className={severityToneClass(haltSummary.severity)}>{HALT_STATUS_LABELS[haltSummary.status]}</strong>
+          </div>
+          <div><span>Reason</span><strong>{haltSummary.reason ?? "—"}</strong></div>
+          <div><span>Event time</span><strong>{formatDateTime(haltSummary.timestamp)}</strong></div>
+          <div><span>Run ID</span><strong>{haltSummary.run_id ?? "—"}</strong></div>
+          <div><span>Audit event ID</span><strong>{haltSummary.audit_event_id ?? "—"}</strong></div>
+          <div><span>Source event</span><strong>{haltSummary.source_event ?? "—"}</strong></div>
+          <div>
+            <span>Kill switch</span>
+            <strong className={boolToneClass(haltSummary.kill_switch_active, "val-critical")}>
+              {boolLabel(haltSummary.kill_switch_active, "Active", "Inactive")}
+            </strong>
+          </div>
+          <div>
+            <span>Integrity halt</span>
+            <strong className={boolToneClass(haltSummary.integrity_halt_active, "val-critical")}>
+              {boolLabel(haltSummary.integrity_halt_active, "Active", "Inactive")}
+            </strong>
+          </div>
+          <div>
+            <span>Risk halt</span>
+            <strong className={boolToneClass(haltSummary.risk_halt_active, "val-critical")}>
+              {boolLabel(haltSummary.risk_halt_active, "Active", "Inactive")}
+            </strong>
+          </div>
+          <div>
+            <span>Deadman watchdog</span>
+            <strong className={haltSummary.deadman_status === "ok" ? "val-ok" : haltSummary.deadman_status === "expired" ? "val-warn" : "val-muted"}>
+              {haltSummary.deadman_status ?? "unknown"}
+            </strong>
+          </div>
+          <div>
+            <span>Live routing</span>
+            <strong className={boolToneClass(haltSummary.live_routing_enabled, "val-critical")}>
+              {boolLabel(haltSummary.live_routing_enabled, "Enabled", "Disabled")}
+            </strong>
+          </div>
+          <div>
+            <span>Reconcile (autonomous)</span>
+            <strong className={haltSummary.reconcile_status === "ok" ? "val-ok" : haltSummary.reconcile_status === "dirty" || haltSummary.reconcile_status === "stale" ? "val-warn" : "val-muted"}>
+              {haltSummary.reconcile_status ?? "unknown"}
+            </strong>
+          </div>
+          <div><span>Next operator action</span><strong>{haltSummary.next_operator_action ?? "—"}</strong></div>
+        </div>
+        {haltSummary.status === "active_halt" && (
+          <p className="panel-notice panel-notice-critical">
+            <strong>Active halt.</strong> Do not re-arm blindly. Review evidence and follow the halt recovery workflow.
+          </p>
+        )}
+        {haltSummary.status === "recent_halt" && (
+          <p className="panel-notice panel-notice-warn">
+            A halt event was recorded for this run. The system is not currently halted, but review the halt recovery
+            workflow before treating this run as clean.
+          </p>
+        )}
+        {haltSummary.status === "no_halt" && <p className="panel-notice">No halt recorded for this run.</p>}
+        {haltSummary.status === "unknown" && (
+          <p className="panel-notice panel-notice-warn">Halt status unavailable — no daemon connection established.</p>
+        )}
+      </Panel>
 
       {/* Real-time runtime metrics — always visible */}
       <div className="metrics-grid desk-panel-row">
