@@ -61,7 +61,8 @@ $Guards = @(
     'test_discord_test_alert_offline.ps1',
     'test_discord_paper_readiness_alerts.ps1',
     'test_discord_evidence_review_alerts.ps1',
-    'test_launch_veritas_ledger.ps1'
+    'test_launch_veritas_ledger.ps1',
+    'test_paper_premarket_validation.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()

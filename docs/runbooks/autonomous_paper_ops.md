@@ -156,6 +156,20 @@ Do not skip step 3.  Without it the daemon will find the prior run in HALTED sta
 
 Run these before the session window opens on any new paper day.
 
+**If the repo has been edited since the last session** (new commits, patches,
+doc edits), validate the repo first:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Invoke-PaperPremarketValidation.ps1
+```
+
+This runs script guards, GUI tests/build, and targeted Rust baseline/reconcile
+tests. It is **not** `full_repo_proof.ps1` and is much cheaper -- and it does
+not start, build-and-run, or arm the daemon, clear a halted run, flatten,
+trade, run a market smoke, or call Discord/broker. See
+`operator_control_surface.md` §0 for the full check list and flags. Proceed
+to the checks below only on `FINAL: PASS`.
+
 **Before the daemon is started at all** (e.g. before double-clicking the
 desktop icon), an optional read-only preflight is available:
 
@@ -392,6 +406,7 @@ soak_<timestamp>.tar.gz       # packaged review bundle
 
 Run this before each autonomous paper day.
 
+- [ ] If repo edited since last session: `Invoke-PaperPremarketValidation.ps1` → `FINAL: PASS`
 - [ ] Daemon is reachable: `GET /v1/health` → `ok = true`
 - [ ] `GET /api/v1/autonomous/readiness` → `truth_state == "active"`
 - [ ] `ws_continuity == "live"` (WS has connected and proven)

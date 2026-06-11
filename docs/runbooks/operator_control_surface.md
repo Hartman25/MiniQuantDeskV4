@@ -5,6 +5,7 @@
 This document is the single reference for every operator action available on
 the paper + autonomous paper trading surface.  It covers:
 
+- Repo/code-change validation before market open (script guards, GUI tests/build, targeted Rust tests)
 - Operator action matrix (every action, endpoint, safety gates, evidence)
 - Monday AAPL smoke quick checklist
 - Safe flatten instructions
@@ -39,6 +40,67 @@ differ (smoke runs require full strict-lifecycle evidence review per §6;
 normal sessions do not).
 
 **Claim boundary:** Autonomous paper session hygiene is code-proven (AUTONOMOUS-PAPER-SESSION-HYGIENE-BUNDLE-01, commit `1d77a72`).  Full market lifecycle proof is still pending.  Do not claim CLOSED on any smoke item until evidence is reviewed and classified `NATURAL-TRADE-LIFECYCLE-CLOSED`.
+
+---
+
+## 0. Repo / Code-Change Validation (Before Market Open)
+
+**Run this first whenever the repo has been edited since the last market
+session** (new commits, patches, doc edits) — *before* §1's status check,
+before `Launch-VeritasLedger.ps1 -CheckOnly`, and before any market-smoke
+retest.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Invoke-PaperPremarketValidation.ps1
+```
+
+This is **not** `full_repo_proof.ps1` and is much cheaper. It answers six
+questions in order, each reported as `PASS` / `FAIL` / `SKIPPED` with elapsed
+time:
+
+1. **Repo status** — confirms repo root, and that the tracked working tree is
+   clean (untracked `evidence/`, `exports/`, logs, and generated artifacts are
+   ignored). Refuses to continue on a dirty tracked tree unless `-AllowDirty`
+   is passed.
+2. **Script guards** — runs `tests\script_guards\run_all_script_guards.ps1`
+   (all guards, `-NonInteractive`).
+3. **GUI tests** — `npm run test` in `core-rs\mqk-gui`.
+4. **GUI build** — `npm run build` in `core-rs\mqk-gui` (typecheck + Vite
+   build). Skip with `-SkipGuiBuild`.
+5. **Rust baseline/reconcile snapshot tests** — targeted `cargo test` runs for
+   `mqk-daemon::state::snapshot`, `scenario_reconcile_baseline_seed_01`, and
+   `scenario_runtime_start_reconcile_baseline_01`. Skip with `-SkipRust`.
+6. **Rust runtime orchestrator tests** — targeted `cargo test -p mqk-runtime
+   --lib orchestrator`. Skip with `-SkipRust`.
+
+**Flags:**
+- `-AllowDirty` — allow a dirty tracked working tree (still reports it).
+- `-SkipGuiBuild` — skip step 4.
+- `-SkipRust` — skip steps 5 and 6.
+- `-Fast` — skip steps 4-6 (repo status + script guards + GUI tests only).
+
+**What this script does NOT do** (by design — it is scripts/tests/build only):
+it does not start, build-and-run, or arm the daemon; does not clear a halted
+run; does not flatten positions; does not submit orders or signals; does not
+call any Alpaca/broker endpoint; does not call a Discord webhook; does not
+read or print `.env.local` contents; does not run `full_repo_proof.ps1`,
+`Run-AAPL5mMarketSmoke.ps1`, or `Start-PaperTradingSmoke.ps1` in normal mode.
+
+**Output:** ends with `FINAL: PASS - safe to proceed to
+Launch-VeritasLedger.ps1 -CheckOnly and market-smoke CheckOnly.` (exit 0) or
+`FINAL: FAIL - <N> of 6 check(s) failed...` naming the first failing command
+(exit 1).
+
+**After `FINAL: PASS`**, proceed to:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Launch-VeritasLedger.ps1 -CheckOnly
+powershell -ExecutionPolicy Bypass -File scripts\windows\Run-AAPL5mMarketSmoke.ps1 -CheckOnly
+```
+
+Guard coverage: `tests\script_guards\test_paper_premarket_validation.ps1`
+(`CI-GUARD-CONSOLIDATION-01`, 15 static assertions PPV01-PPV15) proves the
+script's safety boundaries by source inspection.
 
 ---
 
