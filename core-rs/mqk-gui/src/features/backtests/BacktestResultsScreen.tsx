@@ -4,6 +4,7 @@ import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
 import { formatDateTime } from "../../lib/format";
 import {
+  EVIDENCE_REVIEW_SCHEMA_VERSION,
   formatMicrosAsDollars,
   formatNullableNumber,
   formatNullablePercent,
@@ -43,6 +44,7 @@ import type {
   BacktestMetrics,
   BacktestJobStatusKind,
   EquityCurveRow,
+  EvidenceReviewParseResult,
   FileResult,
   FillRow,
   OrderRow,
@@ -1180,6 +1182,213 @@ function PremarketRevalidationContent({ artifact }: { artifact: PremarketRevalid
   );
 }
 
+// ---------------------------------------------------------------------------
+// Evidence review panel
+// ---------------------------------------------------------------------------
+
+const EVIDENCE_REVIEW_MAX_REASONS = 10;
+
+function evidenceClassificationTone(classification: string): "good" | "bad" | "warn" | "neutral" {
+  if (classification.includes("FALSE-CLOSED")) return "bad";
+  if (classification.includes("CLOSED")) return "good";
+  if (classification === "PARTIAL") return "warn";
+  return "neutral";
+}
+
+function evidenceFlagLabel(value: boolean | null): string {
+  if (value === null) return "—";
+  return value ? "YES" : "NO";
+}
+
+function evidenceFlagTone(value: boolean | null): "good" | "bad" | "neutral" {
+  if (value === null) return "neutral";
+  return value ? "bad" : "good";
+}
+
+function EvidenceReviewPanel({ result }: { result: FileResult<EvidenceReviewParseResult> }) {
+  if (result.kind === "idle" || result.kind === "loading") return null;
+
+  return (
+    <Panel
+      title="Evidence review"
+      subtitle="Paper-smoke evidence review summary from review_summary.json (Review-PaperSmokeEvidence.ps1)."
+    >
+      {result.kind === "missing" && (
+        <div className="empty-state">
+          Evidence review summary not found for this artifact folder.
+        </div>
+      )}
+      {result.kind === "read_error" && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>review_summary.json read error:</strong> {result.message}
+        </div>
+      )}
+      {result.kind === "parse_error" && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>review_summary.json parse error:</strong> {result.message}
+        </div>
+      )}
+      {result.kind === "ok" && <EvidenceReviewContent artifact={result.data} />}
+    </Panel>
+  );
+}
+
+function EvidenceReviewContent({ artifact }: { artifact: EvidenceReviewParseResult }) {
+  if (artifact.kind === "unsupported_schema") {
+    return (
+      <div className="unavailable-notice">
+        <strong>Unsupported evidence-review schema:</strong>{" "}
+        {artifact.schemaVersion ? `'${artifact.schemaVersion}'` : "schema_version missing"} — expected{" "}
+        '{EVIDENCE_REVIEW_SCHEMA_VERSION}'.
+      </div>
+    );
+  }
+
+  if (artifact.kind === "malformed") {
+    return (
+      <div className="unavailable-notice unavailable-critical">
+        <strong>Invalid review_summary.json:</strong> {artifact.message}
+      </div>
+    );
+  }
+
+  if (artifact.kind === "missing_fields") {
+    return (
+      <div className="unavailable-notice unavailable-critical">
+        <strong>review_summary.json missing required fields:</strong> {artifact.message}
+      </div>
+    );
+  }
+
+  const r = artifact.data;
+  const visibleReasons = r.classification_reasons.slice(0, EVIDENCE_REVIEW_MAX_REASONS);
+  const hiddenReasonCount = r.classification_reasons.length - visibleReasons.length;
+  const reviewedAt = r.reviewed_at ?? r.capture_ts;
+  const reconcileTone =
+    r.reconcile_total_mismatches === null ? "neutral" : r.reconcile_total_mismatches > 0 ? "bad" : "good";
+  const flattenTone =
+    r.autonomous_flatten_available === null ? "neutral" : r.autonomous_flatten_available ? "good" : "warn";
+
+  return (
+    <>
+      <div className="timeline-meta-grid">
+        <div>
+          <span>Schema</span>
+          <strong style={{ fontFamily: "monospace" }}>{r.schema_version}</strong>
+        </div>
+        <div>
+          <span>Classification</span>
+          <strong>{r.classification}</strong>
+        </div>
+        <div>
+          <span>Evidence folder</span>
+          <strong style={{ fontFamily: "monospace" }}>{r.folder_name ?? "—"}</strong>
+        </div>
+        <div>
+          <span>Reviewed at</span>
+          <strong>{formatDateTime(reviewedAt)}</strong>
+        </div>
+        <div>
+          <span>Runtime status</span>
+          <strong>{r.runtime_status ?? "—"}</strong>
+        </div>
+        <div>
+          <span>Arm state</span>
+          <strong>{r.arm_state ?? "—"}</strong>
+        </div>
+        <div>
+          <span>Deadman status</span>
+          <strong>{r.deadman_status ?? "—"}</strong>
+        </div>
+      </div>
+
+      <div className="summary-grid summary-grid-five">
+        <StatCard
+          title="Classification"
+          value={r.classification}
+          tone={evidenceClassificationTone(r.classification)}
+        />
+        <StatCard
+          title="Kill switch active"
+          value={evidenceFlagLabel(r.kill_switch_active)}
+          tone={evidenceFlagTone(r.kill_switch_active)}
+        />
+        <StatCard
+          title="Integrity halt active"
+          value={evidenceFlagLabel(r.integrity_halt_active)}
+          tone={evidenceFlagTone(r.integrity_halt_active)}
+        />
+        <StatCard
+          title="Risk halt active"
+          value={evidenceFlagLabel(r.risk_halt_active)}
+          tone={evidenceFlagTone(r.risk_halt_active)}
+        />
+        <StatCard
+          title="Live routing enabled"
+          value={evidenceFlagLabel(r.live_routing_enabled)}
+          tone={evidenceFlagTone(r.live_routing_enabled)}
+        />
+      </div>
+
+      <div className="summary-grid summary-grid-five">
+        <StatCard
+          title="Reconcile status"
+          value={r.reconcile_status ?? "—"}
+          tone={r.reconcile_status === null ? "neutral" : r.reconcile_status === "RECONCILE_CLEAN" ? "good" : "warn"}
+        />
+        <StatCard
+          title="Reconcile mismatches"
+          value={formatNullableNumber(r.reconcile_total_mismatches, 0)}
+          tone={reconcileTone}
+        />
+        <StatCard title="Fill count" value={formatNullableNumber(r.fill_count, 0)} tone="neutral" />
+        <StatCard title="Open order count" value={formatNullableNumber(r.open_order_count, 0)} tone="neutral" />
+        <StatCard title="Position count" value={formatNullableNumber(r.position_count, 0)} tone="neutral" />
+      </div>
+
+      <div className="summary-grid summary-grid-five">
+        <StatCard
+          title="Autonomous flatten available"
+          value={evidenceFlagLabel(r.autonomous_flatten_available)}
+          tone={flattenTone}
+        />
+      </div>
+
+      {visibleReasons.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Classification reasons ({r.classification_reasons.length})</span>
+          <ul>
+            {visibleReasons.map((reason, i) => (
+              <li key={`${reason}-${i}`} style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>
+                {reason}
+              </li>
+            ))}
+          </ul>
+          {hiddenReasonCount > 0 && (
+            <div className="unavailable-notice">
+              + {hiddenReasonCount} more reason(s) not shown.
+            </div>
+          )}
+        </div>
+      )}
+
+      {r.autonomous_flatten_blockers && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Flatten blockers</span>
+          <p style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{r.autonomous_flatten_blockers}</p>
+        </div>
+      )}
+
+      {r.autonomous_next_operator_action && (
+        <div style={{ marginTop: 12 }}>
+          <span className="eyebrow">Next operator action</span>
+          <p style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{r.autonomous_next_operator_action}</p>
+        </div>
+      )}
+    </>
+  );
+}
+
 function EquityCurveSection({
   result,
 }: {
@@ -1436,6 +1645,7 @@ function ArtifactDisplay({ bundle }: { bundle: ArtifactBundle }) {
       <PaperReadinessPanel result={bundle.paperReadiness} />
       <WatchlistPromotionPanel result={bundle.watchlistPromotion} />
       <PremarketRevalidationPanel result={bundle.premarketRevalidation} />
+      <EvidenceReviewPanel result={bundle.evidenceReview} />
 
       <EquityCurveSection result={bundle.equityCurve} />
       <OrdersSection result={bundle.orders} />

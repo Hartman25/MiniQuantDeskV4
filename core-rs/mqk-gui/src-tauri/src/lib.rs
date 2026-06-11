@@ -12,6 +12,7 @@ const ALLOWED_ARTIFACT_FILES: &[&str] = &[
     "readiness_report.json",
     "promoted_watchlist.json",
     "premarket_revalidation.json",
+    "review_summary.json",
 ];
 
 #[derive(Debug, Clone, Serialize)]
