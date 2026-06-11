@@ -7,10 +7,13 @@ import type {
   PaperReadinessParseResult,
   PaperReadinessReport,
   ParsedCsvResult,
+  PremarketRevalidationArtifact,
+  PremarketRevalidationParseResult,
   RankedCandidate,
   StrategyFitArtifact,
   StrategyFitGateFlags,
   StrategyFitParseResult,
+  SymbolPremarketResult,
   WatchlistPromotionArtifact,
   WatchlistPromotionDecision,
   WatchlistPromotionParseResult,
@@ -509,6 +512,79 @@ export function parseWatchlistPromotion(json: string): WatchlistPromotionParseRe
     promotion_decision: promotionDecision,
     top_symbol: deriveTopSymbol(rankedCandidates, symbols),
     hardInvariantAnomalies,
+  };
+
+  return { kind: "ok", data };
+}
+
+// ---------------------------------------------------------------------------
+// WATCHLIST-PROMOTION-DETAIL-GUI-SURFACE-BUNDLE-02: premarket-revalidation-v1 artifact parser
+// ---------------------------------------------------------------------------
+
+export const PREMARKET_REVALIDATION_SCHEMA_VERSION = "premarket-revalidation-v1";
+
+function asSymbolPremarketResults(value: unknown): Record<string, SymbolPremarketResult> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, SymbolPremarketResult> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (!v || typeof v !== "object" || Array.isArray(v)) continue;
+    const r = v as Record<string, unknown>;
+    if (typeof r.passed !== "boolean") continue;
+    const failureReasons = Array.isArray(r.failure_reasons)
+      ? r.failure_reasons.filter((x): x is string => typeof x === "string")
+      : [];
+    out[k] = { passed: r.passed, failure_reasons: failureReasons };
+  }
+  return out;
+}
+
+/**
+ * Parse a premarket_revalidation.json artifact (premarket-revalidation-v1 schema).
+ *
+ * Never throws. Returns one of: ok / unsupported_schema / malformed / missing_fields.
+ * Per-symbol results carry only `passed` and `failure_reasons` — the producer
+ * (PremarketRevalidationResult.to_dict()) does not emit per-check booleans
+ * (e.g. data freshness, spread, volume); failure reason strings encode which
+ * check failed.
+ */
+export function parsePremarketRevalidation(json: string): PremarketRevalidationParseResult {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(json);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { kind: "malformed", message: `premarket_revalidation.json: invalid JSON (${message})` };
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+    return { kind: "malformed", message: "premarket_revalidation.json: expected a JSON object" };
+  }
+  const a = obj as Record<string, unknown>;
+
+  const schemaVersion = typeof a.schema_version === "string" ? a.schema_version : null;
+  if (schemaVersion !== PREMARKET_REVALIDATION_SCHEMA_VERSION) {
+    return { kind: "unsupported_schema", schemaVersion };
+  }
+
+  if (typeof a.passed !== "boolean") {
+    return { kind: "missing_fields", message: "premarket_revalidation.json: missing passed" };
+  }
+
+  if (!Array.isArray(a.failure_reasons)) {
+    return { kind: "missing_fields", message: "premarket_revalidation.json: missing failure_reasons" };
+  }
+  const failureReasons = a.failure_reasons.filter((r): r is string => typeof r === "string");
+
+  if (!a.symbol_results || typeof a.symbol_results !== "object" || Array.isArray(a.symbol_results)) {
+    return { kind: "missing_fields", message: "premarket_revalidation.json: missing symbol_results" };
+  }
+
+  const data: PremarketRevalidationArtifact = {
+    schema_version: schemaVersion,
+    passed: a.passed,
+    failure_reasons: failureReasons,
+    top_symbol: typeof a.top_symbol === "string" ? a.top_symbol : null,
+    symbol_results: asSymbolPremarketResults(a.symbol_results),
+    notes: typeof a.notes === "string" ? a.notes : "",
   };
 
   return { kind: "ok", data };

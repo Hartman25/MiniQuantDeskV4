@@ -246,6 +246,30 @@ export type WatchlistPromotionParseResult =
   | { kind: "missing_fields"; message: string };
 
 // ---------------------------------------------------------------------------
+// WATCHLIST-PROMOTION-DETAIL-GUI-SURFACE-BUNDLE-02: premarket-revalidation-v1 artifact types
+// ---------------------------------------------------------------------------
+
+export interface SymbolPremarketResult {
+  passed: boolean;
+  failure_reasons: string[];
+}
+
+export interface PremarketRevalidationArtifact {
+  schema_version: string;
+  passed: boolean;
+  failure_reasons: string[];
+  top_symbol: string | null;
+  symbol_results: Record<string, SymbolPremarketResult>;
+  notes: string;
+}
+
+export type PremarketRevalidationParseResult =
+  | { kind: "ok"; data: PremarketRevalidationArtifact }
+  | { kind: "unsupported_schema"; schemaVersion: string | null }
+  | { kind: "malformed"; message: string }
+  | { kind: "missing_fields"; message: string };
+
+// ---------------------------------------------------------------------------
 // BACKTEST-GUI-RUNNER-01: Daemon backtest job API types
 // ---------------------------------------------------------------------------
 

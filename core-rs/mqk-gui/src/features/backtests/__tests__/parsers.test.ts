@@ -13,6 +13,7 @@ import {
   parseMetrics,
   parseOrders,
   parsePaperReadiness,
+  parsePremarketRevalidation,
   parseStrategyFit,
   parseWatchlistPromotion,
 } from "../parsers.ts";
@@ -1200,4 +1201,192 @@ test("parseWatchlistPromotion: non-object entries in ranked_candidates are skipp
   if (result.kind !== "ok") return;
   assert.equal(result.data.ranked_candidates.length, 1);
   assert.equal(result.data.ranked_candidates[0].symbol, "AAPL");
+});
+
+// --- parsePremarketRevalidation ---
+
+test("parsePremarketRevalidation: valid passed artifact (real AAPL premarket-revalidation-v1 shape)", () => {
+  const json = JSON.stringify({
+    schema_version: "premarket-revalidation-v1",
+    passed: true,
+    failure_reasons: [],
+    top_symbol: "AAPL",
+    symbol_results: {
+      AAPL: { passed: true, failure_reasons: [] },
+    },
+    notes: "premarket_revalidation_passed",
+  });
+  const result = parsePremarketRevalidation(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.passed, true);
+  assert.deepEqual(result.data.failure_reasons, []);
+  assert.equal(result.data.top_symbol, "AAPL");
+  assert.deepEqual(result.data.symbol_results.AAPL, { passed: true, failure_reasons: [] });
+  assert.equal(result.data.notes, "premarket_revalidation_passed");
+});
+
+test("parsePremarketRevalidation: valid blocked artifact with per-symbol failure reasons", () => {
+  const json = JSON.stringify({
+    schema_version: "premarket-revalidation-v1",
+    passed: false,
+    failure_reasons: ["premarket_data_quality_failed"],
+    top_symbol: "MSFT",
+    symbol_results: {
+      MSFT: { passed: false, failure_reasons: ["premarket_bar_stale", "premarket_spread_too_wide"] },
+    },
+    notes: "blocked: premarket_data_quality_failed",
+  });
+  const result = parsePremarketRevalidation(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.passed, false);
+  assert.deepEqual(result.data.failure_reasons, ["premarket_data_quality_failed"]);
+  assert.deepEqual(result.data.symbol_results.MSFT, {
+    passed: false,
+    failure_reasons: ["premarket_bar_stale", "premarket_spread_too_wide"],
+  });
+});
+
+test("parsePremarketRevalidation: unsupported schema_version is explicit", () => {
+  const json = JSON.stringify({
+    schema_version: "premarket-revalidation-v0",
+    passed: false,
+    failure_reasons: [],
+    symbol_results: {},
+  });
+  const result = parsePremarketRevalidation(json);
+  assert.equal(result.kind, "unsupported_schema");
+  if (result.kind !== "unsupported_schema") return;
+  assert.equal(result.schemaVersion, "premarket-revalidation-v0");
+});
+
+test("parsePremarketRevalidation: missing schema_version is unsupported (not assumed)", () => {
+  const json = JSON.stringify({
+    passed: false,
+    failure_reasons: [],
+    symbol_results: {},
+  });
+  const result = parsePremarketRevalidation(json);
+  assert.equal(result.kind, "unsupported_schema");
+  if (result.kind !== "unsupported_schema") return;
+  assert.equal(result.schemaVersion, null);
+});
+
+test("parsePremarketRevalidation: malformed JSON is explicit", () => {
+  const result = parsePremarketRevalidation("{bad json}");
+  assert.equal(result.kind, "malformed");
+});
+
+test("parsePremarketRevalidation: non-object JSON is malformed", () => {
+  const result = parsePremarketRevalidation("[1,2,3]");
+  assert.equal(result.kind, "malformed");
+});
+
+test("parsePremarketRevalidation: missing passed is missing_fields", () => {
+  const json = JSON.stringify({
+    schema_version: "premarket-revalidation-v1",
+    failure_reasons: [],
+    symbol_results: {},
+  });
+  const result = parsePremarketRevalidation(json);
+  assert.equal(result.kind, "missing_fields");
+});
+
+test("parsePremarketRevalidation: missing failure_reasons is missing_fields", () => {
+  const json = JSON.stringify({
+    schema_version: "premarket-revalidation-v1",
+    passed: true,
+    symbol_results: {},
+  });
+  const result = parsePremarketRevalidation(json);
+  assert.equal(result.kind, "missing_fields");
+});
+
+test("parsePremarketRevalidation: missing symbol_results is missing_fields", () => {
+  const json = JSON.stringify({
+    schema_version: "premarket-revalidation-v1",
+    passed: true,
+    failure_reasons: [],
+  });
+  const result = parsePremarketRevalidation(json);
+  assert.equal(result.kind, "missing_fields");
+});
+
+test("parsePremarketRevalidation: null top_symbol handled", () => {
+  const json = JSON.stringify({
+    schema_version: "premarket-revalidation-v1",
+    passed: false,
+    failure_reasons: ["premarket_watchlist_schema_invalid"],
+    top_symbol: null,
+    symbol_results: {},
+    notes: "",
+  });
+  const result = parsePremarketRevalidation(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.top_symbol, null);
+});
+
+test("parsePremarketRevalidation: empty symbol_results object parses ok", () => {
+  const json = JSON.stringify({
+    schema_version: "premarket-revalidation-v1",
+    passed: false,
+    failure_reasons: ["premarket_mode_not_paper"],
+    top_symbol: null,
+    symbol_results: {},
+    notes: "blocked: premarket_mode_not_paper",
+  });
+  const result = parsePremarketRevalidation(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.deepEqual(result.data.symbol_results, {});
+});
+
+test("parsePremarketRevalidation: non-object and invalid entries in symbol_results are skipped", () => {
+  const json = JSON.stringify({
+    schema_version: "premarket-revalidation-v1",
+    passed: false,
+    failure_reasons: [],
+    top_symbol: "AAPL",
+    symbol_results: {
+      AAPL: { passed: true, failure_reasons: [] },
+      MSFT: "not-an-object",
+      NVDA: { failure_reasons: ["premarket_liquidity_failed"] },
+    },
+    notes: "",
+  });
+  const result = parsePremarketRevalidation(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.deepEqual(Object.keys(result.data.symbol_results), ["AAPL"]);
+});
+
+test("parsePremarketRevalidation: non-string entries in failure_reasons are filtered out", () => {
+  const json = JSON.stringify({
+    schema_version: "premarket-revalidation-v1",
+    passed: false,
+    failure_reasons: ["premarket_rvol_too_low", 42, null, "premarket_price_too_low"],
+    top_symbol: "AAPL",
+    symbol_results: {},
+    notes: "",
+  });
+  const result = parsePremarketRevalidation(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.deepEqual(result.data.failure_reasons, ["premarket_rvol_too_low", "premarket_price_too_low"]);
+});
+
+test("parsePremarketRevalidation: missing notes defaults to empty string", () => {
+  const json = JSON.stringify({
+    schema_version: "premarket-revalidation-v1",
+    passed: true,
+    failure_reasons: [],
+    top_symbol: "AAPL",
+    symbol_results: { AAPL: { passed: true, failure_reasons: [] } },
+  });
+  const result = parsePremarketRevalidation(json);
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") return;
+  assert.equal(result.data.notes, "");
 });
