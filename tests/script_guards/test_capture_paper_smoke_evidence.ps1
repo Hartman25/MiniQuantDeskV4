@@ -327,6 +327,84 @@ if ($scriptText -match [regex]::Escape('"SKIPPED: $admissionSkipReason"')) {
 }
 
 # ---------------------------------------------------------------------------
+# CPE12: notes/final_verdict.txt template hygiene
+# (PAPER-SMOKE-EVIDENCE-VERDICT-HYGIENE-01)
+#
+# The auto-generated final_verdict.txt must be clearly marked as an
+# operator-completed template (not an automatic pass), must point to
+# review_summary.json/.md as the source of truth, must present every
+# verdict option as an unchecked "[ ]" checkbox, and must never present a
+# bare line-start "SMOKE PASSED" that could be misread as completed.
+# Cleans up after itself.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "  -- CPE12: notes/final_verdict.txt template hygiene --"
+
+if (Test-Path $TargetScript) {
+    $evidenceRoot = Join-Path $RepoRoot 'evidence'
+    $beforeFolders = @(Get-ChildItem -Path $evidenceRoot -Directory -Filter 'paper_smoke_*guard_verdict_test*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+
+    & powershell.exe -ExecutionPolicy Bypass -NonInteractive -File $TargetScript `
+        -Label 'guard_verdict_test' -SkipDaemon -SkipDb *>$null
+
+    $afterFolders = @(Get-ChildItem -Path $evidenceRoot -Directory -Filter 'paper_smoke_*guard_verdict_test*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    $newFolders   = @($afterFolders | Where-Object { $beforeFolders -notcontains $_ })
+
+    if ($newFolders) {
+        $verdictPath = Join-Path $newFolders[0] 'notes\final_verdict.txt'
+        if (Test-Path $verdictPath) {
+            $verdictText = Get-Content -Path $verdictPath -Raw
+
+            if ($verdictText -match '(?m)^# OPERATOR FINAL VERDICT -- TEMPLATE ONLY') {
+                Pass 'CPE12a' "final_verdict.txt header marks it TEMPLATE ONLY"
+            } else {
+                Fail 'CPE12a' "final_verdict.txt missing 'OPERATOR FINAL VERDICT -- TEMPLATE ONLY' header"
+            }
+
+            if ($verdictText -match 'Status:\s*PENDING OPERATOR REVIEW') {
+                Pass 'CPE12b' "final_verdict.txt declares Status: PENDING OPERATOR REVIEW"
+            } else {
+                Fail 'CPE12b' "final_verdict.txt missing 'Status: PENDING OPERATOR REVIEW'"
+            }
+
+            if ($verdictText -match [regex]::Escape('review_summary.json') -and
+                $verdictText -match [regex]::Escape('review_summary.md')) {
+                Pass 'CPE12c' "final_verdict.txt points to review_summary.json/.md as source of truth"
+            } else {
+                Fail 'CPE12c' "final_verdict.txt does not reference review_summary.json/.md"
+            }
+
+            if ($verdictText -match '(?m)^\s*#?\s*\[\s*\]\s*SMOKE PASSED') {
+                Pass 'CPE12d' "final_verdict.txt presents SMOKE PASSED as an unchecked '[ ]' option"
+            } else {
+                Fail 'CPE12d' "final_verdict.txt does not present SMOKE PASSED as an unchecked '[ ]' option"
+            }
+
+            $bareSmokePassed = [regex]::Matches($verdictText, '(?m)^\s*#?\s*SMOKE PASSED\b')
+            if ($bareSmokePassed.Count -eq 0) {
+                Pass 'CPE12e' "final_verdict.txt has no bare line-start 'SMOKE PASSED' outside a '[ ]' checkbox"
+            } else {
+                Fail 'CPE12e' "final_verdict.txt contains a bare line-start 'SMOKE PASSED' not inside a checkbox"
+            }
+        } else {
+            Fail 'CPE12a' "notes/final_verdict.txt not found in captured evidence"
+            Fail 'CPE12b' "(skipped -- no file)"
+            Fail 'CPE12c' "(skipped -- no file)"
+            Fail 'CPE12d' "(skipped -- no file)"
+            Fail 'CPE12e' "(skipped -- no file)"
+        }
+        # Clean up
+        Remove-Item -Recurse -Force -Path $newFolders[0] -ErrorAction SilentlyContinue
+    } else {
+        Fail 'CPE12a' "No evidence folder created for guard_verdict_test"
+        Fail 'CPE12b' "(skipped -- no folder)"
+        Fail 'CPE12c' "(skipped -- no folder)"
+        Fail 'CPE12d' "(skipped -- no folder)"
+        Fail 'CPE12e' "(skipped -- no folder)"
+    }
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Write-Host ""

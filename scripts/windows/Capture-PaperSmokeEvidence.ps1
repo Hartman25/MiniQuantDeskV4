@@ -399,19 +399,31 @@ $lifecycleChecklist = @"
 $lifecycleChecklist | Set-Content -Path (Join-Path $EvidenceDir 'notes\smoke_lifecycle_checklist.txt') -Encoding UTF8
 
 $verdictNote = @"
-# Final Verdict
-# Complete after reviewing all evidence.
+# OPERATOR FINAL VERDICT -- TEMPLATE ONLY
+# Status: PENDING OPERATOR REVIEW
+#
+# This file is NOT the source of truth until an operator completes it.
+# Use review_summary.json and review_summary.md (written by
+# Review-PaperSmokeEvidence.ps1 -WriteSummary) as the generated
+# evidence-review source of truth.
+#
+# Do not mark SMOKE PASSED unless the review_summary classification is
+# NATURAL-TRADE-LIFECYCLE-CLOSED (or READINESS-CLOSED-NO-TRADE for a
+# no-trade session) AND the full lifecycle/reconcile requirements listed
+# there are satisfied. If the classification is OPEN, PARTIAL, or
+# FALSE-CLOSED, do not select SMOKE PASSED below.
 #
 # Date (UTC):
 # Smoke label:    $Label
 # Git commit:
 # Proof state:
+# Generated review classification (from review_summary.json):
 #
-# Verdict:
-#   SMOKE PASSED       -- full lifecycle proven, reconcile clean, evidence durable
-#   SMOKE PARTIAL      -- partial lifecycle (describe)
-#   SMOKE FAILED       -- failed (describe)
-#   SMOKE NOT RUN      -- daemon/session not reached
+# Allowed operator verdict values -- check exactly ONE box after review:
+#   [ ] SMOKE PASSED   -- full lifecycle proven, reconcile clean, evidence durable
+#   [ ] SMOKE PARTIAL  -- partial lifecycle (describe)
+#   [ ] SMOKE FAILED   -- failed (describe)
+#   [ ] SMOKE NOT RUN  -- daemon/session not reached
 #
 # Blockers for next smoke (if any):
 #

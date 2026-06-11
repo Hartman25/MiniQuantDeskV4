@@ -91,6 +91,14 @@ Assert-False ($AlertScript -match '(?i)alpaca\.(markets|com)') 'Send-PaperSmokeR
 Assert-False ($AlertScript -match "(?i)https?://[^\s`"']*(alpaca|broker)") 'Send-PaperSmokeReviewDiscordAlert.ps1 does not call any broker/Alpaca URL'
 
 # ---------------------------------------------------------------------------
+# Must never read or reference notes/final_verdict.txt -- it is an
+# operator-completed note/template only, not the source of truth
+# (PAPER-SMOKE-EVIDENCE-VERDICT-HYGIENE-01). review_summary.json/.md remain
+# the only inputs to this alert.
+# ---------------------------------------------------------------------------
+Assert-False ($AlertScript -match '(?i)final_verdict') 'Send-PaperSmokeReviewDiscordAlert.ps1 does not reference notes/final_verdict.txt'
+
+# ---------------------------------------------------------------------------
 # Must not write/mutate any file (no repo mutation, no DB writes) and must not
 # change evidence classification logic.
 # ---------------------------------------------------------------------------

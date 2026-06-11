@@ -147,7 +147,7 @@ evidence folder:
 | `notes/smoke_lifecycle_checklist.txt` | Full lifecycle YES/NO checklist + exact smoke command |
 | `notes/discord_observation.txt` | Discord trade alert observation + screenshot path |
 | `notes/gui_observation.txt` | GUI observation + screenshot path |
-| `notes/final_verdict.txt` | SMOKE PASSED / PARTIAL / FAILED + any blockers |
+| `notes/final_verdict.txt` | Operator note only -- check exactly one `[ ]` box (PASSED/PARTIAL/FAILED/NOT RUN) + any blockers. NOT authoritative; see Section 8. |
 
 ---
 
@@ -170,7 +170,15 @@ evidence folder:
 
 ## 8. Verdict criteria
 
-**SMOKE PASSED** requires all of:
+`review_summary.json` / `review_summary.md` (written by
+`Review-PaperSmokeEvidence.ps1 -WriteSummary`) are the generated
+evidence-review source of truth. `notes/final_verdict.txt` is an
+operator-completed note/template only -- it is NOT authoritative and does
+not override the `review_summary` classification below.
+
+**SMOKE PASSED** requires `review_summary` classification
+`NATURAL-TRADE-LIFECYCLE-CLOSED` (or `READINESS-CLOSED-NO-TRADE` for a
+no-trade session), which in turn requires all of:
 - Full lifecycle from signal to OMS terminal state.
 - `reconcile_status.json` shows clean (no dirty positions).
 - `autonomous_readiness.json` shows `overall_ready = true` (or `outside_window` after stop).
@@ -179,7 +187,12 @@ evidence folder:
 - Discord trade alert fired.
 - GUI showed filled order matching backend.
 - No halt triggered.
-- `final_verdict.txt` marked SMOKE PASSED by operator.
+
+If `notes/final_verdict.txt` has `[x] SMOKE PASSED` checked but
+`review_summary` classification is `OPEN`, `PARTIAL`, or `FALSE-CLOSED`,
+`review_summary` reports `manual_verdict_conflict: true` and prints a
+`*** MANUAL VERDICT CONFLICT ***` warning -- treat the evidence as not
+passed regardless of the operator note.
 
 **SMOKE PARTIAL** — lifecycle partial; document what was and was not proven.
 

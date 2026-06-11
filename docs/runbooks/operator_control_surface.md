@@ -362,6 +362,27 @@ for a quick visual review without opening the JSON/Markdown files directly.
 - AND evidence bundle is present and durable
 - AND `live_routing_enabled=false` is confirmed in the evidence
 
+### Source of truth
+
+- `review_summary.json` / `review_summary.md` (written by
+  `Review-PaperSmokeEvidence.ps1 -WriteSummary`) are the generated
+  evidence-review source of truth. The `VERDICT` / `classification` field
+  there is authoritative.
+- `notes/final_verdict.txt` is an operator-completed note/template only. It
+  is generated as **TEMPLATE ONLY / Status: PENDING OPERATOR REVIEW** with
+  every verdict option as an unchecked `[ ]` checkbox -- it is NOT
+  authoritative and does not override `review_summary`.
+- Do not call a smoke "PASSED" because `notes/final_verdict.txt` has text
+  mentioning `SMOKE PASSED`. Only `review_summary` classification
+  `NATURAL-TRADE-LIFECYCLE-CLOSED` (or `READINESS-CLOSED-NO-TRADE` for a
+  no-trade session) with the lifecycle/reconcile criteria above satisfied
+  means PASSED.
+- If an operator checks `[x] SMOKE PASSED` in `notes/final_verdict.txt` while
+  `review_summary` classification is `OPEN`, `PARTIAL`, or `FALSE-CLOSED`,
+  `review_summary` reports `manual_verdict_conflict: true` and prints a
+  `*** MANUAL VERDICT CONFLICT ***` warning -- treat the evidence as not
+  passed regardless of the operator note.
+
 ---
 
 ## 7. GUI Observation Checklist

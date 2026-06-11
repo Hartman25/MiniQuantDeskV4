@@ -710,14 +710,20 @@ if (-not $no_manual_db_mutation) { $lifecycle_missing_requirements.Add('no_manua
 # Trade lifecycle composite: all strict market-proof requirements confirmed.
 $trade_lifecycle_detected = ($lifecycle_missing_requirements.Count -eq 0)
 
-# Read notes/final_verdict.txt for any manually-filled verdict
+# Read notes/final_verdict.txt for any manually-CHECKED verdict.
+# Only an explicitly-checked checkbox ("[x]" or "[X]") at the start of a
+# line counts as an operator verdict -- the unfilled "[ ] SMOKE PASSED"
+# template option must never be misread as a completed verdict
+# (PAPER-SMOKE-EVIDENCE-VERDICT-HYGIENE-01).
 $manual_verdict = $null
 $verdictFile = Join-Path $EvidencePath 'notes\final_verdict.txt'
+$verdictFileContent = $null
 if (Test-Path $verdictFile) {
-    $vContent = Get-Content $verdictFile -Raw -ErrorAction SilentlyContinue
-    if ($vContent -match 'SMOKE PASSED') { $manual_verdict = 'SMOKE PASSED' }
-    elseif ($vContent -match 'SMOKE PARTIAL') { $manual_verdict = 'SMOKE PARTIAL' }
-    elseif ($vContent -match 'SMOKE FAILED') { $manual_verdict = 'SMOKE FAILED' }
+    $verdictFileContent = Get-Content $verdictFile -Raw -ErrorAction SilentlyContinue
+    if ($verdictFileContent -match '(?im)^\s*#?\s*\[\s*[xX]\s*\]\s*SMOKE PASSED') { $manual_verdict = 'SMOKE PASSED' }
+    elseif ($verdictFileContent -match '(?im)^\s*#?\s*\[\s*[xX]\s*\]\s*SMOKE PARTIAL') { $manual_verdict = 'SMOKE PARTIAL' }
+    elseif ($verdictFileContent -match '(?im)^\s*#?\s*\[\s*[xX]\s*\]\s*SMOKE FAILED') { $manual_verdict = 'SMOKE FAILED' }
+    elseif ($verdictFileContent -match '(?im)^\s*#?\s*\[\s*[xX]\s*\]\s*SMOKE NOT RUN') { $manual_verdict = 'SMOKE NOT RUN' }
 }
 
 # ---------------------------------------------------------------------------
@@ -735,13 +741,6 @@ if ($null -ne $live_routing_confirmed_off -and $live_routing_confirmed_off -eq $
 }
 if (-not $api_files_present) {
     $false_closed_reasons.Add('No API snapshot files present  --  evidence missing')
-}
-# Placeholder/template check: final_verdict still shows uncompleted template markers
-if ($null -ne (Get-Content $verdictFile -Raw -ErrorAction SilentlyContinue)) {
-    $vc = Get-Content $verdictFile -Raw -ErrorAction SilentlyContinue
-    if ($vc -and $vc -match 'SMOKE PASSED\s+--') {
-        # Template line present but may not be filled  --  OK, do not flag
-    }
 }
 if ($SecretWarnings.Count -gt 0) {
     $false_closed_reasons.Add("Possible secrets detected in evidence  --  review before sharing ($($SecretWarnings.Count) warning(s))")
@@ -860,6 +859,20 @@ if ($null -eq $classification) {
 if ($classification -ne 'NATURAL-TRADE-LIFECYCLE-CLOSED' -and $lifecycle_missing_requirements.Count -gt 0) {
     $classification_reasons.Add("lifecycle closure withheld; missing requirements: $($lifecycle_missing_requirements -join ', ')")
 }
+
+# ---------------------------------------------------------------------------
+# Manual-verdict conflict check (PAPER-SMOKE-EVIDENCE-VERDICT-HYGIENE-01)
+#
+# review_summary.json/.md (this output) is the source of truth, never
+# notes/final_verdict.txt. If an operator checked "[x] SMOKE PASSED" but the
+# generated classification did not reach a closed state, surface a loud
+# conflict warning rather than silently trusting the operator note.
+# ---------------------------------------------------------------------------
+$manual_verdict_conflict = (
+    $manual_verdict -eq 'SMOKE PASSED' -and
+    $classification -ne 'NATURAL-TRADE-LIFECYCLE-CLOSED' -and
+    $classification -ne 'READINESS-CLOSED-NO-TRADE'
+)
 
 # ---------------------------------------------------------------------------
 # Ledger-specific classification labels (PAPER-SMOKE-LEDGER-SPECIFIC-CLASSIFIER-01)
@@ -1133,6 +1146,14 @@ if ($capture_ts) { $summaryLines.Add("- Capture time:     $capture_ts") }
 $summaryLines.Add("- API files present: $api_files_present")
 $summaryLines.Add("- DB files present:  $db_files_present")
 $summaryLines.Add("")
+$summaryLines.Add("## Source of Truth")
+$summaryLines.Add("- This file (review_summary.md / review_summary.json) is the generated")
+$summaryLines.Add("  evidence-review source of truth.")
+$summaryLines.Add("- notes/final_verdict.txt is an operator-completed note/template only --")
+$summaryLines.Add("  it is NOT authoritative and does not override the VERDICT below.")
+$summaryLines.Add("- Do not treat a smoke as PASSED unless VERDICT is")
+$summaryLines.Add("  NATURAL-TRADE-LIFECYCLE-CLOSED or READINESS-CLOSED-NO-TRADE.")
+$summaryLines.Add("")
 $summaryLines.Add("## Classification")
 $summaryLines.Add("### VERDICT: $classification")
 foreach ($r in $classification_reasons) { $summaryLines.Add("- $r") }
@@ -1268,6 +1289,12 @@ $summaryLines.Add("")
 if ($manual_verdict) {
     $summaryLines.Add("## Manual Verdict (from notes/final_verdict.txt)")
     $summaryLines.Add("- $manual_verdict")
+    $summaryLines.Add("- NOTE: This is an operator note only. review_summary.json/.md (this")
+    $summaryLines.Add("  document) remains the source of truth, not notes/final_verdict.txt.")
+    if ($manual_verdict_conflict) {
+        $summaryLines.Add("- WARNING: Operator checked SMOKE PASSED but VERDICT is $classification.")
+        $summaryLines.Add("  Do NOT record this smoke as passed. Trust VERDICT above, not this note.")
+    }
     $summaryLines.Add("")
 }
 
@@ -1311,6 +1338,13 @@ Write-Host "VERDICT: $classification" -ForegroundColor $(
     }
 )
 Write-Host ''
+
+if ($manual_verdict_conflict) {
+    Write-Host '*** MANUAL VERDICT CONFLICT ***' -ForegroundColor Magenta
+    Write-Host "  notes/final_verdict.txt has [x] SMOKE PASSED checked, but VERDICT is $classification." -ForegroundColor Magenta
+    Write-Host '  review_summary.json/.md (this output) is the source of truth -- do NOT record this smoke as passed.' -ForegroundColor Magenta
+    Write-Host ''
+}
 
 if ($SecretWarnings.Count -gt 0) {
     Write-Host '*** SECRET SCAN WARNINGS ***' -ForegroundColor Magenta
@@ -1360,6 +1394,7 @@ $jsonObj = [ordered]@{
     api_files_present      = $api_files_present
     db_files_present       = $db_files_present
     manual_verdict_note         = $manual_verdict
+    manual_verdict_conflict     = $manual_verdict_conflict
     trade_lifecycle_detected    = $trade_lifecycle_detected
     lifecycle_missing_requirements = @($lifecycle_missing_requirements)
     has_order_submit          = $has_order_submit

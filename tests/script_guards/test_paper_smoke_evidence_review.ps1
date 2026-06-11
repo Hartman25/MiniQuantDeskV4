@@ -132,6 +132,18 @@ try {
     $script:Failures += 3
 }
 
+# 23-25. Final-verdict hygiene (PAPER-SMOKE-EVIDENCE-VERDICT-HYGIENE-01)
+#   - manual_verdict detection requires an explicitly-CHECKED checkbox, not a
+#     bare substring match against the unedited template's option list.
+#   - manual_verdict_conflict is computed and surfaced when an operator
+#     checks "[x] SMOKE PASSED" but VERDICT did not reach a closed state.
+#   - review_summary documents itself (not notes/final_verdict.txt) as the
+#     source of truth.
+Assert-True ($Content -match [regex]::Escape('\[\s*[xX]\s*\]\s*SMOKE PASSED')) 'manual_verdict detection requires an explicitly-checked [x]/[X] checkbox, not a bare SMOKE PASSED match'
+Assert-True ($Content -match 'manual_verdict_conflict') 'Computes and exposes manual_verdict_conflict when an operator note conflicts with VERDICT'
+Assert-True ($Content -match '(?i)## Source of Truth') 'review_summary documents a Source of Truth section'
+Assert-True ($Content -match '(?i)NOT authoritative') 'review_summary states notes/final_verdict.txt is NOT authoritative'
+
 function Write-FixtureJson {
     param([string]$Path, $Value)
     $parent = Split-Path -Parent $Path
@@ -148,6 +160,41 @@ function Write-FixtureText {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
     $Value | Set-Content -Path $Path -Encoding UTF8
+}
+
+function Get-UntouchedFinalVerdictTemplateText {
+    param([string]$Label = 'guard_test')
+    return @"
+# OPERATOR FINAL VERDICT -- TEMPLATE ONLY
+# Status: PENDING OPERATOR REVIEW
+#
+# This file is NOT the source of truth until an operator completes it.
+# Use review_summary.json and review_summary.md (written by
+# Review-PaperSmokeEvidence.ps1 -WriteSummary) as the generated
+# evidence-review source of truth.
+#
+# Do not mark SMOKE PASSED unless the review_summary classification is
+# NATURAL-TRADE-LIFECYCLE-CLOSED (or READINESS-CLOSED-NO-TRADE for a
+# no-trade session) AND the full lifecycle/reconcile requirements listed
+# there are satisfied. If the classification is OPEN, PARTIAL, or
+# FALSE-CLOSED, do not select SMOKE PASSED below.
+#
+# Date (UTC):
+# Smoke label:    $Label
+# Git commit:
+# Proof state:
+# Generated review classification (from review_summary.json):
+#
+# Allowed operator verdict values -- check exactly ONE box after review:
+#   [ ] SMOKE PASSED   -- full lifecycle proven, reconcile clean, evidence durable
+#   [ ] SMOKE PARTIAL  -- partial lifecycle (describe)
+#   [ ] SMOKE FAILED   -- failed (describe)
+#   [ ] SMOKE NOT RUN  -- daemon/session not reached
+#
+# Blockers for next smoke (if any):
+#
+# Next action:
+"@
 }
 
 function New-StrictLifecycleFixture {
@@ -329,6 +376,46 @@ try {
     Assert-NotLifecycleClosed $unsafe 'Unsafe evidence markers do not close lifecycle' 'no_direct_broker_shortcut_marker'
     Assert-True ($null -ne $unsafe -and $unsafe.classification -eq 'FALSE-CLOSED') 'Unsafe evidence markers classify as FALSE-CLOSED'
     Assert-True ($null -ne $unsafe -and @($unsafe.unsafe_marker_hits).Count -ge 5) 'Unsafe evidence marker details are reported'
+
+    Write-Host ''
+    Write-Host '  -- final_verdict.txt verdict-hygiene fixture tests (PAPER-SMOKE-EVIDENCE-VERDICT-HYGIENE-01) --'
+
+    # (a) OPEN classification + untouched (unchecked) template -> no manual
+    #     verdict, no conflict. The bare "[ ] SMOKE PASSED" option must not
+    #     be misread as an operator verdict.
+    $openUntouchedPath = New-StrictLifecycleFixture -Name 'verdict_open_untouched_template' -ReconcileClean:$false
+    Write-FixtureText (Join-Path $openUntouchedPath 'notes\final_verdict.txt') (Get-UntouchedFinalVerdictTemplateText -Label 'verdict_open_untouched_template')
+    $openUntouched = Invoke-ReviewFixture $openUntouchedPath
+    Assert-True ($null -ne $openUntouched -and $openUntouched.classification -eq 'OPEN') 'Reconcile-dirty fixture classifies as OPEN'
+    Assert-True ($null -ne $openUntouched -and $null -eq $openUntouched.manual_verdict_note) 'Untouched final_verdict.txt template produces no manual_verdict_note (no false SMOKE PASSED)'
+    Assert-False ($null -ne $openUntouched -and $openUntouched.manual_verdict_conflict -eq $true) 'Untouched template does not trigger manual_verdict_conflict'
+
+    # (b) OPEN classification + operator checked "[x] SMOKE PASSED" -> read
+    #     as manual_verdict_note=SMOKE PASSED AND flagged as a conflict.
+    $openCheckedPath = New-StrictLifecycleFixture -Name 'verdict_open_checked_passed' -ReconcileClean:$false
+    $checkedPassedText = (Get-UntouchedFinalVerdictTemplateText -Label 'verdict_open_checked_passed') -replace '\[ \] SMOKE PASSED', '[x] SMOKE PASSED'
+    Write-FixtureText (Join-Path $openCheckedPath 'notes\final_verdict.txt') $checkedPassedText
+    $openChecked = Invoke-ReviewFixture $openCheckedPath
+    Assert-True ($null -ne $openChecked -and $openChecked.classification -eq 'OPEN') 'Reconcile-dirty fixture with [x] SMOKE PASSED still classifies as OPEN'
+    Assert-True ($null -ne $openChecked -and $openChecked.manual_verdict_note -eq 'SMOKE PASSED') 'Checked [x] SMOKE PASSED is read as manual_verdict_note=SMOKE PASSED'
+    Assert-True ($null -ne $openChecked -and $openChecked.manual_verdict_conflict -eq $true) 'Operator [x] SMOKE PASSED on a non-closed VERDICT sets manual_verdict_conflict=true'
+
+    if ($null -ne $openChecked) {
+        $openCheckedMd = Get-Content (Join-Path $openCheckedPath 'review_summary.md') -Raw
+        Assert-True ($openCheckedMd -match '(?i)WARNING') 'review_summary.md contains a WARNING when manual_verdict_conflict is true'
+        Assert-True ($openCheckedMd -match '(?i)SMOKE PASSED') 'review_summary.md WARNING references SMOKE PASSED'
+        Assert-True ($openCheckedMd -match '(?i)source of truth') 'review_summary.md states it is the source of truth, not final_verdict.txt'
+    }
+
+    # (c) NATURAL-TRADE-LIFECYCLE-CLOSED + operator checked "[x] SMOKE PASSED"
+    #     -> no conflict (operator note agrees with VERDICT).
+    $closedCheckedPath = New-StrictLifecycleFixture -Name 'verdict_closed_checked_passed'
+    $closedCheckedText = (Get-UntouchedFinalVerdictTemplateText -Label 'verdict_closed_checked_passed') -replace '\[ \] SMOKE PASSED', '[x] SMOKE PASSED'
+    Write-FixtureText (Join-Path $closedCheckedPath 'notes\final_verdict.txt') $closedCheckedText
+    $closedChecked = Invoke-ReviewFixture $closedCheckedPath
+    Assert-True ($null -ne $closedChecked -and $closedChecked.classification -eq 'NATURAL-TRADE-LIFECYCLE-CLOSED') 'Complete strict lifecycle fixture with [x] SMOKE PASSED still classifies as NATURAL-TRADE-LIFECYCLE-CLOSED'
+    Assert-True ($null -ne $closedChecked -and $closedChecked.manual_verdict_note -eq 'SMOKE PASSED') 'Checked [x] SMOKE PASSED is read as manual_verdict_note=SMOKE PASSED on a closed verdict'
+    Assert-False ($null -ne $closedChecked -and $closedChecked.manual_verdict_conflict -eq $true) 'Operator [x] SMOKE PASSED on a NATURAL-TRADE-LIFECYCLE-CLOSED VERDICT does not trigger manual_verdict_conflict'
 } catch {
     Write-Host "  FAIL: Strict lifecycle fixture tests threw: $_" -ForegroundColor Red
     $script:Failures++
