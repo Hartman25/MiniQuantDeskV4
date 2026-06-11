@@ -133,6 +133,36 @@ find the prior run in HALTED state and refuse a new start.
 
 Run these steps in order before and during the Monday market smoke.
 
+### Retest after a halted prior session (read this first)
+
+If the previous paper-smoke session ended with `kill_switch_active=true`,
+`integrity_halt_active=true`, or `arm_state=halted` (for example,
+`next_operator_action` from `/api/v1/autonomous/paper-status` says "Kill
+switch is active. Clear the halted run..."), this is normal after any halted
+session and does **not** require manual recovery before the next retest:
+
+- Baseline broker positions inherited from a prior session are seeded into
+  the ledger as equivalent Fill entries (`seed_portfolio_from_baseline` in
+  `mqk-daemon/src/state/snapshot.rs`), so `check_capital_invariants` is
+  satisfied immediately on startup. A prior-session position no longer
+  produces a false IntegrityViolation/ReconcileDrift halt by itself.
+- `Run-AAPL5mMarketSmoke.ps1 -CheckOnly` (which calls
+  `Start-PaperTradingSmoke.ps1 -CheckOnly`) includes a STEP 5C dry-check that
+  reads the persisted `sys_arm_state` row read-only and reports
+  `ARMED`/`DISARMED` plus the disarm reason. This tells you what state the
+  prior session left behind without starting the daemon or touching
+  arm/halt state.
+- STEP 10 of the full smoke run reads `kill_switch_active` / `arm_state` /
+  `runtime_status` from the **freshly started** daemon and automatically
+  runs `disarm-execution` -> `clear-halted-run` -> `arm-execution` if a
+  halted state is detected. **Do not manually call `clear-halted-run` or
+  `arm-execution` before running the full smoke** -- STEP 10 handles it, and
+  a manual call beforehand races against the daemon (re)start.
+- If STEP 10's automatic recovery fails (`kill_switch_active` still `true`
+  afterward), the script exits non-zero and captures evidence via
+  `Write-EvidenceCapture`. Treat that as a real blocker, not something to
+  retry manually -- investigate before the next attempt.
+
 ### Pre-smoke (any time, including weekend)
 
 ```powershell
@@ -150,6 +180,9 @@ Expected in CheckOnly:
 - `bar_check_exit: 0` (≥30 completed AAPL/5m bars)
 - `smoke_check_exit: 0` (.env.local present, docker available)
 - `readiness_classification` is not `blocked`
+- STEP 5C reports the persisted `sys_arm_state` (`ARMED`/`DISARMED` + reason).
+  `DISARMED` is expected after a halted prior session and is auto-recovered by
+  STEP 10 of the full run -- see "Retest after a halted prior session" above.
 
 ### Day-of smoke (market hours — 09:30–16:00 ET)
 
@@ -303,6 +336,15 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\Review-PaperSmokeEviden
     -EvidencePath evidence\paper_smoke_<timestamp>_<label> -WriteSummary
 ```
 
+### Viewing evidence in the GUI
+
+`review_summary.json` (and `promotion_chain.json` / `premarket_revalidation.json`
+when present) can also be viewed in the desktop GUI on the **Backtest Results**
+screen (diagnostics/oversight monitor) by entering the evidence folder path.
+The screen renders the same classification, ledger-specific verdicts, and
+Discord workflow guidance (see Section 8) as the Markdown summary -- useful
+for a quick visual review without opening the JSON/Markdown files directly.
+
 ### Classification meanings
 
 | Verdict | Meaning | What it proves |
@@ -342,6 +384,9 @@ Before recording GUI observation as complete, confirm each item:
 
 Configure `DISCORD_WEBHOOK_URL` in `.env.local` to enable paper trade alerts.
 Discord is observability only — delivery failure never blocks trading.
+
+This guidance is also available read-only in the desktop GUI on the
+**Backtest Results** screen, in the "Discord observability workflows" panel.
 
 For a complete AAPL sell/flatten smoke, confirm these Discord messages appeared:
 
