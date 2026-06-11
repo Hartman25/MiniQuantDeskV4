@@ -6,11 +6,11 @@
 // Read-only derivation. No new backend routes, no fabricated state. If the
 // model is disconnected, status is "unknown" — never a fake "no_halt".
 
-import type { Severity, SystemModel } from "./types.ts";
+import type { FeedEvent, Severity, SystemModel } from "./types.ts";
 
 export type HaltSummaryStatus = "active_halt" | "recent_halt" | "no_halt" | "unknown";
 
-const ORCHESTRATOR_HALT_SOURCE = "orchestrator_halt";
+export const ORCHESTRATOR_HALT_SOURCE = "orchestrator_halt";
 
 export interface HaltSummary {
   status: HaltSummaryStatus;
@@ -112,4 +112,22 @@ export function deriveLatestHaltSummary(model: SystemModel): HaltSummary {
     deadman_status: status.deadman_status,
     next_operator_action: autonomousPaperStatus.next_operator_action,
   };
+}
+
+const DEFAULT_HALT_HISTORY_LIMIT = 10;
+
+function haltEventTimestamp(event: FeedEvent): number {
+  const parsed = Date.parse(event.at);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+// GUI-ALERTS-HALT-HISTORY-FILTER-SURFACE-01: selects orchestrator_halt rows
+// from the events feed, newest first, for the Alerts halt history panel.
+// Read-only — does not mutate or reinterpret event fields.
+export function selectHaltEvents(feed: FeedEvent[] | null | undefined, limit = DEFAULT_HALT_HISTORY_LIMIT): FeedEvent[] {
+  return (feed ?? [])
+    .filter((event) => event.source === ORCHESTRATOR_HALT_SOURCE)
+    .slice()
+    .sort((a, b) => haltEventTimestamp(b) - haltEventTimestamp(a))
+    .slice(0, limit);
 }

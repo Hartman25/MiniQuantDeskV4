@@ -5,7 +5,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { FeedEvent, SystemModel } from "./types.ts";
-import { deriveLatestHaltSummary } from "./haltSummary.ts";
+import { deriveLatestHaltSummary, selectHaltEvents } from "./haltSummary.ts";
 
 type MinimalModel = Pick<SystemModel, "connected" | "status" | "feed" | "autonomousPaperStatus">;
 
@@ -210,4 +210,72 @@ test("deriveLatestHaltSummary: multiple orchestrator_halt rows pick the newest b
   assert.equal(summary.reason, "ReconcileDrift");
   assert.equal(summary.run_id, "run-new");
   assert.equal(summary.audit_event_id, "evt-new");
+});
+
+// ---------------------------------------------------------------------------
+// GUI-ALERTS-HALT-HISTORY-FILTER-SURFACE-01: selectHaltEvents
+// ---------------------------------------------------------------------------
+
+test("selectHaltEvents: filters only orchestrator_halt events", () => {
+  const feed: FeedEvent[] = [
+    haltEvent({ id: "a", at: "2026-06-09T18:00:00Z", source: "reconcile", text: "Order drift" }),
+    haltEvent({ id: "b", at: "2026-06-09T19:00:00Z", text: "IntegrityViolation" }),
+    haltEvent({ id: "c", at: "2026-06-09T20:00:00Z", source: "operator_action", text: "Operator armed run" }),
+  ];
+
+  const halts = selectHaltEvents(feed);
+  assert.equal(halts.length, 1);
+  assert.equal(halts[0].id, "b");
+  assert.equal(halts[0].source, "orchestrator_halt");
+});
+
+test("selectHaltEvents: preserves run_id and audit_event_id", () => {
+  const feed: FeedEvent[] = [
+    haltEvent({ id: "a", at: "2026-06-09T18:00:00Z", text: "ReconcileDrift", run_id: "run-1", audit_event_id: "evt-1" }),
+  ];
+
+  const halts = selectHaltEvents(feed);
+  assert.equal(halts.length, 1);
+  assert.equal(halts[0].run_id, "run-1");
+  assert.equal(halts[0].audit_event_id, "evt-1");
+});
+
+test("selectHaltEvents: newest-first ordering", () => {
+  const feed: FeedEvent[] = [
+    haltEvent({ id: "old", at: "2026-06-09T18:00:00Z", text: "LeaderLeaseLost" }),
+    haltEvent({ id: "new", at: "2026-06-09T20:00:00Z", text: "ReconcileDrift" }),
+    haltEvent({ id: "mid", at: "2026-06-09T19:00:00Z", text: "IntegrityViolation" }),
+  ];
+
+  const halts = selectHaltEvents(feed);
+  assert.deepEqual(halts.map((e) => e.id), ["new", "mid", "old"]);
+});
+
+test("selectHaltEvents: empty feed returns empty array", () => {
+  assert.deepEqual(selectHaltEvents([]), []);
+  assert.deepEqual(selectHaltEvents(null), []);
+  assert.deepEqual(selectHaltEvents(undefined), []);
+});
+
+test("selectHaltEvents: missing fields degrade safely", () => {
+  const feed: FeedEvent[] = [
+    haltEvent({ id: "no-ts", at: "", text: "RecoveryQuarantine", run_id: null, audit_event_id: null }),
+    haltEvent({ id: "valid", at: "2026-06-09T20:00:00Z", text: "ReconcileDrift", run_id: "run-1", audit_event_id: "evt-1" }),
+  ];
+
+  const halts = selectHaltEvents(feed);
+  assert.equal(halts.length, 2);
+  assert.ok(halts.some((e) => e.id === "no-ts" && e.run_id === null && e.audit_event_id === null));
+  // Unparseable timestamp sorts as oldest (0), so the valid event comes first.
+  assert.equal(halts[0].id, "valid");
+});
+
+test("selectHaltEvents: respects the limit parameter", () => {
+  const feed: FeedEvent[] = Array.from({ length: 12 }, (_, i) =>
+    haltEvent({ id: `evt-${i}`, at: `2026-06-09T${String(i).padStart(2, "0")}:00:00Z`, text: "ReconcileDrift" }),
+  );
+
+  const halts = selectHaltEvents(feed);
+  assert.equal(halts.length, 10);
+  assert.equal(halts[0].id, "evt-11");
 });

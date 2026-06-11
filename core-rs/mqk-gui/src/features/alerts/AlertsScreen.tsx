@@ -3,6 +3,7 @@ import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
 import { TruthStateNotice } from "../../components/common/TruthStateNotice";
 import { formatDateTime } from "../../lib/format";
+import { selectHaltEvents } from "../system/haltSummary";
 import { panelTruthRenderState } from "../system/truthRendering";
 import type { SystemModel } from "../system/types";
 
@@ -47,6 +48,9 @@ export function AlertsScreen({ model }: { model: SystemModel }) {
   // Raw alerts not yet covered by any triage row — incoming but unmanaged.
   const triageIds = new Set(model.alertTriage.map((r) => r.alert_id));
   const untriaged = model.alerts.filter((a) => !triageIds.has(a.id));
+
+  // Halt history — orchestrator_halt rows from the events feed, newest first.
+  const haltEvents = selectHaltEvents(model.feed);
 
   return (
     <div className="screen-grid desk-screen-grid">
@@ -167,6 +171,40 @@ export function AlertsScreen({ model }: { model: SystemModel }) {
           />
         </Panel>
       )}
+
+      {/* GUI-ALERTS-HALT-HISTORY-FILTER-SURFACE-01: Halt history — orchestrator_halt
+          rows pulled out of the events feed so operators don't have to read the
+          full mixed feed to find recent halts. Same fail-closed truth handling
+          as the raw feed panel below: backend_unavailable is shown explicitly,
+          never as an empty/healthy halt history. */}
+      <Panel
+        title="Halt history"
+        subtitle={
+          model.dataSource.missingEndpoints.includes(FEED_ENDPOINT)
+            ? "backend_unavailable — halt history not accessible"
+            : `Latest ${haltEvents.length} orchestrator_halt event${haltEvents.length === 1 ? "" : "s"} from the events feed (newest first)`
+        }
+      >
+        {model.dataSource.missingEndpoints.includes(FEED_ENDPOINT) ? (
+          <div className="unavailable-notice unavailable-critical">
+            Events feed backend unavailable. Halt history is NOT authoritative — do not read as "no halts".
+          </div>
+        ) : haltEvents.length === 0 ? (
+          <div className="empty-state">No orchestrator halt events in the current feed.</div>
+        ) : (
+          <DataTable
+            rows={haltEvents}
+            rowKey={(row) => row.id}
+            columns={[
+              { key: "at", title: "Time", render: (row) => formatDateTime(row.at) },
+              { key: "severity", title: "Severity", render: (row) => <span className={severityStyle(row.severity)}>{row.severity}</span> },
+              { key: "text", title: "Reason / detail", render: (row) => row.text },
+              { key: "run_id", title: "Run ID", render: (row) => row.run_id ?? "—" },
+              { key: "audit_event_id", title: "Audit event ID", render: (row) => row.audit_event_id ?? "—" },
+            ]}
+          />
+        )}
+      </Panel>
 
       {/* Supporting context only — not the triage surface.
           GUI-OPS-03: Events feed panel — explicit truth notice when backend unavailable.
