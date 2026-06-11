@@ -558,6 +558,15 @@ where
         self.terminal_fill_expiry_refresher = Some(f);
     }
 
+    /// Whether a terminal-fill expiry refresher is configured.
+    ///
+    /// Used by daemon wiring tests (PAPER-TERMINAL-FILL-REFRESHER-AND-RETEST-01)
+    /// to prove the refresher is wired for Paper+Alpaca regardless of
+    /// `broker_snapshot` seed state at run start.
+    pub fn has_terminal_fill_expiry_refresher(&self) -> bool {
+        self.terminal_fill_expiry_refresher.is_some()
+    }
+
     /// Execute one orchestrator tick.
     ///
     /// Phases:

@@ -26,7 +26,7 @@ use super::types::{
     AlpacaWsContinuityState, BrokerSnapshotTruthSource, DaemonOrchestrator, ReconcileTruthGate,
     RuntimeLifecycleError, StateIntegrityGate,
 };
-use super::{AppState, DAEMON_ENGINE_ID};
+use super::{AppState, BrokerSnapshotFetcher, DAEMON_ENGINE_ID};
 
 impl AppState {
     pub(super) async fn next_daemon_run_id(
@@ -362,36 +362,41 @@ impl AppState {
             Box::new(broker_snapshot_provider),
         );
 
-        // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01: wire the
-        // terminal-fill expiry refresher for the External-source path so
-        // Phase 0c forces a final broker REST fetch before halting on grace
-        // expiry.  Uses the same adapter as the periodic snapshot refresh.
-        if self.broker_snapshot_source == BrokerSnapshotTruthSource::External {
-            let expiry_adapter: Option<std::sync::Arc<mqk_broker_alpaca::AlpacaBrokerAdapter>> = {
-                let guard = self.external_snapshot_refresher.read().await;
-                guard.as_ref().cloned()
-            };
-            if let Some(adapter) = expiry_adapter {
-                let expiry_broker_snapshots = Arc::clone(&self.broker_snapshot);
-                orch.set_terminal_fill_expiry_refresher(Box::new(move || {
-                    let now = chrono::Utc::now();
-                    let schema_fresh = match tokio::task::block_in_place(|| {
-                        adapter.fetch_broker_snapshot(now)
-                    }) {
-                        Ok(s) => s,
-                        Err(err) => {
-                            tracing::warn!("terminal_fill_expiry_refresh_fetch_failed error={err}");
-                            return None;
-                        }
-                    };
-                    // Update AppState cache so subsequent ticks and the
-                    // background reconcile see the fresh data without re-fetching.
-                    if let Ok(mut guard) = expiry_broker_snapshots.try_write() {
-                        *guard = Some(schema_fresh.clone());
+        // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01 /
+        // PAPER-TERMINAL-FILL-REFRESHER-AND-RETEST-01: wire the terminal-fill
+        // expiry refresher for the External-source path so Phase 0c forces a
+        // final broker REST fetch before halting on grace expiry.
+        //
+        // Uses `self.snapshot_fetcher` (built once in AppState::new() for any
+        // Alpaca config with credentials present, independent of
+        // `broker_snapshot` seed state) rather than
+        // `self.external_snapshot_refresher` (only populated by the cold-fetch
+        // branch above, which is skipped whenever `broker_snapshot` was
+        // already populated at entry — e.g. by a prior
+        // POST /api/v1/ops/repair/adopt-broker-position-baseline call). That
+        // earlier wiring left `terminal_fill_expiry_refresher` unconfigured
+        // for that paper-deployment sequence, forcing a fail-closed halt at
+        // grace expiry even though a fetcher was available.
+        if let Some(fetcher) = select_terminal_fill_expiry_fetcher(
+            self.broker_snapshot_source,
+            self.snapshot_fetcher.clone(),
+        ) {
+            let expiry_broker_snapshots = Arc::clone(&self.broker_snapshot);
+            orch.set_terminal_fill_expiry_refresher(Box::new(move || {
+                let schema_fresh = match tokio::task::block_in_place(|| fetcher.fetch_snapshot()) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        tracing::warn!("terminal_fill_expiry_refresh_fetch_failed error={err}");
+                        return None;
                     }
-                    reconcile_broker_snapshot_from_schema(&schema_fresh).ok()
-                }));
-            }
+                };
+                // Update AppState cache so subsequent ticks and the
+                // background reconcile see the fresh data without re-fetching.
+                if let Ok(mut guard) = expiry_broker_snapshots.try_write() {
+                    *guard = Some(schema_fresh.clone());
+                }
+                reconcile_broker_snapshot_from_schema(&schema_fresh).ok()
+            }));
         }
 
         // DISCORD-TRADE-LIFECYCLE-ALERTS-01: inject best-effort alert sink.
@@ -616,6 +621,31 @@ fn effective_run_config_for_risk(
     merged
 }
 
+// ---------------------------------------------------------------------------
+// RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01 /
+// PAPER-TERMINAL-FILL-REFRESHER-AND-RETEST-01: terminal-fill expiry refresher
+// selection
+// ---------------------------------------------------------------------------
+
+/// Select the broker snapshot fetcher used to wire the terminal-fill expiry
+/// refresher.
+///
+/// Only the External-source path (Paper+Alpaca, Live+Alpaca) needs a
+/// refresher — the Synthetic (paper broker) source has no real broker lag to
+/// refresh against. For External, `snapshot_fetcher` is the correct seam: it
+/// is built once in `AppState::new()` for any Alpaca config with credentials
+/// present, regardless of whether `broker_snapshot` was already seeded (e.g.
+/// by `adopt-broker-position-baseline`) before run start.
+fn select_terminal_fill_expiry_fetcher(
+    broker_snapshot_source: BrokerSnapshotTruthSource,
+    snapshot_fetcher: Option<Arc<dyn BrokerSnapshotFetcher>>,
+) -> Option<Arc<dyn BrokerSnapshotFetcher>> {
+    match broker_snapshot_source {
+        BrokerSnapshotTruthSource::External => snapshot_fetcher,
+        BrokerSnapshotTruthSource::Synthetic => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,6 +784,69 @@ mod tests {
                 .pointer("/risk/daily_loss_limit")
                 .and_then(|v| v.as_f64()),
             Some(0.03),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01 /
+    // PAPER-TERMINAL-FILL-REFRESHER-AND-RETEST-01
+    // -----------------------------------------------------------------------
+
+    /// Test-only `BrokerSnapshotFetcher`. `fetch_snapshot` is never called by
+    /// `select_terminal_fill_expiry_fetcher` — only the `Option<Arc<dyn _>>`
+    /// identity matters for the selection decision.
+    struct UnusedFetcher;
+
+    impl BrokerSnapshotFetcher for UnusedFetcher {
+        fn fetch_snapshot(&self) -> Result<mqk_schemas::BrokerSnapshot, String> {
+            unreachable!(
+                "select_terminal_fill_expiry_fetcher tests do not invoke fetch_snapshot"
+            )
+        }
+    }
+
+    #[test]
+    fn external_source_with_fetcher_selects_snapshot_fetcher() {
+        let fetcher: Arc<dyn BrokerSnapshotFetcher> = Arc::new(UnusedFetcher);
+        let selected = select_terminal_fill_expiry_fetcher(
+            BrokerSnapshotTruthSource::External,
+            Some(fetcher.clone()),
+        );
+        assert!(
+            selected.is_some(),
+            "External source with snapshot_fetcher present must wire a refresher \
+             regardless of broker_snapshot seed state \
+             (PAPER-TERMINAL-FILL-REFRESHER-AND-RETEST-01)"
+        );
+        assert!(Arc::ptr_eq(&selected.unwrap(), &fetcher));
+    }
+
+    #[test]
+    fn external_source_without_fetcher_stays_unconfigured() {
+        // No `snapshot_fetcher` available (e.g. credentials absent) — the
+        // refresher remains unconfigured and the existing fail-closed
+        // `Some(None) | None` halt path in orchestrator.rs Phase 0c applies.
+        let selected =
+            select_terminal_fill_expiry_fetcher(BrokerSnapshotTruthSource::External, None);
+        assert!(
+            selected.is_none(),
+            "External source with no snapshot_fetcher must not configure a refresher \
+             — fail-closed halt at grace expiry remains intact"
+        );
+    }
+
+    #[test]
+    fn synthetic_source_never_configures_a_refresher() {
+        // Paper-synthetic broker has no real broker lag to refresh against;
+        // a configured snapshot_fetcher must still be ignored.
+        let fetcher: Arc<dyn BrokerSnapshotFetcher> = Arc::new(UnusedFetcher);
+        let selected = select_terminal_fill_expiry_fetcher(
+            BrokerSnapshotTruthSource::Synthetic,
+            Some(fetcher),
+        );
+        assert!(
+            selected.is_none(),
+            "Synthetic source must never configure a terminal-fill expiry refresher"
         );
     }
 }
