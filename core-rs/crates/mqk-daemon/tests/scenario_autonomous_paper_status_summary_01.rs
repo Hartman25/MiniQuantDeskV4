@@ -18,6 +18,9 @@
 //! | PS12 | No DB mutation path in autonomous_paper_status module                  |
 //! | PS13 | No order submission path in autonomous_paper_status module             |
 //! | PS14 | response has readiness_classification field (never null)               |
+//! | PS15 | discord_visibility_ready=false when DISCORD_WEBHOOK_URL unconfigured  |
+//! | PS16 | discord_visibility_ready=true when notifier is configured             |
+//! | PS17 | not_applicable path reflects notifier configuration (not hardcoded)   |
 //!
 //! All tests are pure in-process.  No `MQK_DATABASE_URL` required.
 
@@ -26,6 +29,7 @@ use std::sync::Arc;
 use axum::body::to_bytes;
 use axum::http::{Request, StatusCode};
 use mqk_daemon::{
+    notify::DiscordNotifier,
     routes::build_router,
     state::{
         AlpacaWsContinuityState, AppState, BrokerKind, DeploymentMode,
@@ -454,5 +458,70 @@ async fn ps14b_ws_live_moves_classification_toward_ready() {
     assert!(
         ["ready_for_market_smoke", "market_proof_pending", "blocked"]
             .contains(&classification)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PS15-PS17: discord_visibility_ready reflects actual notifier configuration
+// (DISCORD-LIFECYCLE-OBSERVABILITY-COMPLETION-01)
+// ---------------------------------------------------------------------------
+
+// PS15: discord_visibility_ready=false when DISCORD_WEBHOOK_URL is unconfigured
+// (the default test-process notifier, since AppState::from_env() sees no
+// DISCORD_WEBHOOK_URL in CI/test).
+#[tokio::test]
+async fn ps15_discord_visibility_ready_false_when_unconfigured() {
+    let st = paper_alpaca_state();
+    assert!(
+        !st.discord_notifier.is_configured(),
+        "test notifier must be unconfigured by default"
+    );
+
+    let router = build_router(st);
+    let (status, body) = get_paper_status(router).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["discord_visibility_ready"].as_bool().unwrap(),
+        false,
+        "discord_visibility_ready must be false when DISCORD_WEBHOOK_URL is unconfigured"
+    );
+}
+
+// PS16: discord_visibility_ready=true when the notifier is configured with a
+// webhook URL (no delivery is attempted by this read-only route).
+#[tokio::test]
+async fn ps16_discord_visibility_ready_true_when_configured() {
+    let mut st = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    st.discord_notifier = DiscordNotifier::from_url("http://127.0.0.1:1/hook");
+    let st = Arc::new(st);
+
+    let router = build_router(st);
+    let (status, body) = get_paper_status(router).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["discord_visibility_ready"].as_bool().unwrap(),
+        true,
+        "discord_visibility_ready must be true when a webhook URL is configured"
+    );
+}
+
+// PS17: not_applicable path also reflects notifier configuration rather than
+// a hardcoded true.
+#[tokio::test]
+async fn ps17_not_applicable_path_reflects_notifier_configuration() {
+    let st = paper_paper_state();
+    assert!(!st.discord_notifier.is_configured());
+
+    let router = build_router(st);
+    let (status, body) = get_paper_status(router).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"].as_str().unwrap(), "not_applicable");
+    assert_eq!(
+        body["discord_visibility_ready"].as_bool().unwrap(),
+        false,
+        "not_applicable path must not hardcode discord_visibility_ready=true"
     );
 }
