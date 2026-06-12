@@ -56,6 +56,7 @@ $Guards = @(
     'test_scanner_symbol_inputs_runner.ps1',
     'test_scanner_market_data_export.ps1',
     'test_scanner_market_data_export_db_proof.ps1',
+    'test_scanner_market_data_coverage.ps1',
     'test_scanner_watchlist_promotion_end_to_end.ps1',
     'test_scanner_paper_readiness_runner.ps1',
     'test_discord_test_alert_offline.ps1',

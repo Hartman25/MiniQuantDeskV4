@@ -144,6 +144,23 @@ if ($DaemonDiff.Count -eq 0) {
     $script:Failures.Add("FAIL [MDE11]: daemon files modified/staged: $($DaemonDiff -join ', ')")
 }
 
+Assert-Contains $Content 'def normalize_database_url' 'MDE12-normalize-database-url'
+Assert-Contains $Content 'postgresql+psycopg://' 'MDE12-psycopg-driver-rewrite'
+Write-Host 'PASS [MDE12]: normalize_database_url rewrites bare postgres(ql):// to psycopg3 driver'
+
+Assert-Contains $Content 'cast(:start_end_ts as bigint)' 'MDE13-cast-start-end-ts'
+Assert-Contains $Content 'cast(:end_end_ts as bigint)' 'MDE13-cast-end-end-ts'
+Write-Host 'PASS [MDE13]: time-window query params are cast to bigint (psycopg3 AmbiguousParameter fix)'
+
+foreach ($testSymbol in @(
+    'TestDatabaseUrlNormalization',
+    'test_query_casts_nullable_time_window_params_to_bigint',
+    'test_1d_timeframe_writes_symbol_1d_csv'
+)) {
+    Assert-Contains $TestContent $testSymbol "MDE14-test-$($testSymbol -replace '[^a-zA-Z0-9]','_')"
+}
+Write-Host 'PASS [MDE14]: URL normalization, SQL cast, and 1D export coverage tests present'
+
 Write-Host ''
 if ($Failures.Count -eq 0) {
     Write-Host 'ALL MARKET-DATA-EXPORT-01 GUARDS PASSED' -ForegroundColor Green

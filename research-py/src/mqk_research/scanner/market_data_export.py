@@ -63,6 +63,8 @@ ALL_EXPORT_REASONS = (
     REASON_NO_ROWS_EXPORTED,
 )
 
+_POSTGRES_BARE_SCHEMES = ("postgres://", "postgresql://")
+
 _SAFE_FILE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _BACKTEST_CSV_HEADER = (
     "symbol",
@@ -165,6 +167,21 @@ def _parse_utc_epoch_seconds(raw: Optional[str], name: str) -> tuple[Optional[in
     return int(parsed.astimezone(timezone.utc).timestamp()), None
 
 
+def normalize_database_url(database_url: str) -> str:
+    """Rewrite a bare postgres(ql):// URL to the psycopg3 dialect driver.
+
+    SQLAlchemy's default dialect driver for a driver-less postgres(ql)://
+    URL is psycopg2, which is not installed in this project (only psycopg3
+    is). URLs that already specify a driver (e.g. postgresql+psycopg://) or
+    use a non-postgres scheme are returned unchanged.
+    """
+    url = str(database_url or "")
+    for scheme in _POSTGRES_BARE_SCHEMES:
+        if url.startswith(scheme):
+            return "postgresql+psycopg://" + url[len(scheme):]
+    return url
+
+
 def build_select_md_bars_statement() -> TextClause:
     return text(
         """
@@ -181,8 +198,8 @@ def build_select_md_bars_statement() -> TextClause:
         from md_bars
         where timeframe = :timeframe
           and symbol = any(:symbols)
-          and (:start_end_ts is null or end_ts >= :start_end_ts)
-          and (:end_end_ts is null or end_ts <= :end_end_ts)
+          and (cast(:start_end_ts as bigint) is null or end_ts >= cast(:start_end_ts as bigint))
+          and (cast(:end_end_ts as bigint) is null or end_ts <= cast(:end_end_ts as bigint))
           and is_complete = true
         order by symbol asc, end_ts asc
         """
@@ -197,7 +214,7 @@ def _fetch_md_bars(
     start_end_ts: Optional[int],
     end_end_ts: Optional[int],
 ) -> list[Any]:
-    engine = make_engine(PgConfig(database_url))
+    engine = make_engine(PgConfig(normalize_database_url(database_url)))
     params = {
         "symbols": list(symbols),
         "timeframe": timeframe,

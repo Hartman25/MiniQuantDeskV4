@@ -1368,6 +1368,97 @@ To additionally run the existing paper-readiness artifact chain, provide the req
 
 This proof does not trade, does not start a daemon, does not arm paper trading, does not submit orders, does not call broker APIs, does not inject strategy signals, does not write to Postgres, does not wire watchlist enforcement, and does not prove live readiness. Live remains hard-disabled.
 
+### DATA-FOUNDATION-BUNDLE-01 - Export Query Fix + Market-Data Coverage Report
+
+`DATA-FOUNDATION-BUNDLE-01` fixes the `market_data_export_database_query_failed` defect in
+`MARKET-DATA-EXPORT-01` and adds a read-only multi-symbol coverage report so an operator can
+see which symbol/timeframe combinations in `md_bars` are ready for backtest/readiness/paper
+proof, before any multi-symbol autonomous paper work begins.
+
+**Root cause 1 - SQLAlchemy dialect/driver mismatch.** A bare `postgres://` or `postgresql://`
+URL (the canonical `.env.local` form) resolves to the `psycopg2` dialect driver under
+SQLAlchemy 2.0, but only `psycopg` (v3) is installed in `research-py`. Every query against
+`md_bars` failed at engine-creation time with `market_data_export_database_query_failed`.
+
+Fix: `market_data_export.normalize_database_url(database_url)` rewrites
+`postgres://`/`postgresql://` prefixes to `postgresql+psycopg://`, leaving any URL that
+already specifies a driver (or a non-Postgres scheme) unchanged. Both
+`market_data_export._fetch_md_bars` and `market_data_coverage._fetch_coverage_rows` call
+`make_engine(PgConfig(normalize_database_url(database_url)))` - the coverage module imports
+and reuses this function rather than duplicating URL logic.
+
+**Root cause 2 - psycopg3 `AmbiguousParameter` on nullable time-window bounds.** The
+`start_end_ts`/`end_end_ts` query parameters are `Optional[int]`; when `None`, psycopg3 cannot
+infer a SQL type for `:start_end_ts is null OR end_ts >= :start_end_ts` and raises
+`AmbiguousParameter`. Fix:
+`build_select_md_bars_statement()` now casts both bounds explicitly -
+`cast(:start_end_ts as bigint) is null or end_ts >= cast(:start_end_ts as bigint)` (and the
+symmetric `end_end_ts` clause) - which is valid whether the bound is `NULL` or an integer.
+
+Both fixes were proven end-to-end against the real `mqk-paper-postgres` database (20 symbols x
+{5m, 1D} = 40 symbol/timeframe combinations, all `status=complete`, zero
+`symbols_missing`); see "Real DB proof" below.
+
+**New module: `market_data_coverage.py`** (`research-py/src/mqk_research/scanner/market_data_coverage.py`)
+
+- Schema version: `market-data-coverage-v1`.
+- Public API: `MarketDataCoverageConfig`, `MarketDataCoverageEntry`, `MarketDataCoverageResult`,
+  `build_select_md_bars_coverage_statement()`, `run_market_data_coverage_report(config)`, `main(argv)`.
+- Top-level result fields: `schema_version`, `generated_at_utc`, `symbols_requested`,
+  `timeframes_requested`, `symbols_ready_by_timeframe`, `symbols_missing_by_timeframe`,
+  `entries`, `status` (`complete|partial|blocked`), `failure_reasons`, `approved_for_live` (always `false`).
+- Per symbol/timeframe entry fields: `symbol`, `timeframe`, `row_count`, `first_end_ts`,
+  `latest_end_ts`, `latest_end_utc`, `staleness_minutes`, `is_fresh`, `gap_count`,
+  `missing_reason`, `ready_for_backtest`, `ready_for_paper`, `failure_reasons`, `approved_for_live` (always `false`).
+- **Freshness defaults** (configurable via `MarketDataCoverageConfig`):
+  - `5m`: `max_staleness_minutes_5m=15.0`, checked only during a simple regular-market-hours
+    heuristic (`_is_regular_market_hours_utc`: Mon-Fri 13:00-21:00 UTC, covering NYSE
+    9:30-16:00 ET under both EST/EDT). Outside that window, 5m staleness is not penalized.
+    This heuristic is intentionally simple - it has no holiday or early-close awareness - and
+    is overridable via `config.assume_market_hours` for deterministic testing. It is **not**
+    a substitute for a real trading-calendar/session library.
+  - `1D`: `max_staleness_days_1d=4.0` (calendar days), independent of market hours.
+- **Gap-count heuristic**: computed only for `1D` (`max_expected_gap_days_1d=4.0`, counts
+  consecutive `end_ts` pairs whose gap exceeds the threshold). For `5m`, `gap_count=None` -
+  not computable without a session/trading-calendar, per the "do not invent complex calendar
+  logic" constraint; `None` is reported honestly rather than a fabricated `0`.
+- **Status derivation**: `blocked` if no symbol/timeframe combination has any rows
+  (`market_data_coverage_no_coverage_data`); `partial` if at least one requested combination
+  is missing or stale; `complete` only if every requested combination has rows and passes its
+  freshness check.
+- Stable `REASON_*` constants (all `market_data_coverage_*`-prefixed): missing DB URL, no
+  symbols/timeframes requested, invalid symbol/timeframe, database query failed, no rows for
+  symbol, no coverage data, stale data.
+- Read-only: only `select` against `md_bars`; no daemon/runtime/OMS/broker imports; no
+  subprocess; `approved_for_live` is forced `false` via `__post_init__` on both
+  `MarketDataCoverageConfig` and `MarketDataCoverageEntry`/`MarketDataCoverageResult`.
+
+**Real DB proof (read-only, `exports/` only)**
+
+A one-off operator run against `mqk-paper-postgres` (20 candidate symbols x `{5m, 1D}`) wrote:
+
+```
+exports/market_data/data_foundation_bundle_<timestamp>/bars_root/<SYMBOL>_<TIMEFRAME>.csv   (40 files)
+exports/market_data/data_foundation_bundle_<timestamp>/coverage/coverage_report.json
+exports/market_data/data_foundation_bundle_<timestamp>/coverage/coverage_report.md
+exports/market_data/data_foundation_bundle_<timestamp>/export_summary.json
+```
+
+Result: `export[5m] status=complete exported=20 missing=[]`,
+`export[1D] status=complete exported=20 missing=[]`,
+`coverage status=complete failure_reasons=[]`. Every entry reported `ready_for_backtest=true`
+and `ready_for_paper=true`; `approved_for_live=false` throughout. `.env.local` contents were
+never printed - only presence (`bool`) and URL scheme (`"postgres"`) were logged.
+
+**Explicitly open / future work (unchanged by this patch)**
+
+- H1 provider-native ingest into `md_bars` is not part of this patch - this bundle only fixes
+  the existing `md_bars` -> `bars_root` export/coverage path.
+- Multi-symbol daemon dispatch, strategy retuning, and market smoke runs are not in scope and
+  were not performed.
+- `approved_for_live` remains `false` everywhere in `market_data_export.py` and
+  `market_data_coverage.py` - this patch grants no live-trading authority.
+
 ---
 
 ## Appendix A: Relationship to Existing Specs

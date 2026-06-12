@@ -29,6 +29,7 @@ from mqk_research.scanner.market_data_export import (
     MarketDataExportResult,
     build_select_md_bars_statement,
     export_md_bars_to_bars_root,
+    normalize_database_url,
 )
 from mqk_research.scanner.symbol_inputs_runner import normalize_bars_csv
 
@@ -108,6 +109,35 @@ class TestExportHardInvariants(unittest.TestCase):
         result = MarketDataExportResult(**{"approved_for_live": bool(1)})
         self.assertFalse(result.approved_for_live)
         self.assertFalse(result.to_dict()["approved_for_live"])
+
+
+class TestDatabaseUrlNormalization(unittest.TestCase):
+    def test_bare_postgres_scheme_is_rewritten_to_psycopg(self) -> None:
+        self.assertEqual(
+            normalize_database_url("postgres://user:pass@127.0.0.1:5440/miniquantdesk_paper"),
+            "postgresql+psycopg://user:pass@127.0.0.1:5440/miniquantdesk_paper",
+        )
+
+    def test_bare_postgresql_scheme_is_rewritten_to_psycopg(self) -> None:
+        self.assertEqual(
+            normalize_database_url("postgresql://user:pass@127.0.0.1:5440/miniquantdesk_paper"),
+            "postgresql+psycopg://user:pass@127.0.0.1:5440/miniquantdesk_paper",
+        )
+
+    def test_psycopg_driver_already_specified_is_unchanged(self) -> None:
+        url = "postgresql+psycopg://user:pass@127.0.0.1:5440/miniquantdesk_paper"
+        self.assertEqual(normalize_database_url(url), url)
+
+    def test_psycopg2_driver_already_specified_is_unchanged(self) -> None:
+        url = "postgresql+psycopg2://user:pass@127.0.0.1:5440/miniquantdesk_paper"
+        self.assertEqual(normalize_database_url(url), url)
+
+    def test_non_postgres_scheme_is_unchanged(self) -> None:
+        url = "sqlite:///tmp/example.db"
+        self.assertEqual(normalize_database_url(url), url)
+
+    def test_empty_url_is_unchanged(self) -> None:
+        self.assertEqual(normalize_database_url(""), "")
 
 
 class TestExportBlocksFailClosed(unittest.TestCase):
@@ -232,6 +262,25 @@ class TestExportWritesCsv(unittest.TestCase):
             lines = Path(result.output_paths["AAPL"]).read_text(encoding="utf-8").splitlines()
             self.assertEqual([line.split(",")[1] for line in lines[1:]], ["100", "200", "300"])
 
+    def test_1d_timeframe_writes_symbol_1d_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = _run_with_fake_engine(
+                MarketDataExportConfig(
+                    database_url="postgresql://example",
+                    symbols=["AAPL"],
+                    timeframe="1D",
+                    bars_root=str(Path(tmp) / "bars"),
+                ),
+                _FakeEngine([_row("AAPL", 100), _row("AAPL", 200)]),
+            )
+
+            self.assertEqual(result.status, STATUS_COMPLETE)
+            self.assertEqual(result.symbols_exported, ["AAPL"])
+            self.assertEqual(result.bars_written_by_symbol, {"AAPL": 2})
+            output_path = Path(result.output_paths["AAPL"])
+            self.assertEqual(output_path.name, "AAPL_1D.csv")
+            self.assertTrue(output_path.is_file())
+
     def test_missing_symbol_reports_partial(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = _run_with_fake_engine(
@@ -332,6 +381,12 @@ class TestPathAndSqlSafety(unittest.TestCase):
         self.assertIn(":end_end_ts", sql)
         self.assertNotIn("{symbols}", sql)
         self.assertNotIn("{timeframe}", sql)
+
+    def test_query_casts_nullable_time_window_params_to_bigint(self) -> None:
+        sql = str(build_select_md_bars_statement())
+
+        self.assertIn("cast(:start_end_ts as bigint)", sql)
+        self.assertIn("cast(:end_end_ts as bigint)", sql)
 
     def test_query_contains_no_db_write_sql(self) -> None:
         sql_upper = str(build_select_md_bars_statement()).upper()
