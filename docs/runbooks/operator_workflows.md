@@ -541,6 +541,16 @@ To start the runtime after arming, use the GUI or the smoke harness explicitly.
 Full proof lifecycle.  Starts daemon, arms, waits for autonomous runtime start,
 runs watcher.  Use for smoke sessions, not for normal daily desktop startup.
 
+**GUI observation during the smoke harness (STEP 8B):**
+
+STEP 1 stops any stale `mqk-gui` process before the daemon restarts.  STEP 8B
+relaunches the desktop GUI in observe mode (plain launch, no arm/trade args)
+once daemon identity is verified, so the operator can watch the rest of the
+run.  This is non-fatal: a missing GUI binary or a launch failure is reported
+in STEP 8B and in the final summary's "GUI observation" block, but never
+stops the smoke.  Pass `-SkipGui` to skip the relaunch entirely (also reported
+in the final summary).
+
 ### Market-data parameters (optional overrides)
 
 | Parameter | Default | Notes |

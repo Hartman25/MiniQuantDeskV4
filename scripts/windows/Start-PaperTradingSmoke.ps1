@@ -199,6 +199,74 @@ function Write-EvidenceCapture {
 }
 
 # ---------------------------------------------------------------------------
+# Helper: Start-GuiObserveIfRequested
+# GUI-RELAUNCH-DURING-SMOKE-01: STEP 1 stops any stale mqk-gui process before
+# the daemon restarts, so GUI observation is unavailable for the rest of the
+# run unless something relaunches it. This helper relaunches the desktop GUI
+# in observe mode (plain launch, no arm/trade args) once daemon identity has
+# been verified (STEP 8).
+#
+# Binary detection is read-only (same two candidate paths as
+# Launch-VeritasLedger.ps1's Resolve-GuiBinary). This helper never builds the
+# GUI -- a missing binary is reported as "GUI observation unavailable", not
+# an error. Launch failure is caught and reported non-fatally. Respects
+# -SkipGui: if set, no relaunch is attempted.
+# ---------------------------------------------------------------------------
+function Start-GuiObserveIfRequested {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [switch]$SkipGui
+    )
+
+    $result = [pscustomobject]@{
+        requested    = -not $SkipGui.IsPresent
+        skipped      = $SkipGui.IsPresent
+        binary_found = $false
+        binary_path  = $null
+        launched     = $false
+        gui_pid      = $null
+        message      = $null
+    }
+
+    if ($SkipGui.IsPresent) {
+        $result.message = 'GUI relaunch skipped (-SkipGui specified). GUI observation unavailable for this run.'
+        return $result
+    }
+
+    $candidates = @(
+        (Join-Path $RepoRoot 'core-rs\target\release\mqk-gui.exe'),
+        (Join-Path $RepoRoot 'core-rs\mqk-gui\src-tauri\target\release\mqk-gui.exe')
+    )
+
+    $guiExe = $null
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            $guiExe = (Resolve-Path $candidate).Path
+            break
+        }
+    }
+
+    if ($null -eq $guiExe) {
+        $result.message = 'GUI binary not found (checked core-rs\target\release\mqk-gui.exe and core-rs\mqk-gui\src-tauri\target\release\mqk-gui.exe). GUI observation unavailable for this run. Build it first with Launch-VeritasLedger.ps1 or "npm run tauri build" in core-rs\mqk-gui.'
+        return $result
+    }
+
+    $result.binary_found = $true
+    $result.binary_path  = $guiExe
+
+    try {
+        $guiProc = Start-Process -FilePath $guiExe -WorkingDirectory (Split-Path -Parent $guiExe) -PassThru -ErrorAction Stop
+        $result.launched = $true
+        $result.gui_pid  = $guiProc.Id
+        $result.message  = "GUI relaunched in observe mode (PID $($guiProc.Id))."
+    } catch {
+        $result.message = "GUI relaunch failed (non-fatal): $($_.Exception.Message). GUI observation unavailable for this run."
+    }
+
+    return $result
+}
+
+# ---------------------------------------------------------------------------
 # CHECK-ONLY mode: verify prerequisites without starting anything
 # ---------------------------------------------------------------------------
 if ($CheckOnly) {
@@ -856,6 +924,23 @@ Write-Ok "runtime_status=$($status.runtime_status)  db_status=$($status.db_statu
 Write-Ok "alpaca_ws_continuity=$($status.alpaca_ws_continuity)  deadman_status=$($status.deadman_status)"
 
 # ---------------------------------------------------------------------------
+# STEP 8B: Relaunch GUI in observe mode (GUI-RELAUNCH-DURING-SMOKE-01)
+# STEP 1 stopped any stale mqk-gui process. Relaunch it now that daemon
+# identity is verified, so the operator can observe the remainder of this
+# run. Non-fatal: a missing binary, launch failure, or -SkipGui is reported
+# but never stops the smoke.
+# ---------------------------------------------------------------------------
+Write-Section "STEP 8B: GUI observation"
+
+$guiStatus = Start-GuiObserveIfRequested -RepoRoot $RepoRoot -SkipGui:$SkipGui
+if ($guiStatus.launched) {
+    Write-Ok $guiStatus.message
+    Write-Step "GUI binary: $($guiStatus.binary_path)"
+} else {
+    Write-Warn $guiStatus.message
+}
+
+# ---------------------------------------------------------------------------
 # STEP 9: Verify Alpaca WS live (wait for continuity=live)
 # ---------------------------------------------------------------------------
 Write-Section "STEP 9: Verify Alpaca WS continuity"
@@ -1367,4 +1452,14 @@ Write-Host "  POST $DaemonBaseUrl/api/v1/ops/action  body: {action_key: 'disarm-
 Write-Host "  Then kill mqk-daemon process if desired."
 Write-Host ""
 Write-Host "live_routing_enabled remains false. No order submission was performed by this script."
+Write-Host ""
+Write-Host "GUI observation:"
+if ($guiStatus.launched) {
+    Write-Host "  Relaunched in observe mode (PID $($guiStatus.gui_pid))."
+    Write-Host "  Binary: $($guiStatus.binary_path)"
+} elseif ($guiStatus.skipped) {
+    Write-Host "  Skipped (-SkipGui specified). GUI observation unavailable for this run."
+} else {
+    Write-Host "  Unavailable: $($guiStatus.message)"
+}
 Write-Host ""
