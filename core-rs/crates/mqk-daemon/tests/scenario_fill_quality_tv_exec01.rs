@@ -524,3 +524,124 @@ async fn fq05_read_surface_returns_active_truth_with_exact_rows() {
         "FQ-05: slippage_bps must be non-null for limit fill"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FQ-06: fetch_fill_quality_telemetry_for_order_any_run — cross-run visibility,
+// honest empty, and idempotent reads (FILL-QUALITY-TELEMETRY-PROOF-01)
+// ---------------------------------------------------------------------------
+
+/// Proves:
+/// - a fill row recorded under one run (`run_a`) is invisible to a run-scoped
+///   query for a different run (`run_b`) — the root-cause gap this patch fixes
+/// - `fetch_fill_quality_telemetry_for_order_any_run` finds that same row by
+///   `internal_order_id` alone, with exact field truth (no fabrication)
+/// - for an `internal_order_id` with zero telemetry rows anywhere, the any-run
+///   fetch returns `Ok(vec![])` — honest empty, not an error
+/// - repeated calls are idempotent: the any-run fetch is read-only and
+///   deterministic, and a duplicate insert attempt (same telemetry_id) does
+///   not create a second row
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn fq06_any_run_fetch_cross_run_visible_honest_empty_idempotent() {
+    let pool = match connect_db().await {
+        Some(p) => p,
+        None => {
+            eprintln!("FQ-06: skipping — MQK_DATABASE_URL not set");
+            return;
+        }
+    };
+
+    let run_a = Uuid::parse_str("ee010006-0000-4000-8000-0000000000a6").unwrap();
+    let run_b = Uuid::parse_str("ee010006-0000-4000-8000-0000000000b6").unwrap();
+    seed_run(&pool, run_a).await;
+
+    let internal_order_id = "ord-fq06-cross-run";
+    let broker_message_id = "fq06-fill-msg-1";
+    let fill_received_at = Utc::now();
+    let telemetry_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        format!("mqk.fill-quality.v1|{}|{}", run_a, broker_message_id).as_bytes(),
+    );
+
+    let insert_row = mqk_db::NewFillQualityTelemetry {
+        telemetry_id,
+        run_id: run_a,
+        internal_order_id: internal_order_id.to_string(),
+        broker_order_id: Some("brk-fq06-1".to_string()),
+        broker_fill_id: Some("fill-fq06-1".to_string()),
+        broker_message_id: broker_message_id.to_string(),
+        symbol: "AAPL".to_string(),
+        side: "buy".to_string(),
+        ordered_qty: 5,
+        fill_qty: 5,
+        fill_price_micros: 298_266_000,
+        reference_price_micros: None,
+        slippage_bps: None,
+        submit_ts_utc: None,
+        fill_received_at_utc: fill_received_at,
+        submit_to_fill_ms: None,
+        fill_kind: "final_fill".to_string(),
+        provenance_ref: format!("oms_inbox:{}", broker_message_id),
+        created_at_utc: Utc::now(),
+    };
+    mqk_db::insert_fill_quality_telemetry(&pool, &insert_row)
+        .await
+        .expect("FQ-06: insert must succeed");
+
+    // Root-cause gap: a run-scoped query for a DIFFERENT run finds nothing,
+    // even though the order's fill is durably recorded under run_a.
+    let wrong_run = mqk_db::fetch_fill_quality_telemetry_for_order(&pool, run_b, internal_order_id)
+        .await
+        .expect("FQ-06: run-scoped fetch must succeed");
+    assert!(
+        wrong_run.is_empty(),
+        "FQ-06: run-scoped query for run_b must find nothing for a fill recorded under run_a"
+    );
+
+    // Cross-run fallback: the any-run fetch finds the row by internal_order_id alone.
+    let any_run = mqk_db::fetch_fill_quality_telemetry_for_order_any_run(&pool, internal_order_id)
+        .await
+        .expect("FQ-06: any-run fetch must succeed");
+    assert_eq!(
+        any_run.len(),
+        1,
+        "FQ-06: any-run fetch must find the row recorded under run_a"
+    );
+    let row = &any_run[0];
+    assert_eq!(row.telemetry_id, telemetry_id, "FQ-06: telemetry_id must round-trip");
+    assert_eq!(row.run_id, run_a, "FQ-06: returned row must report its true run_id (run_a), not fabricated");
+    assert_eq!(row.symbol, "AAPL");
+    assert_eq!(row.fill_qty, 5);
+    assert_eq!(row.fill_kind, "final_fill");
+
+    // Honest empty: an internal_order_id with zero telemetry rows anywhere
+    // returns Ok(vec![]), not an error.
+    let none_anywhere =
+        mqk_db::fetch_fill_quality_telemetry_for_order_any_run(&pool, "ord-fq06-does-not-exist")
+            .await
+            .expect("FQ-06: any-run fetch for a nonexistent order must succeed");
+    assert!(
+        none_anywhere.is_empty(),
+        "FQ-06: any-run fetch for an order with zero telemetry rows must be Ok(empty), not an error"
+    );
+
+    // Idempotency: a duplicate insert attempt with the same telemetry_id is a
+    // no-op (ON CONFLICT DO NOTHING), and the read-only any-run fetch is
+    // deterministic across repeated calls.
+    mqk_db::insert_fill_quality_telemetry(&pool, &insert_row)
+        .await
+        .expect("FQ-06: duplicate insert attempt must not error");
+    let any_run_again =
+        mqk_db::fetch_fill_quality_telemetry_for_order_any_run(&pool, internal_order_id)
+            .await
+            .expect("FQ-06: repeated any-run fetch must succeed");
+    assert_eq!(
+        any_run_again.len(),
+        1,
+        "FQ-06: duplicate insert must not create a second row; any-run fetch must remain idempotent"
+    );
+    assert_eq!(
+        any_run_again[0].telemetry_id, telemetry_id,
+        "FQ-06: repeated fetch must return the same row"
+    );
+}

@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 
 /// One fill event row in the per-order execution timeline.
 ///
-/// Source: `postgres.fill_quality_telemetry` for the active run.
+/// Source: `postgres.fill_quality_telemetry`, primarily for the active run,
+/// falling back to any run that recorded a fill for this `internal_order_id`
+/// if the active run has no rows.
 /// Only fill events are represented; pre-fill outbox lifecycle events are not
 /// joined to `internal_order_id` in the current schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,10 +43,18 @@ pub struct OrderTimelineRow {
 ///
 /// # Truth states
 ///
-/// - `"active"` — DB + active run + at least one fill row found; `rows` is
+/// - `"active"` — DB + at least one fill row found (active run, or any prior
+///   run that recorded a fill for this `internal_order_id`); `rows` is
 ///   authoritative and `backend` names the exact source table.
+/// - `"filled_without_fill_quality_telemetry"` — DB + active run available,
+///   the OMS execution snapshot reports `filled_qty > 0` for this order, but
+///   no fill-quality telemetry row exists for this `internal_order_id` in any
+///   run.  `rows` is empty.  This is distinct from `"no_fills_yet"`: the order
+///   has in fact filled per OMS truth, but durable per-fill telemetry could not
+///   be located.
 /// - `"no_fills_yet"` — DB + active run available, order is visible in the OMS
-///   execution snapshot, but no fill rows exist yet; `rows` is empty.
+///   execution snapshot with `filled_qty == 0`, and no fill rows exist yet;
+///   `rows` is empty.
 /// - `"no_order"` — `order_id` was not found in any current authoritative source
 ///   (no active run, no snapshot, or no fill history).  `rows` is empty.
 /// - `"no_db"` — no DB pool configured; `rows` is empty and not authoritative.
@@ -53,7 +63,10 @@ pub struct OrderTimelineRow {
 ///
 /// - `symbol`, `requested_qty`, `filled_qty`, `current_status`, `current_stage`
 ///   — from the in-memory execution snapshot (ephemeral; not durable across restart).
-/// - `rows` — from `postgres.fill_quality_telemetry` (durable, per active run).
+/// - `rows` — from `postgres.fill_quality_telemetry` (durable). Queried first for
+///   the active run; if that returns no rows, falls back to a cross-run query by
+///   `internal_order_id` so that fills recorded under a prior run (e.g. before an
+///   autonomous session recovery-restart assigned a new `run_id`) remain visible.
 ///
 /// # Honest limits
 ///
@@ -93,7 +106,9 @@ pub struct OrderTimelineResponse {
 
 /// One correlated event row in the per-order execution trace.
 ///
-/// Source: `postgres.fill_quality_telemetry` for the active run.
+/// Source: `postgres.fill_quality_telemetry`, primarily for the active run,
+/// falling back to any run that recorded a fill for this `internal_order_id`
+/// if the active run has no rows.
 /// Only fill events are represented; pre-fill outbox lifecycle events are not
 /// joined to `internal_order_id` in the current schema.
 ///
@@ -132,10 +147,18 @@ pub struct OrderTraceRow {
 ///
 /// # Truth states
 ///
-/// - `"active"` — DB + active run + at least one fill row found; `rows` is
+/// - `"active"` — DB + at least one fill row found (active run, or any prior
+///   run that recorded a fill for this `internal_order_id`); `rows` is
 ///   authoritative and `backend` names the exact source table.
+/// - `"filled_without_fill_quality_telemetry"` — DB + active run available,
+///   the OMS execution snapshot reports `filled_qty > 0` for this order, but
+///   no fill-quality telemetry row exists for this `internal_order_id` in any
+///   run.  `rows` is empty.  This is distinct from `"no_fills_yet"`: the order
+///   has in fact filled per OMS truth, but durable per-fill telemetry could not
+///   be located.
 /// - `"no_fills_yet"` — DB + active run available, order is visible in the OMS
-///   execution snapshot, but no fill rows exist yet; `rows` is empty.
+///   execution snapshot with `filled_qty == 0`, and no fill rows exist yet;
+///   `rows` is empty.
 /// - `"no_order"` — `order_id` was not found in any current authoritative source.
 ///   `rows` is empty.
 /// - `"no_db"` — no DB pool configured; `rows` is empty and not authoritative.
@@ -147,7 +170,10 @@ pub struct OrderTraceRow {
 /// - `outbox_status`, `outbox_lifecycle_stage`
 ///   — from `execution_snapshot.pending_outbox`, matched by `idempotency_key == order_id`
 ///   (ephemeral; not durable across restart; absent if order left the outbox window).
-/// - `rows` — from `postgres.fill_quality_telemetry` (durable, per active run).
+/// - `rows` — from `postgres.fill_quality_telemetry` (durable). Queried first for
+///   the active run; if that returns no rows, falls back to a cross-run query by
+///   `internal_order_id` so that fills recorded under a prior run (e.g. before an
+///   autonomous session recovery-restart assigned a new `run_id`) remain visible.
 ///
 /// # Honest limits
 ///

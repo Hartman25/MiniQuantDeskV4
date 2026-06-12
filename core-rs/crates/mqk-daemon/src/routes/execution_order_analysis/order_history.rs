@@ -121,7 +121,13 @@ pub(crate) async fn execution_order_timeline(
     };
 
     // Step 4: Fetch fill quality rows for this specific order, oldest-first.
-    let fill_rows =
+    // First try the run-scoped query (rows recorded under the currently active
+    // run). `internal_order_id` is a durable decision_id independent of
+    // run_id, so if a fill was recorded under a prior run (e.g. before an
+    // autonomous session recovery-restart assigned a new run_id while this
+    // order's in-memory OMS state carried over), fall back to an any-run
+    // lookup so genuinely-recorded fill evidence is not hidden by run scoping.
+    let mut fill_rows =
         match mqk_db::fetch_fill_quality_telemetry_for_order(db, run_id, &order_id).await {
             Ok(rows) => rows,
             Err(e) => {
@@ -135,6 +141,23 @@ pub(crate) async fn execution_order_timeline(
                     .into_response();
             }
         };
+
+    if fill_rows.is_empty() {
+        fill_rows =
+            match mqk_db::fetch_fill_quality_telemetry_for_order_any_run(db, &order_id).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "error": "timeline_fetch_failed",
+                            "detail": e.to_string(),
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+    }
 
     // Step 5: Map fill rows to timeline rows (oldest-first is already provided by the DB query).
     let last_event_at = fill_rows
@@ -167,6 +190,12 @@ pub(crate) async fn execution_order_timeline(
     // Step 6: Determine truth_state from what we found.
     let truth_state = if !rows.is_empty() {
         "active"
+    } else if matches!(filled_qty, Some(q) if q > 0) {
+        // OMS truth says this order has filled quantity, but no
+        // fill_quality_telemetry row exists for it in any run. Report this
+        // honestly rather than "no_fills_yet", which would imply the order
+        // has not filled at all.
+        "filled_without_fill_quality_telemetry"
     } else if order_in_snapshot.is_some() {
         "no_fills_yet"
     } else {
@@ -310,7 +339,13 @@ pub(crate) async fn execution_order_trace(
     };
 
     // Step 4: Fetch fill quality rows for this specific order, oldest-first.
-    let fill_rows =
+    // First try the run-scoped query (rows recorded under the currently active
+    // run). `internal_order_id` is a durable decision_id independent of
+    // run_id, so if a fill was recorded under a prior run (e.g. before an
+    // autonomous session recovery-restart assigned a new run_id while this
+    // order's in-memory OMS state carried over), fall back to an any-run
+    // lookup so genuinely-recorded fill evidence is not hidden by run scoping.
+    let mut fill_rows =
         match mqk_db::fetch_fill_quality_telemetry_for_order(db, run_id, &order_id).await {
             Ok(rows) => rows,
             Err(e) => {
@@ -324,6 +359,23 @@ pub(crate) async fn execution_order_trace(
                     .into_response();
             }
         };
+
+    if fill_rows.is_empty() {
+        fill_rows =
+            match mqk_db::fetch_fill_quality_telemetry_for_order_any_run(db, &order_id).await {
+                Ok(rows) => rows,
+                Err(e) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "error": "trace_fetch_failed",
+                            "detail": e.to_string(),
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+    }
 
     // Step 5: Map fill rows to trace rows (oldest-first provided by DB query).
     let last_event_at = fill_rows
@@ -359,6 +411,12 @@ pub(crate) async fn execution_order_trace(
     // Step 6: Determine truth_state from what was found.
     let truth_state = if !rows.is_empty() {
         "active"
+    } else if matches!(filled_qty, Some(q) if q > 0) {
+        // OMS truth says this order has filled quantity, but no
+        // fill_quality_telemetry row exists for it in any run. Report this
+        // honestly rather than "no_fills_yet", which would imply the order
+        // has not filled at all.
+        "filled_without_fill_quality_telemetry"
     } else if order_in_snapshot.is_some() {
         "no_fills_yet"
     } else {
