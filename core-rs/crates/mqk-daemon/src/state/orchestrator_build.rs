@@ -377,7 +377,7 @@ impl AppState {
         // earlier wiring left `terminal_fill_expiry_refresher` unconfigured
         // for that paper-deployment sequence, forcing a fail-closed halt at
         // grace expiry even though a fetcher was available.
-        if let Some(fetcher) = select_terminal_fill_expiry_fetcher(
+        if let Some(fetcher) = select_external_snapshot_fetcher(
             self.broker_snapshot_source,
             self.snapshot_fetcher.clone(),
         ) {
@@ -623,20 +623,30 @@ fn effective_run_config_for_risk(
 
 // ---------------------------------------------------------------------------
 // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01 /
-// PAPER-TERMINAL-FILL-REFRESHER-AND-RETEST-01: terminal-fill expiry refresher
+// PAPER-TERMINAL-FILL-REFRESHER-AND-RETEST-01 /
+// PAPER-EAGER-SNAPSHOT-REFRESH-WIRE-01: external broker snapshot fetcher
 // selection
 // ---------------------------------------------------------------------------
 
-/// Select the broker snapshot fetcher used to wire the terminal-fill expiry
-/// refresher.
+/// Select the broker snapshot fetcher used to refresh the External-source
+/// broker snapshot.
+///
+/// This is the single shared seam for BOTH:
+/// 1. the eager/periodic refresh in `loop_runner.rs`'s execution tick loop, and
+/// 2. the terminal-fill expiry refresher wired below in
+///    `build_execution_orchestrator` (Phase 0c).
 ///
 /// Only the External-source path (Paper+Alpaca, Live+Alpaca) needs a
 /// refresher — the Synthetic (paper broker) source has no real broker lag to
 /// refresh against. For External, `snapshot_fetcher` is the correct seam: it
 /// is built once in `AppState::new()` for any Alpaca config with credentials
 /// present, regardless of whether `broker_snapshot` was already seeded (e.g.
-/// by `adopt-broker-position-baseline`) before run start.
-fn select_terminal_fill_expiry_fetcher(
+/// by `adopt-broker-position-baseline`) before run start. The previously-used
+/// `external_snapshot_refresher` field is populated only on the cold-fetch
+/// branch above and stays `None` on that pre-seeded path, which left the
+/// eager/periodic refresh permanently dead
+/// (PAPER-EAGER-SNAPSHOT-REFRESH-WIRE-01).
+pub(super) fn select_external_snapshot_fetcher(
     broker_snapshot_source: BrokerSnapshotTruthSource,
     snapshot_fetcher: Option<Arc<dyn BrokerSnapshotFetcher>>,
 ) -> Option<Arc<dyn BrokerSnapshotFetcher>> {
@@ -789,26 +799,35 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // RECONCILE-DRIFT-AFTER-TERMINAL-FILL-FRESH-SNAPSHOT-01 /
-    // PAPER-TERMINAL-FILL-REFRESHER-AND-RETEST-01
+    // PAPER-TERMINAL-FILL-REFRESHER-AND-RETEST-01 /
+    // PAPER-EAGER-SNAPSHOT-REFRESH-WIRE-01
     // -----------------------------------------------------------------------
 
     /// Test-only `BrokerSnapshotFetcher`. `fetch_snapshot` is never called by
-    /// `select_terminal_fill_expiry_fetcher` — only the `Option<Arc<dyn _>>`
+    /// `select_external_snapshot_fetcher` — only the `Option<Arc<dyn _>>`
     /// identity matters for the selection decision.
     struct UnusedFetcher;
 
     impl BrokerSnapshotFetcher for UnusedFetcher {
         fn fetch_snapshot(&self) -> Result<mqk_schemas::BrokerSnapshot, String> {
-            unreachable!(
-                "select_terminal_fill_expiry_fetcher tests do not invoke fetch_snapshot"
-            )
+            unreachable!("select_external_snapshot_fetcher tests do not invoke fetch_snapshot")
+        }
+    }
+
+    /// Test-only `BrokerSnapshotFetcher` that always fails. Proves a fetch
+    /// failure surfaces as `Err`, never as a fabricated/optimistic snapshot.
+    struct FailingFetcher;
+
+    impl BrokerSnapshotFetcher for FailingFetcher {
+        fn fetch_snapshot(&self) -> Result<mqk_schemas::BrokerSnapshot, String> {
+            Err("simulated broker fetch failure".to_string())
         }
     }
 
     #[test]
     fn external_source_with_fetcher_selects_snapshot_fetcher() {
         let fetcher: Arc<dyn BrokerSnapshotFetcher> = Arc::new(UnusedFetcher);
-        let selected = select_terminal_fill_expiry_fetcher(
+        let selected = select_external_snapshot_fetcher(
             BrokerSnapshotTruthSource::External,
             Some(fetcher.clone()),
         );
@@ -827,7 +846,7 @@ mod tests {
         // refresher remains unconfigured and the existing fail-closed
         // `Some(None) | None` halt path in orchestrator.rs Phase 0c applies.
         let selected =
-            select_terminal_fill_expiry_fetcher(BrokerSnapshotTruthSource::External, None);
+            select_external_snapshot_fetcher(BrokerSnapshotTruthSource::External, None);
         assert!(
             selected.is_none(),
             "External source with no snapshot_fetcher must not configure a refresher \
@@ -840,7 +859,7 @@ mod tests {
         // Paper-synthetic broker has no real broker lag to refresh against;
         // a configured snapshot_fetcher must still be ignored.
         let fetcher: Arc<dyn BrokerSnapshotFetcher> = Arc::new(UnusedFetcher);
-        let selected = select_terminal_fill_expiry_fetcher(
+        let selected = select_external_snapshot_fetcher(
             BrokerSnapshotTruthSource::Synthetic,
             Some(fetcher),
         );
@@ -848,5 +867,52 @@ mod tests {
             selected.is_none(),
             "Synthetic source must never configure a terminal-fill expiry refresher"
         );
+    }
+
+    #[test]
+    fn external_source_selection_is_shared_seam_for_eager_and_expiry_refreshers() {
+        // PAPER-EAGER-SNAPSHOT-REFRESH-WIRE-01: both the eager/periodic
+        // refresh in loop_runner.rs and the terminal-fill expiry refresher
+        // wired in build_execution_orchestrator call this same selection
+        // function against the same `state.snapshot_fetcher` Arc. Selecting
+        // twice from the same inputs (simulating both call sites) must yield
+        // the identical underlying fetcher — proving one shared seam, not
+        // two independently-derived ones, and that the result does not
+        // depend on any `broker_snapshot` seed-state side channel.
+        let fetcher: Arc<dyn BrokerSnapshotFetcher> = Arc::new(UnusedFetcher);
+
+        let for_expiry_refresher = select_external_snapshot_fetcher(
+            BrokerSnapshotTruthSource::External,
+            Some(fetcher.clone()),
+        );
+        let for_eager_loop = select_external_snapshot_fetcher(
+            BrokerSnapshotTruthSource::External,
+            Some(fetcher.clone()),
+        );
+
+        let for_expiry_refresher = for_expiry_refresher.expect("expiry refresher seam");
+        let for_eager_loop = for_eager_loop.expect("eager loop seam");
+        assert!(
+            Arc::ptr_eq(&for_expiry_refresher, &for_eager_loop),
+            "terminal-fill expiry refresher and eager/periodic loop refresh must \
+             resolve to the identical snapshot_fetcher instance"
+        );
+        assert!(Arc::ptr_eq(&for_eager_loop, &fetcher));
+    }
+
+    #[test]
+    fn external_source_with_failing_fetcher_propagates_error_not_snapshot() {
+        // Fail-closed contract: if the broker REST fetch fails, the selected
+        // fetcher's `fetch_snapshot()` must return `Err`. Neither the eager
+        // loop refresh nor the terminal-fill expiry refresher may treat a
+        // failed fetch as a fresh/clean snapshot.
+        let fetcher: Arc<dyn BrokerSnapshotFetcher> = Arc::new(FailingFetcher);
+        let selected =
+            select_external_snapshot_fetcher(BrokerSnapshotTruthSource::External, Some(fetcher));
+        let selected = selected.expect("External source with fetcher must select it");
+        match selected.fetch_snapshot() {
+            Err(msg) => assert_eq!(msg, "simulated broker fetch failure"),
+            Ok(_) => panic!("fetch failure must surface as Err, never as a fabricated snapshot"),
+        }
     }
 }

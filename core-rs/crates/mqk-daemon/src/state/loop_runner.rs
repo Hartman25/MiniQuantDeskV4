@@ -20,6 +20,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use super::env::uptime_secs;
+use super::orchestrator_build::select_external_snapshot_fetcher;
 use super::snapshot::{
     outbox_json_side, preserve_fail_closed_reconcile_status, reconcile_status_from_report,
     reconcile_status_from_stale, reconcile_unknown_status,
@@ -425,6 +426,16 @@ pub(super) fn spawn_execution_loop(
                     // position truth is genuinely wrong.  This is fail-closed: a missing
                     // refresh is never silently treated as a clean match.
                     //
+                    // PAPER-EAGER-SNAPSHOT-REFRESH-WIRE-01: the fetcher used here is
+                    // `state_arc.snapshot_fetcher`, selected via
+                    // `select_external_snapshot_fetcher` — the same seed-state-independent
+                    // seam that wires the terminal-fill expiry refresher in
+                    // `orchestrator_build.rs`. The previously-used
+                    // `external_snapshot_refresher` field is only populated on the
+                    // cold-fetch path and stays `None` whenever `broker_snapshot` was
+                    // pre-seeded (e.g. via `adopt-broker-position-baseline`), which left
+                    // this eager/periodic refresh permanently dead on that path.
+                    //
                     // AUTON-SENT-ORDER-BROKER-TRUTH-01: active-order eager refresh.
                     //
                     // The broker seed snapshot is fetched at run-start before any orders
@@ -465,15 +476,12 @@ pub(super) fn spawn_execution_loop(
                         external_refresh_ticks += 1;
                         if external_refresh_ticks >= super::EXTERNAL_SNAPSHOT_REFRESH_TICKS {
                             external_refresh_ticks = 0;
-                            let adapter_opt: Option<std::sync::Arc<mqk_broker_alpaca::AlpacaBrokerAdapter>> = {
-                                let guard = state_arc.external_snapshot_refresher.read().await;
-                                guard.as_ref().cloned()
-                            };
-                            if let Some(adapter) = adapter_opt {
-                                let now = Utc::now();
-                                match tokio::task::block_in_place(|| {
-                                    adapter.fetch_broker_snapshot(now)
-                                }) {
+                            let fetcher_opt = select_external_snapshot_fetcher(
+                                broker_snapshot_source,
+                                state_arc.snapshot_fetcher.clone(),
+                            );
+                            if let Some(fetcher) = fetcher_opt {
+                                match tokio::task::block_in_place(|| fetcher.fetch_snapshot()) {
                                     Ok(fresh) => {
                                         *broker_snapshot_cache.write().await = Some(fresh);
                                         tracing::debug!(

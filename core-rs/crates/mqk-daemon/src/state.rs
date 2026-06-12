@@ -264,11 +264,21 @@ pub struct AppState {
     /// `None` until the first bar is dispatched.  Replaced atomically on each
     /// dispatch.  Read-only; does not affect the decision path.
     last_strategy_diagnostics: Arc<Mutex<Option<mqk_strategy::IntradayScalperDiagnostics>>>,
-    /// AUTON-PAPER-RISK-03: Alpaca adapter retained exclusively for periodic broker
-    /// snapshot refresh on the External-source path.  Set once in
-    /// `build_execution_orchestrator`; `None` for Synthetic source or before
-    /// the first run start.  The execution loop clones the inner Arc and calls
-    /// `fetch_broker_snapshot` every `EXTERNAL_SNAPSHOT_REFRESH_TICKS` ticks.
+    /// AUTON-PAPER-RISK-03: Alpaca adapter populated by the cold-fetch branch of
+    /// `build_execution_orchestrator` (External source, `broker_snapshot` empty
+    /// at entry); stays `None` on the pre-seeded path (e.g.
+    /// `adopt-broker-position-baseline`) and for Synthetic source or before the
+    /// first run start.
+    ///
+    /// PAPER-EAGER-SNAPSHOT-REFRESH-WIRE-01: this field is write-only in
+    /// production now. The eager/periodic broker snapshot refresh in
+    /// `loop_runner.rs` and the terminal-fill expiry refresher in
+    /// `build_execution_orchestrator` both read `snapshot_fetcher` via
+    /// `select_external_snapshot_fetcher` instead — that seam is populated
+    /// once in `AppState::new()` independent of `broker_snapshot` seed state,
+    /// so it does not go dead on the pre-seeded path. This field is retained
+    /// for `scenario_external_snapshot_refresh_risk03.rs` field-mechanics
+    /// proofs only.
     pub external_snapshot_refresher: Arc<RwLock<Option<Arc<AlpacaBrokerAdapter>>>>,
     /// HEARTBEAT-TICK-01: Unix-second timestamp of the last completed execution-loop tick.
     ///
