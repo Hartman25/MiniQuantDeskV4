@@ -31,6 +31,13 @@ const CHUNK_DAYS_1M: i64 = 14;
 /// Stays safely under the TwelveData ~5 000-bar cap.
 const CHUNK_DAYS_5M: i64 = 63;
 
+/// Maximum calendar days per provider fetch window for 1-hour bars.
+///
+/// Hourly bars: ~7 bars/trading-day (regular NYSE session, including the final
+/// partial hour). 365 calendar days ≈ 259 trading days ≈ 1 813 bars.
+/// Stays safely under the TwelveData/Alpaca ~5 000-bar cap with room to spare.
+const CHUNK_DAYS_1H: i64 = 365;
+
 // ---------------------------------------------------------------------------
 // Date-range chunking helper
 // ---------------------------------------------------------------------------
@@ -279,6 +286,7 @@ pub async fn md_ingest_provider(
     // per-request bar cap (~5 000 bars) on deep-history backfills.
     let chunk_days = match tf {
         mqk_md::Timeframe::D1 => CHUNK_DAYS_1D,
+        mqk_md::Timeframe::H1 => CHUNK_DAYS_1H,
         mqk_md::Timeframe::M5 => CHUNK_DAYS_5M,
         mqk_md::Timeframe::M1 => CHUNK_DAYS_1M,
     };
@@ -423,6 +431,7 @@ pub async fn md_sync_provider(
 
     let default_overlap: u32 = match tf {
         mqk_md::Timeframe::D1 => 5,
+        mqk_md::Timeframe::H1 => 2,
         mqk_md::Timeframe::M5 => 2,
         mqk_md::Timeframe::M1 => 1,
     };

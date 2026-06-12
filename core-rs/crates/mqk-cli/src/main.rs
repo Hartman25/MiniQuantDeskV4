@@ -297,7 +297,7 @@ enum MdCmd {
         #[arg(long)]
         symbols_from_registry: Option<PathBuf>,
 
-        /// Timeframe (1D | 1m | 5m)
+        /// Timeframe (1D | 1h | 1m | 5m)
         #[arg(long)]
         timeframe: String,
 
@@ -330,7 +330,7 @@ enum MdCmd {
         #[arg(long)]
         symbols_from_registry: Option<PathBuf>,
 
-        /// Timeframe (1D | 1m | 5m)
+        /// Timeframe (1D | 1h | 1m | 5m)
         #[arg(long)]
         timeframe: String,
 
@@ -345,7 +345,7 @@ enum MdCmd {
         end: Option<String>,
 
         /// Overlap in calendar days subtracted from the latest stored bar date.
-        /// Defaults: 5 for 1D, 2 for 5m, 1 for 1m.
+        /// Defaults: 5 for 1D, 2 for 1h, 2 for 5m, 1 for 1m.
         #[arg(long)]
         overlap_days: Option<u32>,
     },

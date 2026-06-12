@@ -281,6 +281,31 @@ class TestExportWritesCsv(unittest.TestCase):
             self.assertEqual(output_path.name, "AAPL_1D.csv")
             self.assertTrue(output_path.is_file())
 
+    def test_1h_timeframe_writes_symbol_1h_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = _run_with_fake_engine(
+                MarketDataExportConfig(
+                    database_url="postgresql://example",
+                    symbols=["AAPL"],
+                    timeframe="1h",
+                    bars_root=str(Path(tmp) / "bars"),
+                ),
+                _FakeEngine([_row("AAPL", 100), _row("AAPL", 200)]),
+            )
+
+            self.assertEqual(result.status, STATUS_COMPLETE)
+            self.assertEqual(result.symbols_exported, ["AAPL"])
+            self.assertEqual(result.bars_written_by_symbol, {"AAPL": 2})
+            output_path = Path(result.output_paths["AAPL"])
+            self.assertEqual(output_path.name, "AAPL_1h.csv")
+            self.assertTrue(output_path.is_file())
+
+            header = output_path.read_text(encoding="utf-8").splitlines()[0]
+            self.assertEqual(
+                header,
+                "symbol,end_ts,open_micros,high_micros,low_micros,close_micros,volume,is_complete",
+            )
+
     def test_missing_symbol_reports_partial(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = _run_with_fake_engine(

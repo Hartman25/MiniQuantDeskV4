@@ -66,6 +66,7 @@ class MarketDataCoverageConfig:
     symbols: list[str] = field(default_factory=list)
     timeframes: list[str] = field(default_factory=list)
     max_staleness_minutes_5m: float = 15.0
+    max_staleness_minutes_1h: float = 90.0
     max_staleness_days_1d: float = 4.0
     max_expected_gap_days_1d: float = 4.0
     min_rows_for_backtest: int = 1
@@ -278,6 +279,15 @@ def _evaluate_freshness(
         if not market_open:
             return True
         return staleness_minutes <= config.max_staleness_minutes_5m
+    if timeframe == "1h":
+        market_open = (
+            config.assume_market_hours
+            if config.assume_market_hours is not None
+            else _is_regular_market_hours_utc(now_utc)
+        )
+        if not market_open:
+            return True
+        return staleness_minutes <= config.max_staleness_minutes_1h
     return staleness_minutes <= (config.max_staleness_days_1d * 24 * 60)
 
 
@@ -400,6 +410,10 @@ def run_market_data_coverage_report(config: MarketDataCoverageConfig) -> MarketD
             staleness_minutes = _compute_staleness_minutes(latest_end_ts, now_utc)
             is_fresh = _evaluate_freshness(timeframe, staleness_minutes, now_utc, config)
 
+            # gap_count is only computed for 1D. For "5m" and "1h" it is reported
+            # as None rather than fabricated: detecting intraday gaps correctly
+            # requires a trading-session calendar (regular hours, half-days,
+            # holidays), which this report does not implement.
             gap_count: Optional[int] = None
             if timeframe == "1D":
                 gap_count = _compute_gap_count_1d(combo_end_ts, config.max_expected_gap_days_1d)
@@ -487,6 +501,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeframes", dest="timeframes", default="5m,1D")
     parser.add_argument("--now-utc", dest="now_utc", default=None)
     parser.add_argument("--max-staleness-minutes-5m", dest="max_staleness_minutes_5m", type=float, default=15.0)
+    parser.add_argument("--max-staleness-minutes-1h", dest="max_staleness_minutes_1h", type=float, default=90.0)
     parser.add_argument("--max-staleness-days-1d", dest="max_staleness_days_1d", type=float, default=4.0)
     parser.add_argument("--max-expected-gap-days-1d", dest="max_expected_gap_days_1d", type=float, default=4.0)
     parser.add_argument("--min-rows-for-backtest", dest="min_rows_for_backtest", type=int, default=1)
@@ -495,7 +510,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         dest="assume_market_hours",
         choices=["true", "false"],
         default=None,
-        help="Override the regular-market-hours heuristic used for 5m freshness checks.",
+        help="Override the regular-market-hours heuristic used for 5m and 1h freshness checks.",
     )
     return parser
 
@@ -516,6 +531,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             symbols=symbols,
             timeframes=timeframes,
             max_staleness_minutes_5m=args.max_staleness_minutes_5m,
+            max_staleness_minutes_1h=args.max_staleness_minutes_1h,
             max_staleness_days_1d=args.max_staleness_days_1d,
             max_expected_gap_days_1d=args.max_expected_gap_days_1d,
             min_rows_for_backtest=args.min_rows_for_backtest,

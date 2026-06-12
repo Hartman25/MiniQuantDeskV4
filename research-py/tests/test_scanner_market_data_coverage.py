@@ -313,6 +313,73 @@ class TestCoverageFreshness(unittest.TestCase):
         )
         self.assertTrue(result_default.entries[0].is_fresh)
 
+    def test_1h_during_market_hours_beyond_threshold_is_stale(self) -> None:
+        now_utc = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
+        rows = [_cov_row("AAPL", "1h", _epoch(2026, 6, 12, 12, 0))]
+        result = _run_with_fake_engine(
+            MarketDataCoverageConfig(
+                database_url="postgresql://example",
+                symbols=["AAPL"],
+                timeframes=["1h"],
+                max_staleness_minutes_1h=90.0,
+                assume_market_hours=True,
+                now_utc=now_utc,
+            ),
+            _FakeEngine(rows),
+        )
+
+        entry = result.entries[0]
+        self.assertFalse(entry.is_fresh)
+        self.assertFalse(entry.ready_for_paper)
+
+    def test_1h_outside_market_hours_is_fresh_regardless_of_staleness(self) -> None:
+        now_utc = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
+        rows = [_cov_row("AAPL", "1h", _epoch(2026, 6, 11, 13, 30))]
+        result = _run_with_fake_engine(
+            MarketDataCoverageConfig(
+                database_url="postgresql://example",
+                symbols=["AAPL"],
+                timeframes=["1h"],
+                max_staleness_minutes_1h=90.0,
+                assume_market_hours=False,
+                now_utc=now_utc,
+            ),
+            _FakeEngine(rows),
+        )
+
+        entry = result.entries[0]
+        self.assertTrue(entry.is_fresh)
+        self.assertTrue(entry.ready_for_paper)
+
+    def test_1h_freshness_default_and_configurable_threshold(self) -> None:
+        now_utc = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
+        rows = [_cov_row("AAPL", "1h", _epoch(2026, 6, 12, 12, 29))]  # 91 minutes stale
+
+        result_default = _run_with_fake_engine(
+            MarketDataCoverageConfig(
+                database_url="postgresql://example",
+                symbols=["AAPL"],
+                timeframes=["1h"],
+                assume_market_hours=True,
+                now_utc=now_utc,
+            ),
+            _FakeEngine(rows),
+        )
+        self.assertFalse(result_default.entries[0].is_fresh)
+
+        result_relaxed = _run_with_fake_engine(
+            MarketDataCoverageConfig(
+                database_url="postgresql://example",
+                symbols=["AAPL"],
+                timeframes=["1h"],
+                max_staleness_minutes_1h=120.0,
+                assume_market_hours=True,
+                now_utc=now_utc,
+            ),
+            _FakeEngine(rows),
+        )
+        self.assertTrue(result_relaxed.entries[0].is_fresh)
+
 
 class TestCoverageGapCount(unittest.TestCase):
     def test_1d_gap_within_tolerance_is_zero(self) -> None:
@@ -363,6 +430,22 @@ class TestCoverageGapCount(unittest.TestCase):
                 database_url="postgresql://example",
                 symbols=["AAPL"],
                 timeframes=["5m"],
+                assume_market_hours=True,
+                now_utc=now_utc,
+            ),
+            _FakeEngine(rows),
+        )
+
+        self.assertIsNone(result.entries[0].gap_count)
+
+    def test_1h_gap_count_is_not_computable(self) -> None:
+        now_utc = datetime(2026, 6, 12, 14, 0, tzinfo=timezone.utc)
+        rows = [_cov_row("AAPL", "1h", _epoch(2026, 6, 12, 13, 0))]
+        result = _run_with_fake_engine(
+            MarketDataCoverageConfig(
+                database_url="postgresql://example",
+                symbols=["AAPL"],
+                timeframes=["1h"],
                 assume_market_hours=True,
                 now_utc=now_utc,
             ),

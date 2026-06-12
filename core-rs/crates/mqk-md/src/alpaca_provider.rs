@@ -75,6 +75,7 @@ impl AlpacaHistoricalProvider {
     fn alpaca_timeframe(tf: &crate::Timeframe) -> &'static str {
         match tf {
             crate::Timeframe::D1 => "1Day",
+            crate::Timeframe::H1 => "1Hour",
             crate::Timeframe::M1 => "1Min",
             crate::Timeframe::M5 => "5Min",
         }
@@ -271,6 +272,7 @@ mod tests {
         assert_eq!(AlpacaHistoricalProvider::alpaca_timeframe(&Timeframe::M5), "5Min");
         assert_eq!(AlpacaHistoricalProvider::alpaca_timeframe(&Timeframe::M1), "1Min");
         assert_eq!(AlpacaHistoricalProvider::alpaca_timeframe(&Timeframe::D1), "1Day");
+        assert_eq!(AlpacaHistoricalProvider::alpaca_timeframe(&Timeframe::H1), "1Hour");
     }
 
     #[test]

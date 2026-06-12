@@ -33,11 +33,13 @@ const TWELVEDATA_RATE_LIMIT_SLEEP_SECS: u64 = 65;
 ///
 /// Canonical user-facing values are aligned with the backtest spec:
 /// - `1D`
+/// - `1h`
 /// - `1m`
 /// - `5m`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Timeframe {
     D1,
+    H1,
     M1,
     M5,
 }
@@ -46,6 +48,7 @@ impl Timeframe {
     pub fn as_str(&self) -> &'static str {
         match self {
             Timeframe::D1 => "1D",
+            Timeframe::H1 => "1h",
             Timeframe::M1 => "1m",
             Timeframe::M5 => "5m",
         }
@@ -55,6 +58,7 @@ impl Timeframe {
     pub fn as_twelvedata_interval(&self) -> &'static str {
         match self {
             Timeframe::D1 => "1day",
+            Timeframe::H1 => "1h",
             Timeframe::M1 => "1min",
             Timeframe::M5 => "5min",
         }
@@ -63,10 +67,11 @@ impl Timeframe {
     pub fn parse(s: &str) -> Result<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "1d" => Ok(Timeframe::D1),
+            "1h" | "h1" | "60m" => Ok(Timeframe::H1),
             "1m" | "1min" | "1minute" => Ok(Timeframe::M1),
             "5m" | "5min" | "5minute" => Ok(Timeframe::M5),
             other => Err(anyhow!(
-                "invalid timeframe '{}'. expected one of: 1D | 1m | 5m",
+                "invalid timeframe '{}'. expected one of: 1D | 1h | 1m | 5m",
                 other
             )),
         }
@@ -510,6 +515,28 @@ mod tests {
         assert_eq!(Timeframe::parse("1m").unwrap(), Timeframe::M1);
         assert_eq!(Timeframe::parse("5m").unwrap(), Timeframe::M5);
         assert!(Timeframe::parse("15m").is_err());
+    }
+
+    #[test]
+    fn timeframe_parse_h1_aliases() {
+        assert_eq!(Timeframe::parse("H1").unwrap(), Timeframe::H1);
+        assert_eq!(Timeframe::parse("1h").unwrap(), Timeframe::H1);
+        assert_eq!(Timeframe::parse("1H").unwrap(), Timeframe::H1);
+        assert_eq!(Timeframe::parse("60m").unwrap(), Timeframe::H1);
+    }
+
+    #[test]
+    fn timeframe_h1_as_str_and_twelvedata_interval() {
+        assert_eq!(Timeframe::H1.as_str(), "1h");
+        assert_eq!(Timeframe::H1.as_twelvedata_interval(), "1h");
+    }
+
+    #[test]
+    fn timeframe_m5_and_d1_unchanged() {
+        assert_eq!(Timeframe::M5.as_str(), "5m");
+        assert_eq!(Timeframe::M5.as_twelvedata_interval(), "5min");
+        assert_eq!(Timeframe::D1.as_str(), "1D");
+        assert_eq!(Timeframe::D1.as_twelvedata_interval(), "1day");
     }
 
     // -----------------------------------------------------------------------

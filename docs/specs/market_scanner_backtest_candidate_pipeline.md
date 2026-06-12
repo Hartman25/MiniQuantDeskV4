@@ -1452,12 +1452,100 @@ never printed - only presence (`bool`) and URL scheme (`"postgres"`) were logged
 
 **Explicitly open / future work (unchanged by this patch)**
 
-- H1 provider-native ingest into `md_bars` is not part of this patch - this bundle only fixes
-  the existing `md_bars` -> `bars_root` export/coverage path.
 - Multi-symbol daemon dispatch, strategy retuning, and market smoke runs are not in scope and
   were not performed.
 - `approved_for_live` remains `false` everywhere in `market_data_export.py` and
   `market_data_coverage.py` - this patch grants no live-trading authority.
+
+### TIMEFRAME-H1-PROVIDER-INGEST-01 - Provider-Native 1h Timeframe
+
+`TIMEFRAME-H1-PROVIDER-INGEST-01` extends the `5m`/`1D` market-data foundation
+(`DATA-FOUNDATION-BUNDLE-01` above) with a third, provider-native timeframe: `1h` (one-hour
+bars). This is a market-data infrastructure patch only - no daemon, runtime, execution, OMS,
+broker, portfolio, or audit code is touched, and `approved_for_live` remains `false`
+everywhere.
+
+**Rust: `mqk_md::Timeframe` (`core-rs/crates/mqk-md/src/lib.rs`)**
+
+- New variant `Timeframe::H1`, canonical display string `"1h"`.
+- `Timeframe::parse()` accepts case-insensitive aliases `"1h"`, `"h1"`, and `"60m"`, all
+  mapping to `Timeframe::H1`. Existing `5m`/`1D` aliases and canonical strings are unchanged.
+- `as_twelvedata_interval()` maps `Timeframe::H1 -> "1h"` (TwelveData's hourly interval code).
+- Unknown timeframe strings still fail closed via `anyhow::Error` ("invalid timeframe ...") -
+  no silent fallback to a default timeframe.
+
+**Rust: provider adapters**
+
+- `AlpacaHistoricalProvider::alpaca_timeframe()`
+  (`core-rs/crates/mqk-md/src/alpaca_provider.rs`) maps `Timeframe::H1 -> "1Hour"`, Alpaca's
+  hourly bar interval on the Data API v2 (`https://data.alpaca.markets`, shared between paper
+  and live - data-only, no order/account endpoints).
+- TwelveData ingest uses `as_twelvedata_interval()` above (`Timeframe::H1 -> "1h"`).
+- Both providers write rows to `md_bars` with `timeframe = "1h"` (free-text column, no schema
+  migration required - `"1h"` is simply a new string value alongside `"5m"`/`"1D"`).
+
+**Rust: CLI ingest/sync (`core-rs/crates/mqk-cli/src/commands/md.rs`)**
+
+- New constant `CHUNK_DAYS_1H = 365`: hourly bars run ~7 bars/trading-day, so 365 calendar
+  days (~259 trading days, ~1,813 bars) stays safely under the TwelveData/Alpaca ~5,000-bar
+  per-request cap.
+- `md ingest-provider` / `md sync-provider --timeframe 1h` (and aliases `1H`/`H1`/`60m`) use
+  `CHUNK_DAYS_1H` for fetch-window sizing and a default overlap of 2 calendar days
+  (`5m` also uses 2; `1D` uses 5; `1m` uses 1) when re-syncing from the latest stored bar.
+- CLI `--help` doc strings for `--timeframe` and `--overlap-days` on both `ingest-provider`
+  and `sync-provider` document the `1D | 1h | 1m | 5m` set and the per-timeframe overlap
+  defaults.
+
+**Python: `market_data_export.py` - no production changes**
+
+- The exporter already treats `timeframe` as an opaque config string used only to build the
+  output filename (`<SYMBOL>_<TIMEFRAME>.csv`, e.g. `AAPL_1h.csv`) and the `md_bars` query
+  filter. `1h` works with zero code changes; proven by a new test
+  (`test_1h_timeframe_writes_symbol_1h_csv`) asserting the CSV schema and filename for `1h`
+  match the existing `5m`/`1D` behavior exactly.
+
+**Python: `market_data_coverage.py` - 1h freshness support**
+
+- New config field `max_staleness_minutes_1h: float = 90.0` (alongside the existing
+  `max_staleness_minutes_5m=15.0` and `max_staleness_days_1d=4.0`), with a matching
+  `--max-staleness-minutes-1h` CLI argument.
+- New freshness branch for `timeframe == "1h"`: reuses the same
+  `_is_regular_market_hours_utc()` heuristic (Mon-Fri 13:00-21:00 UTC, overridable via
+  `config.assume_market_hours`) as `5m` - outside regular market hours, `1h` staleness is not
+  penalized; during market hours, `is_fresh` requires
+  `staleness_minutes <= max_staleness_minutes_1h`.
+- `gap_count` remains `None` for `1h` (as for `5m`) - intraday gap detection requires a
+  trading-session calendar that this report does not implement; `None` is reported honestly
+  rather than a fabricated `0`. Only `1D` computes `gap_count`.
+- `approved_for_live` remains forced `false` for all `1h` entries via the existing
+  `__post_init__` invariant - no new live-eligibility path was introduced.
+
+**Tests and script guard**
+
+- Rust: `timeframe_parse_h1_aliases`, `timeframe_h1_as_str_and_twelvedata_interval`,
+  `timeframe_m5_and_d1_unchanged` (`mqk-md`); `alpaca_timeframe_maps_correctly` updated for
+  `"1Hour"`. `cargo test -p mqk-md --lib` and `cargo test -p mqk-cli` both pass in full.
+- Python: `test_1h_timeframe_writes_symbol_1h_csv`
+  (`research-py/tests/test_scanner_market_data_export.py`);
+  `test_1h_during_market_hours_beyond_threshold_is_stale`,
+  `test_1h_outside_market_hours_is_fresh_regardless_of_staleness`,
+  `test_1h_freshness_default_and_configurable_threshold`,
+  `test_1h_gap_count_is_not_computable`
+  (`research-py/tests/test_scanner_market_data_coverage.py`).
+- New script guard `tests/script_guards/test_timeframe_h1_provider_ingest.ps1`
+  (`TIMEFRAME-H1-PROVIDER-INGEST-01`, checks H101-H116) is registered in
+  `tests/script_guards/run_all_script_guards.ps1`. It re-asserts the 5m/1D infra-only
+  invariants (no daemon/runtime/execution/OMS/broker/portfolio/audit diff, no `.env.local`
+  references, no `approved_for_live=True`-style literals) alongside the new H1 checks.
+
+**Real provider/DB proof**
+
+- `REAL_PROVIDER_DB_PROOF_SKIPPED` - not run in this patch. Phase 2-4 Rust and Python
+  unit/integration tests plus the new script guard exercise every code path touched by this
+  patch (timeframe parsing/aliases, provider interval mapping, CLI chunk/overlap selection,
+  coverage freshness/gap-count logic, export filename/schema) without requiring live provider
+  credentials or a database connection. A live-credential ingest proof (paper Alpaca/TwelveData
+  -> `md_bars` -> `bars_root` export/coverage for `1h`) remains open for a future session.
 
 ---
 
