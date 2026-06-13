@@ -53,6 +53,20 @@ pub(super) fn spawn_execution_loop(
     // PT-AUTO-01: retained for ws_continuity_gap_requires_halt() check per tick.
     let state_arc = Arc::clone(&state);
 
+    // MULTI-SYMBOL-DISPATCH-LOOP-01: build the per-symbol dispatch assignment
+    // list once, synchronously, before entering the async loop.
+    // `build_multi_symbol_runtime_config_from_env` is pure (env vars plus one
+    // watchlist-artifact file read via `evaluate_watchlist_intake_from_env`) —
+    // a one-time read here, not per tick. `Err` means even the legacy
+    // single-symbol env fallback is unconfigured (`MQK_STRATEGY_SYMBOL` /
+    // `MQK_STRATEGY_IDS` / `MQK_STRATEGY_MD_TIMEFRAME` absent or empty) — an
+    // empty assignment list, matching the existing no-op behavior of
+    // `tick_strategy_dispatch` when strategy dispatch is not configured.
+    let multi_symbol_assignments: Vec<super::SymbolStrategyAssignment> =
+        super::build_multi_symbol_runtime_config_from_env()
+            .map(|cfg| cfg.symbols)
+            .unwrap_or_default();
+
     let join_handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);
         // AUTON-PAPER-RISK-03: countdown to next External broker snapshot refresh.
@@ -585,25 +599,25 @@ pub(super) fn spawn_execution_loop(
                     // (rare: first-tick snapshot failure), decisions are skipped
                     // this tick rather than assuming a flat position — fail-closed.
                     //
-                    // Returns None on most ticks (no pending bar) and when no
+                    // MULTI-SYMBOL-DISPATCH-LOOP-01: dispatch is a per-symbol loop
+                    // over `multi_symbol_assignments` (artifact order, design doc
+                    // §5 Q4), built once at loop startup. For the legacy
+                    // EnvSingleSymbolFallback config (exactly one assignment, the
+                    // MQK_STRATEGY_SYMBOL / MQK_STRATEGY_MD_TIMEFRAME pair) this is
+                    // behaviorally identical to the prior single-dispatch call.
+                    //
+                    // Returns no results on most ticks (no pending bar) and when no
                     // active bootstrap exists — both are fail-closed, not errors.
                     // Shadow-mode results produce no decisions (fail-closed).
-                    if let Some(bar_result) = state_arc.tick_strategy_dispatch().await {
-                        // AUTON-NO-TRADE-01: record signal qty before decisions are
-                        // derived. This is the raw strategy output — zero means the
-                        // strategy returned hold/flat for all targets this tick.
-                        let raw_signal_qty: i64 = bar_result
-                            .intents
-                            .output
-                            .targets
-                            .iter()
-                            .map(|t| t.qty)
-                            .sum();
-                        state_arc.record_bar_tick_outcome(raw_signal_qty);
-
+                    let dispatch_results = state_arc
+                        .tick_strategy_dispatch_multi_symbol(&multi_symbol_assignments)
+                        .await;
+                    if !dispatch_results.is_empty() {
                         let now_micros = Utc::now().timestamp_micros(); // allow: loop-context wall-clock for decision_id
                         // Derive current position truth from the execution snapshot
                         // settled above.  Symbols absent from the map are flat (qty=0).
+                        // Q2: one shared snapshot read covers every symbol dispatched
+                        // this tick — no torn-snapshot race across symbols.
                         let current_positions: Option<BTreeMap<String, i64>> = {
                             let snap = snapshot_cache.read().await;
                             snap.as_ref().map(|s| {
@@ -622,111 +636,152 @@ pub(super) fn spawn_execution_loop(
                             );
                             continue;
                         };
-                        // STRATEGY-SIZING-AND-EXIT-AUDIT-01: log target vs current
-                        // position diagnostics before computing decisions.  This surfaces
-                        // the no_order_reason=already_at_target case in operator logs.
-                        // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: fire one Discord alert
-                        // per (run, symbol) when B5 short-sale guard blocks a sell.
-                        for t in &bar_result.intents.output.targets {
-                            let current = current_positions.get(&t.symbol).copied().unwrap_or(0);
-                            let delta = t.qty - current;
-                            let no_order_reason = if delta == 0 {
-                                "already_at_target"
-                            } else if delta < 0 && (current <= 0 || (-delta) > current) {
-                                "b5_short_sale_guard"
-                            } else {
-                                "order_will_be_submitted"
-                            };
-                            tracing::info!(
-                                run_id = %run_id,
-                                symbol = %t.symbol,
-                                strategy_target_qty = t.qty,
-                                current_position_qty = current,
-                                computed_delta_qty = delta,
-                                no_order_reason,
-                                "b1c_position_delta_diagnostic"
+
+                        for (assignment, mut bar_result) in dispatch_results {
+                            // MULTI-SYMBOL-DISPATCH-LOOP-01 fail-closed symbol guard:
+                            // the native strategy bootstrap's StrategyHost emits
+                            // TargetPosition.symbol fixed at construction time from
+                            // MQK_STRATEGY_SYMBOL, independent of which symbol's
+                            // bar window was just dispatched. A target whose
+                            // symbol does not match the assignment being dispatched
+                            // would otherwise carry a qty computed from a *different*
+                            // symbol's bars under the dispatched symbol's name — drop
+                            // it rather than submit a misattributed decision. See
+                            // docs/design/native_multi_symbol_dispatch.md (per-symbol
+                            // strategy bootstrap gap).
+                            let dropped = AppState::retain_targets_matching_symbol(
+                                &mut bar_result.intents.output.targets,
+                                &assignment.symbol,
                             );
-                            if no_order_reason == "b5_short_sale_guard"
-                                && state_arc.try_claim_b5_alert(&t.symbol).await
-                            {
-                                let notifier = state_arc.discord_notifier.clone();
-                                let env = Some(
-                                    state_arc.deployment_mode().as_api_label().to_string(),
-                                );
-                                let symbol = t.symbol.clone();
-                                let run_id_short = format!("{:.8}", run_id.to_string());
-                                let qty_to_sell = -delta;
-                                let ts = chrono::Utc::now().to_rfc3339(); // allow: ops-metadata notification timestamp
-                                tokio::spawn(async move {
-                                    notifier
-                                        .notify_trade_event(&crate::notify::TradeEventPayload {
-                                            stage: "signal.blocked".to_string(),
-                                            run_id: Some(run_id_short.clone()),
-                                            symbol: Some(symbol.clone()),
-                                            side: Some("sell".to_string()),
-                                            qty: Some(qty_to_sell),
-                                            price_micros: None,
-                                            order_id: None,
-                                            detail: Some(format!(
-                                                "gate=b5_short_sale_guard \
-                                                 current={current} target_delta={delta}"
-                                            )),
-                                            environment: env,
-                                            summary: format!(
-                                                "signal.blocked [b5_short_sale_guard] \
-                                                 symbol={symbol} run={run_id_short} \
-                                                 qty_to_sell={qty_to_sell} current={current} \
-                                                 (no long position to sell against)"
-                                            ),
-                                            ts_utc: ts,
-                                        })
-                                        .await;
-                                });
-                            }
-                        }
-                        let decisions = crate::decision::bar_result_to_decisions(
-                            &bar_result,
-                            run_id,
-                            now_micros,
-                            &current_positions,
-                        );
-                        // AUTON-NO-TRADE-01: log when strategy produced no admissible
-                        // decisions.  This is honest: signal=0 means hold/flat or the
-                        // strategy's conditions (lookback, completeness, price guards)
-                        // were not satisfied.  No fabrication; no forced trades.
-                        if decisions.is_empty() {
-                            tracing::info!(
-                                run_id = %run_id,
-                                raw_signal_qty,
-                                bar_tick_count = state_arc.bar_tick_dispatch_count(),
-                                "b1c_bar_tick_no_decisions: strategy returned no admissible \
-                                 decisions this tick (signal_qty={raw_signal_qty}; \
-                                 check b1c_position_delta_diagnostic for no_order_reason)"
-                            );
-                        }
-                        for decision in decisions {
-                            let did = decision.decision_id.clone();
-                            let sid = decision.strategy_id.clone();
-                            let outcome = crate::decision::submit_internal_strategy_decision(
-                                &state_arc,
-                                decision,
-                            )
-                            .await;
-                            if outcome.accepted {
-                                tracing::info!(
-                                    run_id = %run_id,
-                                    decision_id = %did,
-                                    strategy_id = %sid,
-                                    "b1c_native_decision_accepted"
-                                );
-                            } else {
+                            if dropped > 0 {
                                 tracing::warn!(
                                     run_id = %run_id,
-                                    decision_id = %did,
-                                    strategy_id = %sid,
-                                    disposition = %outcome.disposition,
-                                    "b1c_native_decision_not_accepted"
+                                    dispatched_symbol = %assignment.symbol,
+                                    dropped_targets = dropped,
+                                    "b1c_symbol_mismatch_skipped: strategy-emitted target \
+                                     symbol does not match the dispatched assignment; \
+                                     per-symbol strategy bootstrap not yet implemented"
                                 );
+                            }
+
+                            // AUTON-NO-TRADE-01: record signal qty before decisions are
+                            // derived. This is the raw strategy output — zero means the
+                            // strategy returned hold/flat for all targets this tick.
+                            let raw_signal_qty: i64 = bar_result
+                                .intents
+                                .output
+                                .targets
+                                .iter()
+                                .map(|t| t.qty)
+                                .sum();
+                            state_arc.record_bar_tick_outcome(raw_signal_qty);
+
+                            // STRATEGY-SIZING-AND-EXIT-AUDIT-01: log target vs current
+                            // position diagnostics before computing decisions.  This surfaces
+                            // the no_order_reason=already_at_target case in operator logs.
+                            // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: fire one Discord alert
+                            // per (run, symbol) when B5 short-sale guard blocks a sell.
+                            for t in &bar_result.intents.output.targets {
+                                let current = current_positions.get(&t.symbol).copied().unwrap_or(0);
+                                let delta = t.qty - current;
+                                let no_order_reason = if delta == 0 {
+                                    "already_at_target"
+                                } else if delta < 0 && (current <= 0 || (-delta) > current) {
+                                    "b5_short_sale_guard"
+                                } else {
+                                    "order_will_be_submitted"
+                                };
+                                tracing::info!(
+                                    run_id = %run_id,
+                                    symbol = %t.symbol,
+                                    strategy_target_qty = t.qty,
+                                    current_position_qty = current,
+                                    computed_delta_qty = delta,
+                                    no_order_reason,
+                                    "b1c_position_delta_diagnostic"
+                                );
+                                if no_order_reason == "b5_short_sale_guard"
+                                    && state_arc.try_claim_b5_alert(&t.symbol).await
+                                {
+                                    let notifier = state_arc.discord_notifier.clone();
+                                    let env = Some(
+                                        state_arc.deployment_mode().as_api_label().to_string(),
+                                    );
+                                    let symbol = t.symbol.clone();
+                                    let run_id_short = format!("{:.8}", run_id.to_string());
+                                    let qty_to_sell = -delta;
+                                    let ts = chrono::Utc::now().to_rfc3339(); // allow: ops-metadata notification timestamp
+                                    tokio::spawn(async move {
+                                        notifier
+                                            .notify_trade_event(&crate::notify::TradeEventPayload {
+                                                stage: "signal.blocked".to_string(),
+                                                run_id: Some(run_id_short.clone()),
+                                                symbol: Some(symbol.clone()),
+                                                side: Some("sell".to_string()),
+                                                qty: Some(qty_to_sell),
+                                                price_micros: None,
+                                                order_id: None,
+                                                detail: Some(format!(
+                                                    "gate=b5_short_sale_guard \
+                                                     current={current} target_delta={delta}"
+                                                )),
+                                                environment: env,
+                                                summary: format!(
+                                                    "signal.blocked [b5_short_sale_guard] \
+                                                     symbol={symbol} run={run_id_short} \
+                                                     qty_to_sell={qty_to_sell} current={current} \
+                                                     (no long position to sell against)"
+                                                ),
+                                                ts_utc: ts,
+                                            })
+                                            .await;
+                                    });
+                                }
+                            }
+                            let decisions = crate::decision::bar_result_to_decisions(
+                                &bar_result,
+                                run_id,
+                                now_micros,
+                                &current_positions,
+                            );
+                            // AUTON-NO-TRADE-01: log when strategy produced no admissible
+                            // decisions.  This is honest: signal=0 means hold/flat or the
+                            // strategy's conditions (lookback, completeness, price guards)
+                            // were not satisfied.  No fabrication; no forced trades.
+                            if decisions.is_empty() {
+                                tracing::info!(
+                                    run_id = %run_id,
+                                    raw_signal_qty,
+                                    bar_tick_count = state_arc.bar_tick_dispatch_count(),
+                                    "b1c_bar_tick_no_decisions: strategy returned no admissible \
+                                     decisions this tick (signal_qty={raw_signal_qty}; \
+                                     check b1c_position_delta_diagnostic for no_order_reason)"
+                                );
+                            }
+                            for decision in decisions {
+                                let did = decision.decision_id.clone();
+                                let sid = decision.strategy_id.clone();
+                                let outcome = crate::decision::submit_internal_strategy_decision(
+                                    &state_arc,
+                                    decision,
+                                )
+                                .await;
+                                if outcome.accepted {
+                                    tracing::info!(
+                                        run_id = %run_id,
+                                        decision_id = %did,
+                                        strategy_id = %sid,
+                                        "b1c_native_decision_accepted"
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        run_id = %run_id,
+                                        decision_id = %did,
+                                        strategy_id = %sid,
+                                        disposition = %outcome.disposition,
+                                        "b1c_native_decision_not_accepted"
+                                    );
+                                }
                             }
                         }
                     }

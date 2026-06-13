@@ -436,7 +436,12 @@ impl Default for AppState {
 /// Overwrite policy: a new deposit supersedes any prior unconsumed bar.
 /// The `day_signal_limit` gate (Gate 1d) bounds the deposit rate so
 /// supersession is rare in practice.
-#[derive(Debug)]
+///
+/// `Clone`: MULTI-SYMBOL-DISPATCH-LOOP-01's
+/// [`AppState::tick_strategy_dispatch_multi_symbol`] takes the single
+/// pending input once per tick and dispatches a clone of it to each
+/// configured symbol.
+#[derive(Debug, Clone)]
 pub struct StrategyBarInput {
     pub now_tick: u64,
     pub end_ts: i64,
@@ -1387,6 +1392,15 @@ operator_reconcile_or_repair_required"
         self.pending_strategy_bar_input.lock().await.is_none()
     }
 
+    /// MULTI-SYMBOL-DISPATCH-LOOP-01 test seam: `pub` re-export of the
+    /// crate-private [`Self::try_claim_b5_alert`] (`signal_intake.rs`) for
+    /// the M08 per-symbol B5 alert-dedup proof.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    pub async fn try_claim_b5_alert_for_test(&self, symbol: &str) -> bool {
+        self.try_claim_b5_alert(symbol).await
+    }
+
     /// B1B: Invoke the native strategy `on_bar` callback from raw bar parameters.
     ///
     /// Fail-closed: no bootstrap stored (no active run) → `None`, no callback.
@@ -1517,25 +1531,21 @@ operator_reconcile_or_repair_required"
         *self.last_strategy_diagnostics.lock().await = Some(diag);
     }
 
-    /// PER-SYMBOL-BAR-WINDOW-01: symbol/timeframe-parameterized extraction of
-    /// the dispatch body previously inlined in [`Self::tick_strategy_dispatch`].
+    /// PER-SYMBOL-BAR-WINDOW-01 / MULTI-SYMBOL-DISPATCH-LOOP-01:
+    /// symbol/timeframe-parameterized dispatch of one already-taken
+    /// [`StrategyBarInput`].
     ///
-    /// `symbol`/`timeframe` are trimmed before use. The legacy single-symbol
-    /// caller ([`Self::tick_strategy_dispatch`], which passes
-    /// `MQK_STRATEGY_SYMBOL` / `MQK_STRATEGY_MD_TIMEFRAME`) is unchanged in
-    /// behavior, return shape, and logging.
-    ///
-    /// NOT WIRED: this patch does not call this helper from `loop_runner.rs`
-    /// or any per-symbol dispatch loop — only [`Self::tick_strategy_dispatch`]
-    /// (single-symbol, env-driven) calls it. Multi-symbol dispatch is
-    /// `MULTI-SYMBOL-DISPATCH-LOOP-01` (Patch 4).
-    pub async fn tick_strategy_dispatch_for_symbol(
+    /// `symbol`/`timeframe` are trimmed before use. Does not read or write
+    /// `pending_strategy_bar_input` — callers take the pending bar input
+    /// before calling this, either once for one symbol
+    /// ([`Self::tick_strategy_dispatch_for_symbol`]) or once for many symbols
+    /// ([`Self::tick_strategy_dispatch_multi_symbol`]).
+    async fn dispatch_native_strategy_for_symbol_with_bar(
         &self,
         symbol: &str,
         timeframe: &str,
+        bar: StrategyBarInput,
     ) -> Option<mqk_strategy::StrategyBarResult> {
-        let bar = self.pending_strategy_bar_input.lock().await.take()?;
-
         // AUTON-SIGNAL-CONTEXT-01: attempt DB-backed context window.
         let symbol = symbol.trim();
         let md_timeframe = timeframe.trim();
@@ -1635,6 +1645,25 @@ operator_reconcile_or_repair_required"
         .await
     }
 
+    /// PER-SYMBOL-BAR-WINDOW-01: symbol/timeframe-parameterized extraction of
+    /// the dispatch body previously inlined in [`Self::tick_strategy_dispatch`].
+    ///
+    /// Takes the single pending [`StrategyBarInput`] — fail-closed `None` if
+    /// none is pending — and dispatches it for `symbol`/`timeframe` via
+    /// [`Self::dispatch_native_strategy_for_symbol_with_bar`]. The legacy
+    /// single-symbol caller ([`Self::tick_strategy_dispatch`], which passes
+    /// `MQK_STRATEGY_SYMBOL` / `MQK_STRATEGY_MD_TIMEFRAME`) is unchanged in
+    /// behavior, return shape, and logging.
+    pub async fn tick_strategy_dispatch_for_symbol(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+    ) -> Option<mqk_strategy::StrategyBarResult> {
+        let bar = self.pending_strategy_bar_input.lock().await.take()?;
+        self.dispatch_native_strategy_for_symbol_with_bar(symbol, timeframe, bar)
+            .await
+    }
+
     /// B1B/AUTON-SIGNAL-CONTEXT-01: Execution loop dispatch seam.
     ///
     /// Called exclusively by the execution loop on each tick.  The loop is the
@@ -1669,6 +1698,80 @@ operator_reconcile_or_repair_required"
 
         self.tick_strategy_dispatch_for_symbol(&symbol, &md_timeframe)
             .await
+    }
+
+    /// MULTI-SYMBOL-DISPATCH-LOOP-01: dispatch the native strategy across
+    /// every symbol in `assignments`, sequentially, in the given order
+    /// (design doc §5 Q1/Q4).
+    ///
+    /// Takes the single pending [`StrategyBarInput`] ONCE — fail-closed empty
+    /// `Vec` if none is pending, matching the "no pending bar this tick"
+    /// semantics of [`Self::tick_strategy_dispatch`]. `pending_strategy_bar_input`
+    /// is a single account-wide slot (deposited by the signal route, design
+    /// doc §4.4); it carries no symbol, so the same bar-tick signal
+    /// (`now_tick` / `end_ts` / `limit_price` / `qty`) is cloned and
+    /// dispatched once per [`SymbolStrategyAssignment`] via
+    /// [`Self::dispatch_native_strategy_for_symbol_with_bar`]. Each symbol
+    /// still gets its own DB bar-window lookup
+    /// (`fetch_recent_completed_bars_for_strategy(symbol, timeframe, ...)`),
+    /// so the strategy is evaluated against that symbol's own price history.
+    ///
+    /// Only `Some` results are collected, paired with the assignment that
+    /// produced them — `None` (dormant or absent bootstrap, etc.) is skipped
+    /// without affecting any other symbol (Q5). The returned `Vec` preserves
+    /// `assignments` order.
+    ///
+    /// For [`MultiSymbolConfigSource::EnvSingleSymbolFallback`]
+    /// (`assignments` has exactly one entry — the legacy
+    /// `MQK_STRATEGY_SYMBOL` / `MQK_STRATEGY_MD_TIMEFRAME` pair), this call
+    /// is behaviorally identical to [`Self::tick_strategy_dispatch`]: the
+    /// same single `.take()`, the same single dispatch.
+    pub async fn tick_strategy_dispatch_multi_symbol(
+        &self,
+        assignments: &[SymbolStrategyAssignment],
+    ) -> Vec<(SymbolStrategyAssignment, mqk_strategy::StrategyBarResult)> {
+        let Some(bar) = self.pending_strategy_bar_input.lock().await.take() else {
+            return Vec::new();
+        };
+        let mut results = Vec::new();
+        for assignment in assignments {
+            if let Some(bar_result) = self
+                .dispatch_native_strategy_for_symbol_with_bar(
+                    &assignment.symbol,
+                    &assignment.timeframe,
+                    bar.clone(),
+                )
+                .await
+            {
+                results.push((assignment.clone(), bar_result));
+            }
+        }
+        results
+    }
+
+    /// MULTI-SYMBOL-DISPATCH-LOOP-01 fail-closed symbol guard: retain only
+    /// the `targets` whose `symbol` matches `dispatched_symbol`
+    /// (case-insensitive, trimmed). Returns the number of targets dropped.
+    ///
+    /// The native strategy bootstrap's [`mqk_strategy::TargetPosition::symbol`]
+    /// is fixed at construction time from `MQK_STRATEGY_SYMBOL`, independent
+    /// of which symbol's bar window was just dispatched (see
+    /// `docs/design/native_multi_symbol_dispatch.md`, per-symbol strategy
+    /// bootstrap gap). A target whose symbol does not match the dispatched
+    /// assignment would otherwise carry a qty computed from a *different*
+    /// symbol's bars under the dispatched symbol's name — drop it rather
+    /// than submit a misattributed decision.
+    ///
+    /// No-op for the legacy single-symbol case, where the bootstrap's baked
+    /// symbol and the dispatched symbol are the same (`MQK_STRATEGY_SYMBOL`).
+    pub fn retain_targets_matching_symbol(
+        targets: &mut Vec<mqk_strategy::TargetPosition>,
+        dispatched_symbol: &str,
+    ) -> usize {
+        let before = targets.len();
+        let dispatched_symbol = dispatched_symbol.trim();
+        targets.retain(|t| t.symbol.trim().eq_ignore_ascii_case(dispatched_symbol));
+        before - targets.len()
     }
 
     /// AUTON-SIGNAL-CONTEXT-01: Invoke `on_bar` with a pre-built DB-sourced window.

@@ -168,12 +168,21 @@ if (Test-Path $StateRs) {
     Assert-Fail "M-G21: state.rs not found at $StateRs"
 }
 
-# M-G22 -- loop_runner.rs has zero references to multi_symbol_config / MultiSymbolRuntimeConfig / builders
+# M-G22 -- loop_runner.rs multi-symbol runtime config wiring status.
+# At this patch's (MULTI-SYMBOL-RUNTIME-CONFIG-01) commit, dispatch wiring was
+# explicitly OPEN and forbidden. MULTI-SYMBOL-DISPATCH-LOOP-01 (Patch 4, see
+# native_multi_symbol_dispatch.md SS10) is the documented patch that wires it,
+# via build_multi_symbol_runtime_config_from_env called once at loop startup.
+# Once that patch lands, loop_runner.rs legitimately references
+# multi_symbol_config through that seam -- only an undocumented reference
+# (a different builder, or direct construction) is now forbidden.
 if (Test-Path $LoopRunner) {
     if (-not (Select-String -Path $LoopRunner -Pattern 'multi_symbol_config|MultiSymbolRuntimeConfig|MultiSymbolConfigSource|MultiSymbolConfigError|build_multi_symbol_|build_legacy_single_symbol_' -Quiet)) {
         Assert-Pass "M-G22: loop_runner.rs has no multi-symbol runtime config references -- dispatch NOT wired"
+    } elseif (Select-String -Path $LoopRunner -Pattern 'build_multi_symbol_runtime_config_from_env\(\)' -Quiet) {
+        Assert-Pass "M-G22: loop_runner.rs references multi_symbol_config via the documented MULTI-SYMBOL-DISPATCH-LOOP-01 seam (build_multi_symbol_runtime_config_from_env)"
     } else {
-        Assert-Fail "M-G22: loop_runner.rs references multi_symbol_config -- dispatch wiring FORBIDDEN in this patch"
+        Assert-Fail "M-G22: loop_runner.rs references multi_symbol_config via an undocumented seam -- expected build_multi_symbol_runtime_config_from_env (see MULTI-SYMBOL-DISPATCH-LOOP-01)"
     }
 } else {
     Assert-Fail "M-G22: loop_runner.rs not found at $LoopRunner"

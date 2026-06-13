@@ -1059,6 +1059,53 @@ includes one regression test per modified file (`watchlist_intake.rs`,
 `watchlist_promotion.py`) asserting `approved_for_live` stays `false` with N>1 symbols, for
 defense-in-depth.
 
+### Implementation status (`MULTI-SYMBOL-DISPATCH-LOOP-01`, Patch 4)
+
+**Implemented.** `AppState::tick_strategy_dispatch_multi_symbol(&[SymbolStrategyAssignment]) ->
+Vec<(SymbolStrategyAssignment, StrategyBarResult)>` (`state.rs`) takes the single pending
+`StrategyBarInput` (now `#[derive(Debug, Clone)]`) **once** per tick — fail-closed empty `Vec` if
+none is pending — then dispatches a `.clone()` of it to each assignment via the new private
+`dispatch_native_strategy_for_symbol_with_bar(symbol, timeframe, bar)` helper, which performs that
+symbol's own DB bar-window lookup (`fetch_recent_completed_bars_for_strategy`). The legacy
+`tick_strategy_dispatch_for_symbol` (single-symbol) now takes-then-delegates to the same helper —
+behaviorally unchanged (proven by the pre-existing P12/P13 and L01-L05 tests, all still passing).
+
+`loop_runner.rs`'s B1C block builds `multi_symbol_assignments` once at loop startup (from
+`build_multi_symbol_runtime_config_from_env`), calls `tick_strategy_dispatch_multi_symbol` per
+tick, reads `current_positions` once (Q2, unchanged), then iterates `for (assignment, mut
+bar_result) in dispatch_results` — applying the new `AppState::retain_targets_matching_symbol`
+guard (logs `b1c_symbol_mismatch_skipped` when it drops targets) before the existing B5
+diagnostics/alerts, `bar_result_to_decisions`, and `submit_internal_strategy_decision` body, now
+per-assignment.
+
+Per-question closure:
+
+- **Q1** — one `StrategyHost`, called sequentially per symbol. Confirmed; no change.
+- **Q2** — one shared `current_positions` snapshot per tick, read before the per-symbol loop.
+  Confirmed; unchanged from the prior single-symbol structure.
+- **Q3** — `decision_id` already includes `symbol`; no change needed, not re-tested.
+- **Q4** — `multi_symbol_assignments` iterated in artifact order; proven by M04.
+- **Q5** — partial-symbol failure isolation via `Option`/skip in the `for` loop; proven by M01/M02
+  (empty-`Vec` fail-closed cases) and the per-assignment loop structure itself (one assignment's
+  `None` result does not affect any other assignment's dispatch).
+- **Q6** — halt gate unchanged (still account-wide, evaluated before B1C); not re-tested by this
+  patch.
+- **Q7** — non-goal; unchanged.
+- **Q8** — deadman TTL unchanged (account-wide, per-tick); not re-tested by this patch.
+- **Q9** — no new path; not re-tested by this patch (Patch 11 carries the regression test).
+
+**New honest gap surfaced by this implementation (not previously documented):** the
+single-account-wide-slot nature of `pending_strategy_bar_input` means the *same* bar-tick signal
+(`now_tick`/`end_ts`/`limit_price`/`qty`) is dispatched to every configured symbol — there is no
+per-symbol bar-tick signal yet. Combined with the pre-existing per-symbol strategy bootstrap gap
+(§4.4 note above, mitigated by `retain_targets_matching_symbol`), this means
+`MultiSymbolConfigSource::WatchlistArtifactV2` configs with more than one symbol will, today,
+produce a non-empty decision set for at most one symbol per tick (whichever matches
+`MQK_STRATEGY_SYMBOL`) — every other symbol's targets are dropped by the symbol-mismatch guard.
+The per-symbol *loop* (this patch's deliverable) is real and proven (M04/M05); the per-symbol
+*strategy bootstrap* (a separate dependency) is not, and remains the blocker for true
+multi-symbol decisions.
+
 ---
 
 ## 6. Risk Caps Design — Thirteen Caps
@@ -1490,9 +1537,17 @@ pure config-construction layer in `multi_symbol_config.rs` (see §4.1, §4.3) �
 input/window foundation in `per_symbol_bar_window.rs` (see §4.4, §6 cap #9), plus a
 symbol/timeframe-parameterized `tick_strategy_dispatch_for_symbol` extracted from the legacy
 single-symbol dispatch body — registered in `state.rs` but not invoked, and
-`loop_runner.rs`/`routes/strategy.rs` remain untouched. Patches 4-11 remain `OPEN`; none have been
-started. The dependency graph determines minimum ordering; patches with no dependency on each
-other within a "tier" may be reordered relative to each other but not across tiers.
+`loop_runner.rs`/`routes/strategy.rs` remain untouched. Patch 4
+(`MULTI-SYMBOL-DISPATCH-LOOP-01`) has also been implemented — `loop_runner.rs`'s B1C block now
+calls `AppState::tick_strategy_dispatch_multi_symbol` once per tick over
+`multi_symbol_assignments` (built once at loop startup from
+`build_multi_symbol_runtime_config_from_env`), wraps the existing per-decision body in a
+per-assignment loop, and applies the new `AppState::retain_targets_matching_symbol` fail-closed
+guard (`b1c_symbol_mismatch_skipped`) per dispatched symbol — see §5 for the take-once-clone-to-many
+dispatch architecture and the per-symbol strategy bootstrap gap this guard mitigates. Patches 5-11
+remain `OPEN`; none have been started. The dependency graph determines minimum ordering; patches
+with no dependency on each other within a "tier" may be reordered relative to each other but not
+across tiers.
 
 | # | Patch ID | Depends on | Closes |
 |---|---|---|---|
@@ -1528,8 +1583,34 @@ other within a "tier" may be reordered relative to each other but not across tie
   `AppState::tick_strategy_dispatch_for_symbol`); registered in `state.rs` but not invoked from
   `loop_runner.rs`/`routes/strategy.rs` (Patch 4).
 - **Patch 4** is the highest-risk patch — it changes `loop_runner.rs`'s B1C block, the most
-  sensitive per-tick dispatch code. It should land with Q1-Q9 each individually covered by a
-  scenario test (9 new tests minimum, one per question), per Phase 5.
+  sensitive per-tick dispatch code. **Implemented** as: (1) a `state.rs` refactor splitting the
+  legacy dispatch body into `dispatch_native_strategy_for_symbol_with_bar(symbol, timeframe, bar:
+  StrategyBarInput)` (no `.take()`), with `tick_strategy_dispatch_for_symbol` (legacy,
+  unchanged behavior) taking the pending bar once then delegating, and the new
+  `tick_strategy_dispatch_multi_symbol(&[SymbolStrategyAssignment]) ->
+  Vec<(SymbolStrategyAssignment, StrategyBarResult)>` taking the single pending
+  `StrategyBarInput` (now `Clone`) **once** and dispatching a clone of it to every configured
+  symbol (each symbol still gets its own DB bar-window lookup); (2) the new pure
+  `AppState::retain_targets_matching_symbol(&mut Vec<TargetPosition>, dispatched_symbol: &str) ->
+  usize` guard; (3) `loop_runner.rs`'s B1C block building `multi_symbol_assignments` once at loop
+  startup, calling `tick_strategy_dispatch_multi_symbol` per tick, and wrapping the existing
+  per-decision body in `for (assignment, mut bar_result) in dispatch_results { ... }`, applying
+  `retain_targets_matching_symbol` (logged as `b1c_symbol_mismatch_skipped` when it drops targets)
+  before computing decisions. `current_positions` remains a single shared snapshot read once per
+  tick (Q2), and every decision remains routed through
+  `crate::decision::submit_internal_strategy_decision` (Q5, no outbox bypass). Proven by 8 tests
+  (M01-M08, `scenario_multi_symbol_dispatch_loop_01.rs`) covering Q1/Q2/Q4/Q5 and the
+  `b1c_symbol_mismatch_skipped` guard (M06/M07) and per-symbol B5 dedup (M08, cap #8). Q3/Q6/Q7/Q8/Q9
+  required no code change (§5) and are not separately re-proven by this patch.
+  **Honest open gap (unchanged by this patch):** the native strategy bootstrap remains a single
+  `StrategyHost` whose `TargetPosition.symbol` is fixed at construction time from
+  `MQK_STRATEGY_SYMBOL` — true per-symbol strategy bootstrap (a distinct bootstrap per configured
+  symbol) is not implemented. `retain_targets_matching_symbol` mitigates the resulting
+  symbol-mismatch by dropping misattributed targets rather than submitting them, but for
+  `MultiSymbolConfigSource::WatchlistArtifactV2` configs with more than one symbol, only the
+  symbol matching `MQK_STRATEGY_SYMBOL` (if any) can currently produce a non-empty target list —
+  every other configured symbol's dispatch will have all of its targets dropped by this guard.
+  Per-symbol strategy bootstrap remains a dependency for a future patch.
 - **Patches 5, 6, 7** are mutually independent (each adds an isolated gate/check inside the loop
   patch 4 establishes) and could be reordered among themselves — listed in this order because
   cap #4 (day-order) reuses the most existing infrastructure (mirrors account-wide
@@ -1548,10 +1629,12 @@ other within a "tier" may be reordered relative to each other but not across tie
 - **Patch 11** is last — it's the integration/validation patch. The promotion-side `v2` gate
   logic (§4.2) only depends on patch 1 (schema), but the smoke-runner (§9) needs the
   dispatch-summary route (9) and GUI (10) to be meaningful, so bundling them as one
-  "everything is wired, prove it end-to-end" patch is intentional. This patch also carries the
-  three missing-proof tests called out earlier (Q9's `approved_for_live` regression test, cap
-  #8's multi-symbol B5 independence test, cap #13's PDT cross-symbol summation test) since they
-  are integration-level proofs that only make sense once the full chain exists.
+  "everything is wired, prove it end-to-end" patch is intentional. This patch originally carried
+  three missing-proof tests (Q9's `approved_for_live` regression test, cap #8's multi-symbol B5
+  independence test, cap #13's PDT cross-symbol summation test). Cap #8's proof was pulled forward
+  into Patch 4 (M08, `try_claim_b5_alert` per-symbol independence) since the per-symbol dispatch
+  loop needed to exist for it to be meaningful and Patch 4 built that loop. Patch 11 still carries
+  Q9's regression test and cap #13's PDT cross-symbol summation test.
 
 ---
 
@@ -1586,26 +1669,27 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Component: `MultiSymbolRuntimeConfig` (§4.1) | **CLOSED (config-construction only)** | Patch 2 (`multi_symbol_config.rs`); not wired into `loop_runner.rs`/`state.rs` dispatch (Patches 3/4) |
 | Component: `ApprovedPaperWatchlist` v2 (§4.2) | OPEN | delivered by Patch 1 (schema) + Patch 11 (promotion-side) |
 | Component: `SymbolStrategyAssignment` (§4.3) | **CLOSED (no per-symbol timeframe override)** | Patch 2; `timeframe_overrides` deferred to Patch 3/4 |
-| Component: `PerSymbolBarWindow` (§4.4) | **CLOSED (foundation only)** | Patch 3 (`per_symbol_bar_window.rs`); registered in `state.rs` but not wired into `loop_runner.rs`/`routes/strategy.rs` dispatch (Patch 4) |
-| Component: `PerSymbolStrategyDecision` seam (§4.5) | OPEN | no new types; call-site change in Patch 4 |
+| Component: `PerSymbolBarWindow` (§4.4) | **CLOSED (take-once-clone-to-many, not keyed-map)** | Patch 3 (`per_symbol_bar_window.rs`) added the keyed-map foundation (unused); Patch 4 wired dispatch into `loop_runner.rs` via a different mechanism — `tick_strategy_dispatch_multi_symbol` takes the single `pending_strategy_bar_input` once per tick and `.clone()`s it to every configured symbol's `dispatch_native_strategy_for_symbol_with_bar` call, rather than using `PerSymbolPendingBarInputs`. `PerSymbolPendingBarInputs`/`PerSymbolBarWindow`/`PerSymbolLoadedBars` remain registered but unused |
+| Component: `PerSymbolStrategyDecision` seam (§4.5) | **CLOSED** | Patch 4; `bar_result_to_decisions` now called once per dispatched symbol inside `loop_runner.rs`'s per-assignment loop, sharing one `current_positions` snapshot (Q2) |
 | Component: `PerSymbolTargetState` (§4.6) | OPEN | delivered by Patch 8 |
 | Component: `MultiSymbolRiskCaps` (§4.7) | OPEN | delivered across Patches 5/6/7 |
 | Component: `MultiSymbolDispatchSummary` (§4.8) | OPEN | delivered by Patch 9 |
 | Component: `MultiSymbolEvidenceSnapshot` (§4.9) | OPEN | delivered by Patch 11 |
-| Cap #1 `max_concurrent_symbols` | **CLOSED (construction-time only)** | Patch 2; `MultiSymbolRuntimeConfig.max_concurrent_symbols` validated against `MULTI_SYMBOL_HARD_CEILING` and `symbols.len()` at config-build time, not yet enforced at dispatch time (Patch 4) |
+| `b1c_symbol_mismatch_skipped` guard (`AppState::retain_targets_matching_symbol`) | **CLOSED (interim mitigation)** | Patch 4; drops any `TargetPosition` whose symbol does not match the dispatched assignment (proven M06/M07). Mitigates, but does not close, the per-symbol strategy bootstrap gap below |
+| Cap #1 `max_concurrent_symbols` | **CLOSED (construction-time only)** | Patch 2; `MultiSymbolRuntimeConfig.max_concurrent_symbols` validated against `MULTI_SYMBOL_HARD_CEILING` and `symbols.len()` at config-build time. Patch 4's loop dispatches every assignment in `multi_symbol_assignments` with no separate dispatch-time truncation against this field — no patch currently scheduled to add one |
 | Cap #2 `per_symbol_max_position_qty` | OPEN | Patch 6 |
 | Cap #3 `per_symbol_max_notional_usd` | OPEN | Patch 6 — **honest gap:** unverifiable for market orders (B1C is market-only today) |
 | Cap #4 `per_symbol_day_order_count_limit` (Gate 1f) | OPEN | Patch 5 |
 | Cap #5 `aggregate_gross_exposure_cap_usd` | OPEN | Patch 6 |
 | Cap #6 `max_new_orders_per_tick` | OPEN | Patch 7 |
 | Cap #7 reconcile drift visibility | OPEN | Patch 9/10 — observability only, no halt-scope change |
-| Cap #8 B5 short-sale guard, multi-symbol proof | OPEN | proof in Patch 11; enforcement already correct |
-| Cap #9 `per_symbol_bar_staleness_secs` | **CLOSED (helper only, not enforced)** | Patch 3 (`classify_bar_staleness`); pure staleness classification helper added and proven (P05-P09), not yet called from any dispatch path — enforcement (`no_order_reason = "bar_data_stale"`) remains Patch 4 |
+| Cap #8 B5 short-sale guard, multi-symbol proof | **CLOSED** | Patch 4, M08 (`try_claim_b5_alert` dedups independently per symbol; one symbol's claim does not block another's in the same tick). Enforcement was already correct (cap #8 pre-existing); this closes the multi-symbol proof originally deferred to Patch 11 |
+| Cap #9 `per_symbol_bar_staleness_secs` | **CLOSED (helper only, not enforced)** | Patch 3 (`classify_bar_staleness`); pure staleness classification helper added and proven (P05-P09). Patch 4 did **not** call this helper from the dispatch path — enforcement (`no_order_reason = "bar_data_stale"`) remains OPEN, no patch currently scheduled |
 | Cap #10 deadman TTL (documentation-only) | **PARKED by design** | account-wide by construction; no patch will change this |
 | Cap #11 kill-switch propagation (documentation-only) | **PARKED by design** | account-wide by construction; no patch will change this |
 | Cap #12 `MULTI_SYMBOL_HARD_CEILING` | OPEN | Patch 1 |
 | Cap #13 PDT cross-symbol summation, proof | OPEN | proof in Patch 11; enforcement already correct |
-| Patches 1-11 (§10) | all OPEN | none started; this design patch adds zero production code |
+| Patches 1-4 (§10) | **CLOSED** (see per-patch notes above) | Patches 5-11 remain OPEN; none started |
 
 ### Honest gaps and discrepancies surfaced by this design
 
