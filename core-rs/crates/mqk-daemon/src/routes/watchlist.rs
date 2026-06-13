@@ -59,15 +59,16 @@ pub(crate) fn build_watchlist_status_response(
     let approved_for_autonomous_paper = outcome.approved_for_autonomous_paper();
     let failure_reasons = outcome.failure_reasons().to_vec();
 
-    let (symbols, top_symbol, strategy_assignments, max_symbols, max_concurrent) =
+    let (schema_version, symbols, top_symbol, strategy_assignments, max_symbols, max_concurrent) =
         match outcome.artifact() {
             Some(art) => artifact_fields(art),
-            None => (vec![], None, serde_json::json!({}), None, None),
+            None => (None, vec![], None, serde_json::json!({}), None, None),
         };
 
     WatchlistStatusResponse {
         configured_path,
         status,
+        schema_version,
         approved_for_autonomous_paper,
         approved_for_live: false, // hard invariant — never true
         symbols,
@@ -80,15 +81,17 @@ pub(crate) fn build_watchlist_status_response(
     }
 }
 
-fn artifact_fields(
-    art: &LoadedWatchlistArtifact,
-) -> (
+/// (schema_version, symbols, top_symbol, strategy_assignments, max_symbols_to_trade, max_concurrent_positions)
+type ArtifactFields = (
+    Option<String>,
     Vec<String>,
     Option<String>,
     serde_json::Value,
     Option<u64>,
     Option<u64>,
-) {
+);
+
+fn artifact_fields(art: &LoadedWatchlistArtifact) -> ArtifactFields {
     let assignments: serde_json::Map<String, serde_json::Value> = art
         .strategy_assignments
         .iter()
@@ -96,6 +99,7 @@ fn artifact_fields(
         .collect();
 
     (
+        Some(art.schema_version.clone()),
         art.symbols.clone(),
         art.top_symbol.clone(),
         serde_json::Value::Object(assignments),

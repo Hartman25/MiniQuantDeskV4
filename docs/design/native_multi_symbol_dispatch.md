@@ -688,6 +688,17 @@ pub struct LoadedWatchlistArtifactV2 {
 }
 ```
 
+**Implementation status (`WATCHLIST-V2-SCHEMA-01`):** the schema/validation rules in this
+section are implemented in `watchlist_intake.rs` as an extension of the existing
+`LoadedWatchlistArtifact` (a `schema_version: String` field was added; no separate
+`LoadedWatchlistArtifactV2` type was introduced). `WATCHLIST_SCHEMA_VERSION_V1` /
+`WATCHLIST_SCHEMA_VERSION_V2` / `MULTI_SYMBOL_HARD_CEILING` (= 5) constants are defined, and
+`WatchlistStatusResponse.schema_version: Option<String>` was added additively. This is
+schema/validation only: no runtime multi-symbol dispatch, no `loop_runner.rs` or `state.rs`
+changes, and the dry-run admission contract (§22 of the scanner spec) remains unwired. The
+`excluded_symbols` field and the promotion-side `watchlist_promotion.py` v2 gate (Patch 11)
+remain open.
+
 **Validation (extends `evaluate_watchlist_intake`):**
 
 - `schema_version ∈ {"watchlist-v1", "watchlist-v2"}` (both remain readable; v1 always implies
@@ -1444,10 +1455,11 @@ decision for the patch that builds this (Patch 11, §10).
 ## 10. Implementation Patch Sequence (Dependency-Ordered)
 
 Each patch below is sized for the one-patch-per-turn rule, scoped to a single file/seam, and
-proven by its own scenario tests. **All 11 are `OPEN` as of this design** (this design patch
-introduces no production code). The dependency graph determines minimum ordering; patches with
-no dependency on each other within a "tier" may be reordered relative to each other but not
-across tiers.
+proven by its own scenario tests. Patch 1 (`WATCHLIST-V2-SCHEMA-01`) has been implemented as a
+schema/validation layer in `watchlist_intake.rs` (see §4.2) — it introduces no runtime
+multi-symbol dispatch. Patches 2-11 remain `OPEN`; none have been started. The dependency graph
+determines minimum ordering; patches with no dependency on each other within a "tier" may be
+reordered relative to each other but not across tiers.
 
 | # | Patch ID | Depends on | Closes |
 |---|---|---|---|
@@ -1465,9 +1477,11 @@ across tiers.
 
 ### Dependency notes
 
-- **Patch 1** is foundational — touches only `watchlist_intake.rs` and adds the
-  `MULTI_SYMBOL_HARD_CEILING` const. No runtime/dispatch code changes. Lowest risk, smallest
-  blast radius, good first patch.
+- **Patch 1** (implemented) is foundational — touches `watchlist_intake.rs` (adds
+  `WATCHLIST_SCHEMA_VERSION_V2` and the `MULTI_SYMBOL_HARD_CEILING` const), plus additive
+  surfaces in `api_types.rs` / `routes/watchlist.rs` (`schema_version` on
+  `WatchlistStatusResponse`). No runtime/dispatch code changes. Lowest risk, smallest blast
+  radius, good first patch.
 - **Patch 2** depends on 1 because `MultiSymbolRuntimeConfig` is built from the v2 artifact
   schema; it can still ship with only `EnvSingleSymbolFallback` exercised in tests if patch 1's
   v2 path isn't yet integration-tested end-to-end — but the type and both source variants should

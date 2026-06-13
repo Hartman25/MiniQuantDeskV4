@@ -1,26 +1,44 @@
-//! PAPER-HANDOFF-READONLY-01: Read-only daemon-side watchlist artifact loader.
+//! PAPER-HANDOFF-READONLY-01 / WATCHLIST-V2-SCHEMA-01: Read-only daemon-side
+//! watchlist artifact loader.
 //!
-//! Loads a `watchlist-v1` JSON artifact produced by the Python scanner
-//! promotion pipeline (WATCHLIST-PROMO-01 / WATCHLIST-PREMKT-RISK-BUNDLE-01)
-//! and returns one of five honest outcomes:
+//! Loads a `watchlist-v1` or `watchlist-v2` JSON artifact produced by the
+//! Python scanner promotion pipeline (WATCHLIST-PROMO-01 /
+//! WATCHLIST-PREMKT-RISK-BUNDLE-01) and returns one of five honest outcomes:
 //!
 //! - **`NotConfigured`** — `MQK_PAPER_WATCHLIST_PATH` env var is absent or empty.
 //!   No watchlist is in scope.
 //! - **`Missing`** — path configured but file does not exist at that path.
 //!   Fail-closed; approved_for_autonomous_paper=false.
 //! - **`Invalid`** — file found but structurally invalid (malformed JSON,
-//!   wrong schema_version, mode != paper, approved_for_live=true, missing
-//!   required fields, constraint violations).  Fail-closed.
+//!   unsupported schema_version, mode != paper, approved_for_live=true,
+//!   missing required fields, constraint violations).  Fail-closed.
 //! - **`LoadedNotApproved`** — file valid but `approved_for_autonomous_paper=false`.
 //!   Operator must re-run promotion before the watchlist is usable.
 //! - **`LoadedApproved`** — file valid and `approved_for_autonomous_paper=true`.
 //!   Top symbol and strategy assignment are surfaced for status visibility only.
 //!
-//! # Hard live-lock invariants
+//! # Schema versions
+//! - **`watchlist-v1`** — single-symbol.  `max_symbols_to_trade` and
+//!   `max_concurrent_positions` must both equal 1.
+//! - **`watchlist-v2`** (WATCHLIST-V2-SCHEMA-01) — multi-symbol schema.
+//!   `max_symbols_to_trade` may be in `1..=MULTI_SYMBOL_HARD_CEILING` (5);
+//!   `max_concurrent_positions` may be in `1..=max_symbols_to_trade`;
+//!   `symbols.len()` must not exceed `max_symbols_to_trade` (no
+//!   truncation — exceeding the cap is `Invalid`); every entry in `symbols`
+//!   must have a corresponding `strategy_assignments` entry.
+//!
+//!   v2 is schema/validation only in this patch — it does NOT implement
+//!   runtime multi-symbol dispatch, does NOT modify `loop_runner.rs` or
+//!   strategy dispatch in `state.rs`, and does NOT wire watchlist admission
+//!   into the live signal path.
+//!
+//! # Hard live-lock invariants (v1 and v2)
 //! - `approved_for_live` is ALWAYS false in all outcomes.
 //! - Any artifact with `approved_for_live=true` → `Invalid` (hard live lock).
-//! - `max_symbols_to_trade` must be 1 — anything else → `Invalid`.
-//! - `max_concurrent_positions` must be 1 — anything else → `Invalid`.
+//! - v1: `max_symbols_to_trade` must be 1 — anything else → `Invalid`.
+//! - v1: `max_concurrent_positions` must be 1 — anything else → `Invalid`.
+//! - v2: `max_symbols_to_trade` must be in `1..=MULTI_SYMBOL_HARD_CEILING`.
+//! - v2: `max_concurrent_positions` must be in `1..=max_symbols_to_trade`.
 //!
 //! # Safety
 //! - Pure function: no env reads, no network, no DB in `evaluate_watchlist_intake`.
@@ -46,8 +64,26 @@ use std::path::Path;
 /// `MQK_PAPER_WATCHLIST_PATH=/home/user/exports/watchlist/AAPL_20260606.json`
 pub const ENV_PAPER_WATCHLIST_PATH: &str = "MQK_PAPER_WATCHLIST_PATH";
 
-/// Only accepted schema version.  Must match Python scanner output.
-const WATCHLIST_SCHEMA_VERSION: &str = "watchlist-v1";
+/// Single-symbol schema version (original).  `max_symbols_to_trade` and
+/// `max_concurrent_positions` must both equal [`REQUIRED_MAX_SYMBOLS`] /
+/// [`REQUIRED_MAX_CONCURRENT`] (both 1).
+pub const WATCHLIST_SCHEMA_VERSION_V1: &str = "watchlist-v1";
+
+/// Multi-symbol schema version (WATCHLIST-V2-SCHEMA-01).  Allows
+/// `max_symbols_to_trade` and `max_concurrent_positions` greater than 1, up
+/// to [`MULTI_SYMBOL_HARD_CEILING`], and requires a `strategy_assignments`
+/// entry for every symbol.  Validation only — does not enable runtime
+/// multi-symbol dispatch.
+pub const WATCHLIST_SCHEMA_VERSION_V2: &str = "watchlist-v2";
+
+/// Back-compat alias for the original (v1) schema version constant.
+pub const WATCHLIST_SCHEMA_VERSION: &str = WATCHLIST_SCHEMA_VERSION_V1;
+
+/// Hard ceiling on `max_symbols_to_trade` (and therefore on `symbols.len()`)
+/// for `watchlist-v2` artifacts (native multi-symbol dispatch design, cap
+/// #12).  v1 artifacts remain capped at [`REQUIRED_MAX_SYMBOLS`] regardless
+/// of this value.
+pub const MULTI_SYMBOL_HARD_CEILING: u64 = 5;
 
 /// Hard constraint: v1 only allows one symbol to trade.
 const REQUIRED_MAX_SYMBOLS: u64 = 1;
@@ -59,21 +95,27 @@ const REQUIRED_MAX_CONCURRENT: u64 = 1;
 // LoadedWatchlistArtifact
 // ---------------------------------------------------------------------------
 
-/// Validated content extracted from a `watchlist-v1` artifact.
+/// Validated content extracted from a `watchlist-v1` or `watchlist-v2`
+/// artifact.
 ///
 /// Only constructed when all structural checks pass.  Never carries
 /// `approved_for_live=true` — that is enforced by [`evaluate_watchlist_intake`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedWatchlistArtifact {
-    /// The first (only) approved symbol in v1.
+    /// `"watchlist-v1"` or `"watchlist-v2"`.
+    pub schema_version: String,
+    /// Approved symbols.  Exactly one entry in v1; up to
+    /// [`MULTI_SYMBOL_HARD_CEILING`] entries in v2.
     pub symbols: Vec<String>,
     /// Top-ranked symbol (symbols[0]) if present.
     pub top_symbol: Option<String>,
     /// Strategy assignment map: symbol → strategy_id.
     pub strategy_assignments: std::collections::HashMap<String, String>,
-    /// Always 1 in v1 (enforced by validation).
+    /// Always 1 in v1.  In v2, in `1..=MULTI_SYMBOL_HARD_CEILING` (enforced
+    /// by validation).
     pub max_symbols_to_trade: u64,
-    /// Always 1 in v1 (enforced by validation).
+    /// Always 1 in v1.  In v2, in `1..=max_symbols_to_trade` (enforced by
+    /// validation).
     pub max_concurrent_positions: u64,
     /// Whether scanner-level promotion approved autonomous paper trading.
     pub approved_for_autonomous_paper: bool,
@@ -180,24 +222,45 @@ impl WatchlistIntakeOutcome {
 // Pure evaluator
 // ---------------------------------------------------------------------------
 
-/// Evaluate a `watchlist-v1` artifact at `path` and return the intake outcome.
+/// Evaluate a `watchlist-v1` or `watchlist-v2` artifact at `path` and return
+/// the intake outcome.
 ///
 /// Pure: no env-var reads, no network, no DB.
 ///
-/// # Validation contract (applied in order)
+/// # Validation contract (applied in order; failures accumulate)
 /// 1. `path` is `Some` and non-empty → otherwise `NotConfigured`.
 /// 2. File readable → otherwise `Missing`.
 /// 3. Valid JSON → otherwise `Invalid`.
-/// 4. `schema_version == "watchlist-v1"` → otherwise `Invalid`.
-/// 5. `mode == "paper"` → otherwise `Invalid`.
-/// 6. `approved_for_live` must NOT be `true` → otherwise `Invalid` (hard live lock).
-/// 7. `approved_for_autonomous_paper` must be a bool → otherwise `Invalid`.
-/// 8. `symbols` must be an array → otherwise `Invalid`.
-/// 9. `strategy_assignments` must be an object → otherwise `Invalid`.
-/// 10. `max_symbols_to_trade` must equal 1 → otherwise `Invalid`.
-/// 11. `max_concurrent_positions` must equal 1 → otherwise `Invalid`.
-/// 12. If `approved_for_autonomous_paper=true`, `symbols` must be non-empty
-///     (internal consistency) → otherwise `Invalid`.
+/// 4. `schema_version` ∈ `{"watchlist-v1", "watchlist-v2"}` → otherwise
+///    `Invalid` (`watchlist_schema_invalid`).
+/// 5. `mode == "paper"` → otherwise `Invalid` (`watchlist_mode_not_paper`).
+/// 6. `approved_for_live` must NOT be `true` → otherwise `Invalid`
+///    (`watchlist_live_approval_forbidden`, hard live lock).
+/// 7. `approved_for_autonomous_paper` must be a bool → otherwise `Invalid`
+///    (`watchlist_approved_for_autonomous_paper_invalid`).
+/// 8. `symbols` must be an array → otherwise `Invalid`
+///    (`watchlist_symbols_invalid`).
+/// 9. `strategy_assignments` must be an object → otherwise `Invalid`
+///    (`watchlist_strategy_assignments_invalid`).
+/// 10. `max_symbols_to_trade`:
+///     - v1: must equal [`REQUIRED_MAX_SYMBOLS`] (1) → otherwise `Invalid`
+///       (`watchlist_max_symbols_invalid`).
+///     - v2: must be in `1..=MULTI_SYMBOL_HARD_CEILING` → values `< 1` are
+///       `watchlist_max_symbols_invalid`; values `> MULTI_SYMBOL_HARD_CEILING`
+///       are `watchlist_multi_symbol_ceiling_exceeded`.
+/// 11. `max_concurrent_positions`:
+///     - v1: must equal [`REQUIRED_MAX_CONCURRENT`] (1) → otherwise `Invalid`
+///       (`watchlist_max_concurrent_positions_invalid`).
+///     - v2: must be in `1..=max_symbols_to_trade` → otherwise `Invalid`
+///       (`watchlist_max_concurrent_positions_invalid`).
+/// 12. `symbols.len() <= max_symbols_to_trade` → otherwise `Invalid`
+///     (`watchlist_max_symbols_invalid`).  No truncation is performed.
+/// 13. v2 only: every entry in `symbols` must have a corresponding
+///     `strategy_assignments` entry → otherwise `Invalid`
+///     (`watchlist_strategy_assignment_missing`).
+/// 14. If `approved_for_autonomous_paper=true`, `symbols` must be non-empty
+///     (internal consistency) → otherwise `Invalid`
+///     (`watchlist_symbols_invalid`).
 ///
 /// Multiple validation failures are accumulated before returning `Invalid`.
 pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome {
@@ -233,31 +296,40 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
     // Accumulate all validation failures rather than stopping at first error.
     let mut reasons: Vec<String> = Vec::new();
 
-    // Step 3: schema_version.
-    match j.get("schema_version").and_then(|v| v.as_str()) {
-        Some(sv) if sv == WATCHLIST_SCHEMA_VERSION => {}
-        Some(other) => reasons.push(format!(
-            "unsupported schema_version '{}'; expected '{}'",
-            other, WATCHLIST_SCHEMA_VERSION
-        )),
-        None => reasons.push("missing 'schema_version' field".to_string()),
-    }
+    // Step 3: schema_version must be "watchlist-v1" or "watchlist-v2".
+    let schema_version: String = match j.get("schema_version").and_then(|v| v.as_str()) {
+        Some(sv) if sv == WATCHLIST_SCHEMA_VERSION_V1 || sv == WATCHLIST_SCHEMA_VERSION_V2 => {
+            sv.to_string()
+        }
+        Some(other) => {
+            reasons.push(format!(
+                "watchlist_schema_invalid: unsupported schema_version '{other}'; expected \
+                 '{WATCHLIST_SCHEMA_VERSION_V1}' or '{WATCHLIST_SCHEMA_VERSION_V2}'"
+            ));
+            WATCHLIST_SCHEMA_VERSION_V1.to_string()
+        }
+        None => {
+            reasons.push("watchlist_schema_invalid: missing 'schema_version' field".to_string());
+            WATCHLIST_SCHEMA_VERSION_V1.to_string()
+        }
+    };
+    let is_v2 = schema_version == WATCHLIST_SCHEMA_VERSION_V2;
 
     // Step 4: mode must be "paper".
     match j.get("mode").and_then(|v| v.as_str()) {
         Some("paper") => {}
         Some(other) => reasons.push(format!(
-            "mode '{}' is not allowed; only 'paper' is accepted",
-            other
+            "watchlist_mode_not_paper: mode '{other}' is not allowed; only 'paper' is accepted"
         )),
-        None => reasons.push("missing 'mode' field".to_string()),
+        None => reasons.push("watchlist_mode_not_paper: missing 'mode' field".to_string()),
     }
 
     // Step 5: approved_for_live must NOT be true (hard live lock).
     match j.get("approved_for_live") {
         Some(v) if v.as_bool() == Some(true) => {
             reasons.push(
-                "approved_for_live=true in artifact; hard live lock — artifact is invalid"
+                "watchlist_live_approval_forbidden: approved_for_live=true in artifact; \
+                 hard live lock — artifact is invalid"
                     .to_string(),
             );
         }
@@ -270,13 +342,19 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
             Some(b) => b,
             None => {
                 reasons.push(
-                    "field 'approved_for_autonomous_paper' is not a boolean".to_string(),
+                    "watchlist_approved_for_autonomous_paper_invalid: field \
+                     'approved_for_autonomous_paper' is not a boolean"
+                        .to_string(),
                 );
                 false
             }
         },
         None => {
-            reasons.push("missing required field 'approved_for_autonomous_paper'".to_string());
+            reasons.push(
+                "watchlist_approved_for_autonomous_paper_invalid: missing required field \
+                 'approved_for_autonomous_paper'"
+                    .to_string(),
+            );
             false
         }
     };
@@ -289,12 +367,16 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
                 .filter_map(|e| e.as_str().map(|s| s.to_string()))
                 .collect(),
             None => {
-                reasons.push("field 'symbols' is not an array".to_string());
+                reasons.push(
+                    "watchlist_symbols_invalid: field 'symbols' is not an array".to_string(),
+                );
                 vec![]
             }
         },
         None => {
-            reasons.push("missing required field 'symbols'".to_string());
+            reasons.push(
+                "watchlist_symbols_invalid: missing required field 'symbols'".to_string(),
+            );
             vec![]
         }
     };
@@ -311,44 +393,116 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
                     .collect(),
                 None => {
                     reasons.push(
-                        "field 'strategy_assignments' is not an object".to_string(),
+                        "watchlist_strategy_assignments_invalid: field 'strategy_assignments' \
+                         is not an object"
+                            .to_string(),
                     );
                     std::collections::HashMap::new()
                 }
             },
             None => {
-                reasons.push("missing required field 'strategy_assignments'".to_string());
+                reasons.push(
+                    "watchlist_strategy_assignments_invalid: missing required field \
+                     'strategy_assignments'"
+                        .to_string(),
+                );
                 std::collections::HashMap::new()
             }
         };
 
-    // Step 9: max_symbols_to_trade must be 1.
-    match j.get("max_symbols_to_trade").and_then(|v| v.as_u64()) {
-        Some(n) if n == REQUIRED_MAX_SYMBOLS => {}
-        Some(n) => reasons.push(format!(
-            "max_symbols_to_trade={n}; must be {REQUIRED_MAX_SYMBOLS} in v1"
-        )),
-        None => reasons.push(format!(
-            "missing or non-integer 'max_symbols_to_trade'; must be {REQUIRED_MAX_SYMBOLS}"
-        )),
+    // Step 9: max_symbols_to_trade — v1 must equal 1; v2 must be in
+    // 1..=MULTI_SYMBOL_HARD_CEILING.
+    let max_symbols_to_trade: u64 = match j.get("max_symbols_to_trade").and_then(|v| v.as_u64()) {
+        Some(n) => {
+            if is_v2 {
+                if n < 1 {
+                    reasons.push(format!(
+                        "watchlist_max_symbols_invalid: max_symbols_to_trade={n}; must be >= 1 in v2"
+                    ));
+                } else if n > MULTI_SYMBOL_HARD_CEILING {
+                    reasons.push(format!(
+                        "watchlist_multi_symbol_ceiling_exceeded: max_symbols_to_trade={n} \
+                         exceeds MULTI_SYMBOL_HARD_CEILING={MULTI_SYMBOL_HARD_CEILING}"
+                    ));
+                }
+            } else if n != REQUIRED_MAX_SYMBOLS {
+                reasons.push(format!(
+                    "watchlist_max_symbols_invalid: max_symbols_to_trade={n}; must be \
+                     {REQUIRED_MAX_SYMBOLS} in v1"
+                ));
+            }
+            n
+        }
+        None => {
+            reasons.push(format!(
+                "watchlist_max_symbols_invalid: missing or non-integer 'max_symbols_to_trade'; \
+                 must be {REQUIRED_MAX_SYMBOLS} in v1 or 1..={MULTI_SYMBOL_HARD_CEILING} in v2"
+            ));
+            0
+        }
+    };
+
+    // Step 10: max_concurrent_positions — v1 must equal 1; v2 must be in
+    // 1..=max_symbols_to_trade.
+    let max_concurrent_positions: u64 =
+        match j.get("max_concurrent_positions").and_then(|v| v.as_u64()) {
+            Some(n) => {
+                if is_v2 {
+                    if n < 1 || n > max_symbols_to_trade {
+                        reasons.push(format!(
+                            "watchlist_max_concurrent_positions_invalid: \
+                             max_concurrent_positions={n}; must be between 1 and \
+                             max_symbols_to_trade={max_symbols_to_trade} in v2"
+                        ));
+                    }
+                } else if n != REQUIRED_MAX_CONCURRENT {
+                    reasons.push(format!(
+                        "watchlist_max_concurrent_positions_invalid: \
+                         max_concurrent_positions={n}; must be {REQUIRED_MAX_CONCURRENT} in v1"
+                    ));
+                }
+                n
+            }
+            None => {
+                reasons.push(format!(
+                    "watchlist_max_concurrent_positions_invalid: missing or non-integer \
+                     'max_concurrent_positions'; must be {REQUIRED_MAX_CONCURRENT} in v1 or \
+                     1..=max_symbols_to_trade in v2"
+                ));
+                0
+            }
+        };
+
+    // Step 11: symbols.len() must not exceed max_symbols_to_trade. No truncation —
+    // exceeding the cap is a validation failure, not a silent drop.
+    if symbols.len() as u64 > max_symbols_to_trade {
+        reasons.push(format!(
+            "watchlist_max_symbols_invalid: symbols.len()={} exceeds \
+             max_symbols_to_trade={}",
+            symbols.len(),
+            max_symbols_to_trade
+        ));
     }
 
-    // Step 10: max_concurrent_positions must be 1.
-    match j.get("max_concurrent_positions").and_then(|v| v.as_u64()) {
-        Some(n) if n == REQUIRED_MAX_CONCURRENT => {}
-        Some(n) => reasons.push(format!(
-            "max_concurrent_positions={n}; must be {REQUIRED_MAX_CONCURRENT} in v1"
-        )),
-        None => reasons.push(format!(
-            "missing or non-integer 'max_concurrent_positions'; must be {REQUIRED_MAX_CONCURRENT}"
-        )),
+    // Step 12: v2 only — every symbol must have a strategy_assignments entry.
+    if is_v2 {
+        let missing: Vec<&String> = symbols
+            .iter()
+            .filter(|s| !strategy_assignments.contains_key(*s))
+            .collect();
+        if !missing.is_empty() {
+            reasons.push(format!(
+                "watchlist_strategy_assignment_missing: symbols missing \
+                 strategy_assignments entries: {missing:?}"
+            ));
+        }
     }
 
-    // Step 11: internal consistency — if approved, symbols must be non-empty.
+    // Step 13: internal consistency — if approved, symbols must be non-empty.
     if approved_for_paper && symbols.is_empty() && reasons.is_empty() {
         reasons.push(
-            "approved_for_autonomous_paper=true but symbols list is empty; \
-             internal consistency violation"
+            "watchlist_symbols_invalid: approved_for_autonomous_paper=true but symbols list \
+             is empty; internal consistency violation"
                 .to_string(),
         );
     }
@@ -363,11 +517,12 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
     // Artifact is structurally valid.
     let top_symbol = symbols.first().cloned();
     let artifact = LoadedWatchlistArtifact {
+        schema_version,
         symbols,
         top_symbol,
         strategy_assignments,
-        max_symbols_to_trade: REQUIRED_MAX_SYMBOLS,
-        max_concurrent_positions: REQUIRED_MAX_CONCURRENT,
+        max_symbols_to_trade,
+        max_concurrent_positions,
         approved_for_autonomous_paper: approved_for_paper,
     };
 

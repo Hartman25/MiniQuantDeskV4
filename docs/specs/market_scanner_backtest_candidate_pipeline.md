@@ -735,6 +735,32 @@ Hard invariants:
 - `max_symbols_to_trade` is 1 in v1. Multi-symbol is future work.
 - `max_concurrent_positions` is 1 in v1.
 
+### 17.1 `watchlist-v2` schema (WATCHLIST-V2-SCHEMA-01)
+
+`watchlist-v2` is a multi-symbol evolution of the schema above, read by the daemon-side
+`evaluate_watchlist_intake` (`watchlist_intake.rs`). It is schema/validation only — the
+promotion-side writer (`watchlist_promotion.py`) still emits `watchlist-v1` artifacts; emitting
+`watchlist-v2` is deferred to `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` (see
+`docs/design/native_multi_symbol_dispatch.md` §10, Patch 11).
+
+A `watchlist-v2` artifact uses the same JSON shape as `watchlist-v1` (§17) with
+`"schema_version": "watchlist-v2"` and these relaxed/extended constraints:
+
+- `max_symbols_to_trade` may be any value in `1..=MULTI_SYMBOL_HARD_CEILING` (`MULTI_SYMBOL_HARD_CEILING = 5`).
+- `max_concurrent_positions` may be any value in `1..=max_symbols_to_trade`.
+- `symbols.len()` must be `<= max_symbols_to_trade` — exceeding this is `invalid`. No
+  truncation is performed.
+- Every entry in `symbols` must have a corresponding entry in `strategy_assignments`
+  (`symbol -> strategy_id`) — a missing assignment is `invalid`.
+
+Hard invariants (unchanged from v1):
+- `approved_for_live` is always `false` — any `watchlist-v2` artifact with
+  `approved_for_live=true` is `invalid` (hard live lock).
+- `mode` is always `"paper"`.
+
+`watchlist-v1` artifacts remain valid and unchanged: `max_symbols_to_trade` and
+`max_concurrent_positions` must both still equal `1`.
+
 ---
 
 ## 18. Promotion / Demotion Rules
@@ -1197,6 +1223,43 @@ status surface at `GET /api/v1/watchlist/status`.
 
 **Next step:** `PAPER-HANDOFF-ENFORCE-01` will wire signal admission into the strategy signal
 route (after market smoke proof for Monday AAPL sell/flatten).
+
+---
+
+### Implementation Note (WATCHLIST-V2-SCHEMA-01)
+
+Status: schema/validation layer only. No runtime behavior changes.
+
+**What is implemented (this patch):**
+- `evaluate_watchlist_intake` now accepts both `watchlist-v1` and `watchlist-v2` artifacts
+  (`WATCHLIST_SCHEMA_VERSION_V1` / `WATCHLIST_SCHEMA_VERSION_V2` constants).
+- `watchlist-v2` validation per §17.1: `max_symbols_to_trade` in `1..=MULTI_SYMBOL_HARD_CEILING`
+  (`MULTI_SYMBOL_HARD_CEILING = 5`), `max_concurrent_positions` in `1..=max_symbols_to_trade`,
+  `symbols.len() <= max_symbols_to_trade`, and a `strategy_assignments` entry required for every
+  symbol.
+- `LoadedWatchlistArtifact` carries `schema_version: String`; `GET /api/v1/watchlist/status`
+  returns `schema_version: Option<String>` (`"watchlist-v1"`, `"watchlist-v2"`, or `null` when no
+  artifact is loaded) as an additive field.
+- 10 new stable v2 failure-reason strings (`watchlist_schema_invalid`,
+  `watchlist_mode_not_paper`, `watchlist_live_approval_forbidden`,
+  `watchlist_approved_for_autonomous_paper_invalid`, `watchlist_symbols_invalid`,
+  `watchlist_strategy_assignments_invalid`, `watchlist_strategy_assignment_missing`,
+  `watchlist_max_symbols_invalid`, `watchlist_max_concurrent_positions_invalid`,
+  `watchlist_multi_symbol_ceiling_exceeded`).
+- `approved_for_live=false` hard lock preserved for both `watchlist-v1` and `watchlist-v2`
+  artifacts — any artifact with `approved_for_live=true` is `invalid`.
+- `watchlist-v1` artifacts are unaffected: `max_symbols_to_trade` and `max_concurrent_positions`
+  must still both equal `1`.
+
+**What is NOT implemented (deferred):**
+- The promotion-side writer (`watchlist_promotion.py`) still emits `watchlist-v1` only; emitting
+  `watchlist-v2` is `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` (Patch 11 in
+  `docs/design/native_multi_symbol_dispatch.md` §10).
+- `evaluate_watchlist_signal_admission` (the dry-run admission contract) is unchanged and remains
+  unwired into `POST /api/v1/strategy/signal`.
+- No runtime multi-symbol dispatch: `loop_runner.rs` and `state.rs` are untouched by this patch.
+- Does NOT submit orders, call broker endpoints, mutate production DB, or bypass arm/halt/
+  WS-continuity/reconcile/risk gates.
 
 ---
 

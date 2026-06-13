@@ -36,6 +36,23 @@
 //! | W18  | approved_for_live always false on every outcome variant                       |
 //! | W19  | Empty symbols with approved=true → Invalid (internal consistency)             |
 //! | W20  | LoadedApproved: top_symbol and strategy_assignments surfaced correctly         |
+//!
+//! # WATCHLIST-V2-SCHEMA-01 proof matrix (additions)
+//!
+//! | Test | What it proves                                                                |
+//! |------|-------------------------------------------------------------------------------|
+//! | W21  | v2 valid, 3 symbols all assigned → LoadedApproved                             |
+//! | W22  | v2 max_symbols_to_trade > MULTI_SYMBOL_HARD_CEILING → Invalid                 |
+//! | W23  | v2 symbols.len() > max_symbols_to_trade → Invalid, no truncation              |
+//! | W24  | v2 max_concurrent_positions > max_symbols_to_trade → Invalid                  |
+//! | W25  | v2 symbol missing strategy_assignments entry → Invalid                        |
+//! | W26  | v2 approved_for_live=true → Invalid (hard live lock still applies)            |
+//! | W27  | v2 mode != paper → Invalid                                                    |
+//! | W28  | v2 LoadedApproved artifact carries schema_version == "watchlist-v2"           |
+//! | W29  | v1 LoadedApproved artifact carries schema_version == "watchlist-v1" (compat)  |
+//! | W30  | Status endpoint surfaces schema_version == "watchlist-v2" for v2 artifacts    |
+//! | W31  | v2 dry admission allows symbol #2 and #3 with their assigned strategies       |
+//! | W32  | v2 boundary: max_symbols_to_trade==ceiling and max_concurrent==max_symbols    |
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -48,6 +65,7 @@ use mqk_daemon::{
     watchlist_intake::{
         evaluate_watchlist_intake, evaluate_watchlist_signal_admission,
         WatchlistAdmissionReason, WatchlistIntakeOutcome, ENV_PAPER_WATCHLIST_PATH,
+        MULTI_SYMBOL_HARD_CEILING, WATCHLIST_SCHEMA_VERSION_V1, WATCHLIST_SCHEMA_VERSION_V2,
     },
 };
 use tokio::sync::Mutex;
@@ -157,6 +175,59 @@ fn approved_aapl_watchlist() -> String {
     )
 }
 
+/// Build a minimal `watchlist-v2` JSON string (WATCHLIST-V2-SCHEMA-01).
+fn valid_watchlist_v2(
+    approved_for_paper: bool,
+    approved_for_live: bool,
+    mode: &str,
+    symbols: &[&str],
+    strategy_assignments: &[(&str, &str)],
+    max_symbols: u64,
+    max_concurrent: u64,
+) -> String {
+    let syms_json = symbols
+        .iter()
+        .map(|s| format!("{:?}", s))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let assignments_json = strategy_assignments
+        .iter()
+        .map(|(sym, strat)| format!("{:?}: {:?}", sym, strat))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        r#"{{
+  "schema_version": "watchlist-v2",
+  "mode": "{mode}",
+  "approved_for_autonomous_paper": {approved_for_paper},
+  "approved_for_live": {approved_for_live},
+  "symbols": [{syms_json}],
+  "strategy_assignments": {{{assignments_json}}},
+  "max_symbols_to_trade": {max_symbols},
+  "max_concurrent_positions": {max_concurrent}
+}}"#
+    )
+}
+
+/// Build a fully-approved `watchlist-v2` artifact with 3 symbols, each with
+/// a distinct strategy assignment, `max_symbols_to_trade=3`,
+/// `max_concurrent_positions=2`.
+fn approved_v2_three_symbols() -> String {
+    valid_watchlist_v2(
+        true,
+        false,
+        "paper",
+        &["AAPL", "MSFT", "TSLA"],
+        &[
+            ("AAPL", "strat-scalper-001"),
+            ("MSFT", "strat-scalper-002"),
+            ("TSLA", "strat-scalper-003"),
+        ],
+        3,
+        2,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // W01 — No env var configured → NotConfigured
 // ---------------------------------------------------------------------------
@@ -205,8 +276,10 @@ fn w03_malformed_json_returns_invalid() {
 
 #[test]
 fn w04_wrong_schema_version_returns_invalid() {
+    // "watchlist-v3" is intentionally unsupported — v1 and v2 are the only
+    // accepted schema versions (WATCHLIST-V2-SCHEMA-01).
     let json = r#"{
-  "schema_version": "watchlist-v2",
+  "schema_version": "watchlist-v3",
   "mode": "paper",
   "approved_for_autonomous_paper": false,
   "approved_for_live": false,
@@ -650,4 +723,362 @@ async fn w20_loaded_approved_endpoint_surfaces_top_symbol_and_assignments() {
         json_resp["failure_reasons"].as_array().map_or(false, |a| a.is_empty()),
         "failure_reasons must be empty on loaded_approved"
     );
+}
+
+// ---------------------------------------------------------------------------
+// W21 — v2 valid, 3 symbols all assigned → LoadedApproved
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w21_v2_valid_three_symbols_all_assigned_returns_loaded_approved() {
+    let json = approved_v2_three_symbols();
+    let path = write_watchlist("w21", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "loaded_approved");
+    assert!(outcome.approved_for_autonomous_paper());
+    assert!(!outcome.approved_for_live());
+
+    let art = outcome.artifact().expect("artifact must be present");
+    assert_eq!(art.schema_version, WATCHLIST_SCHEMA_VERSION_V2);
+    assert_eq!(
+        art.symbols,
+        vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()]
+    );
+    assert_eq!(art.top_symbol, Some("AAPL".to_string()));
+    assert_eq!(art.max_symbols_to_trade, 3);
+    assert_eq!(art.max_concurrent_positions, 2);
+    assert_eq!(
+        art.strategy_assignments.get("AAPL"),
+        Some(&"strat-scalper-001".to_string())
+    );
+    assert_eq!(
+        art.strategy_assignments.get("MSFT"),
+        Some(&"strat-scalper-002".to_string())
+    );
+    assert_eq!(
+        art.strategy_assignments.get("TSLA"),
+        Some(&"strat-scalper-003".to_string())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W22 — v2 max_symbols_to_trade > MULTI_SYMBOL_HARD_CEILING → Invalid
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w22_v2_max_symbols_above_hard_ceiling_is_invalid() {
+    let over_ceiling = MULTI_SYMBOL_HARD_CEILING + 1;
+    let json = valid_watchlist_v2(false, false, "paper", &[], &[], over_ceiling, 1);
+    let path = write_watchlist("w22", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "invalid");
+    let reasons = outcome.failure_reasons();
+    assert!(
+        reasons.iter().any(|r| {
+            r.contains("watchlist_multi_symbol_ceiling_exceeded")
+                && r.contains("MULTI_SYMBOL_HARD_CEILING")
+        }),
+        "expected multi-symbol ceiling reason, got: {reasons:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W23 — v2 symbols.len() > max_symbols_to_trade → Invalid, no truncation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w23_v2_symbols_exceeding_max_symbols_to_trade_is_invalid_no_truncation() {
+    let json = valid_watchlist_v2(
+        false,
+        false,
+        "paper",
+        &["AAPL", "MSFT", "TSLA"],
+        &[
+            ("AAPL", "strat-scalper-001"),
+            ("MSFT", "strat-scalper-002"),
+            ("TSLA", "strat-scalper-003"),
+        ],
+        2,
+        1,
+    );
+    let path = write_watchlist("w23", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "invalid");
+    assert!(
+        outcome.artifact().is_none(),
+        "Invalid outcome must not carry a truncated artifact"
+    );
+    let reasons = outcome.failure_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("symbols.len()=3") && r.contains("max_symbols_to_trade=2")),
+        "expected symbols-exceed-max reason, got: {reasons:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W24 — v2 max_concurrent_positions > max_symbols_to_trade → Invalid
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w24_v2_max_concurrent_positions_above_max_symbols_is_invalid() {
+    let json = valid_watchlist_v2(
+        false,
+        false,
+        "paper",
+        &["AAPL", "MSFT"],
+        &[("AAPL", "strat-scalper-001"), ("MSFT", "strat-scalper-002")],
+        2,
+        3,
+    );
+    let path = write_watchlist("w24", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "invalid");
+    let reasons = outcome.failure_reasons();
+    assert!(
+        reasons.iter().any(|r| {
+            r.contains("watchlist_max_concurrent_positions_invalid")
+                && r.contains("max_concurrent_positions=3")
+                && r.contains("max_symbols_to_trade=2")
+        }),
+        "expected max_concurrent_positions-exceeds-max_symbols reason, got: {reasons:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W25 — v2 symbol missing strategy_assignments entry → Invalid
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w25_v2_symbol_missing_strategy_assignment_is_invalid() {
+    let json = valid_watchlist_v2(
+        false,
+        false,
+        "paper",
+        &["AAPL", "MSFT", "TSLA"],
+        &[("AAPL", "strat-scalper-001"), ("MSFT", "strat-scalper-002")],
+        3,
+        2,
+    );
+    let path = write_watchlist("w25", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "invalid");
+    let reasons = outcome.failure_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("watchlist_strategy_assignment_missing") && r.contains("TSLA")),
+        "expected strategy_assignment_missing reason for TSLA, got: {reasons:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W26 — v2 approved_for_live=true → Invalid (hard live lock still applies)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w26_v2_approved_for_live_true_is_hard_locked_invalid() {
+    let json = valid_watchlist_v2(
+        true,
+        true,
+        "paper",
+        &["AAPL"],
+        &[("AAPL", "strat-scalper-001")],
+        1,
+        1,
+    );
+    let path = write_watchlist("w26", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "invalid");
+    let reasons = outcome.failure_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("watchlist_live_approval_forbidden")),
+        "expected live-lock reason, got: {reasons:?}"
+    );
+    // Hard invariant: even in invalid state, approved_for_live() is always false.
+    assert!(!outcome.approved_for_live());
+}
+
+// ---------------------------------------------------------------------------
+// W27 — v2 mode != paper → Invalid
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w27_v2_mode_not_paper_returns_invalid() {
+    let json = valid_watchlist_v2(false, false, "live", &[], &[], 1, 1);
+    let path = write_watchlist("w27", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "invalid");
+    let reasons = outcome.failure_reasons();
+    assert!(
+        reasons
+            .iter()
+            .any(|r| r.contains("watchlist_mode_not_paper")),
+        "expected mode reason, got: {reasons:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W28 — v2 LoadedApproved artifact carries schema_version == "watchlist-v2"
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w28_v2_loaded_approved_artifact_carries_v2_schema_version() {
+    let json = approved_v2_three_symbols();
+    let path = write_watchlist("w28", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "loaded_approved");
+    let art = outcome.artifact().expect("artifact must be present");
+    assert_eq!(art.schema_version, WATCHLIST_SCHEMA_VERSION_V2);
+}
+
+// ---------------------------------------------------------------------------
+// W29 — v1 LoadedApproved artifact carries schema_version == "watchlist-v1" (compat)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w29_v1_loaded_approved_artifact_carries_v1_schema_version() {
+    let json = approved_aapl_watchlist();
+    let path = write_watchlist("w29", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "loaded_approved");
+    let art = outcome.artifact().expect("artifact must be present");
+    assert_eq!(art.schema_version, WATCHLIST_SCHEMA_VERSION_V1);
+}
+
+// ---------------------------------------------------------------------------
+// W30 — Status endpoint surfaces schema_version == "watchlist-v2" for v2 artifacts
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn w30_endpoint_surfaces_v2_schema_version_and_multi_symbol_fields() {
+    let _guard = env_lock().lock().await;
+
+    let json = approved_v2_three_symbols();
+    let path = write_watchlist("w30", &json);
+
+    unsafe {
+        std::env::set_var(ENV_PAPER_WATCHLIST_PATH, path.to_str().unwrap());
+    }
+
+    let router = build_router();
+    let req = Request::builder()
+        .uri("/api/v1/watchlist/status")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router, req).await;
+    let json_resp = parse_json(body);
+
+    unsafe {
+        std::env::remove_var(ENV_PAPER_WATCHLIST_PATH);
+    }
+    cleanup(&path);
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_resp["status"], "loaded_approved");
+    assert_eq!(json_resp["schema_version"], "watchlist-v2");
+    assert_eq!(json_resp["approved_for_live"], false);
+    assert_eq!(json_resp["max_symbols_to_trade"], 3);
+    assert_eq!(json_resp["max_concurrent_positions"], 2);
+    assert_eq!(
+        json_resp["symbols"],
+        serde_json::json!(["AAPL", "MSFT", "TSLA"])
+    );
+    assert_eq!(
+        json_resp["strategy_assignments"]["MSFT"],
+        "strat-scalper-002"
+    );
+    assert_eq!(
+        json_resp["strategy_assignments"]["TSLA"],
+        "strat-scalper-003"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// W31 — v2 dry admission allows symbol #2 and #3 with their assigned strategies
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w31_v2_dry_admission_allows_symbols_two_and_three() {
+    let json = approved_v2_three_symbols();
+    let path = write_watchlist("w31", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    let msft = evaluate_watchlist_signal_admission(&outcome, "MSFT", "strat-scalper-002");
+    assert!(msft.allowed);
+    assert_eq!(msft.reason, WatchlistAdmissionReason::Allowed);
+
+    let tsla = evaluate_watchlist_signal_admission(&outcome, "TSLA", "strat-scalper-003");
+    assert!(tsla.allowed);
+    assert_eq!(tsla.reason, WatchlistAdmissionReason::Allowed);
+
+    // Cross-assignment: MSFT's symbol with TSLA's strategy must be denied.
+    let cross = evaluate_watchlist_signal_admission(&outcome, "MSFT", "strat-scalper-003");
+    assert!(!cross.allowed);
+    assert_eq!(cross.reason, WatchlistAdmissionReason::StrategyNotAssigned);
+}
+
+// ---------------------------------------------------------------------------
+// W32 — v2 boundary: max_symbols_to_trade==ceiling and max_concurrent==max_symbols
+// ---------------------------------------------------------------------------
+
+#[test]
+fn w32_v2_boundary_at_hard_ceiling_is_loaded_approved() {
+    let ceiling = MULTI_SYMBOL_HARD_CEILING;
+    let symbols = ["AAPL", "MSFT", "TSLA", "GOOGL", "AMZN"];
+    assert_eq!(
+        symbols.len() as u64,
+        ceiling,
+        "fixture must match the hard ceiling"
+    );
+
+    let assignments: Vec<(&str, &str)> = vec![
+        ("AAPL", "strat-scalper-001"),
+        ("MSFT", "strat-scalper-002"),
+        ("TSLA", "strat-scalper-003"),
+        ("GOOGL", "strat-scalper-004"),
+        ("AMZN", "strat-scalper-005"),
+    ];
+
+    let json = valid_watchlist_v2(
+        true,
+        false,
+        "paper",
+        &symbols,
+        &assignments,
+        ceiling,
+        ceiling,
+    );
+    let path = write_watchlist("w32", &json);
+    let outcome = evaluate_watchlist_intake(Some(&path));
+    cleanup(&path);
+
+    assert_eq!(outcome.status_label(), "loaded_approved");
+    let art = outcome.artifact().expect("artifact must be present");
+    assert_eq!(art.max_symbols_to_trade, MULTI_SYMBOL_HARD_CEILING);
+    assert_eq!(art.max_concurrent_positions, MULTI_SYMBOL_HARD_CEILING);
+    assert_eq!(art.symbols.len() as u64, MULTI_SYMBOL_HARD_CEILING);
+    assert!(!outcome.approved_for_live());
 }

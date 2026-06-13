@@ -3601,6 +3601,9 @@ pub struct WatchlistStatusResponse {
     /// One of: `"not_configured"` | `"missing"` | `"invalid"` |
     ///         `"loaded_not_approved"` | `"loaded_approved"`.
     pub status: String,
+    /// `"watchlist-v1"` or `"watchlist-v2"` from the loaded artifact.
+    /// `null` when no artifact was loaded (not_configured, missing, or invalid).
+    pub schema_version: Option<String>,
     /// Whether the scanner-level promotion approved autonomous paper trading.
     /// Always `false` except when `status == "loaded_approved"`.
     pub approved_for_autonomous_paper: bool,
