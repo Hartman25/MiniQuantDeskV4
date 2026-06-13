@@ -1485,10 +1485,14 @@ proven by its own scenario tests. Patch 1 (`WATCHLIST-V2-SCHEMA-01`) has been im
 schema/validation layer in `watchlist_intake.rs` (see §4.2) — it introduces no runtime
 multi-symbol dispatch. Patch 2 (`MULTI-SYMBOL-RUNTIME-CONFIG-01`) has also been implemented, as a
 pure config-construction layer in `multi_symbol_config.rs` (see §4.1, §4.3) — registered in
-`state.rs` but not invoked, and `loop_runner.rs`/`routes/strategy.rs` are untouched. Patches 3-11
-remain `OPEN`; none have been started. The dependency graph determines minimum ordering; patches
-with no dependency on each other within a "tier" may be reordered relative to each other but not
-across tiers.
+`state.rs` but not invoked, and `loop_runner.rs`/`routes/strategy.rs` are untouched. Patch 3
+(`PER-SYMBOL-BAR-WINDOW-01`) has also been implemented, as an additive symbol-keyed bar
+input/window foundation in `per_symbol_bar_window.rs` (see §4.4, §6 cap #9), plus a
+symbol/timeframe-parameterized `tick_strategy_dispatch_for_symbol` extracted from the legacy
+single-symbol dispatch body — registered in `state.rs` but not invoked, and
+`loop_runner.rs`/`routes/strategy.rs` remain untouched. Patches 4-11 remain `OPEN`; none have been
+started. The dependency graph determines minimum ordering; patches with no dependency on each
+other within a "tier" may be reordered relative to each other but not across tiers.
 
 | # | Patch ID | Depends on | Closes |
 |---|---|---|---|
@@ -1518,6 +1522,11 @@ across tiers.
 - **Patch 3** depends on 2 for `MultiSymbolRuntimeConfig.symbols` (the list of symbols to build
   `pending_strategy_bar_inputs` keys for) but does not depend on 4 — the keyed map and
   `tick_strategy_dispatch_for_symbol` can exist and be unit-tested before the loop calls them.
+  **Implemented** as `per_symbol_bar_window.rs` (`PerSymbolPendingBarInputs`,
+  `PerSymbolBarWindow`, `PerSymbolLoadedBars`, `classify_bar_staleness`,
+  `load_recent_completed_bars_for_symbol_window` / `per_symbol_loaded_bars_from_rows`, and
+  `AppState::tick_strategy_dispatch_for_symbol`); registered in `state.rs` but not invoked from
+  `loop_runner.rs`/`routes/strategy.rs` (Patch 4).
 - **Patch 4** is the highest-risk patch — it changes `loop_runner.rs`'s B1C block, the most
   sensitive per-tick dispatch code. It should land with Q1-Q9 each individually covered by a
   scenario test (9 new tests minimum, one per question), per Phase 5.
@@ -1577,7 +1586,7 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Component: `MultiSymbolRuntimeConfig` (§4.1) | **CLOSED (config-construction only)** | Patch 2 (`multi_symbol_config.rs`); not wired into `loop_runner.rs`/`state.rs` dispatch (Patches 3/4) |
 | Component: `ApprovedPaperWatchlist` v2 (§4.2) | OPEN | delivered by Patch 1 (schema) + Patch 11 (promotion-side) |
 | Component: `SymbolStrategyAssignment` (§4.3) | **CLOSED (no per-symbol timeframe override)** | Patch 2; `timeframe_overrides` deferred to Patch 3/4 |
-| Component: `PerSymbolBarWindow` (§4.4) | OPEN | delivered by Patch 3 |
+| Component: `PerSymbolBarWindow` (§4.4) | **CLOSED (foundation only)** | Patch 3 (`per_symbol_bar_window.rs`); registered in `state.rs` but not wired into `loop_runner.rs`/`routes/strategy.rs` dispatch (Patch 4) |
 | Component: `PerSymbolStrategyDecision` seam (§4.5) | OPEN | no new types; call-site change in Patch 4 |
 | Component: `PerSymbolTargetState` (§4.6) | OPEN | delivered by Patch 8 |
 | Component: `MultiSymbolRiskCaps` (§4.7) | OPEN | delivered across Patches 5/6/7 |
@@ -1591,7 +1600,7 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Cap #6 `max_new_orders_per_tick` | OPEN | Patch 7 |
 | Cap #7 reconcile drift visibility | OPEN | Patch 9/10 — observability only, no halt-scope change |
 | Cap #8 B5 short-sale guard, multi-symbol proof | OPEN | proof in Patch 11; enforcement already correct |
-| Cap #9 `per_symbol_bar_staleness_secs` | OPEN | Patch 3 |
+| Cap #9 `per_symbol_bar_staleness_secs` | **CLOSED (helper only, not enforced)** | Patch 3 (`classify_bar_staleness`); pure staleness classification helper added and proven (P05-P09), not yet called from any dispatch path — enforcement (`no_order_reason = "bar_data_stale"`) remains Patch 4 |
 | Cap #10 deadman TTL (documentation-only) | **PARKED by design** | account-wide by construction; no patch will change this |
 | Cap #11 kill-switch propagation (documentation-only) | **PARKED by design** | account-wide by construction; no patch will change this |
 | Cap #12 `MULTI_SYMBOL_HARD_CEILING` | OPEN | Patch 1 |

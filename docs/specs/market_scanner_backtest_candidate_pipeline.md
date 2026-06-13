@@ -1313,6 +1313,59 @@ Status: pure config-construction layer only. No runtime behavior changes.
 
 ---
 
+### Implementation Note (PER-SYMBOL-BAR-WINDOW-01)
+
+Status: additive symbol-keyed bar input/window foundation only. No runtime behavior changes.
+
+**What is implemented (this patch):**
+- New module `core-rs/crates/mqk-daemon/src/state/per_symbol_bar_window.rs` defines
+  `PerSymbolBarInput { symbol, now_tick, end_ts, limit_price, qty }`,
+  `PerSymbolBarWindow { symbol, timeframe, bars_loaded, latest_end_ts, latest_end_utc, is_stale }`,
+  `PerSymbolLoadedBars { window, bars }`, and `PerSymbolPendingBarInputs` — a symbol-keyed
+  pending-input map (`insert`/`take`/`normalize_symbol`, trims + uppercases symbols, rejects
+  empty symbols via `EmptySymbolError`).
+- `classify_bar_staleness(latest_end_ts, now_ts, max_staleness_secs) -> Option<bool>` — pure
+  staleness classification helper for the future cap #9 (`per_symbol_bar_staleness_secs`, §6 of
+  `docs/design/native_multi_symbol_dispatch.md`); `None` when the cap is disabled,
+  `Some(true)`/`Some(false)` otherwise, with future-timestamp ages clamped to zero (no panic).
+- `load_recent_completed_bars_for_symbol_window` + `per_symbol_loaded_bars_from_rows` —
+  symbol/timeframe-parameterized bar loading and a pure row-to-window conversion, built on the
+  existing `mqk_db::fetch_recent_completed_bars_for_strategy` (unchanged).
+- `per_symbol_bar_window` is registered in `state.rs` (`mod` + `pub use` re-export) but invoked by
+  nothing — a helper/foundation seam only.
+- **Refactor (additive, not a rewrite):** the legacy `AppState::tick_strategy_dispatch(&self)`
+  body was extracted into a new symbol/timeframe-parameterized
+  `AppState::tick_strategy_dispatch_for_symbol(&self, symbol: &str, timeframe: &str)`. The legacy
+  zero-arg entrypoint now reads `MQK_STRATEGY_SYMBOL` / `MQK_STRATEGY_MD_TIMEFRAME` and delegates
+  to the new method; its signature, callers (`loop_runner.rs`), and fail-closed `None` behavior
+  with no native strategy bootstrap are unchanged.
+- 14 proof tests (`P01`-`P14`) in
+  `core-rs/crates/mqk-daemon/tests/scenario_per_symbol_bar_window_01.rs`: the pending-input map
+  (insert/take/isolation/normalization/empty-rejection), the staleness helper (cap
+  disabled/enabled, missing/old/fresh/future bars), the pure row conversion (ordering metadata,
+  honest empty-result), legacy-dispatch compatibility after the refactor, and the new
+  per-symbol entrypoint's independence from env vars and from `loop_runner.rs`.
+
+**What is NOT implemented (deferred):**
+- Not wired into `loop_runner.rs` (no per-symbol dispatch loop — Patch 4,
+  `MULTI-SYMBOL-DISPATCH-LOOP-01`); `tick_strategy_dispatch_for_symbol` is callable but uncalled
+  outside tests.
+- Not invoked from `routes/strategy.rs` — the signal-admission path is unchanged.
+- Cap #9 (`per_symbol_bar_staleness_secs`) is a pure helper only — `classify_bar_staleness` is
+  proven but not called from any dispatch path; no `no_order_reason = "bar_data_stale"` value is
+  produced yet (Patch 4).
+- `PerSymbolPendingBarInputs` is a standalone keyed map — `AppState`'s existing
+  `pending_strategy_bar_input: Arc<Mutex<Option<StrategyBarInput>>>` single-slot field is
+  unchanged; the per-symbol map is not yet the storage backing
+  `tick_strategy_dispatch_for_symbol` (Patch 4 wires the loop that populates and drains it).
+- None of the new types carry an `approved_for_live` field (proven by `P14`) and no live-routing
+  authority — `approved_for_live=false` remains enforced exclusively by
+  `watchlist_intake.rs` / `WatchlistIntakeOutcome`.
+- Does NOT submit orders, call broker endpoints, mutate production DB, or bypass arm/halt/
+  WS-continuity/reconcile/risk gates.
+
+---
+
 ## 23. Live-Trading Lock
 
 The live-trading lock is preserved at multiple levels:

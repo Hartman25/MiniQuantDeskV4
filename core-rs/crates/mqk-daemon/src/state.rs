@@ -14,6 +14,7 @@ mod loop_runner;
 pub mod market_calendar;
 mod multi_symbol_config;
 mod orchestrator_build;
+mod per_symbol_bar_window;
 mod session_controller;
 mod signal_intake;
 mod snapshot;
@@ -65,6 +66,11 @@ pub use multi_symbol_config::{
     build_multi_symbol_runtime_config_from_env_and_watchlist, MultiSymbolConfigError,
     MultiSymbolConfigSource, MultiSymbolRuntimeConfig, SymbolStrategyAssignment,
     MULTI_SYMBOL_RUNTIME_CONFIG_SCHEMA_VERSION,
+};
+pub use per_symbol_bar_window::{
+    classify_bar_staleness, load_recent_completed_bars_for_symbol_window,
+    per_symbol_loaded_bars_from_rows, EmptySymbolError, PerSymbolBarInput, PerSymbolBarWindow,
+    PerSymbolBarWindowError, PerSymbolLoadedBars, PerSymbolPendingBarInputs,
 };
 pub use session_controller::{
     autonomous_session_schedule_from_env, run_session_controller_tick, session_window_from_env,
@@ -1511,42 +1517,34 @@ operator_reconcile_or_repair_required"
         *self.last_strategy_diagnostics.lock().await = Some(diag);
     }
 
-    /// B1B/AUTON-SIGNAL-CONTEXT-01: Execution loop dispatch seam.
+    /// PER-SYMBOL-BAR-WINDOW-01: symbol/timeframe-parameterized extraction of
+    /// the dispatch body previously inlined in [`Self::tick_strategy_dispatch`].
     ///
-    /// Called exclusively by the execution loop on each tick.  The loop is the
-    /// canonical runtime-owned `on_bar` dispatch owner.
+    /// `symbol`/`timeframe` are trimmed before use. The legacy single-symbol
+    /// caller ([`Self::tick_strategy_dispatch`], which passes
+    /// `MQK_STRATEGY_SYMBOL` / `MQK_STRATEGY_MD_TIMEFRAME`) is unchanged in
+    /// behavior, return shape, and logging.
     ///
-    /// AUTON-SIGNAL-CONTEXT-01: When `MQK_STRATEGY_SYMBOL` and
-    /// `MQK_STRATEGY_MD_TIMEFRAME` are both set and the daemon has a DB pool,
-    /// loads up to `STRATEGY_CONTEXT_LOAD_LIMIT` recent completed bars from
-    /// `md_bars` and builds a real `RecentBarsWindow`.  This lets built-in
-    /// strategies satisfy their LOOKBACK requirements using real price history.
-    ///
-    /// Falls back to the single-stub context (original B1B path) when:
-    /// - env vars are absent (not configured)
-    /// - DB pool is unavailable
-    /// - DB returns no completed bars for the symbol/timeframe
-    /// - DB query fails
-    ///
-    /// Returns `Some(StrategyBarResult)` when a bar was pending AND the bootstrap
-    /// is Active.  Returns `None` on most ticks (no pending bar) or when the
-    /// bootstrap is absent / Dormant / Failed — all fail-closed.
-    pub async fn tick_strategy_dispatch(&self) -> Option<mqk_strategy::StrategyBarResult> {
+    /// NOT WIRED: this patch does not call this helper from `loop_runner.rs`
+    /// or any per-symbol dispatch loop — only [`Self::tick_strategy_dispatch`]
+    /// (single-symbol, env-driven) calls it. Multi-symbol dispatch is
+    /// `MULTI-SYMBOL-DISPATCH-LOOP-01` (Patch 4).
+    pub async fn tick_strategy_dispatch_for_symbol(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+    ) -> Option<mqk_strategy::StrategyBarResult> {
         let bar = self.pending_strategy_bar_input.lock().await.take()?;
 
         // AUTON-SIGNAL-CONTEXT-01: attempt DB-backed context window.
-        let symbol = std::env::var("MQK_STRATEGY_SYMBOL")
-            .map(|v| v.trim().to_string())
-            .unwrap_or_default();
-        let md_timeframe = std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
-            .map(|v| v.trim().to_string())
-            .unwrap_or_default();
+        let symbol = symbol.trim();
+        let md_timeframe = timeframe.trim();
 
         if let (Some(ref pool), true) = (&self.db, !symbol.is_empty() && !md_timeframe.is_empty()) {
             match mqk_db::fetch_recent_completed_bars_for_strategy(
                 pool,
-                &symbol,
-                &md_timeframe,
+                symbol,
+                md_timeframe,
                 STRATEGY_CONTEXT_LOAD_LIMIT,
             )
             .await
@@ -1635,6 +1633,42 @@ operator_reconcile_or_repair_required"
             bar.qty,
         )
         .await
+    }
+
+    /// B1B/AUTON-SIGNAL-CONTEXT-01: Execution loop dispatch seam.
+    ///
+    /// Called exclusively by the execution loop on each tick.  The loop is the
+    /// canonical runtime-owned `on_bar` dispatch owner.
+    ///
+    /// AUTON-SIGNAL-CONTEXT-01: When `MQK_STRATEGY_SYMBOL` and
+    /// `MQK_STRATEGY_MD_TIMEFRAME` are both set and the daemon has a DB pool,
+    /// loads up to `STRATEGY_CONTEXT_LOAD_LIMIT` recent completed bars from
+    /// `md_bars` and builds a real `RecentBarsWindow`.  This lets built-in
+    /// strategies satisfy their LOOKBACK requirements using real price history.
+    ///
+    /// Falls back to the single-stub context (original B1B path) when:
+    /// - env vars are absent (not configured)
+    /// - DB pool is unavailable
+    /// - DB returns no completed bars for the symbol/timeframe
+    /// - DB query fails
+    ///
+    /// Returns `Some(StrategyBarResult)` when a bar was pending AND the bootstrap
+    /// is Active.  Returns `None` on most ticks (no pending bar) or when the
+    /// bootstrap is absent / Dormant / Failed — all fail-closed.
+    ///
+    /// PER-SYMBOL-BAR-WINDOW-01: delegates to
+    /// [`Self::tick_strategy_dispatch_for_symbol`] with the env-configured
+    /// symbol/timeframe. Behavior, return shape, and logging are unchanged.
+    pub async fn tick_strategy_dispatch(&self) -> Option<mqk_strategy::StrategyBarResult> {
+        let symbol = std::env::var("MQK_STRATEGY_SYMBOL")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        let md_timeframe = std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+
+        self.tick_strategy_dispatch_for_symbol(&symbol, &md_timeframe)
+            .await
     }
 
     /// AUTON-SIGNAL-CONTEXT-01: Invoke `on_bar` with a pre-built DB-sourced window.
