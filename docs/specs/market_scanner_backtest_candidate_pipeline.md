@@ -1263,6 +1263,56 @@ Status: schema/validation layer only. No runtime behavior changes.
 
 ---
 
+### Implementation Note (MULTI-SYMBOL-RUNTIME-CONFIG-01)
+
+Status: pure config-construction layer only. No runtime behavior changes.
+
+**What is implemented (this patch):**
+- New module `core-rs/crates/mqk-daemon/src/state/multi_symbol_config.rs` defines
+  `MultiSymbolRuntimeConfig { schema_version, symbols: Vec<SymbolStrategyAssignment>,
+  max_concurrent_symbols, source }`, `SymbolStrategyAssignment { symbol, strategy_id,
+  timeframe }`, and `MultiSymbolConfigSource { EnvSingleSymbolFallback,
+  WatchlistArtifactV2 { path } }`, with
+  `MULTI_SYMBOL_RUNTIME_CONFIG_SCHEMA_VERSION = "multi-symbol-runtime-config-v1"`.
+- Five pure builder functions: `build_legacy_single_symbol_config` (+ `_from_env`),
+  `build_multi_symbol_config_from_watchlist_artifact`,
+  `build_multi_symbol_runtime_config_from_env_and_watchlist` (+ `_from_env`).
+- The watchlist-v2 builder consumes the `LoadedWatchlistArtifact` /
+  `WatchlistIntakeOutcome` types from `WATCHLIST-V2-SCHEMA-01` (§17.1): only
+  `LoadedApproved` + `schema_version == "watchlist-v2"` is accepted; ceiling
+  (`MULTI_SYMBOL_HARD_CEILING`) and per-symbol `strategy_assignments` checks are
+  re-validated at config-build time.
+- 8 new stable fail-closed reason strings (`multi_symbol_config_missing_symbol`,
+  `multi_symbol_config_missing_strategy_id`, `multi_symbol_config_missing_timeframe`,
+  `multi_symbol_config_watchlist_not_v2`, `multi_symbol_config_watchlist_not_approved`,
+  `multi_symbol_config_missing_assignment`, `multi_symbol_config_concurrent_limit_exceeded`,
+  `multi_symbol_config_hard_ceiling_exceeded`).
+- Selection semantics: an invalid/ineligible `watchlist-v2` artifact falls back to the legacy
+  single-symbol env config (not an error); only when *both* sources fail does the combined
+  builder return `Err` (fail-closed).
+- `multi_symbol_config` is registered in `state.rs` (`mod` + `pub use` re-export) but invoked by
+  nothing — a config-construction seam only.
+- 18 proof tests (`M01`-`M18`) in
+  `core-rs/crates/mqk-daemon/tests/scenario_multi_symbol_runtime_config_01.rs`, all pure
+  in-memory (no env reads, no DB, no I/O).
+
+**What is NOT implemented (deferred):**
+- Not wired into `loop_runner.rs` (no per-symbol dispatch loop — Patch 4,
+  `MULTI-SYMBOL-DISPATCH-LOOP-01`).
+- Not invoked from `state.rs` startup, and not referenced from `routes/strategy.rs` — the
+  signal-admission path is unchanged.
+- No per-symbol `timeframe_overrides`: every symbol in a `watchlist-v2` config shares the same
+  global `timeframe` (from `MQK_STRATEGY_MD_TIMEFRAME` / the caller-supplied default), matching
+  Tier A's single global timeframe assumption (§4.3 of
+  `docs/design/native_multi_symbol_dispatch.md`).
+- `MultiSymbolRuntimeConfig` carries no `approved_for_live` field and no live-routing
+  authority — `approved_for_live=false` remains enforced exclusively by
+  `watchlist_intake.rs` / `WatchlistIntakeOutcome` (proven by `M18`).
+- Does NOT submit orders, call broker endpoints, mutate production DB, or bypass arm/halt/
+  WS-continuity/reconcile/risk gates.
+
+---
+
 ## 23. Live-Trading Lock
 
 The live-trading lock is preserved at multiple levels:

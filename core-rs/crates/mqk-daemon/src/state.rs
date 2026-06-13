@@ -12,6 +12,7 @@ mod env;
 mod lifecycle;
 mod loop_runner;
 pub mod market_calendar;
+mod multi_symbol_config;
 mod orchestrator_build;
 mod session_controller;
 mod signal_intake;
@@ -56,6 +57,14 @@ pub use market_calendar::{
     ExchangeCalendarDay, ExchangeCalendarMeta, ExchangeDayStatus, ExchangeSourceState,
     ExchangeSourcedCalendarProvider, ExchangeUnavailablePolicy, FixedWindowOverrideProvider,
     MarketCalendarProvider, MarketSessionState, MarketSessionTruth, NyseWeekdaysProvider,
+};
+pub use multi_symbol_config::{
+    build_legacy_single_symbol_config, build_legacy_single_symbol_config_from_env,
+    build_multi_symbol_config_from_watchlist_artifact,
+    build_multi_symbol_runtime_config_from_env,
+    build_multi_symbol_runtime_config_from_env_and_watchlist, MultiSymbolConfigError,
+    MultiSymbolConfigSource, MultiSymbolRuntimeConfig, SymbolStrategyAssignment,
+    MULTI_SYMBOL_RUNTIME_CONFIG_SCHEMA_VERSION,
 };
 pub use session_controller::{
     autonomous_session_schedule_from_env, run_session_controller_tick, session_window_from_env,

@@ -66,7 +66,8 @@ $Guards = @(
     'test_paper_premarket_validation.ps1',
     'test_gui_relaunch_during_smoke.ps1',
     'test_timeframe_h1_provider_ingest.ps1',
-    'test_watchlist_v2_schema.ps1'
+    'test_watchlist_v2_schema.ps1',
+    'test_multi_symbol_runtime_config.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()

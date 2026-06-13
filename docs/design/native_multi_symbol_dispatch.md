@@ -671,6 +671,21 @@ refuses-start test.
 
 **API/GUI:** surfaced read-only via the extended `WatchlistStatusResponse` (Phase 7).
 
+**Implementation status (`MULTI-SYMBOL-RUNTIME-CONFIG-01`):** the type and both source variants
+above are implemented as written, in
+`core-rs/crates/mqk-daemon/src/state/multi_symbol_config.rs` (not `state/multi_symbol.rs`).
+`build_legacy_single_symbol_config[_from_env]` covers (a); `build_multi_symbol_config_from_watchlist_artifact`
+covers (b), re-validating the ceiling and per-symbol assignments against the `watchlist-v2`
+artifact at config-build time. `build_multi_symbol_runtime_config_from_env_and_watchlist`
+implements the failure-mode language above verbatim: an invalid/ineligible `watchlist-v2`
+artifact falls back to `EnvSingleSymbolFallback`, not an error; only when both sources fail does
+the combined builder return `Err` (8 `multi_symbol_config_*` reason strings, §6 cap #1 plus the
+7 other validation failures). 18 proof tests (`M01`-`M18`) cover both sources, the selection
+fallback, the ceiling, and the `approved_for_live` absence invariant (Q9). This is a
+config-construction seam only: registered in `state.rs` via `mod`/`pub use` but invoked by
+nothing — `loop_runner.rs` and `routes/strategy.rs` are untouched (Patches 3/4 wire dispatch).
+The `WatchlistStatusResponse` surface (API/GUI) remains open for a later patch.
+
 ### 4.2 `ApprovedPaperWatchlist` v2 (schema evolution of `LoadedWatchlistArtifact`)
 
 **Purpose:** evolves the watchlist artifact from `watchlist-v1` to `watchlist-v2`, adding
@@ -751,6 +766,17 @@ more than one *distinct strategy instance* would be registered. A single `strate
 to multiple symbols does **not** violate this — one `StrategyHost` instance processes bars for
 multiple symbols sequentially (Phase 5 Q1). Heterogeneous `strategy_id`s per symbol remain
 explicitly out of scope (§0).
+
+**Implementation status (`MULTI-SYMBOL-RUNTIME-CONFIG-01`):** the `symbol`/`strategy_id`/
+`timeframe` struct above is implemented exactly as written in `multi_symbol_config.rs`. The
+per-symbol `timeframe_overrides: HashMap<String,String>` described above is **not**
+implemented in this patch — every symbol produced by
+`build_multi_symbol_config_from_watchlist_artifact` shares one caller-supplied
+`default_timeframe` (sourced from `MQK_STRATEGY_MD_TIMEFRAME`), consistent with Tier A's single
+global timeframe. The `strategy_id`-exists-in-fleet cross-check is also not implemented here —
+`build_multi_symbol_config_from_watchlist_artifact` only requires that every symbol have *some*
+`strategy_assignments` entry (`multi_symbol_config_missing_assignment` if absent); validating
+that entry against `StrategyFleetEntry` remains open for the dispatch-loop patch (3/4).
 
 ### 4.4 `PerSymbolBarWindow`
 
@@ -1457,9 +1483,12 @@ decision for the patch that builds this (Patch 11, §10).
 Each patch below is sized for the one-patch-per-turn rule, scoped to a single file/seam, and
 proven by its own scenario tests. Patch 1 (`WATCHLIST-V2-SCHEMA-01`) has been implemented as a
 schema/validation layer in `watchlist_intake.rs` (see §4.2) — it introduces no runtime
-multi-symbol dispatch. Patches 2-11 remain `OPEN`; none have been started. The dependency graph
-determines minimum ordering; patches with no dependency on each other within a "tier" may be
-reordered relative to each other but not across tiers.
+multi-symbol dispatch. Patch 2 (`MULTI-SYMBOL-RUNTIME-CONFIG-01`) has also been implemented, as a
+pure config-construction layer in `multi_symbol_config.rs` (see §4.1, §4.3) — registered in
+`state.rs` but not invoked, and `loop_runner.rs`/`routes/strategy.rs` are untouched. Patches 3-11
+remain `OPEN`; none have been started. The dependency graph determines minimum ordering; patches
+with no dependency on each other within a "tier" may be reordered relative to each other but not
+across tiers.
 
 | # | Patch ID | Depends on | Closes |
 |---|---|---|---|
@@ -1545,16 +1574,16 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Item | Status | Notes |
 |---|---|---|
 | This design document (`NATIVE-MULTI-SYMBOL-DISPATCH-DESIGN-01`) | **CLOSED** once committed | docs-only; see §11 |
-| Component: `MultiSymbolRuntimeConfig` (§4.1) | OPEN | delivered by Patch 2 |
+| Component: `MultiSymbolRuntimeConfig` (§4.1) | **CLOSED (config-construction only)** | Patch 2 (`multi_symbol_config.rs`); not wired into `loop_runner.rs`/`state.rs` dispatch (Patches 3/4) |
 | Component: `ApprovedPaperWatchlist` v2 (§4.2) | OPEN | delivered by Patch 1 (schema) + Patch 11 (promotion-side) |
-| Component: `SymbolStrategyAssignment` (§4.3) | OPEN | delivered by Patch 2 |
+| Component: `SymbolStrategyAssignment` (§4.3) | **CLOSED (no per-symbol timeframe override)** | Patch 2; `timeframe_overrides` deferred to Patch 3/4 |
 | Component: `PerSymbolBarWindow` (§4.4) | OPEN | delivered by Patch 3 |
 | Component: `PerSymbolStrategyDecision` seam (§4.5) | OPEN | no new types; call-site change in Patch 4 |
 | Component: `PerSymbolTargetState` (§4.6) | OPEN | delivered by Patch 8 |
 | Component: `MultiSymbolRiskCaps` (§4.7) | OPEN | delivered across Patches 5/6/7 |
 | Component: `MultiSymbolDispatchSummary` (§4.8) | OPEN | delivered by Patch 9 |
 | Component: `MultiSymbolEvidenceSnapshot` (§4.9) | OPEN | delivered by Patch 11 |
-| Cap #1 `max_concurrent_symbols` | OPEN | Patch 2 |
+| Cap #1 `max_concurrent_symbols` | **CLOSED (construction-time only)** | Patch 2; `MultiSymbolRuntimeConfig.max_concurrent_symbols` validated against `MULTI_SYMBOL_HARD_CEILING` and `symbols.len()` at config-build time, not yet enforced at dispatch time (Patch 4) |
 | Cap #2 `per_symbol_max_position_qty` | OPEN | Patch 6 |
 | Cap #3 `per_symbol_max_notional_usd` | OPEN | Patch 6 — **honest gap:** unverifiable for market orders (B1C is market-only today) |
 | Cap #4 `per_symbol_day_order_count_limit` (Gate 1f) | OPEN | Patch 5 |
