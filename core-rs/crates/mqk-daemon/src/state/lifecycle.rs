@@ -789,6 +789,9 @@ impl AppState {
         // PT-AUTO-02: reset per-run signal intake counter at each new start so
         // the bound applies per execution run, not per daemon process lifetime.
         self.day_signal_count.store(0, Ordering::SeqCst);
+        // MULTI-SYMBOL-DAY-ORDER-CAP-01: reset per-symbol order intake counters
+        // (cap #4) at the same run-start boundary as day_signal_count.
+        self.reset_symbol_day_order_counts().await;
         // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: reset dedup state so each new
         // run gets fresh B5 and day-limit alert windows.
         self.reset_signal_blocked_alert_state();

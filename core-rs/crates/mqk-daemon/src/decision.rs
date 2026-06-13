@@ -9,7 +9,8 @@
 //!
 //! ```text
 //! 0.  field_validation     — decision_id / strategy_id / symbol / side / qty
-//! 1.  day_signal_limit     — PT-AUTO-02: per-run intake bound not exceeded
+//! 1.  day_signal_limit     — PT-AUTO-02: per-run intake bound not exceeded (account-wide)
+//! 1f. symbol_day_order_cap — MULTI-SYMBOL-DAY-ORDER-CAP-01: optional per-symbol daily order count cap (cap #4)
 //! 1e. capital_budget       — B6/TV-04B: per-strategy budget authorized (same gate as external signal path)
 //! 2.  db_present           — no DB → unavailable
 //! 3.  registry_check       — strategy must be registered AND enabled
@@ -79,6 +80,7 @@ pub struct InternalDecisionOutcome {
     /// | `"unavailable"`    | transient system state (no DB, arm-state I/O, run)   |
     /// | `"suppressed"`     | strategy is actively suppressed                      |
     /// | `"day_limit_reached"` | PT-AUTO-02 per-run intake bound exceeded          |
+    /// | `"symbol_day_limit_reached"` | MULTI-SYMBOL-DAY-ORDER-CAP-01: per-symbol daily order count cap exceeded (cap #4, Gate 1f) |
     /// | `"budget_denied"`  | B6/TV-04B: capital policy present but strategy not budget-authorized |
     /// | `"policy_invalid"` | B6/TV-04B: capital policy configured but structurally invalid        |
     pub disposition: String,
@@ -359,6 +361,27 @@ pub async fn submit_internal_strategy_decision(
         );
     }
 
+    // Gate 1f: MULTI-SYMBOL-DAY-ORDER-CAP-01 — optional per-symbol daily order
+    // count cap (cap #4, design doc §6). Disabled (None) unless
+    // MQK_PER_SYMBOL_DAY_ORDER_LIMIT is set; in that case Gate 1 above always
+    // passes through unaffected — this is an additive, independent counter.
+    if state.symbol_day_order_limit_exceeded(&decision.symbol).await {
+        return outcome(
+            false,
+            "symbol_day_limit_reached",
+            &did,
+            &sid,
+            None,
+            vec![format!(
+                "internal decision refused: per-symbol daily order count limit reached for {} \
+                 ({} orders accepted this run for this symbol); \
+                 no further decisions for this symbol will be accepted until the next run start",
+                decision.symbol.trim(),
+                state.symbol_day_order_count(&decision.symbol).await
+            )],
+        );
+    }
+
     // Gate 1e: B6 — TV-04B per-strategy capital budget authorization.
     //
     // Applies the same capital budget gate that the external signal path
@@ -618,6 +641,9 @@ pub async fn submit_internal_strategy_decision(
         Ok(true) => {
             // PT-AUTO-02: count only new enqueues; duplicates do not consume quota.
             state.increment_day_signal_count();
+            // MULTI-SYMBOL-DAY-ORDER-CAP-01: per-symbol counterpart (cap #4),
+            // incremented alongside the account-wide counter above.
+            state.increment_symbol_day_order_count(&decision.symbol).await;
             outcome(true, "accepted", &did, &sid, Some(active_run_id), vec![])
         }
         Ok(false) => outcome(

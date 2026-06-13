@@ -21,7 +21,7 @@ mod snapshot;
 mod types;
 pub mod ws_gap_recovery;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -211,6 +211,21 @@ pub struct AppState {
     /// Gate 1d refuses further signals once this reaches
     /// `MAX_AUTONOMOUS_SIGNALS_PER_RUN`.
     day_signal_count: Arc<AtomicU32>,
+    /// MULTI-SYMBOL-DAY-ORDER-CAP-01: Per-run, per-symbol order intake counter
+    /// (cap #4, design doc §6 "Cap #4 — per_symbol_day_order_count_limit").
+    ///
+    /// Keyed by symbol (trimmed, uppercased). Incremented alongside
+    /// `day_signal_count` on every new outbox enqueue (Gate 7 Ok(true)).
+    /// Reset (cleared) at the start of each new execution run, at the same
+    /// point `day_signal_count` is reset to 0.
+    day_signal_count_by_symbol: Arc<RwLock<HashMap<String, u32>>>,
+    /// MULTI-SYMBOL-DAY-ORDER-CAP-01: Optional per-symbol daily order count
+    /// limit (cap #4). `None` (the default, from an unset
+    /// `MQK_PER_SYMBOL_DAY_ORDER_LIMIT`) disables Gate 1f entirely — all
+    /// existing dispositions and the account-wide `day_signal_limit` (Gate 1)
+    /// are unaffected either way. Read once at construction; overridable via
+    /// `set_per_symbol_day_order_limit_for_test`.
+    per_symbol_day_order_limit: Arc<RwLock<Option<u32>>>,
     /// TV-01C: Artifact provenance accepted at the most recent run start.
     ///
     /// Populated by `start_execution_runtime` when artifact intake evaluates to
@@ -865,6 +880,10 @@ impl AppState {
             strategy_fleet: Arc::new(RwLock::new(strategy_fleet)),
             discord_notifier: DiscordNotifier::from_env(),
             day_signal_count: Arc::new(AtomicU32::new(0)),
+            day_signal_count_by_symbol: Arc::new(RwLock::new(HashMap::new())),
+            per_symbol_day_order_limit: Arc::new(RwLock::new(
+                signal_intake::per_symbol_day_order_count_limit_from_env(),
+            )),
             accepted_artifact: Arc::new(RwLock::new(None)),
             autonomous_session_truth: Arc::new(RwLock::new(AutonomousSessionTruth::Clear)),
             autonomous_history_degraded: Arc::new(AtomicBool::new(false)),

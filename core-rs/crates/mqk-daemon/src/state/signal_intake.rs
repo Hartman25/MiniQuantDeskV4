@@ -21,6 +21,24 @@ use super::AppState;
 /// not an economics guarantee — it is a safety bound.
 pub(super) const MAX_AUTONOMOUS_SIGNALS_PER_RUN: u32 = 100;
 
+/// MULTI-SYMBOL-DAY-ORDER-CAP-01: Read the optional per-symbol daily order
+/// count limit (cap #4, design doc §6) from `MQK_PER_SYMBOL_DAY_ORDER_LIMIT`.
+///
+/// `None` (unset or unparsable as a non-negative integer) disables Gate 1f
+/// entirely — this is the default, matching the `Option<u32> = None` default
+/// for cap #4's per-symbol day order count limit in design doc §6.
+pub(super) fn per_symbol_day_order_count_limit_from_env() -> Option<u32> {
+    std::env::var("MQK_PER_SYMBOL_DAY_ORDER_LIMIT")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
+/// Normalize a symbol for use as a `day_signal_count_by_symbol` key
+/// (trimmed, uppercased) so "aapl", "AAPL", and " AAPL " share one counter.
+fn normalize_symbol_key(symbol: &str) -> String {
+    symbol.trim().to_ascii_uppercase()
+}
+
 impl AppState {
     /// Returns the current per-run signal intake count.
     pub fn day_signal_count(&self) -> u32 {
@@ -48,6 +66,84 @@ impl AppState {
     /// submitting 100 real signals.
     pub fn set_day_signal_count_for_test(&self, count: u32) {
         self.day_signal_count.store(count, Ordering::SeqCst);
+    }
+
+    // -----------------------------------------------------------------------
+    // MULTI-SYMBOL-DAY-ORDER-CAP-01: Gate 1f per-symbol order count cap
+    // -----------------------------------------------------------------------
+
+    /// Returns the current per-run order intake count for `symbol`
+    /// (cap #4 counter, keyed by normalized symbol).
+    pub async fn symbol_day_order_count(&self, symbol: &str) -> u32 {
+        let key = normalize_symbol_key(symbol);
+        self.day_signal_count_by_symbol
+            .read()
+            .await
+            .get(&key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Increment the per-run order intake counter for `symbol` by one.
+    ///
+    /// Called alongside [`increment_day_signal_count`](Self::increment_day_signal_count)
+    /// on every new outbox enqueue (Gate 7 Ok(true)). Not called for
+    /// duplicates or gate failures.
+    pub(crate) async fn increment_symbol_day_order_count(&self, symbol: &str) {
+        let key = normalize_symbol_key(symbol);
+        let mut map = self.day_signal_count_by_symbol.write().await;
+        *map.entry(key).or_insert(0) += 1;
+    }
+
+    /// Returns the configured per-symbol daily order count limit (cap #4),
+    /// or `None` if Gate 1f is disabled.
+    pub async fn per_symbol_day_order_limit(&self) -> Option<u32> {
+        *self.per_symbol_day_order_limit.read().await
+    }
+
+    /// Returns `true` when `symbol`'s per-run order count has reached the
+    /// configured [`per_symbol_day_order_limit`](Self::per_symbol_day_order_limit).
+    ///
+    /// Always `false` when Gate 1f is disabled (limit `None`) — the default.
+    pub async fn symbol_day_order_limit_exceeded(&self, symbol: &str) -> bool {
+        match self.per_symbol_day_order_limit().await {
+            Some(limit) => self.symbol_day_order_count(symbol).await >= limit,
+            None => false,
+        }
+    }
+
+    /// Test seam: set the per-run order intake count for `symbol` to an
+    /// arbitrary value.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    /// Used by Gate 1f proof tests to simulate a saturated per-symbol counter
+    /// without driving real outbox enqueues.
+    pub fn set_symbol_day_order_count_for_test(&self, symbol: &str, count: u32) {
+        let key = normalize_symbol_key(symbol);
+        if let Ok(mut map) = self.day_signal_count_by_symbol.try_write() {
+            map.insert(key, count);
+        }
+    }
+
+    /// Test seam: override the configured per-symbol daily order count limit
+    /// (cap #4), bypassing `MQK_PER_SYMBOL_DAY_ORDER_LIMIT`.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    pub fn set_per_symbol_day_order_limit_for_test(&self, limit: Option<u32>) {
+        if let Ok(mut guard) = self.per_symbol_day_order_limit.try_write() {
+            *guard = limit;
+        }
+    }
+
+    /// Reset all per-symbol order intake counts. Called at run start
+    /// alongside `day_signal_count` so cap #4 applies per execution run, not
+    /// per daemon process lifetime (same day-rollover boundary as Gate 1).
+    ///
+    /// `pub` (not `pub(super)`) so D07 in
+    /// `scenario_multi_symbol_day_order_cap_01.rs` can exercise the reset
+    /// directly without driving a full run-start lifecycle transition.
+    pub async fn reset_symbol_day_order_counts(&self) {
+        self.day_signal_count_by_symbol.write().await.clear();
     }
 
     // -----------------------------------------------------------------------

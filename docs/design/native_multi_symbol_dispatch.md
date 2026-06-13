@@ -1544,8 +1544,11 @@ calls `AppState::tick_strategy_dispatch_multi_symbol` once per tick over
 `build_multi_symbol_runtime_config_from_env`), wraps the existing per-decision body in a
 per-assignment loop, and applies the new `AppState::retain_targets_matching_symbol` fail-closed
 guard (`b1c_symbol_mismatch_skipped`) per dispatched symbol — see §5 for the take-once-clone-to-many
-dispatch architecture and the per-symbol strategy bootstrap gap this guard mitigates. Patches 5-11
-remain `OPEN`; none have been started. The dependency graph determines minimum ordering; patches
+dispatch architecture and the per-symbol strategy bootstrap gap this guard mitigates. Patch 5
+(`MULTI-SYMBOL-DAY-ORDER-CAP-01`) has also been implemented — a new Gate 1f in
+`submit_internal_strategy_decision` enforces an optional per-symbol daily order count cap (cap #4,
+§6) via `day_signal_count_by_symbol` and `MQK_PER_SYMBOL_DAY_ORDER_LIMIT`, disabled (`None`) by
+default. Patches 6-11 remain `OPEN`; none have been started. The dependency graph determines minimum ordering; patches
 with no dependency on each other within a "tier" may be reordered relative to each other but not
 across tiers.
 
@@ -1614,7 +1617,21 @@ across tiers.
 - **Patches 5, 6, 7** are mutually independent (each adds an isolated gate/check inside the loop
   patch 4 establishes) and could be reordered among themselves — listed in this order because
   cap #4 (day-order) reuses the most existing infrastructure (mirrors account-wide
-  `day_signal_count`) and is therefore lowest-risk of the three.
+  `day_signal_count`) and is therefore lowest-risk of the three. **Patch 5 implemented:** a new
+  Gate 1f sits between Gate 1 (account-wide `day_signal_limit`) and Gate 1e (capital budget) in
+  `submit_internal_strategy_decision` (`decision.rs`). It is enforced by
+  `AppState::symbol_day_order_limit_exceeded`, backed by a per-run `day_signal_count_by_symbol:
+  HashMap<String, u32>` (normalized-symbol keys) and an `Option<u32>` limit read once at
+  construction from `MQK_PER_SYMBOL_DAY_ORDER_LIMIT` (`None` — disabled — by default, matching
+  `MultiSymbolRiskCaps.per_symbol_day_order_count_limit`). On Gate 1f trip, the disposition is
+  `"symbol_day_limit_reached"` and the blocker names the symbol and count. The per-symbol counter
+  is incremented alongside `day_signal_count` on every Gate 7 `Ok(true)` enqueue, and both are
+  reset together at run start (`lifecycle.rs`). Proven by 9 tests (D01-D09,
+  `scenario_multi_symbol_day_order_cap_01.rs`): D04 proves the headline per-symbol-granularity
+  case (symbol A capped while symbol B is unaffected) and D05/D06 prove Gate 1f and Gate 1 are
+  mutually independent in both directions. `MultiSymbolRiskCaps` as a struct is still not
+  implemented — the env-var config is a minimal standalone substitute scoped to cap #4 only;
+  caps #2/#3/#5/#6 (Patches 6/7) will need their own config plumbing.
 - **Patch 8** depends on 4 (needs per-symbol loop iterations to populate from) but is
   independent of 5/6/7 — it could land in parallel with them. Listed after 5-7 only because the
   dispatch-summary route (9) benefits from all of 5/6/7/8 being present so it doesn't need a
@@ -1679,7 +1696,7 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Cap #1 `max_concurrent_symbols` | **CLOSED (construction-time only)** | Patch 2; `MultiSymbolRuntimeConfig.max_concurrent_symbols` validated against `MULTI_SYMBOL_HARD_CEILING` and `symbols.len()` at config-build time. Patch 4's loop dispatches every assignment in `multi_symbol_assignments` with no separate dispatch-time truncation against this field — no patch currently scheduled to add one |
 | Cap #2 `per_symbol_max_position_qty` | OPEN | Patch 6 |
 | Cap #3 `per_symbol_max_notional_usd` | OPEN | Patch 6 — **honest gap:** unverifiable for market orders (B1C is market-only today) |
-| Cap #4 `per_symbol_day_order_count_limit` (Gate 1f) | OPEN | Patch 5 |
+| Cap #4 `per_symbol_day_order_count_limit` (Gate 1f) | **CLOSED** | Patch 5 (`day_signal_count_by_symbol`, `MQK_PER_SYMBOL_DAY_ORDER_LIMIT`, disposition `"symbol_day_limit_reached"`) |
 | Cap #5 `aggregate_gross_exposure_cap_usd` | OPEN | Patch 6 |
 | Cap #6 `max_new_orders_per_tick` | OPEN | Patch 7 |
 | Cap #7 reconcile drift visibility | OPEN | Patch 9/10 — observability only, no halt-scope change |
@@ -1689,7 +1706,7 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Cap #11 kill-switch propagation (documentation-only) | **PARKED by design** | account-wide by construction; no patch will change this |
 | Cap #12 `MULTI_SYMBOL_HARD_CEILING` | OPEN | Patch 1 |
 | Cap #13 PDT cross-symbol summation, proof | OPEN | proof in Patch 11; enforcement already correct |
-| Patches 1-4 (§10) | **CLOSED** (see per-patch notes above) | Patches 5-11 remain OPEN; none started |
+| Patches 1-5 (§10) | **CLOSED** (see per-patch notes above) | Patches 6-11 remain OPEN; none started |
 
 ### Honest gaps and discrepancies surfaced by this design
 
