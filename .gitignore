@@ -129,4 +129,11 @@ Thumbs.db
 # -----------------------------
 ~$*.docx
 /full_repo_proof_output.txt
+/.proof/evidence/
+scripts/windows/generated/
+
+# Generated proof/evidence/export artifacts
 /.proof/
+/evidence/**
+/exports/**
+/scripts/windows/generated/**
