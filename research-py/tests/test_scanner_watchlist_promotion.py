@@ -11,22 +11,32 @@ from pathlib import Path
 
 from mqk_research.scanner.watchlist_promotion import (
     SCHEMA_VERSION_WATCHLIST,
+    SCHEMA_VERSION_WATCHLIST_V2,
+    MULTI_SYMBOL_HARD_CEILING,
     REASON_WATCHLIST_SCHEMA_INVALID,
     REASON_WATCHLIST_MODE_NOT_PAPER,
     REASON_WATCHLIST_LIVE_NOT_LOCKED,
     REASON_NO_RANKED_CANDIDATES,
     REASON_STRATEGY_FIT_MISSING,
+    REASON_STRATEGY_FIT_SYMBOL_MISMATCH,
+    REASON_STRATEGY_FIT_STRATEGY_MISMATCH,
     REASON_STRATEGY_FIT_NOT_RECOMMENDED_FOR_PAPER,
     REASON_RISK_SIMULATION_REQUIRED,
     REASON_OPERATOR_REVIEW_REQUIRED,
     REASON_PREMARKET_REVALIDATION_REQUIRED,
     REASON_LIVE_APPROVAL_FORBIDDEN,
+    REASON_WATCHLIST_V2_SYMBOL_ASSIGNMENT_MISSING,
+    REASON_WATCHLIST_V2_MAX_SYMBOLS_INVALID,
+    REASON_WATCHLIST_V2_CONCURRENT_LIMIT_INVALID,
+    REASON_WATCHLIST_V2_HARD_CEILING_EXCEEDED,
     WatchlistPromotionConfig,
     PromotionInput,
     PromotionDecision,
     evaluate_watchlist_promotion,
     apply_watchlist_promotion,
     write_promoted_watchlist,
+    _is_watchlist_v2,
+    _selected_symbols_for_promotion,
 )
 
 
@@ -978,6 +988,286 @@ class TestRiskAndPremarketResultIntegration(unittest.TestCase):
         )
         self.assertTrue(decision.approved_for_autonomous_paper)
         self.assertFalse(decision.approved_for_live)
+
+
+# ---------------------------------------------------------------------------
+# PV2-01..15: WATCHLIST-PROMO-V2-MULTI-SYMBOL-01 — watchlist-v2 multi-symbol
+# promotion tests.
+# ---------------------------------------------------------------------------
+
+class TestWatchlistPromoV2MultiSymbol(unittest.TestCase):
+
+    def test_pv2_01_v1_multi_symbol_watchlist_still_approves_only_top_symbol(self):
+        """PV2-01: v1 watchlist with 3 ranked symbols still approves only symbols[0]."""
+        syms = ["AAPL", "MSFT", "NVDA"]
+        wl = _make_watchlist(symbols=syms)  # schema_version defaults to watchlist-v1
+        fits = {s: _make_passing_fit(s) for s in syms}
+        cfg = _make_passing_config()
+
+        self.assertFalse(_is_watchlist_v2(wl))
+        self.assertEqual(_selected_symbols_for_promotion(wl, cfg), ["AAPL"])
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertTrue(decision.passed)
+        self.assertEqual(decision.approved_symbols, ["AAPL"])
+        self.assertNotIn("MSFT", decision.approved_symbols)
+        self.assertNotIn("NVDA", decision.approved_symbols)
+
+    def test_pv2_02_v2_multi_symbol_all_pass_approves_all_selected(self):
+        """PV2-02: v2 watchlist with 3 ranked symbols and matching limits approves all 3."""
+        syms = ["AAPL", "MSFT", "NVDA"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = 3
+        wl["max_concurrent_positions"] = 3
+        fits = {s: _make_passing_fit(s) for s in syms}
+        cfg = _make_passing_config()
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertTrue(decision.passed)
+        self.assertEqual(decision.failure_reasons, [])
+        self.assertEqual(decision.approved_symbols, syms)
+        self.assertEqual(
+            decision.strategy_assignments,
+            {s: "intraday_scalper" for s in syms},
+        )
+        self.assertFalse(decision.approved_for_live)
+
+    def test_pv2_03_v2_capped_by_max_symbols_to_trade(self):
+        """PV2-03: max_symbols_to_trade caps approved symbols below max_concurrent_positions."""
+        syms = ["AAPL", "MSFT", "NVDA"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = 2
+        wl["max_concurrent_positions"] = 3
+        fits = {s: _make_passing_fit(s) for s in syms}
+        cfg = _make_passing_config()
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertTrue(decision.passed)
+        self.assertEqual(decision.approved_symbols, ["AAPL", "MSFT"])
+        self.assertNotIn("NVDA", decision.approved_symbols)
+
+    def test_pv2_04_v2_capped_by_max_concurrent_positions(self):
+        """PV2-04: max_concurrent_positions caps approved symbols below max_symbols_to_trade."""
+        syms = ["AAPL", "MSFT", "NVDA"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = 3
+        wl["max_concurrent_positions"] = 1
+        fits = {s: _make_passing_fit(s) for s in syms}
+        cfg = _make_passing_config()
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertTrue(decision.passed)
+        self.assertEqual(decision.approved_symbols, ["AAPL"])
+
+    def test_pv2_05_v2_hard_ceiling_caps_approval_at_five(self):
+        """PV2-05: MULTI_SYMBOL_HARD_CEILING caps approval at 5 even with 6 ranked symbols."""
+        syms = ["AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "TSLA"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = MULTI_SYMBOL_HARD_CEILING
+        wl["max_concurrent_positions"] = MULTI_SYMBOL_HARD_CEILING
+        fits = {s: _make_passing_fit(s) for s in syms}
+        cfg = _make_passing_config()
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertTrue(decision.passed)
+        self.assertEqual(len(decision.approved_symbols), MULTI_SYMBOL_HARD_CEILING)
+        self.assertEqual(decision.approved_symbols, syms[:MULTI_SYMBOL_HARD_CEILING])
+        self.assertNotIn("TSLA", decision.approved_symbols)
+
+    def test_pv2_06_v2_max_symbols_to_trade_over_hard_ceiling_fails_closed(self):
+        """PV2-06: max_symbols_to_trade > MULTI_SYMBOL_HARD_CEILING fails closed (zero approved)."""
+        syms = ["AAPL", "MSFT", "NVDA"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = MULTI_SYMBOL_HARD_CEILING + 1
+        wl["max_concurrent_positions"] = MULTI_SYMBOL_HARD_CEILING + 1
+        fits = {s: _make_passing_fit(s) for s in syms}
+        cfg = _make_passing_config()
+
+        self.assertEqual(_selected_symbols_for_promotion(wl, cfg), [])
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertFalse(decision.passed)
+        self.assertIn(REASON_WATCHLIST_V2_HARD_CEILING_EXCEEDED, decision.failure_reasons)
+        self.assertEqual(decision.approved_symbols, [])
+
+    def test_pv2_07_v2_missing_strategy_assignment_fails_closed(self):
+        """PV2-07: a selected v2 symbol with no strategy_assignments entry fails closed."""
+        syms = ["AAPL", "MSFT"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = 2
+        wl["max_concurrent_positions"] = 2
+        wl["strategy_assignments"] = {"AAPL": "intraday_scalper"}  # MSFT missing
+        fits = {s: _make_passing_fit(s) for s in syms}
+        cfg = _make_passing_config()
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertFalse(decision.passed)
+        self.assertIn(REASON_WATCHLIST_V2_SYMBOL_ASSIGNMENT_MISSING, decision.failure_reasons)
+        self.assertEqual(decision.approved_symbols, [])
+
+    def test_pv2_08_v2_missing_strategy_fit_artifact_fails_closed(self):
+        """PV2-08: a selected v2 symbol with no strategy-fit artifact fails closed."""
+        syms = ["AAPL", "MSFT"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = 2
+        wl["max_concurrent_positions"] = 2
+        fits = {"AAPL": _make_passing_fit("AAPL")}  # MSFT artifact missing
+        cfg = _make_passing_config()
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertFalse(decision.passed)
+        self.assertIn(REASON_STRATEGY_FIT_MISSING, decision.failure_reasons)
+        self.assertEqual(decision.approved_symbols, [])
+
+    def test_pv2_09_v2_strategy_fit_symbol_mismatch_fails_closed(self):
+        """PV2-09: a strategy-fit artifact with a forged/mismatched symbol fails closed."""
+        syms = ["AAPL", "MSFT"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = 2
+        wl["max_concurrent_positions"] = 2
+        forged_fit = _make_passing_fit("MSFT")
+        forged_fit["symbol"] = "NVDA"  # forged identity — not in the watchlist at all
+        fits = {"AAPL": _make_passing_fit("AAPL"), "MSFT": forged_fit}
+        cfg = _make_passing_config()
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertFalse(decision.passed)
+        self.assertIn(REASON_STRATEGY_FIT_SYMBOL_MISMATCH, decision.failure_reasons)
+        self.assertEqual(decision.approved_symbols, [])
+
+    def test_pv2_10_v2_strategy_fit_strategy_mismatch_fails_closed(self):
+        """PV2-10: a strategy-fit artifact whose strategy_id differs from the watchlist's
+        assignment for that symbol fails closed (v2 requires an exact match)."""
+        syms = ["AAPL", "MSFT"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = 2
+        wl["max_concurrent_positions"] = 2
+        mismatched_fit = _make_passing_fit("MSFT", strategy_id="swing_trader")
+        fits = {"AAPL": _make_passing_fit("AAPL"), "MSFT": mismatched_fit}
+        cfg = _make_passing_config()
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertFalse(decision.passed)
+        self.assertIn(REASON_STRATEGY_FIT_STRATEGY_MISMATCH, decision.failure_reasons)
+        self.assertEqual(decision.approved_symbols, [])
+
+    def test_pv2_11_v2_one_symbol_not_recommended_fails_closed(self):
+        """PV2-11: if any selected v2 symbol's strategy-fit is not recommended_for_paper,
+        the whole decision fails closed (no partial approval)."""
+        syms = ["AAPL", "MSFT"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = 2
+        wl["max_concurrent_positions"] = 2
+        not_recommended_fit = _make_passing_fit("MSFT")
+        not_recommended_fit["recommended_for_paper"] = False
+        fits = {"AAPL": _make_passing_fit("AAPL"), "MSFT": not_recommended_fit}
+        cfg = _make_passing_config()
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertFalse(decision.passed)
+        self.assertIn(REASON_STRATEGY_FIT_NOT_RECOMMENDED_FOR_PAPER, decision.failure_reasons)
+        self.assertEqual(decision.approved_symbols, [])
+
+    def test_pv2_12_v2_approved_symbols_preserve_ranked_order(self):
+        """PV2-12: approved_symbols preserves the watchlist's ranked (non-alphabetical) order."""
+        syms = ["NVDA", "AAPL", "MSFT"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = 3
+        wl["max_concurrent_positions"] = 3
+        fits = {s: _make_passing_fit(s) for s in syms}
+        cfg = _make_passing_config()
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertTrue(decision.passed)
+        self.assertEqual(decision.approved_symbols, syms)
+
+    def test_pv2_13_v2_approved_for_live_always_false_with_multiple_approved(self):
+        """PV2-13: approved_for_live is always False, even with 3 approved v2 symbols."""
+        syms = ["AAPL", "MSFT", "NVDA"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = 3
+        wl["max_concurrent_positions"] = 3
+        fits = {s: _make_passing_fit(s) for s in syms}
+        cfg = _make_passing_config()
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertTrue(decision.passed)
+        self.assertEqual(len(decision.approved_symbols), 3)
+        self.assertFalse(decision.approved_for_live)
+
+        promoted = apply_watchlist_promotion(wl, decision, cfg)
+        self.assertFalse(promoted["approved_for_live"])
+        self.assertEqual(promoted["symbols"], syms)
+        self.assertEqual(promoted["max_symbols_to_trade"], 3)
+        self.assertEqual(promoted["max_concurrent_positions"], 3)
+
+    def test_pv2_14_v2_forged_approved_for_live_true_rejected(self):
+        """PV2-14: a v2 watchlist forged with approved_for_live=True is rejected and
+        approves zero symbols, even though per-symbol gates would otherwise pass."""
+        syms = ["AAPL", "MSFT"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = 2
+        wl["max_concurrent_positions"] = 2
+        wl["approved_for_live"] = True  # forged
+        fits = {s: _make_passing_fit(s) for s in syms}
+        cfg = _make_passing_config()
+
+        decision = evaluate_watchlist_promotion(wl, fits, cfg)
+        self.assertFalse(decision.passed)
+        self.assertFalse(decision.approved_for_live)
+        self.assertIn(REASON_LIVE_APPROVAL_FORBIDDEN, decision.failure_reasons)
+        self.assertIn(REASON_WATCHLIST_LIVE_NOT_LOCKED, decision.failure_reasons)
+        self.assertEqual(decision.approved_symbols, [])
+
+        promoted = apply_watchlist_promotion(wl, decision, cfg)
+        self.assertFalse(promoted["approved_for_live"])
+
+    def test_pv2_15_v2_premarket_result_honored_per_symbol(self):
+        """PV2-15: premarket_revalidation_result["symbol_results"] is honored per
+        selected symbol for v2, overriding the overall "passed" flag in both
+        directions (one failing symbol blocks; all-pass symbols clear the gate)."""
+        syms = ["AAPL", "MSFT"]
+        wl = _make_watchlist(symbols=syms, schema_version=SCHEMA_VERSION_WATCHLIST_V2)
+        wl["max_symbols_to_trade"] = 2
+        wl["max_concurrent_positions"] = 2
+        fits = {s: _make_passing_fit(s) for s in syms}
+        cfg = WatchlistPromotionConfig(
+            operator_review_approved=True,
+            risk_simulation_passed=True,
+        )
+
+        # Overall passed=True, but MSFT's per-symbol entry failed -> gate fires.
+        premarket_one_fails = {
+            "schema_version": "premarket-revalidation-v1",
+            "passed": True,
+            "failure_reasons": [],
+            "symbol_results": {
+                "AAPL": {"passed": True, "failure_reasons": []},
+                "MSFT": {"passed": False, "failure_reasons": ["premarket_bar_stale"]},
+            },
+        }
+        decision = evaluate_watchlist_promotion(
+            wl, fits, cfg, premarket_revalidation_result=premarket_one_fails
+        )
+        self.assertFalse(decision.passed)
+        self.assertIn(REASON_PREMARKET_REVALIDATION_REQUIRED, decision.failure_reasons)
+
+        # Overall passed=False, but both selected symbols pass per-symbol -> gate clears.
+        premarket_both_pass = {
+            "schema_version": "premarket-revalidation-v1",
+            "passed": False,
+            "failure_reasons": ["premarket_bar_stale"],
+            "symbol_results": {
+                "AAPL": {"passed": True, "failure_reasons": []},
+                "MSFT": {"passed": True, "failure_reasons": []},
+            },
+        }
+        decision2 = evaluate_watchlist_promotion(
+            wl, fits, cfg, premarket_revalidation_result=premarket_both_pass
+        )
+        self.assertNotIn(REASON_PREMARKET_REVALIDATION_REQUIRED, decision2.failure_reasons)
+        self.assertTrue(decision2.passed)
+        self.assertEqual(decision2.approved_symbols, syms)
 
 
 if __name__ == "__main__":

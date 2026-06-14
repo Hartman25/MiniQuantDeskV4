@@ -738,9 +738,11 @@ Hard invariants:
 ### 17.1 `watchlist-v2` schema (WATCHLIST-V2-SCHEMA-01)
 
 `watchlist-v2` is a multi-symbol evolution of the schema above, read by the daemon-side
-`evaluate_watchlist_intake` (`watchlist_intake.rs`). It is schema/validation only — the
-promotion-side writer (`watchlist_promotion.py`) still emits `watchlist-v1` artifacts; emitting
-`watchlist-v2` is deferred to `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` (see
+`evaluate_watchlist_intake` (`watchlist_intake.rs`) and by the promotion-side
+`evaluate_watchlist_promotion`/`apply_watchlist_promotion` (`watchlist_promotion.py`,
+`WATCHLIST-PROMO-V2-MULTI-SYMBOL-01`, **CLOSED** — see §18.1 Implementation Note). Producing
+`watchlist-v2` artifacts end-to-end from the live research pipeline and the multi-symbol paper
+smoke/evidence proof remain `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01`, **OPEN** (see
 `docs/design/native_multi_symbol_dispatch.md` §10, Patch 11).
 
 A `watchlist-v2` artifact uses the same JSON shape as `watchlist-v1` (§17) with
@@ -802,6 +804,46 @@ A symbol/strategy pair is eligible for the next-day paper watchlist only when AL
 - Output goes to `exports/watchlist/`; never writes to `config/watchlists`.
 - No daemon integration in this patch. Daemon reads the promoted artifact at startup (§21).
 - EXP penny scanner (`exp-candidate-v1`) is separate and not affected by this module.
+
+### Implementation Note (WATCHLIST-PROMO-V2-MULTI-SYMBOL-01 — CLOSED)
+
+- Extends `evaluate_watchlist_promotion`/`apply_watchlist_promotion` (same module, same public
+  API signatures) to accept `watchlist-v2` artifacts (§17.1) without changing any
+  `watchlist-v1` behavior.
+- `_is_watchlist_v2(watchlist)` / `_watchlist_schema_version(watchlist)`: pure schema-version
+  helpers.
+- `_selected_symbols_for_promotion(watchlist, config)`: v1 returns `[symbols[0]]` (or `[]` if
+  empty); v2 returns `symbols[:effective_limit]`, where `effective_limit =
+  min(max_symbols_to_trade, max_concurrent_positions, MULTI_SYMBOL_HARD_CEILING)`.
+- `MULTI_SYMBOL_HARD_CEILING = 5` defined in `watchlist_promotion.py`, mirroring
+  `core-rs/crates/mqk-daemon/src/watchlist_intake.rs`.
+- New Gate 4b (v2 only, via `_v2_effective_symbol_limit`): `max_symbols_to_trade` and
+  `max_concurrent_positions` must be valid positive integers, and `max_symbols_to_trade` must not
+  exceed `MULTI_SYMBOL_HARD_CEILING`. Failure selects zero symbols (fail closed — never falls back
+  to `symbols[0]`); reasons: `watchlist_v2_max_symbols_invalid`,
+  `watchlist_v2_concurrent_limit_invalid`, `watchlist_v2_hard_ceiling_exceeded`.
+- Gates 5-6 (v2): every selected symbol requires a `strategy_assignments` entry
+  (`watchlist_v2_symbol_assignment_missing` if absent), a strategy-fit artifact whose `symbol`
+  and `strategy_id` both match the assignment (`strategy_fit_missing`,
+  `strategy_fit_symbol_mismatch`, `strategy_fit_strategy_mismatch`), and
+  `recommended_for_paper == True` (`strategy_fit_not_recommended_for_paper`). Any single-symbol
+  violation fails the whole decision closed — no partial approval.
+- Gate 9 (premarket revalidation, v2): when
+  `premarket_revalidation_result["symbol_results"]` is a dict, each selected symbol's own
+  `"passed"` entry is honored (fail closed if any selected symbol is missing or not passed),
+  overriding the overall `"passed"` flag.
+- `apply_watchlist_promotion`: v1 still forces `max_symbols_to_trade=1` and
+  `max_concurrent_positions=1`; v2 carries both values through unchanged from the input (already
+  validated by Gate 4b).
+- `approved_for_live=False` always — unchanged hard invariant, proven for v2 with multiple
+  approved symbols and against a forged `approved_for_live=true` v2 input.
+- No daemon, GUI, broker/OMS/execution/risk/reconcile/portfolio, or smoke/evidence changes. No DB
+  migrations or writes.
+- 15 new tests (`PV2-01`..`PV2-15`) in
+  `research-py/tests/test_scanner_watchlist_promotion.py` cover v1 preservation, v2 approval,
+  capping by each of the three limit terms, fail-closed cases (missing assignment, missing/
+  mismatched strategy-fit, not-recommended, hard-ceiling-exceeded), ranked-order preservation,
+  `approved_for_live` invariants, and per-symbol premarket honoring.
 
 ### Implementation Note (WATCHLIST-PREMARKET-01 — CLOSED)
 
@@ -1252,9 +1294,11 @@ Status: schema/validation layer only. No runtime behavior changes.
   must still both equal `1`.
 
 **What is NOT implemented (deferred):**
-- The promotion-side writer (`watchlist_promotion.py`) still emits `watchlist-v1` only; emitting
-  `watchlist-v2` is `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` (Patch 11 in
-  `docs/design/native_multi_symbol_dispatch.md` §10).
+- The promotion-side gate logic (`watchlist_promotion.py`) now evaluates and approves
+  `watchlist-v2` artifacts (`WATCHLIST-PROMO-V2-MULTI-SYMBOL-01`, **CLOSED** — see §18.1
+  Implementation Note). Producing `watchlist-v2` artifacts end-to-end from the live research
+  pipeline, and the multi-symbol paper smoke/evidence proof, remain `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01`, **OPEN**
+  (Patch 11 in `docs/design/native_multi_symbol_dispatch.md` §10).
 - `evaluate_watchlist_signal_admission` (the dry-run admission contract) is unchanged and remains
   unwired into `POST /api/v1/strategy/signal`.
 - No runtime multi-symbol dispatch: `loop_runner.rs` and `state.rs` are untouched by this patch.

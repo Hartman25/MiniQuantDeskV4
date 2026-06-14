@@ -711,8 +711,8 @@ section are implemented in `watchlist_intake.rs` as an extension of the existing
 `WatchlistStatusResponse.schema_version: Option<String>` was added additively. This is
 schema/validation only: no runtime multi-symbol dispatch, no `loop_runner.rs` or `state.rs`
 changes, and the dry-run admission contract (§22 of the scanner spec) remains unwired. The
-`excluded_symbols` field and the promotion-side `watchlist_promotion.py` v2 gate (Patch 11)
-remain open.
+`excluded_symbols` field remains open. The promotion-side `watchlist_promotion.py` v2 gate
+(sub-patch `WATCHLIST-PROMO-V2-MULTI-SYMBOL-01`, Patch 11a) is now **CLOSED** — see below.
 
 **Validation (extends `evaluate_watchlist_intake`):**
 
@@ -727,10 +727,18 @@ remain open.
 **Failure modes:** same `WatchlistIntakeOutcome` enum; `Invalid` carries all `failure_reasons`,
 unchanged shape.
 
-**Promotion-side change** (`watchlist_promotion.py`): the "only `symbols[0]`" gate
-(`approved_symbols = [top_symbol]`) becomes `approved_symbols =
-symbols[:config.max_symbols_to_trade]` **only when** `schema_version == "watchlist-v2"`. v1
-artifacts keep today's `symbols[0]`-only behavior unchanged (back-compat).
+**Promotion-side change** (`watchlist_promotion.py`, `WATCHLIST-PROMO-V2-MULTI-SYMBOL-01`,
+**CLOSED**): `watchlist-v1` artifacts keep the "only `symbols[0]`" gate
+(`approved_symbols = [symbols[0]]`) unchanged (back-compat). For `watchlist-v2` artifacts,
+`approved_symbols = symbols[:effective_limit]`, where `effective_limit =
+min(max_symbols_to_trade, max_concurrent_positions, MULTI_SYMBOL_HARD_CEILING)`. A new Gate 4b
+validates that `max_symbols_to_trade`/`max_concurrent_positions` are valid positive integers and
+that `max_symbols_to_trade <= MULTI_SYMBOL_HARD_CEILING`; invalid or oversized limits select zero
+symbols (fail closed — never falls back to `symbols[0]`). Every selected v2 symbol additionally
+requires a `strategy_assignments` entry, a matching strategy-fit artifact (`symbol` and
+`strategy_id` both match the assignment), and `recommended_for_paper == True`; any per-symbol
+violation fails the whole decision closed (no partial approval). `approved_for_live` remains hard
+`False` for both v1 and v2.
 
 **Tests:** schema-migration tests — v1 still valid and behaves as before; v2 with N symbols all
 assigned passes; v2 with an unassigned symbol → `Invalid`; v2 exceeding the ceiling → `Invalid`.
@@ -1660,7 +1668,8 @@ across tiers.
 | 8 | `PER-SYMBOL-TARGET-STATE-01` | 4 | §4.6 (`PerSymbolTargetState` in-memory map) — **CLOSED** |
 | 9 | `MULTI-SYMBOL-DISPATCH-SUMMARY-01` | 5, 6, 7, 8 | §4.8, §7.3 (`MultiSymbolDispatchSummaryResponse`, new route) — **CLOSED** |
 | 10 | `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` | 9 | §8.1a (read-only "Multi-symbol dispatch summary" panel on `StrategyScreen`, consuming the existing §7.3/§4.8 route) — **CLOSED**. §7.4-§7.7, §8.2-§8.8 (`OmsOverviewResponse.per_symbol_status`, `MetricsDashboardResponse.per_symbol_exposure`, `AlertsActiveResponse.symbol`, remaining per-screen additions) were not implemented and remain open design (no patch assigned) |
-| 11 | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` | 1, 9, 10 | §4.2 promotion-side (`watchlist_promotion.py` v2 gate logic, caps #8/#13 missing-proof tests), §9 (`MULTI-SYMBOL-PAPER-SMOKE-RUNNER-01`) — **OPEN** |
+| 11 | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` | 1, 9, 10, 11a | §9 (`MULTI-SYMBOL-PAPER-SMOKE-RUNNER-01`), caps #8/#13 missing-proof tests — **OPEN**. §4.2 promotion-side gate logic closed via sub-patch 11a (`WATCHLIST-PROMO-V2-MULTI-SYMBOL-01`) |
+| 11a | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-01` | 1 | §4.2 promotion-side gate logic only (`research-py/src/mqk_research/scanner/watchlist_promotion.py`: `_is_watchlist_v2`, `_selected_symbols_for_promotion`, `_v2_effective_symbol_limit`, Gate 4b, per-symbol Gates 5/6); `watchlist-v1` unchanged — **CLOSED** |
 
 ### Dependency notes
 
@@ -1822,7 +1831,7 @@ added, removed, or modified other than this new file. Validation is scoped accor
 |---|---|---|
 | This design document (`NATIVE-MULTI-SYMBOL-DISPATCH-DESIGN-01`) | **CLOSED** once committed | docs-only; see §11 |
 | Component: `MultiSymbolRuntimeConfig` (§4.1) | **CLOSED (config-construction only)** | Patch 2 (`multi_symbol_config.rs`); not wired into `loop_runner.rs`/`state.rs` dispatch (Patches 3/4) |
-| Component: `ApprovedPaperWatchlist` v2 (§4.2) | OPEN | delivered by Patch 1 (schema) + Patch 11 (promotion-side) |
+| Component: `ApprovedPaperWatchlist` v2 (§4.2) | **PARTIAL** | schema: Patch 1 (`WATCHLIST-V2-SCHEMA-01`, CLOSED); promotion-side gate logic: Patch 11a (`WATCHLIST-PROMO-V2-MULTI-SYMBOL-01`, **CLOSED**); multi-symbol paper smoke/evidence proof: Patch 11 (`WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01`, OPEN) |
 | Component: `SymbolStrategyAssignment` (§4.3) | **CLOSED (no per-symbol timeframe override)** | Patch 2; `timeframe_overrides` deferred to Patch 3/4 |
 | Component: `PerSymbolBarWindow` (§4.4) | **CLOSED (take-once-clone-to-many, not keyed-map)** | Patch 3 (`per_symbol_bar_window.rs`) added the keyed-map foundation (unused); Patch 4 wired dispatch into `loop_runner.rs` via a different mechanism — `tick_strategy_dispatch_multi_symbol` takes the single `pending_strategy_bar_input` once per tick and `.clone()`s it to every configured symbol's `dispatch_native_strategy_for_symbol_with_bar` call, rather than using `PerSymbolPendingBarInputs`. `PerSymbolPendingBarInputs`/`PerSymbolBarWindow`/`PerSymbolLoadedBars` remain registered but unused |
 | Component: `PerSymbolStrategyDecision` seam (§4.5) | **CLOSED** | Patch 4; `bar_result_to_decisions` now called once per dispatched symbol inside `loop_runner.rs`'s per-assignment loop, sharing one `current_positions` snapshot (Q2) |
