@@ -12,6 +12,7 @@
 //! 1.  day_signal_limit     — PT-AUTO-02: per-run intake bound not exceeded (account-wide)
 //! 1f. symbol_day_order_cap — MULTI-SYMBOL-DAY-ORDER-CAP-01: optional per-symbol daily order count cap (cap #4)
 //! 1e. capital_budget       — B6/TV-04B: per-strategy budget authorized (same gate as external signal path)
+//! 1g. per_symbol_notional  — MULTI-SYMBOL-CAPITAL-CAPS-01: optional per-symbol notional cap (cap #3); limit orders only, SizingUnverifiable pass-through for market orders
 //! 2.  db_present           — no DB → unavailable
 //! 3.  registry_check       — strategy must be registered AND enabled
 //! 4.  suppression_check    — strategy must not be actively suppressed (per-strategy targeted query)
@@ -76,7 +77,7 @@ pub struct InternalDecisionOutcome {
     /// |--------------------|------------------------------------------------------|
     /// | `"accepted"`       | passed all gates; new outbox row inserted            |
     /// | `"duplicate"`      | decision_id already in outbox; no new row            |
-    /// | `"rejected"`       | field validation failure or registry gate failure    |
+    /// | `"rejected"`       | field validation failure, registry gate failure, or per-symbol notional cap denial (cap #3, Gate 1g) |
     /// | `"unavailable"`    | transient system state (no DB, arm-state I/O, run)   |
     /// | `"suppressed"`     | strategy is actively suppressed                      |
     /// | `"day_limit_reached"` | PT-AUTO-02 per-run intake bound exceeded          |
@@ -450,6 +451,76 @@ pub async fn submit_internal_strategy_decision(
                 });
             }
             return outcome(false, disposition, &did, &sid, None, vec![blocker]);
+        }
+    }
+
+    // Gate 1g: MULTI-SYMBOL-CAPITAL-CAPS-01 — optional per-symbol notional cap
+    // (cap #3, design doc §6 "Cap #3 — per_symbol_max_notional_usd").
+    //
+    // Disabled (NoSizingConstraint) unless MQK_PER_SYMBOL_MAX_NOTIONAL_USD is
+    // set to a positive number.
+    //
+    // Honest gap: implied notional is only computable for limit orders
+    // (qty x limit_price). B1C (bar_result_to_decisions) always sets
+    // order_type="market" / limit_price=None, so this gate is
+    // SizingUnverifiable (pass-through) for every B1C-originated decision —
+    // dormant in practice until limit-order support exists for the internal
+    // decision path. Proven via direct construction of a limit-order
+    // InternalStrategyDecision in scenario_multi_symbol_capital_caps_01.rs.
+    //
+    // NoSizingConstraint        -> cap disabled or order within cap; pass.
+    // SizingUnverifiable        -> market order; pass (honest, cannot deny
+    //                               the unmeasured).
+    // SizingDeniedPerSymbolCap  -> over cap; "rejected" with a blocker naming
+    //                               the cap (design doc §6 cap #3 test).
+    {
+        use crate::capital_policy::{evaluate_per_symbol_notional_cap_from_env, PositionSizingOutcome};
+        let sizing = evaluate_per_symbol_notional_cap_from_env(
+            &decision.symbol,
+            decision.qty,
+            decision.limit_price,
+        );
+        if let PositionSizingOutcome::SizingDeniedPerSymbolCap {
+            symbol,
+            implied_notional_usd,
+            cap_usd,
+        } = &sizing
+        {
+            let blocker = format!(
+                "internal decision refused: symbol '{symbol}' implied notional \
+                 ${implied_notional_usd:.2} exceeds per_symbol_max_notional_usd=${cap_usd:.2} \
+                 (MQK_PER_SYMBOL_MAX_NOTIONAL_USD)"
+            );
+            // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: alert on per-symbol
+            // notional cap denial — same high-value signal as Gate 1e/1f.
+            let notifier = state.discord_notifier.clone();
+            let env = Some(state.deployment_mode().as_api_label().to_string());
+            let symbol_owned = symbol.clone();
+            let blocker_copy = blocker.clone();
+            tokio::spawn(async move {
+                notifier
+                    .notify_trade_event(&crate::notify::TradeEventPayload {
+                        stage: "signal.blocked".to_string(),
+                        run_id: None,
+                        symbol: Some(symbol_owned.clone()),
+                        side: None,
+                        qty: None,
+                        price_micros: None,
+                        order_id: None,
+                        detail: Some(format!(
+                            "gate=gate_1g_per_symbol_notional_cap path=internal_decision \
+                             reason={blocker_copy}"
+                        )),
+                        environment: env,
+                        summary: format!(
+                            "signal.blocked [sizing_denied_per_symbol_cap] internal decision \
+                             symbol={symbol_owned} | {blocker_copy}"
+                        ),
+                        ts_utc: chrono::Utc::now().to_rfc3339(), // allow: ops-metadata notification timestamp
+                    })
+                    .await;
+            });
+            return outcome(false, "rejected", &did, &sid, None, vec![blocker]);
         }
     }
 

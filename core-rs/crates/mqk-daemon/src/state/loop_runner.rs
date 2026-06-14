@@ -664,6 +664,69 @@ pub(super) fn spawn_execution_loop(
                                 );
                             }
 
+                            // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #2
+                            // (per_symbol_max_position_qty, design doc §6):
+                            // clamp any remaining target whose |qty| exceeds the
+                            // configured per-symbol position cap, preserving
+                            // sign, before delta/decision derivation. Disabled
+                            // (no-op) when MQK_PER_SYMBOL_MAX_POSITION_QTY is
+                            // unset — the default.
+                            if let Some(cap) = state_arc.per_symbol_max_position_qty().await {
+                                let clamped = AppState::clamp_targets_to_per_symbol_position_cap(
+                                    &mut bar_result.intents.output.targets,
+                                    cap,
+                                );
+                                for (symbol, original_qty, clamped_qty) in clamped {
+                                    tracing::warn!(
+                                        run_id = %run_id,
+                                        symbol = %symbol,
+                                        original_qty,
+                                        clamped_qty,
+                                        cap,
+                                        "b1c_target_qty_clamped_per_symbol_cap: strategy target \
+                                         qty exceeds per_symbol_max_position_qty; clamped to cap"
+                                    );
+                                    if state_arc
+                                        .try_claim_per_symbol_position_cap_alert(&symbol)
+                                        .await
+                                    {
+                                        let notifier = state_arc.discord_notifier.clone();
+                                        let env = Some(
+                                            state_arc.deployment_mode().as_api_label().to_string(),
+                                        );
+                                        let run_id_short = format!("{:.8}", run_id.to_string());
+                                        let symbol_owned = symbol.clone();
+                                        let ts = chrono::Utc::now().to_rfc3339(); // allow: ops-metadata notification timestamp
+                                        tokio::spawn(async move {
+                                            notifier
+                                                .notify_trade_event(&crate::notify::TradeEventPayload {
+                                                    stage: "signal.blocked".to_string(),
+                                                    run_id: Some(run_id_short.clone()),
+                                                    symbol: Some(symbol_owned.clone()),
+                                                    side: None,
+                                                    qty: Some(clamped_qty),
+                                                    price_micros: None,
+                                                    order_id: None,
+                                                    detail: Some(format!(
+                                                        "gate=per_symbol_max_position_qty_cap \
+                                                         original_qty={original_qty} \
+                                                         clamped_qty={clamped_qty} cap={cap}"
+                                                    )),
+                                                    environment: env,
+                                                    summary: format!(
+                                                        "signal.blocked [per_symbol_max_position_qty_cap] \
+                                                         symbol={symbol_owned} run={run_id_short} \
+                                                         original_qty={original_qty} \
+                                                         clamped_to={clamped_qty} (cap={cap})"
+                                                    ),
+                                                    ts_utc: ts,
+                                                })
+                                                .await;
+                                        });
+                                    }
+                                }
+                            }
+
                             // AUTON-NO-TRADE-01: record signal qty before decisions are
                             // derived. This is the raw strategy output — zero means the
                             // strategy returned hold/flat for all targets this tick.

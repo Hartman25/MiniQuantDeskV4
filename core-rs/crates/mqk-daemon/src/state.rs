@@ -226,6 +226,13 @@ pub struct AppState {
     /// are unaffected either way. Read once at construction; overridable via
     /// `set_per_symbol_day_order_limit_for_test`.
     per_symbol_day_order_limit: Arc<RwLock<Option<u32>>>,
+    /// MULTI-SYMBOL-CAPITAL-CAPS-01: Optional per-symbol maximum target
+    /// position quantity (cap #2, design doc §6 "Cap #2 —
+    /// per_symbol_max_position_qty"). `None` (the default, from an unset
+    /// `MQK_PER_SYMBOL_MAX_POSITION_QTY`) disables the B1C target-qty clamp
+    /// entirely. Read once at construction; overridable via
+    /// `set_per_symbol_max_position_qty_for_test`.
+    per_symbol_max_position_qty: Arc<RwLock<Option<i64>>>,
     /// TV-01C: Artifact provenance accepted at the most recent run start.
     ///
     /// Populated by `start_execution_runtime` when artifact intake evaluates to
@@ -378,6 +385,13 @@ pub struct AppState {
     /// for day-signal-limit-reached.  Prevents repeated alerts when multiple
     /// signals arrive after the limit is hit.  Reset at run start.
     day_limit_alert_fired: Arc<AtomicBool>,
+    /// MULTI-SYMBOL-CAPITAL-CAPS-01: Per-run set of symbols for which a cap #2
+    /// (`per_symbol_max_position_qty`) target-qty clamp Discord alert has
+    /// already been fired.
+    ///
+    /// Dedup: at most one alert per (run, symbol). Reset at run start
+    /// alongside `b5_alerted_symbols`.
+    per_symbol_position_cap_alerted_symbols: Arc<RwLock<HashSet<String>>>,
 }
 
 /// BROKER-FILL-REST-RECOVERY-01: Injectable abstraction over Alpaca REST activity fetch.
@@ -884,6 +898,9 @@ impl AppState {
             per_symbol_day_order_limit: Arc::new(RwLock::new(
                 signal_intake::per_symbol_day_order_count_limit_from_env(),
             )),
+            per_symbol_max_position_qty: Arc::new(RwLock::new(
+                signal_intake::per_symbol_max_position_qty_from_env(),
+            )),
             accepted_artifact: Arc::new(RwLock::new(None)),
             autonomous_session_truth: Arc::new(RwLock::new(AutonomousSessionTruth::Clear)),
             autonomous_history_degraded: Arc::new(AtomicBool::new(false)),
@@ -908,6 +925,7 @@ impl AppState {
             snapshot_fetcher,
             b5_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
             day_limit_alert_fired: Arc::new(AtomicBool::new(false)),
+            per_symbol_position_cap_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -1420,6 +1438,16 @@ operator_reconcile_or_repair_required"
         self.try_claim_b5_alert(symbol).await
     }
 
+    /// MULTI-SYMBOL-CAPITAL-CAPS-01 test seam: `pub` re-export of the
+    /// crate-private [`Self::try_claim_per_symbol_position_cap_alert`]
+    /// (`signal_intake.rs`) for the cap #2 per-symbol-per-day alert-dedup
+    /// proof.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    pub async fn try_claim_per_symbol_position_cap_alert_for_test(&self, symbol: &str) -> bool {
+        self.try_claim_per_symbol_position_cap_alert(symbol).await
+    }
+
     /// B1B: Invoke the native strategy `on_bar` callback from raw bar parameters.
     ///
     /// Fail-closed: no bootstrap stored (no active run) → `None`, no callback.
@@ -1791,6 +1819,33 @@ operator_reconcile_or_repair_required"
         let dispatched_symbol = dispatched_symbol.trim();
         targets.retain(|t| t.symbol.trim().eq_ignore_ascii_case(dispatched_symbol));
         before - targets.len()
+    }
+
+    /// MULTI-SYMBOL-CAPITAL-CAPS-01 cap #2 (`per_symbol_max_position_qty`,
+    /// design doc §6): clamp each target's `qty` so `|qty| <= cap`,
+    /// preserving sign. Targets already within the cap are left unchanged.
+    ///
+    /// `cap` must be positive — the caller (`per_symbol_max_position_qty`,
+    /// sourced from `MQK_PER_SYMBOL_MAX_POSITION_QTY`) enforces this; `None`
+    /// disables the clamp entirely rather than calling this with `cap <= 0`.
+    ///
+    /// Returns `(symbol, original_qty, clamped_qty)` for every target that
+    /// was clamped, in `targets` order — empty when no target exceeds the
+    /// cap (the common, default-disabled case). Callers use this to log
+    /// `b1c_target_qty_clamped_per_symbol_cap` and fire a Discord alert.
+    pub fn clamp_targets_to_per_symbol_position_cap(
+        targets: &mut [mqk_strategy::TargetPosition],
+        cap: i64,
+    ) -> Vec<(String, i64, i64)> {
+        let mut clamped = Vec::new();
+        for t in targets.iter_mut() {
+            if t.qty.abs() > cap {
+                let original_qty = t.qty;
+                t.qty = if t.qty < 0 { -cap } else { cap };
+                clamped.push((t.symbol.clone(), original_qty, t.qty));
+            }
+        }
+        clamped
     }
 
     /// AUTON-SIGNAL-CONTEXT-01: Invoke `on_bar` with a pre-built DB-sourced window.

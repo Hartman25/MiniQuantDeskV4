@@ -70,7 +70,8 @@ $Guards = @(
     'test_multi_symbol_runtime_config.ps1',
     'test_per_symbol_bar_window.ps1',
     'test_multi_symbol_dispatch_loop.ps1',
-    'test_multi_symbol_day_order_cap.ps1'
+    'test_multi_symbol_day_order_cap.ps1',
+    'test_multi_symbol_capital_caps.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()

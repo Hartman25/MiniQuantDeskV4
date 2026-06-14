@@ -153,6 +153,16 @@ impl PortfolioRiskOutcome {
 /// - `qty` — share quantity from the validated signal (must be > 0)
 /// - `limit_price_micros` — limit price in 1/1_000_000 USD; `None` means
 ///   market order
+/// - `aggregate_gross_exposure_cap_usd` — MULTI-SYMBOL-CAPITAL-CAPS-01 cap #5
+///   (design doc §6 "Cap #5 — aggregate_gross_exposure_cap_usd"): an
+///   optional, account-wide gross exposure ceiling, independent of
+///   `max_portfolio_notional_usd` (read from the policy file at step 4
+///   below). When both are set, the more restrictive (smaller) value is
+///   used as the effective portfolio notional cap for the exposure and
+///   exhaustion checks (steps 8-9) — fail-closed. `None` or non-positive
+///   leaves behavior unchanged from before cap #5 existed; `None` is the
+///   default, matching the `Option<f64> = None` default for cap #5 in
+///   design doc §6.
 ///
 /// # Validation contract
 ///
@@ -160,20 +170,29 @@ impl PortfolioRiskOutcome {
 /// 2. File must be readable and valid JSON — otherwise `PolicyInvalid`.
 /// 3. `schema_version` must equal `"policy-v1"` — otherwise `PolicyInvalid`.
 /// 4. `max_portfolio_notional_usd` absent or ≤ 0 → `NoRiskConstraints`
-///    (no cap to anchor exposure ratio against).
+///    (no cap to anchor exposure ratio against). This early-exit is
+///    unaffected by `aggregate_gross_exposure_cap_usd` — cap #5 only
+///    tightens an already-configured `max_portfolio_notional_usd`, it does
+///    not introduce a constraint on its own.
 /// 5. Strategy entry absent or has no risk fields → `NoRiskConstraints`.
 /// 6. Market order (`limit_price_micros` is `None`) with any risk cap present
 ///    → `RiskUnverifiable` (honest pass-through; drift also falls here).
-/// 7. Limit order with `max_order_exposure_pct_of_portfolio`:
-///    - `implied_notional / portfolio_cap > pct_cap` → `ExposureDenied`.
-/// 8. Limit order with `capital_exhaustion_reserve_usd`:
-///    - `implied_notional > portfolio_cap − reserve` → `ExhaustionDenied`.
-/// 9. All applicable checks pass → `Authorized`.
+/// 7. Effective portfolio notional cap =
+///    `min(max_portfolio_notional_usd, aggregate_gross_exposure_cap_usd)`
+///    when `aggregate_gross_exposure_cap_usd` is `Some` and positive and
+///    smaller than `max_portfolio_notional_usd`; otherwise
+///    `max_portfolio_notional_usd` unchanged (back-compat).
+/// 8. Limit order with `max_order_exposure_pct_of_portfolio`:
+///    - `implied_notional / effective_portfolio_notional > pct_cap` → `ExposureDenied`.
+/// 9. Limit order with `capital_exhaustion_reserve_usd`:
+///    - `implied_notional > effective_portfolio_notional − reserve` → `ExhaustionDenied`.
+/// 10. All applicable checks pass → `Authorized`.
 pub fn evaluate_portfolio_risk(
     path: Option<&Path>,
     strategy_id: &str,
     qty: i64,
     limit_price_micros: Option<i64>,
+    aggregate_gross_exposure_cap_usd: Option<f64>,
 ) -> PortfolioRiskOutcome {
     let path = match path {
         None => return PortfolioRiskOutcome::NotConfigured,
@@ -210,6 +229,9 @@ pub fn evaluate_portfolio_risk(
 
     // Portfolio cap is required to anchor the exposure percentage check.
     // Absent or invalid cap means no exposure ratio can be computed.
+    // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #5: this early-exit is unaffected by
+    // aggregate_gross_exposure_cap_usd — cap #5 only tightens an
+    // already-configured max_portfolio_notional_usd.
     let max_portfolio_notional = match j.get("max_portfolio_notional_usd") {
         None => return PortfolioRiskOutcome::NoRiskConstraints,
         Some(v) => match v.as_f64() {
@@ -268,38 +290,59 @@ pub fn evaluate_portfolio_risk(
     let limit_price_usd = limit_micros as f64 / 1_000_000.0;
     let implied_notional = qty as f64 * limit_price_usd;
 
+    // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #5 (aggregate_gross_exposure_cap_usd,
+    // design doc §6): the effective portfolio notional cap is the more
+    // restrictive of max_portfolio_notional_usd (from the policy file, above)
+    // and the optional account-wide aggregate gross exposure cap. Absent or
+    // non-positive aggregate cap leaves max_portfolio_notional unchanged —
+    // back-compat with pre-cap-#5 behavior.
+    let (effective_portfolio_notional, portfolio_cap_source) =
+        match aggregate_gross_exposure_cap_usd.filter(|&c| c > 0.0) {
+            Some(agg) if agg < max_portfolio_notional => {
+                (agg, "aggregate_gross_exposure_cap_usd")
+            }
+            _ => (max_portfolio_notional, "max_portfolio_notional_usd"),
+        };
+
     // Exposure check: single-order notional must not exceed the per-strategy
-    // portfolio exposure fraction.
+    // portfolio exposure fraction of the effective portfolio notional cap.
     if let Some(pct_cap) = exposure_pct {
-        let exposure_ratio = implied_notional / max_portfolio_notional;
+        let exposure_ratio = implied_notional / effective_portfolio_notional;
         if exposure_ratio > pct_cap {
             return PortfolioRiskOutcome::ExposureDenied {
                 reason: format!(
                     "strategy '{}' single-order exposure {:.2}% \
                      (${:.2} / ${:.2}) exceeds \
-                     max_order_exposure_pct_of_portfolio={:.2}%; \
+                     max_order_exposure_pct_of_portfolio={:.2}% \
+                     (portfolio notional cap source: {}); \
                      reduce qty or limit_price",
                     strategy_id,
                     exposure_ratio * 100.0,
                     implied_notional,
-                    max_portfolio_notional,
+                    effective_portfolio_notional,
                     pct_cap * 100.0,
+                    portfolio_cap_source,
                 ),
             };
         }
     }
 
     // Exhaustion check: implied notional must not consume more than
-    // (portfolio_cap - reserve).
+    // (effective_portfolio_notional - reserve).
     if let Some(reserve) = exhaustion_reserve {
-        let available = max_portfolio_notional - reserve;
+        let available = effective_portfolio_notional - reserve;
         if implied_notional > available {
             return PortfolioRiskOutcome::ExhaustionDenied {
                 reason: format!(
                     "strategy '{}' implied notional ${:.2} exceeds available capital \
-                     ${:.2} (portfolio_cap=${:.2} − reserve=${:.2}); \
+                     ${:.2} (portfolio notional cap=${:.2} via {} − reserve=${:.2}); \
                      capital exhaustion reserve would be breached",
-                    strategy_id, implied_notional, available, max_portfolio_notional, reserve,
+                    strategy_id,
+                    implied_notional,
+                    available,
+                    effective_portfolio_notional,
+                    portfolio_cap_source,
+                    reserve,
                 ),
             };
         }
@@ -310,10 +353,18 @@ pub fn evaluate_portfolio_risk(
     }
 }
 
-/// Read [`super::ENV_CAPITAL_POLICY_PATH`] from the environment and evaluate
+/// Read [`super::ENV_CAPITAL_POLICY_PATH`] and
+/// `MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD` from the environment and evaluate
 /// per-signal portfolio risk for `strategy_id`.
 ///
-/// Returns `NotConfigured` when the env var is absent or empty.
+/// Returns `NotConfigured` when [`super::ENV_CAPITAL_POLICY_PATH`] is absent
+/// or empty — cap #5 alone does not make this gate applicable; it only
+/// tightens an existing `max_portfolio_notional_usd` constraint (see
+/// [`evaluate_portfolio_risk`]).
+///
+/// `MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD` absent or not a positive number →
+/// `None` is passed through, matching the `Option<f64> = None` default for
+/// cap #5 (design doc §6 `aggregate_gross_exposure_cap_usd`).
 pub fn evaluate_portfolio_risk_from_env(
     strategy_id: &str,
     qty: i64,
@@ -325,5 +376,15 @@ pub fn evaluate_portfolio_risk_from_env(
     } else {
         Some(std::path::PathBuf::from(raw.trim()))
     };
-    evaluate_portfolio_risk(path.as_deref(), strategy_id, qty, limit_price_micros)
+    let aggregate_gross_exposure_cap_usd = std::env::var("MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|&c| c > 0.0);
+    evaluate_portfolio_risk(
+        path.as_deref(),
+        strategy_id,
+        qty,
+        limit_price_micros,
+        aggregate_gross_exposure_cap_usd,
+    )
 }

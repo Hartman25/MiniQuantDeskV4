@@ -472,7 +472,7 @@ fn write_tmp_policy(tag: &str, contents: &str) -> (PathBuf, PathBuf) {
 /// E06: None path → NotConfigured.
 #[test]
 fn e06_pure_none_path_returns_not_configured() {
-    let outcome = evaluate_portfolio_risk(None, "strat-x", 10, Some(100_000_000));
+    let outcome = evaluate_portfolio_risk(None, "strat-x", 10, Some(100_000_000), None);
     assert_eq!(outcome, PortfolioRiskOutcome::NotConfigured);
     assert!(outcome.is_signal_safe());
 }
@@ -490,7 +490,7 @@ fn e07_pure_within_exposure_cap_returns_authorized() {
     );
 
     // qty=5 × $100 = $500; 500/10000 = 5% < 10% cap; 500 < 10000-500=9500 → Authorized
-    let outcome = evaluate_portfolio_risk(Some(&path), strat, 5, Some(100_000_000));
+    let outcome = evaluate_portfolio_risk(Some(&path), strat, 5, Some(100_000_000), None);
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(
@@ -513,7 +513,7 @@ fn e08_pure_over_exposure_cap_returns_exposure_denied() {
     );
 
     // qty=100 × $100 = $10,000; 10000/10000 = 100% > 5% → ExposureDenied
-    let outcome = evaluate_portfolio_risk(Some(&path), strat, 100, Some(100_000_000));
+    let outcome = evaluate_portfolio_risk(Some(&path), strat, 100, Some(100_000_000), None);
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(
@@ -547,7 +547,7 @@ fn e09_pure_market_order_with_risk_cap_returns_risk_unverifiable() {
     );
 
     // limit_price_micros = None → market order → RiskUnverifiable
-    let outcome = evaluate_portfolio_risk(Some(&path), strat, 10, None);
+    let outcome = evaluate_portfolio_risk(Some(&path), strat, 10, None, None);
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(
@@ -585,7 +585,7 @@ fn e10_pure_within_exhaustion_reserve_returns_authorized() {
     );
 
     // qty=50 × $100 = $5000; 5000/10000 = 50% < 60% exposure cap; 5000 < 10000-2000=8000 → Auth
-    let outcome = evaluate_portfolio_risk(Some(&path), strat, 50, Some(100_000_000));
+    let outcome = evaluate_portfolio_risk(Some(&path), strat, 50, Some(100_000_000), None);
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(
@@ -609,7 +609,7 @@ fn e11_pure_exceeds_exhaustion_reserve_returns_exhaustion_denied() {
     );
 
     // qty=50 × $100 = $5000; 5000/10000 = 50% < 60% exposure ok; 5000 > 10000-8000=2000 → denied
-    let outcome = evaluate_portfolio_risk(Some(&path), strat, 50, Some(100_000_000));
+    let outcome = evaluate_portfolio_risk(Some(&path), strat, 50, Some(100_000_000), None);
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(
@@ -658,7 +658,7 @@ fn e12_pure_cross_gate_budget_and_sizing_authorized_but_exposure_denied() {
     // qty=20, limit_price=$100 → implied=$2000
     let budget = evaluate_strategy_budget(Some(&path), strat);
     let sizing = evaluate_position_sizing(Some(&path), strat, 20, Some(100_000_000));
-    let risk = evaluate_portfolio_risk(Some(&path), strat, 20, Some(100_000_000));
+    let risk = evaluate_portfolio_risk(Some(&path), strat, 20, Some(100_000_000), None);
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(

@@ -33,6 +33,20 @@ pub(super) fn per_symbol_day_order_count_limit_from_env() -> Option<u32> {
         .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
+/// MULTI-SYMBOL-CAPITAL-CAPS-01: Read the optional per-symbol maximum target
+/// position quantity (cap #2, design doc §6) from
+/// `MQK_PER_SYMBOL_MAX_POSITION_QTY`.
+///
+/// `None` (unset or not a positive integer) disables the B1C target-qty clamp
+/// entirely — this is the default, matching the `Option<i64> = None` default
+/// for cap #2's `per_symbol_max_position_qty` in design doc §6.
+pub(super) fn per_symbol_max_position_qty_from_env() -> Option<i64> {
+    std::env::var("MQK_PER_SYMBOL_MAX_POSITION_QTY")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|&n| n > 0)
+}
+
 /// Normalize a symbol for use as a `day_signal_count_by_symbol` key
 /// (trimmed, uppercased) so "aapl", "AAPL", and " AAPL " share one counter.
 fn normalize_symbol_key(symbol: &str) -> String {
@@ -147,6 +161,26 @@ impl AppState {
     }
 
     // -----------------------------------------------------------------------
+    // MULTI-SYMBOL-CAPITAL-CAPS-01: Gate-less cap #2 target-qty clamp config
+    // -----------------------------------------------------------------------
+
+    /// Returns the configured per-symbol maximum target position quantity
+    /// (cap #2), or `None` if the B1C target-qty clamp is disabled.
+    pub async fn per_symbol_max_position_qty(&self) -> Option<i64> {
+        *self.per_symbol_max_position_qty.read().await
+    }
+
+    /// Test seam: override the configured per-symbol max position qty cap
+    /// (cap #2), bypassing `MQK_PER_SYMBOL_MAX_POSITION_QTY`.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    pub fn set_per_symbol_max_position_qty_for_test(&self, cap: Option<i64>) {
+        if let Ok(mut guard) = self.per_symbol_max_position_qty.try_write() {
+            *guard = cap;
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: dedup helpers
     // -----------------------------------------------------------------------
 
@@ -171,8 +205,21 @@ impl AppState {
             .is_ok()
     }
 
-    /// Reset B5 dedup set and day-limit alert flag.  Called at run start so each
-    /// new run gets fresh dedup state.
+    /// MULTI-SYMBOL-CAPITAL-CAPS-01: Returns `true` the FIRST time this symbol
+    /// is claimed for a cap #2 (`per_symbol_max_position_qty`) clamp Discord
+    /// alert this run; `false` on subsequent calls (already alerted).
+    ///
+    /// Same shape as [`try_claim_b5_alert`](Self::try_claim_b5_alert): at most
+    /// one alert per (run, symbol), to avoid alert storms when a strategy
+    /// repeatedly targets a qty above the cap.
+    pub(crate) async fn try_claim_per_symbol_position_cap_alert(&self, symbol: &str) -> bool {
+        let mut set = self.per_symbol_position_cap_alerted_symbols.write().await;
+        set.insert(symbol.to_string())
+    }
+
+    /// Reset B5 dedup set, day-limit alert flag, and cap #2 position-cap
+    /// alert dedup set.  Called at run start so each new run gets fresh dedup
+    /// state.
     pub(super) fn reset_signal_blocked_alert_state(&self) {
         // Clear the B5 symbol set synchronously using try_write; always succeeds
         // because lifecycle.rs holds the exclusive lifecycle_op lock during start.
@@ -180,5 +227,8 @@ impl AppState {
             set.clear();
         }
         self.day_limit_alert_fired.store(false, Ordering::SeqCst);
+        if let Ok(mut set) = self.per_symbol_position_cap_alerted_symbols.try_write() {
+            set.clear();
+        }
     }
 }

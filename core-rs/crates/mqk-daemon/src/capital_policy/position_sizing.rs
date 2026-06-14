@@ -81,6 +81,23 @@ pub enum PositionSizingOutcome {
         reason: String,
     },
 
+    /// MULTI-SYMBOL-CAPITAL-CAPS-01 cap #3 (`per_symbol_max_notional_usd`,
+    /// design doc §6): the implied notional for `symbol` exceeds the
+    /// configured per-symbol notional cap.
+    ///
+    /// Distinct from [`SizingDenied`](Self::SizingDenied), which is keyed by
+    /// `strategy_id`'s `max_position_notional_usd` policy entry — this
+    /// variant is keyed by `symbol` and sourced from
+    /// `MQK_PER_SYMBOL_MAX_NOTIONAL_USD`. Always fail-closed.
+    SizingDeniedPerSymbolCap {
+        /// The symbol whose implied notional exceeded the cap.
+        symbol: String,
+        /// Computed implied notional in USD.
+        implied_notional_usd: f64,
+        /// The configured `per_symbol_max_notional_usd` cap, in USD.
+        cap_usd: f64,
+    },
+
     /// The sizing evaluator could not be run.
     ///
     /// Reserved for future panic-guard wrapper.  Always fail-closed.
@@ -100,6 +117,7 @@ impl PositionSizingOutcome {
             Self::SizingAuthorized { .. } => "authorized",
             Self::SizingUnverifiable { .. } => "unverifiable",
             Self::SizingDenied { .. } => "sizing_denied",
+            Self::SizingDeniedPerSymbolCap { .. } => "sizing_denied_per_symbol_cap",
             Self::Unavailable { .. } => "unavailable",
         }
     }
@@ -280,4 +298,91 @@ pub fn evaluate_position_sizing_from_env(
         Some(std::path::PathBuf::from(raw.trim()))
     };
     evaluate_position_sizing(path.as_deref(), strategy_id, qty, limit_price_micros)
+}
+
+// ---------------------------------------------------------------------------
+// MULTI-SYMBOL-CAPITAL-CAPS-01 cap #3 — per-symbol notional cap
+// ---------------------------------------------------------------------------
+
+/// Evaluate the per-symbol notional cap (cap #3, design doc §6
+/// `per_symbol_max_notional_usd`) for `symbol`.
+///
+/// Pure: no env reads. `cap_usd` is the configured cap (a positive USD
+/// amount), or `None`/non-positive to disable this check — both map to
+/// [`PositionSizingOutcome::NoSizingConstraint`].
+///
+/// Independent of the per-strategy [`evaluate_position_sizing`] check above:
+/// that check is keyed by `strategy_id` and `max_position_notional_usd` from
+/// the capital allocation policy file; this check is keyed by `symbol` and a
+/// single global cap from `MQK_PER_SYMBOL_MAX_NOTIONAL_USD`.
+///
+/// # Honest gap
+///
+/// Market orders (`limit_price_micros = None`) cannot have their implied
+/// notional computed without a price reference — `SizingUnverifiable`,
+/// the same honest-gap shape as [`evaluate_position_sizing`]. B1C
+/// (`bar_result_to_decisions`) emits `order_type="market"` exclusively
+/// (design doc §1.6), so this cap is currently unverifiable in practice for
+/// all B1C-originated decisions until limit-order support exists for the
+/// internal decision path.
+///
+/// # Validation contract
+///
+/// 1. `cap_usd` absent or `<= 0.0` → `NoSizingConstraint` (disabled).
+/// 2. Market order (`limit_price_micros` is `None`) → `SizingUnverifiable`.
+/// 3. Limit order: compute `qty × (limit_price_micros / 1_000_000)`.
+///    - Implied notional `> cap_usd` → `SizingDeniedPerSymbolCap`.
+///    - Otherwise → `NoSizingConstraint` (checked, not denied).
+pub fn evaluate_per_symbol_notional_cap(
+    symbol: &str,
+    qty: i64,
+    limit_price_micros: Option<i64>,
+    cap_usd: Option<f64>,
+) -> PositionSizingOutcome {
+    let Some(cap_usd) = cap_usd.filter(|&c| c > 0.0) else {
+        return PositionSizingOutcome::NoSizingConstraint;
+    };
+
+    // Market order: notional is not computable without a price reference.
+    let Some(limit_price_micros) = limit_price_micros else {
+        return PositionSizingOutcome::SizingUnverifiable {
+            reason: format!(
+                "market order for symbol '{symbol}': implied notional cannot be computed \
+                 without a price reference; per_symbol_max_notional_usd=${cap_usd:.2} cannot \
+                 be checked — operator should use limit orders when a per-symbol notional \
+                 cap is active"
+            ),
+        };
+    };
+
+    let limit_price_usd = limit_price_micros as f64 / 1_000_000.0;
+    let implied_notional = qty as f64 * limit_price_usd;
+
+    if implied_notional > cap_usd {
+        return PositionSizingOutcome::SizingDeniedPerSymbolCap {
+            symbol: symbol.to_string(),
+            implied_notional_usd: implied_notional,
+            cap_usd,
+        };
+    }
+
+    PositionSizingOutcome::NoSizingConstraint
+}
+
+/// Read `MQK_PER_SYMBOL_MAX_NOTIONAL_USD` from the environment and evaluate
+/// the per-symbol notional cap (cap #3) for `symbol`.
+///
+/// Returns `NoSizingConstraint` when the env var is absent or not a positive
+/// number — this is the default, matching the `Option<f64> = None` default
+/// for cap #3's `per_symbol_max_notional_usd` in design doc §6.
+pub fn evaluate_per_symbol_notional_cap_from_env(
+    symbol: &str,
+    qty: i64,
+    limit_price_micros: Option<i64>,
+) -> PositionSizingOutcome {
+    let cap_usd = std::env::var("MQK_PER_SYMBOL_MAX_NOTIONAL_USD")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|&c| c > 0.0);
+    evaluate_per_symbol_notional_cap(symbol, qty, limit_price_micros, cap_usd)
 }

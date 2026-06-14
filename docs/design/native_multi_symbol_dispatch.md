@@ -893,6 +893,15 @@ errors).
 **API/GUI:** read-only via new `MetricsDashboardResponse` per-symbol panel fields and
 `RiskScreen` (Phase 8).
 
+**Implementation note (Patches 5/6):** this `multi_symbol_risk_caps` JSON block was not built.
+Caps #2 (`per_symbol_max_position_qty`), #3 (`per_symbol_max_notional_usd`), #4
+(`per_symbol_day_order_count_limit`), and #5 (`aggregate_gross_exposure_cap_usd`) were each
+delivered as a standalone `Option`-typed env var
+(`MQK_PER_SYMBOL_MAX_POSITION_QTY`/`MQK_PER_SYMBOL_MAX_NOTIONAL_USD`/`MQK_PER_SYMBOL_DAY_ORDER_LIMIT`/`MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD`),
+each `None`/disabled by default — see §10 dependency notes for Patches 5 and 6. This struct
+remains a design sketch; cap #6 (`max_new_orders_per_tick`, Patch 7) is its only remaining named
+consumer.
+
 ### 4.8 `MultiSymbolDispatchSummary`
 
 **Purpose:** the primary new evidence surface — `GET /api/v1/strategy/multi-symbol-dispatch-summary`.
@@ -1548,7 +1557,12 @@ dispatch architecture and the per-symbol strategy bootstrap gap this guard mitig
 (`MULTI-SYMBOL-DAY-ORDER-CAP-01`) has also been implemented — a new Gate 1f in
 `submit_internal_strategy_decision` enforces an optional per-symbol daily order count cap (cap #4,
 §6) via `day_signal_count_by_symbol` and `MQK_PER_SYMBOL_DAY_ORDER_LIMIT`, disabled (`None`) by
-default. Patches 6-11 remain `OPEN`; none have been started. The dependency graph determines minimum ordering; patches
+default. Patch 6 (`MULTI-SYMBOL-CAPITAL-CAPS-01`) has also been implemented — caps #2
+(`per_symbol_max_position_qty`), #3 (`per_symbol_max_notional_usd`), and #5
+(`aggregate_gross_exposure_cap_usd`) from §6, each via the same lightweight env-var pattern as
+Patch 5 (`MQK_PER_SYMBOL_MAX_POSITION_QTY`, `MQK_PER_SYMBOL_MAX_NOTIONAL_USD`,
+`MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD` respectively), disabled (`None`) by default. Patches 7-11
+remain `OPEN`; none have been started. The dependency graph determines minimum ordering; patches
 with no dependency on each other within a "tier" may be reordered relative to each other but not
 across tiers.
 
@@ -1631,7 +1645,32 @@ across tiers.
   case (symbol A capped while symbol B is unaffected) and D05/D06 prove Gate 1f and Gate 1 are
   mutually independent in both directions. `MultiSymbolRiskCaps` as a struct is still not
   implemented — the env-var config is a minimal standalone substitute scoped to cap #4 only;
-  caps #2/#3/#5/#6 (Patches 6/7) will need their own config plumbing.
+  caps #2/#3/#5/#6 (Patches 6/7) will need their own config plumbing. **Patch 6 implemented:**
+  caps #2/#3/#5 followed the same minimal env-var substitute precedent rather than introducing
+  `MultiSymbolRiskCaps`. Cap #2 (`per_symbol_max_position_qty`,
+  `MQK_PER_SYMBOL_MAX_POSITION_QTY`) is enforced as a B1C target-qty clamp —
+  `AppState::clamp_targets_to_per_symbol_position_cap` clamps any `|target_qty| > cap` to `±cap`
+  (sign preserved) immediately before delta computation, logs
+  `b1c_target_qty_clamped_per_symbol_cap`, and fires a Discord `notify_trade_event` alert deduped
+  per symbol per run via `try_claim_per_symbol_position_cap_alert`
+  (`per_symbol_position_cap_alerted_symbols`, cleared at run start alongside the existing B5/day-limit
+  alert sets). Cap #3 (`per_symbol_max_notional_usd`, `MQK_PER_SYMBOL_MAX_NOTIONAL_USD`) is enforced
+  as a new **Gate 1g** in `submit_internal_strategy_decision`, between Gate 1e (capital budget) and
+  Gate 2 (DB presence) — `evaluate_per_symbol_notional_cap_from_env` returns
+  `PositionSizingOutcome::SizingDeniedPerSymbolCap{symbol, implied_notional_usd, cap_usd}` for a
+  limit order whose `qty * limit_price` exceeds the cap, yielding
+  `InternalDecisionOutcome.disposition = "rejected"` with a blocker naming the symbol and both
+  values; market orders are `SizingUnverifiable` (honest pass-through, per the §11 honest-gap note
+  below). Cap #5 (`aggregate_gross_exposure_cap_usd`, `MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD`) extends
+  `evaluate_portfolio_risk`/`evaluate_portfolio_risk_from_env` with a 5th parameter: when set,
+  positive, and smaller than the policy's `max_portfolio_notional_usd`, it becomes the effective
+  portfolio notional cap for both the exposure and exhaustion checks (fail-closed, more-restrictive
+  wins); the step-4 `NoRiskConstraints` early-exit (no `max_portfolio_notional_usd` configured) is
+  unaffected — cap #5 tightens an existing constraint, it does not introduce one on its own. Proven
+  by 19 tests (C2-01..C2-08, C3-01..C3-06, C5-01..C5-05,
+  `scenario_multi_symbol_capital_caps_01.rs`). `MultiSymbolRiskCaps` as a struct remains not
+  implemented after this patch — cap #6 (Patch 7) is the only remaining consumer named in §4.7's
+  sketch.
 - **Patch 8** depends on 4 (needs per-symbol loop iterations to populate from) but is
   independent of 5/6/7 — it could land in parallel with them. Listed after 5-7 only because the
   dispatch-summary route (9) benefits from all of 5/6/7/8 being present so it doesn't need a
@@ -1689,15 +1728,15 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Component: `PerSymbolBarWindow` (§4.4) | **CLOSED (take-once-clone-to-many, not keyed-map)** | Patch 3 (`per_symbol_bar_window.rs`) added the keyed-map foundation (unused); Patch 4 wired dispatch into `loop_runner.rs` via a different mechanism — `tick_strategy_dispatch_multi_symbol` takes the single `pending_strategy_bar_input` once per tick and `.clone()`s it to every configured symbol's `dispatch_native_strategy_for_symbol_with_bar` call, rather than using `PerSymbolPendingBarInputs`. `PerSymbolPendingBarInputs`/`PerSymbolBarWindow`/`PerSymbolLoadedBars` remain registered but unused |
 | Component: `PerSymbolStrategyDecision` seam (§4.5) | **CLOSED** | Patch 4; `bar_result_to_decisions` now called once per dispatched symbol inside `loop_runner.rs`'s per-assignment loop, sharing one `current_positions` snapshot (Q2) |
 | Component: `PerSymbolTargetState` (§4.6) | OPEN | delivered by Patch 8 |
-| Component: `MultiSymbolRiskCaps` (§4.7) | OPEN | delivered across Patches 5/6/7 |
+| Component: `MultiSymbolRiskCaps` (§4.7) | OPEN (struct not implemented) | caps #2/#3/#4/#5 delivered via lightweight env-var substitutes (Patches 5/6); cap #6 (Patch 7) is the only remaining named consumer of this §4.7 sketch |
 | Component: `MultiSymbolDispatchSummary` (§4.8) | OPEN | delivered by Patch 9 |
 | Component: `MultiSymbolEvidenceSnapshot` (§4.9) | OPEN | delivered by Patch 11 |
 | `b1c_symbol_mismatch_skipped` guard (`AppState::retain_targets_matching_symbol`) | **CLOSED (interim mitigation)** | Patch 4; drops any `TargetPosition` whose symbol does not match the dispatched assignment (proven M06/M07). Mitigates, but does not close, the per-symbol strategy bootstrap gap below |
 | Cap #1 `max_concurrent_symbols` | **CLOSED (construction-time only)** | Patch 2; `MultiSymbolRuntimeConfig.max_concurrent_symbols` validated against `MULTI_SYMBOL_HARD_CEILING` and `symbols.len()` at config-build time. Patch 4's loop dispatches every assignment in `multi_symbol_assignments` with no separate dispatch-time truncation against this field — no patch currently scheduled to add one |
-| Cap #2 `per_symbol_max_position_qty` | OPEN | Patch 6 |
-| Cap #3 `per_symbol_max_notional_usd` | OPEN | Patch 6 — **honest gap:** unverifiable for market orders (B1C is market-only today) |
+| Cap #2 `per_symbol_max_position_qty` | **CLOSED** | Patch 6 (`MQK_PER_SYMBOL_MAX_POSITION_QTY`, `AppState::clamp_targets_to_per_symbol_position_cap`, `b1c_target_qty_clamped_per_symbol_cap`, Discord alert dedup via `try_claim_per_symbol_position_cap_alert`) |
+| Cap #3 `per_symbol_max_notional_usd` | **CLOSED (correct-but-dormant)** | Patch 6 (`MQK_PER_SYMBOL_MAX_NOTIONAL_USD`, Gate 1g, `SizingDeniedPerSymbolCap`, disposition `"rejected"`) — **honest gap unchanged:** unverifiable for market orders (B1C is market-only today); proven via synthetic limit-order decisions (C3-06) |
 | Cap #4 `per_symbol_day_order_count_limit` (Gate 1f) | **CLOSED** | Patch 5 (`day_signal_count_by_symbol`, `MQK_PER_SYMBOL_DAY_ORDER_LIMIT`, disposition `"symbol_day_limit_reached"`) |
-| Cap #5 `aggregate_gross_exposure_cap_usd` | OPEN | Patch 6 |
+| Cap #5 `aggregate_gross_exposure_cap_usd` | **CLOSED** | Patch 6 (`MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD`, 5th parameter to `evaluate_portfolio_risk`/`evaluate_portfolio_risk_from_env`; tightens the effective portfolio notional cap when set, positive, and smaller than `max_portfolio_notional_usd`) |
 | Cap #6 `max_new_orders_per_tick` | OPEN | Patch 7 |
 | Cap #7 reconcile drift visibility | OPEN | Patch 9/10 — observability only, no halt-scope change |
 | Cap #8 B5 short-sale guard, multi-symbol proof | **CLOSED** | Patch 4, M08 (`try_claim_b5_alert` dedups independently per symbol; one symbol's claim does not block another's in the same tick). Enforcement was already correct (cap #8 pre-existing); this closes the multi-symbol proof originally deferred to Patch 11 |
@@ -1706,7 +1745,7 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Cap #11 kill-switch propagation (documentation-only) | **PARKED by design** | account-wide by construction; no patch will change this |
 | Cap #12 `MULTI_SYMBOL_HARD_CEILING` | OPEN | Patch 1 |
 | Cap #13 PDT cross-symbol summation, proof | OPEN | proof in Patch 11; enforcement already correct |
-| Patches 1-5 (§10) | **CLOSED** (see per-patch notes above) | Patches 6-11 remain OPEN; none started |
+| Patches 1-6 (§10) | **CLOSED** (see per-patch notes above) | Patches 7-11 remain OPEN; none started |
 
 ### Honest gaps and discrepancies surfaced by this design
 
@@ -1719,11 +1758,12 @@ added, removed, or modified other than this new file. Validation is scoped accor
 - **Cap #3 (`per_symbol_max_notional_usd`) is currently unverifiable in practice** because B1C
   decisions are always `order_type="market"` (§1.6), and the existing per-strategy notional cap
   in `position_sizing.rs` already has this same limitation (§3.7) — this is a pre-existing gap,
-  not introduced by this design, but it means cap #3's enforcement code path (Patch 6) will be
-  correct-but-dormant until limit-order support exists. This is stated explicitly so Patch 6's
-  scenario tests must construct synthetic limit-order decisions to exercise the check, and so
-  that "Patch 6 is CLOSED" does not get conflated with "cap #3 is enforced in production paper
-  trading today."
+  not introduced by this design. Patch 6 implemented cap #3's enforcement code path (Gate 1g,
+  `SizingDeniedPerSymbolCap`) exactly as predicted here: correct-but-dormant until limit-order
+  support exists, proven only via synthetic limit-order decisions (C3-06,
+  `scenario_multi_symbol_capital_caps_01.rs`). "Patch 6 is CLOSED" does not mean "cap #3 is
+  enforced in production paper trading today" — B1C still emits `order_type="market"` exclusively,
+  so Gate 1g never trips on a real B1C-originated decision until limit-order support exists.
 - **Heterogeneous strategies-per-symbol** (different `strategy_id` per symbol in the same run)
   is explicitly out of scope (§0) — this design only supports one strategy assigned to up to
   `MULTI_SYMBOL_HARD_CEILING` symbols. Lifting the Tier A `StrategyHost` single-registration

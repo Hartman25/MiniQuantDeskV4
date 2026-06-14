@@ -82,6 +82,7 @@ pub use portfolio_risk::{
     evaluate_portfolio_risk, evaluate_portfolio_risk_from_env, PortfolioRiskOutcome,
 };
 pub use position_sizing::{
+    evaluate_per_symbol_notional_cap, evaluate_per_symbol_notional_cap_from_env,
     evaluate_position_sizing, evaluate_position_sizing_from_env, PositionSizingOutcome,
 };
 
