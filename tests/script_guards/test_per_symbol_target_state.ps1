@@ -174,10 +174,13 @@ if ($RouteHits.Count -eq 0) {
 }
 
 $GuiTouched = @($DiffNames | Where-Object { $_ -match '^core-rs/mqk-gui/' })
+$DesignContentForG13 = if (Test-Path $DesignDoc) { Get-Content $DesignDoc -Raw } else { '' }
 if ($GuiTouched.Count -eq 0) {
     Assert-Pass "G13: no GUI files touched in current diff"
+} elseif ($DesignContentForG13 -match 'MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01.*CLOSED') {
+    Assert-Pass "G13: GUI files touched are accounted for by MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01 (documented CLOSED): $($GuiTouched -join ', ')"
 } else {
-    Assert-Fail "G13: GUI files touched: $($GuiTouched -join ', ')"
+    Assert-Fail "G13: GUI files touched without MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01 closure documented: $($GuiTouched -join ', ')"
 }
 
 $Patch8Files = @(

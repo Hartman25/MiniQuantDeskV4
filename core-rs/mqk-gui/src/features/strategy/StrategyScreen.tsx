@@ -7,6 +7,7 @@ import { panelTruthRenderState } from "../system/truthRendering";
 import type {
   AdmissionCheckSurface,
   AutonomousPaperStatusSurface,
+  MultiSymbolDispatchSummarySurface,
   StrategyDecisionDiagnostics,
   SystemModel,
   WatchlistStatusSurface,
@@ -282,6 +283,18 @@ export function StrategyScreen({ model }: { model: SystemModel }) {
           <AdmissionCheckPanel check={model.admissionCheck} />
         </Panel>
       </div>
+
+      {/* MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Multi-symbol dispatch summary —
+          read-only per-symbol target/order-gating state. Visibility only:
+          no approved_for_live/live-routing controls and no order
+          submit/cancel/replace/flatten controls in this panel.
+          Source: GET /api/v1/strategy/multi-symbol-dispatch-summary */}
+      <Panel
+        title="Multi-symbol dispatch summary"
+        subtitle="Read-only per-symbol dispatch state. Source: GET /api/v1/strategy/multi-symbol-dispatch-summary"
+      >
+        <MultiSymbolDispatchSummaryPanel summary={model.multiSymbolDispatchSummary} />
+      </Panel>
     </div>
   );
 }
@@ -482,6 +495,67 @@ function AdmissionCheckPanel({ check }: { check: AdmissionCheckSurface }) {
         {check.note ?? "dry_run_only_not_enforced"} — advisory dry-run only. This result does not gate signal
         admission and must never be used to trigger trading behavior.
       </p>
+    </>
+  );
+}
+
+// MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Read-only render of the multi-symbol
+// dispatch summary truth surface. Renders backend-reported values verbatim —
+// no_order_reason values are never remapped. This panel contains no
+// approved_for_live/live-routing surface and no order
+// submit/cancel/replace/flatten controls.
+function MultiSymbolDispatchSummaryPanel({ summary }: { summary: MultiSymbolDispatchSummarySurface }) {
+  if (summary.truth_state === "unavailable") {
+    return (
+      <div className="unavailable-notice">
+        Multi-symbol dispatch summary is currently unavailable — backend truth could not be retrieved.
+      </div>
+    );
+  }
+  return (
+    <>
+      <div className="metric-list">
+        <div><span>Truth state</span><strong>{summary.truth_state}</strong></div>
+        <div><span>Backend</span><strong>{summary.backend}</strong></div>
+        <div><span>Runtime execution mode</span><strong>{summary.runtime_execution_mode}</strong></div>
+        <div><span>Configured symbol count</span><strong>{summary.configured_symbol_count}</strong></div>
+      </div>
+      {summary.per_symbol.length === 0 ? (
+        <div className="empty-state">No multi-symbol dispatch snapshot yet.</div>
+      ) : (
+        <DataTable
+          rows={summary.per_symbol}
+          rowKey={(row) => row.symbol}
+          columns={[
+            { key: "symbol", title: "Symbol", render: (row) => row.symbol },
+            { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
+            { key: "current_qty", title: "Current Qty", render: (row) => row.current_qty },
+            { key: "target_qty", title: "Target Qty", render: (row) => row.target_qty },
+            { key: "delta", title: "Delta", render: (row) => row.delta },
+            { key: "no_order_reason", title: "No-Order Reason", render: (row) => row.no_order_reason },
+            {
+              key: "last_decision_id",
+              title: "Last Decision ID",
+              render: (row) => row.last_decision_id ?? "—",
+            },
+            {
+              key: "last_decision_disposition",
+              title: "Last Decision Disposition",
+              render: (row) => row.last_decision_disposition ?? "—",
+            },
+            {
+              key: "day_orders",
+              title: "Day Orders (used / limit)",
+              render: (row) => `${row.day_order_count} / ${row.day_order_limit ?? "—"}`,
+            },
+            {
+              key: "bar_staleness_secs",
+              title: "Bar Staleness (s)",
+              render: (row) => (row.bar_staleness_secs ?? "—"),
+            },
+          ]}
+        />
+      )}
     </>
   );
 }

@@ -23,11 +23,13 @@ import type {
   FillQualitySurface,
   FillRow,
   ModeChangeGuidanceResponse,
+  MultiSymbolDispatchSummarySurface,
   OpenOrderRow,
   OperatorActionDefinition,
   OperatorAlert,
   PaperJournalSurface,
   PaperJournalTruthState,
+  PerSymbolDispatchRow,
   PortfolioSummary,
   PositionRow,
   ReconcileMismatchRow,
@@ -1057,6 +1059,59 @@ export function mapAutonomousPaperStatusWrapper(
     next_operator_action: wrapper.next_operator_action,
     autonomous_session_state: wrapper.autonomous_session_state,
     now_utc: wrapper.now_utc,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Multi-symbol dispatch summary wrapper
+// → surface
+//
+// GET /api/v1/strategy/multi-symbol-dispatch-summary (Patch 9, already
+// CLOSED — MultiSymbolDispatchSummaryResponse). The daemon route always
+// returns HTTP 200 with an explicit truth_state of "active" or "no_snapshot".
+// "unavailable" is a GUI-only sentinel for when the route cannot be reached
+// or returns an unrecognized truth_state — empty/zero fields must never be
+// displayed as if they were an authoritative empty snapshot. Read-only.
+// Never used to place, cancel, or replace an order.
+// ---------------------------------------------------------------------------
+
+export interface MultiSymbolDispatchSummaryWrapper {
+  canonical_route: string;
+  backend: string;
+  truth_state: string;
+  runtime_execution_mode: string;
+  configured_symbol_count: number;
+  per_symbol: PerSymbolDispatchRow[];
+}
+
+const MULTI_SYMBOL_DISPATCH_SUMMARY_VALID_TRUTH_STATES = new Set(["active", "no_snapshot"]);
+
+const UNAVAILABLE_MULTI_SYMBOL_DISPATCH_SUMMARY: MultiSymbolDispatchSummarySurface = {
+  truth_state: "unavailable",
+  backend: "unknown",
+  runtime_execution_mode: "unknown",
+  configured_symbol_count: 0,
+  per_symbol: [],
+};
+
+// Read-only mapper: preserves the daemon's truth_state verbatim ("active" |
+// "no_snapshot"). Any other shape (probe failure, structurally invalid body,
+// unrecognized truth_state) maps to the explicit "unavailable" sentinel.
+export function mapMultiSymbolDispatchSummaryWrapper(
+  wrapper: MultiSymbolDispatchSummaryWrapper | null | undefined,
+): MultiSymbolDispatchSummarySurface {
+  if (wrapper == null || typeof wrapper.truth_state !== "string") {
+    return UNAVAILABLE_MULTI_SYMBOL_DISPATCH_SUMMARY;
+  }
+  if (!MULTI_SYMBOL_DISPATCH_SUMMARY_VALID_TRUTH_STATES.has(wrapper.truth_state)) {
+    return UNAVAILABLE_MULTI_SYMBOL_DISPATCH_SUMMARY;
+  }
+  return {
+    truth_state: wrapper.truth_state as MultiSymbolDispatchSummarySurface["truth_state"],
+    backend: wrapper.backend,
+    runtime_execution_mode: wrapper.runtime_execution_mode,
+    configured_symbol_count: wrapper.configured_symbol_count,
+    per_symbol: wrapper.per_symbol ?? [],
   };
 }
 

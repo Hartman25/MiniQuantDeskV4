@@ -4,6 +4,12 @@
 # Verifies the Patch 9 read-only daemon API route:
 # GET /api/v1/strategy/multi-symbol-dispatch-summary
 #
+# G12/G15 were updated for MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01 (Patch 10): that
+# patch legitimately adds a read-only GUI panel consuming this route, so a
+# blanket "no GUI files touched" / "Patch 10 open" check would falsely fail
+# once Patch 10 is committed. See test_multi_symbol_oms_overview_gui.ps1 for
+# Patch 10's own guard.
+#
 # No daemon, no DB, no live calls, no .env.local, no secrets printed.
 # Exit codes: 0 = all assertions pass, 1 = any assertion failed.
 # =============================================================================
@@ -195,10 +201,13 @@ if ($ForbiddenTouched.Count -eq 0) {
 }
 
 $GuiTouched = @($DiffNames | Where-Object { $_ -match '^core-rs/mqk-gui/' })
+$DesignContentForG12 = if (Test-Path $DesignDoc) { Get-Content $DesignDoc -Raw } else { '' }
 if ($GuiTouched.Count -eq 0) {
     Assert-Pass "G12: no GUI files touched"
+} elseif ($DesignContentForG12 -match 'MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01.*CLOSED') {
+    Assert-Pass "G12: GUI files touched are accounted for by MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01 (documented CLOSED): $($GuiTouched -join ', ')"
 } else {
-    Assert-Fail "G12: GUI files touched: $($GuiTouched -join ', ')"
+    Assert-Fail "G12: GUI files touched without MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01 closure documented: $($GuiTouched -join ', ')"
 }
 
 $SmokeTouched = @($DiffNames | Where-Object { $_ -match '^(scripts/windows/|scripts/paper_|research-py/|exports/|evidence/)' })
@@ -222,11 +231,11 @@ if (Test-Path $DesignDoc) {
     $DesignContent = Get-Content $DesignDoc -Raw
     if ($DesignContent -match 'MULTI-SYMBOL-DISPATCH-SUMMARY-01.*CLOSED' -and
         $DesignContent -match 'GET /api/v1/strategy/multi-symbol-dispatch-summary.*exists' -and
-        $DesignContent -match 'MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01.*OPEN' -and
+        $DesignContent -match 'MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01.*CLOSED' -and
         $DesignContent -match 'WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01.*OPEN') {
-        Assert-Pass "G15: docs mark Patch 9 CLOSED and Patch 10/11 open"
+        Assert-Pass "G15: docs mark Patch 9 and Patch 10 CLOSED, Patch 11 open"
     } else {
-        Assert-Fail "G15: docs do not mark MULTI-SYMBOL-DISPATCH-SUMMARY-01 as CLOSED with Patch 10/11 open"
+        Assert-Fail "G15: docs do not mark MULTI-SYMBOL-DISPATCH-SUMMARY-01/MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01 as CLOSED with Patch 11 open"
     }
 } else {
     Assert-Fail "G15: native_multi_symbol_dispatch.md not found at $DesignDoc"

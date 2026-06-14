@@ -2391,6 +2391,12 @@ ul {
 .table-cols-8 .table-row,
 .table-cols-8 .table-head { grid-template-columns: repeat(8, minmax(0, 1fr)); }
 
+.table-cols-9 .table-row,
+.table-cols-9 .table-head { grid-template-columns: repeat(9, minmax(0, 1fr)); }
+
+.table-cols-10 .table-row,
+.table-cols-10 .table-head { grid-template-columns: repeat(10, minmax(0, 1fr)); }
+
 /* Artifact folder path input row */
 .bt-path-row {
   display: flex;

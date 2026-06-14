@@ -155,6 +155,13 @@ const FALLBACK_MODEL: SystemModel = {
     note: null,
     checked_at_utc: null,
   },
+  multiSymbolDispatchSummary: {
+    truth_state: "unavailable",
+    backend: "unknown",
+    runtime_execution_mode: "unknown",
+    configured_symbol_count: 0,
+    per_symbol: [],
+  },
   strategyDecisionDiagnostics: null,
   autonomousBarTickCount: null,
   autonomousLastSignalQty: null,

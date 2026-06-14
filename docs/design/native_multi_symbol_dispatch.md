@@ -1364,10 +1364,14 @@ AppState without rereading env/watchlist files. Backend is `"daemon.runtime_stat
 `PerSymbolTargetState` (§4.6), day-order visibility comes from existing in-memory AppState
 counters, and no Postgres persistence is involved.
 
-This patch deliberately does **not** add GUI fields, `OmsOverviewResponse` expansion, watchlist
-promotion changes, or paper-smoke evidence capture. Patch 10
-(`MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01`) remains next/open, and Patch 11
-(`WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01`) remains open.
+This patch (Patch 9) deliberately did **not** add GUI fields, `OmsOverviewResponse` expansion,
+watchlist promotion changes, or paper-smoke evidence capture. Patch 10
+(`MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01`) has since been implemented and is **CLOSED** — it added a
+read-only "Multi-symbol dispatch summary" panel to `StrategyScreen` that consumes this route
+directly (§8.1a). The broader `OmsOverviewResponse`/`MetricsDashboardResponse`/`AlertsActiveResponse`/
+`ReconcileScreen` expansions originally sketched in §7.4-§7.7, and the remaining per-screen
+additions in §8.2-§8.8, were **not** implemented by Patch 10 and remain open design (no patch
+number assigned). Patch 11 (`WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01`) remains open.
 
 ### 7.4 `OmsOverviewResponse` (`api_types.rs:2070+`) — extend
 
@@ -1448,6 +1452,43 @@ One row per `SymbolStrategyAssignment` (§4.3): symbol, strategy_id, timeframe. 
 existing `strategy` panel's `PANEL_TRUTH_REQUIREMENTS` entry (`hints: ["/strategy/summary"]`) —
 this screen already hard-blocks on `truth_state === "not_wired"`; the new table inherits that
 block with no separate gate.
+
+**Status: open design.** Not implemented by Patch 10 (§8.1a below covers what Patch 10 actually
+built). `symbol_assignments` (§7.2) itself remains `Option<Vec<String>>` and unconsumed by the
+GUI.
+
+### 8.1a `StrategyScreen` — Multi-symbol dispatch summary panel — CLOSED by `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01`
+
+**Implemented** (Patch 10): a new read-only "Multi-symbol dispatch summary" `Panel` was added to
+`StrategyScreen.tsx`, below the existing watchlist admission-check panel. It fetches
+`GET /api/v1/strategy/multi-symbol-dispatch-summary` (§7.3/§4.8, Patch 9, unchanged) as a sibling
+probe outside the `Promise.all` probes array used for `dataSource`/`missingEndpoints`/panel
+hard-block computation — a failure on this endpoint cannot contribute to any panel's hard-block
+state (`panelTruthRenderState(model, "strategy")` is unaffected).
+
+`MultiSymbolDispatchSummaryWrapper` → `mapMultiSymbolDispatchSummaryWrapper` (`legacy.ts`) maps the
+daemon response to `MultiSymbolDispatchSummarySurface` (`types/strategy.ts`), preserving the
+daemon's `truth_state` ("active" | "no_snapshot") verbatim. Any fetch failure, non-2xx response, or
+unrecognized `truth_state` maps to the GUI-only sentinel `truth_state: "unavailable"` — this is a
+fail-soft state for this panel only, distinct from the existing global hard-block states.
+
+Render behavior:
+- `"unavailable"` → `unavailable-notice` text, no table.
+- `"active"`/`"no_snapshot"` → top-level `metric-list` (truth state, backend,
+  runtime_execution_mode, configured_symbol_count) always rendered.
+- `per_symbol.length === 0` (i.e. `"no_snapshot"`, or `"active"` with no rows yet) →
+  `empty-state` message "No multi-symbol dispatch snapshot yet."
+- `per_symbol.length > 0` → one `DataTable` row per symbol: symbol, strategy_id, current_qty,
+  target_qty, delta, no_order_reason (rendered verbatim, e.g.
+  `"max_new_orders_per_tick_reached"`), last_decision_id, last_decision_disposition,
+  day_order_count/day_order_limit, bar_staleness_secs.
+
+This panel is **read-only operator visibility only**: it carries no `approved_for_live` or
+`live_routing_enabled` field, and contains no order submit/cancel/replace/flatten controls (no
+`<button>`, no `onClick`). It does not implement any of §7.4-§7.7's response-type expansions or
+§8.2-§8.8's per-screen additions — those remain open design, not part of Patch 10's scope.
+
+Proven by GUIT01-GUIT08 in `core-rs/mqk-gui/src/features/system/api.test.ts`.
 
 ### 8.2 `ExecutionScreen`
 
@@ -1599,7 +1640,10 @@ per-symbol target diagnostics and last internal-decision outcome for observabili
 `GET /api/v1/strategy/multi-symbol-dispatch-summary` exists as a read-only daemon API backed by
 the in-memory `PerSymbolTargetState` map, with no DB persistence, GUI surface, OMS overview
 expansion, smoke/evidence script, market smoke, or live routing added. Patch 10
-(`MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01`) remains next/open; Patch 11
+(`MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01`) has also been implemented and is CLOSED: a read-only
+"Multi-symbol dispatch summary" panel was added to `StrategyScreen` (§8.1a), consuming the Patch 9
+route verbatim — no DB persistence, broker/OMS change, order controls, or live-routing surface was
+added, and the broader §7.4-§7.7/§8.2-§8.8 expansions remain open design. Patch 11
 (`WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01`) remains `OPEN`. The dependency graph determines minimum ordering; patches
 with no dependency on each other within a "tier" may be reordered relative to each other but not
 across tiers.
@@ -1615,7 +1659,7 @@ across tiers.
 | 7 | `MULTI-SYMBOL-TICK-ORDER-CAP-01` | 4 | §6 cap #6 (`max_new_orders_per_tick`, `"max_new_orders_per_tick_reached"`) |
 | 8 | `PER-SYMBOL-TARGET-STATE-01` | 4 | §4.6 (`PerSymbolTargetState` in-memory map) — **CLOSED** |
 | 9 | `MULTI-SYMBOL-DISPATCH-SUMMARY-01` | 5, 6, 7, 8 | §4.8, §7.3 (`MultiSymbolDispatchSummaryResponse`, new route) — **CLOSED** |
-| 10 | `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` | 9 | §7.4-§7.7, §8.1-§8.8 (`OmsOverviewResponse.per_symbol_status`, `MetricsDashboardResponse.per_symbol_exposure`, `AlertsActiveResponse.symbol`, all 8 GUI screens) — **OPEN / NEXT** |
+| 10 | `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` | 9 | §8.1a (read-only "Multi-symbol dispatch summary" panel on `StrategyScreen`, consuming the existing §7.3/§4.8 route) — **CLOSED**. §7.4-§7.7, §8.2-§8.8 (`OmsOverviewResponse.per_symbol_status`, `MetricsDashboardResponse.per_symbol_exposure`, `AlertsActiveResponse.symbol`, remaining per-screen additions) were not implemented and remain open design (no patch assigned) |
 | 11 | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` | 1, 9, 10 | §4.2 promotion-side (`watchlist_promotion.py` v2 gate logic, caps #8/#13 missing-proof tests), §9 (`MULTI-SYMBOL-PAPER-SMOKE-RUNNER-01`) — **OPEN** |
 
 ### Dependency notes
@@ -1732,6 +1776,11 @@ across tiers.
   smaller additive changes to `OmsOverviewResponse`/`MetricsDashboardResponse`/`AlertsActiveResponse`
   (§7.4-§7.6) which could technically be split out, but are bundled here because they're each
   small (one field) and all consumed by this patch's GUI work.
+  **Patch 10 implemented / CLOSED** as a narrower scope than originally bundled here: it added only
+  the read-only "Multi-symbol dispatch summary" panel on `StrategyScreen` (§8.1a), consuming the
+  existing Patch 9 route directly. The §7.4-§7.6 additive response-type fields and the §8.2-§8.8
+  per-screen additions were **not** implemented and remain open design with no patch number
+  assigned — Patch 10 required no backend change at all.
 - **Patch 11** is last — it's the integration/validation patch. The promotion-side `v2` gate
   logic (§4.2) only depends on patch 1 (schema), but the smoke-runner (§9) needs the
   dispatch-summary route (9) and GUI (10) to be meaningful, so bundling them as one
@@ -1788,7 +1837,7 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Cap #4 `per_symbol_day_order_count_limit` (Gate 1f) | **CLOSED** | Patch 5 (`day_signal_count_by_symbol`, `MQK_PER_SYMBOL_DAY_ORDER_LIMIT`, disposition `"symbol_day_limit_reached"`) |
 | Cap #5 `aggregate_gross_exposure_cap_usd` | **CLOSED** | Patch 6 (`MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD`, 5th parameter to `evaluate_portfolio_risk`/`evaluate_portfolio_risk_from_env`; tightens the effective portfolio notional cap when set, positive, and smaller than `max_portfolio_notional_usd`) |
 | Cap #6 `max_new_orders_per_tick` | **CLOSED** | Patch 7 (`MULTI-SYMBOL-TICK-ORDER-CAP-01`, `MQK_MAX_NEW_ORDERS_PER_TICK`, `"max_new_orders_per_tick_reached"`); no market smoke run, no live routing enabled |
-| Cap #7 reconcile drift visibility | OPEN | Patch 9/10 — observability only, no halt-scope change |
+| Cap #7 reconcile drift visibility | OPEN | Patch 9 added observability via `PerSymbolTargetState`; §7.7's `ReconcileScreen` per-symbol mismatch expansion remains open design (no patch assigned) — observability only, no halt-scope change |
 | Cap #8 B5 short-sale guard, multi-symbol proof | **CLOSED** | Patch 4, M08 (`try_claim_b5_alert` dedups independently per symbol; one symbol's claim does not block another's in the same tick). Enforcement was already correct (cap #8 pre-existing); this closes the multi-symbol proof originally deferred to Patch 11 |
 | Cap #9 `per_symbol_bar_staleness_secs` | **CLOSED (helper only, not enforced)** | Patch 3 (`classify_bar_staleness`); pure staleness classification helper added and proven (P05-P09). Patch 4 did **not** call this helper from the dispatch path — enforcement (`no_order_reason = "bar_data_stale"`) remains OPEN, no patch currently scheduled |
 | Cap #10 deadman TTL (documentation-only) | **PARKED by design** | account-wide by construction; no patch will change this |
@@ -1796,8 +1845,9 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Cap #12 `MULTI_SYMBOL_HARD_CEILING` | OPEN | Patch 1 |
 | Cap #13 PDT cross-symbol summation, proof | OPEN | proof in Patch 11; enforcement already correct |
 | Patch 7 `MULTI-SYMBOL-TICK-ORDER-CAP-01` (§10) | **CLOSED** | Cap #6 / `max_new_orders_per_tick` is CLOSED; no GUI/API summary route was added, no market smoke was run, no live routing was enabled |
-| Patch 9 `MULTI-SYMBOL-DISPATCH-SUMMARY-01` (§10) | **CLOSED** | Read-only API visibility only; Patch 10 / `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` remains next/open; Patch 11 remains OPEN |
-| Patches 1-9 (§10) | **CLOSED** (see per-patch notes above) | Patch 10 / `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` remains next/open; Patch 11 / `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` remains OPEN |
+| Patch 9 `MULTI-SYMBOL-DISPATCH-SUMMARY-01` (§10) | **CLOSED** | Read-only API visibility only; Patch 10 / `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` is also **CLOSED** (§8.1a, consumes this route verbatim); Patch 11 remains OPEN |
+| Patch 10 `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` (§10) | **CLOSED** | Read-only "Multi-symbol dispatch summary" panel on `StrategyScreen` (§8.1a); no backend change; §7.4-§7.7/§8.2-§8.8 expansions not implemented and remain open design (no patch assigned) |
+| Patches 1-10 (§10) | **CLOSED** (see per-patch notes above) | Patch 11 / `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` remains OPEN |
 
 ### Honest gaps and discrepancies surfaced by this design
 

@@ -1276,3 +1276,276 @@ test("PSV-04: watchlist status renders an honest unavailable notice when the bac
     globalThis.fetch = originalFetch;
   }
 });
+
+// ---------------------------------------------------------------------------
+// MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Multi-symbol dispatch summary panel
+// (Patch 10). Read-only — reuses the Patch-9 route
+// GET /api/v1/strategy/multi-symbol-dispatch-summary
+// (MultiSymbolDispatchSummaryResponse / PerSymbolDispatchRow are unchanged by
+// this patch). The panel must never gain order submit/cancel/replace/flatten
+// controls or any approved_for_live/live-routing surface.
+// ---------------------------------------------------------------------------
+
+const MULTI_SYMBOL_DISPATCH_SUMMARY_ROUTE = "/api/v1/strategy/multi-symbol-dispatch-summary";
+
+function notApplicablePaperStatusFixture(nowUtc: string) {
+  return {
+    canonical_route: "/api/v1/autonomous/paper-status",
+    truth_state: "not_applicable",
+    mode: "paper",
+    live_routing_enabled: false,
+    runtime_status: "unknown",
+    arm_state: "unknown",
+    kill_switch_active: false,
+    deadman_status: "unknown",
+    ws_continuity: "not_applicable",
+    reconcile_status: "unknown",
+    mismatch_count: 0,
+    open_order_count: 0,
+    position_count: 0,
+    current_symbol: null,
+    current_position_qty: null,
+    target_qty: null,
+    computed_delta_qty: null,
+    no_order_reason: "NOT_PAPER_ALPACA_DEPLOYMENT",
+    last_strategy_decision: null,
+    flatten_available: false,
+    flatten_blockers: ["NOT_APPLICABLE: deployment is not paper+alpaca"],
+    watchlist_outcome: "not_applicable",
+    watchlist_approved: false,
+    readiness_classification: "not_applicable",
+    blockers: ["NOT_APPLICABLE: deployment is not paper+alpaca"],
+    next_operator_action: "No action — autonomous paper trading is not applicable to this deployment.",
+    autonomous_session_state: "not_applicable",
+    now_utc: nowUtc,
+  };
+}
+
+function buildMultiSymbolDispatchSummaryFetchMock(multiSymbolResponse: () => Response): typeof fetch {
+  const nowUtc = new Date().toISOString();
+  return (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({ ...DEFAULT_STATUS, daemon_reachable: true, last_heartbeat: new Date().toISOString() });
+    }
+    if (path === "/api/v1/system/preflight") {
+      return jsonResponse({ ...DEFAULT_PREFLIGHT, daemon_reachable: true });
+    }
+    if (path === "/api/v1/autonomous/paper-status") {
+      return jsonResponse(notApplicablePaperStatusFixture(nowUtc));
+    }
+    if (path === "/api/v1/watchlist/status") {
+      return notFoundResponse();
+    }
+    if (path === MULTI_SYMBOL_DISPATCH_SUMMARY_ROUTE) {
+      return multiSymbolResponse();
+    }
+    if (path in PSV_STRATEGY_FIXTURES) {
+      return jsonResponse(PSV_STRATEGY_FIXTURES[path]);
+    }
+    return notFoundResponse();
+  }) as typeof fetch;
+}
+
+const ACTIVE_MULTI_SYMBOL_DISPATCH_SUMMARY_FIXTURE = {
+  canonical_route: MULTI_SYMBOL_DISPATCH_SUMMARY_ROUTE,
+  backend: "daemon.runtime_state",
+  truth_state: "active",
+  runtime_execution_mode: "single_symbol",
+  configured_symbol_count: 2,
+  per_symbol: [
+    {
+      symbol: "AAPL",
+      strategy_id: "swing_momentum",
+      current_qty: 0,
+      target_qty: 10,
+      delta: 10,
+      no_order_reason: "order_will_be_submitted",
+      last_decision_id: "decision-001",
+      last_decision_disposition: "accepted",
+      day_order_count: 1,
+      day_order_limit: 5,
+      bar_staleness_secs: 12,
+    },
+    {
+      symbol: "MSFT",
+      strategy_id: "swing_momentum",
+      current_qty: 3,
+      target_qty: 3,
+      delta: 0,
+      no_order_reason: "max_new_orders_per_tick_reached",
+      last_decision_id: null,
+      last_decision_disposition: null,
+      day_order_count: 5,
+      day_order_limit: 5,
+      bar_staleness_secs: null,
+    },
+  ],
+};
+
+const NO_SNAPSHOT_MULTI_SYMBOL_DISPATCH_SUMMARY_FIXTURE = {
+  canonical_route: MULTI_SYMBOL_DISPATCH_SUMMARY_ROUTE,
+  backend: "daemon.runtime_state",
+  truth_state: "no_snapshot",
+  runtime_execution_mode: "unknown",
+  configured_symbol_count: 0,
+  per_symbol: [],
+};
+
+test("GUIT01: fetchOperatorModel parses a normal multi-symbol-dispatch-summary response", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMultiSymbolDispatchSummaryFetchMock(() => jsonResponse(ACTIVE_MULTI_SYMBOL_DISPATCH_SUMMARY_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+
+    assert.equal(model.multiSymbolDispatchSummary.truth_state, "active");
+    assert.equal(model.multiSymbolDispatchSummary.backend, "daemon.runtime_state");
+    assert.equal(model.multiSymbolDispatchSummary.runtime_execution_mode, "single_symbol");
+    assert.equal(model.multiSymbolDispatchSummary.configured_symbol_count, 2);
+    assert.equal(model.multiSymbolDispatchSummary.per_symbol.length, 2);
+    assert.equal(model.multiSymbolDispatchSummary.per_symbol[0].symbol, "AAPL");
+    assert.equal(model.multiSymbolDispatchSummary.per_symbol[1].symbol, "MSFT");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("GUIT02: StrategyScreen renders top-level multi-symbol dispatch summary status", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMultiSymbolDispatchSummaryFetchMock(() => jsonResponse(ACTIVE_MULTI_SYMBOL_DISPATCH_SUMMARY_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    assert.match(html, /Multi-symbol dispatch summary/);
+    assert.match(html, /Truth state<\/span><strong>active<\/strong>/);
+    assert.match(html, /Backend<\/span><strong>daemon\.runtime_state<\/strong>/);
+    assert.match(html, /Runtime execution mode<\/span><strong>single_symbol<\/strong>/);
+    assert.match(html, /Configured symbol count<\/span><strong>2<\/strong>/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("GUIT03: StrategyScreen renders one per-symbol row each for AAPL and MSFT", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMultiSymbolDispatchSummaryFetchMock(() => jsonResponse(ACTIVE_MULTI_SYMBOL_DISPATCH_SUMMARY_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    assert.match(html, /AAPL/);
+    assert.match(html, /MSFT/);
+    assert.match(html, /swing_momentum/);
+    assert.match(html, /decision-001/);
+    assert.match(html, /accepted/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("GUIT04: no_order_reason values render verbatim, including max_new_orders_per_tick_reached", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMultiSymbolDispatchSummaryFetchMock(() => jsonResponse(ACTIVE_MULTI_SYMBOL_DISPATCH_SUMMARY_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+
+    const reasons = model.multiSymbolDispatchSummary.per_symbol.map((row) => row.no_order_reason);
+    assert.deepEqual(reasons, ["order_will_be_submitted", "max_new_orders_per_tick_reached"]);
+
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+    assert.match(html, /order_will_be_submitted/);
+    assert.match(html, /max_new_orders_per_tick_reached/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("GUIT05: StrategyScreen shows the empty-state message when truth_state is no_snapshot with no per_symbol rows", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMultiSymbolDispatchSummaryFetchMock(() => jsonResponse(NO_SNAPSHOT_MULTI_SYMBOL_DISPATCH_SUMMARY_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+
+    assert.equal(model.multiSymbolDispatchSummary.truth_state, "no_snapshot");
+    assert.equal(model.multiSymbolDispatchSummary.per_symbol.length, 0);
+
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+    assert.match(html, /No multi-symbol dispatch snapshot yet\./);
+    assert.doesNotMatch(html, /AAPL|MSFT/, "no per-symbol rows should render for an empty no_snapshot response");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("GUIT06: a failed multi-symbol-dispatch-summary probe degrades to fail-soft unavailable without blocking the rest of the screen", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMultiSymbolDispatchSummaryFetchMock(() => notFoundResponse());
+
+  try {
+    const model = await fetchOperatorModel();
+
+    assert.equal(model.multiSymbolDispatchSummary.truth_state, "unavailable");
+    assert.equal(model.multiSymbolDispatchSummary.per_symbol.length, 0);
+    // Fetch failure on this endpoint must not hard-block the Strategy panel.
+    assert.equal(panelTruthRenderState(model, "strategy"), null);
+
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+    assert.match(html, /Multi-symbol dispatch summary is currently unavailable/);
+    // The rest of the screen still renders (engine posture panel heading present).
+    assert.match(html, /Engine posture/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("GUIT07: multi-symbol dispatch summary panel carries no approved_for_live or live-routing surface", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMultiSymbolDispatchSummaryFetchMock(() => jsonResponse(ACTIVE_MULTI_SYMBOL_DISPATCH_SUMMARY_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+
+    assert.equal("approved_for_live" in model.multiSymbolDispatchSummary, false);
+    assert.equal("live_routing_enabled" in model.multiSymbolDispatchSummary, false);
+
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+    assert.doesNotMatch(html, /approved_for_live/i);
+    assert.doesNotMatch(html, /live[_-]routing/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("GUIT08: multi-symbol dispatch summary panel contains no order submit/cancel/replace/flatten controls", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMultiSymbolDispatchSummaryFetchMock(() => jsonResponse(ACTIVE_MULTI_SYMBOL_DISPATCH_SUMMARY_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    // Scope the assertion to the multi-symbol dispatch summary panel itself —
+    // it is the last section on the screen, so slicing from its heading to
+    // the end of the markup isolates its HTML from unrelated panels (e.g. the
+    // "Flatten availability" panel's subtitle mentions flatten-paper-positions
+    // as prose, not as a control).
+    const panelStart = html.indexOf("Multi-symbol dispatch summary");
+    assert.notEqual(panelStart, -1, "multi-symbol dispatch summary panel should be present");
+    const panelHtml = html.slice(panelStart);
+
+    // The panel is read-only visibility — no buttons or click handlers.
+    assert.doesNotMatch(panelHtml, /<button/i);
+    assert.doesNotMatch(panelHtml, /onClick/i);
+    assert.doesNotMatch(panelHtml, /submit-order|cancel-order|replace-order|flatten-paper-positions/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -787,6 +787,13 @@ export const MOCK_MODEL: SystemModel = {
     note: null,
     checked_at_utc: null,
   },
+  multiSymbolDispatchSummary: {
+    truth_state: "unavailable" as const,
+    backend: "unknown",
+    runtime_execution_mode: "unknown",
+    configured_symbol_count: 0,
+    per_symbol: [],
+  },
   strategyDecisionDiagnostics: null,
   autonomousBarTickCount: null,
   autonomousLastSignalQty: null,

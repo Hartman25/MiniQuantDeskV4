@@ -27,6 +27,7 @@ import {
   mapEventsFeedResponse,
   mapExecutionOutboxWrapper,
   mapFillQualityWrapper,
+  mapMultiSymbolDispatchSummaryWrapper,
   mapPaperJournalWrapper,
   mapWatchlistAdmissionCheckWrapper,
   mapWatchlistStatusWrapper,
@@ -55,6 +56,7 @@ import {
   type LegacyTradingFillsResponse,
   type LegacyTradingOrdersResponse,
   type LegacyTradingPositionsResponse,
+  type MultiSymbolDispatchSummaryWrapper,
   type PaperJournalWrapper,
   type PortfolioFillsResponse,
   type PortfolioOpenOrdersResponse,
@@ -169,7 +171,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   // OBS-SESSION-DISCORD-01: autonomous/readiness is fetched in parallel with the main
   // probes batch for session-window diagnostics (now_utc, session_start_utc, etc.).
   // Kept outside the probes array so it does not contribute to dataSource endpoint counts.
-  const [probes, autonomousReadinessR] = await Promise.all([
+  const [probes, autonomousReadinessR, multiSymbolDispatchSummaryR] = await Promise.all([
     Promise.all([
     fetchJsonCandidates<PreflightStatus>(["/api/v1/system/preflight"]),
     fetchJsonCandidates<ExecutionSummary>(["/api/v1/execution/summary"]),
@@ -494,6 +496,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     fetchJsonCandidates<WatchlistStatusWrapper>(["/api/v1/watchlist/status"]),
     ]),
     fetchJsonCandidate<AutonomousReadinessPartial>("/api/v1/autonomous/readiness"),
+    // MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Multi-symbol dispatch summary
+    // (Patch 9, already CLOSED). Fetched as a sibling outside the probes
+    // array so a failure here cannot contribute to dataSource/missingEndpoints
+    // or hard-block any panel — fail-soft, read-only operator visibility.
+    fetchJsonCandidate<MultiSymbolDispatchSummaryWrapper>("/api/v1/strategy/multi-symbol-dispatch-summary"),
   ]);
 
   const [
@@ -751,6 +758,14 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const watchlistStatus = mapWatchlistStatusWrapper(
     watchlistStatusR.ok && watchlistStatusR.data != null
       ? (watchlistStatusR.data as WatchlistStatusWrapper)
+      : null,
+  );
+
+  // MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Multi-symbol dispatch summary —
+  // read-only per-symbol dispatch state (Patch 9, already CLOSED).
+  const multiSymbolDispatchSummary = mapMultiSymbolDispatchSummaryWrapper(
+    multiSymbolDispatchSummaryR.ok && multiSymbolDispatchSummaryR.data != null
+      ? (multiSymbolDispatchSummaryR.data as MultiSymbolDispatchSummaryWrapper)
       : null,
   );
 
@@ -1032,6 +1047,9 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     autonomousPaperStatus,
     watchlistStatus,
     admissionCheck,
+    // MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Read-only multi-symbol dispatch
+    // summary truth surface. Visibility only — no order controls derived here.
+    multiSymbolDispatchSummary,
     // STRATEGY-DECISION-OBSERVABILITY-01: read-only decision diagnostics.
     strategyDecisionDiagnostics,
     autonomousBarTickCount,
