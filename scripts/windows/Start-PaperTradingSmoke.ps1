@@ -381,6 +381,28 @@ if ($CheckOnly) {
         Write-Warn "STEP 5C dry-check: docker not available -- skipping arm-state check."
     }
 
+    # STEP 9B dry-check: verify the multi-symbol smoke preflight gate code is
+    # present in this script (static self-check, no daemon required in
+    # CheckOnly). Runtime validation (GET /api/v1/watchlist/status against the
+    # MULTI_SYMBOL_SMOKE_BLOCKED_* conditions) happens during the full smoke.
+    $selfPath9b = $PSCommandPath
+    if ([string]::IsNullOrWhiteSpace($selfPath9b)) { $selfPath9b = $MyInvocation.MyCommand.Path }
+    if ($selfPath9b -and (Test-Path $selfPath9b)) {
+        $selfText9b = Get-Content -Path $selfPath9b -Raw
+        if ($selfText9b -match 'STEP 9B: Multi-symbol smoke preflight gate' -and
+            $selfText9b -match 'MULTI_SYMBOL_SMOKE_BLOCKED_SCHEMA_NOT_V2' -and
+            $selfText9b -match 'MULTI_SYMBOL_SMOKE_BLOCKED_NOT_MULTI_SYMBOL' -and
+            $selfText9b -match 'MULTI_SYMBOL_SMOKE_BLOCKED_NOT_APPROVED_FOR_AUTONOMOUS_PAPER' -and
+            $selfText9b -match 'MULTI_SYMBOL_SMOKE_BLOCKED_APPROVED_FOR_LIVE_TRUE') {
+            Write-Ok "STEP 9B dry-check: multi-symbol smoke preflight gate code present."
+            Write-Ok "  Runtime validation (GET /api/v1/watchlist/status) happens during the full smoke run."
+        } else {
+            Write-Warn "STEP 9B dry-check: multi-symbol smoke preflight gate code not found in this script."
+        }
+    } else {
+        Write-Warn "STEP 9B dry-check: could not resolve script path for self-check."
+    }
+
     Write-Section "CHECK-ONLY complete"
     if ($checkPassed) {
         Write-Ok "All prerequisite checks passed. Ready for full startup."
@@ -967,6 +989,65 @@ if ($wsContinuity -eq 'live') {
     Write-Warn "Alpaca WS continuity='$wsContinuity' (not live after 45 s). Check Alpaca credentials."
     Write-Warn "Continuing - WS may still be establishing. Verify at /api/v1/system/status."
 }
+
+# ---------------------------------------------------------------------------
+# STEP 9B: Multi-symbol smoke preflight gate (watchlist-v2)
+# MULTI-SYMBOL-SMOKE-RUNNER-PREFLIGHT-GATE-01
+# Read-only. GET /api/v1/watchlist/status and verify the multi-symbol smoke
+# preconditions from docs/design/native_multi_symbol_dispatch.md Section 9.1
+# before any mutating operator action (STEP 10+) runs. Fails closed with a
+# stable MULTI_SYMBOL_SMOKE_BLOCKED_* code on any unmet condition.
+# ---------------------------------------------------------------------------
+Write-Section "STEP 9B: Multi-symbol smoke preflight gate (watchlist-v2)"
+
+$watchlistStatus = $null
+try {
+    $watchlistStatus = Invoke-DaemonGet -Path '/api/v1/watchlist/status'
+} catch {
+    Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_WATCHLIST_STATUS_UNAVAILABLE: GET /api/v1/watchlist/status failed: $_"
+    Write-EvidenceCapture "STEP 9B: watchlist status unavailable -- $_"
+    exit 1
+}
+
+if ($null -eq $watchlistStatus) {
+    Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_WATCHLIST_STATUS_UNAVAILABLE: watchlist status response was null/empty."
+    Write-EvidenceCapture "STEP 9B: watchlist status response null"
+    exit 1
+}
+
+$wlSchemaVersion = if ($null -ne $watchlistStatus.PSObject.Properties['schema_version']) { $watchlistStatus.schema_version } else { $null }
+$wlSymbols       = if ($null -ne $watchlistStatus.PSObject.Properties['symbols']) { $watchlistStatus.symbols } else { @() }
+$wlSymbolCount   = @($wlSymbols).Count
+$wlApprovedPaper = ($null -ne $watchlistStatus.PSObject.Properties['approved_for_autonomous_paper']) -and ($watchlistStatus.approved_for_autonomous_paper -eq $true)
+$wlApprovedLive  = ($null -ne $watchlistStatus.PSObject.Properties['approved_for_live']) -and ($watchlistStatus.approved_for_live -eq $true)
+
+Write-Step "watchlist/status: schema_version=$wlSchemaVersion  symbols_count=$wlSymbolCount  approved_for_autonomous_paper=$wlApprovedPaper  approved_for_live=$wlApprovedLive"
+
+if ($wlSchemaVersion -ne 'watchlist-v2') {
+    Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_SCHEMA_NOT_V2: schema_version='$wlSchemaVersion' (expected 'watchlist-v2')."
+    Write-EvidenceCapture "STEP 9B: schema_version != watchlist-v2 (got '$wlSchemaVersion')"
+    exit 1
+}
+
+if ($wlSymbolCount -le 1) {
+    Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_NOT_MULTI_SYMBOL: symbols count=$wlSymbolCount (need > 1)."
+    Write-EvidenceCapture "STEP 9B: symbols count <= 1 (got $wlSymbolCount)"
+    exit 1
+}
+
+if (-not $wlApprovedPaper) {
+    Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_NOT_APPROVED_FOR_AUTONOMOUS_PAPER: approved_for_autonomous_paper=$wlApprovedPaper."
+    Write-EvidenceCapture "STEP 9B: approved_for_autonomous_paper=false"
+    exit 1
+}
+
+if ($wlApprovedLive) {
+    Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_APPROVED_FOR_LIVE_TRUE: approved_for_live=$wlApprovedLive (hard invariant violation)."
+    Write-EvidenceCapture "STEP 9B: approved_for_live=true"
+    exit 1
+}
+
+Write-Ok "Multi-symbol smoke preflight gate passed: schema_version=watchlist-v2  symbols_count=$wlSymbolCount  approved_for_autonomous_paper=true  approved_for_live=false"
 
 # ---------------------------------------------------------------------------
 # STEP 10: Clear halted lifecycle if needed (via operator route only)

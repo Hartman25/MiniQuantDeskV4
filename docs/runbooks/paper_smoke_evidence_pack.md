@@ -172,6 +172,37 @@ sub-patch covers evidence capture/review only, not a real multi-symbol paper smo
 
 ---
 
+## 5d. Multi-symbol smoke preflight gate (`MULTI-SYMBOL-SMOKE-RUNNER-PREFLIGHT-GATE-01` — CLOSED)
+
+`Start-PaperTradingSmoke.ps1` STEP 9B is a read-only preflight gate inserted after STEP 9
+(Alpaca WS continuity verified) and before STEP 10 (the first mutating operator action).
+It calls `GET /api/v1/watchlist/status` and fails closed unless ALL of the following hold:
+- `schema_version == "watchlist-v2"`
+- `symbols` count `> 1`
+- `approved_for_autonomous_paper == true`
+- `approved_for_live == false`
+
+If any condition is unmet, the smoke run is refused with one of five stable blocker codes
+(an evidence capture is written before each exit):
+- `MULTI_SYMBOL_SMOKE_BLOCKED_WATCHLIST_STATUS_UNAVAILABLE` — the status route could not be
+  reached or returned no response
+- `MULTI_SYMBOL_SMOKE_BLOCKED_SCHEMA_NOT_V2` — `schema_version != "watchlist-v2"`
+- `MULTI_SYMBOL_SMOKE_BLOCKED_NOT_MULTI_SYMBOL` — fewer than 2 symbols in the watchlist
+- `MULTI_SYMBOL_SMOKE_BLOCKED_NOT_APPROVED_FOR_AUTONOMOUS_PAPER` — promotion gates not yet
+  satisfied for autonomous paper
+- `MULTI_SYMBOL_SMOKE_BLOCKED_APPROVED_FOR_LIVE_TRUE` — `approved_for_live == true` (hard
+  invariant violation; this should never be true in this codebase)
+
+`-CheckOnly` performs a static self-check confirming the STEP 9B gate code is present in
+the script (no daemon required); runtime validation against the live watchlist status
+happens only during the full smoke run.
+
+Covered by `test_multi_symbol_smoke_runner_gate.ps1` (MSG-01..MSG-14). Parent patch
+`WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` (Patch 11) remains OPEN — this sub-patch
+covers the smoke-runner preflight gate only, not a real multi-symbol paper smoke run.
+
+---
+
 ## 6. Operator notes (fill in manually)
 
 After both captures complete, fill in the four note files in the post-smoke

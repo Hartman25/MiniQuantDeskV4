@@ -235,6 +235,17 @@ Inspect `fault_signals` before arming.  Relevant autonomous signals:
 - `autonomous_recovery_succeeded` / `autonomous_recovery_failed` — last recovery truth.
 - `day_limit_reached` — per-run signal cap (100 signals) has been hit.
 
+### 5e. Multi-symbol smoke preflight gate (manual smoke runner only)
+
+If running a multi-symbol smoke via `scripts\windows\Start-PaperTradingSmoke.ps1`, STEP 9B
+gates entry to STEP 10+ on `GET /api/v1/watchlist/status`. The gate fails closed unless all
+of the following hold: `schema_version == "watchlist-v2"`, `symbols` count `> 1`,
+`approved_for_autonomous_paper == true`, and `approved_for_live == false`. See
+`docs/design/native_multi_symbol_dispatch.md` §9.1 and
+`docs/runbooks/paper_smoke_evidence_pack.md` §5d for the stable
+`MULTI_SYMBOL_SMOKE_BLOCKED_*` codes and evidence-on-refusal behavior. This gate does not
+apply to the autonomous session controller itself.
+
 ---
 
 ## 6. What happens during a session

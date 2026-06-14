@@ -1631,6 +1631,18 @@ Reuses `evaluate_watchlist_intake` (extended for v2) via `GET /api/v1/watchlist/
 `symbols.len() <= 1` (this is *the multi-symbol smoke runner*; a single-symbol artifact should
 use the existing single-symbol smoke path unchanged).
 
+**Implemented / CLOSED** as `MULTI-SYMBOL-SMOKE-RUNNER-PREFLIGHT-GATE-01`: STEP 9B in
+`Start-PaperTradingSmoke.ps1`, inserted after STEP 9 (Alpaca WS continuity verified) and before
+STEP 10 (the first mutating operator action). Read-only `GET /api/v1/watchlist/status`; fails
+closed with one of five stable codes if any condition is unmet:
+`MULTI_SYMBOL_SMOKE_BLOCKED_WATCHLIST_STATUS_UNAVAILABLE`, `_SCHEMA_NOT_V2`,
+`_NOT_MULTI_SYMBOL`, `_NOT_APPROVED_FOR_AUTONOMOUS_PAPER`, `_APPROVED_FOR_LIVE_TRUE`. `-CheckOnly`
+performs a static self-check (no daemon) confirming the gate code is present and notes that
+runtime validation occurs during the full smoke. Proven by `test_multi_symbol_smoke_runner_gate.ps1`
+(MSG-01..MSG-14). This patch only gates the smoke runner's entry to STEP 10+ — it does not run a
+real multi-symbol paper smoke; `MULTI-SYMBOL-PAPER-SMOKE-END-TO-END-01` (§10, Patch 11) remains
+OPEN.
+
 ### 9.2 Capture
 
 `Capture-PaperSmokeEvidence.ps1` additionally calls
@@ -1721,8 +1733,9 @@ across tiers.
 | 8 | `PER-SYMBOL-TARGET-STATE-01` | 4 | §4.6 (`PerSymbolTargetState` in-memory map) — **CLOSED** |
 | 9 | `MULTI-SYMBOL-DISPATCH-SUMMARY-01` | 5, 6, 7, 8 | §4.8, §7.3 (`MultiSymbolDispatchSummaryResponse`, new route) — **CLOSED** |
 | 10 | `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` | 9 | §8.1a (read-only "Multi-symbol dispatch summary" panel on `StrategyScreen`, consuming the existing §7.3/§4.8 route) — **CLOSED**. §7.4-§7.7, §8.2-§8.8 (`OmsOverviewResponse.per_symbol_status`, `MetricsDashboardResponse.per_symbol_exposure`, `AlertsActiveResponse.symbol`, remaining per-screen additions) were not implemented and remain open design (no patch assigned) |
-| 11 | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` | 1, 9, 10, 11a | §9 (`MULTI-SYMBOL-PAPER-SMOKE-RUNNER-01`, i.e. `MULTI-SYMBOL-PAPER-SMOKE-END-TO-END-01`) — **OPEN/PARTIAL**. §4.2 promotion-side gate logic closed via sub-patch 11a; caps #8/#13 missing-proof tests closed via Patch 4 (M08) and sub-patch 11c respectively |
+| 11 | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` | 1, 9, 10, 11a | §9 (`MULTI-SYMBOL-PAPER-SMOKE-RUNNER-01`, i.e. `MULTI-SYMBOL-PAPER-SMOKE-END-TO-END-01`) — **OPEN/PARTIAL**. §4.2 promotion-side gate logic closed via sub-patch 11a; caps #8/#13 missing-proof tests closed via Patch 4 (M08) and sub-patch 11c respectively; §9.1 smoke-runner preflight gate closed via sub-patch 11d. The real multi-symbol paper smoke run (`MULTI-SYMBOL-PAPER-SMOKE-END-TO-END-01`) remains OPEN |
 | 11a | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-01` | 1 | §4.2 promotion-side gate logic only (`research-py/src/mqk_research/scanner/watchlist_promotion.py`: `_is_watchlist_v2`, `_selected_symbols_for_promotion`, `_v2_effective_symbol_limit`, Gate 4b, per-symbol Gates 5/6); `watchlist-v1` unchanged — **CLOSED** |
+| 11d | `MULTI-SYMBOL-SMOKE-RUNNER-PREFLIGHT-GATE-01` | 1 | §9.1 smoke-runner preflight gate only (`scripts/windows/Start-PaperTradingSmoke.ps1` STEP 9B: `GET /api/v1/watchlist/status` checked before STEP 10; fails closed via `MULTI_SYMBOL_SMOKE_BLOCKED_*` codes); does not run a real multi-symbol smoke — **CLOSED** |
 | 11c | `PDT-CROSS-SYMBOL-SUMMATION-PROOF-01` | 1, 9, 10, 11a | §6 cap #13 proof only (`core-rs/crates/mqk-risk/tests/scenario_pdt_cross_symbol_summation_01.rs`, PDT-X01..X10); test-only, no production code changed — **CLOSED** |
 
 ### Dependency notes
@@ -1854,9 +1867,12 @@ across tiers.
   loop needed to exist for it to be meaningful and Patch 4 built that loop. Cap #13's PDT
   cross-symbol summation test was pulled forward into sub-patch 11c
   (`PDT-CROSS-SYMBOL-SUMMATION-PROOF-01`, CLOSED) since it only required the existing
-  `mqk_risk::pdt` API and did not depend on the smoke-runner. Patch 11 still carries Q9's
-  regression test and the real multi-symbol paper smoke end-to-end run
-  (`MULTI-SYMBOL-PAPER-SMOKE-END-TO-END-01`).
+  `mqk_risk::pdt` API and did not depend on the smoke-runner. The smoke-runner's own
+  preflight gate (§9.1, checking watchlist-v2 status before STEP 10) was pulled forward
+  into sub-patch 11d (`MULTI-SYMBOL-SMOKE-RUNNER-PREFLIGHT-GATE-01`, CLOSED) since it only
+  required the existing `/api/v1/watchlist/status` route and did not depend on a real
+  multi-symbol smoke run. Patch 11 still carries Q9's regression test and the real
+  multi-symbol paper smoke end-to-end run (`MULTI-SYMBOL-PAPER-SMOKE-END-TO-END-01`).
 
 ---
 
