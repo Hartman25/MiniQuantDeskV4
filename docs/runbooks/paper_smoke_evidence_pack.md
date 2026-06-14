@@ -92,6 +92,7 @@ This captures live daemon API snapshots while state is fresh:
 - `/api/v1/alerts/active`
 - `/api/v1/events/feed`
 - `/api/v1/oms/overview`
+- `/api/v1/strategy/multi-symbol-dispatch-summary` — see Section 5c (WATCHLIST-PROMO-V2-MULTI-SYMBOL-SMOKE-EVIDENCE-01)
 - `/api/v1/risk/summary`
 - `/api/v1/reconcile/status`
 
@@ -134,6 +135,40 @@ resolve the stated blockers before the smoke can proceed.
 **Important:** `readiness_classification` alone cannot mark a trade lifecycle closed.
 Trade lifecycle closure still requires fill evidence, inbox apply, and reconcile clean
 from the evidence pack.
+
+---
+
+## 5c. Multi-symbol dispatch summary evidence (`WATCHLIST-PROMO-V2-MULTI-SYMBOL-SMOKE-EVIDENCE-01` -- CLOSED)
+
+`GET /api/v1/strategy/multi-symbol-dispatch-summary` is captured as
+`api/multi_symbol_dispatch_summary.json` (raw GET response, fail-soft, not mandatory for
+evidence-pack completeness).
+
+`Review-PaperSmokeEvidence.ps1` renders a "Multi-symbol dispatch summary" section and writes
+the following fields to `review_summary.json`:
+- `multi_symbol_dispatch_captured`, `multi_symbol_dispatch_truth_state` (`no_snapshot` or
+  `active`), `multi_symbol_dispatch_canonical_route`, `multi_symbol_dispatch_backend`,
+  `multi_symbol_dispatch_runtime_execution_mode`, `multi_symbol_dispatch_configured_symbol_count`
+- `multi_symbol_dispatch_row_count`, `multi_symbol_dispatch_symbols_seen`
+- `multi_symbol_dispatch_blocked_or_skipped_symbols` — symbols whose latest
+  `no_order_reason` is `b5_short_sale_guard`, `max_new_orders_per_tick_reached`, or
+  `symbol_mismatch_skipped`
+- `multi_symbol_dispatch_per_symbol` — per-symbol `current_qty`, `target_qty`, `delta`,
+  `no_order_reason`, `last_decision_id`, `last_decision_disposition`, `day_order_count`,
+  `day_order_limit`, `bar_staleness_secs` (preserved verbatim; `bar_staleness_secs` shows
+  `n/a` when null)
+- `multi_symbol_dispatch_warnings` — e.g. "not captured" when the snapshot file is missing
+  or the daemon was unavailable at capture time
+
+**Interpreting this section:** a missing snapshot or `truth_state = "no_snapshot"` (empty
+`per_symbol`) is reported honestly as zero rows — it is **not** evidence of a healthy or
+passing trade, and this section does not by itself contribute to a `NATURAL-TRADE-LIFECYCLE-
+CLOSED` classification (Section 8). It is observability only.
+
+Covered by MS-EV-01..14 (`test_capture_paper_smoke_evidence.ps1` /
+`test_paper_smoke_evidence_review.ps1`) and `test_multi_symbol_smoke_evidence.ps1` (G01-G16).
+Parent patch `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` (Patch 11) remains OPEN — this
+sub-patch covers evidence capture/review only, not a real multi-symbol paper smoke run.
 
 ---
 

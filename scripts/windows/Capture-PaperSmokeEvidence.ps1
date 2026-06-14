@@ -45,6 +45,7 @@
 #       alerts_active.json
 #       events_feed.json
 #       oms_overview.json
+#       multi_symbol_dispatch_summary.json -- WATCHLIST-PROMO-V2-MULTI-SYMBOL-SMOKE-EVIDENCE-01
 #       risk_summary.json
 #       reconcile_status.json
 #       reconcile_mismatches.json  -- EVIDENCE-CAPTURE-TRADE-FLOW-01
@@ -198,6 +199,13 @@ if (-not $SkipDaemon) {
     $null = Save-DaemonJson '/api/v1/alerts/active'           'alerts_active.json'
     $null = Save-DaemonJson '/api/v1/events/feed'          'events_feed.json'
     $null = Save-DaemonJson '/api/v1/oms/overview'         'oms_overview.json'
+
+    # --- Multi-symbol dispatch summary (WATCHLIST-PROMO-V2-MULTI-SYMBOL-SMOKE-EVIDENCE-01) ---
+    # Read-only snapshot of per-symbol dispatch state (current/target qty, no_order_reason,
+    # last decision disposition, day-order caps, bar staleness). Fail-soft like all other
+    # daemon snapshots; not mandatory for evidence-pack completeness.
+    $null = Save-DaemonJson '/api/v1/strategy/multi-symbol-dispatch-summary' 'multi_symbol_dispatch_summary.json'
+
     $null = Save-DaemonJson '/api/v1/risk/summary'         'risk_summary.json'
     $null = Save-DaemonJson '/api/v1/reconcile/status'     'reconcile_status.json'
 

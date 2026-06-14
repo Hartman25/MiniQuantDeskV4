@@ -207,6 +207,7 @@ $ReconcileStatus   = Read-JsonSnapshot (Join-Path $ApiDir 'reconcile_status.json
 $AlertsActive      = Read-JsonSnapshot (Join-Path $ApiDir 'alerts_active.json')
 $EventsFeed        = Read-JsonSnapshot (Join-Path $ApiDir 'events_feed.json')
 $RiskSummary       = Read-JsonSnapshot (Join-Path $ApiDir 'risk_summary.json')
+$MultiSymbolDispatchSummary = Read-JsonSnapshot (Join-Path $ApiDir 'multi_symbol_dispatch_summary.json')
 
 # Trade-flow snapshots (EVIDENCE-CAPTURE-TRADE-FLOW-01)
 $ExecutionFlow       = Read-JsonSnapshot (Join-Path $ApiDir 'execution_flow.json')
@@ -367,6 +368,70 @@ if ($FolderName -match 'paper_smoke_(\d{8}_\d{6})') {
 
 $api_files_present = @(Get-ChildItem $ApiDir -File -ErrorAction SilentlyContinue).Count -gt 0
 $db_files_present  = @(Get-ChildItem $DbDir  -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'unavailable.txt' }).Count -gt 0
+
+# ---------------------------------------------------------------------------
+# Multi-symbol dispatch summary field extraction (WATCHLIST-PROMO-V2-MULTI-SYMBOL-SMOKE-EVIDENCE-01)
+# ---------------------------------------------------------------------------
+# Reasons that mean the dispatch loop explicitly declined to act on a symbol
+# due to a gate/limit (as opposed to "nothing to do" or "no decision yet").
+$MSD_BLOCKED_OR_SKIPPED_REASONS = @('b5_short_sale_guard', 'max_new_orders_per_tick_reached', 'symbol_mismatch_skipped')
+
+$msd_captured = $false
+$msdFile = Join-Path $ApiDir 'multi_symbol_dispatch_summary.json'
+if (Test-Path $msdFile) {
+    $msdRaw = Get-Content $msdFile -Raw -ErrorAction SilentlyContinue
+    if ($msdRaw -and $msdRaw -notmatch '^\s*(UNAVAILABLE|SKIPPED)') {
+        $msd_captured = $true
+    }
+}
+
+$msd_truth_state             = Get-Field $MultiSymbolDispatchSummary 'truth_state'
+$msd_canonical_route         = Get-Field $MultiSymbolDispatchSummary 'canonical_route'
+$msd_backend                 = Get-Field $MultiSymbolDispatchSummary 'backend'
+$msd_runtime_execution_mode  = Get-Field $MultiSymbolDispatchSummary 'runtime_execution_mode'
+$msd_configured_symbol_count = Get-Field $MultiSymbolDispatchSummary 'configured_symbol_count'
+$msd_per_symbol_raw          = Get-Field $MultiSymbolDispatchSummary 'per_symbol'
+
+$msd_per_symbol_rows           = [System.Collections.Generic.List[object]]::new()
+$msd_symbols_seen               = [System.Collections.Generic.List[string]]::new()
+$msd_blocked_or_skipped_symbols = [System.Collections.Generic.List[string]]::new()
+$msd_warnings                   = [System.Collections.Generic.List[string]]::new()
+
+if ($null -ne $msd_per_symbol_raw) {
+    foreach ($row in @($msd_per_symbol_raw)) {
+        $rowSymbol       = Get-Field $row 'symbol'
+        $rowNoOrderReason = Get-Field $row 'no_order_reason'
+        $msd_per_symbol_rows.Add([PSCustomObject]@{
+            symbol                    = $rowSymbol
+            strategy_id               = Get-Field $row 'strategy_id'
+            current_qty               = Get-Field $row 'current_qty'
+            target_qty                = Get-Field $row 'target_qty'
+            delta                     = Get-Field $row 'delta'
+            no_order_reason           = $rowNoOrderReason
+            last_decision_id          = Get-Field $row 'last_decision_id'
+            last_decision_disposition = Get-Field $row 'last_decision_disposition'
+            day_order_count           = Get-Field $row 'day_order_count'
+            day_order_limit           = Get-Field $row 'day_order_limit'
+            bar_staleness_secs        = Get-Field $row 'bar_staleness_secs'
+        })
+        if ($rowSymbol) { $msd_symbols_seen.Add([string]$rowSymbol) }
+        if ($null -ne $rowNoOrderReason -and [string]$rowNoOrderReason -in $MSD_BLOCKED_OR_SKIPPED_REASONS -and $rowSymbol) {
+            $msd_blocked_or_skipped_symbols.Add([string]$rowSymbol)
+        }
+    }
+}
+
+$msd_row_count = $msd_per_symbol_rows.Count
+
+if (-not $msd_captured) {
+    $msd_warnings.Add('multi_symbol_dispatch_summary.json not captured (not present or daemon unavailable at capture time)')
+} elseif ($null -eq $MultiSymbolDispatchSummary) {
+    $msd_warnings.Add('multi_symbol_dispatch_summary.json present but could not be parsed as JSON')
+} elseif ($msd_truth_state -eq 'no_snapshot' -and $msd_row_count -gt 0) {
+    $msd_warnings.Add('truth_state=no_snapshot but per_symbol contains rows -- unexpected')
+} elseif ($msd_truth_state -ne 'no_snapshot' -and $msd_truth_state -ne 'active') {
+    $msd_warnings.Add("unrecognized truth_state value: $msd_truth_state")
+}
 
 # ---------------------------------------------------------------------------
 # Trade-flow field extraction (EVIDENCE-CAPTURE-TRADE-FLOW-01)
@@ -1286,6 +1351,37 @@ if ($fault_signal_summaries.Count -gt 0) {
 }
 $summaryLines.Add("")
 
+$summaryLines.Add("## Multi-symbol dispatch summary (WATCHLIST-PROMO-V2-MULTI-SYMBOL-SMOKE-EVIDENCE-01)")
+if (-not $msd_captured) {
+    $summaryLines.Add("- multi_symbol_dispatch_summary.json: not captured")
+} else {
+    $summaryLines.Add("- canonical_route:            $msd_canonical_route")
+    $summaryLines.Add("- backend:                    $msd_backend")
+    $summaryLines.Add("- truth_state:                $msd_truth_state")
+    $summaryLines.Add("- runtime_execution_mode:     $msd_runtime_execution_mode")
+    $summaryLines.Add("- configured_symbol_count:    $msd_configured_symbol_count")
+    $summaryLines.Add("- row_count:                  $msd_row_count")
+    if ($msd_row_count -eq 0) {
+        $summaryLines.Add("- (no per-symbol rows -- truth_state=$msd_truth_state)")
+    } else {
+        $summaryLines.Add("- symbols_seen:               $($msd_symbols_seen -join ', ')")
+        if ($msd_blocked_or_skipped_symbols.Count -gt 0) {
+            $summaryLines.Add("- blocked_or_skipped_symbols: $($msd_blocked_or_skipped_symbols -join ', ')")
+        } else {
+            $summaryLines.Add("- blocked_or_skipped_symbols: (none)")
+        }
+        $summaryLines.Add("- per_symbol:")
+        foreach ($row in $msd_per_symbol_rows) {
+            $bsStr = if ($null -eq $row.bar_staleness_secs) { 'n/a' } else { $row.bar_staleness_secs }
+            $summaryLines.Add("  - $($row.symbol): strategy_id=$($row.strategy_id) current_qty=$($row.current_qty) target_qty=$($row.target_qty) delta=$($row.delta) no_order_reason=$($row.no_order_reason) last_decision_id=$($row.last_decision_id) last_decision_disposition=$($row.last_decision_disposition) day_order_count=$($row.day_order_count)/$($row.day_order_limit) bar_staleness_secs=$bsStr")
+        }
+    }
+}
+if ($msd_warnings.Count -gt 0) {
+    foreach ($w in $msd_warnings) { $summaryLines.Add("- WARNING: $w") }
+}
+$summaryLines.Add("")
+
 if ($manual_verdict) {
     $summaryLines.Add("## Manual Verdict (from notes/final_verdict.txt)")
     $summaryLines.Add("- $manual_verdict")
@@ -1447,6 +1543,17 @@ $jsonObj = [ordered]@{
     autonomous_target_qty            = $ps_target_qty
     autonomous_computed_delta_qty    = $ps_computed_delta_qty
     autonomous_no_order_reason       = $ps_no_order_reason
+    multi_symbol_dispatch_captured                   = $msd_captured
+    multi_symbol_dispatch_truth_state                = $msd_truth_state
+    multi_symbol_dispatch_canonical_route            = $msd_canonical_route
+    multi_symbol_dispatch_backend                    = $msd_backend
+    multi_symbol_dispatch_runtime_execution_mode     = $msd_runtime_execution_mode
+    multi_symbol_dispatch_configured_symbol_count    = $msd_configured_symbol_count
+    multi_symbol_dispatch_row_count                  = $msd_row_count
+    multi_symbol_dispatch_symbols_seen               = @($msd_symbols_seen)
+    multi_symbol_dispatch_blocked_or_skipped_symbols = @($msd_blocked_or_skipped_symbols)
+    multi_symbol_dispatch_per_symbol                 = @($msd_per_symbol_rows)
+    multi_symbol_dispatch_warnings                   = @($msd_warnings)
     ledger_classifications      = $ledger_verdicts
     ledger_closed_labels        = @($ledger_verdicts.Values | Where-Object { $_.closed } | ForEach-Object { $_.label })
 }

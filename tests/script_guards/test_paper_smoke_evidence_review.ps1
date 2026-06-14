@@ -144,6 +144,20 @@ Assert-True ($Content -match 'manual_verdict_conflict') 'Computes and exposes ma
 Assert-True ($Content -match '(?i)## Source of Truth') 'review_summary documents a Source of Truth section'
 Assert-True ($Content -match '(?i)NOT authoritative') 'review_summary states notes/final_verdict.txt is NOT authoritative'
 
+# 26-30. Multi-symbol dispatch summary (WATCHLIST-PROMO-V2-MULTI-SYMBOL-SMOKE-EVIDENCE-01)
+#   Static checks: review script reads the captured snapshot, renders a
+#   dedicated section, and surfaces the per-symbol fields in its JSON output.
+Assert-True ($Content -match [regex]::Escape('multi_symbol_dispatch_summary.json')) 'MS-EV-04: reads multi_symbol_dispatch_summary.json'
+Assert-True ($Content -match '(?i)## Multi-symbol dispatch summary') 'MS-EV-05: renders a "Multi-symbol dispatch summary" section'
+Assert-True ($Content -match 'multi_symbol_dispatch_truth_state') 'MS-EV-06: JSON output includes multi_symbol_dispatch_truth_state'
+Assert-True ($Content -match 'multi_symbol_dispatch_row_count' -and $Content -match 'multi_symbol_dispatch_symbols_seen') 'MS-EV-07: JSON output includes multi_symbol_dispatch_row_count and multi_symbol_dispatch_symbols_seen'
+Assert-True (
+    $Content -match 'last_decision_disposition' -and
+    $Content -match 'day_order_count' -and
+    $Content -match 'day_order_limit' -and
+    $Content -match 'bar_staleness_secs'
+) 'MS-EV-08: per-symbol fields (last_decision_disposition, day_order_count/limit, bar_staleness_secs) are surfaced'
+
 function Write-FixtureJson {
     param([string]$Path, $Value)
     $parent = Split-Path -Parent $Path
@@ -316,6 +330,32 @@ $applyLine
     return $casePath
 }
 
+function New-MultiSymbolDispatchFixture {
+    param(
+        [string]$Name,
+        [string]$TruthState = 'active',
+        [string]$RuntimeExecutionMode = 'multi_symbol',
+        $ConfiguredSymbolCount = 0,
+        [object[]]$PerSymbol = @(),
+        [bool]$WriteFile = $true
+    )
+
+    $casePath = New-StrictLifecycleFixture -Name $Name
+
+    if ($WriteFile) {
+        Write-FixtureJson (Join-Path $casePath 'api\multi_symbol_dispatch_summary.json') ([ordered]@{
+            canonical_route         = '/api/v1/strategy/multi-symbol-dispatch-summary'
+            backend                 = 'daemon.runtime_state'
+            truth_state             = $TruthState
+            runtime_execution_mode  = $RuntimeExecutionMode
+            configured_symbol_count = $ConfiguredSymbolCount
+            per_symbol              = @($PerSymbol)
+        })
+    }
+
+    return $casePath
+}
+
 function Invoke-ReviewFixture {
     param([string]$Path)
     $output = & powershell.exe -ExecutionPolicy Bypass -NonInteractive -File $Target -EvidencePath $Path -WriteSummary 2>&1
@@ -416,6 +456,108 @@ try {
     Assert-True ($null -ne $closedChecked -and $closedChecked.classification -eq 'NATURAL-TRADE-LIFECYCLE-CLOSED') 'Complete strict lifecycle fixture with [x] SMOKE PASSED still classifies as NATURAL-TRADE-LIFECYCLE-CLOSED'
     Assert-True ($null -ne $closedChecked -and $closedChecked.manual_verdict_note -eq 'SMOKE PASSED') 'Checked [x] SMOKE PASSED is read as manual_verdict_note=SMOKE PASSED on a closed verdict'
     Assert-False ($null -ne $closedChecked -and $closedChecked.manual_verdict_conflict -eq $true) 'Operator [x] SMOKE PASSED on a NATURAL-TRADE-LIFECYCLE-CLOSED VERDICT does not trigger manual_verdict_conflict'
+
+    Write-Host ''
+    Write-Host '  -- multi-symbol dispatch summary fixture tests (WATCHLIST-PROMO-V2-MULTI-SYMBOL-SMOKE-EVIDENCE-01) --'
+
+    # Six rows covering all six canonical no_order_reason strings, including
+    # the three classified as "blocked or skipped" (MSFT/AMZN/TSLA) and a
+    # null bar_staleness_secs on MSFT to prove the "n/a" rendering path.
+    $msdRows = @(
+        [ordered]@{
+            symbol = 'AAPL'; strategy_id = 'core_long_v1'
+            current_qty = 10; target_qty = 10; delta = 0
+            no_order_reason = 'already_at_target'
+            last_decision_id = 'dec-aapl-1'; last_decision_disposition = 'no_action'
+            day_order_count = 0; day_order_limit = 5
+            bar_staleness_secs = 12
+        },
+        [ordered]@{
+            symbol = 'MSFT'; strategy_id = 'core_long_v1'
+            current_qty = 0; target_qty = -5; delta = -5
+            no_order_reason = 'b5_short_sale_guard'
+            last_decision_id = 'dec-msft-1'; last_decision_disposition = 'blocked'
+            day_order_count = 1; day_order_limit = 5
+            bar_staleness_secs = $null
+        },
+        [ordered]@{
+            symbol = 'GOOG'; strategy_id = 'core_long_v1'
+            current_qty = 0; target_qty = 8; delta = 8
+            no_order_reason = 'order_will_be_submitted'
+            last_decision_id = 'dec-goog-1'; last_decision_disposition = 'order_submitted'
+            day_order_count = 2; day_order_limit = 5
+            bar_staleness_secs = 30
+        },
+        [ordered]@{
+            symbol = 'AMZN'; strategy_id = 'core_long_v1'
+            current_qty = 0; target_qty = 4; delta = 4
+            no_order_reason = 'max_new_orders_per_tick_reached'
+            last_decision_id = 'dec-amzn-1'; last_decision_disposition = 'blocked'
+            day_order_count = 5; day_order_limit = 5
+            bar_staleness_secs = 45
+        },
+        [ordered]@{
+            symbol = 'TSLA'; strategy_id = 'core_long_v1'
+            current_qty = 2; target_qty = 2; delta = 0
+            no_order_reason = 'symbol_mismatch_skipped'
+            last_decision_id = 'dec-tsla-1'; last_decision_disposition = 'skipped'
+            day_order_count = 0; day_order_limit = 5
+            bar_staleness_secs = 60
+        },
+        [ordered]@{
+            symbol = 'NVDA'; strategy_id = 'core_long_v1'
+            current_qty = 0; target_qty = 0; delta = 0
+            no_order_reason = 'no_decisions'
+            last_decision_id = $null; last_decision_disposition = $null
+            day_order_count = 0; day_order_limit = 5
+            bar_staleness_secs = 5
+        }
+    )
+
+    $msdActivePath = New-MultiSymbolDispatchFixture -Name 'msd_active_rows' -TruthState 'active' -RuntimeExecutionMode 'multi_symbol' -ConfiguredSymbolCount 6 -PerSymbol $msdRows
+    $msdActive = Invoke-ReviewFixture $msdActivePath
+
+    Assert-True ($null -ne $msdActive -and $msdActive.multi_symbol_dispatch_truth_state -eq 'active') 'MS-EV-09: multi_symbol_dispatch_truth_state=active for populated fixture'
+    Assert-True ($null -ne $msdActive -and $msdActive.multi_symbol_dispatch_runtime_execution_mode -eq 'multi_symbol') 'MS-EV-09: multi_symbol_dispatch_runtime_execution_mode=multi_symbol'
+    Assert-True ($null -ne $msdActive -and $msdActive.multi_symbol_dispatch_configured_symbol_count -eq 6) 'MS-EV-09: multi_symbol_dispatch_configured_symbol_count=6'
+    Assert-True ($null -ne $msdActive -and $msdActive.multi_symbol_dispatch_row_count -eq 6) 'MS-EV-09: multi_symbol_dispatch_row_count=6'
+    Assert-True ($null -ne $msdActive -and (@($msdActive.multi_symbol_dispatch_symbols_seen) -join ',') -eq 'AAPL,MSFT,GOOG,AMZN,TSLA,NVDA') 'MS-EV-09: multi_symbol_dispatch_symbols_seen preserves per_symbol order'
+
+    $msdActiveMd = $null
+    if ($null -ne $msdActive) {
+        $msdActiveMd = Get-Content (Join-Path $msdActivePath 'review_summary.md') -Raw
+        foreach ($reason in @('already_at_target', 'b5_short_sale_guard', 'order_will_be_submitted', 'max_new_orders_per_tick_reached', 'symbol_mismatch_skipped', 'no_decisions')) {
+            $jsonHasReason = @($msdActive.multi_symbol_dispatch_per_symbol | Where-Object { $_.no_order_reason -eq $reason }).Count -gt 0
+            Assert-True $jsonHasReason "MS-EV-10: review_summary.json preserves no_order_reason=$reason verbatim"
+            Assert-True ($msdActiveMd -match [regex]::Escape($reason)) "MS-EV-10: review_summary.md preserves no_order_reason=$reason verbatim"
+        }
+    } else {
+        Assert-True $false 'MS-EV-10: review fixture produced output to check no_order_reason values'
+    }
+
+    Assert-True ($null -ne $msdActive -and (@($msdActive.multi_symbol_dispatch_blocked_or_skipped_symbols) -join ',') -eq 'MSFT,AMZN,TSLA') 'MS-EV-11: blocked_or_skipped_symbols = MSFT,AMZN,TSLA'
+
+    $msdNoSnapshotPath = New-MultiSymbolDispatchFixture -Name 'msd_no_snapshot' -TruthState 'no_snapshot' -ConfiguredSymbolCount 0 -PerSymbol @()
+    $msdNoSnapshot = Invoke-ReviewFixture $msdNoSnapshotPath
+    Assert-True ($null -ne $msdNoSnapshot -and $msdNoSnapshot.multi_symbol_dispatch_captured -eq $true) 'MS-EV-12: no_snapshot fixture is reported as captured'
+    Assert-True ($null -ne $msdNoSnapshot -and $msdNoSnapshot.multi_symbol_dispatch_truth_state -eq 'no_snapshot') 'MS-EV-12: no_snapshot fixture truth_state=no_snapshot'
+    Assert-True ($null -ne $msdNoSnapshot -and $msdNoSnapshot.multi_symbol_dispatch_row_count -eq 0) 'MS-EV-12: no_snapshot fixture row_count=0'
+    Assert-True ($null -ne $msdNoSnapshot -and @($msdNoSnapshot.multi_symbol_dispatch_warnings).Count -eq 0) 'MS-EV-12: no_snapshot fixture produces no warnings'
+
+    $msdMissingPath = New-MultiSymbolDispatchFixture -Name 'msd_not_captured' -WriteFile:$false
+    $msdMissing = Invoke-ReviewFixture $msdMissingPath
+    Assert-True ($null -ne $msdMissing -and $msdMissing.multi_symbol_dispatch_captured -eq $false) 'MS-EV-13: missing snapshot is reported as not captured'
+    Assert-True ($null -ne $msdMissing -and @($msdMissing.multi_symbol_dispatch_warnings).Count -ge 1) 'MS-EV-13: missing snapshot produces at least one warning'
+    if ($null -ne $msdMissing) {
+        $msdMissingMd = Get-Content (Join-Path $msdMissingPath 'review_summary.md') -Raw
+        Assert-True ($msdMissingMd -match '(?i)not captured') 'MS-EV-13: review_summary.md reports multi-symbol dispatch summary as not captured'
+    }
+
+    if ($null -ne $msdActiveMd) {
+        Assert-True ($msdActiveMd -match 'MSFT:.*bar_staleness_secs=n/a') 'MS-EV-14: null bar_staleness_secs renders as n/a for MSFT row'
+    } else {
+        Assert-True $false 'MS-EV-14: review fixture produced markdown to check bar_staleness_secs rendering'
+    }
 } catch {
     Write-Host "  FAIL: Strict lifecycle fixture tests threw: $_" -ForegroundColor Red
     $script:Failures++

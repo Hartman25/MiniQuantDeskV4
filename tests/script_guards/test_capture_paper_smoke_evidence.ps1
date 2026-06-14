@@ -405,6 +405,63 @@ if (Test-Path $TargetScript) {
 }
 
 # ---------------------------------------------------------------------------
+# MS-EV-01: Capture script references multi-symbol-dispatch-summary route
+# (WATCHLIST-PROMO-V2-MULTI-SYMBOL-SMOKE-EVIDENCE-01)
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "  -- MS-EV-01: multi-symbol-dispatch-summary route referenced --"
+
+if ($scriptText -match [regex]::Escape('/api/v1/strategy/multi-symbol-dispatch-summary')) {
+    Pass 'MS-EV-01' "Capture script references /api/v1/strategy/multi-symbol-dispatch-summary"
+} else {
+    Fail 'MS-EV-01' "Capture script does not reference /api/v1/strategy/multi-symbol-dispatch-summary"
+}
+
+# ---------------------------------------------------------------------------
+# MS-EV-02: Captured via Save-DaemonJson (GET-only, fail-soft) to
+# multi_symbol_dispatch_summary.json
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "  -- MS-EV-02: capture uses Save-DaemonJson (GET-only, fail-soft) --"
+
+if ($scriptText -match "Save-DaemonJson\s+'/api/v1/strategy/multi-symbol-dispatch-summary'\s+'multi_symbol_dispatch_summary\.json'") {
+    Pass 'MS-EV-02' "multi_symbol_dispatch_summary.json captured via Save-DaemonJson (GET-only helper)"
+} else {
+    Fail 'MS-EV-02' "multi_symbol_dispatch_summary.json capture not found via Save-DaemonJson"
+}
+
+# ---------------------------------------------------------------------------
+# MS-EV-03: No mutation endpoint called near the multi-symbol dispatch capture
+# Confirms the new capture line does not introduce any /ops/action,
+# /strategy/signal, or POST/PUT/PATCH/DELETE call.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "  -- MS-EV-03: multi-symbol dispatch capture is read-only --"
+
+$msdLineIndex = -1
+for ($i = 0; $i -lt $scriptLines.Count; $i++) {
+    if ($scriptLines[$i] -match [regex]::Escape('multi_symbol_dispatch_summary.json')) {
+        $msdLineIndex = $i
+        break
+    }
+}
+if ($msdLineIndex -ge 0) {
+    $msdStart = [Math]::Max(0, $msdLineIndex - 5)
+    $msdBlock = ($scriptLines[$msdStart..$msdLineIndex] -join "`n")
+    $msdOffending = $false
+    foreach ($pat in @('/ops/action', '/strategy/signal', '-Method\s+(Post|Put|Patch|Delete)')) {
+        if ($msdBlock -match $pat) { $msdOffending = $true }
+    }
+    if (-not $msdOffending) {
+        Pass 'MS-EV-03' "Multi-symbol dispatch capture block contains no mutation calls"
+    } else {
+        Fail 'MS-EV-03' "Multi-symbol dispatch capture block appears to contain a mutation call"
+    }
+} else {
+    Fail 'MS-EV-03' "Could not locate multi_symbol_dispatch_summary.json capture line"
+}
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Write-Host ""

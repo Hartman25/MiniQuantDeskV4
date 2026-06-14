@@ -984,6 +984,37 @@ No new Rust/Python types beyond what's captured — purely a PowerShell evidence
 extension, consistent with the existing `Capture-PaperSmokeEvidence.ps1` pattern (GET existing
 routes, write JSON to the evidence dir).
 
+Sub-patch `WATCHLIST-PROMO-V2-MULTI-SYMBOL-SMOKE-EVIDENCE-01` (Patch 11B) is now **CLOSED** —
+see below.
+
+**Implementation note (discrepancy from the sketch above):** the delivered capture writes the
+*raw* `GET /api/v1/strategy/multi-symbol-dispatch-summary` response verbatim to
+`multi_symbol_dispatch_summary.json` — there is no `multi-symbol-evidence-v1` wrapper envelope,
+no `captured_at_utc` field, and no combined `watchlist_status` payload. This matches the
+existing one-line-per-endpoint `Save-DaemonJson` pattern used by every other snapshot in
+`Capture-PaperSmokeEvidence.ps1`, keeping the capture fail-soft, read-only, and not mandatory
+for evidence-pack completeness. The combined wrapper sketched above is superseded by this
+simpler raw-capture approach and is not planned.
+
+`Review-PaperSmokeEvidence.ps1` reads this file via `Read-JsonSnapshot`, renders a
+"Multi-symbol dispatch summary" section (`truth_state`, `runtime_execution_mode`,
+`configured_symbol_count`, and per-symbol `current_qty`/`target_qty`/`delta`/`no_order_reason`/
+`last_decision_id`/`last_decision_disposition`/`day_order_count`/`day_order_limit`/
+`bar_staleness_secs`), and exposes the same data under `multi_symbol_dispatch_*` keys in
+`review_summary.json` (`schema_version` remains `review-v2`, additive only). A missing or
+daemon-unavailable snapshot is reported as "not captured"; an empty `per_symbol` with
+`truth_state = "no_snapshot"` is reported honestly as zero rows — neither is read as a
+healthy/passing trade, and `no_order_reason` values (including `b5_short_sale_guard`,
+`max_new_orders_per_tick_reached`, and `symbol_mismatch_skipped`, classified here as
+"blocked/skipped") are passed through verbatim. MS-EV-01..14 (script guards
+`test_capture_paper_smoke_evidence.ps1` / `test_paper_smoke_evidence_review.ps1`) and
+`test_multi_symbol_smoke_evidence.ps1` (G01-G16) cover this.
+
+This closes the evidence-capture/review portion of `MultiSymbolEvidenceSnapshot` only. Parent
+Patch 11 (`WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01`) — the real multi-symbol paper smoke
+end-to-end run, cap #13 PDT cross-symbol summation proof, and the rest of §9/§12 — remains
+`OPEN`.
+
 ---
 
 ## 5. Dispatch Loop Design — Nine Questions
@@ -1838,7 +1869,7 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Component: `PerSymbolTargetState` (§4.6) | **CLOSED** | Patch 8; in-memory-only `BTreeMap` on `AppState`, observability-only, no DB/API/GUI/risk-cap surface |
 | Component: `MultiSymbolRiskCaps` (§4.7) | OPEN (struct not implemented) | caps #2/#3/#4/#5/#6 delivered via lightweight env-var substitutes (Patches 5/6/7); the Patch 9 summary route surfaces existing runtime state but does not implement this struct |
 | Component: `MultiSymbolDispatchSummary` (§4.8) | **CLOSED** | Patch 9; `GET /api/v1/strategy/multi-symbol-dispatch-summary` exists, read-only, backed by AppState `PerSymbolTargetState`; no DB persistence, GUI, OMS overview expansion, or smoke/evidence script |
-| Component: `MultiSymbolEvidenceSnapshot` (§4.9) | OPEN | delivered by Patch 11 |
+| Component: `MultiSymbolEvidenceSnapshot` (§4.9) | **CLOSED (evidence-capture/review only)** | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-SMOKE-EVIDENCE-01` (Patch 11B): raw `multi_symbol_dispatch_summary.json` capture + "Multi-symbol dispatch summary" review section (no wrapper envelope, no `watchlist_status` combination — see §4.9 implementation note); real multi-symbol paper smoke proof remains in Patch 11 (`WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01`, OPEN) |
 | `b1c_symbol_mismatch_skipped` guard (`AppState::retain_targets_matching_symbol`) | **CLOSED (interim mitigation)** | Patch 4; drops any `TargetPosition` whose symbol does not match the dispatched assignment (proven M06/M07). Mitigates, but does not close, the per-symbol strategy bootstrap gap below |
 | Cap #1 `max_concurrent_symbols` | **CLOSED (construction-time only)** | Patch 2; `MultiSymbolRuntimeConfig.max_concurrent_symbols` validated against `MULTI_SYMBOL_HARD_CEILING` and `symbols.len()` at config-build time. Patch 4's loop dispatches every assignment in `multi_symbol_assignments` with no separate dispatch-time truncation against this field — no patch currently scheduled to add one |
 | Cap #2 `per_symbol_max_position_qty` | **CLOSED** | Patch 6 (`MQK_PER_SYMBOL_MAX_POSITION_QTY`, `AppState::clamp_targets_to_per_symbol_position_cap`, `b1c_target_qty_clamped_per_symbol_cap`, Discord alert dedup via `try_claim_per_symbol_position_cap_alert`) |
