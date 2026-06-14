@@ -233,6 +233,13 @@ pub struct AppState {
     /// entirely. Read once at construction; overridable via
     /// `set_per_symbol_max_position_qty_for_test`.
     per_symbol_max_position_qty: Arc<RwLock<Option<i64>>>,
+    /// MULTI-SYMBOL-CAPITAL-CAPS-01: Optional per-tick maximum number of
+    /// newly-accepted decisions (cap #6, design doc §6 "Cap #6 —
+    /// max_new_orders_per_tick"). `None` (the default, from an unset
+    /// `MQK_MAX_NEW_ORDERS_PER_TICK`) is unbounded — every configured symbol
+    /// is dispatched every tick (today's implicit behavior). Read once at
+    /// construction; overridable via `set_max_new_orders_per_tick_for_test`.
+    max_new_orders_per_tick: Arc<RwLock<Option<u32>>>,
     /// TV-01C: Artifact provenance accepted at the most recent run start.
     ///
     /// Populated by `start_execution_runtime` when artifact intake evaluates to
@@ -900,6 +907,9 @@ impl AppState {
             )),
             per_symbol_max_position_qty: Arc::new(RwLock::new(
                 signal_intake::per_symbol_max_position_qty_from_env(),
+            )),
+            max_new_orders_per_tick: Arc::new(RwLock::new(
+                signal_intake::max_new_orders_per_tick_from_env(),
             )),
             accepted_artifact: Arc::new(RwLock::new(None)),
             autonomous_session_truth: Arc::new(RwLock::new(AutonomousSessionTruth::Clear)),
@@ -1846,6 +1856,37 @@ operator_reconcile_or_repair_required"
             }
         }
         clamped
+    }
+
+    /// MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6 (`max_new_orders_per_tick`, design
+    /// doc §6): given the configured per-tick new-order cap and the number of
+    /// new orders already accepted earlier in this tick (artifact order,
+    /// design doc §5 Q4), returns the `no_order_reason` that should be applied
+    /// to the *next* symbol in iteration order, if it would otherwise produce
+    /// a new order.
+    ///
+    /// `cap = None` (the default, from an unset `MQK_MAX_NEW_ORDERS_PER_TICK`)
+    /// is unbounded — always returns `None` (no override; today's implicit
+    /// behavior, every configured symbol is dispatched every tick).
+    ///
+    /// `Some("max_new_orders_per_tick_reached")` once
+    /// `new_orders_this_tick >= cap` — the caller skips this symbol's decision
+    /// derivation/submission entirely for the remainder of the tick. The
+    /// symbol is **not lost**: its decisions are re-evaluated fresh next tick
+    /// from then-current bar/position state (design doc §6, "no queuing
+    /// mechanism is needed").
+    ///
+    /// `cap = Some(0)` means no new orders are accepted at all this tick — the
+    /// first symbol in iteration order already returns
+    /// `Some("max_new_orders_per_tick_reached")`.
+    pub fn max_new_orders_per_tick_reason(
+        new_orders_this_tick: u32,
+        cap: Option<u32>,
+    ) -> Option<&'static str> {
+        match cap {
+            Some(cap) if new_orders_this_tick >= cap => Some("max_new_orders_per_tick_reached"),
+            _ => None,
+        }
     }
 
     /// AUTON-SIGNAL-CONTEXT-01: Invoke `on_bar` with a pre-built DB-sourced window.

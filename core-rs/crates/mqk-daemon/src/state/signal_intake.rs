@@ -47,6 +47,21 @@ pub(super) fn per_symbol_max_position_qty_from_env() -> Option<i64> {
         .filter(|&n| n > 0)
 }
 
+/// MULTI-SYMBOL-CAPITAL-CAPS-01: Read the optional per-tick maximum number of
+/// newly-accepted decisions (cap #6, design doc §6 "Cap #6 —
+/// max_new_orders_per_tick") from `MQK_MAX_NEW_ORDERS_PER_TICK`.
+///
+/// `None` (unset or unparsable as a non-negative integer) disables cap #6
+/// entirely — this is the default, matching cap #6's `Option<u32> = None`
+/// default in design doc §6 (unbounded; every configured symbol is
+/// dispatched every tick, today's implicit behavior). `0` is a valid,
+/// parseable value — it means no new orders are accepted at all this tick.
+pub(super) fn max_new_orders_per_tick_from_env() -> Option<u32> {
+    std::env::var("MQK_MAX_NEW_ORDERS_PER_TICK")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
 /// Normalize a symbol for use as a `day_signal_count_by_symbol` key
 /// (trimmed, uppercased) so "aapl", "AAPL", and " AAPL " share one counter.
 fn normalize_symbol_key(symbol: &str) -> String {
@@ -176,6 +191,26 @@ impl AppState {
     /// Named `_for_test` to signal intent; never called in production code.
     pub fn set_per_symbol_max_position_qty_for_test(&self, cap: Option<i64>) {
         if let Ok(mut guard) = self.per_symbol_max_position_qty.try_write() {
+            *guard = cap;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // MULTI-SYMBOL-CAPITAL-CAPS-01: cap #6 per-tick new-order cap config
+    // -----------------------------------------------------------------------
+
+    /// Returns the configured per-tick maximum new-order count (cap #6), or
+    /// `None` if the cap is disabled (unbounded — the default).
+    pub async fn max_new_orders_per_tick(&self) -> Option<u32> {
+        *self.max_new_orders_per_tick.read().await
+    }
+
+    /// Test seam: override the configured per-tick new-order cap (cap #6),
+    /// bypassing `MQK_MAX_NEW_ORDERS_PER_TICK`.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    pub fn set_max_new_orders_per_tick_for_test(&self, cap: Option<u32>) {
+        if let Ok(mut guard) = self.max_new_orders_per_tick.try_write() {
             *guard = cap;
         }
     }

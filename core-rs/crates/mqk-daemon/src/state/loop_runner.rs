@@ -637,7 +637,41 @@ pub(super) fn spawn_execution_loop(
                             continue;
                         };
 
+                        // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6
+                        // (max_new_orders_per_tick, design doc §6): per-tick
+                        // counter of accepted decisions, incremented below as
+                        // each symbol's decisions are submitted. `None`
+                        // (MQK_MAX_NEW_ORDERS_PER_TICK unset) is unbounded —
+                        // the default, matching today's behavior where every
+                        // configured symbol is dispatched every tick.
+                        let max_new_orders_per_tick_cap =
+                            state_arc.max_new_orders_per_tick().await;
+                        let mut new_orders_this_tick: u32 = 0;
+
                         for (assignment, mut bar_result) in dispatch_results {
+                            // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6: once the
+                            // per-tick new-order cap is reached, remaining
+                            // symbols in this tick (artifact order, design doc
+                            // §5 Q4) are skipped entirely — re-evaluated fresh
+                            // next tick from then-current bar/position state
+                            // (no queuing mechanism needed).
+                            if let Some(reason) = AppState::max_new_orders_per_tick_reason(
+                                new_orders_this_tick,
+                                max_new_orders_per_tick_cap,
+                            ) {
+                                tracing::warn!(
+                                    run_id = %run_id,
+                                    symbol = %assignment.symbol,
+                                    new_orders_this_tick,
+                                    cap = ?max_new_orders_per_tick_cap,
+                                    no_order_reason = reason,
+                                    "b1c_symbol_skipped_max_new_orders_per_tick: per-tick \
+                                     new-order cap reached; symbol's decisions skipped \
+                                     this tick, re-evaluated next tick"
+                                );
+                                continue;
+                            }
+
                             // MULTI-SYMBOL-DISPATCH-LOOP-01 fail-closed symbol guard:
                             // the native strategy bootstrap's StrategyHost emits
                             // TargetPosition.symbol fixed at construction time from
@@ -830,6 +864,12 @@ pub(super) fn spawn_execution_loop(
                                 )
                                 .await;
                                 if outcome.accepted {
+                                    // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6:
+                                    // count this accepted decision toward
+                                    // the per-tick new-order cap so later
+                                    // symbols in this tick's iteration order
+                                    // can be skipped once the cap is reached.
+                                    new_orders_this_tick += 1;
                                     tracing::info!(
                                         run_id = %run_id,
                                         decision_id = %did,

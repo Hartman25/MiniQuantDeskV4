@@ -893,14 +893,15 @@ errors).
 **API/GUI:** read-only via new `MetricsDashboardResponse` per-symbol panel fields and
 `RiskScreen` (Phase 8).
 
-**Implementation note (Patches 5/6):** this `multi_symbol_risk_caps` JSON block was not built.
+**Implementation note (Patches 5/6/7):** this `multi_symbol_risk_caps` JSON block was not built.
 Caps #2 (`per_symbol_max_position_qty`), #3 (`per_symbol_max_notional_usd`), #4
-(`per_symbol_day_order_count_limit`), and #5 (`aggregate_gross_exposure_cap_usd`) were each
-delivered as a standalone `Option`-typed env var
-(`MQK_PER_SYMBOL_MAX_POSITION_QTY`/`MQK_PER_SYMBOL_MAX_NOTIONAL_USD`/`MQK_PER_SYMBOL_DAY_ORDER_LIMIT`/`MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD`),
-each `None`/disabled by default — see §10 dependency notes for Patches 5 and 6. This struct
-remains a design sketch; cap #6 (`max_new_orders_per_tick`, Patch 7) is its only remaining named
-consumer.
+(`per_symbol_day_order_count_limit`), #5 (`aggregate_gross_exposure_cap_usd`), and #6
+(`max_new_orders_per_tick`) were each delivered as a standalone `Option`-typed env var
+(`MQK_PER_SYMBOL_MAX_POSITION_QTY`/`MQK_PER_SYMBOL_MAX_NOTIONAL_USD`/`MQK_PER_SYMBOL_DAY_ORDER_LIMIT`/`MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD`/`MQK_MAX_NEW_ORDERS_PER_TICK`),
+each `None`/disabled by default — see §10 dependency notes for Patches 5, 6, and 7. This struct
+remains a design sketch with no named consumer scheduled to implement it; cap #9
+(`per_symbol_bar_staleness_secs`) and `max_concurrent_symbols` enforcement (cap #1's
+dispatch-time truncation) are the only fields not yet delivered via any pattern.
 
 ### 4.8 `MultiSymbolDispatchSummary`
 
@@ -1561,8 +1562,13 @@ default. Patch 6 (`MULTI-SYMBOL-CAPITAL-CAPS-01`) has also been implemented — 
 (`per_symbol_max_position_qty`), #3 (`per_symbol_max_notional_usd`), and #5
 (`aggregate_gross_exposure_cap_usd`) from §6, each via the same lightweight env-var pattern as
 Patch 5 (`MQK_PER_SYMBOL_MAX_POSITION_QTY`, `MQK_PER_SYMBOL_MAX_NOTIONAL_USD`,
-`MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD` respectively), disabled (`None`) by default. Patches 7-11
-remain `OPEN`; none have been started. The dependency graph determines minimum ordering; patches
+`MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD` respectively), disabled (`None`) by default. Patch 7
+(`MULTI-SYMBOL-TICK-ORDER-CAP-01`) has also been implemented and is CLOSED: cap #6
+(`max_new_orders_per_tick`) is enforced in the per-tick multi-symbol B1C loop via
+`MQK_MAX_NEW_ORDERS_PER_TICK`, with capped symbols skipped as
+`"max_new_orders_per_tick_reached"`. Patch 8 (`PER-SYMBOL-TARGET-STATE-01`) remains next/open.
+No GUI/API dispatch-summary route was added, no market smoke was run, and no live routing was
+enabled. Patches 8-11 remain `OPEN`; none have been started. The dependency graph determines minimum ordering; patches
 with no dependency on each other within a "tier" may be reordered relative to each other but not
 across tiers.
 
@@ -1669,8 +1675,14 @@ across tiers.
   unaffected — cap #5 tightens an existing constraint, it does not introduce one on its own. Proven
   by 19 tests (C2-01..C2-08, C3-01..C3-06, C5-01..C5-05,
   `scenario_multi_symbol_capital_caps_01.rs`). `MultiSymbolRiskCaps` as a struct remains not
-  implemented after this patch — cap #6 (Patch 7) is the only remaining consumer named in §4.7's
-  sketch.
+  implemented after this patch — cap #6 (Patch 7) was the only remaining consumer named in §4.7's
+  sketch before Patch 7 closed it. **Patch 7 implemented / CLOSED:** `MULTI-SYMBOL-TICK-ORDER-CAP-01`
+  adds cap #6 (`max_new_orders_per_tick`) as the standalone optional env var
+  `MQK_MAX_NEW_ORDERS_PER_TICK`, read once into `AppState` and checked before the symbol-mismatch
+  guard in each per-symbol B1C loop iteration. Once `new_orders_this_tick >= cap`, the symbol is
+  skipped with `"max_new_orders_per_tick_reached"` / `b1c_symbol_skipped_max_new_orders_per_tick`;
+  accepted decisions increment the per-tick counter. This patch did not add the API/GUI
+  dispatch-summary route, did not run market smoke, and did not enable live routing.
 - **Patch 8** depends on 4 (needs per-symbol loop iterations to populate from) but is
   independent of 5/6/7 — it could land in parallel with them. Listed after 5-7 only because the
   dispatch-summary route (9) benefits from all of 5/6/7/8 being present so it doesn't need a
@@ -1728,7 +1740,7 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Component: `PerSymbolBarWindow` (§4.4) | **CLOSED (take-once-clone-to-many, not keyed-map)** | Patch 3 (`per_symbol_bar_window.rs`) added the keyed-map foundation (unused); Patch 4 wired dispatch into `loop_runner.rs` via a different mechanism — `tick_strategy_dispatch_multi_symbol` takes the single `pending_strategy_bar_input` once per tick and `.clone()`s it to every configured symbol's `dispatch_native_strategy_for_symbol_with_bar` call, rather than using `PerSymbolPendingBarInputs`. `PerSymbolPendingBarInputs`/`PerSymbolBarWindow`/`PerSymbolLoadedBars` remain registered but unused |
 | Component: `PerSymbolStrategyDecision` seam (§4.5) | **CLOSED** | Patch 4; `bar_result_to_decisions` now called once per dispatched symbol inside `loop_runner.rs`'s per-assignment loop, sharing one `current_positions` snapshot (Q2) |
 | Component: `PerSymbolTargetState` (§4.6) | OPEN | delivered by Patch 8 |
-| Component: `MultiSymbolRiskCaps` (§4.7) | OPEN (struct not implemented) | caps #2/#3/#4/#5 delivered via lightweight env-var substitutes (Patches 5/6); cap #6 (Patch 7) is the only remaining named consumer of this §4.7 sketch |
+| Component: `MultiSymbolRiskCaps` (§4.7) | OPEN (struct not implemented) | caps #2/#3/#4/#5/#6 delivered via lightweight env-var substitutes (Patches 5/6/7); no GUI/API summary route was added |
 | Component: `MultiSymbolDispatchSummary` (§4.8) | OPEN | delivered by Patch 9 |
 | Component: `MultiSymbolEvidenceSnapshot` (§4.9) | OPEN | delivered by Patch 11 |
 | `b1c_symbol_mismatch_skipped` guard (`AppState::retain_targets_matching_symbol`) | **CLOSED (interim mitigation)** | Patch 4; drops any `TargetPosition` whose symbol does not match the dispatched assignment (proven M06/M07). Mitigates, but does not close, the per-symbol strategy bootstrap gap below |
@@ -1737,7 +1749,7 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Cap #3 `per_symbol_max_notional_usd` | **CLOSED (correct-but-dormant)** | Patch 6 (`MQK_PER_SYMBOL_MAX_NOTIONAL_USD`, Gate 1g, `SizingDeniedPerSymbolCap`, disposition `"rejected"`) — **honest gap unchanged:** unverifiable for market orders (B1C is market-only today); proven via synthetic limit-order decisions (C3-06) |
 | Cap #4 `per_symbol_day_order_count_limit` (Gate 1f) | **CLOSED** | Patch 5 (`day_signal_count_by_symbol`, `MQK_PER_SYMBOL_DAY_ORDER_LIMIT`, disposition `"symbol_day_limit_reached"`) |
 | Cap #5 `aggregate_gross_exposure_cap_usd` | **CLOSED** | Patch 6 (`MQK_AGGREGATE_GROSS_EXPOSURE_CAP_USD`, 5th parameter to `evaluate_portfolio_risk`/`evaluate_portfolio_risk_from_env`; tightens the effective portfolio notional cap when set, positive, and smaller than `max_portfolio_notional_usd`) |
-| Cap #6 `max_new_orders_per_tick` | OPEN | Patch 7 |
+| Cap #6 `max_new_orders_per_tick` | **CLOSED** | Patch 7 (`MULTI-SYMBOL-TICK-ORDER-CAP-01`, `MQK_MAX_NEW_ORDERS_PER_TICK`, `"max_new_orders_per_tick_reached"`); no market smoke run, no live routing enabled |
 | Cap #7 reconcile drift visibility | OPEN | Patch 9/10 — observability only, no halt-scope change |
 | Cap #8 B5 short-sale guard, multi-symbol proof | **CLOSED** | Patch 4, M08 (`try_claim_b5_alert` dedups independently per symbol; one symbol's claim does not block another's in the same tick). Enforcement was already correct (cap #8 pre-existing); this closes the multi-symbol proof originally deferred to Patch 11 |
 | Cap #9 `per_symbol_bar_staleness_secs` | **CLOSED (helper only, not enforced)** | Patch 3 (`classify_bar_staleness`); pure staleness classification helper added and proven (P05-P09). Patch 4 did **not** call this helper from the dispatch path — enforcement (`no_order_reason = "bar_data_stale"`) remains OPEN, no patch currently scheduled |
@@ -1745,7 +1757,8 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Cap #11 kill-switch propagation (documentation-only) | **PARKED by design** | account-wide by construction; no patch will change this |
 | Cap #12 `MULTI_SYMBOL_HARD_CEILING` | OPEN | Patch 1 |
 | Cap #13 PDT cross-symbol summation, proof | OPEN | proof in Patch 11; enforcement already correct |
-| Patches 1-6 (§10) | **CLOSED** (see per-patch notes above) | Patches 7-11 remain OPEN; none started |
+| Patch 7 `MULTI-SYMBOL-TICK-ORDER-CAP-01` (§10) | **CLOSED** | Cap #6 / `max_new_orders_per_tick` is CLOSED; no GUI/API summary route was added, no market smoke was run, no live routing was enabled |
+| Patches 1-7 (§10) | **CLOSED** (see per-patch notes above) | Patch 8 / `PER-SYMBOL-TARGET-STATE-01` remains next/open; Patches 8-11 remain OPEN; none started |
 
 ### Honest gaps and discrepancies surfaced by this design
 
@@ -1771,4 +1784,3 @@ added, removed, or modified other than this new file. Validation is scoped accor
 - **Stateful strategy implementations** are not verified safe for multi-symbol sequential
   dispatch (Q1 caveat) — Patch 4 must not be used with a stateful strategy until that is
   separately verified.
-
