@@ -177,7 +177,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         repair_halted_run_fill_plan, repair_halted_run_fill_rest_recovery,
         repair_halted_run_portfolio_snapshot, repair_outbox_ambiguous, repair_ws_gap_fill_recovery,
     };
-    use strategy::{strategy_signal, strategy_summary, strategy_suppressions};
+    use strategy::{
+        multi_symbol_dispatch_summary, strategy_signal, strategy_summary, strategy_suppressions,
+    };
     use system::{
         autonomous_readiness, health, status_handler, system_config_diffs,
         system_config_fingerprint, system_metadata, system_preflight, system_runtime_leadership,
@@ -251,6 +253,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/system/config-diffs", get(system_config_diffs))
         .route("/api/v1/strategy/summary", get(strategy_summary))
         .route("/api/v1/strategy/suppressions", get(strategy_suppressions))
+        .route(
+            "/api/v1/strategy/multi-symbol-dispatch-summary",
+            get(multi_symbol_dispatch_summary),
+        )
         .route(
             "/api/v1/audit/operator-actions",
             get(audit_operator_actions),

@@ -166,9 +166,11 @@ Push-Location $RepoRoot
 $RouteHits = @(git grep -n -e '/api/v1/strategy/multi-symbol-dispatch-summary' -e 'multi-symbol-dispatch-summary' -- 'core-rs/crates/mqk-daemon/src/routes' 'core-rs/crates/mqk-daemon/src/api_types.rs' 2>$null)
 Pop-Location
 if ($RouteHits.Count -eq 0) {
-    Assert-Pass "G12: no API route for multi-symbol dispatch summary added"
+    Assert-Pass "G12: no API route for multi-symbol dispatch summary added before Patch 9"
+} elseif ((Test-Path $DesignDoc) -and ((Get-Content $DesignDoc -Raw) -match 'MULTI-SYMBOL-DISPATCH-SUMMARY-01.*CLOSED')) {
+    Assert-Pass "G12: dispatch-summary route/API references are allowed because Patch 9 is CLOSED"
 } else {
-    Assert-Fail "G12: dispatch-summary route/API references found: $($RouteHits -join ' | ')"
+    Assert-Fail "G12: dispatch-summary route/API references found before Patch 9 closure: $($RouteHits -join ' | ')"
 }
 
 $GuiTouched = @($DiffNames | Where-Object { $_ -match '^core-rs/mqk-gui/' })
@@ -201,10 +203,10 @@ if (Test-Path $DesignDoc) {
     $DesignContent = Get-Content $DesignDoc -Raw
     if ($DesignContent -match 'PER-SYMBOL-TARGET-STATE-01.*CLOSED' -and
         $DesignContent -match 'PerSymbolTargetState.*in-memory' -and
-        $DesignContent -match 'MULTI-SYMBOL-DISPATCH-SUMMARY-01.*OPEN') {
-        Assert-Pass "G15: docs mark PER-SYMBOL-TARGET-STATE-01 as CLOSED and Patch 9 as next/open"
+        $DesignContent -match 'MULTI-SYMBOL-DISPATCH-SUMMARY-01.*(OPEN|CLOSED)') {
+        Assert-Pass "G15: docs mark PER-SYMBOL-TARGET-STATE-01 as CLOSED and track Patch 9 lifecycle"
     } else {
-        Assert-Fail "G15: design doc does not mark Patch 8 closed with Patch 9 open"
+        Assert-Fail "G15: design doc does not mark Patch 8 closed with Patch 9 lifecycle"
     }
 } else {
     Assert-Fail "G15: native_multi_symbol_dispatch.md not found at $DesignDoc"

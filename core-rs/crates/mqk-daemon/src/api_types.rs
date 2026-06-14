@@ -1099,6 +1099,37 @@ pub struct StrategySuppressionsResponse {
     pub rows: Vec<StrategySuppressionRow>,
 }
 
+/// Response wrapper for `GET /api/v1/strategy/multi-symbol-dispatch-summary`.
+///
+/// Read-only daemon runtime surface backed by in-memory
+/// [`crate::state::PerSymbolTargetState`] rows. Empty `per_symbol` with
+/// `truth_state = "no_snapshot"` means no target-state snapshot has been
+/// recorded yet; callers must not treat it as a successful zero-position state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MultiSymbolDispatchSummaryResponse {
+    pub canonical_route: String,
+    pub backend: String,
+    pub truth_state: String,
+    pub runtime_execution_mode: String,
+    pub configured_symbol_count: usize,
+    pub per_symbol: Vec<PerSymbolDispatchRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PerSymbolDispatchRow {
+    pub symbol: String,
+    pub strategy_id: String,
+    pub current_qty: i64,
+    pub target_qty: i64,
+    pub delta: i64,
+    pub no_order_reason: String,
+    pub last_decision_id: Option<String>,
+    pub last_decision_disposition: Option<String>,
+    pub day_order_count: u32,
+    pub day_order_limit: Option<u32>,
+    pub bar_staleness_secs: Option<i64>,
+}
+
 // ---------------------------------------------------------------------------
 // /api/v1/system/runtime-leadership
 // ---------------------------------------------------------------------------

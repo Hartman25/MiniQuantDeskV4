@@ -73,7 +73,8 @@ $Guards = @(
     'test_multi_symbol_day_order_cap.ps1',
     'test_multi_symbol_capital_caps.ps1',
     'test_multi_symbol_tick_order_cap.ps1',
-    'test_per_symbol_target_state.ps1'
+    'test_per_symbol_target_state.ps1',
+    'test_multi_symbol_dispatch_summary.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()

@@ -913,7 +913,7 @@ remains a design sketch with no named consumer scheduled to implement it; cap #9
 (`per_symbol_bar_staleness_secs`) and `max_concurrent_symbols` enforcement (cap #1's
 dispatch-time truncation) are the only fields not yet delivered via any pattern.
 
-### 4.8 `MultiSymbolDispatchSummary`
+### 4.8 `MultiSymbolDispatchSummary` — CLOSED by `MULTI-SYMBOL-DISPATCH-SUMMARY-01`
 
 **Purpose:** the primary new evidence surface — `GET /api/v1/strategy/multi-symbol-dispatch-summary`.
 
@@ -942,10 +942,20 @@ pub struct PerSymbolDispatchRow {
 }
 ```
 
-`truth_state = "legacy_single_symbol"` when `MultiSymbolConfigSource::EnvSingleSymbolFallback` —
-existing single-symbol deployments see this value, **not** `"active"`, per gui_rules.md (a
-distinct state, not a synonym for "active"). `truth_state = "no_snapshot"` before the first tick
-completes (mirrors `OmsOverviewResponse`'s existing pattern).
+**Patch 9 implementation:** `GET /api/v1/strategy/multi-symbol-dispatch-summary` exists and
+returns this response shape. It is read-only and backed by the daemon's in-memory
+`AppState::per_symbol_target_states()` map (§4.6). `backend` is exactly
+`"daemon.runtime_state"`; no DB persistence, migration, broker call, OMS call, GUI change, or
+smoke/evidence script was added. `day_order_count` / `day_order_limit` are wired from the existing
+in-memory per-symbol day-order counter and limit accessors; `bar_staleness_secs` remains `None`
+until a trusted current per-symbol staleness source is wired. `configured_symbol_count` and
+`runtime_execution_mode` are derived from observed target-state rows in Patch 9; the route does
+not reread env/watchlist config at request time.
+
+`truth_state = "active"` when rows exist. `truth_state = "no_snapshot"` before any per-symbol
+target-state row is recorded; empty rows are not treated as success. The design value
+`"legacy_single_symbol"` remains reserved for the point where the daemon stores the current
+`MultiSymbolConfigSource` in AppState; Patch 9 does not fabricate it from request-time env reads.
 
 ### 4.9 `MultiSymbolEvidenceSnapshot`
 
@@ -1344,14 +1354,20 @@ pub symbol_assignments: Option<Vec<String>>, // symbols this strategy_id is assi
 under this config shape" from "assigned to zero symbols," per gui_rules.md's
 unavailable/empty/present distinction.
 
-### 7.3 New route: `GET /api/v1/strategy/multi-symbol-dispatch-summary`
+### 7.3 New route: `GET /api/v1/strategy/multi-symbol-dispatch-summary` — CLOSED
 
-Returns `MultiSymbolDispatchSummaryResponse` (§4.8). `truth_state` values:
-`"no_snapshot"` (before first tick) | `"active"` (multi-symbol config loaded and at least one
-tick completed) | `"legacy_single_symbol"` (env-fallback config, §4.1). Backend:
-`"daemon.runtime_state"` (in-memory `PerSymbolTargetState`, §4.6) plus, when day-order-count
-fields are populated, `"+postgres"` (day-rollover counters persisted alongside the existing
-account-wide `day_signal_count`).
+`GET /api/v1/strategy/multi-symbol-dispatch-summary` exists. It returns
+`MultiSymbolDispatchSummaryResponse` (§4.8). `truth_state` values:
+`"no_snapshot"` (no in-memory target-state rows yet) | `"active"` (rows exist). The design value
+`"legacy_single_symbol"` remains reserved until the current config source is available from
+AppState without rereading env/watchlist files. Backend is `"daemon.runtime_state"` only: rows come from in-memory
+`PerSymbolTargetState` (§4.6), day-order visibility comes from existing in-memory AppState
+counters, and no Postgres persistence is involved.
+
+This patch deliberately does **not** add GUI fields, `OmsOverviewResponse` expansion, watchlist
+promotion changes, or paper-smoke evidence capture. Patch 10
+(`MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01`) remains next/open, and Patch 11
+(`WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01`) remains open.
 
 ### 7.4 `OmsOverviewResponse` (`api_types.rs:2070+`) — extend
 
@@ -1578,10 +1594,13 @@ Patch 5 (`MQK_PER_SYMBOL_MAX_POSITION_QTY`, `MQK_PER_SYMBOL_MAX_NOTIONAL_USD`,
 `MQK_MAX_NEW_ORDERS_PER_TICK`, with capped symbols skipped as
 `"max_new_orders_per_tick_reached"`. Patch 8 (`PER-SYMBOL-TARGET-STATE-01`) has also been
 implemented and is CLOSED: `AppState` now owns an in-memory `PerSymbolTargetState` map that records
-per-symbol target diagnostics and last internal-decision outcome for observability only. No DB
-persistence, migration, API route, GUI surface, new risk cap, market smoke, or live routing was
-added. Patch 9 (`MULTI-SYMBOL-DISPATCH-SUMMARY-01`) remains next/open; Patches 9-11 remain `OPEN`;
-none have been started. The dependency graph determines minimum ordering; patches
+per-symbol target diagnostics and last internal-decision outcome for observability only. Patch 9
+(`MULTI-SYMBOL-DISPATCH-SUMMARY-01`) has also been implemented and is CLOSED:
+`GET /api/v1/strategy/multi-symbol-dispatch-summary` exists as a read-only daemon API backed by
+the in-memory `PerSymbolTargetState` map, with no DB persistence, GUI surface, OMS overview
+expansion, smoke/evidence script, market smoke, or live routing added. Patch 10
+(`MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01`) remains next/open; Patch 11
+(`WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01`) remains `OPEN`. The dependency graph determines minimum ordering; patches
 with no dependency on each other within a "tier" may be reordered relative to each other but not
 across tiers.
 
@@ -1595,9 +1614,9 @@ across tiers.
 | 6 | `MULTI-SYMBOL-CAPITAL-CAPS-01` | 4 | §6 caps #2/#3/#5 (clamp+alert, `position_sizing.rs` per-symbol/aggregate checks) |
 | 7 | `MULTI-SYMBOL-TICK-ORDER-CAP-01` | 4 | §6 cap #6 (`max_new_orders_per_tick`, `"max_new_orders_per_tick_reached"`) |
 | 8 | `PER-SYMBOL-TARGET-STATE-01` | 4 | §4.6 (`PerSymbolTargetState` in-memory map) — **CLOSED** |
-| 9 | `MULTI-SYMBOL-DISPATCH-SUMMARY-01` | 5, 6, 7, 8 | §4.8, §7.3 (`MultiSymbolDispatchSummaryResponse`, new route) |
-| 10 | `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` | 9 | §7.4-§7.7, §8.1-§8.8 (`OmsOverviewResponse.per_symbol_status`, `MetricsDashboardResponse.per_symbol_exposure`, `AlertsActiveResponse.symbol`, all 8 GUI screens) |
-| 11 | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` | 1, 9, 10 | §4.2 promotion-side (`watchlist_promotion.py` v2 gate logic, caps #8/#13 missing-proof tests), §9 (`MULTI-SYMBOL-PAPER-SMOKE-RUNNER-01`) |
+| 9 | `MULTI-SYMBOL-DISPATCH-SUMMARY-01` | 5, 6, 7, 8 | §4.8, §7.3 (`MultiSymbolDispatchSummaryResponse`, new route) — **CLOSED** |
+| 10 | `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` | 9 | §7.4-§7.7, §8.1-§8.8 (`OmsOverviewResponse.per_symbol_status`, `MetricsDashboardResponse.per_symbol_exposure`, `AlertsActiveResponse.symbol`, all 8 GUI screens) — **OPEN / NEXT** |
+| 11 | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` | 1, 9, 10 | §4.2 promotion-side (`watchlist_promotion.py` v2 gate logic, caps #8/#13 missing-proof tests), §9 (`MULTI-SYMBOL-PAPER-SMOKE-RUNNER-01`) — **OPEN** |
 
 ### Dependency notes
 
@@ -1759,8 +1778,8 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Component: `PerSymbolBarWindow` (§4.4) | **CLOSED (take-once-clone-to-many, not keyed-map)** | Patch 3 (`per_symbol_bar_window.rs`) added the keyed-map foundation (unused); Patch 4 wired dispatch into `loop_runner.rs` via a different mechanism — `tick_strategy_dispatch_multi_symbol` takes the single `pending_strategy_bar_input` once per tick and `.clone()`s it to every configured symbol's `dispatch_native_strategy_for_symbol_with_bar` call, rather than using `PerSymbolPendingBarInputs`. `PerSymbolPendingBarInputs`/`PerSymbolBarWindow`/`PerSymbolLoadedBars` remain registered but unused |
 | Component: `PerSymbolStrategyDecision` seam (§4.5) | **CLOSED** | Patch 4; `bar_result_to_decisions` now called once per dispatched symbol inside `loop_runner.rs`'s per-assignment loop, sharing one `current_positions` snapshot (Q2) |
 | Component: `PerSymbolTargetState` (§4.6) | **CLOSED** | Patch 8; in-memory-only `BTreeMap` on `AppState`, observability-only, no DB/API/GUI/risk-cap surface |
-| Component: `MultiSymbolRiskCaps` (§4.7) | OPEN (struct not implemented) | caps #2/#3/#4/#5/#6 delivered via lightweight env-var substitutes (Patches 5/6/7); no GUI/API summary route was added |
-| Component: `MultiSymbolDispatchSummary` (§4.8) | OPEN | delivered by Patch 9; next/open after Patch 8 |
+| Component: `MultiSymbolRiskCaps` (§4.7) | OPEN (struct not implemented) | caps #2/#3/#4/#5/#6 delivered via lightweight env-var substitutes (Patches 5/6/7); the Patch 9 summary route surfaces existing runtime state but does not implement this struct |
+| Component: `MultiSymbolDispatchSummary` (§4.8) | **CLOSED** | Patch 9; `GET /api/v1/strategy/multi-symbol-dispatch-summary` exists, read-only, backed by AppState `PerSymbolTargetState`; no DB persistence, GUI, OMS overview expansion, or smoke/evidence script |
 | Component: `MultiSymbolEvidenceSnapshot` (§4.9) | OPEN | delivered by Patch 11 |
 | `b1c_symbol_mismatch_skipped` guard (`AppState::retain_targets_matching_symbol`) | **CLOSED (interim mitigation)** | Patch 4; drops any `TargetPosition` whose symbol does not match the dispatched assignment (proven M06/M07). Mitigates, but does not close, the per-symbol strategy bootstrap gap below |
 | Cap #1 `max_concurrent_symbols` | **CLOSED (construction-time only)** | Patch 2; `MultiSymbolRuntimeConfig.max_concurrent_symbols` validated against `MULTI_SYMBOL_HARD_CEILING` and `symbols.len()` at config-build time. Patch 4's loop dispatches every assignment in `multi_symbol_assignments` with no separate dispatch-time truncation against this field — no patch currently scheduled to add one |
@@ -1777,7 +1796,8 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Cap #12 `MULTI_SYMBOL_HARD_CEILING` | OPEN | Patch 1 |
 | Cap #13 PDT cross-symbol summation, proof | OPEN | proof in Patch 11; enforcement already correct |
 | Patch 7 `MULTI-SYMBOL-TICK-ORDER-CAP-01` (§10) | **CLOSED** | Cap #6 / `max_new_orders_per_tick` is CLOSED; no GUI/API summary route was added, no market smoke was run, no live routing was enabled |
-| Patches 1-8 (§10) | **CLOSED** (see per-patch notes above) | Patch 9 / `MULTI-SYMBOL-DISPATCH-SUMMARY-01` remains next/open; Patches 9-11 remain OPEN; none started |
+| Patch 9 `MULTI-SYMBOL-DISPATCH-SUMMARY-01` (§10) | **CLOSED** | Read-only API visibility only; Patch 10 / `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` remains next/open; Patch 11 remains OPEN |
+| Patches 1-9 (§10) | **CLOSED** (see per-patch notes above) | Patch 10 / `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` remains next/open; Patch 11 / `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` remains OPEN |
 
 ### Honest gaps and discrepancies surfaced by this design
 
@@ -1796,6 +1816,9 @@ added, removed, or modified other than this new file. Validation is scoped accor
   `scenario_multi_symbol_capital_caps_01.rs`). "Patch 6 is CLOSED" does not mean "cap #3 is
   enforced in production paper trading today" — B1C still emits `order_type="market"` exclusively,
   so Gate 1g never trips on a real B1C-originated decision until limit-order support exists.
+- **True per-symbol strategy bootstrap remains open**: Patch 4 dispatches one configured strategy
+  sequentially across symbols and uses the symbol-mismatch guard as an interim mitigation. It does
+  not instantiate independent strategy hosts per `(symbol, strategy_id)` pair.
 - **Heterogeneous strategies-per-symbol** (different `strategy_id` per symbol in the same run)
   is explicitly out of scope (§0) — this design only supports one strategy assigned to up to
   `MULTI_SYMBOL_HARD_CEILING` symbols. Lifting the Tier A `StrategyHost` single-registration

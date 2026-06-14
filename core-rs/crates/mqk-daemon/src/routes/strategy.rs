@@ -1,6 +1,7 @@
 //! Strategy route handlers.
 //!
-//! Contains: strategy_summary (via summary), strategy_suppressions, strategy_signal.
+//! Contains: strategy_summary (via summary), multi_symbol_dispatch_summary,
+//! strategy_suppressions, strategy_signal.
 
 // MT-07E: strategy summary handler extracted to reduce file size.
 mod summary;
@@ -16,8 +17,8 @@ use axum::{
 };
 
 use crate::api_types::{
-    StrategySignalRequest, StrategySignalResponse, StrategySuppressionRow,
-    StrategySuppressionsResponse,
+    MultiSymbolDispatchSummaryResponse, PerSymbolDispatchRow, StrategySignalRequest,
+    StrategySignalResponse, StrategySuppressionRow, StrategySuppressionsResponse,
 };
 use mqk_integrity::CalendarSpec;
 
@@ -40,6 +41,9 @@ use chrono::Utc;
 /// all outbox rows are claimed and dispatched unconditionally.  The value is
 /// metadata for audit and tracing only.
 pub(crate) const OUTBOX_SIGNAL_SOURCE: &str = "external_signal_ingestion";
+
+pub(crate) const MULTI_SYMBOL_DISPATCH_SUMMARY_ROUTE: &str =
+    "/api/v1/strategy/multi-symbol-dispatch-summary";
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/strategy/suppressions
@@ -100,6 +104,65 @@ pub(crate) async fn strategy_suppressions(State(st): State<Arc<AppState>>) -> im
         }),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/strategy/multi-symbol-dispatch-summary
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn multi_symbol_dispatch_summary(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let response = build_dispatch_summary_response(&st).await;
+    (StatusCode::OK, Json(response))
+}
+
+pub(crate) async fn build_dispatch_summary_response(
+    state: &AppState,
+) -> MultiSymbolDispatchSummaryResponse {
+    let target_states = state.per_symbol_target_states().await;
+    let configured_symbol_count = target_states.len();
+    let runtime_execution_mode = match configured_symbol_count {
+        0 => "unknown",
+        1 => "single_symbol",
+        _ => "multi_symbol",
+    }
+    .to_string();
+    let truth_state = if target_states.is_empty() {
+        "no_snapshot"
+    } else {
+        "active"
+    }
+    .to_string();
+
+    let day_order_limit = state.per_symbol_day_order_limit().await;
+    let mut per_symbol = Vec::with_capacity(target_states.len());
+    for row in target_states {
+        per_symbol.push(PerSymbolDispatchRow {
+            day_order_count: state.symbol_day_order_count(&row.symbol).await,
+            day_order_limit,
+            // Cap #9 has a classification helper, but no trusted current
+            // in-memory per-symbol staleness source is wired into this route.
+            bar_staleness_secs: None,
+            symbol: row.symbol,
+            strategy_id: row.strategy_id,
+            current_qty: row.current_qty,
+            target_qty: row.target_qty,
+            delta: row.delta,
+            no_order_reason: row.no_order_reason,
+            last_decision_id: row.last_decision_id,
+            last_decision_disposition: row.last_decision_disposition,
+        });
+    }
+
+    MultiSymbolDispatchSummaryResponse {
+        canonical_route: MULTI_SYMBOL_DISPATCH_SUMMARY_ROUTE.to_string(),
+        backend: "daemon.runtime_state".to_string(),
+        truth_state,
+        runtime_execution_mode,
+        configured_symbol_count,
+        per_symbol,
+    }
 }
 
 // ---------------------------------------------------------------------------
