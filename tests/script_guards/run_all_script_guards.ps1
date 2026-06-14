@@ -77,7 +77,8 @@ $Guards = @(
     'test_multi_symbol_dispatch_summary.ps1',
     'test_multi_symbol_oms_overview_gui.ps1',
     'test_watchlist_promo_v2_multi_symbol.ps1',
-    'test_multi_symbol_smoke_evidence.ps1'
+    'test_multi_symbol_smoke_evidence.ps1',
+    'test_pdt_cross_symbol_summation.ps1'
 )
 
 $Results = [System.Collections.Generic.List[object]]::new()

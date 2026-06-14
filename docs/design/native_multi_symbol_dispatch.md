@@ -1015,6 +1015,17 @@ Patch 11 (`WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01`) — the real multi-sym
 end-to-end run, cap #13 PDT cross-symbol summation proof, and the rest of §9/§12 — remains
 `OPEN`.
 
+**`PDT-CROSS-SYMBOL-SUMMATION-PROOF-01` (Patch 11C) is now CLOSED** — see §6 cap #13 and §12 for
+detail. Sub-patch 11C added `core-rs/crates/mqk-risk/tests/scenario_pdt_cross_symbol_summation_01.rs`
+(PDT-X01..X10) proving that `mqk_risk::pdt` day-trade accounting is account-wide: 2 day trades on
+AAPL + 2 day trades on MSFT sum to 4 total account day trades and trip
+`PDT_DAY_TRADE_THRESHOLD` identically to 4 day trades on a single symbol, while 2 AAPL + 1 MSFT
+(total 3) remains untripped. No per-symbol PDT limit was introduced (`record_day_trade` /
+`evaluate_pdt` / `PdtState` / `PdtPolicy` remain exhaustively unchanged — proven via exhaustive
+struct destructuring), and no runtime/broker/OMS/GUI/smoke-script changes were made. Parent Patch
+11 (`WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01`) remains `PARTIAL`/`OPEN` — the real
+multi-symbol paper smoke end-to-end run (`MULTI-SYMBOL-PAPER-SMOKE-END-TO-END-01`) is next/open.
+
 ---
 
 ## 5. Dispatch Loop Design — Nine Questions
@@ -1354,6 +1365,17 @@ implementer must *not* silently overturn (e.g. by "helpfully" adding per-symbol 
   **sum** across symbols, not from each symbol's individual count of 2 (each "under threshold"
   alone). Today's PDT tests are single-symbol, so this cross-symbol summation has never been
   exercised with N>1.
+- **Patch 11C implemented / CLOSED** (`PDT-CROSS-SYMBOL-SUMMATION-PROOF-01`):
+  `core-rs/crates/mqk-risk/tests/scenario_pdt_cross_symbol_summation_01.rs` adds PDT-X01..X10.
+  2 AAPL day trades + 2 MSFT day trades fed into one shared `PdtState` (via `record_day_trade`,
+  which takes no symbol parameter) sum to 4 total account day trades and flag `flagged_pdt`
+  identically to 4 same-symbol day trades (PDT-X01..X03); 2 AAPL + 2 MSFT below-per-symbol
+  thresholds still trips the account-wide rule (PDT-X04); 2 AAPL + 1 MSFT (total 3) remains
+  untripped (PDT-X05); symbol order does not change the result (PDT-X06); a same-day round trip
+  counts as one day trade (PDT-X07); the 4 = 2 + 2 decomposition is genuine, not collapsed
+  (PDT-X08); exhaustive destructuring of `PdtPolicy`/`PdtState`/`PdtContext` proves no per-symbol
+  field or live-routing authority was introduced (PDT-X09/X10). Test-only — no production code
+  changed; enforcement was already correct.
 
 ---
 
@@ -1699,8 +1721,9 @@ across tiers.
 | 8 | `PER-SYMBOL-TARGET-STATE-01` | 4 | §4.6 (`PerSymbolTargetState` in-memory map) — **CLOSED** |
 | 9 | `MULTI-SYMBOL-DISPATCH-SUMMARY-01` | 5, 6, 7, 8 | §4.8, §7.3 (`MultiSymbolDispatchSummaryResponse`, new route) — **CLOSED** |
 | 10 | `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` | 9 | §8.1a (read-only "Multi-symbol dispatch summary" panel on `StrategyScreen`, consuming the existing §7.3/§4.8 route) — **CLOSED**. §7.4-§7.7, §8.2-§8.8 (`OmsOverviewResponse.per_symbol_status`, `MetricsDashboardResponse.per_symbol_exposure`, `AlertsActiveResponse.symbol`, remaining per-screen additions) were not implemented and remain open design (no patch assigned) |
-| 11 | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` | 1, 9, 10, 11a | §9 (`MULTI-SYMBOL-PAPER-SMOKE-RUNNER-01`), caps #8/#13 missing-proof tests — **OPEN**. §4.2 promotion-side gate logic closed via sub-patch 11a (`WATCHLIST-PROMO-V2-MULTI-SYMBOL-01`) |
+| 11 | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-AND-SMOKE-01` | 1, 9, 10, 11a | §9 (`MULTI-SYMBOL-PAPER-SMOKE-RUNNER-01`, i.e. `MULTI-SYMBOL-PAPER-SMOKE-END-TO-END-01`) — **OPEN/PARTIAL**. §4.2 promotion-side gate logic closed via sub-patch 11a; caps #8/#13 missing-proof tests closed via Patch 4 (M08) and sub-patch 11c respectively |
 | 11a | `WATCHLIST-PROMO-V2-MULTI-SYMBOL-01` | 1 | §4.2 promotion-side gate logic only (`research-py/src/mqk_research/scanner/watchlist_promotion.py`: `_is_watchlist_v2`, `_selected_symbols_for_promotion`, `_v2_effective_symbol_limit`, Gate 4b, per-symbol Gates 5/6); `watchlist-v1` unchanged — **CLOSED** |
+| 11c | `PDT-CROSS-SYMBOL-SUMMATION-PROOF-01` | 1, 9, 10, 11a | §6 cap #13 proof only (`core-rs/crates/mqk-risk/tests/scenario_pdt_cross_symbol_summation_01.rs`, PDT-X01..X10); test-only, no production code changed — **CLOSED** |
 
 ### Dependency notes
 
@@ -1828,8 +1851,12 @@ across tiers.
   three missing-proof tests (Q9's `approved_for_live` regression test, cap #8's multi-symbol B5
   independence test, cap #13's PDT cross-symbol summation test). Cap #8's proof was pulled forward
   into Patch 4 (M08, `try_claim_b5_alert` per-symbol independence) since the per-symbol dispatch
-  loop needed to exist for it to be meaningful and Patch 4 built that loop. Patch 11 still carries
-  Q9's regression test and cap #13's PDT cross-symbol summation test.
+  loop needed to exist for it to be meaningful and Patch 4 built that loop. Cap #13's PDT
+  cross-symbol summation test was pulled forward into sub-patch 11c
+  (`PDT-CROSS-SYMBOL-SUMMATION-PROOF-01`, CLOSED) since it only required the existing
+  `mqk_risk::pdt` API and did not depend on the smoke-runner. Patch 11 still carries Q9's
+  regression test and the real multi-symbol paper smoke end-to-end run
+  (`MULTI-SYMBOL-PAPER-SMOKE-END-TO-END-01`).
 
 ---
 
@@ -1883,7 +1910,7 @@ added, removed, or modified other than this new file. Validation is scoped accor
 | Cap #10 deadman TTL (documentation-only) | **PARKED by design** | account-wide by construction; no patch will change this |
 | Cap #11 kill-switch propagation (documentation-only) | **PARKED by design** | account-wide by construction; no patch will change this |
 | Cap #12 `MULTI_SYMBOL_HARD_CEILING` | OPEN | Patch 1 |
-| Cap #13 PDT cross-symbol summation, proof | OPEN | proof in Patch 11; enforcement already correct |
+| Cap #13 PDT cross-symbol summation, proof | **CLOSED** | Patch 11c (`PDT-CROSS-SYMBOL-SUMMATION-PROOF-01`); `scenario_pdt_cross_symbol_summation_01.rs` (PDT-X01..X10): 2 AAPL + 2 MSFT day trades = 4 account day trades, trips `PDT_DAY_TRADE_THRESHOLD` identically to 4 same-symbol day trades; enforcement was already correct, no production code changed |
 | Patch 7 `MULTI-SYMBOL-TICK-ORDER-CAP-01` (§10) | **CLOSED** | Cap #6 / `max_new_orders_per_tick` is CLOSED; no GUI/API summary route was added, no market smoke was run, no live routing was enabled |
 | Patch 9 `MULTI-SYMBOL-DISPATCH-SUMMARY-01` (§10) | **CLOSED** | Read-only API visibility only; Patch 10 / `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` is also **CLOSED** (§8.1a, consumes this route verbatim); Patch 11 remains OPEN |
 | Patch 10 `MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01` (§10) | **CLOSED** | Read-only "Multi-symbol dispatch summary" panel on `StrategyScreen` (§8.1a); no backend change; §7.4-§7.7/§8.2-§8.8 expansions not implemented and remain open design (no patch assigned) |
