@@ -797,6 +797,9 @@ impl AppState {
         self.reset_signal_blocked_alert_state();
         // AUTON-NO-TRADE-01: reset bar-tick counters alongside signal counter.
         self.reset_bar_tick_counters();
+        // PER-SYMBOL-TARGET-STATE-01: clear observability-only target state at
+        // the same run-start boundary as other in-memory per-run tracking.
+        self.clear_per_symbol_target_states().await;
 
         // TV-01C: capture artifact provenance at run start.
         //

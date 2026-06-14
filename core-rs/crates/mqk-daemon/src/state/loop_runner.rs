@@ -32,7 +32,7 @@ use super::types::{
 };
 use crate::notify::CriticalAlertPayload;
 
-use super::{AppState, DEADMAN_TTL_SECONDS, EXECUTION_LOOP_INTERVAL};
+use super::{AppState, PerSymbolTargetState, DEADMAN_TTL_SECONDS, EXECUTION_LOOP_INTERVAL};
 
 // ---------------------------------------------------------------------------
 // spawn_execution_loop
@@ -649,26 +649,41 @@ pub(super) fn spawn_execution_loop(
                         let mut new_orders_this_tick: u32 = 0;
 
                         for (assignment, mut bar_result) in dispatch_results {
+                            let strategy_id = bar_result.spec.name.clone();
                             // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6: once the
                             // per-tick new-order cap is reached, remaining
                             // symbols in this tick (artifact order, design doc
                             // §5 Q4) are skipped entirely — re-evaluated fresh
                             // next tick from then-current bar/position state
                             // (no queuing mechanism needed).
-                            if let Some(reason) = AppState::max_new_orders_per_tick_reason(
+                            if AppState::max_new_orders_per_tick_reason(
                                 new_orders_this_tick,
                                 max_new_orders_per_tick_cap,
-                            ) {
+                            )
+                            .is_some()
+                            {
+                                let no_order_reason = "max_new_orders_per_tick_reached";
                                 tracing::warn!(
                                     run_id = %run_id,
                                     symbol = %assignment.symbol,
                                     new_orders_this_tick,
                                     cap = ?max_new_orders_per_tick_cap,
-                                    no_order_reason = reason,
+                                    no_order_reason,
                                     "b1c_symbol_skipped_max_new_orders_per_tick: per-tick \
                                      new-order cap reached; symbol's decisions skipped \
                                      this tick, re-evaluated next tick"
                                 );
+                                let current =
+                                    current_positions.get(&assignment.symbol).copied().unwrap_or(0);
+                                state_arc
+                                    .record_per_symbol_target_state(build_per_symbol_target_state(
+                                        assignment.symbol.clone(),
+                                        assignment.strategy_id.clone(),
+                                        current,
+                                        current,
+                                        no_order_reason,
+                                    ))
+                                    .await;
                                 continue;
                             }
 
@@ -696,6 +711,23 @@ pub(super) fn spawn_execution_loop(
                                      symbol does not match the dispatched assignment; \
                                      per-symbol strategy bootstrap not yet implemented"
                                 );
+                                if bar_result.intents.output.targets.is_empty() {
+                                    let current = current_positions
+                                        .get(&assignment.symbol)
+                                        .copied()
+                                        .unwrap_or(0);
+                                    state_arc
+                                        .record_per_symbol_target_state(
+                                            build_per_symbol_target_state(
+                                                assignment.symbol.clone(),
+                                                strategy_id.clone(),
+                                                current,
+                                                current,
+                                                "symbol_mismatch_skipped",
+                                            ),
+                                        )
+                                        .await;
+                                }
                             }
 
                             // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #2
@@ -773,14 +805,30 @@ pub(super) fn spawn_execution_loop(
                                 .sum();
                             state_arc.record_bar_tick_outcome(raw_signal_qty);
 
+                            if bar_result.intents.output.targets.is_empty() && dropped == 0 {
+                                let current =
+                                    current_positions.get(&assignment.symbol).copied().unwrap_or(0);
+                                state_arc
+                                    .record_per_symbol_target_state(build_per_symbol_target_state(
+                                        assignment.symbol.clone(),
+                                        strategy_id.clone(),
+                                        current,
+                                        current,
+                                        "no_decisions",
+                                    ))
+                                    .await;
+                            }
+
                             // STRATEGY-SIZING-AND-EXIT-AUDIT-01: log target vs current
                             // position diagnostics before computing decisions.  This surfaces
                             // the no_order_reason=already_at_target case in operator logs.
                             // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: fire one Discord alert
                             // per (run, symbol) when B5 short-sale guard blocks a sell.
                             for t in &bar_result.intents.output.targets {
-                                let current = current_positions.get(&t.symbol).copied().unwrap_or(0);
-                                let delta = t.qty - current;
+                                let symbol = t.symbol.clone();
+                                let target_qty = t.qty;
+                                let current = current_positions.get(&symbol).copied().unwrap_or(0);
+                                let delta = target_qty - current;
                                 let no_order_reason = if delta == 0 {
                                     "already_at_target"
                                 } else if delta < 0 && (current <= 0 || (-delta) > current) {
@@ -797,14 +845,22 @@ pub(super) fn spawn_execution_loop(
                                     no_order_reason,
                                     "b1c_position_delta_diagnostic"
                                 );
+                                state_arc
+                                    .record_per_symbol_target_state(build_per_symbol_target_state(
+                                        symbol.clone(),
+                                        strategy_id.clone(),
+                                        current,
+                                        target_qty,
+                                        no_order_reason,
+                                    ))
+                                    .await;
                                 if no_order_reason == "b5_short_sale_guard"
-                                    && state_arc.try_claim_b5_alert(&t.symbol).await
+                                    && state_arc.try_claim_b5_alert(&symbol).await
                                 {
                                     let notifier = state_arc.discord_notifier.clone();
                                     let env = Some(
                                         state_arc.deployment_mode().as_api_label().to_string(),
                                     );
-                                    let symbol = t.symbol.clone();
                                     let run_id_short = format!("{:.8}", run_id.to_string());
                                     let qty_to_sell = -delta;
                                     let ts = chrono::Utc::now().to_rfc3339(); // allow: ops-metadata notification timestamp
@@ -858,11 +914,45 @@ pub(super) fn spawn_execution_loop(
                             for decision in decisions {
                                 let did = decision.decision_id.clone();
                                 let sid = decision.strategy_id.clone();
+                                let decision_symbol = decision.symbol.clone();
+                                let decision_side = decision.side.clone();
+                                let decision_qty = decision.qty;
                                 let outcome = crate::decision::submit_internal_strategy_decision(
                                     &state_arc,
                                     decision,
                                 )
                                 .await;
+                                let mut target_state = state_arc
+                                    .per_symbol_target_state_for_symbol(&decision_symbol)
+                                    .await
+                                    .unwrap_or_else(|| {
+                                        let current = current_positions
+                                            .get(&decision_symbol)
+                                            .copied()
+                                            .unwrap_or(0);
+                                        let target = match decision_side
+                                            .trim()
+                                            .to_ascii_lowercase()
+                                            .as_str()
+                                        {
+                                            "sell" => current - decision_qty,
+                                            _ => current + decision_qty,
+                                        };
+                                        build_per_symbol_target_state(
+                                            decision_symbol.clone(),
+                                            sid.clone(),
+                                            current,
+                                            target,
+                                            "order_will_be_submitted",
+                                        )
+                                    });
+                                target_state.last_decision_id = Some(did.clone());
+                                target_state.last_decision_disposition =
+                                    Some(outcome.disposition.clone());
+                                target_state.updated_at_utc = Utc::now().to_rfc3339();
+                                state_arc
+                                    .record_per_symbol_target_state(target_state)
+                                    .await;
                                 if outcome.accepted {
                                     // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6:
                                     // count this accepted decision toward
@@ -907,6 +997,26 @@ pub(super) fn spawn_execution_loop(
         run_id,
         stop_tx,
         join_handle,
+    }
+}
+
+fn build_per_symbol_target_state(
+    symbol: String,
+    strategy_id: String,
+    current_qty: i64,
+    target_qty: i64,
+    no_order_reason: &str,
+) -> PerSymbolTargetState {
+    PerSymbolTargetState {
+        symbol,
+        strategy_id,
+        current_qty,
+        target_qty,
+        delta: target_qty - current_qty,
+        no_order_reason: no_order_reason.to_string(),
+        last_decision_id: None,
+        last_decision_disposition: None,
+        updated_at_utc: Utc::now().to_rfc3339(),
     }
 }
 

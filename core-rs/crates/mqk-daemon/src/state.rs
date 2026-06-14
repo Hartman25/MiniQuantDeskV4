@@ -61,8 +61,7 @@ pub use market_calendar::{
 };
 pub use multi_symbol_config::{
     build_legacy_single_symbol_config, build_legacy_single_symbol_config_from_env,
-    build_multi_symbol_config_from_watchlist_artifact,
-    build_multi_symbol_runtime_config_from_env,
+    build_multi_symbol_config_from_watchlist_artifact, build_multi_symbol_runtime_config_from_env,
     build_multi_symbol_runtime_config_from_env_and_watchlist, MultiSymbolConfigError,
     MultiSymbolConfigSource, MultiSymbolRuntimeConfig, SymbolStrategyAssignment,
     MULTI_SYMBOL_RUNTIME_CONFIG_SCHEMA_VERSION,
@@ -147,6 +146,28 @@ const ALPACA_SECRET_LIVE_ENV: &str = "ALPACA_API_SECRET_LIVE";
 // AppState
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PerSymbolTargetState {
+    pub symbol: String,
+    pub strategy_id: String,
+    pub current_qty: i64,
+    pub target_qty: i64,
+    pub delta: i64,
+    pub no_order_reason: String,
+    pub last_decision_id: Option<String>,
+    pub last_decision_disposition: Option<String>,
+    pub updated_at_utc: String,
+}
+
+fn normalize_per_symbol_target_state_key(symbol: &str) -> Option<String> {
+    let key = symbol.trim().to_ascii_uppercase();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key)
+    }
+}
+
 /// Cloneable (Arc) handle shared across all Axum handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -168,6 +189,12 @@ pub struct AppState {
     pub execution_snapshot: Arc<RwLock<Option<mqk_runtime::observability::ExecutionSnapshot>>>,
     /// Per-order side cache (order_id → reconcile Side).
     pub local_order_sides: Arc<RwLock<BTreeMap<String, mqk_reconcile::Side>>>,
+    /// PER-SYMBOL-TARGET-STATE-01: In-memory, observability-only target state.
+    ///
+    /// Keyed by normalized symbol (trimmed, uppercased) for deterministic
+    /// per-symbol replacement. This is not persisted and has no execution
+    /// authority.
+    per_symbol_target_state: Arc<RwLock<BTreeMap<String, PerSymbolTargetState>>>,
     /// Latest monotonic reconcile result known to the daemon.
     reconcile_status: Arc<RwLock<ReconcileStatusSnapshot>>,
     /// Operator auth posture for privileged routes.
@@ -887,6 +914,7 @@ impl AppState {
             broker_snapshot: Arc::new(RwLock::new(None)),
             execution_snapshot: Arc::new(RwLock::new(None)),
             local_order_sides: Arc::new(RwLock::new(BTreeMap::new())),
+            per_symbol_target_state: Arc::new(RwLock::new(BTreeMap::new())),
             reconcile_status: Arc::new(RwLock::new(initial_reconcile_status())),
             operator_auth,
             runtime_selection,
@@ -957,6 +985,38 @@ impl AppState {
 
     pub fn broker_snapshot_source(&self) -> BrokerSnapshotTruthSource {
         self.broker_snapshot_source
+    }
+
+    pub async fn record_per_symbol_target_state(&self, mut state: PerSymbolTargetState) {
+        let Some(key) = normalize_per_symbol_target_state_key(&state.symbol) else {
+            return;
+        };
+        state.symbol = key.clone();
+        self.per_symbol_target_state
+            .write()
+            .await
+            .insert(key, state);
+    }
+
+    pub async fn per_symbol_target_states(&self) -> Vec<PerSymbolTargetState> {
+        self.per_symbol_target_state
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub async fn clear_per_symbol_target_states(&self) {
+        self.per_symbol_target_state.write().await.clear();
+    }
+
+    pub async fn per_symbol_target_state_for_symbol(
+        &self,
+        symbol: &str,
+    ) -> Option<PerSymbolTargetState> {
+        let key = normalize_per_symbol_target_state_key(symbol)?;
+        self.per_symbol_target_state.read().await.get(&key).cloned()
     }
 
     pub fn strategy_market_data_source(&self) -> StrategyMarketDataSource {
