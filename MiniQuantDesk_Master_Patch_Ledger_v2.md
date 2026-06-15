@@ -443,6 +443,65 @@ while ($true) {
 
 ## 6. Active / Next Patch
 
+### MD-STALENESS-PER-TICK-GATE-01 — CLOSED
+
+**Closure:** Closes the `RISK-RECONCILIATION-CONTRACT-AUDIT-01` gap where
+`DATA-FRESHNESS-READINESS-GATE-01` only checked market-data freshness at
+startup — once a run was active, the dispatch loop never re-checked bar age,
+so a stalled intraday market-data refresh could leave the runtime dispatching
+strategies against stale completed bars for the rest of the session. A
+fail-closed per-dispatch-tick staleness gate (cap #9, design doc §6
+"per_symbol_bar_staleness_guard") is now enforced inside
+`AppState::dispatch_native_strategy_for_symbol_with_bar`, on every per-symbol
+dispatch (single-symbol and multi-symbol paths alike).
+
+- New cap #9 config seam in `mqk-daemon::state::signal_intake`:
+  `per_symbol_bar_staleness_secs_from_env()` reads
+  `MQK_PER_SYMBOL_BAR_STALENESS_SECS`; `AppState::per_symbol_bar_staleness_secs()`
+  is **always** `Some` — falling back to the existing documented default
+  `market_data_freshness::MD_FRESHNESS_STALE_SECS` (4 trading days) when unset.
+  Unlike caps #2/#4/#6, this gate cannot be disabled.
+  `set_per_symbol_bar_staleness_secs_for_test` added for test seams.
+- `dispatch_native_strategy_for_symbol_with_bar` now computes `latest_end_ts`
+  from the most recent loaded `md_bars` row, calls the existing pure
+  `classify_bar_staleness` helper (PER-SYMBOL-BAR-WINDOW-01) against
+  `Utc::now()` and the cap #9 threshold, and returns `None` (no
+  target/intent/order) when the result is `Some(true)` (stale-or-missing) —
+  for both the "stale latest bar" case and the "zero completed bars" case (a
+  missing bar is always stale for any cap). Each refusal is logged via
+  `tracing::warn!` with structured fields `no_order_reason = "bar_data_stale"`,
+  `symbol`, `timeframe`, `latest_end_ts`, `age_secs`, `staleness_cap_secs`.
+- The `Err(e)` (DB query failure) arm is unchanged — out of scope for this
+  patch; it continues to fall back to the single-stub context as before.
+- Fresh bars (age within the cap) continue to dispatch exactly as before —
+  unchanged code path beyond the new gate check.
+
+**Behavior preserved:** No change to strategy entry/exit logic, OMS/outbox/
+inbox semantics, broker adapters, or any risk/reconcile/integrity/lease/arm/
+session gate. No DB migration. The gate only adds a `None`-return fail-closed
+refusal *before* strategy dispatch for a stale/missing symbol/tick — it does
+not weaken any existing gate. `RISK-FLATTEN-ON-HALT-01` remains **OPEN**
+(unimplemented) — this patch does not add flatten-on-halt behavior, and the
+broader `RISK-RECONCILIATION-CONTRACT-AUDIT-01` ledger is not fully closed by
+this patch (only the per-tick market-data-staleness gap is closed).
+
+- Files: `core-rs/crates/mqk-daemon/src/state.rs`,
+  `core-rs/crates/mqk-daemon/src/state/signal_intake.rs`,
+  `core-rs/crates/mqk-daemon/tests/scenario_md_staleness_per_tick_gate_01.rs`,
+  `MiniQuantDesk_Master_Patch_Ledger_v2.md`.
+
+**Tests:** New `scenario_md_staleness_per_tick_gate_01.rs` (5 DB-backed tests,
+S01-S05 — fresh bar dispatches, stale bar blocked, missing bar blocked,
+multi-symbol stale-without-blocking-fresh, +/-5s cap boundary; skip gracefully
+without `MQK_DATABASE_URL` pointing at the paper DB, as no local DB was
+available for this session). Targeted regression:
+`scenario_multi_symbol_dispatch_loop_01` (8/8), `scenario_per_symbol_bar_window_01`
+(14/14), `scenario_multi_symbol_capital_caps_01` (19/19),
+`scenario_reconcile_baseline_seed_01` (7/7) — all pass. `cargo build -p mqk-daemon`
+clean.
+
+---
+
 ### RISK-ENGINE-HALTED-VISIBILITY-01 — CLOSED
 
 **Closure:** The risk engine's sticky `RiskState.halted` flag is now surfaced

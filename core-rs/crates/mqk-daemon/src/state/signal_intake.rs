@@ -62,6 +62,22 @@ pub(super) fn max_new_orders_per_tick_from_env() -> Option<u32> {
         .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
+/// MD-STALENESS-PER-TICK-GATE-01: Read the optional per-symbol/per-bar
+/// staleness threshold override (cap #9, design doc §6
+/// "per_symbol_bar_staleness_guard") from `MQK_PER_SYMBOL_BAR_STALENESS_SECS`.
+///
+/// `None` (unset or not a non-negative integer) means "use the existing
+/// documented default" — `market_data_freshness::MD_FRESHNESS_STALE_SECS`
+/// (DATA-FRESHNESS-READINESS-GATE-01, 4 trading days) — NOT "disabled".
+/// Unlike caps #2/#4/#6, the per-tick staleness gate is always-on: there is
+/// no env value that disables it.
+pub(super) fn per_symbol_bar_staleness_secs_from_env() -> Option<i64> {
+    std::env::var("MQK_PER_SYMBOL_BAR_STALENESS_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|&n| n >= 0)
+}
+
 /// Normalize a symbol for use as a `day_signal_count_by_symbol` key
 /// (trimmed, uppercased) so "aapl", "AAPL", and " AAPL " share one counter.
 fn normalize_symbol_key(symbol: &str) -> String {
@@ -211,6 +227,39 @@ impl AppState {
     /// Named `_for_test` to signal intent; never called in production code.
     pub fn set_max_new_orders_per_tick_for_test(&self, cap: Option<u32>) {
         if let Ok(mut guard) = self.max_new_orders_per_tick.try_write() {
+            *guard = cap;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // MD-STALENESS-PER-TICK-GATE-01: cap #9 per-tick bar staleness gate config
+    // -----------------------------------------------------------------------
+
+    /// Returns the effective per-symbol bar staleness threshold (cap #9, in
+    /// seconds) used by `dispatch_native_strategy_for_symbol_with_bar` to
+    /// fail-closed-block strategy dispatch for a symbol/tick whose latest
+    /// completed bar is stale or missing.
+    ///
+    /// Returns the configured `MQK_PER_SYMBOL_BAR_STALENESS_SECS` override if
+    /// set, otherwise `market_data_freshness::MD_FRESHNESS_STALE_SECS` (the
+    /// existing documented default, DATA-FRESHNESS-READINESS-GATE-01). Always
+    /// `Some` — this gate cannot be disabled via env var.
+    pub async fn per_symbol_bar_staleness_secs(&self) -> Option<i64> {
+        Some(
+            self.per_symbol_bar_staleness_secs
+                .read()
+                .await
+                .unwrap_or(crate::market_data_freshness::MD_FRESHNESS_STALE_SECS),
+        )
+    }
+
+    /// Test seam: override the effective per-symbol bar staleness threshold
+    /// (cap #9), bypassing `MQK_PER_SYMBOL_BAR_STALENESS_SECS` and the
+    /// `MD_FRESHNESS_STALE_SECS` default. `None` restores the default.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    pub fn set_per_symbol_bar_staleness_secs_for_test(&self, cap: Option<i64>) {
+        if let Ok(mut guard) = self.per_symbol_bar_staleness_secs.try_write() {
             *guard = cap;
         }
     }

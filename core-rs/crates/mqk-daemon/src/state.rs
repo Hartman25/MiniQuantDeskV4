@@ -267,6 +267,18 @@ pub struct AppState {
     /// is dispatched every tick (today's implicit behavior). Read once at
     /// construction; overridable via `set_max_new_orders_per_tick_for_test`.
     max_new_orders_per_tick: Arc<RwLock<Option<u32>>>,
+    /// MD-STALENESS-PER-TICK-GATE-01: Optional override for the per-symbol
+    /// bar-staleness threshold (cap #9, design doc §6
+    /// "per_symbol_bar_staleness_guard"), in seconds. Used by
+    /// `dispatch_native_strategy_for_symbol_with_bar` to fail-closed-block
+    /// strategy dispatch for a symbol/tick whose latest completed bar is
+    /// stale or missing. `None` (the default, from an unset
+    /// `MQK_PER_SYMBOL_BAR_STALENESS_SECS`) means "use
+    /// `market_data_freshness::MD_FRESHNESS_STALE_SECS`" — unlike caps
+    /// #2/#4/#6, this gate is always-on and cannot be disabled. Read once at
+    /// construction; overridable via
+    /// `set_per_symbol_bar_staleness_secs_for_test`.
+    per_symbol_bar_staleness_secs: Arc<RwLock<Option<i64>>>,
     /// TV-01C: Artifact provenance accepted at the most recent run start.
     ///
     /// Populated by `start_execution_runtime` when artifact intake evaluates to
@@ -938,6 +950,9 @@ impl AppState {
             )),
             max_new_orders_per_tick: Arc::new(RwLock::new(
                 signal_intake::max_new_orders_per_tick_from_env(),
+            )),
+            per_symbol_bar_staleness_secs: Arc::new(RwLock::new(
+                signal_intake::per_symbol_bar_staleness_secs_from_env(),
             )),
             accepted_artifact: Arc::new(RwLock::new(None)),
             autonomous_session_truth: Arc::new(RwLock::new(AutonomousSessionTruth::Clear)),
@@ -1677,6 +1692,34 @@ operator_reconcile_or_repair_required"
             .await
             {
                 Ok(db_bars) if !db_bars.is_empty() => {
+                    // MD-STALENESS-PER-TICK-GATE-01: fail-closed per-dispatch-tick
+                    // staleness gate (cap #9, design doc §6
+                    // "per_symbol_bar_staleness_guard"). Reuses the pure
+                    // classify_bar_staleness helper (PER-SYMBOL-BAR-WINDOW-01).
+                    // `db_bars` is oldest-first, so the last element is the
+                    // latest completed bar.
+                    let latest_end_ts = db_bars.last().map(|b| b.end_ts);
+                    let now_ts = Utc::now().timestamp();
+                    let staleness_cap_secs = self.per_symbol_bar_staleness_secs().await;
+                    if classify_bar_staleness(latest_end_ts, now_ts, staleness_cap_secs)
+                        == Some(true)
+                    {
+                        let age_secs = latest_end_ts.map(|ts| (now_ts - ts).max(0));
+                        tracing::warn!(
+                            symbol = %symbol,
+                            timeframe = %md_timeframe,
+                            latest_end_ts = ?latest_end_ts,
+                            age_secs = ?age_secs,
+                            staleness_cap_secs = ?staleness_cap_secs,
+                            no_order_reason = "bar_data_stale",
+                            "md_staleness_per_tick_gate_01: bar_data_stale — latest \
+                             completed bar exceeds the per-symbol staleness threshold; \
+                             strategy dispatch refused for this symbol/tick \
+                             (fail-closed, no target/intent/order)"
+                        );
+                        return None;
+                    }
+
                     let bars_loaded = db_bars.len();
                     let stubs: Vec<mqk_strategy::BarStub> = db_bars
                         .iter()
@@ -1709,12 +1752,24 @@ operator_reconcile_or_repair_required"
                 Ok(_) => {
                     // No completed bars for this symbol/timeframe.
                     self.last_bar_context_bars.store(0, Ordering::SeqCst);
+                    // MD-STALENESS-PER-TICK-GATE-01: a missing bar is always
+                    // stale (classify_bar_staleness(None, _, Some(_)) ==
+                    // Some(true) for any cap). Fail-closed: refuse dispatch
+                    // for this symbol/tick rather than falling through to the
+                    // single-stub fallback, which could otherwise produce a
+                    // signal from no real price history.
+                    let staleness_cap_secs = self.per_symbol_bar_staleness_secs().await;
                     tracing::warn!(
                         symbol = %symbol,
                         timeframe = %md_timeframe,
-                        "auton_signal_context_01: NO_MARKET_DATA — \
-                         no completed bars in md_bars; falling back to stub (no signal expected)"
+                        staleness_cap_secs = ?staleness_cap_secs,
+                        no_order_reason = "bar_data_stale",
+                        "md_staleness_per_tick_gate_01: bar_data_stale — \
+                         NO_MARKET_DATA: no completed bars in md_bars for this \
+                         symbol/timeframe; strategy dispatch refused for this \
+                         symbol/tick (fail-closed, no target/intent/order)"
                     );
+                    return None;
                 }
                 Err(e) => {
                     self.last_bar_context_bars.store(0, Ordering::SeqCst);
