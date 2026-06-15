@@ -9,7 +9,7 @@ use mqk_db::{ClaimedOutboxRow, RetryDispatchOutcome, TimeSource};
 use mqk_execution::oms::state_machine::{OmsEvent, OmsOrder};
 use mqk_execution::{
     BrokerAdapter, BrokerError, BrokerSubmitRequest, GateRefusal, IntegrityGate, ReconcileGate,
-    RiskGate, SubmitError,
+    RiskGate, RiskRequestContext, Side, SubmitError,
 };
 
 use super::cancel::{
@@ -37,6 +37,7 @@ where
         let claim = claimed_row.token;
         let symbol = req.symbol.clone();
         let qty = req.quantity;
+        let side = req.side;
 
         // Step 3a: RT-5 - write DISPATCHING before calling gateway.submit().
         //
@@ -59,12 +60,26 @@ where
             "exec_submit_dispatching"
         );
 
+        // RISK-FLATTEN-ON-HALT-01: compute whether this submit is a verified
+        // risk-reducing close against the live portfolio position. This is
+        // derived solely from current portfolio state + the request's own
+        // side/quantity - never from order_json.signal_source or any other
+        // caller-supplied flag.
+        let current_qty = self
+            .portfolio
+            .positions
+            .get(&symbol)
+            .map(|p| p.qty_signed())
+            .unwrap_or(0);
+        let is_risk_reducing = is_submit_risk_reducing(current_qty, side, qty);
+        let risk_ctx = RiskRequestContext { is_risk_reducing };
+
         // Step 3b: submit via BrokerGateway - the ONLY submit path.
         //
         // A3: gateway.submit returns Result<_, SubmitError>.
         // SubmitError is Send+Sync (all inner fields are String/u64),
         // so no anyhow conversion is needed before the async dispatch.
-        let submit_result = self.gateway.submit(&claim, req);
+        let submit_result = self.gateway.submit_with_context(&claim, req, risk_ctx);
         let resp = match submit_result {
             Ok(r) => r,
             Err(e) => {
@@ -404,5 +419,70 @@ where
                 Err(anyhow!(err_text))
             }
         }
+    }
+}
+
+/// RISK-FLATTEN-ON-HALT-01: determine whether a submit request is a verified
+/// risk-reducing close against the current portfolio position.
+///
+/// Derived solely from `current_qty` (signed live position), `side`, and
+/// `quantity` (always positive). A request is risk-reducing only when it is
+/// an exact-or-smaller close against an existing opposite-direction position:
+/// - `Buy` is risk-reducing only when `current_qty < 0` (short) and
+///   `quantity <= |current_qty|`.
+/// - `Sell` is risk-reducing only when `current_qty > 0` (long) and
+///   `quantity <= current_qty`.
+pub(super) fn is_submit_risk_reducing(current_qty: i64, side: Side, quantity: i64) -> bool {
+    if quantity <= 0 {
+        return false;
+    }
+    match side {
+        Side::Buy => current_qty < 0 && quantity <= current_qty.abs(),
+        Side::Sell => current_qty > 0 && quantity <= current_qty,
+    }
+}
+
+#[cfg(test)]
+mod is_submit_risk_reducing_tests {
+    use super::*;
+
+    #[test]
+    fn long_position_sell_within_size_is_risk_reducing() {
+        assert!(is_submit_risk_reducing(10, Side::Sell, 10));
+        assert!(is_submit_risk_reducing(10, Side::Sell, 5));
+    }
+
+    #[test]
+    fn long_position_buy_is_not_risk_reducing() {
+        assert!(!is_submit_risk_reducing(10, Side::Buy, 5));
+    }
+
+    #[test]
+    fn short_position_buy_within_size_is_risk_reducing() {
+        assert!(is_submit_risk_reducing(-10, Side::Buy, 10));
+        assert!(is_submit_risk_reducing(-10, Side::Buy, 5));
+    }
+
+    #[test]
+    fn short_position_sell_is_not_risk_reducing() {
+        assert!(!is_submit_risk_reducing(-10, Side::Sell, 5));
+    }
+
+    #[test]
+    fn quantity_exceeding_position_is_not_risk_reducing() {
+        assert!(!is_submit_risk_reducing(10, Side::Sell, 15));
+        assert!(!is_submit_risk_reducing(-10, Side::Buy, 15));
+    }
+
+    #[test]
+    fn flat_position_is_never_risk_reducing() {
+        assert!(!is_submit_risk_reducing(0, Side::Buy, 1));
+        assert!(!is_submit_risk_reducing(0, Side::Sell, 1));
+    }
+
+    #[test]
+    fn non_positive_quantity_is_never_risk_reducing() {
+        assert!(!is_submit_risk_reducing(10, Side::Sell, 0));
+        assert!(!is_submit_risk_reducing(10, Side::Sell, -5));
     }
 }

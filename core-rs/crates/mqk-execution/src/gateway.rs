@@ -75,6 +75,23 @@ pub enum RiskEngineHaltStatus {
     /// The implementor cannot report sticky-halt state.
     Unavailable,
 }
+/// Per-order risk request context (RISK-FLATTEN-ON-HALT-01).
+///
+/// Carries the minimal, runtime-computed context a [`RiskGate`] needs to
+/// distinguish a genuine risk-reducing close/flatten order from a new or
+/// risk-increasing order. This type is independent of `mqk-risk` internals —
+/// gate implementations translate it into whatever request shape their
+/// underlying engine expects.
+///
+/// `is_risk_reducing` must only be set `true` by the caller after verifying,
+/// against live portfolio state, that the order is an exact-or-smaller close
+/// of an existing opposite-direction position. It must never be derived from
+/// caller-supplied flags (e.g. `signal_source`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RiskRequestContext {
+    pub is_risk_reducing: bool,
+}
+
 /// Evaluates whether the risk engine currently allows order submission.
 ///
 /// Implementations must be deterministic, side-effect free, and fail-closed:
@@ -96,6 +113,17 @@ pub trait RiskGate {
     /// Only implementors that hold real `RiskState` should override this.
     fn sticky_halt_status(&self) -> RiskEngineHaltStatus {
         RiskEngineHaltStatus::Unavailable
+    }
+
+    /// Evaluate the gate for a specific per-order request context
+    /// (RISK-FLATTEN-ON-HALT-01).
+    ///
+    /// Default implementation ignores `ctx` and delegates to
+    /// [`evaluate_gate`](RiskGate::evaluate_gate), preserving existing
+    /// behavior for gates that have not been updated to consider
+    /// per-request risk-reducing context.
+    fn evaluate_gate_for_request(&self, _ctx: RiskRequestContext) -> RiskDecision {
+        self.evaluate_gate()
     }
 }
 /// Evaluates whether the most recent reconcile report is clean.
@@ -297,13 +325,14 @@ where
     ///
     /// Gate evaluation order:
     /// 1. `IntegrityGate::is_armed()`   - system integrity / halt state
-    /// 2. `RiskGate::evaluate_gate()`   - structured risk decision (B2)
+    /// 2. `RiskGate::evaluate_gate_for_request(ctx)` - structured risk decision (B2),
+    ///    with per-order risk-reducing context (RISK-FLATTEN-ON-HALT-01)
     /// 3. `ReconcileGate::is_clean()`   - reconcile drift
-    fn enforce_gates(&self) -> Result<(), GateRefusal> {
+    fn enforce_gates(&self, ctx: RiskRequestContext) -> Result<(), GateRefusal> {
         if !self.integrity.is_armed() {
             return Err(GateRefusal::IntegrityDisarmed);
         }
-        match self.risk.evaluate_gate() {
+        match self.risk.evaluate_gate_for_request(ctx) {
             RiskDecision::Allow => {}
             RiskDecision::Deny(denial) => {
                 return Err(GateRefusal::RiskBlocked(denial));
@@ -328,6 +357,21 @@ where
         claim: &OutboxClaimToken,
         req: BrokerSubmitRequest,
     ) -> Result<BrokerSubmitResponse, SubmitError> {
+        self.submit_with_context(claim, req, RiskRequestContext::default())
+    }
+    /// Submit a new broker order with explicit per-order risk context
+    /// (RISK-FLATTEN-ON-HALT-01).
+    ///
+    /// Identical to [`submit`](Self::submit) except the risk gate is evaluated
+    /// via `RiskGate::evaluate_gate_for_request(ctx)` instead of
+    /// `RiskGate::evaluate_gate()`, allowing a verified risk-reducing
+    /// close/flatten order to pass a sticky risk-engine halt.
+    pub fn submit_with_context(
+        &self,
+        claim: &OutboxClaimToken,
+        req: BrokerSubmitRequest,
+        ctx: RiskRequestContext,
+    ) -> Result<BrokerSubmitResponse, SubmitError> {
         // MULTI-ASSET-ROUTING-GUARD-01: reject disabled asset classes before
         // any gate evaluation or broker adapter invocation.
         if req.asset_class != AssetClass::Equity {
@@ -335,7 +379,7 @@ where
                 asset_class: req.asset_class,
             }));
         }
-        self.enforce_gates().map_err(SubmitError::Gate)?;
+        self.enforce_gates(ctx).map_err(SubmitError::Gate)?;
         // EB-3: idempotency_key from the claimed outbox row is the authoritative
         // broker-side order_id. This prevents callers from submitting free-form
         // order IDs that were not recorded in the outbox.
@@ -358,7 +402,7 @@ where
         internal_id: &str,
         order_map: &BrokerOrderMap,
     ) -> Result<BrokerCancelResponse, Box<dyn std::error::Error + Send + Sync>> {
-        self.enforce_gates()?;
+        self.enforce_gates(RiskRequestContext::default())?;
         let broker_id = order_map.broker_id(internal_id).ok_or_else(|| {
             Box::new(UnknownOrder {
                 internal_id: internal_id.to_string(),
@@ -407,7 +451,7 @@ where
         limit_price: Option<i64>,
         time_in_force: String,
     ) -> Result<BrokerReplaceResponse, Box<dyn std::error::Error + Send + Sync>> {
-        self.enforce_gates()?;
+        self.enforce_gates(RiskRequestContext::default())?;
         let broker_id = order_map.broker_id(internal_id).ok_or_else(|| {
             Box::new(UnknownOrder {
                 internal_id: internal_id.to_string(),
@@ -551,6 +595,33 @@ mod tests {
     fn all_clear_submit_succeeds() {
         let res = make_gateway(true, true, true).submit(&make_claim(), make_submit_req());
         assert!(res.is_ok());
+    }
+    // RISK-FLATTEN-ON-HALT-01: gates that do not override
+    // `evaluate_gate_for_request` must behave identically regardless of the
+    // supplied `RiskRequestContext`, and `submit` must remain equivalent to
+    // `submit_with_context(.., RiskRequestContext::default())`.
+    #[test]
+    fn default_evaluate_gate_for_request_ignores_context() {
+        let gate = BoolGate(false);
+        let via_evaluate_gate = gate.evaluate_gate();
+        let via_default_ctx = gate.evaluate_gate_for_request(RiskRequestContext::default());
+        let via_reducing_ctx = gate.evaluate_gate_for_request(RiskRequestContext {
+            is_risk_reducing: true,
+        });
+        assert_eq!(via_evaluate_gate, via_default_ctx);
+        assert_eq!(via_evaluate_gate, via_reducing_ctx);
+    }
+    #[test]
+    fn submit_is_equivalent_to_submit_with_default_context() {
+        let gw = make_gateway(true, true, true);
+        let via_submit = gw.submit(&make_claim(), make_submit_req());
+        let via_with_context = gw.submit_with_context(
+            &make_claim(),
+            make_submit_req(),
+            RiskRequestContext::default(),
+        );
+        assert!(via_submit.is_ok());
+        assert!(via_with_context.is_ok());
     }
     #[test]
     fn integrity_disarmed_blocks_submit() {

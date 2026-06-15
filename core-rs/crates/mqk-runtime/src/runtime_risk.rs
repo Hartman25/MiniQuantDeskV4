@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use mqk_execution::gateway::RiskGate;
+use mqk_execution::gateway::{RiskGate, RiskRequestContext};
 use mqk_risk::{
     evaluate, PdtContext, ReasonCode, RequestKind, RiskAction, RiskConfig, RiskInput, RiskState,
 };
@@ -109,6 +109,46 @@ impl RiskGate for RuntimeRiskGate {
             }
             RuntimeRiskGateState::FailClosed { .. } => {
                 mqk_execution::RiskEngineHaltStatus::Unavailable
+            }
+        }
+    }
+
+    /// Evaluate the gate for a specific per-order request context
+    /// (RISK-FLATTEN-ON-HALT-01).
+    ///
+    /// Overrides the stored `RiskInput`'s `request` / `is_risk_reducing`
+    /// fields based on `ctx.is_risk_reducing` before calling `evaluate()`:
+    /// - `is_risk_reducing == true`  => `RequestKind::Flatten`, `is_risk_reducing: true`
+    /// - `is_risk_reducing == false` => `RequestKind::NewOrder`, `is_risk_reducing: false`
+    ///
+    /// This allows a verified risk-reducing close/flatten order to pass a
+    /// sticky `RiskState.halted` (the engine allows `Flatten` while halted),
+    /// while non-reducing orders remain denied. State mutation and
+    /// fail-closed behavior are identical to `evaluate_gate`.
+    fn evaluate_gate_for_request(&self, ctx: RiskRequestContext) -> mqk_execution::RiskDecision {
+        let mut state = self.state.lock().expect("runtime risk gate lock");
+        match &mut *state {
+            RuntimeRiskGateState::FailClosed { denial } => {
+                mqk_execution::RiskDecision::Deny(denial.clone())
+            }
+            RuntimeRiskGateState::Ready {
+                config,
+                state,
+                input,
+            } => {
+                if input.equity_micros <= 0 {
+                    return mqk_execution::RiskDecision::Deny(runtime_risk_fail_closed_denial());
+                }
+                let mut overridden_input = input.clone();
+                if ctx.is_risk_reducing {
+                    overridden_input.request = RequestKind::Flatten;
+                    overridden_input.is_risk_reducing = true;
+                } else {
+                    overridden_input.request = RequestKind::NewOrder;
+                    overridden_input.is_risk_reducing = false;
+                }
+                let decision = evaluate(config, state, &overridden_input);
+                runtime_risk_decision_to_execution_decision(config, &decision)
             }
         }
     }
@@ -348,6 +388,119 @@ mod tests {
             risk_gate.sticky_halt_status(),
             mqk_execution::RiskEngineHaltStatus::Unavailable,
             "fail-closed gates have no RiskState and must report Unavailable, not a guess"
+        );
+    }
+
+    // RISK-FLATTEN-ON-HALT-01: verified risk-reducing requests pass sticky halt.
+
+    fn halted_risk_gate() -> RuntimeRiskGate {
+        let risk_gate = RuntimeRiskGate::for_test(
+            RiskConfig {
+                daily_loss_limit_micros: 1_000 * 1_000_000,
+                max_drawdown_limit_micros: 0,
+                reject_storm_max_rejects_in_window: 10,
+                pdt_auto_enabled: false,
+                missing_protective_stop_flattens: false,
+            },
+            RiskState::new(20240101, 100_000 * 1_000_000, 1),
+            RiskInput {
+                day_id: 20240101,
+                equity_micros: 98_999 * 1_000_000,
+                reject_window_id: 1,
+                request: RequestKind::NewOrder,
+                is_risk_reducing: false,
+                pdt: PdtContext::ok(),
+                kill_switch: None,
+            },
+        );
+
+        // Trigger the daily-loss breach: evaluate() sets RiskState.halted = true (sticky).
+        let _ = risk_gate.evaluate_gate();
+        assert_eq!(
+            risk_gate.sticky_halt_status(),
+            mqk_execution::RiskEngineHaltStatus::Known { halted: true },
+            "precondition: risk state must be sticky-halted before testing flatten-through-halt"
+        );
+
+        risk_gate
+    }
+
+    #[test]
+    fn evaluate_gate_for_request_allows_verified_flatten_when_halted() {
+        let risk_gate = halted_risk_gate();
+
+        let decision = risk_gate.evaluate_gate_for_request(RiskRequestContext {
+            is_risk_reducing: true,
+        });
+
+        assert_eq!(
+            decision,
+            mqk_execution::RiskDecision::Allow,
+            "a verified risk-reducing flatten must pass the sticky risk halt"
+        );
+    }
+
+    #[test]
+    fn evaluate_gate_for_request_denies_non_reducing_order_when_halted() {
+        let risk_gate = halted_risk_gate();
+
+        let decision = risk_gate.evaluate_gate_for_request(RiskRequestContext {
+            is_risk_reducing: false,
+        });
+
+        let mqk_execution::RiskDecision::Deny(denial) = decision else {
+            panic!(
+                "a non-reducing order must remain denied while the risk engine is sticky-halted"
+            );
+        };
+        assert_eq!(
+            denial.reason,
+            mqk_execution::RiskReason::RiskEngineUnavailable,
+            "sticky-halt denial for non-reducing orders maps to RiskEngineUnavailable"
+        );
+    }
+
+    #[test]
+    fn evaluate_gate_for_request_matches_evaluate_gate_when_not_halted() {
+        let make_config = || RiskConfig {
+            daily_loss_limit_micros: 1_000 * 1_000_000,
+            max_drawdown_limit_micros: 0,
+            reject_storm_max_rejects_in_window: 10,
+            pdt_auto_enabled: false,
+            missing_protective_stop_flattens: false,
+        };
+        let make_input = || RiskInput {
+            day_id: 20240101,
+            equity_micros: 100_000 * 1_000_000,
+            reject_window_id: 1,
+            request: RequestKind::NewOrder,
+            is_risk_reducing: false,
+            pdt: PdtContext::ok(),
+            kill_switch: None,
+        };
+
+        let gate_a = RuntimeRiskGate::for_test(
+            make_config(),
+            RiskState::new(20240101, 100_000 * 1_000_000, 1),
+            make_input(),
+        );
+        let gate_b = RuntimeRiskGate::for_test(
+            make_config(),
+            RiskState::new(20240101, 100_000 * 1_000_000, 1),
+            make_input(),
+        );
+
+        let baseline = gate_a.evaluate_gate();
+        let via_context = gate_b.evaluate_gate_for_request(RiskRequestContext::default());
+
+        assert_eq!(
+            baseline,
+            mqk_execution::RiskDecision::Allow,
+            "precondition: not-halted NewOrder must be allowed"
+        );
+        assert_eq!(
+            via_context, baseline,
+            "evaluate_gate_for_request with default (non-reducing) context must match evaluate_gate when not halted"
         );
     }
 }

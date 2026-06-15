@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{Datelike, Utc};
 use mqk_broker_paper::LockedPaperBroker;
-use mqk_execution::gateway::{BrokerGateway, IntegrityGate, ReconcileGate, RiskGate};
+use mqk_execution::gateway::{
+    BrokerGateway, IntegrityGate, ReconcileGate, RiskGate, RiskRequestContext,
+};
 use mqk_execution::wiring::build_gateway;
 use mqk_risk::{
     evaluate, PdtContext, ReasonCode, RequestKind, RiskAction, RiskConfig, RiskInput, RiskState,
@@ -121,6 +123,45 @@ impl RiskGate for RuntimeRiskGate {
                     input.reject_window_id = runtime_reject_window_id(now);
                 }
                 let decision = evaluate(config, state, input);
+                runtime_risk_decision_to_execution_decision(config, &decision)
+            }
+        }
+    }
+
+    /// Evaluate the gate for a specific per-order request context
+    /// (RISK-FLATTEN-ON-HALT-01). See `mqk_runtime::runtime_risk::RuntimeRiskGate`
+    /// for the canonical doc — this paper-wiring copy mirrors that behavior,
+    /// additionally refreshing `day_id`/`reject_window_id` from wall-clock time
+    /// when `auto_time_context` is set (matching `evaluate_gate`).
+    fn evaluate_gate_for_request(&self, ctx: RiskRequestContext) -> mqk_execution::RiskDecision {
+        let mut state = self.state.lock().expect("runtime risk gate lock");
+        match &mut *state {
+            RuntimeRiskGateState::FailClosed { denial } => {
+                mqk_execution::RiskDecision::Deny(denial.clone())
+            }
+            RuntimeRiskGateState::Ready {
+                config,
+                state,
+                input,
+                auto_time_context,
+            } => {
+                if input.equity_micros <= 0 {
+                    return mqk_execution::RiskDecision::Deny(runtime_risk_fail_closed_denial());
+                }
+                if *auto_time_context {
+                    let now = Utc::now();
+                    input.day_id = runtime_day_id(now);
+                    input.reject_window_id = runtime_reject_window_id(now);
+                }
+                let mut overridden_input = input.clone();
+                if ctx.is_risk_reducing {
+                    overridden_input.request = RequestKind::Flatten;
+                    overridden_input.is_risk_reducing = true;
+                } else {
+                    overridden_input.request = RequestKind::NewOrder;
+                    overridden_input.is_risk_reducing = false;
+                }
+                let decision = evaluate(config, state, &overridden_input);
                 runtime_risk_decision_to_execution_decision(config, &decision)
             }
         }
