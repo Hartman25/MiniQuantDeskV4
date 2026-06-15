@@ -166,7 +166,7 @@ function ManifestSection({ manifest }: { manifest: BacktestManifest }) {
       <div className="timeline-meta-grid">
         <div>
           <span>Run ID</span>
-          <strong style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{manifest.run_id}</strong>
+          <strong className="bt-mono-wrap" style={{ fontFamily: "monospace", fontSize: "0.82rem" }}>{manifest.run_id}</strong>
         </div>
         <div>
           <span>Strategy</span>
@@ -186,15 +186,15 @@ function ManifestSection({ manifest }: { manifest: BacktestManifest }) {
         </div>
         <div>
           <span>Git hash</span>
-          <strong style={{ fontFamily: "monospace" }}>{manifest.git_hash ?? "—"}</strong>
+          <strong className="bt-mono-wrap" style={{ fontFamily: "monospace" }}>{manifest.git_hash ?? "—"}</strong>
         </div>
         <div>
           <span>Config hash</span>
-          <strong style={{ fontFamily: "monospace", fontSize: "0.78rem" }}>{manifest.config_hash ?? "—"}</strong>
+          <strong className="bt-mono-wrap" style={{ fontFamily: "monospace", fontSize: "0.78rem" }}>{manifest.config_hash ?? "—"}</strong>
         </div>
         <div>
           <span>Host</span>
-          <strong style={{ fontSize: "0.82rem" }}>{manifest.host_fingerprint ?? "—"}</strong>
+          <strong className="bt-mono-wrap" style={{ fontSize: "0.82rem" }}>{manifest.host_fingerprint ?? "—"}</strong>
         </div>
       </div>
     </Panel>
@@ -800,7 +800,7 @@ function PaperReadinessContent({ report }: { report: PaperReadinessParseResult }
                 key: "path",
                 title: "Path",
                 render: (row) => (
-                  <span style={{ fontFamily: "monospace", fontSize: "0.78rem" }}>{row.value ?? "—"}</span>
+                  <span className="bt-mono-wrap" style={{ fontFamily: "monospace", fontSize: "0.78rem" }}>{row.value ?? "—"}</span>
                 ),
               },
             ]}
@@ -1290,7 +1290,7 @@ function EvidenceReviewContent({ artifact }: { artifact: EvidenceReviewParseResu
         </div>
         <div>
           <span>Evidence folder</span>
-          <strong style={{ fontFamily: "monospace" }}>{r.folder_name ?? "—"}</strong>
+          <strong className="bt-mono-wrap" style={{ fontFamily: "monospace" }}>{r.folder_name ?? "—"}</strong>
         </div>
         <div>
           <span>Reviewed at</span>
@@ -1680,9 +1680,16 @@ function FillsContent({ data }: { data: ParsedCsvResult<FillRow> }) {
   );
 }
 
-function ArtifactDisplay({ bundle }: { bundle: ArtifactBundle }) {
+function ArtifactDisplay({ bundle, source }: { bundle: ArtifactBundle; source?: string }) {
   return (
     <>
+      {source && (
+        <div className="bt-results-source">
+          <span aria-hidden="true">▸</span> {source}
+        </div>
+      )}
+
+      <div className="bt-group-heading">Run identity &amp; performance</div>
       <FileStatusNote label="manifest.json" result={bundle.manifest} />
       {bundle.manifest.kind === "ok" && (
         <ManifestSection manifest={bundle.manifest.data} />
@@ -1693,13 +1700,17 @@ function ArtifactDisplay({ bundle }: { bundle: ArtifactBundle }) {
         <MetricsSection m={bundle.metrics.data} />
       )}
 
+      <div className="bt-group-heading">Research &amp; promotion gates</div>
       <StrategyFitPanel result={bundle.strategyFit} />
       <PaperReadinessPanel result={bundle.paperReadiness} />
       <WatchlistPromotionPanel result={bundle.watchlistPromotion} />
       <PremarketRevalidationPanel result={bundle.premarketRevalidation} />
       <EvidenceReviewPanel result={bundle.evidenceReview} />
+
+      <div className="bt-group-heading">Observability reference</div>
       <DiscordWorkflowsPanel />
 
+      <div className="bt-group-heading">Execution detail</div>
       <EquityCurveSection result={bundle.equityCurve} />
       <OrdersSection result={bundle.orders} />
       <FillsSection result={bundle.fills} />
@@ -1955,6 +1966,13 @@ export function BacktestResultsScreen() {
       {/* Workflow A — Load completed artifact folder                          */}
       {/* ------------------------------------------------------------------ */}
 
+      <div className="bt-workflow-heading">
+        <span className="bt-workflow-tag">Workflow A · View existing results</span>
+        <span className="bt-workflow-caption">
+          Load a completed backtest's artifact folder from disk. Read-only — nothing is run.
+        </span>
+      </div>
+
       <Panel
         title="A — Load completed artifact folder"
         subtitle="Paste the path to the folder that directly contains manifest.json, metrics.json, equity_curve.csv, orders.csv, fills.csv."
@@ -1995,11 +2013,20 @@ export function BacktestResultsScreen() {
         </div>
       )}
 
-      {bundle && <ArtifactDisplay bundle={bundle} />}
+      {bundle && <ArtifactDisplay bundle={bundle} source="Loaded results — Workflow A (manual folder load)" />}
+
+      <hr className="bt-section-divider" />
 
       {/* ------------------------------------------------------------------ */}
       {/* Workflow B — Run new CSV backtest (offline research only)            */}
       {/* ------------------------------------------------------------------ */}
+
+      <div className="bt-workflow-heading">
+        <span className="bt-workflow-tag">Workflow B · Run a new backtest</span>
+        <span className="bt-workflow-caption">
+          Submit an offline CSV backtest, watch its status, then auto-load results. No live or paper orders.
+        </span>
+      </div>
 
       <Panel
         title="B — Run new CSV backtest (offline research only)"
@@ -2234,7 +2261,7 @@ export function BacktestResultsScreen() {
         </div>
       )}
 
-      {jobBundle && <ArtifactDisplay bundle={jobBundle} />}
+      {jobBundle && <ArtifactDisplay bundle={jobBundle} source="Loaded results — Workflow B (submitted job)" />}
     </div>
   );
 }

@@ -2511,6 +2511,60 @@ ul {
   margin: 8px 0 16px;
 }
 
+/* BACKTEST-GUI-POLISH-01: workflow framing, group headings, and overflow-safe
+   monospace. Presentation only — no behavior change. */
+.bt-workflow-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  margin-top: 2px;
+}
+
+.bt-workflow-tag {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--accent);
+}
+
+.bt-workflow-caption {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.bt-group-heading {
+  font-size: 0.74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  padding: 6px 0 4px;
+  border-bottom: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.bt-results-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--success);
+  padding-bottom: 4px;
+}
+
+/* Long unbroken monospace values (hashes, fingerprints, artifact paths) must
+   wrap inside their cells rather than overflow and clip. */
+.bt-mono-wrap {
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
 /* Equity curve SVG wrapper */
 .bt-equity-curve {
   display: flex;
@@ -2520,16 +2574,18 @@ ul {
 
 .bt-equity-meta {
   display: flex;
-  gap: 20px;
+  flex-wrap: wrap;
+  gap: 8px 20px;
   font-size: 0.82rem;
   color: var(--muted);
 }
 
 .bt-equity-svg {
   width: 100%;
-  height: 80px;
+  height: 120px;
   display: block;
   background: rgba(10, 10, 10, 0.60);
   border: 1px solid var(--border);
   border-radius: 2px;
+  padding: 6px 0;
 }

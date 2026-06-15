@@ -376,6 +376,21 @@ auto-load trigger. Parser and artifact-render coverage is proven by
 `parsers.test.ts`; the Tauri `read_artifact_file` allowlist covers every file
 `loadBundle` requests.
 
+### Presentation (BACKTEST-GUI-POLISH-01)
+
+The screen is framed as two clearly labeled workflows. Each workflow has a
+heading banner (*"Workflow A · View existing results"* /
+*"Workflow B · Run a new backtest"*) and the two sections are separated by a
+divider. When results render, a source line states which workflow produced them
+(*"Loaded results — Workflow A (manual folder load)"* or
+*"… Workflow B (submitted job)"*). Inside the artifact display the panels are
+grouped under section headings — **Run identity & performance**, **Research &
+promotion gates**, **Observability reference**, and **Execution detail** — so a
+long result page stays scannable. Long monospace values (run/config/git hashes,
+host fingerprint, artifact-chain paths, evidence folder) wrap instead of
+clipping, and the equity-curve chart has more vertical room. This is
+presentation only: no parser, API, submit/poll, or auto-load behavior changed.
+
 ---
 
 ## Recommended pre-live workflow

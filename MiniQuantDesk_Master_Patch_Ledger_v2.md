@@ -463,7 +463,7 @@ clean. No broker/OMS/runtime/paper/live path touched.
 - Files: `core-rs/mqk-gui/src/features/backtests/BacktestResultsScreen.tsx`,
   `core-rs/mqk-gui/src/features/backtests/__tests__/api.test.ts`,
   `docs/runbooks/backtest_workflow.md`.
-- `BACKTEST-GUI-POLISH-01` remains future/optional (presentation only).
+- `BACKTEST-GUI-POLISH-01` — CLOSED (presentation polish applied; see Section 9).
 
 **Original mission:** Live-prove and repair if needed the Backtest Results GUI workflow end-to-end:
 
@@ -595,11 +595,23 @@ Do not let backtests silently call TwelveData.
 
 See Section 6.
 
-### BACKTEST-GUI-POLISH-01 — QUEUED
+### BACKTEST-GUI-POLISH-01 — CLOSED
 
 **Purpose:** Optional cleanup after closure if Backtest Results screen has layout/scrolling/clarity issues during live smoke.
 
 **Constraints:** GUI presentation only. No engine/daemon/trading behavior.
+
+**Outcome:** Presentation polish applied to the Backtest Results screen
+(`BacktestResultsScreen.tsx` + `styles.css`). Workflows A and B now have labeled
+heading banners and a divider; rendered results carry a source line identifying
+which workflow produced them; the artifact display groups its panels under
+section headings (Run identity & performance / Research & promotion gates /
+Observability reference / Execution detail); long monospace values (hashes,
+host fingerprint, artifact paths, evidence folder) wrap instead of clipping; the
+equity-curve chart was given more vertical room. No parser, API, submit/poll,
+auto-load, or trading behavior changed. Validation: `npm test` 393/393 pass,
+`npm run build` clean (tsc + vite). See `docs/runbooks/backtest_workflow.md`
+*"Presentation (BACKTEST-GUI-POLISH-01)"*.
 
 ### BACKTEST-REPORT-UX-01 — QUEUED
 
