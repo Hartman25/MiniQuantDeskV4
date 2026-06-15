@@ -273,8 +273,10 @@ pub struct AppState {
     /// `dispatch_native_strategy_for_symbol_with_bar` to fail-closed-block
     /// strategy dispatch for a symbol/tick whose latest completed bar is
     /// stale or missing. `None` (the default, from an unset
-    /// `MQK_PER_SYMBOL_BAR_STALENESS_SECS`) means "use
-    /// `market_data_freshness::MD_FRESHNESS_STALE_SECS`" — unlike caps
+    /// `MQK_PER_SYMBOL_BAR_STALENESS_SECS`) means "use the timeframe-aware
+    /// default" — daily/1D keeps
+    /// `market_data_freshness::MD_FRESHNESS_STALE_SECS`, while intraday uses
+    /// `MQK_INTRADAY_BAR_MAX_AGE_SECS` or its fail-closed default. Unlike caps
     /// #2/#4/#6, this gate is always-on and cannot be disabled. Read once at
     /// construction; overridable via
     /// `set_per_symbol_bar_staleness_secs_for_test`.
@@ -1663,6 +1665,104 @@ operator_reconcile_or_repair_required"
         *self.last_strategy_diagnostics.lock().await = Some(diag);
     }
 
+    async fn dispatch_native_strategy_for_symbol_with_loaded_bars(
+        &self,
+        symbol: &str,
+        md_timeframe: &str,
+        bar: StrategyBarInput,
+        db_bars: Vec<mqk_db::MdBarRow>,
+        now_ts: i64,
+    ) -> Option<mqk_strategy::StrategyBarResult> {
+        if db_bars.is_empty() {
+            // No completed bars for this symbol/timeframe.
+            self.last_bar_context_bars.store(0, Ordering::SeqCst);
+            // MD-STALENESS-PER-TICK-GATE-01: a missing bar is always stale.
+            // Fail-closed: refuse dispatch rather than falling through to the
+            // single-stub fallback, which could otherwise produce a signal from
+            // no real price history.
+            let staleness_cap_secs = self
+                .per_symbol_bar_staleness_secs_for_timeframe(md_timeframe)
+                .await;
+            let now_utc = crate::market_data_freshness::unix_ts_to_rfc3339(now_ts);
+            let no_order_reason =
+                if crate::market_data_freshness::is_intraday_timeframe(md_timeframe) {
+                    crate::market_data_freshness::REASON_CODE_INTRADAY_BAR_NOT_CURRENT
+                } else {
+                    crate::market_data_freshness::REASON_CODE_MARKET_DATA_MISSING
+                };
+            tracing::warn!(
+                symbol = %symbol,
+                timeframe = %md_timeframe,
+                latest_completed_bar_ts = ?Option::<String>::None,
+                now_utc = ?now_utc,
+                age_seconds = ?Option::<i64>::None,
+                max_allowed_age_seconds = ?staleness_cap_secs,
+                no_order_reason = no_order_reason,
+                "md_staleness_per_tick_gate_01: bar_data_missing — \
+                 NO_MARKET_DATA: no completed bars in md_bars for this \
+                 symbol/timeframe; strategy dispatch refused for this \
+                 symbol/tick (fail-closed, no target/intent/order)"
+            );
+            return None;
+        }
+
+        // MD-STALENESS-PER-TICK-GATE-01: fail-closed per-dispatch-tick
+        // staleness gate. `db_bars` is oldest-first, so the last element is the
+        // latest completed bar.
+        let latest_end_ts = db_bars.last().map(|b| b.end_ts);
+        let staleness_cap_secs = self
+            .per_symbol_bar_staleness_secs_for_timeframe(md_timeframe)
+            .await;
+        if classify_bar_staleness(latest_end_ts, now_ts, staleness_cap_secs) == Some(true) {
+            let age_seconds = latest_end_ts.map(|ts| (now_ts - ts).max(0));
+            let now_utc = crate::market_data_freshness::unix_ts_to_rfc3339(now_ts);
+            let latest_completed_bar_ts =
+                latest_end_ts.and_then(crate::market_data_freshness::unix_ts_to_rfc3339);
+            let no_order_reason =
+                if crate::market_data_freshness::is_intraday_timeframe(md_timeframe) {
+                    crate::market_data_freshness::REASON_CODE_INTRADAY_BAR_STALE
+                } else {
+                    crate::market_data_freshness::REASON_CODE_BAR_DATA_STALE
+                };
+            tracing::warn!(
+                symbol = %symbol,
+                timeframe = %md_timeframe,
+                latest_end_ts = ?latest_end_ts,
+                latest_completed_bar_ts = ?latest_completed_bar_ts,
+                now_utc = ?now_utc,
+                age_seconds = ?age_seconds,
+                max_allowed_age_seconds = ?staleness_cap_secs,
+                no_order_reason = no_order_reason,
+                "md_staleness_per_tick_gate_01: bar_data_stale — latest \
+                 completed bar exceeds the per-symbol staleness threshold; \
+                 strategy dispatch refused for this symbol/tick \
+                 (fail-closed, no target/intent/order)"
+            );
+            return None;
+        }
+
+        let bars_loaded = db_bars.len();
+        let stubs: Vec<mqk_strategy::BarStub> = db_bars
+            .iter()
+            .map(|b| mqk_strategy::BarStub::new(b.end_ts, b.is_complete, b.close_micros, b.volume))
+            .collect();
+        // STRATEGY-DECISION-OBSERVABILITY-01: compute diagnostic snapshot from
+        // the bar window before consuming stubs into the strategy context.
+        let diagnostics = mqk_strategy::intraday_scalper_compute_diagnostics(&stubs);
+        *self.last_strategy_diagnostics.lock().await = Some(diagnostics);
+        let window = mqk_strategy::RecentBarsWindow::new(bars_loaded.max(1), stubs);
+        self.last_bar_context_bars
+            .store(bars_loaded as i64, Ordering::SeqCst);
+        tracing::debug!(
+            symbol = %symbol,
+            timeframe = %md_timeframe,
+            bars_loaded,
+            "auton_signal_context_01: db_bar_window_built"
+        );
+        self.invoke_native_strategy_on_bar_from_window(bar.now_tick, window)
+            .await
+    }
+
     /// PER-SYMBOL-BAR-WINDOW-01 / MULTI-SYMBOL-DISPATCH-LOOP-01:
     /// symbol/timeframe-parameterized dispatch of one already-taken
     /// [`StrategyBarInput`].
@@ -1691,85 +1791,16 @@ operator_reconcile_or_repair_required"
             )
             .await
             {
-                Ok(db_bars) if !db_bars.is_empty() => {
-                    // MD-STALENESS-PER-TICK-GATE-01: fail-closed per-dispatch-tick
-                    // staleness gate (cap #9, design doc §6
-                    // "per_symbol_bar_staleness_guard"). Reuses the pure
-                    // classify_bar_staleness helper (PER-SYMBOL-BAR-WINDOW-01).
-                    // `db_bars` is oldest-first, so the last element is the
-                    // latest completed bar.
-                    let latest_end_ts = db_bars.last().map(|b| b.end_ts);
-                    let now_ts = Utc::now().timestamp();
-                    let staleness_cap_secs = self.per_symbol_bar_staleness_secs().await;
-                    if classify_bar_staleness(latest_end_ts, now_ts, staleness_cap_secs)
-                        == Some(true)
-                    {
-                        let age_secs = latest_end_ts.map(|ts| (now_ts - ts).max(0));
-                        tracing::warn!(
-                            symbol = %symbol,
-                            timeframe = %md_timeframe,
-                            latest_end_ts = ?latest_end_ts,
-                            age_secs = ?age_secs,
-                            staleness_cap_secs = ?staleness_cap_secs,
-                            no_order_reason = "bar_data_stale",
-                            "md_staleness_per_tick_gate_01: bar_data_stale — latest \
-                             completed bar exceeds the per-symbol staleness threshold; \
-                             strategy dispatch refused for this symbol/tick \
-                             (fail-closed, no target/intent/order)"
-                        );
-                        return None;
-                    }
-
-                    let bars_loaded = db_bars.len();
-                    let stubs: Vec<mqk_strategy::BarStub> = db_bars
-                        .iter()
-                        .map(|b| {
-                            mqk_strategy::BarStub::new(
-                                b.end_ts,
-                                b.is_complete,
-                                b.close_micros,
-                                b.volume,
-                            )
-                        })
-                        .collect();
-                    // STRATEGY-DECISION-OBSERVABILITY-01: compute diagnostic snapshot
-                    // from the bar window before consuming stubs into the strategy context.
-                    let diagnostics = mqk_strategy::intraday_scalper_compute_diagnostics(&stubs);
-                    *self.last_strategy_diagnostics.lock().await = Some(diagnostics);
-                    let window = mqk_strategy::RecentBarsWindow::new(bars_loaded.max(1), stubs);
-                    self.last_bar_context_bars
-                        .store(bars_loaded as i64, Ordering::SeqCst);
-                    tracing::debug!(
-                        symbol = %symbol,
-                        timeframe = %md_timeframe,
-                        bars_loaded,
-                        "auton_signal_context_01: db_bar_window_built"
-                    );
+                Ok(db_bars) => {
                     return self
-                        .invoke_native_strategy_on_bar_from_window(bar.now_tick, window)
+                        .dispatch_native_strategy_for_symbol_with_loaded_bars(
+                            symbol,
+                            md_timeframe,
+                            bar,
+                            db_bars,
+                            Utc::now().timestamp(),
+                        )
                         .await;
-                }
-                Ok(_) => {
-                    // No completed bars for this symbol/timeframe.
-                    self.last_bar_context_bars.store(0, Ordering::SeqCst);
-                    // MD-STALENESS-PER-TICK-GATE-01: a missing bar is always
-                    // stale (classify_bar_staleness(None, _, Some(_)) ==
-                    // Some(true) for any cap). Fail-closed: refuse dispatch
-                    // for this symbol/tick rather than falling through to the
-                    // single-stub fallback, which could otherwise produce a
-                    // signal from no real price history.
-                    let staleness_cap_secs = self.per_symbol_bar_staleness_secs().await;
-                    tracing::warn!(
-                        symbol = %symbol,
-                        timeframe = %md_timeframe,
-                        staleness_cap_secs = ?staleness_cap_secs,
-                        no_order_reason = "bar_data_stale",
-                        "md_staleness_per_tick_gate_01: bar_data_stale — \
-                         NO_MARKET_DATA: no completed bars in md_bars for this \
-                         symbol/timeframe; strategy dispatch refused for this \
-                         symbol/tick (fail-closed, no target/intent/order)"
-                    );
-                    return None;
                 }
                 Err(e) => {
                     self.last_bar_context_bars.store(0, Ordering::SeqCst);
@@ -1836,6 +1867,64 @@ operator_reconcile_or_repair_required"
             .await
     }
 
+    /// Test seam for INTRADAY-MD-FRESHNESS-AUTONOMOUS-01.
+    ///
+    /// Exercises the same post-fetch dispatch/freshness path as production
+    /// without requiring a DB connection or writing fixture rows. It does not
+    /// read `pending_strategy_bar_input` and never calls providers, brokers, or
+    /// order routes.
+    pub async fn dispatch_native_strategy_for_symbol_with_loaded_bars_for_test(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        bar: StrategyBarInput,
+        db_bars: Vec<mqk_db::MdBarRow>,
+        now_ts: i64,
+    ) -> Option<mqk_strategy::StrategyBarResult> {
+        self.dispatch_native_strategy_for_symbol_with_loaded_bars(
+            symbol.trim(),
+            timeframe.trim(),
+            bar,
+            db_bars,
+            now_ts,
+        )
+        .await
+    }
+
+    /// Test seam for the multi-symbol dispatch loop after DB rows are loaded.
+    ///
+    /// Mirrors [`Self::tick_strategy_dispatch_multi_symbol`] but accepts a
+    /// per-symbol row map instead of reading `md_bars`, so tests can prove
+    /// per-symbol freshness behavior without DB/provider/broker dependencies.
+    pub async fn tick_strategy_dispatch_multi_symbol_with_loaded_bars_for_test(
+        &self,
+        assignments: &[SymbolStrategyAssignment],
+        bar: StrategyBarInput,
+        bars_by_symbol: &BTreeMap<String, Vec<mqk_db::MdBarRow>>,
+        now_ts: i64,
+    ) -> Vec<(SymbolStrategyAssignment, mqk_strategy::StrategyBarResult)> {
+        let mut results = Vec::new();
+        for assignment in assignments {
+            let db_bars = bars_by_symbol
+                .get(&assignment.symbol)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(bar_result) = self
+                .dispatch_native_strategy_for_symbol_with_loaded_bars(
+                    &assignment.symbol,
+                    &assignment.timeframe,
+                    bar.clone(),
+                    db_bars,
+                    now_ts,
+                )
+                .await
+            {
+                results.push((assignment.clone(), bar_result));
+            }
+        }
+        results
+    }
+
     /// B1B/AUTON-SIGNAL-CONTEXT-01: Execution loop dispatch seam.
     ///
     /// Called exclusively by the execution loop on each tick.  The loop is the
@@ -1850,8 +1939,10 @@ operator_reconcile_or_repair_required"
     /// Falls back to the single-stub context (original B1B path) when:
     /// - env vars are absent (not configured)
     /// - DB pool is unavailable
-    /// - DB returns no completed bars for the symbol/timeframe
     /// - DB query fails
+    ///
+    /// DB returns no completed bars, or stale completed bars for the effective
+    /// timeframe cap, fail closed before strategy dispatch.
     ///
     /// Returns `Some(StrategyBarResult)` when a bar was pending AND the bootstrap
     /// is Active.  Returns `None` on most ticks (no pending bar) or when the

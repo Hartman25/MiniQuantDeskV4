@@ -128,7 +128,12 @@ async fn dfr_u04_non_blocking_states_are_not_blockers() {
             completed_rows: 0,
             min_required_rows: 5,
             latest_complete_bar_ts: None,
+            latest_completed_bar_ts: None,
+            now_utc: "2023-11-14T22:13:20+00:00".to_string(),
+            age_seconds: None,
+            max_allowed_age_seconds: 345_600,
             freshness_state: state_str.to_string(),
+            reason_code: String::new(),
             reason: String::new(),
         };
         assert!(
@@ -151,7 +156,12 @@ async fn dfr_u05_blocking_states_are_blockers() {
             completed_rows: 0,
             min_required_rows: 5,
             latest_complete_bar_ts: None,
+            latest_completed_bar_ts: None,
+            now_utc: "2023-11-14T22:13:20+00:00".to_string(),
+            age_seconds: None,
+            max_allowed_age_seconds: 345_600,
             freshness_state: state_str.to_string(),
+            reason_code: String::new(),
             reason: String::new(),
         };
         assert!(

@@ -358,7 +358,20 @@ pub struct MarketDataFreshnessStatus {
     pub min_required_rows: u64,
     /// RFC 3339 timestamp of the latest completed bar, or `null`.
     pub latest_complete_bar_ts: Option<String>,
+    /// RFC 3339 timestamp of the latest completed bar, or `null`.
+    ///
+    /// Kept alongside the original singular field so operator diagnostics use
+    /// the explicit `latest_completed_bar_ts` name.
+    pub latest_completed_bar_ts: Option<String>,
+    /// RFC 3339 UTC timestamp of when this freshness status was evaluated.
+    pub now_utc: String,
+    /// Age of the latest completed bar in seconds, or `null` when no bar exists.
+    pub age_seconds: Option<i64>,
+    /// Effective max allowed age for this symbol/timeframe in seconds.
+    pub max_allowed_age_seconds: i64,
     pub freshness_state: String,
+    /// Machine-readable reason code, e.g. `intraday_bar_stale`.
+    pub reason_code: String,
     pub reason: String,
 }
 

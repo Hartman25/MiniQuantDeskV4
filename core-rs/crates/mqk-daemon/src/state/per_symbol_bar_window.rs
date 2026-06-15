@@ -22,8 +22,8 @@
 //! - [`PerSymbolLoadedBars`] — [`PerSymbolBarWindow`] plus the loaded
 //!   [`mqk_strategy::BarStub`]s, oldest-first, ready for
 //!   `RecentBarsWindow::new`.
-//! - [`classify_bar_staleness`] — pure helper for the future cap #9
-//!   (`per_symbol_bar_staleness_secs`); not enforced by this patch.
+//! - [`classify_bar_staleness`] — pure helper for cap #9
+//!   (`per_symbol_bar_staleness_secs`).
 //!
 //! # Cross-references
 //! - `docs/design/native_multi_symbol_dispatch.md` §4.4, §6 (cap #9)
@@ -266,8 +266,6 @@ pub async fn load_recent_completed_bars_for_symbol_window(
 ///   age to zero — never panics, never reports stale solely due to clock
 ///   skew.
 ///
-/// This patch only prepares the helper; the runtime dispatch loop does not
-/// call it and no cap is enforced yet.
 pub fn classify_bar_staleness(
     latest_end_ts: Option<i64>,
     now_ts: i64,

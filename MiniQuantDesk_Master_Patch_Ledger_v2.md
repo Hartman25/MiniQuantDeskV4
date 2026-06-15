@@ -1121,7 +1121,7 @@ Constraint: Do not touch broker behavior until current paper/autonomous path is 
 
 ## 14. Alpha Scanner / Intraday Data / Strategy Roadmap
 
-### INTRADAY-MD-FRESHNESS-AUTONOMOUS-01 — QUEUED / HIGH PRIORITY
+### INTRADAY-MD-FRESHNESS-AUTONOMOUS-01 — CLOSED
 
 **Purpose:** Ensure autonomous paper strategies using intraday timeframes, especially 5m, do not dispatch from stale prior-session bars.
 
@@ -1137,7 +1137,27 @@ Constraint: Do not touch broker behavior until current paper/autonomous path is 
 - Must not change strategy logic merely to force trades.
 - Must not bypass risk/reconcile/session/arm/live-routing gates.
 
-**Status:** QUEUED / HIGH PRIORITY
+**Closure:** CLOSED by focused validation for
+`INTRADAY-MD-FRESHNESS-AUTONOMOUS-01`; commit no longer pending. Package-scoped
+clippy remains blocked by unrelated existing drift in
+`core-rs/crates/mqk-daemon/src/routes/control_plane.rs:1389`
+(`clippy::unnecessary_map_or`).
+
+- Root cause: the per-dispatch staleness gate defaulted to the broad
+  `MD_FRESHNESS_STALE_SECS` 345600-second / 4-day threshold for every
+  timeframe, so Friday 5m bars could still be accepted on Monday.
+- Intraday timeframes now use `MQK_INTRADAY_BAR_MAX_AGE_SECS`, defaulting to
+  900 seconds. Daily/1D retains the 345600-second tolerance.
+- Autonomous dispatch now resolves the cap by timeframe before native strategy
+  invocation, so stale/missing intraday bars return no `StrategyBarResult`,
+  target, intent, outbox row, or broker contact.
+- Readiness/preflight market-data freshness now surfaces `reason_code`,
+  `latest_completed_bar_ts`, `now_utc`, `age_seconds`, and
+  `max_allowed_age_seconds`. Intraday stale/missing reason codes are
+  `intraday_bar_stale` and `intraday_bar_not_current`.
+- Focused proof: `scenario_intraday_md_freshness_autonomous_01`.
+
+**Status:** CLOSED
 
 ### INTRADAY-MD-REFRESHER-01 — QUEUED / HIGH PRIORITY
 
