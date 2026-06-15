@@ -93,6 +93,25 @@ impl RiskGate for RuntimeRiskGate {
             }
         }
     }
+
+    /// Read-only report of `RiskState.halted` (RISK-ENGINE-HALTED-VISIBILITY-01).
+    ///
+    /// Does NOT call `evaluate()` — only reads the sticky `halted` flag from
+    /// the currently-held `RiskState`. `FailClosed` gates have no `RiskState`
+    /// to read, so they report `Unavailable` (not a claim of "not halted").
+    fn sticky_halt_status(&self) -> mqk_execution::RiskEngineHaltStatus {
+        let state = self.state.lock().expect("runtime risk gate lock");
+        match &*state {
+            RuntimeRiskGateState::Ready { state, .. } => {
+                mqk_execution::RiskEngineHaltStatus::Known {
+                    halted: state.halted,
+                }
+            }
+            RuntimeRiskGateState::FailClosed { .. } => {
+                mqk_execution::RiskEngineHaltStatus::Unavailable
+            }
+        }
+    }
 }
 
 fn runtime_risk_config_from_run_config(
@@ -255,6 +274,80 @@ mod tests {
             denial.reason,
             mqk_execution::RiskReason::CapitalLimitExceeded,
             "engine denial should preserve a truthful non-unavailable category"
+        );
+    }
+
+    // RISK-ENGINE-HALTED-VISIBILITY-01: read-only sticky-halt accessor tests.
+
+    #[test]
+    fn sticky_halt_status_known_false_for_fresh_ready_state() {
+        let risk_gate = RuntimeRiskGate::for_test(
+            RiskConfig {
+                daily_loss_limit_micros: 1_000 * 1_000_000,
+                max_drawdown_limit_micros: 0,
+                reject_storm_max_rejects_in_window: 10,
+                pdt_auto_enabled: false,
+                missing_protective_stop_flattens: false,
+            },
+            RiskState::new(20240101, 100_000 * 1_000_000, 1),
+            RiskInput {
+                day_id: 20240101,
+                equity_micros: 100_000 * 1_000_000,
+                reject_window_id: 1,
+                request: RequestKind::NewOrder,
+                is_risk_reducing: false,
+                pdt: PdtContext::ok(),
+                kill_switch: None,
+            },
+        );
+
+        assert_eq!(
+            risk_gate.sticky_halt_status(),
+            mqk_execution::RiskEngineHaltStatus::Known { halted: false },
+            "fresh risk state must report halted=false, not Unavailable"
+        );
+    }
+
+    #[test]
+    fn sticky_halt_status_known_true_after_daily_loss_breach_is_sticky() {
+        let risk_gate = RuntimeRiskGate::for_test(
+            RiskConfig {
+                daily_loss_limit_micros: 1_000 * 1_000_000,
+                max_drawdown_limit_micros: 0,
+                reject_storm_max_rejects_in_window: 10,
+                pdt_auto_enabled: false,
+                missing_protective_stop_flattens: false,
+            },
+            RiskState::new(20240101, 100_000 * 1_000_000, 1),
+            RiskInput {
+                day_id: 20240101,
+                equity_micros: 98_999 * 1_000_000,
+                reject_window_id: 1,
+                request: RequestKind::NewOrder,
+                is_risk_reducing: false,
+                pdt: PdtContext::ok(),
+                kill_switch: None,
+            },
+        );
+
+        // Trigger the breach: evaluate() sets RiskState.halted = true (sticky).
+        let _ = risk_gate.evaluate_gate();
+
+        assert_eq!(
+            risk_gate.sticky_halt_status(),
+            mqk_execution::RiskEngineHaltStatus::Known { halted: true },
+            "sticky halt must remain visible via the read-only accessor after a breach"
+        );
+    }
+
+    #[test]
+    fn sticky_halt_status_unavailable_for_fail_closed_gate() {
+        let risk_gate = RuntimeRiskGate::from_run_config(&serde_json::json!({}), 0, 20240101, 1);
+
+        assert_eq!(
+            risk_gate.sticky_halt_status(),
+            mqk_execution::RiskEngineHaltStatus::Unavailable,
+            "fail-closed gates have no RiskState and must report Unavailable, not a guess"
         );
     }
 }

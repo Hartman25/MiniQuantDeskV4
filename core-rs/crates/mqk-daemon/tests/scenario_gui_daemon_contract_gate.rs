@@ -978,6 +978,7 @@ async fn gui_contract_execution_orders_200_array_with_injected_snapshot() {
         recent_risk_denials: vec![],
         snapshot_at_utc: DateTime::from_timestamp(0, 0).expect("unix epoch is valid"),
         has_recent_terminal_fill: false,
+        risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus::Unavailable,
     };
     *st.execution_snapshot.write().await = Some(snap);
 
@@ -1548,6 +1549,7 @@ async fn gui_contract_risk_denials_active_snapshot() {
         recent_risk_denials: vec![],
         snapshot_at_utc: DateTime::from_timestamp(0, 0).expect("unix epoch is valid"),
         has_recent_terminal_fill: false,
+        risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus::Unavailable,
     };
     *st.execution_snapshot.write().await = Some(snap);
 
@@ -1618,6 +1620,7 @@ async fn gui_contract_risk_denials_real_row_appears() {
         }],
         snapshot_at_utc: DateTime::from_timestamp(1_700_000_200, 0).expect("valid unix timestamp"),
         has_recent_terminal_fill: false,
+        risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus::Unavailable,
     };
     *st.execution_snapshot.write().await = Some(snap);
 
@@ -1751,6 +1754,7 @@ async fn gui_contract_reconcile_mismatches_active_with_authoritative_diff_rows()
         recent_risk_denials: vec![],
         snapshot_at_utc: DateTime::from_timestamp(1_700_000_000, 0).expect("valid unix timestamp"),
         has_recent_terminal_fill: false,
+        risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus::Unavailable,
     };
     *st.execution_snapshot.write().await = Some(execution_snapshot);
     st.local_order_sides

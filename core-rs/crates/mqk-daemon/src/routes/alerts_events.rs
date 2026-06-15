@@ -59,7 +59,7 @@ use crate::state::{
     AlpacaWsContinuityState, AppState, AutonomousSessionTruth, StrategyMarketDataSource,
 };
 
-use super::helpers::{build_fault_signals, runtime_error_response};
+use super::helpers::{build_fault_signals, runtime_error_response, sticky_halt_fault_signal};
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/alerts/active
@@ -96,8 +96,20 @@ pub(crate) async fn alerts_active(State(st): State<Arc<AppState>>) -> Response {
     } else {
         None
     };
-    let fault_signals =
+    let mut fault_signals =
         build_fault_signals(&status, &reconcile, risk_truth, execution_loop_stall_secs);
+
+    // RISK-ENGINE-HALTED-VISIBILITY-01: overlay the live risk gate's sticky
+    // halt flag, independent of risk_truth (which reflects the transient
+    // sys_risk_block_state DB flag and is reset every orchestrator tick).
+    let risk_engine_sticky_halt = st
+        .current_execution_snapshot()
+        .await
+        .map(|snap| snap.risk_engine_sticky_halt)
+        .unwrap_or(mqk_execution::RiskEngineHaltStatus::Unavailable);
+    if let Some(sig) = sticky_halt_fault_signal(risk_engine_sticky_halt) {
+        fault_signals.push(sig);
+    }
 
     let mut rows: Vec<ActiveAlertRow> = fault_signals
         .into_iter()
@@ -807,12 +819,24 @@ pub(crate) async fn alerts_triage(State(st): State<Arc<AppState>>) -> Response {
     } else {
         None
     };
-    let fault_signals = build_fault_signals(
+    let mut fault_signals = build_fault_signals(
         &status_snap,
         &reconcile,
         risk_truth,
         execution_loop_stall_secs_triage,
     );
+
+    // RISK-ENGINE-HALTED-VISIBILITY-01: overlay the live risk gate's sticky
+    // halt flag, independent of risk_truth (which reflects the transient
+    // sys_risk_block_state DB flag and is reset every orchestrator tick).
+    let risk_engine_sticky_halt_triage = st
+        .current_execution_snapshot()
+        .await
+        .map(|snap| snap.risk_engine_sticky_halt)
+        .unwrap_or(mqk_execution::RiskEngineHaltStatus::Unavailable);
+    if let Some(sig) = sticky_halt_fault_signal(risk_engine_sticky_halt_triage) {
+        fault_signals.push(sig);
+    }
 
     // WS continuity signals — same as alerts/active
     let ws = st.alpaca_ws_continuity().await;

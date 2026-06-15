@@ -443,6 +443,82 @@ while ($true) {
 
 ## 6. Active / Next Patch
 
+### RISK-ENGINE-HALTED-VISIBILITY-01 — CLOSED
+
+**Closure:** The risk engine's sticky `RiskState.halted` flag is now surfaced
+as a read-only operator signal, distinct from the transient
+`sys_risk_block_state.blocked` flag (which Phase 0 of the orchestrator tick
+resets every tick). Prior to this patch an operator could observe
+`kill_switch_active: false` on `/api/v1/risk/summary` while the risk engine
+was permanently denying all orders via sticky `RiskState.halted == true`.
+
+- `RiskGate` trait (`mqk-execution::gateway`) gained
+  `RiskEngineHaltStatus` (`Known { halted: bool }` | `Unavailable`) and a
+  default `sticky_halt_status() -> Unavailable` method. Existing
+  implementors (test stubs, fail-closed gates) are unaffected by the default.
+- `RuntimeRiskGate::sticky_halt_status()` (`mqk-runtime::runtime_risk`) reads
+  `RiskState.halted` from the held `RuntimeRiskGateState::Ready` state
+  without calling `evaluate()` — read-only, no mutation.
+  `RuntimeRiskGateState::FailClosed` reports `Unavailable`.
+- `BrokerGateway::risk_engine_sticky_halt()` read-only passthrough added.
+- `ExecutionSnapshot` gained `risk_engine_sticky_halt: RiskEngineHaltStatus`,
+  populated by `ExecutionOrchestrator::snapshot()` as an in-memory overlay
+  from the live gate (not DB-derived).
+- `GET /api/v1/risk/summary` (`RiskSummaryResponse`) gained
+  `risk_engine_halted: Option<bool>` (from the snapshot overlay; `None` when
+  no snapshot exists or the gate reports `Unavailable`) and
+  `risk_engine_halt_reason_code: Option<String>` (always `None` —
+  `RiskState` does not track a halt reason today).
+- New pure helper `sticky_halt_fault_signal()`
+  (`mqk-daemon::routes::helpers`) emits a `risk.engine.sticky_halted` /
+  `critical` `FaultSignal` only for `Known { halted: true }`. Wired into
+  `GET /api/v1/system/status`, `GET /api/v1/alerts/active`, and
+  `GET /api/v1/alerts/triage`.
+- 15 pre-existing `ExecutionSnapshot` struct-literal sites across
+  `mqk-daemon` tests and `state/snapshot.rs` updated mechanically to set
+  `risk_engine_sticky_halt: RiskEngineHaltStatus::Unavailable` (additive
+  field, no behavior change).
+
+**Behavior preserved:** No change to risk enforcement, gate evaluation,
+dispatch, OMS/outbox/inbox semantics, or broker behavior.
+`risk_engine_halted` is never derived from `sys_risk_block_state.blocked`.
+This is read-only observability only — **not** `RISK-FLATTEN-ON-HALT-01`
+(no flatten-on-halt behavior was added; no close orders generated).
+
+- Files: `core-rs/crates/mqk-execution/src/gateway.rs`,
+  `core-rs/crates/mqk-execution/src/lib.rs`,
+  `core-rs/crates/mqk-runtime/src/runtime_risk.rs`,
+  `core-rs/crates/mqk-runtime/src/observability.rs`,
+  `core-rs/crates/mqk-runtime/src/orchestrator.rs`,
+  `core-rs/crates/mqk-daemon/src/api_types.rs`,
+  `core-rs/crates/mqk-daemon/src/routes/portfolio.rs`,
+  `core-rs/crates/mqk-daemon/src/routes/helpers.rs`,
+  `core-rs/crates/mqk-daemon/src/routes/system.rs`,
+  `core-rs/crates/mqk-daemon/src/routes/alerts_events.rs`,
+  `core-rs/crates/mqk-daemon/src/state/snapshot.rs`, plus 9
+  `mqk-daemon/tests/scenario_*.rs` files (mechanical `ExecutionSnapshot`
+  literal fixups + new test coverage).
+
+**Tests:** 3 new tests in `mqk-runtime::runtime_risk`
+(`sticky_halt_status_known_false_for_fresh_ready_state`,
+`sticky_halt_status_known_true_after_daily_loss_breach_is_sticky`,
+`sticky_halt_status_unavailable_for_fail_closed_gate`); 2 new tests in
+`mqk-daemon::routes::helpers` (`rehv01_known_halted_true_emits_critical_sticky_halt_signal`,
+`rehv01_known_halted_false_and_unavailable_emit_no_signal`); 1 new test in
+`scenario_daemon_routes.rs`
+(`api_risk_summary_exposes_risk_engine_sticky_halt_state`, proves
+`risk_engine_halted` is null/true/false across no-snapshot/halted/clear/unavailable
+states). `cargo test -p mqk-execution -p mqk-runtime` (all pass, including
+the 3 new tests) and targeted `mqk-daemon` test files
+(`scenario_daemon_routes`, `scenario_gui_daemon_contract_gate`,
+`scenario_daemon_order_submit`, `scenario_daemon_runtime_lifecycle`,
+`scenario_monotonic_reconcile_in_run_baseline_01`, `scenario_order_trace_a5b`,
+`scenario_order_timeline_a5a`, `scenario_paper_flatten_psf01`,
+`scenario_runtime_start_reconcile_baseline_01`, plus `mqk-daemon --lib`) all
+pass.
+
+---
+
 ### BACKTEST-GUI-CLOSURE-01 — CLOSED
 
 **Closure (automated component-logic test):** The Backtest Results GUI workflow

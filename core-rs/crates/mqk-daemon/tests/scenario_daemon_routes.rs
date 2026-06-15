@@ -811,6 +811,7 @@ async fn api_execution_summary_derives_counts_from_execution_snapshot() {
             recent_risk_denials: vec![],
             snapshot_at_utc: chrono::Utc::now(),
             has_recent_terminal_fill: false,
+            risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus::Unavailable,
         });
     }
 
@@ -947,6 +948,101 @@ async fn api_portfolio_and_risk_summary_derive_from_snapshot() {
     assert!((risk_json["concentration_pct"].as_f64().unwrap() - 90.9090909090909).abs() < 1e-9);
     assert_eq!(risk_json["kill_switch_active"], false);
     assert_eq!(risk_json["active_breaches"], 0);
+}
+
+#[tokio::test]
+async fn api_risk_summary_exposes_risk_engine_sticky_halt_state() {
+    // RISK-ENGINE-HALTED-VISIBILITY-01: /api/v1/risk/summary must surface the
+    // live risk gate's sticky RiskState.halted flag via risk_engine_halted,
+    // distinct from kill_switch_active (transient sys_risk_block_state).
+    use mqk_runtime::observability::{ExecutionSnapshot, PortfolioSnapshot};
+
+    let st = Arc::new(state::AppState::new_with_operator_auth(
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+
+    // No execution snapshot yet: risk_engine_halted must be explicitly null,
+    // not a guessed `false`.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert!(
+        json["risk_engine_halted"].is_null(),
+        "risk_engine_halted must be null with no execution snapshot; got: {json}"
+    );
+    assert!(json["risk_engine_halt_reason_code"].is_null());
+
+    let base_snapshot = |risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus| {
+        ExecutionSnapshot {
+            run_id: None,
+            active_orders: vec![],
+            pending_outbox: vec![],
+            recent_inbox_events: vec![],
+            portfolio: PortfolioSnapshot {
+                cash_micros: 0,
+                realized_pnl_micros: 0,
+                positions: vec![],
+            },
+            system_block_state: None,
+            recent_risk_denials: vec![],
+            snapshot_at_utc: chrono::Utc::now(),
+            has_recent_terminal_fill: false,
+            risk_engine_sticky_halt,
+        }
+    };
+
+    // Live gate reports a sticky halt: RiskState.halted == true.
+    *st.execution_snapshot.write().await = Some(base_snapshot(
+        mqk_execution::RiskEngineHaltStatus::Known { halted: true },
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(
+        json["risk_engine_halted"], true,
+        "risk_engine_halted must surface RiskState.halted == true; got: {json}"
+    );
+
+    // Live gate confirms not halted: Known{halted: false}, distinct from Unavailable.
+    *st.execution_snapshot.write().await = Some(base_snapshot(
+        mqk_execution::RiskEngineHaltStatus::Known { halted: false },
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["risk_engine_halted"], false);
+
+    // Unavailable gate: absence of a report must not be reported as `false`.
+    *st.execution_snapshot.write().await = Some(base_snapshot(
+        mqk_execution::RiskEngineHaltStatus::Unavailable,
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert!(
+        json["risk_engine_halted"].is_null(),
+        "Unavailable must surface as null, not false; got: {json}"
+    );
 }
 
 #[tokio::test]
@@ -2620,6 +2716,7 @@ async fn risk_denials_route_active_with_pool_returns_only_db_rows() {
         }],
         snapshot_at_utc: DateTime::from_timestamp(1_700_000_600, 0).expect("valid unix timestamp"),
         has_recent_terminal_fill: false,
+        risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus::Unavailable,
     };
     *st.execution_snapshot.write().await = Some(snap);
 
@@ -3593,6 +3690,7 @@ async fn a2_t02_transport_with_snapshot_returns_active_and_depths() {
         recent_risk_denials: vec![],
         snapshot_at_utc: now,
         has_recent_terminal_fill: false,
+        risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus::Unavailable,
     };
 
     *st.execution_snapshot.write().await = Some(snapshot);

@@ -233,6 +233,20 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
     };
     let risk_blocked = durable_risk.as_ref().is_some_and(|state| state.blocked);
 
+    // RISK-ENGINE-HALTED-VISIBILITY-01: read-only overlay of the live risk
+    // gate's sticky `RiskState.halted` flag. Distinct from `risk_blocked`
+    // above, which is derived from the transient `sys_risk_block_state` DB
+    // row and is reset every orchestrator tick.
+    let risk_engine_halted = match st.current_execution_snapshot().await {
+        Some(exec_snapshot) => match exec_snapshot.risk_engine_sticky_halt {
+            mqk_execution::RiskEngineHaltStatus::Known { halted } => Some(halted),
+            mqk_execution::RiskEngineHaltStatus::Unavailable => None,
+        },
+        None => None,
+    };
+    // RiskState does not currently track a reason alongside `halted`.
+    let risk_engine_halt_reason_code: Option<String> = None;
+
     let summary = if let Some(snapshot) = snap {
         let (_, _, gross_exposure, max_abs_position) = exposure_breakdown(&snapshot.positions);
         let net_exposure = snapshot
@@ -256,6 +270,8 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
             loss_limit_utilization_pct: None,
             kill_switch_active: risk_blocked,
             active_breaches: usize::from(risk_blocked),
+            risk_engine_halted,
+            risk_engine_halt_reason_code,
         }
     } else {
         RiskSummaryResponse {
@@ -268,6 +284,8 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
             loss_limit_utilization_pct: None,
             kill_switch_active: risk_blocked,
             active_breaches: usize::from(risk_blocked),
+            risk_engine_halted,
+            risk_engine_halt_reason_code,
         }
     };
 

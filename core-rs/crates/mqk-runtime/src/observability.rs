@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use mqk_db::{InboxRow, OutboxRow};
 use mqk_execution::{
     oms::state_machine::{OmsOrder, OrderState},
-    BrokerOrderMap,
+    BrokerOrderMap, RiskEngineHaltStatus,
 };
 use mqk_portfolio::PortfolioState;
 use serde::{Deserialize, Serialize};
@@ -156,6 +156,15 @@ pub struct ExecutionSnapshot {
     /// snapshot refresh so the post-fill position is confirmed before the
     /// grace window expires (RECONCILE-DRIFT-AFTER-TERMINAL-FILL-01).
     pub has_recent_terminal_fill: bool,
+    /// Read-only report of the risk engine's sticky halt state
+    /// (RISK-ENGINE-HALTED-VISIBILITY-01).
+    ///
+    /// `Known{halted: true}` means `RiskState.halted` is sticky-set in the
+    /// production risk gate — distinct from the transient
+    /// `sys_risk_block_state.blocked` DB flag, which is reset every tick.
+    /// `Unavailable` means the gate cannot report this (overlaid by the
+    /// orchestrator from the live gate; never derived from DB state).
+    pub risk_engine_sticky_halt: RiskEngineHaltStatus,
     /// UTC timestamp at which this snapshot was taken.
     pub snapshot_at_utc: DateTime<Utc>,
 }
@@ -344,6 +353,8 @@ pub async fn collect_db_snapshot(
         recent_risk_denials: vec![],
         // Overlaid by the caller from the orchestrator's recently_applied_fills ring buffer.
         has_recent_terminal_fill: false,
+        // Overlaid by the caller from the live gate via BrokerGateway::risk_engine_sticky_halt().
+        risk_engine_sticky_halt: RiskEngineHaltStatus::Unavailable,
         snapshot_at_utc: now,
     })
 }

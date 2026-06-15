@@ -808,6 +808,17 @@ pub struct RiskSummaryResponse {
     pub loss_limit_utilization_pct: Option<f64>,
     pub kill_switch_active: bool,
     pub active_breaches: usize,
+    /// Sticky `RiskState.halted` flag from the live risk gate
+    /// (RISK-ENGINE-HALTED-VISIBILITY-01). `None` when the gate cannot
+    /// report sticky-halt state (e.g. no execution snapshot yet, or a
+    /// fail-closed gate). Distinct from `kill_switch_active`, which derives
+    /// from the transient `sys_risk_block_state.blocked` flag reset each
+    /// orchestrator tick.
+    pub risk_engine_halted: Option<bool>,
+    /// Reserved for a future reason code explaining why the risk engine is
+    /// sticky-halted. Always `None` today — `RiskState` does not currently
+    /// track a reason alongside `halted`.
+    pub risk_engine_halt_reason_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

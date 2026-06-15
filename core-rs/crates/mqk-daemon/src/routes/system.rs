@@ -39,7 +39,7 @@ use crate::state::{
 
 use super::helpers::{
     build_fault_signals, environment_and_live_routing_truth, runtime_error_response,
-    runtime_status_from_state,
+    runtime_status_from_state, sticky_halt_fault_signal,
 };
 
 const DAEMON_ENGINE_ID: &str = "mqk-daemon";
@@ -252,7 +252,25 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
                 } else {
                     None
                 };
-                build_fault_signals(&status, &reconcile, risk_truth, execution_loop_stall_secs)
+                let mut signals = build_fault_signals(
+                    &status,
+                    &reconcile,
+                    risk_truth,
+                    execution_loop_stall_secs,
+                );
+                // RISK-ENGINE-HALTED-VISIBILITY-01: overlay the live risk gate's
+                // sticky halt flag as an additional fault signal, independent of
+                // risk_truth (which reflects the transient sys_risk_block_state
+                // DB flag and is reset every orchestrator tick).
+                let risk_engine_sticky_halt = st
+                    .current_execution_snapshot()
+                    .await
+                    .map(|snap| snap.risk_engine_sticky_halt)
+                    .unwrap_or(mqk_execution::RiskEngineHaltStatus::Unavailable);
+                if let Some(sig) = sticky_halt_fault_signal(risk_engine_sticky_halt) {
+                    signals.push(sig);
+                }
+                signals
             },
             autonomous_signal_count,
             autonomous_signal_limit_hit,

@@ -293,6 +293,7 @@ async fn daemon_state() -> Arc<state::AppState> {
             recent_risk_denials: vec![],
             snapshot_at_utc: chrono::Utc::now(),
             has_recent_terminal_fill: false,
+            risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus::Unavailable,
         });
     }
     state

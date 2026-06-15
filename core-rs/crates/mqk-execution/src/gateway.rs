@@ -38,6 +38,7 @@ use crate::order_router::{
     BrokerSubmitRequest, BrokerSubmitResponse, OrderRouter,
 };
 use crate::risk_decision::{RiskDecision, RiskDenial};
+use serde::{Deserialize, Serialize};
 // FC-2: OutboxClaimToken now lives in mqk-db (the only crate whose
 // `outbox_claim_batch` function constructs it).  Re-exported below so
 // existing `use mqk_execution::OutboxClaimToken` imports continue to work.
@@ -56,6 +57,24 @@ pub use mqk_db::OutboxClaimToken;
 pub trait IntegrityGate {
     fn is_armed(&self) -> bool;
 }
+/// Read-only report of the risk engine's sticky halt state
+/// (RISK-ENGINE-HALTED-VISIBILITY-01).
+///
+/// This is distinct from a per-request [`RiskDecision`]: `RiskState.halted`
+/// is a sticky flag that, once set by the risk engine, remains `true` across
+/// subsequent ticks regardless of the transient `sys_risk_block_state` DB
+/// flag (which is reset every orchestrator tick at Phase 0).
+///
+/// `Unavailable` means the implementor cannot report sticky-halt state at
+/// all (e.g. fail-closed gates, or test stubs that only implement
+/// `evaluate_gate`). It is not a claim that the engine is *not* halted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RiskEngineHaltStatus {
+    /// The implementor can report the engine's sticky halt flag.
+    Known { halted: bool },
+    /// The implementor cannot report sticky-halt state.
+    Unavailable,
+}
 /// Evaluates whether the risk engine currently allows order submission.
 ///
 /// Implementations must be deterministic, side-effect free, and fail-closed:
@@ -69,6 +88,15 @@ pub trait IntegrityGate {
 /// `RiskReason` variant is present.
 pub trait RiskGate {
     fn evaluate_gate(&self) -> RiskDecision;
+
+    /// Read-only report of the engine's sticky halt state.
+    ///
+    /// Default implementation reports `Unavailable` — this is a read-only
+    /// observability accessor and must never mutate engine state to answer.
+    /// Only implementors that hold real `RiskState` should override this.
+    fn sticky_halt_status(&self) -> RiskEngineHaltStatus {
+        RiskEngineHaltStatus::Unavailable
+    }
 }
 /// Evaluates whether the most recent reconcile report is clean.
 ///
@@ -339,6 +367,15 @@ where
         self.router
             .route_cancel(broker_id)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+    /// Read-only report of the risk engine's sticky halt state
+    /// (RISK-ENGINE-HALTED-VISIBILITY-01).
+    ///
+    /// This is a passthrough to `RG::sticky_halt_status()`. It does not
+    /// evaluate gates, does not mutate any state, and has no effect on
+    /// `submit` / `cancel` / `replace` enforcement.
+    pub fn risk_engine_sticky_halt(&self) -> RiskEngineHaltStatus {
+        self.risk.sticky_halt_status()
     }
     /// Fetch new broker events since `cursor`.
     ///

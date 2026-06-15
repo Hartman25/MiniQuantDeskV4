@@ -50,7 +50,7 @@ pub use order_router::{
 
 pub use gateway::{
     intent_id_to_client_order_id, BrokerGateway, GateRefusal, IntegrityGate, OutboxClaimToken,
-    ReconcileGate, RiskGate, SubmitError, UnknownOrder,
+    ReconcileGate, RiskEngineHaltStatus, RiskGate, SubmitError, UnknownOrder,
 };
 
 pub use risk_decision::{RiskDecision, RiskDenial, RiskEvidence, RiskReason};

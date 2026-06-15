@@ -193,6 +193,31 @@ pub(crate) fn build_fault_signals(
     signals
 }
 
+/// Build a fault signal for a sticky risk-engine halt
+/// (RISK-ENGINE-HALTED-VISIBILITY-01).
+///
+/// Returns `Some` only when the live risk gate reports
+/// `RiskEngineHaltStatus::Known { halted: true }` — a sticky condition that
+/// persists across ticks regardless of the transient
+/// `sys_risk_block_state.blocked` flag covered by `build_fault_signals`'s
+/// `risk_truth` parameter. Returns `None` for `Known { halted: false }` and
+/// for `Unavailable` (absence of a report is not evidence of "not halted").
+pub(crate) fn sticky_halt_fault_signal(
+    status: mqk_execution::RiskEngineHaltStatus,
+) -> Option<FaultSignal> {
+    match status {
+        mqk_execution::RiskEngineHaltStatus::Known { halted: true } => Some(FaultSignal {
+            class: "risk.engine.sticky_halted".to_string(),
+            severity: "critical".to_string(),
+            summary: "Risk engine is sticky-halted; all order submission is denied until the run restarts."
+                .to_string(),
+            detail: None,
+        }),
+        mqk_execution::RiskEngineHaltStatus::Known { halted: false }
+        | mqk_execution::RiskEngineHaltStatus::Unavailable => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // parse_decimal / oms_stage_label / runtime_status_from_state
 // ---------------------------------------------------------------------------
@@ -717,6 +742,33 @@ mod tests {
             stall.summary.contains("30s"),
             "stall signal summary must include elapsed seconds; got: {}",
             stall.summary
+        );
+    }
+
+    // RISK-ENGINE-HALTED-VISIBILITY-01: sticky_halt_fault_signal tests.
+
+    #[test]
+    fn rehv01_known_halted_true_emits_critical_sticky_halt_signal() {
+        let sig =
+            sticky_halt_fault_signal(mqk_execution::RiskEngineHaltStatus::Known { halted: true })
+                .expect("Known{halted: true} must emit a fault signal");
+        assert_eq!(sig.class, "risk.engine.sticky_halted");
+        assert_eq!(sig.severity, "critical");
+    }
+
+    #[test]
+    fn rehv01_known_halted_false_and_unavailable_emit_no_signal() {
+        assert!(
+            sticky_halt_fault_signal(mqk_execution::RiskEngineHaltStatus::Known {
+                halted: false
+            })
+            .is_none(),
+            "Known{{halted: false}} must not emit a sticky-halt fault signal"
+        );
+        assert!(
+            sticky_halt_fault_signal(mqk_execution::RiskEngineHaltStatus::Unavailable).is_none(),
+            "Unavailable must not emit a sticky-halt fault signal (absence is not evidence of \
+             'not halted')"
         );
     }
 }
