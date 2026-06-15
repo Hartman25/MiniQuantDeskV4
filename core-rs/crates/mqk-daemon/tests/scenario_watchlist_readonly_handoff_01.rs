@@ -60,12 +60,11 @@ use std::sync::{Arc, OnceLock};
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{
-    routes,
-    state,
+    routes, state,
     watchlist_intake::{
-        evaluate_watchlist_intake, evaluate_watchlist_signal_admission,
-        WatchlistAdmissionReason, WatchlistIntakeOutcome, ENV_PAPER_WATCHLIST_PATH,
-        MULTI_SYMBOL_HARD_CEILING, WATCHLIST_SCHEMA_VERSION_V1, WATCHLIST_SCHEMA_VERSION_V2,
+        evaluate_watchlist_intake, evaluate_watchlist_signal_admission, WatchlistAdmissionReason,
+        WatchlistIntakeOutcome, ENV_PAPER_WATCHLIST_PATH, MULTI_SYMBOL_HARD_CEILING,
+        WATCHLIST_SCHEMA_VERSION_V1, WATCHLIST_SCHEMA_VERSION_V2,
     },
 };
 use tokio::sync::Mutex;
@@ -405,9 +404,7 @@ fn w09_max_symbols_to_trade_greater_than_1_is_invalid() {
     assert_eq!(outcome.status_label(), "invalid");
     let reasons = outcome.failure_reasons();
     assert!(
-        reasons
-            .iter()
-            .any(|r| r.contains("max_symbols_to_trade")),
+        reasons.iter().any(|r| r.contains("max_symbols_to_trade")),
         "expected max_symbols_to_trade reason, got: {reasons:?}"
     );
 }
@@ -455,9 +452,7 @@ fn w11_missing_strategy_assignments_returns_invalid() {
     assert_eq!(outcome.status_label(), "invalid");
     let reasons = outcome.failure_reasons();
     assert!(
-        reasons
-            .iter()
-            .any(|r| r.contains("strategy_assignments")),
+        reasons.iter().any(|r| r.contains("strategy_assignments")),
         "expected strategy_assignments reason, got: {reasons:?}"
     );
 }
@@ -472,10 +467,7 @@ async fn w12_endpoint_approved_for_live_always_false() {
 
     // Set path to a non-existent file so we get "missing" status — any status is fine.
     unsafe {
-        std::env::set_var(
-            ENV_PAPER_WATCHLIST_PATH,
-            "/tmp/mqk_w12_no_such_file.json",
-        );
+        std::env::set_var(ENV_PAPER_WATCHLIST_PATH, "/tmp/mqk_w12_no_such_file.json");
     }
 
     let router = build_router();
@@ -542,8 +534,7 @@ fn w14_dry_admission_allows_approved_symbol_and_strategy() {
     let outcome = evaluate_watchlist_intake(Some(&path));
     cleanup(&path);
 
-    let result =
-        evaluate_watchlist_signal_admission(&outcome, "AAPL", "strat-scalper-001");
+    let result = evaluate_watchlist_signal_admission(&outcome, "AAPL", "strat-scalper-001");
     assert!(result.allowed);
     assert_eq!(result.reason, WatchlistAdmissionReason::Allowed);
 }
@@ -559,8 +550,7 @@ fn w15_dry_admission_rejects_wrong_symbol() {
     let outcome = evaluate_watchlist_intake(Some(&path));
     cleanup(&path);
 
-    let result =
-        evaluate_watchlist_signal_admission(&outcome, "TSLA", "strat-scalper-001");
+    let result = evaluate_watchlist_signal_admission(&outcome, "TSLA", "strat-scalper-001");
     assert!(!result.allowed);
     assert_eq!(result.reason, WatchlistAdmissionReason::SymbolNotApproved);
 }
@@ -576,13 +566,9 @@ fn w16_dry_admission_rejects_wrong_strategy() {
     let outcome = evaluate_watchlist_intake(Some(&path));
     cleanup(&path);
 
-    let result =
-        evaluate_watchlist_signal_admission(&outcome, "AAPL", "strat-different-999");
+    let result = evaluate_watchlist_signal_admission(&outcome, "AAPL", "strat-different-999");
     assert!(!result.allowed);
-    assert_eq!(
-        result.reason,
-        WatchlistAdmissionReason::StrategyNotAssigned
-    );
+    assert_eq!(result.reason, WatchlistAdmissionReason::StrategyNotAssigned);
 }
 
 // ---------------------------------------------------------------------------
@@ -605,7 +591,10 @@ fn w17_dry_admission_rejects_all_non_approved_states() {
     cleanup(&path);
 
     let cases = [
-        (not_configured, WatchlistAdmissionReason::WatchlistNotConfigured),
+        (
+            not_configured,
+            WatchlistAdmissionReason::WatchlistNotConfigured,
+        ),
         (missing, WatchlistAdmissionReason::WatchlistMissing),
         (invalid, WatchlistAdmissionReason::WatchlistInvalid),
         (not_approved, WatchlistAdmissionReason::WatchlistNotApproved),
@@ -613,9 +602,14 @@ fn w17_dry_admission_rejects_all_non_approved_states() {
 
     for (outcome, expected_reason) in cases {
         let result = evaluate_watchlist_signal_admission(&outcome, "AAPL", "strat-scalper-001");
-        assert!(!result.allowed, "expected denied for {:?}", outcome.status_label());
+        assert!(
+            !result.allowed,
+            "expected denied for {:?}",
+            outcome.status_label()
+        );
         assert_eq!(
-            result.reason, expected_reason,
+            result.reason,
+            expected_reason,
             "wrong reason for {:?}",
             outcome.status_label()
         );
@@ -672,7 +666,9 @@ fn w19_approved_true_with_empty_symbols_is_invalid() {
     assert_eq!(outcome.status_label(), "invalid");
     let reasons = outcome.failure_reasons();
     assert!(
-        reasons.iter().any(|r| r.contains("approved_for_autonomous_paper") || r.contains("symbols")),
+        reasons
+            .iter()
+            .any(|r| r.contains("approved_for_autonomous_paper") || r.contains("symbols")),
         "expected consistency reason, got: {reasons:?}"
     );
     assert!(!outcome.approved_for_live());
@@ -720,7 +716,9 @@ async fn w20_loaded_approved_endpoint_surfaces_top_symbol_and_assignments() {
     assert_eq!(json_resp["max_concurrent_positions"], 1);
     // No failure_reasons on valid approved artifact.
     assert!(
-        json_resp["failure_reasons"].as_array().map_or(false, |a| a.is_empty()),
+        json_resp["failure_reasons"]
+            .as_array()
+            .is_some_and(|a| a.is_empty()),
         "failure_reasons must be empty on loaded_approved"
     );
 }

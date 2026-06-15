@@ -32,8 +32,7 @@ use mqk_daemon::{
     notify::DiscordNotifier,
     routes::build_router,
     state::{
-        AlpacaWsContinuityState, AppState, BrokerKind, DeploymentMode,
-        ReconcileStatusSnapshot,
+        AlpacaWsContinuityState, AppState, BrokerKind, DeploymentMode, ReconcileStatusSnapshot,
     },
 };
 use tower::ServiceExt;
@@ -51,12 +50,12 @@ fn paper_paper_state() -> Arc<AppState> {
 }
 
 fn live_capital_state() -> Arc<AppState> {
-    Arc::new(AppState::new_for_test_with_mode(DeploymentMode::LiveCapital))
+    Arc::new(AppState::new_for_test_with_mode(
+        DeploymentMode::LiveCapital,
+    ))
 }
 
-async fn get_paper_status(
-    router: axum::Router,
-) -> (StatusCode, serde_json::Value) {
+async fn get_paper_status(router: axum::Router) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .uri("/api/v1/autonomous/paper-status")
         .body(axum::body::Body::empty())
@@ -64,8 +63,7 @@ async fn get_paper_status(
     let resp = router.oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let j: serde_json::Value =
-        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    let j: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, j)
 }
 
@@ -103,9 +101,8 @@ async fn ps02_live_routing_enabled_always_false() {
     let (status, body) = get_paper_status(router).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body["live_routing_enabled"].as_bool().unwrap(),
-        false,
+    assert!(
+        !body["live_routing_enabled"].as_bool().unwrap(),
         "live_routing_enabled must always be false for paper mode"
     );
 }
@@ -122,12 +119,9 @@ async fn ps03_non_paper_returns_not_applicable() {
     let (status, body) = get_paper_status(router).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body["truth_state"].as_str().unwrap(),
-        "not_applicable"
-    );
+    assert_eq!(body["truth_state"].as_str().unwrap(), "not_applicable");
     // live_routing_enabled must still be false even in not_applicable path.
-    assert_eq!(body["live_routing_enabled"].as_bool().unwrap(), false);
+    assert!(!body["live_routing_enabled"].as_bool().unwrap());
 }
 
 #[tokio::test]
@@ -176,7 +170,10 @@ async fn ps04_reconcile_dirty_creates_blocker() {
         blockers
     );
     // Dirty reconcile means classification is blocked.
-    assert_eq!(body["readiness_classification"].as_str().unwrap(), "blocked");
+    assert_eq!(
+        body["readiness_classification"].as_str().unwrap(),
+        "blocked"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -196,14 +193,16 @@ async fn ps05_kill_switch_active_surfaces_in_response() {
     let (status, body) = get_paper_status(router).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
+    assert!(
         body["kill_switch_active"].as_bool().unwrap(),
-        true,
         "kill_switch_active must be true when integrity is halted"
     );
     assert_eq!(body["arm_state"].as_str().unwrap(), "halted");
     // Halted counts as a blocker.
-    assert_eq!(body["readiness_classification"].as_str().unwrap(), "blocked");
+    assert_eq!(
+        body["readiness_classification"].as_str().unwrap(),
+        "blocked"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +248,10 @@ async fn ps06b_gap_detected_surfaces_in_ws_continuity() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["ws_continuity"].as_str().unwrap(), "gap_detected");
-    assert_eq!(body["readiness_classification"].as_str().unwrap(), "blocked");
+    assert_eq!(
+        body["readiness_classification"].as_str().unwrap(),
+        "blocked"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -264,9 +266,8 @@ async fn ps07_flatten_unavailable_without_active_run() {
     let (status, body) = get_paper_status(router).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body["flatten_available"].as_bool().unwrap(),
-        false,
+    assert!(
+        !body["flatten_available"].as_bool().unwrap(),
         "flatten must not be available without an active run"
     );
     let flatten_blockers = body["flatten_blockers"].as_array().unwrap();
@@ -298,8 +299,14 @@ async fn ps08_watchlist_not_configured_is_not_fatal() {
     assert_eq!(status, StatusCode::OK);
     // Watchlist not configured must not crash or return 500.
     assert!(
-        ["not_configured", "missing", "invalid", "loaded_not_approved", "loaded_approved"]
-            .contains(&body["watchlist_outcome"].as_str().unwrap_or("missing")),
+        [
+            "not_configured",
+            "missing",
+            "invalid",
+            "loaded_not_approved",
+            "loaded_approved"
+        ]
+        .contains(&body["watchlist_outcome"].as_str().unwrap_or("missing")),
         "watchlist_outcome must be a valid string"
     );
     // approved_for_live is always false.
@@ -349,7 +356,10 @@ async fn ps10_response_has_autonomous_session_state() {
 
     assert_eq!(status, StatusCode::OK);
     let sess_state = body["autonomous_session_state"].as_str().unwrap_or("");
-    assert!(!sess_state.is_empty(), "autonomous_session_state must be present");
+    assert!(
+        !sess_state.is_empty(),
+        "autonomous_session_state must be present"
+    );
     // Default is "clear" (no anomaly).
     assert_eq!(sess_state, "clear");
 }
@@ -428,8 +438,7 @@ async fn ps14_readiness_classification_never_null() {
     assert_eq!(status, StatusCode::OK);
     let classification = body["readiness_classification"].as_str().unwrap_or("");
     assert!(
-        ["ready_for_market_smoke", "market_proof_pending", "blocked"]
-            .contains(&classification),
+        ["ready_for_market_smoke", "market_proof_pending", "blocked"].contains(&classification),
         "readiness_classification must be one of the known strings; got: {:?}",
         classification
     );
@@ -456,8 +465,7 @@ async fn ps14b_ws_live_moves_classification_toward_ready() {
     // Just confirm WS live didn't break the response — classification may still
     // be "blocked" due to other gates (arm, strategy fleet, etc).
     assert!(
-        ["ready_for_market_smoke", "market_proof_pending", "blocked"]
-            .contains(&classification)
+        ["ready_for_market_smoke", "market_proof_pending", "blocked"].contains(&classification)
     );
 }
 
@@ -481,9 +489,8 @@ async fn ps15_discord_visibility_ready_false_when_unconfigured() {
     let (status, body) = get_paper_status(router).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body["discord_visibility_ready"].as_bool().unwrap(),
-        false,
+    assert!(
+        !body["discord_visibility_ready"].as_bool().unwrap(),
         "discord_visibility_ready must be false when DISCORD_WEBHOOK_URL is unconfigured"
     );
 }
@@ -500,9 +507,8 @@ async fn ps16_discord_visibility_ready_true_when_configured() {
     let (status, body) = get_paper_status(router).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
+    assert!(
         body["discord_visibility_ready"].as_bool().unwrap(),
-        true,
         "discord_visibility_ready must be true when a webhook URL is configured"
     );
 }
@@ -519,9 +525,8 @@ async fn ps17_not_applicable_path_reflects_notifier_configuration() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["truth_state"].as_str().unwrap(), "not_applicable");
-    assert_eq!(
-        body["discord_visibility_ready"].as_bool().unwrap(),
-        false,
+    assert!(
+        !body["discord_visibility_ready"].as_bool().unwrap(),
         "not_applicable path must not hardcode discord_visibility_ready=true"
     );
 }

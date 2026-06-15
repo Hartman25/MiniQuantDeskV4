@@ -34,6 +34,7 @@
 //!   - after order ACK (no fill yet): snapshot still shows baseline only
 //!   - after fills: snapshot shows baseline + delta (apply_entry folds the
 //!     fill onto the same already-seeded live PortfolioState)
+//!
 //! Real broker drift (broker != seeded snapshot total) continues to halt.
 //!
 //! These tests model `exec_snap` fixtures as they REALISTICALLY appear post-fix:

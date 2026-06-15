@@ -1173,11 +1173,9 @@ pub(crate) async fn ops_action(
                         disposition: "db_unavailable".to_string(),
                         resulting_integrity_state: None,
                         resulting_desired_armed: None,
-                        blockers: vec![
-                            "flatten-paper-positions requires a DB connection for \
+                        blockers: vec!["flatten-paper-positions requires a DB connection for \
                              durable outbox writes"
-                                .to_string(),
-                        ],
+                            .to_string()],
                         warnings: vec![],
                         environment: Some(env_label),
                         scope: Some("daemon_instance".to_string()),
@@ -1255,9 +1253,7 @@ pub(crate) async fn ops_action(
                 Err(err) => {
                     return runtime_error_response(RuntimeLifecycleError::Internal {
                         fault_class: "ops.flatten.arm_state_load",
-                        message: format!(
-                            "flatten-paper-positions: arm state load failed: {err}"
-                        ),
+                        message: format!("flatten-paper-positions: arm state load failed: {err}"),
                     });
                 }
             };
@@ -1303,11 +1299,9 @@ pub(crate) async fn ops_action(
                         disposition: "no_active_run".to_string(),
                         resulting_integrity_state: None,
                         resulting_desired_armed: None,
-                        blockers: vec![
-                            "flatten-paper-positions refused: no active durable run; \
+                        blockers: vec!["flatten-paper-positions refused: no active durable run; \
                              start the system before flattening"
-                                .to_string(),
-                        ],
+                            .to_string()],
                         warnings: vec![],
                         environment: Some(env_label),
                         scope: Some("daemon_instance".to_string()),
@@ -1388,7 +1382,7 @@ pub(crate) async fn ops_action(
                 .filter(|p| {
                     symbol_filter
                         .as_deref()
-                        .map_or(true, |f| p.symbol.to_uppercase() == f)
+                        .is_none_or(|f| p.symbol.to_uppercase() == f)
                 })
                 .map(|p| (p.symbol.clone(), p.net_qty))
                 .collect();
@@ -1467,7 +1461,10 @@ pub(crate) async fn ops_action(
             for (symbol, net_qty) in &positions_to_flatten {
                 let (key, order_json) =
                     crate::pre_event_flatten::build_operator_flatten_close_order_json(
-                        symbol, *net_qty, ts_secs, active_run_id,
+                        symbol,
+                        *net_qty,
+                        ts_secs,
+                        active_run_id,
                     );
                 match mqk_db::outbox_enqueue(db, active_run_id, &key, order_json).await {
                     Ok(true) => {
@@ -1492,9 +1489,7 @@ pub(crate) async fn ops_action(
                             "operator_flatten_close_already_pending"
                         );
                         already_pending_symbols.push(symbol.clone());
-                        warnings.push(format!(
-                            "already_pending: symbol={symbol} key={key}"
-                        ));
+                        warnings.push(format!("already_pending: symbol={symbol} key={key}"));
                     }
                     Err(err) => {
                         tracing::warn!(
@@ -1504,19 +1499,21 @@ pub(crate) async fn ops_action(
                             "operator_flatten_close_enqueue_failed"
                         );
                         failed_symbols.push(symbol.clone());
-                        warnings.push(format!(
-                            "enqueue_failed: symbol={symbol} error={err}"
-                        ));
+                        warnings.push(format!("enqueue_failed: symbol={symbol} error={err}"));
                     }
                 }
             }
 
             // Write durable audit event for the flatten action (best-effort, non-fatal).
-            let flatten_audit_uuid =
-                write_operator_audit_event(&st, Some(active_run_id), "ops.flatten_paper", "FLATTEN_SUBMITTED")
-                    .await
-                    .ok()
-                    .flatten();
+            let flatten_audit_uuid = write_operator_audit_event(
+                &st,
+                Some(active_run_id),
+                "ops.flatten_paper",
+                "FLATTEN_SUBMITTED",
+            )
+            .await
+            .ok()
+            .flatten();
 
             let accepted = !enqueued_symbols.is_empty() || !already_pending_symbols.is_empty();
 
@@ -1562,7 +1559,10 @@ pub(crate) async fn ops_action(
                 });
             }
 
-            let disposition = if !failed_symbols.is_empty() && enqueued_symbols.is_empty() && already_pending_symbols.is_empty() {
+            let disposition = if !failed_symbols.is_empty()
+                && enqueued_symbols.is_empty()
+                && already_pending_symbols.is_empty()
+            {
                 "all_enqueue_failed".to_string()
             } else if !failed_symbols.is_empty() {
                 "partial_enqueue_failed".to_string()
@@ -1574,10 +1574,7 @@ pub(crate) async fn ops_action(
 
             let mut final_blockers = vec![];
             if !failed_symbols.is_empty() {
-                final_blockers.push(format!(
-                    "enqueue failed for: {}",
-                    failed_symbols.join(", ")
-                ));
+                final_blockers.push(format!("enqueue failed for: {}", failed_symbols.join(", ")));
             }
 
             let mut durable_targets = vec!["oms_outbox".to_string()];
@@ -1586,7 +1583,11 @@ pub(crate) async fn ops_action(
             }
 
             (
-                if accepted { StatusCode::OK } else { StatusCode::INTERNAL_SERVER_ERROR },
+                if accepted {
+                    StatusCode::OK
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
                 Json(OperatorActionResponse {
                     requested_action: "flatten-paper-positions".to_string(),
                     accepted,

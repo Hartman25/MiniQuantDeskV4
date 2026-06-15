@@ -845,8 +845,7 @@ mod tests {
         // No `snapshot_fetcher` available (e.g. credentials absent) — the
         // refresher remains unconfigured and the existing fail-closed
         // `Some(None) | None` halt path in orchestrator.rs Phase 0c applies.
-        let selected =
-            select_external_snapshot_fetcher(BrokerSnapshotTruthSource::External, None);
+        let selected = select_external_snapshot_fetcher(BrokerSnapshotTruthSource::External, None);
         assert!(
             selected.is_none(),
             "External source with no snapshot_fetcher must not configure a refresher \
@@ -859,10 +858,8 @@ mod tests {
         // Paper-synthetic broker has no real broker lag to refresh against;
         // a configured snapshot_fetcher must still be ignored.
         let fetcher: Arc<dyn BrokerSnapshotFetcher> = Arc::new(UnusedFetcher);
-        let selected = select_external_snapshot_fetcher(
-            BrokerSnapshotTruthSource::Synthetic,
-            Some(fetcher),
-        );
+        let selected =
+            select_external_snapshot_fetcher(BrokerSnapshotTruthSource::Synthetic, Some(fetcher));
         assert!(
             selected.is_none(),
             "Synthetic source must never configure a terminal-fill expiry refresher"

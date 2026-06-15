@@ -973,7 +973,10 @@ mod position_seed_tests {
             .get("NVDA")
             .map(|p| p.qty_signed())
             .unwrap_or(0);
-        assert_eq!(nvda, 1, "NVDA=1 must still be seeded when AAPL=0 is skipped");
+        assert_eq!(
+            nvda, 1,
+            "NVDA=1 must still be seeded when AAPL=0 is skipped"
+        );
     }
 }
 
@@ -1121,11 +1124,8 @@ mod baseline_double_count_fix_tests {
     fn bdc05_local_matches_broker_truth_baseline_plus_fills_once() {
         let baseline_qty = 5;
         let fill_qty = 3;
-        let local_qty = local_qty_after_real_chain(
-            "AAPL",
-            &[(Side::Buy, fill_qty)],
-            &[("AAPL", baseline_qty)],
-        );
+        let local_qty =
+            local_qty_after_real_chain("AAPL", &[(Side::Buy, fill_qty)], &[("AAPL", baseline_qty)]);
         let broker_truth = baseline_qty + fill_qty;
         let double_counted = broker_truth + baseline_qty;
         assert_eq!(

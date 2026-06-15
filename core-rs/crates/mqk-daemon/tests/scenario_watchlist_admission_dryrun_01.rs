@@ -36,11 +36,10 @@ use std::sync::{Arc, OnceLock};
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{
-    routes,
-    state,
+    routes, state,
     watchlist_intake::{
-        evaluate_watchlist_intake, evaluate_watchlist_signal_admission,
-        WatchlistAdmissionReason, WatchlistIntakeOutcome, ENV_PAPER_WATCHLIST_PATH,
+        evaluate_watchlist_intake, evaluate_watchlist_signal_admission, WatchlistAdmissionReason,
+        WatchlistIntakeOutcome, ENV_PAPER_WATCHLIST_PATH,
     },
 };
 use tokio::sync::Mutex;
@@ -285,7 +284,10 @@ async fn ad05_loaded_approved_correct_pair_returns_allowed_true() {
     cleanup(&path);
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["allowed"], true, "expected allowed=true for approved pair");
+    assert_eq!(
+        json["allowed"], true,
+        "expected allowed=true for approved pair"
+    );
     assert_eq!(json["reason"], "allowed");
     assert_eq!(json["status"], "loaded_approved");
     assert_eq!(json["approved_for_autonomous_paper"], true);
@@ -477,7 +479,7 @@ async fn ad10_strategy_signal_route_behavior_unchanged() {
     assert!(
         blockers.iter().any(|b| b
             .as_str()
-            .map_or(false, |s| s.contains("ingestion") || s.contains("not configured"))),
+            .is_some_and(|s| s.contains("ingestion") || s.contains("not configured"))),
         "gate_1_ingestion must be the refusal reason, not a watchlist reason; got: {blockers:?}"
     );
     // Confirm no watchlist-related reason in the response.
@@ -573,8 +575,7 @@ fn ad12_approved_for_live_always_false_across_all_outcomes() {
     let _ = std::fs::remove_file(&path);
     assert!(!not_approved.approved_for_live());
 
-    let json_content_approved =
-        valid_watchlist(true, false, &["AAPL"], &[("AAPL", "strat-x")]);
+    let json_content_approved = valid_watchlist(true, false, &["AAPL"], &[("AAPL", "strat-x")]);
     let path2 = std::env::temp_dir().join(format!(
         "mqk_ad12_approved_{}_{}.json",
         std::process::id(),
@@ -619,7 +620,8 @@ fn ad13_all_non_approved_states_fail_admission_comprehensive() {
             outcome.status_label()
         );
         assert_eq!(
-            result.reason, *expected_reason,
+            result.reason,
+            *expected_reason,
             "wrong reason for {:?}",
             outcome.status_label()
         );
@@ -637,8 +639,14 @@ fn ad13_all_non_approved_states_fail_admission_comprehensive() {
     let _ = std::fs::remove_file(&path);
 
     let result = evaluate_watchlist_signal_admission(&not_approved, "AAPL", "strat-scalper-001");
-    assert!(!result.allowed, "LoadedNotApproved must produce allowed=false");
-    assert_eq!(result.reason, WatchlistAdmissionReason::WatchlistNotApproved);
+    assert!(
+        !result.allowed,
+        "LoadedNotApproved must produce allowed=false"
+    );
+    assert_eq!(
+        result.reason,
+        WatchlistAdmissionReason::WatchlistNotApproved
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -175,9 +175,7 @@ impl MultiSymbolConfigError {
             Self::WatchlistNotV2 => "multi_symbol_config_watchlist_not_v2",
             Self::WatchlistNotApproved => "multi_symbol_config_watchlist_not_approved",
             Self::MissingAssignment { .. } => "multi_symbol_config_missing_assignment",
-            Self::ConcurrentLimitExceeded { .. } => {
-                "multi_symbol_config_concurrent_limit_exceeded"
-            }
+            Self::ConcurrentLimitExceeded { .. } => "multi_symbol_config_concurrent_limit_exceeded",
             Self::HardCeilingExceeded { .. } => "multi_symbol_config_hard_ceiling_exceeded",
         }
     }
@@ -205,8 +203,7 @@ pub fn build_legacy_single_symbol_config(
     let symbol = non_empty_trimmed(symbol).ok_or(MultiSymbolConfigError::MissingSymbol)?;
     let strategy_id =
         non_empty_trimmed(strategy_id).ok_or(MultiSymbolConfigError::MissingStrategyId)?;
-    let timeframe =
-        non_empty_trimmed(timeframe).ok_or(MultiSymbolConfigError::MissingTimeframe)?;
+    let timeframe = non_empty_trimmed(timeframe).ok_or(MultiSymbolConfigError::MissingTimeframe)?;
 
     Ok(MultiSymbolRuntimeConfig {
         schema_version: MULTI_SYMBOL_RUNTIME_CONFIG_SCHEMA_VERSION.to_string(),

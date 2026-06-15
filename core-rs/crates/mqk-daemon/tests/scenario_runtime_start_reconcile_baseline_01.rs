@@ -32,6 +32,7 @@
 //!   - after order ACK (no fill yet): snapshot still shows baseline only
 //!   - after fills: snapshot shows baseline + delta (folded by apply_entry on
 //!     top of the seeded portfolio)
+//!
 //! Real broker drift (broker != seeded snapshot total) continues to halt.
 //!
 //! # Test matrix
