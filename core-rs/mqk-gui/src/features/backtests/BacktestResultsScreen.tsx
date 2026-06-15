@@ -4,6 +4,9 @@ import { Panel } from "../../components/common/Panel";
 import { StatCard } from "../../components/common/StatCard";
 import { formatDateTime } from "../../lib/format";
 import {
+  classifyAlpha,
+  describeExecutionWarnings,
+  describeNoTradeActivity,
   DISCORD_WORKFLOWS,
   EVIDENCE_REVIEW_SCHEMA_VERSION,
   formatMicrosAsDollars,
@@ -201,6 +204,162 @@ function ManifestSection({ manifest }: { manifest: BacktestManifest }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// BACKTEST-REPORT-UX-01: Operator review headline summary
+// ---------------------------------------------------------------------------
+
+function OperatorReviewSection({ bundle }: { bundle: ArtifactBundle }) {
+  if (bundle.metrics.kind !== "ok") {
+    return (
+      <Panel
+        title="Operator review"
+        subtitle="Headline summary of this backtest run."
+      >
+        <div className="empty-state">
+          Operator review requires metrics.json — see status below.
+        </div>
+      </Panel>
+    );
+  }
+
+  const m = bundle.metrics.data;
+  const manifest = bundle.manifest.kind === "ok" ? bundle.manifest.data : null;
+  const benchmark = m.benchmark ?? null;
+  const alpha = classifyAlpha(benchmark?.alpha_pct);
+  const noTradeMessage = describeNoTradeActivity(m);
+  const warnings = describeExecutionWarnings(m);
+
+  const returnTone = m.total_return_micros > 0 ? "good" : m.total_return_micros < 0 ? "bad" : "neutral";
+  const ddTone = m.max_drawdown_pct > 10 ? "bad" : m.max_drawdown_pct > 3 ? "warn" : "neutral";
+  const statusTone = m.halted ? "bad" : m.execution_blocked ? "warn" : "neutral";
+  const statusValue = m.halted ? "Halted" : m.execution_blocked ? "Blocked" : "Completed";
+  const statusDetail = m.halted
+    ? m.halt_reason ?? "Halted for an unspecified reason"
+    : m.execution_blocked
+      ? "Execution blocked by integrity gate"
+      : "Normal completion";
+
+  return (
+    <Panel
+      title="Operator review"
+      subtitle="Headline summary — read this first before drilling into the sections below."
+    >
+      <div className="summary-grid summary-grid-five">
+        <StatCard
+          title="Total Return"
+          value={formatNullablePercent(m.total_return_pct)}
+          detail={formatMicrosAsDollars(m.total_return_micros)}
+          tone={returnTone}
+        />
+        <StatCard
+          title="Buy &amp; Hold"
+          value={benchmark ? formatNullablePercent(benchmark.buy_and_hold_return_pct) : "—"}
+          detail={
+            benchmark
+              ? benchmark.assumption
+              : "Benchmark unavailable for this run (fewer than 2 valid bars, or invalid first-bar price)"
+          }
+          tone="neutral"
+        />
+        <StatCard
+          title="Alpha vs Buy &amp; Hold"
+          value={benchmark ? formatNullablePercent(benchmark.alpha_pct) : "—"}
+          detail={alpha.label}
+          tone={alpha.tone}
+        />
+        <StatCard
+          title="Max Drawdown"
+          value={formatNullablePercent(m.max_drawdown_pct)}
+          detail={formatMicrosAsDollars(m.max_drawdown_micros)}
+          tone={ddTone}
+        />
+        <StatCard
+          title="Run Status"
+          value={statusValue}
+          detail={statusDetail}
+          tone={statusTone}
+        />
+      </div>
+
+      <div className="summary-grid summary-grid-five" style={{ marginTop: 14 }}>
+        <StatCard
+          title="Trades"
+          value={String(m.trade_count)}
+          detail={`${m.fills} fill(s) / ${m.orders} order(s)`}
+          tone="neutral"
+        />
+        <StatCard
+          title="Win Rate"
+          value={formatNullablePercent(m.win_rate_pct)}
+          detail={`${m.winning_trade_count}W / ${m.losing_trade_count}L / ${m.flat_trade_count}F`}
+          tone={m.win_rate_pct != null && m.win_rate_pct >= 50 ? "good" : "neutral"}
+        />
+        <StatCard
+          title="Profit Factor"
+          value={formatNullableNumber(m.profit_factor, 2)}
+          detail="Gross profit ÷ gross loss"
+          tone={m.profit_factor != null && m.profit_factor > 1 ? "good" : "neutral"}
+        />
+        <StatCard
+          title="Orders Rejected"
+          value={String(m.orders_rejected)}
+          detail={`of ${m.orders} order(s)`}
+          tone={m.orders_rejected > 0 ? "warn" : "neutral"}
+        />
+        <StatCard
+          title="Exposure"
+          value={formatNullablePercent(m.exposure_time_pct)}
+          detail={`${m.exposure_bars} / ${m.bars} bars`}
+          tone="neutral"
+        />
+      </div>
+
+      {noTradeMessage && (
+        <div className="unavailable-notice" style={{ marginTop: 14 }}>
+          <strong>No trades in this run.</strong> {noTradeMessage}
+        </div>
+      )}
+
+      {warnings.map((w) => (
+        <div
+          key={w.title}
+          className={`unavailable-notice ${w.tone === "bad" ? "unavailable-critical" : ""}`.trim()}
+          style={{ marginTop: 14 }}
+        >
+          <strong>{w.title}:</strong> {w.detail}
+        </div>
+      ))}
+
+      <div className="timeline-meta-grid" style={{ marginTop: 14 }}>
+        <div>
+          <span>Run ID</span>
+          <strong className="bt-mono-wrap" style={{ fontFamily: "monospace", fontSize: "0.78rem" }}>
+            {manifest?.run_id ?? m.run_id}
+          </strong>
+        </div>
+        <div>
+          <span>Strategy</span>
+          <strong>{manifest?.strategy_name ?? m.strategy_name}</strong>
+        </div>
+        <div>
+          <span>Symbol(s)</span>
+          <strong>{m.symbols.length > 0 ? m.symbols.join(", ") : "not reported"}</strong>
+        </div>
+        <div>
+          <span>Timeframe</span>
+          <strong>not reported</strong>
+        </div>
+        <div>
+          <span>Config hash</span>
+          <strong className="bt-mono-wrap" style={{ fontFamily: "monospace", fontSize: "0.78rem" }}>
+            {manifest?.config_hash ?? "—"}
+          </strong>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
 function MetricsSection({ m }: { m: BacktestMetrics }) {
   const returnTone =
     m.total_return_micros > 0 ? "good" : m.total_return_micros < 0 ? "bad" : "neutral";
@@ -349,23 +508,15 @@ function MetricsSection({ m }: { m: BacktestMetrics }) {
             </strong>
           </div>
         </div>
-        {m.execution_blocked && (
-          <div className="unavailable-notice" style={{ marginTop: 12 }}>
-            <strong>Execution blocked by integrity gate.</strong>{" "}
-            No orders were placed after the block. Common cause for daily (1D) data:{" "}
-            the default stale threshold of 120 s is exceeded by the first 86400 s bar gap.
-            Re-run via Workflow B with the stale threshold field left blank (auto-default 172800)
-            or set it explicitly to at least 172800.
-          </div>
-        )}
-        {m.halted && (
+        {describeExecutionWarnings(m).map((w) => (
           <div
-            className="unavailable-notice unavailable-critical"
+            key={w.title}
+            className={`unavailable-notice ${w.tone === "bad" ? "unavailable-critical" : ""}`.trim()}
             style={{ marginTop: 12 }}
           >
-            <strong>Backtest halted:</strong> {m.halt_reason ?? "unknown reason"}
+            <strong>{w.title}:</strong> {w.detail}
           </div>
-        )}
+        ))}
       </Panel>
 
       <StatCard
@@ -1688,6 +1839,9 @@ function ArtifactDisplay({ bundle, source }: { bundle: ArtifactBundle; source?: 
           <span aria-hidden="true">▸</span> {source}
         </div>
       )}
+
+      <div className="bt-group-heading">Operator review</div>
+      <OperatorReviewSection bundle={bundle} />
 
       <div className="bt-group-heading">Run identity &amp; performance</div>
       <FileStatusNote label="manifest.json" result={bundle.manifest} />

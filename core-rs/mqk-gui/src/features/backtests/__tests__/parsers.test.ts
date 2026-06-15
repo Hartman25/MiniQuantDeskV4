@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  classifyAlpha,
   deriveStrategyFitGateFlags,
+  describeExecutionWarnings,
+  describeNoTradeActivity,
   DISCORD_WORKFLOWS,
   formatMicrosAsDollars,
   formatNullableNumber,
@@ -19,6 +22,53 @@ import {
   parseStrategyFit,
   parseWatchlistPromotion,
 } from "../parsers.ts";
+import type { BacktestMetrics } from "../types.ts";
+
+// --- baseMetrics test fixture helper ---
+
+function baseMetrics(overrides: Partial<BacktestMetrics> = {}): BacktestMetrics {
+  return {
+    schema_version: 1,
+    run_id: "r1",
+    strategy_name: "swing_momentum",
+    halted: false,
+    halt_reason: null,
+    execution_blocked: false,
+    bars: 10,
+    orders: 0,
+    orders_filled: 0,
+    orders_rejected: 0,
+    fills: 0,
+    final_equity_micros: 100_000_000_000,
+    symbols: ["AAPL"],
+    starting_equity_micros: 100_000_000_000,
+    ending_equity_micros: 100_000_000_000,
+    total_return_micros: 0,
+    total_return_pct: 0,
+    equity_high_water_mark_micros: 100_000_000_000,
+    max_drawdown_micros: 0,
+    max_drawdown_pct: 0,
+    total_commission_micros: 0,
+    trade_count: 0,
+    winning_trade_count: 0,
+    losing_trade_count: 0,
+    flat_trade_count: 0,
+    win_rate_pct: null,
+    gross_profit_micros: 0,
+    gross_loss_micros: 0,
+    profit_factor: null,
+    average_win_micros: null,
+    average_loss_micros: null,
+    expectancy_micros: null,
+    best_trade_micros: null,
+    worst_trade_micros: null,
+    sharpe_ratio: null,
+    sortino_ratio: null,
+    exposure_bars: 0,
+    exposure_time_pct: 0,
+    ...overrides,
+  };
+}
 
 // --- microsToUsd ---
 
@@ -354,6 +404,167 @@ test("parseMetrics throws on missing run_id", () => {
 test("parseMetrics throws on missing bars", () => {
   const json = JSON.stringify({ schema_version: 1, run_id: "x" });
   assert.throws(() => parseMetrics(json), /missing bars/);
+});
+
+// --- parseMetrics: optional benchmark (BACKTEST-REPORT-UX-01) ---
+
+test("parseMetrics with no benchmark field leaves benchmark undefined", () => {
+  const m = parseMetrics(JSON.stringify(baseMetrics()));
+  assert.equal(m.benchmark, undefined);
+});
+
+test("parseMetrics with benchmark explicitly null", () => {
+  const m = parseMetrics(JSON.stringify(baseMetrics({ benchmark: null })));
+  assert.equal(m.benchmark, null);
+});
+
+test("parseMetrics with a positive-alpha benchmark", () => {
+  const json = JSON.stringify(
+    baseMetrics({
+      total_return_pct: 5.0,
+      benchmark: {
+        first_bar_open_micros: 100_000_000,
+        last_bar_close_micros: 103_000_000,
+        buy_and_hold_return_pct: 3.0,
+        strategy_total_return_pct: 5.0,
+        alpha_pct: 2.0,
+        assumption: "single-symbol buy-and-hold; first bar open → last bar close; no commissions",
+      },
+    })
+  );
+  const m = parseMetrics(json);
+  assert.ok(m.benchmark);
+  assert.equal(m.benchmark?.buy_and_hold_return_pct, 3.0);
+  assert.equal(m.benchmark?.alpha_pct, 2.0);
+});
+
+test("parseMetrics with a negative-alpha benchmark", () => {
+  const json = JSON.stringify(
+    baseMetrics({
+      total_return_pct: 1.0,
+      benchmark: {
+        first_bar_open_micros: 100_000_000,
+        last_bar_close_micros: 105_000_000,
+        buy_and_hold_return_pct: 5.0,
+        strategy_total_return_pct: 1.0,
+        alpha_pct: -4.0,
+        assumption: "single-symbol buy-and-hold; first bar open → last bar close; no commissions",
+      },
+    })
+  );
+  const m = parseMetrics(json);
+  assert.ok(m.benchmark);
+  assert.equal(m.benchmark?.alpha_pct, -4.0);
+});
+
+// --- classifyAlpha ---
+
+test("classifyAlpha reports benchmark unavailable for null alpha", () => {
+  const result = classifyAlpha(null);
+  assert.equal(result.tone, "neutral");
+  assert.match(result.label, /unavailable/i);
+});
+
+test("classifyAlpha reports benchmark unavailable for undefined alpha", () => {
+  const result = classifyAlpha(undefined);
+  assert.equal(result.tone, "neutral");
+  assert.match(result.label, /unavailable/i);
+});
+
+test("classifyAlpha labels positive alpha as outperformance", () => {
+  const result = classifyAlpha(2.5);
+  assert.equal(result.tone, "good");
+  assert.match(result.label, /Outperformed/);
+});
+
+test("classifyAlpha labels negative alpha as underperformance", () => {
+  const result = classifyAlpha(-1.2);
+  assert.equal(result.tone, "bad");
+  assert.match(result.label, /Underperformed/);
+});
+
+test("classifyAlpha labels zero alpha as an exact match", () => {
+  const result = classifyAlpha(0);
+  assert.equal(result.tone, "neutral");
+  assert.match(result.label, /Matched/);
+});
+
+// --- describeNoTradeActivity ---
+
+test("describeNoTradeActivity returns null when trades occurred", () => {
+  const m = baseMetrics({ trade_count: 2, fills: 2 });
+  assert.equal(describeNoTradeActivity(m), null);
+});
+
+test("describeNoTradeActivity returns null when fills occurred even without completed round trips", () => {
+  const m = baseMetrics({ trade_count: 0, fills: 1 });
+  assert.equal(describeNoTradeActivity(m), null);
+});
+
+test("describeNoTradeActivity explains execution_blocked zero-trade runs", () => {
+  const m = baseMetrics({ trade_count: 0, fills: 0, execution_blocked: true });
+  const message = describeNoTradeActivity(m);
+  assert.ok(message);
+  assert.match(message!, /integrity gate/);
+});
+
+test("describeNoTradeActivity explains zero order intents", () => {
+  const m = baseMetrics({ trade_count: 0, fills: 0, orders: 0 });
+  const message = describeNoTradeActivity(m);
+  assert.ok(message);
+  assert.match(message!, /did not generate any order intents/);
+});
+
+test("describeNoTradeActivity explains all-orders-rejected runs", () => {
+  const m = baseMetrics({ trade_count: 0, fills: 0, orders: 3, orders_rejected: 3 });
+  const message = describeNoTradeActivity(m);
+  assert.ok(message);
+  assert.match(message!, /rejected by the engine/);
+});
+
+test("describeNoTradeActivity explains orders-without-fills runs", () => {
+  const m = baseMetrics({ trade_count: 0, fills: 0, orders: 3, orders_rejected: 0 });
+  const message = describeNoTradeActivity(m);
+  assert.ok(message);
+  assert.match(message!, /none resulted in a fill/);
+});
+
+// --- describeExecutionWarnings ---
+
+test("describeExecutionWarnings returns no warnings for a clean run", () => {
+  const m = baseMetrics();
+  assert.deepEqual(describeExecutionWarnings(m), []);
+});
+
+test("describeExecutionWarnings explains execution_blocked with the current daily default", () => {
+  const m = baseMetrics({ execution_blocked: true });
+  const warnings = describeExecutionWarnings(m);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].tone, "warn");
+  assert.match(warnings[0].detail, /345600/);
+});
+
+test("describeExecutionWarnings explains halted runs with halt_reason", () => {
+  const m = baseMetrics({ halted: true, halt_reason: "capital invariant breach" });
+  const warnings = describeExecutionWarnings(m);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].tone, "bad");
+  assert.equal(warnings[0].detail, "capital invariant breach");
+});
+
+test("describeExecutionWarnings explains halted runs without halt_reason", () => {
+  const m = baseMetrics({ halted: true, halt_reason: null });
+  const warnings = describeExecutionWarnings(m);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0].detail, /unspecified reason/);
+});
+
+test("describeExecutionWarnings returns both warnings when execution_blocked and halted", () => {
+  const m = baseMetrics({ execution_blocked: true, halted: true, halt_reason: "x" });
+  const warnings = describeExecutionWarnings(m);
+  assert.equal(warnings.length, 2);
+  assert.equal(warnings[0].title, "Execution blocked by integrity gate");
+  assert.equal(warnings[1].title, "Backtest halted");
 });
 
 // --- deriveStrategyFitGateFlags ---

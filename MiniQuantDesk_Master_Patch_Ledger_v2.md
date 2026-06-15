@@ -613,7 +613,7 @@ auto-load, or trading behavior changed. Validation: `npm test` 393/393 pass,
 `npm run build` clean (tsc + vite). See `docs/runbooks/backtest_workflow.md`
 *"Presentation (BACKTEST-GUI-POLISH-01)"*.
 
-### BACKTEST-REPORT-UX-01 — QUEUED
+### BACKTEST-REPORT-UX-01 — CLOSED
 
 **Purpose:** Improve how backtest output is summarized for operator review:
 
@@ -622,7 +622,27 @@ auto-load, or trading behavior changed. Validation: `npm test` 393/393 pass,
 - drawdown / return / trade-count readability
 - clearer artifact metadata
 
-Only after core backtest GUI is proven.
+**Constraints:** GUI presentation only. No engine/calculation/contract/trading
+behavior.
+
+**Outcome:** New "Operator review" panel at the top of the Backtest Results
+artifact display (`BacktestResultsScreen.tsx`), above *Run identity &
+performance*. It surfaces headline StatCards (Total Return, Buy & Hold,
+Alpha vs Buy & Hold, Max Drawdown, Run Status, Trades, Win Rate, Profit
+Factor, Orders Rejected, Exposure), a no-trade explanation when
+`trade_count == 0 && fills == 0`, execution-blocked/halted warning blocks, and
+an artifact-identity grid (Run ID, Strategy, Symbol(s), Timeframe, Config
+hash). `types.ts` gained `BacktestBenchmark` and an optional
+`BacktestMetrics.benchmark` field mirroring the Rust `BenchmarkSection` already
+written into `metrics.json`. New pure helpers in `parsers.ts` —
+`classifyAlpha`, `describeNoTradeActivity`, `describeExecutionWarnings` — back
+both the new panel and the existing "Trade statistics" warning block (which
+also fixes a stale `172800` daily-default reference, now `345600` per
+BACKTEST-DAILY-STALE-DEFAULT-FIX-01). Timeframe is shown honestly as "not
+reported" since it is absent from both `manifest.json` and `metrics.json`.
+Validation: `npm test` 413/413 pass (20 new), `npm run build` clean (tsc +
+vite). See `docs/runbooks/backtest_workflow.md` *"Presentation
+(BACKTEST-REPORT-UX-01)"*.
 
 ---
 
@@ -1096,7 +1116,7 @@ weekend/calendar gaps. Use a larger threshold only for unusually long gaps.
 Current best next patch:
 
 ```text
-BACKTEST-GUI-CLOSURE-01
+AUTON-NO-TRADE-01
 ```
 
 Then return to the high-value original mission:

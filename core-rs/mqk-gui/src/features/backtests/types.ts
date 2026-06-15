@@ -11,6 +11,22 @@ export interface BacktestManifest {
   artifacts?: Record<string, string>;
 }
 
+/**
+ * Buy-and-hold benchmark comparison. Mirrors `BenchmarkSection` in
+ * core-rs/crates/mqk-artifacts/src/lib.rs. Only present in metrics.json when
+ * the run processed >= 2 valid bars and the first bar's open price was > 0
+ * (see compute_benchmark). Absence is not an error — it means the benchmark
+ * could not be computed for this run.
+ */
+export interface BacktestBenchmark {
+  first_bar_open_micros: number;
+  last_bar_close_micros: number;
+  buy_and_hold_return_pct: number;
+  strategy_total_return_pct: number;
+  alpha_pct: number;
+  assumption: string;
+}
+
 export interface BacktestMetrics {
   schema_version: number;
   run_id: string;
@@ -18,6 +34,7 @@ export interface BacktestMetrics {
   halted: boolean;
   halt_reason: string | null;
   execution_blocked: boolean;
+  benchmark?: BacktestBenchmark | null;
   bars: number;
   orders: number;
   orders_filled: number;

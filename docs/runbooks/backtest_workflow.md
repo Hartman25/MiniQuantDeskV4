@@ -391,6 +391,49 @@ host fingerprint, artifact-chain paths, evidence folder) wrap instead of
 clipping, and the equity-curve chart has more vertical room. This is
 presentation only: no parser, API, submit/poll, or auto-load behavior changed.
 
+### Presentation (BACKTEST-REPORT-UX-01)
+
+The artifact display now opens with an **Operator review** panel — the first
+thing shown above *Run identity & performance* — that summarizes the run in
+one place:
+
+- **Headline cards**: Total Return, Buy & Hold (benchmark), Alpha vs Buy &
+  Hold, Max Drawdown, and Run Status (Completed / Blocked / Halted) on one
+  row; Trades, Win Rate, Profit Factor, Orders Rejected, and Exposure on a
+  second row.
+- **Benchmark / alpha interpretation**: if `metrics.json` includes the optional
+  `benchmark` section, the Buy & Hold and Alpha cards show the buy-and-hold
+  return and alpha, with the Alpha card labeled *"Outperformed buy & hold"*
+  (positive), *"Underperformed buy & hold"* (negative), or *"Matched buy & hold
+  exactly"* (zero). When `benchmark` is absent (fewer than 2 valid bars, or an
+  invalid first-bar open price — see *"What the buy-and-hold benchmark
+  means"* above), both cards show `—` and the Alpha card reads *"Benchmark
+  unavailable"* — never a fabricated value.
+- **No-trade explanation**: if the run produced zero trades and zero fills, an
+  explanation block states the most likely cause — execution blocked by the
+  integrity gate, the strategy generated no order intents, all orders were
+  rejected, or orders were generated but none filled — pointing the operator at
+  `orders.csv` / `fills.csv` as appropriate. A zero-trade run is not labeled an
+  error; it may simply mean the strategy's entry conditions were never met on
+  this data.
+- **Execution warnings**: `execution_blocked` and `halted` each render an
+  explanation block (the `execution_blocked` block now correctly cites the
+  daemon's current timeframe-aware defaults — `345600` s for daily bars, `120`
+  s for intraday — per BACKTEST-DAILY-STALE-DEFAULT-FIX-01). The same helper
+  drives both the Operator Review banner and the detailed notice inside *"Trade
+  statistics"*, so the wording cannot drift between the two.
+- **Artifact identity**: Run ID, Strategy, Symbol(s), Timeframe, and Config
+  hash are shown together. Symbol(s) comes from `metrics.json`'s `symbols`
+  array; Timeframe is not present in either `manifest.json` or `metrics.json`
+  and is shown honestly as *"not reported"* rather than guessed or omitted.
+
+This is presentation only: no parser, calculation, API, submit/poll, or
+auto-load behavior changed. Proof: `parsers.test.ts` covers `classifyAlpha`,
+`describeNoTradeActivity`, and `describeExecutionWarnings` (positive/negative/
+zero/missing alpha, every no-trade cause, blocked/halted/clean warning sets),
+plus `parseMetrics` with the optional `benchmark` object present, absent, and
+explicitly `null`.
+
 ---
 
 ## Recommended pre-live workflow
