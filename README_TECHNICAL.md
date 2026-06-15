@@ -502,6 +502,8 @@ cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- backtest csv `
   --integrity-gap-tolerance-bars 0
 ```
 
+Cash fields are integer micros. For a $100,000 backtest, enter `100000000000`; `100000` means $0.10, not $100,000. Using `100000` can make otherwise valid AAPL orders reject for insufficient cash. This applies to the GUI backtest form as well as CLI `--initial-cash-micros`.
+
 Optional artifact output:
 
 ```powershell
@@ -642,6 +644,10 @@ Use those only if you explicitly want to override the default NYSE regular-sessi
 - `GET /api/v1/ops/catalog`
 - `POST /api/v1/ops/action`
 
+### Paper smoke review caveat
+
+Current `scripts/windows/Review-PaperSmokeEvidence.ps1` derives `runtime_halted=true` by scanning captured `events_feed.json` rows for any `runtime_transition/HALTED` event. That check is not filtered by the current `run_id` or evidence window, so older HALTED events in the captured feed can set the flag. Treat `runtime_halted=true` as a review caveat and verify run_id/window context before using it as the current smoke verdict.
+
 ## GUI
 
 Run from `core-rs/mqk-gui/`:
@@ -654,7 +660,7 @@ npm run dev
 
 Default dev URL:
 
-- `http://127.0.0.1:5173`
+- `http://127.0.0.1:1420`
 
 Default daemon URL:
 

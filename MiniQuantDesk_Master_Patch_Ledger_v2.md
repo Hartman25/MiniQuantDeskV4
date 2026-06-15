@@ -443,6 +443,12 @@ while ($true) {
 
 ## 6. Active / Next Patch
 
+### DOCS-README-CURRENT-STATUS-20260615-01 — CLOSED
+
+README/README_TECHNICAL were updated for the 2026-06-15 no-trade smoke, GUI dev port `1420`, GUI/CLI backtest cash micros warning, and evidence workflow wording. Doc-only patch; no code, script, config, evidence, or generated artifact changes.
+
+---
+
 ### RISK-FLATTEN-ON-HALT-01 — CLOSED
 
 **Closure:** Closes the `RISK-FLATTEN-ON-HALT-DESIGN-01` gap: `mqk_risk::evaluate()`

@@ -64,8 +64,10 @@ Use these labels precisely:
 | Mode | Current posture | Meaning |
 |---|---|---|
 | **Supervised Paper + Alpaca** | Candidate / operator-watched | Credible current path after a clean proof run, valid env, live Alpaca paper auth, and operator supervision. |
-| **Autonomous Paper + Alpaca** | Mechanically ready — live-paper evidence pending | Long-only single-symbol path is mechanically proven. Remaining blockers are operational evidence: live-paper lifecycle, reconcile after real fill, and repeated autonomous cycle proof. |
+| **Autonomous Paper + Alpaca** | Mechanically ready — real-fill evidence pending | Long-only single-symbol path is mechanically proven. The 2026-06-15 AAPL/5m smoke proved readiness and no-trade truth, but real order/fill lifecycle, reconcile after real fill, and repeated autonomous cycle proof remain open. |
 | **Live / live-capital** | Not ready | Typed support and gates exist, but this repo should not be treated as safe for unattended live trading yet. |
+
+**Autonomous paper smoke status (2026-06-15):** the smoke proved that the autonomous session controller can start the paper run at the session window, gates can all go green, the runtime can run, AAPL/5m market data can be fresh, `intraday_scalper` can tick, and the daemon can surface a durable no-trade reason. The observed decision was `strategy=intraday_scalper`, `symbol=AAPL`, `timeframe=5m`, `decision=flat_below_threshold`, `move_bps=12`, `threshold_bps=20`, final verdict `NO_TRADE_WITH_DURABLE_REASON`.
 
 **Proof status (2026-06-01):** `full_repo_proof.ps1 -ProofProfile full -LowMemory` passed 18/18 lanes. The repo is proof-clean for current scope. Proof-clean is not the same as live-ready. Proof-clean is not the same as safe-capital-deployment.
 
@@ -237,11 +239,13 @@ The long-only single-symbol Paper + Alpaca MVP is mechanically ready. The follow
 
 These proof items are operational evidence gates, not necessarily code gaps.
 
+The 2026-06-15 no-trade smoke is a readiness/no-trade-truth proof, not a real-fill closure. It does not close the real order/fill lifecycle, reconcile-after-fill, Discord real-cycle, or repeated autonomous cycle proof items above.
+
 ### Evidence capture workflow
 
-Evidence is captured using `scripts/windows/Capture-PaperSmokeEvidence.ps1` before and after a paper smoke session. The full workflow is documented in `docs/runbooks/paper_smoke_evidence_pack.md`. Evidence folders are stored under `evidence/` in timestamped run folders and are gitignored by default.
+When configured and inside the session window, the autonomous session controller owns starting the paper run. Evidence is captured using the read-only `scripts/windows/Capture-PaperSmokeEvidence.ps1` before and after a paper smoke session, then reviewed with `scripts/windows/Review-PaperSmokeEvidence.ps1 -Latest -WriteSummary`. The full workflow is documented in `docs/runbooks/paper_smoke_evidence_pack.md`. Evidence folders are stored under `evidence/` in timestamped run folders and are gitignored by default.
 
-For the current AAPL/5m Paper+Alpaca smoke, use `scripts/windows/Run-AAPL5mMarketSmoke.ps1` and then `Review-PaperSmokeEvidence.ps1 -Latest -WriteSummary`.
+`scripts/windows/Run-AAPL5mMarketSmoke.ps1` remains an optional AAPL/5m helper path. It is not the sole source of truth; captured daemon/API/DB evidence plus `Review-PaperSmokeEvidence.ps1` is the review boundary.
 
 Live trading remains locked until repeated clean paper evidence and live-capital readiness gates are satisfied.
 
