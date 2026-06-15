@@ -443,7 +443,7 @@ while ($true) {
 
 ## 6. Active / Next Patch
 
-### MD-STALENESS-PER-TICK-GATE-01 — CLOSED
+### MD-STALENESS-PER-TICK-GATE-01 — CLOSED / DB-PROVEN
 
 **Closure:** Closes the `RISK-RECONCILIATION-CONTRACT-AUDIT-01` gap where
 `DATA-FRESHNESS-READINESS-GATE-01` only checked market-data freshness at
@@ -490,11 +490,28 @@ this patch (only the per-tick market-data-staleness gap is closed).
   `core-rs/crates/mqk-daemon/tests/scenario_md_staleness_per_tick_gate_01.rs`,
   `MiniQuantDesk_Master_Patch_Ledger_v2.md`.
 
-**Tests:** New `scenario_md_staleness_per_tick_gate_01.rs` (5 DB-backed tests,
+**Tests:** `scenario_md_staleness_per_tick_gate_01.rs` (5 DB-backed tests,
 S01-S05 — fresh bar dispatches, stale bar blocked, missing bar blocked,
-multi-symbol stale-without-blocking-fresh, +/-5s cap boundary; skip gracefully
-without `MQK_DATABASE_URL` pointing at the paper DB, as no local DB was
-available for this session). Targeted regression:
+multi-symbol stale-without-blocking-fresh, +/-5s cap boundary).
+
+**DB proof (MD-STALENESS-PER-TICK-GATE-DB-PROOF-01, 2026-06-14):** the 5
+tests previously skipped gracefully (no `MQK_DATABASE_URL`). Re-run against
+`mqk_test_smoke`, an already-migrated (schema at 0040, current HEAD), isolated
+database on the same Postgres instance as the paper DB container
+(`mqk-paper-postgres`, port 5440) — a *separate* database from
+`miniquantdesk_paper`; no paper trading data read or written:
+
+```
+MQK_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5440/mqk_test_smoke?sslmode=disable" `
+  cargo test -p mqk-daemon --test scenario_md_staleness_per_tick_gate_01 -- --nocapture
+```
+
+Result: `test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered
+out`. All 5 cases (S01-S05) actually executed against the DB (confirmed via
+the `MDS0*` fixture rows written to `md_bars` in `mqk_test_smoke`), not
+skipped. Re-run twice for idempotency; both runs 5/5.
+
+Targeted regression (pure, no DB required):
 `scenario_multi_symbol_dispatch_loop_01` (8/8), `scenario_per_symbol_bar_window_01`
 (14/14), `scenario_multi_symbol_capital_caps_01` (19/19),
 `scenario_reconcile_baseline_seed_01` (7/7) — all pass. `cargo build -p mqk-daemon`
