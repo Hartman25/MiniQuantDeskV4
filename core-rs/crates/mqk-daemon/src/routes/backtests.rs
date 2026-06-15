@@ -311,6 +311,35 @@ pub(crate) async fn backtest_job_status(
 // Blocking backtest runner (no async, no broker, no live execution)
 // ---------------------------------------------------------------------------
 
+/// Timeframe-aware default for the integrity stale-data threshold (in ticks /
+/// seconds), used when the operator does not supply an explicit value.
+///
+/// BACKTEST-DAILY-STALE-DEFAULT-FIX-01: daily (>= 1 day) bars legitimately gap
+/// across weekends and holidays. A Friday→Monday gap is ~259_200 s; longer
+/// holiday weekends exceed that. A 4-day (345_600 s) default safely survives
+/// those gaps and matches the recommended value documented in
+/// `docs/runbooks/backtest_workflow.md`. The previous 172_800 s (2-day) default
+/// was below a normal weekend gap and could falsely block daily proof runs.
+///
+/// Intraday timeframes keep the runtime-mirrored 120 s threshold
+/// (`runtime.stale_data_threshold_seconds`) — they are not widened here.
+fn default_integrity_stale_threshold_ticks(timeframe_secs: i64) -> u64 {
+    if timeframe_secs >= 86_400 {
+        345_600
+    } else {
+        120
+    }
+}
+
+/// Resolve the integrity stale-data threshold to apply for a backtest run.
+///
+/// An explicit operator-supplied value always wins and is never widened or
+/// clamped (request validation remains the fail-closed authority on bad
+/// values). When absent, the timeframe-aware default is applied.
+fn resolve_integrity_stale_threshold(explicit: Option<u64>, timeframe_secs: i64) -> u64 {
+    explicit.unwrap_or_else(|| default_integrity_stale_threshold_ticks(timeframe_secs))
+}
+
 /// Run a CSV backtest synchronously and write artifacts.
 ///
 /// Returns `(artifact_dir, manifest_path, metrics_path)` on success.
@@ -343,13 +372,8 @@ fn run_backtest_csv_blocking(
     // Timeframe-aware stale threshold: conservative_defaults() uses 120 s which
     // immediately triggers execution_blocked=true on daily bar gaps (86400 s).
     // Apply operator-supplied value when present; otherwise default by timeframe.
-    cfg.integrity_stale_threshold_ticks = integrity_stale_threshold_ticks.unwrap_or({
-        if timeframe_secs >= 86_400 {
-            172_800
-        } else {
-            120
-        }
-    });
+    cfg.integrity_stale_threshold_ticks =
+        resolve_integrity_stale_threshold(integrity_stale_threshold_ticks, timeframe_secs);
 
     // Resolve strategy from built-in registry.
     let mut reg = mqk_strategy::PluginRegistry::new();
@@ -464,4 +488,80 @@ fn bkt_host_fingerprint() -> String {
         std::env::consts::OS,
         std::env::consts::ARCH
     )
+}
+
+// ---------------------------------------------------------------------------
+// BACKTEST-DAILY-STALE-DEFAULT-FIX-01: stale-threshold defaulting unit tests.
+//
+// These prove the daemon's *actual* default constant and override resolution,
+// which are not observable from the JSON job API (the value is not echoed in
+// metrics.json). The engine-level value justification for daily/weekend gaps is
+// proven separately as BJ-D04 in tests/scenario_backtest_jobs_01.rs.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod stale_threshold_default_tests {
+    use super::{default_integrity_stale_threshold_ticks, resolve_integrity_stale_threshold};
+
+    // BJ-D01: daily timeframe default stale threshold is 345_600 or greater.
+    #[test]
+    fn bj_d01_daily_default_is_at_least_345600() {
+        // Exactly one trading day and longer all use the daily default.
+        for tf in [86_400i64, 604_800, 2_592_000] {
+            let got = default_integrity_stale_threshold_ticks(tf);
+            assert!(
+                got >= 345_600,
+                "daily default for tf={tf}s must be >= 345600, got {got}"
+            );
+            assert_eq!(
+                got, 345_600,
+                "daily default for tf={tf}s must be exactly 345600 (matches runbook)"
+            );
+        }
+        // Resolution with no explicit value must yield the daily default.
+        assert_eq!(
+            resolve_integrity_stale_threshold(None, 86_400),
+            345_600,
+            "daily resolution with no explicit value must be 345600"
+        );
+    }
+
+    // BJ-D02: an explicit operator-supplied value still overrides the default.
+    #[test]
+    fn bj_d02_explicit_value_overrides_daily_default() {
+        // A small explicit value must win even on a daily timeframe.
+        assert_eq!(
+            resolve_integrity_stale_threshold(Some(120), 86_400),
+            120,
+            "explicit 120 must override the daily default"
+        );
+        // A large explicit value must also be honored verbatim (not clamped).
+        assert_eq!(
+            resolve_integrity_stale_threshold(Some(1_000_000), 86_400),
+            1_000_000,
+            "explicit value must be applied verbatim, never widened or clamped"
+        );
+        // Override applies to intraday too.
+        assert_eq!(
+            resolve_integrity_stale_threshold(Some(300), 60),
+            300,
+            "explicit value must override the intraday default"
+        );
+    }
+
+    // BJ-D03: intraday default behavior is unchanged (still 120 s, not widened).
+    #[test]
+    fn bj_d03_intraday_default_unchanged() {
+        for tf in [1i64, 60, 300, 3_600, 86_399] {
+            assert_eq!(
+                default_integrity_stale_threshold_ticks(tf),
+                120,
+                "intraday/sub-daily tf={tf}s default must remain 120 (unchanged)"
+            );
+        }
+        assert_eq!(
+            resolve_integrity_stale_threshold(None, 60),
+            120,
+            "intraday resolution with no explicit value must be 120"
+        );
+    }
 }

@@ -474,7 +474,7 @@ $body = @{
   timeframe_secs = 86400
   initial_cash_micros = 100000000000
   integrity_enabled = $true
-  integrity_stale_threshold_ticks = 172800
+  integrity_stale_threshold_ticks = 345600
   out_dir = "C:\Users\Zacha\Desktop\MiniQuantDeskV4\exports\backtests"
 } | ConvertTo-Json -Depth 20
 ```
@@ -503,6 +503,7 @@ BACKTEST-DAEMON-JOBS-01: CLOSED
 BACKTEST-DAEMON-JOBS-02: CLOSED
 BACKTEST-DATASET-01: CLOSED
 BACKTEST-CLI-UX-01: CLOSED
+BACKTEST-DAILY-STALE-DEFAULT-FIX-01: CLOSED
 DESKTOP-LAUNCH-GUI-AUTO-REBUILD-01: CLOSED
 ```
 
@@ -513,7 +514,7 @@ DESKTOP-LAUNCH-GUI-AUTO-REBUILD-01: CLOSED
 - Backtest daemon jobs are isolated from live/paper execution.
 - `exports/md_backup/1D` schema is compatible after loader support for `t/f` booleans.
 - Real AAPL 1D backtest proof loaded 8,375 bars.
-- For daily bars, use `integrity_stale_threshold_ticks=172800` to avoid 120-second intraday stale threshold blocking 1D data.
+- For daily bars, the daemon backtest-jobs API defaults `integrity_stale_threshold_ticks` to `345600` (4 days) so weekend gaps (~259 200 s) do not falsely block 1D data; the prior `172800` (2-day) default sat below a weekend gap (BACKTEST-DAILY-STALE-DEFAULT-FIX-01). Explicit request values still override.
 - Do not make backtests automatically call TwelveData. Backtests should use known local data for repeatability and to avoid hidden API-credit use.
 
 ---
@@ -1037,10 +1038,12 @@ rows_rejected=0
 **Preserved rule:** For 1D / `timeframe_secs=86400`, use:
 
 ```text
-integrity_stale_threshold_ticks=172800
+integrity_stale_threshold_ticks=345600
 ```
 
-or a larger threshold if the dataset has weekend/calendar gaps that require it.
+This is also the daemon backtest-jobs API default for daily timeframes
+(BACKTEST-DAILY-STALE-DEFAULT-FIX-01); `345600` (4 days) safely clears normal
+weekend/calendar gaps. Use a larger threshold only for unusually long gaps.
 
 **Current status:** Closed.
 

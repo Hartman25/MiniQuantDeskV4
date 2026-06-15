@@ -621,3 +621,116 @@ async fn bj10_backtest_does_not_touch_live_execution_state() {
         "active_run_id must remain None after backtest — no live run started"
     );
 }
+
+// ---------------------------------------------------------------------------
+// BJ-D04: BACKTEST-DAILY-STALE-DEFAULT-FIX-01 — a daily series spanning a
+// weekend-sized gap is NOT blocked by the new 345_600 s default stale
+// threshold, whereas the old 172_800 s default would block it.
+//
+// Note on scope: the daemon job runner feeds a single integrity feed, so its
+// stale gate compares each bar against itself and never disarms on its own.
+// The stale threshold's value is therefore exercised here at the engine level
+// with a seeded "heartbeat" feed — the canonical construct used by
+// mqk-backtest's scenario_stale_data_stops_execution.rs. Gap-tolerance is set
+// high so this isolates the *stale* gate (not gap detection), proving the
+// chosen default value safely survives a Friday→Monday (259_200 s) gap.
+// ---------------------------------------------------------------------------
+
+use mqk_execution::StrategyOutput;
+use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
+
+/// Minimal strategy that never targets a position. `execution_blocked` is set
+/// by the integrity gate independently of strategy intents, so a hold-only
+/// strategy is sufficient to observe the stale-disarm outcome.
+struct HoldStrategy;
+
+impl Strategy for HoldStrategy {
+    fn spec(&self) -> StrategySpec {
+        StrategySpec::new("HoldStrategy", 86_400)
+    }
+    fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
+        StrategyOutput::new(vec![])
+    }
+}
+
+/// Run a 3-bar daily backtest (Fri / Mon / Tue) with a heartbeat feed seeded at
+/// the first bar and the given stale threshold. Returns `execution_blocked`.
+fn run_daily_weekend_gap_with_stale_threshold(stale_threshold_ticks: u64) -> bool {
+    use mqk_backtest::{
+        BacktestBar, BacktestConfig, BacktestEngine, CommissionModel, CorporateActionPolicy,
+        StrategySizingConfig, StressProfile,
+    };
+
+    let base_ts = 1_700_000_000i64;
+    // Friday close, then a 3-day weekend gap to Monday, then a normal Tuesday.
+    let bars = vec![
+        BacktestBar::new("TEST", base_ts, 1_000_000, 1_010_000, 990_000, 1_000_000, 1_000),
+        BacktestBar::new(
+            "TEST",
+            base_ts + 259_200, // Fri -> Mon: 3 calendar days (weekend gap)
+            1_000_000,
+            1_010_000,
+            990_000,
+            1_000_000,
+            1_000,
+        ),
+        BacktestBar::new(
+            "TEST",
+            base_ts + 259_200 + 86_400, // Mon -> Tue: one trading day
+            1_000_000,
+            1_010_000,
+            990_000,
+            1_000_000,
+            1_000,
+        ),
+    ];
+
+    let cfg = BacktestConfig {
+        timeframe_secs: 86_400,
+        bar_history_len: 50,
+        initial_cash_micros: 100_000_000_000,
+        shadow_mode: false,
+        daily_loss_limit_micros: 0,
+        max_drawdown_limit_micros: 0,
+        reject_storm_max_rejects: 100,
+        pdt_enabled: false,
+        kill_switch_flattens: true,
+        max_gross_exposure_mult_micros: 10_000_000,
+        stress: StressProfile {
+            slippage_bps: 0,
+            volatility_mult_bps: 0,
+        },
+        commission: CommissionModel::ZERO,
+        integrity_enabled: true,
+        integrity_stale_threshold_ticks: stale_threshold_ticks,
+        // Large so gap detection never halts — isolate the stale gate.
+        integrity_gap_tolerance_bars: 100,
+        integrity_enforce_feed_disagreement: false,
+        integrity_calendar: mqk_integrity::CalendarSpec::AlwaysOn,
+        corporate_action_policy: CorporateActionPolicy::Allow,
+        sizing: StrategySizingConfig::default_sizing(),
+    };
+
+    let mut engine = BacktestEngine::new(cfg);
+    // Seed a heartbeat feed at the first bar; it then goes stale as bars advance.
+    engine.seed_integrity_feed("heartbeat", base_ts as u64);
+    engine.add_strategy(Box::new(HoldStrategy)).unwrap();
+    let report = engine.run(&bars).unwrap();
+    report.execution_blocked
+}
+
+#[test]
+fn bj_d04_daily_weekend_gap_not_blocked_by_default_stale_threshold() {
+    // New default (345_600 s ≈ 4 days) survives a 259_200 s weekend gap.
+    assert!(
+        !run_daily_weekend_gap_with_stale_threshold(345_600),
+        "BJ-D04: daily weekend gap (259200 s) must NOT block under the 345600 s default"
+    );
+
+    // Old default (172_800 s ≈ 2 days) is below a weekend gap and DOES block —
+    // this is the regression the patch fixes.
+    assert!(
+        run_daily_weekend_gap_with_stale_threshold(172_800),
+        "BJ-D04: the old 172800 s default blocks the same weekend gap (regression)"
+    );
+}

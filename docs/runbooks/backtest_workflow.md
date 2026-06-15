@@ -59,8 +59,16 @@ writes artifacts under `exports\backtests\<run_id>\`.
 
 **Note on `--integrity-stale-threshold-ticks`:**  For daily bars, weekend gaps
 are up to 259 200 s (3 calendar days).  Use at least `345600` (4 days) so that
-normal weekend gaps do not trigger the stale-feed disarm.  The default of `120`
-is correct for intraday bars only.
+normal weekend gaps do not trigger the stale-feed disarm.  The bare-engine
+intraday default is `120` s and is correct for intraday bars only.
+
+**Daemon backtest-jobs API default (BACKTEST-DAILY-STALE-DEFAULT-FIX-01):**  The
+daemon job route (`POST /api/v1/backtests/jobs`) now applies a timeframe-aware
+default that matches this guidance: daily bars (`timeframe_secs >= 86400`)
+default to `345600` (4 days), while intraday timeframes keep `120` s.  An
+explicit `integrity_stale_threshold_ticks` in the request still overrides the
+default verbatim.  The previous daily default was `172800` (2 days), which sat
+below a normal weekend gap and could falsely block daily proof runs.
 
 ### CSV format
 
