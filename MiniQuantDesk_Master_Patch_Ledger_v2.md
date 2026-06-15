@@ -1119,7 +1119,294 @@ Constraint: Do not touch broker behavior until current paper/autonomous path is 
 
 ---
 
-## 14. DB / Migration Failure Tracking
+## 14. Alpha Scanner / Intraday Data / Strategy Roadmap
+
+### INTRADAY-MD-FRESHNESS-AUTONOMOUS-01 — QUEUED / HIGH PRIORITY
+
+**Purpose:** Ensure autonomous paper strategies using intraday timeframes, especially 5m, do not dispatch from stale prior-session bars.
+
+**Background:** The 2026-06-15 autonomous paper session ran safely, but AAPL/5m latest completed bar appeared to be from 2026-06-12 while the 4-day freshness threshold still marked it acceptable. That is safe from a system-fail-closed perspective, but not sufficient for a real intraday signal/trade proof.
+
+**Requirements:**
+
+- During active market session, intraday strategies must require current-session bars or a much tighter max-age threshold.
+- For 5m bars, stale should mean no current/recent completed bar available.
+- Must surface durable no-trade reason, such as `intraday_bar_not_current` or `market_data_not_refreshed`.
+- Must not silently trade from old prior-session bars.
+- Must not call providers in tests.
+- Must not change strategy logic merely to force trades.
+- Must not bypass risk/reconcile/session/arm/live-routing gates.
+
+**Status:** QUEUED / HIGH PRIORITY
+
+### INTRADAY-MD-REFRESHER-01 — QUEUED / HIGH PRIORITY
+
+**Purpose:** Add or prove a safe intraday market-data refresh path so AAPL/5m and future watchlist symbols receive latest completed bars during the market session.
+
+**Requirements:**
+
+- Prefer completed bar polling/refresh first before true streaming complexity.
+- Refresh cadence should align with timeframe boundaries or safe periodic polling.
+- Must write to canonical `md_bars` or existing approved market-data path.
+- Must expose last refresh time, latest completed bar time, provider/source, rows inserted, and failure reason.
+- Must be rate-limit aware.
+- Must be safe when provider credentials are missing.
+- Must not spend API credits in tests.
+- Must not submit orders.
+- Must not modify broker/risk/order behavior.
+- Must keep live routing false in any paper smoke.
+
+**Status:** QUEUED / HIGH PRIORITY
+
+### DATA-STREAMING-BARS-01 — QUEUED / PARKED
+
+**Purpose:** Evaluate true streaming or websocket bar ingestion for one or more symbols after polling/refresh is proven.
+
+**Requirements:**
+
+- Must define source of truth: streaming bars vs provider historical completed bars vs DB bars.
+- Must handle reconnects, gaps, duplicate bars, partial/incomplete bars, and clock/session boundaries.
+- Must prove that strategy dispatch only uses complete, current bars.
+- Must include replay/recovery behavior after laptop sleep/network gap.
+- Do not start until INTRADAY-MD-REFRESHER-01 is proven or explicitly superseded.
+
+**Status:** QUEUED / PARKED
+
+### STRATEGY-LAB-01 — OPEN / ROADMAP
+
+**Goal:** Create a standardized strategy evaluation framework before adding many live strategies.
+
+**Requirements:**
+
+- Same interface for every strategy.
+- Backtest support.
+- Paper support.
+- Common performance metrics:
+  - win rate
+  - profit factor
+  - Sharpe
+  - max drawdown
+  - expectancy
+  - trade frequency
+  - exposure
+- Promotion evidence must separate research/backtest results from paper/live readiness.
+- No strategy should be promoted only because it trades frequently.
+- Must support comparing strategies across multiple symbols and regimes.
+
+**Status:** OPEN / ROADMAP
+
+### MULTI-SYMBOL-SCANNER-01 — OPEN / ROADMAP
+
+**Goal:** Monitor and score 10–50 symbols simultaneously after current data-refresh and paper lifecycle proofs are stable.
+
+**Initial target symbols:**
+
+- SPY
+- QQQ
+- AAPL
+- MSFT
+- META
+- AMZN
+- GOOGL
+- NVDA
+- AMD
+- TSLA
+
+**Requirements:**
+
+- Relative volume ranking.
+- ATR ranking.
+- Momentum ranking.
+- Liquidity filtering.
+- Spread/price sanity filters if data is available.
+- Dynamic watchlist generation.
+- Must not trade every symbol blindly.
+- Must feed the strategy router/admission framework with ranked opportunities.
+- Must be proven in backtest/replay before autonomous paper promotion.
+
+**Status:** OPEN / ROADMAP
+
+### REGIME-DETECTION-01 — OPEN / ROADMAP
+
+**Goal:** Classify current market state so the bot can choose strategies appropriate to conditions.
+
+**Initial regimes:**
+
+- Trending
+- Range-bound
+- Volatile
+- Quiet
+
+**Example output:**
+
+```json
+{
+  "regime": "TRENDING",
+  "confidence": 0.82
+}
+```
+
+**Requirements:**
+
+- Must be deterministic and explainable.
+- Must work at market/index level and potentially symbol level.
+- Must support backtest/replay.
+- Must not be used to bypass risk or admission checks.
+- Must expose confidence and reason codes.
+
+**Status:** OPEN / ROADMAP
+
+### STRATEGY-ROUTER-01 — OPEN / ROADMAP
+
+**Goal:** Match strategy to symbol and regime instead of running one strategy blindly everywhere.
+
+**Examples:**
+
+- NVDA + Trending -> Opening Range Breakout
+- SPY + Range-bound -> Mean Reversion
+- TSLA + High Volatility -> Momentum
+
+**Requirements:**
+
+- Consume scanner scores and regime detection.
+- Select strategy candidates per symbol.
+- Respect risk engine, capital caps, session rules, and admission-check framework.
+- Must be backtestable across many symbols.
+- Must expose why a strategy/symbol pair was selected or rejected.
+- Must avoid overtrading low-edge setups.
+
+**Status:** OPEN / ROADMAP
+
+### STRATEGY-OPENING-RANGE-BREAKOUT-01 — QUEUED / RESEARCH
+
+**Goal:** Research and backtest Opening Range Breakout strategy.
+
+**Candidate symbols:**
+
+- AAPL
+- NVDA
+- AMD
+- META
+- TSLA
+- SPY
+- QQQ
+
+**Concept:**
+
+- First 15 minutes establish range.
+- Break high.
+- Volume confirmation.
+- ATR stop.
+- Risk/reward target.
+
+**Requirements:**
+
+- Backtest first.
+- No autonomous paper promotion until performance and risk metrics are proven.
+- Must handle failed breakouts and no-trade days.
+
+**Status:** QUEUED / RESEARCH
+
+### STRATEGY-VWAP-PULLBACK-01 — QUEUED / RESEARCH
+
+**Goal:** Research and backtest VWAP Pullback strategy.
+
+**Candidate symbols:**
+
+- SPY
+- QQQ
+- AAPL
+- MSFT
+
+**Concept:**
+
+- Strong trend.
+- Pullback to VWAP.
+- Momentum resumes.
+
+**Requirements:**
+
+- Needs VWAP calculation or source.
+- Backtest first.
+- Must define trend, pullback, confirmation, stop, and invalidation rules.
+- No autonomous paper promotion until metrics are proven.
+
+**Status:** QUEUED / RESEARCH
+
+### STRATEGY-RELATIVE-VOLUME-MOMENTUM-01 — QUEUED / RESEARCH
+
+**Goal:** Research relative-volume momentum as both a strategy and scanner input.
+
+**Concept:**
+
+- Relative volume > 2x.
+- Price above VWAP.
+- Breaking intraday highs.
+
+**Requirements:**
+
+- Requires reliable intraday volume and baseline volume calculation.
+- Should feed scanner ranking.
+- Backtest first.
+- No autonomous paper promotion until metrics are proven.
+
+**Status:** QUEUED / RESEARCH
+
+### STRATEGY-GAP-AND-GO-01 — QUEUED / RESEARCH
+
+**Goal:** Research Gap & Go strategy.
+
+**Concept:**
+
+- Gap > 3%.
+- High premarket volume.
+- Break premarket high.
+- Often strongest in small caps, but small-cap risk controls must be stricter.
+
+**Requirements:**
+
+- Needs premarket data support before realistic testing.
+- Must include liquidity/spread filters.
+- Must be treated as experimental/high-risk until proven.
+- No autonomous paper promotion until metrics are proven.
+
+**Status:** QUEUED / RESEARCH
+
+### STRATEGY-TREND-FOLLOWING-01 — QUEUED / RESEARCH
+
+**Goal:** Research longer-horizon trend following strategy.
+
+**Concept:**
+
+- 20 EMA > 50 EMA.
+- ADX strong.
+- Volume confirmation.
+- Useful for swing testing later.
+
+**Requirements:**
+
+- Backtest first.
+- Must separate swing/longer-horizon behavior from intraday paper smoke behavior.
+- No autonomous paper promotion until metrics are proven.
+
+**Status:** QUEUED / RESEARCH
+
+### Recommended Alpha Scanner Order
+
+1. Finish and prove intraday market-data freshness/refresh.
+2. Complete real paper order/fill lifecycle proof.
+3. Build STRATEGY-LAB-01 evaluation framework.
+4. Build MULTI-SYMBOL-SCANNER-01.
+5. Backtest 2–3 high-quality strategies across 10–20 symbols.
+6. Add REGIME-DETECTION-01.
+7. Add STRATEGY-ROUTER-01.
+8. Promote only top performers into autonomous paper.
+
+**Warning:** Monitoring many symbols with no proven edge only loses money faster. The repo should eventually become many strategies + many symbols + scoring + regime-aware routing, but strategy count should not be expanded before evaluation, data quality, and paper lifecycle proof are stable.
+
+---
+
+## 15. DB / Migration Failure Tracking
 
 ### DB-MIGRATION-CHECKSUM-01 — QUEUED
 
@@ -1139,7 +1426,7 @@ Rule: Do not repair inside unrelated patches. Handle as its own DB/migration-sta
 
 ---
 
-## 15. Older Parked Verification / Open Follow-Up Ledger
+## 16. Older Parked Verification / Open Follow-Up Ledger
 
 These are still queued as “verify from current repo before touching.” Do not treat as open bugs until the current repo proves them.
 
@@ -1173,7 +1460,7 @@ CTRL-03 improved operator truthfulness by replacing unknown placeholders with ex
 ---
 
 
-## 16. Historical Patch Aliases / Superseded Items
+## 17. Historical Patch Aliases / Superseded Items
 
 This section preserves older patch labels that were discussed or partially closed before later umbrella patches absorbed them. Do not lose these names. If a future chat sees one of these labels, map it to the current active/closed patch listed here before starting work.
 
@@ -1336,7 +1623,7 @@ weekend/calendar gaps. Use a larger threshold only for unusually long gaps.
 
 **Current status:** Closed.
 
-## 17. Recommended Order
+## 18. Recommended Order
 
 ```text
 1. BACKTEST-GUI-CLOSURE-01
