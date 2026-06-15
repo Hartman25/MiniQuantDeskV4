@@ -28,7 +28,14 @@ import {
   STRATEGY_FIT_SCHEMA_VERSION,
   WATCHLIST_PROMOTION_SCHEMA_VERSION,
 } from "./parsers.ts";
-import { getBacktestJob, isTerminalJobStatus, normalizeJobStatus, submitBacktestJob } from "./api.ts";
+import {
+  buildActiveJob,
+  extractArtifactDir,
+  getBacktestJob,
+  isTerminalJobStatus,
+  normalizeJobStatus,
+  submitBacktestJob,
+} from "./api.ts";
 import {
   classifyArtifactPathInput,
   buildRepoRelativePath,
@@ -1833,26 +1840,25 @@ export function BacktestResultsScreen() {
         }
 
         const data = result.data!;
-        const newStatus = normalizeJobStatus(data.status);
+        // Map the poll response through the same pure helper the unit tests
+        // prove (buildActiveJob) so the production status path IS the proven
+        // path — not a parallel inline reimplementation that can silently drift
+        // from the tested contract.
+        const updated = buildActiveJob(data);
 
         setActiveJob((prev) =>
-          prev?.jobId === activeJob!.jobId
-            ? {
-                ...prev,
-                status: newStatus,
-                startedAt: data.started_at_utc ?? null,
-                completedAt: data.completed_at_utc ?? null,
-                artifactDir: data.artifact_dir ?? null,
-                error: data.error ?? null,
-              }
-            : prev,
+          prev?.jobId === activeJob!.jobId ? updated : prev,
         );
 
-        if (isTerminalJobStatus(newStatus)) {
-          if (newStatus === "completed") {
-            if (data.artifact_dir) {
+        if (isTerminalJobStatus(updated.status)) {
+          if (updated.status === "completed") {
+            // extractArtifactDir returns a non-null path only for a completed
+            // job that actually carries artifact_dir. This is the single
+            // auto-load trigger — proven by the api.test.ts B02 sequence tests.
+            const autoLoadDir = extractArtifactDir(data);
+            if (autoLoadDir) {
               if (!token.cancelled) setJobBundleLoading(true);
-              loadBundle(data.artifact_dir)
+              loadBundle(autoLoadDir)
                 .then((b) => {
                   if (!token.cancelled) {
                     setJobBundle(b);

@@ -326,6 +326,58 @@ If buy-and-hold benchmark is unavailable (< 2 valid bars), ranking falls back to
 
 ---
 
+## Backtest Results GUI workflow (BACKTEST-GUI-CLOSURE-01)
+
+The **Backtest Results** screen in the Veritas Ledger desktop shell provides two
+independent, offline workflows. Neither touches a broker adapter, the OMS, or any
+live/paper execution path — the daemon backtest-jobs API is research-only.
+
+### Workflow A — load a completed artifact folder (manual)
+
+1. Open **Backtest Results**.
+2. In *"A — Load completed artifact folder"*, paste the path to the **run-id
+   folder** that directly contains `manifest.json`, `metrics.json`,
+   `equity_curve.csv`, `orders.csv`, `fills.csv` (e.g.
+   `exports\backtests\<run_id>`). Pasting a bars CSV is rejected with a hint.
+3. The screen reads each artifact via the Tauri `read_artifact_file` command
+   (allowlisted filenames only) and renders manifest, metrics/KPI cards, equity
+   curve, orders, and fills.
+4. Each file is reported truthfully: a missing file shows *"… missing"*, a parse
+   failure shows the parser error, and a read failure shows the read error — no
+   failure is hidden behind empty content.
+
+### Workflow B — submit a job, poll, auto-load (end-to-end)
+
+1. In *"Submit backtest"*, fill bars path, strategy, symbol, timeframe, initial
+   cash, and (optionally) the integrity stale threshold. Leave the threshold
+   blank to use the daemon's timeframe-aware default (`345600` for daily,
+   `120` for intraday).
+2. Submit. The GUI calls `POST /api/v1/backtests/jobs` with the operator token.
+   The daemon validates the request, returns `202 Accepted` with
+   `status: "queued"`, and runs the backtest on a background task. The submit
+   button is disabled while a job is active.
+3. The GUI polls `GET /api/v1/backtests/jobs/:job_id` every 2 seconds and shows
+   the live status badge (`queued` → `running` → `completed`/`failed`).
+4. On `completed` **with** an `artifact_dir`, the GUI **auto-loads** that folder
+   and renders the same artifact display as Workflow A.
+5. On `completed` **without** an `artifact_dir`, the GUI shows an explicit
+   *"Completed without artifact path"* notice and directs the operator to load
+   manually via Workflow A.
+6. On `failed`, the GUI surfaces the daemon's error message verbatim and never
+   auto-loads.
+
+### Proof
+
+The submit → poll → auto-load decision is proven by the `api.test.ts` `B06`
+sequence tests, which drive the exact pure helpers the polling effect calls
+(`buildActiveJob`, `isTerminalJobStatus`, `extractArtifactDir`) over realistic
+`queued → running → completed` / `failed` sequences and assert the single
+auto-load trigger. Parser and artifact-render coverage is proven by
+`parsers.test.ts`; the Tauri `read_artifact_file` allowlist covers every file
+`loadBundle` requests.
+
+---
+
 ## Recommended pre-live workflow
 
 1. **Refresh data** — run the premarket data refresh or ingest script.

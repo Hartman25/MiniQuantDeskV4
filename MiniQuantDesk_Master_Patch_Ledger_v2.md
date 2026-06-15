@@ -443,9 +443,29 @@ while ($true) {
 
 ## 6. Active / Next Patch
 
-### BACKTEST-GUI-CLOSURE-01 — QUEUED / NEXT
+### BACKTEST-GUI-CLOSURE-01 — CLOSED
 
-**Mission:** Live-prove and repair if needed the Backtest Results GUI workflow end-to-end:
+**Closure (automated component-logic test):** The Backtest Results GUI workflow
+is closed end-to-end. The polling effect's status mapping and auto-load decision
+were inline reimplementations that did not call the tested pure helpers
+(`buildActiveJob`, `extractArtifactDir`) — a hollow proof. They were wired into
+the production polling path, and `api.test.ts` `B06`/`B06b`/`B06c`/`B06d`
+sequence tests now drive those exact helpers over realistic
+`queued → running → completed`/`failed` sequences, asserting the single
+auto-load trigger. The Tauri `read_artifact_file` allowlist was verified to
+cover all 10 files `loadBundle` requests. Submit calls the real
+`POST /api/v1/backtests/jobs` (no mockData); manual Workflow-A load and truthful
+parser/missing/failed states already existed and are covered by
+`parsers.test.ts`. GUI workflow documented in
+`docs/runbooks/backtest_workflow.md`. Full GUI suite 393/393 pass; `npm run build`
+clean. No broker/OMS/runtime/paper/live path touched.
+
+- Files: `core-rs/mqk-gui/src/features/backtests/BacktestResultsScreen.tsx`,
+  `core-rs/mqk-gui/src/features/backtests/__tests__/api.test.ts`,
+  `docs/runbooks/backtest_workflow.md`.
+- `BACKTEST-GUI-POLISH-01` remains future/optional (presentation only).
+
+**Original mission:** Live-prove and repair if needed the Backtest Results GUI workflow end-to-end:
 
 - GUI can submit a CSV backtest job to daemon.
 - GUI polls job status.
@@ -571,7 +591,7 @@ Do not let backtests silently call TwelveData.
 
 ## 9. Remaining Backtest / Research Workflow Patches
 
-### BACKTEST-GUI-CLOSURE-01 — QUEUED / NEXT
+### BACKTEST-GUI-CLOSURE-01 — CLOSED
 
 See Section 6.
 

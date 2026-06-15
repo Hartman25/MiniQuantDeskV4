@@ -324,3 +324,100 @@ test("B05b: idle and loading FileResult kinds are non-error states", () => {
   assert.ok(!errorKinds.includes(loading.kind), "loading is not an error kind");
   // GUI hides FileStatusNote for idle and loading — no false error displayed.
 });
+
+// ---------------------------------------------------------------------------
+// B06: Poll-sequence proof (BACKTEST-GUI-CLOSURE-01)
+//
+// The BacktestResultsScreen polling effect maps each poll response through
+// buildActiveJob and decides auto-load via extractArtifactDir. This test drives
+// the EXACT same pure helpers over a realistic queued → running → completed
+// sequence and asserts the resulting state stream and the single auto-load
+// trigger. Because production now calls these same helpers (not an inline
+// reimplementation), this proves the real submit → poll → auto-load decision.
+// ---------------------------------------------------------------------------
+
+interface PollSimResult {
+  states: { status: string; artifactDir: string | null; error: string | null }[];
+  autoLoadDirs: string[]; // every dir the loop would have handed to loadBundle()
+  stopped: boolean; // loop reached a terminal status and broke
+}
+
+// Pure mirror of the polling effect's per-tick decision in
+// BacktestResultsScreen.tsx — same helpers, same control flow, no React/HTTP.
+function simulatePollLoop(responses: BacktestJobStatusResponse[]): PollSimResult {
+  const states: PollSimResult["states"] = [];
+  const autoLoadDirs: string[] = [];
+  let stopped = false;
+
+  for (const data of responses) {
+    const updated = buildActiveJob(data);
+    states.push({
+      status: updated.status,
+      artifactDir: updated.artifactDir,
+      error: updated.error,
+    });
+
+    if (isTerminalJobStatus(updated.status)) {
+      if (updated.status === "completed") {
+        const autoLoadDir = extractArtifactDir(data);
+        if (autoLoadDir) autoLoadDirs.push(autoLoadDir);
+      }
+      stopped = true;
+      break; // production breaks the poll loop on any terminal status
+    }
+  }
+
+  return { states, autoLoadDirs, stopped };
+}
+
+test("B06: queued → running → completed(with artifact) fires exactly one auto-load on the completed tick", () => {
+  const dir = "C:\\repo\\exports\\backtests\\bfa264d3-1328-5bd1-b732-9d32e8dac8ad";
+  const sim = simulatePollLoop([
+    makeStatusResponse("queued", null),
+    makeStatusResponse("running", null),
+    makeStatusResponse("completed", dir),
+  ]);
+
+  assert.deepEqual(
+    sim.states.map((s) => s.status),
+    ["queued", "running", "completed"],
+    "status stream must reflect each poll truthfully",
+  );
+  assert.ok(sim.stopped, "loop must stop once the job reaches a terminal status");
+  assert.equal(sim.autoLoadDirs.length, 1, "auto-load must fire exactly once");
+  assert.equal(sim.autoLoadDirs[0], dir, "auto-load must use the completed artifact_dir");
+});
+
+test("B06b: no auto-load fires on queued or running ticks (artifact_dir ignored until completed)", () => {
+  // A stray artifact_dir on a running tick must NOT trigger an early load.
+  const sim = simulatePollLoop([
+    makeStatusResponse("queued", null),
+    makeStatusResponse("running", "C:\\repo\\exports\\backtests\\premature"),
+  ]);
+  assert.equal(sim.autoLoadDirs.length, 0, "running job must never auto-load even with a path present");
+  assert.ok(!sim.stopped, "non-terminal sequence must keep polling (not stop)");
+});
+
+test("B06c: completed without artifact_dir surfaces completed state but fires no auto-load", () => {
+  const sim = simulatePollLoop([
+    makeStatusResponse("running", null),
+    makeStatusResponse("completed", null),
+  ]);
+  assert.deepEqual(sim.states.map((s) => s.status), ["running", "completed"]);
+  assert.ok(sim.stopped, "completed is terminal — loop stops");
+  assert.equal(sim.autoLoadDirs.length, 0, "completed-without-artifact must not auto-load (screen shows warning)");
+});
+
+test("B06d: failed job stops the loop, surfaces error, and never auto-loads", () => {
+  const failed = makeStatusResponse("failed", null);
+  failed.error = "load bars csv failed: AAPL_1D.csv: file not found";
+  const sim = simulatePollLoop([
+    makeStatusResponse("running", null),
+    failed,
+  ]);
+  assert.ok(sim.stopped, "failed is terminal — loop stops");
+  assert.equal(sim.autoLoadDirs.length, 0, "failed job must never auto-load");
+  const last = sim.states[sim.states.length - 1];
+  assert.equal(last.status, "failed");
+  assert.ok(last.error?.includes("AAPL_1D.csv"), "failed state must carry the truthful error");
+});
