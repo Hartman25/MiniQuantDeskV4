@@ -3427,6 +3427,86 @@ pub struct MdBarsCoverageResponse {
 }
 
 // ---------------------------------------------------------------------------
+// INTRADAY-MD-REFRESHER-OPERATOR-SURFACE-01: Intraday refresh evidence status
+// ---------------------------------------------------------------------------
+
+/// Per-symbol row from the latest intraday refresh evidence file.
+///
+/// Fields map directly from the `intraday-refresh-v1` evidence JSON.
+/// Fields absent in the evidence file (e.g., provider fields in check_only mode)
+/// are `None` — never substituted with defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntradayRefreshSymbolStatus {
+    pub symbol: String,
+    /// "PASS" | "FAIL", or `null` when the evidence is from check_only mode.
+    pub gate: Option<String>,
+    /// Total completed bars in md_bars for this symbol/timeframe.
+    pub completed_count: Option<i64>,
+    /// ISO timestamp of the latest completed bar end_ts (max_ts_iso in evidence).
+    pub latest_completed_bar_ts: Option<String>,
+    /// Age of the latest bar in minutes (-1 if unavailable in evidence).
+    pub staleness_min: Option<i64>,
+    /// Provider source string used for the refresh, e.g. "twelvedata" or "alpaca".
+    pub provider_source: Option<String>,
+    /// Whether the provider key was configured when the refresh ran.
+    pub provider_configured: Option<bool>,
+    /// Whether a provider sync was attempted.
+    pub provider_attempted: Option<bool>,
+    /// Whether the provider sync succeeded (exit code 0).
+    pub provider_success: Option<bool>,
+    /// Rows inserted into md_bars during the refresh.
+    pub rows_inserted: Option<i64>,
+    /// Rows updated in md_bars during the refresh.
+    pub rows_updated: Option<i64>,
+    /// Rows dropped because the bar was flagged incomplete.
+    pub rows_filtered_incomplete: Option<i64>,
+    /// Rows dropped because the bar was still in-progress (current bar).
+    pub rows_filtered_in_progress: Option<i64>,
+    /// Fail reasons for this symbol, empty on PASS.
+    pub fail_reasons: Vec<String>,
+}
+
+/// Response for `GET /api/v1/market-data/intraday-refresh/status`.
+///
+/// Read-only. Reads the latest `intraday_refresh_*.json` evidence file
+/// written by `Refresh-IntradayMarketData.ps1`. No provider calls, no DB writes,
+/// no broker interaction.
+///
+/// `truth_state` values:
+/// - `"active"`               — latest evidence file parsed successfully.
+/// - `"no_evidence"`          — no evidence file found in the evidence directory.
+/// - `"parse_error"`          — evidence file found but JSON is malformed or has
+///   an unsupported schema_version.
+/// - `"backend_unavailable"`  — evidence directory could not be read.
+///
+/// `stale_or_missing_evidence` is `true` when:
+/// - `truth_state != "active"`, or
+/// - `produced_at_utc` is more than 24 h in the past.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntradayRefreshStatusResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    /// Filesystem path of the evidence file that was read. `null` when no file found.
+    pub evidence_path: Option<String>,
+    /// `true` when evidence is absent, unreadable, or older than 24 h.
+    pub stale_or_missing_evidence: bool,
+    pub schema_version: Option<String>,
+    pub produced_at_utc: Option<String>,
+    /// "check_only" | "once" | "interval".
+    pub mode: Option<String>,
+    /// Provider source from evidence file: "twelvedata" | "alpaca".
+    pub source: Option<String>,
+    pub timeframe: Option<String>,
+    /// Whether all symbols passed the fail-closed gates on the most recent run.
+    pub all_passed: Option<bool>,
+    /// Human-readable pass/fail reason from the evidence file.
+    pub reason: Option<String>,
+    pub symbols: Vec<IntradayRefreshSymbolStatus>,
+    /// Error description when `truth_state` is `"parse_error"` or `"backend_unavailable"`.
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // DATA-INGEST-GUI-SYNC-ALL-01: Tracked-equities registry preview
 // ---------------------------------------------------------------------------
 

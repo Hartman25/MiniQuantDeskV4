@@ -393,6 +393,13 @@ pub struct AppState {
     /// Default: "config/providers/providers.json" (relative to daemon CWD).
     /// Override: MQK_PROVIDER_REGISTRY_PATH env var.
     pub provider_registry_path: String,
+    /// INTRADAY-MD-REFRESHER-OPERATOR-SURFACE-01: Directory containing intraday refresh
+    /// evidence files written by Refresh-IntradayMarketData.ps1.
+    ///
+    /// Read at route-time (not cached) by GET /api/v1/market-data/intraday-refresh/status.
+    /// Default: "exports/market_data" (relative to daemon CWD).
+    /// Override: MQK_MD_REFRESH_EVIDENCE_DIR env var.
+    pub md_refresh_evidence_dir: String,
     /// BROKER-FILL-REST-RECOVERY-01: Injectable Alpaca fill activity fetcher.
     ///
     /// `None` when REST recovery is not configured on this daemon instance.
@@ -974,6 +981,8 @@ impl AppState {
                 .unwrap_or_else(|_| "config/instruments/equities.json".to_string()),
             provider_registry_path: std::env::var("MQK_PROVIDER_REGISTRY_PATH")
                 .unwrap_or_else(|_| "config/providers/providers.json".to_string()),
+            md_refresh_evidence_dir: std::env::var("MQK_MD_REFRESH_EVIDENCE_DIR")
+                .unwrap_or_else(|_| "exports/market_data".to_string()),
             fill_activity_fetcher,
             ws_gap_fill_fetcher,
             broker_baseline: Arc::new(RwLock::new(None)),

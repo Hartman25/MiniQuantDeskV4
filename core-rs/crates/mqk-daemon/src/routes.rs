@@ -193,7 +193,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         diagnostics_snapshot, stream, trading_account, trading_fills, trading_orders,
         trading_positions, trading_snapshot, trading_snapshot_clear, trading_snapshot_set,
     };
-    use transport_quality::{execution_transport, market_data_coverage, market_data_quality};
+    use transport_quality::{
+        execution_transport, intraday_refresh_status, market_data_coverage, market_data_quality,
+    };
     use watchlist::{watchlist_admission_check, watchlist_status};
 
     // --- Public (unauthenticated) routes — read-only telemetry & data. ---
@@ -307,6 +309,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/market-data/quality", get(market_data_quality))
         // DATA-INGEST-GUI-RESULTS-01: read-only md_bars coverage (public, no auth)
         .route("/api/v1/market-data/coverage", get(market_data_coverage))
+        // INTRADAY-MD-REFRESHER-OPERATOR-SURFACE-01: read-only refresher evidence (public, no auth)
+        .route(
+            "/api/v1/market-data/intraday-refresh/status",
+            get(intraday_refresh_status),
+        )
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
         .route("/v1/trading/orders", get(trading_orders))

@@ -1194,6 +1194,46 @@ clippy remains blocked by unrelated existing drift in
 
 **Status:** CLOSED
 
+### INTRADAY-MD-REFRESHER-OPERATOR-SURFACE-01 — CLOSED
+
+**Purpose:** Expose latest intraday refresh evidence through a read-only daemon/operator API surface.
+
+**Requirements:**
+
+- `GET /api/v1/market-data/intraday-refresh/status` returns structured evidence status.
+- Missing evidence → `truth_state: "no_evidence"`, `stale_or_missing_evidence: true`.
+- Malformed evidence → `truth_state: "parse_error"`, no crash.
+- Valid evidence → `truth_state: "active"`, surfaces provider/symbol/timeframe/bar ts/row counts/fail_reasons.
+- Evidence older than 24 h → `stale_or_missing_evidence: true`.
+- No provider calls, no DB mutation, no broker calls.
+
+**Closure:**
+
+- `GET /api/v1/market-data/intraday-refresh/status` registered in public router.
+- Handler in `routes/transport_quality.rs`: reads latest `intraday_refresh_*.json` from
+  `md_refresh_evidence_dir` (env `MQK_MD_REFRESH_EVIDENCE_DIR`, default `exports/market_data`).
+- `IntradayRefreshStatusResponse` + `IntradayRefreshSymbolStatus` types in `api_types.rs`.
+- `md_refresh_evidence_dir` field added to `AppState`.
+- 9 scenario tests (IRS-01..IRS-09) in `scenario_intraday_md_refresher_operator_surface_01.rs`; all pass.
+
+**Status:** CLOSED
+
+### INTRADAY-MD-REFRESHER-GUI-01 — OPEN
+
+**Purpose:** Add read-only GUI display for intraday refresh status exposed by INTRADAY-MD-REFRESHER-OPERATOR-SURFACE-01.
+
+**Requirements:**
+
+- Frontend API client/types for `GET /api/v1/market-data/intraday-refresh/status`.
+- Display on existing Market Data screen (or most appropriate existing surface).
+- Show: not configured/no evidence, parse error, last success, last failure, stale evidence,
+  latest completed bar ts, provider/source, rows inserted/updated, filtered counts.
+- Do not hide fail-closed states.
+- No buttons that call providers.
+- Do not change backend logic or trading behavior.
+
+**Status:** OPEN
+
 ### DATA-STREAMING-BARS-01 — QUEUED / PARKED
 
 **Purpose:** Evaluate true streaming or websocket bar ingestion for one or more symbols after polling/refresh is proven.
