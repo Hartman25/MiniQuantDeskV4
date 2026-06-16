@@ -75,6 +75,8 @@ pub async fn run_start(engine: String, mode: String, config_paths: Vec<String>) 
         strategy_name: &engine, // live run: engine_id is the operational identity
         engine_id: &engine,
         mode: &mode,
+        timeframe: None,
+        timeframe_secs: None,
         git_hash: &git_hash,
         config_hash: &loaded.config_hash,
         host_fingerprint: &host_fp,

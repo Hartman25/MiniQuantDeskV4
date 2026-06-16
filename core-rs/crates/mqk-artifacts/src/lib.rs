@@ -13,6 +13,10 @@ pub struct RunManifest {
     pub strategy_name: String,
     pub engine_id: String,
     pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeframe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeframe_secs: Option<i64>,
     pub git_hash: String,
     pub config_hash: String,
     pub host_fingerprint: String,
@@ -37,6 +41,8 @@ pub struct InitRunArtifactsArgs<'a> {
     pub strategy_name: &'a str,
     pub engine_id: &'a str,
     pub mode: &'a str,
+    pub timeframe: Option<&'a str>,
+    pub timeframe_secs: Option<i64>,
     pub git_hash: &'a str,
     pub config_hash: &'a str,
     pub host_fingerprint: &'a str,
@@ -79,6 +85,11 @@ pub fn init_run_artifacts(args: InitRunArtifactsArgs<'_>) -> Result<InitRunArtif
         strategy_name: args.strategy_name.to_string(),
         engine_id: args.engine_id.to_string(),
         mode: args.mode.to_string(),
+        timeframe: args
+            .timeframe
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string),
+        timeframe_secs: args.timeframe_secs,
         git_hash: args.git_hash.to_string(),
         config_hash: args.config_hash.to_string(),
         host_fingerprint: args.host_fingerprint.to_string(),
@@ -238,12 +249,19 @@ fn strategy_lab_input_from_artifact_parts(
         })
         .unwrap_or_else(|| "unknown".to_string());
 
-    let timeframe = metrics
-        .timeframe
-        .as_deref()
+    let timeframe = manifest
+        .and_then(|m| m.timeframe.as_deref())
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
-        .or_else(|| metrics.timeframe_secs.map(|secs| format!("{secs}s")))
+        .or_else(|| manifest.and_then(|m| timeframe_from_secs(m.timeframe_secs)))
+        .or_else(|| {
+            metrics
+                .timeframe
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| timeframe_from_secs(metrics.timeframe_secs))
         .unwrap_or_else(|| "unknown".to_string());
 
     let benchmark_buy_hold = metrics
@@ -279,6 +297,20 @@ fn strategy_lab_input_from_artifact_parts(
 
 fn first_non_empty<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<&'a str> {
     values.into_iter().flatten().find(|s| !s.trim().is_empty())
+}
+
+fn timeframe_from_secs(timeframe_secs: Option<i64>) -> Option<String> {
+    let secs = timeframe_secs?;
+    let timeframe = match secs {
+        60 => "1m".to_string(),
+        300 => "5m".to_string(),
+        900 => "15m".to_string(),
+        3_600 => "1h".to_string(),
+        86_400 => "1D".to_string(),
+        secs if secs > 0 => format!("{secs}s"),
+        _ => return None,
+    };
+    Some(timeframe)
 }
 
 // ---------------------------------------------------------------------------

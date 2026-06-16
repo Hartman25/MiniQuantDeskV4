@@ -15,6 +15,22 @@ fn temp_artifact_dir(label: &str) -> PathBuf {
 }
 
 fn write_manifest(dir: &PathBuf, strategy_name: &str) {
+    write_manifest_with_metadata(dir, strategy_name, None, None);
+}
+
+fn write_manifest_with_metadata(
+    dir: &PathBuf,
+    strategy_name: &str,
+    timeframe: Option<&str>,
+    timeframe_secs: Option<i64>,
+) {
+    let timeframe_json = timeframe
+        .map(|value| format!(r#"  "timeframe": "{value}","#))
+        .unwrap_or_default();
+    let timeframe_secs_json = timeframe_secs
+        .map(|value| format!(r#"  "timeframe_secs": {value},"#))
+        .unwrap_or_default();
+
     fs::write(
         dir.join("manifest.json"),
         format!(
@@ -24,6 +40,8 @@ fn write_manifest(dir: &PathBuf, strategy_name: &str) {
   "strategy_name": "{strategy_name}",
   "engine_id": "mqk-backtest",
   "mode": "backtest",
+{timeframe_json}
+{timeframe_secs_json}
   "git_hash": "test",
   "config_hash": "cfg",
   "host_fingerprint": "test-host",
@@ -85,6 +103,53 @@ fn strategy_lab_artifact_valid_folder_evaluates_successfully() {
 }
 
 #[test]
+fn strategy_lab_artifact_manifest_timeframe_is_used() {
+    let dir = temp_artifact_dir("manifest_timeframe");
+    write_manifest_with_metadata(&dir, "manifest_strategy", Some("5m"), None);
+    fs::write(
+        dir.join("metrics.json"),
+        r#"{
+  "schema_version": 1,
+  "symbols": ["SPY"],
+  "timeframe": "1m",
+  "total_return_pct": 8.0,
+  "max_drawdown_pct": 4.0,
+  "trade_count": 11
+}
+"#,
+    )
+    .expect("write metrics");
+
+    let evaluation =
+        mqk_artifacts::evaluate_strategy_lab_artifact_dir(&dir).expect("evaluate artifact");
+
+    assert_eq!(evaluation.timeframe, "5m");
+}
+
+#[test]
+fn strategy_lab_artifact_manifest_timeframe_secs_is_mapped() {
+    let dir = temp_artifact_dir("manifest_timeframe_secs");
+    write_manifest_with_metadata(&dir, "manifest_strategy", None, Some(300));
+    fs::write(
+        dir.join("metrics.json"),
+        r#"{
+  "schema_version": 1,
+  "symbols": ["SPY"],
+  "total_return_pct": 8.0,
+  "max_drawdown_pct": 4.0,
+  "trade_count": 11
+}
+"#,
+    )
+    .expect("write metrics");
+
+    let evaluation =
+        mqk_artifacts::evaluate_strategy_lab_artifact_dir(&dir).expect("evaluate artifact");
+
+    assert_eq!(evaluation.timeframe, "5m");
+}
+
+#[test]
 fn strategy_lab_artifact_missing_metrics_json_fails_truthfully() {
     let dir = temp_artifact_dir("missing_metrics");
     write_manifest(&dir, "manifest_strategy");
@@ -143,6 +208,31 @@ fn strategy_lab_artifact_missing_optional_metrics_does_not_crash() {
     assert!(evaluation
         .reason_codes
         .contains(&StrategyLabReasonCode::ExpectancyMissing));
+}
+
+#[test]
+fn strategy_lab_artifact_old_shape_without_timeframe_evaluates_unknown() {
+    let dir = temp_artifact_dir("old_shape_unknown_timeframe");
+    fs::write(
+        dir.join("metrics.json"),
+        r#"{
+  "strategy_name": "old_strategy",
+  "symbol": "SPY",
+  "total_return_pct": 12.0,
+  "max_drawdown_pct": 6.0,
+  "trade_count": 15
+}
+"#,
+    )
+    .expect("write metrics");
+
+    let evaluation =
+        mqk_artifacts::evaluate_strategy_lab_artifact_dir(&dir).expect("evaluate artifact");
+
+    assert_eq!(evaluation.strategy_id, "old_strategy");
+    assert_eq!(evaluation.symbol, "SPY");
+    assert_eq!(evaluation.timeframe, "unknown");
+    assert_ne!(evaluation.decision, StrategyLabDecision::InsufficientData);
 }
 
 #[test]

@@ -125,6 +125,8 @@ pub async fn run_backtest_csv(
             strategy_name: &report.strategy_name,
             engine_id: "mqk-backtest",
             mode: "backtest",
+            timeframe: None,
+            timeframe_secs: Some(timeframe_secs),
             git_hash: &git_hash,
             config_hash: &config_hash,
             host_fingerprint: &host_fp,
@@ -164,6 +166,43 @@ pub async fn run_backtest_csv(
         println!("halt_reason={}", r);
     }
     println!("final_equity_micros={}", final_equity);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Strategy Lab artifact report
+// ---------------------------------------------------------------------------
+
+pub fn run_strategy_lab_evaluate(artifact_dir: String, json: bool) -> Result<()> {
+    let evaluation = mqk_artifacts::evaluate_strategy_lab_artifact_dir(Path::new(&artifact_dir))
+        .with_context(|| format!("strategy lab artifact evaluation failed: {}", artifact_dir))?;
+    let reason_codes: Vec<&str> = evaluation.reason_codes.iter().map(|r| r.code()).collect();
+
+    if json {
+        let report = serde_json::json!({
+            "strategy_id": evaluation.strategy_id,
+            "symbol": evaluation.symbol,
+            "timeframe": evaluation.timeframe,
+            "score": evaluation.score,
+            "grade": evaluation.grade.code(),
+            "decision": evaluation.decision.code(),
+            "reason_codes": reason_codes,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .context("serialize strategy lab report failed")?
+        );
+    } else {
+        println!("strategy_id={}", evaluation.strategy_id);
+        println!("symbol={}", evaluation.symbol);
+        println!("timeframe={}", evaluation.timeframe);
+        println!("score={:.2}", evaluation.score);
+        println!("grade={}", evaluation.grade.code());
+        println!("decision={}", evaluation.decision.code());
+        println!("reason_codes={}", reason_codes.join(","));
+    }
 
     Ok(())
 }
@@ -301,6 +340,8 @@ pub async fn run_backtest_db(
             strategy_name: &report.strategy_name,
             engine_id: "mqk-backtest",
             mode: "backtest",
+            timeframe: Some(&timeframe),
+            timeframe_secs: Some(timeframe_secs),
             git_hash: &git_hash,
             config_hash: &config_hash,
             host_fingerprint: &host_fp,
@@ -481,6 +522,8 @@ pub async fn run_sweep_csv(
                     strategy_name: &report.strategy_name,
                     engine_id: "mqk-backtest",
                     mode: "backtest-sweep",
+                    timeframe: None,
+                    timeframe_secs: Some(timeframe_secs),
                     git_hash: &git_hash,
                     config_hash: &config_hash,
                     host_fingerprint: &host_fp,

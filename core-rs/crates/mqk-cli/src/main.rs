@@ -5,7 +5,10 @@ use std::path::PathBuf;
 mod commands;
 
 use commands::{
-    bkt::{run_backtest_csv, run_backtest_db, run_sweep_csv, IntegrityCalendarArg},
+    bkt::{
+        run_backtest_csv, run_backtest_db, run_strategy_lab_evaluate, run_sweep_csv,
+        IntegrityCalendarArg,
+    },
     load_payload,
     md::{md_ingest_csv, md_ingest_provider, md_sync_provider},
     run::{
@@ -262,6 +265,17 @@ enum BacktestCmd {
         /// Optional output directory for deterministic artifacts (fills/equity/metrics/manifest).
         #[arg(long)]
         out_dir: Option<String>,
+    },
+
+    /// Evaluate an existing completed backtest artifact folder with Strategy Lab.
+    StrategyLabEvaluate {
+        /// Existing artifact run directory containing metrics.json.
+        #[arg(long)]
+        artifact_dir: String,
+
+        /// Print a deterministic JSON report instead of key=value lines.
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 }
 
@@ -715,6 +729,9 @@ async fn main() -> Result<()> {
                     out_dir,
                 )
                 .await?;
+            }
+            BacktestCmd::StrategyLabEvaluate { artifact_dir, json } => {
+                run_strategy_lab_evaluate(artifact_dir, json)?;
             }
         },
 
