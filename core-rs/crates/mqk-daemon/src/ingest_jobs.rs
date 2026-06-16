@@ -31,6 +31,7 @@ pub enum IngestJobStatus {
     /// Partial success: at least one symbol succeeded and at least one failed,
     /// or all symbols fetched but a guardrail was hit before completing the batch.
     Partial,
+    Cancelled,
 }
 
 impl IngestJobStatus {
@@ -43,7 +44,20 @@ impl IngestJobStatus {
             IngestJobStatus::Failed => "failed",
             IngestJobStatus::Refused => "refused",
             IngestJobStatus::Partial => "partial",
+            IngestJobStatus::Cancelled => "cancelled",
         }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            IngestJobStatus::Completed
+                | IngestJobStatus::DryRunCompleted
+                | IngestJobStatus::Failed
+                | IngestJobStatus::Refused
+                | IngestJobStatus::Partial
+                | IngestJobStatus::Cancelled
+        )
     }
 
     fn from_str(value: &str) -> Result<Self, String> {
@@ -55,6 +69,7 @@ impl IngestJobStatus {
             "failed" => Ok(Self::Failed),
             "refused" => Ok(Self::Refused),
             "partial" => Ok(Self::Partial),
+            "cancelled" => Ok(Self::Cancelled),
             other => Err(format!("unknown ingest job status in DB: {other}")),
         }
     }

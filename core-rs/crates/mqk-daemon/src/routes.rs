@@ -165,7 +165,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         execution_order_replay, execution_order_timeline, execution_order_trace, execution_outbox,
         execution_protection_status, execution_replace_cancel_chains,
     };
-    use ingest::{ingest_job_status, ingest_job_submit, ingest_jobs_list, tracked_equities_list};
+    use ingest::{
+        ingest_job_cancel, ingest_job_status, ingest_job_submit, ingest_jobs_list,
+        tracked_equities_list,
+    };
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
     use portfolio::{
@@ -400,6 +403,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Route identity: market-data ingestion / research-data-control.
         // Not trading execution. Does not require arm_state.
         .route("/api/v1/ingest/jobs", post(ingest_job_submit))
+        .route(
+            "/api/v1/ingest/jobs/:job_id/cancel",
+            post(ingest_job_cancel),
+        )
         .merge(control::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

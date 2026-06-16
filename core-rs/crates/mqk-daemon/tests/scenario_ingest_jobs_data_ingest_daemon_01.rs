@@ -39,11 +39,17 @@
 //! All tests require no database and no network.
 //! No TwelveData API credits are consumed.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use mqk_daemon::{routes, state};
+use mqk_daemon::{
+    ingest_jobs::{IngestJobRecord, IngestJobStatus},
+    routes, state,
+};
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -55,6 +61,27 @@ use tower::ServiceExt;
 struct FakeProvider {
     bars: Vec<mqk_md::ProviderBar>,
     fail_symbols: Vec<String>,
+}
+
+struct SlowCountingProvider {
+    calls: Arc<AtomicUsize>,
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl mqk_md::HistoricalProvider for SlowCountingProvider {
+    fn source_name(&self) -> &'static str {
+        "slow_counting_test_provider"
+    }
+
+    async fn fetch_bars(
+        &self,
+        _req: mqk_md::FetchBarsRequest,
+    ) -> anyhow::Result<Vec<mqk_md::ProviderBar>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(self.delay).await;
+        Ok(vec![])
+    }
 }
 
 impl FakeProvider {
@@ -171,6 +198,69 @@ fn post_ingest_json(payload: serde_json::Value) -> Request<axum::body::Body> {
             serde_json::to_vec(&payload).unwrap(),
         ))
         .unwrap()
+}
+
+fn cancel_ingest_request(job_id: uuid::Uuid) -> Request<axum::body::Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/ingest/jobs/{}/cancel", job_id))
+        .body(axum::body::Body::empty())
+        .unwrap()
+}
+
+async fn post_cancel_job(
+    router: axum::Router,
+    job_id: uuid::Uuid,
+) -> (StatusCode, serde_json::Value) {
+    let (status, body) = call(router, cancel_ingest_request(job_id)).await;
+    (status, parse_json(body))
+}
+
+fn seed_job_record(job_id: uuid::Uuid, status: IngestJobStatus) -> IngestJobRecord {
+    let now = chrono::Utc::now();
+    let completed_at_utc = if status.is_terminal() {
+        Some(now)
+    } else {
+        None
+    };
+
+    IngestJobRecord {
+        job_id,
+        source: "twelvedata".to_string(),
+        mode: Some("sync_provider".to_string()),
+        csv_path: None,
+        timeframe: "1D".to_string(),
+        source_label: "twelvedata".to_string(),
+        out_dir: "exports/md_ingest".to_string(),
+        status,
+        created_at_utc: now,
+        started_at_utc: None,
+        completed_at_utc,
+        rows_read: None,
+        rows_inserted: None,
+        rows_rejected: None,
+        quality_report_path: None,
+        error: None,
+        dry_run: true,
+        provider_api_calls_allowed: false,
+        api_calls_made: 0,
+        symbols_source: Some("registry".to_string()),
+        registry_path_used: None,
+        provider_registry_path_used: None,
+        symbols_count: Some(88),
+        planned_first_symbol: Some("AAL".to_string()),
+        planned_last_symbol: Some("XOM".to_string()),
+        asset_class: "equity".to_string(),
+        provider_enabled: Some(true),
+        provider_verification_status: Some("verified".to_string()),
+        symbols_completed: Some(0),
+        symbols_failed: Some(0),
+    }
+}
+
+fn insert_seed_job(st: &Arc<state::AppState>, record: IngestJobRecord) {
+    let mut store = st.ingest_jobs.lock().expect("ingest_jobs lock poisoned");
+    store.insert(record.job_id, record);
 }
 
 /// Create a temporary CSV file with md_backup schema and `true`/`false` is_complete.
@@ -390,6 +480,155 @@ async fn ij07_get_unknown_job_id_returns_404() {
         json_str(&json, "truth_state"),
         "not_found",
         "truth_state must be 'not_found'"
+    );
+}
+
+#[test]
+fn cancel_01_cancelled_status_is_terminal() {
+    assert!(
+        IngestJobStatus::Cancelled.is_terminal(),
+        "cancelled must be terminal"
+    );
+    assert_eq!(IngestJobStatus::Cancelled.as_str(), "cancelled");
+}
+
+#[tokio::test]
+async fn cancel_02_unknown_job_returns_404_truthful_error() {
+    let router = make_router();
+    let phantom_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000198")
+        .expect("static uuid must parse");
+
+    let (status, body) = post_cancel_job(router, phantom_id).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "unknown cancel must → 404");
+    assert_eq!(json_str(&body, "truth_state"), "not_found");
+    assert!(
+        !json_bool(&body, "accepted"),
+        "unknown cancel must not be accepted: {body}"
+    );
+    let err = json_str(&body, "error");
+    assert!(
+        err.contains("not found") && err.contains(&phantom_id.to_string()),
+        "error must identify unknown job_id, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn cancel_03_queued_job_becomes_cancelled_terminal() {
+    let (st, _) = make_router_with_state();
+    let job_id = uuid::Uuid::new_v4();
+    insert_seed_job(&st, seed_job_record(job_id, IngestJobStatus::Queued));
+
+    let router_cancel = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_cancel_job(router_cancel, job_id).await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "queued cancel must → 202");
+    assert!(json_bool(&body, "accepted"), "cancel must be accepted");
+    assert_eq!(json_str(&body, "truth_state"), "cancel_accepted");
+    assert_eq!(json_str(&body, "status"), "cancelled");
+    let err = json_str(&body, "error");
+    assert!(
+        err.contains("cancel requested by operator"),
+        "cancel reason must be truthful, got: {err}"
+    );
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (status, body) = get_job_status(router_get, &job_id.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_str(&body, "status"), "cancelled");
+}
+
+#[tokio::test]
+async fn cancel_04_already_terminal_job_returns_truthful_response_without_mutation() {
+    let (st, _) = make_router_with_state();
+    let job_id = uuid::Uuid::new_v4();
+    insert_seed_job(
+        &st,
+        seed_job_record(job_id, IngestJobStatus::DryRunCompleted),
+    );
+
+    let router_cancel = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_cancel_job(router_cancel, job_id).await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "already-terminal cancel must return a truth response"
+    );
+    assert_eq!(json_str(&body, "truth_state"), "already_terminal");
+    assert!(
+        !json_bool(&body, "accepted"),
+        "already-terminal cancel must not be accepted: {body}"
+    );
+    assert_eq!(
+        json_str(&body, "status"),
+        "dry_run_completed",
+        "terminal status must not be mutated"
+    );
+}
+
+#[tokio::test]
+async fn cancel_05_fake_provider_stops_after_cancel_between_symbols() {
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    let calls = Arc::new(AtomicUsize::new(0));
+    st_raw.set_provider_client_for_test(Arc::new(SlowCountingProvider {
+        calls: Arc::clone(&calls),
+        delay: std::time::Duration::from_millis(50),
+    }));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "real job must queue: {body}");
+    let job_id: uuid::Uuid = json_str(&body, "job_id")
+        .parse()
+        .expect("job_id must parse");
+
+    for _ in 0..50 {
+        if calls.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        calls.load(Ordering::SeqCst) > 0,
+        "fake provider must have entered first fetch before cancellation"
+    );
+
+    let router_cancel = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_cancel_job(router_cancel, job_id).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "running cancel must → 202");
+    assert_eq!(json_str(&body, "status"), "cancelled");
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    let total_calls = calls.load(Ordering::SeqCst);
+    assert!(
+        total_calls < 88,
+        "provider must not continue through all registry symbols after cancel; calls={total_calls}"
+    );
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (status, body) = get_job_status(router_get, &job_id.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_str(&body, "status"), "cancelled");
+    let err = json_str(&body, "error");
+    assert!(
+        err.contains("cancel requested by operator"),
+        "cancelled job must preserve cancel reason, got: {err}"
     );
 }
 
@@ -1990,6 +2229,48 @@ async fn db_03_refused_provider_job_persists_reason() {
         "refusal reason must be persisted, got: {err}"
     );
     assert_eq!(persisted.api_calls_made, 0);
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+// DB-04: cancel route persists cancelled status/reason when DB is configured.
+#[tokio::test]
+async fn db_04_cancel_persists_cancelled_status_and_reason() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-04").await else {
+        return;
+    };
+
+    let mut st_raw =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st_raw.db = Some(pool.clone());
+    let st = Arc::new(st_raw);
+
+    let job_id = uuid::Uuid::new_v4();
+    let record = seed_job_record(job_id, IngestJobStatus::Queued);
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &record)
+        .await
+        .expect("persist queued ingest job");
+
+    let router_cancel = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_cancel_job(router_cancel, job_id).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "DB cancel must → 202");
+    assert_eq!(json_str(&body, "truth_state"), "cancel_accepted");
+    assert_eq!(json_str(&body, "status"), "cancelled");
+
+    let persisted = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+        .await
+        .expect("load cancelled job")
+        .expect("cancelled job must be persisted");
+    assert_eq!(persisted.status.as_str(), "cancelled");
+    let err = persisted.error.as_deref().unwrap_or("");
+    assert!(
+        err.contains("cancel requested by operator"),
+        "cancel reason must be persisted, got: {err}"
+    );
+    assert!(
+        persisted.completed_at_utc.is_some(),
+        "cancelled persisted job must have completed_at_utc"
+    );
 
     cleanup_ingest_job(&pool, job_id).await;
 }

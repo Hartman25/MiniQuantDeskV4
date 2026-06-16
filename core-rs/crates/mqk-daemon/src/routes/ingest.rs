@@ -2,6 +2,7 @@
 //!
 //! Routes:
 //!   POST /api/v1/ingest/jobs          — submit a CSV or provider sync job (operator)
+//!   POST /api/v1/ingest/jobs/:job_id/cancel — cancel a queued/running job (operator)
 //!   GET  /api/v1/ingest/jobs          — list ingest jobs (DB-backed when configured)
 //!   GET  /api/v1/ingest/jobs/:job_id  — job status + artifact paths (public)
 //!
@@ -48,6 +49,8 @@ use crate::{
     },
     state::AppState,
 };
+
+const INGEST_JOB_CANCEL_REASON: &str = "cancel requested by operator";
 
 // ---------------------------------------------------------------------------
 // Timeframe validation (no mqk-md dep required for daemon validation)
@@ -149,8 +152,26 @@ where
 {
     let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
     let record = store.get_mut(&job_id)?;
+    let was_cancelled = record.status == IngestJobStatus::Cancelled;
     mutate(record);
+    if was_cancelled {
+        record.status = IngestJobStatus::Cancelled;
+        if record.completed_at_utc.is_none() {
+            record.completed_at_utc = Some(Utc::now());
+        }
+        if record.error.is_none() {
+            record.error = Some(INGEST_JOB_CANCEL_REASON.to_string());
+        }
+    }
     Some(record.clone())
+}
+
+fn ingest_job_is_cancelled(jobs: &IngestJobStore, job_id: Uuid) -> bool {
+    let store = jobs.lock().expect("ingest_jobs lock poisoned");
+    store
+        .get(&job_id)
+        .map(|r| r.status == IngestJobStatus::Cancelled)
+        .unwrap_or(false)
 }
 
 async fn persist_job_update<F>(
@@ -342,6 +363,126 @@ pub(crate) async fn ingest_job_submit(
         .into_response()
 }
 
+enum IngestCancelOutcome {
+    Accepted(IngestJobRecord),
+    AlreadyTerminal(IngestJobRecord),
+}
+
+fn cancel_record_in_memory(jobs: &IngestJobStore, job_id: Uuid) -> Option<IngestCancelOutcome> {
+    let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
+    let record = store.get_mut(&job_id)?;
+    if record.status.is_terminal() {
+        return Some(IngestCancelOutcome::AlreadyTerminal(record.clone()));
+    }
+
+    record.status = IngestJobStatus::Cancelled;
+    record.completed_at_utc = Some(Utc::now());
+    record.error = Some(INGEST_JOB_CANCEL_REASON.to_string());
+    Some(IngestCancelOutcome::Accepted(record.clone()))
+}
+
+fn cancel_route_response(
+    status_code: StatusCode,
+    truth_state: &str,
+    accepted: bool,
+    job: &IngestJobRecord,
+) -> Response {
+    (
+        status_code,
+        Json(serde_json::json!({
+            "canonical_route": "/api/v1/ingest/jobs/:job_id/cancel",
+            "truth_state": truth_state,
+            "accepted": accepted,
+            "job_id": job.job_id,
+            "status": job.status.as_str(),
+            "error": job.error.clone(),
+        })),
+    )
+        .into_response()
+}
+
+fn not_found_cancel_response(job_id: Uuid) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "canonical_route": "/api/v1/ingest/jobs/:job_id/cancel",
+            "truth_state": "not_found",
+            "accepted": false,
+            "job_id": job_id,
+            "error": format!("job_id {} not found", job_id),
+        })),
+    )
+        .into_response()
+}
+
+fn backend_unavailable_cancel_response(job_id: Uuid, error: String) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "canonical_route": "/api/v1/ingest/jobs/:job_id/cancel",
+            "truth_state": "backend_unavailable",
+            "accepted": false,
+            "job_id": job_id,
+            "error": error,
+        })),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/ingest/jobs/:job_id/cancel
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn ingest_job_cancel(
+    State(st): State<Arc<AppState>>,
+    AxumPath(job_id): AxumPath<Uuid>,
+) -> Response {
+    if let Some(outcome) = cancel_record_in_memory(&st.ingest_jobs, job_id) {
+        return match outcome {
+            IngestCancelOutcome::AlreadyTerminal(record) => {
+                cancel_route_response(StatusCode::OK, "already_terminal", false, &record)
+            }
+            IngestCancelOutcome::Accepted(record) => {
+                if let Some(pool) = &st.db {
+                    if let Err(e) = persist_ingest_job_record(pool, &record).await {
+                        return backend_unavailable_cancel_response(job_id, e);
+                    }
+                }
+                cancel_route_response(StatusCode::ACCEPTED, "cancel_accepted", true, &record)
+            }
+        };
+    }
+
+    let Some(pool) = &st.db else {
+        return not_found_cancel_response(job_id);
+    };
+
+    let mut record = match load_persisted_ingest_job(pool, job_id).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return not_found_cancel_response(job_id),
+        Err(e) => return backend_unavailable_cancel_response(job_id, e),
+    };
+
+    if record.status.is_terminal() {
+        return cancel_route_response(StatusCode::OK, "already_terminal", false, &record);
+    }
+
+    record.status = IngestJobStatus::Cancelled;
+    record.completed_at_utc = Some(Utc::now());
+    record.error = Some(INGEST_JOB_CANCEL_REASON.to_string());
+
+    if let Err(e) = persist_ingest_job_record(pool, &record).await {
+        return backend_unavailable_cancel_response(job_id, e);
+    }
+
+    {
+        let mut store = st.ingest_jobs.lock().expect("ingest_jobs lock poisoned");
+        store.insert(job_id, record.clone());
+    }
+
+    cancel_route_response(StatusCode::ACCEPTED, "cancel_accepted", true, &record)
+}
+
 // ---------------------------------------------------------------------------
 // CSV job handler
 // ---------------------------------------------------------------------------
@@ -469,12 +610,20 @@ async fn handle_csv_job(st: Arc<AppState>, req: IngestJobRequest, source: String
     let db_pool = st.db.clone();
 
     tokio::spawn(async move {
+        if ingest_job_is_cancelled(&jobs, job_id) {
+            return;
+        }
+
         // Mark running.
         persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
             r.status = IngestJobStatus::Running;
             r.started_at_utc = Some(Utc::now()); // allow: operational
         })
         .await;
+
+        if ingest_job_is_cancelled(&jobs, job_id) {
+            return;
+        }
 
         let result =
             run_csv_ingest_async(db_pool.clone(), csv_path, timeframe, source_label, out_dir).await;
@@ -990,12 +1139,20 @@ async fn handle_provider_dry_run(
     let jobs = Arc::clone(&st.ingest_jobs);
     let db_pool = st.db.clone();
     tokio::spawn(async move {
+        if ingest_job_is_cancelled(&jobs, job_id) {
+            return;
+        }
+
         // Mark running.
         persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
             r.status = IngestJobStatus::Running;
             r.started_at_utc = Some(Utc::now()); // allow: operational
         })
         .await;
+
+        if ingest_job_is_cancelled(&jobs, job_id) {
+            return;
+        }
 
         // Resolve symbols — pure filesystem read; zero network calls.
         let path = std::path::Path::new(&registry_path);
@@ -1073,12 +1230,20 @@ async fn run_real_provider_sync(
     api_credits_per_day: Option<i64>,
     ingest_id: Uuid,
 ) {
+    if ingest_job_is_cancelled(&jobs, job_id) {
+        return;
+    }
+
     // Mark running.
     persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
         r.status = IngestJobStatus::Running;
         r.started_at_utc = Some(Utc::now()); // allow: operational
     })
     .await;
+
+    if ingest_job_is_cancelled(&jobs, job_id) {
+        return;
+    }
 
     // Resolve provider client (injected or built from env).
     let provider: std::sync::Arc<dyn mqk_md::HistoricalProvider> = if let Some(p) = provider_client
@@ -1150,6 +1315,10 @@ async fn run_real_provider_sync(
     let mut guardrail_msg: Option<String> = None;
 
     for sym in &symbols {
+        if ingest_job_is_cancelled(&jobs, job_id) {
+            return;
+        }
+
         // Check per-day guardrail before making the next call.
         if let Some(max_day) = api_credits_per_day {
             if api_calls_made >= max_day {
@@ -1214,6 +1383,14 @@ async fn run_real_provider_sync(
             r.symbols_failed = Some(symbols_failed);
         })
         .await;
+
+        if ingest_job_is_cancelled(&jobs, job_id) {
+            return;
+        }
+    }
+
+    if ingest_job_is_cancelled(&jobs, job_id) {
+        return;
     }
 
     // Sort bars deterministically before DB insert.
