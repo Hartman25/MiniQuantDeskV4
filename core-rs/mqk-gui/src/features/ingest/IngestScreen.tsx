@@ -10,6 +10,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Panel } from "../../components/common/Panel";
 import { formatDateTime } from "../../lib/format";
 import {
+  buildActiveProviderJob,
+  buildProviderJobRequest,
   coverageTruthLabel,
   fetchIntradayRefreshStatus,
   fetchMdBarsCoverage,
@@ -18,6 +20,7 @@ import {
   getIngestJob,
   isCoverageActive,
   isIntradayRefreshActive,
+  isProviderSyncAllowed,
   isTrackedEquitiesActive,
   isTerminalIngestStatus,
   intradayRefreshTruthLabel,
@@ -27,7 +30,7 @@ import {
 } from "./api.ts";
 import { buildRepoRelativePath, buildMd1DSymbolPath, MD_BACKUP_1D_SEGMENTS, MD_INGEST_SEGMENTS } from "../backtests/pathHelpers.ts";
 import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
-import type { ActiveIngestJob, IngestJobStatusKind, IntradayRefreshStatusResponse, MdBarsCoverageResponse, TrackedEquitiesResponse } from "./types.ts";
+import type { ActiveIngestJob, ActiveProviderJob, IngestJobStatusKind, IntradayRefreshStatusResponse, MdBarsCoverageResponse, TrackedEquitiesResponse } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -38,6 +41,8 @@ function IngestJobStatusBadge({ status }: { status: IngestJobStatusKind }) {
     status === "queued" ? "Queued" :
     status === "running" ? "Running…" :
     status === "completed" ? "Completed" :
+    status === "dry_run_completed" ? "Dry-run completed" :
+    status === "partial" ? "Partial" :
     status === "failed" ? "Failed" : "Unknown";
 
   return (
@@ -148,6 +153,17 @@ export function IngestScreen() {
   const [intradayRefreshLoading, setIntradayRefreshLoading] = useState(false);
   const [intradayRefreshError, setIntradayRefreshError] = useState<string | null>(null);
 
+  // DATA-INGEST-GUI-PROVIDER-RUNNER-01: Provider sync state
+  const [providerStart, setProviderStart] = useState("");
+  const [providerEnd, setProviderEnd] = useState("");
+  const [providerAllowApiCalls, setProviderAllowApiCalls] = useState(false);
+  const [providerSyncConfirmation, setProviderSyncConfirmation] = useState("");
+  const [providerApiCreditsPerMin, setProviderApiCreditsPerMin] = useState("");
+  const [providerApiCreditsPerDay, setProviderApiCreditsPerDay] = useState("");
+  const [providerSubmitting, setProviderSubmitting] = useState(false);
+  const [providerSubmitError, setProviderSubmitError] = useState<string | null>(null);
+  const [activeProviderJob, setActiveProviderJob] = useState<ActiveProviderJob | null>(null);
+
   const loadCoverage = useCallback(async () => {
     setCoverageLoading(true);
     setCoverageError(null);
@@ -204,6 +220,7 @@ export function IngestScreen() {
   }, []);
 
   const pollingRef = useRef<{ cancelled: boolean }>({ cancelled: false });
+  const providerPollingRef = useRef<{ cancelled: boolean }>({ cancelled: false });
 
   // Polling: 2-second cadence, stops on terminal status or unmount.
   useEffect(() => {
@@ -308,7 +325,158 @@ export function IngestScreen() {
     });
   }, [csvPath, timeframe, sourceLabel, outDir]);
 
+  // Provider job polling effect — 2-second cadence, stops on terminal status or unmount.
+  useEffect(() => {
+    if (!activeProviderJob) return;
+    if (isTerminalIngestStatus(activeProviderJob.status)) return;
+
+    const token = { cancelled: false };
+    providerPollingRef.current = token;
+
+    async function poll() {
+      while (!token.cancelled) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+        if (token.cancelled) break;
+
+        const result = await getIngestJob(activeProviderJob!.jobId);
+        if (token.cancelled) break;
+
+        if (!result.ok) {
+          setActiveProviderJob((prev) =>
+            prev?.jobId === activeProviderJob!.jobId
+              ? { ...prev, status: "failed" as IngestJobStatusKind, error: result.error ?? "Poll failed." }
+              : prev,
+          );
+          break;
+        }
+
+        const updated = buildActiveProviderJob(result.data!);
+
+        setActiveProviderJob((prev) =>
+          prev?.jobId === activeProviderJob!.jobId ? updated : prev,
+        );
+
+        if (isTerminalIngestStatus(updated.status)) {
+          // Refresh coverage after a completed or partial real sync.
+          if (!updated.dryRun && (updated.status === "completed" || updated.status === "partial")) {
+            void loadCoverage();
+          }
+          break;
+        }
+      }
+    }
+
+    void poll();
+
+    return () => {
+      token.cancelled = true;
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProviderJob?.jobId]);
+
+  const handleDryRunSubmit = useCallback(async () => {
+    setProviderSubmitting(true);
+    setProviderSubmitError(null);
+    setActiveProviderJob(null);
+
+    const req = buildProviderJobRequest({
+      dryRun: true,
+      allowProviderApiCalls: false,
+      start: providerStart.trim() || null,
+      end: providerEnd.trim() || null,
+    });
+
+    const result = await submitIngestJob(req);
+    setProviderSubmitting(false);
+
+    if (!result.ok) {
+      setProviderSubmitError(result.error ?? "Submission failed.");
+      return;
+    }
+
+    const data = result.data!;
+    if (!data.accepted) {
+      setProviderSubmitError(data.error ?? "Job refused by daemon.");
+      return;
+    }
+
+    setActiveProviderJob({
+      jobId: data.job_id,
+      status: normalizeIngestJobStatus(data.status),
+      dryRun: true,
+      allowProviderApiCalls: false,
+      createdAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null,
+      error: data.error ?? null,
+      apiCallsMade: data.api_calls_made ?? 0,
+      symbolsCount: data.symbols_count ?? null,
+      symbolsCompleted: null,
+      symbolsFailed: null,
+      rowsInserted: null,
+      rowsRejected: null,
+      plannedFirstSymbol: null,
+      plannedLastSymbol: null,
+    });
+  }, [providerStart, providerEnd]);
+
+  const handleRealSyncSubmit = useCallback(async () => {
+    if (!isProviderSyncAllowed(true, providerSyncConfirmation)) {
+      setProviderSubmitError("Real sync requires typing 'SYNC' in the confirmation field.");
+      return;
+    }
+
+    setProviderSubmitting(true);
+    setProviderSubmitError(null);
+    setActiveProviderJob(null);
+
+    const req = buildProviderJobRequest({
+      dryRun: false,
+      allowProviderApiCalls: true,
+      start: providerStart.trim() || null,
+      end: providerEnd.trim() || null,
+      apiCreditsPerMinute: providerApiCreditsPerMin ? parseInt(providerApiCreditsPerMin, 10) : null,
+      apiCreditsPerDay: providerApiCreditsPerDay ? parseInt(providerApiCreditsPerDay, 10) : null,
+    });
+
+    const result = await submitIngestJob(req);
+    setProviderSubmitting(false);
+
+    if (!result.ok) {
+      setProviderSubmitError(result.error ?? "Submission failed.");
+      return;
+    }
+
+    const data = result.data!;
+    if (!data.accepted) {
+      setProviderSubmitError(data.error ?? "Job refused by daemon.");
+      return;
+    }
+
+    setActiveProviderJob({
+      jobId: data.job_id,
+      status: normalizeIngestJobStatus(data.status),
+      dryRun: false,
+      allowProviderApiCalls: true,
+      createdAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null,
+      error: data.error ?? null,
+      apiCallsMade: data.api_calls_made ?? 0,
+      symbolsCount: data.symbols_count ?? null,
+      symbolsCompleted: null,
+      symbolsFailed: null,
+      rowsInserted: null,
+      rowsRejected: null,
+      plannedFirstSymbol: null,
+      plannedLastSymbol: null,
+    });
+
+    setProviderSyncConfirmation("");
+  }, [providerSyncConfirmation, providerStart, providerEnd, providerApiCreditsPerMin, providerApiCreditsPerDay]);
+
   const jobIsActive = activeJob !== null && !isTerminalIngestStatus(activeJob.status);
+  const providerJobIsActive = activeProviderJob !== null && !isTerminalIngestStatus(activeProviderJob.status);
 
   const repoRoot = getDesktopRepoRoot();
   const md1DDir = buildRepoRelativePath(repoRoot, ...MD_BACKUP_1D_SEGMENTS);
@@ -647,14 +815,8 @@ export function IngestScreen() {
               </div>
             )}
 
-            <div
-              className="unavailable-notice"
-              style={{ marginTop: 8, borderColor: "var(--accent, #c8a84b)", color: "var(--text-muted, #888)" }}
-            >
-              Provider sync job not enabled yet. No API credits consumed.
-              To sync from TwelveData, use the CLI (<code>mqk-cli md sync-provider</code>) or{" "}
-              <code>backfill_daily_bars.ps1</code>.
-              Follow-up: DATA-INGEST-DAEMON-PROVIDER-JOBS-01 / DATA-INGEST-GUI-PROVIDER-RUNNER-01.
+            <div className="bt-field-hint" style={{ marginTop: 8, fontSize: "0.82rem", color: "var(--text-muted, #888)" }}>
+              Provider sync: see the Provider sync panel below.
             </div>
           </>
         )}
@@ -665,6 +827,300 @@ export function IngestScreen() {
           </div>
         )}
       </Panel>
+
+      {/* DATA-INGEST-GUI-PROVIDER-RUNNER-01: Provider sync runner */}
+      <Panel
+        title="Provider sync — TwelveData registry sync"
+        subtitle="Submits a daemon ingest job to pull 1D bars from TwelveData for all registry symbols. No broker orders. No execution routes."
+      >
+        {/* Static config display */}
+        <div className="bt-job-meta" style={{ marginBottom: 8 }}>
+          <span className="eyebrow">source</span>{" "}
+          <strong>twelvedata</strong>
+          {" "}<span className="eyebrow">mode</span>{" "}
+          <strong>sync_provider</strong>
+          {" "}<span className="eyebrow">symbols</span>{" "}
+          <strong>registry</strong>
+          {" "}<span className="eyebrow">asset_class</span>{" "}
+          <strong>equity</strong>
+          {" "}<span className="eyebrow">timeframe</span>{" "}
+          <strong>1D</strong>
+        </div>
+        <div className="bt-field-hint" style={{ marginBottom: 12, fontSize: "0.82rem" }}>
+          <span className="eyebrow">registry</span>{" "}
+          <code>config/instruments/equities.json</code>
+        </div>
+
+        {/* Optional date range */}
+        <div className="bt-job-form-grid">
+          <div className="bt-job-field">
+            <label htmlFor="provider-start">Start date (optional)</label>
+            <input
+              id="provider-start"
+              type="text"
+              value={providerStart}
+              onChange={(e) => setProviderStart(e.target.value)}
+              placeholder="YYYY-MM-DD"
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </div>
+          <div className="bt-job-field">
+            <label htmlFor="provider-end">End date (optional)</label>
+            <input
+              id="provider-end"
+              type="text"
+              value={providerEnd}
+              onChange={(e) => setProviderEnd(e.target.value)}
+              placeholder="YYYY-MM-DD"
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </div>
+        </div>
+
+        {/* Dry-run section */}
+        <div style={{ marginTop: 12, borderTop: "1px solid var(--border, rgba(255,255,255,0.08))", paddingTop: 12 }}>
+          <div className="bt-field-hint" style={{ marginBottom: 8, fontSize: "0.82rem" }}>
+            <strong>Dry-run (safe default):</strong> Resolves symbols from registry and validates
+            config. Zero provider API calls. Zero DB writes.
+          </div>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void handleDryRunSubmit()}
+            disabled={providerSubmitting || providerJobIsActive}
+          >
+            {providerSubmitting ? "Submitting…" : providerJobIsActive ? "Job running…" : "Run dry-run"}
+          </button>
+        </div>
+
+        {/* Real sync opt-in section */}
+        <div style={{ marginTop: 16, borderTop: "1px solid var(--border, rgba(255,255,255,0.08))", paddingTop: 12 }}>
+          <div className="bt-field-hint" style={{ marginBottom: 8, fontSize: "0.82rem", color: "var(--text-muted, #888)" }}>
+            <strong style={{ color: "var(--text)" }}>Real sync (explicit opt-in required):</strong>{" "}
+            Calls TwelveData API and writes bars to md_bars.
+            Provider API credits are consumed. Partial or failed jobs must be reviewed before re-run.
+          </div>
+
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", fontSize: "0.85rem", marginBottom: 10 }}>
+            <input
+              type="checkbox"
+              checked={providerAllowApiCalls}
+              onChange={(e) => {
+                setProviderAllowApiCalls(e.target.checked);
+                if (!e.target.checked) setProviderSyncConfirmation("");
+              }}
+              style={{ marginTop: 2 }}
+            />
+            I understand real sync consumes provider API credits and writes to the database
+          </label>
+
+          {providerAllowApiCalls && (
+            <>
+              <div className="unavailable-notice" style={{ marginBottom: 10, borderColor: "var(--accent, #c8a84b)" }}>
+                <strong>Warning:</strong> Real sync will call TwelveData and consume API credits.
+                Symbols are loaded from <code>config/instruments/equities.json</code>.
+                Failed or partial results are not auto-retried — review job status after completion.
+              </div>
+
+              <div className="bt-job-form-grid" style={{ marginBottom: 10 }}>
+                <div className="bt-job-field">
+                  <label htmlFor="provider-credits-min">API credits / minute (optional guardrail)</label>
+                  <input
+                    id="provider-credits-min"
+                    type="number"
+                    value={providerApiCreditsPerMin}
+                    onChange={(e) => setProviderApiCreditsPerMin(e.target.value)}
+                    placeholder="e.g. 8"
+                    min="1"
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </div>
+                <div className="bt-job-field">
+                  <label htmlFor="provider-credits-day">API credits / day (optional guardrail)</label>
+                  <input
+                    id="provider-credits-day"
+                    type="number"
+                    value={providerApiCreditsPerDay}
+                    onChange={(e) => setProviderApiCreditsPerDay(e.target.value)}
+                    placeholder="e.g. 800"
+                    min="1"
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                <label htmlFor="provider-sync-confirm" style={{ fontSize: "0.85rem", whiteSpace: "nowrap" }}>
+                  Type SYNC to confirm:
+                </label>
+                <input
+                  id="provider-sync-confirm"
+                  type="text"
+                  value={providerSyncConfirmation}
+                  onChange={(e) => setProviderSyncConfirmation(e.target.value)}
+                  placeholder="SYNC"
+                  spellCheck={false}
+                  autoComplete="off"
+                  style={{ width: 120 }}
+                />
+              </div>
+
+              <button
+                type="button"
+                className="action-button"
+                onClick={() => void handleRealSyncSubmit()}
+                disabled={
+                  !isProviderSyncAllowed(true, providerSyncConfirmation) ||
+                  providerSubmitting ||
+                  providerJobIsActive
+                }
+              >
+                Run real sync (consumes API credits)
+              </button>
+            </>
+          )}
+        </div>
+
+        {providerSubmitError && (
+          <div className="unavailable-notice unavailable-critical" style={{ marginTop: 10 }}>
+            <strong>Submit failed:</strong> {providerSubmitError}
+          </div>
+        )}
+      </Panel>
+
+      {/* Provider sync job status */}
+      {activeProviderJob && (
+        <Panel
+          title="Provider sync job status"
+          subtitle="Daemon-managed TwelveData registry sync. Writes to md_bars only. No broker orders."
+        >
+          <div className="bt-job-status-row">
+            <IngestJobStatusBadge status={activeProviderJob.status} />
+            <span className="bt-job-meta" title={activeProviderJob.jobId}>
+              job {activeProviderJob.jobId.slice(0, 8)}…
+            </span>
+            <span className="bt-job-meta">
+              {activeProviderJob.dryRun ? "dry-run" : "real sync"}
+            </span>
+            {activeProviderJob.allowProviderApiCalls && (
+              <span className="bt-job-meta" style={{ color: "var(--accent)" }}>
+                provider API calls enabled
+              </span>
+            )}
+            {activeProviderJob.completedAt && (
+              <span className="bt-job-meta">
+                completed {formatDateTime(activeProviderJob.completedAt)}
+              </span>
+            )}
+            {!activeProviderJob.completedAt && activeProviderJob.startedAt && (
+              <span className="bt-job-meta">
+                started {formatDateTime(activeProviderJob.startedAt)}
+              </span>
+            )}
+          </div>
+
+          {(activeProviderJob.status === "queued" || activeProviderJob.status === "running") && (
+            <div className="bt-job-meta" style={{ marginTop: 6, color: "var(--accent)" }}>
+              Polling for status every 2 seconds…
+            </div>
+          )}
+
+          {/* Progress metrics */}
+          <div className="timeline-meta-grid" style={{ marginTop: 8 }}>
+            <div>
+              <span>API calls made</span>
+              <strong>{activeProviderJob.apiCallsMade}</strong>
+            </div>
+            <div>
+              <span>Symbols planned</span>
+              <strong>{activeProviderJob.symbolsCount ?? "—"}</strong>
+            </div>
+            {activeProviderJob.symbolsCompleted !== null && (
+              <div>
+                <span>Completed</span>
+                <strong>{activeProviderJob.symbolsCompleted}</strong>
+              </div>
+            )}
+            {activeProviderJob.symbolsFailed !== null && (
+              <div>
+                <span>Failed</span>
+                <strong style={{ color: activeProviderJob.symbolsFailed > 0 ? "var(--red, #f44336)" : undefined }}>
+                  {activeProviderJob.symbolsFailed}
+                </strong>
+              </div>
+            )}
+            {activeProviderJob.rowsInserted !== null && (
+              <div>
+                <span>Rows inserted</span>
+                <strong>{activeProviderJob.rowsInserted}</strong>
+              </div>
+            )}
+            {activeProviderJob.rowsRejected !== null && (
+              <div>
+                <span>Rows rejected</span>
+                <strong>{activeProviderJob.rowsRejected}</strong>
+              </div>
+            )}
+          </div>
+
+          {(activeProviderJob.plannedFirstSymbol || activeProviderJob.plannedLastSymbol) && (
+            <div className="bt-job-meta" style={{ marginTop: 6, fontSize: "0.82rem" }}>
+              {activeProviderJob.plannedFirstSymbol && (
+                <>
+                  <span className="eyebrow">first symbol</span>{" "}
+                  <strong>{activeProviderJob.plannedFirstSymbol}</strong>
+                  {" "}
+                </>
+              )}
+              {activeProviderJob.plannedLastSymbol && (
+                <>
+                  <span className="eyebrow">last symbol</span>{" "}
+                  <strong>{activeProviderJob.plannedLastSymbol}</strong>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Terminal state indicators */}
+          {activeProviderJob.status === "dry_run_completed" && (
+            <div className="unavailable-notice" style={{ marginTop: 8, borderColor: "var(--accent, #c8a84b)" }}>
+              <strong>Dry-run completed.</strong> Zero provider API calls consumed. Zero DB writes.
+              Registry symbols resolved and validated. Check symbols_count before running real sync.
+            </div>
+          )}
+
+          {activeProviderJob.status === "partial" && (
+            <div className="unavailable-notice" style={{ marginTop: 8, borderColor: "rgba(230,126,34,0.5)" }}>
+              <strong>Partial completion — not a full success.</strong>{" "}
+              Some symbols succeeded; others failed. Review failed symbols and consider re-running.
+            </div>
+          )}
+
+          {activeProviderJob.status === "completed" && (
+            <div className="unavailable-notice" style={{ marginTop: 8, borderColor: "rgba(76,175,80,0.4)" }}>
+              <strong>Sync completed.</strong> All symbols processed successfully.
+            </div>
+          )}
+
+          {activeProviderJob.status === "failed" && (
+            <div className="unavailable-notice unavailable-critical" style={{ marginTop: 8 }}>
+              <strong>Job failed:</strong>{" "}
+              {activeProviderJob.error ?? "No error message returned. Check daemon logs."}
+            </div>
+          )}
+
+          {activeProviderJob.status === "unknown" && (
+            <div className="unavailable-notice" style={{ marginTop: 8 }}>
+              <strong>Unrecognized status.</strong>{" "}
+              Daemon returned an unknown status string — check daemon version.
+            </div>
+          )}
+        </Panel>
+      )}
 
       {/* INTRADAY-MD-REFRESHER-GUI-01: Intraday refresh status */}
       <Panel

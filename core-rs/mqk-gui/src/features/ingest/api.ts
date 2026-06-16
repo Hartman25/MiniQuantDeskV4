@@ -9,6 +9,7 @@
 import { fetchJsonCandidate, postJson } from "../system/http";
 import type {
   ActiveIngestJob,
+  ActiveProviderJob,
   IngestJobAcceptedResponse,
   IngestJobRequest,
   IngestJobStatusKind,
@@ -28,6 +29,8 @@ export function normalizeIngestJobStatus(raw: string): IngestJobStatusKind {
     case "queued":
     case "running":
     case "completed":
+    case "dry_run_completed":
+    case "partial":
     case "failed":
       return raw;
     default:
@@ -36,7 +39,12 @@ export function normalizeIngestJobStatus(raw: string): IngestJobStatusKind {
 }
 
 export function isTerminalIngestStatus(status: IngestJobStatusKind): boolean {
-  return status === "completed" || status === "failed";
+  return (
+    status === "completed" ||
+    status === "dry_run_completed" ||
+    status === "partial" ||
+    status === "failed"
+  );
 }
 
 export function extractIngestRowCounts(
@@ -65,6 +73,80 @@ export function buildActiveIngestJob(response: IngestJobStatusResponse): ActiveI
     rowsRejected: response.rows_rejected ?? null,
     qualityReportPath: response.quality_report_path ?? null,
     error: response.error ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// DATA-INGEST-GUI-PROVIDER-RUNNER-01: Provider sync pure helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Guard: is the operator allowed to submit with these settings?
+ *
+ * - Dry-run (allow_provider_api_calls=false): always allowed, no confirmation needed.
+ * - Real sync (allow_provider_api_calls=true): requires the operator to type "SYNC".
+ */
+export function isProviderSyncAllowed(
+  allowProviderApiCalls: boolean,
+  syncConfirmation: string,
+): boolean {
+  if (!allowProviderApiCalls) return true;
+  return syncConfirmation.trim() === "SYNC";
+}
+
+/**
+ * Build a canonical provider job request with safe defaults.
+ * Caller controls dryRun and allowProviderApiCalls; all other fields use
+ * the project-standard values (source=twelvedata, mode=sync_provider, registry).
+ */
+export function buildProviderJobRequest(opts: {
+  dryRun: boolean;
+  allowProviderApiCalls: boolean;
+  start?: string | null;
+  end?: string | null;
+  apiCreditsPerMinute?: number | null;
+  apiCreditsPerDay?: number | null;
+}): IngestJobRequest {
+  return {
+    source: "twelvedata",
+    mode: "sync_provider",
+    timeframe: "1D",
+    symbols_source: "registry",
+    registry_path: "config/instruments/equities.json",
+    asset_class: "equity",
+    dry_run: opts.dryRun,
+    allow_provider_api_calls: opts.allowProviderApiCalls,
+    start: opts.start ?? null,
+    end: opts.end ?? null,
+    api_credits_per_minute: opts.apiCreditsPerMinute ?? null,
+    api_credits_per_day: opts.apiCreditsPerDay ?? null,
+  };
+}
+
+/**
+ * Map a polled IngestJobStatusResponse to an ActiveProviderJob.
+ * Used on every poll tick to update the in-flight job state.
+ */
+export function buildActiveProviderJob(
+  response: IngestJobStatusResponse,
+): ActiveProviderJob {
+  return {
+    jobId: response.job_id,
+    status: normalizeIngestJobStatus(response.status),
+    dryRun: response.dry_run,
+    allowProviderApiCalls: response.provider_api_calls_allowed,
+    createdAt: response.created_at_utc,
+    startedAt: response.started_at_utc ?? null,
+    completedAt: response.completed_at_utc ?? null,
+    error: response.error ?? null,
+    apiCallsMade: response.api_calls_made,
+    symbolsCount: response.symbols_count ?? null,
+    symbolsCompleted: response.symbols_completed ?? null,
+    symbolsFailed: response.symbols_failed ?? null,
+    rowsInserted: response.rows_inserted ?? null,
+    rowsRejected: response.rows_rejected ?? null,
+    plannedFirstSymbol: response.planned_first_symbol ?? null,
+    plannedLastSymbol: response.planned_last_symbol ?? null,
   };
 }
 

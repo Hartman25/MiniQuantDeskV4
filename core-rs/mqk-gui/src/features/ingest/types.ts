@@ -11,9 +11,15 @@ export interface IngestJobRequest {
   // Provider job fields (DATA-INGEST-GUI-PROVIDER-RUNNER-01):
   mode?: string | null;
   symbols_source?: string | null;
+  registry_path?: string | null;
+  provider_registry_path?: string | null;
   asset_class?: string;
+  start?: string | null;
+  end?: string | null;
   dry_run?: boolean;
   allow_provider_api_calls?: boolean;
+  api_credits_per_minute?: number | null;
+  api_credits_per_day?: number | null;
 }
 
 export interface IngestJobAcceptedResponse {
@@ -78,9 +84,20 @@ export interface IngestJobStatusResponse {
   asset_class: string;
   provider_enabled: boolean | null;
   provider_verification_status: string | null;
+  /** Number of symbols for which provider fetch succeeded (null for dry-run). */
+  symbols_completed: number | null;
+  /** Number of symbols for which provider fetch failed (null for dry-run). */
+  symbols_failed: number | null;
 }
 
-export type IngestJobStatusKind = "queued" | "running" | "completed" | "dry_run_completed" | "failed" | "unknown";
+export type IngestJobStatusKind =
+  | "queued"
+  | "running"
+  | "completed"
+  | "dry_run_completed"
+  | "partial"
+  | "failed"
+  | "unknown";
 
 // ---------------------------------------------------------------------------
 // DATA-INGEST-GUI-RESULTS-01: md_bars coverage types
@@ -147,6 +164,26 @@ export interface ActiveIngestJob {
   rowsRejected: number | null;
   qualityReportPath: string | null;
   error: string | null;
+}
+
+/** In-flight or terminal provider sync job tracked by the GUI. */
+export interface ActiveProviderJob {
+  jobId: string;
+  status: IngestJobStatusKind;
+  dryRun: boolean;
+  allowProviderApiCalls: boolean;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  error: string | null;
+  apiCallsMade: number;
+  symbolsCount: number | null;
+  symbolsCompleted: number | null;
+  symbolsFailed: number | null;
+  rowsInserted: number | null;
+  rowsRejected: number | null;
+  plannedFirstSymbol: string | null;
+  plannedLastSymbol: string | null;
 }
 
 // INTRADAY-MD-REFRESHER-GUI-01: Intraday refresh status types

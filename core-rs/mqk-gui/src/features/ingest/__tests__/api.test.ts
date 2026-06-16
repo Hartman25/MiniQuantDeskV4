@@ -5,6 +5,9 @@ import {
   isTerminalIngestStatus,
   extractIngestRowCounts,
   buildActiveIngestJob,
+  isProviderSyncAllowed,
+  buildProviderJobRequest,
+  buildActiveProviderJob,
   formatEndTs,
   coverageTruthLabel,
   isCoverageActive,
@@ -610,4 +613,212 @@ test("TrackedEquitiesResponse does not contain provider sync fields", () => {
   assert.ok(!("provider_job" in resp));
   assert.ok(!("dry_run" in resp));
   assert.ok(!("api_credits" in resp));
+});
+
+// ---------------------------------------------------------------------------
+// DATA-INGEST-GUI-PROVIDER-RUNNER-01: provider-specific status helpers
+// ---------------------------------------------------------------------------
+
+test("normalizeIngestJobStatus returns dry_run_completed for 'dry_run_completed'", () => {
+  assert.equal(normalizeIngestJobStatus("dry_run_completed"), "dry_run_completed");
+});
+
+test("normalizeIngestJobStatus returns partial for 'partial'", () => {
+  assert.equal(normalizeIngestJobStatus("partial"), "partial");
+});
+
+test("isTerminalIngestStatus returns true for dry_run_completed", () => {
+  assert.ok(isTerminalIngestStatus("dry_run_completed"));
+});
+
+test("isTerminalIngestStatus returns true for partial", () => {
+  assert.ok(isTerminalIngestStatus("partial"));
+});
+
+// ---------------------------------------------------------------------------
+// isProviderSyncAllowed
+// ---------------------------------------------------------------------------
+
+test("isProviderSyncAllowed: dry-run (allowProviderApiCalls=false) is always allowed", () => {
+  assert.ok(isProviderSyncAllowed(false, ""));
+  assert.ok(isProviderSyncAllowed(false, "anything"));
+  assert.ok(isProviderSyncAllowed(false, "SYNC"));
+});
+
+test("isProviderSyncAllowed: real sync (allowProviderApiCalls=true) requires SYNC confirmation", () => {
+  assert.ok(!isProviderSyncAllowed(true, ""));
+  assert.ok(!isProviderSyncAllowed(true, "sync"));
+  assert.ok(!isProviderSyncAllowed(true, "Sync"));
+  assert.ok(isProviderSyncAllowed(true, "SYNC"));
+  // trim() is applied so leading/trailing whitespace is accepted
+  assert.ok(isProviderSyncAllowed(true, " SYNC "));
+  assert.ok(isProviderSyncAllowed(true, "SYNC "));
+});
+
+// ---------------------------------------------------------------------------
+// buildProviderJobRequest
+// ---------------------------------------------------------------------------
+
+test("buildProviderJobRequest dry-run default has correct safe payload", () => {
+  const req = buildProviderJobRequest({ dryRun: true, allowProviderApiCalls: false });
+  assert.equal(req.source, "twelvedata");
+  assert.equal(req.mode, "sync_provider");
+  assert.equal(req.timeframe, "1D");
+  assert.equal(req.symbols_source, "registry");
+  assert.equal(req.registry_path, "config/instruments/equities.json");
+  assert.equal(req.asset_class, "equity");
+  assert.equal(req.dry_run, true);
+  assert.equal(req.allow_provider_api_calls, false);
+  assert.equal(req.start, null);
+  assert.equal(req.end, null);
+  assert.equal(req.api_credits_per_minute, null);
+  assert.equal(req.api_credits_per_day, null);
+});
+
+test("buildProviderJobRequest real sync payload has dry_run=false and allow_provider_api_calls=true", () => {
+  const req = buildProviderJobRequest({ dryRun: false, allowProviderApiCalls: true });
+  assert.equal(req.dry_run, false);
+  assert.equal(req.allow_provider_api_calls, true);
+  assert.equal(req.source, "twelvedata");
+});
+
+test("buildProviderJobRequest passes optional date range and credit limits", () => {
+  const req = buildProviderJobRequest({
+    dryRun: true,
+    allowProviderApiCalls: false,
+    start: "2025-01-01",
+    end: "2025-12-31",
+    apiCreditsPerMinute: 8,
+    apiCreditsPerDay: 800,
+  });
+  assert.equal(req.start, "2025-01-01");
+  assert.equal(req.end, "2025-12-31");
+  assert.equal(req.api_credits_per_minute, 8);
+  assert.equal(req.api_credits_per_day, 800);
+});
+
+test("buildProviderJobRequest omits optional fields when not provided", () => {
+  const req = buildProviderJobRequest({ dryRun: true, allowProviderApiCalls: false });
+  assert.equal(req.api_credits_per_minute, null);
+  assert.equal(req.api_credits_per_day, null);
+});
+
+// ---------------------------------------------------------------------------
+// buildActiveProviderJob
+// ---------------------------------------------------------------------------
+
+function makeProviderStatusResponse(
+  status: string,
+  overrides: Partial<IngestJobStatusResponse> = {},
+): IngestJobStatusResponse {
+  return {
+    truth_state: "active",
+    job_id: "prov-001",
+    status,
+    source: "twelvedata",
+    mode: "sync_provider",
+    timeframe: "1D",
+    csv_path: null,
+    created_at_utc: "2026-06-15T10:00:00Z",
+    started_at_utc: null,
+    completed_at_utc: null,
+    rows_read: null,
+    rows_inserted: null,
+    rows_rejected: null,
+    quality_report_path: null,
+    error: null,
+    dry_run: true,
+    provider_api_calls_allowed: false,
+    api_calls_made: 0,
+    symbols_source: "registry",
+    registry_path_used: "config/instruments/equities.json",
+    symbols_count: 88,
+    planned_first_symbol: "AAPL",
+    planned_last_symbol: "XOM",
+    asset_class: "equity",
+    provider_enabled: true,
+    provider_verification_status: "verified",
+    symbols_completed: null,
+    symbols_failed: null,
+    ...overrides,
+  };
+}
+
+test("buildActiveProviderJob maps dry_run_completed job correctly", () => {
+  const resp = makeProviderStatusResponse("dry_run_completed");
+  const job = buildActiveProviderJob(resp);
+  assert.equal(job.jobId, "prov-001");
+  assert.equal(job.status, "dry_run_completed");
+  assert.equal(job.dryRun, true);
+  assert.equal(job.allowProviderApiCalls, false);
+  assert.equal(job.symbolsCount, 88);
+  assert.equal(job.plannedFirstSymbol, "AAPL");
+  assert.equal(job.plannedLastSymbol, "XOM");
+  assert.equal(job.apiCallsMade, 0);
+  assert.equal(job.symbolsCompleted, null);
+  assert.equal(job.symbolsFailed, null);
+});
+
+test("buildActiveProviderJob maps partial job with symbols_completed and symbols_failed", () => {
+  const resp = makeProviderStatusResponse("partial", {
+    dry_run: false,
+    provider_api_calls_allowed: true,
+    api_calls_made: 70,
+    symbols_completed: 62,
+    symbols_failed: 8,
+    rows_inserted: 124600,
+    rows_rejected: 0,
+  });
+  const job = buildActiveProviderJob(resp);
+  assert.equal(job.status, "partial");
+  assert.equal(job.dryRun, false);
+  assert.equal(job.allowProviderApiCalls, true);
+  assert.equal(job.apiCallsMade, 70);
+  assert.equal(job.symbolsCompleted, 62);
+  assert.equal(job.symbolsFailed, 8);
+  assert.equal(job.rowsInserted, 124600);
+});
+
+test("buildActiveProviderJob maps completed job with all symbol counts", () => {
+  const resp = makeProviderStatusResponse("completed", {
+    dry_run: false,
+    provider_api_calls_allowed: true,
+    api_calls_made: 88,
+    symbols_completed: 88,
+    symbols_failed: 0,
+    rows_inserted: 176000,
+    rows_rejected: 0,
+    completed_at_utc: "2026-06-15T10:45:00Z",
+  });
+  const job = buildActiveProviderJob(resp);
+  assert.equal(job.status, "completed");
+  assert.equal(job.symbolsCompleted, 88);
+  assert.equal(job.symbolsFailed, 0);
+  assert.equal(job.rowsInserted, 176000);
+  assert.equal(job.completedAt, "2026-06-15T10:45:00Z");
+});
+
+test("buildActiveProviderJob maps failed job with error", () => {
+  const resp = makeProviderStatusResponse("failed", {
+    error: "registry_unavailable: config/instruments/equities.json not found",
+  });
+  const job = buildActiveProviderJob(resp);
+  assert.equal(job.status, "failed");
+  assert.equal(job.error, "registry_unavailable: config/instruments/equities.json not found");
+});
+
+test("buildActiveProviderJob maps unknown daemon status to unknown", () => {
+  const resp = makeProviderStatusResponse("some_future_state");
+  const job = buildActiveProviderJob(resp);
+  assert.equal(job.status, "unknown");
+});
+
+test("IngestJobStatusResponse with symbols_completed and symbols_failed fields is valid", () => {
+  const resp = makeProviderStatusResponse("partial", {
+    symbols_completed: 50,
+    symbols_failed: 10,
+  });
+  assert.equal(resp.symbols_completed, 50);
+  assert.equal(resp.symbols_failed, 10);
+  assert.ok(resp.truth_state === "active");
 });
