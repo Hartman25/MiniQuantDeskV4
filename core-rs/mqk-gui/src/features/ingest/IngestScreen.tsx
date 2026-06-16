@@ -11,20 +11,23 @@ import { Panel } from "../../components/common/Panel";
 import { formatDateTime } from "../../lib/format";
 import {
   coverageTruthLabel,
+  fetchIntradayRefreshStatus,
   fetchMdBarsCoverage,
   fetchTrackedEquities,
   formatEndTs,
   getIngestJob,
   isCoverageActive,
+  isIntradayRefreshActive,
   isTrackedEquitiesActive,
   isTerminalIngestStatus,
+  intradayRefreshTruthLabel,
   normalizeIngestJobStatus,
   submitIngestJob,
   trackedEquitiesTruthLabel,
 } from "./api.ts";
 import { buildRepoRelativePath, buildMd1DSymbolPath, MD_BACKUP_1D_SEGMENTS, MD_INGEST_SEGMENTS } from "../backtests/pathHelpers.ts";
 import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
-import type { ActiveIngestJob, IngestJobStatusKind, MdBarsCoverageResponse, TrackedEquitiesResponse } from "./types.ts";
+import type { ActiveIngestJob, IngestJobStatusKind, IntradayRefreshStatusResponse, MdBarsCoverageResponse, TrackedEquitiesResponse } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -140,6 +143,11 @@ export function IngestScreen() {
   const [trackedEquitiesLoading, setTrackedEquitiesLoading] = useState(false);
   const [trackedEquitiesError, setTrackedEquitiesError] = useState<string | null>(null);
 
+  // INTRADAY-MD-REFRESHER-GUI-01: Intraday refresh status state
+  const [intradayRefresh, setIntradayRefresh] = useState<IntradayRefreshStatusResponse | null>(null);
+  const [intradayRefreshLoading, setIntradayRefreshLoading] = useState(false);
+  const [intradayRefreshError, setIntradayRefreshError] = useState<string | null>(null);
+
   const loadCoverage = useCallback(async () => {
     setCoverageLoading(true);
     setCoverageError(null);
@@ -174,6 +182,24 @@ export function IngestScreen() {
   // Auto-load tracked equities on mount
   useEffect(() => {
     void loadTrackedEquities();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadIntradayRefresh = useCallback(async () => {
+    setIntradayRefreshLoading(true);
+    setIntradayRefreshError(null);
+    const result = await fetchIntradayRefreshStatus();
+    setIntradayRefreshLoading(false);
+    if (!result.ok) {
+      setIntradayRefreshError(result.error ?? "Intraday refresh status fetch failed.");
+      return;
+    }
+    setIntradayRefresh(result.data ?? null);
+  }, []);
+
+  // Auto-load intraday refresh status on mount
+  useEffect(() => {
+    void loadIntradayRefresh();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -636,6 +662,139 @@ export function IngestScreen() {
         {trackedEquitiesLoading && (
           <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
             Loading tracked equities…
+          </div>
+        )}
+      </Panel>
+
+      {/* INTRADAY-MD-REFRESHER-GUI-01: Intraday refresh status */}
+      <Panel
+        title="Intraday refresh status"
+        subtitle="Read-only evidence from Refresh-IntradayMarketData.ps1. No provider calls. No DB writes."
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void loadIntradayRefresh()}
+            disabled={intradayRefreshLoading}
+            style={{ padding: "2px 12px" }}
+          >
+            {intradayRefreshLoading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+
+        {intradayRefreshError && (
+          <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+            <strong>Fetch failed:</strong> {intradayRefreshError}
+          </div>
+        )}
+
+        {intradayRefresh === null && !intradayRefreshLoading && !intradayRefreshError && (
+          <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+            Not loaded yet. Click Refresh or wait for auto-load.
+          </div>
+        )}
+
+        {intradayRefresh !== null && (
+          <>
+            <div className="bt-job-meta" style={{ marginBottom: 6 }}>
+              <span className="eyebrow">truth_state</span>{" "}
+              <strong>{intradayRefreshTruthLabel(intradayRefresh.truth_state)}</strong>
+              {intradayRefresh.produced_at_utc && (
+                <>
+                  {" "}<span className="eyebrow">produced</span>{" "}
+                  <strong>{intradayRefresh.produced_at_utc.slice(0, 19).replace("T", " ")}</strong>
+                </>
+              )}
+              {intradayRefresh.mode && (
+                <>
+                  {" "}<span className="eyebrow">mode</span>{" "}
+                  <strong>{intradayRefresh.mode}</strong>
+                </>
+              )}
+              {intradayRefresh.source && (
+                <>
+                  {" "}<span className="eyebrow">source</span>{" "}
+                  <strong>{intradayRefresh.source}</strong>
+                </>
+              )}
+              {intradayRefresh.timeframe && (
+                <>
+                  {" "}<span className="eyebrow">timeframe</span>{" "}
+                  <strong>{intradayRefresh.timeframe}</strong>
+                </>
+              )}
+            </div>
+
+            {intradayRefresh.stale_or_missing_evidence && (
+              <div className="unavailable-notice" style={{ marginBottom: 8 }}>
+                <strong>Evidence is stale or missing.</strong>{" "}
+                Run <code>Refresh-IntradayMarketData.ps1</code> to refresh.
+              </div>
+            )}
+
+            {isIntradayRefreshActive(intradayRefresh.truth_state) && (
+              <>
+                <div className="bt-job-meta" style={{ marginBottom: 6 }}>
+                  <span className="eyebrow">all_passed</span>{" "}
+                  <strong style={{ color: intradayRefresh.all_passed ? "var(--green, #4caf50)" : "var(--red, #f44336)" }}>
+                    {intradayRefresh.all_passed === true ? "PASS" : intradayRefresh.all_passed === false ? "FAIL" : "—"}
+                  </strong>
+                  {intradayRefresh.reason && (
+                    <>
+                      {" "}<span className="eyebrow">reason</span>{" "}
+                      <span>{intradayRefresh.reason}</span>
+                    </>
+                  )}
+                </div>
+
+                {intradayRefresh.symbols.length > 0 && (
+                  <table className="bt-table" style={{ width: "100%", tableLayout: "auto" }}>
+                    <thead>
+                      <tr>
+                        <th>Symbol</th>
+                        <th>Gate</th>
+                        <th style={{ textAlign: "right" }}>Bars</th>
+                        <th style={{ textAlign: "right" }}>Stale (min)</th>
+                        <th>Fail reasons</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {intradayRefresh.symbols.map((sym) => (
+                        <tr key={sym.symbol}>
+                          <td><strong>{sym.symbol}</strong></td>
+                          <td style={{ color: sym.gate === "PASS" ? "var(--green, #4caf50)" : sym.gate === "FAIL" ? "var(--red, #f44336)" : undefined }}>
+                            {sym.gate ?? "—"}
+                          </td>
+                          <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                            {sym.completed_count ?? "—"}
+                          </td>
+                          <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                            {sym.staleness_min ?? "—"}
+                          </td>
+                          <td style={{ color: "var(--text-muted, #888)", fontSize: "0.82rem" }}>
+                            {sym.fail_reasons.length > 0 ? sym.fail_reasons.join("; ") : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </>
+            )}
+
+            {!isIntradayRefreshActive(intradayRefresh.truth_state) && (
+              <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+                <strong>truth_state:</strong> {intradayRefreshTruthLabel(intradayRefresh.truth_state)}
+                {intradayRefresh.error ? ` — ${intradayRefresh.error}` : ""}
+              </div>
+            )}
+          </>
+        )}
+
+        {intradayRefreshLoading && (
+          <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
+            Loading intraday refresh status…
           </div>
         )}
       </Panel>

@@ -14,6 +14,7 @@ import type {
   IngestJobStatusKind,
   IngestJobStatusResponse,
   IngestJobsListResponse,
+  IntradayRefreshStatusResponse,
   MdBarsCoverageResponse,
   TrackedEquitiesResponse,
 } from "./types";
@@ -275,6 +276,52 @@ export async function fetchTrackedEquities(): Promise<FetchTrackedEquitiesResult
 
   if (!result.ok) {
     return { ok: false, error: result.error ?? "Tracked-equities fetch failed." };
+  }
+
+  return { ok: true, data: result.data };
+}
+
+// ---------------------------------------------------------------------------
+// INTRADAY-MD-REFRESHER-GUI-01: Intraday refresh status
+// ---------------------------------------------------------------------------
+
+export interface FetchIntradayRefreshResult {
+  ok: boolean;
+  data?: IntradayRefreshStatusResponse;
+  error?: string;
+}
+
+export function isIntradayRefreshActive(truthState: string): boolean {
+  return truthState === "active";
+}
+
+export function intradayRefreshTruthLabel(truthState: string): string {
+  switch (truthState) {
+    case "active":
+      return "active";
+    case "no_evidence":
+      return "no evidence";
+    case "parse_error":
+      return "parse error";
+    case "backend_unavailable":
+      return "unavailable";
+    default:
+      return truthState;
+  }
+}
+
+/**
+ * Fetch GET /api/v1/market-data/intraday-refresh/status.
+ *
+ * Safety: Read-only. No DB writes. No provider calls. No API credits consumed.
+ */
+export async function fetchIntradayRefreshStatus(): Promise<FetchIntradayRefreshResult> {
+  const result = await fetchJsonCandidate<IntradayRefreshStatusResponse>(
+    "/api/v1/market-data/intraday-refresh/status",
+  );
+
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Intraday refresh status fetch failed." };
   }
 
   return { ok: true, data: result.data };

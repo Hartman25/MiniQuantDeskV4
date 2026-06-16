@@ -148,3 +148,37 @@ export interface ActiveIngestJob {
   qualityReportPath: string | null;
   error: string | null;
 }
+
+// INTRADAY-MD-REFRESHER-GUI-01: Intraday refresh status types
+export interface IntradayRefreshSymbolStatus {
+  symbol: string;
+  gate: string | null;
+  completed_count: number | null;
+  latest_completed_bar_ts: string | null;
+  staleness_min: number | null;
+  provider_source: string | null;
+  provider_configured: boolean | null;
+  provider_attempted: boolean | null;
+  provider_success: boolean | null;
+  rows_inserted: number | null;
+  rows_updated: number | null;
+  rows_filtered_incomplete: number | null;
+  rows_filtered_in_progress: number | null;
+  fail_reasons: string[];
+}
+
+export interface IntradayRefreshStatusResponse {
+  canonical_route: string;
+  truth_state: string;
+  evidence_path: string | null;
+  stale_or_missing_evidence: boolean;
+  schema_version: string | null;
+  produced_at_utc: string | null;
+  mode: string | null;
+  source: string | null;
+  timeframe: string | null;
+  all_passed: boolean | null;
+  reason: string | null;
+  symbols: IntradayRefreshSymbolStatus[];
+  error: string | null;
+}

@@ -8,10 +8,12 @@ import {
   formatEndTs,
   coverageTruthLabel,
   isCoverageActive,
+  isIntradayRefreshActive,
+  intradayRefreshTruthLabel,
   isTrackedEquitiesActive,
   trackedEquitiesTruthLabel,
 } from "../api.ts";
-import type { IngestJobStatusResponse, MdBarsCoverageResponse, TrackedEquitiesResponse } from "../types.ts";
+import type { IngestJobStatusResponse, IntradayRefreshStatusResponse, MdBarsCoverageResponse, TrackedEquitiesResponse } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // normalizeIngestJobStatus
@@ -393,6 +395,202 @@ test("TrackedEquitiesResponse registry_unavailable shape is honest", () => {
   assert.equal(resp.count, 0);
   assert.equal(resp.symbols.length, 0);
   assert.ok(resp.error !== null);
+});
+
+// ---------------------------------------------------------------------------
+// INTRADAY-MD-REFRESHER-GUI-01: Intraday refresh helpers
+// ---------------------------------------------------------------------------
+
+// isIntradayRefreshActive
+
+test("isIntradayRefreshActive returns true for active", () => {
+  assert.ok(isIntradayRefreshActive("active"));
+});
+
+test("isIntradayRefreshActive returns false for no_evidence", () => {
+  assert.ok(!isIntradayRefreshActive("no_evidence"));
+});
+
+test("isIntradayRefreshActive returns false for parse_error", () => {
+  assert.ok(!isIntradayRefreshActive("parse_error"));
+});
+
+test("isIntradayRefreshActive returns false for backend_unavailable", () => {
+  assert.ok(!isIntradayRefreshActive("backend_unavailable"));
+});
+
+test("isIntradayRefreshActive returns false for empty string", () => {
+  assert.ok(!isIntradayRefreshActive(""));
+});
+
+// intradayRefreshTruthLabel
+
+test("intradayRefreshTruthLabel active → active", () => {
+  assert.equal(intradayRefreshTruthLabel("active"), "active");
+});
+
+test("intradayRefreshTruthLabel no_evidence → no evidence", () => {
+  assert.equal(intradayRefreshTruthLabel("no_evidence"), "no evidence");
+});
+
+test("intradayRefreshTruthLabel parse_error → parse error", () => {
+  assert.equal(intradayRefreshTruthLabel("parse_error"), "parse error");
+});
+
+test("intradayRefreshTruthLabel backend_unavailable → unavailable", () => {
+  assert.equal(intradayRefreshTruthLabel("backend_unavailable"), "unavailable");
+});
+
+test("intradayRefreshTruthLabel unknown string passes through", () => {
+  assert.equal(intradayRefreshTruthLabel("some_other_state"), "some_other_state");
+});
+
+// IntradayRefreshStatusResponse shape
+
+test("IntradayRefreshStatusResponse active shape has symbols and all_passed", () => {
+  const resp: IntradayRefreshStatusResponse = {
+    canonical_route: "/api/v1/market-data/intraday-refresh/status",
+    truth_state: "active",
+    evidence_path: "exports/market_data/intraday_refresh_20260615_093000.json",
+    stale_or_missing_evidence: false,
+    schema_version: "intraday-refresh-v1",
+    produced_at_utc: "2026-06-15T09:30:00Z",
+    mode: "once",
+    source: "alpaca",
+    timeframe: "1m",
+    all_passed: true,
+    reason: "all symbols passed",
+    symbols: [
+      {
+        symbol: "AAPL",
+        gate: "PASS",
+        completed_count: 390,
+        latest_completed_bar_ts: "2026-06-15T16:00:00Z",
+        staleness_min: 2,
+        provider_source: "alpaca",
+        provider_configured: true,
+        provider_attempted: true,
+        provider_success: true,
+        rows_inserted: 5,
+        rows_updated: 385,
+        rows_filtered_incomplete: 0,
+        rows_filtered_in_progress: 1,
+        fail_reasons: [],
+      },
+    ],
+    error: null,
+  };
+  assert.ok(isIntradayRefreshActive(resp.truth_state));
+  assert.equal(resp.all_passed, true);
+  assert.equal(resp.symbols.length, 1);
+  assert.equal(resp.symbols[0].symbol, "AAPL");
+  assert.equal(resp.symbols[0].gate, "PASS");
+  assert.equal(resp.symbols[0].completed_count, 390);
+  assert.equal(resp.symbols[0].fail_reasons.length, 0);
+  assert.equal(resp.stale_or_missing_evidence, false);
+});
+
+test("IntradayRefreshStatusResponse no_evidence shape is honest", () => {
+  const resp: IntradayRefreshStatusResponse = {
+    canonical_route: "/api/v1/market-data/intraday-refresh/status",
+    truth_state: "no_evidence",
+    evidence_path: null,
+    stale_or_missing_evidence: true,
+    schema_version: null,
+    produced_at_utc: null,
+    mode: null,
+    source: null,
+    timeframe: null,
+    all_passed: null,
+    reason: null,
+    symbols: [],
+    error: null,
+  };
+  assert.ok(!isIntradayRefreshActive(resp.truth_state));
+  assert.equal(resp.all_passed, null);
+  assert.equal(resp.symbols.length, 0);
+  assert.equal(resp.stale_or_missing_evidence, true);
+  assert.equal(resp.evidence_path, null);
+});
+
+test("IntradayRefreshStatusResponse stale evidence has stale_or_missing_evidence=true", () => {
+  const resp: IntradayRefreshStatusResponse = {
+    canonical_route: "/api/v1/market-data/intraday-refresh/status",
+    truth_state: "active",
+    evidence_path: "exports/market_data/intraday_refresh_20260614_093000.json",
+    stale_or_missing_evidence: true,
+    schema_version: "intraday-refresh-v1",
+    produced_at_utc: "2026-06-14T09:30:00Z",
+    mode: "once",
+    source: "alpaca",
+    timeframe: "1m",
+    all_passed: true,
+    reason: "all symbols passed",
+    symbols: [],
+    error: null,
+  };
+  assert.ok(isIntradayRefreshActive(resp.truth_state));
+  assert.equal(resp.stale_or_missing_evidence, true);
+});
+
+test("IntradayRefreshStatusResponse parse_error shape has error field", () => {
+  const resp: IntradayRefreshStatusResponse = {
+    canonical_route: "/api/v1/market-data/intraday-refresh/status",
+    truth_state: "parse_error",
+    evidence_path: "exports/market_data/intraday_refresh_20260615_093000.json",
+    stale_or_missing_evidence: true,
+    schema_version: null,
+    produced_at_utc: null,
+    mode: null,
+    source: null,
+    timeframe: null,
+    all_passed: null,
+    reason: null,
+    symbols: [],
+    error: "unsupported schema_version: unknown-v99",
+  };
+  assert.ok(!isIntradayRefreshActive(resp.truth_state));
+  assert.equal(resp.error, "unsupported schema_version: unknown-v99");
+  assert.equal(resp.symbols.length, 0);
+});
+
+test("IntradayRefreshSymbolStatus fail case has fail_reasons", () => {
+  const resp: IntradayRefreshStatusResponse = {
+    canonical_route: "/api/v1/market-data/intraday-refresh/status",
+    truth_state: "active",
+    evidence_path: "exports/market_data/intraday_refresh_20260615_093000.json",
+    stale_or_missing_evidence: false,
+    schema_version: "intraday-refresh-v1",
+    produced_at_utc: "2026-06-15T09:30:00Z",
+    mode: "once",
+    source: "alpaca",
+    timeframe: "1m",
+    all_passed: false,
+    reason: "TSLA failed gate",
+    symbols: [
+      {
+        symbol: "TSLA",
+        gate: "FAIL",
+        completed_count: 12,
+        latest_completed_bar_ts: "2026-06-15T10:00:00Z",
+        staleness_min: 380,
+        provider_source: "alpaca",
+        provider_configured: true,
+        provider_attempted: true,
+        provider_success: false,
+        rows_inserted: 0,
+        rows_updated: 0,
+        rows_filtered_incomplete: 0,
+        rows_filtered_in_progress: 0,
+        fail_reasons: ["too_few_bars: 12 < 30", "provider_failed"],
+      },
+    ],
+    error: null,
+  };
+  assert.equal(resp.symbols[0].gate, "FAIL");
+  assert.equal(resp.symbols[0].fail_reasons.length, 2);
+  assert.equal(resp.symbols[0].fail_reasons[0], "too_few_bars: 12 < 30");
+  assert.equal(resp.all_passed, false);
 });
 
 // provider sync NOT active — this panel is preview-only

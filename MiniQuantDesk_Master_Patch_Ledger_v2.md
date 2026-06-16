@@ -1218,7 +1218,7 @@ clippy remains blocked by unrelated existing drift in
 
 **Status:** CLOSED
 
-### INTRADAY-MD-REFRESHER-GUI-01 — OPEN
+### INTRADAY-MD-REFRESHER-GUI-01 — CLOSED
 
 **Purpose:** Add read-only GUI display for intraday refresh status exposed by INTRADAY-MD-REFRESHER-OPERATOR-SURFACE-01.
 
@@ -1232,7 +1232,14 @@ clippy remains blocked by unrelated existing drift in
 - No buttons that call providers.
 - Do not change backend logic or trading behavior.
 
-**Status:** OPEN
+**Status:** CLOSED
+
+**Evidence:**
+- `core-rs/mqk-gui/src/features/ingest/types.ts`: `IntradayRefreshSymbolStatus` + `IntradayRefreshStatusResponse` interfaces added.
+- `core-rs/mqk-gui/src/features/ingest/api.ts`: `isIntradayRefreshActive`, `intradayRefreshTruthLabel`, `fetchIntradayRefreshStatus` added.
+- `core-rs/mqk-gui/src/features/ingest/IngestScreen.tsx`: "Intraday refresh status" panel appended; auto-loads on mount; shows truth_state, stale warning, produced_at, mode/source/timeframe, all_passed, per-symbol table.
+- `core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts`: 15 new tests (IRA-01..IRA-15); 428/428 total pass.
+- Build: `npm run build` passes (TypeScript clean; pre-existing chunking warnings only).
 
 ### DATA-STREAMING-BARS-01 — QUEUED / PARKED
 
