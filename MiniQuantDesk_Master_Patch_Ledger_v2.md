@@ -885,46 +885,23 @@ vite). See `docs/runbooks/backtest_workflow.md` *"Presentation
 
 ## 10. Remaining Data Ingestion / Provider Patches
 
-### DATA-SYMBOL-REGISTRY-01 — QUEUED
+### DATA-SYMBOL-REGISTRY-01 — CLOSED 0d74598
 
-**Purpose:** Create or identify one canonical tracked-instrument source instead of hardcoded script lists.
+**Closed:** `config/instruments/equities.json` (88 enabled equities) + `core-rs/crates/mqk-md/src/instrument_registry.rs` — `TrackedInstrument` struct with `instrument_id`, `symbol`, `asset_class`, `provider_symbol`, `venue`, `currency`, `enabled`, `timeframes`, `notes`. Schema is multi-asset ready (notes reference crypto/futures/options/forex). Tests REG-01..REG-11 in `instrument_registry.rs` + RS-03..RS-08 in `mqk-cli/src/commands/md.rs` prove: 88 enabled equities resolve, sorted, unique IDs, no empty fields, validation passes/fails correctly.
 
-Start with equities, but schema must support future:
+All 10 required seed symbols present and enabled: SPY, QQQ, AAPL, MSFT, META, AMZN, GOOGL, NVDA, AMD, TSLA.
 
-- crypto
-- futures
-- options
-- forex
+### DATA-INGEST-SYNC-ALL-EQUITIES-01 — CLOSED da92040+99201f4
 
-Suggested registry fields:
+**Closed:** CLI `mqk md sync-provider --symbols-from-registry <path>` resolves all 88 enabled equities from the canonical registry and syncs per-symbol incremental bars. Rate-limit controls via TwelveData's bounded retry (4 retries, 65s sleep) and fixed chunk windows (1D: 8yr, 5m: 63d, 1m: 14d) prevent API-credit overruns. Per-symbol `effective_start` detection provides resume behavior. Daemon `POST /api/v1/ingest/jobs` (source=twelvedata, mode=sync_provider) accepts dry-run jobs: resolves 88 symbols, reports count/first/last, zero API calls. Tests RS-01..RS-08 prove: symbol resolution from registry, sorted order, known anchors present, conflict/error cases.
 
-- `instrument_id`
-- `symbol`
-- `asset_class`
-- `provider_symbol`
-- `venue/exchange`
-- `currency`
-- `timezone/session calendar`
-- `enabled`
-- `data_timeframes`
-- `provider/source preference`
+**Note:** Daemon real-provider wiring (dry_run=false) is explicitly deferred to `DATA-INGEST-PROVIDER-REAL-SYNC-01` — the daemon gate returns `not_implemented` until wired.
 
-### DATA-INGEST-SYNC-ALL-EQUITIES-01 — QUEUED
+### DATA-INGEST-GUI-SYNC-ALL-01 — CLOSED 9c50c3a+99201f4
 
-**Purpose:** Add daemon job support to sync all enabled equity symbols from the registry using existing provider ingest/sync logic.
+**Closed:** "Tracked equities" panel in `core-rs/mqk-gui/src/features/ingest/IngestScreen.tsx` shows registry truth_state, count, first/last symbol, and registry path. Panel auto-loads from `GET /api/v1/ingest/tracked-equities` on mount. Displays clear operator notice that provider sync is not enabled (points to CLI and DATA-INGEST-DAEMON-PROVIDER-JOBS-01). GUI tests: `isTrackedEquitiesActive`, `trackedEquitiesTruthLabel`, `TrackedEquitiesResponse` active/unavailable shapes (including honest error on missing registry), no provider sync fields. GUI does not imply trading readiness; no orders triggered.
 
-**Important:** Must include TwelveData rate limits, API-credit guardrails, resume behavior, and per-symbol failure tracking.
-
-### DATA-INGEST-GUI-SYNC-ALL-01 — QUEUED
-
-**Purpose:** Add GUI workflow to update all tracked symbols with:
-
-- timeframe
-- start/end
-- rate-limit controls
-- progress
-- failures
-- coverage refresh
+GUI total test suite: 428 tests pass.
 
 ### DATA-INGEST-PROVIDER-PLAN-01 — QUEUED
 
