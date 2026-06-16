@@ -14,6 +14,12 @@ pub mod provider_registry;
 pub use alpaca_provider::{
     load_alpaca_paper_credentials, AlpacaHistoricalProvider, ALPACA_DATA_BASE_URL,
 };
+pub use provider::{
+    CanonicalBar, FakeMarketDataProvider, FakeMarketDataProviderCallCounts, HistoricalBarsRequest,
+    HistoricalProviderMarketDataAdapter, LatestClosedBarRequest, MarketDataProvider,
+    MarketDataProviderCapabilities, MarketDataProviderError, MarketDataProviderHealth,
+    MarketDataProviderHealthStatus, MarketDataProviderRateLimits, ProviderAssetClass,
+};
 pub mod quality;
 
 use anyhow::{anyhow, Context, Result};
