@@ -114,6 +114,174 @@ fn ensure_file_exists_with(path: &Path, contents_if_create: &str) -> Result<()> 
 }
 
 // ---------------------------------------------------------------------------
+// Strategy Lab artifact evaluator (read-only)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Deserialize)]
+struct StrategyLabArtifactMetrics {
+    #[serde(default)]
+    strategy_name: Option<String>,
+    #[serde(default)]
+    symbol: Option<String>,
+    #[serde(default)]
+    symbols: Vec<String>,
+    #[serde(default)]
+    timeframe: Option<String>,
+    #[serde(default)]
+    timeframe_secs: Option<i64>,
+    #[serde(default)]
+    total_return_pct: Option<f64>,
+    #[serde(default)]
+    max_drawdown_pct: Option<f64>,
+    #[serde(default)]
+    trade_count: Option<usize>,
+    #[serde(default)]
+    win_rate_pct: Option<f64>,
+    #[serde(default)]
+    profit_factor: Option<f64>,
+    #[serde(default)]
+    expectancy: Option<f64>,
+    #[serde(default)]
+    trade_frequency: Option<f64>,
+    #[serde(default)]
+    exposure_time_pct: Option<f64>,
+    #[serde(default)]
+    sharpe_ratio: Option<f64>,
+    #[serde(default)]
+    buy_and_hold_return_pct: Option<f64>,
+    #[serde(default)]
+    alpha_pct: Option<f64>,
+    #[serde(default)]
+    benchmark: Option<StrategyLabArtifactBenchmark>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct StrategyLabArtifactBenchmark {
+    #[serde(default)]
+    buy_and_hold_return_pct: Option<f64>,
+    #[serde(default)]
+    alpha_pct: Option<f64>,
+}
+
+/// Build a Strategy Lab input from an existing completed backtest artifact folder.
+///
+/// This is read-only: it only reads `metrics.json` and, when present,
+/// `manifest.json`. It does not run a backtest, create jobs, write files, call
+/// providers, or make paper/live promotion decisions.
+pub fn strategy_lab_input_from_artifact_dir(
+    artifact_dir: impl AsRef<Path>,
+) -> Result<mqk_backtest::StrategyLabInput> {
+    let artifact_dir = artifact_dir.as_ref();
+    if !artifact_dir.is_dir() {
+        anyhow::bail!(
+            "artifact directory does not exist or is not a directory: {}",
+            artifact_dir.display()
+        );
+    }
+
+    let metrics_path = artifact_dir.join("metrics.json");
+    let metrics_json = fs::read_to_string(&metrics_path)
+        .with_context(|| format!("read metrics.json failed: {}", metrics_path.display()))?;
+    let metrics: StrategyLabArtifactMetrics = serde_json::from_str(&metrics_json)
+        .with_context(|| format!("parse metrics.json failed: {}", metrics_path.display()))?;
+
+    let manifest_path = artifact_dir.join("manifest.json");
+    let manifest = if manifest_path.exists() {
+        let manifest_json = fs::read_to_string(&manifest_path)
+            .with_context(|| format!("read manifest.json failed: {}", manifest_path.display()))?;
+        Some(
+            serde_json::from_str::<RunManifest>(&manifest_json).with_context(|| {
+                format!("parse manifest.json failed: {}", manifest_path.display())
+            })?,
+        )
+    } else {
+        None
+    };
+
+    Ok(strategy_lab_input_from_artifact_parts(
+        metrics,
+        manifest.as_ref(),
+    ))
+}
+
+/// Evaluate an existing completed backtest artifact folder with the pure
+/// Strategy Lab contract.
+pub fn evaluate_strategy_lab_artifact_dir(
+    artifact_dir: impl AsRef<Path>,
+) -> Result<mqk_backtest::StrategyLabEvaluation> {
+    let input = strategy_lab_input_from_artifact_dir(artifact_dir)?;
+    Ok(mqk_backtest::evaluate_strategy_lab(&input))
+}
+
+fn strategy_lab_input_from_artifact_parts(
+    metrics: StrategyLabArtifactMetrics,
+    manifest: Option<&RunManifest>,
+) -> mqk_backtest::StrategyLabInput {
+    let strategy_id = first_non_empty([
+        metrics.strategy_name.as_deref(),
+        manifest.map(|m| m.strategy_name.as_str()),
+    ])
+    .unwrap_or("unknown")
+    .to_string();
+
+    let symbol = metrics
+        .symbol
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            if metrics.symbols.is_empty() {
+                None
+            } else {
+                Some(metrics.symbols.join(","))
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let timeframe = metrics
+        .timeframe
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| metrics.timeframe_secs.map(|secs| format!("{secs}s")))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let benchmark_buy_hold = metrics
+        .benchmark
+        .as_ref()
+        .and_then(|b| b.buy_and_hold_return_pct)
+        .or(metrics.buy_and_hold_return_pct);
+    let benchmark_alpha = metrics
+        .benchmark
+        .as_ref()
+        .and_then(|b| b.alpha_pct)
+        .or(metrics.alpha_pct);
+
+    mqk_backtest::StrategyLabInput {
+        strategy_id,
+        symbol,
+        timeframe,
+        metrics: mqk_backtest::StrategyLabMetrics {
+            total_return: metrics.total_return_pct,
+            max_drawdown: metrics.max_drawdown_pct,
+            trade_count: metrics.trade_count,
+            win_rate: metrics.win_rate_pct,
+            profit_factor: metrics.profit_factor,
+            expectancy: metrics.expectancy,
+            trade_frequency: metrics.trade_frequency,
+            exposure: metrics.exposure_time_pct,
+            sharpe: metrics.sharpe_ratio,
+            buy_hold_return: benchmark_buy_hold,
+            alpha_vs_benchmark: benchmark_alpha,
+        },
+    }
+}
+
+fn first_non_empty<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<&'a str> {
+    values.into_iter().flatten().find(|s| !s.trim().is_empty())
+}
+
+// ---------------------------------------------------------------------------
 // Backtest report writer (deterministic outputs)
 // ---------------------------------------------------------------------------
 
