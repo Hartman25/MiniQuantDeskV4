@@ -18,6 +18,40 @@ fn write_manifest(dir: &PathBuf, strategy_name: &str) {
     write_manifest_with_metadata(dir, strategy_name, None, None);
 }
 
+fn write_rank_metrics(
+    dir: &PathBuf,
+    strategy_name: &str,
+    symbol: &str,
+    timeframe: &str,
+    total_return_pct: f64,
+) {
+    fs::write(
+        dir.join("metrics.json"),
+        format!(
+            r#"{{
+  "schema_version": 1,
+  "strategy_name": "{strategy_name}",
+  "symbol": "{symbol}",
+  "timeframe": "{timeframe}",
+  "total_return_pct": {total_return_pct},
+  "max_drawdown_pct": 3.0,
+  "trade_count": 20,
+  "win_rate_pct": 65.0,
+  "profit_factor": 2.4,
+  "expectancy": 1.0,
+  "exposure_time_pct": 45.0,
+  "sharpe_ratio": 1.2,
+  "benchmark": {{
+    "buy_and_hold_return_pct": 5.0,
+    "alpha_pct": 35.0
+  }}
+}}
+"#
+        ),
+    )
+    .expect("write metrics");
+}
+
 fn write_manifest_with_metadata(
     dir: &PathBuf,
     strategy_name: &str,
@@ -256,4 +290,122 @@ fn strategy_lab_artifact_missing_required_metrics_returns_insufficient_data() {
     assert!(evaluation
         .reason_codes
         .contains(&StrategyLabReasonCode::MetricsMissing));
+}
+
+#[test]
+fn strategy_lab_artifact_tree_ranks_multiple_valid_folders_deterministically() {
+    let root = temp_artifact_dir("rank_tree");
+    let weak = root.join("b_weak");
+    let strong = root.join("a_strong");
+    fs::create_dir_all(&weak).expect("create weak artifact");
+    fs::create_dir_all(&strong).expect("create strong artifact");
+    write_rank_metrics(&weak, "weak_strategy", "MSFT", "5m", 15.0);
+    write_rank_metrics(&strong, "strong_strategy", "AAPL", "1m", 40.0);
+
+    let report = mqk_artifacts::rank_strategy_lab_artifact_tree(
+        &root,
+        mqk_artifacts::StrategyLabArtifactRankOptions::default(),
+    )
+    .expect("rank artifact tree");
+
+    assert_eq!(report.root_path, root);
+    assert_eq!(report.candidates_scanned, 2);
+    assert_eq!(report.evaluations_count, 2);
+    assert_eq!(report.failures_count, 0);
+    assert_eq!(report.ranked[0].strategy_id, "strong_strategy");
+    assert_eq!(report.ranked[0].symbol, "AAPL");
+    assert_eq!(report.ranked[0].timeframe, "1m");
+    assert_eq!(report.ranked[0].decision, "research_pass");
+    assert_eq!(report.ranked[1].strategy_id, "weak_strategy");
+}
+
+#[test]
+fn strategy_lab_artifact_tree_top_n_limits_ranked_rows() {
+    let root = temp_artifact_dir("rank_top_n");
+    for (name, total_return_pct) in [("one", 40.0), ("two", 30.0), ("three", 20.0)] {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).expect("create artifact");
+        write_rank_metrics(&dir, name, "SPY", "1m", total_return_pct);
+    }
+
+    let report = mqk_artifacts::rank_strategy_lab_artifact_tree(
+        &root,
+        mqk_artifacts::StrategyLabArtifactRankOptions { top_n: Some(2) },
+    )
+    .expect("rank artifact tree");
+
+    assert_eq!(report.candidates_scanned, 3);
+    assert_eq!(report.evaluations_count, 3);
+    assert_eq!(report.failures_count, 0);
+    assert_eq!(report.ranked.len(), 2);
+    assert_eq!(report.ranked[0].rank, 1);
+    assert_eq!(report.ranked[1].rank, 2);
+}
+
+#[test]
+fn strategy_lab_artifact_tree_malformed_candidate_is_reported_with_valid_results() {
+    let root = temp_artifact_dir("rank_mixed");
+    let valid = root.join("valid");
+    let malformed = root.join("malformed");
+    fs::create_dir_all(&valid).expect("create valid artifact");
+    fs::create_dir_all(&malformed).expect("create malformed artifact");
+    write_rank_metrics(&valid, "valid_strategy", "SPY", "1m", 35.0);
+    fs::write(malformed.join("metrics.json"), "{ not valid json").expect("write malformed");
+
+    let report = mqk_artifacts::rank_strategy_lab_artifact_tree(
+        &root,
+        mqk_artifacts::StrategyLabArtifactRankOptions::default(),
+    )
+    .expect("rank artifact tree");
+
+    assert_eq!(report.candidates_scanned, 2);
+    assert_eq!(report.evaluations_count, 1);
+    assert_eq!(report.failures_count, 1);
+    assert_eq!(report.ranked[0].strategy_id, "valid_strategy");
+    assert_eq!(report.failures[0].artifact_path, malformed);
+    assert!(
+        report.failures[0]
+            .error
+            .contains("parse metrics.json failed"),
+        "unexpected error: {}",
+        report.failures[0].error
+    );
+}
+
+#[test]
+fn strategy_lab_artifact_tree_no_candidates_is_truthful() {
+    let root = temp_artifact_dir("rank_empty");
+
+    let report = mqk_artifacts::rank_strategy_lab_artifact_tree(
+        &root,
+        mqk_artifacts::StrategyLabArtifactRankOptions::default(),
+    )
+    .expect("rank empty artifact tree");
+
+    assert_eq!(report.candidates_scanned, 0);
+    assert_eq!(report.evaluations_count, 0);
+    assert_eq!(report.failures_count, 0);
+    assert!(report.ranked.is_empty());
+    assert!(report.failures.is_empty());
+}
+
+#[test]
+fn strategy_lab_artifact_tree_stable_tie_breaker_uses_artifact_path() {
+    let root = temp_artifact_dir("rank_tie_path");
+    let first = root.join("a_first");
+    let second = root.join("b_second");
+    fs::create_dir_all(&first).expect("create first artifact");
+    fs::create_dir_all(&second).expect("create second artifact");
+    write_rank_metrics(&second, "same_strategy", "SPY", "1m", 25.0);
+    write_rank_metrics(&first, "same_strategy", "SPY", "1m", 25.0);
+
+    let report = mqk_artifacts::rank_strategy_lab_artifact_tree(
+        &root,
+        mqk_artifacts::StrategyLabArtifactRankOptions::default(),
+    )
+    .expect("rank artifact tree");
+
+    assert_eq!(report.candidates_scanned, 2);
+    assert_eq!(report.ranked[0].artifact_path, first);
+    assert_eq!(report.ranked[1].artifact_path, second);
 }

@@ -207,6 +207,50 @@ pub fn run_strategy_lab_evaluate(artifact_dir: String, json: bool) -> Result<()>
     Ok(())
 }
 
+pub fn run_strategy_lab_rank(artifacts_root: String, top: Option<usize>, json: bool) -> Result<()> {
+    let report = mqk_artifacts::rank_strategy_lab_artifact_tree(
+        Path::new(&artifacts_root),
+        mqk_artifacts::StrategyLabArtifactRankOptions { top_n: top },
+    )
+    .with_context(|| format!("strategy lab artifact ranking failed: {}", artifacts_root))?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report)
+                .context("serialize strategy lab rank report failed")?
+        );
+    } else {
+        println!("root_path={}", report.root_path.display());
+        println!("candidates_scanned={}", report.candidates_scanned);
+        println!("evaluations_count={}", report.evaluations_count);
+        println!("failures_count={}", report.failures_count);
+        for row in &report.ranked {
+            println!(
+                "rank={} artifact_path={} strategy_id={} symbol={} timeframe={} score={:.2} grade={} decision={} reason_codes={}",
+                row.rank,
+                row.artifact_path.display(),
+                row.strategy_id,
+                row.symbol,
+                row.timeframe,
+                row.score,
+                row.grade,
+                row.decision,
+                row.reason_codes.join(",")
+            );
+        }
+        for failure in &report.failures {
+            println!(
+                "failure_artifact_path={} error={}",
+                failure.artifact_path.display(),
+                failure.error
+            );
+        }
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // DB backtest runner
 // ---------------------------------------------------------------------------

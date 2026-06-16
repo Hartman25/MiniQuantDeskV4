@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use mqk_portfolio::Side;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -222,6 +223,216 @@ pub fn evaluate_strategy_lab_artifact_dir(
 ) -> Result<mqk_backtest::StrategyLabEvaluation> {
     let input = strategy_lab_input_from_artifact_dir(artifact_dir)?;
     Ok(mqk_backtest::evaluate_strategy_lab(&input))
+}
+
+/// Options for read-only Strategy Lab artifact tree ranking.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StrategyLabArtifactRankOptions {
+    pub top_n: Option<usize>,
+}
+
+/// Deterministic read-only ranking report for completed artifact folders.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StrategyLabArtifactRankReport {
+    pub root_path: PathBuf,
+    pub candidates_scanned: usize,
+    pub evaluations_count: usize,
+    pub failures_count: usize,
+    pub ranked: Vec<StrategyLabArtifactRankRow>,
+    pub failures: Vec<StrategyLabArtifactRankFailure>,
+}
+
+/// One ranked Strategy Lab artifact evaluation row.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StrategyLabArtifactRankRow {
+    pub rank: usize,
+    pub artifact_path: PathBuf,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe: String,
+    pub score: f64,
+    pub grade: String,
+    pub decision: String,
+    pub reason_codes: Vec<String>,
+    pub total_return: Option<f64>,
+    pub max_drawdown: Option<f64>,
+    pub trade_count: Option<usize>,
+    pub win_rate: Option<f64>,
+    pub profit_factor: Option<f64>,
+    pub expectancy: Option<f64>,
+    pub exposure: Option<f64>,
+    pub sharpe: Option<f64>,
+    pub buy_hold_return: Option<f64>,
+    pub alpha_vs_benchmark: Option<f64>,
+}
+
+/// One artifact candidate that could not be evaluated.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StrategyLabArtifactRankFailure {
+    pub artifact_path: PathBuf,
+    pub error: String,
+}
+
+/// Scan an artifact tree and rank completed Strategy Lab artifact folders.
+///
+/// This is read-only: it identifies folders containing `metrics.json`, evaluates
+/// each candidate with the existing single-artifact Strategy Lab evaluator, and
+/// returns a deterministic report. It does not run backtests, write files, call
+/// providers, touch the database, or make paper/live promotion decisions.
+pub fn rank_strategy_lab_artifact_tree(
+    root: impl AsRef<Path>,
+    options: StrategyLabArtifactRankOptions,
+) -> Result<StrategyLabArtifactRankReport> {
+    let root = root.as_ref();
+    if !root.is_dir() {
+        anyhow::bail!(
+            "artifact root does not exist or is not a directory: {}",
+            root.display()
+        );
+    }
+
+    let mut candidates = Vec::new();
+    collect_strategy_lab_artifact_candidates(root, &mut candidates)?;
+    candidates.sort();
+
+    let mut evaluated = Vec::new();
+    let mut failures = Vec::new();
+    for artifact_path in candidates.iter() {
+        match evaluate_strategy_lab_artifact_dir(artifact_path) {
+            Ok(evaluation) => evaluated.push((artifact_path.clone(), evaluation)),
+            Err(err) => failures.push(StrategyLabArtifactRankFailure {
+                artifact_path: artifact_path.clone(),
+                error: format!("{err:#}"),
+            }),
+        }
+    }
+
+    rank_strategy_lab_artifact_evaluations(&mut evaluated);
+    let evaluations_count = evaluated.len();
+    if let Some(top_n) = options.top_n {
+        evaluated.truncate(top_n);
+    }
+
+    let ranked = evaluated
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (artifact_path, evaluation))| {
+            StrategyLabArtifactRankRow::from_evaluation(idx + 1, artifact_path, evaluation)
+        })
+        .collect::<Vec<_>>();
+
+    let failures_count = failures.len();
+
+    Ok(StrategyLabArtifactRankReport {
+        root_path: root.to_path_buf(),
+        candidates_scanned: candidates.len(),
+        evaluations_count,
+        failures_count,
+        ranked,
+        failures,
+    })
+}
+
+impl StrategyLabArtifactRankRow {
+    fn from_evaluation(
+        rank: usize,
+        artifact_path: PathBuf,
+        evaluation: mqk_backtest::StrategyLabEvaluation,
+    ) -> Self {
+        Self {
+            rank,
+            artifact_path,
+            strategy_id: evaluation.strategy_id,
+            symbol: evaluation.symbol,
+            timeframe: evaluation.timeframe,
+            score: evaluation.score,
+            grade: evaluation.grade.code().to_string(),
+            decision: evaluation.decision.code().to_string(),
+            reason_codes: evaluation
+                .reason_codes
+                .iter()
+                .map(|reason| reason.code().to_string())
+                .collect(),
+            total_return: evaluation.total_return,
+            max_drawdown: evaluation.max_drawdown,
+            trade_count: evaluation.trade_count,
+            win_rate: evaluation.win_rate,
+            profit_factor: evaluation.profit_factor,
+            expectancy: evaluation.expectancy,
+            exposure: evaluation.exposure,
+            sharpe: evaluation.sharpe,
+            buy_hold_return: evaluation.buy_hold_return,
+            alpha_vs_benchmark: evaluation.alpha_vs_benchmark,
+        }
+    }
+}
+
+fn collect_strategy_lab_artifact_candidates(
+    root: &Path,
+    candidates: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if root.join("metrics.json").is_file() {
+        candidates.push(root.to_path_buf());
+    }
+
+    let mut child_dirs = Vec::new();
+    for entry in fs::read_dir(root)
+        .with_context(|| format!("read artifact tree failed: {}", root.display()))?
+    {
+        let entry = entry
+            .with_context(|| format!("read artifact tree entry failed: {}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read artifact tree file type failed: {}", path.display()))?;
+        if file_type.is_dir() {
+            child_dirs.push(path);
+        }
+    }
+    child_dirs.sort();
+
+    for child in child_dirs {
+        collect_strategy_lab_artifact_candidates(&child, candidates)?;
+    }
+
+    Ok(())
+}
+
+fn rank_strategy_lab_artifact_evaluations(
+    rows: &mut [(PathBuf, mqk_backtest::StrategyLabEvaluation)],
+) {
+    rows.sort_by(|(path_a, a), (path_b, b)| {
+        strategy_lab_decision_priority(a.decision)
+            .cmp(&strategy_lab_decision_priority(b.decision))
+            .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal))
+            .then_with(|| {
+                strategy_lab_grade_priority(a.grade).cmp(&strategy_lab_grade_priority(b.grade))
+            })
+            .then_with(|| a.strategy_id.cmp(&b.strategy_id))
+            .then_with(|| a.symbol.cmp(&b.symbol))
+            .then_with(|| a.timeframe.cmp(&b.timeframe))
+            .then_with(|| path_a.cmp(path_b))
+    });
+}
+
+fn strategy_lab_decision_priority(decision: mqk_backtest::StrategyLabDecision) -> u8 {
+    match decision {
+        mqk_backtest::StrategyLabDecision::ResearchPass => 0,
+        mqk_backtest::StrategyLabDecision::ResearchWatch => 1,
+        mqk_backtest::StrategyLabDecision::ResearchFail => 2,
+        mqk_backtest::StrategyLabDecision::InsufficientData => 3,
+    }
+}
+
+fn strategy_lab_grade_priority(grade: mqk_backtest::StrategyLabGrade) -> u8 {
+    match grade {
+        mqk_backtest::StrategyLabGrade::A => 0,
+        mqk_backtest::StrategyLabGrade::B => 1,
+        mqk_backtest::StrategyLabGrade::C => 2,
+        mqk_backtest::StrategyLabGrade::D => 3,
+        mqk_backtest::StrategyLabGrade::F => 4,
+        mqk_backtest::StrategyLabGrade::Insufficient => 5,
+    }
 }
 
 fn strategy_lab_input_from_artifact_parts(

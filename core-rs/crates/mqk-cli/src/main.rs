@@ -6,8 +6,8 @@ mod commands;
 
 use commands::{
     bkt::{
-        run_backtest_csv, run_backtest_db, run_strategy_lab_evaluate, run_sweep_csv,
-        IntegrityCalendarArg,
+        run_backtest_csv, run_backtest_db, run_strategy_lab_evaluate, run_strategy_lab_rank,
+        run_sweep_csv, IntegrityCalendarArg,
     },
     load_payload,
     md::{md_ingest_csv, md_ingest_provider, md_sync_provider},
@@ -272,6 +272,21 @@ enum BacktestCmd {
         /// Existing artifact run directory containing metrics.json.
         #[arg(long)]
         artifact_dir: String,
+
+        /// Print a deterministic JSON report instead of key=value lines.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Rank existing completed backtest artifact folders with Strategy Lab.
+    StrategyLabRank {
+        /// Root directory to scan for artifact folders containing metrics.json.
+        #[arg(long)]
+        artifacts_root: String,
+
+        /// Limit ranked rows.
+        #[arg(long)]
+        top: Option<usize>,
 
         /// Print a deterministic JSON report instead of key=value lines.
         #[arg(long, default_value_t = false)]
@@ -732,6 +747,13 @@ async fn main() -> Result<()> {
             }
             BacktestCmd::StrategyLabEvaluate { artifact_dir, json } => {
                 run_strategy_lab_evaluate(artifact_dir, json)?;
+            }
+            BacktestCmd::StrategyLabRank {
+                artifacts_root,
+                top,
+                json,
+            } => {
+                run_strategy_lab_rank(artifacts_root, top, json)?;
             }
         },
 
