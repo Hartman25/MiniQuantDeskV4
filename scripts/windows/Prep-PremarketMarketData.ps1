@@ -19,6 +19,8 @@
 #   -PaperDbUrl        Paper DB connection URL. Default: postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper?sslmode=disable
 #   -RepoRoot          Repo root. Default: auto-resolved two levels up from this script.
 #   -CheckOnly         Verify schema, bar counts, key presence. No mutations.
+#   -SkipAlpacaIntraday
+#                      Skip normal-mode Alpaca intraday top-off for intraday timeframes.
 #
 # Hard rules:
 #   - Paper DB only. Refuses if MQK_DATABASE_URL does not contain port 5440.
@@ -35,7 +37,8 @@ param(
     [int]     $MaxStalenessDays = 4,
     [string]  $PaperDbUrl       = 'postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper?sslmode=disable',
     [string]  $RepoRoot         = '',
-    [switch]  $CheckOnly
+    [switch]  $CheckOnly,
+    [switch]  $SkipAlpacaIntraday
 )
 
 Set-StrictMode -Version Latest
@@ -114,6 +117,21 @@ if ($twelvekeyPresent) {
 } else {
     Write-Warn "TWELVEDATA_API_KEY is not set. Provider sync top-off will be skipped."
     Write-Warn "Add TWELVEDATA_API_KEY to .env.local to enable live sync."
+}
+
+# ---------------------------------------------------------------------------
+# GUARD: ALPACA paper credential presence check (never print values)
+# Used for intraday top-off of intraday timeframes during/after market open.
+# TwelveData sync only provides data through previous day's close; Alpaca
+# intraday ingest provides today's completed bars (DATA-FRESHNESS-READINESS-GATE-01).
+# ---------------------------------------------------------------------------
+$alpacaPaperConfigured = (-not [string]::IsNullOrWhiteSpace($env:ALPACA_API_KEY_PAPER)) -and
+                         (-not [string]::IsNullOrWhiteSpace($env:ALPACA_API_SECRET_PAPER))
+if ($alpacaPaperConfigured) {
+    Write-Ok "ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER configured (values not printed)."
+} else {
+    Write-Warn "ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER not fully configured. Alpaca intraday top-off will be skipped."
+    Write-Warn "Add ALPACA_API_KEY_PAPER and ALPACA_API_SECRET_PAPER to .env.local to enable intraday bar refresh."
 }
 
 # ---------------------------------------------------------------------------
@@ -270,6 +288,11 @@ if ($CheckOnly) {
     } else {
         Write-Warn "TWELVEDATA_API_KEY not configured -- provider sync unavailable."
     }
+    if ($alpacaPaperConfigured) {
+        Write-Ok "ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER configured -- intraday top-off available in normal mode."
+    } else {
+        Write-Warn "ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER not fully configured -- intraday top-off unavailable (DATA-FRESHNESS-READINESS-GATE-01 may fail during market hours)."
+    }
 
     Write-Sect "CHECK-ONLY complete"
     Write-Ok "CheckOnly passed (no mutations performed)."
@@ -348,6 +371,54 @@ foreach ($sym in $symbolList) {
         } finally { Pop-Location }
     } else {
         Write-Warn "Skipping provider sync for $sym (TWELVEDATA_API_KEY not set)."
+    }
+
+    # --- Alpaca intraday top-off (intraday timeframes only) ---
+    # TwelveData sync stops at the previous day's close. During and after market
+    # open the daemon's DATA-FRESHNESS-READINESS-GATE-01 requires bars younger
+    # than 900 s for intraday timeframes. Alpaca's historical API provides
+    # today's completed bars; this step is non-fatal so premarket runs (before
+    # bars exist) and missing credentials degrade gracefully.
+    if ($SkipAlpacaIntraday) {
+        Write-Step "Skipping Alpaca intraday top-off for $sym (SkipAlpacaIntraday set)."
+    } elseif ($Timeframe -ine '1D') {
+        if ($alpacaPaperConfigured) {
+            $todayDate = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+            Write-Step "Alpaca intraday refresh: provider=alpaca timeframe=$Timeframe date=$todayDate symbols=$sym"
+            Push-Location $coreRs
+            try {
+                $local:ErrorActionPreference = 'Continue'
+                $alpacaOutput = cargo run -p mqk-cli --bin mqk-cli -- md ingest-provider `
+                    --source alpaca `
+                    --symbols $sym `
+                    --timeframe $Timeframe `
+                    --start $todayDate `
+                    --end $todayDate 2>&1
+                $alpacaExitCode = $LASTEXITCODE
+                $alpacaOutput | Out-Host
+
+                $alpacaRowsLine = $null
+                foreach ($line in $alpacaOutput) {
+                    $lineText = [string]$line
+                    if ($lineText -match '^rows_read=\d+ rows_ok=\d+ rejected=\d+ inserted=\d+ updated=\d+$') {
+                        $alpacaRowsLine = $lineText
+                    }
+                }
+                $alpacaResult = if ([string]::IsNullOrWhiteSpace($alpacaRowsLine)) { "rows=unavailable" } else { $alpacaRowsLine }
+
+                if ($alpacaExitCode -ne 0) {
+                    Write-Warn "Alpaca intraday refresh failed: provider=alpaca timeframe=$Timeframe date=$todayDate symbols=$sym exit=$alpacaExitCode $alpacaResult; continuing."
+                } else {
+                    Write-Ok "Alpaca intraday refresh result: provider=alpaca timeframe=$Timeframe date=$todayDate symbols=$sym exit=0 $alpacaResult"
+                }
+            } catch {
+                Write-Warn "Alpaca intraday refresh threw exception: provider=alpaca timeframe=$Timeframe date=$todayDate symbols=$sym error=$_; continuing."
+            } finally { Pop-Location }
+        } else {
+            Write-Warn "Skipping Alpaca intraday top-off for $sym (ALPACA_API_KEY_PAPER / ALPACA_API_SECRET_PAPER not fully configured)."
+        }
+    } else {
+        Write-Step "Skipping Alpaca intraday top-off for $sym (daily timeframe, not applicable)."
     }
 
     # --- Post-sync summary ---

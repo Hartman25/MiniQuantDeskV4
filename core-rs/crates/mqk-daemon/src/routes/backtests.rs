@@ -417,6 +417,8 @@ fn run_backtest_csv_blocking(
         strategy_name: &report.strategy_name,
         engine_id: "mqk-backtest",
         mode: "backtest",
+        timeframe: None,
+        timeframe_secs: Some(timeframe_secs),
         git_hash: &git_hash,
         config_hash: &config_hash,
         host_fingerprint: &host_fp,
