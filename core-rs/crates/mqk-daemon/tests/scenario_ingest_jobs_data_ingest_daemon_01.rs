@@ -965,6 +965,63 @@ async fn get_job_status(router: axum::Router, job_id: &str) -> (StatusCode, serd
     (status, parse_json(body))
 }
 
+async fn ingest_job_db_pool_or_skip(label: &str) -> Option<sqlx::PgPool> {
+    let Ok(url) = std::env::var("MQK_DATABASE_URL") else {
+        eprintln!("{label}: skipped; MQK_DATABASE_URL is not set");
+        return None;
+    };
+
+    let pool = match sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(e) => {
+            eprintln!("{label}: skipped; could not connect to MQK_DATABASE_URL: {e}");
+            return None;
+        }
+    };
+
+    if let Err(e) = mqk_db::migrate(&pool).await {
+        eprintln!("{label}: skipped; mqk_db::migrate failed: {e}");
+        return None;
+    }
+
+    Some(pool)
+}
+
+async fn cleanup_ingest_job(pool: &sqlx::PgPool, job_id: uuid::Uuid) {
+    sqlx::query("delete from sys_ingest_jobs where job_id = $1")
+        .bind(job_id)
+        .execute(pool)
+        .await
+        .expect("cleanup sys_ingest_jobs row");
+}
+
+async fn wait_for_persisted_status(
+    pool: &sqlx::PgPool,
+    job_id: uuid::Uuid,
+    terminal_statuses: &[&str],
+) -> mqk_daemon::ingest_jobs::IngestJobRecord {
+    for _ in 0..50 {
+        if let Some(record) = mqk_daemon::ingest_jobs::load_persisted_ingest_job(pool, job_id)
+            .await
+            .expect("load persisted ingest job")
+        {
+            if terminal_statuses.contains(&record.status.as_str()) {
+                return record;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    mqk_daemon::ingest_jobs::load_persisted_ingest_job(pool, job_id)
+        .await
+        .expect("load persisted ingest job after timeout")
+        .unwrap_or_else(|| panic!("persisted ingest job {job_id} not found after timeout"))
+}
+
 // PD-01: dry_run=true → 202, accepted=true, dry_run echoed, api_calls_made=0
 #[tokio::test]
 async fn pd_01_provider_dryryn_accepted() {
@@ -1759,4 +1816,180 @@ async fn pd_13_per_symbol_failure_tracked() {
         job_status == "failed" || job_status == "partial",
         "job must be terminal (failed or partial), got: {job_status}"
     );
+}
+
+// DB-01: provider dry-run job persists create/progress/terminal state and fresh state can read it.
+#[tokio::test]
+async fn db_01_provider_dry_run_persists_and_fresh_state_reads() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-01").await else {
+        return;
+    };
+
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    st_raw.db = Some(pool.clone());
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "dry-run must queue: {body}");
+    let job_id: uuid::Uuid = json_str(&body, "job_id")
+        .parse()
+        .expect("job_id must parse");
+
+    let persisted =
+        wait_for_persisted_status(&pool, job_id, &["dry_run_completed", "failed"]).await;
+    assert_eq!(
+        persisted.status.as_str(),
+        "dry_run_completed",
+        "dry-run must complete without provider calls"
+    );
+    assert_eq!(persisted.api_calls_made, 0, "dry-run must make zero calls");
+    assert_eq!(persisted.symbols_count, Some(88));
+
+    let mut fresh =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    fresh.db = Some(pool.clone());
+    let fresh = Arc::new(fresh);
+
+    let router_status = routes::build_router(Arc::clone(&fresh));
+    let (status, body) = get_job_status(router_status, &job_id.to_string()).await;
+    assert_eq!(status, StatusCode::OK, "fresh state status must read DB");
+    assert_eq!(json_str(&body, "status"), "dry_run_completed");
+    assert_eq!(body["api_calls_made"].as_i64().unwrap_or(-1), 0);
+
+    let router_list = routes::build_router(fresh);
+    let req = Request::builder()
+        .uri("/api/v1/ingest/jobs")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, resp) = call(router_list, req).await;
+    assert_eq!(status, StatusCode::OK, "fresh state list must read DB");
+    let json = parse_json(resp);
+    let jobs = json["jobs"].as_array().expect("jobs must be array");
+    let job_id_str = job_id.to_string();
+    assert!(
+        jobs.iter()
+            .any(|j| j["job_id"].as_str() == Some(job_id_str.as_str())),
+        "fresh state list must include persisted job {job_id}: {json}"
+    );
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+// DB-02: fake-provider real sync uses no network and persists progress/final state.
+#[tokio::test]
+async fn db_02_fake_provider_real_sync_persists_progress_and_terminal_state() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-02").await else {
+        return;
+    };
+
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    st_raw.db = Some(pool.clone());
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::empty()));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05"
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "real fake-provider job must queue: {body}"
+    );
+    let job_id: uuid::Uuid = json_str(&body, "job_id")
+        .parse()
+        .expect("job_id must parse");
+
+    let persisted =
+        wait_for_persisted_status(&pool, job_id, &["completed", "partial", "failed"]).await;
+    assert_eq!(
+        persisted.status.as_str(),
+        "completed",
+        "empty fake-provider bars should complete with zero inserted rows"
+    );
+    assert!(
+        persisted.api_calls_made > 0,
+        "fake provider must be called through the real sync path"
+    );
+    assert_eq!(persisted.symbols_count, Some(88));
+    assert_eq!(persisted.symbols_completed, Some(88));
+    assert_eq!(persisted.rows_inserted, Some(0));
+    assert_eq!(persisted.rows_rejected, Some(0));
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+// DB-03: refused provider job persists refused status/reason when DB is configured.
+#[tokio::test]
+async fn db_03_refused_provider_job_persists_reason() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-03").await else {
+        return;
+    };
+
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    st_raw.db = Some(pool.clone());
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "job must be refused: {body}"
+    );
+    let job_id: uuid::Uuid = json_str(&body, "job_id")
+        .parse()
+        .expect("job_id must parse");
+    assert!(!job_id.is_nil(), "refused persisted jobs need a durable id");
+
+    let persisted = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+        .await
+        .expect("load refused job")
+        .expect("refused job must be persisted");
+    assert_eq!(persisted.status.as_str(), "refused");
+    let err = persisted.error.as_deref().unwrap_or("");
+    assert!(
+        err.contains("allow_provider_api_calls") || err.contains("provider API calls"),
+        "refusal reason must be persisted, got: {err}"
+    );
+    assert_eq!(persisted.api_calls_made, 0);
+
+    cleanup_ingest_job(&pool, job_id).await;
 }

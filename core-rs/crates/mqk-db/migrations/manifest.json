@@ -254,6 +254,12 @@
       "path": "0040_inbox_single_final_fill.sql",
       "status": "applied",
       "intent": "MIGRATION-0040-BACKFILL-DUP-FILLS-01: deterministic historical cleanup of duplicate event_kind='fill' rows (WS+REST dual delivery, Pattern A applied; REST reingestion, Pattern B unapplied) followed by unique partial index uq_inbox_run_order_single_fill enforcing at most one final fill per (run_id, internal_order_id). Canonical keep rule: applied over unapplied, broker_fill_id present over null, earliest applied_at_utc, earliest received_at_utc, lowest inbox_id."
+    },
+    {
+      "id": "0041",
+      "path": "0041_ingest_job_history.sql",
+      "status": "applied",
+      "intent": "DATA-INGEST-JOB-PERSISTENCE-01: add sys_ingest_jobs durable daemon ingest job history for DB-backed job list/status restart survival. Caller supplies all timestamps; no provider secrets or raw provider payloads are stored."
     }
   ]
 }

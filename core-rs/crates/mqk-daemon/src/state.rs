@@ -376,9 +376,10 @@ pub struct AppState {
     ///
     /// Process-lifetime only. No DB persistence. Isolated from live/paper execution.
     pub backtest_jobs: BacktestJobStore,
-    /// DATA-INGEST-DAEMON-JOBS-01: In-memory market-data ingest job registry.
+    /// DATA-INGEST-DAEMON-JOBS-01: Market-data ingest job registry.
     ///
-    /// Process-lifetime only. No DB persistence of job state.
+    /// Process-lifetime fallback when DB is not configured; DB-backed job
+    /// history is used by ingest routes when `db` is present.
     /// Isolated from live/paper execution: no broker adapters, no OMS tables.
     pub ingest_jobs: IngestJobStore,
     /// DATA-INGEST-GUI-SYNC-ALL-01: Filesystem path to the canonical instrument registry.

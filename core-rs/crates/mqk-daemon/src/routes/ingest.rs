@@ -2,7 +2,7 @@
 //!
 //! Routes:
 //!   POST /api/v1/ingest/jobs          — submit a CSV or provider sync job (operator)
-//!   GET  /api/v1/ingest/jobs          — list all in-memory jobs (public)
+//!   GET  /api/v1/ingest/jobs          — list ingest jobs (DB-backed when configured)
 //!   GET  /api/v1/ingest/jobs/:job_id  — job status + artifact paths (public)
 //!
 //! DATA-INGEST-DAEMON-PROVIDER-JOBS-01:
@@ -15,7 +15,8 @@
 //! - No broker adapter is called. No Alpaca. No live/paper execution state.
 //! - No OMS tables written. No orders/fills in live DB tables.
 //! - Does not require arm_state. Does not start/stop the trading runtime.
-//! - Jobs are in-memory only (process-lifetime); no DB persistence of job state.
+//! - Jobs are persisted to DB when a pool is configured; in-memory store remains
+//!   the no-DB fallback.
 //! - Quality reports are written to exports/md_ingest/<ingest_id>/ by default.
 //! - Failed jobs report errors truthfully. No hidden failures.
 //! - If DB is unavailable (pool is None), CSV job fails with "no_db" error.
@@ -41,7 +42,10 @@ use crate::{
         IngestJobAcceptedResponse, IngestJobRequest, IngestJobStatusResponse, IngestJobSummary,
         IngestJobsListResponse, TrackedEquitiesResponse, TrackedEquitySummary,
     },
-    ingest_jobs::{IngestJobRecord, IngestJobStatus},
+    ingest_jobs::{
+        list_persisted_ingest_jobs, load_persisted_ingest_job, persist_ingest_job_record,
+        IngestJobRecord, IngestJobStatus, IngestJobStore,
+    },
     state::AppState,
 };
 
@@ -60,6 +64,214 @@ fn validate_timeframe(tf: &str) -> Result<&'static str, String> {
             other
         )),
     }
+}
+
+fn record_to_summary(r: &IngestJobRecord) -> IngestJobSummary {
+    IngestJobSummary {
+        job_id: r.job_id,
+        status: r.status.as_str().to_string(),
+        source: r.source.clone(),
+        mode: r.mode.clone(),
+        timeframe: r.timeframe.clone(),
+        created_at_utc: r.created_at_utc.to_rfc3339(),
+        started_at_utc: r.started_at_utc.map(|t| t.to_rfc3339()),
+        completed_at_utc: r.completed_at_utc.map(|t| t.to_rfc3339()),
+        rows_read: r.rows_read,
+        rows_inserted: r.rows_inserted,
+        rows_rejected: r.rows_rejected,
+        quality_report_path: r.quality_report_path.clone(),
+        error: r.error.clone(),
+        dry_run: r.dry_run,
+        symbols_count: r.symbols_count,
+        api_calls_made: r.api_calls_made,
+        symbols_completed: r.symbols_completed,
+        symbols_failed: r.symbols_failed,
+    }
+}
+
+fn record_to_status_response(r: &IngestJobRecord) -> IngestJobStatusResponse {
+    IngestJobStatusResponse {
+        truth_state: "active".to_string(),
+        job_id: r.job_id,
+        status: r.status.as_str().to_string(),
+        source: r.source.clone(),
+        mode: r.mode.clone(),
+        timeframe: r.timeframe.clone(),
+        csv_path: r.csv_path.clone(),
+        created_at_utc: r.created_at_utc.to_rfc3339(),
+        started_at_utc: r.started_at_utc.map(|t| t.to_rfc3339()),
+        completed_at_utc: r.completed_at_utc.map(|t| t.to_rfc3339()),
+        rows_read: r.rows_read,
+        rows_inserted: r.rows_inserted,
+        rows_rejected: r.rows_rejected,
+        quality_report_path: r.quality_report_path.clone(),
+        error: r.error.clone(),
+        dry_run: r.dry_run,
+        provider_api_calls_allowed: r.provider_api_calls_allowed,
+        api_calls_made: r.api_calls_made,
+        symbols_source: r.symbols_source.clone(),
+        registry_path_used: r.registry_path_used.clone(),
+        symbols_count: r.symbols_count,
+        planned_first_symbol: r.planned_first_symbol.clone(),
+        planned_last_symbol: r.planned_last_symbol.clone(),
+        asset_class: r.asset_class.clone(),
+        provider_enabled: r.provider_enabled,
+        provider_verification_status: r.provider_verification_status.clone(),
+        symbols_completed: r.symbols_completed,
+        symbols_failed: r.symbols_failed,
+    }
+}
+
+async fn persist_and_insert_job(st: &AppState, record: IngestJobRecord) -> Result<(), Response> {
+    if let Some(pool) = &st.db {
+        persist_ingest_job_record(pool, &record)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "truth_state": "backend_unavailable",
+                        "error": e
+                    })),
+                )
+                    .into_response()
+            })?;
+    }
+
+    let mut store = st.ingest_jobs.lock().expect("ingest_jobs lock poisoned");
+    store.insert(record.job_id, record);
+    Ok(())
+}
+
+fn mutate_job<F>(jobs: &IngestJobStore, job_id: Uuid, mutate: F) -> Option<IngestJobRecord>
+where
+    F: FnOnce(&mut IngestJobRecord),
+{
+    let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
+    let record = store.get_mut(&job_id)?;
+    mutate(record);
+    Some(record.clone())
+}
+
+async fn persist_job_update<F>(
+    jobs: &IngestJobStore,
+    db_pool: Option<&sqlx::PgPool>,
+    job_id: Uuid,
+    mutate: F,
+) where
+    F: FnOnce(&mut IngestJobRecord),
+{
+    let Some(record) = mutate_job(jobs, job_id, mutate) else {
+        return;
+    };
+
+    if let Some(pool) = db_pool {
+        if let Err(err) = persist_ingest_job_record(pool, &record).await {
+            tracing::error!(
+                job_id = %job_id,
+                error = %err,
+                "ingest job persistence update failed"
+            );
+            let failed_record = mutate_job(jobs, job_id, |r| {
+                r.status = IngestJobStatus::Failed;
+                r.completed_at_utc = Some(Utc::now());
+                r.error = Some(format!("ingest job persistence update failed: {err}"));
+            });
+            if let Some(failed_record) = failed_record {
+                let _ = persist_ingest_job_record(pool, &failed_record).await;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn refused_provider_job_response(
+    st: &Arc<AppState>,
+    source: String,
+    req: &IngestJobRequest,
+    error: String,
+    dry_run: Option<bool>,
+    allow_provider: Option<bool>,
+    asset_class: Option<String>,
+    registry_path: Option<String>,
+    provider_registry_path: Option<String>,
+    provider_enabled: Option<bool>,
+    provider_verification_status: Option<String>,
+) -> Response {
+    let job_id = Uuid::new_v4(); // allow: operator-visible refused job identifier
+    let now = Utc::now(); // allow: operational job refusal timestamp
+    let dry_run_value = dry_run.unwrap_or(req.dry_run);
+    let allow_provider_value = allow_provider.unwrap_or(req.allow_provider_api_calls);
+    let symbols_source = req
+        .symbols_source
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_ascii_lowercase());
+    let record = IngestJobRecord {
+        job_id,
+        source: source.clone(),
+        mode: Some("sync_provider".to_string()),
+        csv_path: None,
+        timeframe: req.timeframe.trim().to_string(),
+        source_label: source.clone(),
+        out_dir: req
+            .out_dir
+            .clone()
+            .unwrap_or_else(|| "exports/md_ingest".to_string()),
+        status: IngestJobStatus::Refused,
+        created_at_utc: now,
+        started_at_utc: None,
+        completed_at_utc: Some(now),
+        rows_read: None,
+        rows_inserted: None,
+        rows_rejected: None,
+        quality_report_path: None,
+        error: Some(error.clone()),
+        dry_run: dry_run_value,
+        provider_api_calls_allowed: allow_provider_value,
+        api_calls_made: 0,
+        symbols_source,
+        registry_path_used: registry_path.or_else(|| {
+            req.registry_path
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string())
+        }),
+        provider_registry_path_used: provider_registry_path.or_else(|| {
+            req.provider_registry_path
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string())
+        }),
+        symbols_count: None,
+        planned_first_symbol: None,
+        planned_last_symbol: None,
+        asset_class: asset_class.unwrap_or_else(|| req.asset_class.trim().to_ascii_lowercase()),
+        provider_enabled,
+        provider_verification_status,
+        symbols_completed: None,
+        symbols_failed: None,
+    };
+
+    if let Err(resp) = persist_and_insert_job(st, record).await {
+        return resp;
+    }
+
+    (
+        StatusCode::BAD_REQUEST,
+        Json(IngestJobAcceptedResponse {
+            accepted: false,
+            job_id,
+            status: "refused".to_string(),
+            source,
+            error: Some(error),
+            dry_run: Some(dry_run_value),
+            provider_api_calls_allowed: Some(allow_provider_value),
+            symbols_count: None,
+            api_calls_made: Some(0),
+        }),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +449,7 @@ async fn handle_csv_job(st: Arc<AppState>, req: IngestJobRequest, source: String
         api_calls_made: 0,
         symbols_source: None,
         registry_path_used: None,
+        provider_registry_path_used: None,
         symbols_count: None,
         planned_first_symbol: None,
         planned_last_symbol: None,
@@ -247,9 +460,8 @@ async fn handle_csv_job(st: Arc<AppState>, req: IngestJobRequest, source: String
         symbols_failed: None,
     };
 
-    {
-        let mut store = st.ingest_jobs.lock().expect("ingest_jobs lock poisoned");
-        store.insert(job_id, record);
+    if let Err(resp) = persist_and_insert_job(&st, record).await {
+        return resp;
     }
 
     // Clone state for background task.
@@ -258,20 +470,17 @@ async fn handle_csv_job(st: Arc<AppState>, req: IngestJobRequest, source: String
 
     tokio::spawn(async move {
         // Mark running.
-        {
-            let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
-            if let Some(r) = store.get_mut(&job_id) {
-                r.status = IngestJobStatus::Running;
-                r.started_at_utc = Some(Utc::now()); // allow: operational
-            }
-        }
+        persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+            r.status = IngestJobStatus::Running;
+            r.started_at_utc = Some(Utc::now()); // allow: operational
+        })
+        .await;
 
         let result =
-            run_csv_ingest_async(db_pool, csv_path, timeframe, source_label, out_dir).await;
+            run_csv_ingest_async(db_pool.clone(), csv_path, timeframe, source_label, out_dir).await;
 
         // Mark completed / failed.
-        let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
-        if let Some(r) = store.get_mut(&job_id) {
+        persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
             r.completed_at_utc = Some(Utc::now()); // allow: operational
             match result {
                 Ok(outcome) => {
@@ -286,7 +495,8 @@ async fn handle_csv_job(st: Arc<AppState>, req: IngestJobRequest, source: String
                     r.error = Some(e);
                 }
             }
-        }
+        })
+        .await;
     });
 
     (
@@ -333,26 +543,23 @@ async fn handle_provider_sync_job(
 
     // Gate: dry_run=false without explicit allow → refused.
     if !dry_run && !allow_provider {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(IngestJobAcceptedResponse {
-                accepted: false,
-                job_id: Uuid::nil(),
-                status: "refused".to_string(),
-                source: source.clone(),
-                error: Some(
-                    "provider API calls are not allowed: \
-                     set allow_provider_api_calls=true to permit real ingestion, \
-                     or use dry_run=true (default) to validate without provider calls."
-                        .to_string(),
-                ),
-                dry_run: Some(false),
-                provider_api_calls_allowed: Some(false),
-                symbols_count: None,
-                api_calls_made: Some(0),
-            }),
+        return refused_provider_job_response(
+            &st,
+            source,
+            &req,
+            "provider API calls are not allowed: \
+             set allow_provider_api_calls=true to permit real ingestion, \
+             or use dry_run=true (default) to validate without provider calls."
+                .to_string(),
+            Some(false),
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            None,
         )
-            .into_response();
+        .await;
     }
 
     // asset_class validation (synchronous, no file I/O).
@@ -360,25 +567,24 @@ async fn handle_provider_sync_job(
     const VALID_ASSET_CLASSES: &[&str] =
         &["equity", "etf", "crypto", "futures", "options", "forex"];
     if !VALID_ASSET_CLASSES.contains(&asset_class.as_str()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(IngestJobAcceptedResponse {
-                accepted: false,
-                job_id: Uuid::nil(),
-                status: "refused".to_string(),
-                source: source.clone(),
-                error: Some(format!(
-                    "unsupported asset_class '{}'. accepted: {}",
-                    asset_class,
-                    VALID_ASSET_CLASSES.join(", ")
-                )),
-                dry_run: Some(dry_run),
-                provider_api_calls_allowed: Some(allow_provider),
-                symbols_count: None,
-                api_calls_made: Some(0),
-            }),
+        return refused_provider_job_response(
+            &st,
+            source,
+            &req,
+            format!(
+                "unsupported asset_class '{}'. accepted: {}",
+                asset_class,
+                VALID_ASSET_CLASSES.join(", ")
+            ),
+            Some(dry_run),
+            Some(allow_provider),
+            Some(asset_class),
+            None,
+            None,
+            None,
+            None,
         )
-            .into_response();
+        .await;
     }
 
     // Provider registry validation (synchronous, graceful if file absent).
@@ -396,71 +602,68 @@ async fn handle_provider_sync_job(
         )) {
             Ok(providers) => match mqk_md::provider_registry::find_provider(&providers, &source) {
                 None => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(IngestJobAcceptedResponse {
-                            accepted: false,
-                            job_id: Uuid::nil(),
-                            status: "refused".to_string(),
-                            source: source.clone(),
-                            error: Some(format!(
-                                "provider '{}' is not registered in the provider registry. \
-                                     Check config/providers/providers.json.",
-                                source
-                            )),
-                            dry_run: Some(dry_run),
-                            provider_api_calls_allowed: Some(allow_provider),
-                            symbols_count: None,
-                            api_calls_made: Some(0),
-                        }),
+                    return refused_provider_job_response(
+                        &st,
+                        source.clone(),
+                        &req,
+                        format!(
+                            "provider '{}' is not registered in the provider registry. \
+                                 Check config/providers/providers.json.",
+                            source
+                        ),
+                        Some(dry_run),
+                        Some(allow_provider),
+                        Some(asset_class.clone()),
+                        None,
+                        Some(provider_registry_path.clone()),
+                        None,
+                        None,
                     )
-                        .into_response();
+                    .await;
                 }
                 Some(p) => {
                     if !p.enabled {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(IngestJobAcceptedResponse {
-                                accepted: false,
-                                job_id: Uuid::nil(),
-                                status: "refused".to_string(),
-                                source: source.clone(),
-                                error: Some(format!(
-                                    "provider '{}' is disabled in the provider registry \
-                                         (enabled=false). No real ingestion is possible until \
-                                         the provider is implemented and enabled.",
-                                    source
-                                )),
-                                dry_run: Some(dry_run),
-                                provider_api_calls_allowed: Some(allow_provider),
-                                symbols_count: None,
-                                api_calls_made: Some(0),
-                            }),
+                        return refused_provider_job_response(
+                            &st,
+                            source.clone(),
+                            &req,
+                            format!(
+                                "provider '{}' is disabled in the provider registry \
+                                     (enabled=false). No real ingestion is possible until \
+                                     the provider is implemented and enabled.",
+                                source
+                            ),
+                            Some(dry_run),
+                            Some(allow_provider),
+                            Some(asset_class.clone()),
+                            None,
+                            Some(provider_registry_path.clone()),
+                            Some(p.enabled),
+                            Some(p.verification_status.clone()),
                         )
-                            .into_response();
+                        .await;
                     }
                     if !p.supports_asset_class(&asset_class) {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(IngestJobAcceptedResponse {
-                                accepted: false,
-                                job_id: Uuid::nil(),
-                                status: "refused".to_string(),
-                                source: source.clone(),
-                                error: Some(format!(
-                                    "provider '{}' does not support asset_class='{}'. \
-                                         Supported by this provider: {}",
-                                    source,
-                                    asset_class,
-                                    p.asset_classes.join(", ")
-                                )),
-                                dry_run: Some(dry_run),
-                                provider_api_calls_allowed: Some(allow_provider),
-                                symbols_count: None,
-                                api_calls_made: Some(0),
-                            }),
+                        return refused_provider_job_response(
+                            &st,
+                            source.clone(),
+                            &req,
+                            format!(
+                                "provider '{}' does not support asset_class='{}'. \
+                                     Supported by this provider: {}",
+                                source,
+                                asset_class,
+                                p.asset_classes.join(", ")
+                            ),
+                            Some(dry_run),
+                            Some(allow_provider),
+                            Some(asset_class.clone()),
+                            None,
+                            Some(provider_registry_path.clone()),
+                            Some(p.enabled),
+                            Some(p.verification_status.clone()),
                         )
-                            .into_response();
+                        .await;
                     }
                     (Some(p.enabled), Some(p.verification_status.clone()))
                 }
@@ -477,46 +680,44 @@ async fn handle_provider_sync_job(
         .trim()
         .to_ascii_lowercase();
     if symbols_source != "registry" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(IngestJobAcceptedResponse {
-                accepted: false,
-                job_id: Uuid::nil(),
-                status: "refused".to_string(),
-                source: source.clone(),
-                error: Some(format!(
-                    "symbols_source '{}' is not supported. \
-                     Only 'registry' is implemented in this version.",
-                    symbols_source
-                )),
-                dry_run: Some(dry_run),
-                provider_api_calls_allowed: Some(allow_provider),
-                symbols_count: None,
-                api_calls_made: Some(0),
-            }),
+        return refused_provider_job_response(
+            &st,
+            source,
+            &req,
+            format!(
+                "symbols_source '{}' is not supported. \
+                 Only 'registry' is implemented in this version.",
+                symbols_source
+            ),
+            Some(dry_run),
+            Some(allow_provider),
+            Some(asset_class),
+            None,
+            Some(provider_registry_path),
+            provider_enabled_val,
+            provider_verification_status_val,
         )
-            .into_response();
+        .await;
     }
 
     // Timeframe validation.
     let timeframe = match validate_timeframe(&req.timeframe) {
         Ok(tf) => tf.to_string(),
         Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(IngestJobAcceptedResponse {
-                    accepted: false,
-                    job_id: Uuid::nil(),
-                    status: "refused".to_string(),
-                    source: source.clone(),
-                    error: Some(e),
-                    dry_run: Some(dry_run),
-                    provider_api_calls_allowed: Some(allow_provider),
-                    symbols_count: None,
-                    api_calls_made: Some(0),
-                }),
+            return refused_provider_job_response(
+                &st,
+                source,
+                &req,
+                e,
+                Some(dry_run),
+                Some(allow_provider),
+                Some(asset_class),
+                None,
+                Some(provider_registry_path),
+                provider_enabled_val,
+                provider_verification_status_val,
             )
-                .into_response();
+            .await;
         }
     };
 
@@ -540,6 +741,7 @@ async fn handle_provider_sync_job(
             source,
             asset_class,
             registry_path,
+            provider_registry_path,
             out_dir,
             timeframe,
             provider_enabled_val,
@@ -555,21 +757,20 @@ async fn handle_provider_sync_job(
         Some(s) => match NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d") {
             Ok(d) => d,
             Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(IngestJobAcceptedResponse {
-                        accepted: false,
-                        job_id: Uuid::nil(),
-                        status: "refused".to_string(),
-                        source: source.clone(),
-                        error: Some(format!("invalid end date '{}'; expected YYYY-MM-DD", s)),
-                        dry_run: Some(false),
-                        provider_api_calls_allowed: Some(true),
-                        symbols_count: None,
-                        api_calls_made: Some(0),
-                    }),
+                return refused_provider_job_response(
+                    &st,
+                    source,
+                    &req,
+                    format!("invalid end date '{}'; expected YYYY-MM-DD", s),
+                    Some(false),
+                    Some(true),
+                    Some(asset_class),
+                    Some(registry_path),
+                    Some(provider_registry_path),
+                    provider_enabled_val,
+                    provider_verification_status_val,
                 )
-                    .into_response();
+                .await;
             }
         },
         None => Utc::now().date_naive(),
@@ -579,21 +780,20 @@ async fn handle_provider_sync_job(
         Some(s) => match NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d") {
             Ok(d) => d,
             Err(_) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(IngestJobAcceptedResponse {
-                        accepted: false,
-                        job_id: Uuid::nil(),
-                        status: "refused".to_string(),
-                        source: source.clone(),
-                        error: Some(format!("invalid start date '{}'; expected YYYY-MM-DD", s)),
-                        dry_run: Some(false),
-                        provider_api_calls_allowed: Some(true),
-                        symbols_count: None,
-                        api_calls_made: Some(0),
-                    }),
+                return refused_provider_job_response(
+                    &st,
+                    source,
+                    &req,
+                    format!("invalid start date '{}'; expected YYYY-MM-DD", s),
+                    Some(false),
+                    Some(true),
+                    Some(asset_class),
+                    Some(registry_path),
+                    Some(provider_registry_path),
+                    provider_enabled_val,
+                    provider_verification_status_val,
                 )
-                    .into_response();
+                .await;
             }
         },
         // Default: 30-day lookback (safe and bounded for any timeframe).
@@ -601,21 +801,20 @@ async fn handle_provider_sync_job(
     };
 
     if start_d > end_d {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(IngestJobAcceptedResponse {
-                accepted: false,
-                job_id: Uuid::nil(),
-                status: "refused".to_string(),
-                source: source.clone(),
-                error: Some(format!("start ({}) must be <= end ({})", start_d, end_d)),
-                dry_run: Some(false),
-                provider_api_calls_allowed: Some(true),
-                symbols_count: None,
-                api_calls_made: Some(0),
-            }),
+        return refused_provider_job_response(
+            &st,
+            source,
+            &req,
+            format!("start ({}) must be <= end ({})", start_d, end_d),
+            Some(false),
+            Some(true),
+            Some(asset_class),
+            Some(registry_path),
+            Some(provider_registry_path),
+            provider_enabled_val,
+            provider_verification_status_val,
         )
-            .into_response();
+        .await;
     }
 
     // Deterministic ingest_id for this job: keyed on source, timeframe, date range.
@@ -632,21 +831,20 @@ async fn handle_provider_sync_job(
     let tf = match mqk_md::Timeframe::parse(&timeframe) {
         Ok(t) => t,
         Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(IngestJobAcceptedResponse {
-                    accepted: false,
-                    job_id: Uuid::nil(),
-                    status: "refused".to_string(),
-                    source: source.clone(),
-                    error: Some(format!("timeframe parse error: {}", e)),
-                    dry_run: Some(false),
-                    provider_api_calls_allowed: Some(true),
-                    symbols_count: None,
-                    api_calls_made: Some(0),
-                }),
+            return refused_provider_job_response(
+                &st,
+                source,
+                &req,
+                format!("timeframe parse error: {}", e),
+                Some(false),
+                Some(true),
+                Some(asset_class),
+                Some(registry_path),
+                Some(provider_registry_path),
+                provider_enabled_val,
+                provider_verification_status_val,
             )
-                .into_response();
+            .await;
         }
     };
 
@@ -675,6 +873,7 @@ async fn handle_provider_sync_job(
         api_calls_made: 0,
         symbols_source: Some("registry".to_string()),
         registry_path_used: Some(registry_path.clone()),
+        provider_registry_path_used: Some(provider_registry_path.clone()),
         symbols_count: None,
         planned_first_symbol: None,
         planned_last_symbol: None,
@@ -685,9 +884,8 @@ async fn handle_provider_sync_job(
         symbols_failed: None,
     };
 
-    {
-        let mut store = st.ingest_jobs.lock().expect("ingest_jobs lock poisoned");
-        store.insert(job_id, record);
+    if let Err(resp) = persist_and_insert_job(&st, record).await {
+        return resp;
     }
 
     let jobs = Arc::clone(&st.ingest_jobs);
@@ -742,6 +940,7 @@ async fn handle_provider_dry_run(
     source: String,
     asset_class: String,
     registry_path: String,
+    provider_registry_path: String,
     out_dir: String,
     timeframe: String,
     provider_enabled_val: Option<bool>,
@@ -772,6 +971,7 @@ async fn handle_provider_dry_run(
         api_calls_made: 0,
         symbols_source: Some("registry".to_string()),
         registry_path_used: Some(registry_path.clone()),
+        provider_registry_path_used: Some(provider_registry_path.clone()),
         symbols_count: None,
         planned_first_symbol: None,
         planned_last_symbol: None,
@@ -782,22 +982,20 @@ async fn handle_provider_dry_run(
         symbols_failed: None,
     };
 
-    {
-        let mut store = st.ingest_jobs.lock().expect("ingest_jobs lock poisoned");
-        store.insert(job_id, record);
+    if let Err(resp) = persist_and_insert_job(&st, record).await {
+        return resp;
     }
 
     // Background task: resolve symbols from registry (pure fs read, no network).
     let jobs = Arc::clone(&st.ingest_jobs);
+    let db_pool = st.db.clone();
     tokio::spawn(async move {
         // Mark running.
-        {
-            let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
-            if let Some(r) = store.get_mut(&job_id) {
-                r.status = IngestJobStatus::Running;
-                r.started_at_utc = Some(Utc::now()); // allow: operational
-            }
-        }
+        persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+            r.status = IngestJobStatus::Running;
+            r.started_at_utc = Some(Utc::now()); // allow: operational
+        })
+        .await;
 
         // Resolve symbols — pure filesystem read; zero network calls.
         let path = std::path::Path::new(&registry_path);
@@ -811,8 +1009,7 @@ async fn handle_provider_dry_run(
             });
 
         // Mark terminal.
-        let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
-        if let Some(r) = store.get_mut(&job_id) {
+        persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
             r.completed_at_utc = Some(Utc::now()); // allow: operational
             match result {
                 Ok((count, first, last)) => {
@@ -828,7 +1025,8 @@ async fn handle_provider_dry_run(
                     r.error = Some(format!("registry load failed: {}", e));
                 }
             }
-        }
+        })
+        .await;
     });
 
     (
@@ -876,13 +1074,11 @@ async fn run_real_provider_sync(
     ingest_id: Uuid,
 ) {
     // Mark running.
-    {
-        let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
-        if let Some(r) = store.get_mut(&job_id) {
-            r.status = IngestJobStatus::Running;
-            r.started_at_utc = Some(Utc::now()); // allow: operational
-        }
-    }
+    persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+        r.status = IngestJobStatus::Running;
+        r.started_at_utc = Some(Utc::now()); // allow: operational
+    })
+    .await;
 
     // Resolve provider client (injected or built from env).
     let provider: std::sync::Arc<dyn mqk_md::HistoricalProvider> = if let Some(p) = provider_client
@@ -892,8 +1088,7 @@ async fn run_real_provider_sync(
         match std::env::var("TWELVEDATA_API_KEY") {
             Ok(key) => std::sync::Arc::new(mqk_md::TwelveDataHistoricalProvider::new(key)),
             Err(_) => {
-                let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
-                if let Some(r) = store.get_mut(&job_id) {
+                persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
                     r.status = IngestJobStatus::Failed;
                     r.completed_at_utc = Some(Utc::now()); // allow: operational
                     r.error = Some(
@@ -901,7 +1096,8 @@ async fn run_real_provider_sync(
                              set it or inject a provider_client for testing"
                             .to_string(),
                     );
-                }
+                })
+                .await;
                 return;
             }
         }
@@ -914,36 +1110,34 @@ async fn run_real_provider_sync(
         Ok(instruments) => {
             let equities = mqk_md::instrument_registry::enabled_equities(&instruments);
             if equities.is_empty() {
-                let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
-                if let Some(r) = store.get_mut(&job_id) {
+                persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
                     r.status = IngestJobStatus::Failed;
                     r.completed_at_utc = Some(Utc::now()); // allow: operational
                     r.error = Some("registry contains no enabled equity symbols".to_string());
-                }
+                })
+                .await;
                 return;
             }
             let syms: Vec<String> = equities.iter().map(|e| e.symbol.clone()).collect();
             let first = equities.first().map(|e| e.symbol.clone());
             let last = equities.last().map(|e| e.symbol.clone());
-            {
-                let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
-                if let Some(r) = store.get_mut(&job_id) {
-                    r.symbols_count = Some(syms.len());
-                    r.planned_first_symbol = first;
-                    r.planned_last_symbol = last;
-                    r.symbols_completed = Some(0);
-                    r.symbols_failed = Some(0);
-                }
-            }
+            persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+                r.symbols_count = Some(syms.len());
+                r.planned_first_symbol = first;
+                r.planned_last_symbol = last;
+                r.symbols_completed = Some(0);
+                r.symbols_failed = Some(0);
+            })
+            .await;
             syms
         }
         Err(e) => {
-            let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
-            if let Some(r) = store.get_mut(&job_id) {
+            persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
                 r.status = IngestJobStatus::Failed;
                 r.completed_at_utc = Some(Utc::now()); // allow: operational
                 r.error = Some(format!("registry load failed: {}", e));
-            }
+            })
+            .await;
             return;
         }
     };
@@ -1014,14 +1208,12 @@ async fn run_real_provider_sync(
         }
 
         // Progress update after each symbol.
-        {
-            let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
-            if let Some(r) = store.get_mut(&job_id) {
-                r.api_calls_made = api_calls_made;
-                r.symbols_completed = Some(symbols_completed);
-                r.symbols_failed = Some(symbols_failed);
-            }
-        }
+        persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+            r.api_calls_made = api_calls_made;
+            r.symbols_completed = Some(symbols_completed);
+            r.symbols_failed = Some(symbols_failed);
+        })
+        .await;
     }
 
     // Sort bars deterministically before DB insert.
@@ -1051,7 +1243,7 @@ async fn run_real_provider_sync(
     let (rows_inserted, rows_rejected, db_error) = if db_bars.is_empty() {
         (Some(0i64), Some(0i64), None)
     } else {
-        match db_pool {
+        match &db_pool {
             None => (
                 None,
                 None,
@@ -1059,7 +1251,7 @@ async fn run_real_provider_sync(
             ),
             Some(pool) => {
                 match mqk_db::md::ingest_provider_bars_to_md_bars(
-                    &pool,
+                    pool,
                     mqk_db::md::IngestProviderBarsArgs {
                         source: source.clone(),
                         timeframe: timeframe.as_str().to_string(),
@@ -1093,8 +1285,7 @@ async fn run_real_provider_sync(
 
     let final_error = db_error.or(guardrail_msg);
 
-    let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
-    if let Some(r) = store.get_mut(&job_id) {
+    persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
         r.completed_at_utc = Some(Utc::now()); // allow: operational
         r.status = final_status;
         r.api_calls_made = api_calls_made;
@@ -1103,7 +1294,8 @@ async fn run_real_provider_sync(
         r.rows_inserted = rows_inserted;
         r.rows_rejected = rows_rejected;
         r.error = final_error;
-    }
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1185,40 +1377,45 @@ async fn run_csv_ingest_async(
 // GET /api/v1/ingest/jobs
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn ingest_jobs_list(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+pub(crate) async fn ingest_jobs_list(State(st): State<Arc<AppState>>) -> Response {
+    if let Some(pool) = &st.db {
+        return match list_persisted_ingest_jobs(pool).await {
+            Ok(records) => {
+                let jobs = records.iter().map(record_to_summary).collect();
+                Json(IngestJobsListResponse {
+                    truth_state: "active".to_string(),
+                    jobs,
+                })
+                .into_response()
+            }
+            Err(e) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "truth_state": "backend_unavailable",
+                    "error": e,
+                    "jobs": []
+                })),
+            )
+                .into_response(),
+        };
+    }
+
     let store = st.ingest_jobs.lock().expect("ingest_jobs lock poisoned");
 
-    let mut jobs: Vec<IngestJobSummary> = store
-        .values()
-        .map(|r| IngestJobSummary {
-            job_id: r.job_id,
-            status: r.status.as_str().to_string(),
-            source: r.source.clone(),
-            mode: r.mode.clone(),
-            timeframe: r.timeframe.clone(),
-            created_at_utc: r.created_at_utc.to_rfc3339(),
-            started_at_utc: r.started_at_utc.map(|t| t.to_rfc3339()),
-            completed_at_utc: r.completed_at_utc.map(|t| t.to_rfc3339()),
-            rows_read: r.rows_read,
-            rows_inserted: r.rows_inserted,
-            rows_rejected: r.rows_rejected,
-            quality_report_path: r.quality_report_path.clone(),
-            error: r.error.clone(),
-            dry_run: r.dry_run,
-            symbols_count: r.symbols_count,
-            api_calls_made: r.api_calls_made,
-            symbols_completed: r.symbols_completed,
-            symbols_failed: r.symbols_failed,
-        })
-        .collect();
+    let mut jobs: Vec<IngestJobSummary> = store.values().map(record_to_summary).collect();
 
-    // Deterministic ordering: newest first by created_at_utc.
-    jobs.sort_by(|a, b| b.created_at_utc.cmp(&a.created_at_utc));
+    // Deterministic ordering: newest first by created_at_utc, then job_id.
+    jobs.sort_by(|a, b| {
+        b.created_at_utc
+            .cmp(&a.created_at_utc)
+            .then_with(|| a.job_id.cmp(&b.job_id))
+    });
 
     Json(IngestJobsListResponse {
         truth_state: "active".to_string(),
         jobs,
     })
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,6 +1493,28 @@ pub(crate) async fn ingest_job_status(
     State(st): State<Arc<AppState>>,
     AxumPath(job_id): AxumPath<Uuid>,
 ) -> Response {
+    if let Some(pool) = &st.db {
+        return match load_persisted_ingest_job(pool, job_id).await {
+            Ok(None) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("job_id {} not found", job_id),
+                    "truth_state": "not_found"
+                })),
+            )
+                .into_response(),
+            Ok(Some(r)) => (StatusCode::OK, Json(record_to_status_response(&r))).into_response(),
+            Err(e) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "truth_state": "backend_unavailable",
+                    "error": e
+                })),
+            )
+                .into_response(),
+        };
+    }
+
     let store = st.ingest_jobs.lock().expect("ingest_jobs lock poisoned");
 
     match store.get(&job_id) {
@@ -1307,39 +1526,6 @@ pub(crate) async fn ingest_job_status(
             })),
         )
             .into_response(),
-        Some(r) => (
-            StatusCode::OK,
-            Json(IngestJobStatusResponse {
-                truth_state: "active".to_string(),
-                job_id: r.job_id,
-                status: r.status.as_str().to_string(),
-                source: r.source.clone(),
-                mode: r.mode.clone(),
-                timeframe: r.timeframe.clone(),
-                csv_path: r.csv_path.clone(),
-                created_at_utc: r.created_at_utc.to_rfc3339(),
-                started_at_utc: r.started_at_utc.map(|t| t.to_rfc3339()),
-                completed_at_utc: r.completed_at_utc.map(|t| t.to_rfc3339()),
-                rows_read: r.rows_read,
-                rows_inserted: r.rows_inserted,
-                rows_rejected: r.rows_rejected,
-                quality_report_path: r.quality_report_path.clone(),
-                error: r.error.clone(),
-                dry_run: r.dry_run,
-                provider_api_calls_allowed: r.provider_api_calls_allowed,
-                api_calls_made: r.api_calls_made,
-                symbols_source: r.symbols_source.clone(),
-                registry_path_used: r.registry_path_used.clone(),
-                symbols_count: r.symbols_count,
-                planned_first_symbol: r.planned_first_symbol.clone(),
-                planned_last_symbol: r.planned_last_symbol.clone(),
-                asset_class: r.asset_class.clone(),
-                provider_enabled: r.provider_enabled,
-                provider_verification_status: r.provider_verification_status.clone(),
-                symbols_completed: r.symbols_completed,
-                symbols_failed: r.symbols_failed,
-            }),
-        )
-            .into_response(),
+        Some(r) => (StatusCode::OK, Json(record_to_status_response(r))).into_response(),
     }
 }
