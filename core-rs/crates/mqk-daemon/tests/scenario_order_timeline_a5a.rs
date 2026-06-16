@@ -249,7 +249,11 @@ async fn connect_db() -> Option<sqlx::PgPool> {
 /// Seed a minimal CREATED run anchored to engine_id="mqk-daemon", mode="PAPER",
 /// at the given `started_at_utc`. Used to control which run is "latest" for
 /// `fetch_latest_run_for_engine`.
-async fn seed_run(pool: &sqlx::PgPool, run_id: uuid::Uuid, started_at: chrono::DateTime<chrono::Utc>) {
+async fn seed_run(
+    pool: &sqlx::PgPool,
+    run_id: uuid::Uuid,
+    started_at: chrono::DateTime<chrono::Utc>,
+) {
     sqlx::query("delete from fill_quality_telemetry where run_id = $1")
         .bind(run_id)
         .execute(pool)
@@ -398,12 +402,17 @@ async fn tl08_cross_run_fallback_returns_active_with_prior_run_fill() {
     );
     {
         let mut snap = st.execution_snapshot.write().await;
-        *snap = Some(exec_snapshot_with_filled_order(active_run_id, internal_order_id));
+        *snap = Some(exec_snapshot_with_filled_order(
+            active_run_id,
+            internal_order_id,
+        ));
     }
 
     let router = routes::build_router(Arc::new(st));
     let req = Request::builder()
-        .uri(format!("/api/v1/execution/orders/{internal_order_id}/timeline"))
+        .uri(format!(
+            "/api/v1/execution/orders/{internal_order_id}/timeline"
+        ))
         .body(axum::body::Body::empty())
         .unwrap();
     let (status, body) = call(router, req).await;
@@ -462,10 +471,9 @@ async fn tl09_filled_without_telemetry_returns_honest_truth_state() {
     let internal_order_id = "ord-tl09-no-telemetry";
 
     // Precondition: no telemetry rows exist anywhere for this order_id.
-    let existing =
-        mqk_db::fetch_fill_quality_telemetry_for_order_any_run(&pool, internal_order_id)
-            .await
-            .expect("TL-09: any-run fetch must succeed even when empty");
+    let existing = mqk_db::fetch_fill_quality_telemetry_for_order_any_run(&pool, internal_order_id)
+        .await
+        .expect("TL-09: any-run fetch must succeed even when empty");
     assert!(
         existing.is_empty(),
         "TL-09: precondition — no telemetry rows must exist for this order_id"
@@ -481,12 +489,17 @@ async fn tl09_filled_without_telemetry_returns_honest_truth_state() {
     );
     {
         let mut snap = st.execution_snapshot.write().await;
-        *snap = Some(exec_snapshot_with_filled_order(active_run_id, internal_order_id));
+        *snap = Some(exec_snapshot_with_filled_order(
+            active_run_id,
+            internal_order_id,
+        ));
     }
 
     let router = routes::build_router(Arc::new(st));
     let req = Request::builder()
-        .uri(format!("/api/v1/execution/orders/{internal_order_id}/timeline"))
+        .uri(format!(
+            "/api/v1/execution/orders/{internal_order_id}/timeline"
+        ))
         .body(axum::body::Body::empty())
         .unwrap();
     let (status, body) = call(router, req).await;

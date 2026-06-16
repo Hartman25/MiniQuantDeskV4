@@ -54,6 +54,19 @@ impl Timeframe {
         }
     }
 
+    pub fn duration_secs(&self) -> i64 {
+        match self {
+            Timeframe::D1 => 86_400,
+            Timeframe::H1 => 3_600,
+            Timeframe::M1 => 60,
+            Timeframe::M5 => 300,
+        }
+    }
+
+    pub fn is_intraday(&self) -> bool {
+        self.duration_secs() < 86_400
+    }
+
     /// TwelveData interval string.
     pub fn as_twelvedata_interval(&self) -> &'static str {
         match self {
@@ -94,6 +107,116 @@ pub struct ProviderBar {
     pub close: String,
     pub volume: i64,
     pub is_complete: bool,
+}
+
+/// Diagnostic summary for provider-bar completion filtering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedBarFilterReport {
+    pub timeframe: String,
+    pub now_ts: i64,
+    pub timeframe_secs: i64,
+    pub completed_cutoff_ts: Option<i64>,
+    pub rows_in: usize,
+    pub rows_kept: usize,
+    pub rows_dropped_incomplete_flag: usize,
+    pub rows_dropped_current: usize,
+    pub latest_completed_end_ts: Option<i64>,
+}
+
+/// Keep only bars that are safe to ingest as completed strategy input.
+///
+/// Provider adapters can only report what their historical endpoint returns.
+/// For intraday timeframes, the stored timestamp convention in this repo is the
+/// bar period timestamp used by the providers, so a bar is treated as completed
+/// only after `end_ts + timeframe_secs <= now_ts`. This keeps an in-progress
+/// current 5m/1m/1h bar out of canonical `md_bars`.
+pub fn filter_completed_provider_bars(
+    bars: Vec<ProviderBar>,
+    timeframe: Timeframe,
+    now_ts: i64,
+) -> (Vec<ProviderBar>, CompletedBarFilterReport) {
+    let timeframe_secs = timeframe.duration_secs();
+    let completed_cutoff_ts = timeframe
+        .is_intraday()
+        .then_some(now_ts.saturating_sub(timeframe_secs));
+
+    let mut report = CompletedBarFilterReport {
+        timeframe: timeframe.as_str().to_string(),
+        now_ts,
+        timeframe_secs,
+        completed_cutoff_ts,
+        rows_in: bars.len(),
+        rows_kept: 0,
+        rows_dropped_incomplete_flag: 0,
+        rows_dropped_current: 0,
+        latest_completed_end_ts: None,
+    };
+
+    let mut kept = Vec::with_capacity(bars.len());
+    for bar in bars {
+        if !bar.is_complete {
+            report.rows_dropped_incomplete_flag += 1;
+            continue;
+        }
+
+        if let Some(cutoff_ts) = completed_cutoff_ts {
+            if bar.end_ts > cutoff_ts {
+                report.rows_dropped_current += 1;
+                continue;
+            }
+        }
+
+        report.latest_completed_end_ts = Some(
+            report
+                .latest_completed_end_ts
+                .map_or(bar.end_ts, |prev| prev.max(bar.end_ts)),
+        );
+        kept.push(bar);
+    }
+
+    report.rows_kept = kept.len();
+    (kept, report)
+}
+
+/// Decide whether a refresh attempt should be suppressed by a minimum interval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RefreshAttemptDecision {
+    pub allowed: bool,
+    pub retry_after_secs: Option<i64>,
+    pub reason: Option<String>,
+}
+
+pub fn refresh_attempt_decision(
+    last_attempt_ts: Option<i64>,
+    now_ts: i64,
+    min_interval_secs: i64,
+) -> RefreshAttemptDecision {
+    let min_interval_secs = min_interval_secs.max(0);
+    let Some(last_attempt_ts) = last_attempt_ts else {
+        return RefreshAttemptDecision {
+            allowed: true,
+            retry_after_secs: None,
+            reason: None,
+        };
+    };
+
+    let elapsed = now_ts.saturating_sub(last_attempt_ts);
+    if elapsed >= min_interval_secs {
+        RefreshAttemptDecision {
+            allowed: true,
+            retry_after_secs: None,
+            reason: None,
+        }
+    } else {
+        let retry_after_secs = min_interval_secs - elapsed;
+        RefreshAttemptDecision {
+            allowed: false,
+            retry_after_secs: Some(retry_after_secs),
+            reason: Some(format!(
+                "refresh suppressed: last_attempt_age_secs={elapsed} < min_refresh_interval_secs={min_interval_secs}"
+            )),
+        }
+    }
 }
 
 /// Fetch request for a provider.
@@ -537,6 +660,94 @@ mod tests {
         assert_eq!(Timeframe::M5.as_twelvedata_interval(), "5min");
         assert_eq!(Timeframe::D1.as_str(), "1D");
         assert_eq!(Timeframe::D1.as_twelvedata_interval(), "1day");
+    }
+
+    fn provider_bar(symbol: &str, timeframe: &str, end_ts: i64, is_complete: bool) -> ProviderBar {
+        ProviderBar {
+            symbol: symbol.to_string(),
+            timeframe: timeframe.to_string(),
+            end_ts,
+            open: "100".to_string(),
+            high: "101".to_string(),
+            low: "99".to_string(),
+            close: "100.5".to_string(),
+            volume: 1_000,
+            is_complete,
+        }
+    }
+
+    #[test]
+    fn timeframe_duration_and_intraday_classification_are_stable() {
+        assert_eq!(Timeframe::M5.duration_secs(), 300);
+        assert_eq!(Timeframe::M1.duration_secs(), 60);
+        assert_eq!(Timeframe::H1.duration_secs(), 3_600);
+        assert_eq!(Timeframe::D1.duration_secs(), 86_400);
+        assert!(Timeframe::M5.is_intraday());
+        assert!(Timeframe::H1.is_intraday());
+        assert!(!Timeframe::D1.is_intraday());
+    }
+
+    #[test]
+    fn completed_filter_drops_current_intraday_and_incomplete_flagged_bars() {
+        let now_ts = 10_000;
+        let bars = vec![
+            provider_bar("AAPL", "5m", 9_400, true),
+            provider_bar("AAPL", "5m", 9_700, true),
+            provider_bar("AAPL", "5m", 9_701, true),
+            provider_bar("AAPL", "5m", 9_400, false),
+        ];
+
+        let (kept, report) = filter_completed_provider_bars(bars, Timeframe::M5, now_ts);
+
+        assert_eq!(
+            kept.iter().map(|b| b.end_ts).collect::<Vec<_>>(),
+            vec![9_400, 9_700],
+            "5m bars newer than now_ts - 300 are current/in-progress and must be dropped"
+        );
+        assert_eq!(report.completed_cutoff_ts, Some(9_700));
+        assert_eq!(report.rows_in, 4);
+        assert_eq!(report.rows_kept, 2);
+        assert_eq!(report.rows_dropped_current, 1);
+        assert_eq!(report.rows_dropped_incomplete_flag, 1);
+        assert_eq!(report.latest_completed_end_ts, Some(9_700));
+    }
+
+    #[test]
+    fn completed_filter_keeps_daily_complete_bars_without_intraday_cutoff() {
+        let now_ts = 10_000;
+        let bars = vec![
+            provider_bar("AAPL", "1D", 9_900, true),
+            provider_bar("AAPL", "1D", 10_000, false),
+        ];
+
+        let (kept, report) = filter_completed_provider_bars(bars, Timeframe::D1, now_ts);
+
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].end_ts, 9_900);
+        assert_eq!(report.completed_cutoff_ts, None);
+        assert_eq!(report.rows_dropped_current, 0);
+        assert_eq!(report.rows_dropped_incomplete_flag, 1);
+        assert_eq!(report.latest_completed_end_ts, Some(9_900));
+    }
+
+    #[test]
+    fn refresh_attempt_decision_suppresses_too_frequent_attempts() {
+        let suppressed = refresh_attempt_decision(Some(1_000), 1_120, 300);
+        assert!(!suppressed.allowed);
+        assert_eq!(suppressed.retry_after_secs, Some(180));
+        assert!(
+            suppressed
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("min_refresh_interval_secs=300"),
+            "suppression reason must expose the configured interval"
+        );
+
+        let allowed = refresh_attempt_decision(Some(1_000), 1_300, 300);
+        assert!(allowed.allowed);
+        assert_eq!(allowed.retry_after_secs, None);
+        assert_eq!(allowed.reason, None);
     }
 
     // -----------------------------------------------------------------------

@@ -759,10 +759,8 @@ mod tests {
     #[test]
     fn rehv01_known_halted_false_and_unavailable_emit_no_signal() {
         assert!(
-            sticky_halt_fault_signal(mqk_execution::RiskEngineHaltStatus::Known {
-                halted: false
-            })
-            .is_none(),
+            sticky_halt_fault_signal(mqk_execution::RiskEngineHaltStatus::Known { halted: false })
+                .is_none(),
             "Known{{halted: false}} must not emit a sticky-halt fault signal"
         );
         assert!(

@@ -201,7 +201,10 @@ fn dis06_t03_flatten_payload_no_secrets() {
 #[tokio::test(flavor = "multi_thread")]
 async fn dis06_t04_noop_notifier_discards_flatten_alert() {
     let notifier = DiscordNotifier::noop();
-    assert!(!notifier.is_configured(), "DIS06-T04: noop must not be configured");
+    assert!(
+        !notifier.is_configured(),
+        "DIS06-T04: noop must not be configured"
+    );
 
     // Must complete without panic or error; no delivery attempted.
     notifier.notify_trade_event(&flatten_payload("AAPL")).await;
@@ -278,7 +281,10 @@ async fn dis06_t07_reconcile_clean_detail_has_transitioned_from() {
 #[tokio::test(flavor = "multi_thread")]
 async fn dis06_t08_noop_discards_reconcile_clean_alert() {
     let notifier = DiscordNotifier::noop();
-    assert!(!notifier.is_configured(), "DIS06-T08: noop must not be configured");
+    assert!(
+        !notifier.is_configured(),
+        "DIS06-T08: noop must not be configured"
+    );
 
     // Must complete without panic or error.
     notifier

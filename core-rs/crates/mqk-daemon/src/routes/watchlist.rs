@@ -135,7 +135,12 @@ pub(crate) async fn watchlist_admission_check(
     Query(params): Query<AdmissionCheckParams>,
 ) -> impl IntoResponse {
     let symbol = params.symbol.as_deref().unwrap_or("").trim().to_string();
-    let strategy_id = params.strategy_id.as_deref().unwrap_or("").trim().to_string();
+    let strategy_id = params
+        .strategy_id
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let checked_at_utc = Utc::now().to_rfc3339();
 
     let configured_path = match std::env::var(ENV_PAPER_WATCHLIST_PATH) {
@@ -180,7 +185,10 @@ pub(crate) fn build_watchlist_admission_check_response(
                 .iter()
                 .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
                 .collect();
-            (art.top_symbol.clone(), serde_json::Value::Object(assignments))
+            (
+                art.top_symbol.clone(),
+                serde_json::Value::Object(assignments),
+            )
         }
         None => (None, serde_json::json!({})),
     };

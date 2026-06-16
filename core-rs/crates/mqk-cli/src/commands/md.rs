@@ -108,6 +108,27 @@ fn write_provider_bars_csv(path: &Path, bars: &[mqk_db::md::ProviderBar]) -> Res
         .with_context(|| format!("write_provider_bars_csv failed: {}", path.display()))
 }
 
+fn fmt_opt_i64(v: Option<i64>) -> String {
+    v.map(|n| n.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn print_completed_bar_filter_report(source: &str, report: &mqk_md::CompletedBarFilterReport) {
+    println!(
+        "completed_bar_filter source={} timeframe={} now_ts={} timeframe_secs={} completed_cutoff_ts={} rows_in={} rows_kept={} dropped_incomplete_flag={} dropped_current={} latest_completed_end_ts={}",
+        source,
+        report.timeframe,
+        report.now_ts,
+        report.timeframe_secs,
+        fmt_opt_i64(report.completed_cutoff_ts),
+        report.rows_in,
+        report.rows_kept,
+        report.rows_dropped_incomplete_flag,
+        report.rows_dropped_current,
+        fmt_opt_i64(report.latest_completed_end_ts),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PATCH B — CSV ingestion
 // ---------------------------------------------------------------------------
@@ -230,8 +251,9 @@ pub fn resolve_symbols(
 /// so that the DB ingest layer's per-symbol monotonicity check is never tripped by
 /// cross-chunk ordering.
 ///
-/// A `provider_bars.csv` backup artifact is written before DB ingest so the raw
-/// normalized fetch is preserved independently of DB state.
+/// A `provider_bars.csv` backup artifact is written before DB ingest so the
+/// completed, normalized provider rows selected for ingest are preserved
+/// independently of DB state.
 pub async fn md_ingest_provider(
     source: String,
     symbols: Option<String>,
@@ -316,9 +338,13 @@ pub async fn md_ingest_provider(
             .then_with(|| a.end_ts.cmp(&b.end_ts))
     });
 
+    let (completed_raw, completion_report) =
+        mqk_md::filter_completed_provider_bars(all_raw, tf, Utc::now().timestamp());
+    print_completed_bar_filter_report(&source_lc, &completion_report);
+
     // Convert mqk_md::ProviderBar → mqk_db::md::ProviderBar.
     // Prices are already normalized by fetch_bars; no additional transformation needed.
-    let bars: Vec<mqk_db::md::ProviderBar> = all_raw
+    let bars: Vec<mqk_db::md::ProviderBar> = completed_raw
         .iter()
         .map(|b| mqk_db::md::ProviderBar {
             symbol: b.symbol.clone(),
@@ -338,8 +364,8 @@ pub async fn md_ingest_provider(
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create {}", out_dir.display()))?;
 
-    // Write CSV backup before DB ingest: captures the normalized fetch regardless
-    // of DB ingest outcome.
+    // Write CSV backup before DB ingest: captures the completed filtered provider
+    // rows regardless of DB ingest outcome.
     let csv_path = out_dir.join("provider_bars.csv");
     write_provider_bars_csv(&csv_path, &bars)?;
 
@@ -501,7 +527,7 @@ pub async fn md_sync_provider(
     };
 
     // --- Fetch per-symbol, collect all bars into one batch ---
-    let mut all_bars: Vec<mqk_db::md::ProviderBar> = Vec::new();
+    let mut all_raw: Vec<mqk_md::ProviderBar> = Vec::new();
     for (sym, effective_start) in &sym_start_pairs {
         if effective_start > &end_d {
             // Symbol already up-to-date; overlap window extends past end_d.
@@ -518,20 +544,33 @@ pub async fn md_sync_provider(
             end: end_d,
         };
         let raw = provider.fetch_bars(req).await?;
-        for b in raw {
-            all_bars.push(mqk_db::md::ProviderBar {
-                symbol: b.symbol,
-                timeframe: b.timeframe,
-                end_ts: b.end_ts,
-                open: b.open,
-                high: b.high,
-                low: b.low,
-                close: b.close,
-                volume: b.volume,
-                is_complete: b.is_complete,
-            });
-        }
+        all_raw.extend(raw);
     }
+
+    all_raw.sort_by(|a, b| {
+        a.symbol
+            .cmp(&b.symbol)
+            .then_with(|| a.end_ts.cmp(&b.end_ts))
+    });
+
+    let (completed_raw, completion_report) =
+        mqk_md::filter_completed_provider_bars(all_raw, tf, Utc::now().timestamp());
+    print_completed_bar_filter_report(&source_lc, &completion_report);
+
+    let all_bars: Vec<mqk_db::md::ProviderBar> = completed_raw
+        .into_iter()
+        .map(|b| mqk_db::md::ProviderBar {
+            symbol: b.symbol,
+            timeframe: b.timeframe,
+            end_ts: b.end_ts,
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+            volume: b.volume,
+            is_complete: b.is_complete,
+        })
+        .collect();
 
     // --- Ingest all bars in one atomic quality-report pass ---
     let res = mqk_db::md::ingest_provider_bars_to_md_bars(

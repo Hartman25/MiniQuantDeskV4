@@ -112,7 +112,10 @@ fn m01_legacy_all_present_returns_env_single_symbol_fallback() {
         build_legacy_single_symbol_config(Some("AAPL"), Some("strat-scalper-001"), Some("5Min"))
             .expect("expected Ok");
 
-    assert_eq!(cfg.schema_version, MULTI_SYMBOL_RUNTIME_CONFIG_SCHEMA_VERSION);
+    assert_eq!(
+        cfg.schema_version,
+        MULTI_SYMBOL_RUNTIME_CONFIG_SCHEMA_VERSION
+    );
     assert_eq!(cfg.symbols.len(), 1);
     assert_eq!(
         cfg.symbols[0],
@@ -132,9 +135,8 @@ fn m01_legacy_all_present_returns_env_single_symbol_fallback() {
 
 #[test]
 fn m02_legacy_missing_symbol_fails_closed() {
-    let err =
-        build_legacy_single_symbol_config(None, Some("strat-scalper-001"), Some("5Min"))
-            .expect_err("expected Err");
+    let err = build_legacy_single_symbol_config(None, Some("strat-scalper-001"), Some("5Min"))
+        .expect_err("expected Err");
 
     assert_eq!(err, MultiSymbolConfigError::MissingSymbol);
     assert_eq!(err.as_str(), "multi_symbol_config_missing_symbol");
@@ -197,11 +199,17 @@ fn m06_watchlist_v2_loaded_approved_builds_three_symbol_config() {
     );
     let outcome = loaded_approved(artifact);
 
-    let cfg =
-        build_multi_symbol_config_from_watchlist_artifact(&outcome, "/cfg/watchlist.json", Some("5Min"))
-            .expect("expected Ok");
+    let cfg = build_multi_symbol_config_from_watchlist_artifact(
+        &outcome,
+        "/cfg/watchlist.json",
+        Some("5Min"),
+    )
+    .expect("expected Ok");
 
-    assert_eq!(cfg.schema_version, MULTI_SYMBOL_RUNTIME_CONFIG_SCHEMA_VERSION);
+    assert_eq!(
+        cfg.schema_version,
+        MULTI_SYMBOL_RUNTIME_CONFIG_SCHEMA_VERSION
+    );
     assert_eq!(cfg.symbols.len(), 3);
     assert_eq!(
         cfg.symbols[0],
@@ -263,8 +271,12 @@ fn m08_watchlist_loaded_not_approved_fails_closed() {
     let artifact = artifact_v2(&["AAPL"], &[("AAPL", "strat-scalper-001")], 1, 1);
     let outcome = loaded_not_approved(artifact);
 
-    let err = build_multi_symbol_config_from_watchlist_artifact(&outcome, "/cfg/watchlist.json", Some("5Min"))
-        .expect_err("expected Err");
+    let err = build_multi_symbol_config_from_watchlist_artifact(
+        &outcome,
+        "/cfg/watchlist.json",
+        Some("5Min"),
+    )
+    .expect_err("expected Err");
 
     assert_eq!(err, MultiSymbolConfigError::WatchlistNotApproved);
 }
@@ -278,8 +290,12 @@ fn m09_watchlist_v1_artifact_fails_not_v2() {
     let artifact = artifact_v1("AAPL", "strat-scalper-001");
     let outcome = loaded_approved(artifact);
 
-    let err = build_multi_symbol_config_from_watchlist_artifact(&outcome, "/cfg/watchlist.json", Some("5Min"))
-        .expect_err("expected Err");
+    let err = build_multi_symbol_config_from_watchlist_artifact(
+        &outcome,
+        "/cfg/watchlist.json",
+        Some("5Min"),
+    )
+    .expect_err("expected Err");
 
     assert_eq!(err, MultiSymbolConfigError::WatchlistNotV2);
     assert_eq!(err.as_str(), "multi_symbol_config_watchlist_not_v2");
@@ -294,8 +310,9 @@ fn m10_watchlist_v2_missing_timeframe_fails_closed() {
     let artifact = artifact_v2(&["AAPL"], &[("AAPL", "strat-scalper-001")], 1, 1);
     let outcome = loaded_approved(artifact);
 
-    let err = build_multi_symbol_config_from_watchlist_artifact(&outcome, "/cfg/watchlist.json", None)
-        .expect_err("expected Err");
+    let err =
+        build_multi_symbol_config_from_watchlist_artifact(&outcome, "/cfg/watchlist.json", None)
+            .expect_err("expected Err");
 
     assert_eq!(err, MultiSymbolConfigError::MissingTimeframe);
     assert_eq!(err.as_str(), "multi_symbol_config_missing_timeframe");
@@ -312,8 +329,12 @@ fn m11_watchlist_v2_over_hard_ceiling_fails_closed() {
     let artifact = artifact_v2(&["AAPL"], &[("AAPL", "strat-scalper-001")], over, over);
     let outcome = loaded_approved(artifact);
 
-    let err = build_multi_symbol_config_from_watchlist_artifact(&outcome, "/cfg/watchlist.json", Some("5Min"))
-        .expect_err("expected Err");
+    let err = build_multi_symbol_config_from_watchlist_artifact(
+        &outcome,
+        "/cfg/watchlist.json",
+        Some("5Min"),
+    )
+    .expect_err("expected Err");
 
     assert_eq!(
         err,
@@ -344,8 +365,12 @@ fn m12_watchlist_v2_symbols_exceed_max_to_trade_fails_closed() {
     );
     let outcome = loaded_approved(artifact);
 
-    let err = build_multi_symbol_config_from_watchlist_artifact(&outcome, "/cfg/watchlist.json", Some("5Min"))
-        .expect_err("expected Err");
+    let err = build_multi_symbol_config_from_watchlist_artifact(
+        &outcome,
+        "/cfg/watchlist.json",
+        Some("5Min"),
+    )
+    .expect_err("expected Err");
 
     assert_eq!(
         err,
@@ -354,7 +379,10 @@ fn m12_watchlist_v2_symbols_exceed_max_to_trade_fails_closed() {
             limit: 2,
         }
     );
-    assert_eq!(err.as_str(), "multi_symbol_config_concurrent_limit_exceeded");
+    assert_eq!(
+        err.as_str(),
+        "multi_symbol_config_concurrent_limit_exceeded"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -372,8 +400,12 @@ fn m13_watchlist_v2_missing_assignment_fails_closed() {
     );
     let outcome = loaded_approved(artifact);
 
-    let err = build_multi_symbol_config_from_watchlist_artifact(&outcome, "/cfg/watchlist.json", Some("5Min"))
-        .expect_err("expected Err");
+    let err = build_multi_symbol_config_from_watchlist_artifact(
+        &outcome,
+        "/cfg/watchlist.json",
+        Some("5Min"),
+    )
+    .expect_err("expected Err");
 
     assert_eq!(
         err,
@@ -392,10 +424,7 @@ fn m13_watchlist_v2_missing_assignment_fails_closed() {
 fn m14_selection_prefers_valid_watchlist_v2_over_legacy() {
     let artifact = artifact_v2(
         &["AAPL", "MSFT"],
-        &[
-            ("AAPL", "strat-scalper-001"),
-            ("MSFT", "strat-scalper-002"),
-        ],
+        &[("AAPL", "strat-scalper-001"), ("MSFT", "strat-scalper-002")],
         2,
         2,
     );
@@ -516,9 +545,12 @@ fn m18_multi_symbol_runtime_config_carries_no_approved_for_live_field() {
     // Watchlist-v2 path.
     let artifact = artifact_v2(&["AAPL"], &[("AAPL", "strat-scalper-001")], 1, 1);
     let outcome = loaded_approved(artifact);
-    let wl_cfg =
-        build_multi_symbol_config_from_watchlist_artifact(&outcome, "/cfg/watchlist.json", Some("5Min"))
-            .expect("expected Ok");
+    let wl_cfg = build_multi_symbol_config_from_watchlist_artifact(
+        &outcome,
+        "/cfg/watchlist.json",
+        Some("5Min"),
+    )
+    .expect("expected Ok");
     let wl_debug = format!("{wl_cfg:?}");
     assert!(
         !wl_debug.contains("approved_for_live"),

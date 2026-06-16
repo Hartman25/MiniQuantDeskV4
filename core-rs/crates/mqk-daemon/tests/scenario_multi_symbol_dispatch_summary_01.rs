@@ -35,7 +35,6 @@ impl EnvVarGuard {
         std::env::remove_var(key);
         Self { key, prior }
     }
-
 }
 
 impl Drop for EnvVarGuard {

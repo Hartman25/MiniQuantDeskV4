@@ -1159,7 +1159,7 @@ clippy remains blocked by unrelated existing drift in
 
 **Status:** CLOSED
 
-### INTRADAY-MD-REFRESHER-01 — QUEUED / HIGH PRIORITY
+### INTRADAY-MD-REFRESHER-01 — CLOSED
 
 **Purpose:** Add or prove a safe intraday market-data refresh path so AAPL/5m and future watchlist symbols receive latest completed bars during the market session.
 
@@ -1176,7 +1176,23 @@ clippy remains blocked by unrelated existing drift in
 - Must not modify broker/risk/order behavior.
 - Must keep live routing false in any paper smoke.
 
-**Status:** QUEUED / HIGH PRIORITY
+**Closure:**
+
+- Selected Option 2 (CLI/script-backed refresher): `Refresh-IntradayMarketData.ps1`
+  drives `mqk-cli md sync-provider`, which writes through the canonical
+  `ingest_provider_bars_to_md_bars` upsert path into `md_bars`.
+- `mqk-cli` now filters provider rows before ingest so incomplete rows and
+  in-progress intraday rows newer than `now_ts - timeframe_secs` are not written
+  as completed strategy input.
+- The Windows refresher keeps the default 300s cadence, suppresses loop
+  intervals below the configured minimum, and writes provider/source, attempt,
+  completion-filter, inserted/updated-row, latest-bar, and failure diagnostics
+  to its intraday refresh evidence JSON.
+- Readiness/preflight freshness gates remain unchanged; strategy dispatch still
+  consumes only completed rows from `md_bars`.
+- Focused proof: `scenario_intraday_md_refresher_01`.
+
+**Status:** CLOSED
 
 ### DATA-STREAMING-BARS-01 — QUEUED / PARKED
 

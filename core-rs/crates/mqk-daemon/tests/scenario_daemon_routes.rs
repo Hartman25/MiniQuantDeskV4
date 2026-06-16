@@ -977,8 +977,8 @@ async fn api_risk_summary_exposes_risk_engine_sticky_halt_state() {
     );
     assert!(json["risk_engine_halt_reason_code"].is_null());
 
-    let base_snapshot = |risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus| {
-        ExecutionSnapshot {
+    let base_snapshot =
+        |risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus| ExecutionSnapshot {
             run_id: None,
             active_orders: vec![],
             pending_outbox: vec![],
@@ -993,13 +993,13 @@ async fn api_risk_summary_exposes_risk_engine_sticky_halt_state() {
             snapshot_at_utc: chrono::Utc::now(),
             has_recent_terminal_fill: false,
             risk_engine_sticky_halt,
-        }
-    };
+        };
 
     // Live gate reports a sticky halt: RiskState.halted == true.
-    *st.execution_snapshot.write().await = Some(base_snapshot(
-        mqk_execution::RiskEngineHaltStatus::Known { halted: true },
-    ));
+    *st.execution_snapshot.write().await =
+        Some(base_snapshot(mqk_execution::RiskEngineHaltStatus::Known {
+            halted: true,
+        }));
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/risk/summary")
@@ -1014,9 +1014,10 @@ async fn api_risk_summary_exposes_risk_engine_sticky_halt_state() {
     );
 
     // Live gate confirms not halted: Known{halted: false}, distinct from Unavailable.
-    *st.execution_snapshot.write().await = Some(base_snapshot(
-        mqk_execution::RiskEngineHaltStatus::Known { halted: false },
-    ));
+    *st.execution_snapshot.write().await =
+        Some(base_snapshot(mqk_execution::RiskEngineHaltStatus::Known {
+            halted: false,
+        }));
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/risk/summary")

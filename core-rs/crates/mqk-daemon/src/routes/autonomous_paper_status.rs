@@ -30,9 +30,7 @@ use super::system::autonomous_session_truth_to_api;
 // GET /api/v1/autonomous/paper-status
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn autonomous_paper_status(
-    State(st): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub(crate) async fn autonomous_paper_status(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let now = Utc::now();
     let now_utc = now.to_rfc3339();
 
@@ -106,11 +104,7 @@ pub(crate) async fn autonomous_paper_status(
                     arm_state: "unavailable".to_string(),
                     kill_switch_active: false,
                     deadman_status: "unavailable".to_string(),
-                    ws_continuity: st
-                        .alpaca_ws_continuity()
-                        .await
-                        .as_status_str()
-                        .to_string(),
+                    ws_continuity: st.alpaca_ws_continuity().await.as_status_str().to_string(),
                     reconcile_status: "unavailable".to_string(),
                     mismatch_count: 0,
                     open_order_count: 0,
@@ -214,13 +208,18 @@ pub(crate) async fn autonomous_paper_status(
 
     // current_position_qty: look up symbol in exec snapshot portfolio.
     let current_position_qty: Option<i64> = current_symbol.as_deref().and_then(|sym| {
-        exec_snap.as_ref()?.portfolio.positions.iter().find_map(|p| {
-            if p.symbol == sym {
-                Some(p.net_qty)
-            } else {
-                None
-            }
-        })
+        exec_snap
+            .as_ref()?
+            .portfolio
+            .positions
+            .iter()
+            .find_map(|p| {
+                if p.symbol == sym {
+                    Some(p.net_qty)
+                } else {
+                    None
+                }
+            })
     });
 
     // target_qty from last bar signal.
@@ -286,9 +285,8 @@ pub(crate) async fn autonomous_paper_status(
     }
     // Gate 8: positions non-empty
     if position_count == 0 {
-        flatten_blockers.push(
-            "flatten blocked: no open positions to flatten (gate=no_positions)".to_string(),
-        );
+        flatten_blockers
+            .push("flatten blocked: no open positions to flatten (gate=no_positions)".to_string());
     }
 
     let flatten_available = flatten_blockers.is_empty();
@@ -364,9 +362,7 @@ pub(crate) async fn autonomous_paper_status(
     let run_active_blocker = "a locally-owned execution run is already active";
     let fatal_blockers_count = blockers
         .iter()
-        .filter(|b| {
-            !b.starts_with(session_window_blocker) && !b.starts_with(run_active_blocker)
-        })
+        .filter(|b| !b.starts_with(session_window_blocker) && !b.starts_with(run_active_blocker))
         .count();
 
     let readiness_classification = if fatal_blockers_count > 0 || kill_switch_active {
@@ -385,9 +381,13 @@ pub(crate) async fn autonomous_paper_status(
     } else if ws_continuity_str == "gap_detected" {
         "WS gap detected. Review reconcile mismatches at /api/v1/reconcile/mismatches and perform operator gap recovery".to_string()
     } else if !reconcile_ready {
-        format!("Reconcile is '{}'. Review /api/v1/reconcile/mismatches and resolve before start", reconcile_status_str)
+        format!(
+            "Reconcile is '{}'. Review /api/v1/reconcile/mismatches and resolve before start",
+            reconcile_status_str
+        )
     } else if arm_state == "disarmed_db" {
-        "DB arm state is DISARMED. Re-arm: POST /api/v1/ops/action {\"action\":\"arm-execution\"}".to_string()
+        "DB arm state is DISARMED. Re-arm: POST /api/v1/ops/action {\"action\":\"arm-execution\"}"
+            .to_string()
     } else if arm_state == "halted" {
         "Integrity halted. Arm: POST /api/v1/ops/action {\"action\":\"arm-execution\"} after resolving halt cause".to_string()
     } else if !signal_ingestion_configured {
@@ -395,11 +395,13 @@ pub(crate) async fn autonomous_paper_status(
     } else if strategy_fleet_empty {
         "Set MQK_STRATEGY_IDS to a registered strategy name (e.g. intraday_scalper) and restart daemon".to_string()
     } else if !ws_continuity_ready {
-        "WS continuity is not live. Wait for WS reconnect or restart daemon to re-establish".to_string()
+        "WS continuity is not live. Wait for WS reconnect or restart daemon to re-establish"
+            .to_string()
     } else if !runtime_start_allowed {
         "An autonomous session run is active. Monitor at /api/v1/autonomous/readiness".to_string()
     } else if !session_in_window {
-        "System is ready. Awaiting market hours (NYSE regular session). No operator action needed.".to_string()
+        "System is ready. Awaiting market hours (NYSE regular session). No operator action needed."
+            .to_string()
     } else {
         "All gates pass. System is ready for autonomous paper market session.".to_string()
     };

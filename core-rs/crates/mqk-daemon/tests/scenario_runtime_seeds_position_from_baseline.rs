@@ -85,12 +85,11 @@ fn sp02_baseline_aapl_one_seeds_portfolio_qty_one() {
     seed_from_positions(&mut pf, &[("AAPL", 1)]);
     let snap = build_portfolio_snapshot(&pf);
     let aapl = snap.positions.iter().find(|p| p.symbol == "AAPL");
-    assert!(aapl.is_some(), "SP02: AAPL position must be present after seeding");
-    assert_eq!(
-        aapl.unwrap().net_qty,
-        1,
-        "SP02: AAPL net_qty must be 1"
+    assert!(
+        aapl.is_some(),
+        "SP02: AAPL position must be present after seeding"
     );
+    assert_eq!(aapl.unwrap().net_qty, 1, "SP02: AAPL net_qty must be 1");
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +233,10 @@ fn sp07_zero_qty_baseline_entry_skipped() {
         .find(|p| p.symbol == "NVDA")
         .map(|p| p.net_qty)
         .unwrap_or(0);
-    assert_eq!(nvda, 1, "SP07: NVDA=1 must still be seeded when AAPL=0 is skipped");
+    assert_eq!(
+        nvda, 1,
+        "SP07: NVDA=1 must still be seeded when AAPL=0 is skipped"
+    );
 }
 
 // ---------------------------------------------------------------------------

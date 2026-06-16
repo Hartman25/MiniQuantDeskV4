@@ -491,7 +491,8 @@ fn c5_01_aggregate_cap_binding_turns_authorized_into_exposure_denied() {
         &policy_with_risk_fields(strat, 10_000.0, 50_000.0, 0.50, 0.0),
     );
 
-    let without_aggregate = evaluate_portfolio_risk(Some(&path), strat, 30, Some(100_000_000), None);
+    let without_aggregate =
+        evaluate_portfolio_risk(Some(&path), strat, 30, Some(100_000_000), None);
     let with_aggregate =
         evaluate_portfolio_risk(Some(&path), strat, 30, Some(100_000_000), Some(5000.0));
     cleanup(&dir);
@@ -531,7 +532,8 @@ fn c5_02_aggregate_cap_looser_than_portfolio_cap_unchanged() {
         &policy_with_risk_fields(strat, 10_000.0, 50_000.0, 0.50, 0.0),
     );
 
-    let without_aggregate = evaluate_portfolio_risk(Some(&path), strat, 30, Some(100_000_000), None);
+    let without_aggregate =
+        evaluate_portfolio_risk(Some(&path), strat, 30, Some(100_000_000), None);
     let with_aggregate =
         evaluate_portfolio_risk(Some(&path), strat, 30, Some(100_000_000), Some(50_000.0));
     cleanup(&dir);
@@ -590,7 +592,8 @@ fn c5_04_aggregate_cap_binding_turns_authorized_into_exhaustion_denied() {
         &policy_with_risk_fields(strat, 10_000.0, 50_000.0, 1.0, 1000.0),
     );
 
-    let without_aggregate = evaluate_portfolio_risk(Some(&path), strat, 40, Some(100_000_000), None);
+    let without_aggregate =
+        evaluate_portfolio_risk(Some(&path), strat, 40, Some(100_000_000), None);
     let with_aggregate =
         evaluate_portfolio_risk(Some(&path), strat, 40, Some(100_000_000), Some(4000.0));
     cleanup(&dir);
@@ -602,7 +605,10 @@ fn c5_04_aggregate_cap_binding_turns_authorized_into_exhaustion_denied() {
     );
 
     assert!(
-        matches!(with_aggregate, PortfolioRiskOutcome::ExhaustionDenied { .. }),
+        matches!(
+            with_aggregate,
+            PortfolioRiskOutcome::ExhaustionDenied { .. }
+        ),
         "aggregate cap of $4000 must become the binding cap, leaving only \
          $3000 available against a $4000 order; got: {with_aggregate:?}"
     );
@@ -616,7 +622,8 @@ fn c5_04_aggregate_cap_binding_turns_authorized_into_exhaustion_denied() {
             "reason must name the binding cap source; got: {reason}"
         );
         assert!(
-            reason.to_lowercase().contains("exhaustion") || reason.to_lowercase().contains("reserve"),
+            reason.to_lowercase().contains("exhaustion")
+                || reason.to_lowercase().contains("reserve"),
             "reason must mention exhaustion or reserve; got: {reason}"
         );
     }
@@ -632,7 +639,8 @@ fn c5_05_no_portfolio_cap_means_no_risk_constraints_regardless_of_aggregate() {
     let strat = "strat-c5-05";
     let (path, dir) = write_tmp_policy("c5_05", &policy_without_portfolio_cap(strat));
 
-    let without_aggregate = evaluate_portfolio_risk(Some(&path), strat, 40, Some(100_000_000), None);
+    let without_aggregate =
+        evaluate_portfolio_risk(Some(&path), strat, 40, Some(100_000_000), None);
     let with_aggregate =
         evaluate_portfolio_risk(Some(&path), strat, 40, Some(100_000_000), Some(1000.0));
     cleanup(&dir);

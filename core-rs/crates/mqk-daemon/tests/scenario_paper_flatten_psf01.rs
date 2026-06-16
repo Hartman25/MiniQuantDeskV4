@@ -48,7 +48,9 @@ fn paper_no_db_router() -> axum::Router {
 }
 
 fn live_capital_no_db_router() -> axum::Router {
-    let st = Arc::new(AppState::new_for_test_with_mode(DeploymentMode::LiveCapital));
+    let st = Arc::new(AppState::new_for_test_with_mode(
+        DeploymentMode::LiveCapital,
+    ));
     build_router(st)
 }
 
@@ -133,7 +135,10 @@ async fn daemon_state_with_db(pool: sqlx::PgPool) -> Arc<AppState> {
 /// Persist a "ok" reconcile status record to the DB so `current_reconcile_snapshot`
 /// returns "ok" (DB takes priority over in-memory when a record exists).
 async fn set_reconcile_ok(st: &Arc<AppState>) {
-    let pool = st.db.as_ref().expect("DB must be configured for set_reconcile_ok");
+    let pool = st
+        .db
+        .as_ref()
+        .expect("DB must be configured for set_reconcile_ok");
     mqk_db::persist_reconcile_status_state(
         pool,
         &mqk_db::PersistReconcileStatusState {
@@ -232,7 +237,10 @@ async fn psf_01_non_paper_mode_returns_403_not_paper_mode() {
         StatusCode::FORBIDDEN,
         "PSF-01: non-paper mode must return 403; body: {j}"
     );
-    assert_eq!(j["accepted"], false, "PSF-01: accepted must be false; body: {j}");
+    assert_eq!(
+        j["accepted"], false,
+        "PSF-01: accepted must be false; body: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("not_paper_mode"),
@@ -259,7 +267,10 @@ async fn psf_02_paper_no_db_returns_503_db_unavailable() {
         StatusCode::SERVICE_UNAVAILABLE,
         "PSF-02: no-DB paper must return 503; body: {j}"
     );
-    assert_eq!(j["accepted"], false, "PSF-02: accepted must be false; body: {j}");
+    assert_eq!(
+        j["accepted"], false,
+        "PSF-02: accepted must be false; body: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("db_unavailable"),
@@ -272,9 +283,9 @@ async fn psf_02_paper_no_db_returns_503_db_unavailable() {
 /// Proves the route sits behind the operator token middleware.
 #[tokio::test]
 async fn psf_11_requires_operator_token_returns_401_without_token() {
-    let st = Arc::new(AppState::new_with_operator_auth(OperatorAuthMode::TokenRequired(
-        TEST_TOKEN.to_string(),
-    )));
+    let st = Arc::new(AppState::new_with_operator_auth(
+        OperatorAuthMode::TokenRequired(TEST_TOKEN.to_string()),
+    ));
     let (status, _j) = call_flatten_with_token(
         tokenized_router(st),
         serde_json::json!({ "action_key": "flatten-paper-positions", "reason": "test" }),
@@ -312,7 +323,10 @@ async fn psf_03_dirty_reconcile_returns_403_reconcile_not_ok() {
         StatusCode::FORBIDDEN,
         "PSF-03: dirty reconcile must return 403; body: {j}"
     );
-    assert_eq!(j["accepted"], false, "PSF-03: accepted must be false; body: {j}");
+    assert_eq!(
+        j["accepted"], false,
+        "PSF-03: accepted must be false; body: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("reconcile_not_ok"),
@@ -341,7 +355,10 @@ async fn psf_04_absent_arm_state_returns_403_not_armed() {
         StatusCode::FORBIDDEN,
         "PSF-04: absent arm must return 403; body: {j}"
     );
-    assert_eq!(j["accepted"], false, "PSF-04: accepted must be false; body: {j}");
+    assert_eq!(
+        j["accepted"], false,
+        "PSF-04: accepted must be false; body: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("not_armed"),
@@ -359,13 +376,9 @@ async fn psf_05_no_active_run_returns_409_no_active_run() {
     let st = daemon_state_with_db(pool).await;
     set_reconcile_ok(&st).await;
     // Arm the system in DB but do NOT create a run.
-    mqk_db::persist_arm_state_canonical(
-        st.db.as_ref().unwrap(),
-        mqk_db::ArmState::Armed,
-        None,
-    )
-    .await
-    .expect("persist arm");
+    mqk_db::persist_arm_state_canonical(st.db.as_ref().unwrap(), mqk_db::ArmState::Armed, None)
+        .await
+        .expect("persist arm");
     let router = build_router(Arc::clone(&st));
     let (status, j) = call_flatten(
         router,
@@ -377,7 +390,10 @@ async fn psf_05_no_active_run_returns_409_no_active_run() {
         StatusCode::CONFLICT,
         "PSF-05: no active run must return 409; body: {j}"
     );
-    assert_eq!(j["accepted"], false, "PSF-05: accepted must be false; body: {j}");
+    assert_eq!(
+        j["accepted"], false,
+        "PSF-05: accepted must be false; body: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("no_active_run"),
@@ -408,7 +424,10 @@ async fn psf_08_no_positions_returns_409_no_positions() {
         StatusCode::CONFLICT,
         "PSF-08: no positions must return 409; body: {j}"
     );
-    assert_eq!(j["accepted"], false, "PSF-08: accepted must be false; body: {j}");
+    assert_eq!(
+        j["accepted"], false,
+        "PSF-08: accepted must be false; body: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("no_positions"),
@@ -441,7 +460,10 @@ async fn psf_09_short_position_returns_403_short_positions_not_supported_v1() {
         StatusCode::FORBIDDEN,
         "PSF-09: short position must return 403; body: {j}"
     );
-    assert_eq!(j["accepted"], false, "PSF-09: accepted must be false; body: {j}");
+    assert_eq!(
+        j["accepted"], false,
+        "PSF-09: accepted must be false; body: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("short_positions_not_supported_v1"),
@@ -484,8 +506,15 @@ async fn psf_10_flatten_all_long_positions_enqueues_outbox_row() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "PSF-10: flatten must return 200; body: {j}");
-    assert_eq!(j["accepted"], true, "PSF-10: accepted must be true; body: {j}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "PSF-10: flatten must return 200; body: {j}"
+    );
+    assert_eq!(
+        j["accepted"], true,
+        "PSF-10: accepted must be true; body: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("enqueued"),
@@ -589,8 +618,15 @@ async fn psf_12_flatten_single_symbol_only_targets_that_symbol() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "PSF-12: single-symbol flatten must return 200; body: {j}");
-    assert_eq!(j["accepted"], true, "PSF-12: accepted must be true; body: {j}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "PSF-12: single-symbol flatten must return 200; body: {j}"
+    );
+    assert_eq!(
+        j["accepted"], true,
+        "PSF-12: accepted must be true; body: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("enqueued"),
@@ -600,12 +636,16 @@ async fn psf_12_flatten_single_symbol_only_targets_that_symbol() {
     let warnings = j["warnings"].as_array().expect("warnings is array");
     // AAPL must be in warnings.
     assert!(
-        warnings.iter().any(|w| w.as_str().unwrap_or("").contains("AAPL")),
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").contains("AAPL")),
         "PSF-12: AAPL must appear in warnings; body: {j}"
     );
     // SPY must NOT be in warnings (was not targeted).
     assert!(
-        !warnings.iter().any(|w| w.as_str().unwrap_or("").contains("SPY")),
+        !warnings
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").contains("SPY")),
         "PSF-12: SPY must NOT appear in warnings — only AAPL was targeted; body: {j}"
     );
 }

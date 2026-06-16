@@ -608,8 +608,14 @@ async fn fq06_any_run_fetch_cross_run_visible_honest_empty_idempotent() {
         "FQ-06: any-run fetch must find the row recorded under run_a"
     );
     let row = &any_run[0];
-    assert_eq!(row.telemetry_id, telemetry_id, "FQ-06: telemetry_id must round-trip");
-    assert_eq!(row.run_id, run_a, "FQ-06: returned row must report its true run_id (run_a), not fabricated");
+    assert_eq!(
+        row.telemetry_id, telemetry_id,
+        "FQ-06: telemetry_id must round-trip"
+    );
+    assert_eq!(
+        row.run_id, run_a,
+        "FQ-06: returned row must report its true run_id (run_a), not fabricated"
+    );
     assert_eq!(row.symbol, "AAPL");
     assert_eq!(row.fill_qty, 5);
     assert_eq!(row.fill_kind, "final_fill");

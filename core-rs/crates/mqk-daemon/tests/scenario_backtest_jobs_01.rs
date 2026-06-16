@@ -664,7 +664,9 @@ fn run_daily_weekend_gap_with_stale_threshold(stale_threshold_ticks: u64) -> boo
     let base_ts = 1_700_000_000i64;
     // Friday close, then a 3-day weekend gap to Monday, then a normal Tuesday.
     let bars = vec![
-        BacktestBar::new("TEST", base_ts, 1_000_000, 1_010_000, 990_000, 1_000_000, 1_000),
+        BacktestBar::new(
+            "TEST", base_ts, 1_000_000, 1_010_000, 990_000, 1_000_000, 1_000,
+        ),
         BacktestBar::new(
             "TEST",
             base_ts + 259_200, // Fri -> Mon: 3 calendar days (weekend gap)

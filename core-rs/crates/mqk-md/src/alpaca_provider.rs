@@ -104,9 +104,10 @@ impl crate::HistoricalProvider for AlpacaHistoricalProvider {
         // Alpaca start/end: ISO 8601 UTC.  Use start-of-day for `start` and
         // end-of-day for `end` so the full calendar day is covered.
         let start_iso = format!("{}T00:00:00Z", req.start.format("%Y-%m-%d"));
-        let end_dt = req.end.and_hms_opt(23, 59, 59).ok_or_else(|| {
-            anyhow!("alpaca: could not build end datetime from {}", req.end)
-        })?;
+        let end_dt = req
+            .end
+            .and_hms_opt(23, 59, 59)
+            .ok_or_else(|| anyhow!("alpaca: could not build end datetime from {}", req.end))?;
         let end_iso = Utc.from_utc_datetime(&end_dt).to_rfc3339();
 
         let symbols_csv = req.symbols.join(",");
@@ -170,7 +171,7 @@ impl crate::HistoricalProvider for AlpacaHistoricalProvider {
                     // Use 6 decimal places; normalize_price_str will trim trailing zeros.
                     let open_s = format!("{:.6}", rb.o);
                     let high_s = format!("{:.6}", rb.h);
-                    let low_s  = format!("{:.6}", rb.l);
+                    let low_s = format!("{:.6}", rb.l);
                     let close_s = format!("{:.6}", rb.c);
 
                     entry.push(ProviderBar {
@@ -205,7 +206,11 @@ impl crate::HistoricalProvider for AlpacaHistoricalProvider {
 
         // Flatten all symbols, sort ascending by (symbol, end_ts).
         let mut out: Vec<ProviderBar> = all_bars.into_values().flatten().collect();
-        out.sort_by(|a, b| a.symbol.cmp(&b.symbol).then_with(|| a.end_ts.cmp(&b.end_ts)));
+        out.sort_by(|a, b| {
+            a.symbol
+                .cmp(&b.symbol)
+                .then_with(|| a.end_ts.cmp(&b.end_ts))
+        });
         Ok(out)
     }
 }
@@ -269,10 +274,22 @@ mod tests {
 
     #[test]
     fn alpaca_timeframe_maps_correctly() {
-        assert_eq!(AlpacaHistoricalProvider::alpaca_timeframe(&Timeframe::M5), "5Min");
-        assert_eq!(AlpacaHistoricalProvider::alpaca_timeframe(&Timeframe::M1), "1Min");
-        assert_eq!(AlpacaHistoricalProvider::alpaca_timeframe(&Timeframe::D1), "1Day");
-        assert_eq!(AlpacaHistoricalProvider::alpaca_timeframe(&Timeframe::H1), "1Hour");
+        assert_eq!(
+            AlpacaHistoricalProvider::alpaca_timeframe(&Timeframe::M5),
+            "5Min"
+        );
+        assert_eq!(
+            AlpacaHistoricalProvider::alpaca_timeframe(&Timeframe::M1),
+            "1Min"
+        );
+        assert_eq!(
+            AlpacaHistoricalProvider::alpaca_timeframe(&Timeframe::D1),
+            "1Day"
+        );
+        assert_eq!(
+            AlpacaHistoricalProvider::alpaca_timeframe(&Timeframe::H1),
+            "1Hour"
+        );
     }
 
     #[test]
@@ -367,7 +384,10 @@ mod tests {
             end: NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
         };
         let bars = provider.fetch_bars(req).await.unwrap();
-        assert!(bars.is_empty(), "must return empty vec when no bars available");
+        assert!(
+            bars.is_empty(),
+            "must return empty vec when no bars available"
+        );
     }
 
     #[tokio::test]
@@ -392,7 +412,10 @@ mod tests {
         };
         let err = provider.fetch_bars(req).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("403"), "error must mention http status 403: {msg}");
+        assert!(
+            msg.contains("403"),
+            "error must mention http status 403: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -441,7 +464,11 @@ mod tests {
             end: NaiveDate::from_ymd_opt(2026, 6, 3).unwrap(),
         };
         let bars = provider.fetch_bars(req).await.unwrap();
-        assert_eq!(bars.len(), 2, "pagination must collect bars from both pages");
+        assert_eq!(
+            bars.len(),
+            2,
+            "pagination must collect bars from both pages"
+        );
         assert!(bars[0].end_ts < bars[1].end_ts, "must be sorted ascending");
     }
 

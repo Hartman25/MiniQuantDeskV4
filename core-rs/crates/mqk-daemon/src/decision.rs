@@ -366,7 +366,10 @@ pub async fn submit_internal_strategy_decision(
     // count cap (cap #4, design doc §6). Disabled (None) unless
     // MQK_PER_SYMBOL_DAY_ORDER_LIMIT is set; in that case Gate 1 above always
     // passes through unaffected — this is an additive, independent counter.
-    if state.symbol_day_order_limit_exceeded(&decision.symbol).await {
+    if state
+        .symbol_day_order_limit_exceeded(&decision.symbol)
+        .await
+    {
         return outcome(
             false,
             "symbol_day_limit_reached",
@@ -474,7 +477,9 @@ pub async fn submit_internal_strategy_decision(
     // SizingDeniedPerSymbolCap  -> over cap; "rejected" with a blocker naming
     //                               the cap (design doc §6 cap #3 test).
     {
-        use crate::capital_policy::{evaluate_per_symbol_notional_cap_from_env, PositionSizingOutcome};
+        use crate::capital_policy::{
+            evaluate_per_symbol_notional_cap_from_env, PositionSizingOutcome,
+        };
         let sizing = evaluate_per_symbol_notional_cap_from_env(
             &decision.symbol,
             decision.qty,
@@ -714,7 +719,9 @@ pub async fn submit_internal_strategy_decision(
             state.increment_day_signal_count();
             // MULTI-SYMBOL-DAY-ORDER-CAP-01: per-symbol counterpart (cap #4),
             // incremented alongside the account-wide counter above.
-            state.increment_symbol_day_order_count(&decision.symbol).await;
+            state
+                .increment_symbol_day_order_count(&decision.symbol)
+                .await;
             outcome(true, "accepted", &did, &sid, Some(active_run_id), vec![])
         }
         Ok(false) => outcome(

@@ -24,6 +24,8 @@
 #   -Symbols              Comma-separated ticker list. Default: AAPL
 #   -Timeframe            Bar timeframe. Default: 5m
 #   -IntervalSeconds      Seconds between refreshes in loop mode. Default: 300
+#   -MinRefreshIntervalSeconds
+#                          Minimum seconds between refresh attempts in loop mode. Default: 300
 #   -DurationSeconds      Total loop duration in seconds. Default: 1800
 #   -MinCompletedBars     Minimum completed bars to report OK. Default: 30
 #   -MaxStalenessMinutes  Maximum minutes since latest complete bar before warning. Default: 1440
@@ -48,6 +50,7 @@ param(
     [string] $Symbols             = 'AAPL',
     [string] $Timeframe           = '5m',
     [int]    $IntervalSeconds     = 300,
+    [int]    $MinRefreshIntervalSeconds = 300,
     [int]    $DurationSeconds     = 1800,
     [int]    $MinCompletedBars    = 30,
     [int]    $MaxStalenessMinutes = 1440,
@@ -159,6 +162,16 @@ if ($symbolList.Count -eq 0) {
 Write-Step "Symbols: $($symbolList -join ', ')  Timeframe: $Timeframe"
 Write-Step "MinCompletedBars: $MinCompletedBars  MaxStalenessMinutes: $MaxStalenessMinutes"
 
+if ($MinRefreshIntervalSeconds -lt 300) {
+    Write-Warn "MinRefreshIntervalSeconds=$MinRefreshIntervalSeconds is below 300; using 300 to avoid provider hammering."
+    $MinRefreshIntervalSeconds = 300
+}
+$EffectiveIntervalSeconds = [math]::Max($IntervalSeconds, $MinRefreshIntervalSeconds)
+if ($EffectiveIntervalSeconds -ne $IntervalSeconds) {
+    Write-Warn "IntervalSeconds=$IntervalSeconds suppressed by MinRefreshIntervalSeconds=$MinRefreshIntervalSeconds; effective interval=${EffectiveIntervalSeconds}s."
+}
+Write-Step "Effective refresh interval: ${EffectiveIntervalSeconds}s"
+
 # ---------------------------------------------------------------------------
 # Helper: query md_bars summary for one symbol/timeframe
 # Returns: completed_count, max_ts_unix (bigint), max_ts_iso (ISO string), query_ok
@@ -222,7 +235,11 @@ function Write-Evidence {
         schema_version              = 'intraday-refresh-v1'
         produced_at_utc             = (Get-Date).ToUniversalTime().ToString('o')
         mode                        = $Mode
+        source                      = $Source
         timeframe                   = $Timeframe
+        provider_configured         = if ($Source -eq 'alpaca') { $alpacaKeyPresent } else { $twelvekeyPresent }
+        min_refresh_interval_secs   = $MinRefreshIntervalSeconds
+        effective_interval_secs     = $EffectiveIntervalSeconds
         min_completed_bars_required = $MinCompletedBars
         max_staleness_minutes       = $MaxStalenessMinutes
         all_passed                  = $AllPassed
@@ -277,6 +294,9 @@ if ($CheckOnly) {
         }
         $checkResults += [pscustomobject]@{
             symbol          = $sym
+            timeframe       = $Timeframe
+            provider_source = $Source
+            provider_configured = if ($Source -eq 'alpaca') { $alpacaKeyPresent } else { $twelvekeyPresent }
             completed_count = $s.completed_count
             max_ts_iso      = $s.max_ts_iso
             staleness_min   = (Get-StalenessMinutes -MaxTsUnix $s.max_ts_unix)
@@ -319,6 +339,17 @@ function Invoke-OneRefresh {
     foreach ($sym in $symbolList) {
         $symFailed  = $false
         $symReasons = @()
+        $attemptedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+        $providerAttempted = $false
+        $providerSuccess = $false
+        $providerExitCode = $null
+        $providerRowsRead = $null
+        $providerRowsInserted = $null
+        $providerRowsUpdated = $null
+        $providerRowsKept = $null
+        $providerDroppedIncomplete = $null
+        $providerDroppedCurrent = $null
+        $providerLatestCompletedEndTs = $null
 
         Write-Step "[$sym/$Timeframe] Before refresh..."
         $before = Get-MdBarSummary -Sym $sym -Tf $Timeframe
@@ -335,16 +366,34 @@ function Invoke-OneRefresh {
             Push-Location $coreRs
             try {
                 $local:ErrorActionPreference = 'Continue'
-                cargo run -p mqk-cli --bin mqk-cli -- md sync-provider `
+                $providerAttempted = $true
+                $syncOutput = cargo run -p mqk-cli --bin mqk-cli -- md sync-provider `
                     --source $Source `
                     --symbols $sym `
                     --timeframe $Timeframe `
-                    --full-start "2024-01-01" 2>&1 | Out-Host
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Warn "[$sym/$Timeframe] Provider sync failed (exit $LASTEXITCODE). Using existing bars."
+                    --full-start "2024-01-01" 2>&1
+                $providerExitCode = $LASTEXITCODE
+                $syncOutput | Out-Host
+                foreach ($line in $syncOutput) {
+                    $lineText = [string]$line
+                    if ($lineText -match 'completed_bar_filter .*rows_in=(\d+) rows_kept=(\d+) dropped_incomplete_flag=(\d+) dropped_current=(\d+) latest_completed_end_ts=([^\s]+)') {
+                        $providerRowsKept = [int]$Matches[2]
+                        $providerDroppedIncomplete = [int]$Matches[3]
+                        $providerDroppedCurrent = [int]$Matches[4]
+                        $providerLatestCompletedEndTs = $Matches[5]
+                    }
+                    if ($lineText -match 'rows_read=(\d+) rows_ok=(\d+) rejected=(\d+) inserted=(\d+) updated=(\d+)') {
+                        $providerRowsRead = [int]$Matches[1]
+                        $providerRowsInserted = [int]$Matches[4]
+                        $providerRowsUpdated = [int]$Matches[5]
+                    }
+                }
+                if ($providerExitCode -ne 0) {
+                    Write-Warn "[$sym/$Timeframe] Provider sync failed (exit $providerExitCode). Using existing bars."
                     $symFailed = $true
-                    $symReasons += "provider sync failed (exit $LASTEXITCODE)"
+                    $symReasons += "provider sync failed (exit $providerExitCode)"
                 } else {
+                    $providerSuccess = $true
                     Write-Ok "[$sym/$Timeframe] Provider sync complete."
                 }
             } catch {
@@ -366,6 +415,20 @@ function Invoke-OneRefresh {
             $symReasons += "could not query md_bars after refresh"
             $symResults += [pscustomobject]@{
                 symbol          = $sym
+                timeframe       = $Timeframe
+                provider_source = $Source
+                attempted_at_utc = $attemptedAtUtc
+                provider_configured = $providerKeyReady
+                provider_attempted = $providerAttempted
+                provider_success = $providerSuccess
+                provider_exit_code = $providerExitCode
+                provider_rows_read = $providerRowsRead
+                provider_rows_inserted = $providerRowsInserted
+                provider_rows_updated = $providerRowsUpdated
+                provider_rows_kept_after_completion_filter = $providerRowsKept
+                provider_rows_dropped_incomplete = $providerDroppedIncomplete
+                provider_rows_dropped_current = $providerDroppedCurrent
+                provider_latest_completed_end_ts = $providerLatestCompletedEndTs
                 gate            = 'FAIL'
                 completed_count = 0
                 max_ts_iso      = $null
@@ -398,6 +461,20 @@ function Invoke-OneRefresh {
 
         $symResults += [pscustomobject]@{
             symbol          = $sym
+            timeframe       = $Timeframe
+            provider_source = $Source
+            attempted_at_utc = $attemptedAtUtc
+            provider_configured = $providerKeyReady
+            provider_attempted = $providerAttempted
+            provider_success = $providerSuccess
+            provider_exit_code = $providerExitCode
+            provider_rows_read = $providerRowsRead
+            provider_rows_inserted = $providerRowsInserted
+            provider_rows_updated = $providerRowsUpdated
+            provider_rows_kept_after_completion_filter = $providerRowsKept
+            provider_rows_dropped_incomplete = $providerDroppedIncomplete
+            provider_rows_dropped_current = $providerDroppedCurrent
+            provider_latest_completed_end_ts = $providerLatestCompletedEndTs
             gate            = $gate
             completed_count = $after.completed_count
             max_ts_iso      = $after.max_ts_iso
@@ -434,7 +511,7 @@ if ($Once) {
 # ---------------------------------------------------------------------------
 # INTERVAL LOOP mode
 # ---------------------------------------------------------------------------
-Write-Sect "Intraday refresh loop: $($symbolList -join ', ') / $Timeframe  interval=${IntervalSeconds}s  duration=${DurationSeconds}s"
+Write-Sect "Intraday refresh loop: $($symbolList -join ', ') / $Timeframe  interval=${EffectiveIntervalSeconds}s  duration=${DurationSeconds}s"
 Write-Step "Press Ctrl-C to stop early."
 
 $loopEnd  = (Get-Date).AddSeconds($DurationSeconds)
@@ -451,7 +528,7 @@ while ((Get-Date) -lt $loopEnd) {
     $remaining = [int]($loopEnd - $nowAfter).TotalSeconds
     if ($remaining -le 0) { break }
 
-    $sleepSec = [math]::Min($IntervalSeconds, $remaining)
+    $sleepSec = [math]::Min($EffectiveIntervalSeconds, $remaining)
     Write-Step "Next refresh in ${sleepSec}s  (loop ends in ${remaining}s)"
     Start-Sleep -Seconds $sleepSec
 }

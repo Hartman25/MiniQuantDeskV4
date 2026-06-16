@@ -298,9 +298,7 @@ pub fn evaluate_portfolio_risk(
     // back-compat with pre-cap-#5 behavior.
     let (effective_portfolio_notional, portfolio_cap_source) =
         match aggregate_gross_exposure_cap_usd.filter(|&c| c > 0.0) {
-            Some(agg) if agg < max_portfolio_notional => {
-                (agg, "aggregate_gross_exposure_cap_usd")
-            }
+            Some(agg) if agg < max_portfolio_notional => (agg, "aggregate_gross_exposure_cap_usd"),
             _ => (max_portfolio_notional, "max_portfolio_notional_usd"),
         };
 

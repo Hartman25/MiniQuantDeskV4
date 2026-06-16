@@ -170,7 +170,9 @@ async fn s01_fresh_bar_within_threshold_dispatches() {
     st.set_per_symbol_bar_staleness_secs_for_test(Some(300));
     st.deposit_strategy_bar_input(test_bar_input(1)).await;
 
-    let result = st.tick_strategy_dispatch_for_symbol(symbol, timeframe).await;
+    let result = st
+        .tick_strategy_dispatch_for_symbol(symbol, timeframe)
+        .await;
     assert!(
         result.is_some(),
         "S01: fresh bar (age=60s, cap=300s) must dispatch normally"
@@ -202,7 +204,9 @@ async fn s02_stale_bar_beyond_threshold_blocks_dispatch() {
     st.set_per_symbol_bar_staleness_secs_for_test(Some(300));
     st.deposit_strategy_bar_input(test_bar_input(1)).await;
 
-    let result = st.tick_strategy_dispatch_for_symbol(symbol, timeframe).await;
+    let result = st
+        .tick_strategy_dispatch_for_symbol(symbol, timeframe)
+        .await;
     assert!(
         result.is_none(),
         "S02: stale bar (age=10000s, cap=300s) must block dispatch (fail-closed)"
@@ -231,7 +235,9 @@ async fn s03_missing_bar_blocks_dispatch() {
     st.set_per_symbol_bar_staleness_secs_for_test(Some(300));
     st.deposit_strategy_bar_input(test_bar_input(1)).await;
 
-    let result = st.tick_strategy_dispatch_for_symbol(symbol, timeframe).await;
+    let result = st
+        .tick_strategy_dispatch_for_symbol(symbol, timeframe)
+        .await;
     assert!(
         result.is_none(),
         "S03: missing bar (zero md_bars rows) must block dispatch (fail-closed)"

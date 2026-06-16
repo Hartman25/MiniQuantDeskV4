@@ -88,7 +88,9 @@ fn paper_paper_state() -> Arc<AppState> {
 }
 
 fn live_capital_state() -> Arc<AppState> {
-    Arc::new(AppState::new_for_test_with_mode(DeploymentMode::LiveCapital))
+    Arc::new(AppState::new_for_test_with_mode(
+        DeploymentMode::LiveCapital,
+    ))
 }
 
 /// Fixed UTC session window 14:30–21:00.
@@ -155,8 +157,7 @@ async fn sh01_run_ended_unexpectedly_sets_truth_and_resets_locally_started() {
     // state (no execution loop handle — default fresh state).
     let mut locally_started = true;
 
-    mqk_daemon::state::run_session_controller_tick(&st, schedule, &mut locally_started, now)
-        .await;
+    mqk_daemon::state::run_session_controller_tick(&st, schedule, &mut locally_started, now).await;
 
     // locally_started must be reset to false — the controller no longer owns the run.
     assert!(
@@ -190,9 +191,11 @@ async fn sh02_after_run_ended_unexpectedly_next_tick_attempts_restart() {
 
     // Tick 1: run vanishes → RunEndedUnexpectedly, locally_started=false.
     let mut locally_started = true;
-    mqk_daemon::state::run_session_controller_tick(&st, schedule, &mut locally_started, now)
-        .await;
-    assert!(!locally_started, "SH02 precondition: tick 1 must reset locally_started");
+    mqk_daemon::state::run_session_controller_tick(&st, schedule, &mut locally_started, now).await;
+    assert!(
+        !locally_started,
+        "SH02 precondition: tick 1 must reset locally_started"
+    );
     assert!(
         matches!(
             st.autonomous_session_truth().await,
@@ -203,8 +206,7 @@ async fn sh02_after_run_ended_unexpectedly_next_tick_attempts_restart() {
 
     // Tick 2: still in-session, locally_started=false → attempt_auto_start fires.
     // The attempt fails (no DB, arm gate, etc.) and surfaces as StartRefused.
-    mqk_daemon::state::run_session_controller_tick(&st, schedule, &mut locally_started, now)
-        .await;
+    mqk_daemon::state::run_session_controller_tick(&st, schedule, &mut locally_started, now).await;
 
     // After tick 2, the start path was entered.  locally_started must remain
     // false because no run was successfully started (no DB).
@@ -240,8 +242,7 @@ async fn sh03_run_ended_unexpectedly_detail_is_non_empty() {
     let now = ts_in_session();
     let mut locally_started = true;
 
-    mqk_daemon::state::run_session_controller_tick(&st, schedule, &mut locally_started, now)
-        .await;
+    mqk_daemon::state::run_session_controller_tick(&st, schedule, &mut locally_started, now).await;
 
     let truth = st.autonomous_session_truth().await;
     if let AutonomousSessionTruth::RunEndedUnexpectedly { ref detail } = truth {
@@ -270,16 +271,14 @@ async fn sh04_consecutive_run_ended_ticks_are_idempotent() {
 
     // Tick 1: locally_started=true → RunEndedUnexpectedly, locally_started=false.
     let mut locally_started = true;
-    mqk_daemon::state::run_session_controller_tick(&st, schedule, &mut locally_started, now)
-        .await;
+    mqk_daemon::state::run_session_controller_tick(&st, schedule, &mut locally_started, now).await;
     assert!(!locally_started, "SH04: tick 1 must reset locally_started");
 
     // Force locally_started back to true to simulate a race or double-fire.
     locally_started = true;
 
     // Tick 2: same conditions again.
-    mqk_daemon::state::run_session_controller_tick(&st, schedule, &mut locally_started, now)
-        .await;
+    mqk_daemon::state::run_session_controller_tick(&st, schedule, &mut locally_started, now).await;
 
     assert!(
         !locally_started,
@@ -438,8 +437,7 @@ async fn sh09_try_autonomous_arm_refuses_without_db() {
     );
     let reason = result.unwrap_err();
     assert!(
-        reason.to_lowercase().contains("db")
-            || reason.to_lowercase().contains("database"),
+        reason.to_lowercase().contains("db") || reason.to_lowercase().contains("database"),
         "SH09: refusal reason must mention DB; got: {reason}"
     );
 }
@@ -471,7 +469,10 @@ async fn sh10_flatten_route_paper_no_db_returns_503() {
         StatusCode::SERVICE_UNAVAILABLE,
         "SH10: paper flatten without DB must return 503; body: {j}"
     );
-    assert_eq!(j["accepted"], false, "SH10: must not be accepted; body: {j}");
+    assert_eq!(
+        j["accepted"], false,
+        "SH10: must not be accepted; body: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("db_unavailable"),
@@ -506,7 +507,10 @@ async fn sh11_flatten_route_live_capital_returns_403_not_paper_mode() {
         StatusCode::FORBIDDEN,
         "SH11: non-paper flatten must return 403; body: {j}"
     );
-    assert_eq!(j["accepted"], false, "SH11: must not be accepted; body: {j}");
+    assert_eq!(
+        j["accepted"], false,
+        "SH11: must not be accepted; body: {j}"
+    );
     assert_eq!(
         j["disposition"].as_str(),
         Some("not_paper_mode"),

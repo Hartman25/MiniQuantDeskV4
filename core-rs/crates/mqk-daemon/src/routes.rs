@@ -27,8 +27,8 @@
 //! | `transport_quality` | execution_transport, market_data_quality           |
 
 pub(crate) mod alerts_events;
-pub(crate) mod autonomous_paper_status;
 pub(crate) mod audit_ops;
+pub(crate) mod autonomous_paper_status;
 pub(crate) mod backtests;
 pub mod control;
 pub(crate) mod control_plane;
@@ -149,6 +149,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         resolve_incident,
     };
     use audit_ops::{audit_artifacts, audit_operator_actions, ops_operator_timeline};
+    use autonomous_paper_status::autonomous_paper_status;
     use backtests::{backtest_job_status, backtest_job_submit, backtest_jobs_list};
     use control_plane::{
         integrity_arm, integrity_disarm, ops_action, ops_catalog, ops_mode_change_guidance,
@@ -194,7 +195,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use transport_quality::{execution_transport, market_data_coverage, market_data_quality};
     use watchlist::{watchlist_admission_check, watchlist_status};
-    use autonomous_paper_status::autonomous_paper_status;
 
     // --- Public (unauthenticated) routes — read-only telemetry & data. ---
     let public = Router::new()
@@ -287,7 +287,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/autonomous/readiness", get(autonomous_readiness))
         // PAPER-AUTONOMOUS-COMPLETION-BUNDLE-01: read-only paper status summary.
         // No broker calls, no DB mutations, no orders. fail-soft on missing subsystems.
-        .route("/api/v1/autonomous/paper-status", get(autonomous_paper_status))
+        .route(
+            "/api/v1/autonomous/paper-status",
+            get(autonomous_paper_status),
+        )
         .route(
             "/api/v1/execution/replace-cancel-chains",
             get(execution_replace_cancel_chains),

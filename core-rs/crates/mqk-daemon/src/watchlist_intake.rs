@@ -285,10 +285,7 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
         Ok(v) => v,
         Err(e) => {
             return WatchlistIntakeOutcome::Invalid {
-                failure_reasons: vec![format!(
-                    "invalid JSON in '{}': {e}",
-                    path.display()
-                )],
+                failure_reasons: vec![format!("invalid JSON in '{}': {e}", path.display())],
             }
         }
     };
@@ -367,16 +364,13 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
                 .filter_map(|e| e.as_str().map(|s| s.to_string()))
                 .collect(),
             None => {
-                reasons.push(
-                    "watchlist_symbols_invalid: field 'symbols' is not an array".to_string(),
-                );
+                reasons
+                    .push("watchlist_symbols_invalid: field 'symbols' is not an array".to_string());
                 vec![]
             }
         },
         None => {
-            reasons.push(
-                "watchlist_symbols_invalid: missing required field 'symbols'".to_string(),
-            );
+            reasons.push("watchlist_symbols_invalid: missing required field 'symbols'".to_string());
             vec![]
         }
     };
@@ -387,9 +381,7 @@ pub fn evaluate_watchlist_intake(path: Option<&Path>) -> WatchlistIntakeOutcome 
             Some(v) => match v.as_object() {
                 Some(obj) => obj
                     .iter()
-                    .filter_map(|(k, val)| {
-                        val.as_str().map(|s| (k.clone(), s.to_string()))
-                    })
+                    .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
                     .collect(),
                 None => {
                     reasons.push(

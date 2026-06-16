@@ -771,7 +771,10 @@ async fn obs_ar01_not_applicable_diagnostics_is_null() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let v = parse_json(body);
-    assert_eq!(v["truth_state"], "not_applicable", "OBS-AR01: pp is not_applicable");
+    assert_eq!(
+        v["truth_state"], "not_applicable",
+        "OBS-AR01: pp is not_applicable"
+    );
     assert!(
         v["strategy_decision_diagnostics"].is_null(),
         "OBS-AR01: strategy_decision_diagnostics must be null for not_applicable"
@@ -829,7 +832,10 @@ async fn obs_ar03_after_dispatch_diagnostics_non_null_with_correct_shape() {
     assert_eq!(status, StatusCode::OK);
     let v = parse_json(body);
     let d = &v["strategy_decision_diagnostics"];
-    assert!(!d.is_null(), "OBS-AR03: diagnostics non-null after dispatch");
+    assert!(
+        !d.is_null(),
+        "OBS-AR03: diagnostics non-null after dispatch"
+    );
 
     // Shape assertions.
     assert!(
@@ -840,7 +846,10 @@ async fn obs_ar03_after_dispatch_diagnostics_non_null_with_correct_shape() {
         d["threshold_bps"].as_i64().is_some(),
         "OBS-AR03: threshold_bps present"
     );
-    assert_eq!(d["decision"], "signal_long", "OBS-AR03: decision=signal_long for bullish bars");
+    assert_eq!(
+        d["decision"], "signal_long",
+        "OBS-AR03: decision=signal_long for bullish bars"
+    );
     assert_eq!(d["raw_direction"], 1, "OBS-AR03: raw_direction=+1");
     assert!(
         d["move_bps"].as_i64().is_some(),
@@ -899,5 +908,8 @@ async fn obs_ar04_flat_below_threshold_surfaces_in_readiness() {
         "OBS-AR04: below-threshold decision surfaced"
     );
     let gap = d["gap_to_threshold_bps"].as_i64().unwrap();
-    assert!(gap > 0, "OBS-AR04: gap_to_threshold_bps > 0 when below threshold");
+    assert!(
+        gap > 0,
+        "OBS-AR04: gap_to_threshold_bps > 0 when below threshold"
+    );
 }

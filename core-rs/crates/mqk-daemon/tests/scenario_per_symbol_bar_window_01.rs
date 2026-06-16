@@ -192,7 +192,10 @@ fn p09_stale_helper_future_latest_end_ts_safe() {
         Some(false)
     );
     // Cap of zero with a future bar: age clamps to 0, 0 > 0 is false.
-    assert_eq!(classify_bar_staleness(Some(3_000), 2_000, Some(0)), Some(false));
+    assert_eq!(
+        classify_bar_staleness(Some(3_000), 2_000, Some(0)),
+        Some(false)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -297,9 +300,7 @@ async fn p13_per_symbol_helper_independent_of_loop_dispatch() {
     })
     .await;
 
-    let result = st
-        .tick_strategy_dispatch_for_symbol("AAPL", "1Min")
-        .await;
+    let result = st.tick_strategy_dispatch_for_symbol("AAPL", "1Min").await;
     assert!(
         result.is_none(),
         "P13: tick_strategy_dispatch_for_symbol must be fail-closed (None) \
@@ -307,9 +308,7 @@ async fn p13_per_symbol_helper_independent_of_loop_dispatch() {
     );
 
     // No pending bar remains — calling it again with nothing pending is None.
-    let result2 = st
-        .tick_strategy_dispatch_for_symbol("AAPL", "1Min")
-        .await;
+    let result2 = st.tick_strategy_dispatch_for_symbol("AAPL", "1Min").await;
     assert!(
         result2.is_none(),
         "P13: with no pending bar, tick_strategy_dispatch_for_symbol returns None"
