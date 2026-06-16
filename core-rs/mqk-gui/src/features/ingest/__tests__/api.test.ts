@@ -8,15 +8,23 @@ import {
   isProviderSyncAllowed,
   buildProviderJobRequest,
   buildActiveProviderJob,
-  formatEndTs,
+  classifyCoverageFreshness,
+  computeCoverageSummary,
+  computeMissingTrackedSymbols,
+  coverageFreshnessThresholdSecs,
   coverageTruthLabel,
+  filterCoverageRows,
+  formatEndTs,
   isCoverageActive,
   isIntradayRefreshActive,
   intradayRefreshTruthLabel,
   isTrackedEquitiesActive,
+  sortCoverageRows,
   trackedEquitiesTruthLabel,
+  COVERAGE_FRESHNESS_THRESHOLD_1D_SECS,
+  COVERAGE_FRESHNESS_THRESHOLD_INTRADAY_SECS,
 } from "../api.ts";
-import type { IngestJobStatusResponse, IntradayRefreshStatusResponse, MdBarsCoverageResponse, TrackedEquitiesResponse } from "../types.ts";
+import type { IngestJobStatusResponse, IntradayRefreshStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // normalizeIngestJobStatus
@@ -555,6 +563,267 @@ test("IntradayRefreshStatusResponse parse_error shape has error field", () => {
   assert.ok(!isIntradayRefreshActive(resp.truth_state));
   assert.equal(resp.error, "unsupported schema_version: unknown-v99");
   assert.equal(resp.symbols.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// DATA-INGEST-GUI-COVERAGE-POLISH-01: coverage freshness, sort, filter, summary, missing
+// ---------------------------------------------------------------------------
+
+// Test fixture helpers
+function makeRow(
+  symbol: string,
+  timeframe: string,
+  bars: number,
+  maxEndTs: number,
+): MdBarsCoverageRow {
+  return {
+    symbol,
+    timeframe,
+    bars,
+    min_end_ts: maxEndTs - bars * 86400,
+    max_end_ts: maxEndTs,
+    latest_ingested_at: null,
+  };
+}
+
+const NOW = 1_718_000_000; // fixed epoch for deterministic freshness tests
+
+// coverageFreshnessThresholdSecs
+
+test("coverageFreshnessThresholdSecs 1D returns 345600", () => {
+  assert.equal(coverageFreshnessThresholdSecs("1D"), COVERAGE_FRESHNESS_THRESHOLD_1D_SECS);
+  assert.equal(coverageFreshnessThresholdSecs("1D"), 345600);
+});
+
+test("coverageFreshnessThresholdSecs 1m returns 900", () => {
+  assert.equal(coverageFreshnessThresholdSecs("1m"), COVERAGE_FRESHNESS_THRESHOLD_INTRADAY_SECS);
+  assert.equal(coverageFreshnessThresholdSecs("1m"), 900);
+});
+
+test("coverageFreshnessThresholdSecs 5m returns 900", () => {
+  assert.equal(coverageFreshnessThresholdSecs("5m"), 900);
+});
+
+test("coverageFreshnessThresholdSecs unknown timeframe returns null", () => {
+  assert.equal(coverageFreshnessThresholdSecs("4h"), null);
+  assert.equal(coverageFreshnessThresholdSecs(""), null);
+});
+
+// classifyCoverageFreshness
+
+test("classifyCoverageFreshness 1D fresh — age at exactly threshold is fresh", () => {
+  const maxEndTs = NOW - COVERAGE_FRESHNESS_THRESHOLD_1D_SECS;
+  assert.equal(classifyCoverageFreshness(maxEndTs, NOW, "1D"), "fresh");
+});
+
+test("classifyCoverageFreshness 1D stale — age one second past threshold", () => {
+  const maxEndTs = NOW - COVERAGE_FRESHNESS_THRESHOLD_1D_SECS - 1;
+  assert.equal(classifyCoverageFreshness(maxEndTs, NOW, "1D"), "stale");
+});
+
+test("classifyCoverageFreshness 5m fresh — age well within 900s", () => {
+  const maxEndTs = NOW - 300;
+  assert.equal(classifyCoverageFreshness(maxEndTs, NOW, "5m"), "fresh");
+});
+
+test("classifyCoverageFreshness 5m stale — age exceeds 900s", () => {
+  const maxEndTs = NOW - 2000;
+  assert.equal(classifyCoverageFreshness(maxEndTs, NOW, "5m"), "stale");
+});
+
+test("classifyCoverageFreshness unknown timeframe → unknown", () => {
+  assert.equal(classifyCoverageFreshness(NOW - 100, NOW, "4h"), "unknown");
+});
+
+test("classifyCoverageFreshness null maxEndTs → unknown", () => {
+  assert.equal(classifyCoverageFreshness(null, NOW, "1D"), "unknown");
+});
+
+test("classifyCoverageFreshness zero maxEndTs → unknown", () => {
+  assert.equal(classifyCoverageFreshness(0, NOW, "1D"), "unknown");
+});
+
+// filterCoverageRows
+
+test("filterCoverageRows empty query returns all rows", () => {
+  const rows = [makeRow("AAPL", "1D", 100, NOW), makeRow("MSFT", "1D", 200, NOW)];
+  assert.equal(filterCoverageRows(rows, "").length, 2);
+});
+
+test("filterCoverageRows whitespace-only query returns all rows", () => {
+  const rows = [makeRow("AAPL", "1D", 100, NOW), makeRow("MSFT", "1D", 200, NOW)];
+  assert.equal(filterCoverageRows(rows, "   ").length, 2);
+});
+
+test("filterCoverageRows matches case-insensitively", () => {
+  const rows = [makeRow("AAPL", "1D", 100, NOW), makeRow("MSFT", "1D", 200, NOW)];
+  const result = filterCoverageRows(rows, "aapl");
+  assert.equal(result.length, 1);
+  assert.equal(result[0].symbol, "AAPL");
+});
+
+test("filterCoverageRows uppercase query matches lowercase stored symbol", () => {
+  const rows = [makeRow("aapl", "1D", 100, NOW)];
+  const result = filterCoverageRows(rows, "AAPL");
+  assert.equal(result.length, 1);
+});
+
+test("filterCoverageRows returns empty when no match", () => {
+  const rows = [makeRow("AAPL", "1D", 100, NOW), makeRow("MSFT", "1D", 200, NOW)];
+  assert.equal(filterCoverageRows(rows, "GOOG").length, 0);
+});
+
+test("filterCoverageRows partial substring match", () => {
+  const rows = [makeRow("AAPL", "1D", 100, NOW), makeRow("MSFT", "1D", 200, NOW), makeRow("AMZN", "1D", 50, NOW)];
+  const result = filterCoverageRows(rows, "A");
+  assert.equal(result.length, 2); // AAPL and AMZN
+});
+
+// sortCoverageRows
+
+test("sortCoverageRows symbol_asc sorts A before Z", () => {
+  const rows = [makeRow("MSFT", "1D", 100, NOW), makeRow("AAPL", "1D", 100, NOW)];
+  const sorted = sortCoverageRows(rows, "symbol_asc");
+  assert.equal(sorted[0].symbol, "AAPL");
+  assert.equal(sorted[1].symbol, "MSFT");
+});
+
+test("sortCoverageRows symbol_desc sorts Z before A", () => {
+  const rows = [makeRow("AAPL", "1D", 100, NOW), makeRow("MSFT", "1D", 100, NOW)];
+  const sorted = sortCoverageRows(rows, "symbol_desc");
+  assert.equal(sorted[0].symbol, "MSFT");
+  assert.equal(sorted[1].symbol, "AAPL");
+});
+
+test("sortCoverageRows bars_desc puts highest bar count first", () => {
+  const rows = [makeRow("AAPL", "1D", 50, NOW), makeRow("MSFT", "1D", 200, NOW)];
+  const sorted = sortCoverageRows(rows, "bars_desc");
+  assert.equal(sorted[0].symbol, "MSFT");
+});
+
+test("sortCoverageRows bars_asc puts lowest bar count first", () => {
+  const rows = [makeRow("AAPL", "1D", 50, NOW), makeRow("MSFT", "1D", 200, NOW)];
+  const sorted = sortCoverageRows(rows, "bars_asc");
+  assert.equal(sorted[0].symbol, "AAPL");
+});
+
+test("sortCoverageRows bars_desc ties broken by symbol ascending", () => {
+  const rows = [makeRow("MSFT", "1D", 100, NOW), makeRow("AAPL", "1D", 100, NOW)];
+  const sorted = sortCoverageRows(rows, "bars_desc");
+  assert.equal(sorted[0].symbol, "AAPL"); // tie broken alphabetically
+});
+
+test("sortCoverageRows latest_desc puts newest max_end_ts first", () => {
+  const rows = [makeRow("AAPL", "1D", 10, NOW - 1000), makeRow("MSFT", "1D", 10, NOW)];
+  const sorted = sortCoverageRows(rows, "latest_desc");
+  assert.equal(sorted[0].symbol, "MSFT");
+});
+
+test("sortCoverageRows latest_asc puts oldest max_end_ts first", () => {
+  const rows = [makeRow("AAPL", "1D", 10, NOW - 1000), makeRow("MSFT", "1D", 10, NOW)];
+  const sorted = sortCoverageRows(rows, "latest_asc");
+  assert.equal(sorted[0].symbol, "AAPL");
+});
+
+test("sortCoverageRows does not mutate the input array", () => {
+  const rows = [makeRow("MSFT", "1D", 100, NOW), makeRow("AAPL", "1D", 100, NOW)];
+  sortCoverageRows(rows, "symbol_asc");
+  assert.equal(rows[0].symbol, "MSFT"); // original order unchanged
+});
+
+// computeCoverageSummary
+
+test("computeCoverageSummary counts totalDaemonRows from allRows", () => {
+  const allRows = [makeRow("AAPL", "1D", 100, NOW), makeRow("MSFT", "1D", 200, NOW)];
+  const filtered = [allRows[0]];
+  const summary = computeCoverageSummary(allRows, filtered);
+  assert.equal(summary.totalDaemonRows, 2);
+});
+
+test("computeCoverageSummary counts visibleRows from filtered", () => {
+  const allRows = [makeRow("AAPL", "1D", 100, NOW), makeRow("MSFT", "1D", 200, NOW)];
+  const filtered = [allRows[0]];
+  const summary = computeCoverageSummary(allRows, filtered);
+  assert.equal(summary.visibleRows, 1);
+});
+
+test("computeCoverageSummary sums visibleBars from filtered rows", () => {
+  const allRows = [makeRow("AAPL", "1D", 100, NOW), makeRow("MSFT", "1D", 200, NOW)];
+  const filtered = allRows;
+  const summary = computeCoverageSummary(allRows, filtered);
+  assert.equal(summary.visibleBars, 300);
+});
+
+test("computeCoverageSummary empty filtered has zero visibleBars", () => {
+  const allRows = [makeRow("AAPL", "1D", 100, NOW)];
+  const summary = computeCoverageSummary(allRows, []);
+  assert.equal(summary.visibleRows, 0);
+  assert.equal(summary.visibleBars, 0);
+  assert.equal(summary.totalDaemonRows, 1);
+});
+
+// computeMissingTrackedSymbols
+
+test("computeMissingTrackedSymbols returns null when trackedSymbols is null (registry unavailable)", () => {
+  const result = computeMissingTrackedSymbols(null, [makeRow("AAPL", "1D", 100, NOW)], "1D");
+  assert.equal(result, null); // NOT an empty array
+});
+
+test("computeMissingTrackedSymbols returns empty array when all tracked symbols have coverage", () => {
+  const tracked = [{ symbol: "AAPL", timeframes: ["1D"] }];
+  const coverage = [makeRow("AAPL", "1D", 100, NOW)];
+  const result = computeMissingTrackedSymbols(tracked, coverage, "1D");
+  assert.deepEqual(result, []);
+});
+
+test("computeMissingTrackedSymbols returns missing symbols sorted", () => {
+  const tracked = [
+    { symbol: "MSFT", timeframes: ["1D"] },
+    { symbol: "AAPL", timeframes: ["1D"] },
+    { symbol: "GOOG", timeframes: ["1D"] },
+  ];
+  const coverage = [makeRow("AAPL", "1D", 100, NOW)];
+  const result = computeMissingTrackedSymbols(tracked, coverage, "1D");
+  assert.deepEqual(result, ["GOOG", "MSFT"]); // sorted, AAPL covered
+});
+
+test("computeMissingTrackedSymbols with empty coverage returns all tracked (sorted)", () => {
+  const tracked = [
+    { symbol: "MSFT", timeframes: ["1D"] },
+    { symbol: "AAPL", timeframes: ["1D"] },
+  ];
+  const result = computeMissingTrackedSymbols(tracked, [], "1D");
+  assert.deepEqual(result, ["AAPL", "MSFT"]);
+});
+
+test("computeMissingTrackedSymbols timeframe filter skips tracked symbols not in filter", () => {
+  const tracked = [
+    { symbol: "AAPL", timeframes: ["1D"] },    // matches filter
+    { symbol: "MSFT", timeframes: ["1m"] },    // does NOT match 1D filter
+  ];
+  const coverage: MdBarsCoverageRow[] = []; // empty coverage
+  const result = computeMissingTrackedSymbols(tracked, coverage, "1D");
+  // Only AAPL should be checked (has 1D in timeframes). MSFT is excluded.
+  assert.deepEqual(result, ["AAPL"]);
+});
+
+test("computeMissingTrackedSymbols null timeframeFilter checks all tracked symbols", () => {
+  const tracked = [
+    { symbol: "AAPL", timeframes: ["1D"] },
+    { symbol: "MSFT", timeframes: ["1m"] },
+  ];
+  const coverage = [makeRow("AAPL", "1D", 100, NOW)];
+  const result = computeMissingTrackedSymbols(tracked, coverage, null);
+  // timeframeFilter=null → all tracked symbols are relevant; coverage row for AAPL 1D covers AAPL
+  assert.deepEqual(result, ["MSFT"]);
+});
+
+test("COVERAGE_FRESHNESS_THRESHOLD_1D_SECS is 345600 (4 days)", () => {
+  assert.equal(COVERAGE_FRESHNESS_THRESHOLD_1D_SECS, 345600);
+});
+
+test("COVERAGE_FRESHNESS_THRESHOLD_INTRADAY_SECS is 900 (15 min)", () => {
+  assert.equal(COVERAGE_FRESHNESS_THRESHOLD_INTRADAY_SECS, 900);
 });
 
 test("IntradayRefreshSymbolStatus fail case has fail_reasons", () => {

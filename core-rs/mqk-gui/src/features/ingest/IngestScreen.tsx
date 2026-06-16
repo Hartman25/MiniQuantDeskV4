@@ -12,10 +12,14 @@ import { formatDateTime } from "../../lib/format";
 import {
   buildActiveProviderJob,
   buildProviderJobRequest,
+  classifyCoverageFreshness,
+  computeCoverageSummary,
+  computeMissingTrackedSymbols,
   coverageTruthLabel,
   fetchIntradayRefreshStatus,
   fetchMdBarsCoverage,
   fetchTrackedEquities,
+  filterCoverageRows,
   formatEndTs,
   getIngestJob,
   isCoverageActive,
@@ -25,12 +29,14 @@ import {
   isTerminalIngestStatus,
   intradayRefreshTruthLabel,
   normalizeIngestJobStatus,
+  sortCoverageRows,
   submitIngestJob,
   trackedEquitiesTruthLabel,
 } from "./api.ts";
 import { buildRepoRelativePath, buildMd1DSymbolPath, MD_BACKUP_1D_SEGMENTS, MD_INGEST_SEGMENTS } from "../backtests/pathHelpers.ts";
 import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
-import type { ActiveIngestJob, ActiveProviderJob, IngestJobStatusKind, IntradayRefreshStatusResponse, MdBarsCoverageResponse, TrackedEquitiesResponse } from "./types.ts";
+import type { CoverageSortMode } from "./api.ts";
+import type { ActiveIngestJob, ActiveProviderJob, IngestJobStatusKind, IntradayRefreshStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -70,7 +76,15 @@ function deriveDefaultOutDir(): string {
 // Coverage table component
 // ---------------------------------------------------------------------------
 
-function CoverageTable({ coverage }: { coverage: MdBarsCoverageResponse }) {
+function CoverageTable({
+  coverage,
+  rows,
+  nowSecs,
+}: {
+  coverage: MdBarsCoverageResponse;
+  rows: MdBarsCoverageRow[];
+  nowSecs: number;
+}) {
   if (!isCoverageActive(coverage.truth_state)) {
     return (
       <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
@@ -89,30 +103,44 @@ function CoverageTable({ coverage }: { coverage: MdBarsCoverageResponse }) {
           <th style={{ textAlign: "right" }}>Bars</th>
           <th>From</th>
           <th>To</th>
+          <th>Freshness</th>
           <th>Last Ingested</th>
         </tr>
       </thead>
       <tbody>
-        {coverage.rows.map((row) => (
-          <tr key={`${row.symbol}|${row.timeframe}`}>
-            <td><strong>{row.symbol}</strong></td>
-            <td>{row.timeframe}</td>
-            <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-              {row.bars.toLocaleString()}
-            </td>
-            <td style={{ fontVariantNumeric: "tabular-nums" }}>
-              {formatEndTs(row.min_end_ts)}
-            </td>
-            <td style={{ fontVariantNumeric: "tabular-nums" }}>
-              {formatEndTs(row.max_end_ts)}
-            </td>
-            <td style={{ color: "var(--text-muted, #888)" }}>
-              {row.latest_ingested_at
-                ? row.latest_ingested_at.slice(0, 19).replace("T", " ")
-                : "—"}
-            </td>
-          </tr>
-        ))}
+        {rows.map((row) => {
+          const freshness = classifyCoverageFreshness(row.max_end_ts, nowSecs, row.timeframe);
+          return (
+            <tr key={`${row.symbol}|${row.timeframe}`}>
+              <td><strong>{row.symbol}</strong></td>
+              <td>{row.timeframe}</td>
+              <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                {row.bars.toLocaleString()}
+              </td>
+              <td style={{ fontVariantNumeric: "tabular-nums" }}>
+                {formatEndTs(row.min_end_ts)}
+              </td>
+              <td style={{ fontVariantNumeric: "tabular-nums" }}>
+                {formatEndTs(row.max_end_ts)}
+              </td>
+              <td style={{
+                color: freshness === "fresh"
+                  ? "var(--green, #4caf50)"
+                  : freshness === "stale"
+                  ? "var(--red, #f44336)"
+                  : "var(--text-muted, #888)",
+                fontSize: "0.82rem",
+              }}>
+                {freshness}
+              </td>
+              <td style={{ color: "var(--text-muted, #888)" }}>
+                {row.latest_ingested_at
+                  ? row.latest_ingested_at.slice(0, 19).replace("T", " ")
+                  : "—"}
+              </td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );
@@ -142,6 +170,8 @@ export function IngestScreen() {
   const [coverage, setCoverage] = useState<MdBarsCoverageResponse | null>(null);
   const [coverageLoading, setCoverageLoading] = useState(false);
   const [coverageError, setCoverageError] = useState<string | null>(null);
+  const [coverageSymbolSearch, setCoverageSymbolSearch] = useState("");
+  const [coverageSortMode, setCoverageSortMode] = useState<CoverageSortMode>("symbol_asc");
 
   // DATA-INGEST-GUI-SYNC-ALL-01: Tracked-equities registry preview state
   const [trackedEquities, setTrackedEquities] = useState<TrackedEquitiesResponse | null>(null);
@@ -478,6 +508,20 @@ export function IngestScreen() {
   const jobIsActive = activeJob !== null && !isTerminalIngestStatus(activeJob.status);
   const providerJobIsActive = activeProviderJob !== null && !isTerminalIngestStatus(activeProviderJob.status);
 
+  // Coverage polish computed values — derived inline (small datasets, no useMemo needed)
+  const nowSecs = Math.floor(Date.now() / 1000);
+  const allCoverageRows = coverage !== null && isCoverageActive(coverage.truth_state) ? coverage.rows : [];
+  const coverageFilteredRows = filterCoverageRows(allCoverageRows, coverageSymbolSearch);
+  const coverageSortedRows = sortCoverageRows(coverageFilteredRows, coverageSortMode);
+  const coverageSummary = computeCoverageSummary(allCoverageRows, coverageSortedRows);
+  const missingTrackedSymbols = computeMissingTrackedSymbols(
+    trackedEquities !== null && isTrackedEquitiesActive(trackedEquities.truth_state)
+      ? trackedEquities.symbols
+      : null,
+    allCoverageRows,
+    coverageFilter.trim() || null,
+  );
+
   const repoRoot = getDesktopRepoRoot();
   const md1DDir = buildRepoRelativePath(repoRoot, ...MD_BACKUP_1D_SEGMENTS);
 
@@ -681,9 +725,10 @@ export function IngestScreen() {
         title="Local data coverage"
         subtitle="Read-only view of what md_bars data exists locally. No DB writes. No provider calls."
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        {/* Timeframe filter + refresh */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
           <label htmlFor="coverage-timeframe" style={{ fontSize: "0.85rem" }}>
-            Timeframe filter
+            Timeframe
           </label>
           <input
             id="coverage-timeframe"
@@ -706,6 +751,39 @@ export function IngestScreen() {
           </button>
         </div>
 
+        {/* Symbol search + sort */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          <label htmlFor="coverage-search" style={{ fontSize: "0.85rem" }}>
+            Symbol search
+          </label>
+          <input
+            id="coverage-search"
+            type="text"
+            value={coverageSymbolSearch}
+            onChange={(e) => setCoverageSymbolSearch(e.target.value)}
+            spellCheck={false}
+            autoComplete="off"
+            placeholder="filter symbols…"
+            style={{ width: 160 }}
+          />
+          <label htmlFor="coverage-sort" style={{ fontSize: "0.85rem" }}>
+            Sort
+          </label>
+          <select
+            id="coverage-sort"
+            value={coverageSortMode}
+            onChange={(e) => setCoverageSortMode(e.target.value as CoverageSortMode)}
+            style={{ fontSize: "0.85rem" }}
+          >
+            <option value="symbol_asc">Symbol A→Z</option>
+            <option value="symbol_desc">Symbol Z→A</option>
+            <option value="bars_desc">Bars high→low</option>
+            <option value="bars_asc">Bars low→high</option>
+            <option value="latest_desc">Latest bar newest</option>
+            <option value="latest_asc">Latest bar oldest</option>
+          </select>
+        </div>
+
         {coverageError && (
           <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
             <strong>Coverage fetch failed:</strong> {coverageError}
@@ -720,7 +798,7 @@ export function IngestScreen() {
 
         {coverage !== null && (
           <>
-            <div className="bt-job-meta" style={{ marginBottom: 6 }}>
+            <div className="bt-job-meta" style={{ marginBottom: 4 }}>
               <span className="eyebrow">truth_state</span>{" "}
               <strong>{coverageTruthLabel(coverage.truth_state)}</strong>
               {coverage.timeframe && (
@@ -731,12 +809,45 @@ export function IngestScreen() {
               )}
               {coverage.truth_state === "active" && (
                 <>
-                  {" "}<span className="eyebrow">groups</span>{" "}
-                  <strong>{coverage.rows.length}</strong>
+                  {" "}<span className="eyebrow">total rows</span>{" "}
+                  <strong>{coverageSummary.totalDaemonRows}</strong>
+                  {coverageSymbolSearch && (
+                    <>
+                      {" "}<span className="eyebrow">visible</span>{" "}
+                      <strong>{coverageSummary.visibleRows}</strong>
+                    </>
+                  )}
+                  {" "}<span className="eyebrow">visible bars</span>{" "}
+                  <strong>{coverageSummary.visibleBars.toLocaleString()}</strong>
                 </>
               )}
             </div>
-            <CoverageTable coverage={coverage} />
+            <CoverageTable coverage={coverage} rows={coverageSortedRows} nowSecs={nowSecs} />
+
+            {missingTrackedSymbols === null && (
+              <div className="bt-field-hint" style={{ marginTop: 10, fontSize: "0.82rem", color: "var(--text-muted, #888)" }}>
+                Registry unavailable — cannot compute missing symbols.
+              </div>
+            )}
+            {missingTrackedSymbols !== null && missingTrackedSymbols.length === 0 && (
+              <div className="bt-field-hint" style={{ marginTop: 10, fontSize: "0.82rem", color: "var(--green, #4caf50)" }}>
+                All tracked symbols have coverage{coverageFilter.trim() ? ` for ${coverageFilter.trim()}` : ""}.
+              </div>
+            )}
+            {missingTrackedSymbols !== null && missingTrackedSymbols.length > 0 && (
+              <div className="unavailable-notice" style={{ marginTop: 10 }}>
+                <strong>
+                  Missing tracked symbols ({missingTrackedSymbols.length})
+                  {coverageFilter.trim() ? ` for ${coverageFilter.trim()}` : ""}:
+                </strong>{" "}
+                {missingTrackedSymbols.slice(0, 25).join(", ")}
+                {missingTrackedSymbols.length > 25 && (
+                  <span style={{ color: "var(--text-muted, #888)" }}>
+                    {" "}+{missingTrackedSymbols.length - 25} more
+                  </span>
+                )}
+              </div>
+            )}
           </>
         )}
 

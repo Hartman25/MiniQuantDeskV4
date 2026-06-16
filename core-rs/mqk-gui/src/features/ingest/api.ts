@@ -17,6 +17,7 @@ import type {
   IngestJobsListResponse,
   IntradayRefreshStatusResponse,
   MdBarsCoverageResponse,
+  MdBarsCoverageRow,
   TrackedEquitiesResponse,
 } from "./types";
 
@@ -407,4 +408,149 @@ export async function fetchIntradayRefreshStatus(): Promise<FetchIntradayRefresh
   }
 
   return { ok: true, data: result.data };
+}
+
+// ---------------------------------------------------------------------------
+// DATA-INGEST-GUI-COVERAGE-POLISH-01: Coverage freshness, sort, filter, summary
+// ---------------------------------------------------------------------------
+
+export const COVERAGE_FRESHNESS_THRESHOLD_1D_SECS = 345600; // 4 days (handles weekends + holidays)
+export const COVERAGE_FRESHNESS_THRESHOLD_INTRADAY_SECS = 900; // 15 min
+
+export type CoverageFreshness = "fresh" | "stale" | "unknown";
+
+/**
+ * Return the freshness threshold in seconds for a timeframe, or null for unknown timeframes.
+ */
+export function coverageFreshnessThresholdSecs(timeframe: string): number | null {
+  if (timeframe === "1D") return COVERAGE_FRESHNESS_THRESHOLD_1D_SECS;
+  if (timeframe === "1m" || timeframe === "5m") return COVERAGE_FRESHNESS_THRESHOLD_INTRADAY_SECS;
+  return null;
+}
+
+/**
+ * Classify a coverage row as fresh/stale/unknown.
+ * - unknown: timeframe unrecognized, or maxEndTs is zero/null.
+ * - fresh: (nowSecs - maxEndTs) <= threshold.
+ * - stale: (nowSecs - maxEndTs) > threshold.
+ */
+export function classifyCoverageFreshness(
+  maxEndTs: number | null | undefined,
+  nowSecs: number,
+  timeframe: string,
+): CoverageFreshness {
+  if (!maxEndTs) return "unknown";
+  const threshold = coverageFreshnessThresholdSecs(timeframe);
+  if (threshold === null) return "unknown";
+  const ageSecs = nowSecs - maxEndTs;
+  return ageSecs <= threshold ? "fresh" : "stale";
+}
+
+export type CoverageSortMode =
+  | "symbol_asc"
+  | "symbol_desc"
+  | "bars_desc"
+  | "bars_asc"
+  | "latest_desc"
+  | "latest_asc";
+
+/**
+ * Sort coverage rows by the given mode. Ties broken by symbol ascending for determinism.
+ */
+export function sortCoverageRows(
+  rows: MdBarsCoverageRow[],
+  mode: CoverageSortMode,
+): MdBarsCoverageRow[] {
+  return [...rows].sort((a, b) => {
+    switch (mode) {
+      case "symbol_asc":
+        return a.symbol.localeCompare(b.symbol);
+      case "symbol_desc":
+        return b.symbol.localeCompare(a.symbol);
+      case "bars_desc":
+        if (b.bars !== a.bars) return b.bars - a.bars;
+        return a.symbol.localeCompare(b.symbol);
+      case "bars_asc":
+        if (a.bars !== b.bars) return a.bars - b.bars;
+        return a.symbol.localeCompare(b.symbol);
+      case "latest_desc":
+        if (b.max_end_ts !== a.max_end_ts) return b.max_end_ts - a.max_end_ts;
+        return a.symbol.localeCompare(b.symbol);
+      case "latest_asc":
+        if (a.max_end_ts !== b.max_end_ts) return a.max_end_ts - b.max_end_ts;
+        return a.symbol.localeCompare(b.symbol);
+    }
+  });
+}
+
+/**
+ * Filter coverage rows by symbol substring (case-insensitive). Empty query returns all rows.
+ */
+export function filterCoverageRows(
+  rows: MdBarsCoverageRow[],
+  symbolQuery: string,
+): MdBarsCoverageRow[] {
+  const q = symbolQuery.trim().toLowerCase();
+  if (!q) return rows;
+  return rows.filter((r) => r.symbol.toLowerCase().includes(q));
+}
+
+export interface CoverageSummary {
+  totalDaemonRows: number;
+  visibleRows: number;
+  visibleBars: number;
+}
+
+/**
+ * Compute totals for the coverage panel header.
+ * totalDaemonRows: all rows from daemon; visibleRows/visibleBars: after filter+sort.
+ */
+export function computeCoverageSummary(
+  allRows: MdBarsCoverageRow[],
+  filtered: MdBarsCoverageRow[],
+): CoverageSummary {
+  return {
+    totalDaemonRows: allRows.length,
+    visibleRows: filtered.length,
+    visibleBars: filtered.reduce((sum, r) => sum + r.bars, 0),
+  };
+}
+
+/**
+ * Return the sorted list of tracked symbols that have no coverage row for the given timeframe.
+ *
+ * Returns null when the tracked-equities registry is unavailable — explicitly NOT an empty array.
+ * Returns [] when the registry is loaded and all tracked symbols have coverage.
+ *
+ * @param trackedSymbols - flat list of (symbol, timeframes[]) from TrackedEquitiesResponse.symbols,
+ *   or null when registry is unavailable.
+ * @param coverageRows - all coverage rows from the daemon.
+ * @param timeframeFilter - only check tracked symbols that include this timeframe; null = no filter.
+ */
+export function computeMissingTrackedSymbols(
+  trackedSymbols: Array<{ symbol: string; timeframes: string[] }> | null,
+  coverageRows: MdBarsCoverageRow[],
+  timeframeFilter: string | null,
+): string[] | null {
+  if (trackedSymbols === null) return null;
+
+  const coveredSet = new Set<string>();
+  for (const row of coverageRows) {
+    if (timeframeFilter === null || row.timeframe === timeframeFilter) {
+      coveredSet.add(row.symbol);
+    }
+  }
+
+  const missing: string[] = [];
+  for (const entry of trackedSymbols) {
+    const relevant =
+      timeframeFilter === null
+        ? true
+        : entry.timeframes.includes(timeframeFilter);
+    if (relevant && !coveredSet.has(entry.symbol)) {
+      missing.push(entry.symbol);
+    }
+  }
+
+  return missing.sort();
 }
