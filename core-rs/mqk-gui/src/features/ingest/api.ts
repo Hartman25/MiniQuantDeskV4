@@ -10,6 +10,7 @@ import { fetchJsonCandidate, postJson } from "../system/http";
 import type {
   ActiveIngestJob,
   ActiveProviderJob,
+  CancelIngestJobResponse,
   IngestJobAcceptedResponse,
   IngestJobRequest,
   IngestJobStatusKind,
@@ -32,6 +33,8 @@ export function normalizeIngestJobStatus(raw: string): IngestJobStatusKind {
     case "completed":
     case "dry_run_completed":
     case "partial":
+    case "refused":
+    case "cancelled":
     case "failed":
       return raw;
     default:
@@ -44,8 +47,14 @@ export function isTerminalIngestStatus(status: IngestJobStatusKind): boolean {
     status === "completed" ||
     status === "dry_run_completed" ||
     status === "partial" ||
+    status === "refused" ||
+    status === "cancelled" ||
     status === "failed"
   );
+}
+
+export function isCancellableIngestStatus(status: IngestJobStatusKind): boolean {
+  return status === "queued" || status === "running";
 }
 
 export function extractIngestRowCounts(
@@ -170,6 +179,14 @@ export interface GetIngestJobResult {
   notFound?: boolean;
 }
 
+export interface CancelIngestJobResult {
+  ok: boolean;
+  status?: number;
+  data?: CancelIngestJobResponse;
+  error?: string;
+  notFound?: boolean;
+}
+
 export interface ListIngestJobsResult {
   ok: boolean;
   data?: IngestJobsListResponse;
@@ -229,6 +246,50 @@ export async function getIngestJob(jobId: string): Promise<GetIngestJobResult> {
   }
 
   return { ok: true, data: result.data };
+}
+
+export async function cancelIngestJob(jobId: string): Promise<CancelIngestJobResult> {
+  const result = await postJson<CancelIngestJobResponse>(
+    [`/api/v1/ingest/jobs/${jobId}/cancel`],
+    {},
+    { privileged: true },
+  );
+
+  if (result.error === "desktop operator token missing") {
+    return {
+      ok: false,
+      error:
+        "Operator token missing — configure MQK_OPERATOR_TOKEN and launch via Launch-VeritasLedger.ps1 to cancel ingest jobs.",
+    };
+  }
+
+  if (!result.ok) {
+    if (result.status === 401 || result.status === 403) {
+      return {
+        ok: false,
+        status: result.status,
+        error: "Operator auth required. Set MQK_OPERATOR_TOKEN and launch the daemon with that token configured.",
+      };
+    }
+    if (result.status === 404) {
+      return {
+        ok: false,
+        status: 404,
+        error: "Ingest job not found.",
+        notFound: true,
+      };
+    }
+    if (result.status === 503) {
+      return {
+        ok: false,
+        status: 503,
+        error: "Ingest job cancel backend unavailable.",
+      };
+    }
+    return { ok: false, status: result.status, error: result.error ?? "Cancel failed." };
+  }
+
+  return { ok: true, status: result.status, data: result.data };
 }
 
 export async function listIngestJobs(): Promise<ListIngestJobsResult> {

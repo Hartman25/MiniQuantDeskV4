@@ -2492,7 +2492,16 @@ ul {
   border: 1px solid rgba(72, 199, 142, 0.35);
 }
 
+.bt-job-status-badge.status-dry_run_completed,
+.bt-job-status-badge.status-partial,
+.bt-job-status-badge.status-cancelled {
+  background: rgba(245, 166, 35, 0.14);
+  color: var(--accent);
+  border: 1px solid rgba(245, 166, 35, 0.35);
+}
+
 .bt-job-status-badge.status-failed,
+.bt-job-status-badge.status-refused,
 .bt-job-status-badge.status-unknown {
   background: rgba(255, 56, 96, 0.15);
   color: var(--critical);

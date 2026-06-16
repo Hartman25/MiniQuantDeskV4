@@ -12,6 +12,7 @@ import { formatDateTime } from "../../lib/format";
 import {
   buildActiveProviderJob,
   buildProviderJobRequest,
+  cancelIngestJob,
   classifyCoverageFreshness,
   computeCoverageSummary,
   computeMissingTrackedSymbols,
@@ -24,6 +25,7 @@ import {
   getIngestJob,
   isCoverageActive,
   isIntradayRefreshActive,
+  isCancellableIngestStatus,
   isProviderSyncAllowed,
   isTrackedEquitiesActive,
   isTerminalIngestStatus,
@@ -49,6 +51,8 @@ function IngestJobStatusBadge({ status }: { status: IngestJobStatusKind }) {
     status === "completed" ? "Completed" :
     status === "dry_run_completed" ? "Dry-run completed" :
     status === "partial" ? "Partial" :
+    status === "refused" ? "Refused" :
+    status === "cancelled" ? "Cancelled" :
     status === "failed" ? "Failed" : "Unknown";
 
   return (
@@ -164,6 +168,10 @@ export function IngestScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<ActiveIngestJob | null>(null);
+  const [csvCancelConfirmed, setCsvCancelConfirmed] = useState(false);
+  const [csvCancelling, setCsvCancelling] = useState(false);
+  const [csvCancelError, setCsvCancelError] = useState<string | null>(null);
+  const [csvCancelNotice, setCsvCancelNotice] = useState<string | null>(null);
 
   // Coverage state — read-only view of what's in md_bars
   const [coverageFilter, setCoverageFilter] = useState("1D");
@@ -193,6 +201,10 @@ export function IngestScreen() {
   const [providerSubmitting, setProviderSubmitting] = useState(false);
   const [providerSubmitError, setProviderSubmitError] = useState<string | null>(null);
   const [activeProviderJob, setActiveProviderJob] = useState<ActiveProviderJob | null>(null);
+  const [providerCancelConfirmed, setProviderCancelConfirmed] = useState(false);
+  const [providerCancelling, setProviderCancelling] = useState(false);
+  const [providerCancelError, setProviderCancelError] = useState<string | null>(null);
+  const [providerCancelNotice, setProviderCancelNotice] = useState<string | null>(null);
 
   const loadCoverage = useCallback(async () => {
     setCoverageLoading(true);
@@ -315,6 +327,9 @@ export function IngestScreen() {
     setSubmitting(true);
     setSubmitError(null);
     setActiveJob(null);
+    setCsvCancelConfirmed(false);
+    setCsvCancelError(null);
+    setCsvCancelNotice(null);
 
     const result = await submitIngestJob({
       source: "csv",
@@ -354,6 +369,64 @@ export function IngestScreen() {
       error: null,
     });
   }, [csvPath, timeframe, sourceLabel, outDir]);
+
+  const handleCsvCancel = useCallback(async () => {
+    if (!activeJob || !isCancellableIngestStatus(activeJob.status)) return;
+    if (!csvCancelConfirmed) {
+      setCsvCancelError("Confirm cancellation before cancelling this ingest job.");
+      return;
+    }
+
+    setCsvCancelling(true);
+    setCsvCancelError(null);
+    setCsvCancelNotice(null);
+
+    const cancelResult = await cancelIngestJob(activeJob.jobId);
+    if (!cancelResult.ok) {
+      setCsvCancelling(false);
+      setCsvCancelError(cancelResult.error ?? "Cancel failed.");
+      return;
+    }
+
+    const returnedStatus = cancelResult.data?.status
+      ? normalizeIngestJobStatus(cancelResult.data.status)
+      : activeJob.status;
+    setCsvCancelNotice(
+      cancelResult.data?.accepted
+        ? "Cancel accepted. Refreshing job status."
+        : `Cancel not accepted: job is ${returnedStatus}.`,
+    );
+
+    const statusResult = await getIngestJob(activeJob.jobId);
+    setCsvCancelling(false);
+    setCsvCancelConfirmed(false);
+
+    if (!statusResult.ok) {
+      setCsvCancelError(statusResult.error ?? "Status fetch after cancel failed.");
+      setActiveJob((prev) =>
+        prev?.jobId === activeJob.jobId
+          ? { ...prev, status: returnedStatus, error: cancelResult.data?.error ?? prev.error }
+          : prev,
+      );
+      return;
+    }
+
+    setActiveJob((prev) =>
+      prev?.jobId === activeJob.jobId
+        ? {
+            ...prev,
+            status: normalizeIngestJobStatus(statusResult.data!.status),
+            startedAt: statusResult.data!.started_at_utc ?? null,
+            completedAt: statusResult.data!.completed_at_utc ?? null,
+            rowsRead: statusResult.data!.rows_read ?? null,
+            rowsInserted: statusResult.data!.rows_inserted ?? null,
+            rowsRejected: statusResult.data!.rows_rejected ?? null,
+            qualityReportPath: statusResult.data!.quality_report_path ?? null,
+            error: statusResult.data!.error ?? null,
+          }
+        : prev,
+    );
+  }, [activeJob, csvCancelConfirmed]);
 
   // Provider job polling effect — 2-second cadence, stops on terminal status or unmount.
   useEffect(() => {
@@ -408,6 +481,9 @@ export function IngestScreen() {
     setProviderSubmitting(true);
     setProviderSubmitError(null);
     setActiveProviderJob(null);
+    setProviderCancelConfirmed(false);
+    setProviderCancelError(null);
+    setProviderCancelNotice(null);
 
     const req = buildProviderJobRequest({
       dryRun: true,
@@ -459,6 +535,9 @@ export function IngestScreen() {
     setProviderSubmitting(true);
     setProviderSubmitError(null);
     setActiveProviderJob(null);
+    setProviderCancelConfirmed(false);
+    setProviderCancelError(null);
+    setProviderCancelNotice(null);
 
     const req = buildProviderJobRequest({
       dryRun: false,
@@ -505,8 +584,57 @@ export function IngestScreen() {
     setProviderSyncConfirmation("");
   }, [providerSyncConfirmation, providerStart, providerEnd, providerApiCreditsPerMin, providerApiCreditsPerDay]);
 
+  const handleProviderCancel = useCallback(async () => {
+    if (!activeProviderJob || !isCancellableIngestStatus(activeProviderJob.status)) return;
+    if (!providerCancelConfirmed) {
+      setProviderCancelError("Confirm cancellation before cancelling this provider sync job.");
+      return;
+    }
+
+    setProviderCancelling(true);
+    setProviderCancelError(null);
+    setProviderCancelNotice(null);
+
+    const cancelResult = await cancelIngestJob(activeProviderJob.jobId);
+    if (!cancelResult.ok) {
+      setProviderCancelling(false);
+      setProviderCancelError(cancelResult.error ?? "Cancel failed.");
+      return;
+    }
+
+    const returnedStatus = cancelResult.data?.status
+      ? normalizeIngestJobStatus(cancelResult.data.status)
+      : activeProviderJob.status;
+    setProviderCancelNotice(
+      cancelResult.data?.accepted
+        ? "Cancel accepted. Refreshing job status."
+        : `Cancel not accepted: job is ${returnedStatus}.`,
+    );
+
+    const statusResult = await getIngestJob(activeProviderJob.jobId);
+    setProviderCancelling(false);
+    setProviderCancelConfirmed(false);
+
+    if (!statusResult.ok) {
+      setProviderCancelError(statusResult.error ?? "Status fetch after cancel failed.");
+      setActiveProviderJob((prev) =>
+        prev?.jobId === activeProviderJob.jobId
+          ? { ...prev, status: returnedStatus, error: cancelResult.data?.error ?? prev.error }
+          : prev,
+      );
+      return;
+    }
+
+    const updated = buildActiveProviderJob(statusResult.data!);
+    setActiveProviderJob((prev) =>
+      prev?.jobId === activeProviderJob.jobId ? updated : prev,
+    );
+  }, [activeProviderJob, providerCancelConfirmed]);
+
   const jobIsActive = activeJob !== null && !isTerminalIngestStatus(activeJob.status);
   const providerJobIsActive = activeProviderJob !== null && !isTerminalIngestStatus(activeProviderJob.status);
+  const activeJobCanCancel = activeJob !== null && isCancellableIngestStatus(activeJob.status);
+  const activeProviderJobCanCancel = activeProviderJob !== null && isCancellableIngestStatus(activeProviderJob.status);
 
   // Coverage polish computed values — derived inline (small datasets, no useMemo needed)
   const nowSecs = Math.floor(Date.now() / 1000);
@@ -682,7 +810,45 @@ export function IngestScreen() {
             </div>
           )}
 
-          {activeJob.status === "completed" && (
+          {activeJobCanCancel && (
+            <div className="unavailable-notice" style={{ marginTop: 8 }}>
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", fontSize: "0.85rem", marginBottom: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={csvCancelConfirmed}
+                  onChange={(e) => {
+                    setCsvCancelConfirmed(e.target.checked);
+                    if (e.target.checked) setCsvCancelError(null);
+                  }}
+                  style={{ marginTop: 2 }}
+                />
+                I understand this cancels only the active CSV ingest job shown here
+              </label>
+              <button
+                type="button"
+                className="action-button ghost"
+                onClick={() => void handleCsvCancel()}
+                disabled={!csvCancelConfirmed || csvCancelling}
+                style={{ padding: "2px 12px" }}
+              >
+                {csvCancelling ? "Cancelling…" : "Cancel job"}
+              </button>
+            </div>
+          )}
+
+          {csvCancelError && (
+            <div className="unavailable-notice unavailable-critical" style={{ marginTop: 8 }}>
+              <strong>Cancel failed:</strong> {csvCancelError}
+            </div>
+          )}
+
+          {csvCancelNotice && (
+            <div className="unavailable-notice" style={{ marginTop: 8 }}>
+              {csvCancelNotice}
+            </div>
+          )}
+
+          {(activeJob.rowsRead !== null || activeJob.rowsInserted !== null || activeJob.rowsRejected !== null) && (
             <div className="timeline-meta-grid" style={{ marginTop: 8 }}>
               <div>
                 <span>Rows read</span>
@@ -715,6 +881,27 @@ export function IngestScreen() {
           {activeJob.status === "failed" && activeJob.error && (
             <div className="unavailable-notice unavailable-critical" style={{ marginTop: 4 }}>
               <strong>Job failed:</strong> {activeJob.error}
+            </div>
+          )}
+
+          {activeJob.status === "cancelled" && (
+            <div className="unavailable-notice" style={{ marginTop: 8, borderColor: "var(--accent, #c8a84b)" }}>
+              <strong>Job cancelled.</strong>{" "}
+              {activeJob.error ?? "Daemon marked this ingest job cancelled."}
+            </div>
+          )}
+
+          {activeJob.status === "refused" && (
+            <div className="unavailable-notice unavailable-critical" style={{ marginTop: 8 }}>
+              <strong>Job refused:</strong>{" "}
+              {activeJob.error ?? "Daemon refused this ingest job."}
+            </div>
+          )}
+
+          {activeJob.status === "unknown" && (
+            <div className="unavailable-notice" style={{ marginTop: 8 }}>
+              <strong>Unrecognized status.</strong>{" "}
+              Daemon returned an unknown status string — check daemon version.
             </div>
           )}
         </Panel>
@@ -1140,6 +1327,44 @@ export function IngestScreen() {
             </div>
           )}
 
+          {activeProviderJobCanCancel && (
+            <div className="unavailable-notice" style={{ marginTop: 8 }}>
+              <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", fontSize: "0.85rem", marginBottom: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={providerCancelConfirmed}
+                  onChange={(e) => {
+                    setProviderCancelConfirmed(e.target.checked);
+                    if (e.target.checked) setProviderCancelError(null);
+                  }}
+                  style={{ marginTop: 2 }}
+                />
+                I understand this cancels only the active provider sync job shown here
+              </label>
+              <button
+                type="button"
+                className="action-button ghost"
+                onClick={() => void handleProviderCancel()}
+                disabled={!providerCancelConfirmed || providerCancelling}
+                style={{ padding: "2px 12px" }}
+              >
+                {providerCancelling ? "Cancelling…" : "Cancel provider job"}
+              </button>
+            </div>
+          )}
+
+          {providerCancelError && (
+            <div className="unavailable-notice unavailable-critical" style={{ marginTop: 8 }}>
+              <strong>Cancel failed:</strong> {providerCancelError}
+            </div>
+          )}
+
+          {providerCancelNotice && (
+            <div className="unavailable-notice" style={{ marginTop: 8 }}>
+              {providerCancelNotice}
+            </div>
+          )}
+
           {/* Progress metrics */}
           <div className="timeline-meta-grid" style={{ marginTop: 8 }}>
             <div>
@@ -1221,6 +1446,20 @@ export function IngestScreen() {
             <div className="unavailable-notice unavailable-critical" style={{ marginTop: 8 }}>
               <strong>Job failed:</strong>{" "}
               {activeProviderJob.error ?? "No error message returned. Check daemon logs."}
+            </div>
+          )}
+
+          {activeProviderJob.status === "cancelled" && (
+            <div className="unavailable-notice" style={{ marginTop: 8, borderColor: "var(--accent, #c8a84b)" }}>
+              <strong>Job cancelled.</strong>{" "}
+              {activeProviderJob.error ?? "Daemon marked this provider sync job cancelled."}
+            </div>
+          )}
+
+          {activeProviderJob.status === "refused" && (
+            <div className="unavailable-notice unavailable-critical" style={{ marginTop: 8 }}>
+              <strong>Job refused:</strong>{" "}
+              {activeProviderJob.error ?? "Daemon refused this provider sync job."}
             </div>
           )}
 

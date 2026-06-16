@@ -90,12 +90,23 @@ export interface IngestJobStatusResponse {
   symbols_failed: number | null;
 }
 
+export interface CancelIngestJobResponse {
+  canonical_route: string;
+  truth_state: string;
+  accepted: boolean;
+  job_id: string;
+  status?: string;
+  error: string | null;
+}
+
 export type IngestJobStatusKind =
   | "queued"
   | "running"
   | "completed"
   | "dry_run_completed"
   | "partial"
+  | "refused"
+  | "cancelled"
   | "failed"
   | "unknown";
 

@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import {
   normalizeIngestJobStatus,
   isTerminalIngestStatus,
+  isCancellableIngestStatus,
   extractIngestRowCounts,
   buildActiveIngestJob,
+  cancelIngestJob,
   isProviderSyncAllowed,
   buildProviderJobRequest,
   buildActiveProviderJob,
@@ -46,6 +48,14 @@ test("normalizeIngestJobStatus returns failed for 'failed'", () => {
   assert.equal(normalizeIngestJobStatus("failed"), "failed");
 });
 
+test("normalizeIngestJobStatus returns refused for 'refused'", () => {
+  assert.equal(normalizeIngestJobStatus("refused"), "refused");
+});
+
+test("normalizeIngestJobStatus returns cancelled for 'cancelled'", () => {
+  assert.equal(normalizeIngestJobStatus("cancelled"), "cancelled");
+});
+
 test("normalizeIngestJobStatus returns unknown for unrecognized string", () => {
   assert.equal(normalizeIngestJobStatus("in_progress"), "unknown");
 });
@@ -66,6 +76,14 @@ test("isTerminalIngestStatus returns true for failed", () => {
   assert.ok(isTerminalIngestStatus("failed"));
 });
 
+test("isTerminalIngestStatus returns true for refused", () => {
+  assert.ok(isTerminalIngestStatus("refused"));
+});
+
+test("isTerminalIngestStatus returns true for cancelled", () => {
+  assert.ok(isTerminalIngestStatus("cancelled"));
+});
+
 test("isTerminalIngestStatus returns false for queued", () => {
   assert.ok(!isTerminalIngestStatus("queued"));
 });
@@ -76,6 +94,29 @@ test("isTerminalIngestStatus returns false for running", () => {
 
 test("isTerminalIngestStatus returns false for unknown", () => {
   assert.ok(!isTerminalIngestStatus("unknown"));
+});
+
+// ---------------------------------------------------------------------------
+// isCancellableIngestStatus
+// ---------------------------------------------------------------------------
+
+test("isCancellableIngestStatus returns true for queued and running", () => {
+  assert.ok(isCancellableIngestStatus("queued"));
+  assert.ok(isCancellableIngestStatus("running"));
+});
+
+test("isCancellableIngestStatus returns false for terminal and unknown statuses", () => {
+  for (const status of [
+    "completed",
+    "failed",
+    "partial",
+    "refused",
+    "dry_run_completed",
+    "cancelled",
+    "unknown",
+  ] as const) {
+    assert.equal(isCancellableIngestStatus(status), false);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -905,6 +946,73 @@ test("isTerminalIngestStatus returns true for partial", () => {
 });
 
 // ---------------------------------------------------------------------------
+// cancelIngestJob
+// ---------------------------------------------------------------------------
+
+test("cancelIngestJob POSTs to the canonical cancel endpoint", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify({
+        canonical_route: "/api/v1/ingest/jobs/:job_id/cancel",
+        truth_state: "cancel_accepted",
+        accepted: true,
+        job_id: "job-123",
+        status: "cancelled",
+        error: null,
+      }),
+      {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const result = await cancelIngestJob("job-123");
+    assert.equal(result.ok, true);
+    assert.equal(result.status, 202);
+    assert.equal(result.data?.status, "cancelled");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "http://127.0.0.1:8899/api/v1/ingest/jobs/job-123/cancel");
+    assert.equal(calls[0].init?.method, "POST");
+    assert.equal(calls[0].init?.body, "{}");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("cancelIngestJob maps HTTP 404 to notFound", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        canonical_route: "/api/v1/ingest/jobs/:job_id/cancel",
+        truth_state: "not_found",
+        accepted: false,
+        job_id: "missing-job",
+        error: "job_id missing-job not found",
+      }),
+      {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      },
+    )) as typeof fetch;
+
+  try {
+    const result = await cancelIngestJob("missing-job");
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 404);
+    assert.equal(result.notFound, true);
+    assert.equal(result.error, "Ingest job not found.");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
 // isProviderSyncAllowed
 // ---------------------------------------------------------------------------
 
@@ -1080,6 +1188,29 @@ test("buildActiveProviderJob maps unknown daemon status to unknown", () => {
   const resp = makeProviderStatusResponse("some_future_state");
   const job = buildActiveProviderJob(resp);
   assert.equal(job.status, "unknown");
+});
+
+test("buildActiveProviderJob maps cancelled job without dropping progress counters", () => {
+  const resp = makeProviderStatusResponse("cancelled", {
+    dry_run: false,
+    provider_api_calls_allowed: true,
+    api_calls_made: 4,
+    symbols_completed: 3,
+    symbols_failed: 1,
+    rows_inserted: 150,
+    rows_rejected: 2,
+    completed_at_utc: "2026-06-15T10:12:00Z",
+    error: "cancelled by operator",
+  });
+  const job = buildActiveProviderJob(resp);
+  assert.equal(job.status, "cancelled");
+  assert.equal(isTerminalIngestStatus(job.status), true);
+  assert.equal(job.apiCallsMade, 4);
+  assert.equal(job.symbolsCompleted, 3);
+  assert.equal(job.symbolsFailed, 1);
+  assert.equal(job.rowsInserted, 150);
+  assert.equal(job.rowsRejected, 2);
+  assert.equal(job.error, "cancelled by operator");
 });
 
 test("IngestJobStatusResponse with symbols_completed and symbols_failed fields is valid", () => {
