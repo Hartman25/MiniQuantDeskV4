@@ -4,8 +4,8 @@ use clap::ValueEnum;
 use std::path::Path;
 
 use mqk_backtest::{
-    BacktestBar, BacktestConfig, BacktestEngine, StrategySizingConfig, SweepGrid, SweepRowResult,
-    SWEEP_MAX_COMBINATIONS,
+    BacktestBar, BacktestConfig, BacktestEngine, MarketRegimeClassification, MarketRegimeFeatures,
+    MarketRegimePolicy, StrategySizingConfig, SweepGrid, SweepRowResult, SWEEP_MAX_COMBINATIONS,
 };
 use mqk_integrity::CalendarSpec;
 use mqk_strategy::{engines::register_builtin_strategies_with_sizing, PluginRegistry};
@@ -249,6 +249,107 @@ pub fn run_strategy_lab_rank(artifacts_root: String, top: Option<usize>, json: b
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Research-only regime detection report
+// ---------------------------------------------------------------------------
+
+pub fn run_regime_detect(
+    csv_path: String,
+    symbol: String,
+    timeframe: String,
+    json: bool,
+) -> Result<()> {
+    let bars = mqk_backtest::load_csv_file(&csv_path)
+        .with_context(|| format!("load bars csv failed: {}", csv_path))?;
+    let input = mqk_backtest::MarketRegimeInput::from_bars(bars, Some(symbol), Some(timeframe));
+    let report =
+        mqk_backtest::detect_market_regime(&input, &MarketRegimePolicy::conservative_defaults());
+
+    if json {
+        print_regime_json(&report)?;
+    } else {
+        print_regime_text(&report);
+    }
+
+    Ok(())
+}
+
+fn print_regime_text(report: &MarketRegimeClassification) {
+    let reason_codes: Vec<&str> = report.reason_codes.iter().map(|r| r.code()).collect();
+
+    println!("symbol={}", report.symbol.as_deref().unwrap_or(""));
+    println!("timeframe={}", report.timeframe.as_deref().unwrap_or(""));
+    println!("bar_count={}", report.bar_count);
+    println!("valid_bar_count={}", report.features.valid_bar_count);
+    println!("regime_kind={}", report.kind.code());
+    println!("confidence={:.4}", report.confidence.score);
+    println!(
+        "return_pct={}",
+        format_optional_f64(report.features.return_pct)
+    );
+    println!(
+        "realized_volatility_pct={}",
+        format_optional_f64(report.features.realized_volatility_pct)
+    );
+    println!(
+        "average_range_pct={}",
+        format_optional_f64(report.features.average_range_pct)
+    );
+    println!(
+        "directional_consistency={}",
+        format_optional_f64(report.features.directional_consistency)
+    );
+    println!(
+        "max_drawdown_pct={}",
+        format_optional_f64(report.features.max_drawdown_pct)
+    );
+    println!(
+        "volume_trend_pct={}",
+        format_optional_f64(report.features.volume_trend_pct)
+    );
+    println!("reason_codes={}", reason_codes.join(","));
+}
+
+fn print_regime_json(report: &MarketRegimeClassification) -> Result<()> {
+    let reason_codes: Vec<&str> = report.reason_codes.iter().map(|r| r.code()).collect();
+    let features = &report.features;
+    let value = serde_json::json!({
+        "symbol": report.symbol,
+        "timeframe": report.timeframe,
+        "bar_count": report.bar_count,
+        "valid_bar_count": features.valid_bar_count,
+        "regime_kind": report.kind.code(),
+        "confidence": report.confidence.score,
+        "features": regime_features_json(features),
+        "reason_codes": reason_codes,
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).context("serialize regime report failed")?
+    );
+    Ok(())
+}
+
+fn regime_features_json(features: &MarketRegimeFeatures) -> serde_json::Value {
+    serde_json::json!({
+        "input_bar_count": features.input_bar_count,
+        "valid_bar_count": features.valid_bar_count,
+        "return_pct": features.return_pct,
+        "realized_volatility_pct": features.realized_volatility_pct,
+        "average_range_pct": features.average_range_pct,
+        "directional_consistency": features.directional_consistency,
+        "max_drawdown_pct": features.max_drawdown_pct,
+        "volume_trend_pct": features.volume_trend_pct,
+    })
+}
+
+fn format_optional_f64(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{v:.4}"))
+        .unwrap_or_else(|| "n/a".to_string())
 }
 
 // ---------------------------------------------------------------------------

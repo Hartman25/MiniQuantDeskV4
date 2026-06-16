@@ -17,6 +17,7 @@
 pub mod corporate_actions; // Patch B4
 mod engine;
 pub mod loader;
+pub mod regime;
 pub mod strategy_lab;
 pub mod sweep;
 pub mod types;
@@ -24,6 +25,10 @@ pub mod types;
 pub use corporate_actions::{CorporateActionPolicy, ForbidEntry}; // Patch B4
 pub use engine::{BacktestEngine, BacktestError};
 pub use loader::{load_csv_file, parse_csv_bars, LoadError};
+pub use regime::{
+    detect_market_regime, MarketRegimeClassification, MarketRegimeConfidence, MarketRegimeFeatures,
+    MarketRegimeInput, MarketRegimeKind, MarketRegimePolicy, MarketRegimeReasonCode,
+};
 pub use strategy_lab::{
     evaluate_strategy_lab, evaluate_strategy_lab_with_policy, rank_strategy_lab_evaluations,
     strategy_lab_input_from_sweep_row, StrategyLabDecision, StrategyLabEvaluation,

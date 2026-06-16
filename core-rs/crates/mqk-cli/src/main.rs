@@ -6,8 +6,8 @@ mod commands;
 
 use commands::{
     bkt::{
-        run_backtest_csv, run_backtest_db, run_strategy_lab_evaluate, run_strategy_lab_rank,
-        run_sweep_csv, IntegrityCalendarArg,
+        run_backtest_csv, run_backtest_db, run_regime_detect, run_strategy_lab_evaluate,
+        run_strategy_lab_rank, run_sweep_csv, IntegrityCalendarArg,
     },
     load_payload,
     md::{md_ingest_csv, md_ingest_provider, md_sync_provider},
@@ -289,6 +289,25 @@ enum BacktestCmd {
         top: Option<usize>,
 
         /// Print a deterministic JSON report instead of key=value lines.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Research-only market regime report over a CSV bars file.
+    RegimeDetect {
+        /// Path to bars CSV file.
+        #[arg(long)]
+        csv: String,
+
+        /// Symbol label to include in the report.
+        #[arg(long)]
+        symbol: String,
+
+        /// Timeframe label to include in the report.
+        #[arg(long)]
+        timeframe: String,
+
+        /// Print deterministic JSON instead of key=value lines.
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -754,6 +773,14 @@ async fn main() -> Result<()> {
                 json,
             } => {
                 run_strategy_lab_rank(artifacts_root, top, json)?;
+            }
+            BacktestCmd::RegimeDetect {
+                csv,
+                symbol,
+                timeframe,
+                json,
+            } => {
+                run_regime_detect(csv, symbol, timeframe, json)?;
             }
         },
 
