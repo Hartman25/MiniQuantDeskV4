@@ -53,11 +53,14 @@ pub mod md;
 
 pub use md::{
     fetch_md_bars, fetch_recent_completed_bars_for_strategy, latest_stored_bar_end_ts,
-    CoverageTotals, FetchMdBarsArgs, IngestCsvArgs, IngestProviderBarsArgs, IngestResult, MdBarRow,
-    MdQualityReport, ProviderBar,
+    CoverageTotals, FetchMdBarsArgs, IngestCsvArgs, IngestProviderBarsArgs, IngestResult,
+    MdBarProviderMetadata, MdBarRow, MdQualityReport, ProviderBar,
 };
 
-pub use md::{ingest_csv_to_md_bars, ingest_provider_bars_to_md_bars};
+pub use md::{
+    ingest_csv_to_md_bars, ingest_provider_bars_to_md_bars,
+    ingest_provider_bars_to_md_bars_with_provider_metadata,
+};
 
 // ---------------------------------------------------------------------------
 // Domain modules

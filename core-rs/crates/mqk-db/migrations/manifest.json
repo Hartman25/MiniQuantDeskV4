@@ -260,6 +260,12 @@
       "path": "0041_ingest_job_history.sql",
       "status": "applied",
       "intent": "DATA-INGEST-JOB-PERSISTENCE-01: add sys_ingest_jobs durable daemon ingest job history for DB-backed job list/status restart survival. Caller supplies all timestamps; no provider secrets or raw provider payloads are stored."
+    },
+    {
+      "id": "0042",
+      "path": "0042_md_bars_provider_metadata.sql",
+      "status": "applied",
+      "intent": "DATA-PROVIDER-MD-SOURCE-METADATA-01: add provider/source provenance metadata to canonical md_bars without changing the existing (symbol, timeframe, end_ts) primary key. Existing rows backfill provider_id='unknown'."
     }
   ]
 }

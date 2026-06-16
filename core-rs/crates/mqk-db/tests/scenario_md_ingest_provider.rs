@@ -678,6 +678,151 @@ async fn md_ingest_provider_empty_batch_persists_zero_report_without_touching_hi
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
+async fn md_ingest_provider_without_metadata_defaults_provider_id_unknown() -> Result<()> {
+    let pool = db_pool().await?;
+    clear_symbol(&pool, "MDMETA_UNKNOWN").await?;
+
+    mqk_db::ingest_provider_bars_to_md_bars(
+        &pool,
+        mqk_db::IngestProviderBarsArgs {
+            source: "legacy_source_label".to_string(),
+            timeframe: "1D".to_string(),
+            ingest_id: Uuid::new_v4(),
+            bars: vec![bar(
+                "MDMETA_UNKNOWN",
+                "1D",
+                1_708_041_600,
+                "10",
+                "12",
+                "9",
+                "11",
+                100,
+                true,
+            )],
+        },
+    )
+    .await?;
+
+    let row: (String, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        r#"
+        select provider_id, provider_source, provider_symbol, ingest_mode
+        from md_bars
+        where symbol = 'MDMETA_UNKNOWN'
+          and timeframe = '1D'
+          and end_ts = $1
+        "#,
+    )
+    .bind(1_708_041_600_i64)
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(row.0, "unknown");
+    assert_eq!(row.1, None);
+    assert_eq!(row.2, None);
+    assert_eq!(row.3, None);
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db -- --include-ignored"]
+async fn md_ingest_provider_metadata_updates_on_conflict_without_duplicate_bar() -> Result<()> {
+    let pool = db_pool().await?;
+    clear_symbol(&pool, "MDMETA_CONFLICT").await?;
+
+    let first = mqk_db::ingest_provider_bars_to_md_bars_with_provider_metadata(
+        &pool,
+        mqk_db::IngestProviderBarsArgs {
+            source: "twelvedata".to_string(),
+            timeframe: "1D".to_string(),
+            ingest_id: Uuid::new_v4(),
+            bars: vec![bar(
+                "MDMETA_CONFLICT",
+                "1D",
+                1_708_041_600,
+                "10",
+                "12",
+                "9",
+                "11",
+                100,
+                true,
+            )],
+        },
+        mqk_db::MdBarProviderMetadata {
+            provider_id: "twelvedata".to_string(),
+            provider_source: Some("twelvedata".to_string()),
+            provider_symbol: None,
+            ingest_mode: Some("historical_backfill".to_string()),
+            provider_bar_id: None,
+            provider_updated_at_utc: None,
+        },
+    )
+    .await?;
+
+    assert_eq!(first.report.coverage.rows_inserted, 1);
+    assert_eq!(first.report.coverage.rows_updated, 0);
+
+    let second = mqk_db::ingest_provider_bars_to_md_bars_with_provider_metadata(
+        &pool,
+        mqk_db::IngestProviderBarsArgs {
+            source: "alpaca".to_string(),
+            timeframe: "1D".to_string(),
+            ingest_id: Uuid::new_v4(),
+            bars: vec![bar(
+                "MDMETA_CONFLICT",
+                "1D",
+                1_708_041_600,
+                "21",
+                "23",
+                "20",
+                "22",
+                999,
+                true,
+            )],
+        },
+        mqk_db::MdBarProviderMetadata {
+            provider_id: "alpaca".to_string(),
+            provider_source: Some("alpaca".to_string()),
+            provider_symbol: None,
+            ingest_mode: Some("historical_backfill".to_string()),
+            provider_bar_id: None,
+            provider_updated_at_utc: None,
+        },
+    )
+    .await?;
+
+    assert_eq!(second.report.coverage.rows_inserted, 0);
+    assert_eq!(second.report.coverage.rows_updated, 1);
+
+    let cnt = count_symbol_rows(&pool, "MDMETA_CONFLICT").await?;
+    assert_eq!(
+        cnt, 1,
+        "metadata conflict update must not duplicate bar rows"
+    );
+
+    let row: (String, Option<String>, Option<String>, i64) = sqlx::query_as(
+        r#"
+        select provider_id, provider_source, ingest_mode, volume
+        from md_bars
+        where symbol = 'MDMETA_CONFLICT'
+          and timeframe = '1D'
+          and end_ts = $1
+        "#,
+    )
+    .bind(1_708_041_600_i64)
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(row.0, "alpaca");
+    assert_eq!(row.1.as_deref(), Some("alpaca"));
+    assert_eq!(row.2.as_deref(), Some("historical_backfill"));
+    assert_eq!(row.3, 999);
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Scenario 9 — determinism: shuffled provider output yields same report stats
 // ---------------------------------------------------------------------------

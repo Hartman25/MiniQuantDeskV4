@@ -1546,26 +1546,32 @@ async fn run_real_provider_sync(
                 None,
                 Some("no_db: database pool is not configured".to_string()),
             ),
-            Some(pool) => {
-                match mqk_db::md::ingest_provider_bars_to_md_bars(
-                    pool,
-                    mqk_db::md::IngestProviderBarsArgs {
-                        source: source.clone(),
-                        timeframe: timeframe.as_str().to_string(),
-                        ingest_id,
-                        bars: db_bars,
-                    },
-                )
-                .await
-                {
-                    Ok(res) => (
-                        Some(res.report.coverage.rows_inserted as i64),
-                        Some(res.report.coverage.rows_rejected as i64),
-                        None,
-                    ),
-                    Err(e) => (None, None, Some(format!("db ingest failed: {}", e))),
-                }
-            }
+            Some(pool) => match mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata(
+                pool,
+                mqk_db::md::IngestProviderBarsArgs {
+                    source: source.clone(),
+                    timeframe: timeframe.as_str().to_string(),
+                    ingest_id,
+                    bars: db_bars,
+                },
+                mqk_db::md::MdBarProviderMetadata {
+                    provider_id: source.clone(),
+                    provider_source: Some(source.clone()),
+                    provider_symbol: None,
+                    ingest_mode: Some("historical_backfill".to_string()),
+                    provider_bar_id: None,
+                    provider_updated_at_utc: None,
+                },
+            )
+            .await
+            {
+                Ok(res) => (
+                    Some(res.report.coverage.rows_inserted as i64),
+                    Some(res.report.coverage.rows_rejected as i64),
+                    None,
+                ),
+                Err(e) => (None, None, Some(format!("db ingest failed: {}", e))),
+            },
         }
     };
 

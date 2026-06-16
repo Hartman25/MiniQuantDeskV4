@@ -254,6 +254,43 @@ pub struct ProviderBar {
     pub is_complete: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MdBarProviderMetadata {
+    pub provider_id: String,
+    pub provider_source: Option<String>,
+    pub provider_symbol: Option<String>,
+    pub ingest_mode: Option<String>,
+    pub provider_bar_id: Option<String>,
+    pub provider_updated_at_utc: Option<DateTime<Utc>>,
+}
+
+impl MdBarProviderMetadata {
+    pub fn unknown() -> Self {
+        Self {
+            provider_id: "unknown".to_string(),
+            provider_source: None,
+            provider_symbol: None,
+            ingest_mode: None,
+            provider_bar_id: None,
+            provider_updated_at_utc: None,
+        }
+    }
+
+    pub fn provider_id_or_unknown(provider_id: impl Into<String>) -> Self {
+        let provider_id = provider_id.into();
+        let provider_id = if provider_id.trim().is_empty() {
+            "unknown".to_string()
+        } else {
+            provider_id
+        };
+
+        Self {
+            provider_id,
+            ..Self::unknown()
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct IngestProviderBarsArgs {
     pub source: String,
@@ -422,7 +459,28 @@ pub async fn ingest_provider_bars_to_md_bars(
     pool: &PgPool,
     args: IngestProviderBarsArgs,
 ) -> Result<IngestResult> {
+    ingest_provider_bars_to_md_bars_inner(pool, args, MdBarProviderMetadata::unknown()).await
+}
+
+pub async fn ingest_provider_bars_to_md_bars_with_provider_metadata(
+    pool: &PgPool,
+    args: IngestProviderBarsArgs,
+    provider_metadata: MdBarProviderMetadata,
+) -> Result<IngestResult> {
+    ingest_provider_bars_to_md_bars_inner(pool, args, provider_metadata).await
+}
+
+async fn ingest_provider_bars_to_md_bars_inner(
+    pool: &PgPool,
+    args: IngestProviderBarsArgs,
+    provider_metadata: MdBarProviderMetadata,
+) -> Result<IngestResult> {
     let ingest_id = args.ingest_id;
+    let provider_id = if provider_metadata.provider_id.trim().is_empty() {
+        "unknown".to_string()
+    } else {
+        provider_metadata.provider_id
+    };
 
     let mut coverage = CoverageTotals {
         rows_read: 0,
@@ -534,15 +592,23 @@ pub async fn ingest_provider_bars_to_md_bars(
             insert into md_bars (
               symbol, timeframe, end_ts,
               open_micros, high_micros, low_micros, close_micros,
-              volume, is_complete
-            ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+              volume, is_complete,
+              provider_id, provider_source, provider_symbol, ingest_mode,
+              provider_bar_id, provider_updated_at_utc
+            ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
             on conflict (symbol, timeframe, end_ts) do update set
               open_micros = excluded.open_micros,
               high_micros = excluded.high_micros,
               low_micros = excluded.low_micros,
               close_micros = excluded.close_micros,
               volume = excluded.volume,
-              is_complete = excluded.is_complete
+              is_complete = excluded.is_complete,
+              provider_id = excluded.provider_id,
+              provider_source = excluded.provider_source,
+              provider_symbol = excluded.provider_symbol,
+              ingest_mode = excluded.ingest_mode,
+              provider_bar_id = excluded.provider_bar_id,
+              provider_updated_at_utc = excluded.provider_updated_at_utc
             returning (xmax = 0)
             "#,
         )
@@ -555,6 +621,12 @@ pub async fn ingest_provider_bars_to_md_bars(
         .bind(close_micros)
         .bind(b.volume)
         .bind(b.is_complete)
+        .bind(&provider_id)
+        .bind(&provider_metadata.provider_source)
+        .bind(&provider_metadata.provider_symbol)
+        .bind(&provider_metadata.ingest_mode)
+        .bind(&provider_metadata.provider_bar_id)
+        .bind(provider_metadata.provider_updated_at_utc.clone())
         .fetch_one(pool)
         .await
         .context("upsert md_bars failed")?;
@@ -1417,6 +1489,25 @@ pub async fn latest_stored_bar_end_ts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn md_bar_provider_metadata_unknown_defaults_to_unknown_id() {
+        let metadata = MdBarProviderMetadata::unknown();
+
+        assert_eq!(metadata.provider_id, "unknown");
+        assert_eq!(metadata.provider_source, None);
+        assert_eq!(metadata.provider_symbol, None);
+        assert_eq!(metadata.ingest_mode, None);
+        assert_eq!(metadata.provider_bar_id, None);
+        assert_eq!(metadata.provider_updated_at_utc, None);
+    }
+
+    #[test]
+    fn md_bar_provider_metadata_blank_provider_id_fails_closed_to_unknown() {
+        let metadata = MdBarProviderMetadata::provider_id_or_unknown("   ");
+
+        assert_eq!(metadata.provider_id, "unknown");
+    }
 
     // --- micros_to_price_str round-trip ---
 
