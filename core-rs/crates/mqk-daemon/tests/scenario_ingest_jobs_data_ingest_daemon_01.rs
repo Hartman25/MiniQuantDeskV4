@@ -140,10 +140,17 @@ fn make_provider_router_with_registry_raw() -> (state::AppState, ()) {
         .expect("registry must resolve")
         .to_string_lossy()
         .to_string();
+    let provider_registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/providers/providers.json")
+        .canonicalize()
+        .expect("provider registry must resolve")
+        .to_string_lossy()
+        .to_string();
 
     let mut st =
         state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
     st.instrument_registry_path = registry_path;
+    st.provider_registry_path = provider_registry_path;
     (st, ())
 }
 
@@ -1168,10 +1175,17 @@ fn make_provider_router_with_registry() -> (Arc<state::AppState>, axum::Router) 
         .expect("registry must resolve")
         .to_string_lossy()
         .to_string();
+    let provider_registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/providers/providers.json")
+        .canonicalize()
+        .expect("provider registry must resolve")
+        .to_string_lossy()
+        .to_string();
 
     let mut st =
         state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
     st.instrument_registry_path = registry_path;
+    st.provider_registry_path = provider_registry_path;
     let st = Arc::new(st);
     let router = routes::build_router(Arc::clone(&st));
     (st, router)
@@ -1566,10 +1580,19 @@ async fn pd_05_twelvedata_without_mode_still_refused() {
 #[tokio::test]
 async fn pd_06_invalid_registry_path_job_fails_truthfully() {
     // Use a router pointing at a guaranteed-nonexistent registry path.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let provider_registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/providers/providers.json")
+        .canonicalize()
+        .expect("provider registry must resolve")
+        .to_string_lossy()
+        .to_string();
+
     let mut st =
         state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
     st.instrument_registry_path =
         "/nonexistent/path/that/cannot/exist/equities_phantom.json".to_string();
+    st.provider_registry_path = provider_registry_path;
     let st = Arc::new(st);
 
     let router_post = routes::build_router(Arc::clone(&st));
@@ -1659,6 +1682,14 @@ fn make_full_registry_router() -> (Arc<state::AppState>, axum::Router) {
     (st, router)
 }
 
+fn write_provider_registry(entries: serde_json::Value) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("temp provider registry dir");
+    let path = dir.path().join("providers.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&entries).unwrap())
+        .expect("write temp provider registry");
+    (dir, path.to_string_lossy().to_string())
+}
+
 // PD-07: twelvedata + asset_class="futures" → 400 refused (provider does not support futures)
 #[tokio::test]
 async fn pd_07_unsupported_asset_class_refused() {
@@ -1699,6 +1730,151 @@ async fn pd_07_unsupported_asset_class_refused() {
         0,
         "api_calls_made must be 0 on refusal: {body}"
     );
+}
+
+// DATA-PROVIDER-REGISTRY-FACTORY-01: Alpaca dry-run is selectable and makes zero provider calls.
+#[tokio::test]
+async fn provider_registry_alpaca_dry_run_completes_zero_provider_calls() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    st_raw.set_provider_client_for_test(Arc::new(SlowCountingProvider {
+        calls: Arc::clone(&calls),
+        delay: std::time::Duration::from_millis(1),
+    }));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "alpaca",
+            "mode": "sync_provider",
+            "timeframe": "5m",
+            "symbols_source": "registry",
+            "asset_class": "equity",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "POST must → 202: {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (status, body) = get_job_status(router_get, &job_id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json_str(&body, "status"), "dry_run_completed");
+    assert_eq!(body["source"], "alpaca");
+    assert_eq!(body["api_calls_made"].as_i64().unwrap_or(999), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+// DATA-PROVIDER-REGISTRY-FACTORY-01: unknown provider ids are refused from registry.
+#[tokio::test]
+async fn provider_registry_unknown_provider_refused_truthfully() {
+    let (_, router) = make_full_registry_router();
+    let (status, body) = post_provider_job(
+        router,
+        serde_json::json!({
+            "source": "not_registered_provider",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "asset_class": "equity",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "must → 400: {body}");
+    assert!(!json_bool(&body, "accepted"));
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("not registered") || err.contains("provider"),
+        "error must describe unknown provider: {err}"
+    );
+    assert_eq!(body["api_calls_made"].as_i64().unwrap_or(999), 0);
+}
+
+// DATA-PROVIDER-REGISTRY-FACTORY-01: disabled provider ids are refused from registry.
+#[tokio::test]
+async fn provider_registry_disabled_provider_refused_truthfully() {
+    let (_, router) = make_full_registry_router();
+    let (status, body) = post_provider_job(
+        router,
+        serde_json::json!({
+            "source": "alphavantage",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "asset_class": "equity",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "must → 400: {body}");
+    assert!(!json_bool(&body, "accepted"));
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("disabled") || err.contains("enabled=false"),
+        "error must describe disabled provider: {err}"
+    );
+    assert_eq!(body["api_calls_made"].as_i64().unwrap_or(999), 0);
+}
+
+// DATA-PROVIDER-REGISTRY-FACTORY-01: provider without historical capability is refused.
+#[tokio::test]
+async fn provider_registry_provider_without_historical_capability_refused() {
+    let (_dir, provider_registry_path) = write_provider_registry(serde_json::json!([
+        {
+            "provider_id": "fake",
+            "display_name": "Fake No Historical",
+            "asset_classes": ["equity"],
+            "free_tier_available": true,
+            "api_key_required": false,
+            "credential_env_vars": [],
+            "rate_limit_notes": "test",
+            "supported_timeframes": [],
+            "historical_depth_notes": "none",
+            "realtime_support_notes": "none",
+            "licensing_notes": "test",
+            "implementation_status": "implemented_equity_provider",
+            "enabled": true,
+            "verification_status": "repo_implemented_official_limits_unverified",
+            "docs_url": ""
+        }
+    ]));
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    st_raw.provider_registry_path = provider_registry_path;
+    let st = Arc::new(st_raw);
+
+    let (status, body) = post_provider_job(
+        routes::build_router(Arc::clone(&st)),
+        serde_json::json!({
+            "source": "fake",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "asset_class": "equity",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "must → 400: {body}");
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("historical_bars"),
+        "error must describe missing historical capability: {err}"
+    );
+    assert_eq!(body["api_calls_made"].as_i64().unwrap_or(999), 0);
 }
 
 // PD-08: unknown asset_class value → 400 refused immediately (not a valid class)
@@ -1872,6 +2048,50 @@ async fn pd_10_real_provider_job_runs_with_fake_provider() {
     assert_eq!(
         body["provider_api_calls_allowed"],
         serde_json::Value::Bool(true)
+    );
+}
+
+// DATA-PROVIDER-REGISTRY-FACTORY-01: non-TwelveData real path can use fake provider seam.
+#[tokio::test]
+async fn provider_registry_alpaca_real_provider_job_runs_with_fake_provider() {
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::empty()));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "alpaca",
+            "mode": "sync_provider",
+            "timeframe": "5m",
+            "symbols_source": "registry",
+            "asset_class": "equity",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "must → 202 (queued): {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (_, body) = get_job_status(router_get, &job_id).await;
+
+    let job_status = json_str(&body, "status");
+    assert!(
+        job_status == "failed" || job_status == "completed" || job_status == "partial",
+        "job must have reached terminal status, got: {job_status}. body: {body}"
+    );
+    assert_eq!(body["source"], "alpaca");
+    assert!(
+        body["api_calls_made"].as_i64().unwrap_or(0) > 0,
+        "fake provider must be called on real path: {body}"
     );
 }
 

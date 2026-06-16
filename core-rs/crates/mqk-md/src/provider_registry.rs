@@ -12,9 +12,15 @@
 //! - `verification_status="requires_external_verification"` means the entry is based on
 //!   public knowledge only; no repo-level test proves the claimed capabilities.
 
+use crate::{
+    AlpacaHistoricalProvider, FakeMarketDataProvider, HistoricalProviderMarketDataAdapter,
+    MarketDataProvider, MarketDataProviderCapabilities, MarketDataProviderHealth,
+    MarketDataProviderRateLimits, ProviderAssetClass, Timeframe, TwelveDataHistoricalProvider,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fmt;
 use std::path::Path;
 
 /// One provider entry in the registry.
@@ -30,6 +36,9 @@ pub struct ProviderConfig {
     pub free_tier_available: bool,
     /// Whether an API key is required.
     pub api_key_required: bool,
+    /// Environment variable names used to load credentials. Values are never stored here.
+    #[serde(default)]
+    pub credential_env_vars: Vec<String>,
     /// Rate-limit notes for the operator; may require external verification.
     pub rate_limit_notes: String,
     /// Timeframes known to be supported (e.g. `["1D", "1m", "5m"]`).
@@ -64,6 +73,233 @@ impl ProviderConfig {
             .iter()
             .any(|tf| tf.eq_ignore_ascii_case(timeframe))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderFactoryError {
+    UnknownProvider {
+        provider_id: String,
+    },
+    DisabledProvider {
+        provider_id: String,
+    },
+    MissingCredential {
+        provider_id: String,
+        credential: String,
+    },
+    UnsupportedProvider {
+        provider_id: String,
+    },
+    InvalidProviderConfig {
+        provider_id: String,
+        message: String,
+    },
+}
+
+impl ProviderFactoryError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            ProviderFactoryError::UnknownProvider { .. } => "unknown_provider",
+            ProviderFactoryError::DisabledProvider { .. } => "disabled_provider",
+            ProviderFactoryError::MissingCredential { .. } => "missing_credential",
+            ProviderFactoryError::UnsupportedProvider { .. } => "unsupported_provider",
+            ProviderFactoryError::InvalidProviderConfig { .. } => "invalid_provider_config",
+        }
+    }
+}
+
+impl fmt::Display for ProviderFactoryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProviderFactoryError::UnknownProvider { provider_id } => {
+                write!(
+                    f,
+                    "unknown_provider: provider '{provider_id}' is not registered"
+                )
+            }
+            ProviderFactoryError::DisabledProvider { provider_id } => {
+                write!(f, "disabled_provider: provider '{provider_id}' is disabled")
+            }
+            ProviderFactoryError::MissingCredential {
+                provider_id,
+                credential,
+            } => write!(
+                f,
+                "missing_credential: provider '{provider_id}' requires credential '{credential}'"
+            ),
+            ProviderFactoryError::UnsupportedProvider { provider_id } => write!(
+                f,
+                "unsupported_provider: provider '{provider_id}' has no factory implementation"
+            ),
+            ProviderFactoryError::InvalidProviderConfig {
+                provider_id,
+                message,
+            } => write!(
+                f,
+                "invalid_provider_config: provider '{provider_id}' config invalid: {message}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProviderFactoryError {}
+
+pub type MarketDataProviderBox = Box<dyn MarketDataProvider>;
+
+fn asset_class_from_config(value: &str) -> ProviderAssetClass {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "equity" => ProviderAssetClass::Equity,
+        "etf" => ProviderAssetClass::Etf,
+        "crypto" => ProviderAssetClass::Crypto,
+        "futures" => ProviderAssetClass::Futures,
+        "options" => ProviderAssetClass::Options,
+        "forex" => ProviderAssetClass::Forex,
+        other => ProviderAssetClass::Other(other.to_string()),
+    }
+}
+
+fn timeframes_from_config(
+    provider_id: &str,
+    config: &ProviderConfig,
+) -> Result<Vec<Timeframe>, ProviderFactoryError> {
+    config
+        .supported_timeframes
+        .iter()
+        .map(|tf| {
+            Timeframe::parse(tf).map_err(|err| ProviderFactoryError::InvalidProviderConfig {
+                provider_id: provider_id.to_string(),
+                message: format!("unsupported timeframe '{tf}': {err}"),
+            })
+        })
+        .collect()
+}
+
+pub fn capabilities_from_provider_config(
+    config: &ProviderConfig,
+) -> Result<MarketDataProviderCapabilities, ProviderFactoryError> {
+    let provider_id = config.provider_id.trim();
+    let supported_timeframes = timeframes_from_config(provider_id, config)?;
+    Ok(MarketDataProviderCapabilities {
+        historical_bars: !supported_timeframes.is_empty(),
+        latest_closed_bar: false,
+        completed_bar_stream: false,
+        supported_asset_classes: config
+            .asset_classes
+            .iter()
+            .map(|asset_class| asset_class_from_config(asset_class))
+            .collect(),
+        supported_timeframes,
+    })
+}
+
+pub fn provider_supports_historical_bars(
+    config: &ProviderConfig,
+) -> Result<bool, ProviderFactoryError> {
+    capabilities_from_provider_config(config).map(|capabilities| capabilities.historical_bars)
+}
+
+pub fn build_market_data_provider_from_env(
+    provider_id: &str,
+    providers: &[ProviderConfig],
+) -> Result<MarketDataProviderBox, ProviderFactoryError> {
+    build_market_data_provider(provider_id, providers, |name| std::env::var(name).ok())
+}
+
+pub fn build_market_data_provider<F>(
+    provider_id: &str,
+    providers: &[ProviderConfig],
+    env_lookup: F,
+) -> Result<MarketDataProviderBox, ProviderFactoryError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let config = find_provider(providers, provider_id).ok_or_else(|| {
+        ProviderFactoryError::UnknownProvider {
+            provider_id: provider_id.trim().to_ascii_lowercase(),
+        }
+    })?;
+    build_market_data_provider_from_config(config, env_lookup)
+}
+
+pub fn build_market_data_provider_from_config<F>(
+    config: &ProviderConfig,
+    env_lookup: F,
+) -> Result<MarketDataProviderBox, ProviderFactoryError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let provider_id = config.provider_id.trim().to_ascii_lowercase();
+    if !config.enabled {
+        return Err(ProviderFactoryError::DisabledProvider { provider_id });
+    }
+
+    let capabilities = capabilities_from_provider_config(config)?;
+    let rate_limits = MarketDataProviderRateLimits {
+        calls_per_minute: None,
+        calls_per_day: None,
+        remaining_calls: None,
+        notes: (!config.rate_limit_notes.trim().is_empty())
+            .then(|| config.rate_limit_notes.clone()),
+    };
+
+    match provider_id.as_str() {
+        "fake" => Ok(Box::new(
+            FakeMarketDataProvider::new(vec![], None)
+                .with_capabilities(capabilities)
+                .with_rate_limits(Some(rate_limits)),
+        )),
+        "twelvedata" => {
+            let key = credential_value(config, &env_lookup, 0)?;
+            Ok(Box::new(
+                HistoricalProviderMarketDataAdapter::new(
+                    TwelveDataHistoricalProvider::new(key),
+                    config.provider_id.clone(),
+                    config.display_name.clone(),
+                    capabilities.supported_timeframes,
+                )
+                .with_health(MarketDataProviderHealth::unknown())
+                .with_rate_limits(rate_limits),
+            ))
+        }
+        "alpaca" => {
+            let key = credential_value(config, &env_lookup, 0)?;
+            let secret = credential_value(config, &env_lookup, 1)?;
+            Ok(Box::new(
+                HistoricalProviderMarketDataAdapter::new(
+                    AlpacaHistoricalProvider::new(key, secret),
+                    config.provider_id.clone(),
+                    config.display_name.clone(),
+                    capabilities.supported_timeframes,
+                )
+                .with_health(MarketDataProviderHealth::unknown())
+                .with_rate_limits(rate_limits),
+            ))
+        }
+        _ => Err(ProviderFactoryError::UnsupportedProvider { provider_id }),
+    }
+}
+
+fn credential_value<F>(
+    config: &ProviderConfig,
+    env_lookup: &F,
+    index: usize,
+) -> Result<String, ProviderFactoryError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let provider_id = config.provider_id.trim().to_ascii_lowercase();
+    let credential = config.credential_env_vars.get(index).ok_or_else(|| {
+        ProviderFactoryError::InvalidProviderConfig {
+            provider_id: provider_id.clone(),
+            message: format!("missing credential_env_vars[{index}]"),
+        }
+    })?;
+    env_lookup(credential)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ProviderFactoryError::MissingCredential {
+            provider_id,
+            credential: credential.clone(),
+        })
 }
 
 /// Parse the provider registry JSON file at `path`.
@@ -220,6 +456,7 @@ mod tests {
             asset_classes: vec!["equity".into()],
             free_tier_available: true,
             api_key_required: true,
+            credential_env_vars: vec!["TWELVEDATA_API_KEY".into()],
             rate_limit_notes: "test".into(),
             supported_timeframes: vec!["1D".into()],
             historical_depth_notes: "test".into(),
@@ -248,6 +485,7 @@ mod tests {
             asset_classes: vec!["equity".into(), "Crypto".into()],
             free_tier_available: true,
             api_key_required: false,
+            credential_env_vars: vec![],
             rate_limit_notes: "".into(),
             supported_timeframes: vec!["1D".into()],
             historical_depth_notes: "".into(),
@@ -278,5 +516,183 @@ mod tests {
             !td.supports_asset_class("options"),
             "twelvedata must not declare options support"
         );
+    }
+
+    fn provider_config(
+        provider_id: &str,
+        enabled: bool,
+        credential_env_vars: Vec<&str>,
+        supported_timeframes: Vec<&str>,
+    ) -> ProviderConfig {
+        ProviderConfig {
+            provider_id: provider_id.to_string(),
+            display_name: format!("{provider_id} Display"),
+            asset_classes: vec!["equity".into()],
+            free_tier_available: true,
+            api_key_required: !credential_env_vars.is_empty(),
+            credential_env_vars: credential_env_vars
+                .into_iter()
+                .map(|value| value.to_string())
+                .collect(),
+            rate_limit_notes: "test limits".into(),
+            supported_timeframes: supported_timeframes
+                .into_iter()
+                .map(|value| value.to_string())
+                .collect(),
+            historical_depth_notes: "test".into(),
+            realtime_support_notes: "test".into(),
+            licensing_notes: "test".into(),
+            implementation_status: "implemented_equity_provider".into(),
+            enabled,
+            verification_status: "repo_implemented_official_limits_unverified".into(),
+            docs_url: "".into(),
+        }
+    }
+
+    // PROVIDER-FACTORY-01: fake provider can be built without env lookup.
+    #[test]
+    fn provider_factory_builds_fake_provider_with_injected_config() {
+        let providers = vec![provider_config("fake", true, vec![], vec!["1D", "5m"])];
+
+        let provider = build_market_data_provider("fake", &providers, |_| None)
+            .expect("fake provider must build without credentials");
+
+        assert_eq!(provider.provider_id(), "fake");
+        assert!(provider.capabilities().historical_bars);
+        assert!(provider
+            .capabilities()
+            .supported_timeframes
+            .contains(&Timeframe::M5));
+    }
+
+    // PROVIDER-FACTORY-02: TwelveData construction requires injected credential presence.
+    #[test]
+    fn provider_factory_builds_twelvedata_with_injected_credential() {
+        let providers = vec![provider_config(
+            "twelvedata",
+            true,
+            vec!["TWELVEDATA_API_KEY"],
+            vec!["1D"],
+        )];
+
+        let provider = build_market_data_provider("twelvedata", &providers, |name| {
+            (name == "TWELVEDATA_API_KEY").then(|| "test-key".to_string())
+        })
+        .expect("twelvedata provider must build with injected credential");
+
+        assert_eq!(provider.provider_id(), "twelvedata");
+        assert!(provider.capabilities().historical_bars);
+    }
+
+    // PROVIDER-FACTORY-03: missing credential is typed and does not contain the secret value.
+    #[test]
+    fn provider_factory_missing_credential_fails_without_secret_value() {
+        let providers = vec![provider_config(
+            "twelvedata",
+            true,
+            vec!["TWELVEDATA_API_KEY"],
+            vec!["1D"],
+        )];
+
+        let err = match build_market_data_provider("twelvedata", &providers, |_| None) {
+            Ok(_) => panic!("twelvedata provider must fail without credential"),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            err,
+            ProviderFactoryError::MissingCredential {
+                provider_id: "twelvedata".into(),
+                credential: "TWELVEDATA_API_KEY".into()
+            }
+        );
+        assert_eq!(err.code(), "missing_credential");
+        assert!(!err.to_string().contains("test-key"));
+    }
+
+    // PROVIDER-FACTORY-04: unknown provider id is typed.
+    #[test]
+    fn provider_factory_unknown_provider_fails_truthfully() {
+        let providers = vec![provider_config("fake", true, vec![], vec!["1D"])];
+
+        let err = match build_market_data_provider("not_registered", &providers, |_| None) {
+            Ok(_) => panic!("unknown provider must fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            err,
+            ProviderFactoryError::UnknownProvider {
+                provider_id: "not_registered".into()
+            }
+        );
+        assert_eq!(err.code(), "unknown_provider");
+    }
+
+    // PROVIDER-FACTORY-05: disabled provider is typed and refused before credentials.
+    #[test]
+    fn provider_factory_disabled_provider_fails_truthfully() {
+        let providers = vec![provider_config(
+            "twelvedata",
+            false,
+            vec!["TWELVEDATA_API_KEY"],
+            vec!["1D"],
+        )];
+
+        let err = match build_market_data_provider("twelvedata", &providers, |_| {
+            Some("test-key".to_string())
+        }) {
+            Ok(_) => panic!("disabled provider must fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            err,
+            ProviderFactoryError::DisabledProvider {
+                provider_id: "twelvedata".into()
+            }
+        );
+        assert_eq!(err.code(), "disabled_provider");
+    }
+
+    // PROVIDER-FACTORY-06: Alpaca factory path uses two injected credentials.
+    #[test]
+    fn provider_factory_builds_alpaca_with_injected_credentials() {
+        let providers = vec![provider_config(
+            "alpaca",
+            true,
+            vec!["ALPACA_API_KEY_PAPER", "ALPACA_API_SECRET_PAPER"],
+            vec!["1D", "5m"],
+        )];
+
+        let provider = build_market_data_provider("alpaca", &providers, |name| match name {
+            "ALPACA_API_KEY_PAPER" => Some("paper-key".to_string()),
+            "ALPACA_API_SECRET_PAPER" => Some("paper-secret".to_string()),
+            _ => None,
+        })
+        .expect("alpaca provider must build with injected credentials");
+
+        assert_eq!(provider.provider_id(), "alpaca");
+        assert!(provider.capabilities().historical_bars);
+        assert!(provider
+            .capabilities()
+            .supported_timeframes
+            .contains(&Timeframe::M5));
+    }
+
+    // PROVIDER-FACTORY-07: capability metadata is available without constructing credentials.
+    #[test]
+    fn provider_factory_capabilities_are_exposed_from_config() {
+        let config = provider_config("fake", true, vec![], vec!["1D", "1m"]);
+
+        let capabilities = capabilities_from_provider_config(&config)
+            .expect("capabilities must derive from config");
+
+        assert!(capabilities.historical_bars);
+        assert!(!capabilities.latest_closed_bar);
+        assert!(capabilities
+            .supported_asset_classes
+            .contains(&ProviderAssetClass::Equity));
+        assert!(capabilities.supported_timeframes.contains(&Timeframe::M1));
     }
 }

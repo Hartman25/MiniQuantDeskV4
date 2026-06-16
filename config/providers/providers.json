@@ -5,6 +5,7 @@
     "asset_classes": ["equity", "etf", "forex", "crypto"],
     "free_tier_available": true,
     "api_key_required": true,
+    "credential_env_vars": ["TWELVEDATA_API_KEY"],
     "rate_limit_notes": "8 requests/minute on free tier; verify against official docs before real sync",
     "supported_timeframes": ["1D", "1m", "5m"],
     "historical_depth_notes": "requires external verification against official docs",
@@ -14,6 +15,23 @@
     "enabled": true,
     "verification_status": "repo_implemented_official_limits_unverified",
     "docs_url": "https://twelvedata.com/docs"
+  },
+  {
+    "provider_id": "alpaca",
+    "display_name": "Alpaca Market Data",
+    "asset_classes": ["equity", "etf"],
+    "free_tier_available": true,
+    "api_key_required": true,
+    "credential_env_vars": ["ALPACA_API_KEY_PAPER", "ALPACA_API_SECRET_PAPER"],
+    "rate_limit_notes": "uses configured Alpaca market-data feed; verify current limits against official docs before real sync",
+    "supported_timeframes": ["1D", "1m", "5m"],
+    "historical_depth_notes": "repo has Alpaca historical provider; market data entitlement/depth requires external verification",
+    "realtime_support_notes": "not wired by daemon ingest in this patch",
+    "licensing_notes": "requires external verification against official docs",
+    "implementation_status": "implemented_equity_provider",
+    "enabled": true,
+    "verification_status": "repo_implemented_official_limits_unverified",
+    "docs_url": "https://docs.alpaca.markets/docs/market-data-faq"
   },
   {
     "provider_id": "alphavantage",

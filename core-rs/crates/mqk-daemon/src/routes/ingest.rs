@@ -7,7 +7,7 @@
 //!   GET  /api/v1/ingest/jobs/:job_id  — job status + artifact paths (public)
 //!
 //! DATA-INGEST-DAEMON-PROVIDER-JOBS-01:
-//! - source="twelvedata" + mode="sync_provider" accepted for dry-run and real sync.
+//! - source="<registered provider>" + mode="sync_provider" accepted for dry-run and real sync.
 //! - dry_run=true: resolves symbols from registry; makes ZERO provider API calls; writes nothing.
 //! - dry_run=false + allow_provider_api_calls=false: refused immediately.
 //! - dry_run=false + allow_provider_api_calls=true: job queued; runs via injectable provider.
@@ -21,10 +21,11 @@
 //! - Quality reports are written to exports/md_ingest/<ingest_id>/ by default.
 //! - Failed jobs report errors truthfully. No hidden failures.
 //! - If DB is unavailable (pool is None), CSV job fails with "no_db" error.
-//! - Provider dry-run jobs never call TwelveData or consume API credits.
+//! - Provider dry-run jobs never call providers or consume API credits.
 //! - Provider dry-run jobs never write to DB or CSV.
-//! - Real provider jobs use an injectable client (AppState.provider_client) so
-//!   tests can verify the real code path without making network calls.
+//! - Real provider jobs use a registry-backed provider factory, or an injectable
+//!   client (AppState.provider_client) in tests, so tests verify the real code
+//!   path without making network calls.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -309,17 +310,17 @@ pub(crate) async fn ingest_job_submit(
         return handle_csv_job(st, req, source).await;
     }
 
-    if source == "twelvedata" {
-        let mode = req
-            .mode
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
-        if mode == "sync_provider" {
-            return handle_provider_sync_job(st, req, source).await;
-        }
-        // source=twelvedata but no mode or wrong mode → refused
+    let mode = req
+        .mode
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if mode == "sync_provider" {
+        return handle_provider_sync_job(st, req, source).await;
+    }
+
+    if !source.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(IngestJobAcceptedResponse {
@@ -328,8 +329,9 @@ pub(crate) async fn ingest_job_submit(
                 status: "refused".to_string(),
                 source: source.clone(),
                 error: Some(format!(
-                    "source 'twelvedata' requires mode='sync_provider'; \
+                    "provider source '{}' requires mode='sync_provider'; \
                      got mode='{}'",
+                    source,
                     req.mode.as_deref().unwrap_or("(absent)")
                 )),
                 dry_run: None,
@@ -341,7 +343,7 @@ pub(crate) async fn ingest_job_submit(
             .into_response();
     }
 
-    // Any other source is not implemented.
+    // Empty source or otherwise malformed non-provider request.
     (
         StatusCode::BAD_REQUEST,
         Json(IngestJobAcceptedResponse {
@@ -351,7 +353,7 @@ pub(crate) async fn ingest_job_submit(
             source: source.clone(),
             error: Some(format!(
                 "source '{}' is not implemented in this version. \
-                 supported: 'csv', 'twelvedata' (with mode='sync_provider').",
+                 supported: 'csv' or registered providers with mode='sync_provider'.",
                 source
             )),
             dry_run: None,
@@ -669,7 +671,7 @@ async fn handle_csv_job(st: Arc<AppState>, req: IngestJobRequest, source: String
 // Provider sync job handler (DATA-INGEST-DAEMON-PROVIDER-JOBS-01)
 // ---------------------------------------------------------------------------
 
-/// Handle source="twelvedata" + mode="sync_provider" job submissions.
+/// Handle source="<registered provider>" + mode="sync_provider" job submissions.
 ///
 /// Safety:
 /// - dry_run=true (default): resolves symbols from registry; makes ZERO provider
@@ -736,8 +738,8 @@ async fn handle_provider_sync_job(
         .await;
     }
 
-    // Provider registry validation (synchronous, graceful if file absent).
-    // Validates provider is enabled and supports the requested asset_class.
+    // Provider registry validation (synchronous, no provider construction).
+    // Validates provider is registered, enabled, and supports the requested asset_class.
     let provider_registry_path = req
         .provider_registry_path
         .as_deref()
@@ -745,7 +747,7 @@ async fn handle_provider_sync_job(
         .unwrap_or(&st.provider_registry_path)
         .to_string();
 
-    let (provider_enabled_val, provider_verification_status_val) =
+    let (provider_config, provider_enabled_val, provider_verification_status_val) =
         match mqk_md::provider_registry::load_provider_registry(std::path::Path::new(
             &provider_registry_path,
         )) {
@@ -814,11 +816,29 @@ async fn handle_provider_sync_job(
                         )
                         .await;
                     }
-                    (Some(p.enabled), Some(p.verification_status.clone()))
+                    (
+                        p.clone(),
+                        Some(p.enabled),
+                        Some(p.verification_status.clone()),
+                    )
                 }
             },
-            // Registry unavailable: skip validation, proceed with None values.
-            Err(_) => (None, None),
+            Err(e) => {
+                return refused_provider_job_response(
+                    &st,
+                    source.clone(),
+                    &req,
+                    format!("provider registry load failed: {}", e),
+                    Some(dry_run),
+                    Some(allow_provider),
+                    Some(asset_class.clone()),
+                    None,
+                    Some(provider_registry_path.clone()),
+                    None,
+                    None,
+                )
+                .await;
+            }
         };
 
     // symbols_source validation.
@@ -869,6 +889,89 @@ async fn handle_provider_sync_job(
             .await;
         }
     };
+
+    let provider_capabilities = match mqk_md::capabilities_from_provider_config(&provider_config) {
+        Ok(capabilities) => capabilities,
+        Err(e) => {
+            return refused_provider_job_response(
+                &st,
+                source,
+                &req,
+                e.to_string(),
+                Some(dry_run),
+                Some(allow_provider),
+                Some(asset_class),
+                None,
+                Some(provider_registry_path),
+                provider_enabled_val,
+                provider_verification_status_val,
+            )
+            .await;
+        }
+    };
+
+    if !provider_capabilities.historical_bars {
+        return refused_provider_job_response(
+            &st,
+            source,
+            &req,
+            format!(
+                "provider '{}' does not support capability historical_bars",
+                provider_config.provider_id
+            ),
+            Some(dry_run),
+            Some(allow_provider),
+            Some(asset_class),
+            None,
+            Some(provider_registry_path),
+            provider_enabled_val,
+            provider_verification_status_val,
+        )
+        .await;
+    }
+
+    let parsed_timeframe = match mqk_md::Timeframe::parse(&timeframe) {
+        Ok(t) => t,
+        Err(e) => {
+            return refused_provider_job_response(
+                &st,
+                source,
+                &req,
+                format!("timeframe parse error: {}", e),
+                Some(dry_run),
+                Some(allow_provider),
+                Some(asset_class),
+                None,
+                Some(provider_registry_path),
+                provider_enabled_val,
+                provider_verification_status_val,
+            )
+            .await;
+        }
+    };
+
+    if !provider_capabilities
+        .supported_timeframes
+        .contains(&parsed_timeframe)
+    {
+        return refused_provider_job_response(
+            &st,
+            source,
+            &req,
+            format!(
+                "provider '{}' does not support timeframe '{}'",
+                provider_config.provider_id, timeframe
+            ),
+            Some(dry_run),
+            Some(allow_provider),
+            Some(asset_class),
+            None,
+            Some(provider_registry_path),
+            provider_enabled_val,
+            provider_verification_status_val,
+        )
+        .await;
+    }
 
     // Registry path: use request override, otherwise fall back to AppState default.
     let registry_path = req
@@ -977,25 +1080,7 @@ async fn handle_provider_sync_job(
         .as_bytes(),
     );
 
-    let tf = match mqk_md::Timeframe::parse(&timeframe) {
-        Ok(t) => t,
-        Err(e) => {
-            return refused_provider_job_response(
-                &st,
-                source,
-                &req,
-                format!("timeframe parse error: {}", e),
-                Some(false),
-                Some(true),
-                Some(asset_class),
-                Some(registry_path),
-                Some(provider_registry_path),
-                provider_enabled_val,
-                provider_verification_status_val,
-            )
-            .await;
-        }
-    };
+    let tf = parsed_timeframe;
 
     // Create job record (Queued).
     let job_id = Uuid::new_v4(); // allow: process-local transient job identifier
@@ -1044,6 +1129,7 @@ async fn handle_provider_sync_job(
     let db_pool = st.db.clone();
     let source_for_task = source.clone();
     let registry_path_for_task = registry_path.clone();
+    let provider_registry_path_for_task = provider_registry_path.clone();
 
     tokio::spawn(async move {
         run_real_provider_sync(
@@ -1053,6 +1139,7 @@ async fn handle_provider_sync_job(
             db_pool,
             source_for_task,
             registry_path_for_task,
+            provider_registry_path_for_task,
             tf,
             start_d,
             end_d,
@@ -1207,9 +1294,35 @@ async fn handle_provider_dry_run(
 // Real provider sync background task
 // ---------------------------------------------------------------------------
 
+enum ProviderSyncClient {
+    Historical(std::sync::Arc<dyn mqk_md::HistoricalProvider>),
+    MarketData(mqk_md::MarketDataProviderBox),
+}
+
+impl ProviderSyncClient {
+    async fn fetch_bars(
+        &self,
+        req: mqk_md::FetchBarsRequest,
+    ) -> anyhow::Result<Vec<mqk_md::ProviderBar>> {
+        match self {
+            ProviderSyncClient::Historical(provider) => provider.fetch_bars(req).await,
+            ProviderSyncClient::MarketData(provider) => provider
+                .fetch_historical_bars(mqk_md::HistoricalBarsRequest {
+                    symbols: req.symbols,
+                    timeframe: req.timeframe,
+                    start: req.start,
+                    end: req.end,
+                })
+                .await
+                .map_err(anyhow::Error::from),
+        }
+    }
+}
+
 /// Executes the real provider sync job asynchronously.
 ///
 /// Safety:
+/// - Uses registry-backed provider construction in production.
 /// - Uses injectable `provider_client`; tests pass a fake that makes zero network calls.
 /// - API credit guardrails are checked before each symbol fetch.
 /// - One failed symbol does not abort the batch (per-symbol error tracking).
@@ -1223,6 +1336,7 @@ async fn run_real_provider_sync(
     db_pool: Option<sqlx::PgPool>,
     source: String,
     registry_path: String,
+    provider_registry_path: String,
     timeframe: mqk_md::Timeframe,
     start_d: NaiveDate,
     end_d: NaiveDate,
@@ -1245,22 +1359,28 @@ async fn run_real_provider_sync(
         return;
     }
 
-    // Resolve provider client (injected or built from env).
-    let provider: std::sync::Arc<dyn mqk_md::HistoricalProvider> = if let Some(p) = provider_client
-    {
-        p
+    // Resolve provider client (injected or built from registry + env).
+    let provider = if let Some(p) = provider_client {
+        ProviderSyncClient::Historical(p)
     } else {
-        match std::env::var("TWELVEDATA_API_KEY") {
-            Ok(key) => std::sync::Arc::new(mqk_md::TwelveDataHistoricalProvider::new(key)),
-            Err(_) => {
+        match mqk_md::provider_registry::load_provider_registry(std::path::Path::new(
+            &provider_registry_path,
+        ))
+        .map_err(|err| err.to_string())
+        .and_then(|providers| {
+            mqk_md::build_market_data_provider_from_env(&source, &providers)
+                .map(ProviderSyncClient::MarketData)
+                .map_err(|err| err.to_string())
+        }) {
+            Ok(provider) => provider,
+            Err(err) => {
                 persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
                     r.status = IngestJobStatus::Failed;
                     r.completed_at_utc = Some(Utc::now()); // allow: operational
-                    r.error = Some(
-                        "missing TWELVEDATA_API_KEY env var; \
-                             set it or inject a provider_client for testing"
-                            .to_string(),
-                    );
+                    r.error = Some(format!(
+                        "provider construction failed for '{}': {}",
+                        source, err
+                    ));
                 })
                 .await;
                 return;

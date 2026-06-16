@@ -20,6 +20,11 @@ pub use provider::{
     MarketDataProviderCapabilities, MarketDataProviderError, MarketDataProviderHealth,
     MarketDataProviderHealthStatus, MarketDataProviderRateLimits, ProviderAssetClass,
 };
+pub use provider_registry::{
+    build_market_data_provider, build_market_data_provider_from_config,
+    build_market_data_provider_from_env, capabilities_from_provider_config,
+    provider_supports_historical_bars, MarketDataProviderBox, ProviderConfig, ProviderFactoryError,
+};
 pub mod quality;
 
 use anyhow::{anyhow, Context, Result};
