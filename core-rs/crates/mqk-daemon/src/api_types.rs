@@ -3381,6 +3381,8 @@ pub struct IngestJobSummary {
     pub dry_run: bool,
     pub symbols_count: Option<usize>,
     pub api_calls_made: i64,
+    pub symbols_completed: Option<usize>,
+    pub symbols_failed: Option<usize>,
 }
 
 /// Response to GET /api/v1/ingest/jobs.
@@ -3589,6 +3591,10 @@ pub struct IngestJobStatusResponse {
     pub provider_enabled: Option<bool>,
     /// Provider verification status from the provider registry (None if registry unavailable).
     pub provider_verification_status: Option<String>,
+    /// Number of symbols for which provider fetch succeeded (real jobs only; null for dry-run).
+    pub symbols_completed: Option<usize>,
+    /// Number of symbols for which provider fetch failed (real jobs only; null for dry-run).
+    pub symbols_failed: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------

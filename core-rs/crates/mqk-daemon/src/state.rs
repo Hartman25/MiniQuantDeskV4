@@ -400,6 +400,13 @@ pub struct AppState {
     /// Default: "exports/market_data" (relative to daemon CWD).
     /// Override: MQK_MD_REFRESH_EVIDENCE_DIR env var.
     pub md_refresh_evidence_dir: String,
+    /// DATA-INGEST-DAEMON-PROVIDER-JOBS-01: Injectable provider client for sync jobs.
+    ///
+    /// `None` in production: the provider sync background task reads
+    /// `TWELVEDATA_API_KEY` from the environment and constructs a real client.
+    /// `Some(client)` in tests: the injected fake client is used directly,
+    /// allowing zero-network test coverage without real TwelveData credentials.
+    pub provider_client: Option<Arc<dyn mqk_md::HistoricalProvider>>,
     /// BROKER-FILL-REST-RECOVERY-01: Injectable Alpaca fill activity fetcher.
     ///
     /// `None` when REST recovery is not configured on this daemon instance.
@@ -679,6 +686,14 @@ impl AppState {
     /// running in parallel (BRK-07R).
     pub fn set_adapter_id_for_test(&mut self, adapter_id: &str) {
         self.runtime_selection.adapter_id = adapter_id.to_string();
+    }
+
+    /// DATA-INGEST-DAEMON-PROVIDER-JOBS-01: Test helper — inject a fake provider client.
+    ///
+    /// Allows scenario tests to verify the real sync-provider job path without
+    /// making real TwelveData HTTP calls or requiring credentials.
+    pub fn set_provider_client_for_test(&mut self, client: Arc<dyn mqk_md::HistoricalProvider>) {
+        self.provider_client = Some(client);
     }
 
     /// Test helper: inject a fill activity fetcher for BROKER-FILL-REST-RECOVERY-01 tests.
@@ -983,6 +998,7 @@ impl AppState {
                 .unwrap_or_else(|_| "config/providers/providers.json".to_string()),
             md_refresh_evidence_dir: std::env::var("MQK_MD_REFRESH_EVIDENCE_DIR")
                 .unwrap_or_else(|_| "exports/market_data".to_string()),
+            provider_client: None,
             fill_activity_fetcher,
             ws_gap_fill_fetcher,
             broker_baseline: Arc::new(RwLock::new(None)),

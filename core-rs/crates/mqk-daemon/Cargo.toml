@@ -65,3 +65,5 @@ http-body-util = "0.1"
 bytes = "1"
 # B6: temp policy files for capital budget gate proof tests
 tempfile = "3"
+# DATA-INGEST-DAEMON-PROVIDER-JOBS-01: implement HistoricalProvider in test fakes
+async-trait = "0.1"

@@ -27,6 +27,9 @@ pub enum IngestJobStatus {
     /// no DB/CSV writes performed.
     DryRunCompleted,
     Failed,
+    /// Partial success: at least one symbol succeeded and at least one failed,
+    /// or all symbols fetched but a guardrail was hit before completing the batch.
+    Partial,
 }
 
 impl IngestJobStatus {
@@ -37,6 +40,7 @@ impl IngestJobStatus {
             IngestJobStatus::Completed => "completed",
             IngestJobStatus::DryRunCompleted => "dry_run_completed",
             IngestJobStatus::Failed => "failed",
+            IngestJobStatus::Partial => "partial",
         }
     }
 }
@@ -96,6 +100,10 @@ pub struct IngestJobRecord {
     pub provider_enabled: Option<bool>,
     /// Provider verification status from the provider registry (None if registry unavailable).
     pub provider_verification_status: Option<String>,
+    /// Number of symbols for which provider fetch succeeded (real jobs only).
+    pub symbols_completed: Option<usize>,
+    /// Number of symbols for which provider fetch failed (real jobs only).
+    pub symbols_failed: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------

@@ -47,6 +47,80 @@ use mqk_daemon::{routes, state};
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
+// FakeProvider — zero-network HistoricalProvider for testing the real sync path.
+//
+// Used in PD-04, PD-10..PD-13.  Never makes HTTP calls; returns configurable bars.
+// ---------------------------------------------------------------------------
+
+struct FakeProvider {
+    bars: Vec<mqk_md::ProviderBar>,
+    fail_symbols: Vec<String>,
+}
+
+impl FakeProvider {
+    fn empty() -> Self {
+        Self {
+            bars: vec![],
+            fail_symbols: vec![],
+        }
+    }
+
+    #[allow(dead_code)]
+    fn with_bars(bars: Vec<mqk_md::ProviderBar>) -> Self {
+        Self {
+            bars,
+            fail_symbols: vec![],
+        }
+    }
+
+    fn failing(fail_symbols: Vec<String>) -> Self {
+        Self {
+            bars: vec![],
+            fail_symbols,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl mqk_md::HistoricalProvider for FakeProvider {
+    fn source_name(&self) -> &'static str {
+        "fake_test_provider"
+    }
+
+    async fn fetch_bars(
+        &self,
+        req: mqk_md::FetchBarsRequest,
+    ) -> anyhow::Result<Vec<mqk_md::ProviderBar>> {
+        for sym in &req.symbols {
+            if self.fail_symbols.contains(sym) {
+                return Err(anyhow::anyhow!(
+                    "fake provider: intentional failure for symbol {}",
+                    sym
+                ));
+            }
+        }
+        Ok(self.bars.clone())
+    }
+}
+
+/// Build AppState (not Arc-wrapped) pointing at the real canonical registry.
+/// Caller can mutate it (e.g. inject a provider client) before wrapping in Arc.
+fn make_provider_router_with_registry_raw() -> (state::AppState, ()) {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/instruments/equities.json")
+        .canonicalize()
+        .expect("registry must resolve")
+        .to_string_lossy()
+        .to_string();
+
+    let mut st =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st.instrument_registry_path = registry_path;
+    (st, ())
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -830,19 +904,20 @@ async fn te_05_no_db_required() {
 }
 
 // ---------------------------------------------------------------------------
-// DATA-INGEST-DAEMON-PROVIDER-JOBS-01: Provider dry-run job tests
+// DATA-INGEST-DAEMON-PROVIDER-JOBS-01: Provider sync job tests
 //
-// | Test   | What it proves                                                              |
-// |--------|-----------------------------------------------------------------------------|
-// | PD-01  | POST dry_run=true → 202, accepted=true, dry_run=true, api_calls_made=0     |
-// | PD-02  | After wait, job is dry_run_completed, symbols_count=88, api_calls_made=0   |
-// | PD-03  | dry_run=false + allow_provider_api_calls=false → 400 refused               |
-// | PD-04  | dry_run=false + allow_provider_api_calls=true → 400 not_implemented        |
-// | PD-05  | source=twelvedata without mode → 400 refused (IJ-05 compat preserved)     |
-// | PD-06  | invalid registry path → job fails truthfully (registry_load_failed)        |
+// | Test   | What it proves                                                                |
+// |--------|-------------------------------------------------------------------------------|
+// | PD-01  | POST dry_run=true → 202, accepted=true, dry_run=true, api_calls_made=0      |
+// | PD-02  | After wait, job is dry_run_completed, symbols_count=88, api_calls_made=0    |
+// | PD-03  | dry_run=false + allow_provider_api_calls=false → 400 refused                |
+// | PD-04  | dry_run=false + allow_provider_api_calls=true + fake provider → 202 queued  |
+// | PD-05  | source=twelvedata without mode → 400 refused (IJ-05 compat preserved)      |
+// | PD-06  | invalid registry path → dry-run job fails truthfully (registry_load_failed) |
 //
-// No provider API calls in any test. No DB writes. No TwelveData credits consumed.
-// All tests are fully in-process with no network access.
+// No real TwelveData network calls in any test. No DB writes. No API credits consumed.
+// Real-provider path (PD-04) uses an injectable fake provider (zero-network).
+// All tests are fully in-process.
 // ---------------------------------------------------------------------------
 
 /// Return a router + shared state pointing at the real canonical registry.
@@ -1090,10 +1165,20 @@ async fn pd_03_provider_real_without_allow_refused() {
     );
 }
 
-// PD-04: dry_run=false + allow_provider_api_calls=true → 400 not_implemented
+// PD-04: dry_run=false + allow_provider_api_calls=true + fake provider → 202 queued
+//
+// Verifies that the real provider-sync path is now implemented: the job is
+// accepted (202) rather than refused.  A zero-network fake provider is
+// injected so no TwelveData API calls are made.  No DB is wired, so the
+// background task will fail at DB insert — but the key invariant proven here
+// is that the route no longer returns "not_implemented".
 #[tokio::test]
-async fn pd_04_provider_real_with_allow_not_implemented() {
-    let (_, router) = make_provider_router_with_registry();
+async fn pd_04_provider_real_with_allow_queued() {
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::empty()));
+    let st = Arc::new(st_raw);
+    let router = routes::build_router(Arc::clone(&st));
+
     let (status, body) = post_provider_job(
         router,
         serde_json::json!({
@@ -1102,39 +1187,52 @@ async fn pd_04_provider_real_with_allow_not_implemented() {
             "timeframe": "1D",
             "symbols_source": "registry",
             "dry_run": false,
-            "allow_provider_api_calls": true
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-10"
         }),
     )
     .await;
 
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
-        "must → 400 (not_implemented): {body}"
+        StatusCode::ACCEPTED,
+        "real provider path must → 202 (queued): {body}"
     );
     assert!(
-        !json_bool(&body, "accepted"),
-        "accepted must be false: {body}"
+        json_bool(&body, "accepted"),
+        "accepted must be true: {body}"
     );
 
     let job_status = json_str(&body, "status");
     assert_eq!(
-        job_status, "not_implemented",
-        "status must be not_implemented, got: {job_status}"
+        job_status, "queued",
+        "status must be 'queued', got: {job_status}"
     );
 
-    let err = body["error"].as_str().unwrap_or("");
-    assert!(
-        err.contains("not implemented") || err.contains("not_implemented"),
-        "error must explain real sync is not implemented: {err}"
+    // dry_run must be false; provider_api_calls_allowed must be true.
+    assert_eq!(
+        body["dry_run"],
+        serde_json::Value::Bool(false),
+        "dry_run must be false: {body}"
+    );
+    assert_eq!(
+        body["provider_api_calls_allowed"],
+        serde_json::Value::Bool(true),
+        "provider_api_calls_allowed must be true: {body}"
     );
 
-    // api_calls_made must be 0 — never called provider.
+    // api_calls_made must be 0 at acceptance time.
     assert_eq!(
         body["api_calls_made"].as_i64().unwrap_or(999),
         0,
-        "api_calls_made must be 0 on not_implemented: {body}"
+        "api_calls_made must be 0 at acceptance: {body}"
     );
+
+    // job_id must be a non-nil UUID.
+    let job_id_str = json_str(&body, "job_id");
+    let job_id: uuid::Uuid = job_id_str.parse().expect("job_id must be a valid UUID");
+    assert!(!job_id.is_nil(), "job_id must be non-nil");
 }
 
 // PD-05: source=twelvedata without mode → 400 (IJ-05 behaviour preserved)
@@ -1401,5 +1499,264 @@ async fn pd_09_dry_run_reports_provider_registry_fields() {
         body["api_calls_made"].as_i64().unwrap_or(999),
         0,
         "api_calls_made must be 0: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DATA-INGEST-DAEMON-PROVIDER-JOBS-01: Real provider path proof tests
+//
+// | Test   | What it proves                                                                |
+// |--------|-------------------------------------------------------------------------------|
+// | PD-10  | Real path with fake provider: job runs, api_calls_made > 0                   |
+// | PD-11  | Missing API key without injected client: job queues then fails truthfully     |
+// | PD-12  | api_credits_per_minute guardrail stops batch at cap                           |
+// | PD-13  | Partial success: failing symbols tracked, non-zero symbols_failed             |
+//
+// All tests use FakeProvider (zero-network). No TwelveData credentials required.
+// No DB is wired in these tests; jobs reach `failed` at the DB insert step
+// (except PD-12 which is halted by guardrail before any DB call).
+// This is expected and proves the fail-closed behavior on missing DB.
+// ---------------------------------------------------------------------------
+
+// PD-10: real provider path runs, makes api calls via fake provider, fails at DB (no pool)
+#[tokio::test]
+async fn pd_10_real_provider_job_runs_with_fake_provider() {
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::empty()));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "must → 202 (queued): {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+
+    // Wait for background task to complete.  88 fake symbols × instant = fast.
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (_, body) = get_job_status(router_get, &job_id).await;
+
+    // Job must have finished (not still running).
+    let job_status = json_str(&body, "status");
+    assert!(
+        job_status == "failed" || job_status == "completed" || job_status == "partial",
+        "job must have reached terminal status, got: {job_status}. body: {body}"
+    );
+
+    // api_calls_made must be > 0 — the fake provider was called.
+    let api_calls = body["api_calls_made"].as_i64().unwrap_or(0);
+    assert!(
+        api_calls > 0,
+        "api_calls_made must be > 0; fake provider was called for each symbol. got: {api_calls}"
+    );
+
+    // symbols_count must be 88 (full registry).
+    let symbols_count = body["symbols_count"].as_u64().unwrap_or(0);
+    assert_eq!(
+        symbols_count, 88,
+        "symbols_count must be 88, got: {symbols_count}"
+    );
+
+    // dry_run must be false; provider_api_calls_allowed must be true.
+    assert_eq!(body["dry_run"], serde_json::Value::Bool(false));
+    assert_eq!(
+        body["provider_api_calls_allowed"],
+        serde_json::Value::Bool(true)
+    );
+}
+
+// PD-11: missing API key without injected client → job is queued but then fails truthfully
+#[tokio::test]
+async fn pd_11_missing_api_key_job_fails_truthfully() {
+    // No provider_client injected, no TWELVEDATA_API_KEY set in test environment.
+    // Ensure the env var is absent for this test.
+    std::env::remove_var("TWELVEDATA_API_KEY");
+
+    let (st_raw, _) = make_provider_router_with_registry_raw();
+    // Do NOT inject a provider client — this exercises the env-var fallback path.
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05"
+        }),
+    )
+    .await;
+
+    // Job must be accepted (202); the API key check is async.
+    assert_eq!(status, StatusCode::ACCEPTED, "must → 202 (queued): {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+
+    // Wait for background task to discover missing API key.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (_, body) = get_job_status(router_get, &job_id).await;
+
+    let job_status = json_str(&body, "status");
+    assert_eq!(
+        job_status, "failed",
+        "job must fail when API key is missing, got: {job_status}"
+    );
+
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("TWELVEDATA_API_KEY") || err.contains("api key") || err.contains("missing"),
+        "error must describe missing API key, got: {err}"
+    );
+
+    // api_calls_made must be 0 — never got to make a provider call.
+    assert_eq!(
+        body["api_calls_made"].as_i64().unwrap_or(999),
+        0,
+        "api_calls_made must be 0 on missing key: {body}"
+    );
+}
+
+// PD-12: api_credits_per_minute guardrail stops batch before exceeding cap
+#[tokio::test]
+async fn pd_12_api_credits_per_minute_guardrail_stops_batch() {
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::empty()));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    // Cap at 3 API calls — should stop after 3 symbols out of 88.
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05",
+            "api_credits_per_minute": 3
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "must → 202 (queued): {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (_, body) = get_job_status(router_get, &job_id).await;
+
+    let job_status = json_str(&body, "status");
+    // After hitting the guardrail with some symbols done and some skipped:
+    // - if no DB: status is "failed" (db error overrides partial)
+    // - if guardrail fires before any symbol completes and DB OK: "failed"
+    // - if some symbols completed before guardrail and DB OK: "partial"
+    // Since we have no DB here, the terminal is "failed" (db error path).
+    // The key invariant: api_calls_made <= 3 (guardrail enforced).
+    let api_calls = body["api_calls_made"].as_i64().unwrap_or(999);
+    assert!(
+        api_calls <= 3,
+        "api_calls_made must be <= 3 (guardrail cap), got: {api_calls}"
+    );
+
+    // symbols_count must be 88 (all symbols were resolved).
+    let symbols_count = body["symbols_count"].as_u64().unwrap_or(0);
+    assert_eq!(
+        symbols_count, 88,
+        "symbols_count must be 88 (registry size), got: {symbols_count}"
+    );
+
+    // Job must have reached a terminal state.
+    assert!(
+        job_status == "failed" || job_status == "partial" || job_status == "completed",
+        "job must be terminal, got: {job_status}"
+    );
+}
+
+// PD-13: per-symbol failure tracking — symbols_failed is non-zero for failing symbols
+#[tokio::test]
+async fn pd_13_per_symbol_failure_tracked() {
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    // FakeProvider that fails for all symbols (simulates provider errors).
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::failing(vec![
+        // We use a small cap so the test runs quickly.
+        // The guardrail will stop after 2 calls, both of which fail.
+        "AAPL".to_string(),
+        "MSFT".to_string(),
+    ])));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    // Cap to 2 symbols via per-day guardrail to keep test fast.
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05",
+            "api_credits_per_day": 2
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "must → 202 (queued): {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (_, body) = get_job_status(router_get, &job_id).await;
+
+    // symbols_count must be 88 (all resolved from registry).
+    let symbols_count = body["symbols_count"].as_u64().unwrap_or(0);
+    assert_eq!(symbols_count, 88, "symbols_count must be 88: {body}");
+
+    // api_calls_made must be <= 2 (guardrail).
+    let api_calls = body["api_calls_made"].as_i64().unwrap_or(999);
+    assert!(
+        api_calls <= 2,
+        "api_calls_made must be <= 2 (per_day guardrail), got: {api_calls}"
+    );
+
+    // symbols_failed must be > 0 (at least AAPL or MSFT was attempted and failed).
+    let symbols_failed = body["symbols_failed"].as_u64().unwrap_or(0);
+    assert!(
+        symbols_failed > 0,
+        "symbols_failed must be > 0 (fake provider fails for AAPL/MSFT), got: {symbols_failed}"
+    );
+
+    // Job must have reached a terminal state.
+    let job_status = json_str(&body, "status");
+    assert!(
+        job_status == "failed" || job_status == "partial",
+        "job must be terminal (failed or partial), got: {job_status}"
     );
 }
