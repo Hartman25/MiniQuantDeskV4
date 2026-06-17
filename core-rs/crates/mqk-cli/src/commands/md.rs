@@ -309,6 +309,7 @@ pub async fn md_ingest_provider(
     let chunk_days = match tf {
         mqk_md::Timeframe::D1 => CHUNK_DAYS_1D,
         mqk_md::Timeframe::H1 => CHUNK_DAYS_1H,
+        mqk_md::Timeframe::M15 => CHUNK_DAYS_5M,
         mqk_md::Timeframe::M5 => CHUNK_DAYS_5M,
         mqk_md::Timeframe::M1 => CHUNK_DAYS_1M,
     };
@@ -458,6 +459,7 @@ pub async fn md_sync_provider(
     let default_overlap: u32 = match tf {
         mqk_md::Timeframe::D1 => 5,
         mqk_md::Timeframe::H1 => 2,
+        mqk_md::Timeframe::M15 => 2,
         mqk_md::Timeframe::M5 => 2,
         mqk_md::Timeframe::M1 => 1,
     };
