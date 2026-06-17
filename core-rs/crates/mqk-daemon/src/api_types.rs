@@ -3461,6 +3461,53 @@ pub struct MarketDataFeedStatusResponse {
     pub last_poll: Option<MarketDataFeedPollOnceResponse>,
 }
 
+/// Request body for `POST /api/v1/market-data/feed/scheduler/start`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketDataFeedSchedulerStartRequest {
+    pub provider_id: String,
+    pub symbols: Vec<String>,
+    pub timeframe: String,
+    /// Permit real provider API calls. Default: false.
+    /// Must be explicitly true when `dry_run=false`.
+    #[serde(default)]
+    pub allow_provider_api_calls: bool,
+    /// Dry-run mode: validate cadence/symbols/provider registry only.
+    /// Makes zero provider calls and zero DB writes. Default: true.
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
+    /// Run one poll immediately after start. Default: false.
+    #[serde(default)]
+    pub poll_immediately: bool,
+    /// Deterministic UTC reference time for tests/operator replay.
+    /// Accepts RFC3339 UTC timestamps.
+    pub now_utc: Option<String>,
+    /// Override provider registry path; omitted uses AppState default.
+    pub provider_registry_path: Option<String>,
+}
+
+/// Response body for latest-bar scheduler start/stop/status routes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketDataFeedSchedulerStatusResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub limitation: String,
+    pub running: bool,
+    pub provider_id: Option<String>,
+    pub timeframe: Option<String>,
+    pub symbols: Vec<String>,
+    pub last_poll_utc: Option<String>,
+    pub next_poll_utc: Option<String>,
+    pub latest_expected_closed_bar_utc: Option<String>,
+    pub last_result: Option<MarketDataFeedPollOnceResponse>,
+    pub last_error: Option<String>,
+    pub started_at_utc: Option<String>,
+    pub stopped_at_utc: Option<String>,
+    pub poll_count: u64,
+    pub inserted_count: u64,
+    pub unchanged_or_skipped_count: u64,
+    pub error_count: u64,
+}
+
 // ---------------------------------------------------------------------------
 // DATA-INGEST-GUI-RESULTS-01: md_bars coverage query response
 // ---------------------------------------------------------------------------

@@ -31,20 +31,23 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
+    body::to_bytes,
     extract::{Path as AxumPath, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
+use tokio::time::{sleep, Duration as TokioDuration};
 use uuid::Uuid;
 
 use crate::{
     api_types::{
         IngestJobAcceptedResponse, IngestJobRequest, IngestJobStatusResponse, IngestJobSummary,
         IngestJobsListResponse, MarketDataFeedPollOnceRequest, MarketDataFeedPollOnceResponse,
-        MarketDataFeedPollSymbolResult, MarketDataFeedStatusResponse, TrackedEquitiesResponse,
-        TrackedEquitySummary,
+        MarketDataFeedPollSymbolResult, MarketDataFeedSchedulerStartRequest,
+        MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse,
+        TrackedEquitiesResponse, TrackedEquitySummary,
     },
     ingest_jobs::{
         list_persisted_ingest_jobs, load_persisted_ingest_job, persist_ingest_job_record,
@@ -56,6 +59,10 @@ use crate::{
 const INGEST_JOB_CANCEL_REASON: &str = "cancel requested by operator";
 const FEED_POLL_ROUTE: &str = "/api/v1/market-data/feed/poll-once";
 const FEED_STATUS_ROUTE: &str = "/api/v1/market-data/feed/status";
+const FEED_SCHEDULER_START_ROUTE: &str = "/api/v1/market-data/feed/scheduler/start";
+const FEED_SCHEDULER_STOP_ROUTE: &str = "/api/v1/market-data/feed/scheduler/stop";
+const FEED_SCHEDULER_STATUS_ROUTE: &str = "/api/v1/market-data/feed/scheduler/status";
+const SCHEDULER_RESPONSE_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Timeframe validation (no mqk-md dep required for daemon validation)
@@ -854,6 +861,396 @@ pub(crate) async fn market_data_feed_status(State(st): State<Arc<AppState>>) -> 
         limitation: "process_local_only_not_persisted".to_string(),
         last_poll,
     })
+}
+
+#[derive(Clone)]
+struct MarketDataFeedSchedulerPollConfig {
+    provider_id: String,
+    symbols: Vec<String>,
+    timeframe: mqk_md::Timeframe,
+    dry_run: bool,
+    allow_provider_api_calls: bool,
+    provider_registry_path: Option<String>,
+}
+
+fn ts_to_utc_string(ts: i64) -> String {
+    DateTime::<Utc>::from_timestamp(ts, 0)
+        .expect("scheduler timestamp must be representable")
+        .to_rfc3339()
+}
+
+fn scheduler_status_response(
+    canonical_route: &str,
+    truth_state: &str,
+    scheduler: &crate::state::MarketDataFeedSchedulerRuntimeState,
+) -> MarketDataFeedSchedulerStatusResponse {
+    MarketDataFeedSchedulerStatusResponse {
+        canonical_route: canonical_route.to_string(),
+        truth_state: truth_state.to_string(),
+        limitation: "process_local_only_not_persisted".to_string(),
+        running: scheduler.running,
+        provider_id: scheduler.provider_id.clone(),
+        timeframe: scheduler.timeframe.map(|tf| tf.as_str().to_string()),
+        symbols: scheduler.symbols.clone(),
+        last_poll_utc: scheduler.last_poll_ts.map(ts_to_utc_string),
+        next_poll_utc: scheduler.next_poll_ts.map(ts_to_utc_string),
+        latest_expected_closed_bar_utc: scheduler
+            .latest_expected_closed_bar_ts
+            .map(ts_to_utc_string),
+        last_result: scheduler.last_result.clone(),
+        last_error: scheduler.last_error.clone(),
+        started_at_utc: scheduler.started_at_ts.map(ts_to_utc_string),
+        stopped_at_utc: scheduler.stopped_at_ts.map(ts_to_utc_string),
+        poll_count: scheduler.poll_count,
+        inserted_count: scheduler.inserted_count,
+        unchanged_or_skipped_count: scheduler.unchanged_or_skipped_count,
+        error_count: scheduler.error_count,
+    }
+}
+
+fn scheduler_refused_response(
+    status: StatusCode,
+    canonical_route: &str,
+    error: String,
+) -> Response {
+    (
+        status,
+        Json(MarketDataFeedSchedulerStatusResponse {
+            canonical_route: canonical_route.to_string(),
+            truth_state: "refused".to_string(),
+            limitation: "process_local_only_not_persisted".to_string(),
+            running: false,
+            provider_id: None,
+            timeframe: None,
+            symbols: vec![],
+            last_poll_utc: None,
+            next_poll_utc: None,
+            latest_expected_closed_bar_utc: None,
+            last_result: None,
+            last_error: Some(error),
+            started_at_utc: None,
+            stopped_at_utc: None,
+            poll_count: 0,
+            inserted_count: 0,
+            unchanged_or_skipped_count: 0,
+            error_count: 1,
+        }),
+    )
+        .into_response()
+}
+
+async fn execute_scheduler_poll_once(
+    st: Arc<AppState>,
+    config: MarketDataFeedSchedulerPollConfig,
+    poll_time: DateTime<Utc>,
+) -> Result<(StatusCode, MarketDataFeedPollOnceResponse), String> {
+    let response = market_data_feed_poll_once(
+        State(st),
+        Json(MarketDataFeedPollOnceRequest {
+            provider_id: config.provider_id,
+            symbols: config.symbols,
+            timeframe: config.timeframe.as_str().to_string(),
+            dry_run: config.dry_run,
+            allow_provider_api_calls: config.allow_provider_api_calls,
+            now_utc: Some(poll_time.to_rfc3339()),
+            provider_registry_path: config.provider_registry_path,
+        }),
+    )
+    .await;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), SCHEDULER_RESPONSE_BODY_LIMIT_BYTES)
+        .await
+        .map_err(|err| format!("scheduler poll response read failed: {err}"))?;
+    let parsed = serde_json::from_slice::<MarketDataFeedPollOnceResponse>(&bytes)
+        .map_err(|err| format!("scheduler poll response parse failed: {err}"))?;
+    Ok((status, parsed))
+}
+
+async fn apply_scheduler_poll_result(
+    st: &Arc<AppState>,
+    timeframe: mqk_md::Timeframe,
+    poll_time: DateTime<Utc>,
+    result: Result<(StatusCode, MarketDataFeedPollOnceResponse), String>,
+) {
+    let mut scheduler = st.market_data_feed_scheduler.lock().await;
+    if !scheduler.running {
+        return;
+    }
+
+    scheduler.last_poll_ts = Some(poll_time.timestamp());
+    scheduler.latest_expected_closed_bar_ts = Some(mqk_md::latest_closed_bar_end_ts(
+        timeframe,
+        poll_time.timestamp(),
+    ));
+    scheduler.next_poll_ts = Some(mqk_md::next_poll_time_ts(timeframe, poll_time.timestamp()));
+    scheduler.poll_count += 1;
+
+    match result {
+        Ok((status, response)) => {
+            scheduler.inserted_count += response.inserted_count;
+            scheduler.unchanged_or_skipped_count += response.updated_count + response.skipped_count;
+            if status.is_success() {
+                scheduler.last_error = response.error.clone();
+                scheduler.error_count += response.error_count;
+            } else {
+                let error = response
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| format!("poll-once returned HTTP {status}"));
+                scheduler.last_error = Some(error);
+                scheduler.error_count += response.error_count.max(1);
+            }
+            scheduler.last_result = Some(response);
+        }
+        Err(error) => {
+            scheduler.last_error = Some(error);
+            scheduler.error_count += 1;
+        }
+    }
+}
+
+async fn market_data_feed_scheduler_loop(
+    st: Arc<AppState>,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        let (next_poll_ts, config) = {
+            let scheduler = st.market_data_feed_scheduler.lock().await;
+            if !scheduler.running {
+                return;
+            }
+            let Some(timeframe) = scheduler.timeframe else {
+                return;
+            };
+            let Some(provider_id) = scheduler.provider_id.clone() else {
+                return;
+            };
+            (
+                scheduler
+                    .next_poll_ts
+                    .unwrap_or_else(|| Utc::now().timestamp()),
+                MarketDataFeedSchedulerPollConfig {
+                    provider_id,
+                    symbols: scheduler.symbols.clone(),
+                    timeframe,
+                    dry_run: scheduler.dry_run,
+                    allow_provider_api_calls: scheduler.allow_provider_api_calls,
+                    provider_registry_path: scheduler.provider_registry_path.clone(),
+                },
+            )
+        };
+
+        let now_ts = Utc::now().timestamp();
+        let effective_next_poll_ts = if next_poll_ts <= now_ts {
+            mqk_md::next_poll_time_ts(config.timeframe, now_ts)
+        } else {
+            next_poll_ts
+        };
+        let wait_secs = effective_next_poll_ts.saturating_sub(now_ts) as u64;
+        tokio::select! {
+            changed = stop_rx.changed() => {
+                if changed.is_err() || *stop_rx.borrow() {
+                    return;
+                }
+            }
+            _ = sleep(TokioDuration::from_secs(wait_secs)) => {}
+        }
+
+        if *stop_rx.borrow() {
+            return;
+        }
+
+        let poll_time = Utc::now();
+        let result = execute_scheduler_poll_once(st.clone(), config.clone(), poll_time).await;
+        apply_scheduler_poll_result(&st, config.timeframe, poll_time, result).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/market-data/feed/scheduler/start
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn market_data_feed_scheduler_start(
+    State(st): State<Arc<AppState>>,
+    Json(req): Json<MarketDataFeedSchedulerStartRequest>,
+) -> Response {
+    let provider_id = req.provider_id.trim().to_ascii_lowercase();
+    if provider_id.is_empty() {
+        return scheduler_refused_response(
+            StatusCode::BAD_REQUEST,
+            FEED_SCHEDULER_START_ROUTE,
+            "provider_id must not be empty".to_string(),
+        );
+    }
+
+    let symbols = match normalize_poll_symbols(&req.symbols) {
+        Ok(symbols) => symbols,
+        Err(error) => {
+            return scheduler_refused_response(
+                StatusCode::BAD_REQUEST,
+                FEED_SCHEDULER_START_ROUTE,
+                error,
+            );
+        }
+    };
+    let timeframe = match mqk_md::Timeframe::parse(&req.timeframe) {
+        Ok(timeframe) => timeframe,
+        Err(error) => {
+            return scheduler_refused_response(
+                StatusCode::BAD_REQUEST,
+                FEED_SCHEDULER_START_ROUTE,
+                error.to_string(),
+            );
+        }
+    };
+    let start_time = match parse_poll_now(req.now_utc.as_deref()) {
+        Ok(now) => now,
+        Err(error) => {
+            return scheduler_refused_response(
+                StatusCode::BAD_REQUEST,
+                FEED_SCHEDULER_START_ROUTE,
+                error,
+            );
+        }
+    };
+
+    if !req.dry_run && !req.allow_provider_api_calls {
+        return scheduler_refused_response(
+            StatusCode::BAD_REQUEST,
+            FEED_SCHEDULER_START_ROUTE,
+            "allow_provider_api_calls=true is required when dry_run=false".to_string(),
+        );
+    }
+
+    let provider_registry_path = req
+        .provider_registry_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or(&st.provider_registry_path)
+        .to_string();
+    let provider_config = match load_poll_provider_config(&provider_id, &provider_registry_path) {
+        Ok(config) => config,
+        Err(error) => {
+            return scheduler_refused_response(
+                StatusCode::BAD_REQUEST,
+                FEED_SCHEDULER_START_ROUTE,
+                error,
+            );
+        }
+    };
+
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let latest_expected_closed_bar_ts =
+        mqk_md::latest_closed_bar_end_ts(timeframe, start_time.timestamp());
+    let next_poll_ts = mqk_md::next_poll_time_ts(timeframe, start_time.timestamp());
+    {
+        let mut scheduler = st.market_data_feed_scheduler.lock().await;
+        if scheduler.running {
+            scheduler.last_error = Some("latest-bar scheduler is already running".to_string());
+            let response = scheduler_status_response(
+                FEED_SCHEDULER_START_ROUTE,
+                "already_running",
+                &scheduler,
+            );
+            return (StatusCode::CONFLICT, Json(response)).into_response();
+        }
+
+        *scheduler = crate::state::MarketDataFeedSchedulerRuntimeState {
+            running: true,
+            provider_id: Some(provider_config.provider_id.clone()),
+            timeframe: Some(timeframe),
+            symbols: symbols.clone(),
+            dry_run: req.dry_run,
+            allow_provider_api_calls: req.allow_provider_api_calls,
+            provider_registry_path: Some(provider_registry_path.clone()),
+            last_poll_ts: None,
+            next_poll_ts: Some(next_poll_ts),
+            latest_expected_closed_bar_ts: Some(latest_expected_closed_bar_ts),
+            last_result: None,
+            last_error: None,
+            started_at_ts: Some(start_time.timestamp()),
+            stopped_at_ts: None,
+            poll_count: 0,
+            inserted_count: 0,
+            unchanged_or_skipped_count: 0,
+            error_count: 0,
+            stop_tx: Some(stop_tx),
+            task: None,
+        };
+    }
+
+    let config = MarketDataFeedSchedulerPollConfig {
+        provider_id: provider_config.provider_id,
+        symbols,
+        timeframe,
+        dry_run: req.dry_run,
+        allow_provider_api_calls: req.allow_provider_api_calls,
+        provider_registry_path: Some(provider_registry_path),
+    };
+
+    if req.poll_immediately {
+        let result = execute_scheduler_poll_once(st.clone(), config.clone(), start_time).await;
+        apply_scheduler_poll_result(&st, timeframe, start_time, result).await;
+    }
+
+    let task = tokio::spawn(market_data_feed_scheduler_loop(st.clone(), stop_rx));
+    {
+        let mut scheduler = st.market_data_feed_scheduler.lock().await;
+        if scheduler.running {
+            scheduler.task = Some(task);
+        } else {
+            task.abort();
+        }
+        let response = scheduler_status_response(FEED_SCHEDULER_START_ROUTE, "started", &scheduler);
+        (StatusCode::OK, Json(response)).into_response()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/market-data/feed/scheduler/stop
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn market_data_feed_scheduler_stop(State(st): State<Arc<AppState>>) -> Response {
+    let mut scheduler = st.market_data_feed_scheduler.lock().await;
+    if scheduler.running {
+        scheduler.running = false;
+        scheduler.stopped_at_ts = Some(Utc::now().timestamp());
+        let _ = scheduler.stop_tx.as_ref().map(|tx| tx.send(true));
+        if let Some(task) = scheduler.task.take() {
+            task.abort();
+        }
+        scheduler.stop_tx = None;
+        scheduler.next_poll_ts = None;
+    }
+    let truth_state = if scheduler.stopped_at_ts.is_some() {
+        "stopped"
+    } else {
+        "not_running"
+    };
+    let response = scheduler_status_response(FEED_SCHEDULER_STOP_ROUTE, truth_state, &scheduler);
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/market-data/feed/scheduler/status
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn market_data_feed_scheduler_status(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let scheduler = st.market_data_feed_scheduler.lock().await;
+    let truth_state = if scheduler.running {
+        "running"
+    } else if scheduler.stopped_at_ts.is_some() {
+        "stopped"
+    } else {
+        "not_started"
+    };
+    Json(scheduler_status_response(
+        FEED_SCHEDULER_STATUS_ROUTE,
+        truth_state,
+        &scheduler,
+    ))
 }
 
 // ---------------------------------------------------------------------------

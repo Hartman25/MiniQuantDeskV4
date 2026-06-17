@@ -168,6 +168,61 @@ fn normalize_per_symbol_target_state_key(symbol: &str) -> Option<String> {
     }
 }
 
+/// Process-local latest-bar scheduler runtime state.
+///
+/// This is intentionally not durable in this patch. The scheduler is disabled
+/// at boot and becomes active only after the operator start route installs a
+/// task handle and request configuration here.
+pub struct MarketDataFeedSchedulerRuntimeState {
+    pub running: bool,
+    pub provider_id: Option<String>,
+    pub timeframe: Option<mqk_md::Timeframe>,
+    pub symbols: Vec<String>,
+    pub dry_run: bool,
+    pub allow_provider_api_calls: bool,
+    pub provider_registry_path: Option<String>,
+    pub last_poll_ts: Option<i64>,
+    pub next_poll_ts: Option<i64>,
+    pub latest_expected_closed_bar_ts: Option<i64>,
+    pub last_result: Option<crate::api_types::MarketDataFeedPollOnceResponse>,
+    pub last_error: Option<String>,
+    pub started_at_ts: Option<i64>,
+    pub stopped_at_ts: Option<i64>,
+    pub poll_count: u64,
+    pub inserted_count: u64,
+    pub unchanged_or_skipped_count: u64,
+    pub error_count: u64,
+    pub stop_tx: Option<watch::Sender<bool>>,
+    pub task: Option<JoinHandle<()>>,
+}
+
+impl Default for MarketDataFeedSchedulerRuntimeState {
+    fn default() -> Self {
+        Self {
+            running: false,
+            provider_id: None,
+            timeframe: None,
+            symbols: Vec::new(),
+            dry_run: true,
+            allow_provider_api_calls: false,
+            provider_registry_path: None,
+            last_poll_ts: None,
+            next_poll_ts: None,
+            latest_expected_closed_bar_ts: None,
+            last_result: None,
+            last_error: None,
+            started_at_ts: None,
+            stopped_at_ts: None,
+            poll_count: 0,
+            inserted_count: 0,
+            unchanged_or_skipped_count: 0,
+            error_count: 0,
+            stop_tx: None,
+            task: None,
+        }
+    }
+}
+
 /// Cloneable (Arc) handle shared across all Axum handlers.
 #[derive(Clone)]
 pub struct AppState {
@@ -417,6 +472,10 @@ pub struct AppState {
     /// DATA-PROVIDER-LATEST-BAR-POLL-01: Process-local last poll result for feed status.
     pub market_data_feed_status:
         Arc<RwLock<Option<crate::api_types::MarketDataFeedPollOnceResponse>>>,
+    /// DATA-PROVIDER-LATEST-BAR-SCHEDULER-01: Process-local latest-bar scheduler.
+    ///
+    /// Disabled by default. Holds only in-memory task/config/status state.
+    pub market_data_feed_scheduler: Arc<Mutex<MarketDataFeedSchedulerRuntimeState>>,
     /// BROKER-FILL-REST-RECOVERY-01: Injectable Alpaca fill activity fetcher.
     ///
     /// `None` when REST recovery is not configured on this daemon instance.
@@ -1019,6 +1078,9 @@ impl AppState {
             provider_client: None,
             latest_bar_provider_client: None,
             market_data_feed_status: Arc::new(RwLock::new(None)),
+            market_data_feed_scheduler: Arc::new(Mutex::new(
+                MarketDataFeedSchedulerRuntimeState::default(),
+            )),
             fill_activity_fetcher,
             ws_gap_fill_fetcher,
             broker_baseline: Arc::new(RwLock::new(None)),
