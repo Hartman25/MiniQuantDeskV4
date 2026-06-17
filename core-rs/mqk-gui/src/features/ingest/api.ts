@@ -7,6 +7,8 @@
 //   buildActiveIngestJob) are exported for test isolation.
 
 import { fetchJsonCandidate, postJson } from "../system/http";
+import { getDaemonUrl } from "../../config";
+import { getDesktopOperatorToken, isDesktopShell } from "../../desktop/bootstrap";
 import type {
   ActiveIngestJob,
   ActiveProviderJob,
@@ -17,6 +19,12 @@ import type {
   IngestJobStatusResponse,
   IngestJobsListResponse,
   IntradayRefreshStatusResponse,
+  MarketDataFeedPollOnceRequest,
+  MarketDataFeedPollOnceResponse,
+  MarketDataFeedPollSymbolResult,
+  MarketDataFeedSchedulerStartRequest,
+  MarketDataFeedSchedulerStatusResponse,
+  MarketDataFeedStatusResponse,
   MdBarsCoverageResponse,
   MdBarsCoverageRow,
   TrackedEquitiesResponse,
@@ -469,6 +477,348 @@ export async function fetchIntradayRefreshStatus(): Promise<FetchIntradayRefresh
   }
 
   return { ok: true, data: result.data };
+}
+
+// ---------------------------------------------------------------------------
+// DATA-PROVIDER-GUI-FEED-SCHEDULER-01: latest closed-bar feed scheduler
+// ---------------------------------------------------------------------------
+
+export interface MarketDataFeedActionResult<T> {
+  ok: boolean;
+  status?: number;
+  data?: T;
+  error?: string;
+}
+
+export interface MarketDataFeedRequestOptions {
+  providerId: string;
+  symbols: string[];
+  timeframe: string;
+  dryRun: boolean;
+  allowProviderApiCalls: boolean;
+  pollImmediately?: boolean;
+}
+
+function normalizeNullableString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+function normalizeString(value: unknown, fallback: string): string {
+  return typeof value === "string" && value.trim() !== "" ? value : fallback;
+}
+
+function normalizeNullableNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function normalizeNullableBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+function normalizePollSymbolResult(raw: unknown): MarketDataFeedPollSymbolResult {
+  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  return {
+    symbol: normalizeString(record.symbol, "unknown"),
+    status: normalizeString(record.status, "unknown"),
+    expected_latest_closed_bar_ts: normalizeNullableNumber(record.expected_latest_closed_bar_ts),
+    returned_bar_ts: normalizeNullableNumber(record.returned_bar_ts),
+    rows_inserted: normalizeNullableNumber(record.rows_inserted),
+    rows_updated: normalizeNullableNumber(record.rows_updated),
+    rows_skipped: normalizeNullableNumber(record.rows_skipped),
+    error: normalizeNullableString(record.error),
+  };
+}
+
+export function normalizeMarketDataFeedPollOnceResponse(
+  raw: unknown,
+): MarketDataFeedPollOnceResponse {
+  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const symbolsRaw = Array.isArray(record.symbols) ? record.symbols : [];
+  return {
+    canonical_route: normalizeString(record.canonical_route, "/api/v1/market-data/feed/poll-once"),
+    truth_state: normalizeString(record.truth_state, "unknown"),
+    provider_id: normalizeNullableString(record.provider_id),
+    timeframe: normalizeNullableString(record.timeframe),
+    dry_run: normalizeNullableBoolean(record.dry_run),
+    provider_api_calls_allowed: normalizeNullableBoolean(record.provider_api_calls_allowed),
+    symbols_count: normalizeNullableNumber(record.symbols_count),
+    poll_time_utc: normalizeNullableString(record.poll_time_utc),
+    latest_expected_closed_bar_ts: normalizeNullableNumber(record.latest_expected_closed_bar_ts),
+    next_poll_ts: normalizeNullableNumber(record.next_poll_ts),
+    inserted_count: normalizeNullableNumber(record.inserted_count),
+    updated_count: normalizeNullableNumber(record.updated_count),
+    skipped_count: normalizeNullableNumber(record.skipped_count),
+    error_count: normalizeNullableNumber(record.error_count),
+    api_calls_made: normalizeNullableNumber(record.api_calls_made),
+    symbols: symbolsRaw.map(normalizePollSymbolResult),
+    error: normalizeNullableString(record.error),
+  };
+}
+
+export function normalizeMarketDataFeedStatusResponse(raw: unknown): MarketDataFeedStatusResponse {
+  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  return {
+    canonical_route: normalizeString(record.canonical_route, "/api/v1/market-data/feed/status"),
+    truth_state: normalizeString(record.truth_state, "unknown"),
+    limitation: normalizeNullableString(record.limitation),
+    last_poll: record.last_poll === null || record.last_poll === undefined
+      ? null
+      : normalizeMarketDataFeedPollOnceResponse(record.last_poll),
+  };
+}
+
+export function normalizeMarketDataFeedSchedulerStatusResponse(
+  raw: unknown,
+): MarketDataFeedSchedulerStatusResponse {
+  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  return {
+    canonical_route: normalizeString(
+      record.canonical_route,
+      "/api/v1/market-data/feed/scheduler/status",
+    ),
+    truth_state: normalizeString(record.truth_state, "unknown"),
+    limitation: normalizeNullableString(record.limitation),
+    running: normalizeNullableBoolean(record.running),
+    provider_id: normalizeNullableString(record.provider_id),
+    timeframe: normalizeNullableString(record.timeframe),
+    symbols: normalizeStringArray(record.symbols),
+    last_poll_utc: normalizeNullableString(record.last_poll_utc),
+    next_poll_utc: normalizeNullableString(record.next_poll_utc),
+    latest_expected_closed_bar_utc: normalizeNullableString(record.latest_expected_closed_bar_utc),
+    last_result: record.last_result === null || record.last_result === undefined
+      ? null
+      : normalizeMarketDataFeedPollOnceResponse(record.last_result),
+    last_error: normalizeNullableString(record.last_error),
+    started_at_utc: normalizeNullableString(record.started_at_utc),
+    stopped_at_utc: normalizeNullableString(record.stopped_at_utc),
+    poll_count: normalizeNullableNumber(record.poll_count),
+    inserted_count: normalizeNullableNumber(record.inserted_count),
+    unchanged_or_skipped_count: normalizeNullableNumber(record.unchanged_or_skipped_count),
+    error_count: normalizeNullableNumber(record.error_count),
+  };
+}
+
+export function parseMarketDataFeedSymbols(value: string): string[] {
+  const unique = new Set<string>();
+  for (const symbol of value.split(/[,\s]+/)) {
+    const normalized = symbol.trim().toUpperCase();
+    if (normalized) unique.add(normalized);
+  }
+  return [...unique];
+}
+
+export function isMarketDataFeedRealActionAllowed(
+  allowProviderApiCalls: boolean,
+  confirmation: string,
+  expected: "POLL" | "START",
+): boolean {
+  if (!allowProviderApiCalls) return true;
+  return confirmation.trim() === expected;
+}
+
+export function buildMarketDataFeedPollOnceRequest(
+  opts: MarketDataFeedRequestOptions,
+): MarketDataFeedPollOnceRequest {
+  const req: MarketDataFeedPollOnceRequest = {
+    provider_id: opts.providerId.trim(),
+    symbols: opts.symbols,
+    timeframe: opts.timeframe.trim(),
+    dry_run: opts.dryRun,
+  };
+  if (!opts.dryRun && opts.allowProviderApiCalls) {
+    req.allow_provider_api_calls = true;
+  }
+  return req;
+}
+
+export function buildMarketDataFeedSchedulerStartRequest(
+  opts: MarketDataFeedRequestOptions,
+): MarketDataFeedSchedulerStartRequest {
+  const req: MarketDataFeedSchedulerStartRequest = {
+    provider_id: opts.providerId.trim(),
+    symbols: opts.symbols,
+    timeframe: opts.timeframe.trim(),
+    dry_run: opts.dryRun,
+    poll_immediately: opts.pollImmediately === true,
+  };
+  if (!opts.dryRun && opts.allowProviderApiCalls) {
+    req.allow_provider_api_calls = true;
+  }
+  return req;
+}
+
+function marketDataFeedPostError(status: number | undefined, fallback: string): string {
+  if (fallback && !/^HTTP \d+$/.test(fallback)) return fallback;
+  if (status === 400) return "Request refused by daemon. Check provider, symbols, timeframe, and provider-call allowance.";
+  if (status === 401 || status === 403) return "Operator auth required. Set MQK_OPERATOR_TOKEN and launch the daemon with that token configured.";
+  if (status === 404) return "Market-data feed route unavailable. Is the daemon running with feed scheduler routes?";
+  if (status === 409) return "Latest-bar scheduler is already running.";
+  if (status === 503) return "Market-data feed backend unavailable.";
+  return fallback;
+}
+
+function marketDataFeedBodyError(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  return normalizeNullableString(record.error) ?? normalizeNullableString(record.last_error);
+}
+
+async function postMarketDataFeedJson<T>(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<MarketDataFeedActionResult<T>> {
+  const desktopOperatorToken = getDesktopOperatorToken();
+  if (isDesktopShell() && !desktopOperatorToken) {
+    return { ok: false, error: "desktop operator token missing" };
+  }
+
+  try {
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    };
+    if (desktopOperatorToken) {
+      headers.Authorization = `Bearer ${desktopOperatorToken}`;
+    }
+
+    const response = await fetch(new URL(path, getDaemonUrl()).toString(), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+    const contentType = response.headers.get("content-type") ?? "";
+    const data = contentType.includes("application/json")
+      ? ((await response.json()) as T)
+      : undefined;
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        data,
+        error: marketDataFeedBodyError(data) ?? `HTTP ${response.status}`,
+      };
+    }
+
+    return { ok: true, status: response.status, data };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "unknown error",
+    };
+  }
+}
+
+export async function getMarketDataFeedStatus(): Promise<
+  MarketDataFeedActionResult<MarketDataFeedStatusResponse>
+> {
+  const result = await fetchJsonCandidate<unknown>("/api/v1/market-data/feed/status");
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Feed status fetch failed." };
+  }
+  return { ok: true, data: normalizeMarketDataFeedStatusResponse(result.data) };
+}
+
+export async function pollMarketDataFeedOnce(
+  req: MarketDataFeedPollOnceRequest,
+): Promise<MarketDataFeedActionResult<MarketDataFeedPollOnceResponse>> {
+  const result = await postMarketDataFeedJson<unknown>(
+    "/api/v1/market-data/feed/poll-once",
+    req as unknown as Record<string, unknown>,
+  );
+
+  if (result.error === "desktop operator token missing") {
+    return {
+      ok: false,
+      error:
+        "Operator token missing — configure MQK_OPERATOR_TOKEN and launch via Launch-VeritasLedger.ps1 to poll latest bars.",
+    };
+  }
+  if (!result.ok) {
+    const data = result.data === undefined
+      ? undefined
+      : normalizeMarketDataFeedPollOnceResponse(result.data);
+    return {
+      ok: false,
+      status: result.status,
+      data,
+      error: marketDataFeedPostError(result.status, result.error ?? "Feed poll failed."),
+    };
+  }
+  return { ok: true, status: result.status, data: normalizeMarketDataFeedPollOnceResponse(result.data) };
+}
+
+export async function getMarketDataFeedSchedulerStatus(): Promise<
+  MarketDataFeedActionResult<MarketDataFeedSchedulerStatusResponse>
+> {
+  const result = await fetchJsonCandidate<unknown>("/api/v1/market-data/feed/scheduler/status");
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Feed scheduler status fetch failed." };
+  }
+  return { ok: true, data: normalizeMarketDataFeedSchedulerStatusResponse(result.data) };
+}
+
+export async function startMarketDataFeedScheduler(
+  req: MarketDataFeedSchedulerStartRequest,
+): Promise<MarketDataFeedActionResult<MarketDataFeedSchedulerStatusResponse>> {
+  const result = await postMarketDataFeedJson<unknown>(
+    "/api/v1/market-data/feed/scheduler/start",
+    req as unknown as Record<string, unknown>,
+  );
+
+  if (result.error === "desktop operator token missing") {
+    return {
+      ok: false,
+      error:
+        "Operator token missing — configure MQK_OPERATOR_TOKEN and launch via Launch-VeritasLedger.ps1 to start the latest-bar scheduler.",
+    };
+  }
+  if (!result.ok) {
+    const data = result.data === undefined
+      ? undefined
+      : normalizeMarketDataFeedSchedulerStatusResponse(result.data);
+    return {
+      ok: false,
+      status: result.status,
+      data,
+      error: marketDataFeedPostError(result.status, result.error ?? "Feed scheduler start failed."),
+    };
+  }
+  return { ok: true, status: result.status, data: normalizeMarketDataFeedSchedulerStatusResponse(result.data) };
+}
+
+export async function stopMarketDataFeedScheduler(): Promise<
+  MarketDataFeedActionResult<MarketDataFeedSchedulerStatusResponse>
+> {
+  const result = await postMarketDataFeedJson<unknown>(
+    "/api/v1/market-data/feed/scheduler/stop",
+    {},
+  );
+
+  if (result.error === "desktop operator token missing") {
+    return {
+      ok: false,
+      error:
+        "Operator token missing — configure MQK_OPERATOR_TOKEN and launch via Launch-VeritasLedger.ps1 to stop the latest-bar scheduler.",
+    };
+  }
+  if (!result.ok) {
+    const data = result.data === undefined
+      ? undefined
+      : normalizeMarketDataFeedSchedulerStatusResponse(result.data);
+    return {
+      ok: false,
+      status: result.status,
+      data,
+      error: marketDataFeedPostError(result.status, result.error ?? "Feed scheduler stop failed."),
+    };
+  }
+  return { ok: true, status: result.status, data: normalizeMarketDataFeedSchedulerStatusResponse(result.data) };
 }
 
 // ---------------------------------------------------------------------------

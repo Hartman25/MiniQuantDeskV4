@@ -230,3 +230,84 @@ export interface IntradayRefreshStatusResponse {
   symbols: IntradayRefreshSymbolStatus[];
   error: string | null;
 }
+
+// DATA-PROVIDER-GUI-FEED-SCHEDULER-01: latest closed-bar feed scheduler
+export interface MarketDataFeedPollOnceRequest {
+  provider_id: string;
+  symbols: string[];
+  timeframe: string;
+  dry_run: boolean;
+  allow_provider_api_calls?: boolean;
+  now_utc?: string | null;
+  provider_registry_path?: string | null;
+}
+
+export interface MarketDataFeedSchedulerStartRequest {
+  provider_id: string;
+  symbols: string[];
+  timeframe: string;
+  dry_run: boolean;
+  allow_provider_api_calls?: boolean;
+  poll_immediately: boolean;
+  now_utc?: string | null;
+  provider_registry_path?: string | null;
+}
+
+export interface MarketDataFeedPollSymbolResult {
+  symbol: string;
+  status: string;
+  expected_latest_closed_bar_ts: number | null;
+  returned_bar_ts: number | null;
+  rows_inserted: number | null;
+  rows_updated: number | null;
+  rows_skipped: number | null;
+  error: string | null;
+}
+
+export interface MarketDataFeedPollOnceResponse {
+  canonical_route: string;
+  truth_state: string;
+  provider_id: string | null;
+  timeframe: string | null;
+  dry_run: boolean | null;
+  provider_api_calls_allowed: boolean | null;
+  symbols_count: number | null;
+  poll_time_utc: string | null;
+  latest_expected_closed_bar_ts: number | null;
+  next_poll_ts: number | null;
+  inserted_count: number | null;
+  updated_count: number | null;
+  skipped_count: number | null;
+  error_count: number | null;
+  api_calls_made: number | null;
+  symbols: MarketDataFeedPollSymbolResult[];
+  error: string | null;
+}
+
+export interface MarketDataFeedStatusResponse {
+  canonical_route: string;
+  truth_state: string;
+  limitation: string | null;
+  last_poll: MarketDataFeedPollOnceResponse | null;
+}
+
+export interface MarketDataFeedSchedulerStatusResponse {
+  canonical_route: string;
+  truth_state: string;
+  limitation: string | null;
+  running: boolean | null;
+  provider_id: string | null;
+  timeframe: string | null;
+  symbols: string[];
+  last_poll_utc: string | null;
+  next_poll_utc: string | null;
+  latest_expected_closed_bar_utc: string | null;
+  last_result: MarketDataFeedPollOnceResponse | null;
+  last_error: string | null;
+  started_at_utc: string | null;
+  stopped_at_utc: string | null;
+  poll_count: number | null;
+  inserted_count: number | null;
+  unchanged_or_skipped_count: number | null;
+  error_count: number | null;
+}

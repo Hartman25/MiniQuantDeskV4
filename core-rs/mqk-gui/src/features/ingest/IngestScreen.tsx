@@ -23,22 +23,31 @@ import {
   filterCoverageRows,
   formatEndTs,
   getIngestJob,
+  getMarketDataFeedSchedulerStatus,
+  getMarketDataFeedStatus,
   isCoverageActive,
   isIntradayRefreshActive,
   isCancellableIngestStatus,
+  isMarketDataFeedRealActionAllowed,
   isProviderSyncAllowed,
   isTrackedEquitiesActive,
   isTerminalIngestStatus,
   intradayRefreshTruthLabel,
   normalizeIngestJobStatus,
+  parseMarketDataFeedSymbols,
+  pollMarketDataFeedOnce,
   sortCoverageRows,
+  startMarketDataFeedScheduler,
+  stopMarketDataFeedScheduler,
   submitIngestJob,
   trackedEquitiesTruthLabel,
+  buildMarketDataFeedPollOnceRequest,
+  buildMarketDataFeedSchedulerStartRequest,
 } from "./api.ts";
 import { buildRepoRelativePath, buildMd1DSymbolPath, MD_BACKUP_1D_SEGMENTS, MD_INGEST_SEGMENTS } from "../backtests/pathHelpers.ts";
 import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
 import type { CoverageSortMode } from "./api.ts";
-import type { ActiveIngestJob, ActiveProviderJob, IngestJobStatusKind, IntradayRefreshStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
+import type { ActiveIngestJob, ActiveProviderJob, IngestJobStatusKind, IntradayRefreshStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -70,6 +79,21 @@ function deriveDefaultCsvPath(): string {
 
 function deriveDefaultOutDir(): string {
   return buildRepoRelativePath(getDesktopRepoRoot(), ...MD_INGEST_SEGMENTS) ?? "";
+}
+
+function shortUtc(value: string | null | undefined): string {
+  return value ? value.slice(0, 19).replace("T", " ") : "—";
+}
+
+function numericValue(value: number | null | undefined): string {
+  return value === null || value === undefined ? "unknown" : value.toLocaleString();
+}
+
+function latestBarFeedResultLabel(result: MarketDataFeedPollOnceResponse | null): string {
+  if (!result) return "—";
+  const state = result.truth_state || "unknown";
+  const error = result.error ? ` (${result.error})` : "";
+  return `${state}${error}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +215,23 @@ export function IngestScreen() {
   const [intradayRefreshLoading, setIntradayRefreshLoading] = useState(false);
   const [intradayRefreshError, setIntradayRefreshError] = useState<string | null>(null);
 
+  // DATA-PROVIDER-GUI-FEED-SCHEDULER-01: Latest closed-bar feed scheduler state
+  const [latestFeedProviderId, setLatestFeedProviderId] = useState("alpaca");
+  const [latestFeedTimeframe, setLatestFeedTimeframe] = useState("5m");
+  const [latestFeedSymbolsText, setLatestFeedSymbolsText] = useState("AAPL");
+  const [latestFeedPollConfirmation, setLatestFeedPollConfirmation] = useState("");
+  const [latestFeedStartConfirmation, setLatestFeedStartConfirmation] = useState("");
+  const [latestFeedPollImmediately, setLatestFeedPollImmediately] = useState(false);
+  const [latestFeedLoading, setLatestFeedLoading] = useState(false);
+  const [latestFeedActionPending, setLatestFeedActionPending] = useState(false);
+  const [latestFeedStatus, setLatestFeedStatus] = useState<MarketDataFeedStatusResponse | null>(null);
+  const [latestFeedSchedulerStatus, setLatestFeedSchedulerStatus] =
+    useState<MarketDataFeedSchedulerStatusResponse | null>(null);
+  const [latestFeedLastPoll, setLatestFeedLastPoll] = useState<MarketDataFeedPollOnceResponse | null>(null);
+  const [latestFeedError, setLatestFeedError] = useState<string | null>(null);
+  const [latestFeedNotice, setLatestFeedNotice] = useState<string | null>(null);
+  const [latestFeedSymbolsSeeded, setLatestFeedSymbolsSeeded] = useState(false);
+
   // DATA-INGEST-GUI-PROVIDER-RUNNER-01: Provider sync state
   const [providerStart, setProviderStart] = useState("");
   const [providerEnd, setProviderEnd] = useState("");
@@ -260,6 +301,167 @@ export function IngestScreen() {
     void loadIntradayRefresh();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const loadLatestBarFeedStatus = useCallback(async () => {
+    setLatestFeedLoading(true);
+    setLatestFeedError(null);
+    const [feedResult, schedulerResult] = await Promise.all([
+      getMarketDataFeedStatus(),
+      getMarketDataFeedSchedulerStatus(),
+    ]);
+    setLatestFeedLoading(false);
+
+    if (!feedResult.ok) {
+      setLatestFeedStatus(null);
+      setLatestFeedError(feedResult.error ?? "Feed status fetch failed.");
+    } else {
+      const data = feedResult.data ?? null;
+      setLatestFeedStatus(data);
+      setLatestFeedLastPoll(data?.last_poll ?? null);
+    }
+
+    if (!schedulerResult.ok) {
+      setLatestFeedSchedulerStatus(null);
+      setLatestFeedError((prev) =>
+        prev
+          ? `${prev} Scheduler status fetch failed: ${schedulerResult.error ?? "unknown error"}`
+          : schedulerResult.error ?? "Feed scheduler status fetch failed.",
+      );
+    } else {
+      setLatestFeedSchedulerStatus(schedulerResult.data ?? null);
+    }
+  }, []);
+
+  // Auto-load latest-bar feed status only. This never starts scheduler or polls provider.
+  useEffect(() => {
+    void loadLatestBarFeedStatus();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (latestFeedSymbolsSeeded) return;
+    if (!trackedEquities || !isTrackedEquitiesActive(trackedEquities.truth_state)) return;
+    const intradaySymbols = trackedEquities.symbols
+      .filter((entry) => entry.timeframes.includes("5m") || entry.timeframes.includes("1m"))
+      .slice(0, 10)
+      .map((entry) => entry.symbol);
+    if (intradaySymbols.length === 0) return;
+    setLatestFeedSymbolsText(intradaySymbols.join(", "));
+    setLatestFeedSymbolsSeeded(true);
+  }, [latestFeedSymbolsSeeded, trackedEquities]);
+
+  const latestFeedSymbols = parseMarketDataFeedSymbols(latestFeedSymbolsText);
+
+  const validateLatestFeedInputs = useCallback((): string | null => {
+    if (!latestFeedProviderId.trim()) return "provider id is required.";
+    if (!latestFeedTimeframe.trim()) return "timeframe is required.";
+    if (latestFeedSymbols.length === 0) return "at least one symbol is required.";
+    return null;
+  }, [latestFeedProviderId, latestFeedSymbols, latestFeedTimeframe]);
+
+  const handleLatestFeedPoll = useCallback(async (real: boolean) => {
+    const validationError = validateLatestFeedInputs();
+    if (validationError) {
+      setLatestFeedError(validationError);
+      return;
+    }
+    if (real && !isMarketDataFeedRealActionAllowed(true, latestFeedPollConfirmation, "POLL")) {
+      setLatestFeedError("Real latest-bar poll requires typing 'POLL' in the confirmation field.");
+      return;
+    }
+
+    setLatestFeedActionPending(true);
+    setLatestFeedError(null);
+    setLatestFeedNotice(null);
+    const request = buildMarketDataFeedPollOnceRequest({
+      providerId: latestFeedProviderId,
+      symbols: latestFeedSymbols,
+      timeframe: latestFeedTimeframe,
+      dryRun: !real,
+      allowProviderApiCalls: real,
+    });
+    const result = await pollMarketDataFeedOnce(request);
+    setLatestFeedActionPending(false);
+
+    if (!result.ok) {
+      setLatestFeedLastPoll(result.data ?? null);
+      setLatestFeedError(result.error ?? "Latest-bar poll failed.");
+      return;
+    }
+    setLatestFeedLastPoll(result.data ?? null);
+    setLatestFeedNotice(real ? "Real latest-bar poll completed. Review result counts." : "Dry-run latest-bar poll completed. No provider calls or DB writes.");
+    await loadLatestBarFeedStatus();
+  }, [
+    latestFeedPollConfirmation,
+    latestFeedProviderId,
+    latestFeedSymbols,
+    latestFeedTimeframe,
+    loadLatestBarFeedStatus,
+    validateLatestFeedInputs,
+  ]);
+
+  const handleLatestFeedStart = useCallback(async (real: boolean) => {
+    const validationError = validateLatestFeedInputs();
+    if (validationError) {
+      setLatestFeedError(validationError);
+      return;
+    }
+    if (real && !isMarketDataFeedRealActionAllowed(true, latestFeedStartConfirmation, "START")) {
+      setLatestFeedError("Real scheduler start requires typing 'START' in the confirmation field.");
+      return;
+    }
+
+    setLatestFeedActionPending(true);
+    setLatestFeedError(null);
+    setLatestFeedNotice(null);
+    const request = buildMarketDataFeedSchedulerStartRequest({
+      providerId: latestFeedProviderId,
+      symbols: latestFeedSymbols,
+      timeframe: latestFeedTimeframe,
+      dryRun: !real,
+      allowProviderApiCalls: real,
+      pollImmediately: latestFeedPollImmediately,
+    });
+    const result = await startMarketDataFeedScheduler(request);
+    setLatestFeedActionPending(false);
+
+    if (!result.ok) {
+      setLatestFeedSchedulerStatus(result.data ?? null);
+      setLatestFeedLastPoll(result.data?.last_result ?? latestFeedLastPoll);
+      setLatestFeedError(result.error ?? "Latest-bar scheduler start failed.");
+      return;
+    }
+    setLatestFeedSchedulerStatus(result.data ?? null);
+    setLatestFeedLastPoll(result.data?.last_result ?? latestFeedLastPoll);
+    setLatestFeedNotice(real ? "Real latest-bar scheduler start accepted. Provider calls are enabled." : "Dry-run latest-bar scheduler start accepted. Provider calls remain disabled.");
+    await loadLatestBarFeedStatus();
+  }, [
+    latestFeedLastPoll,
+    latestFeedPollImmediately,
+    latestFeedProviderId,
+    latestFeedStartConfirmation,
+    latestFeedSymbols,
+    latestFeedTimeframe,
+    loadLatestBarFeedStatus,
+    validateLatestFeedInputs,
+  ]);
+
+  const handleLatestFeedStop = useCallback(async () => {
+    setLatestFeedActionPending(true);
+    setLatestFeedError(null);
+    setLatestFeedNotice(null);
+    const result = await stopMarketDataFeedScheduler();
+    setLatestFeedActionPending(false);
+
+    if (!result.ok) {
+      setLatestFeedSchedulerStatus(result.data ?? null);
+      setLatestFeedError(result.error ?? "Latest-bar scheduler stop failed.");
+      return;
+    }
+    setLatestFeedSchedulerStatus(result.data ?? null);
+    setLatestFeedNotice(result.data?.truth_state === "not_running" ? "Scheduler was already stopped." : "Scheduler stopped.");
+    await loadLatestBarFeedStatus();
+  }, [loadLatestBarFeedStatus]);
 
   const pollingRef = useRef<{ cancelled: boolean }>({ cancelled: false });
   const providerPollingRef = useRef<{ cancelled: boolean }>({ cancelled: false });
@@ -652,6 +854,11 @@ export function IngestScreen() {
 
   const repoRoot = getDesktopRepoRoot();
   const md1DDir = buildRepoRelativePath(repoRoot, ...MD_BACKUP_1D_SEGMENTS);
+  const latestFeedSchedulerRunning = latestFeedSchedulerStatus?.running === true;
+  const latestFeedStatusLimitation =
+    latestFeedSchedulerStatus?.limitation ?? latestFeedStatus?.limitation ?? "process_local_only_not_persisted";
+  const latestFeedDisplayResult = latestFeedSchedulerStatus?.last_result ?? latestFeedLastPoll;
+  const latestFeedCanRun = !latestFeedActionPending && !latestFeedSchedulerRunning;
 
   return (
     <div className="screen-grid desk-screen-grid">
@@ -1471,6 +1678,287 @@ export function IngestScreen() {
           )}
         </Panel>
       )}
+
+      {/* DATA-PROVIDER-GUI-FEED-SCHEDULER-01: Latest closed-bar feed scheduler */}
+      <Panel
+        title="Latest Bar Feed"
+        subtitle="Operator controls for /api/v1/market-data/feed/*. Dry-run is safe; real provider calls require explicit confirmation."
+      >
+        <div className="unavailable-notice" style={{ marginBottom: 10 }}>
+          <strong>Scheduler state is process-local and not persisted.</strong>{" "}
+          Feed status can be lost on daemon restart. Limitation: <code>{latestFeedStatusLimitation}</code>
+        </div>
+
+        <div className="bt-job-form-grid">
+          <div className="bt-job-field">
+            <label htmlFor="latest-feed-provider">Provider id</label>
+            <input
+              id="latest-feed-provider"
+              type="text"
+              value={latestFeedProviderId}
+              onChange={(e) => setLatestFeedProviderId(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </div>
+          <div className="bt-job-field">
+            <label htmlFor="latest-feed-timeframe">Timeframe</label>
+            <input
+              id="latest-feed-timeframe"
+              type="text"
+              value={latestFeedTimeframe}
+              onChange={(e) => setLatestFeedTimeframe(e.target.value)}
+              placeholder="5m"
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </div>
+          <div className="bt-job-field" style={{ gridColumn: "1 / -1" }}>
+            <label htmlFor="latest-feed-symbols">Symbols</label>
+            <input
+              id="latest-feed-symbols"
+              type="text"
+              value={latestFeedSymbolsText}
+              onChange={(e) => {
+                setLatestFeedSymbolsText(e.target.value);
+                setLatestFeedSymbolsSeeded(true);
+              }}
+              placeholder="AAPL, MSFT"
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </div>
+        </div>
+
+        <div className="timeline-meta-grid" style={{ marginTop: 10 }}>
+          <div>
+            <span>feed status</span>
+            <strong>{latestFeedStatus?.truth_state ?? "unknown"}</strong>
+          </div>
+          <div>
+            <span>scheduler</span>
+            <strong>{latestFeedSchedulerStatus?.truth_state ?? "unknown"}</strong>
+          </div>
+          <div>
+            <span>running</span>
+            <strong>{latestFeedSchedulerStatus?.running === true ? "yes" : latestFeedSchedulerStatus?.running === false ? "no" : "unknown"}</strong>
+          </div>
+          <div>
+            <span>provider</span>
+            <strong>{latestFeedSchedulerStatus?.provider_id ?? latestFeedDisplayResult?.provider_id ?? "unknown"}</strong>
+          </div>
+          <div>
+            <span>timeframe</span>
+            <strong>{latestFeedSchedulerStatus?.timeframe ?? latestFeedDisplayResult?.timeframe ?? "unknown"}</strong>
+          </div>
+          <div>
+            <span>symbols</span>
+            <strong>{latestFeedSchedulerStatus?.symbols.length ? latestFeedSchedulerStatus.symbols.join(", ") : latestFeedSymbols.join(", ")}</strong>
+          </div>
+          <div>
+            <span>last poll</span>
+            <strong>{shortUtc(latestFeedSchedulerStatus?.last_poll_utc ?? latestFeedDisplayResult?.poll_time_utc)}</strong>
+          </div>
+          <div>
+            <span>next poll</span>
+            <strong>{shortUtc(latestFeedSchedulerStatus?.next_poll_utc)}</strong>
+          </div>
+          <div>
+            <span>expected closed bar</span>
+            <strong>{shortUtc(latestFeedSchedulerStatus?.latest_expected_closed_bar_utc)}</strong>
+          </div>
+          <div>
+            <span>poll count</span>
+            <strong>{numericValue(latestFeedSchedulerStatus?.poll_count)}</strong>
+          </div>
+          <div>
+            <span>inserted</span>
+            <strong>{numericValue(latestFeedSchedulerStatus?.inserted_count ?? latestFeedDisplayResult?.inserted_count)}</strong>
+          </div>
+          <div>
+            <span>skipped/unchanged</span>
+            <strong>{numericValue(latestFeedSchedulerStatus?.unchanged_or_skipped_count ?? latestFeedDisplayResult?.skipped_count)}</strong>
+          </div>
+          <div>
+            <span>errors</span>
+            <strong style={{ color: (latestFeedSchedulerStatus?.error_count ?? latestFeedDisplayResult?.error_count ?? 0) > 0 ? "var(--red, #f44336)" : undefined }}>
+              {numericValue(latestFeedSchedulerStatus?.error_count ?? latestFeedDisplayResult?.error_count)}
+            </strong>
+          </div>
+          <div>
+            <span>last result</span>
+            <strong>{latestBarFeedResultLabel(latestFeedDisplayResult)}</strong>
+          </div>
+        </div>
+
+        {latestFeedSchedulerStatus?.last_error && (
+          <div className="unavailable-notice unavailable-critical" style={{ marginTop: 10 }}>
+            <strong>Scheduler error:</strong> {latestFeedSchedulerStatus.last_error}
+          </div>
+        )}
+
+        {latestFeedDisplayResult?.symbols.length ? (
+          <table className="bt-table" style={{ width: "100%", tableLayout: "auto", marginTop: 10 }}>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Status</th>
+                <th style={{ textAlign: "right" }}>Inserted</th>
+                <th style={{ textAlign: "right" }}>Updated</th>
+                <th style={{ textAlign: "right" }}>Skipped</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {latestFeedDisplayResult.symbols.map((symbol) => (
+                <tr key={`${symbol.symbol}|${symbol.status}`}>
+                  <td><strong>{symbol.symbol}</strong></td>
+                  <td>{symbol.status}</td>
+                  <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{numericValue(symbol.rows_inserted)}</td>
+                  <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{numericValue(symbol.rows_updated)}</td>
+                  <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{numericValue(symbol.rows_skipped)}</td>
+                  <td style={{ color: symbol.error ? "var(--red, #f44336)" : "var(--text-muted, #888)" }}>
+                    {symbol.error ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="bt-job-meta" style={{ marginTop: 10, color: "var(--text-muted, #888)" }}>
+            No latest-bar poll result loaded.
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginTop: 12 }}>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void loadLatestBarFeedStatus()}
+            disabled={latestFeedLoading || latestFeedActionPending}
+            style={{ padding: "2px 12px" }}
+          >
+            {latestFeedLoading ? "Loading…" : "Refresh status"}
+          </button>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void handleLatestFeedPoll(false)}
+            disabled={!latestFeedCanRun}
+            style={{ padding: "2px 12px" }}
+          >
+            Poll once dry-run
+          </button>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void handleLatestFeedStart(false)}
+            disabled={!latestFeedCanRun}
+            style={{ padding: "2px 12px" }}
+          >
+            Start scheduler dry-run
+          </button>
+          <button
+            type="button"
+            className="action-button ghost"
+            onClick={() => void handleLatestFeedStop()}
+            disabled={latestFeedActionPending}
+            style={{ padding: "2px 12px" }}
+          >
+            Stop scheduler
+          </button>
+        </div>
+
+        <div style={{ marginTop: 14, borderTop: "1px solid var(--border, rgba(255,255,255,0.08))", paddingTop: 12 }}>
+          <div className="bt-field-hint" style={{ marginBottom: 8, fontSize: "0.82rem", color: "var(--text-muted, #888)" }}>
+            <strong style={{ color: "var(--text)" }}>Real provider calls:</strong>{" "}
+            Real poll/start sends <code>allow_provider_api_calls=true</code> and may write md_bars. No orders are submitted.
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+            <label htmlFor="latest-feed-poll-confirm" style={{ fontSize: "0.85rem" }}>
+              Type POLL:
+            </label>
+            <input
+              id="latest-feed-poll-confirm"
+              type="text"
+              value={latestFeedPollConfirmation}
+              onChange={(e) => setLatestFeedPollConfirmation(e.target.value)}
+              placeholder="POLL"
+              spellCheck={false}
+              autoComplete="off"
+              style={{ width: 100 }}
+            />
+            <button
+              type="button"
+              className="action-button"
+              onClick={() => void handleLatestFeedPoll(true)}
+              disabled={
+                !latestFeedCanRun ||
+                !isMarketDataFeedRealActionAllowed(true, latestFeedPollConfirmation, "POLL")
+              }
+              style={{ padding: "2px 12px" }}
+            >
+              Poll once real
+            </button>
+          </div>
+
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer", fontSize: "0.85rem", marginTop: 10 }}>
+            <input
+              type="checkbox"
+              checked={latestFeedPollImmediately}
+              onChange={(e) => setLatestFeedPollImmediately(e.target.checked)}
+              style={{ marginTop: 2 }}
+            />
+            Poll immediately after scheduler start
+          </label>
+
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginTop: 10 }}>
+            <label htmlFor="latest-feed-start-confirm" style={{ fontSize: "0.85rem" }}>
+              Type START:
+            </label>
+            <input
+              id="latest-feed-start-confirm"
+              type="text"
+              value={latestFeedStartConfirmation}
+              onChange={(e) => setLatestFeedStartConfirmation(e.target.value)}
+              placeholder="START"
+              spellCheck={false}
+              autoComplete="off"
+              style={{ width: 110 }}
+            />
+            <button
+              type="button"
+              className="action-button"
+              onClick={() => void handleLatestFeedStart(true)}
+              disabled={
+                !latestFeedCanRun ||
+                !isMarketDataFeedRealActionAllowed(true, latestFeedStartConfirmation, "START")
+              }
+              style={{ padding: "2px 12px" }}
+            >
+              Start scheduler real
+            </button>
+          </div>
+        </div>
+
+        {latestFeedNotice && (
+          <div className="unavailable-notice" style={{ marginTop: 10 }}>
+            {latestFeedNotice}
+          </div>
+        )}
+
+        {latestFeedError && (
+          <div className="unavailable-notice unavailable-critical" style={{ marginTop: 10 }}>
+            <strong>Latest-bar feed error:</strong> {latestFeedError}
+          </div>
+        )}
+
+        {latestFeedActionPending && (
+          <div className="bt-job-meta" style={{ marginTop: 8, color: "var(--accent)" }}>
+            Latest-bar feed action pending…
+          </div>
+        )}
+      </Panel>
 
       {/* INTRADAY-MD-REFRESHER-GUI-01: Intraday refresh status */}
       <Panel

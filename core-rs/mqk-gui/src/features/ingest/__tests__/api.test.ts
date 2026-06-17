@@ -25,6 +25,16 @@ import {
   trackedEquitiesTruthLabel,
   COVERAGE_FRESHNESS_THRESHOLD_1D_SECS,
   COVERAGE_FRESHNESS_THRESHOLD_INTRADAY_SECS,
+  buildMarketDataFeedPollOnceRequest,
+  buildMarketDataFeedSchedulerStartRequest,
+  getMarketDataFeedSchedulerStatus,
+  isMarketDataFeedRealActionAllowed,
+  normalizeMarketDataFeedSchedulerStatusResponse,
+  normalizeMarketDataFeedStatusResponse,
+  parseMarketDataFeedSymbols,
+  pollMarketDataFeedOnce,
+  startMarketDataFeedScheduler,
+  stopMarketDataFeedScheduler,
 } from "../api.ts";
 import type { IngestJobStatusResponse, IntradayRefreshStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
 
@@ -1221,4 +1231,437 @@ test("IngestJobStatusResponse with symbols_completed and symbols_failed fields i
   assert.equal(resp.symbols_completed, 50);
   assert.equal(resp.symbols_failed, 10);
   assert.ok(resp.truth_state === "active");
+});
+
+// ---------------------------------------------------------------------------
+// DATA-PROVIDER-GUI-FEED-SCHEDULER-01: latest-bar feed scheduler helpers
+// ---------------------------------------------------------------------------
+
+test("parseMarketDataFeedSymbols normalizes comma and whitespace separated symbols", () => {
+  assert.deepEqual(parseMarketDataFeedSymbols("aapl, msft\nAAPL  spy"), ["AAPL", "MSFT", "SPY"]);
+});
+
+test("isMarketDataFeedRealActionAllowed requires exact real-action confirmation", () => {
+  assert.equal(isMarketDataFeedRealActionAllowed(false, "", "POLL"), true);
+  assert.equal(isMarketDataFeedRealActionAllowed(true, "", "POLL"), false);
+  assert.equal(isMarketDataFeedRealActionAllowed(true, "poll", "POLL"), false);
+  assert.equal(isMarketDataFeedRealActionAllowed(true, " POLL ", "POLL"), true);
+  assert.equal(isMarketDataFeedRealActionAllowed(true, " START ", "START"), true);
+});
+
+test("buildMarketDataFeedPollOnceRequest dry-run omits provider-call allowance", () => {
+  const req = buildMarketDataFeedPollOnceRequest({
+    providerId: "alpaca",
+    symbols: ["AAPL"],
+    timeframe: "5m",
+    dryRun: true,
+    allowProviderApiCalls: false,
+  });
+  assert.equal(req.provider_id, "alpaca");
+  assert.deepEqual(req.symbols, ["AAPL"]);
+  assert.equal(req.timeframe, "5m");
+  assert.equal(req.dry_run, true);
+  assert.equal("allow_provider_api_calls" in req, false);
+});
+
+test("buildMarketDataFeedPollOnceRequest real poll sends provider-call allowance", () => {
+  const req = buildMarketDataFeedPollOnceRequest({
+    providerId: "alpaca",
+    symbols: ["AAPL"],
+    timeframe: "5m",
+    dryRun: false,
+    allowProviderApiCalls: true,
+  });
+  assert.equal(req.dry_run, false);
+  assert.equal(req.allow_provider_api_calls, true);
+});
+
+test("buildMarketDataFeedSchedulerStartRequest dry-run omits provider-call allowance", () => {
+  const req = buildMarketDataFeedSchedulerStartRequest({
+    providerId: "alpaca",
+    symbols: ["AAPL"],
+    timeframe: "5m",
+    dryRun: true,
+    allowProviderApiCalls: false,
+    pollImmediately: true,
+  });
+  assert.equal(req.dry_run, true);
+  assert.equal(req.poll_immediately, true);
+  assert.equal("allow_provider_api_calls" in req, false);
+});
+
+test("buildMarketDataFeedSchedulerStartRequest confirmed real start sends provider-call allowance", () => {
+  const req = buildMarketDataFeedSchedulerStartRequest({
+    providerId: "alpaca",
+    symbols: ["AAPL"],
+    timeframe: "5m",
+    dryRun: false,
+    allowProviderApiCalls: true,
+    pollImmediately: false,
+  });
+  assert.equal(req.dry_run, false);
+  assert.equal(req.allow_provider_api_calls, true);
+  assert.equal(req.poll_immediately, false);
+});
+
+test("normalizeMarketDataFeedSchedulerStatusResponse parses running scheduler status", () => {
+  const status = normalizeMarketDataFeedSchedulerStatusResponse({
+    canonical_route: "/api/v1/market-data/feed/scheduler/status",
+    truth_state: "running",
+    limitation: "process_local_only_not_persisted",
+    running: true,
+    provider_id: "alpaca",
+    timeframe: "5m",
+    symbols: ["AAPL"],
+    last_poll_utc: "2024-01-01T00:10:30+00:00",
+    next_poll_utc: "2024-01-01T00:15:00+00:00",
+    latest_expected_closed_bar_utc: "2024-01-01T00:05:00+00:00",
+    last_result: {
+      canonical_route: "/api/v1/market-data/feed/poll-once",
+      truth_state: "dry_run",
+      provider_id: "alpaca",
+      timeframe: "5m",
+      dry_run: true,
+      provider_api_calls_allowed: false,
+      symbols_count: 1,
+      poll_time_utc: "2024-01-01T00:10:30+00:00",
+      latest_expected_closed_bar_ts: 1704067500,
+      next_poll_ts: 1704068100,
+      inserted_count: 0,
+      updated_count: 0,
+      skipped_count: 0,
+      error_count: 0,
+      api_calls_made: 0,
+      symbols: [],
+      error: null,
+    },
+    last_error: null,
+    started_at_utc: "2024-01-01T00:10:30+00:00",
+    stopped_at_utc: null,
+    poll_count: 1,
+    inserted_count: 0,
+    unchanged_or_skipped_count: 0,
+    error_count: 0,
+  });
+  assert.equal(status.truth_state, "running");
+  assert.equal(status.running, true);
+  assert.equal(status.provider_id, "alpaca");
+  assert.equal(status.last_result?.truth_state, "dry_run");
+});
+
+test("normalizeMarketDataFeedStatusResponse treats missing backend fields as unknown or null", () => {
+  const status = normalizeMarketDataFeedStatusResponse({});
+  assert.equal(status.truth_state, "unknown");
+  assert.equal(status.limitation, null);
+  assert.equal(status.last_poll, null);
+});
+
+test("getMarketDataFeedSchedulerStatus GET parses scheduler status", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    assert.equal(String(url), "http://127.0.0.1:8899/api/v1/market-data/feed/scheduler/status");
+    assert.equal(init?.method, "GET");
+    return new Response(
+      JSON.stringify({
+        canonical_route: "/api/v1/market-data/feed/scheduler/status",
+        truth_state: "not_started",
+        limitation: "process_local_only_not_persisted",
+        running: false,
+        provider_id: null,
+        timeframe: null,
+        symbols: [],
+        last_poll_utc: null,
+        next_poll_utc: null,
+        latest_expected_closed_bar_utc: null,
+        last_result: null,
+        last_error: null,
+        started_at_utc: null,
+        stopped_at_utc: null,
+        poll_count: 0,
+        inserted_count: 0,
+        unchanged_or_skipped_count: 0,
+        error_count: 0,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const result = await getMarketDataFeedSchedulerStatus();
+    assert.equal(result.ok, true);
+    assert.equal(result.data?.truth_state, "not_started");
+    assert.equal(result.data?.running, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("pollMarketDataFeedOnce sends dry-run request without provider-call allowance", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify({
+        canonical_route: "/api/v1/market-data/feed/poll-once",
+        truth_state: "dry_run",
+        provider_id: "alpaca",
+        timeframe: "5m",
+        dry_run: true,
+        provider_api_calls_allowed: false,
+        symbols_count: 1,
+        poll_time_utc: "2024-01-01T00:10:30+00:00",
+        latest_expected_closed_bar_ts: 1704067500,
+        next_poll_ts: 1704068100,
+        inserted_count: 0,
+        updated_count: 0,
+        skipped_count: 0,
+        error_count: 0,
+        api_calls_made: 0,
+        symbols: [],
+        error: null,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const req = buildMarketDataFeedPollOnceRequest({
+      providerId: "alpaca",
+      symbols: ["AAPL"],
+      timeframe: "5m",
+      dryRun: true,
+      allowProviderApiCalls: false,
+    });
+    const result = await pollMarketDataFeedOnce(req);
+    const body = JSON.parse(String(calls[0].init?.body));
+    assert.equal(result.ok, true);
+    assert.equal(calls[0].url, "http://127.0.0.1:8899/api/v1/market-data/feed/poll-once");
+    assert.equal(calls[0].init?.method, "POST");
+    assert.equal(body.dry_run, true);
+    assert.equal("allow_provider_api_calls" in body, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("pollMarketDataFeedOnce sends confirmed real request with provider-call allowance", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify({
+        canonical_route: "/api/v1/market-data/feed/poll-once",
+        truth_state: "completed",
+        provider_id: "alpaca",
+        timeframe: "5m",
+        dry_run: false,
+        provider_api_calls_allowed: true,
+        symbols_count: 1,
+        poll_time_utc: "2024-01-01T00:10:30+00:00",
+        latest_expected_closed_bar_ts: 1704067500,
+        next_poll_ts: 1704068100,
+        inserted_count: 1,
+        updated_count: 0,
+        skipped_count: 0,
+        error_count: 0,
+        api_calls_made: 1,
+        symbols: [],
+        error: null,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const req = buildMarketDataFeedPollOnceRequest({
+      providerId: "alpaca",
+      symbols: ["AAPL"],
+      timeframe: "5m",
+      dryRun: false,
+      allowProviderApiCalls: true,
+    });
+    const result = await pollMarketDataFeedOnce(req);
+    const body = JSON.parse(String(calls[0].init?.body));
+    assert.equal(result.ok, true);
+    assert.equal(body.dry_run, false);
+    assert.equal(body.allow_provider_api_calls, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("startMarketDataFeedScheduler dry-run request does not send provider-call allowance", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify({
+        canonical_route: "/api/v1/market-data/feed/scheduler/start",
+        truth_state: "started",
+        limitation: "process_local_only_not_persisted",
+        running: true,
+        provider_id: "alpaca",
+        timeframe: "5m",
+        symbols: ["AAPL"],
+        last_poll_utc: null,
+        next_poll_utc: "2024-01-01T00:15:00+00:00",
+        latest_expected_closed_bar_utc: "2024-01-01T00:05:00+00:00",
+        last_result: null,
+        last_error: null,
+        started_at_utc: "2024-01-01T00:10:30+00:00",
+        stopped_at_utc: null,
+        poll_count: 0,
+        inserted_count: 0,
+        unchanged_or_skipped_count: 0,
+        error_count: 0,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const req = buildMarketDataFeedSchedulerStartRequest({
+      providerId: "alpaca",
+      symbols: ["AAPL"],
+      timeframe: "5m",
+      dryRun: true,
+      allowProviderApiCalls: false,
+      pollImmediately: false,
+    });
+    const result = await startMarketDataFeedScheduler(req);
+    const body = JSON.parse(String(calls[0].init?.body));
+    assert.equal(result.ok, true);
+    assert.equal(calls[0].url, "http://127.0.0.1:8899/api/v1/market-data/feed/scheduler/start");
+    assert.equal(body.dry_run, true);
+    assert.equal(body.poll_immediately, false);
+    assert.equal("allow_provider_api_calls" in body, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("startMarketDataFeedScheduler confirmed real request sends provider-call allowance", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify({
+        canonical_route: "/api/v1/market-data/feed/scheduler/start",
+        truth_state: "started",
+        limitation: "process_local_only_not_persisted",
+        running: true,
+        provider_id: "alpaca",
+        timeframe: "5m",
+        symbols: ["AAPL"],
+        last_poll_utc: null,
+        next_poll_utc: "2024-01-01T00:15:00+00:00",
+        latest_expected_closed_bar_utc: "2024-01-01T00:05:00+00:00",
+        last_result: null,
+        last_error: null,
+        started_at_utc: "2024-01-01T00:10:30+00:00",
+        stopped_at_utc: null,
+        poll_count: 0,
+        inserted_count: 0,
+        unchanged_or_skipped_count: 0,
+        error_count: 0,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const req = buildMarketDataFeedSchedulerStartRequest({
+      providerId: "alpaca",
+      symbols: ["AAPL"],
+      timeframe: "5m",
+      dryRun: false,
+      allowProviderApiCalls: true,
+      pollImmediately: true,
+    });
+    const result = await startMarketDataFeedScheduler(req);
+    const body = JSON.parse(String(calls[0].init?.body));
+    assert.equal(result.ok, true);
+    assert.equal(body.dry_run, false);
+    assert.equal(body.allow_provider_api_calls, true);
+    assert.equal(body.poll_immediately, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("stopMarketDataFeedScheduler POSTs an empty body to canonical stop endpoint", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify({
+        canonical_route: "/api/v1/market-data/feed/scheduler/stop",
+        truth_state: "not_running",
+        limitation: "process_local_only_not_persisted",
+        running: false,
+        provider_id: null,
+        timeframe: null,
+        symbols: [],
+        last_poll_utc: null,
+        next_poll_utc: null,
+        latest_expected_closed_bar_utc: null,
+        last_result: null,
+        last_error: null,
+        started_at_utc: null,
+        stopped_at_utc: null,
+        poll_count: 0,
+        inserted_count: 0,
+        unchanged_or_skipped_count: 0,
+        error_count: 0,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const result = await stopMarketDataFeedScheduler();
+    assert.equal(result.ok, true);
+    assert.equal(calls[0].url, "http://127.0.0.1:8899/api/v1/market-data/feed/scheduler/stop");
+    assert.equal(calls[0].init?.method, "POST");
+    assert.equal(calls[0].init?.body, "{}");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("startMarketDataFeedScheduler normalizes already-running error response", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        canonical_route: "/api/v1/market-data/feed/scheduler/start",
+        truth_state: "already_running",
+        last_error: "latest-bar scheduler is already running",
+      }),
+      { status: 409, headers: { "content-type": "application/json" } },
+    )) as typeof fetch;
+
+  try {
+    const req = buildMarketDataFeedSchedulerStartRequest({
+      providerId: "alpaca",
+      symbols: ["AAPL"],
+      timeframe: "5m",
+      dryRun: true,
+      allowProviderApiCalls: false,
+      pollImmediately: false,
+    });
+    const result = await startMarketDataFeedScheduler(req);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 409);
+    assert.equal(result.error, "latest-bar scheduler is already running");
+    assert.equal(result.data?.truth_state, "already_running");
+    assert.equal(result.data?.last_error, "latest-bar scheduler is already running");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
