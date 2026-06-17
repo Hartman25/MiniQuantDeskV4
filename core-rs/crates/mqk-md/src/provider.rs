@@ -407,6 +407,15 @@ where
         self.health = health;
         self
     }
+
+    /// Enable `fetch_latest_closed_bar` by delegating to a bounded historical window.
+    ///
+    /// Only call this when the underlying `HistoricalProvider` is known to support a
+    /// narrow date-window query that returns recently closed bars (e.g. Alpaca).
+    pub fn with_latest_closed_bar_enabled(mut self) -> Self {
+        self.capabilities.latest_closed_bar = true;
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -449,12 +458,48 @@ where
 
     async fn fetch_latest_closed_bar(
         &self,
-        _request: LatestClosedBarRequest,
+        request: LatestClosedBarRequest,
     ) -> Result<Option<CanonicalBar>, MarketDataProviderError> {
-        Err(MarketDataProviderError::UnsupportedCapability {
-            provider_id: self.provider_id.clone(),
-            capability: "latest_closed_bar".to_string(),
-        })
+        if !self.capabilities.latest_closed_bar {
+            return Err(MarketDataProviderError::UnsupportedCapability {
+                provider_id: self.provider_id.clone(),
+                capability: "latest_closed_bar".to_string(),
+            });
+        }
+
+        // Build a narrow 5-calendar-day window ending at the reference date.
+        // Five days covers weekends and most market holidays so there is always
+        // at least one closed bar in the window for any supported timeframe.
+        let end_date = chrono::DateTime::from_timestamp(request.reference_ts, 0)
+            .ok_or_else(|| MarketDataProviderError::Other {
+                provider_id: self.provider_id.clone(),
+                message: format!("invalid reference_ts: {}", request.reference_ts),
+            })?
+            .date_naive();
+        let start_date = end_date - chrono::Duration::days(5);
+
+        let bars = self
+            .inner
+            .fetch_bars(crate::FetchBarsRequest {
+                symbols: vec![request.symbol.clone()],
+                timeframe: request.timeframe,
+                start: start_date,
+                end: end_date,
+            })
+            .await
+            .map_err(|err| MarketDataProviderError::Other {
+                provider_id: self.provider_id.clone(),
+                message: err.to_string(),
+            })?;
+
+        // Return the most recent bar that has fully closed at or before reference_ts.
+        // Never return a forming or future bar.
+        let result = bars
+            .into_iter()
+            .filter(|bar| bar.is_complete && bar.end_ts <= request.reference_ts)
+            .max_by_key(|bar| bar.end_ts);
+
+        Ok(result)
     }
 }
 
@@ -1046,5 +1091,225 @@ mod tests {
                 .unwrap_err(),
             MarketDataProviderError::UnsupportedCapability { .. }
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // HistoricalProviderMarketDataAdapter::fetch_latest_closed_bar enabled path
+    //
+    // Uses a controllable AdapterHistoricalProvider that returns fixed bars.
+    // No real provider or network calls.
+    // -----------------------------------------------------------------------
+
+    struct FixedBarsProvider {
+        bars: Vec<CanonicalBar>,
+        error: Option<anyhow::Error>,
+    }
+
+    impl FixedBarsProvider {
+        fn returning(bars: Vec<CanonicalBar>) -> Self {
+            Self { bars, error: None }
+        }
+
+        fn erroring(msg: &str) -> Self {
+            Self {
+                bars: vec![],
+                error: Some(anyhow::anyhow!("{}", msg)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::HistoricalProvider for FixedBarsProvider {
+        fn source_name(&self) -> &'static str {
+            "fixed"
+        }
+
+        async fn fetch_bars(
+            &self,
+            _req: crate::FetchBarsRequest,
+        ) -> anyhow::Result<Vec<CanonicalBar>> {
+            if let Some(ref err) = self.error {
+                return Err(anyhow::anyhow!("{}", err));
+            }
+            Ok(self.bars.clone())
+        }
+    }
+
+    fn make_adapter_with_latest(
+        provider: FixedBarsProvider,
+    ) -> HistoricalProviderMarketDataAdapter<FixedBarsProvider> {
+        HistoricalProviderMarketDataAdapter::new(
+            provider,
+            "test-alpaca",
+            "Test Alpaca",
+            vec![crate::Timeframe::D1, crate::Timeframe::M5],
+        )
+        .with_latest_closed_bar_enabled()
+    }
+
+    fn closed_bar(symbol: &str, timeframe: &str, end_ts: i64) -> CanonicalBar {
+        CanonicalBar {
+            symbol: symbol.to_string(),
+            timeframe: timeframe.to_string(),
+            end_ts,
+            open: "100".to_string(),
+            high: "105".to_string(),
+            low: "99".to_string(),
+            close: "102".to_string(),
+            volume: 1_000,
+            is_complete: true,
+        }
+    }
+
+    // ALPACA-LATEST-01: adapter with latest enabled returns the most recent
+    // complete bar at or before reference_ts.
+    #[tokio::test]
+    async fn adapter_with_latest_enabled_returns_most_recent_closed_bar_at_or_before_reference_ts()
+    {
+        let reference_ts = 1_700_000_100_i64;
+        let bars = vec![
+            closed_bar("AAPL", "1D", 1_699_999_000),
+            closed_bar("AAPL", "1D", 1_700_000_000),
+            closed_bar("AAPL", "1D", 1_700_000_200), // after reference_ts → must be excluded
+        ];
+        let adapter = make_adapter_with_latest(FixedBarsProvider::returning(bars));
+
+        let result = adapter
+            .fetch_latest_closed_bar(LatestClosedBarRequest {
+                symbol: "AAPL".to_string(),
+                timeframe: crate::Timeframe::D1,
+                reference_ts,
+            })
+            .await
+            .unwrap();
+
+        assert!(result.is_some(), "must return a bar");
+        assert_eq!(
+            result.unwrap().end_ts,
+            1_700_000_000,
+            "must return the most recent bar at or before reference_ts, not the future one"
+        );
+    }
+
+    // ALPACA-LATEST-02: adapter with latest enabled returns None when provider
+    // returns no bars.
+    #[tokio::test]
+    async fn adapter_with_latest_enabled_returns_none_when_provider_returns_no_bars() {
+        let adapter = make_adapter_with_latest(FixedBarsProvider::returning(vec![]));
+
+        let result = adapter
+            .fetch_latest_closed_bar(LatestClosedBarRequest {
+                symbol: "AAPL".to_string(),
+                timeframe: crate::Timeframe::D1,
+                reference_ts: 1_700_000_100,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result, None, "empty provider response must yield None");
+    }
+
+    // ALPACA-LATEST-03: forming (is_complete=false) bars returned by the provider
+    // must be excluded even if end_ts <= reference_ts.
+    #[tokio::test]
+    async fn adapter_with_latest_enabled_excludes_incomplete_forming_bar() {
+        let reference_ts = 1_700_000_100_i64;
+        let forming = CanonicalBar {
+            symbol: "AAPL".to_string(),
+            timeframe: "1D".to_string(),
+            end_ts: 1_700_000_000,
+            open: "100".to_string(),
+            high: "105".to_string(),
+            low: "99".to_string(),
+            close: "102".to_string(),
+            volume: 1_000,
+            is_complete: false, // forming
+        };
+        let adapter = make_adapter_with_latest(FixedBarsProvider::returning(vec![forming]));
+
+        let result = adapter
+            .fetch_latest_closed_bar(LatestClosedBarRequest {
+                symbol: "AAPL".to_string(),
+                timeframe: crate::Timeframe::D1,
+                reference_ts,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result, None,
+            "a forming bar (is_complete=false) must be excluded"
+        );
+    }
+
+    // ALPACA-LATEST-04: bars whose end_ts > reference_ts must be excluded even
+    // if is_complete=true (future/lookahead bar).
+    #[tokio::test]
+    async fn adapter_with_latest_enabled_excludes_future_bar_after_reference_ts() {
+        let reference_ts = 1_700_000_000_i64;
+        let future_bar = closed_bar("AAPL", "1D", 1_700_000_001);
+        let adapter = make_adapter_with_latest(FixedBarsProvider::returning(vec![future_bar]));
+
+        let result = adapter
+            .fetch_latest_closed_bar(LatestClosedBarRequest {
+                symbol: "AAPL".to_string(),
+                timeframe: crate::Timeframe::D1,
+                reference_ts,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result, None,
+            "a bar with end_ts > reference_ts must be excluded (no lookahead)"
+        );
+    }
+
+    // ALPACA-LATEST-05: provider error surfaces as MarketDataProviderError::Other.
+    #[tokio::test]
+    async fn adapter_with_latest_enabled_surfaces_provider_error_as_other() {
+        let adapter =
+            make_adapter_with_latest(FixedBarsProvider::erroring("provider-fetch-failed"));
+
+        let err = adapter
+            .fetch_latest_closed_bar(LatestClosedBarRequest {
+                symbol: "AAPL".to_string(),
+                timeframe: crate::Timeframe::D1,
+                reference_ts: 1_700_000_100,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, MarketDataProviderError::Other { .. }),
+            "provider error must surface as MarketDataProviderError::Other: {err:?}"
+        );
+    }
+
+    // ALPACA-LATEST-06: adapter without with_latest_closed_bar_enabled still returns
+    // UnsupportedCapability (existing contract preserved).
+    #[tokio::test]
+    async fn adapter_without_latest_enabled_returns_unsupported_capability() {
+        let adapter = HistoricalProviderMarketDataAdapter::new(
+            FixedBarsProvider::returning(vec![]),
+            "adapter-default",
+            "Adapter Default",
+            vec![crate::Timeframe::D1],
+        );
+
+        let err = adapter
+            .fetch_latest_closed_bar(LatestClosedBarRequest {
+                symbol: "AAPL".to_string(),
+                timeframe: crate::Timeframe::D1,
+                reference_ts: 1_700_000_100,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, MarketDataProviderError::UnsupportedCapability { .. }),
+            "adapter without explicit enablement must return UnsupportedCapability"
+        );
+        assert!(!adapter.capabilities().latest_closed_bar);
     }
 }

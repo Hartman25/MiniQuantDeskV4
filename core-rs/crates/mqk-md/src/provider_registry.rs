@@ -181,7 +181,9 @@ pub fn capabilities_from_provider_config(
     let supported_timeframes = timeframes_from_config(provider_id, config)?;
     Ok(MarketDataProviderCapabilities {
         historical_bars: !supported_timeframes.is_empty(),
-        latest_closed_bar: false,
+        // Alpaca supports latest_closed_bar via a bounded historical window fetch.
+        // Other providers are not advertised as capable until their implementation exists.
+        latest_closed_bar: provider_id.eq_ignore_ascii_case("alpaca"),
         completed_bar_stream: false,
         supported_asset_classes: config
             .asset_classes
@@ -271,6 +273,7 @@ where
                     config.display_name.clone(),
                     capabilities.supported_timeframes,
                 )
+                .with_latest_closed_bar_enabled()
                 .with_health(MarketDataProviderHealth::unknown())
                 .with_rate_limits(rate_limits),
             ))
@@ -694,5 +697,63 @@ mod tests {
             .supported_asset_classes
             .contains(&ProviderAssetClass::Equity));
         assert!(capabilities.supported_timeframes.contains(&Timeframe::M1));
+    }
+
+    // ALPACA-CAP-01: Alpaca provider config reports latest_closed_bar=true.
+    #[test]
+    fn alpaca_provider_config_reports_latest_closed_bar_true() {
+        let config = provider_config(
+            "alpaca",
+            true,
+            vec!["ALPACA_API_KEY_PAPER", "ALPACA_API_SECRET_PAPER"],
+            vec!["1D", "5m"],
+        );
+
+        let capabilities = capabilities_from_provider_config(&config)
+            .expect("alpaca capabilities must derive from config");
+
+        assert!(
+            capabilities.latest_closed_bar,
+            "alpaca must advertise latest_closed_bar=true"
+        );
+        assert!(capabilities.historical_bars);
+    }
+
+    // ALPACA-CAP-02: Non-Alpaca provider configs do not advertise latest_closed_bar.
+    #[test]
+    fn non_alpaca_provider_configs_do_not_report_latest_closed_bar() {
+        for id in &["twelvedata", "fake", "polygon", "candidate_xyz"] {
+            let config = provider_config(id, true, vec![], vec!["1D"]);
+            let capabilities = capabilities_from_provider_config(&config)
+                .expect("capabilities must derive from config");
+            assert!(
+                !capabilities.latest_closed_bar,
+                "provider '{id}' must not advertise latest_closed_bar"
+            );
+        }
+    }
+
+    // ALPACA-CAP-03: Alpaca factory builds a provider that reports latest_closed_bar=true.
+    #[test]
+    fn alpaca_factory_provider_reports_latest_closed_bar_capability() {
+        let providers = vec![provider_config(
+            "alpaca",
+            true,
+            vec!["ALPACA_API_KEY_PAPER", "ALPACA_API_SECRET_PAPER"],
+            vec!["1D", "5m"],
+        )];
+
+        let provider = build_market_data_provider("alpaca", &providers, |name| match name {
+            "ALPACA_API_KEY_PAPER" => Some("paper-key".to_string()),
+            "ALPACA_API_SECRET_PAPER" => Some("paper-secret".to_string()),
+            _ => None,
+        })
+        .expect("alpaca provider must build with injected credentials");
+
+        assert!(
+            provider.capabilities().latest_closed_bar,
+            "alpaca factory provider must report latest_closed_bar=true"
+        );
+        assert_eq!(provider.provider_id(), "alpaca");
     }
 }
