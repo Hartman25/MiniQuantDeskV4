@@ -78,6 +78,7 @@ impl AlpacaHistoricalProvider {
             crate::Timeframe::H1 => "1Hour",
             crate::Timeframe::M1 => "1Min",
             crate::Timeframe::M5 => "5Min",
+            crate::Timeframe::M15 => "15Min",
         }
     }
 

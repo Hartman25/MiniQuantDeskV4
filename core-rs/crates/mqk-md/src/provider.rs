@@ -498,6 +498,7 @@ impl FakeMarketDataProvider {
                     crate::Timeframe::H1,
                     crate::Timeframe::M1,
                     crate::Timeframe::M5,
+                    crate::Timeframe::M15,
                 ],
             },
             health: MarketDataProviderHealth {

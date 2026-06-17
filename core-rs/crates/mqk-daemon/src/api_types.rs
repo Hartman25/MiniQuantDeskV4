@@ -3393,6 +3393,75 @@ pub struct IngestJobsListResponse {
 }
 
 // ---------------------------------------------------------------------------
+// DATA-PROVIDER-LATEST-BAR-POLL-01: latest closed-bar feed poll-once
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/v1/market-data/feed/poll-once`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketDataFeedPollOnceRequest {
+    pub provider_id: String,
+    pub symbols: Vec<String>,
+    pub timeframe: String,
+    /// Dry-run mode: validate cadence/symbols/provider registry only.
+    /// Makes zero provider calls and zero DB writes. Default: true.
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
+    /// Permit real provider API calls. Default: false.
+    /// Must be explicitly true when `dry_run=false`.
+    #[serde(default)]
+    pub allow_provider_api_calls: bool,
+    /// Deterministic UTC reference time for tests/operator replay.
+    /// Accepts RFC3339 UTC timestamps.
+    pub now_utc: Option<String>,
+    /// Override provider registry path; omitted uses AppState default.
+    pub provider_registry_path: Option<String>,
+}
+
+/// Per-symbol result for one latest closed-bar poll.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketDataFeedPollSymbolResult {
+    pub symbol: String,
+    pub status: String,
+    pub expected_latest_closed_bar_ts: i64,
+    pub returned_bar_ts: Option<i64>,
+    pub rows_inserted: u64,
+    pub rows_updated: u64,
+    pub rows_skipped: u64,
+    pub error: Option<String>,
+}
+
+/// Response body for `POST /api/v1/market-data/feed/poll-once`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketDataFeedPollOnceResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub provider_id: String,
+    pub timeframe: String,
+    pub dry_run: bool,
+    pub provider_api_calls_allowed: bool,
+    pub symbols_count: usize,
+    pub poll_time_utc: String,
+    pub latest_expected_closed_bar_ts: i64,
+    pub next_poll_ts: i64,
+    pub inserted_count: u64,
+    pub updated_count: u64,
+    pub skipped_count: u64,
+    pub error_count: u64,
+    pub api_calls_made: u64,
+    pub symbols: Vec<MarketDataFeedPollSymbolResult>,
+    pub error: Option<String>,
+}
+
+/// Response body for `GET /api/v1/market-data/feed/status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketDataFeedStatusResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub limitation: String,
+    pub last_poll: Option<MarketDataFeedPollOnceResponse>,
+}
+
+// ---------------------------------------------------------------------------
 // DATA-INGEST-GUI-RESULTS-01: md_bars coverage query response
 // ---------------------------------------------------------------------------
 

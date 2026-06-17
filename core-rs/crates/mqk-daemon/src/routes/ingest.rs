@@ -36,13 +36,15 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use uuid::Uuid;
 
 use crate::{
     api_types::{
         IngestJobAcceptedResponse, IngestJobRequest, IngestJobStatusResponse, IngestJobSummary,
-        IngestJobsListResponse, TrackedEquitiesResponse, TrackedEquitySummary,
+        IngestJobsListResponse, MarketDataFeedPollOnceRequest, MarketDataFeedPollOnceResponse,
+        MarketDataFeedPollSymbolResult, MarketDataFeedStatusResponse, TrackedEquitiesResponse,
+        TrackedEquitySummary,
     },
     ingest_jobs::{
         list_persisted_ingest_jobs, load_persisted_ingest_job, persist_ingest_job_record,
@@ -52,6 +54,8 @@ use crate::{
 };
 
 const INGEST_JOB_CANCEL_REASON: &str = "cancel requested by operator";
+const FEED_POLL_ROUTE: &str = "/api/v1/market-data/feed/poll-once";
+const FEED_STATUS_ROUTE: &str = "/api/v1/market-data/feed/status";
 
 // ---------------------------------------------------------------------------
 // Timeframe validation (no mqk-md dep required for daemon validation)
@@ -68,6 +72,162 @@ fn validate_timeframe(tf: &str) -> Result<&'static str, String> {
             other
         )),
     }
+}
+
+fn normalize_poll_symbols(symbols: &[String]) -> Result<Vec<String>, String> {
+    let mut out = Vec::with_capacity(symbols.len());
+    for symbol in symbols {
+        let symbol = symbol.trim();
+        if symbol.is_empty() {
+            return Err("symbols must not contain blank entries".to_string());
+        }
+        out.push(symbol.to_string());
+    }
+    if out.is_empty() {
+        return Err("symbols must contain at least one symbol".to_string());
+    }
+    Ok(out)
+}
+
+fn parse_poll_now(now_utc: Option<&str>) -> Result<DateTime<Utc>, String> {
+    match now_utc {
+        Some(value) => DateTime::parse_from_rfc3339(value)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|err| format!("now_utc must be RFC3339 UTC: {err}")),
+        None => Ok(Utc::now()), // allow: operator poll reference time
+    }
+}
+
+fn provider_registry_path_for_poll(st: &AppState, req: &MarketDataFeedPollOnceRequest) -> String {
+    req.provider_registry_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or(&st.provider_registry_path)
+        .to_string()
+}
+
+fn load_poll_provider_config(
+    provider_id: &str,
+    provider_registry_path: &str,
+) -> Result<mqk_md::ProviderConfig, String> {
+    let providers = mqk_md::provider_registry::load_provider_registry(std::path::Path::new(
+        provider_registry_path,
+    ))
+    .map_err(|err| format!("provider registry load failed: {err}"))?;
+    let config = mqk_md::provider_registry::find_provider(&providers, provider_id)
+        .ok_or_else(|| format!("unknown_provider: provider '{provider_id}' is not registered"))?;
+    if !config.enabled {
+        return Err(format!(
+            "disabled_provider: provider '{}' is disabled",
+            config.provider_id
+        ));
+    }
+    Ok(config.clone())
+}
+
+enum LatestBarProviderClient {
+    Injected(Arc<dyn mqk_md::MarketDataProvider>),
+    Built(mqk_md::MarketDataProviderBox),
+}
+
+impl LatestBarProviderClient {
+    fn capabilities(&self) -> mqk_md::MarketDataProviderCapabilities {
+        match self {
+            LatestBarProviderClient::Injected(provider) => provider.capabilities(),
+            LatestBarProviderClient::Built(provider) => provider.capabilities(),
+        }
+    }
+
+    async fn fetch_latest_closed_bar(
+        &self,
+        request: mqk_md::LatestClosedBarRequest,
+    ) -> Result<Option<mqk_md::CanonicalBar>, mqk_md::MarketDataProviderError> {
+        match self {
+            LatestBarProviderClient::Injected(provider) => {
+                provider.fetch_latest_closed_bar(request).await
+            }
+            LatestBarProviderClient::Built(provider) => {
+                provider.fetch_latest_closed_bar(request).await
+            }
+        }
+    }
+}
+
+fn poll_response(
+    truth_state: &str,
+    provider_id: String,
+    timeframe: String,
+    dry_run: bool,
+    provider_api_calls_allowed: bool,
+    symbols_count: usize,
+    poll_time: DateTime<Utc>,
+    latest_expected_closed_bar_ts: i64,
+    next_poll_ts: i64,
+    symbols: Vec<MarketDataFeedPollSymbolResult>,
+    api_calls_made: u64,
+    error: Option<String>,
+) -> MarketDataFeedPollOnceResponse {
+    let inserted_count = symbols.iter().map(|s| s.rows_inserted).sum();
+    let updated_count = symbols.iter().map(|s| s.rows_updated).sum();
+    let skipped_count = symbols.iter().map(|s| s.rows_skipped).sum();
+    let error_count = symbols.iter().filter(|s| s.error.is_some()).count() as u64;
+
+    MarketDataFeedPollOnceResponse {
+        canonical_route: FEED_POLL_ROUTE.to_string(),
+        truth_state: truth_state.to_string(),
+        provider_id,
+        timeframe,
+        dry_run,
+        provider_api_calls_allowed,
+        symbols_count,
+        poll_time_utc: poll_time.to_rfc3339(),
+        latest_expected_closed_bar_ts,
+        next_poll_ts,
+        inserted_count,
+        updated_count,
+        skipped_count,
+        error_count,
+        api_calls_made,
+        symbols,
+        error,
+    }
+}
+
+async fn store_feed_poll_status(st: &AppState, response: &MarketDataFeedPollOnceResponse) {
+    let mut status = st.market_data_feed_status.write().await;
+    *status = Some(response.clone());
+}
+
+fn refused_poll_response(
+    status: StatusCode,
+    provider_id: String,
+    timeframe: String,
+    dry_run: bool,
+    allow_provider_api_calls: bool,
+    symbols_count: usize,
+    poll_time: DateTime<Utc>,
+    latest_expected_closed_bar_ts: i64,
+    next_poll_ts: i64,
+    error: String,
+) -> Response {
+    (
+        status,
+        Json(poll_response(
+            "refused",
+            provider_id,
+            timeframe,
+            dry_run,
+            allow_provider_api_calls,
+            symbols_count,
+            poll_time,
+            latest_expected_closed_bar_ts,
+            next_poll_ts,
+            vec![],
+            0,
+            Some(error),
+        )),
+    )
+        .into_response()
 }
 
 fn record_to_summary(r: &IngestJobRecord) -> IngestJobSummary {
@@ -294,6 +454,406 @@ async fn refused_provider_job_response(
         }),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/market-data/feed/poll-once
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn market_data_feed_poll_once(
+    State(st): State<Arc<AppState>>,
+    Json(req): Json<MarketDataFeedPollOnceRequest>,
+) -> Response {
+    let provider_id = req.provider_id.trim().to_ascii_lowercase();
+    let symbols = match normalize_poll_symbols(&req.symbols) {
+        Ok(symbols) => symbols,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "canonical_route": FEED_POLL_ROUTE,
+                    "truth_state": "refused",
+                    "error": error,
+                })),
+            )
+                .into_response();
+        }
+    };
+    let poll_time = match parse_poll_now(req.now_utc.as_deref()) {
+        Ok(now) => now,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "canonical_route": FEED_POLL_ROUTE,
+                    "truth_state": "refused",
+                    "error": error,
+                })),
+            )
+                .into_response();
+        }
+    };
+    let timeframe = match mqk_md::Timeframe::parse(&req.timeframe) {
+        Ok(timeframe) => timeframe,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "canonical_route": FEED_POLL_ROUTE,
+                    "truth_state": "refused",
+                    "error": error.to_string(),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let latest_expected_closed_bar_ts =
+        mqk_md::latest_closed_bar_end_ts(timeframe, poll_time.timestamp());
+    let next_poll_ts = mqk_md::next_poll_time_ts(timeframe, poll_time.timestamp());
+    let timeframe_str = timeframe.as_str().to_string();
+
+    if provider_id.is_empty() {
+        return refused_poll_response(
+            StatusCode::BAD_REQUEST,
+            provider_id,
+            timeframe_str,
+            req.dry_run,
+            req.allow_provider_api_calls,
+            symbols.len(),
+            poll_time,
+            latest_expected_closed_bar_ts,
+            next_poll_ts,
+            "provider_id must not be empty".to_string(),
+        );
+    }
+
+    if !req.dry_run && !req.allow_provider_api_calls {
+        return refused_poll_response(
+            StatusCode::BAD_REQUEST,
+            provider_id,
+            timeframe_str,
+            false,
+            false,
+            symbols.len(),
+            poll_time,
+            latest_expected_closed_bar_ts,
+            next_poll_ts,
+            "allow_provider_api_calls=true is required when dry_run=false".to_string(),
+        );
+    }
+
+    let provider_registry_path = provider_registry_path_for_poll(&st, &req);
+    let provider_config = match load_poll_provider_config(&provider_id, &provider_registry_path) {
+        Ok(config) => config,
+        Err(error) => {
+            return refused_poll_response(
+                StatusCode::BAD_REQUEST,
+                provider_id,
+                timeframe_str,
+                req.dry_run,
+                req.allow_provider_api_calls,
+                symbols.len(),
+                poll_time,
+                latest_expected_closed_bar_ts,
+                next_poll_ts,
+                error,
+            );
+        }
+    };
+
+    if req.dry_run {
+        let per_symbol = symbols
+            .iter()
+            .map(|symbol| MarketDataFeedPollSymbolResult {
+                symbol: symbol.clone(),
+                status: "dry_run".to_string(),
+                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                returned_bar_ts: None,
+                rows_inserted: 0,
+                rows_updated: 0,
+                rows_skipped: 0,
+                error: None,
+            })
+            .collect();
+        let response = poll_response(
+            "dry_run",
+            provider_config.provider_id,
+            timeframe_str,
+            true,
+            false,
+            symbols.len(),
+            poll_time,
+            latest_expected_closed_bar_ts,
+            next_poll_ts,
+            per_symbol,
+            0,
+            None,
+        );
+        store_feed_poll_status(&st, &response).await;
+        return (StatusCode::OK, Json(response)).into_response();
+    }
+
+    let Some(pool) = st.db.clone() else {
+        return refused_poll_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            provider_config.provider_id,
+            timeframe_str,
+            false,
+            true,
+            symbols.len(),
+            poll_time,
+            latest_expected_closed_bar_ts,
+            next_poll_ts,
+            "no_db: database pool is not configured".to_string(),
+        );
+    };
+
+    let provider = if let Some(provider) = st.latest_bar_provider_client.clone() {
+        LatestBarProviderClient::Injected(provider)
+    } else {
+        match mqk_md::build_market_data_provider_from_config(&provider_config, |name| {
+            std::env::var(name).ok()
+        }) {
+            Ok(provider) => LatestBarProviderClient::Built(provider),
+            Err(error) => {
+                return refused_poll_response(
+                    StatusCode::BAD_REQUEST,
+                    provider_config.provider_id,
+                    timeframe_str,
+                    false,
+                    true,
+                    symbols.len(),
+                    poll_time,
+                    latest_expected_closed_bar_ts,
+                    next_poll_ts,
+                    error.to_string(),
+                );
+            }
+        }
+    };
+
+    let capabilities = provider.capabilities();
+    if !capabilities.latest_closed_bar {
+        return refused_poll_response(
+            StatusCode::BAD_REQUEST,
+            provider_config.provider_id.clone(),
+            timeframe_str,
+            false,
+            true,
+            symbols.len(),
+            poll_time,
+            latest_expected_closed_bar_ts,
+            next_poll_ts,
+            format!(
+                "provider '{}' does not support capability latest_closed_bar",
+                provider_config.provider_id
+            ),
+        );
+    }
+    if !capabilities.supported_timeframes.is_empty()
+        && !capabilities.supported_timeframes.contains(&timeframe)
+    {
+        return refused_poll_response(
+            StatusCode::BAD_REQUEST,
+            provider_config.provider_id.clone(),
+            timeframe_str,
+            false,
+            true,
+            symbols.len(),
+            poll_time,
+            latest_expected_closed_bar_ts,
+            next_poll_ts,
+            format!(
+                "provider '{}' does not support timeframe '{}'",
+                provider_config.provider_id,
+                timeframe.as_str()
+            ),
+        );
+    }
+
+    let mut per_symbol = Vec::with_capacity(symbols.len());
+    let mut api_calls_made = 0_u64;
+
+    for symbol in &symbols {
+        api_calls_made += 1;
+        let request = mqk_md::LatestClosedBarRequest {
+            symbol: symbol.clone(),
+            timeframe,
+            reference_ts: poll_time.timestamp(),
+        };
+
+        let latest_bar = match provider.fetch_latest_closed_bar(request).await {
+            Ok(Some(bar)) => bar,
+            Ok(None) => {
+                per_symbol.push(MarketDataFeedPollSymbolResult {
+                    symbol: symbol.clone(),
+                    status: "skipped_no_bar".to_string(),
+                    expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                    returned_bar_ts: None,
+                    rows_inserted: 0,
+                    rows_updated: 0,
+                    rows_skipped: 1,
+                    error: None,
+                });
+                continue;
+            }
+            Err(error) => {
+                per_symbol.push(MarketDataFeedPollSymbolResult {
+                    symbol: symbol.clone(),
+                    status: "provider_error".to_string(),
+                    expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                    returned_bar_ts: None,
+                    rows_inserted: 0,
+                    rows_updated: 0,
+                    rows_skipped: 0,
+                    error: Some(error.to_string()),
+                });
+                continue;
+            }
+        };
+
+        if latest_bar.symbol != *symbol
+            || latest_bar.timeframe != timeframe.as_str()
+            || !latest_bar.is_complete
+            || latest_bar.end_ts > latest_expected_closed_bar_ts
+        {
+            per_symbol.push(MarketDataFeedPollSymbolResult {
+                symbol: symbol.clone(),
+                status: "skipped_unclosed_or_unexpected_bar".to_string(),
+                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                returned_bar_ts: Some(latest_bar.end_ts),
+                rows_inserted: 0,
+                rows_updated: 0,
+                rows_skipped: 1,
+                error: None,
+            });
+            continue;
+        }
+
+        let ingest_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            format!(
+                "mqk-md-latest-poll.v1|{}|{}|{}|{}",
+                provider_config.provider_id,
+                timeframe.as_str(),
+                symbol,
+                latest_bar.end_ts
+            )
+            .as_bytes(),
+        );
+        let provider_symbol = latest_bar.symbol.clone();
+        let db_bar = mqk_db::md::ProviderBar {
+            symbol: latest_bar.symbol,
+            timeframe: latest_bar.timeframe,
+            end_ts: latest_bar.end_ts,
+            open: latest_bar.open,
+            high: latest_bar.high,
+            low: latest_bar.low,
+            close: latest_bar.close,
+            volume: latest_bar.volume,
+            is_complete: latest_bar.is_complete,
+        };
+        let returned_bar_ts = db_bar.end_ts;
+
+        match mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata(
+            &pool,
+            mqk_db::md::IngestProviderBarsArgs {
+                source: provider_config.provider_id.clone(),
+                timeframe: timeframe.as_str().to_string(),
+                ingest_id,
+                bars: vec![db_bar],
+            },
+            mqk_db::md::MdBarProviderMetadata {
+                provider_id: provider_config.provider_id.clone(),
+                provider_source: Some(provider_config.provider_id.clone()),
+                provider_symbol: Some(provider_symbol),
+                ingest_mode: Some("latest_poll".to_string()),
+                provider_bar_id: None,
+                provider_updated_at_utc: None,
+            },
+        )
+        .await
+        {
+            Ok(result) => per_symbol.push(MarketDataFeedPollSymbolResult {
+                symbol: symbol.clone(),
+                status: if result.report.coverage.rows_inserted > 0 {
+                    "inserted".to_string()
+                } else {
+                    "updated".to_string()
+                },
+                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                returned_bar_ts: Some(returned_bar_ts),
+                rows_inserted: result.report.coverage.rows_inserted,
+                rows_updated: result.report.coverage.rows_updated,
+                rows_skipped: result.report.coverage.rows_rejected,
+                error: None,
+            }),
+            Err(error) => per_symbol.push(MarketDataFeedPollSymbolResult {
+                symbol: symbol.clone(),
+                status: "db_error".to_string(),
+                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                returned_bar_ts: Some(returned_bar_ts),
+                rows_inserted: 0,
+                rows_updated: 0,
+                rows_skipped: 0,
+                error: Some(format!("db ingest failed: {error}")),
+            }),
+        }
+    }
+
+    let error_count = per_symbol.iter().filter(|s| s.error.is_some()).count();
+    let success_count = per_symbol
+        .iter()
+        .filter(|s| s.rows_inserted > 0 || s.rows_updated > 0)
+        .count();
+    let truth_state = if error_count == 0 {
+        "completed"
+    } else if success_count > 0 {
+        "partial"
+    } else {
+        "failed"
+    };
+    let error = (error_count > 0).then(|| format!("{error_count} symbol(s) failed"));
+    let status_code = if truth_state == "failed" {
+        StatusCode::BAD_GATEWAY
+    } else {
+        StatusCode::OK
+    };
+    let response = poll_response(
+        truth_state,
+        provider_config.provider_id,
+        timeframe_str,
+        false,
+        true,
+        symbols.len(),
+        poll_time,
+        latest_expected_closed_bar_ts,
+        next_poll_ts,
+        per_symbol,
+        api_calls_made,
+        error,
+    );
+    store_feed_poll_status(&st, &response).await;
+    (status_code, Json(response)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/market-data/feed/status
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn market_data_feed_status(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let last_poll = st.market_data_feed_status.read().await.clone();
+    Json(MarketDataFeedStatusResponse {
+        canonical_route: FEED_STATUS_ROUTE.to_string(),
+        truth_state: if last_poll.is_some() {
+            "active".to_string()
+        } else {
+            "no_poll".to_string()
+        },
+        limitation: "process_local_only_not_persisted".to_string(),
+        last_poll,
+    })
 }
 
 // ---------------------------------------------------------------------------

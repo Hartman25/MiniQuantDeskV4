@@ -408,6 +408,15 @@ pub struct AppState {
     /// `Some(client)` in tests: the injected fake client is used directly,
     /// allowing zero-network test coverage without real TwelveData credentials.
     pub provider_client: Option<Arc<dyn mqk_md::HistoricalProvider>>,
+    /// DATA-PROVIDER-LATEST-BAR-POLL-01: Injectable latest-bar provider client for poll-once.
+    ///
+    /// `None` in production: the poll-once route builds from the provider registry.
+    /// `Some(client)` in tests: the injected capability-aware fake is used directly,
+    /// allowing zero-network latest-bar tests without provider credentials.
+    pub latest_bar_provider_client: Option<Arc<dyn mqk_md::MarketDataProvider>>,
+    /// DATA-PROVIDER-LATEST-BAR-POLL-01: Process-local last poll result for feed status.
+    pub market_data_feed_status:
+        Arc<RwLock<Option<crate::api_types::MarketDataFeedPollOnceResponse>>>,
     /// BROKER-FILL-REST-RECOVERY-01: Injectable Alpaca fill activity fetcher.
     ///
     /// `None` when REST recovery is not configured on this daemon instance.
@@ -695,6 +704,14 @@ impl AppState {
     /// making real TwelveData HTTP calls or requiring credentials.
     pub fn set_provider_client_for_test(&mut self, client: Arc<dyn mqk_md::HistoricalProvider>) {
         self.provider_client = Some(client);
+    }
+
+    /// Test helper: inject a capability-aware latest-bar provider for poll-once.
+    pub fn set_latest_bar_provider_client_for_test(
+        &mut self,
+        client: Arc<dyn mqk_md::MarketDataProvider>,
+    ) {
+        self.latest_bar_provider_client = Some(client);
     }
 
     /// Test helper: inject a fill activity fetcher for BROKER-FILL-REST-RECOVERY-01 tests.
@@ -1000,6 +1017,8 @@ impl AppState {
             md_refresh_evidence_dir: std::env::var("MQK_MD_REFRESH_EVIDENCE_DIR")
                 .unwrap_or_else(|_| "exports/market_data".to_string()),
             provider_client: None,
+            latest_bar_provider_client: None,
+            market_data_feed_status: Arc::new(RwLock::new(None)),
             fill_activity_fetcher,
             ws_gap_fill_fetcher,
             broker_baseline: Arc::new(RwLock::new(None)),

@@ -167,7 +167,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use ingest::{
         ingest_job_cancel, ingest_job_status, ingest_job_submit, ingest_jobs_list,
-        tracked_equities_list,
+        market_data_feed_poll_once, market_data_feed_status, tracked_equities_list,
     };
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
@@ -317,6 +317,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/market-data/intraday-refresh/status",
             get(intraday_refresh_status),
         )
+        .route(
+            "/api/v1/market-data/feed/status",
+            get(market_data_feed_status),
+        )
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
         .route("/v1/trading/orders", get(trading_orders))
@@ -406,6 +410,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/ingest/jobs/:job_id/cancel",
             post(ingest_job_cancel),
+        )
+        .route(
+            "/api/v1/market-data/feed/poll-once",
+            post(market_data_feed_poll_once),
         )
         .merge(control::router())
         .layer(axum::middleware::from_fn_with_state(

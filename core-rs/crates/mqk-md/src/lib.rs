@@ -47,12 +47,14 @@ const TWELVEDATA_RATE_LIMIT_SLEEP_SECS: u64 = 65;
 /// - `1h`
 /// - `1m`
 /// - `5m`
+/// - `15m`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Timeframe {
     D1,
     H1,
     M1,
     M5,
+    M15,
 }
 
 impl Timeframe {
@@ -62,6 +64,7 @@ impl Timeframe {
             Timeframe::H1 => "1h",
             Timeframe::M1 => "1m",
             Timeframe::M5 => "5m",
+            Timeframe::M15 => "15m",
         }
     }
 
@@ -71,6 +74,7 @@ impl Timeframe {
             Timeframe::H1 => 3_600,
             Timeframe::M1 => 60,
             Timeframe::M5 => 300,
+            Timeframe::M15 => 900,
         }
     }
 
@@ -85,6 +89,7 @@ impl Timeframe {
             Timeframe::H1 => "1h",
             Timeframe::M1 => "1min",
             Timeframe::M5 => "5min",
+            Timeframe::M15 => "15min",
         }
     }
 
@@ -94,12 +99,52 @@ impl Timeframe {
             "1h" | "h1" | "60m" => Ok(Timeframe::H1),
             "1m" | "1min" | "1minute" => Ok(Timeframe::M1),
             "5m" | "5min" | "5minute" => Ok(Timeframe::M5),
+            "15m" | "15min" | "15minute" => Ok(Timeframe::M15),
             other => Err(anyhow!(
-                "invalid timeframe '{}'. expected one of: 1D | 1h | 1m | 5m",
+                "invalid timeframe '{}'. expected one of: 1D | 1h | 1m | 5m | 15m",
                 other
             )),
         }
     }
+}
+
+/// Parse a timeframe and return its canonical form.
+pub fn parse_timeframe_canonical(s: &str) -> Result<&'static str> {
+    Ok(Timeframe::parse(s)?.as_str())
+}
+
+/// Convert a supported timeframe string to seconds.
+pub fn timeframe_secs(s: &str) -> Result<i64> {
+    Ok(Timeframe::parse(s)?.duration_secs())
+}
+
+/// Latest closed bar boundary at or before `now_ts`.
+///
+/// This uses UTC epoch-second cadence boundaries. If `now_ts` is exactly on a
+/// boundary, that boundary is the bar that just closed. If `now_ts` is inside a
+/// forming bar, the previous boundary is returned.
+pub fn latest_closed_bar_end_ts(timeframe: Timeframe, now_ts: i64) -> i64 {
+    let cadence = timeframe.duration_secs();
+    now_ts.div_euclid(cadence) * cadence
+}
+
+/// Latest closed bar boundary for a timeframe string.
+pub fn latest_closed_bar_end_ts_for_timeframe(timeframe: &str, now_ts: i64) -> Result<i64> {
+    Ok(latest_closed_bar_end_ts(
+        Timeframe::parse(timeframe)?,
+        now_ts,
+    ))
+}
+
+/// Next cadence-aligned poll time strictly after `now_ts`.
+pub fn next_poll_time_ts(timeframe: Timeframe, now_ts: i64) -> i64 {
+    let cadence = timeframe.duration_secs();
+    (now_ts.div_euclid(cadence) + 1) * cadence
+}
+
+/// Next cadence-aligned poll time for a timeframe string.
+pub fn next_poll_time_ts_for_timeframe(timeframe: &str, now_ts: i64) -> Result<i64> {
+    Ok(next_poll_time_ts(Timeframe::parse(timeframe)?, now_ts))
 }
 
 /// A raw OHLCV bar as returned by a historical provider.
@@ -648,7 +693,8 @@ mod tests {
         assert_eq!(Timeframe::parse("1D").unwrap(), Timeframe::D1);
         assert_eq!(Timeframe::parse("1m").unwrap(), Timeframe::M1);
         assert_eq!(Timeframe::parse("5m").unwrap(), Timeframe::M5);
-        assert!(Timeframe::parse("15m").is_err());
+        assert_eq!(Timeframe::parse("15m").unwrap(), Timeframe::M15);
+        assert!(Timeframe::parse("2m").is_err());
     }
 
     #[test]
@@ -669,8 +715,67 @@ mod tests {
     fn timeframe_m5_and_d1_unchanged() {
         assert_eq!(Timeframe::M5.as_str(), "5m");
         assert_eq!(Timeframe::M5.as_twelvedata_interval(), "5min");
+        assert_eq!(Timeframe::M15.as_str(), "15m");
+        assert_eq!(Timeframe::M15.as_twelvedata_interval(), "15min");
         assert_eq!(Timeframe::D1.as_str(), "1D");
         assert_eq!(Timeframe::D1.as_twelvedata_interval(), "1day");
+    }
+
+    #[test]
+    fn timeframe_secs_accepts_supported_values_and_rejects_invalid() {
+        assert_eq!(timeframe_secs("1m").unwrap(), 60);
+        assert_eq!(timeframe_secs("5m").unwrap(), 300);
+        assert_eq!(timeframe_secs("15m").unwrap(), 900);
+        assert_eq!(timeframe_secs("1h").unwrap(), 3_600);
+        assert_eq!(timeframe_secs("1D").unwrap(), 86_400);
+        assert!(timeframe_secs("2m").is_err());
+    }
+
+    #[test]
+    fn timeframe_latest_closed_bar_boundary_1m() {
+        assert_eq!(latest_closed_bar_end_ts(Timeframe::M1, 125), 120);
+        assert_eq!(latest_closed_bar_end_ts(Timeframe::M1, 120), 120);
+    }
+
+    #[test]
+    fn timeframe_latest_closed_bar_boundary_5m() {
+        assert_eq!(latest_closed_bar_end_ts(Timeframe::M5, 604), 600);
+        assert_eq!(latest_closed_bar_end_ts(Timeframe::M5, 600), 600);
+    }
+
+    #[test]
+    fn timeframe_latest_closed_bar_boundary_15m() {
+        assert_eq!(latest_closed_bar_end_ts(Timeframe::M15, 1_799), 900);
+        assert_eq!(latest_closed_bar_end_ts(Timeframe::M15, 1_800), 1_800);
+    }
+
+    #[test]
+    fn timeframe_latest_closed_bar_boundary_1h() {
+        assert_eq!(latest_closed_bar_end_ts(Timeframe::H1, 7_199), 3_600);
+        assert_eq!(latest_closed_bar_end_ts(Timeframe::H1, 7_200), 7_200);
+    }
+
+    #[test]
+    fn timeframe_latest_closed_bar_boundary_1d() {
+        assert_eq!(latest_closed_bar_end_ts(Timeframe::D1, 172_799), 86_400);
+        assert_eq!(latest_closed_bar_end_ts(Timeframe::D1, 172_800), 172_800);
+    }
+
+    #[test]
+    fn timeframe_next_poll_time_is_cadence_aligned() {
+        assert_eq!(next_poll_time_ts(Timeframe::M5, 604), 900);
+        assert_eq!(next_poll_time_ts(Timeframe::M5, 600), 900);
+        assert_eq!(next_poll_time_ts(Timeframe::M15, 901), 1_800);
+        assert_eq!(next_poll_time_ts(Timeframe::H1, 3_600), 7_200);
+    }
+
+    #[test]
+    fn timeframe_latest_closed_bar_has_no_lookahead_into_forming_bar() {
+        let now_inside_forming_5m = 604;
+        let boundary = latest_closed_bar_end_ts(Timeframe::M5, now_inside_forming_5m);
+        assert!(boundary <= now_inside_forming_5m);
+        assert_eq!(boundary % Timeframe::M5.duration_secs(), 0);
+        assert_eq!(boundary, 600);
     }
 
     fn provider_bar(symbol: &str, timeframe: &str, end_ts: i64, is_complete: bool) -> ProviderBar {
@@ -690,10 +795,12 @@ mod tests {
     #[test]
     fn timeframe_duration_and_intraday_classification_are_stable() {
         assert_eq!(Timeframe::M5.duration_secs(), 300);
+        assert_eq!(Timeframe::M15.duration_secs(), 900);
         assert_eq!(Timeframe::M1.duration_secs(), 60);
         assert_eq!(Timeframe::H1.duration_secs(), 3_600);
         assert_eq!(Timeframe::D1.duration_secs(), 86_400);
         assert!(Timeframe::M5.is_intraday());
+        assert!(Timeframe::M15.is_intraday());
         assert!(Timeframe::H1.is_intraday());
         assert!(!Timeframe::D1.is_intraday());
     }
