@@ -88,8 +88,9 @@ pub use position_sizing::{
 };
 pub use short_entry_policy::{
     classify_order_intent, classify_short_entry_intent, evaluate_short_entry_policy,
-    order_intent_to_short_entry_intent, parse_short_entry_config, OrderIntent, ShortEntryConfig,
-    ShortEntryIntent, ShortEntryPolicyDecision,
+    evaluate_short_entry_policy_with_preflight, order_intent_to_short_entry_intent,
+    parse_short_entry_config, OrderIntent, ShortEntryConfig, ShortEntryIntent,
+    ShortEntryPolicyDecision, ShortabilityPreflightResult, ShortabilitySource,
 };
 
 // ---------------------------------------------------------------------------

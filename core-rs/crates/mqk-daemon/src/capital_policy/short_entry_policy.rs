@@ -221,6 +221,241 @@ pub fn order_intent_to_short_entry_intent(intent: OrderIntent) -> ShortEntryInte
 }
 
 // ---------------------------------------------------------------------------
+// Shortability preflight (SHORT-SIDE-SHORTABLE-PREFLIGHT-01)
+// ---------------------------------------------------------------------------
+
+/// Source of a [`ShortabilityPreflightResult`].
+///
+/// Carried on `Confirmed` results so diagnostics can report where the
+/// shortability determination came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortabilitySource {
+    /// Synthetic value constructed in a test; never used on a real broker path.
+    Test,
+    /// Derived from a real Alpaca `GET /v2/assets/{symbol}` response.
+    AlpacaAsset,
+    /// Explicitly configured in the paper trading config file.
+    PaperConfig,
+}
+
+/// Shortability / borrow preflight result for a symbol.
+///
+/// Constructed from a broker asset lookup, a paper-config override, or a
+/// synthetic test value.  Passed to
+/// [`evaluate_short_entry_policy_with_preflight`] in place of the raw
+/// `Option<bool>` shortable flag so callers can express distinct failure modes.
+///
+/// Each variant maps to a distinct fail-closed outcome when
+/// `require_shortable_check = true` is active in the policy config.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShortabilityPreflightResult {
+    /// Shortability was not checked; status is unknown.
+    ///
+    /// When `require_shortable_check=true` this rejects with
+    /// `"shortable_check_required"`.
+    Unknown { symbol: String },
+
+    /// The shortability check could not be completed (provider unavailable,
+    /// network error, timeout, etc.).
+    ///
+    /// When `require_shortable_check=true` this rejects with
+    /// `"shortable_check_unavailable"`.
+    Unavailable { symbol: String, reason: String },
+
+    /// Symbol was not found in the broker asset registry.
+    ///
+    /// Always rejects with `"shortable_symbol_not_found"` regardless of
+    /// `require_shortable_check`.
+    SymbolNotFound { symbol: String },
+
+    /// Symbol found but `tradable=false`.
+    ///
+    /// Always rejects with `"shortable_not_tradable"`.
+    NotTradable { symbol: String },
+
+    /// Symbol is tradable but `shortable=false`.
+    ///
+    /// Always rejects with `"shortable_not_shortable"`.
+    NotShortable { symbol: String },
+
+    /// Symbol is shortable but `easy_to_borrow=false`.
+    ///
+    /// Always rejects with `"shortable_not_easy_to_borrow"`.
+    NotEasyToBorrow { symbol: String },
+
+    /// All shortability fields are confirmed positive.
+    ///
+    /// `tradable=true` and `shortable=true`.  The `easy_to_borrow` field is
+    /// stored for diagnostic logging; callers must use `NotEasyToBorrow` if
+    /// ETB is required and the broker returned `false`.
+    Confirmed {
+        symbol: String,
+        tradable: bool,
+        shortable: bool,
+        easy_to_borrow: Option<bool>,
+        source: ShortabilitySource,
+    },
+}
+
+/// Evaluate the short-entry policy using a detailed shortability preflight result.
+///
+/// This is the evaluation entry point for paths that have performed or
+/// attempted a broker asset shortability check.  All gates from
+/// [`evaluate_short_entry_policy`] are still enforced; this function adds a
+/// preflight layer that maps each [`ShortabilityPreflightResult`] variant to
+/// a specific reason code before delegating cap evaluation.
+///
+/// # Preflight → reason code mapping
+///
+/// | Variant                    | Condition                         | `reason_code`                     |
+/// |----------------------------|-----------------------------------|-----------------------------------|
+/// | `Unknown`                  | `require_shortable_check=true`    | `"shortable_check_required"`      |
+/// | `Unavailable`              | `require_shortable_check=true`    | `"shortable_check_unavailable"`   |
+/// | `SymbolNotFound`           | always                            | `"shortable_symbol_not_found"`    |
+/// | `NotTradable`              | always                            | `"shortable_not_tradable"`        |
+/// | `NotShortable`             | always                            | `"shortable_not_shortable"`       |
+/// | `NotEasyToBorrow`          | always                            | `"shortable_not_easy_to_borrow"`  |
+/// | `Confirmed { shortable=true, .. }` | —                         | proceeds to cap gates             |
+///
+/// Gates checked before preflight (live mode, master enable, paper mode) use
+/// the same logic as [`evaluate_short_entry_policy`].
+///
+/// # Safety invariant
+///
+/// Live mode (`is_paper_mode = false`) is always blocked regardless of the
+/// preflight result.  This function cannot authorize a short-open in live mode.
+pub fn evaluate_short_entry_policy_with_preflight(
+    config: &ShortEntryConfig,
+    intent: ShortEntryIntent,
+    is_paper_mode: bool,
+    preflight: &ShortabilityPreflightResult,
+    projected_short_shares: Option<i64>,
+    projected_short_notional_usd: Option<f64>,
+) -> ShortEntryPolicyDecision {
+    // Gate 1: non-ShortOpen intents are not subject to this gate.
+    if intent != ShortEntryIntent::ShortOpen {
+        return ShortEntryPolicyDecision::NotShortOpen;
+    }
+
+    // Gate 2: live mode — always blocked (hard invariant).
+    if !is_paper_mode {
+        return ShortEntryPolicyDecision::ShortOpenBlocked {
+            reason_code: "live_short_entries_blocked",
+            detail: "short-open rejected: live short entries are not supported; \
+                     the live_short_entries_blocked invariant is enforced regardless of \
+                     live_short_entries_enabled in the policy file or shortability status"
+                .to_string(),
+        };
+    }
+
+    // Gate 3: master short-entry gate.
+    if !config.allow_short_entries {
+        return ShortEntryPolicyDecision::ShortOpenBlocked {
+            reason_code: "short_entries_disabled",
+            detail: "short-open rejected: allow_short_entries=false in short_entry_policy \
+                     (fail-closed default)"
+                .to_string(),
+        };
+    }
+
+    // Gate 4: paper-mode gate.
+    if !config.paper_short_entries_enabled {
+        return ShortEntryPolicyDecision::ShortOpenBlocked {
+            reason_code: "paper_short_entries_disabled",
+            detail: "short-open rejected: paper_short_entries_enabled=false in \
+                     short_entry_policy"
+                .to_string(),
+        };
+    }
+
+    // Gate 5: shortability preflight — map to Option<bool> for the existing cap
+    //         evaluator, or return a preflight-specific reason code.
+    let shortable_status: Option<bool> = match preflight {
+        ShortabilityPreflightResult::Unknown { symbol } => {
+            if config.require_shortable_check {
+                return ShortEntryPolicyDecision::ShortOpenBlocked {
+                    reason_code: "shortable_check_required",
+                    detail: format!(
+                        "short-open rejected: shortability status unknown for '{}'; \
+                         require_shortable_check=true — broker asset lookup must complete \
+                         before a short-open is permitted",
+                        symbol
+                    ),
+                };
+            }
+            None
+        }
+        ShortabilityPreflightResult::Unavailable { symbol, reason } => {
+            if config.require_shortable_check {
+                return ShortEntryPolicyDecision::ShortOpenBlocked {
+                    reason_code: "shortable_check_unavailable",
+                    detail: format!(
+                        "short-open rejected: shortability check unavailable for '{}': {}; \
+                         require_shortable_check=true — broker asset check must succeed \
+                         before a short-open is permitted",
+                        symbol, reason
+                    ),
+                };
+            }
+            None
+        }
+        ShortabilityPreflightResult::SymbolNotFound { symbol } => {
+            return ShortEntryPolicyDecision::ShortOpenBlocked {
+                reason_code: "shortable_symbol_not_found",
+                detail: format!(
+                    "short-open rejected: symbol '{}' not found in the broker asset \
+                     registry; shortability cannot be confirmed",
+                    symbol
+                ),
+            };
+        }
+        ShortabilityPreflightResult::NotTradable { symbol } => {
+            return ShortEntryPolicyDecision::ShortOpenBlocked {
+                reason_code: "shortable_not_tradable",
+                detail: format!(
+                    "short-open rejected: symbol '{}' is not tradable \
+                     (tradable=false in broker asset response)",
+                    symbol
+                ),
+            };
+        }
+        ShortabilityPreflightResult::NotShortable { symbol } => {
+            return ShortEntryPolicyDecision::ShortOpenBlocked {
+                reason_code: "shortable_not_shortable",
+                detail: format!(
+                    "short-open rejected: symbol '{}' is not shortable \
+                     (shortable=false in broker asset response)",
+                    symbol
+                ),
+            };
+        }
+        ShortabilityPreflightResult::NotEasyToBorrow { symbol } => {
+            return ShortEntryPolicyDecision::ShortOpenBlocked {
+                reason_code: "shortable_not_easy_to_borrow",
+                detail: format!(
+                    "short-open rejected: symbol '{}' is not easy-to-borrow \
+                     (easy_to_borrow=false in broker asset response)",
+                    symbol
+                ),
+            };
+        }
+        ShortabilityPreflightResult::Confirmed { shortable, .. } => Some(*shortable),
+    };
+
+    // Delegate remaining cap gates to the existing evaluator.
+    // Gates 2-4 above already passed so the delegate's gates 2-4 are redundant
+    // but harmless — they will pass with the same inputs.
+    evaluate_short_entry_policy(
+        config,
+        intent,
+        is_paper_mode,
+        shortable_status,
+        projected_short_shares,
+        projected_short_notional_usd,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Policy config
 // ---------------------------------------------------------------------------
 

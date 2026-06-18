@@ -299,6 +299,54 @@ pub struct AlpacaPositionRaw {
     pub avg_entry_price: String,
 }
 
+// ---------------------------------------------------------------------------
+// Asset shortability wire types — SHORT-SIDE-SHORTABLE-PREFLIGHT-01
+// GET /v2/assets/{symbol}
+// ---------------------------------------------------------------------------
+
+/// Raw Alpaca asset object from `GET /v2/assets/{symbol}`.
+///
+/// Used to derive shortability/borrow status for the short-entry preflight
+/// gate (`SHORT-SIDE-SHORTABLE-PREFLIGHT-01`).  No live HTTP calls are made in
+/// tests — this type is exercised via pure JSON deserialization.
+///
+/// # Missing-field policy
+///
+/// `easy_to_borrow`, `marginable`, and `fractionable` are optional in some
+/// Alpaca environments.  They default to `None` when absent.  `tradable` and
+/// `shortable` are required; if either is absent the JSON parse returns an
+/// error (fail-closed).
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlpacaAssetRaw {
+    /// Ticker symbol, e.g. `"AAPL"`.
+    pub symbol: String,
+    /// Whether the asset is tradable through Alpaca.
+    pub tradable: bool,
+    /// Whether short selling is permitted for this asset.
+    pub shortable: bool,
+    /// Easy-to-borrow status.  `Some(true)` = ETB; `Some(false)` = HTB / not
+    /// ETB; `None` = field absent (treated as unknown).
+    #[serde(default)]
+    pub easy_to_borrow: Option<bool>,
+    /// Whether the asset can be used as margin collateral.
+    #[serde(default)]
+    pub marginable: Option<bool>,
+    /// Whether fractional-share orders are supported.
+    #[serde(default)]
+    pub fractionable: Option<bool>,
+}
+
+/// Parse a raw Alpaca asset JSON string into [`AlpacaAssetRaw`].
+///
+/// Returns `None` when `tradable` or `shortable` fields are absent or the JSON
+/// is malformed — fail-closed: a parse failure is treated as unknown
+/// shortability, not as confirmed shortable.
+///
+/// Pure: no IO, no HTTP calls.
+pub fn parse_alpaca_asset_json(json_str: &str) -> Option<AlpacaAssetRaw> {
+    serde_json::from_str(json_str).ok()
+}
+
 /// Raw Alpaca order from `GET /v2/orders?status=open`.
 ///
 /// The list endpoint returns the full order object. This type is distinct from
