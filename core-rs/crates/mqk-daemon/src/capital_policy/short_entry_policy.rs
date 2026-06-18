@@ -121,6 +121,106 @@ pub fn classify_short_entry_intent(current_qty: i64, delta: i64) -> ShortEntryIn
 }
 
 // ---------------------------------------------------------------------------
+// Granular order intent model (SHORT-SIDE-INTENT-MODEL-01)
+// ---------------------------------------------------------------------------
+
+/// Full order-intent classification for a `(current_qty, delta)` transition.
+///
+/// More granular than [`ShortEntryIntent`]: distinguishes `SellToClose` from
+/// `SellToFlat`, `BuyToCover` from `BuyToFlat`/`BuyBeyondShortToLong`, etc.
+/// Use [`classify_order_intent`] to derive and
+/// [`order_intent_to_short_entry_intent`] to map to the coarser type for
+/// policy evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderIntent {
+    /// `delta > 0`, `current >= 0`: buying into flat or existing long position.
+    LongOpen,
+    /// `delta < 0`, `current > 0`, `abs(delta) < current`: reducing long; stays long.
+    SellToClose,
+    /// `delta < 0`, `current > 0`, `abs(delta) == current`: selling exactly to flat.
+    SellToFlat,
+    /// `delta < 0`, `current > 0`, `abs(delta) > current`: sell exceeds long; excess drives net-short.
+    SellBeyondLongToShort,
+    /// `delta < 0`, `current <= 0`: sell from flat or existing short; opens/deepens short.
+    ShortOpen,
+    /// `delta > 0`, `current < 0`, `delta < abs(current)`: partially covering short.
+    BuyToCover,
+    /// `delta > 0`, `current < 0`, `delta == abs(current)`: covering short exactly to flat.
+    BuyToFlat,
+    /// `delta > 0`, `current < 0`, `delta > abs(current)`: covering past flat into long.
+    BuyBeyondShortToLong,
+    /// `delta == 0`: no change; already at target.
+    NoOp,
+}
+
+impl OrderIntent {
+    /// Returns `true` for intents that would open or extend a short position.
+    ///
+    /// Both `ShortOpen` and `SellBeyondLongToShort` require short-entry policy
+    /// authorization.  All other intents are not subject to the short-entry gate.
+    pub fn requires_short_entry_policy(&self) -> bool {
+        matches!(self, Self::ShortOpen | Self::SellBeyondLongToShort)
+    }
+}
+
+/// Classify the granular order intent for a `(current_qty, delta)` pair.
+///
+/// Pure: no IO, no side effects.
+///
+/// - `current_qty` — signed portfolio quantity (negative = short; 0 = flat; positive = long).
+/// - `delta` — intended signed quantity change (positive = buy, negative = sell).
+pub fn classify_order_intent(current_qty: i64, delta: i64) -> OrderIntent {
+    if delta == 0 {
+        return OrderIntent::NoOp;
+    }
+    if delta > 0 {
+        if current_qty < 0 {
+            let abs_current = -current_qty; // positive (current_qty < 0)
+            if delta < abs_current {
+                OrderIntent::BuyToCover
+            } else if delta == abs_current {
+                OrderIntent::BuyToFlat
+            } else {
+                OrderIntent::BuyBeyondShortToLong
+            }
+        } else {
+            // current_qty >= 0: buying from flat or adding to long
+            OrderIntent::LongOpen
+        }
+    } else {
+        // delta < 0: selling
+        let qty_to_sell = -delta; // positive
+        if current_qty <= 0 {
+            // flat or already short: any sell opens/deepens short
+            OrderIntent::ShortOpen
+        } else if qty_to_sell < current_qty {
+            OrderIntent::SellToClose
+        } else if qty_to_sell == current_qty {
+            OrderIntent::SellToFlat
+        } else {
+            OrderIntent::SellBeyondLongToShort
+        }
+    }
+}
+
+/// Map [`OrderIntent`] to the coarser [`ShortEntryIntent`] for use with
+/// [`evaluate_short_entry_policy`].
+///
+/// Both `ShortOpen` and `SellBeyondLongToShort` map to
+/// `ShortEntryIntent::ShortOpen` — both require explicit short-entry policy
+/// authorization.
+pub fn order_intent_to_short_entry_intent(intent: OrderIntent) -> ShortEntryIntent {
+    match intent {
+        OrderIntent::ShortOpen | OrderIntent::SellBeyondLongToShort => ShortEntryIntent::ShortOpen,
+        OrderIntent::BuyToCover | OrderIntent::BuyToFlat | OrderIntent::BuyBeyondShortToLong => {
+            ShortEntryIntent::BuyToCover
+        }
+        OrderIntent::SellToClose | OrderIntent::SellToFlat => ShortEntryIntent::LongClose,
+        OrderIntent::LongOpen | OrderIntent::NoOp => ShortEntryIntent::LongOpen,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Policy config
 // ---------------------------------------------------------------------------
 

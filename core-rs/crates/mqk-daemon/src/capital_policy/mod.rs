@@ -87,8 +87,9 @@ pub use position_sizing::{
     evaluate_position_sizing, evaluate_position_sizing_from_env, PositionSizingOutcome,
 };
 pub use short_entry_policy::{
-    classify_short_entry_intent, evaluate_short_entry_policy, parse_short_entry_config,
-    ShortEntryConfig, ShortEntryIntent, ShortEntryPolicyDecision,
+    classify_order_intent, classify_short_entry_intent, evaluate_short_entry_policy,
+    order_intent_to_short_entry_intent, parse_short_entry_config, OrderIntent, ShortEntryConfig,
+    ShortEntryIntent, ShortEntryPolicyDecision,
 };
 
 // ---------------------------------------------------------------------------

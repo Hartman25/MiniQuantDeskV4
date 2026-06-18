@@ -278,27 +278,24 @@ pub fn bar_result_to_decisions(
             if delta == 0 {
                 return None; // already at target; no order needed
             }
-            let (side, qty) = if delta > 0 {
-                ("buy".to_string(), delta)
-            } else {
-                // delta < 0: sell direction.
-                //
-                // B5 short-sale guard: the native strategy runtime does not support
-                // short selling.  A sell that would open or extend a short position
-                // is silently dropped here rather than forwarded to the broker.
-                //
-                // Two rejection cases:
-                //   (a) current <= 0 — no long position to sell against (flat or
-                //       already short); any sell would open/deepen a short.
-                //   (b) abs(delta) > current — sell exceeds long holdings; the
-                //       excess would drive the position net-short.
-                //
-                // Fail-closed: return None so the broker never sees the intent.
-                let qty_to_sell = -delta; // positive by construction (delta < 0)
-                if current <= 0 || qty_to_sell > current {
-                    return None;
+            // SHORT-SIDE-INTENT-MODEL-01: classify intent explicitly so the
+            // control plane distinguishes sell-to-close from short-open.
+            // Short-open and sell-beyond-long are blocked fail-closed (B5 backstop).
+            // Call evaluate_short_entry_policy directly for policy diagnostics; see
+            // scenario_short_side_intent_model_01 for integrated proof tests.
+            let intent = crate::capital_policy::classify_order_intent(current, delta);
+            let (side, qty) = match intent {
+                crate::capital_policy::OrderIntent::LongOpen
+                | crate::capital_policy::OrderIntent::BuyToCover
+                | crate::capital_policy::OrderIntent::BuyToFlat
+                | crate::capital_policy::OrderIntent::BuyBeyondShortToLong => {
+                    ("buy".to_string(), delta)
                 }
-                ("sell".to_string(), qty_to_sell)
+                crate::capital_policy::OrderIntent::SellToClose
+                | crate::capital_policy::OrderIntent::SellToFlat => ("sell".to_string(), -delta),
+                crate::capital_policy::OrderIntent::ShortOpen
+                | crate::capital_policy::OrderIntent::SellBeyondLongToShort
+                | crate::capital_policy::OrderIntent::NoOp => return None,
             };
             let decision_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_DNS,
