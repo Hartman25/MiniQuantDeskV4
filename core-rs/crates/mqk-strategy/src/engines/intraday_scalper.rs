@@ -213,6 +213,9 @@ pub fn compute_diagnostics_with_config(
 }
 
 const NAME: &str = "intraday_scalper";
+/// Strategy ID for the short-only variant.  Distinct from `NAME` so both
+/// identities can be registered and selected independently.
+pub const SHORT_NAME: &str = "intraday_short_scalper";
 const VERSION: &str = "0.1.0";
 const TIMEFRAME_SECS: i64 = 300; // 5m
 const LOOKBACK: usize = 5;
@@ -269,6 +272,21 @@ pub fn meta() -> StrategyMeta {
     )
 }
 
+/// Return strategy metadata for the short-only variant.
+///
+/// Use this instead of [`meta`] when registering `"intraday_short_scalper"`
+/// in a [`crate::PluginRegistry`].
+pub fn meta_short() -> StrategyMeta {
+    StrategyMeta::new(
+        SHORT_NAME,
+        VERSION,
+        TIMEFRAME_SECS,
+        "Short-only intraday scalp engine. \
+         Bearish displacement produces a negative target qty; \
+         bullish displacement maps to flat (long direction suppressed).",
+    )
+}
+
 #[derive(Clone, Debug)]
 pub struct IntradayScalperStrategy {
     symbol: String,
@@ -283,6 +301,14 @@ pub struct IntradayScalperStrategy {
     ///
     /// Downstream B5 guard and risk gates remain active regardless of this flag.
     allow_short_signals: bool,
+    /// Strategy identity returned by `spec()`.  Defaults to `NAME`
+    /// ("intraday_scalper"); set to `SHORT_NAME` for the short-only variant.
+    strategy_name: &'static str,
+    /// When `true`, bullish direction is suppressed to flat so this strategy
+    /// only expresses bearish (short) intent.  Requires `allow_short_signals`
+    /// to be `true` to produce negative targets; a stand-alone `is_short_only`
+    /// without `allow_short_signals` has no observable effect.
+    is_short_only: bool,
 }
 
 impl IntradayScalperStrategy {
@@ -317,6 +343,8 @@ impl IntradayScalperStrategy {
             max_target_qty,
             max_notional_usd,
             allow_short_signals: false,
+            strategy_name: NAME,
+            is_short_only: false,
         }
     }
 
@@ -330,6 +358,31 @@ impl IntradayScalperStrategy {
     pub fn short_signals(mut self, enabled: bool) -> Self {
         self.allow_short_signals = enabled;
         self
+    }
+
+    /// Construct the short-only variant of this strategy.
+    ///
+    /// Identity: `SHORT_NAME` (`"intraday_short_scalper"`), distinct from
+    /// `"intraday_scalper"`.
+    ///
+    /// Behaviour:
+    /// - bearish displacement → `-effective_target_qty` (short signal)
+    /// - bullish displacement → `0` (short-only; long direction suppressed)
+    /// - below threshold     → `0` (no signal)
+    ///
+    /// Reads sizing from env vars (`MQK_STRATEGY_TARGET_QTY` etc.) at
+    /// construction time, identical to [`new`].  Downstream B5 guard and
+    /// risk gates remain active; this constructor does not bypass them.
+    pub fn new_short(symbol: impl Into<String>) -> Self {
+        Self {
+            symbol: symbol.into(),
+            target_qty: target_qty_from_env(),
+            max_target_qty: max_target_qty_from_env(),
+            max_notional_usd: max_notional_usd_from_env(),
+            allow_short_signals: true,
+            strategy_name: SHORT_NAME,
+            is_short_only: true,
+        }
     }
 
     /// Returns the raw direction signal: +1 (bullish), 0 (hold), -1 (bearish).
@@ -407,20 +460,29 @@ impl IntradayScalperStrategy {
 
 impl Strategy for IntradayScalperStrategy {
     fn spec(&self) -> StrategySpec {
-        StrategySpec::new(NAME, TIMEFRAME_SECS)
+        StrategySpec::new(self.strategy_name, TIMEFRAME_SECS)
     }
 
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
         let direction = Self::signal_from_recent(&ctx.recent.bars);
+
+        // SHORT-SIDE-PARALLEL-STRATEGY-DRY-RUN-01: short-only mode suppresses
+        // bullish direction (clamp ≤ 0) so this variant only expresses bearish
+        // intent.  Default (is_short_only=false): direction is unmodified.
+        let effective_direction = if self.is_short_only {
+            direction.min(0)
+        } else {
+            direction
+        };
 
         // STRATEGY-EXIT-RULES-01 (default, allow_short_signals=false): clamp direction
         // to [0, 1].  direction=+1 → +target_qty; direction=0/-1 → 0 (go flat).
         // SHORT-SIDE-STRATEGY-GATE-01 (allow_short_signals=true): direction=-1 produces
         // -target_qty instead of 0.  Downstream B5 and risk gates remain active.
         let requested_target = if self.allow_short_signals {
-            direction * self.target_qty
+            effective_direction * self.target_qty
         } else {
-            direction.max(0) * self.target_qty
+            effective_direction.max(0) * self.target_qty
         };
 
         // STRATEGY-POSITION-SIZING-01: apply caps for all non-zero targets.
