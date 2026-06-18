@@ -25,6 +25,4 @@ pub use mqk_execution::{StrategyOutput, TargetPosition};
 
 // STRATEGY-DECISION-OBSERVABILITY-01: re-export diagnostics so daemon can store
 // and surface them without a direct dependency on the engine sub-module.
-pub use engines::{
-    intraday_scalper_compute_diagnostics, IntradayScalperDiagnostics,
-};
+pub use engines::{intraday_scalper_compute_diagnostics, IntradayScalperDiagnostics};

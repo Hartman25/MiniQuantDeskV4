@@ -18,7 +18,11 @@
 //! held, `bar_result_to_decisions` computes `delta = 0 - current < 0`, `qty_to_sell =
 //! current` and the B5 guard passes (selling exactly what is held, not going short).
 //!
-//! This strategy is therefore **long-only**: it enters on bullish displacement and
+//! When `allow_short_signals = true` (opt-in; default `false`), `direction = -1`
+//! produces `target = -effective_target_qty` instead.  Downstream B5 guard and
+//! risk gates remain active; this flag only lets the strategy express intent.
+//!
+//! This strategy is **long-only by default**: it enters on bullish displacement and
 //! exits (closes the long) on bearish or neutral displacement.
 //!
 //! The downstream `bar_result_to_decisions` function computes the *delta*:
@@ -55,6 +59,7 @@ use crate::{
 
 // ── Decision vocabulary (STRATEGY-DECISION-OBSERVABILITY-01) ─────────────────
 pub const DECISION_SIGNAL_LONG: &str = "signal_long";
+pub const DECISION_SIGNAL_SHORT: &str = "short_due_to_negative_direction";
 pub const DECISION_FLAT_NEGATIVE: &str = "flat_due_to_negative_direction";
 pub const DECISION_FLAT_BELOW_THRESHOLD: &str = "flat_below_threshold";
 pub const DECISION_INSUFFICIENT_BARS: &str = "insufficient_bars";
@@ -100,7 +105,23 @@ pub struct IntradayScalperDiagnostics {
 /// Pure function — does not modify strategy state or affect the decision path.
 /// Safe to call on any bar slice; returns `decision = "insufficient_bars"` when
 /// the window is too small rather than panicking.
+///
+/// Equivalent to `compute_diagnostics_with_config(recent, false)`.
 pub fn compute_diagnostics(recent: &[BarStub]) -> IntradayScalperDiagnostics {
+    compute_diagnostics_with_config(recent, false)
+}
+
+/// Compute a read-only diagnostic snapshot from a bar window, with explicit
+/// short-signal configuration.
+///
+/// When `allow_short_signals = true`, bearish displacement returns
+/// `decision = DECISION_SIGNAL_SHORT` (`"short_due_to_negative_direction"`)
+/// instead of `DECISION_FLAT_NEGATIVE`.  All other logic is identical to
+/// [`compute_diagnostics`].
+pub fn compute_diagnostics_with_config(
+    recent: &[BarStub],
+    allow_short_signals: bool,
+) -> IntradayScalperDiagnostics {
     let latest = recent.last();
     let latest_bar_ts = latest.map(|b| b.end_ts);
     let latest_close_micros = latest.map(|b| b.close_micros);
@@ -154,11 +175,19 @@ pub fn compute_diagnostics(recent: &[BarStub]) -> IntradayScalperDiagnostics {
     let (raw_direction, decision, reason) = if bps_i128 >= MICRO_MOVE_BPS as i128 {
         (1i64, DECISION_SIGNAL_LONG, "move_bps >= threshold_bps")
     } else if bps_i128 <= -(MICRO_MOVE_BPS as i128) {
-        (
-            -1i64,
-            DECISION_FLAT_NEGATIVE,
-            "bearish displacement; long-only strategy maps to flat",
-        )
+        if allow_short_signals {
+            (
+                -1i64,
+                DECISION_SIGNAL_SHORT,
+                "bearish displacement; short signals enabled",
+            )
+        } else {
+            (
+                -1i64,
+                DECISION_FLAT_NEGATIVE,
+                "bearish displacement; long-only strategy maps to flat",
+            )
+        }
     } else {
         (
             0i64,
@@ -249,6 +278,11 @@ pub struct IntradayScalperStrategy {
     max_target_qty: Option<i64>,
     /// Hard cap on position notional in whole USD (None = no cap).
     max_notional_usd: Option<i64>,
+    /// When `true`, bearish displacement (direction=-1) produces a negative
+    /// target qty instead of 0.  Default: `false` (long-only).
+    ///
+    /// Downstream B5 guard and risk gates remain active regardless of this flag.
+    allow_short_signals: bool,
 }
 
 impl IntradayScalperStrategy {
@@ -282,7 +316,20 @@ impl IntradayScalperStrategy {
             target_qty: target_qty.max(1),
             max_target_qty,
             max_notional_usd,
+            allow_short_signals: false,
         }
+    }
+
+    /// Enable or disable short signal generation for this strategy instance.
+    ///
+    /// When `enabled = true`, bearish displacement (direction=-1) produces a
+    /// negative target qty instead of 0.  Default: `false` (long-only).
+    ///
+    /// Short signals still pass through the daemon's B5 guard and short-entry
+    /// policy gates; this flag does not bypass those downstream controls.
+    pub fn short_signals(mut self, enabled: bool) -> Self {
+        self.allow_short_signals = enabled;
+        self
     }
 
     /// Returns the raw direction signal: +1 (bullish), 0 (hold), -1 (bearish).
@@ -364,19 +411,28 @@ impl Strategy for IntradayScalperStrategy {
     }
 
     fn on_bar(&mut self, ctx: &StrategyContext) -> StrategyOutput {
-        // STRATEGY-EXIT-RULES-01: clamp direction to [0, 1] before multiplying.
-        // direction=+1 → target=+target_qty (enter/hold long).
-        // direction= 0 → target=0 (go flat; close any long on neutral bar).
-        // direction=-1 → target=0 (go flat; exit long on bearish bar, not net-short).
         let direction = Self::signal_from_recent(&ctx.recent.bars);
-        let requested_target = direction.max(0) * self.target_qty;
 
-        // STRATEGY-POSITION-SIZING-01: apply caps only for bullish (positive) targets.
-        // Bearish/neutral exits (target=0) are never capped — they must always reach 0.
+        // STRATEGY-EXIT-RULES-01 (default, allow_short_signals=false): clamp direction
+        // to [0, 1].  direction=+1 → +target_qty; direction=0/-1 → 0 (go flat).
+        // SHORT-SIDE-STRATEGY-GATE-01 (allow_short_signals=true): direction=-1 produces
+        // -target_qty instead of 0.  Downstream B5 and risk gates remain active.
+        let requested_target = if self.allow_short_signals {
+            direction * self.target_qty
+        } else {
+            direction.max(0) * self.target_qty
+        };
+
+        // STRATEGY-POSITION-SIZING-01: apply caps for all non-zero targets.
+        // Neutral exits (0) bypass caps. Short signals apply caps to magnitude then
+        // restore the sign — same sizing rules as the long side.
         let (effective_target, capped_by) = if requested_target > 0 {
             self.apply_caps(requested_target, &ctx.recent.bars)
+        } else if requested_target < 0 {
+            let (capped_mag, cap_label) = self.apply_caps(-requested_target, &ctx.recent.bars);
+            (-capped_mag, cap_label)
         } else {
-            (requested_target, "none")
+            (0, "none")
         };
 
         // Sizing diagnostic fields are surfaced via the return value.
@@ -414,16 +470,28 @@ mod tests {
             BarStub::new(1004, true, last_close, 1),
         ];
         let d = compute_diagnostics(&bars);
-        assert_eq!(d.decision, DECISION_SIGNAL_LONG, "OBS-D01: decision=signal_long");
+        assert_eq!(
+            d.decision, DECISION_SIGNAL_LONG,
+            "OBS-D01: decision=signal_long"
+        );
         assert_eq!(d.raw_direction, 1, "OBS-D01: raw_direction=+1");
         let move_bps = d.move_bps.expect("OBS-D01: move_bps must be Some");
         let abs_move_bps = d.abs_move_bps.expect("OBS-D01: abs_move_bps must be Some");
         assert!(move_bps >= MICRO_MOVE_BPS, "OBS-D01: move_bps >= threshold");
-        assert_eq!(abs_move_bps, move_bps, "OBS-D01: positive displacement, abs==move");
+        assert_eq!(
+            abs_move_bps, move_bps,
+            "OBS-D01: positive displacement, abs==move"
+        );
         let gap = d.gap_to_threshold_bps.expect("OBS-D01: gap must be Some");
         assert!(gap <= 0, "OBS-D01: gap <= 0 means threshold was met");
-        assert_eq!(d.threshold_bps, MICRO_MOVE_BPS, "OBS-D01: threshold matches constant");
-        assert_eq!(d.lookback_bars, LOOKBACK, "OBS-D01: lookback_bars matches constant");
+        assert_eq!(
+            d.threshold_bps, MICRO_MOVE_BPS,
+            "OBS-D01: threshold matches constant"
+        );
+        assert_eq!(
+            d.lookback_bars, LOOKBACK,
+            "OBS-D01: lookback_bars matches constant"
+        );
     }
 
     /// OBS-D02: below-threshold move → decision=flat_below_threshold, gap positive.
@@ -459,7 +527,7 @@ mod tests {
     fn obs_d03_amd_pullback_scenario_flat_below_threshold() {
         // AMD: lookback $523.57, latest $530.64 at 15:35; then pulled back to +15 bps
         let lookback_micros = 523_570_000i64; // $523.57
-        // +15 bps on $523.57 ≈ $524.35
+                                              // +15 bps on $523.57 ≈ $524.35
         let latest_micros = 524_354_550i64; // ~$524.35 ≈ +15 bps
         let bars: Vec<BarStub> = vec![
             BarStub::new(1000, true, lookback_micros, 1),
@@ -534,7 +602,10 @@ mod tests {
     #[test]
     fn obs_d06_empty_bars_no_panic() {
         let d = compute_diagnostics(&[]);
-        assert_eq!(d.decision, DECISION_INSUFFICIENT_BARS, "OBS-D06: empty → no panic");
+        assert_eq!(
+            d.decision, DECISION_INSUFFICIENT_BARS,
+            "OBS-D06: empty → no panic"
+        );
         assert!(d.latest_bar_ts.is_none(), "OBS-D06: latest_bar_ts is None");
     }
 
@@ -570,12 +641,18 @@ mod tests {
             BarStub::new(1004, true, latest_micros, 1),
         ];
         let d = compute_diagnostics(&bars);
-        assert_eq!(d.decision, DECISION_SIGNAL_LONG, "OBS-D08: AMD 135bps → signal_long");
+        assert_eq!(
+            d.decision, DECISION_SIGNAL_LONG,
+            "OBS-D08: AMD 135bps → signal_long"
+        );
         let move_bps = d.move_bps.unwrap();
         // (530_640_000 - 523_570_000) * 10_000 / 523_570_000 ≈ 135
         assert!((130..=140).contains(&move_bps), "OBS-D08: move_bps ~135");
         let gap = d.gap_to_threshold_bps.unwrap();
-        assert!(gap < 0, "OBS-D08: gap < 0 (threshold exceeded by large margin)");
+        assert!(
+            gap < 0,
+            "OBS-D08: gap < 0 (threshold exceeded by large margin)"
+        );
     }
 
     fn bar(close_micros: i64, is_complete: bool) -> BarStub {
@@ -954,5 +1031,160 @@ mod tests {
             "SS-05: zero → default 1 (filtered)"
         );
         std::env::remove_var(TARGET_QTY_ENV);
+    }
+
+    // ── SHORT-SIDE-STRATEGY-GATE-01: short signal gate tests ─────────────────────
+
+    /// SSG01: Default constructor has allow_short_signals=false (long-only by default).
+    #[test]
+    fn ssg01_default_is_long_only() {
+        let base = 200_000_000i64;
+        let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1);
+        let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
+        assert_eq!(
+            out.targets[0].qty, 0,
+            "SSG01: default allow_short_signals=false → bearish maps to 0"
+        );
+    }
+
+    /// SSG02: Bearish displacement with default config returns target qty 0 regardless of sizing.
+    #[test]
+    fn ssg02_bearish_default_config_returns_zero() {
+        let base = 200_000_000i64;
+        let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 3);
+        let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
+        assert_eq!(
+            out.targets[0].qty, 0,
+            "SSG02: target_qty=3, bearish, default → target=0 (long-only)"
+        );
+    }
+
+    /// SSG03: ss04 continuity — existing bearish-maps-to-flat behavior is unaffected.
+    #[test]
+    fn ssg03_ss04_continuity_bearish_long_only_flat() {
+        let base = 200_000_000i64;
+        let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1);
+        let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
+        assert_eq!(
+            out.targets[0].qty, 0,
+            "SSG03: ss04 continuity — bearish → target=0 with default (long-only)"
+        );
+    }
+
+    /// SSG04: Bearish displacement with short signals enabled returns negative target qty.
+    #[test]
+    fn ssg04_bearish_short_enabled_returns_negative_target() {
+        let base = 200_000_000i64;
+        let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1).short_signals(true);
+        let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
+        assert_eq!(
+            out.targets[0].qty, -1,
+            "SSG04: bearish + allow_short_signals=true → target=-1"
+        );
+    }
+
+    /// SSG05: Bullish displacement with short signals enabled still returns positive target qty.
+    #[test]
+    fn ssg05_bullish_short_enabled_unchanged() {
+        let base = 200_000_000i64;
+        let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 3).short_signals(true);
+        let out = s.on_bar(&ctx_with_bars(bullish_bars(base)));
+        assert_eq!(
+            out.targets[0].qty, 3,
+            "SSG05: bullish + short_signals=true → target=3 (positive; unchanged)"
+        );
+    }
+
+    /// SSG06: Below-threshold move with short signals enabled still returns zero.
+    #[test]
+    fn ssg06_below_threshold_short_enabled_returns_zero() {
+        let base = 200_000_000i64;
+        let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 1).short_signals(true);
+        let out = s.on_bar(&ctx_with_bars(flat_bars(base)));
+        assert_eq!(
+            out.targets[0].qty, 0,
+            "SSG06: below-threshold + short_signals=true → target=0 (no signal)"
+        );
+    }
+
+    /// SSG07: Short target qty magnitude matches target_qty sizing (target_qty=5 → -5).
+    #[test]
+    fn ssg07_short_target_magnitude_matches_sizing() {
+        let base = 200_000_000i64;
+        let mut s = IntradayScalperStrategy::with_target_qty("AAPL", 5).short_signals(true);
+        let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
+        assert_eq!(
+            out.targets[0].qty, -5,
+            "SSG07: target_qty=5, bearish + short_signals=true → target=-5"
+        );
+    }
+
+    /// SSG08: Diagnostics (disabled) — bearish returns flat_due_to_negative_direction.
+    #[test]
+    fn ssg08_diagnostics_long_only_returns_flat_negative() {
+        let base = 200_000_000i64;
+        let d = compute_diagnostics_with_config(&bearish_bars(base), false);
+        assert_eq!(
+            d.decision, DECISION_FLAT_NEGATIVE,
+            "SSG08: disabled → flat_due_to_negative_direction"
+        );
+        assert_eq!(
+            d.reason, "bearish displacement; long-only strategy maps to flat",
+            "SSG08: reason text matches long-only label"
+        );
+    }
+
+    /// SSG09: Diagnostics (enabled) — bearish returns short_due_to_negative_direction.
+    #[test]
+    fn ssg09_diagnostics_short_enabled_returns_signal_short() {
+        let base = 200_000_000i64;
+        let d = compute_diagnostics_with_config(&bearish_bars(base), true);
+        assert_eq!(
+            d.decision, DECISION_SIGNAL_SHORT,
+            "SSG09: enabled → short_due_to_negative_direction"
+        );
+        assert_eq!(
+            d.reason, "bearish displacement; short signals enabled",
+            "SSG09: reason text matches short-enabled label"
+        );
+    }
+
+    /// SSG10: Caps are applied to short signal magnitude (same rules as long side).
+    /// target_qty=10, max_qty_cap=3, bearish + short → target=-3.
+    #[test]
+    fn ssg10_caps_applied_to_short_signal_magnitude() {
+        let base = 200_000_000i64;
+        let mut s =
+            IntradayScalperStrategy::with_caps("AAPL", 10, Some(3), None).short_signals(true);
+        let out = s.on_bar(&ctx_with_bars(bearish_bars(base)));
+        assert_eq!(
+            out.targets[0].qty, -3,
+            "SSG10: target_qty=10 capped at 3, bearish + short_signals → target=-3"
+        );
+    }
+
+    /// SSG11: B5 logic would block a short-from-flat target emitted by allow_short_signals=true.
+    /// Mirrors the classification in decision.rs.  Full daemon integration is proven by
+    /// scenario_native_strategy_b5_short_guard::b5_s01_sell_from_flat_is_blocked.
+    #[test]
+    fn ssg11_b5_logic_blocks_short_from_flat_target() {
+        let base = 200_000_000i64;
+        let mut strategy = IntradayScalperStrategy::with_target_qty("AAPL", 1).short_signals(true);
+        let out = strategy.on_bar(&ctx_with_bars(bearish_bars(base)));
+
+        assert_eq!(
+            out.targets[0].qty, -1,
+            "SSG11: strategy emits target=-1 (short signal expressed)"
+        );
+
+        // B5 guard in decision.rs: delta < 0 AND (current <= 0 OR abs(delta) > current)
+        // → ShortOpen intent → filtered (no decision produced).
+        let current = 0i64; // flat position
+        let delta = out.targets[0].qty - current; // -1
+        let is_b5_blocked = delta < 0 && current <= 0;
+        assert!(
+            is_b5_blocked,
+            "SSG11: delta={delta}, current={current} → B5 classifies ShortOpen and blocks"
+        );
     }
 }
