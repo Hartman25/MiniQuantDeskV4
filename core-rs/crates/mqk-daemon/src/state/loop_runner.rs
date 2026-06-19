@@ -32,7 +32,10 @@ use super::types::{
 };
 use crate::notify::CriticalAlertPayload;
 
-use super::{AppState, PerSymbolTargetState, DEADMAN_TTL_SECONDS, EXECUTION_LOOP_INTERVAL};
+use super::{
+    dry_run_strategy_ids_from_env, evaluate_dry_run_strategies, AppState, PerSymbolTargetState,
+    DEADMAN_TTL_SECONDS, EXECUTION_LOOP_INTERVAL, STRATEGY_CONTEXT_LOAD_LIMIT,
+};
 
 // ---------------------------------------------------------------------------
 // spawn_execution_loop
@@ -66,6 +69,11 @@ pub(super) fn spawn_execution_loop(
         super::build_multi_symbol_runtime_config_from_env()
             .map(|cfg| cfg.symbols)
             .unwrap_or_default();
+
+    // MULTI-STRATEGY-RUNTIME-DRY-RUN-01: one-time env read, mirroring
+    // `multi_symbol_assignments` above. Empty unless MQK_DRY_RUN_STRATEGY_IDS
+    // is explicitly set — default-off, no behavior change when absent.
+    let dry_run_strategy_ids: Vec<String> = dry_run_strategy_ids_from_env();
 
     let join_handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);
@@ -891,6 +899,88 @@ pub(super) fn spawn_execution_loop(
                                     });
                                 }
                             }
+
+                            // MULTI-STRATEGY-RUNTIME-DRY-RUN-01: optional dry-run secondary
+                            // strategy diagnostics. Default-off (dry_run_strategy_ids empty
+                            // unless MQK_DRY_RUN_STRATEGY_IDS is set) — no-op in that case.
+                            //
+                            // Rides along with the primary dispatch for this assignment only:
+                            // re-fetches the same md_bars window the primary strategy was just
+                            // evaluated against (read-only; same call shape as
+                            // `dispatch_native_strategy_for_symbol_with_loaded_bars`). The
+                            // evaluator (`evaluate_dry_run_strategies`) takes no DB/AppState/
+                            // broker handle, so it cannot submit a decision or write an outbox
+                            // row — see `state/dry_run_strategy.rs` for the structural proof.
+                            if !dry_run_strategy_ids.is_empty() {
+                                if let Some(ref pool) = db {
+                                    match mqk_db::fetch_recent_completed_bars_for_strategy(
+                                        pool,
+                                        &assignment.symbol,
+                                        &assignment.timeframe,
+                                        STRATEGY_CONTEXT_LOAD_LIMIT,
+                                    )
+                                    .await
+                                    {
+                                        Ok(db_bars) if !db_bars.is_empty() => {
+                                            let stubs: Vec<mqk_strategy::BarStub> = db_bars
+                                                .iter()
+                                                .map(|b| {
+                                                    mqk_strategy::BarStub::new(
+                                                        b.end_ts,
+                                                        b.is_complete,
+                                                        b.close_micros,
+                                                        b.volume,
+                                                    )
+                                                })
+                                                .collect();
+                                            let window = mqk_strategy::RecentBarsWindow::new(
+                                                stubs.len().max(1),
+                                                stubs,
+                                            );
+                                            let dry_run_current = current_positions
+                                                .get(&assignment.symbol)
+                                                .copied()
+                                                .unwrap_or(0);
+                                            for diag in evaluate_dry_run_strategies(
+                                                &dry_run_strategy_ids,
+                                                &assignment.symbol,
+                                                0,
+                                                &window,
+                                                dry_run_current,
+                                            ) {
+                                                tracing::info!(
+                                                    run_id = %run_id,
+                                                    symbol = %diag.symbol,
+                                                    strategy_id = %diag.strategy_id,
+                                                    timeframe_secs = diag.timeframe_secs,
+                                                    current_qty = diag.current_qty,
+                                                    target_qty = diag.target_qty,
+                                                    delta_qty = diag.delta_qty,
+                                                    decision = diag.decision,
+                                                    would_classify_as = diag.would_classify_as,
+                                                    would_b5_block = diag.would_b5_block,
+                                                    submitted = diag.submitted,
+                                                    reason = %diag.reason,
+                                                    "multi_strategy_dry_run_diagnostic"
+                                                );
+                                            }
+                                        }
+                                        Ok(_) => {
+                                            // No completed bars yet for this symbol/timeframe;
+                                            // nothing to evaluate this tick.
+                                        }
+                                        Err(err) => {
+                                            tracing::warn!(
+                                                run_id = %run_id,
+                                                symbol = %assignment.symbol,
+                                                error = %err,
+                                                "multi_strategy_dry_run_bar_load_failed"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
                             let decisions = crate::decision::bar_result_to_decisions(
                                 &bar_result,
                                 run_id,

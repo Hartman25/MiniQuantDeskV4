@@ -8,6 +8,7 @@ mod alpaca_ws_transport;
 mod autonomous_bar_ticker;
 mod broker;
 mod deadman;
+mod dry_run_strategy;
 mod env;
 mod lifecycle;
 mod loop_runner;
@@ -52,6 +53,10 @@ use broker::{
     build_ws_gap_fill_fetcher_from_env,
 };
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
+pub use dry_run_strategy::{
+    dry_run_strategy_ids_from_env, evaluate_dry_run_strategies, evaluate_dry_run_strategy,
+    DryRunStrategyDiagnostic, DRY_RUN_STRATEGY_IDS_ENV,
+};
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
 pub use loop_runner::spawn_reconcile_tick;
 pub use market_calendar::{
