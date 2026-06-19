@@ -8,7 +8,7 @@ import type { ExecutionOrderRow, ExecutionOutboxSurface, ExecutionSummary, FillQ
 import type { ArtifactRegistrySummary, ConfigFingerprintSummary, MarketDataQualitySummary, RuntimeLeadershipSummary, ServiceTopology, SessionStateSummary, SystemMetrics, TransportSummary } from "./infra";
 import type { AuditActionRow, AlertTriageRow, FeedEvent, IncidentCase, OperatorActionDefinition, OperatorAlert, OperatorTimelineEvent, PaperJournalAdmissionRow, PaperJournalTruthState, ReplaceCancelChainRow } from "./ops";
 import type { FillRow, OpenOrderRow, PortfolioSummary, PositionRow, ReconcileMismatchRow, RiskDenialRow, RiskSummary } from "./portfolio";
-import type { ConfigDiffRow, MultiSymbolDispatchSummarySurface, StrategyDecisionDiagnostics, StrategyRow, StrategySuppressionRow } from "./strategy";
+import type { ConfigDiffRow, DryRunStrategyStatusSurface, MultiSymbolDispatchSummarySurface, StrategyDecisionDiagnostics, StrategyRow, StrategySuppressionRow } from "./strategy";
 
 export interface SystemStatus {
   environment: EnvironmentMode;
@@ -296,6 +296,12 @@ export interface SystemModel {
   admissionCheck: AdmissionCheckSurface;
   /** MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Multi-symbol dispatch summary surface (read-only). */
   multiSymbolDispatchSummary: MultiSymbolDispatchSummarySurface;
+  /**
+   * MULTI-STRATEGY-DRY-RUN-GUI-01: Multi-strategy dry-run diagnostics surface
+   * (read-only). Dry-run strategies never submit orders — `submitted` is
+   * always `false` on every row. Source: GET /api/v1/strategy/dry-run/status.
+   */
+  dryRunStrategyStatus: DryRunStrategyStatusSurface;
   /**
    * STRATEGY-DECISION-OBSERVABILITY-01: Read-only decision diagnostics from the most
    * recent native strategy bar dispatch. Null when not paper+alpaca or no bar dispatched.

@@ -118,3 +118,60 @@ export interface MultiSymbolDispatchSummarySurface {
   configured_symbol_count: number;
   per_symbol: PerSymbolDispatchRow[];
 }
+
+/**
+ * MULTI-STRATEGY-DRY-RUN-GUI-01: Read-only dry-run secondary-strategy
+ * diagnostic row, surfaced by GET /api/v1/strategy/dry-run/status.
+ *
+ * Mirrors DryRunStrategyDiagnosticRow in
+ * core-rs/crates/mqk-daemon/src/api_types.rs. `submitted` is always `false`
+ * — dry-run strategies never reach the outbox or broker (see
+ * crates/mqk-daemon/src/state/dry_run_strategy.rs for the structural proof).
+ */
+export interface DryRunStrategyDiagnosticRow {
+  strategy_id: string;
+  symbol: string;
+  timeframe_secs: number;
+  current_qty: number;
+  target_qty: number;
+  delta_qty: number;
+  /** One of: "already_at_target" | "b5_short_sale_guard" | "order_would_be_submitted" | "evaluation_unavailable". */
+  decision: string;
+  reason: string;
+  /** Stable label for the classified order intent (e.g. "ShortOpen", "LongOpen", "SellToClose", "NoOp"), or "unavailable". */
+  would_classify_as: string;
+  /** `true` when the B5 short-sale guard would drop this intent before it reaches the outbox. */
+  would_b5_block: boolean;
+  /** `true` when the fail-closed short-entry policy would also block this intent. */
+  would_policy_block: boolean;
+  /** Machine-readable short-entry policy block reason (e.g. "short_entries_disabled"). `null` when would_policy_block is false. */
+  policy_reason_code: string | null;
+  /** Always `false`. Dry-run strategies never submit orders. */
+  submitted: boolean;
+  evaluated_at_utc: string;
+}
+
+/**
+ * "not_configured" and "active" are returned by the daemon route itself.
+ * "unavailable" is a GUI-only sentinel used when the route cannot be
+ * reached at all, or returns an unrecognized truth_state (fail-soft).
+ */
+export type DryRunStrategyStatusTruthState =
+  | "not_configured"
+  | "active"
+  | "unavailable";
+
+/**
+ * MULTI-STRATEGY-DRY-RUN-GUI-01: Read-only multi-strategy dry-run
+ * diagnostics surface for the Strategy screen.
+ *
+ * Source: GET /api/v1/strategy/dry-run/status
+ * (DryRunStrategyStatusResponse, MULTI-STRATEGY-DRY-RUN-STATUS-01, already
+ * CLOSED). Visibility only — `submitted` is always `false` on every row.
+ */
+export interface DryRunStrategyStatusSurface {
+  truth_state: DryRunStrategyStatusTruthState;
+  backend: string;
+  configured_dry_run_strategy_ids: string[];
+  dry_run_strategy_diagnostics: DryRunStrategyDiagnosticRow[];
+}

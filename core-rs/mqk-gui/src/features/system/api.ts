@@ -24,6 +24,7 @@ import {
   mapActiveAlertsResponse,
   mapAutonomousPaperStatusWrapper,
   mapDaemonCatalog,
+  mapDryRunStrategyStatusWrapper,
   mapEventsFeedResponse,
   mapExecutionOutboxWrapper,
   mapFillQualityWrapper,
@@ -48,6 +49,7 @@ import {
   type DaemonArtifactsWrapper,
   type DaemonOperatorTimelineWrapper,
   type DaemonOrderTimelineResponse,
+  type DryRunStrategyStatusWrapper,
   type EventsFeedWrapper,
   type ExecutionOutboxWrapper,
   type FillQualityWrapper,
@@ -171,7 +173,7 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   // OBS-SESSION-DISCORD-01: autonomous/readiness is fetched in parallel with the main
   // probes batch for session-window diagnostics (now_utc, session_start_utc, etc.).
   // Kept outside the probes array so it does not contribute to dataSource endpoint counts.
-  const [probes, autonomousReadinessR, multiSymbolDispatchSummaryR] = await Promise.all([
+  const [probes, autonomousReadinessR, multiSymbolDispatchSummaryR, dryRunStrategyStatusR] = await Promise.all([
     Promise.all([
     fetchJsonCandidates<PreflightStatus>(["/api/v1/system/preflight"]),
     fetchJsonCandidates<ExecutionSummary>(["/api/v1/execution/summary"]),
@@ -501,6 +503,12 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     // array so a failure here cannot contribute to dataSource/missingEndpoints
     // or hard-block any panel — fail-soft, read-only operator visibility.
     fetchJsonCandidate<MultiSymbolDispatchSummaryWrapper>("/api/v1/strategy/multi-symbol-dispatch-summary"),
+    // MULTI-STRATEGY-DRY-RUN-GUI-01: Multi-strategy dry-run diagnostics
+    // (MULTI-STRATEGY-DRY-RUN-STATUS-01, already CLOSED). Fetched as a sibling
+    // outside the probes array — fail-soft, read-only operator visibility.
+    // Dry-run strategies never submit orders; this route cannot contribute
+    // to any hard-block gate.
+    fetchJsonCandidate<DryRunStrategyStatusWrapper>("/api/v1/strategy/dry-run/status"),
   ]);
 
   const [
@@ -766,6 +774,15 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const multiSymbolDispatchSummary = mapMultiSymbolDispatchSummaryWrapper(
     multiSymbolDispatchSummaryR.ok && multiSymbolDispatchSummaryR.data != null
       ? (multiSymbolDispatchSummaryR.data as MultiSymbolDispatchSummaryWrapper)
+      : null,
+  );
+
+  // MULTI-STRATEGY-DRY-RUN-GUI-01: Multi-strategy dry-run diagnostics —
+  // read-only secondary-strategy evaluation visibility. submitted is always
+  // false on every row; this surface cannot drive order submission.
+  const dryRunStrategyStatus = mapDryRunStrategyStatusWrapper(
+    dryRunStrategyStatusR.ok && dryRunStrategyStatusR.data != null
+      ? (dryRunStrategyStatusR.data as DryRunStrategyStatusWrapper)
       : null,
   );
 
@@ -1050,6 +1067,9 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     // MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Read-only multi-symbol dispatch
     // summary truth surface. Visibility only — no order controls derived here.
     multiSymbolDispatchSummary,
+    // MULTI-STRATEGY-DRY-RUN-GUI-01: Read-only multi-strategy dry-run
+    // diagnostics surface. Visibility only — no order controls derived here.
+    dryRunStrategyStatus,
     // STRATEGY-DECISION-OBSERVABILITY-01: read-only decision diagnostics.
     strategyDecisionDiagnostics,
     autonomousBarTickCount,

@@ -16,6 +16,8 @@ import type {
   AutonomousPaperStatusSurface,
   ConfigDiffRow,
   DataSourceDetail,
+  DryRunStrategyDiagnosticRow,
+  DryRunStrategyStatusSurface,
   ExecutionOrderRow,
   ExecutionOutboxSurface,
   ExecutionSummary,
@@ -1112,6 +1114,58 @@ export function mapMultiSymbolDispatchSummaryWrapper(
     runtime_execution_mode: wrapper.runtime_execution_mode,
     configured_symbol_count: wrapper.configured_symbol_count,
     per_symbol: wrapper.per_symbol ?? [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// MULTI-STRATEGY-DRY-RUN-GUI-01: Dry-run strategy status wrapper → surface
+//
+// GET /api/v1/strategy/dry-run/status (MULTI-STRATEGY-DRY-RUN-STATUS-01,
+// already CLOSED). The daemon route always returns HTTP 200 with an explicit
+// truth_state of "not_configured" or "active". "unavailable" is a GUI-only
+// sentinel for when the route cannot be reached or returns an unrecognized
+// truth_state — empty diagnostics must never be displayed as if they were an
+// authoritative empty snapshot.
+//
+// Read-only visibility surface: dry-run (secondary) strategies never reach
+// the outbox or broker — see crates/mqk-daemon/src/state/dry_run_strategy.rs
+// for the structural proof. `submitted` is always `false` on every row.
+// ---------------------------------------------------------------------------
+
+export interface DryRunStrategyStatusWrapper {
+  canonical_route: string;
+  backend: string;
+  truth_state: string;
+  configured_dry_run_strategy_ids: string[];
+  dry_run_strategy_diagnostics: DryRunStrategyDiagnosticRow[];
+}
+
+const DRY_RUN_STRATEGY_STATUS_VALID_TRUTH_STATES = new Set(["not_configured", "active"]);
+
+const UNAVAILABLE_DRY_RUN_STRATEGY_STATUS: DryRunStrategyStatusSurface = {
+  truth_state: "unavailable",
+  backend: "unknown",
+  configured_dry_run_strategy_ids: [],
+  dry_run_strategy_diagnostics: [],
+};
+
+// Read-only mapper: preserves the daemon's truth_state verbatim ("not_configured"
+// | "active"). Any other shape (probe failure, structurally invalid body,
+// unrecognized truth_state) maps to the explicit "unavailable" sentinel.
+export function mapDryRunStrategyStatusWrapper(
+  wrapper: DryRunStrategyStatusWrapper | null | undefined,
+): DryRunStrategyStatusSurface {
+  if (wrapper == null || typeof wrapper.truth_state !== "string") {
+    return UNAVAILABLE_DRY_RUN_STRATEGY_STATUS;
+  }
+  if (!DRY_RUN_STRATEGY_STATUS_VALID_TRUTH_STATES.has(wrapper.truth_state)) {
+    return UNAVAILABLE_DRY_RUN_STRATEGY_STATUS;
+  }
+  return {
+    truth_state: wrapper.truth_state as DryRunStrategyStatusSurface["truth_state"],
+    backend: wrapper.backend,
+    configured_dry_run_strategy_ids: wrapper.configured_dry_run_strategy_ids ?? [],
+    dry_run_strategy_diagnostics: wrapper.dry_run_strategy_diagnostics ?? [],
   };
 }
 

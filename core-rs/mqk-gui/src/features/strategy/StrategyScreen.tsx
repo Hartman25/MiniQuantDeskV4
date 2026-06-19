@@ -7,6 +7,7 @@ import { panelTruthRenderState } from "../system/truthRendering";
 import type {
   AdmissionCheckSurface,
   AutonomousPaperStatusSurface,
+  DryRunStrategyStatusSurface,
   MultiSymbolDispatchSummarySurface,
   StrategyDecisionDiagnostics,
   SystemModel,
@@ -295,6 +296,18 @@ export function StrategyScreen({ model }: { model: SystemModel }) {
       >
         <MultiSymbolDispatchSummaryPanel summary={model.multiSymbolDispatchSummary} />
       </Panel>
+
+      {/* MULTI-STRATEGY-DRY-RUN-GUI-01: Multi-strategy dry-run diagnostics —
+          read-only secondary-strategy evaluation visibility. Dry-run strategies
+          never reach the outbox or broker: submitted is always false on every
+          row. No order submission, no live shorting, no dispatch changes are
+          possible from this panel. */}
+      <Panel
+        title="Multi-strategy dry-run diagnostics"
+        subtitle="Read-only secondary-strategy evaluation. DRY RUN ONLY — submitted=false, no order submission. Source: GET /api/v1/strategy/dry-run/status"
+      >
+        <DryRunStrategyDiagnosticsPanel status={model.dryRunStrategyStatus} />
+      </Panel>
     </div>
   );
 }
@@ -555,6 +568,109 @@ function MultiSymbolDispatchSummaryPanel({ summary }: { summary: MultiSymbolDisp
             },
           ]}
         />
+      )}
+    </>
+  );
+}
+
+// MULTI-STRATEGY-DRY-RUN-GUI-01: Read-only render of the multi-strategy
+// dry-run diagnostics truth surface. submitted is always false on every row —
+// dry-run (secondary) strategies never reach the outbox or broker (see
+// crates/mqk-daemon/src/state/dry_run_strategy.rs for the structural proof).
+// This panel contains no order submit/cancel/replace controls and cannot
+// enable short-side or secondary-strategy order submission.
+function dryRunDecisionTone(decision: string): "warn" | "neutral" {
+  if (decision === "b5_short_sale_guard" || decision === "evaluation_unavailable") return "warn";
+  return "neutral";
+}
+
+function DryRunStrategyDiagnosticsPanel({ status }: { status: DryRunStrategyStatusSurface }) {
+  if (status.truth_state === "unavailable") {
+    return (
+      <div className="unavailable-notice">
+        Dry-run strategy diagnostics are currently unavailable — backend truth could not be retrieved.
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="metric-list">
+        <div><span>Truth state</span><strong>{status.truth_state}</strong></div>
+        <div><span>Backend</span><strong>{status.backend}</strong></div>
+        <div>
+          <span>Configured dry-run strategy ids</span>
+          <strong>{status.configured_dry_run_strategy_ids.length > 0 ? status.configured_dry_run_strategy_ids.join(", ") : "—"}</strong>
+        </div>
+      </div>
+
+      {status.truth_state === "not_configured" || status.dry_run_strategy_diagnostics.length === 0 ? (
+        <div className="empty-state">
+          No dry-run strategies configured. Set MQK_DRY_RUN_STRATEGY_IDS to enable diagnostics.
+        </div>
+      ) : (
+        <>
+          <p className="panel-notice panel-notice-warn">
+            DRY RUN ONLY — submitted=false for every row below. No order submission, no broker calls. These
+            secondary strategies cannot reach the outbox and cannot place an order.
+          </p>
+          <DataTable
+            rows={status.dry_run_strategy_diagnostics}
+            rowKey={(row) => `${row.strategy_id}:${row.symbol}:${row.evaluated_at_utc}`}
+            columns={[
+              { key: "strategy", title: "Strategy", render: (row) => row.strategy_id },
+              { key: "symbol", title: "Symbol", render: (row) => row.symbol },
+              { key: "timeframe", title: "Timeframe (s)", render: (row) => row.timeframe_secs },
+              { key: "current_qty", title: "Current Qty", render: (row) => row.current_qty },
+              { key: "target_qty", title: "Target Qty", render: (row) => row.target_qty },
+              { key: "delta_qty", title: "Delta Qty", render: (row) => row.delta_qty },
+              {
+                key: "decision",
+                title: "Decision",
+                render: (row) => (
+                  <strong className={dryRunDecisionTone(row.decision) === "warn" ? "val-warn" : undefined}>
+                    {row.decision}
+                  </strong>
+                ),
+              },
+              { key: "reason", title: "Reason", render: (row) => row.reason },
+              { key: "would_classify_as", title: "Would Classify As", render: (row) => row.would_classify_as },
+              {
+                key: "would_b5_block",
+                title: "B5 Block",
+                render: (row) => (
+                  <strong className={row.would_b5_block ? "val-warn" : "val-muted"}>
+                    {row.would_b5_block ? "true" : "false"}
+                  </strong>
+                ),
+              },
+              {
+                key: "would_policy_block",
+                title: "Policy Block",
+                render: (row) => (
+                  <strong className={row.would_policy_block ? "val-warn" : "val-muted"}>
+                    {row.would_policy_block ? "true" : "false"}
+                  </strong>
+                ),
+              },
+              { key: "policy_reason_code", title: "Policy Reason", render: (row) => row.policy_reason_code ?? "—" },
+              {
+                key: "submitted",
+                title: "Submitted",
+                render: (row) => (
+                  <strong className={row.submitted ? "val-negative" : "val-positive"}>
+                    {row.submitted ? "true" : "false"}
+                  </strong>
+                ),
+              },
+              {
+                key: "evaluated_at_utc",
+                title: "Evaluated At",
+                render: (row) => (row.evaluated_at_utc ? formatDateTime(row.evaluated_at_utc) : "—"),
+              },
+            ]}
+          />
+        </>
       )}
     </>
   );

@@ -1549,3 +1549,263 @@ test("GUIT08: multi-symbol dispatch summary panel contains no order submit/cance
     globalThis.fetch = originalFetch;
   }
 });
+
+// ---------------------------------------------------------------------------
+// MULTI-STRATEGY-DRY-RUN-GUI-01: Multi-strategy dry-run diagnostics panel.
+// Read-only — reuses the already-CLOSED route
+// GET /api/v1/strategy/dry-run/status (MULTI-STRATEGY-DRY-RUN-STATUS-01).
+// submitted is always false on every row. The panel must never gain order
+// submit/cancel/replace controls, must never enable secondary-strategy order
+// submission, and must never enable live shorting.
+// ---------------------------------------------------------------------------
+
+const DRY_RUN_STRATEGY_STATUS_ROUTE = "/api/v1/strategy/dry-run/status";
+
+function buildDryRunStrategyStatusFetchMock(dryRunResponse: () => Response): typeof fetch {
+  const nowUtc = new Date().toISOString();
+  return (async (input: string | URL | Request) => {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const path = new URL(raw).pathname;
+
+    if (path === "/api/v1/system/status") {
+      return jsonResponse({ ...DEFAULT_STATUS, daemon_reachable: true, last_heartbeat: new Date().toISOString() });
+    }
+    if (path === "/api/v1/system/preflight") {
+      return jsonResponse({ ...DEFAULT_PREFLIGHT, daemon_reachable: true });
+    }
+    if (path === "/api/v1/autonomous/paper-status") {
+      return jsonResponse(notApplicablePaperStatusFixture(nowUtc));
+    }
+    if (path === "/api/v1/watchlist/status") {
+      return notFoundResponse();
+    }
+    if (path === DRY_RUN_STRATEGY_STATUS_ROUTE) {
+      return dryRunResponse();
+    }
+    if (path in PSV_STRATEGY_FIXTURES) {
+      return jsonResponse(PSV_STRATEGY_FIXTURES[path]);
+    }
+    return notFoundResponse();
+  }) as typeof fetch;
+}
+
+const NOT_CONFIGURED_DRY_RUN_STATUS_FIXTURE = {
+  canonical_route: DRY_RUN_STRATEGY_STATUS_ROUTE,
+  backend: "daemon.runtime_state",
+  truth_state: "not_configured",
+  configured_dry_run_strategy_ids: [],
+  dry_run_strategy_diagnostics: [],
+};
+
+const ACTIVE_DRY_RUN_STATUS_FIXTURE = {
+  canonical_route: DRY_RUN_STRATEGY_STATUS_ROUTE,
+  backend: "daemon.runtime_state",
+  truth_state: "active",
+  configured_dry_run_strategy_ids: ["intraday_short_scalper"],
+  dry_run_strategy_diagnostics: [
+    {
+      strategy_id: "intraday_short_scalper",
+      symbol: "AAPL",
+      timeframe_secs: 300,
+      current_qty: 0,
+      target_qty: -5,
+      delta_qty: -5,
+      decision: "order_would_be_submitted",
+      reason: "bearish displacement exceeds threshold; would open short",
+      would_classify_as: "ShortOpen",
+      would_b5_block: true,
+      would_policy_block: true,
+      policy_reason_code: "short_entries_disabled",
+      submitted: false,
+      evaluated_at_utc: "2026-06-19T13:35:00+00:00",
+    },
+  ],
+};
+
+test("DRGT01: fetchOperatorModel parses not_configured dry-run status with empty diagnostics", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildDryRunStrategyStatusFetchMock(() => jsonResponse(NOT_CONFIGURED_DRY_RUN_STATUS_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+
+    assert.equal(model.dryRunStrategyStatus.truth_state, "not_configured");
+    assert.deepEqual(model.dryRunStrategyStatus.configured_dry_run_strategy_ids, []);
+    assert.equal(model.dryRunStrategyStatus.dry_run_strategy_diagnostics.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DRGT02: fetchOperatorModel parses active dry-run status with one intraday_short_scalper diagnostic row", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildDryRunStrategyStatusFetchMock(() => jsonResponse(ACTIVE_DRY_RUN_STATUS_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+
+    assert.equal(model.dryRunStrategyStatus.truth_state, "active");
+    assert.deepEqual(model.dryRunStrategyStatus.configured_dry_run_strategy_ids, ["intraday_short_scalper"]);
+    assert.equal(model.dryRunStrategyStatus.dry_run_strategy_diagnostics.length, 1);
+
+    const row = model.dryRunStrategyStatus.dry_run_strategy_diagnostics[0];
+    assert.equal(row.strategy_id, "intraday_short_scalper");
+    assert.equal(row.symbol, "AAPL");
+    assert.equal(row.target_qty, -5);
+    assert.equal(row.would_b5_block, true);
+    assert.equal(row.would_policy_block, true);
+    assert.equal(row.policy_reason_code, "short_entries_disabled");
+    assert.equal(row.submitted, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DRGT03: StrategyScreen renders the DRY RUN ONLY safety label", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildDryRunStrategyStatusFetchMock(() => jsonResponse(ACTIVE_DRY_RUN_STATUS_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    assert.match(html, /DRY RUN ONLY/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DRGT04: StrategyScreen renders the configured intraday_short_scalper strategy id", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildDryRunStrategyStatusFetchMock(() => jsonResponse(ACTIVE_DRY_RUN_STATUS_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    assert.match(html, /intraday_short_scalper/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DRGT05: StrategyScreen renders the negative target qty", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildDryRunStrategyStatusFetchMock(() => jsonResponse(ACTIVE_DRY_RUN_STATUS_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    assert.match(html, />-5</);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DRGT06: StrategyScreen renders submitted=false in the safety banner and the row value", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildDryRunStrategyStatusFetchMock(() => jsonResponse(ACTIVE_DRY_RUN_STATUS_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    assert.match(html, /submitted=false/);
+    assert.match(html, /val-positive">false/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DRGT07: StrategyScreen renders the B5 block status", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildDryRunStrategyStatusFetchMock(() => jsonResponse(ACTIVE_DRY_RUN_STATUS_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    assert.match(html, /B5 Block/);
+    assert.match(html, /val-warn">true/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DRGT08: StrategyScreen renders the short_entries_disabled policy block reason", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildDryRunStrategyStatusFetchMock(() => jsonResponse(ACTIVE_DRY_RUN_STATUS_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    assert.match(html, /Policy Block/);
+    assert.match(html, /short_entries_disabled/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DRGT09: StrategyScreen shows the empty-state message when no dry-run strategies are configured", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildDryRunStrategyStatusFetchMock(() => jsonResponse(NOT_CONFIGURED_DRY_RUN_STATUS_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    assert.match(html, /No dry-run strategies configured\. Set MQK_DRY_RUN_STRATEGY_IDS to enable diagnostics\./);
+    assert.doesNotMatch(
+      html,
+      /intraday_short_scalper/,
+      "no configured strategy id should render when the daemon reports not_configured",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DRGT10: a failed dry-run-status probe degrades to fail-soft unavailable without blocking the rest of the screen", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildDryRunStrategyStatusFetchMock(() => notFoundResponse());
+
+  try {
+    const model = await fetchOperatorModel();
+
+    assert.equal(model.dryRunStrategyStatus.truth_state, "unavailable");
+    assert.equal(model.dryRunStrategyStatus.dry_run_strategy_diagnostics.length, 0);
+    // Fetch failure on this endpoint must not hard-block the Strategy panel.
+    assert.equal(panelTruthRenderState(model, "strategy"), null);
+
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+    assert.match(html, /Dry-run strategy diagnostics are currently unavailable/);
+    // The rest of the screen still renders (engine posture panel heading present).
+    assert.match(html, /Engine posture/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("DRGT11: dry-run diagnostics panel contains no order submit/cancel/replace controls", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildDryRunStrategyStatusFetchMock(() => jsonResponse(ACTIVE_DRY_RUN_STATUS_FIXTURE));
+
+  try {
+    const model = await fetchOperatorModel();
+    const html = renderToStaticMarkup(React.createElement(StrategyScreen, { model }));
+
+    const panelStart = html.indexOf("Multi-strategy dry-run diagnostics");
+    assert.notEqual(panelStart, -1, "dry-run diagnostics panel should be present");
+    const panelHtml = html.slice(panelStart);
+
+    // The panel is read-only visibility — no buttons or click handlers, and no
+    // path to submit, cancel, or replace an order from this surface.
+    assert.doesNotMatch(panelHtml, /<button/i);
+    assert.doesNotMatch(panelHtml, /onClick/i);
+    assert.doesNotMatch(panelHtml, /submit-order|cancel-order|replace-order/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -162,6 +162,12 @@ const FALLBACK_MODEL: SystemModel = {
     configured_symbol_count: 0,
     per_symbol: [],
   },
+  dryRunStrategyStatus: {
+    truth_state: "unavailable",
+    backend: "unknown",
+    configured_dry_run_strategy_ids: [],
+    dry_run_strategy_diagnostics: [],
+  },
   strategyDecisionDiagnostics: null,
   autonomousBarTickCount: null,
   autonomousLastSignalQty: null,
