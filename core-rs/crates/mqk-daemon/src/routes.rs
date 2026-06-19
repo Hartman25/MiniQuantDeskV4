@@ -19,7 +19,8 @@
 //! | `execution`      | execution_summary, execution_orders, order submit/cancel |
 //! | `portfolio`      | portfolio_summary/positions/orders/fills, risk        |
 //! | `reconcile`      | reconcile_status, reconcile_mismatches                |
-//! | `strategy`       | strategy_summary, strategy_suppressions               |
+//! | `strategy`       | strategy_summary, strategy_suppressions,              |
+//! |                   | strategy_dry_run_status                               |
 //! | `audit_ops`      | audit_operator_actions, audit_artifacts,              |
 //! |                  | ops_operator_timeline                                 |
 //! | `oms_metrics`    | oms_overview, metrics_dashboards                      |
@@ -184,7 +185,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         repair_halted_run_portfolio_snapshot, repair_outbox_ambiguous, repair_ws_gap_fill_recovery,
     };
     use strategy::{
-        multi_symbol_dispatch_summary, strategy_signal, strategy_summary, strategy_suppressions,
+        multi_symbol_dispatch_summary, strategy_dry_run_status, strategy_signal, strategy_summary,
+        strategy_suppressions,
     };
     use system::{
         autonomous_readiness, health, status_handler, system_config_diffs,
@@ -263,6 +265,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/strategy/multi-symbol-dispatch-summary",
             get(multi_symbol_dispatch_summary),
+        )
+        // MULTI-STRATEGY-DRY-RUN-STATUS-01: read-only dry-run diagnostics (public, no auth).
+        // No broker calls, no DB mutations, no orders. submitted is always false.
+        .route(
+            "/api/v1/strategy/dry-run/status",
+            get(strategy_dry_run_status),
         )
         .route(
             "/api/v1/audit/operator-actions",

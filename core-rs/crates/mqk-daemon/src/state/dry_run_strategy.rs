@@ -31,7 +31,10 @@
 
 use mqk_strategy::{PluginRegistry, RecentBarsWindow, ShadowMode, StrategyContext, StrategyHost};
 
-use crate::capital_policy::{classify_order_intent, OrderIntent};
+use crate::capital_policy::{
+    classify_order_intent, evaluate_short_entry_policy, order_intent_to_short_entry_intent,
+    OrderIntent, ShortEntryConfig, ShortEntryPolicyDecision,
+};
 
 /// Env var: comma-separated list of strategy ids to evaluate in dry-run mode
 /// alongside the primary strategy. Absent or blank → no dry-run strategies
@@ -86,6 +89,16 @@ pub struct DryRunStrategyDiagnostic {
     /// which is also the set of intents the default fail-closed short-entry
     /// policy would block).
     pub would_b5_block: bool,
+    /// `true` when the default fail-closed short-entry policy
+    /// (`ShortEntryConfig::fail_closed`, evaluated as if in paper mode) would
+    /// also block this intent. Always `false` for non-short-open intents —
+    /// the short-entry policy gate does not apply to them, mirroring
+    /// `ShortEntryPolicyDecision::NotShortOpen`.
+    pub would_policy_block: bool,
+    /// Machine-readable short-entry policy block reason (e.g.
+    /// `"short_entries_disabled"`), from `ShortEntryPolicyDecision::ShortOpenBlocked`.
+    /// `None` when `would_policy_block` is `false`.
+    pub policy_reason_code: Option<&'static str>,
     /// Always `false`. This struct is a diagnostic only; no order is ever
     /// submitted from a dry-run evaluation.
     pub submitted: bool,
@@ -122,7 +135,41 @@ fn unavailable(
         reason,
         would_classify_as: "unavailable",
         would_b5_block: false,
+        would_policy_block: false,
+        policy_reason_code: None,
         submitted: false,
+    }
+}
+
+/// Evaluate the default fail-closed short-entry policy for a classified
+/// [`OrderIntent`], purely (no IO, no env reads, no wall-clock).
+///
+/// Mirrors the `ShortEntryConfig::fail_closed()` cross-check already asserted
+/// in `scenario_multi_strategy_runtime_dry_run_01.rs` (DR08) — this just makes
+/// that cross-check part of the diagnostic itself instead of a side
+/// assertion. Always evaluated as paper mode: a dry-run diagnostic answers
+/// "would the default policy block this", and the paper-mode reason codes
+/// (e.g. `"short_entries_disabled"`) are strictly more informative than the
+/// unconditional live-mode block, which would otherwise mask them.
+///
+/// Non-short-open intents short-circuit to `(false, None)` without calling
+/// the evaluator — the gate does not apply to them.
+fn would_default_short_entry_policy_block(intent: OrderIntent) -> (bool, Option<&'static str>) {
+    if !intent.requires_short_entry_policy() {
+        return (false, None);
+    }
+    let short_intent = order_intent_to_short_entry_intent(intent);
+    match evaluate_short_entry_policy(
+        &ShortEntryConfig::fail_closed(),
+        short_intent,
+        true, // paper mode: see doc comment above
+        None, // no broker shortable check is performed for a dry-run evaluation
+        None, // projected_short_shares: not computed for a dry-run evaluation
+        None, // projected_short_notional_usd: not computed for a dry-run evaluation
+    ) {
+        ShortEntryPolicyDecision::ShortOpenBlocked { reason_code, .. } => (true, Some(reason_code)),
+        ShortEntryPolicyDecision::ShortOpenAllowed { .. }
+        | ShortEntryPolicyDecision::NotShortOpen => (false, None),
     }
 }
 
@@ -219,6 +266,7 @@ pub fn evaluate_dry_run_strategy(
     let delta_qty = target_qty - current_qty;
     let intent = classify_order_intent(current_qty, delta_qty);
     let would_b5_block = intent.requires_short_entry_policy();
+    let (would_policy_block, policy_reason_code) = would_default_short_entry_policy_block(intent);
 
     let (decision, reason): (&'static str, String) = if delta_qty == 0 {
         (
@@ -261,6 +309,8 @@ pub fn evaluate_dry_run_strategy(
         reason,
         would_classify_as: intent_label(intent),
         would_b5_block,
+        would_policy_block,
+        policy_reason_code,
         submitted: false,
     }
 }

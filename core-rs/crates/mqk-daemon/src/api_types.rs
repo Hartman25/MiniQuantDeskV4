@@ -1155,6 +1155,74 @@ pub struct PerSymbolDispatchRow {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/strategy/dry-run/status (MULTI-STRATEGY-DRY-RUN-STATUS-01)
+// ---------------------------------------------------------------------------
+
+/// One dry-run secondary-strategy diagnostic, mapped field-for-field from
+/// [`crate::state::DryRunStrategyDiagnostic`].
+///
+/// `submitted` is always `false` — dry-run strategies never reach the outbox
+/// or broker; see `state/dry_run_strategy.rs` for the structural proof.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DryRunStrategyDiagnosticRow {
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe_secs: i64,
+    pub current_qty: i64,
+    pub target_qty: i64,
+    pub delta_qty: i64,
+    /// One of: `"already_at_target"`, `"b5_short_sale_guard"`,
+    /// `"order_would_be_submitted"`, `"evaluation_unavailable"`.
+    pub decision: String,
+    pub reason: String,
+    /// Stable label for the classified order intent (e.g. `"ShortOpen"`,
+    /// `"LongOpen"`, `"SellToClose"`, `"NoOp"`), or `"unavailable"`.
+    pub would_classify_as: String,
+    /// `true` when the B5 short-sale guard in `bar_result_to_decisions` would
+    /// drop this intent before it reaches the outbox.
+    pub would_b5_block: bool,
+    /// `true` when the default fail-closed short-entry policy would also
+    /// block this intent. Always `false` for non-short-open intents.
+    pub would_policy_block: bool,
+    /// Machine-readable short-entry policy block reason (e.g.
+    /// `"short_entries_disabled"`). `None` when `would_policy_block` is `false`.
+    pub policy_reason_code: Option<String>,
+    /// Always `false`. Dry-run strategies never submit orders.
+    pub submitted: bool,
+    /// RFC3339 timestamp shared by every row in the same snapshot — the wall
+    /// clock time the daemon last replaced the dry-run diagnostic snapshot,
+    /// not a per-strategy evaluation time (all strategies in one snapshot are
+    /// evaluated within the same execution-loop tick).
+    pub evaluated_at_utc: String,
+}
+
+/// Response wrapper for `GET /api/v1/strategy/dry-run/status`.
+///
+/// Read-only daemon runtime surface backed by the in-memory latest dry-run
+/// diagnostic snapshot (`AppState::dry_run_diagnostics`). This route never
+/// touches the broker, the outbox, or any submission path — it only reads a
+/// snapshot that `state/dry_run_strategy.rs` and `state/loop_runner.rs`
+/// already prove cannot contain a submitted order.
+///
+/// `truth_state == "not_configured"`: `MQK_DRY_RUN_STRATEGY_IDS` is unset or
+/// blank — `dry_run_strategy_diagnostics` is always empty (default-off;
+/// existing single-strategy behavior unchanged).
+///
+/// `truth_state == "active"`: one or more dry-run strategy ids are
+/// configured. `dry_run_strategy_diagnostics` is empty until the first
+/// execution-loop tick evaluates them, then holds the latest snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DryRunStrategyStatusResponse {
+    pub canonical_route: String,
+    pub backend: String,
+    pub truth_state: String,
+    /// Strategy ids from `MQK_DRY_RUN_STRATEGY_IDS`, in configured order.
+    /// Empty when dry-run is not configured.
+    pub configured_dry_run_strategy_ids: Vec<String>,
+    pub dry_run_strategy_diagnostics: Vec<DryRunStrategyDiagnosticRow>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/system/runtime-leadership
 // ---------------------------------------------------------------------------
 

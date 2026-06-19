@@ -409,6 +409,21 @@ pub struct AppState {
     /// `None` until the first bar is dispatched.  Replaced atomically on each
     /// dispatch.  Read-only; does not affect the decision path.
     last_strategy_diagnostics: Arc<Mutex<Option<mqk_strategy::IntradayScalperDiagnostics>>>,
+    /// MULTI-STRATEGY-DRY-RUN-STATUS-01: Latest dry-run secondary-strategy
+    /// diagnostic snapshot.
+    ///
+    /// Empty `Vec` when `MQK_DRY_RUN_STRATEGY_IDS` is unset (default-off) or
+    /// when no dry-run evaluation has run yet this process lifetime.
+    /// Replaced wholesale on each tick's dry-run evaluation — never appended
+    /// — so storage is bounded by the configured dry-run strategy count, not
+    /// by tick count. Diagnostics only: every entry has `submitted == false`
+    /// (see `state/dry_run_strategy.rs` for the structural proof) and this
+    /// field is never read by any decision/submission path.
+    dry_run_diagnostics: Arc<RwLock<Vec<DryRunStrategyDiagnostic>>>,
+    /// MULTI-STRATEGY-DRY-RUN-STATUS-01: Unix-second timestamp of the most
+    /// recent write to `dry_run_diagnostics`. Zero (sentinel) means no
+    /// dry-run evaluation has been stored yet this process lifetime.
+    dry_run_diagnostics_evaluated_at: Arc<AtomicI64>,
     /// AUTON-PAPER-RISK-03: Alpaca adapter populated by the cold-fetch branch of
     /// `build_execution_orchestrator` (External source, `broker_snapshot` empty
     /// at entry); stays `None` on the pre-seeded path (e.g.
@@ -1070,6 +1085,8 @@ impl AppState {
             bar_tick_dispatch_count: Arc::new(AtomicU64::new(0)),
             last_bar_context_bars: Arc::new(AtomicI64::new(-1)),
             last_strategy_diagnostics: Arc::new(Mutex::new(None)),
+            dry_run_diagnostics: Arc::new(RwLock::new(Vec::new())),
+            dry_run_diagnostics_evaluated_at: Arc::new(AtomicI64::new(0)),
             external_snapshot_refresher: Arc::new(RwLock::new(None)),
             execution_last_tick_at: Arc::new(AtomicI64::new(0)),
             backtest_jobs: new_job_store(),
@@ -1775,6 +1792,54 @@ operator_reconcile_or_repair_required"
         diag: mqk_strategy::IntradayScalperDiagnostics,
     ) {
         *self.last_strategy_diagnostics.lock().await = Some(diag);
+    }
+
+    /// MULTI-STRATEGY-DRY-RUN-STATUS-01: Clone the latest dry-run secondary-
+    /// strategy diagnostic snapshot.
+    ///
+    /// Empty when `MQK_DRY_RUN_STRATEGY_IDS` is unset (default-off) or when
+    /// no dry-run evaluation has been stored yet this process lifetime.
+    pub async fn dry_run_diagnostics(&self) -> Vec<DryRunStrategyDiagnostic> {
+        self.dry_run_diagnostics.read().await.clone()
+    }
+
+    /// MULTI-STRATEGY-DRY-RUN-STATUS-01: Unix-second timestamp of the most
+    /// recent dry-run diagnostic snapshot write. `0` (sentinel) means no
+    /// dry-run evaluation has been stored yet this process lifetime.
+    pub fn dry_run_diagnostics_evaluated_at(&self) -> i64 {
+        self.dry_run_diagnostics_evaluated_at.load(Ordering::SeqCst)
+    }
+
+    /// MULTI-STRATEGY-DRY-RUN-STATUS-01: Replace the latest dry-run
+    /// diagnostic snapshot wholesale (never appended), and record the
+    /// wall-clock time of this write.
+    ///
+    /// Called once per tick from the execution loop's dry-run evaluation
+    /// step (`loop_runner.rs`), after `evaluate_dry_run_strategies` returns —
+    /// never from any decision/submission path. Replacing rather than
+    /// appending keeps storage bounded by the configured dry-run strategy
+    /// count, not by tick count.
+    pub(crate) async fn set_dry_run_diagnostics(
+        &self,
+        diagnostics: Vec<DryRunStrategyDiagnostic>,
+        evaluated_at_ts: i64,
+    ) {
+        *self.dry_run_diagnostics.write().await = diagnostics;
+        self.dry_run_diagnostics_evaluated_at
+            .store(evaluated_at_ts, Ordering::SeqCst);
+    }
+
+    /// MULTI-STRATEGY-DRY-RUN-STATUS-01 test seam: directly set the dry-run
+    /// diagnostic snapshot without running the execution loop.
+    ///
+    /// Named `_for_test` to signal intent; never called in production code.
+    pub async fn set_dry_run_diagnostics_for_test(
+        &self,
+        diagnostics: Vec<DryRunStrategyDiagnostic>,
+        evaluated_at_ts: i64,
+    ) {
+        self.set_dry_run_diagnostics(diagnostics, evaluated_at_ts)
+            .await;
     }
 
     async fn dispatch_native_strategy_for_symbol_with_loaded_bars(

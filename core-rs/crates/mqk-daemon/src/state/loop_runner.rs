@@ -941,13 +941,14 @@ pub(super) fn spawn_execution_loop(
                                                 .get(&assignment.symbol)
                                                 .copied()
                                                 .unwrap_or(0);
-                                            for diag in evaluate_dry_run_strategies(
+                                            let dry_run_diags = evaluate_dry_run_strategies(
                                                 &dry_run_strategy_ids,
                                                 &assignment.symbol,
                                                 0,
                                                 &window,
                                                 dry_run_current,
-                                            ) {
+                                            );
+                                            for diag in &dry_run_diags {
                                                 tracing::info!(
                                                     run_id = %run_id,
                                                     symbol = %diag.symbol,
@@ -959,11 +960,26 @@ pub(super) fn spawn_execution_loop(
                                                     decision = diag.decision,
                                                     would_classify_as = diag.would_classify_as,
                                                     would_b5_block = diag.would_b5_block,
+                                                    would_policy_block = diag.would_policy_block,
+                                                    policy_reason_code = ?diag.policy_reason_code,
                                                     submitted = diag.submitted,
                                                     reason = %diag.reason,
                                                     "multi_strategy_dry_run_diagnostic"
                                                 );
                                             }
+                                            // MULTI-STRATEGY-DRY-RUN-STATUS-01: store the latest
+                                            // snapshot for operator-visible status surfacing
+                                            // (GET /api/v1/strategy/dry-run/status). Replaces the
+                                            // prior snapshot wholesale — see
+                                            // `AppState::set_dry_run_diagnostics`. This is the
+                                            // only place this snapshot is written; it is never
+                                            // read by any decision/submission path.
+                                            state_arc
+                                                .set_dry_run_diagnostics(
+                                                    dry_run_diags,
+                                                    Utc::now().timestamp(),
+                                                )
+                                                .await;
                                         }
                                         Ok(_) => {
                                             // No completed bars yet for this symbol/timeframe;

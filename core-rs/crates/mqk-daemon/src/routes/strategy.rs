@@ -1,11 +1,16 @@
 //! Strategy route handlers.
 //!
 //! Contains: strategy_summary (via summary), multi_symbol_dispatch_summary,
-//! strategy_suppressions, strategy_signal.
+//! strategy_suppressions, strategy_signal, strategy_dry_run_status (via
+//! dry_run_status).
 
 // MT-07E: strategy summary handler extracted to reduce file size.
 mod summary;
 pub(crate) use summary::strategy_summary;
+
+// MULTI-STRATEGY-DRY-RUN-STATUS-01: dry-run diagnostics status handler.
+mod dry_run_status;
+pub(crate) use dry_run_status::strategy_dry_run_status;
 
 use std::sync::Arc;
 
