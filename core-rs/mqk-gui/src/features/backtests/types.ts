@@ -4,6 +4,19 @@ export interface BacktestManifest {
   strategy_name: string;
   engine_id: string;
   mode: string;
+  /**
+   * Optional friendly timeframe string (e.g. "5m", "1D"). Mirrors the Rust
+   * RunManifest.timeframe field. Backtest jobs leave this unset and only emit
+   * timeframe_secs; other producers may set it directly. Absence is not an
+   * error — derive a label from timeframe_secs when this is missing.
+   */
+  timeframe?: string | null;
+  /**
+   * Optional bar interval in seconds. Mirrors the Rust RunManifest.timeframe_secs
+   * field. The daemon backtest job writes this (the operator-submitted
+   * timeframe_secs); the friendly label is derived via timeframeLabelFromSecs.
+   */
+  timeframe_secs?: number | null;
   git_hash?: string | null;
   config_hash?: string | null;
   host_fingerprint?: string | null;

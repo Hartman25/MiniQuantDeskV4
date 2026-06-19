@@ -9,6 +9,7 @@ import {
   formatMicrosAsDollars,
   formatNullableNumber,
   formatNullablePercent,
+  manifestTimeframeLabel,
   microsToUsd,
   parseCsvRows,
   parseEquityCurve,
@@ -21,6 +22,7 @@ import {
   parsePremarketRevalidation,
   parseStrategyFit,
   parseWatchlistPromotion,
+  timeframeLabelFromSecs,
 } from "../parsers.ts";
 import type { BacktestMetrics } from "../types.ts";
 
@@ -297,6 +299,77 @@ test("parseManifest throws on non-object JSON", () => {
 
 test("parseManifest throws on invalid JSON", () => {
   assert.throws(() => parseManifest("{bad json}"));
+});
+
+test("parseManifest passes through timeframe_secs and timeframe when present", () => {
+  const json = JSON.stringify({
+    schema_version: 1,
+    run_id: "abc-123",
+    strategy_name: "swing_momentum",
+    engine_id: "mqk-backtest",
+    mode: "backtest",
+    timeframe: "5m",
+    timeframe_secs: 300,
+    created_at_utc: "2026-05-01T12:00:00Z",
+  });
+  const manifest = parseManifest(json);
+  assert.equal(manifest.timeframe_secs, 300);
+  assert.equal(manifest.timeframe, "5m");
+});
+
+test("parseManifest leaves timeframe_secs undefined when absent", () => {
+  const json = JSON.stringify({
+    schema_version: 1,
+    run_id: "abc-123",
+    strategy_name: "swing_momentum",
+    engine_id: "mqk-backtest",
+    mode: "backtest",
+    created_at_utc: "2026-05-01T12:00:00Z",
+  });
+  const manifest = parseManifest(json);
+  assert.equal(manifest.timeframe_secs, undefined);
+});
+
+// --- timeframeLabelFromSecs (mirrors Rust timeframe_from_secs) ---
+
+test("timeframeLabelFromSecs maps the canonical bar intervals", () => {
+  assert.equal(timeframeLabelFromSecs(60), "1m");
+  assert.equal(timeframeLabelFromSecs(300), "5m");
+  assert.equal(timeframeLabelFromSecs(900), "15m");
+  assert.equal(timeframeLabelFromSecs(3600), "1h");
+  assert.equal(timeframeLabelFromSecs(86400), "1D");
+});
+
+test("timeframeLabelFromSecs falls back to {secs}s for other positive values", () => {
+  assert.equal(timeframeLabelFromSecs(1800), "1800s");
+  assert.equal(timeframeLabelFromSecs(120), "120s");
+});
+
+test("timeframeLabelFromSecs returns null for absent, NaN, zero, or negative", () => {
+  assert.equal(timeframeLabelFromSecs(null), null);
+  assert.equal(timeframeLabelFromSecs(undefined), null);
+  assert.equal(timeframeLabelFromSecs(Number.NaN), null);
+  assert.equal(timeframeLabelFromSecs(0), null);
+  assert.equal(timeframeLabelFromSecs(-300), null);
+});
+
+// --- manifestTimeframeLabel ---
+
+test("manifestTimeframeLabel prefers a non-empty timeframe string", () => {
+  assert.equal(manifestTimeframeLabel("5m", 86400), "5m");
+  assert.equal(manifestTimeframeLabel("  15m  ", 60), "15m");
+});
+
+test("manifestTimeframeLabel derives from timeframe_secs when string is empty or missing", () => {
+  assert.equal(manifestTimeframeLabel(null, 300), "5m");
+  assert.equal(manifestTimeframeLabel(undefined, 86400), "1D");
+  assert.equal(manifestTimeframeLabel("   ", 3600), "1h");
+});
+
+test("manifestTimeframeLabel returns null when neither source is available", () => {
+  assert.equal(manifestTimeframeLabel(null, null), null);
+  assert.equal(manifestTimeframeLabel("", undefined), null);
+  assert.equal(manifestTimeframeLabel(undefined, 0), null);
 });
 
 // --- parseMetrics ---

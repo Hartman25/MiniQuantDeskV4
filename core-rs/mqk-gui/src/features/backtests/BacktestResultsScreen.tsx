@@ -12,6 +12,7 @@ import {
   formatMicrosAsDollars,
   formatNullableNumber,
   formatNullablePercent,
+  manifestTimeframeLabel,
   PAPER_READINESS_SCHEMA_VERSION,
   PAPER_READINESS_STATUS_BLOCKED,
   PAPER_READINESS_STATUS_PARTIAL,
@@ -184,6 +185,10 @@ function ManifestSection({ manifest }: { manifest: BacktestManifest }) {
           <strong>{manifest.mode}</strong>
         </div>
         <div>
+          <span>Timeframe</span>
+          <strong>{manifestTimeframeLabel(manifest.timeframe, manifest.timeframe_secs) ?? "not reported"}</strong>
+        </div>
+        <div>
           <span>Created</span>
           <strong>{formatDateTime(manifest.created_at_utc)}</strong>
         </div>
@@ -225,6 +230,16 @@ function OperatorReviewSection({ bundle }: { bundle: ArtifactBundle }) {
   const m = bundle.metrics.data;
   const manifest = bundle.manifest.kind === "ok" ? bundle.manifest.data : null;
   const benchmark = m.benchmark ?? null;
+  // Timeframe is sourced from the run manifest (timeframe / timeframe_secs),
+  // not fabricated — null renders as "not reported".
+  const timeframeLabel = manifestTimeframeLabel(manifest?.timeframe, manifest?.timeframe_secs);
+  // Data range is the actual span of the equity curve (first → last bar
+  // timestamp). Derived from real rows; null when no equity curve is available.
+  const equityRows = bundle.equityCurve.kind === "ok" ? bundle.equityCurve.data.rows : [];
+  const dataRangeLabel =
+    equityRows.length > 0
+      ? `${equityRows[0].ts_utc || "—"} → ${equityRows[equityRows.length - 1].ts_utc || "—"}`
+      : null;
   const alpha = classifyAlpha(benchmark?.alpha_pct);
   const noTradeMessage = describeNoTradeActivity(m);
   const warnings = describeExecutionWarnings(m);
@@ -347,7 +362,13 @@ function OperatorReviewSection({ bundle }: { bundle: ArtifactBundle }) {
         </div>
         <div>
           <span>Timeframe</span>
-          <strong>not reported</strong>
+          <strong>{timeframeLabel ?? "not reported"}</strong>
+        </div>
+        <div>
+          <span>Data range</span>
+          <strong className="bt-mono-wrap" style={{ fontSize: "0.8rem" }}>
+            {dataRangeLabel ? `${dataRangeLabel} (${m.bars} bars)` : "not reported"}
+          </strong>
         </div>
         <div>
           <span>Config hash</span>
@@ -2249,16 +2270,22 @@ export function BacktestResultsScreen() {
             />
           </div>
           <div className="bt-job-field">
-            <label htmlFor="bt-timeframe">Timeframe (seconds)</label>
-            <input
+            <label htmlFor="bt-timeframe">Timeframe</label>
+            <select
               id="bt-timeframe"
-              type="text"
               value={timeframeSecs}
               onChange={(e) => setTimeframeSecs(e.target.value)}
-              spellCheck={false}
-              autoComplete="off"
-              placeholder="e.g. 86400"
-            />
+            >
+              <option value="60">1m (60s)</option>
+              <option value="300">5m (300s)</option>
+              <option value="900">15m (900s)</option>
+              <option value="3600">1h (3600s)</option>
+              <option value="86400">1D (86400s)</option>
+            </select>
+            <div className="bt-field-hint" style={{ marginTop: 4, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
+              Bar interval submitted as <code>timeframe_secs</code>. Match this to the bars CSV —
+              the pre-filled <code>bkt4_bars.csv</code> fixture is daily (<strong>1D</strong>).
+            </div>
           </div>
           <div className="bt-job-field">
             <label htmlFor="bt-cash">Initial cash (micros)</label>

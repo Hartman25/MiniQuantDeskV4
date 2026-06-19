@@ -147,6 +147,52 @@ export function formatNullablePercent(value: number | null | undefined): string 
 }
 
 // ---------------------------------------------------------------------------
+// BACKTEST-GUI-EXPERIENCE-01: run timeframe display helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Friendly timeframe label derived from a bar interval in seconds.
+ *
+ * Mirrors the canonical Rust mapping in
+ * core-rs/crates/mqk-artifacts/src/lib.rs (`timeframe_from_secs`) exactly so the
+ * GUI label never drifts from the engine's own vocabulary. Returns null when the
+ * value is absent, not a number, or non-positive, so callers can render
+ * "not reported" honestly rather than a fabricated label.
+ */
+export function timeframeLabelFromSecs(timeframeSecs: number | null | undefined): string | null {
+  if (typeof timeframeSecs !== "number" || Number.isNaN(timeframeSecs)) return null;
+  switch (timeframeSecs) {
+    case 60:
+      return "1m";
+    case 300:
+      return "5m";
+    case 900:
+      return "15m";
+    case 3600:
+      return "1h";
+    case 86400:
+      return "1D";
+    default:
+      return timeframeSecs > 0 ? `${timeframeSecs}s` : null;
+  }
+}
+
+/**
+ * Resolve the display timeframe for a run manifest. An explicit, non-empty
+ * `timeframe` string wins; otherwise a label is derived from `timeframe_secs`.
+ * Mirrors the Rust precedence (manifest.timeframe, then
+ * timeframe_from_secs(manifest.timeframe_secs)). Returns null when neither is
+ * available so callers render "not reported" rather than fabricating a value.
+ */
+export function manifestTimeframeLabel(
+  timeframe: string | null | undefined,
+  timeframeSecs: number | null | undefined,
+): string | null {
+  if (typeof timeframe === "string" && timeframe.trim() !== "") return timeframe.trim();
+  return timeframeLabelFromSecs(timeframeSecs);
+}
+
+// ---------------------------------------------------------------------------
 // BACKTEST-REPORT-UX-01: operator-review summary helpers
 // ---------------------------------------------------------------------------
 
