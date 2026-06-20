@@ -4,11 +4,18 @@
 //! configured strategy symbol/timeframe.  Used by autonomous readiness, system
 //! preflight, and start_execution_runtime to block startup when data is missing,
 //! insufficient, or stale.
+//!
+//! PREMARKET-DATA-READINESS-GATE-01 extends this to every symbol the current
+//! deployment requires (not just one): [`required_symbols_for_freshness_gate_from_env`]
+//! resolves the required set, [`evaluate_md_freshness_status_for_symbols`]
+//! evaluates each independently via [`evaluate_md_freshness_status`] (no
+//! duplicate DB logic), and [`aggregate_freshness_statuses`] combines the
+//! results into one fail-closed [`MultiSymbolFreshnessReport`] decision.
 
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
-use crate::api_types::MarketDataFreshnessStatus;
+use crate::api_types::{MarketDataFreshnessStatus, MultiSymbolFreshnessReport};
 
 /// Minimum completed bars required before paper trading is allowed.
 pub const MD_FRESHNESS_MIN_BARS: u64 = 5;
@@ -369,4 +376,214 @@ pub async fn evaluate_md_freshness_status(
         .unwrap_or(None);
 
     evaluate_md_freshness_snapshot(symbol, timeframe, completed_rows_u64, latest_end_ts, now_ts)
+}
+
+// ---------------------------------------------------------------------------
+// PREMARKET-DATA-READINESS-GATE-01: multi-symbol aggregation
+// ---------------------------------------------------------------------------
+
+/// One symbol/timeframe pair the premarket readiness gate must verify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredSymbolTimeframe {
+    pub symbol: String,
+    pub timeframe: String,
+}
+
+/// Normalize a required-symbol list: trim and uppercase each symbol, trim
+/// each timeframe (case is significant for the `md_bars.timeframe` column,
+/// so it is not folded), drop entries that are empty after trimming, and
+/// collapse exact `(symbol, timeframe)` duplicates to their first
+/// occurrence. Input order is otherwise preserved.
+///
+/// Pure: no DB, network, or broker access.
+pub fn normalize_required_symbols(
+    required: &[RequiredSymbolTimeframe],
+) -> Vec<RequiredSymbolTimeframe> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::with_capacity(required.len());
+    for r in required {
+        let symbol = r.symbol.trim().to_uppercase();
+        let timeframe = r.timeframe.trim().to_string();
+        if symbol.is_empty() || timeframe.is_empty() {
+            continue;
+        }
+        if seen.insert((symbol.clone(), timeframe.clone())) {
+            out.push(RequiredSymbolTimeframe { symbol, timeframe });
+        }
+    }
+    out
+}
+
+/// Aggregate already-evaluated per-symbol freshness statuses into a single
+/// [`MultiSymbolFreshnessReport`] (PREMARKET-DATA-READINESS-GATE-01).
+///
+/// Pure: performs no DB, network, or broker access. `per_symbol` must
+/// already be evaluated (e.g. via repeated [`evaluate_md_freshness_status`]
+/// calls over a [`normalize_required_symbols`]-normalized list), and
+/// `required_symbols` should be the matching normalized symbol list.
+///
+/// # Aggregate semantics
+/// - `per_symbol` empty → `"not_applicable"`; start allowed (no symbol is
+///   configured; mirrors the single-symbol gate's behaviour when env vars
+///   are absent).
+/// - Exactly one required symbol → `aggregate_status` is exactly that
+///   symbol's own `freshness_state` (`"ok"` | `"missing"` | `"insufficient"`
+///   | `"stale"` | `"unavailable"`) — byte-identical to the pre-existing
+///   single-symbol gate decision (backward compatibility).
+/// - More than one required symbol, more than one blocking → `"mixed_blocked"`.
+/// - More than one required symbol, exactly one blocking → that symbol's own
+///   blocking state (named explicitly, not a vague aggregate).
+/// - More than one required symbol, none blocking, at least one
+///   `"unavailable"` → `"unavailable"` (cannot fully assert ok, but not a
+///   start blocker — same honesty rule as the single-symbol gate).
+/// - Otherwise → `"ok"`.
+///
+/// `start_allowed` is true unless `aggregate_status` is one of `"missing"`,
+/// `"insufficient"`, `"stale"`, or `"mixed_blocked"`.
+pub fn aggregate_freshness_statuses(
+    required_symbols: Vec<String>,
+    per_symbol: Vec<MarketDataFreshnessStatus>,
+) -> MultiSymbolFreshnessReport {
+    if per_symbol.is_empty() {
+        return MultiSymbolFreshnessReport {
+            aggregate_status: REASON_CODE_NOT_APPLICABLE.to_string(),
+            start_allowed: true,
+            required_symbols: Vec::new(),
+            per_symbol: Vec::new(),
+            blockers: Vec::new(),
+        };
+    }
+
+    let blockers: Vec<String> = per_symbol
+        .iter()
+        .filter(|s| s.is_start_blocker())
+        .map(|s| s.reason.clone())
+        .collect();
+    let blocking_count = blockers.len();
+
+    let aggregate_status = if per_symbol.len() == 1 {
+        per_symbol[0].freshness_state.clone()
+    } else if blocking_count == 1 {
+        per_symbol
+            .iter()
+            .find(|s| s.is_start_blocker())
+            .map(|s| s.freshness_state.clone())
+            .unwrap_or_else(|| "mixed_blocked".to_string())
+    } else if blocking_count > 1 {
+        "mixed_blocked".to_string()
+    } else if per_symbol.iter().any(|s| s.freshness_state == "unavailable") {
+        "unavailable".to_string()
+    } else {
+        REASON_CODE_OK.to_string()
+    };
+
+    let start_allowed = !matches!(
+        aggregate_status.as_str(),
+        "missing" | "insufficient" | "stale" | "mixed_blocked"
+    );
+
+    MultiSymbolFreshnessReport {
+        aggregate_status,
+        start_allowed,
+        required_symbols,
+        per_symbol,
+        blockers,
+    }
+}
+
+/// Evaluate market-data freshness for every required symbol/timeframe pair
+/// against the DB and aggregate the results
+/// (PREMARKET-DATA-READINESS-GATE-01).
+///
+/// Extends [`evaluate_md_freshness_status`] (single symbol) to a required
+/// set: `required` is normalized via [`normalize_required_symbols`], each
+/// resulting pair is evaluated independently with the exact same pure/DB
+/// logic as the single-symbol gate (one query per unique pair — no
+/// duplicate DB logic, no broker/order/outbox access), and the results are
+/// combined via [`aggregate_freshness_statuses`].
+///
+/// `now_ts` is injected for testability; pass `Utc::now().timestamp()` in
+/// production.
+pub async fn evaluate_md_freshness_status_for_symbols(
+    db: Option<&PgPool>,
+    required: &[RequiredSymbolTimeframe],
+    now_ts: i64,
+) -> MultiSymbolFreshnessReport {
+    let normalized = normalize_required_symbols(required);
+    if normalized.is_empty() {
+        return aggregate_freshness_statuses(Vec::new(), Vec::new());
+    }
+
+    let mut per_symbol = Vec::with_capacity(normalized.len());
+    for req in &normalized {
+        per_symbol
+            .push(evaluate_md_freshness_status(db, &req.symbol, &req.timeframe, now_ts).await);
+    }
+    let required_symbols = normalized.into_iter().map(|r| r.symbol).collect();
+
+    aggregate_freshness_statuses(required_symbols, per_symbol)
+}
+
+/// Resolve the symbol/timeframe pairs the premarket readiness gate must
+/// verify, from the environment (PREMARKET-DATA-READINESS-GATE-01).
+///
+/// # Source preference
+/// 1. An approved `watchlist-v2` artifact (`MQK_PAPER_WATCHLIST_PATH`,
+///    [`crate::watchlist_intake::evaluate_watchlist_intake_from_env`]) — the
+///    same multi-symbol source `loop_runner.rs` already prefers for actual
+///    dispatch. Every symbol in `artifact.symbols` is paired with the shared
+///    `MQK_STRATEGY_MD_TIMEFRAME` (per-symbol timeframe overrides are not
+///    yet supported anywhere in the runtime — Tier A is one global
+///    timeframe; see `crate::state::multi_symbol_config`).
+/// 2. Otherwise, the legacy single `MQK_STRATEGY_SYMBOL` /
+///    `MQK_STRATEGY_MD_TIMEFRAME` pair — the exact source the freshness
+///    gate has always used.
+///
+/// Deliberately independent of `MQK_STRATEGY_IDS` / strategy-id
+/// configuration: freshness is a property of (symbol, timeframe) data
+/// availability in `md_bars`, not of which strategy a symbol is mapped to.
+/// `crate::state::multi_symbol_config::build_legacy_single_symbol_config`
+/// requires a strategy id and is deliberately not reused here — doing so
+/// would make this gate go silently `not_applicable` whenever
+/// `MQK_STRATEGY_IDS` is unset while `MQK_STRATEGY_SYMBOL` is set, which is
+/// not how the pre-existing single-symbol gate behaved.
+///
+/// Returns an empty list when neither source yields a usable symbol or the
+/// shared timeframe is absent — callers must treat an empty list as
+/// `"not_applicable"`, exactly matching prior single-symbol behavior when
+/// env vars were absent.
+pub fn required_symbols_for_freshness_gate_from_env() -> Vec<RequiredSymbolTimeframe> {
+    let timeframe = std::env::var(crate::state::STRATEGY_MD_TIMEFRAME_ENV)
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    if timeframe.is_empty() {
+        return Vec::new();
+    }
+
+    let watchlist_outcome = crate::watchlist_intake::evaluate_watchlist_intake_from_env();
+    if let crate::watchlist_intake::WatchlistIntakeOutcome::LoadedApproved { artifact } =
+        &watchlist_outcome
+    {
+        if artifact.schema_version == crate::watchlist_intake::WATCHLIST_SCHEMA_VERSION_V2
+            && !artifact.symbols.is_empty()
+        {
+            return artifact
+                .symbols
+                .iter()
+                .map(|symbol| RequiredSymbolTimeframe {
+                    symbol: symbol.clone(),
+                    timeframe: timeframe.clone(),
+                })
+                .collect();
+        }
+    }
+
+    let symbol = std::env::var("MQK_STRATEGY_SYMBOL")
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    if symbol.is_empty() {
+        return Vec::new();
+    }
+
+    vec![RequiredSymbolTimeframe { symbol, timeframe }]
 }

@@ -25,11 +25,14 @@ use chrono::Utc;
 
 use crate::api_types::{
     AssetCapabilityEntry, AssetCapabilityMatrix, AutonomousPaperReadinessResponse, HealthResponse,
-    PreflightStatusResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
-    SessionStateResponse, StrategyDecisionDiagnostics, SystemMetadataResponse,
-    SystemStatusResponse,
+    MultiSymbolFreshnessReport, PreflightStatusResponse, RuntimeLeadershipCheckpointRow,
+    RuntimeLeadershipResponse, SessionStateResponse, StrategyDecisionDiagnostics,
+    SystemMetadataResponse, SystemStatusResponse,
 };
-use crate::market_data_freshness::evaluate_md_freshness_status;
+use crate::market_data_freshness::{
+    evaluate_md_freshness_status, evaluate_md_freshness_status_for_symbols,
+    required_symbols_for_freshness_gate_from_env,
+};
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::{
     autonomous_session_schedule_from_env, session_window_from_env, AppState,
@@ -465,6 +468,22 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         None
     };
 
+    // PREMARKET-DATA-READINESS-GATE-01: multi-symbol premarket readiness,
+    // covering every required symbol (not just the single legacy symbol
+    // above) — the same aggregate gate start_execution_runtime enforces.
+    let pf_md_readiness: Option<MultiSymbolFreshnessReport> = if is_paper_alpaca {
+        Some(
+            evaluate_md_freshness_status_for_symbols(
+                st.db.as_ref(),
+                &required_symbols_for_freshness_gate_from_env(),
+                Utc::now().timestamp(),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+
     let mut warnings = Vec::new();
     if status.notes.is_some() {
         warnings.push("Daemon status contains notes; verify runtime state.".to_string());
@@ -485,11 +504,11 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
     for b in &autonomous_blockers {
         blockers.push(b.clone());
     }
-    // DATA-FRESHNESS-READINESS-GATE-01: surface freshness blocker in preflight.
-    if let Some(ref mdf) = pf_md_freshness {
-        if mdf.is_start_blocker() {
-            blockers.push(mdf.reason.clone());
-        }
+    // PREMARKET-DATA-READINESS-GATE-01: surface multi-symbol readiness
+    // blockers in preflight (supersedes the single-symbol blocker push —
+    // `pf_md_readiness` covers the same single symbol plus any others).
+    if let Some(ref readiness) = pf_md_readiness {
+        blockers.extend(readiness.blockers.clone());
     }
 
     (
@@ -518,6 +537,7 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
             parity_evidence_state,
             live_trust_complete,
             market_data_freshness: pf_md_freshness,
+            market_data_readiness: pf_md_readiness,
         }),
     )
         .into_response()
@@ -669,6 +689,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                 session_start_env_raw: diag.session_start_env_raw,
                 session_stop_env_raw: diag.session_stop_env_raw,
                 market_data_freshness: None,
+                market_data_readiness: None,
                 strategy_decision_diagnostics: None,
             }),
         )
@@ -959,10 +980,19 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
         .unwrap_or_default();
     let md_freshness =
         evaluate_md_freshness_status(st.db.as_ref(), &ar_sym, &ar_tf, now.timestamp()).await;
-    if md_freshness.is_start_blocker() {
-        blockers.push(md_freshness.reason.clone());
-    }
-    let md_freshness_not_ok = md_freshness.is_start_blocker();
+
+    // PREMARKET-DATA-READINESS-GATE-01: multi-symbol premarket readiness,
+    // covering every required symbol (not just the single legacy symbol
+    // above) — the same aggregate gate start_execution_runtime enforces.
+    // Supersedes md_freshness for blockers/overall_ready (md_freshness is
+    // retained only for the back-compat `market_data_freshness` field below).
+    let md_readiness = evaluate_md_freshness_status_for_symbols(
+        st.db.as_ref(),
+        &required_symbols_for_freshness_gate_from_env(),
+        now.timestamp(),
+    )
+    .await;
+    blockers.extend(md_readiness.blockers.clone());
 
     let overall_ready = ws_continuity_ready
         && reconcile_ready
@@ -971,7 +1001,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
         && session_in_window
         && runtime_start_allowed
         && !strategy_fleet_empty
-        && !md_freshness_not_ok;
+        && md_readiness.start_allowed;
 
     let autonomous_history_degraded = st.autonomous_history_degraded();
 
@@ -1048,6 +1078,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
             session_start_env_raw: diag.session_start_env_raw,
             session_stop_env_raw: diag.session_stop_env_raw,
             market_data_freshness: Some(md_freshness),
+            market_data_readiness: Some(md_readiness),
             strategy_decision_diagnostics,
         }),
     )

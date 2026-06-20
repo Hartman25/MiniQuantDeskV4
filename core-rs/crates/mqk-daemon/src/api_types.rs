@@ -393,6 +393,43 @@ impl MarketDataFreshnessStatus {
     }
 }
 
+/// Aggregate multi-symbol market-data readiness report
+/// (PREMARKET-DATA-READINESS-GATE-01).
+///
+/// Extends [`MarketDataFreshnessStatus`] (single symbol/timeframe) to the
+/// full set of symbols the current deployment requires — the approved
+/// `watchlist-v2` artifact's symbols when one is configured and approved,
+/// otherwise the legacy single `MQK_STRATEGY_SYMBOL`. `start_execution_runtime`
+/// fails closed when any required symbol is missing, insufficient, or stale;
+/// this report is also surfaced read-only on `system/preflight` and
+/// `autonomous/readiness` for operator visibility.
+///
+/// `aggregate_status` values:
+/// - `"ok"` — every required symbol passed its freshness check.
+/// - `"not_applicable"` — no symbol is configured; gate not applicable.
+/// - `"unavailable"` — no symbol is blocking, but at least one symbol's
+///   freshness could not be verified (DB unreachable); not a start blocker.
+/// - `"missing"` / `"insufficient"` / `"stale"` — exactly one required
+///   symbol is blocking, with this state; see `blockers` for which symbol.
+/// - `"mixed_blocked"` — more than one required symbol is blocking
+///   simultaneously; see `blockers` and `per_symbol` for the exact symbols.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiSymbolFreshnessReport {
+    pub aggregate_status: String,
+    /// True unless `aggregate_status` is one of the blocking states
+    /// (`"missing"`, `"insufficient"`, `"stale"`, `"mixed_blocked"`).
+    pub start_allowed: bool,
+    /// Normalized (trimmed, uppercased, deduped) symbols actually checked.
+    /// Empty when `aggregate_status == "not_applicable"`.
+    pub required_symbols: Vec<String>,
+    /// One row per required symbol/timeframe, in the order checked.
+    pub per_symbol: Vec<MarketDataFreshnessStatus>,
+    /// Operator-readable reasons for every blocking symbol (the `reason` of
+    /// each `per_symbol` entry where `is_start_blocker()` is true). Empty
+    /// when `start_allowed` is true.
+    pub blockers: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeErrorResponse {
     pub error: String,
@@ -482,6 +519,13 @@ pub struct PreflightStatusResponse {
     ///
     /// `null` when not applicable (non-paper+alpaca or env vars absent).
     pub market_data_freshness: Option<MarketDataFreshnessStatus>,
+    // PREMARKET-DATA-READINESS-GATE-01: multi-symbol premarket readiness.
+    /// Aggregate market-data readiness across every required symbol (the
+    /// approved watchlist-v2 artifact's symbols, or the legacy single
+    /// `MQK_STRATEGY_SYMBOL`). Same gate `start_execution_runtime` enforces.
+    ///
+    /// `null` when not applicable (non-paper+alpaca).
+    pub market_data_readiness: Option<MultiSymbolFreshnessReport>,
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +715,14 @@ pub struct AutonomousPaperReadinessResponse {
     ///
     /// `null` when not applicable (non-paper+alpaca or env vars absent).
     pub market_data_freshness: Option<MarketDataFreshnessStatus>,
+    // PREMARKET-DATA-READINESS-GATE-01: multi-symbol premarket readiness.
+    /// Aggregate market-data readiness across every required symbol (the
+    /// approved watchlist-v2 artifact's symbols, or the legacy single
+    /// `MQK_STRATEGY_SYMBOL`). Factored into `overall_ready` and `blockers`
+    /// — the same gate `start_execution_runtime` enforces.
+    ///
+    /// `null` when not applicable (non-paper+alpaca).
+    pub market_data_readiness: Option<MultiSymbolFreshnessReport>,
     // STRATEGY-DECISION-OBSERVABILITY-01: signal decision diagnostics.
     /// Read-only diagnostic snapshot from the most recent native strategy bar dispatch.
     ///
