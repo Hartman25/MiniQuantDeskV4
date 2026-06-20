@@ -30,6 +30,7 @@
 //! | IP-09   | response shape: every field present with the documented JSON type                        |
 //! | IP-10   | route requires no DB/provider/broker state and is mounted on the public (no-auth) router |
 //! | IP-11   | watchlist loaded but approved_for_autonomous_paper=false -> degraded, falls back        |
+//! | IP-12   | ingest-plan and system/preflight market_data_readiness agree on required symbols/tf      |
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
@@ -565,4 +566,96 @@ async fn ip11_watchlist_not_approved_falls_back_and_is_degraded() {
         }),
         "IP-11: warnings must explain the not-approved watchlist; got {v}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// IP-12 — cross-surface proof: ingest-plan and system/preflight's
+// market_data_readiness agree on required symbols/timeframe
+// (PREMARKET-INGEST-PLAN-PROOF-01)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ip12_ingest_plan_and_preflight_market_data_readiness_agree_on_required_symbols() {
+    let _g = env_lock().lock().await;
+    clear_ingest_plan_env();
+    let json = valid_watchlist_v2(
+        &["AAPL", "MSFT"],
+        &[("AAPL", "strat-a"), ("MSFT", "strat-b")],
+        2,
+        2,
+    );
+    let path = write_watchlist("ip12", &json);
+    unsafe {
+        std::env::set_var("MQK_PAPER_WATCHLIST_PATH", path.to_str().unwrap());
+        // Decoy legacy symbol: must not leak into either surface once a
+        // watchlist-v2 artifact is approved and active.
+        std::env::set_var("MQK_STRATEGY_SYMBOL", "SPY");
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "1D");
+    }
+
+    let plan = get_ingest_plan().await;
+
+    // system/preflight only populates market_data_readiness for paper+alpaca
+    // (PREMARKET-DATA-READINESS-GATE-01's is_paper_alpaca gate); mirrors
+    // scenario_premarket_data_readiness_gate_01.rs::make_paper_alpaca().
+    let st = std::sync::Arc::new(state::AppState::new_for_test_with_broker_kind(
+        state::BrokerKind::Alpaca,
+    ));
+    let router = routes::build_router(st);
+    let (status, body) = call(
+        router,
+        Request::builder()
+            .uri("/api/v1/system/preflight")
+            .body(axum::body::Body::empty())
+            .unwrap(),
+    )
+    .await;
+    clear_ingest_plan_env();
+    cleanup(&path);
+
+    assert_eq!(status, StatusCode::OK);
+    let preflight = parse_json(body);
+    let readiness = &preflight["market_data_readiness"];
+    assert!(
+        !readiness.is_null(),
+        "IP-12: paper+alpaca preflight must return a market_data_readiness object; got {preflight}"
+    );
+
+    assert_eq!(
+        plan["symbol_source"], "watchlist_v2",
+        "IP-12: ingest-plan must resolve the watchlist-v2 source; got {plan}"
+    );
+    assert_eq!(
+        sorted_strings(&plan["required_symbols"]),
+        sorted_strings(&readiness["required_symbols"]),
+        "IP-12: ingest-plan and system/preflight market_data_readiness must agree on \
+         required_symbols -- both reuse required_symbols_with_source_from_env; \
+         ingest_plan={plan} preflight_readiness={readiness}"
+    );
+    assert!(
+        !sorted_strings(&plan["required_symbols"])
+            .iter()
+            .any(|s| s == "SPY"),
+        "IP-12: the decoy legacy symbol must not leak into either surface once watchlist-v2 \
+         is active; got ingest_plan={plan}"
+    );
+
+    // Per-symbol rows on the preflight side must carry the exact timeframe
+    // ingest-plan resolved, proving the two surfaces share not just the
+    // symbol set but also the timeframe.
+    let plan_timeframe = plan["timeframe"].as_str().unwrap();
+    let per_symbol = readiness["per_symbol"].as_array().unwrap();
+    assert_eq!(
+        per_symbol.len(),
+        2,
+        "IP-12: preflight must evaluate both watchlist-v2 symbols; got {readiness}"
+    );
+    for row in per_symbol {
+        assert_eq!(
+            row["timeframe"].as_str().unwrap(),
+            plan_timeframe,
+            "IP-12: preflight per-symbol timeframe must match ingest-plan timeframe; \
+             row={row} plan_timeframe={plan_timeframe}"
+        );
+    }
 }
