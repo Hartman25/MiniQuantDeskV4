@@ -27,12 +27,29 @@
 //!
 //! All tests are pure in-process and always runnable in CI without environment variables.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
+use tokio::sync::Mutex;
 use tower::ServiceExt;
+
+// ---------------------------------------------------------------------------
+// Env-var serialization — TEST-FLAKE-EVENT-RISK-B7B-ENV-LOCK-01.
+//
+// E7B-05 and E7B-06 mutate the process-global MQK_EVENT_RISK_BLACKOUT_PATH /
+// MQK_EARNINGS_CALENDAR_PATH env vars that event_risk_status() reads. Without
+// serialization, the default parallel test runner can interleave a mutator
+// with a reader (e.g. E7B-01 asserting "not_wired" while E7B-06 has
+// MQK_EARNINGS_CALENDAR_PATH set), producing nondeterministic failures.
+// Mirrors scenario_premarket_data_readiness_gate_01.rs / scenario_market_data_bar_context_01.rs.
+// ---------------------------------------------------------------------------
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -80,6 +97,7 @@ fn oms_overview_req() -> Request<axum::body::Body> {
 
 #[tokio::test]
 async fn e7b_01_event_risk_status_returns_200_not_wired() {
+    let _g = env_lock().lock().await;
     let st = Arc::new(state::AppState::new());
     let router = routes::build_router(st);
 
@@ -115,6 +133,7 @@ async fn e7b_01_event_risk_status_returns_200_not_wired() {
 
 #[tokio::test]
 async fn e7b_02_capability_fields_are_explicitly_absent() {
+    let _g = env_lock().lock().await;
     let st = Arc::new(state::AppState::new());
     let router = routes::build_router(st);
 
@@ -158,6 +177,7 @@ async fn e7b_02_capability_fields_are_explicitly_absent() {
 
 #[tokio::test]
 async fn e7b_03_all_fields_are_non_null_non_empty_strings() {
+    let _g = env_lock().lock().await;
     let st = Arc::new(state::AppState::new());
     let router = routes::build_router(st);
 
@@ -194,6 +214,7 @@ async fn e7b_03_all_fields_are_non_null_non_empty_strings() {
 
 #[tokio::test]
 async fn e7b_04_b7_oms_overview_unaffected_by_event_risk_01() {
+    let _g = env_lock().lock().await;
     let st = Arc::new(state::AppState::new());
     let router = routes::build_router(st);
 
@@ -235,6 +256,7 @@ async fn e7b_04_b7_oms_overview_unaffected_by_event_risk_01() {
 
 #[tokio::test]
 async fn e7b_05_truth_state_is_partial_when_gate_configured() {
+    let _g = env_lock().lock().await;
     // Point the env var at any non-empty path; blackout_surface_label only checks
     // that the var is set — actual file content is evaluated at signal-admission time.
     std::env::set_var(
@@ -288,6 +310,7 @@ async fn e7b_05_truth_state_is_partial_when_gate_configured() {
 
 #[tokio::test]
 async fn e7b_06_earnings_calendar_feed_is_operator_file_when_configured() {
+    let _g = env_lock().lock().await;
     // Point the env var at any non-empty path — earnings_calendar_surface_label
     // only checks that the var is set and non-empty; actual file content is
     // evaluated at signal-admission time.

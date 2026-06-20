@@ -14,14 +14,31 @@
 //!
 //! All tests are pure in-process (no DB, no network, no real Discord call).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::{body::Body, http::Request};
 use chrono::DateTime;
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
 use state::{AlpacaWsContinuityState, BrokerKind, StrategyFleetEntry};
+use tokio::sync::Mutex;
 use tower::ServiceExt;
+
+// ---------------------------------------------------------------------------
+// Env-var serialization — TEST-FLAKE-SESSION-WINDOW-OBS01-ENV-LOCK-01.
+//
+// OBS-SW-01/05/06 mutate the process-global MQK_SESSION_START_HH_MM /
+// MQK_SESSION_STOP_HH_MM env vars that session_window_from_env() reads.
+// Without serialization, the default parallel test runner can interleave a
+// mutator with OBS-SW-02/03 (which assert the env vars are absent),
+// producing nondeterministic failures. Mirrors the same fix applied to
+// scenario_event_risk_status_b7b.rs / scenario_premarket_data_readiness_gate_01.rs.
+// ---------------------------------------------------------------------------
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -96,6 +113,7 @@ fn nyse_regular_ts() -> i64 {
 /// - `session_window_basis = "UTC"`
 #[tokio::test]
 async fn obs_sw_01_env_window_exposes_source_and_derived_times() {
+    let _g = env_lock().lock().await;
     // Set env vars for this test only.  Use a very specific window so we can
     // assert exact values without risk of conflict with other tests.
     std::env::set_var("MQK_SESSION_START_HH_MM", "13:30");
@@ -148,6 +166,7 @@ async fn obs_sw_01_env_window_exposes_source_and_derived_times() {
 /// - `session_stop_utc = null`
 #[tokio::test]
 async fn obs_sw_02_absent_env_exposes_default_source_and_null_times() {
+    let _g = env_lock().lock().await;
     // Guarantee env vars are absent.
     std::env::remove_var("MQK_SESSION_START_HH_MM");
     std::env::remove_var("MQK_SESSION_STOP_HH_MM");
@@ -190,6 +209,7 @@ async fn obs_sw_02_absent_env_exposes_default_source_and_null_times() {
 /// `overall_ready` must still be `true` and `blockers` must still be empty.
 #[tokio::test]
 async fn obs_sw_03_diagnostics_do_not_alter_readiness_verdict() {
+    let _g = env_lock().lock().await;
     std::env::remove_var("MQK_SESSION_START_HH_MM");
     std::env::remove_var("MQK_SESSION_STOP_HH_MM");
 
@@ -232,6 +252,7 @@ async fn obs_sw_03_diagnostics_do_not_alter_readiness_verdict() {
 /// `active` and `not_applicable` paths.
 #[tokio::test]
 async fn obs_sw_04_now_utc_is_valid_rfc3339() {
+    let _g = env_lock().lock().await;
     let st_active = make_paper_alpaca();
     let v_active = call_readiness(st_active).await;
     let active_now = v_active["now_utc"]
@@ -262,6 +283,7 @@ async fn obs_sw_04_now_utc_is_valid_rfc3339() {
 /// bad value so the operator can identify the misconfiguration.
 #[tokio::test]
 async fn obs_sw_05_invalid_env_falls_back_to_default_with_raw_visible() {
+    let _g = env_lock().lock().await;
     std::env::set_var("MQK_SESSION_START_HH_MM", "bad-value");
     std::env::set_var("MQK_SESSION_STOP_HH_MM", "20:00");
 
@@ -298,6 +320,7 @@ async fn obs_sw_05_invalid_env_falls_back_to_default_with_raw_visible() {
 /// window configuration from any deployment.
 #[tokio::test]
 async fn obs_sw_06_not_applicable_path_includes_diagnostic_fields() {
+    let _g = env_lock().lock().await;
     std::env::set_var("MQK_SESSION_START_HH_MM", "13:30");
     std::env::set_var("MQK_SESSION_STOP_HH_MM", "20:00");
 
