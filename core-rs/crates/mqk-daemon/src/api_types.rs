@@ -430,6 +430,73 @@ pub struct MultiSymbolFreshnessReport {
     pub blockers: Vec<String>,
 }
 
+/// One resolved required symbol/timeframe pair with explicit provenance
+/// (WATCHLIST-INGEST-PLAN-01).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestPlanSymbolTimeframe {
+    pub symbol: String,
+    pub timeframe: String,
+    /// Same value as the response's top-level `symbol_source` — repeated
+    /// per-entry so a future per-symbol timeframe/source split does not
+    /// require a breaking schema change.
+    pub source: String,
+}
+
+/// Static description of how this ingest plan relates to existing
+/// market-data surfaces (WATCHLIST-INGEST-PLAN-01). Both fields are
+/// currently always `true`: every required symbol is checked by the
+/// `market_data_readiness` premarket gate, and `md_bars` is the canonical
+/// store that gate reads from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestPlanCoverageExpectation {
+    pub uses_market_data_readiness: bool,
+    pub uses_md_bars: bool,
+}
+
+/// Response for `GET /api/v1/market-data/ingest-plan` (WATCHLIST-INGEST-PLAN-01).
+///
+/// Answers, in one place: which symbols/timeframe does the bot require for
+/// trading readiness, where did that list come from, and which source
+/// should premarket ingest and the GUI coverage panel expect. Reuses
+/// [`crate::market_data_freshness::required_symbols_with_source_from_env`] —
+/// the exact resolver `PREMARKET-DATA-READINESS-GATE-01` already uses — so
+/// this surface and the readiness gate can never disagree.
+///
+/// # `truth_state` values
+/// - `"active"` — at least one required symbol resolved from a usable source.
+/// - `"not_configured"` — no timeframe and/or no symbol source is configured;
+///   mirrors the readiness gate's `"not_applicable"`.
+/// - `"degraded"` — a watchlist path is configured but is not the active
+///   source (e.g. `Missing`/`Invalid`/`LoadedNotApproved`/v1); the plan still
+///   resolved symbols via fallback, but the operator's intended source is
+///   not actually in effect. See `warnings` for why.
+///
+/// # Safety invariants
+/// - Read-only. No DB, no provider/broker calls, no network access.
+/// - Does not touch live/paper execution state. No arm_state required.
+/// - Never uses the full instrument registry as the required-symbol source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IngestPlanResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    /// `"watchlist_v2"` | `"env_strategy_symbol"` | `"none"`.
+    pub symbol_source: String,
+    /// Normalized (trimmed, uppercased, deduped) required symbols, in
+    /// resolution order. Empty when `symbol_source == "none"`.
+    pub required_symbols: Vec<String>,
+    /// Shared timeframe applied to every required symbol, or `None` when
+    /// `MQK_STRATEGY_MD_TIMEFRAME` is not configured.
+    pub timeframe: Option<String>,
+    /// One row per required symbol, each carrying its own timeframe/source.
+    pub required_symbol_timeframes: Vec<IngestPlanSymbolTimeframe>,
+    pub coverage_expectation: IngestPlanCoverageExpectation,
+    /// Operator-readable explanations, e.g. a configured-but-unusable
+    /// watchlist artifact, or a missing shared timeframe. Empty when the
+    /// resolution is unambiguous.
+    pub warnings: Vec<String>,
+    pub checked_at_utc: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeErrorResponse {
     pub error: String,

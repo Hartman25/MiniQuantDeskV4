@@ -16,6 +16,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
 use crate::api_types::{MarketDataFreshnessStatus, MultiSymbolFreshnessReport};
+use crate::watchlist_intake::WatchlistIntakeOutcome;
 
 /// Minimum completed bars required before paper trading is allowed.
 pub const MD_FRESHNESS_MIN_BARS: u64 = 5;
@@ -552,22 +553,73 @@ pub async fn evaluate_md_freshness_status_for_symbols(
 /// shared timeframe is absent — callers must treat an empty list as
 /// `"not_applicable"`, exactly matching prior single-symbol behavior when
 /// env vars were absent.
+///
+/// Thin wrapper over [`required_symbols_with_source_from_env`] — kept for
+/// existing callers that only need the resolved list, not its provenance.
 pub fn required_symbols_for_freshness_gate_from_env() -> Vec<RequiredSymbolTimeframe> {
+    required_symbols_with_source_from_env().required
+}
+
+/// Source label: an approved `watchlist-v2` artifact supplied the required
+/// symbols (WATCHLIST-INGEST-PLAN-01).
+pub const SYMBOL_SOURCE_WATCHLIST_V2: &str = "watchlist_v2";
+
+/// Source label: the legacy single `MQK_STRATEGY_SYMBOL` env var supplied
+/// the required symbol (WATCHLIST-INGEST-PLAN-01).
+pub const SYMBOL_SOURCE_ENV_STRATEGY_SYMBOL: &str = "env_strategy_symbol";
+
+/// Source label: no symbol source is configured/usable
+/// (WATCHLIST-INGEST-PLAN-01).
+pub const SYMBOL_SOURCE_NONE: &str = "none";
+
+/// Result of resolving the required symbol/timeframe set from the
+/// environment, with explicit provenance (WATCHLIST-INGEST-PLAN-01).
+#[derive(Debug, Clone)]
+pub struct RequiredSymbolsResolution {
+    /// The resolved required symbol/timeframe pairs (unnormalized — callers
+    /// that need normalization should still apply
+    /// [`normalize_required_symbols`]).
+    pub required: Vec<RequiredSymbolTimeframe>,
+    /// Which source produced `required`: [`SYMBOL_SOURCE_WATCHLIST_V2`],
+    /// [`SYMBOL_SOURCE_ENV_STRATEGY_SYMBOL`], or [`SYMBOL_SOURCE_NONE`].
+    pub source: &'static str,
+    /// The watchlist intake outcome evaluated during resolution, regardless
+    /// of whether it ended up being the active source. Lets callers explain
+    /// *why* a configured watchlist was/was not used (e.g.
+    /// `Missing`/`Invalid`/`LoadedNotApproved`/v1) without re-evaluating the
+    /// artifact themselves.
+    pub watchlist_outcome: WatchlistIntakeOutcome,
+}
+
+/// Resolve the symbol/timeframe pairs the premarket readiness gate must
+/// verify, from the environment, together with explicit source provenance
+/// (WATCHLIST-INGEST-PLAN-01).
+///
+/// This is the same source-preference logic documented on
+/// [`required_symbols_for_freshness_gate_from_env`] (that function is now a
+/// thin wrapper over this one) — so the premarket readiness gate and any
+/// provenance-aware caller (e.g. the ingest-plan surface) can never disagree
+/// about which symbols are required or where they came from.
+pub fn required_symbols_with_source_from_env() -> RequiredSymbolsResolution {
     let timeframe = std::env::var(crate::state::STRATEGY_MD_TIMEFRAME_ENV)
         .map(|v| v.trim().to_string())
         .unwrap_or_default();
-    if timeframe.is_empty() {
-        return Vec::new();
-    }
 
     let watchlist_outcome = crate::watchlist_intake::evaluate_watchlist_intake_from_env();
-    if let crate::watchlist_intake::WatchlistIntakeOutcome::LoadedApproved { artifact } =
-        &watchlist_outcome
-    {
+
+    if timeframe.is_empty() {
+        return RequiredSymbolsResolution {
+            required: Vec::new(),
+            source: SYMBOL_SOURCE_NONE,
+            watchlist_outcome,
+        };
+    }
+
+    if let WatchlistIntakeOutcome::LoadedApproved { artifact } = &watchlist_outcome {
         if artifact.schema_version == crate::watchlist_intake::WATCHLIST_SCHEMA_VERSION_V2
             && !artifact.symbols.is_empty()
         {
-            return artifact
+            let required = artifact
                 .symbols
                 .iter()
                 .map(|symbol| RequiredSymbolTimeframe {
@@ -575,6 +627,11 @@ pub fn required_symbols_for_freshness_gate_from_env() -> Vec<RequiredSymbolTimef
                     timeframe: timeframe.clone(),
                 })
                 .collect();
+            return RequiredSymbolsResolution {
+                required,
+                source: SYMBOL_SOURCE_WATCHLIST_V2,
+                watchlist_outcome,
+            };
         }
     }
 
@@ -582,8 +639,16 @@ pub fn required_symbols_for_freshness_gate_from_env() -> Vec<RequiredSymbolTimef
         .map(|v| v.trim().to_string())
         .unwrap_or_default();
     if symbol.is_empty() {
-        return Vec::new();
+        return RequiredSymbolsResolution {
+            required: Vec::new(),
+            source: SYMBOL_SOURCE_NONE,
+            watchlist_outcome,
+        };
     }
 
-    vec![RequiredSymbolTimeframe { symbol, timeframe }]
+    RequiredSymbolsResolution {
+        required: vec![RequiredSymbolTimeframe { symbol, timeframe }],
+        source: SYMBOL_SOURCE_ENV_STRATEGY_SYMBOL,
+        watchlist_outcome,
+    }
 }

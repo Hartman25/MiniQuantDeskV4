@@ -44,7 +44,8 @@ use uuid::Uuid;
 use crate::{
     api_types::{
         IngestJobAcceptedResponse, IngestJobRequest, IngestJobStatusResponse, IngestJobSummary,
-        IngestJobsListResponse, MarketDataFeedPollOnceRequest, MarketDataFeedPollOnceResponse,
+        IngestJobsListResponse, IngestPlanCoverageExpectation, IngestPlanResponse,
+        IngestPlanSymbolTimeframe, MarketDataFeedPollOnceRequest, MarketDataFeedPollOnceResponse,
         MarketDataFeedPollSymbolResult, MarketDataFeedSchedulerStartRequest,
         MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse,
         TrackedEquitiesResponse, TrackedEquitySummary,
@@ -53,7 +54,12 @@ use crate::{
         list_persisted_ingest_jobs, load_persisted_ingest_job, persist_ingest_job_record,
         IngestJobRecord, IngestJobStatus, IngestJobStore,
     },
-    state::AppState,
+    market_data_freshness::{
+        normalize_required_symbols, required_symbols_with_source_from_env,
+        RequiredSymbolsResolution, SYMBOL_SOURCE_WATCHLIST_V2,
+    },
+    state::{AppState, STRATEGY_MD_TIMEFRAME_ENV},
+    watchlist_intake::WatchlistIntakeOutcome,
 };
 
 const INGEST_JOB_CANCEL_REASON: &str = "cancel requested by operator";
@@ -62,6 +68,7 @@ const FEED_STATUS_ROUTE: &str = "/api/v1/market-data/feed/status";
 const FEED_SCHEDULER_START_ROUTE: &str = "/api/v1/market-data/feed/scheduler/start";
 const FEED_SCHEDULER_STOP_ROUTE: &str = "/api/v1/market-data/feed/scheduler/stop";
 const FEED_SCHEDULER_STATUS_ROUTE: &str = "/api/v1/market-data/feed/scheduler/status";
+const INGEST_PLAN_ROUTE: &str = "/api/v1/market-data/ingest-plan";
 const SCHEDULER_RESPONSE_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -2743,6 +2750,110 @@ pub(crate) async fn tracked_equities_list(State(st): State<Arc<AppState>>) -> im
         last_symbol,
         error: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/market-data/ingest-plan — WATCHLIST-INGEST-PLAN-01
+// ---------------------------------------------------------------------------
+
+/// Build the `IngestPlanResponse` from a resolved symbol set and the
+/// configured timeframe. Pure helper — extracted for testability (mirrors
+/// `routes/watchlist.rs::build_watchlist_status_response`).
+///
+/// Safety: takes no DB/provider/broker handles and performs no I/O — every
+/// input is already resolved by the caller from env vars + the watchlist
+/// artifact reader.
+fn build_ingest_plan_response(
+    resolution: RequiredSymbolsResolution,
+    timeframe_configured: Option<String>,
+    checked_at_utc: String,
+) -> IngestPlanResponse {
+    let normalized = normalize_required_symbols(&resolution.required);
+    let required_symbols: Vec<String> = normalized.iter().map(|r| r.symbol.clone()).collect();
+    let required_symbol_timeframes: Vec<IngestPlanSymbolTimeframe> = normalized
+        .iter()
+        .map(|r| IngestPlanSymbolTimeframe {
+            symbol: r.symbol.clone(),
+            timeframe: r.timeframe.clone(),
+            source: resolution.source.to_string(),
+        })
+        .collect();
+
+    let watchlist_configured = !matches!(
+        resolution.watchlist_outcome,
+        WatchlistIntakeOutcome::NotConfigured
+    );
+    let watchlist_is_active_source = resolution.source == SYMBOL_SOURCE_WATCHLIST_V2;
+
+    let mut warnings = Vec::new();
+    if timeframe_configured.is_none() {
+        warnings.push(
+            "MQK_STRATEGY_MD_TIMEFRAME is not configured; ingest plan cannot resolve a \
+             required timeframe regardless of symbol source"
+                .to_string(),
+        );
+    }
+    if watchlist_configured && !watchlist_is_active_source {
+        let fallback_desc = if required_symbols.is_empty() {
+            "no source (no required symbols resolved)".to_string()
+        } else {
+            format!("source '{}'", resolution.source)
+        };
+        warnings.push(format!(
+            "MQK_PAPER_WATCHLIST_PATH is configured but is not the active ingest-plan source \
+             (status={}); falling back to {}",
+            resolution.watchlist_outcome.status_label(),
+            fallback_desc,
+        ));
+    }
+
+    let truth_state = if watchlist_configured && !watchlist_is_active_source {
+        "degraded"
+    } else if required_symbols.is_empty() {
+        "not_configured"
+    } else {
+        "active"
+    };
+
+    IngestPlanResponse {
+        canonical_route: INGEST_PLAN_ROUTE.to_string(),
+        truth_state: truth_state.to_string(),
+        symbol_source: resolution.source.to_string(),
+        required_symbols,
+        timeframe: timeframe_configured,
+        required_symbol_timeframes,
+        coverage_expectation: IngestPlanCoverageExpectation {
+            uses_market_data_readiness: true,
+            uses_md_bars: true,
+        },
+        warnings,
+        checked_at_utc,
+    }
+}
+
+/// Read-only required-symbol/timeframe ingest plan, naming its source.
+///
+/// Answers: which symbols/timeframe does the bot require for trading
+/// readiness, where did that list come from, and which source should
+/// premarket ingest and the GUI coverage panel expect.
+///
+/// # Safety invariants
+/// - Read-only. No DB, no provider/broker calls, no network access.
+/// - Does not touch live/paper execution state. No arm_state required.
+/// - Never uses the full instrument registry as the required-symbol source.
+pub(crate) async fn market_data_ingest_plan() -> impl IntoResponse {
+    let resolution = required_symbols_with_source_from_env();
+    let timeframe_configured = std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let checked_at_utc = Utc::now().to_rfc3339();
+
+    Json(build_ingest_plan_response(
+        resolution,
+        timeframe_configured,
+        checked_at_utc,
+    ))
 }
 
 // ---------------------------------------------------------------------------

@@ -748,6 +748,39 @@ The scheduled task calls **only** `Prep-PremarketMarketData.ps1` on weekdays
 before market open.  It does NOT start the daemon, the runtime, or trading.
 It does NOT call `Start-PaperTradingSmoke.ps1`.
 
+### Which symbols are required? (`GET /api/v1/market-data/ingest-plan`)
+
+The daemon exposes one read-only, canonical answer to "which symbols/timeframe
+does the bot require for trading readiness, and where did that list come
+from":
+
+```
+GET /api/v1/market-data/ingest-plan
+```
+
+It reuses the exact same symbol-resolution logic as the premarket readiness
+gate (Section 1's `market_data_readiness` field), so the two surfaces can
+never disagree:
+
+1. An approved `watchlist-v2` artifact (`MQK_PAPER_WATCHLIST_PATH`), if configured and valid.
+2. Otherwise the legacy single `MQK_STRATEGY_SYMBOL` / `MQK_STRATEGY_MD_TIMEFRAME` pair.
+3. Otherwise no symbols (`symbol_source: "none"`).
+
+It never falls back to the full instrument registry (`config/instruments/equities.json`)
+as a default trading watchlist — that registry remains a separate, larger
+tracked/coverage universe (`GET /api/v1/ingest/tracked-equities`), not the
+required-symbol source.
+
+`truth_state` is `"active"` (symbols resolved), `"not_configured"` (nothing
+usable is configured), or `"degraded"` (a watchlist path is configured but is
+not the active source, e.g. missing/invalid/not-yet-approved — `warnings`
+names why). This route makes no DB, provider, or broker calls and does not
+touch live/paper execution state.
+
+`Prep-PremarketMarketData.ps1 -SymbolsFromIngestPlan` (see below) calls this
+route to resolve `-Symbols`/`-Timeframe` automatically instead of relying on
+the script's `AAPL` default.
+
 ### Register the scheduled task (one-time setup)
 
 ```powershell
@@ -793,6 +826,15 @@ Or with custom symbols:
 powershell -ExecutionPolicy Bypass -File scripts\windows\Prep-PremarketMarketData.ps1 `
     -Symbols AAPL,AMD -Timeframe 1D -MinCompletedBars 30
 ```
+
+Or resolving symbols/timeframe from the daemon's ingest plan instead of
+`-Symbols`/`-Timeframe` (requires the daemon to already be running):
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Prep-PremarketMarketData.ps1 -SymbolsFromIngestPlan
+```
+This calls `GET /api/v1/market-data/ingest-plan` (see above) and fails
+clearly (exit 1) if the daemon is unreachable or the plan has no required
+symbols — it never silently falls back to the `AAPL` default.
 
 ### Check data readiness without mutations
 

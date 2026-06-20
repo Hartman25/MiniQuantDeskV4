@@ -170,7 +170,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         ingest_job_cancel, ingest_job_status, ingest_job_submit, ingest_jobs_list,
         market_data_feed_poll_once, market_data_feed_scheduler_start,
         market_data_feed_scheduler_status, market_data_feed_scheduler_stop,
-        market_data_feed_status, tracked_equities_list,
+        market_data_feed_status, market_data_ingest_plan, tracked_equities_list,
     };
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
@@ -334,6 +334,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/market-data/feed/scheduler/status",
             get(market_data_feed_scheduler_status),
+        )
+        // WATCHLIST-INGEST-PLAN-01: read-only required-symbol ingest plan (public, no auth)
+        // No DB, no provider/broker calls. Reuses the PREMARKET-DATA-READINESS-GATE-01 resolver.
+        .route(
+            "/api/v1/market-data/ingest-plan",
+            get(market_data_ingest_plan),
         )
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))

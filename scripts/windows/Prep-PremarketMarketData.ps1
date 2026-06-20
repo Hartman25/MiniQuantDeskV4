@@ -10,6 +10,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\windows\Prep-PremarketMarketData.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\windows\Prep-PremarketMarketData.ps1 -CheckOnly
 #   powershell -ExecutionPolicy Bypass -File scripts\windows\Prep-PremarketMarketData.ps1 -Symbols AAPL,AMD -Timeframe 1D -MinCompletedBars 30
+#   powershell -ExecutionPolicy Bypass -File scripts\windows\Prep-PremarketMarketData.ps1 -SymbolsFromIngestPlan
 #
 # Parameters:
 #   -Symbols           Comma-separated ticker list. Default: AAPL
@@ -21,6 +22,13 @@
 #   -CheckOnly         Verify schema, bar counts, key presence. No mutations.
 #   -SkipAlpacaIntraday
 #                      Skip normal-mode Alpaca intraday top-off for intraday timeframes.
+#   -SymbolsFromIngestPlan
+#                      WATCHLIST-INGEST-PLAN-01: resolve -Symbols/-Timeframe from
+#                      GET /api/v1/market-data/ingest-plan on the local daemon instead of
+#                      the -Symbols/-Timeframe parameters. Fails clearly (exit 1) if the
+#                      daemon is unreachable or the plan has no required symbols -- this
+#                      is an explicit opt-in, so it never silently falls back to AAPL.
+#   -DaemonPort        Daemon HTTP port, used only with -SymbolsFromIngestPlan. Default: 8899.
 #
 # Hard rules:
 #   - Paper DB only. Refuses if MQK_DATABASE_URL does not contain port 5440.
@@ -38,7 +46,9 @@ param(
     [string]  $PaperDbUrl       = 'postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper?sslmode=disable',
     [string]  $RepoRoot         = '',
     [switch]  $CheckOnly,
-    [switch]  $SkipAlpacaIntraday
+    [switch]  $SkipAlpacaIntraday,
+    [switch]  $SymbolsFromIngestPlan,
+    [int]     $DaemonPort       = 8899
 )
 
 Set-StrictMode -Version Latest
@@ -135,12 +145,39 @@ if ($alpacaPaperConfigured) {
 }
 
 # ---------------------------------------------------------------------------
-# Parse symbol list
+# Parse symbol list -- or resolve from the daemon ingest-plan route
+# (WATCHLIST-INGEST-PLAN-01) when -SymbolsFromIngestPlan is set.
 # ---------------------------------------------------------------------------
-$symbolList = @($Symbols -split '[,; ]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim().ToUpper() })
-if ($symbolList.Count -eq 0) {
-    Write-Fail "No symbols provided. Use -Symbols AAPL or set MQK_STRATEGY_SYMBOL."
-    exit 1
+if ($SymbolsFromIngestPlan) {
+    Write-Sect "Resolving symbols/timeframe from daemon ingest-plan (port $DaemonPort)"
+    $ingestPlanUrl = "http://127.0.0.1:$DaemonPort/api/v1/market-data/ingest-plan"
+    try {
+        $plan = Invoke-RestMethod -Uri $ingestPlanUrl -Method Get -TimeoutSec 5 -ErrorAction Stop
+    } catch {
+        Write-Fail "Could not reach daemon ingest-plan route at $ingestPlanUrl ($_)."
+        Write-Fail "Start the daemon first, or omit -SymbolsFromIngestPlan to use -Symbols/-Timeframe directly."
+        exit 1
+    }
+
+    if (-not $plan.required_symbols -or @($plan.required_symbols).Count -eq 0) {
+        Write-Fail ("Daemon ingest-plan returned no required symbols " +
+                     "(truth_state=$($plan.truth_state), symbol_source=$($plan.symbol_source)).")
+        Write-Fail "Configure MQK_PAPER_WATCHLIST_PATH or MQK_STRATEGY_SYMBOL/MQK_STRATEGY_MD_TIMEFRAME on the daemon, or omit -SymbolsFromIngestPlan."
+        exit 1
+    }
+
+    $symbolList = @($plan.required_symbols | ForEach-Object { $_.Trim().ToUpper() })
+    $Symbols    = ($symbolList -join ',')
+    $Timeframe  = $plan.timeframe
+    Write-Ok ("Ingest plan: source=$($plan.symbol_source) truth_state=$($plan.truth_state) " +
+              "symbols=$($symbolList -join ', ') timeframe=$Timeframe")
+    foreach ($w in @($plan.warnings)) { Write-Warn "ingest-plan: $w" }
+} else {
+    $symbolList = @($Symbols -split '[,; ]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim().ToUpper() })
+    if ($symbolList.Count -eq 0) {
+        Write-Fail "No symbols provided. Use -Symbols AAPL or set MQK_STRATEGY_SYMBOL."
+        exit 1
+    }
 }
 Write-Step "Symbols: $($symbolList -join ', ')  Timeframe: $Timeframe"
 Write-Step "MinCompletedBars: $MinCompletedBars  MaxStalenessDays: $MaxStalenessDays"
