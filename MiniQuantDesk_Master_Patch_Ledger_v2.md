@@ -1708,3 +1708,26 @@ Then return to the high-value original mission:
 ```text
 AUTON-NO-TRADE-01
 ```
+
+---
+
+## 19. Multi-Asset Expansion Roadmap
+
+**Source:** `MULTI-ASSET-COMPLETION-AUDIT-01` (docs-only audit; no code/trading-path changes).
+**Full detail:** [`docs/audits/multi_asset_completion_audit.md`](docs/audits/multi_asset_completion_audit.md)
+
+Repo trades equities only today, but already has a tested fail-closed multi-asset admission boundary (`AssetClass` enum, Gate 0 signal-admission reject, `MULTI-ASSET-ROUTING-GUARD-01` broker-submit reject, `ASSET-CAPABILITY-MATRIX-01` on `/api/v1/system/metadata` — all pre-existing, all `enabled:false` for non-equity). Nothing exists past that boundary for any non-equity class. See the audit doc for full evidence; this section is index-only and will drift if treated as the source of truth.
+
+**Note:** ledger §11 (`DATA-MULTI-ASSET-MODEL-01` and the four `DATA-INGEST-*-PLAN-01` items, all `QUEUED`) overlaps this roadmap's Phase 0–4 patches. Recommend reconciling both under one tracking scheme via `LEDGER-MULTI-ASSET-RECONCILE-01` (see audit doc §5/§13) rather than tracking the same work twice.
+
+Phase list: Phase 0 Core Foundation (`ASSET-CORE-01..05`) → Phase 5 ETF/Sector (cheapest real wins) → Phase 3 Crypto (cheapest new asset class) → Phase 7 Broker Expansion (IBKR) → Phase 1 Futures → Phase 2 Options → Phase 4 Forex / Phase 6 Rates (lowest near-term priority).
+
+Top 20 (build order; full rationale in audit doc §8): `LEDGER-MULTI-ASSET-RECONCILE-01`, `ETF-RISK-01`, `ETF-REGISTRY-01`, `ASSET-CORE-01`, `ASSET-CORE-05`, `BACKTEST-MULTIPLIER-MARGIN-01`, `ASSET-CORE-02`, `ASSET-CORE-03`, `MULTI-ASSET-ALLOCATOR-01`, `ETF-RANKER-01`, `ETF-STRAT-01`, `MULTI-STRATEGY-CONFLICT-POLICY-01`, `PROVIDER-SWAP-CONTRACT-01`, `ASSET-CORE-04`, `CRYPTO-REGISTRY-01`, `CRYPTO-DATA-01`, `CRYPTO-RISK-01`, `CRYPTO-EXEC-01`, `CRYPTO-STRAT-01`, `BROKER-IBKR-01`.
+
+Recommended next patch:
+
+```text
+ETF-RISK-01
+```
+
+(wires already-written, zero-caller `SectorConstraint`/`check_sector_limits()` in `mqk-portfolio/src/constraints.rs` into the live risk engine — smallest diff, real risk value, no dependencies.)
