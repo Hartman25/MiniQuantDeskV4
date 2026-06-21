@@ -165,7 +165,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "broad_market",
+    "category": "index_equity"
   },
   {
     "instrument_id": "equity:US:DKNG",
@@ -273,7 +276,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "commodity_gold",
+    "category": "commodity"
   },
   {
     "instrument_id": "equity:US:GOOGL",
@@ -369,7 +375,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "rates_duration",
+    "category": "fixed_income"
   },
   {
     "instrument_id": "equity:US:INTC",
@@ -405,7 +414,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "broad_market",
+    "category": "index_equity"
   },
   {
     "instrument_id": "equity:US:JBLU",
@@ -693,7 +705,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "broad_market",
+    "category": "index_equity"
   },
   {
     "instrument_id": "equity:US:RBLX",
@@ -753,7 +768,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "rates_duration",
+    "category": "fixed_income"
   },
   {
     "instrument_id": "equity:US:SLV",
@@ -801,7 +819,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "broad_market",
+    "category": "index_equity"
   },
   {
     "instrument_id": "equity:US:T",
@@ -837,7 +858,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "rates_duration",
+    "category": "fixed_income"
   },
   {
     "instrument_id": "equity:US:TSLA",
@@ -957,7 +981,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "sector_energy",
+    "category": "sector_equity"
   },
   {
     "instrument_id": "equity:US:XLF",
@@ -969,7 +996,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "sector_financials",
+    "category": "sector_equity"
   },
   {
     "instrument_id": "equity:US:XLI",
@@ -981,7 +1011,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "sector_industrials",
+    "category": "sector_equity"
   },
   {
     "instrument_id": "equity:US:XLK",
@@ -993,7 +1026,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "sector_technology",
+    "category": "sector_equity"
   },
   {
     "instrument_id": "equity:US:XLP",
@@ -1005,7 +1041,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "sector_consumer_staples",
+    "category": "sector_equity"
   },
   {
     "instrument_id": "equity:US:XLU",
@@ -1017,7 +1056,10 @@
     "currency": "USD",
     "enabled": true,
     "timeframes": ["1D"],
-    "notes": "seeded from existing daily backfill universe"
+    "notes": "seeded from existing daily backfill universe",
+    "instrument_kind": "etf",
+    "sector": "sector_utilities",
+    "category": "sector_equity"
   },
   {
     "instrument_id": "equity:US:XLV",

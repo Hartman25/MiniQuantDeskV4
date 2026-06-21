@@ -1724,10 +1724,18 @@ Phase list: Phase 0 Core Foundation (`ASSET-CORE-01..05`) → Phase 5 ETF/Sector
 
 Top 20 (build order; full rationale in audit doc §8): `LEDGER-MULTI-ASSET-RECONCILE-01`, `ETF-RISK-01`, `ETF-REGISTRY-01`, `ASSET-CORE-01`, `ASSET-CORE-05`, `BACKTEST-MULTIPLIER-MARGIN-01`, `ASSET-CORE-02`, `ASSET-CORE-03`, `MULTI-ASSET-ALLOCATOR-01`, `ETF-RANKER-01`, `ETF-STRAT-01`, `MULTI-STRATEGY-CONFLICT-POLICY-01`, `PROVIDER-SWAP-CONTRACT-01`, `ASSET-CORE-04`, `CRYPTO-REGISTRY-01`, `CRYPTO-DATA-01`, `CRYPTO-RISK-01`, `CRYPTO-EXEC-01`, `CRYPTO-STRAT-01`, `BROKER-IBKR-01`.
 
+### ETF-FOUNDATION-01 — ETF-REGISTRY-01 CLOSED / ETF-RISK-01 PARTIAL
+
+**`ETF-REGISTRY-01` CLOSED.** The 14 target ETFs (SPY, QQQ, IWM, DIA, XLK, XLF, XLE, XLI, XLP, XLU, TLT, IEF, SHY, GLD) are tagged in `config/instruments/equities.json` with new optional fields on `TrackedInstrument` (`core-rs/crates/mqk-md/src/instrument_registry.rs`): `instrument_kind: "etf"`, `sector` (e.g. `broad_market`, `sector_technology`, `rates_duration`), `category` (e.g. `index_equity`, `sector_equity`, `fixed_income`, `commodity`). `asset_class` stays `"equity"` for all of them — zero change to ingestion/backtest/GUI behavior, zero change to the other 74 entries. New `sector_map()` pure helper bridges registry metadata to the `HashMap<String,String>` shape `mqk_portfolio::constraints::check_sector_limits` expects. 10 new tests (REG-12..REG-19) + 9 pre-existing registry tests all pass; `cargo check`/`clippy -D warnings` clean on `mqk-md`/`mqk-cli`/`mqk-daemon`.
+
+**`ETF-RISK-01` PARTIAL — blocked on missing live portfolio-weight plumbing, not just missing sector metadata.** Direct inspection (not the original audit's "zero callers" framing) found the real gap: no live mark-price/notional/weight computation reaches any admission boundary today, for any symbol. `mqk_risk::RiskInput`/`RiskState` carry no symbol field; `RiskRequestContext` (the struct reaching the live pre-broker-submit `RiskGate`) carries only `is_risk_reducing: bool`; the live tick-loop `PositionSnapshot`/`PortfolioSnapshot` (`mqk-runtime::observability`) carry qty + cash only, no mark price or NAV. The existing analogous per-order caps (`mqk-daemon/src/capital_policy/{position_sizing,portfolio_risk}.rs`) are single-order notional checks that explicitly punt on this same gap (`RiskUnverifiable`: "portfolio drift is not measurable at signal time without runtime portfolio state"). `cargo test -p mqk-risk sector` / `-p mqk-runtime sector` both match zero tests against HEAD, confirming no sector-aware code exists outside the dead `mqk-portfolio::constraints` module. Wiring `check_sector_limits` for real would require fabricating a price/NAV source — forbidden by `CLAUDE.md` operator-truth discipline. `mqk-portfolio`, `mqk-risk`, `mqk-runtime`, and `mqk-daemon` production code were therefore **not touched**; the dead `SectorConstraint`/`check_sector_limits` code is unchanged and still has its original 22 passing tests. Full detail: `docs/audits/multi_asset_completion_audit.md` §16.
+
+**Next dependency patch:** `PORTFOLIO-LIVE-WEIGHTS-01` (live mark-price + NAV/weight computation reaching the decision boundary, equity-wide — not ETF-specific). Only after that exists can `ETF-RISK-01` close for real.
+
 Recommended next patch:
 
 ```text
-ETF-RISK-01
+PORTFOLIO-LIVE-WEIGHTS-01
 ```
 
 (wires already-written, zero-caller `SectorConstraint`/`check_sector_limits()` in `mqk-portfolio/src/constraints.rs` into the live risk engine — smallest diff, real risk value, no dependencies.)

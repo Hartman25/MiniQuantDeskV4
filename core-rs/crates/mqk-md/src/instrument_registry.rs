@@ -15,11 +15,15 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// One tracked instrument entry. All fields are required; no optional fields on the
-/// canonical schema so parsers fail closed on malformed files.
+/// One tracked instrument entry. Core fields are required; no optional fields on the
+/// canonical schema so parsers fail closed on malformed files. `instrument_kind`,
+/// `sector`, and `category` (ETF-REGISTRY-01) are the sole exception: they are
+/// `None` for every instrument that predates ETF-REGISTRY-01 and for any plain
+/// equity going forward — absent in JSON deserializes to `None` via
+/// `#[serde(default)]`, so existing entries did not need to change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackedInstrument {
     /// Globally unique identifier: `"{asset_class}:{region}:{symbol}"` (e.g. `"equity:US:AAPL"`).
@@ -27,6 +31,11 @@ pub struct TrackedInstrument {
     /// Primary market symbol (e.g. `"AAPL"`).
     pub symbol: String,
     /// Asset class: `"equity"` | future values: `"crypto"`, `"futures"`, `"options"`, `"forex"`.
+    ///
+    /// ETFs are NOT a distinct `asset_class` value — they remain `"equity"` so
+    /// `enabled_equities()` / `validate_registry()` and every existing ingestion,
+    /// backtest, and GUI consumer continue to treat them exactly as before
+    /// (ETF-REGISTRY-01). `instrument_kind` below carries the ETF tag instead.
     pub asset_class: String,
     /// Data provider name (e.g. `"twelvedata"`).
     pub provider: String,
@@ -42,6 +51,22 @@ pub struct TrackedInstrument {
     pub timeframes: Vec<String>,
     /// Free-form note (source, caveats, seeding origin).
     pub notes: String,
+    /// Optional instrument-kind tag (ETF-REGISTRY-01), e.g. `"etf"`. `None` for
+    /// plain equities. Informational only — does not affect `asset_class`,
+    /// `enabled_equities()`, ingestion, or backtest behavior.
+    #[serde(default)]
+    pub instrument_kind: Option<String>,
+    /// Optional sector/exposure-bucket tag (ETF-REGISTRY-01), e.g.
+    /// `"broad_market"`, `"sector_technology"`, `"rates_duration"`. `None` for
+    /// untagged instruments. This is the key consumed by
+    /// `mqk_portfolio::constraints::check_sector_limits` via [`sector_map`].
+    #[serde(default)]
+    pub sector: Option<String>,
+    /// Optional coarse category tag (ETF-REGISTRY-01), e.g. `"index_equity"`,
+    /// `"sector_equity"`, `"fixed_income"`, `"commodity"`. `None` for untagged
+    /// instruments. Descriptive only; no consumer reads this field yet.
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 /// Parse the instrument registry JSON file at `path`.
@@ -84,8 +109,13 @@ pub fn enabled_equity_symbols(instruments: &[TrackedInstrument]) -> Vec<String> 
 /// 3. All `asset_class` values are non-empty.
 /// 4. All `provider_symbol` values are non-empty.
 /// 5. No enabled equity has duplicate `provider_symbol` within the same provider.
+/// 6. No duplicate `symbol` across the whole registry.
+/// 7. ETF-REGISTRY-01: if present, `instrument_kind`/`sector`/`category` must not
+///    be empty/whitespace-only strings; an instrument tagged `instrument_kind ==
+///    "etf"` must carry both a non-empty `sector` and a non-empty `category`.
 pub fn validate_registry(instruments: &[TrackedInstrument]) -> Result<()> {
     let mut seen_ids: HashSet<&str> = HashSet::new();
+    let mut seen_symbols: HashSet<&str> = HashSet::new();
     let mut seen_provider_symbols: HashSet<(&str, &str)> = HashSet::new();
 
     for inst in instruments {
@@ -115,6 +145,10 @@ pub fn validate_registry(instruments: &[TrackedInstrument]) -> Result<()> {
             );
         }
 
+        if !seen_symbols.insert(inst.symbol.as_str()) {
+            anyhow::bail!("instrument_registry: duplicate symbol={}", inst.symbol);
+        }
+
         if inst.enabled && inst.asset_class == "equity" {
             let key = (inst.provider.as_str(), inst.provider_symbol.as_str());
             if !seen_provider_symbols.insert(key) {
@@ -125,9 +159,72 @@ pub fn validate_registry(instruments: &[TrackedInstrument]) -> Result<()> {
                 );
             }
         }
+
+        // ETF-REGISTRY-01: optional tags must not be empty-string when present.
+        if let Some(kind) = &inst.instrument_kind {
+            if kind.trim().is_empty() {
+                anyhow::bail!(
+                    "instrument_registry: empty instrument_kind for symbol={}",
+                    inst.symbol
+                );
+            }
+        }
+        if let Some(sector) = &inst.sector {
+            if sector.trim().is_empty() {
+                anyhow::bail!(
+                    "instrument_registry: empty sector for symbol={}",
+                    inst.symbol
+                );
+            }
+        }
+        if let Some(category) = &inst.category {
+            if category.trim().is_empty() {
+                anyhow::bail!(
+                    "instrument_registry: empty category for symbol={}",
+                    inst.symbol
+                );
+            }
+        }
+        if inst.instrument_kind.as_deref() == Some("etf") {
+            let sector_ok = inst.sector.as_deref().is_some_and(|s| !s.trim().is_empty());
+            let category_ok = inst
+                .category
+                .as_deref()
+                .is_some_and(|c| !c.trim().is_empty());
+            if !sector_ok || !category_ok {
+                anyhow::bail!(
+                    "instrument_registry: etf instrument symbol={} missing sector and/or category metadata",
+                    inst.symbol
+                );
+            }
+        }
     }
 
     Ok(())
+}
+
+/// ETF-RISK-01 bridge: build a `symbol -> sector` map from registry entries that
+/// carry a `sector` tag.
+///
+/// Instruments with `sector == None` (every plain equity today) are omitted —
+/// `mqk_portfolio::constraints::check_sector_limits` treats a symbol absent
+/// from its `sector_map` argument as belonging to no sector, which is exactly
+/// the correct behavior for untagged instruments. Pure; no IO.
+///
+/// This function only produces the map shape that `check_sector_limits`
+/// expects; it does not call into `mqk-portfolio` and does not evaluate any
+/// constraint itself. Wiring this map into a live, weight-aware admission gate
+/// is tracked separately — see `docs/audits/multi_asset_completion_audit.md`
+/// (ETF-RISK-01 closure note) for the exact blocking dependency.
+pub fn sector_map(instruments: &[TrackedInstrument]) -> HashMap<String, String> {
+    instruments
+        .iter()
+        .filter_map(|inst| {
+            inst.sector
+                .as_ref()
+                .map(|sector| (inst.symbol.clone(), sector.clone()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -303,6 +400,9 @@ mod tests {
             enabled: true,
             timeframes: vec!["1D".into()],
             notes: "test".into(),
+            instrument_kind: None,
+            sector: None,
+            category: None,
         };
         let spy = TrackedInstrument {
             instrument_id: "equity:US:AAPL".into(), // intentional duplicate
@@ -315,6 +415,9 @@ mod tests {
             enabled: true,
             timeframes: vec!["1D".into()],
             notes: "test".into(),
+            instrument_kind: None,
+            sector: None,
+            category: None,
         };
         let result = validate_registry(&[aapl, spy]);
         assert!(result.is_err(), "must reject duplicate instrument_id");
@@ -342,5 +445,201 @@ mod tests {
         }
         assert!(syms.contains(&"AAPL".to_string()));
         assert!(syms.contains(&"SPY".to_string()));
+    }
+
+    // ── ETF-REGISTRY-01 ───────────────────────────────────────────────────────
+
+    const ETF_SYMBOLS: &[&str] = &[
+        "SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLI", "XLP", "XLU", "TLT", "IEF", "SHY",
+        "GLD",
+    ];
+
+    // REG-12: every target ETF symbol is tagged instrument_kind="etf" with a
+    // non-empty sector and category, and asset_class is unchanged ("equity").
+    #[test]
+    fn reg_12_target_etfs_are_tagged() {
+        let instruments = load_instrument_registry(&registry_path()).unwrap();
+        for symbol in ETF_SYMBOLS {
+            let inst = instruments
+                .iter()
+                .find(|i| i.symbol == *symbol)
+                .unwrap_or_else(|| panic!("expected ETF symbol {symbol} in registry"));
+            assert_eq!(
+                inst.instrument_kind.as_deref(),
+                Some("etf"),
+                "{symbol} must be tagged instrument_kind=etf"
+            );
+            assert_eq!(
+                inst.asset_class, "equity",
+                "{symbol} asset_class must remain 'equity' (ETF-REGISTRY-01 does not change it)"
+            );
+            assert!(
+                inst.sector.as_deref().is_some_and(|s| !s.is_empty()),
+                "{symbol} must have a non-empty sector"
+            );
+            assert!(
+                inst.category.as_deref().is_some_and(|c| !c.is_empty()),
+                "{symbol} must have a non-empty category"
+            );
+        }
+    }
+
+    // REG-13: legacy (non-ETF) equity symbols still parse with no ETF tags.
+    #[test]
+    fn reg_13_legacy_equities_have_no_etf_tags() {
+        let instruments = load_instrument_registry(&registry_path()).unwrap();
+        let aapl = instruments
+            .iter()
+            .find(|i| i.symbol == "AAPL")
+            .expect("AAPL must exist in registry");
+        assert_eq!(aapl.instrument_kind, None);
+        assert_eq!(aapl.sector, None);
+        assert_eq!(aapl.category, None);
+        assert_eq!(aapl.asset_class, "equity");
+    }
+
+    // REG-14: tagging ETFs did not change provider_symbol/timeframes/enabled.
+    #[test]
+    fn reg_14_etf_provider_fields_preserved() {
+        let instruments = load_instrument_registry(&registry_path()).unwrap();
+        for symbol in ETF_SYMBOLS {
+            let inst = instruments.iter().find(|i| i.symbol == *symbol).unwrap();
+            assert_eq!(inst.provider_symbol, *symbol);
+            assert_eq!(inst.timeframes, vec!["1D".to_string()]);
+            assert!(inst.enabled, "{symbol} must remain enabled");
+            assert_eq!(inst.provider, "twelvedata");
+        }
+    }
+
+    // REG-15: no duplicate symbols anywhere in the registry (includes ETFs).
+    #[test]
+    fn reg_15_no_duplicate_symbols() {
+        let instruments = load_instrument_registry(&registry_path()).unwrap();
+        let mut seen = HashSet::new();
+        for inst in &instruments {
+            assert!(
+                seen.insert(inst.symbol.as_str()),
+                "duplicate symbol: {}",
+                inst.symbol
+            );
+        }
+    }
+
+    // REG-16: validate_registry rejects malformed ETF metadata (instrument_kind
+    // == "etf" with no sector/category).
+    #[test]
+    fn reg_16_validate_rejects_incomplete_etf_metadata() {
+        let malformed = TrackedInstrument {
+            instrument_id: "equity:US:SPY".into(),
+            symbol: "SPY".into(),
+            asset_class: "equity".into(),
+            provider: "twelvedata".into(),
+            provider_symbol: "SPY".into(),
+            venue: "NYSEARCA".into(),
+            currency: "USD".into(),
+            enabled: true,
+            timeframes: vec!["1D".into()],
+            notes: "test".into(),
+            instrument_kind: Some("etf".into()),
+            sector: None, // missing — must fail validation
+            category: Some("index_equity".into()),
+        };
+        let result = validate_registry(&[malformed]);
+        assert!(result.is_err(), "must reject etf with missing sector");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing sector and/or category"),
+            "error message must identify the violation"
+        );
+    }
+
+    // REG-17: validate_registry rejects an empty-string sector tag.
+    #[test]
+    fn reg_17_validate_rejects_empty_sector_string() {
+        let malformed = TrackedInstrument {
+            instrument_id: "equity:US:SPY".into(),
+            symbol: "SPY".into(),
+            asset_class: "equity".into(),
+            provider: "twelvedata".into(),
+            provider_symbol: "SPY".into(),
+            venue: "NYSEARCA".into(),
+            currency: "USD".into(),
+            enabled: true,
+            timeframes: vec!["1D".into()],
+            notes: "test".into(),
+            instrument_kind: None,
+            sector: Some("   ".into()), // whitespace-only — must fail validation
+            category: None,
+        };
+        let result = validate_registry(&[malformed]);
+        assert!(result.is_err(), "must reject whitespace-only sector");
+        assert!(
+            result.unwrap_err().to_string().contains("empty sector"),
+            "error message must identify the violation"
+        );
+    }
+
+    // REG-18 (ETF-RISK-01 bridge): sector_map() produces exactly the expected
+    // symbol->sector mapping for the canonical file's ETF universe, and omits
+    // every untagged (plain equity) symbol.
+    #[test]
+    fn reg_18_sector_map_matches_expected_etf_taxonomy() {
+        let instruments = load_instrument_registry(&registry_path()).unwrap();
+        let map = sector_map(&instruments);
+
+        let expected: &[(&str, &str)] = &[
+            ("SPY", "broad_market"),
+            ("QQQ", "broad_market"),
+            ("IWM", "broad_market"),
+            ("DIA", "broad_market"),
+            ("XLK", "sector_technology"),
+            ("XLF", "sector_financials"),
+            ("XLE", "sector_energy"),
+            ("XLI", "sector_industrials"),
+            ("XLP", "sector_consumer_staples"),
+            ("XLU", "sector_utilities"),
+            ("TLT", "rates_duration"),
+            ("IEF", "rates_duration"),
+            ("SHY", "rates_duration"),
+            ("GLD", "commodity_gold"),
+        ];
+        for (symbol, sector) in expected {
+            assert_eq!(
+                map.get(*symbol).map(|s| s.as_str()),
+                Some(*sector),
+                "sector_map mismatch for {symbol}"
+            );
+        }
+
+        // Untagged plain equities must not appear in the map.
+        assert_eq!(map.get("AAPL"), None);
+        assert_eq!(map.get("MSFT"), None);
+
+        // Map size matches exactly the tagged ETF universe — no stray entries.
+        assert_eq!(map.len(), expected.len());
+    }
+
+    // REG-19 (ETF-RISK-01 bridge): sector_map() is pure and returns an empty
+    // map for instruments with no sector tag.
+    #[test]
+    fn reg_19_sector_map_empty_when_no_tags_present() {
+        let aapl = TrackedInstrument {
+            instrument_id: "equity:US:AAPL".into(),
+            symbol: "AAPL".into(),
+            asset_class: "equity".into(),
+            provider: "twelvedata".into(),
+            provider_symbol: "AAPL".into(),
+            venue: "NASDAQ".into(),
+            currency: "USD".into(),
+            enabled: true,
+            timeframes: vec!["1D".into()],
+            notes: "test".into(),
+            instrument_kind: None,
+            sector: None,
+            category: None,
+        };
+        assert!(sector_map(&[aapl]).is_empty());
     }
 }

@@ -417,3 +417,24 @@ No `cargo build`/`cargo test`/full workspace suite was run (not required for a s
 - No broker submit changes. No live routing changes. No order/outbox writes. No DB migrations. `.env.local` was not read or touched. No provider/broker network calls were made. No paper/live orders were submitted. No short-entry enablement. B5/risk gates untouched.
 - No daemon was started at any point during this audit.
 - No full test suite or full workspace build was run.
+
+---
+
+## 16. ETF-FOUNDATION-01 Closure Note (follow-up patch)
+
+`ETF-FOUNDATION-01` (combining `ETF-REGISTRY-01` + `ETF-RISK-01`) closed `ETF-REGISTRY-01` in full and found `ETF-RISK-01` blocked on a dependency deeper than this audit identified. Recorded here rather than left only in commit history, per `audit_repo_truth_rules.md` ("repo state is authoritative... if memory contradicts the current file state, trust the file").
+
+**`ETF-REGISTRY-01` — CLOSED.** The 14 target ETFs (§ mission brief) are tagged in `config/instruments/equities.json` with `instrument_kind: "etf"`, `sector`, and `category`, added as new optional fields on `TrackedInstrument` (`core-rs/crates/mqk-md/src/instrument_registry.rs`). `asset_class` was deliberately left `"equity"` for every ETF — `enabled_equities()`/`validate_registry()`/ingestion/backtest/GUI behavior is unchanged. A new pure `sector_map()` helper builds the `symbol -> sector` map shape `mqk_portfolio::constraints::check_sector_limits` expects.
+
+**`ETF-RISK-01` — PARTIAL, blocker is more fundamental than "missing sector metadata."** This audit's §4/§13 framed the gap as `SectorConstraint`/`check_sector_limits` having "zero callers" — implying wiring was mostly a metadata problem. Direct inspection of the live admission path during `ETF-FOUNDATION-01` found a deeper blocker: **no live per-symbol mark-price, notional, or portfolio-weight computation reaches any admission boundary today, for any symbol, equity or ETF.**
+
+Evidence:
+- `mqk_risk::{RiskInput, RiskState}` (`core-rs/crates/mqk-risk/src/types.rs`) carry no symbol field at all — the engine is a portfolio-level kill switch (drawdown/daily-loss/PDT/reject-storm), not a per-instrument gate.
+- `RiskRequestContext` (`core-rs/crates/mqk-execution/src/gateway.rs`), the struct carried into the live `RiskGate::evaluate_gate_for_request` call at `BrokerGateway::submit_with_context` — the closest thing to a "pre-broker-submit risk gate" — has exactly one field, `is_risk_reducing: bool`. No symbol, no quantity, no price.
+- The live tick-loop snapshot consumed at decision time, `PositionSnapshot`/`PortfolioSnapshot` (`core-rs/crates/mqk-runtime/src/observability.rs`), carries only `symbol`/`net_qty`/`cash_micros`/`realized_pnl_micros` — no mark price, no market value, no NAV.
+- The existing per-symbol/per-strategy caps that *do* run at the decision boundary (`mqk-daemon/src/capital_policy/{position_sizing,portfolio_risk}.rs`, cap #3/#5) are single-order notional checks computed from the order's own `qty x limit_price` — they do not aggregate cross-symbol portfolio state, and `portfolio_risk.rs` says so explicitly: market-order / drift cases return `RiskUnverifiable` because "portfolio drift is not measurable at signal time without runtime portfolio state."
+- `cargo test -p mqk-risk sector` and `cargo test -p mqk-runtime sector` both match zero tests against current HEAD, confirming no sector-aware code exists in either crate today.
+
+`check_sector_limits` takes a weight map (`BTreeMap<String, f64>`) and is meant to be evaluated against prospective post-trade weights. Building that input for real would require fabricating a price/NAV source that does not exist in the live runtime — which is exactly the "no fabricated truth, no optimistic defaults" failure mode `CLAUDE.md`'s operator-truth discipline forbids. Per this patch's own operating brief ("create only the registry metadata and a small pure bridge/helper if safe... report ETF-RISK-01 as PARTIAL"), `ETF-FOUNDATION-01` stopped at the registry + `sector_map()` bridge and did not touch `mqk-portfolio`, `mqk-risk`, `mqk-runtime`, or `mqk-daemon` production code.
+
+**Recommended next dependency patch:** a live portfolio-weight/notional patch (e.g. `PORTFOLIO-LIVE-WEIGHTS-01`) that adds mark-price and NAV/weight computation to the live snapshot/decision path — equity-wide, not ETF-specific. Only after that exists can `ETF-RISK-01` wire `check_sector_limits` against real (not fabricated) inputs.
