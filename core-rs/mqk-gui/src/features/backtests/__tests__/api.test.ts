@@ -421,3 +421,58 @@ test("B06d: failed job stops the loop, surfaces error, and never auto-loads", ()
   assert.equal(last.status, "failed");
   assert.ok(last.error?.includes("AAPL_1D.csv"), "failed state must carry the truthful error");
 });
+
+// ---------------------------------------------------------------------------
+// DB-GUI: BACKTEST-DB-BARS-SOURCE-01 — md_bars source request shape
+// ---------------------------------------------------------------------------
+
+test("DB-GUI-01: explicit CSV source request omits md_bars-only fields", () => {
+  const req: BacktestJobRequest = {
+    source: "csv",
+    bars_path: "C:\\repo\\exports\\md_backup\\1D\\AAPL_1D.csv",
+    strategy: "swing_momentum",
+    symbol: "AAPL",
+    timeframe_secs: 86400,
+    initial_cash_micros: 100_000_000_000,
+  };
+  assert.equal(req.source, "csv");
+  assert.ok(req.bars_path && req.bars_path.length > 0, "csv source must carry a bars_path");
+  assert.equal(req.timeframe, undefined, "csv source must not set the md_bars timeframe field");
+  assert.equal(req.start, undefined, "csv source must not set start");
+  assert.equal(req.end, undefined, "csv source must not set end");
+});
+
+test("DB-GUI-02: md_bars source request carries symbol/timeframe/date-range and omits bars_path", () => {
+  const req: BacktestJobRequest = {
+    source: "md_bars",
+    strategy: "swing_momentum",
+    symbol: "AAPL",
+    timeframe_secs: 86400,
+    initial_cash_micros: 100_000_000_000,
+    timeframe: "1D",
+    start: "2026-06-01T00:00:00Z",
+    end: "2026-06-20T00:00:00Z",
+  };
+  assert.equal(req.source, "md_bars");
+  assert.equal(req.bars_path, undefined, "md_bars source must not require bars_path");
+  assert.equal(req.timeframe, "1D");
+  assert.equal(req.start, "2026-06-01T00:00:00Z");
+  assert.equal(req.end, "2026-06-20T00:00:00Z");
+  assert.ok(
+    new Date(req.end as string) >= new Date(req.start as string),
+    "end must be >= start in a well-formed md_bars request",
+  );
+});
+
+test("DB-GUI-03: BacktestJobRequest with source omitted still type-checks (server defaults to csv)", () => {
+  // Mirrors pre-existing B01 shape — no `source` key at all.
+  const req: BacktestJobRequest = {
+    bars_path: "C:\\repo\\exports\\md_backup\\1D\\AAPL_1D.csv",
+    strategy: "swing_momentum",
+    symbol: "AAPL",
+    timeframe_secs: 86400,
+    initial_cash_micros: 100_000_000_000,
+  };
+  assert.equal(req.source, undefined, "omitted source is a valid request shape — daemon defaults to csv");
+  assert.equal(req.strategy, "swing_momentum");
+});

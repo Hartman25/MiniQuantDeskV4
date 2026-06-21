@@ -22,6 +22,34 @@ export interface BacktestManifest {
   host_fingerprint?: string | null;
   created_at_utc: string;
   artifacts?: Record<string, string>;
+  /**
+   * BACKTEST-DB-BARS-SOURCE-01: bars source for this run. Only present for
+   * md_bars-sourced backtest jobs (additively merged into manifest.json after
+   * the standard write) — absent on CSV-sourced runs and on manifests written
+   * by other engines/modes. Absence means "not reported by this run", not csv;
+   * callers should not assume one.
+   */
+  source?: string | null;
+  /**
+   * BACKTEST-DB-BARS-SOURCE-01: symbol queried from md_bars. Only present for
+   * md_bars-sourced backtest jobs.
+   */
+  symbol?: string | null;
+  /**
+   * BACKTEST-DB-BARS-SOURCE-01: inclusive md_bars query range start (RFC3339).
+   * Only present for md_bars-sourced backtest jobs.
+   */
+  start?: string | null;
+  /**
+   * BACKTEST-DB-BARS-SOURCE-01: inclusive md_bars query range end (RFC3339).
+   * Only present for md_bars-sourced backtest jobs.
+   */
+  end?: string | null;
+  /**
+   * BACKTEST-DB-BARS-SOURCE-01: number of md_bars rows loaded for this run.
+   * Only present for md_bars-sourced backtest jobs.
+   */
+  bar_count?: number | null;
 }
 
 /**
@@ -340,8 +368,17 @@ export type EvidenceReviewParseResult =
 // BACKTEST-GUI-RUNNER-01: Daemon backtest job API types
 // ---------------------------------------------------------------------------
 
+/** BACKTEST-DB-BARS-SOURCE-01: backtest bars source. */
+export type BacktestSourceKind = "csv" | "md_bars";
+
 export interface BacktestJobRequest {
-  bars_path: string;
+  /**
+   * Bars source. Optional — omitting it (pre-existing requests) defaults to
+   * "csv" on the daemon. Mirrors the Rust BacktestJobRequest.source default.
+   */
+  source?: BacktestSourceKind;
+  /** Required when source="csv". Omit (or leave empty) when source="md_bars". */
+  bars_path?: string;
   strategy: string;
   symbol: string;
   timeframe_secs: number;
@@ -358,6 +395,12 @@ export interface BacktestJobRequest {
    */
   integrity_stale_threshold_ticks?: number | null;
   shadow?: boolean | null;
+  /** Required when source="md_bars": md_bars timeframe string (e.g. "1D", "5m"). */
+  timeframe?: string | null;
+  /** Required when source="md_bars": inclusive range start, RFC3339. */
+  start?: string | null;
+  /** Required when source="md_bars": inclusive range end, RFC3339. Must be >= start. */
+  end?: string | null;
 }
 
 export interface BacktestJobAcceptedResponse {

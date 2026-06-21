@@ -330,6 +330,47 @@ test("parseManifest leaves timeframe_secs undefined when absent", () => {
   assert.equal(manifest.timeframe_secs, undefined);
 });
 
+// --- parseManifest: BACKTEST-DB-BARS-SOURCE-01 md_bars provenance passthrough ---
+
+test("parseManifest passes through md_bars source-provenance fields when present", () => {
+  const json = JSON.stringify({
+    schema_version: 1,
+    run_id: "abc-123",
+    strategy_name: "swing_momentum",
+    engine_id: "mqk-backtest",
+    mode: "backtest",
+    timeframe: "1D",
+    timeframe_secs: 86400,
+    created_at_utc: "2026-05-01T12:00:00Z",
+    source: "md_bars",
+    symbol: "AAPL",
+    start: "2026-06-01T00:00:00Z",
+    end: "2026-06-20T00:00:00Z",
+    bar_count: 14,
+  });
+  const manifest = parseManifest(json);
+  assert.equal(manifest.source, "md_bars");
+  assert.equal(manifest.symbol, "AAPL");
+  assert.equal(manifest.start, "2026-06-01T00:00:00Z");
+  assert.equal(manifest.end, "2026-06-20T00:00:00Z");
+  assert.equal(manifest.bar_count, 14);
+});
+
+test("parseManifest leaves md_bars provenance fields undefined for a csv-sourced manifest", () => {
+  const json = JSON.stringify({
+    schema_version: 1,
+    run_id: "abc-123",
+    strategy_name: "swing_momentum",
+    engine_id: "mqk-backtest",
+    mode: "backtest",
+    created_at_utc: "2026-05-01T12:00:00Z",
+  });
+  const manifest = parseManifest(json);
+  assert.equal(manifest.source, undefined, "csv-sourced manifests carry no source field — absence is not csv-the-value");
+  assert.equal(manifest.symbol, undefined);
+  assert.equal(manifest.bar_count, undefined);
+});
+
 // --- timeframeLabelFromSecs (mirrors Rust timeframe_from_secs) ---
 
 test("timeframeLabelFromSecs maps the canonical bar intervals", () => {

@@ -3372,16 +3372,25 @@ pub struct AlertAckResponse {
 // BACKTEST-DAEMON-JOBS-01: Backtest job API types
 // ---------------------------------------------------------------------------
 
-/// POST /api/v1/backtests/jobs — submit a CSV backtest job.
+/// POST /api/v1/backtests/jobs — submit a CSV- or md_bars-sourced backtest job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacktestJobRequest {
-    /// Absolute path to the CSV bars file (required).
+    /// BACKTEST-DB-BARS-SOURCE-01: bars source — `"csv"` (default) or
+    /// `"md_bars"`. Omitted/unrecognized-but-blank defaults to `"csv"` for
+    /// backward compatibility with pre-existing CSV-only requests; any other
+    /// unrecognized value is refused explicitly (never silently treated as csv).
+    #[serde(default = "default_backtest_job_source")]
+    pub source: String,
+    /// Absolute path to the CSV bars file. Required when `source="csv"`.
+    /// Ignored (and may be omitted) when `source="md_bars"`.
+    #[serde(default)]
     pub bars_path: String,
     /// Strategy name (e.g. "swing_momentum"). Must be a registered built-in.
     pub strategy: String,
     /// Ticker symbol (e.g. "TEST", "SPY").
     pub symbol: String,
-    /// Bar timeframe in seconds (must be > 0).
+    /// Bar timeframe in seconds (must be > 0). Drives the backtest engine
+    /// config for both sources.
     pub timeframe_secs: i64,
     /// Starting cash in micros (must be > 0).
     pub initial_cash_micros: i64,
@@ -3405,6 +3414,24 @@ pub struct BacktestJobRequest {
     pub integrity_stale_threshold_ticks: Option<u64>,
     /// Run in shadow mode (strategy signals observed but not executed). Defaults to false.
     pub shadow: Option<bool>,
+    /// BACKTEST-DB-BARS-SOURCE-01: `md_bars` timeframe string for the DB query
+    /// (e.g. `"1D"`, `"5m"`) — independent of `timeframe_secs`, which only
+    /// drives the engine config. Required when `source="md_bars"`; ignored
+    /// when `source="csv"`.
+    #[serde(default)]
+    pub timeframe: Option<String>,
+    /// BACKTEST-DB-BARS-SOURCE-01: inclusive range start, RFC3339
+    /// (e.g. `"2026-06-01T00:00:00Z"`). Required when `source="md_bars"`.
+    #[serde(default)]
+    pub start: Option<String>,
+    /// BACKTEST-DB-BARS-SOURCE-01: inclusive range end, RFC3339. Required when
+    /// `source="md_bars"`. Must be `>= start`.
+    #[serde(default)]
+    pub end: Option<String>,
+}
+
+fn default_backtest_job_source() -> String {
+    "csv".to_string()
 }
 
 /// Response to POST /api/v1/backtests/jobs.

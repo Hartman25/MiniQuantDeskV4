@@ -13,6 +13,7 @@ import {
   formatNullableNumber,
   formatNullablePercent,
   manifestTimeframeLabel,
+  timeframeLabelFromSecs,
   PAPER_READINESS_SCHEMA_VERSION,
   PAPER_READINESS_STATUS_BLOCKED,
   PAPER_READINESS_STATUS_PARTIAL,
@@ -52,9 +53,11 @@ import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
 import type {
   ActiveBacktestJob,
   ArtifactBundle,
+  BacktestJobRequest,
   BacktestManifest,
   BacktestMetrics,
   BacktestJobStatusKind,
+  BacktestSourceKind,
   EquityCurveRow,
   EvidenceReviewParseResult,
   FileResult,
@@ -165,6 +168,12 @@ function FileStatusNote({ label, result }: { label: string; result: FileResult<u
 }
 
 function ManifestSection({ manifest }: { manifest: BacktestManifest }) {
+  // BACKTEST-DB-BARS-SOURCE-01: source/symbol/start/end/bar_count are only
+  // present on md_bars-sourced runs (additively merged into manifest.json).
+  // Absence means "not reported by this run", not csv — render "csv (or not
+  // reported)" rather than asserting a source that was never recorded.
+  const isMdBars = manifest.source === "md_bars";
+
   return (
     <Panel title="Run summary" subtitle="Identity and provenance from manifest.json.">
       <div className="timeline-meta-grid">
@@ -183,6 +192,10 @@ function ManifestSection({ manifest }: { manifest: BacktestManifest }) {
         <div>
           <span>Mode</span>
           <strong>{manifest.mode}</strong>
+        </div>
+        <div>
+          <span>Bars source</span>
+          <strong>{manifest.source ?? "csv (or not reported)"}</strong>
         </div>
         <div>
           <span>Timeframe</span>
@@ -204,6 +217,24 @@ function ManifestSection({ manifest }: { manifest: BacktestManifest }) {
           <span>Host</span>
           <strong className="bt-mono-wrap" style={{ fontSize: "0.82rem" }}>{manifest.host_fingerprint ?? "—"}</strong>
         </div>
+        {isMdBars && (
+          <>
+            <div>
+              <span>md_bars symbol</span>
+              <strong>{manifest.symbol ?? "—"}</strong>
+            </div>
+            <div>
+              <span>md_bars query range</span>
+              <strong className="bt-mono-wrap" style={{ fontSize: "0.8rem" }}>
+                {(manifest.start ?? "—")} → {(manifest.end ?? "—")}
+              </strong>
+            </div>
+            <div>
+              <span>md_bars rows loaded</span>
+              <strong>{manifest.bar_count ?? "—"}</strong>
+            </div>
+          </>
+        )}
       </div>
     </Panel>
   );
@@ -1970,7 +2001,8 @@ export function BacktestResultsScreen() {
     [handleLoad],
   );
 
-  // --- Workflow B: submit CSV backtest job ---
+  // --- Workflow B: submit a new backtest job (CSV or md_bars source) ---
+  const [source, setSource] = useState<BacktestSourceKind>("csv");
   const [barsPath, setBarsPath] = useState(() => deriveDefaultBarsPath());
   const [strategy, setStrategy] = useState("swing_momentum");
   const [symbol, setSymbol] = useState("TEST");
@@ -1979,6 +2011,9 @@ export function BacktestResultsScreen() {
   const [outDir, setOutDir] = useState(() => deriveDefaultOutDir());
   // Empty = use daemon's timeframe-aware default (172800 for daily, 120 otherwise).
   const [integrityStaleThresholdTicks, setIntegrityStaleThresholdTicks] = useState("");
+  // BACKTEST-DB-BARS-SOURCE-01: md_bars source range — only used when source="md_bars".
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
 
   // Refresh portable defaults once the Tauri bootstrap cache is warm (async
   // init may not have finished before first render). Only fills empty fields —
@@ -2079,7 +2114,6 @@ export function BacktestResultsScreen() {
     const staleThresholdRaw = integrityStaleThresholdTicks.trim();
     const staleThreshold = staleThresholdRaw ? parseInt(staleThresholdRaw, 10) : null;
 
-    if (!barsPath.trim()) { setJobSubmitError("bars_path is required."); return; }
     if (!strategy.trim()) { setJobSubmitError("strategy is required."); return; }
     if (!symbol.trim()) { setJobSubmitError("symbol is required."); return; }
     if (Number.isNaN(tf) || tf <= 0) { setJobSubmitError("timeframe_secs must be a positive integer."); return; }
@@ -2089,21 +2123,52 @@ export function BacktestResultsScreen() {
       return;
     }
 
+    let request: BacktestJobRequest;
+    if (source === "csv") {
+      if (!barsPath.trim()) { setJobSubmitError("bars_path is required."); return; }
+      request = {
+        source: "csv",
+        bars_path: barsPath.trim(),
+        strategy: strategy.trim(),
+        symbol: symbol.trim(),
+        timeframe_secs: tf,
+        initial_cash_micros: cash,
+        out_dir: outDir.trim() || null,
+        integrity_stale_threshold_ticks: staleThreshold,
+      };
+    } else {
+      // BACKTEST-DB-BARS-SOURCE-01: md_bars source — symbol/timeframe/date
+      // range instead of a CSV path. The md_bars timeframe string is derived
+      // from the same Timeframe selector used for timeframe_secs so the two
+      // can never disagree.
+      const mdTimeframe = timeframeLabelFromSecs(tf);
+      if (!mdTimeframe) {
+        setJobSubmitError("Could not derive a database timeframe label from timeframe_secs.");
+        return;
+      }
+      if (!startDate.trim()) { setJobSubmitError("Start is required for the database source."); return; }
+      if (!endDate.trim()) { setJobSubmitError("End is required for the database source."); return; }
+      request = {
+        source: "md_bars",
+        strategy: strategy.trim(),
+        symbol: symbol.trim(),
+        timeframe_secs: tf,
+        initial_cash_micros: cash,
+        out_dir: outDir.trim() || null,
+        integrity_stale_threshold_ticks: staleThreshold,
+        timeframe: mdTimeframe,
+        start: startDate.trim(),
+        end: endDate.trim(),
+      };
+    }
+
     setJobSubmitting(true);
     setJobSubmitError(null);
     setActiveJob(null);
     setJobBundle(null);
     setJobBundleError(null);
 
-    const result = await submitBacktestJob({
-      bars_path: barsPath.trim(),
-      strategy: strategy.trim(),
-      symbol: symbol.trim(),
-      timeframe_secs: tf,
-      initial_cash_micros: cash,
-      out_dir: outDir.trim() || null,
-      integrity_stale_threshold_ticks: staleThreshold,
-    });
+    const result = await submitBacktestJob(request);
 
     setJobSubmitting(false);
 
@@ -2130,7 +2195,7 @@ export function BacktestResultsScreen() {
       artifactDir: data.artifact_dir ?? null,
       error: null,
     });
-  }, [barsPath, strategy, symbol, timeframeSecs, initialCashMicros, outDir, integrityStaleThresholdTicks]);
+  }, [source, barsPath, strategy, symbol, timeframeSecs, initialCashMicros, outDir, integrityStaleThresholdTicks, startDate, endDate]);
 
   const jobIsActive = activeJob !== null && !isTerminalJobStatus(activeJob.status);
 
@@ -2199,52 +2264,112 @@ export function BacktestResultsScreen() {
       <div className="bt-workflow-heading">
         <span className="bt-workflow-tag">Workflow B · Run a new backtest</span>
         <span className="bt-workflow-caption">
-          Submit an offline CSV backtest, watch its status, then auto-load results. No live or paper orders.
+          Submit an offline backtest from a CSV file or canonical md_bars in the database,
+          watch its status, then auto-load results. No live or paper orders.
         </span>
       </div>
 
       <Panel
-        title="B — Run new CSV backtest (offline research only)"
-        subtitle="Runs an offline backtest against a CSV bars file. No live or paper orders are created. No broker adapter is called."
+        title="B — Run a new backtest (offline research only)"
+        subtitle={
+          source === "csv"
+            ? "Runs an offline backtest against a CSV bars file. No live or paper orders are created. No broker adapter is called."
+            : "Runs an offline backtest against canonical md_bars from the database. No live or paper orders are created. No broker adapter or provider is called."
+        }
       >
         <div className="bt-job-form-grid">
           <div className="bt-job-field" style={{ gridColumn: "1 / -1" }}>
-            <label htmlFor="bt-bars-path">Bars CSV path</label>
-            <input
-              id="bt-bars-path"
-              type="text"
-              value={barsPath}
-              onChange={(e) => setBarsPath(e.target.value)}
-              spellCheck={false}
-              autoComplete="off"
-              placeholder={
-                getDesktopRepoRoot()
-                  ? "Path to .csv bars file (portable default pre-filled above)"
-                  : "Absolute path to .csv bars file — repo root not detected, set manually"
-              }
-            />
-            {(() => {
-              const md1DDir = deriveMdBackup1DPath();
-              const examplePath = buildMd1DSymbolPath(getDesktopRepoRoot(), symbol || "AAPL");
-              return (
-                <div className="bt-field-hint" style={{ marginTop: 4, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
-                  {md1DDir
-                    ? <>
-                        <strong>Real 1D market-data backup:</strong>{" "}
-                        <code>{md1DDir}</code> — paste <code>{"<SYMBOL>"}_1D.csv</code> from that folder
-                        {examplePath ? <> (e.g. <code>{examplePath.split(/[\\/]/).pop()}</code>)</> : null}.
-                        {" "}The pre-filled <code>bkt4_bars.csv</code> fixture has 3 bars — plumbing proof only.
-                      </>
-                    : <>
-                        Set repo root via the launcher to see the portable 1D market-data backup path.
-                        Real 1D bars live in <code>exports\md_backup\1D\{"<SYMBOL>"}_1D.csv</code>.
-                        The pre-filled <code>bkt4_bars.csv</code> fixture has 3 bars — plumbing proof only.
-                      </>
-                  }
-                </div>
-              );
-            })()}
+            <label htmlFor="bt-source">Bars source</label>
+            <select
+              id="bt-source"
+              value={source}
+              onChange={(e) => setSource(e.target.value as BacktestSourceKind)}
+            >
+              <option value="csv">CSV file</option>
+              <option value="md_bars">Database (md_bars)</option>
+            </select>
+            <div className="bt-field-hint" style={{ marginTop: 4, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
+              {source === "csv"
+                ? "Loads bars from an operator-supplied CSV file."
+                : "Loads canonical bars already ingested into md_bars for the symbol/timeframe/date range below — same market-data truth used by runtime/dry-run/paper trading."}
+            </div>
           </div>
+          {source === "csv" && (
+            <div className="bt-job-field" style={{ gridColumn: "1 / -1" }}>
+              <label htmlFor="bt-bars-path">Bars CSV path</label>
+              <input
+                id="bt-bars-path"
+                type="text"
+                value={barsPath}
+                onChange={(e) => setBarsPath(e.target.value)}
+                spellCheck={false}
+                autoComplete="off"
+                placeholder={
+                  getDesktopRepoRoot()
+                    ? "Path to .csv bars file (portable default pre-filled above)"
+                    : "Absolute path to .csv bars file — repo root not detected, set manually"
+                }
+              />
+              {(() => {
+                const md1DDir = deriveMdBackup1DPath();
+                const examplePath = buildMd1DSymbolPath(getDesktopRepoRoot(), symbol || "AAPL");
+                return (
+                  <div className="bt-field-hint" style={{ marginTop: 4, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
+                    {md1DDir
+                      ? <>
+                          <strong>Real 1D market-data backup:</strong>{" "}
+                          <code>{md1DDir}</code> — paste <code>{"<SYMBOL>"}_1D.csv</code> from that folder
+                          {examplePath ? <> (e.g. <code>{examplePath.split(/[\\/]/).pop()}</code>)</> : null}.
+                          {" "}The pre-filled <code>bkt4_bars.csv</code> fixture has 3 bars — plumbing proof only.
+                        </>
+                      : <>
+                          Set repo root via the launcher to see the portable 1D market-data backup path.
+                          Real 1D bars live in <code>exports\md_backup\1D\{"<SYMBOL>"}_1D.csv</code>.
+                          The pre-filled <code>bkt4_bars.csv</code> fixture has 3 bars — plumbing proof only.
+                        </>
+                    }
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+          {source === "md_bars" && (
+            <>
+              <div className="bt-job-field">
+                <label htmlFor="bt-start-date">Start (RFC3339)</label>
+                <input
+                  id="bt-start-date"
+                  type="text"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder="e.g. 2026-06-01T00:00:00Z"
+                />
+              </div>
+              <div className="bt-job-field">
+                <label htmlFor="bt-end-date">End (RFC3339)</label>
+                <input
+                  id="bt-end-date"
+                  type="text"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  spellCheck={false}
+                  autoComplete="off"
+                  placeholder="e.g. 2026-06-20T00:00:00Z"
+                />
+              </div>
+              <div className="bt-job-field" style={{ gridColumn: "1 / -1" }}>
+                <div className="bt-field-hint" style={{ fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
+                  Inclusive query range, bounded by bar end-timestamp. The database timeframe
+                  string (e.g. <code>{timeframeLabelFromSecs(parseInt(timeframeSecs, 10)) ?? "1D"}</code>)
+                  is derived from the Timeframe selector below — no separate field needed.
+                  If the database has no matching bars, the job fails with a clear no-data error
+                  — results are never fabricated.
+                </div>
+              </div>
+            </>
+          )}
           <div className="bt-job-field">
             <label htmlFor="bt-strategy">Strategy</label>
             <input
@@ -2283,8 +2408,13 @@ export function BacktestResultsScreen() {
               <option value="86400">1D (86400s)</option>
             </select>
             <div className="bt-field-hint" style={{ marginTop: 4, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
-              Bar interval submitted as <code>timeframe_secs</code>. Match this to the bars CSV —
-              the pre-filled <code>bkt4_bars.csv</code> fixture is daily (<strong>1D</strong>).
+              {source === "csv"
+                ? <>Bar interval submitted as <code>timeframe_secs</code>. Match this to the bars CSV —
+                    the pre-filled <code>bkt4_bars.csv</code> fixture is daily (<strong>1D</strong>).</>
+                : <>Bar interval submitted as <code>timeframe_secs</code>, and also drives the
+                    database query's timeframe string. Match this to what was actually ingested
+                    into md_bars for this symbol.</>
+              }
             </div>
           </div>
           <div className="bt-job-field">
