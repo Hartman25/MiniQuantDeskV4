@@ -7,6 +7,7 @@
 
 pub mod alpaca_provider;
 pub mod instrument_registry;
+pub mod instrument_registry_v2;
 pub mod normalizer;
 pub mod provider;
 pub mod provider_registry;

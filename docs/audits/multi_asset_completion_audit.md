@@ -475,3 +475,17 @@ Docs/ledger-only maintenance patch. No production code, config, DB, or trading-p
 **Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-01A` entry (end of §19).
 
 **Safety confirmation:** no broker submit changes; no Alpaca adapter changes; no live routing changes; no order/outbox writes; no DB migrations; `.env.local` untouched; no provider/broker calls; no paper/live orders; no non-equity asset class enabled; disabled-asset gates re-proven unmodified (`scenario_asset_class_scope_b8` 12/12, `scenario_asset_class_guard_multi_asset_routing_guard_01` 8/8). No daemon started.
+
+---
+
+## 19. ASSET-CORE-01B Closure Note (maintenance)
+
+`ASSET-CORE-01B` built the real registry v2 schema/loader/validator `ASSET-CORE-01A` deferred: `core-rs/crates/mqk-md/src/instrument_registry_v2.rs` (`InstrumentRegistryV2`/`InstrumentDefinitionV2`/`ContractDefinitionV2`, covering equity/ETF/option/future/crypto/forex), `load_instrument_registry_v2`, `validate_registry_v2`, and pure v1→v2 conversion (`convert_v1_registry_to_v2`/`convert_tracked_instrument_to_v2`). 26 new tests; the entire real 88-row `config/instruments/equities.json` converts and validates cleanly under v2 rules. Recorded here per `audit_repo_truth_rules.md` rather than left only in commit history.
+
+**Resolved:** a real, additive multi-asset-aware registry model now exists and is proven compatible with current production data in memory — the §2/§5 gap this audit identified as `ASSET-CORE-01B`'s job.
+
+**Not resolved (`ASSET-CORE-01` remains PARTIAL):** nothing consumes `InstrumentRegistryV2` yet — no daemon route, no CLI command, no ingestion/backtest/GUI path. `equities.json` is still the only registry file any production code reads. No `mqk-md → mqk-schemas` dependency was added (same Option B rationale as `ASSET-CORE-01A`, re-justified: the existing `mqk_schemas::Instrument`/`ContractSpec` types are live execution-path types and narrower than what v2 needs). No non-equity asset class is enabled anywhere.
+
+**Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-01B` entry (end of §19).
+
+**Safety confirmation:** no broker submit changes; no Alpaca adapter changes; no live routing changes; no order/outbox writes; no DB migrations; `.env.local` untouched; no provider/broker calls; no paper/live orders; no non-equity asset class enabled (the one `enabled=true` non-equity test case is `#[cfg(test)]`-only and proves the validator's own explicit escape hatch, not a production path). No daemon started.
