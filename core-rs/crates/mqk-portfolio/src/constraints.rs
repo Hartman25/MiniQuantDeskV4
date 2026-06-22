@@ -14,6 +14,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::valuation::{
+    compute_portfolio_weights, PortfolioWeightsSnapshot, PositionMark, PositionWeightInput,
+};
+
 // ─── ConstraintViolation ──────────────────────────────────────────────────────
 
 /// A single constraint breach detected during validation.
@@ -359,6 +363,251 @@ pub fn check_all(
         all.extend(check_turnover(cur, weights, tc));
     }
     all
+}
+
+// ─── Live, bps-based sector exposure gate (ETF-RISK-CLOSURE-01) ──────────────
+//
+// Distinct from `SectorConstraint`/`check_sector_limits` above, which check a
+// caller-supplied *fractional* weight map (`BTreeMap<String, f64>`) — that is
+// the research allocator's post-allocation constraint check (Institutional
+// Addendum §8.1) and is unrelated to this gate; it is not modified by
+// ETF-RISK-CLOSURE-01.
+//
+// This evaluator is for the live, mark-price-driven admission path: it
+// consumes the same integer-basis-point weights that
+// `crate::valuation::compute_portfolio_weights` produces, recomputes them
+// before and after a candidate order, and never fabricates a mark, NAV, or
+// weight — every fail-closed branch is driven by
+// `PortfolioWeightsSnapshot::truth_state`, never assumed.
+
+/// Result of evaluating a candidate order against a configured per-sector
+/// gross exposure cap, using real live weights (ETF-RISK-CLOSURE-01).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SectorRiskEvaluation {
+    /// `true` iff the candidate order is safe to admit on sector-risk grounds
+    /// alone — other gates may still deny it for unrelated reasons.
+    pub allowed: bool,
+    /// Human-readable explanation. `None` for simple pass-throughs
+    /// (disabled / unclassified symbol / no cap for this sector / within
+    /// cap); `Some` whenever a denial or a notable allow (risk-reducing
+    /// override) needs explaining.
+    pub reason_code: Option<String>,
+    /// The candidate symbol's sector, when known.
+    pub sector: Option<String>,
+    /// Current sector gross exposure (sum of `|weight_bps|` for every symbol
+    /// in `sector`), before the candidate order. `None` when not computed
+    /// (disabled / unclassified / no limit for this sector / fail-closed).
+    pub current_weight_bps: Option<i64>,
+    /// Sector gross exposure after applying the candidate order.
+    pub prospective_weight_bps: Option<i64>,
+    /// The configured cap for `sector`, when one applies.
+    pub max_weight_bps: Option<i64>,
+    /// Stable machine-readable code, always present. One of:
+    /// `"sector_risk_disabled"`, `"sector_metadata_missing"`,
+    /// `"sector_limit_ok"`, `"sector_weights_missing"`,
+    /// `"sector_nav_unavailable"`, `"sector_risk_reducing_allowed"`,
+    /// `"sector_limit_exceeded"`.
+    pub truth_state: String,
+}
+
+fn sector_risk_passthrough(truth_state: &str, sector: Option<String>) -> SectorRiskEvaluation {
+    SectorRiskEvaluation {
+        allowed: true,
+        reason_code: None,
+        sector,
+        current_weight_bps: None,
+        prospective_weight_bps: None,
+        max_weight_bps: None,
+        truth_state: truth_state.to_string(),
+    }
+}
+
+fn sector_risk_fail_closed(
+    truth_state: &str,
+    sector: String,
+    max_weight_bps: i64,
+    reason: String,
+) -> SectorRiskEvaluation {
+    SectorRiskEvaluation {
+        allowed: false,
+        reason_code: Some(reason),
+        sector: Some(sector),
+        current_weight_bps: None,
+        prospective_weight_bps: None,
+        max_weight_bps: Some(max_weight_bps),
+        truth_state: truth_state.to_string(),
+    }
+}
+
+/// `i64::abs()` panics on `i64::MIN`; this saturates instead. Never panics,
+/// never silently wraps.
+fn abs_i64_saturating(x: i64) -> i64 {
+    if x == i64::MIN {
+        i64::MAX
+    } else {
+        x.abs()
+    }
+}
+
+/// Sum of `|weight_bps|` over every row in `snapshot` whose symbol maps to
+/// `sector` in `sector_map`. Rows with `weight_bps = None` (always false for
+/// an `"active"` snapshot, but defensively skipped rather than assumed-zero)
+/// do not contribute. Saturating sum: never panics, never wraps.
+fn sector_gross_weight_bps(
+    snapshot: &PortfolioWeightsSnapshot,
+    sector_map: &HashMap<String, String>,
+    sector: &str,
+) -> i64 {
+    snapshot
+        .positions
+        .iter()
+        .filter(|row| sector_map.get(&row.symbol).map(|s| s.as_str()) == Some(sector))
+        .filter_map(|row| row.weight_bps)
+        .fold(0i64, |acc, w| acc.saturating_add(abs_i64_saturating(w)))
+}
+
+/// Evaluate a candidate order against configured per-sector gross exposure
+/// caps, using real live weights (ETF-RISK-CLOSURE-01).
+///
+/// Pure: no IO, no env reads, no clock. Callers (the daemon-side gate) are
+/// responsible for: fetching `current_positions`/`cash_micros` from the live
+/// execution snapshot, fetching `marks` from `md_bars` (leaving a symbol out
+/// of `marks` when no mark is available — never fabricating one), loading
+/// `sector_map` from the instrument registry, and parsing
+/// `sector_limits_bps` from configuration.
+///
+/// `sector_limits_bps` is `sector -> max_gross_weight_bps`. An empty map
+/// means sector risk is disabled: this function returns `allowed: true,
+/// truth_state: "sector_risk_disabled"` immediately, without consulting
+/// `marks`, `sector_map`, or `current_positions` at all — the caller does
+/// not need to fetch any of them when this map is empty.
+///
+/// # Behavior
+///
+/// 1. `sector_limits_bps.is_empty()` → disabled. No marks needed.
+/// 2. `candidate_symbol` absent from `sector_map` → `"sector_metadata_missing"`,
+///    allowed. No marks needed. (Safest default: this gate does not block an
+///    untagged symbol; a future patch may add an explicit
+///    require-sector-metadata flag if that is ever wanted.)
+/// 3. `candidate_symbol`'s sector has no entry in `sector_limits_bps` →
+///    `"sector_limit_ok"`, allowed, `sector: Some(..)`, no cap to check. No
+///    marks needed.
+/// 4. Otherwise, compute the "current" weights snapshot from
+///    `current_positions`/`marks`/`cash_micros`, and a "prospective"
+///    snapshot with `candidate_signed_delta_qty` applied to
+///    `candidate_symbol`'s quantity (inserting a new position if
+///    `candidate_symbol` was flat or absent). Both snapshots use the same
+///    `marks` (the order does not change any mark) and the same
+///    `cash_micros` (this is an exposure/weight check, not a cash-impact
+///    check).
+///    - Either snapshot's `truth_state == "missing_marks"` → fail closed,
+///      `"sector_weights_missing"`.
+///    - Either snapshot's `truth_state == "nav_unavailable"` → fail closed,
+///      `"sector_nav_unavailable"`.
+/// 5. Otherwise, sum `|weight_bps|` over every symbol in the candidate's
+///    sector, for both snapshots, giving `current_weight_bps` /
+///    `prospective_weight_bps`.
+///    - `prospective_weight_bps <= max_weight_bps` → `"sector_limit_ok"`,
+///      allowed.
+///    - `prospective_weight_bps > max_weight_bps` AND `prospective_weight_bps
+///      < current_weight_bps` (the order strictly reduces sector exposure) →
+///      `"sector_risk_reducing_allowed"`, allowed — even though the sector
+///      remains over cap.
+///    - Otherwise → `"sector_limit_exceeded"`, denied.
+pub fn evaluate_sector_risk(
+    cash_micros: i64,
+    current_positions: &[PositionWeightInput],
+    marks: &BTreeMap<String, PositionMark>,
+    sector_map: &HashMap<String, String>,
+    sector_limits_bps: &HashMap<String, i64>,
+    candidate_symbol: &str,
+    candidate_signed_delta_qty: i64,
+) -> SectorRiskEvaluation {
+    if sector_limits_bps.is_empty() {
+        return sector_risk_passthrough("sector_risk_disabled", None);
+    }
+
+    let Some(sector) = sector_map.get(candidate_symbol).cloned() else {
+        return sector_risk_passthrough("sector_metadata_missing", None);
+    };
+
+    let Some(&max_weight_bps) = sector_limits_bps.get(&sector) else {
+        return sector_risk_passthrough("sector_limit_ok", Some(sector));
+    };
+
+    let current_snapshot = compute_portfolio_weights(cash_micros, current_positions, marks);
+
+    let mut prospective_positions: Vec<PositionWeightInput> = current_positions.to_vec();
+    match prospective_positions
+        .iter_mut()
+        .find(|p| p.symbol == candidate_symbol)
+    {
+        Some(p) => p.signed_qty = p.signed_qty.saturating_add(candidate_signed_delta_qty),
+        None => prospective_positions.push(PositionWeightInput {
+            symbol: candidate_symbol.to_string(),
+            signed_qty: candidate_signed_delta_qty,
+        }),
+    }
+    let prospective_snapshot = compute_portfolio_weights(cash_micros, &prospective_positions, marks);
+
+    for snapshot in [&current_snapshot, &prospective_snapshot] {
+        if snapshot.truth_state == "missing_marks" {
+            let reason = format!(
+                "sector '{sector}' gross exposure cannot be verified: one or more \
+                 positions are missing a live mark (missing_mark_symbols={:?})",
+                snapshot.missing_mark_symbols
+            );
+            return sector_risk_fail_closed("sector_weights_missing", sector, max_weight_bps, reason);
+        }
+        if snapshot.truth_state == "nav_unavailable" {
+            let reason = format!(
+                "sector '{sector}' gross exposure cannot be verified: portfolio NAV is \
+                 not positive (nav_micros={:?})",
+                snapshot.nav_micros
+            );
+            return sector_risk_fail_closed("sector_nav_unavailable", sector, max_weight_bps, reason);
+        }
+    }
+
+    let current_weight_bps = sector_gross_weight_bps(&current_snapshot, sector_map, &sector);
+    let prospective_weight_bps =
+        sector_gross_weight_bps(&prospective_snapshot, sector_map, &sector);
+    let is_risk_reducing = prospective_weight_bps < current_weight_bps;
+    let within_cap = prospective_weight_bps <= max_weight_bps;
+
+    let (allowed, truth_state, reason_code) = if within_cap {
+        (true, "sector_limit_ok", None)
+    } else if is_risk_reducing {
+        (
+            true,
+            "sector_risk_reducing_allowed",
+            Some(format!(
+                "sector '{sector}' prospective gross exposure {prospective_weight_bps} bps \
+                 exceeds max_weight_bps={max_weight_bps}, but the order reduces exposure from \
+                 {current_weight_bps} bps — allowed as risk-reducing"
+            )),
+        )
+    } else {
+        (
+            false,
+            "sector_limit_exceeded",
+            Some(format!(
+                "sector '{sector}' prospective gross exposure {prospective_weight_bps} bps \
+                 would exceed max_weight_bps={max_weight_bps} (current {current_weight_bps} \
+                 bps); order is not risk-reducing"
+            )),
+        )
+    };
+
+    SectorRiskEvaluation {
+        allowed,
+        reason_code,
+        sector: Some(sector),
+        current_weight_bps: Some(current_weight_bps),
+        prospective_weight_bps: Some(prospective_weight_bps),
+        max_weight_bps: Some(max_weight_bps),
+        truth_state: truth_state.to_string(),
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

@@ -72,6 +72,7 @@ pub const ENV_CAPITAL_POLICY_PATH: &str = "MQK_CAPITAL_POLICY_PATH";
 pub mod deployment_economics;
 pub mod portfolio_risk;
 pub mod position_sizing;
+pub mod sector_risk;
 pub mod short_entry_policy;
 
 // Flat re-exports — preserve existing `crate::capital_policy::X` call sites.
@@ -85,6 +86,10 @@ pub use portfolio_risk::{
 pub use position_sizing::{
     evaluate_per_symbol_notional_cap, evaluate_per_symbol_notional_cap_from_env,
     evaluate_position_sizing, evaluate_position_sizing_from_env, PositionSizingOutcome,
+};
+pub use sector_risk::{
+    parse_sector_exposure_limits_bps, sector_exposure_limits_bps_from_env,
+    ENV_SECTOR_EXPOSURE_LIMITS_BPS,
 };
 pub use short_entry_policy::{
     classify_order_intent, classify_short_entry_intent, evaluate_short_entry_policy,

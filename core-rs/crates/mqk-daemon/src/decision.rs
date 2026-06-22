@@ -13,6 +13,7 @@
 //! 1f. symbol_day_order_cap — MULTI-SYMBOL-DAY-ORDER-CAP-01: optional per-symbol daily order count cap (cap #4)
 //! 1e. capital_budget       — B6/TV-04B: per-strategy budget authorized (same gate as external signal path)
 //! 1g. per_symbol_notional  — MULTI-SYMBOL-CAPITAL-CAPS-01: optional per-symbol notional cap (cap #3); limit orders only, SizingUnverifiable pass-through for market orders
+//! 1h. sector_risk          — ETF-RISK-CLOSURE-01: optional per-sector live gross exposure cap (`MQK_SECTOR_EXPOSURE_LIMITS_BPS`); uses real live weights/marks, fail-closed when enabled and unverifiable, risk-reducing orders always allowed
 //! 2.  db_present           — no DB → unavailable
 //! 3.  registry_check       — strategy must be registered AND enabled
 //! 4.  suppression_check    — strategy must not be actively suppressed (per-strategy targeted query)
@@ -84,6 +85,10 @@ pub struct InternalDecisionOutcome {
     /// | `"symbol_day_limit_reached"` | MULTI-SYMBOL-DAY-ORDER-CAP-01: per-symbol daily order count cap exceeded (cap #4, Gate 1f) |
     /// | `"budget_denied"`  | B6/TV-04B: capital policy present but strategy not budget-authorized |
     /// | `"policy_invalid"` | B6/TV-04B: capital policy configured but structurally invalid        |
+    /// | `"sector_config_invalid"` | ETF-RISK-CLOSURE-01: `MQK_SECTOR_EXPOSURE_LIMITS_BPS` is set but malformed (Gate 1h) |
+    /// | `"sector_weights_missing"` | ETF-RISK-CLOSURE-01: sector risk is enabled for this symbol's sector but live weights/marks could not be established (Gate 1h) |
+    /// | `"sector_nav_unavailable"` | ETF-RISK-CLOSURE-01: sector risk is enabled but portfolio NAV is not positive (Gate 1h) |
+    /// | `"sector_limit_exceeded"`  | ETF-RISK-CLOSURE-01: candidate order would exceed a configured per-sector gross exposure cap and is not risk-reducing (Gate 1h) |
     pub disposition: String,
     /// Echoed from [`InternalStrategyDecision::decision_id`].
     pub decision_id: String,
@@ -523,6 +528,230 @@ pub async fn submit_internal_strategy_decision(
                     .await;
             });
             return outcome(false, "rejected", &did, &sid, None, vec![blocker]);
+        }
+    }
+
+    // Gate 1h: ETF-RISK-CLOSURE-01 — optional per-sector live gross exposure
+    // cap (`MQK_SECTOR_EXPOSURE_LIMITS_BPS`).
+    //
+    // Default-off: an unset/empty env var disables this gate entirely and
+    // the decision path below never touches the DB or the instrument
+    // registry for this check (mirrors Gate 1g's
+    // MQK_PER_SYMBOL_MAX_NOTIONAL_USD shape — same env-var-driven,
+    // no-cap-means-no-check pattern).
+    //
+    // When enabled for the candidate symbol's sector, this gate needs the
+    // live execution snapshot (current positions/cash) and a completed
+    // md_bars mark for every non-flat symbol in that sector plus the
+    // candidate symbol itself. Both a missing live snapshot and a missing
+    // mark fail closed (`sector_weights_missing`) rather than fabricate a
+    // price or treat a missing mark as zero — same operator-truth
+    // discipline as `GET /api/v1/portfolio/live-weights`
+    // (PORTFOLIO-LIVE-WEIGHTS-01), whose pure valuation seam
+    // (`mqk_portfolio::compute_portfolio_weights`) this gate reuses via
+    // `mqk_portfolio::evaluate_sector_risk`. A malformed env var fails
+    // closed for this decision only (`sector_config_invalid`) — it does not
+    // block daemon startup or any other gate.
+    {
+        let sector_limits_bps = match crate::capital_policy::sector_exposure_limits_bps_from_env()
+        {
+            Ok(limits) => limits,
+            Err(parse_err) => {
+                let blocker = format!(
+                    "internal decision unavailable: MQK_SECTOR_EXPOSURE_LIMITS_BPS is set but \
+                     malformed: {parse_err}"
+                );
+                return outcome(
+                    false,
+                    "sector_config_invalid",
+                    &did,
+                    &sid,
+                    None,
+                    vec![blocker],
+                );
+            }
+        };
+
+        if !sector_limits_bps.is_empty() {
+            let candidate_symbol = decision.symbol.trim();
+            let registry_path = std::path::PathBuf::from(&state.instrument_registry_path);
+            let sector_map = match mqk_md::instrument_registry::load_instrument_registry(
+                &registry_path,
+            ) {
+                Ok(instruments) => mqk_md::instrument_registry::sector_map(&instruments),
+                Err(err) => {
+                    return outcome(
+                        false,
+                        "unavailable",
+                        &did,
+                        &sid,
+                        None,
+                        vec![format!(
+                            "internal decision unavailable: instrument registry could not be \
+                             loaded for the sector risk gate: {err}"
+                        )],
+                    );
+                }
+            };
+
+            // Only fetch the live snapshot/marks when the candidate symbol
+            // is actually in a capped sector — an untagged symbol or a
+            // sector with no configured cap never needs them, matching the
+            // pure evaluator's own no-marks-needed early exits.
+            let needs_live_weights = sector_map
+                .get(candidate_symbol)
+                .is_some_and(|sector| sector_limits_bps.contains_key(sector));
+
+            if needs_live_weights {
+                let snap = state.execution_snapshot.read().await.clone();
+                let Some(snapshot) = snap else {
+                    return outcome(
+                        false,
+                        "sector_weights_missing",
+                        &did,
+                        &sid,
+                        None,
+                        vec![format!(
+                            "internal decision refused: sector risk is configured for \
+                             '{candidate_symbol}'s sector but no live execution snapshot is \
+                             available to compute current weights"
+                        )],
+                    );
+                };
+
+                let Some(db) = state.db.as_ref() else {
+                    return outcome(
+                        false,
+                        "sector_weights_missing",
+                        &did,
+                        &sid,
+                        None,
+                        vec![format!(
+                            "internal decision refused: sector risk is configured for \
+                             '{candidate_symbol}'s sector but no database is available to \
+                             fetch live marks"
+                        )],
+                    );
+                };
+
+                let delta: i64 = if decision.side.trim().eq_ignore_ascii_case("buy") {
+                    decision.qty
+                } else {
+                    -decision.qty
+                };
+
+                let cash_micros = snapshot.portfolio.cash_micros;
+                let current_positions: Vec<mqk_portfolio::PositionWeightInput> = snapshot
+                    .portfolio
+                    .positions
+                    .iter()
+                    .map(|p| mqk_portfolio::PositionWeightInput {
+                        symbol: p.symbol.clone(),
+                        signed_qty: p.net_qty,
+                    })
+                    .collect();
+
+                let mut symbols_needing_marks: Vec<String> = current_positions
+                    .iter()
+                    .filter(|p| p.signed_qty != 0)
+                    .map(|p| p.symbol.clone())
+                    .collect();
+                if !symbols_needing_marks
+                    .iter()
+                    .any(|s| s == candidate_symbol)
+                {
+                    symbols_needing_marks.push(candidate_symbol.to_string());
+                }
+
+                const SECTOR_RISK_MARK_TIMEFRAME: &str = "1D";
+                let mut marks: BTreeMap<String, mqk_portfolio::PositionMark> = BTreeMap::new();
+                for symbol in &symbols_needing_marks {
+                    match mqk_db::fetch_recent_completed_bars_for_strategy(
+                        db,
+                        symbol,
+                        SECTOR_RISK_MARK_TIMEFRAME,
+                        1,
+                    )
+                    .await
+                    {
+                        Ok(bars) => {
+                            if let Some(bar) = bars.last() {
+                                marks.insert(
+                                    symbol.clone(),
+                                    mqk_portfolio::PositionMark {
+                                        symbol: symbol.clone(),
+                                        mark_price_micros: bar.close_micros,
+                                        mark_ts_utc: Some(bar.end_ts),
+                                        source: format!(
+                                            "md_bars:{SECTOR_RISK_MARK_TIMEFRAME}:close"
+                                        ),
+                                    },
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                "sector risk gate: md_bars lookup failed for {symbol}: {err}"
+                            );
+                        }
+                    }
+                }
+
+                let evaluation = mqk_portfolio::evaluate_sector_risk(
+                    cash_micros,
+                    &current_positions,
+                    &marks,
+                    &sector_map,
+                    &sector_limits_bps,
+                    candidate_symbol,
+                    delta,
+                );
+
+                if !evaluation.allowed {
+                    let blocker = evaluation.reason_code.clone().unwrap_or_else(|| {
+                        format!(
+                            "internal decision refused: sector risk gate denied ({})",
+                            evaluation.truth_state
+                        )
+                    });
+                    let notifier = state.discord_notifier.clone();
+                    let env = Some(state.deployment_mode().as_api_label().to_string());
+                    let symbol_owned = candidate_symbol.to_string();
+                    let blocker_copy = blocker.clone();
+                    let truth_state_copy = evaluation.truth_state.clone();
+                    tokio::spawn(async move {
+                        notifier
+                            .notify_trade_event(&crate::notify::TradeEventPayload {
+                                stage: "signal.blocked".to_string(),
+                                run_id: None,
+                                symbol: Some(symbol_owned.clone()),
+                                side: None,
+                                qty: None,
+                                price_micros: None,
+                                order_id: None,
+                                detail: Some(format!(
+                                    "gate=gate_1h_sector_risk path=internal_decision \
+                                     reason={blocker_copy}"
+                                )),
+                                environment: env,
+                                summary: format!(
+                                    "signal.blocked [{truth_state_copy}] internal decision \
+                                     symbol={symbol_owned} | {blocker_copy}"
+                                ),
+                                ts_utc: chrono::Utc::now().to_rfc3339(), // allow: ops-metadata notification timestamp
+                            })
+                            .await;
+                    });
+                    return outcome(
+                        false,
+                        &evaluation.truth_state,
+                        &did,
+                        &sid,
+                        None,
+                        vec![blocker],
+                    );
+                }
+            }
         }
     }
 

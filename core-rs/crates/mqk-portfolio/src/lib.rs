@@ -26,7 +26,8 @@ pub use allocator::{
 };
 pub use constraints::{
     check_all, check_sector_limits, check_turnover, check_weight_bounds, compute_turnover,
-    ConstraintViolation, SectorConstraint, TurnoverConstraint, WeightBoundsConstraint,
+    evaluate_sector_risk, ConstraintViolation, SectorConstraint, SectorRiskEvaluation,
+    TurnoverConstraint, WeightBoundsConstraint,
 };
 pub use ledger::{Ledger, LedgerError, LedgerSnapshot};
 
