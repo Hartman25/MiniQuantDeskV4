@@ -13,6 +13,7 @@ mod fixedpoint;
 mod metrics;
 mod ordering;
 mod types;
+mod valuation;
 
 pub mod allocator;
 pub mod constraints;
@@ -41,6 +42,12 @@ pub use fixedpoint::Micros;
 pub use ordering::{apply_fills_canonical, sort_fills_canonical, TaggedFill};
 
 pub use types::{CashEntry, Fill, LedgerEntry, Lot, PortfolioState, PositionState, Side};
+
+// PORTFOLIO-LIVE-WEIGHTS-01: live position valuation / weight truth seam
+pub use valuation::{
+    compute_portfolio_weights, PositionMark, PositionWeightInput, PositionWeightRow,
+    PortfolioWeightsSnapshot,
+};
 
 use std::collections::BTreeMap;
 

@@ -953,6 +953,68 @@ pub struct RiskSummaryResponse {
     pub risk_engine_halt_reason_code: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// GET /api/v1/portfolio/live-weights (PORTFOLIO-LIVE-WEIGHTS-01)
+// ---------------------------------------------------------------------------
+
+/// Per-symbol row for `GET /api/v1/portfolio/live-weights`.
+///
+/// Mirrors `mqk_portfolio::PositionWeightRow`. Money/notional fields are
+/// clamped from `i128` to `i64` for JSON transport — portfolio values at
+/// i64-micros scale (+/- ~9.2 trillion dollars) cannot realistically reach
+/// that clamp boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioLiveWeightRow {
+    pub symbol: String,
+    pub signed_qty: i64,
+    pub mark_price_micros: Option<i64>,
+    /// Epoch seconds of the bar/source the mark was taken from.
+    pub mark_ts_utc: Option<i64>,
+    /// Provenance string, e.g. `"md_bars:1D:close"`. `None` iff `missing_mark`.
+    pub mark_source: Option<String>,
+    pub market_value_micros: Option<i64>,
+    pub absolute_notional_micros: Option<i64>,
+    /// Signed weight in basis points of NAV. `None` unless `truth_state ==
+    /// "active"`.
+    pub weight_bps: Option<i64>,
+    pub missing_mark: bool,
+}
+
+/// Response for `GET /api/v1/portfolio/live-weights`.
+///
+/// Truthful, read-only live position valuation seam
+/// (`PORTFOLIO-LIVE-WEIGHTS-01`). Marks are sourced exclusively from the
+/// latest *completed* `md_bars` row at `timeframe` for each non-flat
+/// position — never from the broker, a live quote, an entry price, or a
+/// last order price. Does not enforce any risk limit; this is a valuation
+/// seam only.
+///
+/// `truth_state`:
+/// - `"no_snapshot"` — no execution snapshot exists yet this session (the
+///   runtime has not produced a portfolio snapshot). All financial fields
+///   are `null` and `positions` is empty.
+/// - `"db_unavailable"` — a snapshot exists with at least one non-flat
+///   position, but no DB pool is configured, so marks cannot be looked up
+///   at all.
+/// - `"missing_marks"` — DB is available but at least one non-flat position
+///   has no completed bar at `timeframe`. NAV/weights are not computed for
+///   *any* position; see `missing_mark_symbols`.
+/// - `"nav_unavailable"` — every non-flat position has a confirmed mark, but
+///   NAV (cash + sum of market values) is `<= 0`; weights are not computed.
+/// - `"active"` — NAV and weights are fully computed. This also covers a
+///   flat / no-position portfolio, where NAV == cash.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioLiveWeightsResponse {
+    pub truth_state: String,
+    /// Timeframe used for the md_bars mark lookup (echoed; defaults to `"1D"`).
+    pub timeframe: String,
+    pub cash_micros: i64,
+    pub nav_micros: Option<i64>,
+    pub gross_exposure_micros: Option<i64>,
+    pub positions: Vec<PortfolioLiveWeightRow>,
+    pub missing_mark_symbols: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReconcileSummaryResponse {
     /// RECON-06: Machine-readable truth state disambiguating reconcile lifecycle.

@@ -1739,3 +1739,20 @@ PORTFOLIO-LIVE-WEIGHTS-01
 ```
 
 (wires already-written, zero-caller `SectorConstraint`/`check_sector_limits()` in `mqk-portfolio/src/constraints.rs` into the live risk engine — smallest diff, real risk value, no dependencies.)
+
+### PORTFOLIO-LIVE-WEIGHTS-01 — CLOSED_LOCAL
+
+**Purpose:** Build the missing live mark-price / NAV / portfolio-weight truth seam that `ETF-FOUNDATION-01` identified as the real blocker on `ETF-RISK-01` — without enforcing any risk limit, touching broker/order/outbox code, or fabricating a price.
+
+**What was built:**
+
+- `mqk_portfolio::compute_portfolio_weights` (`core-rs/crates/mqk-portfolio/src/valuation.rs`) — pure, deterministic, zero-dependency function. Inputs: `cash_micros`, `&[PositionWeightInput { symbol, signed_qty }]`, `&BTreeMap<String, PositionMark>` (explicit, attributed marks). Output: `PortfolioWeightsSnapshot` with per-symbol `market_value_micros`/`absolute_notional_micros`/`weight_bps` (all `i128`-safe) and one of three truth states — `"active"`, `"missing_marks"`, `"nav_unavailable"` — never a fabricated NAV or weight. A flat (`signed_qty == 0`) position never requires a mark. 11 scenario tests (`mqk-portfolio/tests/scenario_portfolio_live_weights_01.rs`, PW-01..PW-09) cover long/short/multi-position weights, missing marks, NAV `<= 0` (both negative and exact-zero), `i64::MAX`-magnitude overflow safety, zero-quantity predictability, and determinism.
+- `GET /api/v1/portfolio/live-weights` (`core-rs/crates/mqk-daemon/src/routes/portfolio.rs`, registered in `routes.rs`) — read-only. Positions/cash come from the in-memory execution snapshot (`AppState.execution_snapshot`, runtime-ledger-derived — distinct from the broker-account-derived snapshot `portfolio_summary` uses); marks come only from the latest *completed* `md_bars` row per non-flat symbol at a `timeframe` query param (default `"1D"`), formatted as `source = "md_bars:{timeframe}:close"`. Adds a fourth, daemon-level truth state, `"db_unavailable"` (no DB pool configured at all), distinct from the pure helper's `"missing_marks"` (DB present, symbol has no completed bar) — both collapse to "no mark" but are different operator truths. 8 scenario tests (`mqk-daemon/tests/scenario_portfolio_live_weights_01.rs`, PLW-01..PLW-08), 2 of them DB-backed (seeded/unseeded `md_bars` rows against the local paper DB on port 5440) and proven for real, including an explicit assertion that the route never writes to `oms_outbox`.
+
+**Mark source:** `md_bars` latest completed row only (`is_complete = true`, highest `end_ts`), via the existing `fetch_recent_completed_bars_for_strategy` read path. No provider call, no broker call, no live quote, no entry/order price.
+
+**Deliberately not done (next dependency patch is still `ETF-RISK-01`):** `check_sector_limits` is not called from this patch; `mqk-risk`, `RiskRequestContext`, and the live admission/decision path are untouched. The seam now exists and is provably truthful, but nothing in the live risk/admission boundary consumes it yet.
+
+**Validation:** `cargo check -p mqk-portfolio` / `-p mqk-runtime` (untouched) / `-p mqk-daemon` all clean. `cargo test -p mqk-portfolio --test scenario_portfolio_live_weights_01` — 11/11 pass. `cargo test -p mqk-daemon --test scenario_portfolio_live_weights_01` — 8/8 pass against the real local paper DB (port 5440), confirmed via `--nocapture` timing and a post-run `md_bars` query showing zero leftover test rows. Pre-existing, unrelated `cargo clippy -p mqk-daemon` failure at `mqk-db/src/md.rs:629` (a `clippy::clone_on_copy` lint on a file untouched by this patch — toolchain/clippy-version drift) was identified, not reproduced as caused by this patch, and left alone per the test-failure policy.
+
+**Safety confirmation:** no broker/Alpaca submit code touched; no live routing changes; no order/outbox writes (asserted by test); no DB migrations; `.env.local` untouched; no provider/broker calls; no orders submitted; no short-entry changes; no ETF sector risk enforcement; B5/risk gates unchanged.

@@ -17,7 +17,8 @@
 //! | `control_plane`  | run_start/stop/halt, integrity arm/disarm, ops_action,|
 //! |                  | ops_catalog, ops_mode_change_guidance                 |
 //! | `execution`      | execution_summary, execution_orders, order submit/cancel |
-//! | `portfolio`      | portfolio_summary/positions/orders/fills, risk        |
+//! | `portfolio`      | portfolio_summary/positions/orders/fills/live-weights,|
+//! |                  | risk                                                  |
 //! | `reconcile`      | reconcile_status, reconcile_mismatches                |
 //! | `strategy`       | strategy_summary, strategy_suppressions,              |
 //! |                   | strategy_dry_run_status                               |
@@ -175,8 +176,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
     use portfolio::{
-        portfolio_fills, portfolio_open_orders, portfolio_positions, portfolio_summary,
-        risk_denials, risk_summary,
+        portfolio_fills, portfolio_live_weights, portfolio_open_orders, portfolio_positions,
+        portfolio_summary, risk_denials, risk_summary,
     };
     use reconcile::{reconcile_mismatches, reconcile_status};
     use repair::{
@@ -249,6 +250,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/portfolio/positions", get(portfolio_positions))
         .route("/api/v1/portfolio/orders/open", get(portfolio_open_orders))
         .route("/api/v1/portfolio/fills", get(portfolio_fills))
+        .route(
+            "/api/v1/portfolio/live-weights",
+            get(portfolio_live_weights),
+        )
         .route("/api/v1/risk/summary", get(risk_summary))
         .route("/api/v1/risk/denials", get(risk_denials))
         .route("/api/v1/reconcile/status", get(reconcile_status))
