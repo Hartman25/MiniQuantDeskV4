@@ -961,13 +961,17 @@ Only after provider jobs exist or CSV jobs prove cancellation is needed.
 
 ## 11. Multi-Asset Data / Ingestion Roadmap
 
-### DATA-MULTI-ASSET-MODEL-01 — QUEUED
+**Reconciliation note:** the five labels below are historical planning entries, preserved for continuity. Active multi-asset tracking now lives in §19 Multi-Asset Expansion Roadmap (full detail: `docs/audits/multi_asset_completion_audit.md`). Each label is mapped below to its corresponding §19 patch IDs. Do not start any label below directly — work against its mapped §19 patch ID instead. See `LEDGER-MULTI-ASSET-RECONCILE-01` in §19 for the closure note.
 
-**Purpose:** Audit current symbol/timeframe/bar schema and design the migration path from symbol-only equity bars to `instrument_id + asset_class` market data.
+### DATA-MULTI-ASSET-MODEL-01 — RECONCILED / SUPERSEDED BY ASSET-CORE ROADMAP
 
-**Required direction:** Do not bolt each asset class on as a one-off. Build a shared instrument model and normalized market-data layer.
+**Maps to (§19):** `ASSET-CORE-01`, `ASSET-CORE-02`, `ASSET-CORE-03`, `ASSET-CORE-04`, `ASSET-CORE-05`, `BACKTEST-MULTIPLIER-MARGIN-01`. Do not start this older label directly unless intentionally reopening the roadmap design.
 
-Suggested normalized market data design:
+**Original purpose (preserved for history):** Audit current symbol/timeframe/bar schema and design the migration path from symbol-only equity bars to `instrument_id + asset_class` market data.
+
+**Original required direction:** Do not bolt each asset class on as a one-off. Build a shared instrument model and normalized market-data layer.
+
+Suggested normalized market data design (historical):
 
 ```text
 bars keyed by:
@@ -981,21 +985,29 @@ preserve:
 - asset-class-specific extensions when needed
 ```
 
-### DATA-INGEST-CRYPTO-PLAN-01 — QUEUED
+### DATA-INGEST-CRYPTO-PLAN-01 — RECONCILED / SUPERSEDED BY CRYPTO ROADMAP
 
-**Purpose:** Plan crypto ingestion provider(s), symbol mapping, 24/7 sessions, timeframes, and storage compatibility.
+**Maps to (§19, Phase 3 — Crypto Engine):** `CRYPTO-REGISTRY-01`, `CRYPTO-DATA-01`, `CRYPTO-RISK-01`, `CRYPTO-EXEC-01`, `CRYPTO-STRAT-01`. Do not start this older label directly unless intentionally reopening the roadmap design.
 
-### DATA-INGEST-FUTURES-PLAN-01 — QUEUED
+**Original purpose (preserved for history):** Plan crypto ingestion provider(s), symbol mapping, 24/7 sessions, timeframes, and storage compatibility.
 
-**Purpose:** Plan futures ingestion with contract symbols, expiries, continuous contracts, sessions, and roll logic.
+### DATA-INGEST-FUTURES-PLAN-01 — RECONCILED / SUPERSEDED BY FUTURES ROADMAP
 
-### DATA-INGEST-OPTIONS-PLAN-01 — QUEUED
+**Maps to (§19, Phase 1 — Futures Trading Engine):** `FUTURES-REGISTRY-01`, `FUTURES-DATA-01`, `FUTURES-DATA-02`, `FUTURES-RISK-01`, `FUTURES-EXEC-01`, `FUTURES-STRAT-01`, `FUTURES-STRAT-02`. Do not start this older label directly unless intentionally reopening the roadmap design.
 
-**Purpose:** Plan options chain/contract ingestion separately from OHLCV bars.
+**Original purpose (preserved for history):** Plan futures ingestion with contract symbols, expiries, continuous contracts, sessions, and roll logic.
 
-### DATA-INGEST-FOREX-PLAN-01 — QUEUED
+### DATA-INGEST-OPTIONS-PLAN-01 — RECONCILED / SUPERSEDED BY OPTIONS ROADMAP
 
-**Purpose:** Plan forex ingestion with currency pairs, 24/5 sessions, provider mapping, and pip/price precision.
+**Maps to (§19, Phase 2 — Options Trading Engine):** `OPTIONS-CONTRACT-01`, `OPTIONS-CHAIN-01`, `OPTIONS-RISK-01`, `OPTIONS-BACKTEST-01`, `OPTIONS-WHEEL-01`, `OPTIONS-WHEEL-02`, `OPTIONS-SPREADS-01`. Do not start this older label directly unless intentionally reopening the roadmap design.
+
+**Original purpose (preserved for history):** Plan options chain/contract ingestion separately from OHLCV bars.
+
+### DATA-INGEST-FOREX-PLAN-01 — RECONCILED / SUPERSEDED BY FOREX ROADMAP
+
+**Maps to (§19, Phase 4 — Forex Engine):** `FX-FUTURES-01`, `FX-DATA-01`, `FX-RISK-01`, `FX-STRAT-01`. Do not start this older label directly unless intentionally reopening the roadmap design.
+
+**Original purpose (preserved for history):** Plan forex ingestion with currency pairs, 24/5 sessions, provider mapping, and pip/price precision.
 
 ---
 
@@ -1697,6 +1709,8 @@ weekend/calendar gaps. Use a larger threshold only for unusually long gaps.
 9. GUI polish / older parked verification items
 ```
 
+**Note:** §18 is the older, general repo-wide patch order and predates the multi-asset audit. Items 7–8 above (`DATA-MULTI-ASSET-MODEL-01`, "Provider/multi-asset ingestion plans") are superseded — see §11 for the reconciled label mapping and §19 Multi-Asset Expansion Roadmap (current next: `ASSET-CORE-01`) for active multi-asset tracking. §19 governs multi-asset sequencing where the two disagree.
+
 Current best next patch:
 
 ```text
@@ -1718,11 +1732,13 @@ AUTON-NO-TRADE-01
 
 Repo trades equities only today, but already has a tested fail-closed multi-asset admission boundary (`AssetClass` enum, Gate 0 signal-admission reject, `MULTI-ASSET-ROUTING-GUARD-01` broker-submit reject, `ASSET-CAPABILITY-MATRIX-01` on `/api/v1/system/metadata` — all pre-existing, all `enabled:false` for non-equity). Nothing exists past that boundary for any non-equity class. See the audit doc for full evidence; this section is index-only and will drift if treated as the source of truth.
 
-**Note:** ledger §11 (`DATA-MULTI-ASSET-MODEL-01` and the four `DATA-INGEST-*-PLAN-01` items, all `QUEUED`) overlaps this roadmap's Phase 0–4 patches. Recommend reconciling both under one tracking scheme via `LEDGER-MULTI-ASSET-RECONCILE-01` (see audit doc §5/§13) rather than tracking the same work twice.
+**Note:** ledger §11 (`DATA-MULTI-ASSET-MODEL-01` and the four `DATA-INGEST-*-PLAN-01` items) has been reconciled against this roadmap's Phase 0–4 patches under one tracking scheme via `LEDGER-MULTI-ASSET-RECONCILE-01` (closure note at the end of this section; see also audit doc §5/§13). Each old label is mapped to its corresponding §19 patch IDs directly in §11 — none were deleted.
 
 Phase list: Phase 0 Core Foundation (`ASSET-CORE-01..05`) → Phase 5 ETF/Sector (cheapest real wins) → Phase 3 Crypto (cheapest new asset class) → Phase 7 Broker Expansion (IBKR) → Phase 1 Futures → Phase 2 Options → Phase 4 Forex / Phase 6 Rates (lowest near-term priority).
 
 Top 20 (build order; full rationale in audit doc §8): `LEDGER-MULTI-ASSET-RECONCILE-01`, `ETF-RISK-01`, `ETF-REGISTRY-01`, `ASSET-CORE-01`, `ASSET-CORE-05`, `BACKTEST-MULTIPLIER-MARGIN-01`, `ASSET-CORE-02`, `ASSET-CORE-03`, `MULTI-ASSET-ALLOCATOR-01`, `ETF-RANKER-01`, `ETF-STRAT-01`, `MULTI-STRATEGY-CONFLICT-POLICY-01`, `PROVIDER-SWAP-CONTRACT-01`, `ASSET-CORE-04`, `CRYPTO-REGISTRY-01`, `CRYPTO-DATA-01`, `CRYPTO-RISK-01`, `CRYPTO-EXEC-01`, `CRYPTO-STRAT-01`, `BROKER-IBKR-01`.
+
+**Status update:** positions 1–3 above (`LEDGER-MULTI-ASSET-RECONCILE-01`, `ETF-RISK-01`, `ETF-REGISTRY-01`) are now `CLOSED`. The current next foundation patch is `ASSET-CORE-01` (position 4). This list is preserved verbatim as the original audit's build-order rationale (full detail: audit doc §8) — it is not rewritten as patches close.
 
 ### ETF-FOUNDATION-01 — ETF-REGISTRY-01 CLOSED / ETF-RISK-01 PARTIAL
 
@@ -1732,7 +1748,7 @@ Top 20 (build order; full rationale in audit doc §8): `LEDGER-MULTI-ASSET-RECON
 
 **Next dependency patch:** `PORTFOLIO-LIVE-WEIGHTS-01` (live mark-price + NAV/weight computation reaching the decision boundary, equity-wide — not ETF-specific). Only after that exists can `ETF-RISK-01` close for real.
 
-Recommended next patch:
+Recommended next patch (historical — at the time this section was written; superseded, see `LEDGER-MULTI-ASSET-RECONCILE-01` closure note at the end of §19 for the current recommendation):
 
 ```text
 PORTFOLIO-LIVE-WEIGHTS-01
@@ -1815,3 +1831,28 @@ PORTFOLIO-LIVE-WEIGHTS-01
 **Unrelated pre-existing finding (not caused by this patch, not fixed):** `cargo test -p mqk-daemon --test scenario_signal_to_outbox_unit_proof_01 -- --include-ignored` fails 4 of its 9 tests (`sto01`/`sto02`/`sto03`/`sto06`) when `MQK_DATABASE_URL` points at the local paper DB (port 5440 / `miniquantdesk_paper`) — that file's ignored-by-default tests go through a different connection helper (`mqk-testkit`'s `TEST-DB-SAFETY-GUARD`) that explicitly refuses to connect to any DB whose name contains `"miniquantdesk_paper"`/`"paper"`/`"live"`, by design, regardless of this patch. This file was not touched by this patch and the guard predates it; the failure reproduces identically on `main` before this patch's changes. The 5 non-ignored tests in that same file pass.
 
 **Validation:** `cargo check -p mqk-daemon` / `-p mqk-portfolio` / `-p mqk-md` / `-p mqk-runtime` all clean. `cargo clippy -p mqk-daemon --lib -- -D warnings`, `cargo clippy -p mqk-daemon --test scenario_external_signal_sector_risk_01 -- -D warnings`, and `cargo clippy -p mqk-portfolio --all-targets -- -D warnings` all clean. `cargo fmt -p mqk-daemon -- --check` shows zero diffs in every file this patch touched (remaining repo-wide diffs are pre-existing, in files untouched by this patch). `cargo test -p mqk-daemon --test scenario_external_signal_sector_risk_01 -- --test-threads=1` — 9/9 pass against the real local paper DB (port 5440). `cargo test -p mqk-daemon --test scenario_sector_risk_gate_etf_risk_closure_01 -- --test-threads=1` — 8/8 pass (zero regression on the refactored internal path). `cargo test -p mqk-daemon --test scenario_internal_strategy_decision -- --include-ignored --test-threads=1` — 17/17 pass, including the full accept-to-outbox path. `cargo test -p mqk-daemon --test scenario_asset_class_scope_b8 --test scenario_capital_policy_tv04 --test scenario_capital_policy_tv04c --test scenario_capital_policy_tv04e --test scenario_signal_refusal_obs01 --test scenario_canonical_paper_path_pta01 -- --test-threads=1` — all pass, zero regression on the external signal route's other gates. `cargo test -p mqk-portfolio --test scenario_etf_risk_closure_01` — 12/12 pass (pure evaluator untouched).
+
+---
+
+### LEDGER-MULTI-ASSET-RECONCILE-01 — CLOSED_LOCAL
+
+**Purpose:** Reconcile ledger §11's older multi-asset planning labels against this roadmap's `ASSET-CORE`/`CRYPTO`/`FUTURES`/`OPTIONS`/`FX` patch IDs, refresh `docs/specs/experimental/multi_asset_scaffold_01.md`'s stale "not yet created" status table, and update the recommended next patch now that the ETF sector-risk chain (`ETF-RISK-01` via `ETF-RISK-CLOSURE-01` + `ETF-RISK-EXTERNAL-SIGNAL-GATE-01`) is fully closed. Docs/ledger only — no Rust, GUI, config, DB, or test changes.
+
+**What changed:**
+
+- Ledger §11's five labels (`DATA-MULTI-ASSET-MODEL-01`, `DATA-INGEST-CRYPTO-PLAN-01`, `DATA-INGEST-FUTURES-PLAN-01`, `DATA-INGEST-OPTIONS-PLAN-01`, `DATA-INGEST-FOREX-PLAN-01`) are marked `RECONCILED / SUPERSEDED` in §11 and each mapped to its corresponding §19 patch IDs. No old label was deleted; original purpose text is preserved alongside the mapping.
+- §18's numbered list items 7–8 (`DATA-MULTI-ASSET-MODEL-01`, "Provider/multi-asset ingestion plans") are annotated as superseded by §19, without rewriting §18's historical order.
+- This section's own "Note:", "Top 20", and `ETF-FOUNDATION-01` "Recommended next patch" references to `PORTFOLIO-LIVE-WEIGHTS-01`/`ETF-RISK-01`/`LEDGER-MULTI-ASSET-RECONCILE-01` as forward-looking recommendations are annotated as historical/closed, pointing here for the current state.
+- `docs/specs/experimental/multi_asset_scaffold_01.md`'s "Future Patch Lane IDs" table is refreshed: `ASSET-CAPABILITY-MATRIX-01` (`424f0de`), `MULTI-ASSET-ROUTING-GUARD-01` (`ff2ae59`), and `DISABLED-ASSET-GATE-TESTS-01` (`6fe1697`) are marked `SHIPPED`, independently re-verified as ancestors of `HEAD` via `git merge-base --is-ancestor` (not just copied from the audit doc). The doc's promotion-gate philosophy and hard boundaries are unchanged.
+- `docs/audits/multi_asset_completion_audit.md`'s patch status table and §13 "Recommended Next Patch" are updated: `LEDGER-MULTI-ASSET-RECONCILE-01` is now `CLOSED`, and the recommended next patch is `ASSET-CORE-01`.
+
+**Current state (confirmed against committed `HEAD`, not memory or prior chat claims):**
+
+1. `ETF-RISK-01` is `CLOSED` — closed across both the internal decision path (`ETF-RISK-CLOSURE-01`, Gate 1h in `decision.rs`) and the external signal path (`ETF-RISK-EXTERNAL-SIGNAL-GATE-01`, Gate 1i in `routes/strategy.rs`).
+2. Ledger §11's old planning labels are reconciled, not deleted — each maps to specific §19 patch IDs; a future session can map an old label forward without losing the original ask.
+3. The canonical next multi-asset foundation patch is `ASSET-CORE-01` (Unified Instrument Registry v2 — also resolves the `mqk_schemas::AssetClass` vs `mqk_md::provider::ProviderAssetClass` two-enum split documented in the audit doc §2). This was already the audit's own foundational recommendation; closing `ETF-RISK-01` removed it from the "next" position without changing the underlying sequencing.
+4. §18 (Recommended Order) is the older, general repo-wide patch order and predates the multi-asset audit; §19 (this section) is the active multi-asset expansion order. Where the two disagree on multi-asset sequencing, §19 governs (note added directly in §18).
+
+**Validation:** docs-only; no `cargo`/GUI build was required or run. `git diff --check` run clean (see commit record). No Rust/GUI/config/DB files were touched; no daemon started; no provider/broker calls; no paper/live orders.
+
+**Safety:** docs only. No source code, test, config, or DB migration changes. `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md` (untracked draft) and `smoke_logs/` were not staged or touched.

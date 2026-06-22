@@ -129,7 +129,7 @@ Difficulty: S (days) / M (1-2 weeks) / L (3-6 weeks) / XL (6+ weeks, likely mult
 | `MULTI-ASSET-ROUTING-GUARD-01` | CLOSED | 100% | `ff2ae59`; 8 tests | Broker-submit asset-class reject gate. |
 | `DISABLED-ASSET-GATE-TESTS-01` | CLOSED | 100% | `6fe1697` | Outbox-payload-level rejection proof. |
 | `ASSET-CAPABILITY-MATRIX-01` | CLOSED | 100% (backend) | `424f0de`; contract-gated | Backend done + tested; **not yet rendered in the GUI** (no TS consumer found) — would need a small follow-up to reach 90%+. |
-| `MULTI-ASSET-SCAFFOLD-01` | CLOSED (docs) | 100% (as a planning doc) | `0b622a5` | Stale status table (§2) — recommend refresh, see `LEDGER-MULTI-ASSET-RECONCILE-01` below. |
+| `MULTI-ASSET-SCAFFOLD-01` | CLOSED (docs) | 100% (as a planning doc) | `0b622a5` | Status table (§2) refreshed by `LEDGER-MULTI-ASSET-RECONCILE-01` (closed, §17). |
 | `RESEARCH-NON-EQ-01` | CLOSED/PARKED | n/a (intentionally inert) | `mqk-execution/src/types.rs:95-178` | Deliberate, documented, isolated scaffold. Correct as-is; do not wire without a scope-reviewed patch (per its own comment). |
 
 ### Phase 0 — Core Multi-Asset Foundation
@@ -222,7 +222,7 @@ Difficulty: S (days) / M (1-2 weeks) / L (3-6 weeks) / XL (6+ weeks, likely mult
 | `MULTI-ASSET-ALLOCATOR-01` | PARTIAL | 50% (as a generic allocator) / 0% (as multi-asset) | M | `ASSET-CORE-01` | `mqk-portfolio/src/allocator.rs` is a complete, tested, deterministic weight-normalization allocator — but has zero callers in `mqk-runtime`/`mqk-daemon` and zero asset-class awareness in its candidate type | 9 | Wiring + extending, not building from scratch. |
 | `MULTI-STRATEGY-CONFLICT-POLICY-01` | MISSING | 0% | M | none | Today symbol→strategy is a structural 1:1 mapping, so conflicts are avoided by construction rather than resolved; zero conflict-detection code exists | 12 | Required before any "rank strategies per instrument" capability. |
 | `PROVIDER-SWAP-CONTRACT-01` | PARTIAL | 40% | M | none | Already substantially covered by the prior `DATA-INGESTION-COVERAGE-AUDIT-01` audit: `MarketDataProvider` trait is capability-aware and asset-class-tagged (`ProviderAssetClass`), but the factory (`build_market_data_provider_from_config`) hardcodes match arms per provider — declaring a provider "crypto-capable" in JSON does not make it usable | 13 | Lower marginal audit value — already characterized; mainly needs the enum-unification work from `ASSET-CORE-01`. |
-| `LEDGER-MULTI-ASSET-RECONCILE-01` | MISSING (new, recommended) | 0% | S | none | Ledger §11 (`DATA-MULTI-ASSET-MODEL-01`, `DATA-INGEST-CRYPTO-PLAN-01`, `DATA-INGEST-FUTURES-PLAN-01`, `DATA-INGEST-OPTIONS-PLAN-01`, `DATA-INGEST-FOREX-PLAN-01`) are all still `QUEUED` and conceptually overlap this audit's Phase-0/1-4 patches; `multi_asset_scaffold_01.md`'s status table is stale (§2) | 1 | Pure docs hygiene — zero code risk, removes confusion for the next session. |
+| `LEDGER-MULTI-ASSET-RECONCILE-01` | CLOSED | 100% | S | none | Ledger §11's five labels reconciled and mapped to this roadmap's Phase 0–4 patch IDs (preserved, not deleted); `multi_asset_scaffold_01.md`'s stale status table (§2) refreshed; see ledger §19 closure note and §17 below | 1 | Pure docs hygiene — zero code risk. Closed this patch. |
 
 ---
 
@@ -375,13 +375,13 @@ These restate and extend the existing `multi_asset_scaffold_01.md` "Hard Boundar
 
 ## 13. Recommended Next Patch
 
-**`ETF-RISK-01`** (wire the existing, already-written `SectorConstraint`/`check_sector_limits()` code in `mqk-portfolio/src/constraints.rs` into the live risk engine).
+**Superseded by events — see §17 for the current closure note.** At audit time, this section recommended `ETF-RISK-01` first (or `LEDGER-MULTI-ASSET-RECONCILE-01` as a docs-first alternative), then `ASSET-CORE-01`. Since then: `ETF-RISK-01` closed (`ETF-RISK-CLOSURE-01` + `ETF-RISK-EXTERNAL-SIGNAL-GATE-01`, see §16) and `LEDGER-MULTI-ASSET-RECONCILE-01` closed (this patch, see §17). The current recommended next patch is:
 
-Rationale: smallest possible diff (the logic is already written and presumably already unit-tested in isolation — it just has zero callers), zero new architecture, zero touch to broker/execution/live-routing code, delivers a real risk-management capability (sector exposure limits) that is squarely inside the mission's own Phase 5 ask, and requires no preceding patch. It is the single highest ratio of (real value delivered) to (risk + effort) anywhere in the 47-patch backlog.
+**`ASSET-CORE-01`** (Unified Instrument Registry v2 — also resolves the `mqk_schemas::AssetClass` vs `mqk_md::provider::ProviderAssetClass` two-enum split, §2).
 
-A close second, if a pure-docs first step is preferred before any code patch: **`LEDGER-MULTI-ASSET-RECONCILE-01`** — refresh `multi_asset_scaffold_01.md`'s status table (§2) and reconcile ledger §11's `QUEUED` items against this audit, at zero risk, in under a day.
+Rationale (unchanged from the original recommendation): every other asset class in this roadmap depends on it; nothing in Phases 1–6 should start in earnest until the instrument model is unified, per this audit's central recommendation in §1.
 
-After either of those: **`ASSET-CORE-01`** is the next *foundational* patch — nothing in Phases 1–6 should start in earnest until the instrument model is unified, per this audit's central recommendation in §1.
+**Original recommendation (preserved for history):** at audit time, **`ETF-RISK-01`** (wire the existing, already-written `SectorConstraint`/`check_sector_limits()` code in `mqk-portfolio/src/constraints.rs` into the live risk engine) was recommended first — smallest possible diff, zero new architecture, zero touch to broker/execution/live-routing code, delivered a real risk-management capability squarely inside the mission's own Phase 5 ask, with no preceding patch required. A close second was **`LEDGER-MULTI-ASSET-RECONCILE-01`** as a docs-first alternative. Both are now closed.
 
 ---
 
@@ -444,3 +444,20 @@ Evidence:
 **`ETF-RISK-CLOSURE-01` — CLOSED.** `mqk_portfolio::evaluate_sector_risk` (`constraints.rs`, distinct from and additive to the untouched `SectorConstraint`/`check_sector_limits`) recomputes `compute_portfolio_weights` before/after a candidate order and applies a configured per-sector bps cap, fail-closed on missing marks/NAV, with a risk-reducing override. It is wired as **Gate 1h** in `decision.rs`'s `submit_internal_strategy_decision` — pre-outbox, default-off via `MQK_SECTOR_EXPOSURE_LIMITS_BPS`, reusing the exact registry `sector_map()` and `md_bars` seam `PORTFOLIO-LIVE-WEIGHTS-01` built. `mqk_risk`/`RiskRequestContext` (the pre-broker-submit seam) remain untouched — unnecessary, since the pre-outbox seam is earlier and sufficient. Known gap at the time: the separate external-signal HTTP path (`routes/strategy.rs`) was not wired, by scope decision.
 
 **`ETF-RISK-EXTERNAL-SIGNAL-GATE-01` — CLOSED.** Closes the gap named directly above. The registry/snapshot/marks glue that built Gate 1h's inputs was extracted from `decision.rs` into a new shared module, `capital_policy::sector_risk_gate::evaluate_sector_risk_gate` — both the internal decision path (`decision.rs` Gate 1h) and the external signal path (`routes/strategy.rs`, new **Gate 1i**) now call the same function, so sector exposure risk cannot drift between an internally-generated order and an externally-submitted signal. Same env var, same default-off behavior, same pure `evaluate_sector_risk` evaluator underneath (untouched). On the external path, a verified breach (`sector_limit_exceeded`) returns `403`; every other deny outcome — malformed config, unreadable registry, missing snapshot/DB/mark, non-positive NAV — returns `503` (the gate could not verify safety, distinct from a verified breach). 9 new scenario tests (`mqk-daemon/tests/scenario_external_signal_sector_risk_01.rs`), 6 DB-backed and run for real against the local paper DB, using a fixture distinct from `ETF-RISK-CLOSURE-01`'s own test file. Full detail, test matrix, and validation evidence: `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ETF-RISK-EXTERNAL-SIGNAL-GATE-01` entry.
+
+---
+
+## 17. LEDGER-MULTI-ASSET-RECONCILE-01 Closure Note (maintenance)
+
+Docs/ledger-only maintenance patch. No production code, config, DB, or trading-path changes. Recorded here per `audit_repo_truth_rules.md` ("repo state is authoritative... if memory contradicts the current file state, trust the file").
+
+**What this patch closed:**
+
+- Ledger §11's five historical planning labels (`DATA-MULTI-ASSET-MODEL-01`, `DATA-INGEST-CRYPTO-PLAN-01`, `DATA-INGEST-FUTURES-PLAN-01`, `DATA-INGEST-OPTIONS-PLAN-01`, `DATA-INGEST-FOREX-PLAN-01`) are reconciled — mapped to this roadmap's Phase 0–4 patch IDs directly in §11, marked `RECONCILED / SUPERSEDED` rather than `QUEUED`. None were deleted.
+- `multi_asset_scaffold_01.md`'s "Future Patch Lane IDs" table refreshed: `ASSET-CAPABILITY-MATRIX-01` (`424f0de`), `MULTI-ASSET-ROUTING-GUARD-01` (`ff2ae59`), `DISABLED-ASSET-GATE-TESTS-01` (`6fe1697`) marked `SHIPPED` — independently re-verified via `git merge-base --is-ancestor` against current `HEAD` (not just copied from §2/§5 above), plus a direct read confirming `mqk-daemon/src/routes/system.rs::static_asset_capability_matrix` and `mqk-execution/tests/scenario_asset_class_guard_multi_asset_routing_guard_01.rs` exist in the working tree.
+- §13 above updated: recommended next patch is now `ASSET-CORE-01`, not `ETF-RISK-01` (closed) or `LEDGER-MULTI-ASSET-RECONCILE-01` (closed by this patch).
+- §5's patch status table: this patch's own row updated from `MISSING (new, recommended)` to `CLOSED`.
+
+**What this patch deliberately did not do:** no re-audit of `ASSET-CORE-01` or any other PARTIAL/MISSING patch's completion percentage; no change to the dependency graph (§6), build sequence (§7), Top-20 list (§8), or any asset-class roadmap (§9); no change to `multi_asset_scaffold_01.md`'s promotion-gate philosophy or hard boundaries. This is a pure status-reconciliation pass, not a re-audit.
+
+**Safety confirmation:** docs only. No Rust/GUI/config/DB files touched. No daemon started. No provider/broker network calls. No paper/live orders submitted. `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md` (untracked draft) and `smoke_logs/` were not staged or touched.

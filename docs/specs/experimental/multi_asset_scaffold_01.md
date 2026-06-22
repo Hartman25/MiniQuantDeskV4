@@ -205,6 +205,8 @@ These requirements apply before any non-equity asset class can be wired for exec
 
 ### MULTI-ASSET-ROUTING-GUARD-01
 
+**Status: SHIPPED** (`ff2ae59`; broker-submit asset-class reject gate, `GateRefusal::AssetClassDisabled`, 8 tests). See `docs/audits/multi_asset_completion_audit.md` §2/§5.
+
 A mandatory code gate that must exist before any multi-asset routing lands:
 
 - A static test that proves unsupported asset classes are rejected at the
@@ -218,6 +220,8 @@ A mandatory code gate that must exist before any multi-asset routing lands:
 
 ### DISABLED-ASSET-GATE-TESTS-01
 
+**Status: SHIPPED** (`6fe1697`; outbox-payload-level rejection of disabled asset classes). See `docs/audits/multi_asset_completion_audit.md` §2/§5.
+
 - A test file (e.g. `scenario_disabled_asset_gates.rs`) that statically proves:
   - Crypto orders are rejected
   - Futures orders are rejected
@@ -227,6 +231,8 @@ A mandatory code gate that must exist before any multi-asset routing lands:
     current Alpaca equity adapter
 
 ### ASSET-CAPABILITY-MATRIX-01
+
+**Status: SHIPPED** (`424f0de`; `GET /api/v1/system/metadata`, backend-complete and contract-gated; not yet GUI-rendered). See `docs/audits/multi_asset_completion_audit.md` §2/§5.
 
 A live machine-readable capability matrix (JSON or TOML) that records:
 
@@ -252,21 +258,23 @@ A live machine-readable capability matrix (JSON or TOML) that records:
 
 ---
 
-## Future Patch Lane IDs (not yet created)
+## Future Patch Lane IDs (status)
 
-| Lane ID | Description | Prerequisite |
-|---------|-------------|--------------|
-| ASSET-CAPABILITY-MATRIX-01 | Machine-readable matrix in daemon metadata | This document |
-| MULTI-ASSET-ROUTING-GUARD-01 | Static reject gate for disabled asset classes | Before any non-equity adapter code |
-| DISABLED-ASSET-GATE-TESTS-01 | Test coverage for all disabled rejections | MULTI-ASSET-ROUTING-GUARD-01 |
-| CRYPTO-SCAFFOLD-01 | Crypto spot instrument model + adapter spec | ASSET-CAPABILITY-MATRIX-01 |
-| FUTURES-SCAFFOLD-01 | Futures margin model + roll-date spec | ASSET-CAPABILITY-MATRIX-01 |
-| OPTIONS-SCAFFOLD-01 | Options chain data + Greeks model spec | ASSET-CAPABILITY-MATRIX-01 |
-| FOREX-SCAFFOLD-01 | FX pip/lot/leverage model spec | ASSET-CAPABILITY-MATRIX-01 |
-| CRYPTO-PAPER-01 | Paper execution wiring for crypto | CRYPTO-SCAFFOLD-01 + 30d evidence |
-| FUTURES-PAPER-01 | Paper execution wiring for futures | FUTURES-SCAFFOLD-01 + margin model |
-| OPTIONS-PAPER-LONG-01 | Paper execution for long options | OPTIONS-SCAFFOLD-01 + chain data |
-| FOREX-PAPER-01 | Paper execution for forex | FOREX-SCAFFOLD-01 + leverage model |
+**Maintenance note (`LEDGER-MULTI-ASSET-RECONCILE-01`):** this table's heading was originally "not yet created" — three lane IDs below have since shipped (status column added). Active multi-asset roadmap tracking now lives in `docs/audits/multi_asset_completion_audit.md` and `MiniQuantDesk_Master_Patch_Ledger_v2.md` §19; this document remains the per-asset-class architecture/requirements reference.
+
+| Lane ID | Description | Prerequisite | Status |
+|---------|-------------|--------------|--------|
+| ASSET-CAPABILITY-MATRIX-01 | Machine-readable matrix in daemon metadata | This document | SHIPPED (`424f0de`) |
+| MULTI-ASSET-ROUTING-GUARD-01 | Static reject gate for disabled asset classes | Before any non-equity adapter code | SHIPPED (`ff2ae59`) |
+| DISABLED-ASSET-GATE-TESTS-01 | Test coverage for all disabled rejections | MULTI-ASSET-ROUTING-GUARD-01 | SHIPPED (`6fe1697`) |
+| CRYPTO-SCAFFOLD-01 | Crypto spot instrument model + adapter spec | ASSET-CAPABILITY-MATRIX-01 | BACKLOG |
+| FUTURES-SCAFFOLD-01 | Futures margin model + roll-date spec | ASSET-CAPABILITY-MATRIX-01 | BACKLOG |
+| OPTIONS-SCAFFOLD-01 | Options chain data + Greeks model spec | ASSET-CAPABILITY-MATRIX-01 | BACKLOG |
+| FOREX-SCAFFOLD-01 | FX pip/lot/leverage model spec | ASSET-CAPABILITY-MATRIX-01 | BACKLOG |
+| CRYPTO-PAPER-01 | Paper execution wiring for crypto | CRYPTO-SCAFFOLD-01 + 30d evidence | BACKLOG |
+| FUTURES-PAPER-01 | Paper execution wiring for futures | FUTURES-SCAFFOLD-01 + margin model | BACKLOG |
+| OPTIONS-PAPER-LONG-01 | Paper execution for long options | OPTIONS-SCAFFOLD-01 + chain data | BACKLOG |
+| FOREX-PAPER-01 | Paper execution for forex | FOREX-SCAFFOLD-01 + leverage model | BACKLOG |
 
 ---
 
