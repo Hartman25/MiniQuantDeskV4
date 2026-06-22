@@ -15,7 +15,8 @@ pub use alpaca_provider::{
     load_alpaca_paper_credentials, AlpacaHistoricalProvider, ALPACA_DATA_BASE_URL,
 };
 pub use provider::{
-    CanonicalBar, FakeMarketDataProvider, FakeMarketDataProviderCallCounts, HistoricalBarsRequest,
+    provider_asset_class_instrument_kind, provider_asset_class_trading_class, CanonicalBar,
+    FakeMarketDataProvider, FakeMarketDataProviderCallCounts, HistoricalBarsRequest,
     HistoricalProviderMarketDataAdapter, LatestClosedBarRequest, MarketDataProvider,
     MarketDataProviderCapabilities, MarketDataProviderError, MarketDataProviderHealth,
     MarketDataProviderHealthStatus, MarketDataProviderRateLimits, ProviderAssetClass,

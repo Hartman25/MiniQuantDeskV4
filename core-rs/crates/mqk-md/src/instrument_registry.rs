@@ -69,6 +69,53 @@ pub struct TrackedInstrument {
     pub category: Option<String>,
 }
 
+impl TrackedInstrument {
+    /// `true` iff this instrument carries a normalized `instrument_kind` of
+    /// `"etf"` (ETF-REGISTRY-01 tag). Does not affect `asset_class`,
+    /// `enabled_equities()`, or any ingestion/backtest behavior.
+    pub fn is_etf(&self) -> bool {
+        self.normalized_instrument_kind() == Some("etf")
+    }
+
+    /// `instrument_kind`, trimmed and with an empty/whitespace-only value
+    /// normalized to `None`. `validate_registry` already rejects a stored
+    /// empty/whitespace `instrument_kind`, so this is a defensive guarantee
+    /// for callers that read a `TrackedInstrument` without first calling
+    /// `validate_registry` (e.g. a record built directly in a test), not
+    /// evidence that malformed data exists in the canonical file.
+    pub fn normalized_instrument_kind(&self) -> Option<&str> {
+        normalize_optional_tag(self.instrument_kind.as_deref())
+    }
+
+    /// `sector`, normalized the same way as [`Self::normalized_instrument_kind`].
+    pub fn normalized_sector(&self) -> Option<&str> {
+        normalize_optional_tag(self.sector.as_deref())
+    }
+
+    /// `category`, normalized the same way as [`Self::normalized_instrument_kind`].
+    pub fn normalized_category(&self) -> Option<&str> {
+        normalize_optional_tag(self.category.as_deref())
+    }
+
+    /// The asset class this instrument trades as today, for execution-safety
+    /// purposes. Identical to `asset_class` — ETFs are deliberately not a
+    /// distinct trading class (ETF-REGISTRY-01); this accessor exists so
+    /// future callers have a semantically named entry point instead of
+    /// reaching into the raw field and re-deriving the "ETF trades as
+    /// equity" invariant by convention. Matches
+    /// `provider::provider_asset_class_trading_class(&ProviderAssetClass::Etf)`
+    /// (ASSET-CORE-01A) for every ETF-tagged entry — see `im_08_*` below.
+    pub fn trading_asset_class(&self) -> &str {
+        &self.asset_class
+    }
+}
+
+/// Shared normalization for the optional ETF-REGISTRY-01 tag fields: trims
+/// whitespace and treats an empty result as absent. Pure; no IO.
+fn normalize_optional_tag(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|s| !s.is_empty())
+}
+
 /// Parse the instrument registry JSON file at `path`.
 ///
 /// Returns all entries, both enabled and disabled, in file order.
@@ -619,6 +666,157 @@ mod tests {
 
         // Map size matches exactly the tagged ETF universe — no stray entries.
         assert_eq!(map.len(), expected.len());
+    }
+
+    // ── ASSET-CORE-01A: TrackedInstrument metadata helpers (IM-01..IM-08) ──
+
+    // IM-01: is_etf() identifies exactly the 14 ETF-REGISTRY-01 symbols —
+    // no false positives, no false negatives, against the live registry file.
+    #[test]
+    fn im_01_is_etf_identifies_exactly_the_tagged_etf_universe() {
+        let instruments = load_instrument_registry(&registry_path()).unwrap();
+        let etf_symbols: HashSet<&str> = instruments
+            .iter()
+            .filter(|i| i.is_etf())
+            .map(|i| i.symbol.as_str())
+            .collect();
+        let expected: HashSet<&str> = ETF_SYMBOLS.iter().copied().collect();
+        assert_eq!(etf_symbols, expected);
+    }
+
+    // IM-02: a non-ETF equity (AAPL) is not classified as an ETF.
+    #[test]
+    fn im_02_non_etf_equity_is_not_classified_as_etf() {
+        let instruments = load_instrument_registry(&registry_path()).unwrap();
+        let aapl = instruments.iter().find(|i| i.symbol == "AAPL").unwrap();
+        assert!(!aapl.is_etf());
+        assert_eq!(aapl.normalized_instrument_kind(), None);
+    }
+
+    // IM-03: trading_asset_class() reports "equity" for both ETFs and plain
+    // equities — proves ETF-REGISTRY-01's "ETF is not a distinct trading
+    // class" invariant through the new accessor, not just the raw field.
+    #[test]
+    fn im_03_trading_asset_class_is_equity_for_etfs_and_plain_equities() {
+        let instruments = load_instrument_registry(&registry_path()).unwrap();
+        for symbol in ETF_SYMBOLS {
+            let inst = instruments.iter().find(|i| i.symbol == *symbol).unwrap();
+            assert_eq!(
+                inst.trading_asset_class(),
+                "equity",
+                "{symbol} must trade as equity"
+            );
+        }
+        let aapl = instruments.iter().find(|i| i.symbol == "AAPL").unwrap();
+        assert_eq!(aapl.trading_asset_class(), "equity");
+    }
+
+    // IM-04: normalized_sector()/normalized_category() return the same
+    // non-empty values the raw fields carry for a tagged ETF.
+    #[test]
+    fn im_04_normalized_accessors_match_raw_fields_when_present() {
+        let instruments = load_instrument_registry(&registry_path()).unwrap();
+        let spy = instruments.iter().find(|i| i.symbol == "SPY").unwrap();
+        assert_eq!(spy.normalized_sector(), Some("broad_market"));
+        assert_eq!(spy.normalized_category(), Some("index_equity"));
+        assert_eq!(spy.normalized_instrument_kind(), Some("etf"));
+    }
+
+    // IM-05: whitespace-only tag values normalize to None (deterministic
+    // rejection), independent of whether validate_registry has run.
+    #[test]
+    fn im_05_whitespace_only_tags_normalize_to_none() {
+        let inst = TrackedInstrument {
+            instrument_id: "equity:US:ZZZ".into(),
+            symbol: "ZZZ".into(),
+            asset_class: "equity".into(),
+            provider: "twelvedata".into(),
+            provider_symbol: "ZZZ".into(),
+            venue: "NASDAQ".into(),
+            currency: "USD".into(),
+            enabled: true,
+            timeframes: vec!["1D".into()],
+            notes: "test".into(),
+            instrument_kind: Some("   ".into()),
+            sector: Some("\t".into()),
+            category: Some("".into()),
+        };
+        assert_eq!(inst.normalized_instrument_kind(), None);
+        assert_eq!(inst.normalized_sector(), None);
+        assert_eq!(inst.normalized_category(), None);
+        assert!(!inst.is_etf());
+    }
+
+    // IM-06: surrounding whitespace on an otherwise-valid tag is trimmed.
+    #[test]
+    fn im_06_normalized_accessors_trim_surrounding_whitespace() {
+        let inst = TrackedInstrument {
+            instrument_id: "equity:US:ZZZ".into(),
+            symbol: "ZZZ".into(),
+            asset_class: "equity".into(),
+            provider: "twelvedata".into(),
+            provider_symbol: "ZZZ".into(),
+            venue: "NASDAQ".into(),
+            currency: "USD".into(),
+            enabled: true,
+            timeframes: vec!["1D".into()],
+            notes: "test".into(),
+            instrument_kind: Some("  etf  ".into()),
+            sector: None,
+            category: None,
+        };
+        assert_eq!(inst.normalized_instrument_kind(), Some("etf"));
+        assert!(inst.is_etf());
+    }
+
+    // IM-07: None stays None through every normalized accessor.
+    #[test]
+    fn im_07_absent_tags_stay_none() {
+        let aapl = TrackedInstrument {
+            instrument_id: "equity:US:AAPL".into(),
+            symbol: "AAPL".into(),
+            asset_class: "equity".into(),
+            provider: "twelvedata".into(),
+            provider_symbol: "AAPL".into(),
+            venue: "NASDAQ".into(),
+            currency: "USD".into(),
+            enabled: true,
+            timeframes: vec!["1D".into()],
+            notes: "test".into(),
+            instrument_kind: None,
+            sector: None,
+            category: None,
+        };
+        assert_eq!(aapl.normalized_instrument_kind(), None);
+        assert_eq!(aapl.normalized_sector(), None);
+        assert_eq!(aapl.normalized_category(), None);
+        assert!(!aapl.is_etf());
+        assert_eq!(aapl.trading_asset_class(), "equity");
+    }
+
+    // IM-08 (ASSET-CORE-01A cross-mapping proof): the registry's real ETF
+    // instruments and the provider-side ProviderAssetClass::Etf mapping
+    // (mqk_md::provider) agree on both the trading class and the
+    // instrument_kind tag, even though the two representations are
+    // independent types with no shared dependency. This is the explicit
+    // conversion/mapping proof ASSET-CORE-01A is required to deliver.
+    #[test]
+    fn im_08_registry_etf_tagging_agrees_with_provider_asset_class_mapping() {
+        use crate::provider::{
+            provider_asset_class_instrument_kind, provider_asset_class_trading_class,
+            ProviderAssetClass,
+        };
+
+        let instruments = load_instrument_registry(&registry_path()).unwrap();
+        let expected_trading_class = provider_asset_class_trading_class(&ProviderAssetClass::Etf);
+        let expected_instrument_kind =
+            provider_asset_class_instrument_kind(&ProviderAssetClass::Etf);
+
+        for symbol in ETF_SYMBOLS {
+            let inst = instruments.iter().find(|i| i.symbol == *symbol).unwrap();
+            assert_eq!(inst.trading_asset_class(), expected_trading_class);
+            assert_eq!(inst.normalized_instrument_kind(), expected_instrument_kind);
+        }
     }
 
     // REG-19 (ETF-RISK-01 bridge): sector_map() is pure and returns an empty

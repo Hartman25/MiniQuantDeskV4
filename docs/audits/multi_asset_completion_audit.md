@@ -461,3 +461,17 @@ Docs/ledger-only maintenance patch. No production code, config, DB, or trading-p
 **What this patch deliberately did not do:** no re-audit of `ASSET-CORE-01` or any other PARTIAL/MISSING patch's completion percentage; no change to the dependency graph (§6), build sequence (§7), Top-20 list (§8), or any asset-class roadmap (§9); no change to `multi_asset_scaffold_01.md`'s promotion-gate philosophy or hard boundaries. This is a pure status-reconciliation pass, not a re-audit.
 
 **Safety confirmation:** docs only. No Rust/GUI/config/DB files touched. No daemon started. No provider/broker network calls. No paper/live orders submitted. `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md` (untracked draft) and `smoke_logs/` were not staged or touched.
+
+---
+
+## 18. ASSET-CORE-01A Closure Note (maintenance)
+
+`ASSET-CORE-01A` started `ASSET-CORE-01` with its safest slice: the §2 "architecture-debt finding" two-enum split is now explicitly mapped and exhaustively tested, not just documented as a gap. Recorded here per `audit_repo_truth_rules.md` rather than left only in commit history.
+
+**Resolved:** `mqk_md::provider::provider_asset_class_trading_class`/`provider_asset_class_instrument_kind` (`core-rs/crates/mqk-md/src/provider.rs`) give `ProviderAssetClass` an explicit, exhaustive (no-wildcard-match), pure mapping to the same canonical singular vocabulary `mqk_schemas::AssetClass` and `mqk-runtime`'s `validated_asset_class` already use independently (`"equity"`, `"option"`, `"future"`, `"crypto"`, `"forex"`). `TrackedInstrument` gained typed accessors (`is_etf`, `trading_asset_class`, `normalized_instrument_kind`/`sector`/`category`) proving the same ETF-as-equity invariant the registry already encoded. A new cross-mapping test (`im_08`) directly checks the registry's real ETF entries against the provider-side mapping and confirms they agree. 17 new tests total; zero behavior change to any existing function; zero new `Cargo.toml` dependency edges (confirmed dependency-graph-legal in either direction, but deliberately not taken — see the patch's own ledger entry for the Option A vs Option B rationale).
+
+**Not resolved (`ASSET-CORE-01` remains PARTIAL):** the two enums still exist as separate types — this patch did not collapse them into one shared type, did not add a `mqk-md → mqk-schemas` dependency, and did not touch `equities.json`'s schema. A real unified instrument-registry v2 (multi-provider, multi-asset-class-aware, replacing today's equities-only registry file and string `asset_class` field) is still `ASSET-CORE-01B`'s job, not done here.
+
+**Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-01A` entry (end of §19).
+
+**Safety confirmation:** no broker submit changes; no Alpaca adapter changes; no live routing changes; no order/outbox writes; no DB migrations; `.env.local` untouched; no provider/broker calls; no paper/live orders; no non-equity asset class enabled; disabled-asset gates re-proven unmodified (`scenario_asset_class_scope_b8` 12/12, `scenario_asset_class_guard_multi_asset_routing_guard_01` 8/8). No daemon started.

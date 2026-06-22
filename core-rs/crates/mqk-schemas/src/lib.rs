@@ -83,6 +83,24 @@ pub struct BrokerSnapshot {
 ///
 /// This is intentionally small and stable; additional classes can be added
 /// later without changing the core execution semantics.
+///
+/// **Canonical status (ASSET-CORE-01A):** this is the canonical domain
+/// asset-class type — it is the type actually checked by the live broker-submit
+/// gate (`mqk_execution::gateway::BrokerGateway::submit_with_context`,
+/// `MULTI-ASSET-ROUTING-GUARD-01`), which rejects every non-`Equity` value
+/// before any broker adapter is invoked. A second, independent type,
+/// `mqk_md::provider::ProviderAssetClass`, exists for an unrelated purpose
+/// (declaring what asset classes a market-data *provider* can serve) and is
+/// not unified with this enum — `mqk-md` has no dependency on `mqk-schemas`.
+/// See `mqk_md::provider::provider_asset_class_trading_class` for the
+/// explicit, exhaustively-tested mapping from that type to this one's
+/// vocabulary (lower-cased, singular: `"equity"`, `"option"`, `"future"`,
+/// `"crypto"`, `"forex"`).
+///
+/// ETF is deliberately **not** a variant here: an ETF trades as `Equity` for
+/// every execution-path purpose today, and is tagged only as instrument-level
+/// metadata (`instrument_kind = "etf"`) in the instrument registry
+/// (`mqk_md::instrument_registry::TrackedInstrument`, ETF-REGISTRY-01).
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AssetClass {
     Equity,

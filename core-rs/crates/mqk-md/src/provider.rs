@@ -153,6 +153,62 @@ pub enum ProviderAssetClass {
     Other(String),
 }
 
+/// ASSET-CORE-01A: explicit, exhaustive mapping from [`ProviderAssetClass`]
+/// (market-data provider capability metadata) to the canonical trading
+/// asset-class vocabulary used elsewhere in the repo.
+///
+/// This is a **local, pure mapping** — `mqk-md` does not depend on
+/// `mqk-schemas` today and this patch does not add that dependency (the two
+/// crates have no dependency edge in either direction, so none is needed to
+/// avoid a cycle; the seam below is additive, not a forced unification). The
+/// output strings match `mqk_schemas::AssetClass`'s variant names
+/// lower-cased and singular (`"equity"`, `"option"`, `"future"`, `"crypto"`,
+/// `"forex"`) — the same convention `mqk-runtime`'s outbox payload parser
+/// (`validated_asset_class`) already uses independently — so a future
+/// instrument-registry unification (ASSET-CORE-01B) has a trivial
+/// string-level seam instead of a third divergent vocabulary.
+///
+/// ETF is intentionally **not** a distinct canonical trading class: it maps
+/// to `"equity"` (the only class enabled for execution today) plus
+/// `instrument_kind = Some("etf")`, mirroring exactly how the instrument
+/// registry already represents ETFs (`TrackedInstrument`, ETF-REGISTRY-01).
+///
+/// Labeling is not enablement. The only live enforcement boundary for what
+/// may actually reach a broker is
+/// `mqk_execution::gateway::GateRefusal::AssetClassDisabled`
+/// (`MULTI-ASSET-ROUTING-GUARD-01`); this function does not call into, gate,
+/// or change that boundary in any way.
+///
+/// Neither this function nor [`provider_asset_class_instrument_kind`] uses a
+/// wildcard match arm: adding a new bare `ProviderAssetClass` variant will
+/// fail to compile here until both mappings are updated, by design.
+pub fn provider_asset_class_trading_class(class: &ProviderAssetClass) -> &str {
+    match class {
+        ProviderAssetClass::Equity => "equity",
+        ProviderAssetClass::Etf => "equity",
+        ProviderAssetClass::Crypto => "crypto",
+        ProviderAssetClass::Futures => "future",
+        ProviderAssetClass::Options => "option",
+        ProviderAssetClass::Forex => "forex",
+        ProviderAssetClass::Other(raw) => raw.as_str(),
+    }
+}
+
+/// Companion to [`provider_asset_class_trading_class`]: the `instrument_kind`
+/// tag (if any) implied by a [`ProviderAssetClass`]. Only `Etf` carries one
+/// today, matching `TrackedInstrument.instrument_kind` (ETF-REGISTRY-01).
+pub fn provider_asset_class_instrument_kind(class: &ProviderAssetClass) -> Option<&'static str> {
+    match class {
+        ProviderAssetClass::Etf => Some("etf"),
+        ProviderAssetClass::Equity
+        | ProviderAssetClass::Crypto
+        | ProviderAssetClass::Futures
+        | ProviderAssetClass::Options
+        | ProviderAssetClass::Forex
+        | ProviderAssetClass::Other(_) => None,
+    }
+}
+
 /// Capability declarations for a market-data provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketDataProviderCapabilities {
@@ -1311,5 +1367,152 @@ mod tests {
             "adapter without explicit enablement must return UnsupportedCapability"
         );
         assert!(!adapter.capabilities().latest_closed_bar);
+    }
+
+    // -----------------------------------------------------------------------
+    // ASSET-CORE-01A — ProviderAssetClass canonical mapping (PAC-01..PAC-09)
+    //
+    // provider_asset_class_trading_class / provider_asset_class_instrument_kind
+    // use no wildcard match arm, so these mappings are exhaustive by
+    // construction: adding a new bare ProviderAssetClass variant breaks the
+    // build before it can silently fall through here.
+    // -----------------------------------------------------------------------
+
+    // PAC-01: every named variant maps to its documented canonical trading class.
+    #[test]
+    fn pac_01_every_named_variant_maps_explicitly() {
+        assert_eq!(
+            provider_asset_class_trading_class(&ProviderAssetClass::Equity),
+            "equity"
+        );
+        assert_eq!(
+            provider_asset_class_trading_class(&ProviderAssetClass::Etf),
+            "equity"
+        );
+        assert_eq!(
+            provider_asset_class_trading_class(&ProviderAssetClass::Crypto),
+            "crypto"
+        );
+        assert_eq!(
+            provider_asset_class_trading_class(&ProviderAssetClass::Futures),
+            "future"
+        );
+        assert_eq!(
+            provider_asset_class_trading_class(&ProviderAssetClass::Options),
+            "option"
+        );
+        assert_eq!(
+            provider_asset_class_trading_class(&ProviderAssetClass::Forex),
+            "forex"
+        );
+    }
+
+    // PAC-02: Etf maps to trading class "equity" plus instrument_kind "etf" —
+    // the exact shape TrackedInstrument uses for tagged ETF entries.
+    #[test]
+    fn pac_02_etf_maps_to_equity_plus_etf_instrument_kind() {
+        assert_eq!(
+            provider_asset_class_trading_class(&ProviderAssetClass::Etf),
+            "equity"
+        );
+        assert_eq!(
+            provider_asset_class_instrument_kind(&ProviderAssetClass::Etf),
+            Some("etf")
+        );
+    }
+
+    // PAC-03: Options maps to canonical singular "option" (not "options").
+    #[test]
+    fn pac_03_options_maps_to_canonical_option() {
+        assert_eq!(
+            provider_asset_class_trading_class(&ProviderAssetClass::Options),
+            "option"
+        );
+    }
+
+    // PAC-04: Futures maps to canonical singular "future" (not "futures").
+    #[test]
+    fn pac_04_futures_maps_to_canonical_future() {
+        assert_eq!(
+            provider_asset_class_trading_class(&ProviderAssetClass::Futures),
+            "future"
+        );
+    }
+
+    // PAC-05/06: crypto and forex mappings are explicit, with no instrument_kind.
+    #[test]
+    fn pac_05_crypto_mapping_is_explicit() {
+        assert_eq!(
+            provider_asset_class_trading_class(&ProviderAssetClass::Crypto),
+            "crypto"
+        );
+        assert_eq!(
+            provider_asset_class_instrument_kind(&ProviderAssetClass::Crypto),
+            None
+        );
+    }
+
+    #[test]
+    fn pac_06_forex_mapping_is_explicit() {
+        assert_eq!(
+            provider_asset_class_trading_class(&ProviderAssetClass::Forex),
+            "forex"
+        );
+        assert_eq!(
+            provider_asset_class_instrument_kind(&ProviderAssetClass::Forex),
+            None
+        );
+    }
+
+    // PAC-07: only Etf carries a non-None instrument_kind; every other named
+    // variant (including bare Equity) carries None.
+    #[test]
+    fn pac_07_only_etf_carries_instrument_kind() {
+        assert_eq!(
+            provider_asset_class_instrument_kind(&ProviderAssetClass::Equity),
+            None
+        );
+        assert_eq!(
+            provider_asset_class_instrument_kind(&ProviderAssetClass::Crypto),
+            None
+        );
+        assert_eq!(
+            provider_asset_class_instrument_kind(&ProviderAssetClass::Futures),
+            None
+        );
+        assert_eq!(
+            provider_asset_class_instrument_kind(&ProviderAssetClass::Options),
+            None
+        );
+        assert_eq!(
+            provider_asset_class_instrument_kind(&ProviderAssetClass::Forex),
+            None
+        );
+    }
+
+    // PAC-08: an unrecognized config-supplied class (Other) round-trips its
+    // own raw string as the trading class rather than silently defaulting to
+    // equity, and carries no instrument_kind.
+    #[test]
+    fn pac_08_other_variant_passes_through_raw_string_not_equity() {
+        let other = ProviderAssetClass::Other("perpetual_swap".to_string());
+        assert_eq!(provider_asset_class_trading_class(&other), "perpetual_swap");
+        assert_eq!(provider_asset_class_instrument_kind(&other), None);
+    }
+
+    // PAC-09: mapping is pure — repeated calls with equal inputs are
+    // idempotent and deterministic (no hidden state, no clock, no IO).
+    #[test]
+    fn pac_09_mapping_is_pure_and_deterministic() {
+        for _ in 0..3 {
+            assert_eq!(
+                provider_asset_class_trading_class(&ProviderAssetClass::Etf),
+                "equity"
+            );
+            assert_eq!(
+                provider_asset_class_instrument_kind(&ProviderAssetClass::Etf),
+                Some("etf")
+            );
+        }
     }
 }
