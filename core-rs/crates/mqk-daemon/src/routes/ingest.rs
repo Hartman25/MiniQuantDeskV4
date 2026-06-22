@@ -167,8 +167,9 @@ impl LatestBarProviderClient {
     }
 }
 
-fn poll_response(
-    truth_state: &str,
+/// Shared poll-time context threaded through every `poll_response` /
+/// `refused_poll_response` call within `market_data_feed_poll_once`.
+struct PollContext {
     provider_id: String,
     timeframe: String,
     dry_run: bool,
@@ -177,6 +178,11 @@ fn poll_response(
     poll_time: DateTime<Utc>,
     latest_expected_closed_bar_ts: i64,
     next_poll_ts: i64,
+}
+
+fn poll_response(
+    ctx: PollContext,
+    truth_state: &str,
     symbols: Vec<MarketDataFeedPollSymbolResult>,
     api_calls_made: u64,
     error: Option<String>,
@@ -189,14 +195,14 @@ fn poll_response(
     MarketDataFeedPollOnceResponse {
         canonical_route: FEED_POLL_ROUTE.to_string(),
         truth_state: truth_state.to_string(),
-        provider_id,
-        timeframe,
-        dry_run,
-        provider_api_calls_allowed,
-        symbols_count,
-        poll_time_utc: poll_time.to_rfc3339(),
-        latest_expected_closed_bar_ts,
-        next_poll_ts,
+        provider_id: ctx.provider_id,
+        timeframe: ctx.timeframe,
+        dry_run: ctx.dry_run,
+        provider_api_calls_allowed: ctx.provider_api_calls_allowed,
+        symbols_count: ctx.symbols_count,
+        poll_time_utc: ctx.poll_time.to_rfc3339(),
+        latest_expected_closed_bar_ts: ctx.latest_expected_closed_bar_ts,
+        next_poll_ts: ctx.next_poll_ts,
         inserted_count,
         updated_count,
         skipped_count,
@@ -212,34 +218,10 @@ async fn store_feed_poll_status(st: &AppState, response: &MarketDataFeedPollOnce
     *status = Some(response.clone());
 }
 
-fn refused_poll_response(
-    status: StatusCode,
-    provider_id: String,
-    timeframe: String,
-    dry_run: bool,
-    allow_provider_api_calls: bool,
-    symbols_count: usize,
-    poll_time: DateTime<Utc>,
-    latest_expected_closed_bar_ts: i64,
-    next_poll_ts: i64,
-    error: String,
-) -> Response {
+fn refused_poll_response(status: StatusCode, ctx: PollContext, error: String) -> Response {
     (
         status,
-        Json(poll_response(
-            "refused",
-            provider_id,
-            timeframe,
-            dry_run,
-            allow_provider_api_calls,
-            symbols_count,
-            poll_time,
-            latest_expected_closed_bar_ts,
-            next_poll_ts,
-            vec![],
-            0,
-            Some(error),
-        )),
+        Json(poll_response(ctx, "refused", vec![], 0, Some(error))),
     )
         .into_response()
 }
@@ -530,14 +512,16 @@ pub(crate) async fn market_data_feed_poll_once(
     if provider_id.is_empty() {
         return refused_poll_response(
             StatusCode::BAD_REQUEST,
-            provider_id,
-            timeframe_str,
-            req.dry_run,
-            req.allow_provider_api_calls,
-            symbols.len(),
-            poll_time,
-            latest_expected_closed_bar_ts,
-            next_poll_ts,
+            PollContext {
+                provider_id,
+                timeframe: timeframe_str,
+                dry_run: req.dry_run,
+                provider_api_calls_allowed: req.allow_provider_api_calls,
+                symbols_count: symbols.len(),
+                poll_time,
+                latest_expected_closed_bar_ts,
+                next_poll_ts,
+            },
             "provider_id must not be empty".to_string(),
         );
     }
@@ -545,14 +529,16 @@ pub(crate) async fn market_data_feed_poll_once(
     if !req.dry_run && !req.allow_provider_api_calls {
         return refused_poll_response(
             StatusCode::BAD_REQUEST,
-            provider_id,
-            timeframe_str,
-            false,
-            false,
-            symbols.len(),
-            poll_time,
-            latest_expected_closed_bar_ts,
-            next_poll_ts,
+            PollContext {
+                provider_id,
+                timeframe: timeframe_str,
+                dry_run: false,
+                provider_api_calls_allowed: false,
+                symbols_count: symbols.len(),
+                poll_time,
+                latest_expected_closed_bar_ts,
+                next_poll_ts,
+            },
             "allow_provider_api_calls=true is required when dry_run=false".to_string(),
         );
     }
@@ -563,14 +549,16 @@ pub(crate) async fn market_data_feed_poll_once(
         Err(error) => {
             return refused_poll_response(
                 StatusCode::BAD_REQUEST,
-                provider_id,
-                timeframe_str,
-                req.dry_run,
-                req.allow_provider_api_calls,
-                symbols.len(),
-                poll_time,
-                latest_expected_closed_bar_ts,
-                next_poll_ts,
+                PollContext {
+                    provider_id,
+                    timeframe: timeframe_str,
+                    dry_run: req.dry_run,
+                    provider_api_calls_allowed: req.allow_provider_api_calls,
+                    symbols_count: symbols.len(),
+                    poll_time,
+                    latest_expected_closed_bar_ts,
+                    next_poll_ts,
+                },
                 error,
             );
         }
@@ -591,15 +579,17 @@ pub(crate) async fn market_data_feed_poll_once(
             })
             .collect();
         let response = poll_response(
+            PollContext {
+                provider_id: provider_config.provider_id,
+                timeframe: timeframe_str,
+                dry_run: true,
+                provider_api_calls_allowed: false,
+                symbols_count: symbols.len(),
+                poll_time,
+                latest_expected_closed_bar_ts,
+                next_poll_ts,
+            },
             "dry_run",
-            provider_config.provider_id,
-            timeframe_str,
-            true,
-            false,
-            symbols.len(),
-            poll_time,
-            latest_expected_closed_bar_ts,
-            next_poll_ts,
             per_symbol,
             0,
             None,
@@ -611,14 +601,16 @@ pub(crate) async fn market_data_feed_poll_once(
     let Some(pool) = st.db.clone() else {
         return refused_poll_response(
             StatusCode::SERVICE_UNAVAILABLE,
-            provider_config.provider_id,
-            timeframe_str,
-            false,
-            true,
-            symbols.len(),
-            poll_time,
-            latest_expected_closed_bar_ts,
-            next_poll_ts,
+            PollContext {
+                provider_id: provider_config.provider_id,
+                timeframe: timeframe_str,
+                dry_run: false,
+                provider_api_calls_allowed: true,
+                symbols_count: symbols.len(),
+                poll_time,
+                latest_expected_closed_bar_ts,
+                next_poll_ts,
+            },
             "no_db: database pool is not configured".to_string(),
         );
     };
@@ -633,14 +625,16 @@ pub(crate) async fn market_data_feed_poll_once(
             Err(error) => {
                 return refused_poll_response(
                     StatusCode::BAD_REQUEST,
-                    provider_config.provider_id,
-                    timeframe_str,
-                    false,
-                    true,
-                    symbols.len(),
-                    poll_time,
-                    latest_expected_closed_bar_ts,
-                    next_poll_ts,
+                    PollContext {
+                        provider_id: provider_config.provider_id,
+                        timeframe: timeframe_str,
+                        dry_run: false,
+                        provider_api_calls_allowed: true,
+                        symbols_count: symbols.len(),
+                        poll_time,
+                        latest_expected_closed_bar_ts,
+                        next_poll_ts,
+                    },
                     error.to_string(),
                 );
             }
@@ -651,14 +645,16 @@ pub(crate) async fn market_data_feed_poll_once(
     if !capabilities.latest_closed_bar {
         return refused_poll_response(
             StatusCode::BAD_REQUEST,
-            provider_config.provider_id.clone(),
-            timeframe_str,
-            false,
-            true,
-            symbols.len(),
-            poll_time,
-            latest_expected_closed_bar_ts,
-            next_poll_ts,
+            PollContext {
+                provider_id: provider_config.provider_id.clone(),
+                timeframe: timeframe_str,
+                dry_run: false,
+                provider_api_calls_allowed: true,
+                symbols_count: symbols.len(),
+                poll_time,
+                latest_expected_closed_bar_ts,
+                next_poll_ts,
+            },
             format!(
                 "provider '{}' does not support capability latest_closed_bar",
                 provider_config.provider_id
@@ -670,14 +666,16 @@ pub(crate) async fn market_data_feed_poll_once(
     {
         return refused_poll_response(
             StatusCode::BAD_REQUEST,
-            provider_config.provider_id.clone(),
-            timeframe_str,
-            false,
-            true,
-            symbols.len(),
-            poll_time,
-            latest_expected_closed_bar_ts,
-            next_poll_ts,
+            PollContext {
+                provider_id: provider_config.provider_id.clone(),
+                timeframe: timeframe_str,
+                dry_run: false,
+                provider_api_calls_allowed: true,
+                symbols_count: symbols.len(),
+                poll_time,
+                latest_expected_closed_bar_ts,
+                next_poll_ts,
+            },
             format!(
                 "provider '{}' does not support timeframe '{}'",
                 provider_config.provider_id,
@@ -835,15 +833,17 @@ pub(crate) async fn market_data_feed_poll_once(
         StatusCode::OK
     };
     let response = poll_response(
+        PollContext {
+            provider_id: provider_config.provider_id,
+            timeframe: timeframe_str,
+            dry_run: false,
+            provider_api_calls_allowed: true,
+            symbols_count: symbols.len(),
+            poll_time,
+            latest_expected_closed_bar_ts,
+            next_poll_ts,
+        },
         truth_state,
-        provider_config.provider_id,
-        timeframe_str,
-        false,
-        true,
-        symbols.len(),
-        poll_time,
-        latest_expected_closed_bar_ts,
-        next_poll_ts,
         per_symbol,
         api_calls_made,
         error,
