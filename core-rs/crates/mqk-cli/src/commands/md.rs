@@ -621,6 +621,70 @@ pub async fn md_sync_provider(
 }
 
 // ---------------------------------------------------------------------------
+// registry-v2-status — ASSET-CORE-01C read-only v1->v2 status probe
+// ---------------------------------------------------------------------------
+
+/// Execute `mqk md registry-v2-status`: load the v1 instrument registry at
+/// `registry`, convert it to `InstrumentRegistryV2` in memory, validate it,
+/// and print a concise status report.
+///
+/// Read-only: no DB connection, no provider or broker calls, no writes.
+/// Returns `Err` (nonzero exit) when the v1 load or the v2 validation fails,
+/// mirroring `resolve_symbols`'s fail-closed convention for malformed
+/// registries. Never makes `InstrumentRegistryV2` a trading input — this is
+/// a diagnostic probe only.
+pub fn md_registry_v2_status(registry: PathBuf) -> Result<()> {
+    let v1 = mqk_md::instrument_registry::load_instrument_registry(&registry)
+        .with_context(|| format!("registry-v2-status: v1 load failed: {}", registry.display()))?;
+    let v2 = mqk_md::instrument_registry_v2::convert_v1_registry_to_v2(&v1);
+    let validation = mqk_md::instrument_registry_v2::validate_registry_v2(&v2);
+
+    let v1_count = v1.len();
+    let v2_count = v2.instruments.len();
+    let etf_count = v2
+        .instruments
+        .iter()
+        .filter(|i| i.instrument_kind.as_deref() == Some("etf"))
+        .count();
+    let enabled_count = v2.instruments.iter().filter(|i| i.enabled).count();
+    let non_equity_count = v2
+        .instruments
+        .iter()
+        .filter(|i| i.asset_class != "equity")
+        .count();
+    let enabled_non_equity_count = v2
+        .instruments
+        .iter()
+        .filter(|i| i.enabled && i.asset_class != "equity")
+        .count();
+
+    println!("registry_path={}", registry.display());
+    println!("schema_version={}", v2.schema_version);
+    println!("v1_count={v1_count}");
+    println!("v2_count={v2_count}");
+    println!("etf_count={etf_count}");
+    println!("enabled_count={enabled_count}");
+    println!("non_equity_count={non_equity_count}");
+    println!("enabled_non_equity_count={enabled_non_equity_count}");
+    println!("production_cutover_enabled=false");
+    println!("trading_uses_v2=false");
+
+    match validation {
+        Ok(()) => {
+            println!("validation_passed=true");
+            Ok(())
+        }
+        Err(e) => {
+            println!("validation_passed=false");
+            println!("validation_error={e}");
+            Err(anyhow::anyhow!(
+                "registry-v2-status: v2 validation failed: {e}"
+            ))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -860,6 +924,77 @@ mod tests {
         assert!(
             msg.contains("failed to load registry"),
             "error must mention 'failed to load registry': {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // md_registry_v2_status — ASSET-CORE-01C
+    // -----------------------------------------------------------------------
+    //
+    // No DB connection, no provider/broker calls: `md_registry_v2_status`'s
+    // signature takes only a `PathBuf` and its body calls nothing but
+    // `mqk_md::instrument_registry{,_v2}` pure functions and `println!`.
+
+    // RV2-01: registry-v2-status succeeds on the real canonical registry.
+    #[test]
+    fn rv2_01_registry_v2_status_succeeds_on_canonical_registry() {
+        let path = canonical_registry_path();
+        let result = md_registry_v2_status(path);
+        assert!(
+            result.is_ok(),
+            "canonical registry must pass v1 load + v2 validation: {:?}",
+            result.err()
+        );
+    }
+
+    // RV2-02: missing registry file returns a clear, non-panicking error.
+    #[test]
+    fn rv2_02_registry_v2_status_missing_file_returns_clear_error() {
+        let bad_path = std::path::PathBuf::from("/nonexistent/path/equities.json");
+        let result = md_registry_v2_status(bad_path);
+        assert!(result.is_err(), "missing registry must return Err");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("v1 load failed"),
+            "error must mention 'v1 load failed': {msg}"
+        );
+    }
+
+    // RV2-03: a v1 file that parses but converts to an invalid v2 shape
+    // (ETF tagged with no sector/category) fails closed with a nonzero-exit
+    // error, not a silent success.
+    #[test]
+    fn rv2_03_registry_v2_status_fails_closed_on_invalid_v2_shape() {
+        let bad = mqk_md::instrument_registry::TrackedInstrument {
+            instrument_id: "equity:US:SPY".to_string(),
+            symbol: "SPY".to_string(),
+            asset_class: "equity".to_string(),
+            provider: "twelvedata".to_string(),
+            provider_symbol: "SPY".to_string(),
+            venue: "NYSEARCA".to_string(),
+            currency: "USD".to_string(),
+            enabled: true,
+            timeframes: vec!["1D".to_string()],
+            notes: "fixture".to_string(),
+            instrument_kind: Some("etf".to_string()),
+            sector: None,
+            category: None,
+        };
+        let json = serde_json::to_string(&vec![bad]).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "mqk_test_cli_registry_v2_status_{}.json",
+            std::process::id()
+        ));
+        fs::write(&path, json).expect("write temp fixture");
+
+        let result = md_registry_v2_status(path.clone());
+        fs::remove_file(&path).ok();
+
+        assert!(result.is_err(), "invalid v2 shape must return Err");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("v2 validation failed"),
+            "error must mention 'v2 validation failed': {msg}"
         );
     }
 }

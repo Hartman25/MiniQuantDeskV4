@@ -1,8 +1,8 @@
 //! System-level route handlers (runtime operational surfaces).
 //!
 //! Contains: health, status_handler, system_status, system_preflight,
-//! autonomous_readiness, system_metadata, system_runtime_leadership,
-//! system_session.
+//! autonomous_readiness, system_metadata, system_instrument_registry_v2_status,
+//! system_runtime_leadership, system_session.
 //!
 //! Config-surface handlers (system_config_fingerprint, system_config_diffs)
 //! live in the `config` submodule (MT-07D split).
@@ -13,6 +13,7 @@
 mod config;
 pub(crate) use config::{system_config_diffs, system_config_fingerprint};
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::{
@@ -25,9 +26,9 @@ use chrono::Utc;
 
 use crate::api_types::{
     AssetCapabilityEntry, AssetCapabilityMatrix, AutonomousPaperReadinessResponse, HealthResponse,
-    MultiSymbolFreshnessReport, PreflightStatusResponse, RuntimeLeadershipCheckpointRow,
-    RuntimeLeadershipResponse, SessionStateResponse, StrategyDecisionDiagnostics,
-    SystemMetadataResponse, SystemStatusResponse,
+    InstrumentRegistryV2StatusResponse, MultiSymbolFreshnessReport, PreflightStatusResponse,
+    RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
+    StrategyDecisionDiagnostics, SystemMetadataResponse, SystemStatusResponse,
 };
 use crate::market_data_freshness::{
     evaluate_md_freshness_status, evaluate_md_freshness_status_for_symbols,
@@ -1193,6 +1194,171 @@ pub(crate) async fn system_metadata(State(st): State<Arc<AppState>>) -> impl Int
         }),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/instrument-registry-v2/status — ASSET-CORE-01C
+// ---------------------------------------------------------------------------
+
+/// Contract-shape label for a v2 instrument's `contract` field. Pure; no IO.
+/// Used only to build `contract_kind_counts` — never to drive any decision.
+fn contract_kind_label(
+    contract: &Option<mqk_md::instrument_registry_v2::ContractDefinitionV2>,
+) -> &'static str {
+    use mqk_md::instrument_registry_v2::ContractDefinitionV2;
+    match contract {
+        None => "none",
+        Some(ContractDefinitionV2::Equity) => "equity",
+        Some(ContractDefinitionV2::Etf) => "etf",
+        Some(ContractDefinitionV2::Future { .. }) => "future",
+        Some(ContractDefinitionV2::Option { .. }) => "option",
+        Some(ContractDefinitionV2::CryptoPair { .. }) => "crypto_pair",
+        Some(ContractDefinitionV2::ForexPair { .. }) => "forex_pair",
+    }
+}
+
+/// Build the empty/failed-path `InstrumentRegistryV2StatusResponse` shared by
+/// the `unavailable` and `v1_load_failed` truth states. Pure; no IO.
+fn instrument_registry_v2_failure_response(
+    truth_state: &str,
+    registry_path: String,
+    error: String,
+) -> InstrumentRegistryV2StatusResponse {
+    InstrumentRegistryV2StatusResponse {
+        truth_state: truth_state.to_string(),
+        registry_path,
+        schema_version: None,
+        v1_count: 0,
+        v2_count: 0,
+        validation_passed: false,
+        validation_errors: vec![error],
+        asset_class_counts: BTreeMap::new(),
+        instrument_kind_counts: BTreeMap::new(),
+        contract_kind_counts: BTreeMap::new(),
+        enabled_count: 0,
+        etf_count: 0,
+        non_equity_count: 0,
+        enabled_non_equity_count: 0,
+        paper_trading_enabled_count: 0,
+        live_trading_enabled_count: 0,
+        production_cutover_enabled: false,
+        trading_uses_v2: false,
+        notes: vec![
+            "v1 registry remains the sole production source for trading/ingestion/backtest/GUI."
+                .to_string(),
+        ],
+    }
+}
+
+/// GET /api/v1/system/instrument-registry-v2/status (ASSET-CORE-01C).
+///
+/// Read-only proof surface: loads the v1 registry at
+/// `st.instrument_registry_path`, converts it to `InstrumentRegistryV2` in
+/// memory, validates it, and summarizes the result. No DB pool, no provider
+/// or broker calls, no writes of any kind — every value here is derived
+/// purely from the v1 registry file and the pure `mqk_md::instrument_registry_v2`
+/// functions. `production_cutover_enabled` and `trading_uses_v2` are always
+/// `false`; this route is never read by any trading/ingest/backtest/GUI path.
+pub(crate) async fn system_instrument_registry_v2_status(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let registry_path = st.instrument_registry_path.clone();
+    let path = std::path::Path::new(&registry_path);
+
+    let v1 = match mqk_md::instrument_registry::load_instrument_registry(path) {
+        Ok(v) => v,
+        Err(e) => {
+            let truth_state = if path.exists() {
+                "v1_load_failed"
+            } else {
+                "unavailable"
+            };
+            return Json(instrument_registry_v2_failure_response(
+                truth_state,
+                registry_path,
+                e.to_string(),
+            ))
+            .into_response();
+        }
+    };
+
+    let v2 = mqk_md::instrument_registry_v2::convert_v1_registry_to_v2(&v1);
+    let v1_count = v1.len();
+    let v2_count = v2.instruments.len();
+
+    let mut asset_class_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut instrument_kind_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut contract_kind_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut enabled_count = 0usize;
+    let mut etf_count = 0usize;
+    let mut non_equity_count = 0usize;
+    let mut enabled_non_equity_count = 0usize;
+    let mut paper_trading_enabled_count = 0usize;
+    let mut live_trading_enabled_count = 0usize;
+
+    for inst in &v2.instruments {
+        *asset_class_counts
+            .entry(inst.asset_class.clone())
+            .or_insert(0) += 1;
+        if let Some(kind) = &inst.instrument_kind {
+            *instrument_kind_counts.entry(kind.clone()).or_insert(0) += 1;
+            if kind == "etf" {
+                etf_count += 1;
+            }
+        }
+        *contract_kind_counts
+            .entry(contract_kind_label(&inst.contract).to_string())
+            .or_insert(0) += 1;
+        if inst.enabled {
+            enabled_count += 1;
+        }
+        if inst.asset_class != "equity" {
+            non_equity_count += 1;
+            if inst.enabled {
+                enabled_non_equity_count += 1;
+            }
+        }
+        if inst.paper_trading_enabled {
+            paper_trading_enabled_count += 1;
+        }
+        if inst.live_trading_enabled {
+            live_trading_enabled_count += 1;
+        }
+    }
+
+    let (truth_state, validation_passed, validation_errors) =
+        match mqk_md::instrument_registry_v2::validate_registry_v2(&v2) {
+            Ok(()) => ("active", true, Vec::new()),
+            Err(e) => ("v2_validation_failed", false, vec![e.to_string()]),
+        };
+
+    Json(InstrumentRegistryV2StatusResponse {
+        truth_state: truth_state.to_string(),
+        registry_path,
+        schema_version: Some(v2.schema_version),
+        v1_count,
+        v2_count,
+        validation_passed,
+        validation_errors,
+        asset_class_counts,
+        instrument_kind_counts,
+        contract_kind_counts,
+        enabled_count,
+        etf_count,
+        non_equity_count,
+        enabled_non_equity_count,
+        paper_trading_enabled_count,
+        live_trading_enabled_count,
+        production_cutover_enabled: false,
+        trading_uses_v2: false,
+        notes: vec![
+            "v1 registry remains the sole production source for trading/ingestion/backtest/GUI."
+                .to_string(),
+            "InstrumentRegistryV2 is read-only/diagnostic via this route; no consumer reads it for decisions."
+                .to_string(),
+        ],
+    })
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------

@@ -3,6 +3,8 @@
 //! These types are `Serialize + Deserialize` so they can be JSON-encoded
 //! by Axum and decoded by tests.  No business logic lives here.
 
+use std::collections::BTreeMap;
+
 use mqk_runtime::observability::ExecutionSnapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -1519,6 +1521,75 @@ pub struct SystemMetadataResponse {
     /// Static asset capability matrix (ASSET-CAPABILITY-MATRIX-01).
     /// Read-only metadata; not used for routing or dispatch.
     pub asset_capability_matrix: AssetCapabilityMatrix,
+}
+
+// ---------------------------------------------------------------------------
+// /api/v1/system/instrument-registry-v2/status — ASSET-CORE-01C
+// ---------------------------------------------------------------------------
+
+/// Read-only instrument-registry-v2 status surface (ASSET-CORE-01C).
+///
+/// Answers exactly: can the currently configured v1 registry
+/// (`AppState::instrument_registry_path`) be loaded, converted to
+/// `mqk_md::instrument_registry_v2::InstrumentRegistryV2`, and validated —
+/// and what does the converted shape look like? It does **not** answer "can
+/// we trade crypto/futures/options/forex now" — the answer to that remains
+/// no regardless of this route's output. `production_cutover_enabled` and
+/// `trading_uses_v2` are always `false`: no daemon/runtime/ingest/backtest/
+/// GUI/risk/broker path reads `InstrumentRegistryV2` for any decision. The
+/// only file any production path reads is `config/instruments/equities.json`
+/// (v1) at `registry_path`.
+///
+/// `truth_state`:
+/// - `"active"` — v1 loaded, converted to v2, and v2 validated cleanly.
+/// - `"v1_load_failed"` — registry file exists but failed to parse/load as v1.
+/// - `"v2_validation_failed"` — v1 loaded and converted, but the converted v2
+///   registry failed `validate_registry_v2`. `validation_errors` carries the
+///   first violation message (the validator fails closed on the first error
+///   found; it is not an exhaustive list).
+/// - `"unavailable"` — no file exists at `registry_path`.
+///
+/// `"v2_conversion_failed"` is reserved for forward compatibility but is
+/// unreachable today: `convert_v1_registry_to_v2` is a pure, infallible
+/// function (no `Result`, no panics on well-typed `TrackedInstrument` input),
+/// so conversion never fails once v1 has loaded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentRegistryV2StatusResponse {
+    pub truth_state: String,
+    /// Path to the v1 registry file that was read (`AppState::instrument_registry_path`).
+    pub registry_path: String,
+    /// `InstrumentRegistryV2::schema_version` once v1 has loaded and converted; `None` otherwise.
+    pub schema_version: Option<u32>,
+    pub v1_count: usize,
+    pub v2_count: usize,
+    pub validation_passed: bool,
+    /// First validation violation, if any. Empty when `validation_passed` is `true`.
+    pub validation_errors: Vec<String>,
+    /// Instrument count by `asset_class` (e.g. `"equity"`). Counts all converted
+    /// entries, not just enabled ones.
+    pub asset_class_counts: BTreeMap<String, usize>,
+    /// Instrument count by `instrument_kind`. Only instruments carrying a
+    /// non-`None` `instrument_kind` (e.g. `"etf"`) are represented here —
+    /// untagged plain equities do not appear, mirroring
+    /// `instrument_registry::sector_map`'s omission convention.
+    pub instrument_kind_counts: BTreeMap<String, usize>,
+    /// Instrument count by contract shape: `"equity"`, `"etf"`, `"future"`,
+    /// `"option"`, `"crypto_pair"`, `"forex_pair"`, or `"none"` when `contract`
+    /// is absent.
+    pub contract_kind_counts: BTreeMap<String, usize>,
+    pub enabled_count: usize,
+    /// Count of instruments tagged `instrument_kind = "etf"`.
+    pub etf_count: usize,
+    pub non_equity_count: usize,
+    pub enabled_non_equity_count: usize,
+    pub paper_trading_enabled_count: usize,
+    pub live_trading_enabled_count: usize,
+    /// Always `false`. No production v2 registry cutover path exists.
+    pub production_cutover_enabled: bool,
+    /// Always `false`. No daemon/runtime/ingest/backtest/GUI/risk/broker path
+    /// reads `InstrumentRegistryV2` for any decision.
+    pub trading_uses_v2: bool,
+    pub notes: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

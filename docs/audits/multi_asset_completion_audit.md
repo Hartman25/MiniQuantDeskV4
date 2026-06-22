@@ -489,3 +489,15 @@ Docs/ledger-only maintenance patch. No production code, config, DB, or trading-p
 **Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-01B` entry (end of §19).
 
 **Safety confirmation:** no broker submit changes; no Alpaca adapter changes; no live routing changes; no order/outbox writes; no DB migrations; `.env.local` untouched; no provider/broker calls; no paper/live orders; no non-equity asset class enabled (the one `enabled=true` non-equity test case is `#[cfg(test)]`-only and proves the validator's own explicit escape hatch, not a production path). No daemon started.
+
+## 20. ASSET-CORE-01C Closure Note (maintenance)
+
+`ASSET-CORE-01C` gave `InstrumentRegistryV2` (`ASSET-CORE-01B`) its first real, non-test reader: `GET /api/v1/system/instrument-registry-v2/status` (`mqk-daemon/src/routes/system.rs::system_instrument_registry_v2_status`) and `mqk md registry-v2-status --registry <path>` (`mqk-cli`) both load the configured v1 registry, convert it to v2 in memory, validate it, and report `truth_state`/counts/validation errors. Both are strictly read-only diagnostics: `production_cutover_enabled` and `trading_uses_v2` are hardcoded `false` in every response, on every `truth_state` path including failures. Recorded here per `audit_repo_truth_rules.md` rather than left only in commit history.
+
+**Resolved:** the §16/§19 gap ("nothing consumes `InstrumentRegistryV2` yet") now has a concrete, tested answer — an operator/CI-facing surface exists that proves, against the real `config/instruments/equities.json`, that v1→v2 conversion and validation succeed (`v1_count == v2_count == 88`, `etf_count == 14`, zero non-equity/paper/live-enabled rows) and reports truthfully when they don't (missing file, malformed JSON, or a v2-shape validation failure).
+
+**Not resolved (`ASSET-CORE-01` remains PARTIAL):** `equities.json` is still the only registry file any production trading/ingestion/backtest/GUI/risk/broker path reads. No daemon/runtime/ingest/backtest/GUI code path was changed to read `InstrumentRegistryV2`; the new route and CLI command are diagnostic-only and were the explicit mission boundary. No `mqk-md → mqk-schemas` dependency was added (no occasion to revisit it — this slice touched only `mqk-daemon`/`mqk-cli`, not `mqk-md`). No non-equity asset class is enabled anywhere.
+
+**Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-01C` entry (end of §19).
+
+**Safety confirmation:** no broker submit changes; no Alpaca adapter changes; no live routing changes; no order/outbox writes; no DB migrations; `.env.local` untouched; no provider/broker calls; no paper/live orders; no non-equity asset class enabled; disabled-asset gates untouched. No daemon started — all proof is route/unit-level (`axum::Router::oneshot`).

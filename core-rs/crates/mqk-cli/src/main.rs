@@ -10,7 +10,7 @@ use commands::{
         run_strategy_lab_rank, run_sweep_csv, IntegrityCalendarArg,
     },
     load_payload,
-    md::{md_ingest_csv, md_ingest_provider, md_sync_provider},
+    md::{md_ingest_csv, md_ingest_provider, md_registry_v2_status, md_sync_provider},
     run::{
         run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_halt, run_heartbeat,
         run_start, run_status, run_stop,
@@ -397,6 +397,16 @@ enum MdCmd {
         #[arg(long)]
         overlap_days: Option<u32>,
     },
+
+    /// ASSET-CORE-01C: read-only v1->v2 instrument-registry conversion/validation
+    /// status probe. Loads `--registry`, converts to InstrumentRegistryV2 in
+    /// memory, validates it, and prints a status report. No DB connection, no
+    /// provider/broker calls, no writes. Exits nonzero on v2 validation failure.
+    RegistryV2Status {
+        /// Path to the v1 instrument registry JSON (e.g. config/instruments/equities.json).
+        #[arg(long)]
+        registry: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -658,6 +668,9 @@ async fn main() -> Result<()> {
                     overlap_days,
                 )
                 .await?;
+            }
+            MdCmd::RegistryV2Status { registry } => {
+                md_registry_v2_status(registry)?;
             }
         },
 

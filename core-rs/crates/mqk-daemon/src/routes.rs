@@ -191,8 +191,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use system::{
         autonomous_readiness, health, status_handler, system_config_diffs,
-        system_config_fingerprint, system_metadata, system_preflight, system_runtime_leadership,
-        system_session, system_status,
+        system_config_fingerprint, system_instrument_registry_v2_status, system_metadata,
+        system_preflight, system_runtime_leadership, system_session, system_status,
     };
     use system_artifact::{
         system_artifact_intake, system_parity_evidence, system_run_artifact, system_topology,
@@ -217,6 +217,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/system/runtime-leadership",
             get(system_runtime_leadership),
+        )
+        // ASSET-CORE-01C: read-only v1->v2 instrument-registry conversion/validation
+        // status (public, no auth). No DB, no provider/broker calls, no writes.
+        // production_cutover_enabled and trading_uses_v2 are always false.
+        .route(
+            "/api/v1/system/instrument-registry-v2/status",
+            get(system_instrument_registry_v2_status),
         )
         .route("/api/v1/execution/summary", get(execution_summary))
         .route("/api/v1/execution/orders", get(execution_orders))
