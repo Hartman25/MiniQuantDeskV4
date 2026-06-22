@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
@@ -11,7 +11,7 @@ fn temp_artifact_dir(label: &str) -> PathBuf {
     dir
 }
 
-fn write_manifest(dir: &PathBuf) {
+fn write_manifest(dir: &Path) {
     fs::write(
         dir.join("manifest.json"),
         r#"{
@@ -39,7 +39,7 @@ fn write_manifest(dir: &PathBuf) {
     .expect("write manifest");
 }
 
-fn write_valid_metrics(dir: &PathBuf) {
+fn write_valid_metrics(dir: &Path) {
     fs::write(
         dir.join("metrics.json"),
         r#"{
@@ -64,7 +64,7 @@ fn write_valid_metrics(dir: &PathBuf) {
     .expect("write metrics");
 }
 
-fn write_rank_metrics(dir: &PathBuf, strategy_name: &str, symbol: &str, total_return_pct: f64) {
+fn write_rank_metrics(dir: &Path, strategy_name: &str, symbol: &str, total_return_pct: f64) {
     fs::write(
         dir.join("metrics.json"),
         format!(
