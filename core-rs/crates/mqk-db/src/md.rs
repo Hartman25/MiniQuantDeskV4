@@ -626,7 +626,7 @@ async fn ingest_provider_bars_to_md_bars_inner(
         .bind(&provider_metadata.provider_symbol)
         .bind(&provider_metadata.ingest_mode)
         .bind(&provider_metadata.provider_bar_id)
-        .bind(provider_metadata.provider_updated_at_utc.clone())
+        .bind(provider_metadata.provider_updated_at_utc)
         .fetch_one(pool)
         .await
         .context("upsert md_bars failed")?;
