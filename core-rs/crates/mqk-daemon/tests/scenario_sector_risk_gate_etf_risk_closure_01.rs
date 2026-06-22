@@ -41,7 +41,7 @@
 //! matching the convention in `scenario_portfolio_live_weights_01.rs`.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::Utc;
 use mqk_daemon::{
@@ -49,6 +49,7 @@ use mqk_daemon::{
     state,
 };
 use mqk_runtime::observability::{ExecutionSnapshot, PortfolioSnapshot, PositionSnapshot};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const ENV_SECTOR_LIMITS: &str = "MQK_SECTOR_EXPOSURE_LIMITS_BPS";
@@ -64,7 +65,14 @@ const FAKE_SECTOR: &str = "zzsr01_sector_tech";
 /// `ENV_REGISTRY_PATH` (process-wide env vars). `cargo test` runs tests in
 /// this binary on parallel threads by default, so each test holds this lock
 /// for its full body to avoid racing another test's env var value.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+///
+/// `tokio::sync::Mutex`, not `std::sync::Mutex`: every test holds this guard
+/// across `.await` points (DB connects/queries), which clippy's
+/// `await_holding_lock` correctly flags as unsound for a sync mutex. A
+/// tokio mutex is designed to be held across awaits, and (unlike
+/// `std::sync::Mutex`) never poisons on a panicking test, so one test's
+/// failure cannot cascade into spurious failures in the rest of this file.
+static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// RAII guard: sets an env var on construction, restores the previous value
 /// (or removes it) on drop. Caller must hold `ENV_LOCK` for the guard's
@@ -187,7 +195,7 @@ fn make_snapshot(cash_micros: i64, positions: &[(&str, i64)]) -> ExecutionSnapsh
 
 #[tokio::test]
 async fn srg01_malformed_config_rejected_before_any_db_access() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let _limits = EnvVarGuard::set(ENV_SECTOR_LIMITS, "not_a_valid_entry_no_equals_sign");
 
     let st = Arc::new(state::AppState::new_with_operator_auth(
@@ -215,7 +223,7 @@ async fn srg01_malformed_config_rejected_before_any_db_access() {
 
 #[tokio::test]
 async fn srg02_disabled_gate_does_not_change_the_pre_existing_no_db_outcome() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let _limits = EnvVarGuard::remove(ENV_SECTOR_LIMITS);
 
     let st = Arc::new(state::AppState::new_with_operator_auth(
@@ -247,7 +255,7 @@ async fn srg02_disabled_gate_does_not_change_the_pre_existing_no_db_outcome() {
 
 #[tokio::test]
 async fn srg03_enabled_config_for_untagged_symbol_does_not_need_db() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     // Sector risk IS enabled, but the candidate symbol (FAKE_SYMBOL) is not
     // in the (default, real) registry at all, so it must be treated as
     // unclassified and pass through without ever needing a DB.
@@ -277,7 +285,7 @@ async fn srg03_enabled_config_for_untagged_symbol_does_not_need_db() {
 
 #[tokio::test]
 async fn srg04_enabled_for_candidate_sector_without_db_fails_closed_distinctly() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let (registry_path, registry_dir) = write_fake_registry();
     let _limits = EnvVarGuard::set(ENV_SECTOR_LIMITS, &format!("{FAKE_SECTOR}=1000"));
     let _registry = EnvVarGuard::set(ENV_REGISTRY_PATH, registry_path.to_str().unwrap());
@@ -405,7 +413,7 @@ async fn srg05_no_sector_config_never_denies() {
         eprintln!("SRG-05: skipped (no MQK_DATABASE_URL pointing to paper DB)");
         return;
     };
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let _limits = EnvVarGuard::remove(ENV_SECTOR_LIMITS);
 
     let pool = sqlx::postgres::PgPoolOptions::new()
@@ -455,7 +463,7 @@ async fn srg06_enabled_config_denies_sector_cap_breach_before_outbox() {
         eprintln!("SRG-06: skipped (no MQK_DATABASE_URL pointing to paper DB)");
         return;
     };
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let (registry_path, registry_dir) = write_fake_registry();
     let _limits = EnvVarGuard::set(ENV_SECTOR_LIMITS, &format!("{FAKE_SECTOR}=3000")); // 30% cap
     let _registry = EnvVarGuard::set(ENV_REGISTRY_PATH, registry_path.to_str().unwrap());
@@ -511,7 +519,7 @@ async fn srg07_missing_md_bars_mark_denies_before_outbox() {
         eprintln!("SRG-07: skipped (no MQK_DATABASE_URL pointing to paper DB)");
         return;
     };
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let (registry_path, registry_dir) = write_fake_registry();
     let _limits = EnvVarGuard::set(ENV_SECTOR_LIMITS, &format!("{FAKE_SECTOR}=3000"));
     let _registry = EnvVarGuard::set(ENV_REGISTRY_PATH, registry_path.to_str().unwrap());
@@ -558,7 +566,7 @@ async fn srg08_risk_reducing_sell_is_still_allowed_through_to_accepted() {
         eprintln!("SRG-08: skipped (no MQK_DATABASE_URL pointing to paper DB)");
         return;
     };
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let (registry_path, registry_dir) = write_fake_registry();
     let _limits = EnvVarGuard::set(ENV_SECTOR_LIMITS, &format!("{FAKE_SECTOR}=6000")); // 60% cap
     let _registry = EnvVarGuard::set(ENV_REGISTRY_PATH, registry_path.to_str().unwrap());
