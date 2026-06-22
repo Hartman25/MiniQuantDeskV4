@@ -1,19 +1,23 @@
 //! ETF-RISK-CLOSURE-01 — optional per-sector live gross exposure cap.
 //!
 //! Parses `MQK_SECTOR_EXPOSURE_LIMITS_BPS`, the env-var configuration for the
-//! sector-risk gate (Gate 1h in `decision.rs`). Pure parsing only — no IO, no
-//! DB, no live weights — consistent with every other module in this package
-//! (`portfolio_risk`, `position_sizing`, `short_entry_policy`): "Pure: no env
-//! reads, no network, no DB" for the evaluator itself, with a `_from_env`
-//! wrapper that reads the environment and nothing else.
+//! sector-risk gate (Gate 1h in `decision.rs`; shared by the external signal
+//! path in `routes/strategy.rs` since ETF-RISK-EXTERNAL-SIGNAL-GATE-01).
+//! Pure parsing only — no IO, no DB, no live weights — consistent with every
+//! other module in this package (`portfolio_risk`, `position_sizing`,
+//! `short_entry_policy`): "Pure: no env reads, no network, no DB" for the
+//! evaluator itself, with a `_from_env` wrapper that reads the environment
+//! and nothing else.
 //!
 //! The actual evaluation against real positions/marks is
 //! `mqk_portfolio::evaluate_sector_risk`; the DB/snapshot/registry glue that
-//! builds its inputs lives in `decision.rs`'s Gate 1h. That glue is
-//! deliberately NOT in this module: every `capital_policy` evaluator today is
-//! synchronous and DB-free, while fetching live positions/marks is async and
-//! DB-touching, the same shape Gates 2-7 in `decision.rs` already use for
-//! direct `mqk_db::*` calls rather than going through this package.
+//! builds its inputs lives in the sibling [`super::sector_risk_gate`] module,
+//! called by both `decision.rs`'s Gate 1h and `routes/strategy.rs`'s external
+//! signal gate. That glue is deliberately NOT in this module: every other
+//! `capital_policy` evaluator is synchronous and DB-free, while fetching live
+//! positions/marks is async and DB-touching — `sector_risk_gate` is the one
+//! documented exception, kept separate so this module stays pure and so the
+//! glue is written once instead of duplicated per call site.
 //!
 //! # Configuration
 //!

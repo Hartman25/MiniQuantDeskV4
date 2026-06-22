@@ -73,6 +73,7 @@ pub mod deployment_economics;
 pub mod portfolio_risk;
 pub mod position_sizing;
 pub mod sector_risk;
+pub mod sector_risk_gate;
 pub mod short_entry_policy;
 
 // Flat re-exports — preserve existing `crate::capital_policy::X` call sites.

@@ -185,6 +185,7 @@ pub(crate) async fn build_dispatch_summary_response(
 //   1g. portfolio_risk              — exposure and capital exhaustion (TV-04E)
 //   1h. event_risk_blackout         — symbol-level static blackout periods (EVENT-RISK-GATE-01)
 //   1h2.earnings_calendar           — symbol-level earnings proximity blackout (EVENT-RISK-CALENDAR-01)
+//   1i. sector_risk                 — optional per-sector live gross exposure cap (`MQK_SECTOR_EXPOSURE_LIMITS_BPS`); shared with internal Gate 1h (decision.rs) via capital_policy::sector_risk_gate (ETF-RISK-EXTERNAL-SIGNAL-GATE-01)
 //   1b. alpaca_ws_continuity        — must be Live (PT-DAY-02)
 //   1c. nyse_session                — must be regular session (PT-DAY-03)
 //   1d. day_signal_limit            — per-run intake bound not exceeded (PT-AUTO-02)
@@ -610,6 +611,92 @@ pub(crate) async fn strategy_signal(
                 status,
                 "gate_1h_calendar",
                 disposition,
+                RefusedSignalArgs {
+                    signal_id: validated.signal_id,
+                    strategy_id: validated.strategy_id,
+                    symbol: validated.symbol.clone(),
+                    active_run_id: None,
+                    blockers: vec![blocker],
+                },
+            );
+        }
+    }
+
+    // Gate 1i: ETF-RISK-EXTERNAL-SIGNAL-GATE-01 — optional per-sector live
+    // gross exposure cap (`MQK_SECTOR_EXPOSURE_LIMITS_BPS`).
+    //
+    // Shares its registry/snapshot/marks mechanics with the internal
+    // decision path's Gate 1h (`decision.rs`) via
+    // `capital_policy::sector_risk_gate::evaluate_sector_risk_gate` — one
+    // mechanism, two callers, so sector exposure risk cannot drift between
+    // an internally-generated order and an externally-submitted signal.
+    //
+    // Default-off: an unset/empty env var disables this gate entirely; no
+    // DB or instrument-registry access occurs for this check in that case,
+    // and existing external signal behavior is unchanged.
+    //
+    // `signed_delta_qty` is derived from `validated.side`/`validated.qty`
+    // inside the shared gate — never from a caller-supplied claim — so
+    // risk-reducing status is determined the same honest way as the
+    // internal path: from real current/prospective weights, not metadata.
+    //
+    // `sector_limit_exceeded` is a verified breach → 403 (denied). Every
+    // other deny outcome (`sector_config_invalid`, `unavailable`,
+    // `sector_weights_missing`, `sector_nav_unavailable`) means the gate
+    // could not verify safety → 503, fail-closed without claiming a breach
+    // that was never actually computed.
+    {
+        use crate::capital_policy::sector_risk_gate::evaluate_sector_risk_gate;
+        let result =
+            evaluate_sector_risk_gate(&st, &validated.symbol, &validated.side, validated.qty).await;
+
+        if !result.allowed {
+            let status = if result.reason_code == "sector_limit_exceeded" {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            };
+            let blocker = format!(
+                "strategy signal refused: {}",
+                result
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| format!("sector risk gate denied ({})", result.reason_code))
+            );
+            // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: alert on sector-risk denial —
+            // same high-value signal as the other signal.blocked gates above.
+            let notifier = st.discord_notifier.clone();
+            let env = Some(st.deployment_mode().as_api_label().to_string());
+            let symbol_owned = validated.symbol.clone();
+            let strategy_owned = validated.strategy_id.clone();
+            let blocker_copy = blocker.clone();
+            let reason_code_copy = result.reason_code.clone();
+            tokio::spawn(async move {
+                notifier
+                    .notify_trade_event(&crate::notify::TradeEventPayload {
+                        stage: "signal.blocked".to_string(),
+                        run_id: None,
+                        symbol: Some(symbol_owned.clone()),
+                        side: None,
+                        qty: None,
+                        price_micros: None,
+                        order_id: None,
+                        detail: Some(format!(
+                            "gate=external_gate_1h_sector_risk reason={blocker_copy}"
+                        )),
+                        environment: env,
+                        summary: format!(
+                            "signal.blocked [{reason_code_copy}] strategy={strategy_owned} \
+                             symbol={symbol_owned} | {blocker_copy}"
+                        ),
+                        ts_utc: Utc::now().to_rfc3339(), // allow: ops-metadata notification timestamp
+                    })
+                    .await;
+            });
+            return refused_signal_response(
+                status,
+                "external_gate_1h_sector_risk",
+                &result.reason_code,
                 RefusedSignalArgs {
                     signal_id: validated.signal_id,
                     strategy_id: validated.strategy_id,
