@@ -183,7 +183,7 @@ pub fn evaluate_strategy_lab_with_policy(
     let exposure = bounded_percent(input.metrics.exposure);
     let sharpe = finite(input.metrics.sharpe);
     let buy_hold_return = finite(input.metrics.buy_hold_return);
-    let alpha_vs_benchmark = finite(input.metrics.alpha_vs_benchmark).or_else(|| {
+    let alpha_vs_benchmark = finite(input.metrics.alpha_vs_benchmark).or({
         match (total_return, buy_hold_return) {
             (Some(total), Some(benchmark)) => Some(total - benchmark),
             _ => None,
@@ -224,14 +224,16 @@ pub fn evaluate_strategy_lab_with_policy(
     }
 
     let score = score_metrics(
-        total_return,
-        max_drawdown,
-        trade_count,
-        win_rate,
-        profit_factor,
-        expectancy,
-        exposure,
-        sharpe,
+        ScoreMetricsInput {
+            total_return,
+            max_drawdown,
+            trade_count,
+            win_rate,
+            profit_factor,
+            expectancy,
+            exposure,
+            sharpe,
+        },
         policy,
     );
     let decision = classify(score, &reason_codes);
@@ -339,7 +341,14 @@ fn grade(score: f64, decision: StrategyLabDecision) -> StrategyLabGrade {
     }
 }
 
-fn score_metrics(
+/// Sanitized metric inputs consumed by [`score_metrics`].
+///
+/// Each field mirrors the validated local binding of the same name in
+/// `evaluate_strategy_lab_with_policy` (already passed through
+/// `finite`/`bounded_percent`/`valid_profit_factor`), not the raw
+/// `StrategyLabMetrics` input.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScoreMetricsInput {
     total_return: Option<f64>,
     max_drawdown: Option<f64>,
     trade_count: Option<usize>,
@@ -348,40 +357,41 @@ fn score_metrics(
     expectancy: Option<f64>,
     exposure: Option<f64>,
     sharpe: Option<f64>,
-    policy: &StrategyLabPolicy,
-) -> f64 {
+}
+
+fn score_metrics(metrics: ScoreMetricsInput, policy: &StrategyLabPolicy) -> f64 {
     let mut score = 0.0;
 
-    if let Some(value) = total_return {
+    if let Some(value) = metrics.total_return {
         score += clamp(value, 0.0, 35.0);
     }
-    if let Some(value) = max_drawdown {
+    if let Some(value) = metrics.max_drawdown {
         score += clamp(policy.max_drawdown - value, 0.0, 20.0);
     }
-    if let Some(count) = trade_count {
+    if let Some(count) = metrics.trade_count {
         if count >= policy.min_trade_count {
             score += 10.0;
         } else if count > 0 {
             score += 5.0 * count as f64 / policy.min_trade_count as f64;
         }
     }
-    if let Some(value) = profit_factor {
+    if let Some(value) = metrics.profit_factor {
         if value.is_infinite() && value.is_sign_positive() {
             score += 15.0;
         } else {
             score += clamp((value - 1.0) * 20.0, 0.0, 15.0);
         }
     }
-    if let Some(value) = win_rate {
+    if let Some(value) = metrics.win_rate {
         score += clamp((value - 40.0) / 60.0 * 5.0, 0.0, 5.0);
     }
-    if let Some(value) = expectancy {
+    if let Some(value) = metrics.expectancy {
         score += clamp(value * 10.0, 0.0, 10.0);
     }
-    if let Some(value) = sharpe {
+    if let Some(value) = metrics.sharpe {
         score += clamp(value * 5.0, 0.0, 10.0);
     }
-    if let Some(value) = exposure {
+    if let Some(value) = metrics.exposure {
         if value <= policy.high_exposure {
             score += 5.0;
         }
