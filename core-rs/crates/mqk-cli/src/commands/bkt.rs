@@ -30,6 +30,38 @@ impl From<IntegrityCalendarArg> for CalendarSpec {
 }
 
 // ---------------------------------------------------------------------------
+// Shared economics flag wiring (CSV + DB backtest CLI entry points)
+// ---------------------------------------------------------------------------
+
+/// BACKTEST-ECONOMICS-DB-CLI-ENTRY-01: shared opt-in economics builder for
+/// every backtest CLI entry point (csv, db). If none of the three flags are
+/// supplied, returns `None` and the caller keeps the engine's default equity
+/// economics (multiplier=1, no margin) -- byte-identical to pre-flag
+/// behavior. If `--contract-multiplier` is omitted but a margin flag is
+/// supplied, the multiplier defaults to 1. A non-positive multiplier fails
+/// closed here, before the caller does any further work.
+fn build_backtest_economics_from_cli_flags(
+    contract_multiplier: Option<i64>,
+    initial_margin_micros: Option<i64>,
+    maintenance_margin_micros: Option<i64>,
+) -> Result<Option<BacktestInstrumentEconomics>> {
+    if contract_multiplier.is_none()
+        && initial_margin_micros.is_none()
+        && maintenance_margin_micros.is_none()
+    {
+        return Ok(None);
+    }
+    let multiplier = contract_multiplier.unwrap_or(1);
+    let economics = BacktestInstrumentEconomics::new(
+        multiplier,
+        initial_margin_micros,
+        maintenance_margin_micros,
+    )
+    .with_context(|| format!("invalid --contract-multiplier {}", multiplier))?;
+    Ok(Some(economics))
+}
+
+// ---------------------------------------------------------------------------
 // CSV backtest runner
 // ---------------------------------------------------------------------------
 
@@ -102,23 +134,13 @@ pub async fn run_backtest_csv(
 
     let mut engine = BacktestEngine::new(cfg);
 
-    // BACKTEST-ECONOMICS-CLI-ENTRY-01: opt-in economics wiring. If none of
-    // --contract-multiplier/--initial-margin-micros/--maintenance-margin-micros
-    // are supplied, the engine keeps its default equity economics
-    // (multiplier=1, no margin) and behavior is unchanged from before this flag
-    // existed. An explicit non-positive --contract-multiplier fails closed here,
-    // before any artifact directory is created.
-    if contract_multiplier.is_some()
-        || initial_margin_micros.is_some()
-        || maintenance_margin_micros.is_some()
-    {
-        let multiplier = contract_multiplier.unwrap_or(1);
-        let economics = BacktestInstrumentEconomics::new(
-            multiplier,
-            initial_margin_micros,
-            maintenance_margin_micros,
-        )
-        .with_context(|| format!("invalid --contract-multiplier {}", multiplier))?;
+    // BACKTEST-ECONOMICS-CLI-ENTRY-01: opt-in economics wiring, before any
+    // artifact directory is created. See build_backtest_economics_from_cli_flags.
+    if let Some(economics) = build_backtest_economics_from_cli_flags(
+        contract_multiplier,
+        initial_margin_micros,
+        maintenance_margin_micros,
+    )? {
         engine = engine.with_economics(economics);
     }
 
@@ -405,6 +427,9 @@ pub async fn run_backtest_db(
     target_qty: i64,
     max_target_qty: Option<i64>,
     max_position_notional_usd: Option<i64>,
+    contract_multiplier: Option<i64>,
+    initial_margin_micros: Option<i64>,
+    maintenance_margin_micros: Option<i64>,
     out_dir: Option<String>,
 ) -> Result<()> {
     if timeframe_secs <= 0 {
@@ -419,6 +444,15 @@ pub async fn run_backtest_db(
     if end_end_ts < start_end_ts {
         anyhow::bail!("--end-end-ts must be >= --start-end-ts");
     }
+
+    // BACKTEST-ECONOMICS-DB-CLI-ENTRY-01: validate economics flags before
+    // connecting to the DB or loading any bars, so an invalid
+    // --contract-multiplier fails closed without a wasted DB round trip.
+    let economics = build_backtest_economics_from_cli_flags(
+        contract_multiplier,
+        initial_margin_micros,
+        maintenance_margin_micros,
+    )?;
 
     let symbols: Vec<String> = symbols_csv
         .unwrap_or_default()
@@ -490,6 +524,9 @@ pub async fn run_backtest_db(
     })?;
 
     let mut engine = BacktestEngine::new(cfg);
+    if let Some(economics) = economics {
+        engine = engine.with_economics(economics);
+    }
     engine
         .add_strategy(strategy_instance)
         .with_context(|| format!("add_strategy failed for '{}'", strategy))?;
@@ -505,6 +542,14 @@ pub async fn run_backtest_db(
     println!("strategy={}", report.strategy_name);
     println!("git_hash={}", git_hash);
     println!("config_hash={}", config_hash);
+    println!(
+        "economics_contract_multiplier={}",
+        report.economics.contract_multiplier
+    );
+    println!(
+        "economics_margin_enforced={}",
+        report.economics.margin_enforced
+    );
 
     // BKT-02P: if an output directory is requested, initialize the full run
     // artifact structure (manifest.json + placeholder files) before writing
