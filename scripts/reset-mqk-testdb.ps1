@@ -90,6 +90,18 @@ CANONICAL PROOF DB
   DB name:   mqk_test
   User:      mqk / mqk
 
+  NOTE: 5432 is only free if nothing else on this machine already owns it.
+  Some local setups run a persistent runtime/live/paper Postgres container
+  on 5432 (or 5440 for a reality-test lane) that this script must never touch.
+  Run `docker ps` and check the PORTS column before assuming 5432 is free;
+  if it is not, use a different -DatabaseUrl port (e.g. 55432, per
+  README_TECHNICAL.md's "isolated manual proof DB" example) instead of
+  colliding with it. Also: if you just recreated a container on a host port
+  it previously used, verify the password actually works end-to-end
+  (`docker exec <container> psql -U <user> -c "select 1"`) before trusting
+  it — a stale host-side port forward has been observed to make a correct
+  password look like an authentication failure from outside the container.
+
 BLOCKED DB NAMES (will never be dropped by this script)
   postgres, template0, template1, mqk_dev, mqk_live, mqk_prod,
   production, live, prod, defaultdb

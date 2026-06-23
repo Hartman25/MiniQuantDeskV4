@@ -196,6 +196,23 @@ That script intentionally uses its **own isolated Docker default path**:
 That separation is deliberate.
 Treat reality-test DB state as a different lane from both everyday runtime ops and proof DB work.
 
+### Verify ports before trusting any default above
+
+The ports above (`5432`, `55432`, `5440`) are *defaults*, not guarantees. On a machine that already
+has long-running containers for other purposes — e.g. a persistent live-trading or paper-trading
+Postgres container — one or more of those ports may already be bound to something you must not touch.
+Before starting a new container or pointing `MQK_DATABASE_URL` at one of these defaults, run
+`docker ps` and check the `PORTS` column for what is *actually* listening, not just what a doc or
+script assumes. If a default port is already taken by something other than a disposable proof/test
+container, pick a free port explicitly (check with `docker ps` first — don't just reuse a port a
+container on this machine has used before) rather than colliding — and double-check with
+`docker exec <container> psql -U <user> -c "select 1"` that the container you think you are talking
+to is the one actually answering on that port; a stale host-side port forward (observed once on this
+repo, recreating a container on a host port it had previously used) can otherwise make a correct
+password look like authentication failure from outside the container, even though the same password
+works fine via `docker exec` or Docker's internal network. If that happens, recreating the same
+container on a *different* host port is the fastest fix — cheaper than re-debugging credentials.
+
 ## Prerequisites
 
 ### Core workspace
