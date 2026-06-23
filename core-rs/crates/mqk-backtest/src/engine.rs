@@ -32,10 +32,12 @@ use mqk_strategy::{
     StrategyHostError,
 };
 
-use crate::economics::{notional_micros, BacktestEconomicsLedger, BacktestInstrumentEconomics};
+use crate::economics::{
+    notional_micros, BacktestEconomicsLedger, BacktestEconomicsReport, BacktestInstrumentEconomics,
+};
 use crate::types::{
-    derive_input_data_hash, derive_run_id, BacktestBar, BacktestConfig, BacktestFill,
-    BacktestOrder, BacktestOrderSide, BacktestReport, OrderStatus,
+    derive_input_data_hash, derive_run_id_with_economics, BacktestBar, BacktestConfig,
+    BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport, OrderStatus,
 };
 
 /// Backtest error variants.
@@ -625,7 +627,30 @@ impl BacktestEngine {
         // BKT-PROV-01: strategy identity — derive from spec if registered.
         let strategy_name = self.host.spec().map(|s| s.name.clone()).unwrap_or_default();
         let config_id = self.config.config_id();
-        let run_id = derive_run_id(&strategy_name, &config_id, &input_data_hash);
+        // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: run identity folds in economics
+        // so two runs with identical strategy/config/input but different
+        // multiplier/margin cannot collide on run_id. Byte-identical to the
+        // pre-existing v2 run_id whenever economics is default equity.
+        let run_id = derive_run_id_with_economics(
+            &strategy_name,
+            &config_id,
+            &input_data_hash,
+            &self.economics,
+        );
+
+        // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: report.equity_curve stays the
+        // unmodified mqk_portfolio-driven curve (byte-identical to every
+        // existing equity backtest) when multiplier=1. For multiplier>1 it
+        // surfaces the multiplier-aware economics curve instead, since the
+        // mqk_portfolio-driven curve was never multiplier-aware.
+        let equity_curve = if self.economics.contract_multiplier == 1 {
+            self.equity_curve.clone()
+        } else {
+            self.economics_equity_curve.clone()
+        };
+
+        let economics_report =
+            BacktestEconomicsReport::from_run(&self.economics, self.economics_realized_pnl_micros());
 
         Ok(BacktestReport {
             strategy_name,
@@ -634,7 +659,7 @@ impl BacktestEngine {
             input_data_hash,
             halted: self.halted,
             halt_reason: self.halt_reason.clone(),
-            equity_curve: self.equity_curve.clone(),
+            equity_curve,
             orders: self.orders.clone(),
             fills: self.fills.clone(),
             last_prices: self.last_prices.clone(),
@@ -642,6 +667,7 @@ impl BacktestEngine {
             first_bar_open_micros: self.first_bar_open_micros,
             last_bar_close_micros: self.last_bar_close_micros,
             sizing: self.config.sizing.clone(),
+            economics: economics_report,
         })
     }
 

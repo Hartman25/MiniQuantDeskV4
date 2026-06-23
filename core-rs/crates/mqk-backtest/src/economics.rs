@@ -97,6 +97,65 @@ impl BacktestInstrumentEconomics {
             maintenance_margin_micros,
         })
     }
+
+    /// True iff this economics value is identical to [`Self::equity`]
+    /// (multiplier=1, no margin scaffold).
+    ///
+    /// BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: used to decide whether a run's
+    /// `run_id` stays byte-identical to the pre-existing (economics-unaware)
+    /// formula, or becomes economics-sensitive. See `derive_run_id_with_economics`.
+    pub(crate) fn is_default_equity(&self) -> bool {
+        *self == Self::equity()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BacktestEconomicsReport — BACKTEST-REPORT-ECONOMICS-ARTIFACT-01
+// ---------------------------------------------------------------------------
+
+/// Truthful economics summary attached to every [`crate::types::BacktestReport`].
+///
+/// Default (equity) reports carry [`BacktestEconomicsReport::equity`] --
+/// multiplier=1, no margin, `margin_enforced=false` -- identical for every
+/// backtest that never calls `BacktestEngine::with_economics`. Multiplier- or
+/// margin-bearing runs carry the actual configured values plus the final
+/// multiplier-aware realized P&L from [`BacktestEconomicsLedger`].
+///
+/// `margin_enforced` is always `false`: margin fields remain metadata-only
+/// scaffolding (see module docs above) -- no code path in this crate gates,
+/// blocks, or alters behavior based on them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BacktestEconomicsReport {
+    pub contract_multiplier: i64,
+    pub initial_margin_micros: Option<i64>,
+    pub maintenance_margin_micros: Option<i64>,
+    pub realized_pnl_micros: i64,
+    pub margin_enforced: bool,
+}
+
+impl BacktestEconomicsReport {
+    /// Default equity report economics: multiplier=1, no margin, zero realized P&L.
+    pub const fn equity() -> Self {
+        Self {
+            contract_multiplier: 1,
+            initial_margin_micros: None,
+            maintenance_margin_micros: None,
+            realized_pnl_micros: 0,
+            margin_enforced: false,
+        }
+    }
+
+    /// Build the report section from the run's configured economics and the
+    /// final realized P&L accumulated in the [`BacktestEconomicsLedger`].
+    pub fn from_run(economics: &BacktestInstrumentEconomics, realized_pnl_micros: i64) -> Self {
+        Self {
+            contract_multiplier: economics.contract_multiplier,
+            initial_margin_micros: economics.initial_margin_micros,
+            maintenance_margin_micros: economics.maintenance_margin_micros,
+            realized_pnl_micros,
+            margin_enforced: false,
+        }
+    }
 }
 
 /// Saturating i128 multiplication: returns `i128::MAX`/`i128::MIN` on
@@ -498,6 +557,60 @@ mod tests {
             mark_to_market_value_micros(i64::MIN, i64::MAX, &econ),
             i64::MIN
         );
+    }
+
+    // --- bmm07: is_default_equity (BACKTEST-REPORT-ECONOMICS-ARTIFACT-01) ---
+
+    #[test]
+    fn bmm07_is_default_equity_true_only_for_bare_multiplier_one() {
+        assert!(BacktestInstrumentEconomics::equity().is_default_equity());
+        assert!(BacktestInstrumentEconomics::new(1, None, None)
+            .unwrap()
+            .is_default_equity());
+    }
+
+    #[test]
+    fn bmm07b_is_default_equity_false_for_multiplier_or_margin() {
+        assert!(!BacktestInstrumentEconomics::new(50, None, None)
+            .unwrap()
+            .is_default_equity());
+        assert!(!BacktestInstrumentEconomics::new(1, Some(10 * M), None)
+            .unwrap()
+            .is_default_equity());
+        assert!(!BacktestInstrumentEconomics::new(1, None, Some(10 * M))
+            .unwrap()
+            .is_default_equity());
+    }
+
+    // --- ber01: BacktestEconomicsReport (BACKTEST-REPORT-ECONOMICS-ARTIFACT-01) ---
+
+    #[test]
+    fn ber01_equity_default_is_truthful_zero_state() {
+        let r = BacktestEconomicsReport::equity();
+        assert_eq!(r.contract_multiplier, 1);
+        assert_eq!(r.initial_margin_micros, None);
+        assert_eq!(r.maintenance_margin_micros, None);
+        assert_eq!(r.realized_pnl_micros, 0);
+        assert!(!r.margin_enforced);
+    }
+
+    #[test]
+    fn ber02_from_run_round_trips_economics_and_pnl_truthfully() {
+        let econ = BacktestInstrumentEconomics::new(50, Some(10_000 * M), Some(5_000 * M)).unwrap();
+        let r = BacktestEconomicsReport::from_run(&econ, 12_345 * M);
+        assert_eq!(r.contract_multiplier, 50);
+        assert_eq!(r.initial_margin_micros, Some(10_000 * M));
+        assert_eq!(r.maintenance_margin_micros, Some(5_000 * M));
+        assert_eq!(r.realized_pnl_micros, 12_345 * M);
+        // Margin metadata is scaffold-only -- never enforced.
+        assert!(!r.margin_enforced);
+    }
+
+    #[test]
+    fn ber03_from_run_at_equity_matches_equity_constructor() {
+        let econ = BacktestInstrumentEconomics::equity();
+        let r = BacktestEconomicsReport::from_run(&econ, 0);
+        assert_eq!(r, BacktestEconomicsReport::equity());
     }
 
     // --- bmw_ledger: BacktestEconomicsLedger (BACKTEST-MULTIPLIER-RUN-WIRE-01) ---

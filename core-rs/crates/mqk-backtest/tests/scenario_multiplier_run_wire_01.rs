@@ -134,6 +134,13 @@ fn bmw01b_explicit_multiplier_one_equals_default() {
         engine_default.economics_realized_pnl_micros(),
         engine_explicit.economics_realized_pnl_micros()
     );
+
+    // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: explicit multiplier=1 is
+    // `is_default_equity()`, so report identity and the report's economics
+    // section must match the unconfigured-default report exactly.
+    assert_eq!(report_default.run_id, report_explicit.run_id);
+    assert_eq!(report_default.config_id, report_explicit.config_id);
+    assert_eq!(report_default.economics, report_explicit.economics);
 }
 
 // --- bmw02: synthetic multiplier=50/100 full-run proof ---
@@ -152,20 +159,35 @@ fn bmw02_multiplier_50_scales_full_run_outputs() {
     engine50.add_strategy(Box::new(BuyHoldSell::new(10))).unwrap();
     let report50 = engine50.run(&bars).unwrap();
 
-    // The existing mqk_portfolio-driven equity curve / fills stay byte-identical
-    // regardless of economics -- `self.portfolio` is never touched by this seam.
-    assert_eq!(report1.equity_curve, report50.equity_curve);
+    // `self.portfolio` (fills, fill count) is never touched by this seam.
     assert_eq!(report1.fills.len(), report50.fills.len());
+
+    // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: report.equity_curve now surfaces
+    // the multiplier-aware economics curve once multiplier != 1 -- closing the
+    // gap this test originally documented (the underlying mqk_portfolio-driven
+    // curve is still untouched; see `bmw01`'s multiplier=1 equality instead).
+    assert_eq!(report50.equity_curve, engine50.economics_equity_curve().to_vec());
+    assert_ne!(
+        report1.equity_curve, report50.equity_curve,
+        "multiplier=50 must scale reported equity, not reproduce the multiplier=1 curve"
+    );
 
     // Realized P&L: (4,510 - 4,500) * 10 = $100 at multiplier=1; x50 at multiplier=50.
     assert_eq!(engine1.economics_realized_pnl_micros(), 100 * M);
     assert_eq!(engine50.economics_realized_pnl_micros(), 50 * 100 * M);
+    assert_eq!(report50.economics.realized_pnl_micros, 50 * 100 * M);
+    assert_eq!(report50.economics.contract_multiplier, 50);
 
     // Final equity gain (position is flat again after bar 3) scales identically.
     let final_gain1 = engine1.economics_equity_curve().last().unwrap().1 - initial_cash;
     let final_gain50 = engine50.economics_equity_curve().last().unwrap().1 - initial_cash;
     assert_eq!(final_gain1, 100 * M);
     assert_eq!(final_gain50, 50 * 100 * M);
+
+    // Report identity must diverge from the default-equity report once
+    // economics is non-default (multiplier=50 here).
+    assert_ne!(report1.run_id, report50.run_id);
+    assert_eq!(report1.config_id, report50.config_id, "config_id stays config-only (economics is not a BacktestConfig field)");
 }
 
 #[test]
@@ -184,16 +206,27 @@ fn bmw02b_multiplier_100_scales_full_run_outputs() {
         .unwrap();
     let report100 = engine100.run(&bars).unwrap();
 
-    assert_eq!(report1.equity_curve, report100.equity_curve);
     assert_eq!(report1.fills.len(), report100.fills.len());
+
+    // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: same closure as bmw02, at
+    // multiplier=100 instead of 50.
+    assert_eq!(report100.equity_curve, engine100.economics_equity_curve().to_vec());
+    assert_ne!(
+        report1.equity_curve, report100.equity_curve,
+        "multiplier=100 must scale reported equity, not reproduce the multiplier=1 curve"
+    );
 
     assert_eq!(engine1.economics_realized_pnl_micros(), 100 * M);
     assert_eq!(engine100.economics_realized_pnl_micros(), 100 * 100 * M);
+    assert_eq!(report100.economics.realized_pnl_micros, 100 * 100 * M);
+    assert_eq!(report100.economics.contract_multiplier, 100);
 
     let final_gain1 = engine1.economics_equity_curve().last().unwrap().1 - initial_cash;
     let final_gain100 = engine100.economics_equity_curve().last().unwrap().1 - initial_cash;
     assert_eq!(final_gain1, 100 * M);
     assert_eq!(final_gain100, 100 * 100 * M);
+
+    assert_ne!(report1.run_id, report100.run_id);
 }
 
 #[test]
@@ -270,14 +303,29 @@ fn bmw04_economics_metadata_round_trips_truthfully_and_margin_is_inert() {
     engine_bare
         .add_strategy(Box::new(BuyHoldSell::new(10)))
         .unwrap();
-    engine_bare.run(&bars).unwrap();
+    let report_bare = engine_bare.run(&bars).unwrap();
 
     let mut engine_margin =
         BacktestEngine::new(cfg_with_wide_cap()).with_economics(econ_margin.clone());
     engine_margin
         .add_strategy(Box::new(BuyHoldSell::new(10)))
         .unwrap();
-    engine_margin.run(&bars).unwrap();
+    let report_margin = engine_margin.run(&bars).unwrap();
+
+    // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: the report's economics section
+    // round-trips the configured margin metadata truthfully, and never
+    // claims enforcement that does not exist.
+    assert_eq!(report_margin.economics.contract_multiplier, 50);
+    assert_eq!(report_margin.economics.initial_margin_micros, Some(10_000 * M));
+    assert_eq!(
+        report_margin.economics.maintenance_margin_micros,
+        Some(5_000 * M)
+    );
+    assert!(!report_margin.economics.margin_enforced);
+    // Margin-bearing run_id must differ from the bare (margin-free) run_id at
+    // the same multiplier -- margin metadata is identity-relevant even though
+    // it never alters P&L/equity math.
+    assert_ne!(report_bare.run_id, report_margin.run_id);
 
     // Truthful round-trip: the engine reports back exactly what was configured.
     assert_eq!(engine_margin.economics(), &econ_margin);

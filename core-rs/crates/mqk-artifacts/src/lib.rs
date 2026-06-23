@@ -659,6 +659,9 @@ struct BacktestMetrics<'a> {
 
     // --- BACKTEST-CONFIG-DETERMINISM-SIZING-01: strategy sizing ---
     strategy_sizing: SizingSection,
+
+    // --- BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: instrument economics ---
+    economics: EconomicsSection,
 }
 
 /// Strategy sizing configuration as captured in the backtest run.
@@ -670,6 +673,21 @@ struct SizingSection {
     target_qty: i64,
     max_target_qty: Option<i64>,
     max_position_notional_usd: Option<i64>,
+}
+
+/// Instrument economics as captured in the backtest run.
+///
+/// BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: included in metrics.json so artifact
+/// consumers can see truthfully whether (and how) a run used multiplier/margin
+/// economics. Default equity runs (the overwhelming majority today) always
+/// report `contract_multiplier=1`, both margins `null`, and `margin_enforced=false`.
+#[derive(Debug, Clone, Serialize)]
+struct EconomicsSection {
+    contract_multiplier: i64,
+    initial_margin_micros: Option<i64>,
+    maintenance_margin_micros: Option<i64>,
+    realized_pnl_micros: i64,
+    margin_enforced: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,6 +1147,13 @@ pub fn write_backtest_report(
             max_target_qty: report.sizing.max_target_qty,
             max_position_notional_usd: report.sizing.max_position_notional_usd,
         },
+        economics: EconomicsSection {
+            contract_multiplier: report.economics.contract_multiplier,
+            initial_margin_micros: report.economics.initial_margin_micros,
+            maintenance_margin_micros: report.economics.maintenance_margin_micros,
+            realized_pnl_micros: report.economics.realized_pnl_micros,
+            margin_enforced: report.economics.margin_enforced,
+        },
     };
 
     let metrics_path = run_dir.join("metrics.json");
@@ -1214,6 +1239,36 @@ fn build_report_md(
             .map(|v| format!("${}", v))
             .unwrap_or_else(|| "none (no cap)".to_string())
     ));
+    out.push('\n');
+
+    // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: instrument economics section.
+    out.push_str("## Instrument Economics\n\n");
+    out.push_str("| Parameter | Value |\n|---|---|\n");
+    out.push_str(&format!(
+        "| Contract Multiplier | {} |\n",
+        m.economics.contract_multiplier
+    ));
+    out.push_str(&format!(
+        "| Initial Margin | {} |\n",
+        opt_micros(m.economics.initial_margin_micros)
+    ));
+    out.push_str(&format!(
+        "| Maintenance Margin | {} |\n",
+        opt_micros(m.economics.maintenance_margin_micros)
+    ));
+    out.push_str(&format!(
+        "| Economics Realized P&L | {} |\n",
+        micros_to_dollars(m.economics.realized_pnl_micros)
+    ));
+    out.push_str(&format!(
+        "| Margin Enforced | {} |\n",
+        m.economics.margin_enforced
+    ));
+    if m.economics.contract_multiplier == 1 {
+        out.push_str("\n_Equity economics (multiplier=1): equity curve above is the multiplier-aware curve, identical to the standard portfolio curve._\n");
+    } else {
+        out.push_str("\n_Multiplier economics active: the Equity Performance curve above is the multiplier-aware economics curve, not the un-multiplied share-count curve._\n");
+    }
     out.push('\n');
 
     out.push_str("## Equity Performance\n\n");

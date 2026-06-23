@@ -5,6 +5,7 @@ use mqk_portfolio::Fill;
 use uuid::Uuid;
 
 use crate::corporate_actions::CorporateActionPolicy;
+use crate::economics::{BacktestEconomicsReport, BacktestInstrumentEconomics};
 
 // ---------------------------------------------------------------------------
 // Deterministic UUID namespaces (fixed constants — never change post-release)
@@ -696,6 +697,46 @@ pub fn derive_run_id(strategy_name: &str, config_id: &Uuid, input_data_hash: &st
     Uuid::new_v5(&BACKTEST_RUN_NS, data.as_bytes())
 }
 
+/// Derive a deterministic backtest run ID, folding in instrument economics.
+///
+/// BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: extends [`derive_run_id`] so that two
+/// runs with identical strategy/config/input-data identity but different
+/// [`BacktestInstrumentEconomics`] (multiplier or margin) cannot collide on
+/// `run_id`.
+///
+/// When `economics.is_default_equity()` is true (multiplier=1, no margin
+/// scaffold), this returns **exactly** the same UUID as [`derive_run_id`] --
+/// every pre-existing equity backtest's `run_id` is unchanged. Any other
+/// economics value is hashed under a distinct `v3` prefix, which can never
+/// collide with a `v2` (legacy/equity) digest because the version prefix
+/// itself differs.
+pub fn derive_run_id_with_economics(
+    strategy_name: &str,
+    config_id: &Uuid,
+    input_data_hash: &str,
+    economics: &BacktestInstrumentEconomics,
+) -> Uuid {
+    if economics.is_default_equity() {
+        return derive_run_id(strategy_name, config_id, input_data_hash);
+    }
+    let data = format!(
+        "mqk-bkt.run.v3|{}|{}|{}|mult={}|im={}|mm={}",
+        strategy_name,
+        config_id,
+        input_data_hash,
+        economics.contract_multiplier,
+        economics
+            .initial_margin_micros
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        economics
+            .maintenance_margin_micros
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+    );
+    Uuid::new_v5(&BACKTEST_RUN_NS, data.as_bytes())
+}
+
 // ---------------------------------------------------------------------------
 // BacktestReport
 // ---------------------------------------------------------------------------
@@ -757,6 +798,13 @@ pub struct BacktestReport {
     /// artifact writers can surface sizing values in metrics.json and report.md
     /// without needing access to the original config struct.
     pub sizing: StrategySizingConfig,
+    /// BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: truthful instrument economics
+    /// for this run (multiplier, margin scaffold, multiplier-aware realized P&L).
+    ///
+    /// Defaults to [`BacktestEconomicsReport::equity`] for every backtest that
+    /// never calls `BacktestEngine::with_economics` -- multiplier=1, no margin,
+    /// `margin_enforced=false`, identical to today's implicit equity behavior.
+    pub economics: BacktestEconomicsReport,
 }
 
 impl BacktestReport {
@@ -785,6 +833,7 @@ impl BacktestReport {
             first_bar_open_micros: None,
             last_bar_close_micros: None,
             sizing: StrategySizingConfig::default_sizing(),
+            economics: BacktestEconomicsReport::equity(),
         }
     }
 }

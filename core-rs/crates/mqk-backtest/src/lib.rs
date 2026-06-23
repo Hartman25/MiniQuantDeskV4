@@ -25,9 +25,9 @@ pub mod types;
 
 pub use corporate_actions::{CorporateActionPolicy, ForbidEntry}; // Patch B4
 pub use economics::{
-    mark_to_market_value_micros, notional_micros, realized_pnl_micros,
+    mark_to_market_value_micros, notional_micros, realized_pnl_micros, BacktestEconomicsReport,
     BacktestInstrumentEconomics, EconomicsError,
-}; // BACKTEST-MULTIPLIER-MARGIN-01
+}; // BACKTEST-MULTIPLIER-MARGIN-01 / BACKTEST-REPORT-ECONOMICS-ARTIFACT-01
 pub use engine::{BacktestEngine, BacktestError};
 pub use loader::{load_csv_file, parse_csv_bars, LoadError};
 pub use regime::{
@@ -45,7 +45,7 @@ pub use sweep::{
     SweepRowResult, SWEEP_MAX_COMBINATIONS,
 };
 pub use types::{
-    derive_input_data_hash, derive_run_id, BacktestBar, BacktestConfig, BacktestFill,
-    BacktestOrder, BacktestOrderSide, BacktestReport, CommissionModel, OrderStatus,
-    StrategySizingConfig, StressProfile,
+    derive_input_data_hash, derive_run_id, derive_run_id_with_economics, BacktestBar,
+    BacktestConfig, BacktestFill, BacktestOrder, BacktestOrderSide, BacktestReport,
+    CommissionModel, OrderStatus, StrategySizingConfig, StressProfile,
 };
