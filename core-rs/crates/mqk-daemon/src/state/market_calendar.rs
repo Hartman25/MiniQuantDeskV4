@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc, Weekday};
 use mqk_integrity::{nyse_is_early_close_today, utc_to_et_components, CalendarSpec};
 
 use super::session_controller::SessionWindow;
@@ -463,5 +463,249 @@ impl MarketCalendarProvider for ExchangeSourcedCalendarProvider {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ASSET-CORE-05A: Multi-asset session-classification seam (model-only)
+// ---------------------------------------------------------------------------
+//
+// The types and functions below are an ADDITIVE classification seam for
+// representing session concepts across future asset classes (crypto,
+// futures, forex) alongside the existing equity-only `MarketSessionState`.
+//
+// Honesty contract:
+// - This seam does NOT replace `MarketCalendarProvider`, `MarketSessionState`,
+//   or any equity runtime behavior. `NyseWeekdaysProvider`,
+//   `FixedWindowOverrideProvider`, and `ExchangeSourcedCalendarProvider`
+//   above are unchanged and remain the only providers consulted by
+//   `session_controller` / `start_execution_runtime`.
+// - Only `MarketSessionProfile::EquityUsRegular` is backed by real exchange
+//   calendar logic (`CalendarSpec::NyseWeekdays`, hardcoded holiday/early-close
+//   tables). The crypto/futures/forex classifiers below are MODEL ONLY: they
+//   represent the *shape* of session truth for those asset classes (e.g.
+//   "continuous," "weekday vs weekend," "regular vs extended vs overnight")
+//   but do not consult any authoritative exchange or holiday calendar. No
+//   CME holiday table, no FX market-center calendar, and no crypto
+//   exchange-specific downtime is modeled here.
+// - Nothing in this section is called from `session_controller.rs`,
+//   `start_execution_runtime`, or any route. Wiring a new asset class into
+//   the runtime is explicit future work (ASSET-CORE-05B+), not a side
+//   effect of this seam existing.
+
+/// Generic, asset-class-agnostic session kind — ASSET-CORE-05A.
+///
+/// Where [`MarketSessionState`] is equity-specific (NYSE/Nasdaq terminology),
+/// `MarketVenueSessionKind` is the additive generalization that future
+/// asset-class session profiles classify into. Variants are a superset
+/// covering equities, crypto, futures, and forex session shapes.
+///
+/// # Fail-closed contract
+///
+/// [`MarketVenueSessionKind::is_open`] returns `true` only for `Regular` and
+/// `Continuous`. Every other variant — including `Extended`, `Overnight`,
+/// and `Unknown` — returns `false`. This intentionally does NOT assert that
+/// futures `Extended`/`Overnight` sessions are tradable; that policy
+/// decision is out of scope for this model-only seam and is future work
+/// if/when a futures asset class is actually enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarketVenueSessionKind {
+    /// Venue is closed; no trading activity expected.
+    Closed,
+    /// Pre-regular-session period (e.g., equity premarket).
+    PreMarket,
+    /// The venue's primary/regular trading session.
+    Regular,
+    /// Post-regular-session period (e.g., equity after-hours).
+    PostMarket,
+    /// Extended session immediately surrounding regular hours (e.g.,
+    /// futures Globex extended hours).
+    Extended,
+    /// Deep overnight session, outside both regular and extended windows.
+    Overnight,
+    /// No session boundary exists — venue trades continuously (e.g., crypto
+    /// 24/7, forex 24/5 weekdays).
+    Continuous,
+    /// Classification could not be determined. Treated as closed.
+    Unknown,
+}
+
+impl MarketVenueSessionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::PreMarket => "premarket",
+            Self::Regular => "regular",
+            Self::PostMarket => "post_market",
+            Self::Extended => "extended",
+            Self::Overnight => "overnight",
+            Self::Continuous => "continuous",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// `true` only for `Regular` and `Continuous` (fail-closed contract).
+    ///
+    /// `Extended` and `Overnight` deliberately return `false`: this seam
+    /// does not assert futures extended-hours tradability, which is a
+    /// policy decision for a future patch, not this model-only seam.
+    pub fn is_open(self) -> bool {
+        matches!(self, Self::Regular | Self::Continuous)
+    }
+}
+
+impl MarketSessionState {
+    /// Maps the existing equity-only state onto the generic
+    /// [`MarketVenueSessionKind`] model — ASSET-CORE-05A.
+    ///
+    /// Purely additive: does not change `MarketSessionState` itself or any
+    /// caller of `is_in_session()`. `Holiday` and `Closed` both map to
+    /// `Closed`; `EarlyClose` maps to `PostMarket` (the session has already
+    /// ended for the day, same as ordinary after-hours).
+    pub fn to_venue_kind(self) -> MarketVenueSessionKind {
+        match self {
+            Self::RegularOpen => MarketVenueSessionKind::Regular,
+            Self::PreMarket => MarketVenueSessionKind::PreMarket,
+            Self::AfterHours => MarketVenueSessionKind::PostMarket,
+            Self::Closed => MarketVenueSessionKind::Closed,
+            Self::Holiday => MarketVenueSessionKind::Closed,
+            Self::EarlyClose => MarketVenueSessionKind::PostMarket,
+            Self::Unknown => MarketVenueSessionKind::Unknown,
+        }
+    }
+}
+
+/// Named session profile for a future asset class — ASSET-CORE-05A.
+///
+/// Distinct from [`MarketSessionState`] (equity-only) and
+/// [`MarketVenueSessionKind`] (generic kind): a `MarketSessionProfile`
+/// identifies *which* classifier/calendar shape applies to a given asset
+/// class, independent of the specific moment-in-time classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarketSessionProfile {
+    /// US equities regular session — backed by real NYSE calendar logic.
+    EquityUsRegular,
+    /// Crypto 24/7 continuous session — model only.
+    CryptoContinuous,
+    /// Futures Globex-style regular/extended/overnight session — model only.
+    FuturesGlobex,
+    /// Forex 24/5 weekday-continuous session — model only.
+    ForexWeekdayContinuous,
+}
+
+impl MarketSessionProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EquityUsRegular => "equity_us_regular",
+            Self::CryptoContinuous => "crypto_continuous",
+            Self::FuturesGlobex => "futures_globex",
+            Self::ForexWeekdayContinuous => "forex_24x5",
+        }
+    }
+
+    /// Honest implementation-status label for this profile.
+    ///
+    /// `"implemented_current"`: backed by real exchange-calendar logic and
+    /// already used by production session truth (equity only).
+    /// `"model_only"`: classifiable by this seam's pure functions, but not
+    /// backed by any authoritative calendar and not wired into any runtime
+    /// or trading decision.
+    pub fn implementation_status(self) -> &'static str {
+        match self {
+            Self::EquityUsRegular => "implemented_current",
+            Self::CryptoContinuous | Self::FuturesGlobex | Self::ForexWeekdayContinuous => {
+                "model_only"
+            }
+        }
+    }
+}
+
+/// Classify the US equity regular-session profile — ASSET-CORE-05A.
+///
+/// Thin wrapper over [`MarketSessionState::to_venue_kind`] so callers can
+/// classify equity sessions through the same generic shape as the
+/// model-only profiles below. Backed by real exchange-calendar logic via
+/// whichever [`MarketCalendarProvider`] produced `state`.
+pub fn classify_equity_us_regular_session(state: MarketSessionState) -> MarketVenueSessionKind {
+    state.to_venue_kind()
+}
+
+/// Classify the crypto 24/7 continuous session profile — MODEL ONLY
+/// (ASSET-CORE-05A).
+///
+/// Crypto venues have no exchange-calendar concept of a closed day; every
+/// moment is tradable. Takes `_now_utc` for symmetry with the other profile
+/// classifiers even though the result never varies — this makes the
+/// "always continuous" claim explicit and testable rather than implicit.
+/// Not wired into any runtime path; crypto remains disabled.
+pub fn classify_crypto_continuous_session(_now_utc: DateTime<Utc>) -> MarketVenueSessionKind {
+    MarketVenueSessionKind::Continuous
+}
+
+/// Classify the forex 24/5 weekday-continuous session profile — MODEL ONLY
+/// (ASSET-CORE-05A).
+///
+/// Concept-level only: Monday-Friday is `Continuous`, Saturday/Sunday is
+/// `Closed`. Does not model the precise Friday-evening-to-Sunday-evening ET
+/// rollover used by real FX market centers — that refinement is future work
+/// if/when a forex asset class is actually enabled. Not wired into any
+/// runtime path; forex remains disabled.
+pub fn classify_forex_weekday_continuous_session(
+    now_utc: DateTime<Utc>,
+) -> MarketVenueSessionKind {
+    match now_utc.weekday() {
+        Weekday::Sat | Weekday::Sun => MarketVenueSessionKind::Closed,
+        _ => MarketVenueSessionKind::Continuous,
+    }
+}
+
+/// Caller-supplied UTC HH:MM window bounds for the futures Globex-style
+/// classifier — MODEL ONLY (ASSET-CORE-05A).
+///
+/// Reuses [`SessionWindow`] (the same fixed-UTC-window type backing
+/// `FixedWindowOverrideProvider`) for both bounds rather than introducing a
+/// parallel HH:MM representation. `extended` must be a superset of
+/// `regular` for [`classify_futures_globex_session`] to behave sensibly,
+/// but this is not enforced — the caller owns boundary correctness, same as
+/// `FixedWindowOverrideProvider`'s env-sourced window today.
+///
+/// This slice does not hardcode any real CME (or other futures exchange)
+/// product's actual trading schedule, and — because `SessionWindow` cannot
+/// express a window that wraps midnight — cannot represent the real
+/// Sunday-evening-to-Friday-evening Globex rollover. The caller supplies
+/// illustrative or product-specific same-day boundaries. No holiday
+/// calendar is consulted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FuturesSessionWindows {
+    /// Regular trading hours, UTC HH:MM bounds.
+    pub regular: SessionWindow,
+    /// Extended session bounds, UTC HH:MM bounds.
+    pub extended: SessionWindow,
+}
+
+/// Classify the futures Globex-style session profile — MODEL ONLY
+/// (ASSET-CORE-05A).
+///
+/// Distinguishes `Regular` (inside `windows.regular`) from `Extended`
+/// (inside `windows.extended` but outside `regular`) from `Overnight`
+/// (outside both windows) from `Closed` (Saturday, treated as the one day
+/// with no Globex-style activity in this model-only slice — real Globex
+/// Sunday-evening opens are approximated as `Overnight` rather than
+/// asserting a precise open time). No CME holiday calendar is consulted —
+/// full-day closures other than Saturday are not modeled here. Not wired
+/// into any runtime path; futures remain disabled.
+pub fn classify_futures_globex_session(
+    now_utc: DateTime<Utc>,
+    windows: &FuturesSessionWindows,
+) -> MarketVenueSessionKind {
+    if now_utc.weekday() == Weekday::Sat {
+        return MarketVenueSessionKind::Closed;
+    }
+    if windows.regular.is_in_session(now_utc) {
+        MarketVenueSessionKind::Regular
+    } else if windows.extended.is_in_session(now_utc) {
+        MarketVenueSessionKind::Extended
+    } else {
+        MarketVenueSessionKind::Overnight
     }
 }

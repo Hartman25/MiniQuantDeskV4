@@ -1,5 +1,6 @@
 //! # SMART-CALENDAR-SESSION-PROVIDER-01 — Market calendar session provider proof
 //! # NYSE-CALENDAR-EXTENSION-AND-EXCHANGE-PROVIDER-01 — 2027/2028 static table proof
+//! # ASSET-CORE-05A — Multi-asset session-classification seam proof (model-only)
 //!
 //! Proves that:
 //! - DST is handled correctly (EDT vs EST → 13:30 vs 14:30 UTC open)
@@ -11,28 +12,41 @@
 //! - `NyseWeekdaysProvider` and `CalendarSpec::NyseWeekdays.classify_market_session`
 //!   agree on `is_in_session()` (SCSP08 consistency)
 //! - Extended 2027–2028 holiday and early-close dates are correctly classified
+//! - The additive `MarketVenueSessionKind`/`MarketSessionProfile` seam can
+//!   represent equity, crypto, futures, and forex session shapes without
+//!   changing equity runtime behavior, and remains fail-closed on `Unknown`
 //!
 //! All tests are pure in-process.  No DB, no network, no daemon startup.
 //!
-//! | Test    | Claim                                                                        |
-//! |---------|------------------------------------------------------------------------------|
-//! | MCSP01  | July (EDT) trading day: 13:28 UTC premarket, 13:32 UTC regular, 20:01 closed |
-//! | MCSP02  | January (EST) trading day: 14:28 UTC premarket, 14:32 UTC regular, 21:01 AH |
-//! | MCSP03  | Saturday returns Closed (SCSP03)                                             |
-//! | MCSP04  | Known full-day holiday (2026-07-03) returns Holiday (SCSP04)                 |
-//! | MCSP05  | Known early-close day (2024-11-29) closes at 13:00 ET (SCSP05)              |
-//! | MCSP06  | FixedWindowOverrideProvider is labeled "fixed_window_override" (SCSP06)      |
-//! | MCSP07  | MarketSessionTruth::unknown() fails closed (SCSP07)                          |
-//! | MCSP08  | NyseWeekdaysProvider.is_in_session() agrees with CalendarSpec (SCSP08)       |
-//! | NCAL01  | 2027 full-day holiday (Jan 1) returns Holiday                                |
-//! | NCAL02  | 2027 normal trading day (Jan 4) is regular session during session hours       |
-//! | NCAL03  | 2027 day-after-Thanksgiving (Nov 26) closes at 13:00 ET                      |
-//! | NCAL04  | 2028 full-day holiday (Dec 25 Christmas) returns Holiday                     |
-//! | NCAL05  | 2028 day-after-Thanksgiving (Nov 24) closes at 13:00 ET                      |
+//! | Test     | Claim                                                                        |
+//! |----------|------------------------------------------------------------------------------|
+//! | MCSP01   | July (EDT) trading day: 13:28 UTC premarket, 13:32 UTC regular, 20:01 closed |
+//! | MCSP02   | January (EST) trading day: 14:28 UTC premarket, 14:32 UTC regular, 21:01 AH |
+//! | MCSP03   | Saturday returns Closed (SCSP03)                                             |
+//! | MCSP04   | Known full-day holiday (2026-07-03) returns Holiday (SCSP04)                 |
+//! | MCSP05   | Known early-close day (2024-11-29) closes at 13:00 ET (SCSP05)              |
+//! | MCSP06   | FixedWindowOverrideProvider is labeled "fixed_window_override" (SCSP06)      |
+//! | MCSP07   | MarketSessionTruth::unknown() fails closed (SCSP07)                          |
+//! | MCSP08   | NyseWeekdaysProvider.is_in_session() agrees with CalendarSpec (SCSP08)       |
+//! | NCAL01   | 2027 full-day holiday (Jan 1) returns Holiday                                |
+//! | NCAL02   | 2027 normal trading day (Jan 4) is regular session during session hours       |
+//! | NCAL03   | 2027 day-after-Thanksgiving (Nov 26) closes at 13:00 ET                      |
+//! | NCAL04   | 2028 full-day holiday (Dec 25 Christmas) returns Holiday                     |
+//! | NCAL05   | 2028 day-after-Thanksgiving (Nov 24) closes at 13:00 ET                      |
+//! | ACS05A01 | Equity regular-session state maps onto generic `Regular`/open kind          |
+//! | ACS05A02 | Equity outside-window states map onto generic non-open kinds                |
+//! | ACS05A03 | `Unknown` remains fail-closed on the generic `MarketVenueSessionKind` model  |
+//! | ACS05A04 | Crypto continuous profile is open at any time, any weekday                  |
+//! | ACS05A05 | Futures profile distinguishes regular / extended / overnight / closed       |
+//! | ACS05A06 | Forex profile distinguishes weekday-open vs weekend-closed                  |
+//! | ACS05A07 | Only the equity profile is labeled `implemented_current`; rest `model_only` |
 
 use chrono::{TimeZone, Utc};
 use mqk_daemon::state::{
-    FixedWindowOverrideProvider, MarketCalendarProvider, MarketSessionState, MarketSessionTruth,
+    classify_crypto_continuous_session, classify_equity_us_regular_session,
+    classify_forex_weekday_continuous_session, classify_futures_globex_session,
+    FixedWindowOverrideProvider, FuturesSessionWindows, MarketCalendarProvider,
+    MarketSessionProfile, MarketSessionState, MarketSessionTruth, MarketVenueSessionKind,
     NyseWeekdaysProvider, SessionWindow,
 };
 
@@ -569,4 +583,283 @@ fn ncal05_2028_black_friday_early_close_at_13_et() {
         t_after.is_early_close,
         "NCAL05: is_early_close must be true after early close"
     );
+}
+
+// ---------------------------------------------------------------------------
+// ACS05A01 — Equity regular-session state maps onto generic Regular/open kind
+// ---------------------------------------------------------------------------
+
+/// Today's equity regular-session truth (`MarketSessionState::RegularOpen`,
+/// produced by the real `NyseWeekdaysProvider`) must map onto the generic
+/// seam as `MarketVenueSessionKind::Regular`, and that kind must be `is_open`.
+/// This proves the additive seam can represent current equity behavior
+/// without re-deriving it — it only re-labels the existing provider's output.
+#[test]
+fn acs05a01_equity_regular_session_maps_to_generic_regular_open() {
+    let p = provider();
+    // July weekday regular session (reuses MCSP01's known-good timestamp).
+    let truth = p.session_for(ts(2024, 7, 8, 13, 32, 0));
+    assert_eq!(truth.state, MarketSessionState::RegularOpen);
+
+    let kind = truth.state.to_venue_kind();
+    assert_eq!(
+        kind,
+        MarketVenueSessionKind::Regular,
+        "ACS05A01: RegularOpen must map to generic Regular"
+    );
+    assert!(
+        kind.is_open(),
+        "ACS05A01: generic Regular kind must be is_open"
+    );
+
+    // classify_equity_us_regular_session is a thin wrapper; must agree.
+    assert_eq!(
+        classify_equity_us_regular_session(truth.state),
+        MarketVenueSessionKind::Regular,
+        "ACS05A01: classify_equity_us_regular_session must agree with to_venue_kind"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ACS05A02 — Equity outside-window states map onto generic non-open kinds
+// ---------------------------------------------------------------------------
+
+/// Every non-`RegularOpen` equity state must map onto a generic kind that is
+/// NOT `is_open`, preserving the existing fail-closed posture under the new
+/// model. `Holiday` and `Closed` both collapse to generic `Closed`;
+/// `EarlyClose` and `AfterHours` both collapse to generic `PostMarket`
+/// (the trading day's regular session has already ended in both cases).
+#[test]
+fn acs05a02_equity_outside_window_states_map_to_non_open_kinds() {
+    let cases = [
+        (MarketSessionState::PreMarket, MarketVenueSessionKind::PreMarket),
+        (MarketSessionState::AfterHours, MarketVenueSessionKind::PostMarket),
+        (MarketSessionState::Closed, MarketVenueSessionKind::Closed),
+        (MarketSessionState::Holiday, MarketVenueSessionKind::Closed),
+        (MarketSessionState::EarlyClose, MarketVenueSessionKind::PostMarket),
+    ];
+    for (equity_state, expected_kind) in cases {
+        let kind = equity_state.to_venue_kind();
+        assert_eq!(
+            kind, expected_kind,
+            "ACS05A02: {equity_state:?} must map to {expected_kind:?}"
+        );
+        assert!(
+            !kind.is_open(),
+            "ACS05A02: {equity_state:?} -> {kind:?} must not be is_open"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ACS05A03 — Unknown remains fail-closed on the generic model
+// ---------------------------------------------------------------------------
+
+/// `MarketSessionState::Unknown` must map to generic `Unknown`, and generic
+/// `Unknown` must not be `is_open`. Also proves that `is_open()` is `true`
+/// for exactly `Regular` and `Continuous` and `false` for every other
+/// variant — the fail-closed contract for the new model.
+#[test]
+fn acs05a03_unknown_remains_fail_closed_on_generic_model() {
+    assert_eq!(
+        MarketSessionState::Unknown.to_venue_kind(),
+        MarketVenueSessionKind::Unknown,
+        "ACS05A03: equity Unknown must map to generic Unknown"
+    );
+    assert!(
+        !MarketVenueSessionKind::Unknown.is_open(),
+        "ACS05A03: generic Unknown must fail closed (is_open=false)"
+    );
+
+    let open_kinds = [MarketVenueSessionKind::Regular, MarketVenueSessionKind::Continuous];
+    let closed_kinds = [
+        MarketVenueSessionKind::Closed,
+        MarketVenueSessionKind::PreMarket,
+        MarketVenueSessionKind::PostMarket,
+        MarketVenueSessionKind::Extended,
+        MarketVenueSessionKind::Overnight,
+        MarketVenueSessionKind::Unknown,
+    ];
+    for kind in open_kinds {
+        assert!(kind.is_open(), "ACS05A03: {kind:?} must be is_open");
+    }
+    for kind in closed_kinds {
+        assert!(!kind.is_open(), "ACS05A03: {kind:?} must NOT be is_open");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ACS05A04 — Crypto continuous profile is open at any time, any weekday
+// ---------------------------------------------------------------------------
+
+/// Crypto's 24/7 continuous concept must classify as `Continuous` (and thus
+/// `is_open`) at a weekday, a Saturday, a Sunday, midnight UTC, and a
+/// far-future timestamp — there is no time input that produces a closed
+/// result. Model-only: not backed by any real crypto exchange calendar.
+#[test]
+fn acs05a04_crypto_continuous_profile_open_at_any_time() {
+    let probes = [
+        ts(2026, 3, 30, 14, 0, 0),       // Monday, regular-equity-hours-equivalent
+        ts(2026, 3, 28, 3, 0, 0),        // Saturday, 03:00 UTC
+        ts(2026, 3, 29, 23, 59, 0),      // Sunday, 23:59 UTC
+        ts(2026, 7, 3, 0, 0, 0),         // known equity holiday date, midnight UTC
+        Utc.with_ymd_and_hms(9999, 12, 31, 23, 59, 59).unwrap(), // far future
+    ];
+    for probe in probes {
+        let kind = classify_crypto_continuous_session(probe);
+        assert_eq!(
+            kind,
+            MarketVenueSessionKind::Continuous,
+            "ACS05A04: crypto must classify as Continuous at {probe}"
+        );
+        assert!(
+            kind.is_open(),
+            "ACS05A04: crypto Continuous at {probe} must be is_open"
+        );
+    }
+    assert_eq!(
+        MarketSessionProfile::CryptoContinuous.implementation_status(),
+        "model_only"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ACS05A05 — Futures distinguishes regular / extended / overnight / closed
+// ---------------------------------------------------------------------------
+
+/// Using illustrative (non-authoritative) UTC HH:MM bounds, the futures
+/// classifier must produce all four reachable kinds: `Regular` inside the
+/// regular window, `Extended` inside the extended window but outside
+/// regular (both before and after), `Overnight` outside both windows, and
+/// `Closed` on Saturday regardless of time-of-day. No CME calendar is
+/// consulted — these bounds are test fixtures, not real product hours.
+#[test]
+fn acs05a05_futures_distinguishes_regular_extended_overnight_closed() {
+    let windows = FuturesSessionWindows {
+        regular: SessionWindow::parse("14:30", "21:00").expect("regular window must parse"),
+        extended: SessionWindow::parse("12:00", "23:00").expect("extended window must parse"),
+    };
+
+    // Weekday inside regular window (Monday 2026-03-30).
+    let regular = classify_futures_globex_session(ts(2026, 3, 30, 15, 0, 0), &windows);
+    assert_eq!(regular, MarketVenueSessionKind::Regular, "ACS05A05: regular window");
+    assert!(regular.is_open(), "ACS05A05: Regular must be is_open");
+
+    // Weekday inside extended window, before regular opens.
+    let extended_before =
+        classify_futures_globex_session(ts(2026, 3, 30, 12, 30, 0), &windows);
+    assert_eq!(
+        extended_before,
+        MarketVenueSessionKind::Extended,
+        "ACS05A05: extended-before-regular window"
+    );
+    assert!(
+        !extended_before.is_open(),
+        "ACS05A05: Extended must NOT be is_open"
+    );
+
+    // Weekday inside extended window, after regular closes.
+    let extended_after = classify_futures_globex_session(ts(2026, 3, 30, 22, 0, 0), &windows);
+    assert_eq!(
+        extended_after,
+        MarketVenueSessionKind::Extended,
+        "ACS05A05: extended-after-regular window"
+    );
+
+    // Weekday outside both windows entirely (deep overnight).
+    let overnight = classify_futures_globex_session(ts(2026, 3, 30, 2, 0, 0), &windows);
+    assert_eq!(
+        overnight,
+        MarketVenueSessionKind::Overnight,
+        "ACS05A05: outside both windows must be Overnight"
+    );
+    assert!(!overnight.is_open(), "ACS05A05: Overnight must NOT be is_open");
+
+    // Saturday: Closed regardless of time-of-day, even during what would
+    // otherwise be the regular window.
+    let saturday = classify_futures_globex_session(ts(2026, 4, 4, 15, 0, 0), &windows);
+    assert_eq!(
+        saturday,
+        MarketVenueSessionKind::Closed,
+        "ACS05A05: Saturday must be Closed regardless of time-of-day"
+    );
+    assert!(!saturday.is_open(), "ACS05A05: Closed must NOT be is_open");
+
+    assert_eq!(
+        MarketSessionProfile::FuturesGlobex.implementation_status(),
+        "model_only"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ACS05A06 — Forex distinguishes weekday-open vs weekend-closed
+// ---------------------------------------------------------------------------
+
+/// Forex's 24/5 concept: any weekday timestamp classifies as `Continuous`
+/// (and `is_open`); Saturday and Sunday classify as `Closed`. Model-only —
+/// does not encode the precise Friday/Sunday-evening ET rollover.
+#[test]
+fn acs05a06_forex_distinguishes_weekday_open_vs_weekend_closed() {
+    let weekdays = [
+        ts(2026, 3, 30, 0, 0, 0),  // Monday
+        ts(2026, 3, 31, 12, 0, 0), // Tuesday
+        ts(2026, 4, 2, 23, 59, 0), // Thursday
+        ts(2026, 4, 3, 0, 0, 1),   // Friday, just after midnight UTC
+    ];
+    for wd in weekdays {
+        let kind = classify_forex_weekday_continuous_session(wd);
+        assert_eq!(
+            kind,
+            MarketVenueSessionKind::Continuous,
+            "ACS05A06: weekday {wd} must classify as Continuous"
+        );
+        assert!(kind.is_open(), "ACS05A06: weekday {wd} must be is_open");
+    }
+
+    let weekend = [
+        ts(2026, 4, 4, 12, 0, 0), // Saturday
+        ts(2026, 4, 5, 12, 0, 0), // Sunday
+    ];
+    for we in weekend {
+        let kind = classify_forex_weekday_continuous_session(we);
+        assert_eq!(
+            kind,
+            MarketVenueSessionKind::Closed,
+            "ACS05A06: weekend {we} must classify as Closed"
+        );
+        assert!(!kind.is_open(), "ACS05A06: weekend {we} must NOT be is_open");
+    }
+
+    assert_eq!(
+        MarketSessionProfile::ForexWeekdayContinuous.implementation_status(),
+        "model_only"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ACS05A07 — Only equity is implemented_current; rest are model_only
+// ---------------------------------------------------------------------------
+
+/// Honesty check on the profile metadata itself: exactly one profile
+/// (`EquityUsRegular`) claims `implemented_current`; the other three
+/// (crypto, futures, forex) must claim `model_only`. This is the seam's own
+/// "do not claim full authoritative calendars are complete" promise,
+/// expressed as an assertion rather than just a doc comment.
+#[test]
+fn acs05a07_only_equity_profile_is_implemented_current() {
+    assert_eq!(
+        MarketSessionProfile::EquityUsRegular.implementation_status(),
+        "implemented_current"
+    );
+    for model_only_profile in [
+        MarketSessionProfile::CryptoContinuous,
+        MarketSessionProfile::FuturesGlobex,
+        MarketSessionProfile::ForexWeekdayContinuous,
+    ] {
+        assert_eq!(
+            model_only_profile.implementation_status(),
+            "model_only",
+            "ACS05A07: {model_only_profile:?} must be model_only, not implemented_current"
+        );
+    }
 }

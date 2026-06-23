@@ -60,9 +60,12 @@ pub use dry_run_strategy::{
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
 pub use loop_runner::spawn_reconcile_tick;
 pub use market_calendar::{
+    classify_crypto_continuous_session, classify_equity_us_regular_session,
+    classify_forex_weekday_continuous_session, classify_futures_globex_session,
     ExchangeCalendarDay, ExchangeCalendarMeta, ExchangeDayStatus, ExchangeSourceState,
     ExchangeSourcedCalendarProvider, ExchangeUnavailablePolicy, FixedWindowOverrideProvider,
-    MarketCalendarProvider, MarketSessionState, MarketSessionTruth, NyseWeekdaysProvider,
+    FuturesSessionWindows, MarketCalendarProvider, MarketSessionProfile, MarketSessionState,
+    MarketSessionTruth, MarketVenueSessionKind, NyseWeekdaysProvider,
 };
 pub use multi_symbol_config::{
     build_legacy_single_symbol_config, build_legacy_single_symbol_config_from_env,
