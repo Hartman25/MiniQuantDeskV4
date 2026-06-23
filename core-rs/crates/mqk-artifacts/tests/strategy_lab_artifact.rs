@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mqk_backtest::{StrategyLabDecision, StrategyLabReasonCode};
 
@@ -14,12 +14,12 @@ fn temp_artifact_dir(label: &str) -> PathBuf {
     dir
 }
 
-fn write_manifest(dir: &PathBuf, strategy_name: &str) {
+fn write_manifest(dir: &Path, strategy_name: &str) {
     write_manifest_with_metadata(dir, strategy_name, None, None);
 }
 
 fn write_rank_metrics(
-    dir: &PathBuf,
+    dir: &Path,
     strategy_name: &str,
     symbol: &str,
     timeframe: &str,
@@ -53,7 +53,7 @@ fn write_rank_metrics(
 }
 
 fn write_manifest_with_metadata(
-    dir: &PathBuf,
+    dir: &Path,
     strategy_name: &str,
     timeframe: Option<&str>,
     timeframe_secs: Option<i64>,
