@@ -2012,3 +2012,40 @@ PORTFOLIO-LIVE-WEIGHTS-01
 `ASSET-CORE-05` remains `PARTIAL`.
 
 **Recommended next slice:** `ASSET-CORE-05B` — authoritative equity calendar / holiday / early-close provider.
+
+### ASSET-CORE-05B-COMBINED — CLOSED_LOCAL / PARTIAL
+
+**Commit:** single combined local commit, message `"daemon: strengthen equity calendar session profiles"` (code + tests + this ledger/audit update, per this patch's explicit one-commit instruction). Hash intentionally not hardcoded here — this entry is part of that commit's own tree, so it cannot self-reference its own resulting hash; see `git log --oneline -1` in the repo for the exact hash.
+
+**Built (Part A — equity calendar authority audit):**
+- corrected a stale doc-comment on `NyseWeekdaysProvider` (`mqk-daemon/src/state/market_calendar.rs`) that claimed 2023–2026 coverage; the underlying table in `mqk-integrity::calendar` has covered 2023–2028 since `NYSE-CALENDAR-EXTENSION-AND-EXCHANGE-PROVIDER-01` — this was a documentation-only correction, no behavior change
+- audited the existing holiday/early-close table (`core-rs/crates/mqk-integrity/src/calendar.rs`, untouched — out of this patch's file scope): 60 holiday entries (10 named US market holidays × 6 years) and 10 early-close entries (day-after-Thanksgiving every year; Christmas Eve in 2024/2025/2026; Independence Day Eve in 2024) across 2023–2028
+- added `EQCAL01`/`EQCAL02` contract tests to `scenario_market_calendar_session_provider_01.rs`: one known full-day holiday and one known early-close date per covered year (2023–2028), closing a real test-coverage gap — 2023 and 2025 previously had no holiday/early-close-specific assertion in this file. All dates reused verbatim from the existing table; none invented.
+
+**Built (Part B — session-profile resolution seam):**
+- `SessionProfileResolutionTruth` (`Active` / `UnsupportedAssetClass` / `Unknown`) and `SessionProfileResolution` types, plus pure fn `resolve_session_profile_for_instrument_metadata(asset_class: &str, instrument_kind: Option<&str>) -> SessionProfileResolution` in `mqk-daemon/src/state/market_calendar.rs` (ASSET-CORE-05B section, additive to ASSET-CORE-05A)
+- equity (bare or `instrument_kind="etf"`) resolves to `MarketSessionProfile::EquityUsRegular` with `truth_state=Active` (the real, wired profile)
+- crypto / `"future"`/`"futures"` / forex resolve to their ASSET-CORE-05A model-only profiles with `truth_state=UnsupportedAssetClass` — known shape, not wired into any runtime or trading path
+- `"option"`/`"options"` resolve to `UnsupportedAssetClass` with `profile=None` — no options session calendar is invented; documented as likely to inherit the underlying equity session in a future patch
+- unknown and blank/whitespace `asset_class` fail closed to `Unknown` with `profile=None`
+- exported from `mqk-daemon::state` re-exports; 8 new `ACS05B01`–`ACS05B08` tests
+- skipped the optional read-only metadata route exposure (explicitly optional in the mission) to keep file scope minimal — pure helper + tests only
+
+**Validation:**
+- `cargo test -p mqk-daemon --test scenario_market_calendar_session_provider_01` — 30/30 pass (22 pre-existing + 8 new: `EQCAL01`, `EQCAL02`, `ACS05B01`–`ACS05B06` [`ACS05B04`/`06` are table-driven over 2 cases each], `ACS05B07`, `ACS05B08`)
+- `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — 23/23 pass (no regression)
+- `cargo check -p mqk-daemon` — clean
+- `cargo clippy -p mqk-daemon --lib -- -D warnings` — clean
+- `cargo clippy -p mqk-daemon --test scenario_market_calendar_session_provider_01 -- -D warnings` — clean (after factoring a 6-tuple into a named `EarlyCloseCoverageCase` type alias per clippy's `type_complexity` lint)
+
+**Not done:**
+- `mqk-integrity/src/calendar.rs` (the actual holiday/early-close table) was not modified — out of this patch's file scope; Part A is audit/contract-proof + doc correction only, not table expansion
+- no production runtime cutover; `session_controller.rs`'s `AutonomousSessionSchedule::NyseRegularSession` still calls `mqk_integrity::CalendarSpec::NyseWeekdays.classify_market_session` directly and was not touched
+- no per-instrument session routing — `resolve_session_profile_for_instrument_metadata` is not called from any route, gate, or runtime path
+- no DB migration, no daemon smoke, no provider/broker calls, no crypto/futures/forex/options enablement
+
+`ASSET-CORE-05` remains `PARTIAL` pending true per-instrument runtime session routing and authoritative non-equity session providers.
+
+**Audit finding (honesty note, not a defect to fix in this patch):** the `MarketCalendarProvider` trait and its implementors (`NyseWeekdaysProvider`, `FixedWindowOverrideProvider`, `ExchangeSourcedCalendarProvider`) in `mqk-daemon/src/state/market_calendar.rs` are consulted only by their own test files — production runtime gating (`session_controller.rs`) depends directly on `mqk_integrity::CalendarSpec::NyseWeekdays`, not on this trait/seam. Both call sites converge on the same underlying holiday/early-close table in `mqk-integrity`, so there is no truth drift today, but the `MarketCalendarProvider` seam itself remains an unconsumed abstraction in production code.
+
+**Recommended next slice:** wire `resolve_session_profile_for_instrument_metadata` as a read-only diagnostic (e.g., a status route) once a second real consumer exists beyond status reporting — or, if multi-asset trading is actually prioritized next, scope true per-instrument runtime session routing as its own patch with its own proof standard (this is explicitly NOT what ASSET-CORE-05B-COMBINED did).

@@ -159,7 +159,14 @@ pub trait MarketCalendarProvider: Send + Sync {
 /// Delegates all session classification to
 /// `mqk_integrity::CalendarSpec::NyseWeekdays`, which uses
 /// `chrono_tz::America::New_York` for DST-correct conversion and a hardcoded
-/// holiday + early-close table for 2023–2026.
+/// holiday + early-close table bounded to 2023–2028 (ASSET-CORE-05B audit;
+/// previously misdocumented here as 2023–2026 — the underlying table in
+/// `mqk-integrity` has covered 2023–2028 since
+/// NYSE-CALENDAR-EXTENSION-AND-EXCHANGE-PROVIDER-01). Dates outside this
+/// bound are not represented and fall through to ordinary time-of-day
+/// classification rather than failing closed — see `EQCAL01`/`EQCAL02` in
+/// `scenario_market_calendar_session_provider_01.rs` for the exact bounded
+/// coverage this provider can honestly claim.
 ///
 /// Source label: `"nyse_weekdays_heuristic"`.  This is NOT exchange-sourced;
 /// operator surfaces must label it as heuristic (SCSP07 honesty requirement).
@@ -707,5 +714,121 @@ pub fn classify_futures_globex_session(
         MarketVenueSessionKind::Extended
     } else {
         MarketVenueSessionKind::Overnight
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ASSET-CORE-05B: Session-profile resolution seam (instrument metadata, read-only)
+// ---------------------------------------------------------------------------
+//
+// Resolves an instrument's `asset_class` (+ optional `instrument_kind`)
+// string metadata to the [`MarketSessionProfile`] that *would* govern its
+// session truth, using the same canonical asset-class strings already
+// established by `mqk-md` (`instrument_registry.rs` / `instrument_registry_v2.rs`):
+// `"equity"` (with `instrument_kind = Some("etf")` for ETFs — ETFs are not a
+// distinct asset class in this repo), `"crypto"`, `"future"`/`"futures"`,
+// `"forex"`, `"option"`/`"options"`. Matching is exact-case, mirroring
+// `mqk-md::provider_registry::asset_class_from_config`'s existing convention
+// (no case-folding) — every canonical asset_class value written by this
+// repo's registries is already lowercase.
+//
+// Honesty contract:
+// - Pure function: no DB, no config/env var, no network, no wall clock.
+// - Does not make any non-equity asset class tradable. A returned
+//   `MarketSessionProfile` here is metadata classification only — this
+//   function is not called by `session_controller.rs`,
+//   `start_execution_runtime`, any route, or any gate.
+// - Only equity/ETF resolves to `SessionProfileResolutionTruth::Active`
+//   (the real, currently-wired session authority). Crypto/futures/forex
+//   resolve to `UnsupportedAssetClass` carrying their model-only
+//   `MarketSessionProfile` from ASSET-CORE-05A, so callers can see *which*
+//   shape would apply without it being wired up anywhere.
+// - Options resolve to `UnsupportedAssetClass` with `profile: None`: options
+//   have no independent session-profile shape modeled in this seam. They
+//   will likely inherit the underlying equity session in a future patch;
+//   that inheritance is not invented here.
+// - Unknown and blank/whitespace asset classes fail closed to `Unknown`.
+
+/// Resolution outcome for [`resolve_session_profile_for_instrument_metadata`] — ASSET-CORE-05B.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionProfileResolutionTruth {
+    /// `profile` is the real, currently-wired session authority for this metadata.
+    Active,
+    /// `asset_class` is recognized, but its session profile (if any) is
+    /// model-only and not wired into any runtime or trading path.
+    UnsupportedAssetClass,
+    /// `asset_class` could not be classified. Fail-closed: callers must not
+    /// treat this as any particular session shape.
+    Unknown,
+}
+
+/// Pure resolution result returned by
+/// [`resolve_session_profile_for_instrument_metadata`] — ASSET-CORE-05B.
+///
+/// `profile` is `None` whenever no session-profile shape applies (unknown
+/// asset class, or options — see module docs above).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionProfileResolution {
+    pub truth_state: SessionProfileResolutionTruth,
+    pub profile: Option<MarketSessionProfile>,
+    pub reason: &'static str,
+}
+
+/// Resolve `(asset_class, instrument_kind)` instrument metadata to the
+/// session profile that would classify it — ASSET-CORE-05B.
+///
+/// Pure, read-only metadata classification; see the module docs above for
+/// the full honesty contract. Accepts both the singular (`"future"`,
+/// `"option"`) and plural (`"futures"`, `"options"`) spellings used across
+/// this repo's provider/registry layers (`mqk-md::provider_registry` uses
+/// plural; `mqk-md::instrument_registry_v2` uses singular).
+pub fn resolve_session_profile_for_instrument_metadata(
+    asset_class: &str,
+    instrument_kind: Option<&str>,
+) -> SessionProfileResolution {
+    let trimmed = asset_class.trim();
+    if trimmed.is_empty() {
+        return SessionProfileResolution {
+            truth_state: SessionProfileResolutionTruth::Unknown,
+            profile: None,
+            reason: "blank asset_class",
+        };
+    }
+
+    match trimmed {
+        "equity" => SessionProfileResolution {
+            truth_state: SessionProfileResolutionTruth::Active,
+            profile: Some(MarketSessionProfile::EquityUsRegular),
+            reason: if instrument_kind == Some("etf") {
+                "etf trades on the equity regular session"
+            } else {
+                "equity regular session is the real, wired session authority"
+            },
+        },
+        "crypto" => SessionProfileResolution {
+            truth_state: SessionProfileResolutionTruth::UnsupportedAssetClass,
+            profile: Some(MarketSessionProfile::CryptoContinuous),
+            reason: "crypto continuous profile is model-only and not wired into runtime",
+        },
+        "future" | "futures" => SessionProfileResolution {
+            truth_state: SessionProfileResolutionTruth::UnsupportedAssetClass,
+            profile: Some(MarketSessionProfile::FuturesGlobex),
+            reason: "futures globex-style profile is model-only and not wired into runtime",
+        },
+        "forex" => SessionProfileResolution {
+            truth_state: SessionProfileResolutionTruth::UnsupportedAssetClass,
+            profile: Some(MarketSessionProfile::ForexWeekdayContinuous),
+            reason: "forex 24x5 profile is model-only and not wired into runtime",
+        },
+        "option" | "options" => SessionProfileResolution {
+            truth_state: SessionProfileResolutionTruth::UnsupportedAssetClass,
+            profile: None,
+            reason: "options have no modeled session profile in this seam; likely to inherit the underlying equity session in a future patch",
+        },
+        _ => SessionProfileResolution {
+            truth_state: SessionProfileResolutionTruth::Unknown,
+            profile: None,
+            reason: "unrecognized asset_class",
+        },
     }
 }

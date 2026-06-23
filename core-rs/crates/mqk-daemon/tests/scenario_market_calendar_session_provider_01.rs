@@ -1,6 +1,7 @@
 //! # SMART-CALENDAR-SESSION-PROVIDER-01 — Market calendar session provider proof
 //! # NYSE-CALENDAR-EXTENSION-AND-EXCHANGE-PROVIDER-01 — 2027/2028 static table proof
 //! # ASSET-CORE-05A — Multi-asset session-classification seam proof (model-only)
+//! # ASSET-CORE-05B — Equity calendar authority audit + session-profile resolution seam
 //!
 //! Proves that:
 //! - DST is handled correctly (EDT vs EST → 13:30 vs 14:30 UTC open)
@@ -12,9 +13,16 @@
 //! - `NyseWeekdaysProvider` and `CalendarSpec::NyseWeekdays.classify_market_session`
 //!   agree on `is_in_session()` (SCSP08 consistency)
 //! - Extended 2027–2028 holiday and early-close dates are correctly classified
+//! - The bounded 2023–2028 holiday/early-close table coverage is contract-proved
+//!   for every covered year, not just a sample of years (ASSET-CORE-05B Part A)
 //! - The additive `MarketVenueSessionKind`/`MarketSessionProfile` seam can
 //!   represent equity, crypto, futures, and forex session shapes without
 //!   changing equity runtime behavior, and remains fail-closed on `Unknown`
+//! - `resolve_session_profile_for_instrument_metadata` resolves equity/ETF to
+//!   the real wired profile, resolves crypto/futures/forex to their known
+//!   model-only profiles without enabling them, resolves options to an
+//!   explicit no-profile placeholder, and fails closed on unknown/blank
+//!   asset classes (ASSET-CORE-05B Part B)
 //!
 //! All tests are pure in-process.  No DB, no network, no daemon startup.
 //!
@@ -40,14 +48,25 @@
 //! | ACS05A05 | Futures profile distinguishes regular / extended / overnight / closed       |
 //! | ACS05A06 | Forex profile distinguishes weekday-open vs weekend-closed                  |
 //! | ACS05A07 | Only the equity profile is labeled `implemented_current`; rest `model_only` |
+//! | EQCAL01  | Every covered year 2023–2028 has a known full-day holiday classified correctly |
+//! | EQCAL02  | Every covered year 2023–2028 has a known early-close date closing at 13:00 ET |
+//! | ACS05B01 | Equity (bare) resolves to EquityUsRegular, Active                           |
+//! | ACS05B02 | Equity + ETF resolves to EquityUsRegular, Active                            |
+//! | ACS05B03 | Crypto resolves to model-only CryptoContinuous, UnsupportedAssetClass        |
+//! | ACS05B04 | "future"/"futures" resolve to model-only FuturesGlobex, UnsupportedAssetClass|
+//! | ACS05B05 | Forex resolves to model-only ForexWeekdayContinuous, UnsupportedAssetClass   |
+//! | ACS05B06 | "option"/"options" resolve to UnsupportedAssetClass with no invented profile |
+//! | ACS05B07 | Unrecognized asset_class fails closed to Unknown                            |
+//! | ACS05B08 | Blank/whitespace asset_class fails closed to Unknown                        |
 
 use chrono::{TimeZone, Utc};
 use mqk_daemon::state::{
     classify_crypto_continuous_session, classify_equity_us_regular_session,
     classify_forex_weekday_continuous_session, classify_futures_globex_session,
-    FixedWindowOverrideProvider, FuturesSessionWindows, MarketCalendarProvider,
-    MarketSessionProfile, MarketSessionState, MarketSessionTruth, MarketVenueSessionKind,
-    NyseWeekdaysProvider, SessionWindow,
+    resolve_session_profile_for_instrument_metadata, FixedWindowOverrideProvider,
+    FuturesSessionWindows, MarketCalendarProvider, MarketSessionProfile, MarketSessionState,
+    MarketSessionTruth, MarketVenueSessionKind, NyseWeekdaysProvider, SessionProfileResolutionTruth,
+    SessionWindow,
 };
 
 // ---------------------------------------------------------------------------
@@ -861,5 +880,252 @@ fn acs05a07_only_equity_profile_is_implemented_current() {
             "model_only",
             "ACS05A07: {model_only_profile:?} must be model_only, not implemented_current"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EQCAL01 — Bounded coverage contract: every covered year (2023-2028) has at
+// least one known full-day holiday that classifies correctly
+// ---------------------------------------------------------------------------
+
+/// ASSET-CORE-05B (Part A): contract-proves the bounded coverage claim for
+/// the existing NYSE/Nasdaq holiday table consulted by `NyseWeekdaysProvider`
+/// (`mqk_integrity::CalendarSpec::NyseWeekdays`). One known full-day-closure
+/// holiday per covered year, 2023-2028 inclusive — every date below is
+/// already present in the repo's holiday table
+/// (`core-rs/crates/mqk-integrity/src/calendar.rs`); none invented here.
+/// Holiday full-day closure does not depend on time-of-day, so each date is
+/// probed at one representative mid-session UTC hour.
+#[test]
+fn eqcal01_every_covered_year_has_a_known_holiday() {
+    let p = provider();
+    // (year, month, day, label) — one full-day-closure holiday per covered year.
+    let cases: &[(i32, u32, u32, &str)] = &[
+        (2023, 12, 25, "2023 Christmas"),
+        (2024, 11, 28, "2024 Thanksgiving"),
+        (2025, 7, 4, "2025 Independence Day"),
+        (2026, 7, 3, "2026 Independence Day (observed)"),
+        (2027, 1, 1, "2027 New Year's Day"),
+        (2028, 12, 25, "2028 Christmas"),
+    ];
+    for (y, m, d, label) in cases {
+        let t = p.session_for(ts(*y, *m, *d, 16, 0, 0));
+        assert_eq!(
+            t.state,
+            MarketSessionState::Holiday,
+            "EQCAL01: {label} ({y}-{m:02}-{d:02}) must classify as Holiday"
+        );
+        assert!(!t.is_in_session(), "EQCAL01: {label} must not be in-session");
+        assert!(!t.is_trading_day, "EQCAL01: {label} is not a trading day");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EQCAL02 — Bounded coverage contract: every covered year (2023-2028) has at
+// least one known early-close date that closes at the correct ET time
+// ---------------------------------------------------------------------------
+
+/// Companion to EQCAL01: one known early-close date per covered year,
+/// 2023-2028 inclusive — every date and ET close time below is already
+/// present in the repo's early-close table
+/// (`core-rs/crates/mqk-integrity/src/calendar.rs`); none invented here.
+/// Each case checks one minute before vs. one minute after the 13:00 ET
+/// close, in UTC (accounting for EST/EDT per date).
+/// (year, month, day, before_close_utc_hm, after_close_utc_hm, label).
+type EarlyCloseCoverageCase = (i32, u32, u32, (u32, u32), (u32, u32), &'static str);
+
+#[test]
+fn eqcal02_every_covered_year_has_a_known_early_close() {
+    let p = provider();
+    let cases: &[EarlyCloseCoverageCase] = &[
+        (2023, 11, 24, (17, 59), (18, 1), "2023 day-after-Thanksgiving (EST)"),
+        (2024, 7, 3, (16, 59), (17, 1), "2024 Independence Day Eve (EDT)"),
+        (2025, 12, 24, (17, 59), (18, 1), "2025 Christmas Eve (EST)"),
+        (2026, 11, 27, (17, 59), (18, 1), "2026 day-after-Thanksgiving (EST)"),
+        (2027, 11, 26, (17, 59), (18, 1), "2027 day-after-Thanksgiving (EST)"),
+        (2028, 11, 24, (17, 59), (18, 1), "2028 day-after-Thanksgiving (EST)"),
+    ];
+    for (y, m, d, (bh, bm), (ah, am), label) in cases {
+        let before = p.session_for(ts(*y, *m, *d, *bh, *bm, 0));
+        assert_eq!(
+            before.state,
+            MarketSessionState::RegularOpen,
+            "EQCAL02: {label} ({y}-{m:02}-{d:02}) one minute before early close must be RegularOpen"
+        );
+        assert!(
+            before.is_early_close,
+            "EQCAL02: {label} must report is_early_close=true before close"
+        );
+
+        let after = p.session_for(ts(*y, *m, *d, *ah, *am, 0));
+        assert_eq!(
+            after.state,
+            MarketSessionState::EarlyClose,
+            "EQCAL02: {label} one minute after early close must be EarlyClose"
+        );
+        assert!(
+            !after.is_in_session(),
+            "EQCAL02: {label} must not be in-session after early close"
+        );
+        assert!(
+            after.is_early_close,
+            "EQCAL02: {label} must report is_early_close=true after close"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ACS05B01 — Equity (bare) resolves to EquityUsRegular, Active
+// ---------------------------------------------------------------------------
+
+/// Plain equity metadata (no `instrument_kind`) must resolve to the real,
+/// currently-wired equity session profile with `truth_state = Active`.
+#[test]
+fn acs05b01_equity_bare_resolves_to_equity_us_regular_active() {
+    let r = resolve_session_profile_for_instrument_metadata("equity", None);
+    assert_eq!(r.truth_state, SessionProfileResolutionTruth::Active);
+    assert_eq!(r.profile, Some(MarketSessionProfile::EquityUsRegular));
+    assert_eq!(
+        r.profile.unwrap().implementation_status(),
+        "implemented_current",
+        "ACS05B01: equity must resolve to the implemented_current profile"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ACS05B02 — Equity + ETF resolves to EquityUsRegular, Active
+// ---------------------------------------------------------------------------
+
+/// ETF metadata (`asset_class = "equity"`, `instrument_kind = Some("etf")`,
+/// matching `mqk-md`'s convention that ETFs are equities with a kind tag,
+/// not a distinct asset class) must resolve identically to bare equity.
+#[test]
+fn acs05b02_equity_etf_resolves_to_equity_us_regular_active() {
+    let r = resolve_session_profile_for_instrument_metadata("equity", Some("etf"));
+    assert_eq!(r.truth_state, SessionProfileResolutionTruth::Active);
+    assert_eq!(r.profile, Some(MarketSessionProfile::EquityUsRegular));
+}
+
+// ---------------------------------------------------------------------------
+// ACS05B03 — Crypto resolves to a known model-only profile, unsupported
+// ---------------------------------------------------------------------------
+
+/// Crypto metadata must resolve to its model-only profile shape
+/// (`CryptoContinuous`) but with `truth_state = UnsupportedAssetClass` —
+/// known, but not wired/tradable.
+#[test]
+fn acs05b03_crypto_resolves_to_model_only_known_profile_unsupported() {
+    let r = resolve_session_profile_for_instrument_metadata("crypto", None);
+    assert_eq!(
+        r.truth_state,
+        SessionProfileResolutionTruth::UnsupportedAssetClass
+    );
+    assert_eq!(r.profile, Some(MarketSessionProfile::CryptoContinuous));
+    assert_eq!(r.profile.unwrap().implementation_status(), "model_only");
+    assert_ne!(r.truth_state, SessionProfileResolutionTruth::Active);
+}
+
+// ---------------------------------------------------------------------------
+// ACS05B04 — Futures (singular and plural) resolve to a known model-only profile
+// ---------------------------------------------------------------------------
+
+/// Both `"future"` and `"futures"` (both spellings appear across the repo's
+/// provider/registry layers) must resolve identically to the model-only
+/// `FuturesGlobex` profile, unsupported (not wired/tradable).
+#[test]
+fn acs05b04_futures_singular_and_plural_resolve_to_model_only_known_profile() {
+    for asset_class in ["future", "futures"] {
+        let r = resolve_session_profile_for_instrument_metadata(asset_class, None);
+        assert_eq!(
+            r.truth_state,
+            SessionProfileResolutionTruth::UnsupportedAssetClass,
+            "ACS05B04: {asset_class} must be UnsupportedAssetClass"
+        );
+        assert_eq!(r.profile, Some(MarketSessionProfile::FuturesGlobex));
+        assert_eq!(r.profile.unwrap().implementation_status(), "model_only");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ACS05B05 — Forex resolves to a known model-only profile, unsupported
+// ---------------------------------------------------------------------------
+
+/// Forex metadata must resolve to its model-only profile shape
+/// (`ForexWeekdayContinuous`) but with `truth_state = UnsupportedAssetClass`.
+#[test]
+fn acs05b05_forex_resolves_to_model_only_known_profile_unsupported() {
+    let r = resolve_session_profile_for_instrument_metadata("forex", None);
+    assert_eq!(
+        r.truth_state,
+        SessionProfileResolutionTruth::UnsupportedAssetClass
+    );
+    assert_eq!(r.profile, Some(MarketSessionProfile::ForexWeekdayContinuous));
+    assert_eq!(r.profile.unwrap().implementation_status(), "model_only");
+}
+
+// ---------------------------------------------------------------------------
+// ACS05B06 — Options (singular and plural) resolve to unsupported, no profile
+// ---------------------------------------------------------------------------
+
+/// Options have no independent session-profile shape in this seam (see
+/// `market_calendar.rs` module docs — they will likely inherit the
+/// underlying equity session in a future patch). Both `"option"` and
+/// `"options"` must resolve to `UnsupportedAssetClass` with `profile: None`
+/// — explicitly not tradable, and no invented options calendar.
+#[test]
+fn acs05b06_options_singular_and_plural_resolve_to_unsupported_with_no_profile() {
+    for asset_class in ["option", "options"] {
+        let r = resolve_session_profile_for_instrument_metadata(asset_class, None);
+        assert_eq!(
+            r.truth_state,
+            SessionProfileResolutionTruth::UnsupportedAssetClass,
+            "ACS05B06: {asset_class} must be UnsupportedAssetClass"
+        );
+        assert_eq!(
+            r.profile, None,
+            "ACS05B06: {asset_class} must not carry an invented session profile"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ACS05B07 — Unrecognized asset_class fails closed
+// ---------------------------------------------------------------------------
+
+/// Asset classes outside the known set — including case mismatches, since
+/// matching is exact-case per `mqk-md`'s existing convention — must fail
+/// closed to `Unknown` with no profile.
+#[test]
+fn acs05b07_unknown_asset_class_fails_closed() {
+    for asset_class in ["bond", "commodity", "EQUITY", "Crypto", "totally-unrecognized"] {
+        let r = resolve_session_profile_for_instrument_metadata(asset_class, None);
+        assert_eq!(
+            r.truth_state,
+            SessionProfileResolutionTruth::Unknown,
+            "ACS05B07: {asset_class} must fail closed to Unknown"
+        );
+        assert_eq!(
+            r.profile, None,
+            "ACS05B07: {asset_class} must not carry a profile"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ACS05B08 — Blank / whitespace asset_class fails closed
+// ---------------------------------------------------------------------------
+
+/// Empty and whitespace-only `asset_class` values must fail closed to
+/// `Unknown` rather than falling through to any default profile.
+#[test]
+fn acs05b08_blank_or_whitespace_asset_class_fails_closed() {
+    for asset_class in ["", "   ", "\t"] {
+        let r = resolve_session_profile_for_instrument_metadata(asset_class, None);
+        assert_eq!(
+            r.truth_state,
+            SessionProfileResolutionTruth::Unknown,
+            "ACS05B08: blank asset_class must fail closed to Unknown"
+        );
+        assert_eq!(r.profile, None);
     }
 }

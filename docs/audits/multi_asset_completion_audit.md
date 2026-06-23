@@ -507,3 +507,11 @@ Docs/ledger-only maintenance patch. No production code, config, DB, or trading-p
 ASSET-CORE-05A added an additive session-classification seam for equity US regular, crypto continuous, futures regular/extended/overnight, and forex 24x5 concepts. It is model/test-only and does not switch runtime behavior, enable non-equity assets, add DB state, or change trading. `ASSET-CORE-05` remains `PARTIAL` pending authoritative calendar/holiday/early-close and per-instrument session routing work.
 
 **Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-05A` entry (end of §19).
+
+## 22. ASSET-CORE-05B-COMBINED Closure Note (maintenance)
+
+ASSET-CORE-05B-COMBINED strengthened/proved the bounded US equity calendar/holiday/early-close provider and added a pure session-profile resolution seam for future instrument metadata. Current runtime behavior is unchanged; non-equity profiles remain model-only/unwired. `ASSET-CORE-05` remains `PARTIAL` pending true per-instrument session routing and non-equity authoritative session providers.
+
+Part A found the existing bounded table (`mqk-integrity::calendar`, 2023–2028, 60 holiday + 10 early-close entries) already well-covered and did not expand it — expanding it would require dates beyond what the repo already encodes, which this patch's mission forbade inventing. It corrected one stale doc-comment (`NyseWeekdaysProvider` claimed 2023–2026) and added `EQCAL01`/`EQCAL02` contract tests proving one known holiday and one known early-close per covered year, closing a real per-year test-coverage gap (2023 and 2025 had none before this patch). Part A also surfaced — but did not fix, since fixing it would be a runtime behavior change out of scope — that the `MarketCalendarProvider` trait seam in `mqk-daemon` is consulted only by its own tests; production session gating (`session_controller.rs`) calls `mqk_integrity::CalendarSpec::NyseWeekdays` directly. Both paths converge on the same underlying table today, so there is no truth drift, but the daemon-side seam remains an unconsumed abstraction.
+
+**Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-05B-COMBINED` entry (end of §19).
