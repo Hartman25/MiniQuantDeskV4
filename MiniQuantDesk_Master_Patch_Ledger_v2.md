@@ -2192,3 +2192,52 @@ PORTFOLIO-LIVE-WEIGHTS-01
 **Recommended next slice:** either (a) a narrowly-scoped follow-up patch that applies the same `..BacktestReport::test_fixture()` treatment to the seven literals now found in `mqk-promotion/tests/` (mechanical, same pattern, low risk — this is the last remaining `BacktestReport` blocker), after which a `contract_multiplier`/margin field could be added to `BacktestReport` with reasonable confidence, or (b) proceed directly to adding the `BacktestConfig.economics`-equivalent field now that `mqk-backtest`/`mqk-daemon` are de-risked, accepting that `mqk-promotion`'s `BacktestReport` literals would need fixing in the same patch that adds a `BacktestReport` field (not before).
 
 **Full detail, exact test names, and validation commands:** this entry (above) is the full detail; see `git log --oneline -1` in the repo for the exact commit hash.
+
+### BACKTEST-REPORT-FIXTURE-READY-01-COMBINED — CLOSED_LOCAL / PARTIAL
+
+**Commit:** single local commit, message `"test: make promotion backtest report fixtures future-safe"` (test-only diff + this ledger update). Hash intentionally not hardcoded here — this entry is part of that commit's own tree; see `git log --oneline -1` for the exact hash.
+
+**Mission:** close the exact blocker `BACKTEST-ECONOMICS-CONFIG-READY-01` identified directly above — the remaining exhaustive `BacktestReport { .. }` literals in `mqk-promotion/tests/` — by routing them through `BacktestReport::test_fixture()`. Mechanical test-surface cleanup only; no economics field added, no promotion/backtest behavior changed.
+
+**Repo evidence found before writing any code (current HEAD, not the prior entry's count):**
+- The prior entry's count ("seven... across six files", naming five files) does not match current HEAD. Direct `rg`/`grep` enumeration found **nine** exhaustive `BacktestReport { .. }` literals across **six** files: `scenario_golden_artifact_hash_lock.rs` ×1, `scenario_tie_break_correctness.rs` ×1 (not named in the prior entry at all), `scenario_backtest_to_promotion_pipeline.rs` ×1, `scenario_pass_above_threshold.rs` ×1, `scenario_promotion_requires_partial_fill_stress.rs` ×3, `scenario_fail_below_threshold.rs` ×2. Per this repo's audit rules, current repo state overrides the prior doc's claim; the higher count is what was actually fixed.
+- `BacktestReport::test_fixture()` (added by `BACKTEST-ECONOMICS-CONFIG-READY-01`) was confirmed present in `mqk-backtest/src/types.rs` and already reachable from `mqk-promotion/tests` via the existing `use mqk_backtest::{..., BacktestReport}` imports in every affected file — no new import needed.
+- Every one of the nine literals followed the same shape: a handful of meaningful, test-specific fields (`strategy_name`, computed `run_id`/`config_id`/`input_data_hash`, `equity_curve`, and in some cases `fills`/`halted`/`halt_reason` threaded through as function parameters) plus a fixed tail of fields whose literal value was identical to `BacktestReport::test_fixture()`'s default (`halted: false`, `halt_reason: None`, `orders: vec![]`, sometimes `fills: vec![]`, `last_prices: BTreeMap::new()`, `execution_blocked: false`, `first_bar_open_micros: None`, `last_bar_close_micros: None`, `sizing: StrategySizingConfig::default_sizing()`).
+- No literal asserted behavior that depended on a field being absent/defaulted in a way the spread would change — every dropped field's value is byte-identical to the fixture default it now inherits.
+
+**Built:**
+- Rewrote all nine literals (in `scenario_golden_artifact_hash_lock.rs`, `scenario_tie_break_correctness.rs`, `scenario_backtest_to_promotion_pipeline.rs`, `scenario_pass_above_threshold.rs`, `scenario_promotion_requires_partial_fill_stress.rs` ×3, `scenario_fail_below_threshold.rs` ×2) to keep only each test's actually-distinguishing fields plus `..BacktestReport::test_fixture()`. Dropped fields whose literal value matched the fixture default exactly; kept every field whose value was computed, parametrized, or otherwise meaningful to the test.
+- Removed the now-unused `use std::collections::BTreeMap;` import from all six files (its only use in each file was the dropped `last_prices: BTreeMap::new()` field).
+- No new helper functions added; existing per-file helpers (`good_report()`, `report_with_provenance()`, `make_report_with_provenance()`) were edited in place.
+
+**Construction/default pattern used:** same Option B pattern as `BACKTEST-ECONOMICS-CONFIG-READY-01` (functional-update spread against `BacktestReport::test_fixture()`), applied to the six `mqk-promotion/tests` files that patch left untouched by scope.
+
+**Proof existing behavior is unchanged:**
+- `cargo test -p mqk-promotion` — 0 lib tests + 40 integration tests across all 7 test binaries (3 + 2 + 11 + 14 + 1 + 6 + 3), 0 failures. Every test in every file containing a rewritten literal passes unchanged.
+- `cargo check -p mqk-promotion` — clean.
+- `cargo clippy -p mqk-promotion --all-targets -- -D warnings` — clean (no `clippy::needless_update`, confirming every rewritten literal still has at least one field genuinely sourced from the spread).
+- `cargo check -p mqk-backtest` / `cargo test -p mqk-backtest` / `cargo clippy -p mqk-backtest --all-targets -- -D warnings` — all clean (upstream fixture constructor itself untouched by this patch; re-run only to confirm it still resolves correctly from a downstream crate).
+- `mqk-artifacts` was not touched (confirmed via `git diff --name-only`) and its suite was not re-run, per this patch's own instruction to avoid noise.
+
+**Proof no `BacktestReport` fields were added:** `mqk-backtest/src/types.rs` (the struct definition and `test_fixture()` impl) does not appear in `git diff --name-only` for this patch — read-only, as scoped.
+
+**Proof no economics output behavior changed:** zero lines in `mqk-backtest/src/engine.rs` or `mqk-backtest/src/economics.rs` were touched; this patch's diff is entirely contained in `mqk-promotion/tests/*`.
+
+**Proof no promotion logic changed:** `mqk-promotion/src/*` does not appear in `git diff --name-only` — only `mqk-promotion/tests/*` files were edited.
+
+**Proof no artifact/config_id/run_id behavior changed:** every rewritten literal still computes `run_id`/`config_id`/`input_data_hash` via the same `derive_run_id`/`derive_input_data_hash`/`BacktestConfig::test_defaults().config_id()` calls as before, unmodified; `mqk-artifacts/src/lib.rs` was not touched.
+
+**Unrelated/pre-existing findings:** none newly found. The previously-flagged `clippy::ptr_arg` in `mqk-artifacts/tests/strategy_lab_artifact.rs` was already fixed in a separate prior commit (`test: fix strategy lab artifact clippy ptr arg lint`) before this patch started, confirmed via the clean-tree precondition check.
+
+**Not done (explicit):**
+- No `BacktestReport` field added.
+- No `BacktestConfig` field added.
+- No change to `metrics.json` / `manifest.json` / `report.md` output format, `config_id()`, or `run_id` behavior.
+- No promotion scoring/gating/ranker/artifact logic changed.
+- No daemon, CLI, GUI, runtime, broker, DB, or live/paper trading path touched.
+
+`BACKTEST-MULTIPLIER-MARGIN-01` remains `PARTIAL`. This patch closes the last concrete `BacktestReport` construction-safety blocker (`mqk-promotion/tests/`); a `contract_multiplier`/margin field can now be added to `BacktestReport` without breaking any known exhaustive-literal call site in the workspace.
+
+**Recommended next slice:** add the actual economics/margin field to `BacktestReport` (e.g. `contract_multiplier` or equivalent), now that both `mqk-backtest`/`mqk-daemon`/`mqk-artifacts` (via `BACKTEST-ECONOMICS-CONFIG-READY-01`) and `mqk-promotion/tests` (via this patch) are de-risked. That follow-up should re-grep the full workspace for any exhaustive `BacktestReport { .. }` literal once more immediately before adding the field, since this repo's audit rules require verifying current HEAD rather than trusting either ledger entry's literal count.
+
+**Full detail, exact test names, and validation commands:** this entry (above) is the full detail; see `git log --oneline -1` in the repo for the exact commit hash.

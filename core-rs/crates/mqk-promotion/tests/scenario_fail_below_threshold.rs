@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use mqk_backtest::{derive_input_data_hash, derive_run_id, BacktestConfig, BacktestReport};
 use mqk_promotion::{evaluate_promotion, PromotionConfig, PromotionInput};
 
@@ -18,20 +16,12 @@ fn fails_when_below_multiple_thresholds() {
     let input_data_hash = derive_input_data_hash(&[]);
     let run_id = derive_run_id("flat_equity_strategy_v1", &config_id, &input_data_hash);
     let report = BacktestReport {
-        halted: false,
-        halt_reason: None,
         equity_curve: vec![(0, 1_000_000), (day, 1_000_000), (2 * day, 1_000_000)],
         strategy_name: "flat_equity_strategy_v1".to_string(),
         run_id,
         config_id,
         input_data_hash,
-        orders: vec![],
-        fills: vec![],
-        last_prices: BTreeMap::new(),
-        execution_blocked: false,
-        first_bar_open_micros: None,
-        last_bar_close_micros: None,
-        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
+        ..BacktestReport::test_fixture()
     };
 
     let config = PromotionConfig {
@@ -83,8 +73,6 @@ fn fails_with_large_drawdown() {
     let input_data_hash = derive_input_data_hash(&[]);
     let run_id = derive_run_id("large_drawdown_strategy_v1", &config_id, &input_data_hash);
     let report = BacktestReport {
-        halted: false,
-        halt_reason: None,
         equity_curve: vec![
             (0, 1_000_000),
             (month, 600_000), // 40% drawdown
@@ -95,13 +83,7 @@ fn fails_with_large_drawdown() {
         run_id,
         config_id,
         input_data_hash,
-        orders: vec![],
-        fills: vec![],
-        last_prices: BTreeMap::new(),
-        execution_blocked: false,
-        first_bar_open_micros: None,
-        last_bar_close_micros: None,
-        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
+        ..BacktestReport::test_fixture()
     };
 
     let config = PromotionConfig {

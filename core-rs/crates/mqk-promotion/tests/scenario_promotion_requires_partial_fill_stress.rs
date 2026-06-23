@@ -8,8 +8,6 @@
 //! - Profit factor is computed correctly from partial fills.
 //! - No phantom PnL is generated for the uncancelled portion of a partial-fill.
 
-use std::collections::BTreeMap;
-
 use mqk_backtest::{
     derive_input_data_hash, derive_run_id, BacktestConfig, BacktestFill, BacktestReport,
 };
@@ -74,20 +72,13 @@ fn good_report() -> BacktestReport {
         &input_data_hash,
     );
     BacktestReport {
-        halted: false,
-        halt_reason: None,
         equity_curve: good_equity_curve(),
         strategy_name: "stress_suite_test_strategy_v1".to_string(),
         run_id,
         config_id,
         input_data_hash,
-        orders: vec![],
         fills: good_fills(),
-        last_prices: BTreeMap::new(),
-        execution_blocked: false,
-        first_bar_open_micros: None,
-        last_bar_close_micros: None,
-        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
+        ..BacktestReport::test_fixture()
     }
 }
 
@@ -247,20 +238,13 @@ fn partial_fills_profit_factor_computed_correctly() {
     let input_data_hash = derive_input_data_hash(&[]);
     let run_id = derive_run_id("partial_fills_pf_strategy_v1", &config_id, &input_data_hash);
     let report = BacktestReport {
-        halted: false,
-        halt_reason: None,
         equity_curve: vec![(0, 1_000_000_000), (180 * day, 1_100_000_000)],
         strategy_name: "partial_fills_pf_strategy_v1".to_string(),
         run_id,
         config_id,
         input_data_hash,
-        orders: vec![],
         fills,
-        last_prices: BTreeMap::new(),
-        execution_blocked: false,
-        first_bar_open_micros: None,
-        last_bar_close_micros: None,
-        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
+        ..BacktestReport::test_fixture()
     };
 
     let config = PromotionConfig {
@@ -323,20 +307,13 @@ fn cancel_after_partial_fill_no_phantom_pnl() {
         &input_data_hash,
     );
     let report = BacktestReport {
-        halted: false,
-        halt_reason: None,
         equity_curve: vec![(0, 1_000_000_000), (180 * day, 1_100_000_000)],
         strategy_name: "cancel_partial_fill_strategy_v1".to_string(),
         run_id,
         config_id,
         input_data_hash,
-        orders: vec![],
         fills,
-        last_prices: BTreeMap::new(),
-        execution_blocked: false,
-        first_bar_open_micros: None,
-        last_bar_close_micros: None,
-        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
+        ..BacktestReport::test_fixture()
     };
 
     let config = PromotionConfig {

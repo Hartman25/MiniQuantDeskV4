@@ -7,8 +7,6 @@
 //! - An unprofitable backtest report fails promotion with correct reason codes.
 //! - Metrics computed from BacktestReport are consistent with evaluator output.
 
-use std::collections::BTreeMap;
-
 use mqk_backtest::{
     derive_input_data_hash, derive_run_id, BacktestConfig, BacktestFill, BacktestReport,
 };
@@ -51,13 +49,8 @@ fn make_report_with_provenance(
         halted,
         halt_reason,
         equity_curve,
-        orders: vec![],
         fills,
-        last_prices: BTreeMap::new(),
-        execution_blocked: false,
-        first_bar_open_micros: None,
-        last_bar_close_micros: None,
-        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
+        ..BacktestReport::test_fixture()
     }
 }
 

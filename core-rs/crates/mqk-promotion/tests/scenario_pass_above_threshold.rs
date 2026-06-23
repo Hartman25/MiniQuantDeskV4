@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use mqk_backtest::{
     derive_input_data_hash, derive_run_id, BacktestConfig, BacktestFill, BacktestReport,
 };
@@ -61,20 +59,13 @@ fn passes_all_thresholds() {
         &input_data_hash,
     );
     let report = BacktestReport {
-        halted: false,
-        halt_reason: None,
         equity_curve,
         strategy_name: "passes_all_thresholds_strategy".to_string(),
         run_id,
         config_id,
         input_data_hash,
-        orders: vec![],
         fills,
-        last_prices: BTreeMap::new(),
-        execution_blocked: false,
-        first_bar_open_micros: None,
-        last_bar_close_micros: None,
-        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
+        ..BacktestReport::test_fixture()
     };
 
     // Set thresholds that the above data should comfortably clear

@@ -12,7 +12,6 @@
 //! - Malformed manifest JSON is rejected (`ManifestParse`).
 //! - A partial artifact (no audit log events) blocks promotion.
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mqk_audit::AuditWriter;
@@ -95,20 +94,12 @@ fn good_report() -> BacktestReport {
     let input_data_hash = derive_input_data_hash(&[]);
     let run_id = derive_run_id("golden_artifact_strategy_v1", &config_id, &input_data_hash);
     BacktestReport {
-        halted: false,
-        halt_reason: None,
         equity_curve: good_equity_curve(),
         strategy_name: "golden_artifact_strategy_v1".to_string(),
         run_id,
         config_id,
         input_data_hash,
-        orders: vec![],
-        fills: vec![],
-        last_prices: BTreeMap::new(),
-        execution_blocked: false,
-        first_bar_open_micros: None,
-        last_bar_close_micros: None,
-        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
+        ..BacktestReport::test_fixture()
     }
 }
 
