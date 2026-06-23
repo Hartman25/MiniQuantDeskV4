@@ -3633,6 +3633,22 @@ pub struct BacktestEconomicsRequest {
     pub maintenance_margin_micros: Option<i64>,
 }
 
+/// GET /api/v1/backtests/economics-suggestion?symbol=<SYMBOL>
+///
+/// Read-only operator hint for backtest economics. This is not a trading
+/// permission surface and does not make InstrumentRegistryV2 a live/runtime
+/// input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacktestEconomicsSuggestionResponse {
+    pub truth_state: String,
+    pub symbol: String,
+    pub source: String,
+    pub contract_multiplier: Option<i64>,
+    pub initial_margin_micros: Option<i64>,
+    pub maintenance_margin_micros: Option<i64>,
+    pub reason: Option<String>,
+}
+
 fn default_backtest_job_source() -> String {
     "csv".to_string()
 }

@@ -34,8 +34,10 @@ import {
   WATCHLIST_PROMOTION_SCHEMA_VERSION,
 } from "./parsers.ts";
 import {
+  buildBacktestEconomicsRequest,
   buildActiveJob,
   extractArtifactDir,
+  getBacktestEconomicsSuggestion,
   getBacktestJob,
   isTerminalJobStatus,
   normalizeJobStatus,
@@ -58,6 +60,7 @@ import type {
   BacktestMetrics,
   BacktestJobStatusKind,
   BacktestSourceKind,
+  BacktestEconomicsSuggestionResponse,
   EquityCurveRow,
   EvidenceReviewParseResult,
   FileResult,
@@ -417,6 +420,9 @@ function MetricsSection({ m }: { m: BacktestMetrics }) {
     m.total_return_micros > 0 ? "good" : m.total_return_micros < 0 ? "bad" : "neutral";
   const ddTone = m.max_drawdown_pct > 10 ? "bad" : m.max_drawdown_pct > 3 ? "warn" : "neutral";
   const haltTone = m.halted ? "bad" : "neutral";
+  const economics = m.economics ?? null;
+  const economicsValue = (value: number | null | undefined): string =>
+    value == null || Number.isNaN(value) ? "not reported" : String(value);
 
   return (
     <>
@@ -491,6 +497,40 @@ function MetricsSection({ m }: { m: BacktestMetrics }) {
           tone="neutral"
         />
       </div>
+
+      <Panel
+        title="Instrument economics"
+        subtitle="Backtest economics metadata from metrics.json."
+      >
+        {economics ? (
+          <div className="timeline-meta-grid">
+            <div>
+              <span>contract_multiplier</span>
+              <strong>{economicsValue(economics.contract_multiplier)}</strong>
+            </div>
+            <div>
+              <span>initial_margin_micros</span>
+              <strong>{economicsValue(economics.initial_margin_micros)}</strong>
+            </div>
+            <div>
+              <span>maintenance_margin_micros</span>
+              <strong>{economicsValue(economics.maintenance_margin_micros)}</strong>
+            </div>
+            <div>
+              <span>realized_pnl_micros</span>
+              <strong>{economicsValue(economics.realized_pnl_micros)}</strong>
+            </div>
+            <div>
+              <span>margin_enforced</span>
+              <strong>{economics.margin_enforced == null ? "not reported" : economics.margin_enforced ? "true" : "false"}</strong>
+            </div>
+          </div>
+        ) : (
+          <div className="empty-state">
+            Instrument economics not reported in this metrics.json.
+          </div>
+        )}
+      </Panel>
 
       <Panel
         title="Trade statistics"
@@ -2008,6 +2048,9 @@ export function BacktestResultsScreen() {
   const [symbol, setSymbol] = useState("TEST");
   const [timeframeSecs, setTimeframeSecs] = useState("86400");
   const [initialCashMicros, setInitialCashMicros] = useState("100000000000");
+  const [contractMultiplier, setContractMultiplier] = useState("");
+  const [initialMarginMicros, setInitialMarginMicros] = useState("");
+  const [maintenanceMarginMicros, setMaintenanceMarginMicros] = useState("");
   const [outDir, setOutDir] = useState(() => deriveDefaultOutDir());
   // Empty = use daemon's timeframe-aware default (172800 for daily, 120 otherwise).
   const [integrityStaleThresholdTicks, setIntegrityStaleThresholdTicks] = useState("");
@@ -2031,6 +2074,9 @@ export function BacktestResultsScreen() {
   const [jobBundle, setJobBundle] = useState<ArtifactBundle | null>(null);
   const [jobBundleLoading, setJobBundleLoading] = useState(false);
   const [jobBundleError, setJobBundleError] = useState<string | null>(null);
+  const [economicsSuggestionLoading, setEconomicsSuggestionLoading] = useState(false);
+  const [economicsSuggestion, setEconomicsSuggestion] = useState<BacktestEconomicsSuggestionResponse | null>(null);
+  const [economicsSuggestionError, setEconomicsSuggestionError] = useState<string | null>(null);
 
   // Polling: fire when a non-terminal job is active. Bounded cadence: 2s.
   // Cancellation token prevents state updates after unmount or job change.
@@ -2108,6 +2154,32 @@ export function BacktestResultsScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeJob?.jobId]);
 
+  const handleLoadEconomicsSuggestion = useCallback(async () => {
+    setEconomicsSuggestionLoading(true);
+    setEconomicsSuggestion(null);
+    setEconomicsSuggestionError(null);
+
+    const result = await getBacktestEconomicsSuggestion(symbol);
+
+    setEconomicsSuggestionLoading(false);
+
+    if (!result.ok || !result.data) {
+      setEconomicsSuggestionError(result.error ?? "Economics suggestion unavailable.");
+      return;
+    }
+
+    setEconomicsSuggestion(result.data);
+    if (result.data.truth_state === "active" && result.data.contract_multiplier !== null) {
+      setContractMultiplier(String(result.data.contract_multiplier));
+      if (result.data.initial_margin_micros !== null) {
+        setInitialMarginMicros(String(result.data.initial_margin_micros));
+      }
+      if (result.data.maintenance_margin_micros !== null) {
+        setMaintenanceMarginMicros(String(result.data.maintenance_margin_micros));
+      }
+    }
+  }, [symbol]);
+
   const handleSubmitJob = useCallback(async () => {
     const tf = parseInt(timeframeSecs, 10);
     const cash = parseInt(initialCashMicros, 10);
@@ -2120,6 +2192,15 @@ export function BacktestResultsScreen() {
     if (Number.isNaN(cash) || cash <= 0) { setJobSubmitError("initial_cash_micros must be a positive integer."); return; }
     if (staleThreshold !== null && (Number.isNaN(staleThreshold) || staleThreshold <= 0)) {
       setJobSubmitError("Integrity stale threshold must be a positive integer (or leave blank for auto).");
+      return;
+    }
+    const economicsResult = buildBacktestEconomicsRequest({
+      contractMultiplier,
+      initialMarginMicros,
+      maintenanceMarginMicros,
+    });
+    if (!economicsResult.ok) {
+      setJobSubmitError(economicsResult.error);
       return;
     }
 
@@ -2161,6 +2242,9 @@ export function BacktestResultsScreen() {
         end: endDate.trim(),
       };
     }
+    if (economicsResult.economics) {
+      request.economics = economicsResult.economics;
+    }
 
     setJobSubmitting(true);
     setJobSubmitError(null);
@@ -2195,7 +2279,7 @@ export function BacktestResultsScreen() {
       artifactDir: data.artifact_dir ?? null,
       error: null,
     });
-  }, [source, barsPath, strategy, symbol, timeframeSecs, initialCashMicros, outDir, integrityStaleThresholdTicks, startDate, endDate]);
+  }, [source, barsPath, strategy, symbol, timeframeSecs, initialCashMicros, contractMultiplier, initialMarginMicros, maintenanceMarginMicros, outDir, integrityStaleThresholdTicks, startDate, endDate]);
 
   const jobIsActive = activeJob !== null && !isTerminalJobStatus(activeJob.status);
 
@@ -2388,7 +2472,11 @@ export function BacktestResultsScreen() {
               id="bt-symbol"
               type="text"
               value={symbol}
-              onChange={(e) => setSymbol(e.target.value)}
+              onChange={(e) => {
+                setSymbol(e.target.value);
+                setEconomicsSuggestion(null);
+                setEconomicsSuggestionError(null);
+              }}
               spellCheck={false}
               autoComplete="off"
               placeholder="e.g. TEST"
@@ -2428,6 +2516,70 @@ export function BacktestResultsScreen() {
               autoComplete="off"
               placeholder="e.g. 100000000000"
             />
+          </div>
+          <div className="bt-job-field" style={{ gridColumn: "1 / -1" }}>
+            <div className="bt-group-heading" style={{ marginTop: 0 }}>Instrument economics</div>
+            <div className="bt-field-hint" style={{ marginTop: 4, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
+              Leave all fields blank to omit <code>economics</code> from the daemon request.
+            </div>
+          </div>
+          <div className="bt-job-field">
+            <label htmlFor="bt-contract-multiplier">Contract multiplier</label>
+            <input
+              id="bt-contract-multiplier"
+              type="text"
+              value={contractMultiplier}
+              onChange={(e) => setContractMultiplier(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="blank"
+            />
+          </div>
+          <div className="bt-job-field">
+            <label htmlFor="bt-initial-margin">Initial margin micros</label>
+            <input
+              id="bt-initial-margin"
+              type="text"
+              value={initialMarginMicros}
+              onChange={(e) => setInitialMarginMicros(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="blank"
+            />
+          </div>
+          <div className="bt-job-field">
+            <label htmlFor="bt-maintenance-margin">Maintenance margin micros</label>
+            <input
+              id="bt-maintenance-margin"
+              type="text"
+              value={maintenanceMarginMicros}
+              onChange={(e) => setMaintenanceMarginMicros(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="blank"
+            />
+          </div>
+          <div className="bt-job-field" style={{ gridColumn: "1 / -1" }}>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void handleLoadEconomicsSuggestion()}
+              disabled={economicsSuggestionLoading || !symbol.trim()}
+            >
+              {economicsSuggestionLoading ? "Loading registry economics…" : "Load registry economics"}
+            </button>
+            {economicsSuggestion && (
+              <div className="bt-field-hint" style={{ marginTop: 6, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
+                Registry economics: <strong>{economicsSuggestion.truth_state}</strong>
+                {economicsSuggestion.contract_multiplier !== null ? <> · multiplier <code>{economicsSuggestion.contract_multiplier}</code></> : null}
+                {economicsSuggestion.reason ? <> · {economicsSuggestion.reason}</> : null}
+              </div>
+            )}
+            {economicsSuggestionError && (
+              <div className="unavailable-notice unavailable-critical" style={{ marginTop: 8 }}>
+                <strong>Registry economics unavailable:</strong> {economicsSuggestionError}
+              </div>
+            )}
           </div>
           <div className="bt-job-field" style={{ gridColumn: "1 / -1" }}>
             <label htmlFor="bt-out-dir">Output folder</label>

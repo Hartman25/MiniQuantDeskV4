@@ -510,6 +510,29 @@ test("parseMetrics accepts null nullable fields", () => {
   assert.equal(m.profit_factor, null);
 });
 
+test("parseMetrics preserves economics metadata when metrics.json reports it", () => {
+  const m = parseMetrics(JSON.stringify(baseMetrics({
+    economics: {
+      contract_multiplier: 50,
+      initial_margin_micros: 500_000_000,
+      maintenance_margin_micros: 400_000_000,
+      realized_pnl_micros: 125_000_000,
+      margin_enforced: true,
+    },
+  })));
+
+  assert.equal(m.economics?.contract_multiplier, 50);
+  assert.equal(m.economics?.initial_margin_micros, 500_000_000);
+  assert.equal(m.economics?.maintenance_margin_micros, 400_000_000);
+  assert.equal(m.economics?.realized_pnl_micros, 125_000_000);
+  assert.equal(m.economics?.margin_enforced, true);
+});
+
+test("parseMetrics leaves economics undefined for older metrics artifacts", () => {
+  const m = parseMetrics(JSON.stringify(baseMetrics()));
+  assert.equal(m.economics, undefined);
+});
+
 test("parseMetrics throws on missing run_id", () => {
   const json = JSON.stringify({ schema_version: 1, bars: 0 });
   assert.throws(() => parseMetrics(json), /missing run_id/);

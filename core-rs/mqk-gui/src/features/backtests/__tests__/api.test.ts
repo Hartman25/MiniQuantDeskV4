@@ -5,6 +5,7 @@ import {
   isTerminalJobStatus,
   extractArtifactDir,
   buildActiveJob,
+  buildBacktestEconomicsRequest,
 } from "../api.ts";
 import type { BacktestJobRequest, BacktestJobStatusResponse, FileResult } from "../types.ts";
 
@@ -475,4 +476,71 @@ test("DB-GUI-03: BacktestJobRequest with source omitted still type-checks (serve
   };
   assert.equal(req.source, undefined, "omitted source is a valid request shape — daemon defaults to csv");
   assert.equal(req.strategy, "swing_momentum");
+});
+
+// ---------------------------------------------------------------------------
+// BACKTEST-ECONOMICS-GUI-REGISTRY-01-COMBINED — request-shape helpers
+// ---------------------------------------------------------------------------
+
+test("ECON-GUI-01: blank economics fields omit economics from POST body", () => {
+  const result = buildBacktestEconomicsRequest({
+    contractMultiplier: "",
+    initialMarginMicros: "",
+    maintenanceMarginMicros: "",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.ok ? result.economics : undefined, undefined);
+});
+
+test("ECON-GUI-02: multiplier field adds economics.contract_multiplier", () => {
+  const result = buildBacktestEconomicsRequest({
+    contractMultiplier: "50",
+    initialMarginMicros: "",
+    maintenanceMarginMicros: "",
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.ok ? result.economics : undefined, {
+    contract_multiplier: 50,
+  });
+});
+
+test("ECON-GUI-03: margin fields add economics margin metadata without multiplier", () => {
+  const result = buildBacktestEconomicsRequest({
+    contractMultiplier: "",
+    initialMarginMicros: "500000000",
+    maintenanceMarginMicros: "400000000",
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.ok ? result.economics : undefined, {
+    initial_margin_micros: 500_000_000,
+    maintenance_margin_micros: 400_000_000,
+  });
+});
+
+test("ECON-GUI-04: invalid multiplier <= 0 is blocked before submit", () => {
+  const zero = buildBacktestEconomicsRequest({
+    contractMultiplier: "0",
+    initialMarginMicros: "",
+    maintenanceMarginMicros: "",
+  });
+  assert.equal(zero.ok, false);
+  assert.match(zero.ok ? "" : zero.error, /positive integer/);
+
+  const negative = buildBacktestEconomicsRequest({
+    contractMultiplier: "-1",
+    initialMarginMicros: "",
+    maintenanceMarginMicros: "",
+  });
+  assert.equal(negative.ok, false);
+  assert.match(negative.ok ? "" : negative.error, /positive integer/);
+});
+
+test("ECON-GUI-05: non-integer economics fields are rejected", () => {
+  const result = buildBacktestEconomicsRequest({
+    contractMultiplier: "50.5",
+    initialMarginMicros: "",
+    maintenanceMarginMicros: "",
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.ok ? "" : result.error, /integer/);
 });

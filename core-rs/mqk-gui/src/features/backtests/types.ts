@@ -108,6 +108,15 @@ export interface BacktestMetrics {
   sortino_ratio: number | null;
   exposure_bars: number;
   exposure_time_pct: number;
+  economics?: BacktestEconomicsMetadata | null;
+}
+
+export interface BacktestEconomicsMetadata {
+  contract_multiplier?: number | null;
+  initial_margin_micros?: number | null;
+  maintenance_margin_micros?: number | null;
+  realized_pnl_micros?: number | null;
+  margin_enforced?: boolean | null;
 }
 
 export interface EquityCurveRow {
@@ -401,6 +410,24 @@ export interface BacktestJobRequest {
   start?: string | null;
   /** Required when source="md_bars": inclusive range end, RFC3339. Must be >= start. */
   end?: string | null;
+  /** Optional backtest-only instrument economics override. Omit to preserve default equity behavior. */
+  economics?: BacktestEconomicsRequest;
+}
+
+export interface BacktestEconomicsRequest {
+  contract_multiplier?: number;
+  initial_margin_micros?: number;
+  maintenance_margin_micros?: number;
+}
+
+export interface BacktestEconomicsSuggestionResponse {
+  truth_state: string;
+  symbol: string;
+  source: string;
+  contract_multiplier: number | null;
+  initial_margin_micros: number | null;
+  maintenance_margin_micros: number | null;
+  reason: string | null;
 }
 
 export interface BacktestJobAcceptedResponse {

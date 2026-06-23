@@ -17,22 +17,30 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
 use chrono::{DateTime, Utc};
+use mqk_md::instrument_registry_v2::ContractDefinitionV2;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
     api_types::{
-        BacktestEconomicsRequest, BacktestJobAcceptedResponse, BacktestJobRequest,
-        BacktestJobStatusResponse, BacktestJobSummary, BacktestJobsListResponse,
+        BacktestEconomicsRequest, BacktestEconomicsSuggestionResponse, BacktestJobAcceptedResponse,
+        BacktestJobRequest, BacktestJobStatusResponse, BacktestJobSummary,
+        BacktestJobsListResponse,
     },
     backtest_jobs::{BacktestJobRecord, BacktestJobStatus},
     state::AppState,
 };
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct BacktestEconomicsSuggestionQuery {
+    symbol: Option<String>,
+}
 
 // ---------------------------------------------------------------------------
 // POST /api/v1/backtests/jobs
@@ -450,6 +458,129 @@ pub(crate) async fn backtest_job_status(
             }),
         )
             .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/backtests/economics-suggestion?symbol=<SYMBOL>
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn backtest_economics_suggestion(
+    State(st): State<Arc<AppState>>,
+    Query(query): Query<BacktestEconomicsSuggestionQuery>,
+) -> Response {
+    let symbol = query.symbol.unwrap_or_default();
+    let requested_symbol = symbol.trim();
+    if requested_symbol.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(backtest_economics_suggestion_response(
+                "error",
+                requested_symbol,
+                None,
+                Some("symbol is required".to_string()),
+            )),
+        )
+            .into_response();
+    }
+
+    let registry_path = st.instrument_registry_path.clone();
+    if !Path::new(&registry_path).exists() {
+        return Json(backtest_economics_suggestion_response(
+            "registry_unavailable",
+            requested_symbol,
+            None,
+            Some("instrument registry path is unavailable".to_string()),
+        ))
+        .into_response();
+    }
+
+    let v1 = match mqk_md::instrument_registry::load_instrument_registry(Path::new(&registry_path))
+    {
+        Ok(registry) => registry,
+        Err(err) => {
+            return Json(backtest_economics_suggestion_response(
+                "registry_unavailable",
+                requested_symbol,
+                None,
+                Some(format!("v1 registry load failed: {err}")),
+            ))
+            .into_response();
+        }
+    };
+
+    let v2 = mqk_md::instrument_registry_v2::convert_v1_registry_to_v2(&v1);
+    if let Err(err) = mqk_md::instrument_registry_v2::validate_registry_v2(&v2) {
+        return Json(backtest_economics_suggestion_response(
+            "registry_unavailable",
+            requested_symbol,
+            None,
+            Some(format!("v2 registry validation failed: {err}")),
+        ))
+        .into_response();
+    }
+
+    let Some(instrument) = v2
+        .instruments
+        .iter()
+        .find(|inst| inst.symbol.eq_ignore_ascii_case(requested_symbol))
+    else {
+        return Json(backtest_economics_suggestion_response(
+            "not_found",
+            requested_symbol,
+            None,
+            Some("symbol not found in instrument registry".to_string()),
+        ))
+        .into_response();
+    };
+
+    if instrument.asset_class != "equity" {
+        return Json(backtest_economics_suggestion_response(
+            "unsupported",
+            &instrument.symbol,
+            None,
+            Some(
+                "non-equity registry entries are not supported for backtest economics suggestions"
+                    .to_string(),
+            ),
+        ))
+        .into_response();
+    }
+
+    match &instrument.contract {
+        None | Some(ContractDefinitionV2::Equity) | Some(ContractDefinitionV2::Etf) => {
+            Json(backtest_economics_suggestion_response(
+                "active",
+                &instrument.symbol,
+                Some(1),
+                Some("equity_default".to_string()),
+            ))
+            .into_response()
+        }
+        Some(_) => Json(backtest_economics_suggestion_response(
+            "no_contract_economics",
+            &instrument.symbol,
+            None,
+            Some("registry has no supported equity contract economics".to_string()),
+        ))
+        .into_response(),
+    }
+}
+
+fn backtest_economics_suggestion_response(
+    truth_state: &str,
+    symbol: &str,
+    contract_multiplier: Option<i64>,
+    reason: Option<String>,
+) -> BacktestEconomicsSuggestionResponse {
+    BacktestEconomicsSuggestionResponse {
+        truth_state: truth_state.to_string(),
+        symbol: symbol.to_string(),
+        source: "instrument_registry_v2".to_string(),
+        contract_multiplier,
+        initial_margin_micros: None,
+        maintenance_margin_micros: None,
+        reason,
     }
 }
 

@@ -152,7 +152,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use audit_ops::{audit_artifacts, audit_operator_actions, ops_operator_timeline};
     use autonomous_paper_status::autonomous_paper_status;
-    use backtests::{backtest_job_status, backtest_job_submit, backtest_jobs_list};
+    use backtests::{
+        backtest_economics_suggestion, backtest_job_status, backtest_job_submit, backtest_jobs_list,
+    };
     use control_plane::{
         integrity_arm, integrity_disarm, ops_action, ops_catalog, ops_mode_change_guidance,
         run_halt, run_start, run_stop,
@@ -366,6 +368,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // BACKTEST-DAEMON-JOBS-01: read-only backtest job status (public, no auth)
         .route("/api/v1/backtests/jobs", get(backtest_jobs_list))
         .route("/api/v1/backtests/jobs/:job_id", get(backtest_job_status))
+        .route(
+            "/api/v1/backtests/economics-suggestion",
+            get(backtest_economics_suggestion),
+        )
         // DATA-INGEST-DAEMON-JOBS-01: read-only ingest job status (public, no auth)
         .route("/api/v1/ingest/jobs", get(ingest_jobs_list))
         .route("/api/v1/ingest/jobs/:job_id", get(ingest_job_status))
