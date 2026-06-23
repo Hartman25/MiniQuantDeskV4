@@ -2093,3 +2093,54 @@ PORTFOLIO-LIVE-WEIGHTS-01
 `BACKTEST-MULTIPLIER-MARGIN-01` remains `PARTIAL` — this combined patch is the foundation seam only (pure helpers + proof), not engine wiring or asset-class enablement.
 
 **Recommended next slice:** wire `BacktestInstrumentEconomics` into `BacktestEngine` for a single explicitly-flagged synthetic instrument path (e.g. an opt-in per-run economics override defaulting to `equity()`), proven against a full synthetic futures-style backtest run rather than pure-helper unit tests alone — only after that wiring exists does per-instrument multiplier selection (reading `ContractDefinitionV2::multiplier` from the registry) become a meaningful next step.
+
+### BACKTEST-MULTIPLIER-RUN-WIRE-01-COMBINED — CLOSED_LOCAL / PARTIAL
+
+**Commit:** single combined local commit, message `"backtest: wire multiplier economics into run path"` (code + tests + this ledger/audit update). Hash intentionally not hardcoded here — this entry is part of that commit's own tree; see `git log --oneline -1` for the exact hash.
+
+**Repo evidence found before writing any code:**
+- `BacktestEngine::run` calls `mqk_portfolio::apply_fill` (cash + FIFO realized P&L) and `compute_equity_micros`/`compute_exposure_micros` (equity curve, allocation-cap exposure) directly — confirmed still the same functions the live/paper path calls via `mqk-runtime::orchestrator`; no change was made to any of them.
+- The allocation-cap notional check (PATCH 13, in the per-intent loop) computed `qty * fill_price` inline with no multiplier — this is the one place pre-existing engine code computed notional itself rather than delegating to `mqk-portfolio`.
+- `BacktestConfig` looked like a clean place for an optional `economics` field, but one exhaustive struct literal outside this patch's allowed scope — `mqk-daemon/tests/scenario_backtest_jobs_01.rs:690` (every field named, no `..base` spread) — would fail to compile the moment a new field was added. (`mqk-testkit/tests/scenario_corp_act_01.rs` and every in-scope `mqk-backtest/tests/*` literal use `..BacktestConfig::test_defaults()` and would have been fine.)
+- `BacktestReport` has the same problem one level worse: `mqk-artifacts/src/lib.rs`'s own test module exhaustively constructs `BacktestReport { .. }` literals (`test_report_with_orders`, `make_report_no_fills`), and `mqk-artifacts` is not even in this patch's read-only-unless-necessary list.
+- Conclusion: neither config-side nor report-side struct gains a field without an undisclosed out-of-scope edit. Per this patch's own fallback clause ("if no clean config exists, add a minimal constructor or builder method"), economics is wired as an opt-in builder method on `BacktestEngine` instead — `BacktestConfig` and `BacktestReport` are both untouched, byte-for-byte, by this patch.
+
+**Built (all inside `mqk-backtest`):**
+- `BacktestEconomicsLedger` (new, crate-private, in `economics.rs`): a backtest-only shadow ledger that mirrors `mqk_portfolio::accounting::{apply_fill, buy_fifo, sell_fifo}` 1:1 in control flow (same FIFO consumption order, same cash/lot shape), but every notional/P&L term goes through the already-proven `notional_micros`/`realized_pnl_micros`/`mark_to_market_value_micros` helpers instead of raw `qty * price`. Never reads from or writes to `mqk_portfolio::PortfolioState`.
+- `BacktestEngine::with_economics(self, economics: BacktestInstrumentEconomics) -> Self` — opt-in builder, called as `BacktestEngine::new(cfg).with_economics(econ)`. Engines that never call it default to `BacktestInstrumentEconomics::equity()` (multiplier=1), reproducing today's behavior exactly.
+- `BacktestEngine::economics()`, `::economics_equity_curve()`, `::economics_realized_pnl_micros()` — read-only accessors, callable after `run()` returns.
+- `BacktestEngine::validate_economics()` (mirrors the existing `validate_stress_profile()` pattern) + new `BacktestError::InvalidEconomics { multiplier }` variant, checked at the very top of `run()` — before any bar is touched or any `BacktestReport` produced. Defense-in-depth: catches an invalid multiplier even if a caller bypasses the validating `BacktestInstrumentEconomics::new()` constructor via direct struct literal (its fields are public).
+- The PATCH 13 allocation-cap notional check now calls `economics::notional_micros(intent.qty, fill_price, &self.economics)` instead of the old inline `qty * fill_price` clamp. Exactly equal to the old formula at multiplier=1 (proven directly in `economics.rs`'s pre-existing `bmm01` tests); scales correctly above 1.
+- Both fill-application sites (intent fills in the main loop, and risk-halt flatten fills in `flatten_all`) now also call `self.economics_ledger.apply_fill(...)` with the same symbol/side/qty/price/fee passed to the existing `mqk_portfolio::apply_fill` call — `self.portfolio` itself is untouched by the new code.
+- Tests: 5 new ledger-level unit tests in `economics.rs` (`bmw_ledger_*`) + 8 new engine-level scenario tests in `tests/scenario_multiplier_run_wire_01.rs` (`bmw01`, `bmw01b`, `bmw02`, `bmw02b`, `bmw02c`, `bmw03`, `bmw03b`, `bmw04`).
+
+**Multiplier-aware outputs (proven):**
+- Allocation-cap enforcement notional — `bmw02c`: qty=100 @ $100 ($10,000 notional) fits a $20,000 cap at multiplier=1 (fill recorded) but breaches the same $20,000 cap at multiplier=50 for the identical share count (order rejected, zero fills).
+- `BacktestEngine::economics_realized_pnl_micros()` — `bmw02`/`bmw02b`: a 10-share buy@$4,500/sell@$4,510 round trip realizes exactly $100 at multiplier=1, $5,000 at multiplier=50, $10,000 at multiplier=100.
+- `BacktestEngine::economics_equity_curve()` — parallel curve; the final-bar equity gain over initial cash scales identically ($100 / $5,000 / $10,000).
+- `bmw_ledger_matches_portfolio_state_at_multiplier_one` (in `economics.rs`) directly replays the same fills through both `mqk_portfolio::apply_fill`/`compute_equity_micros` and `BacktestEconomicsLedger` and asserts byte-identical cash, realized P&L, and equity at multiplier=1 — the strongest available proof that the new seam is a true superset of existing behavior, not an approximation of it.
+
+**Outputs still multiplier=1 / explicitly unwired:**
+- `BacktestReport.equity_curve` — the field daemon/CLI/`mqk-artifacts` actually read — is still produced by `mqk_portfolio::compute_equity_micros` against the real, un-multiplied `PortfolioState`, unchanged by design (`mqk-portfolio` was not modified). The multiplier-aware curve exists only on the engine object (`engine.economics_equity_curve()`), not on `BacktestReport`.
+- `BacktestReport` gained zero new fields (deliberately, per the repo evidence above), so `metrics.json`/`manifest.json`/`report.md` (written by `mqk-artifacts::write_backtest_report`) do not surface `contract_multiplier` or margin metadata anywhere yet. No artifact reports economics metadata at all — truthfully or otherwise — in this patch.
+- `BacktestConfig::config_id()` / `BacktestReport::run_id` do not encode economics (economics lives on `BacktestEngine` via `with_economics`, not on `BacktestConfig`). Two runs over identical bars/config/strategy but different economics currently produce the **same** `run_id`/`config_id` — a real determinism/identity gap, not just a metadata one.
+- Margin fields remain metadata-only — carried faithfully through `BacktestEngine::economics()` (round-trip proven by `bmw04`) but read by nothing; no enforcement, same status as the parent patch.
+- No daemon route, CLI command, or config/report field was touched, so there is no operator-facing (CLI/GUI) way to run a multiplier-aware backtest yet — only a direct Rust caller using `BacktestEngine::new(cfg).with_economics(econ)` can reach this seam.
+
+**Validation:**
+- `cargo test -p mqk-backtest --test scenario_multiplier_run_wire_01` — 8/8 new engine-level tests pass.
+- `cargo test -p mqk-backtest` — full crate suite (28 lib unit tests + 26 scenario/integration test binaries) passes, zero regressions, including the now-modified `scenario_allocation_cap_enforced.rs` path.
+- `cargo check -p mqk-backtest` — clean.
+- `cargo clippy -p mqk-backtest --all-targets -- -D warnings` — clean.
+- Daemon/CLI checks were intentionally **not** run — neither `BacktestConfig`, `BacktestReport`, nor any daemon/CLI file was touched (see repo evidence above), so per this patch's own instruction ("if no daemon/CLI touched, do not run those just for noise") they would add no signal.
+
+**Not done (explicit):**
+- No `BacktestConfig`/`BacktestReport` field, no daemon route, no CLI command, no `mqk-artifacts` change — economics is reachable only via `BacktestEngine::with_economics` today.
+- No margin enforcement (still `Option<i64>` metadata only, read by nothing).
+- No live/paper portfolio accounting change — `mqk-portfolio` was not modified.
+- No futures/options registry, broker, execution, or DB/migration change; no non-equity asset class enabled.
+- No `run_id`/`config_id` sensitivity to economics.
+
+`BACKTEST-MULTIPLIER-MARGIN-01` remains `PARTIAL` — this patch wires the engine seam and proves full-run multiplier-aware notional/P&L/equity behavior, but the artifact/report/config-identity layer (`metrics.json`, `manifest.json`, `run_id`) is still entirely multiplier=1/unaware, and there is still no CLI/daemon/GUI path to use it.
+
+**Recommended next slice:** thread `with_economics` through to an operator-facing surface — either (a) fix the one out-of-scope exhaustive `BacktestConfig` literal in `mqk-daemon/tests/scenario_backtest_jobs_01.rs` as its own tiny, explicitly-scoped patch so a `BacktestConfig.economics` field becomes safe to add, or (b) add a narrow CLI flag (e.g. `--contract-multiplier`) that calls `.with_economics(...)` directly without touching `BacktestConfig` at all — then fold `contract_multiplier`/margin metadata into `BacktestReport`/`metrics.json`/`manifest.json` and into `config_id()`/`run_id` so replay identity is sensitive to economics.

@@ -32,6 +32,7 @@ use mqk_strategy::{
     StrategyHostError,
 };
 
+use crate::economics::{notional_micros, BacktestEconomicsLedger, BacktestInstrumentEconomics};
 use crate::types::{
     derive_input_data_hash, derive_run_id, BacktestBar, BacktestConfig, BacktestFill,
     BacktestOrder, BacktestOrderSide, BacktestReport, OrderStatus,
@@ -57,6 +58,12 @@ pub enum BacktestError {
         /// The offending value in basis points.
         value_bps: i64,
     },
+    /// BACKTEST-MULTIPLIER-RUN-WIRE-01 -- `contract_multiplier` must be
+    /// strictly positive. Fails closed before any bar is processed or any
+    /// artifact is produced. Defense-in-depth: `BacktestInstrumentEconomics`
+    /// fields are public, so a caller could construct an invalid value
+    /// without going through the validating `::new()` constructor.
+    InvalidEconomics { multiplier: i64 },
 }
 
 impl core::fmt::Display for BacktestError {
@@ -74,6 +81,11 @@ impl core::fmt::Display for BacktestError {
                 "negative slippage rejected: {} = {} bps (must be >= 0; negative values produce favorable fills and are forbidden)",
                 field,
                 value_bps
+            ),
+            BacktestError::InvalidEconomics { multiplier } => write!(
+                f,
+                "invalid economics rejected: contract_multiplier = {} (must be > 0)",
+                multiplier
             ),
         }
     }
@@ -118,6 +130,19 @@ pub struct BacktestEngine {
     first_bar_open_micros: Option<i64>,
     /// Close price of the last complete bar processed (for benchmark computation).
     last_bar_close_micros: Option<i64>,
+    // --- BACKTEST-MULTIPLIER-RUN-WIRE-01: backtest-only economics seam ---
+    /// Economics for this run. Defaults to `BacktestInstrumentEconomics::equity()`
+    /// (multiplier=1), which reproduces today's behavior exactly. Set via
+    /// `with_economics` before `run()`.
+    economics: BacktestInstrumentEconomics,
+    /// Backtest-only shadow ledger tracking multiplier-aware cash/realized-P&L/
+    /// equity in parallel with `self.portfolio`. `self.portfolio` remains the
+    /// unmodified, authoritative `mqk_portfolio::PortfolioState` used for risk
+    /// gating, halts, and `equity_curve`.
+    economics_ledger: BacktestEconomicsLedger,
+    /// Multiplier-aware equity curve, parallel to `equity_curve`. Identical to
+    /// `equity_curve` when `economics.contract_multiplier == 1`.
+    economics_equity_curve: Vec<(i64, i64)>,
 }
 
 impl BacktestEngine {
@@ -147,6 +172,13 @@ impl BacktestEngine {
         };
         let integrity_enabled = config.integrity_enabled;
 
+        // BACKTEST-MULTIPLIER-RUN-WIRE-01: default to equity economics
+        // (multiplier=1) so callers that never use `with_economics` get
+        // exactly today's behavior, byte-for-byte.
+        let economics = BacktestInstrumentEconomics::equity();
+        let economics_ledger =
+            BacktestEconomicsLedger::new(config.initial_cash_micros, economics.clone());
+
         Self {
             config,
             host,
@@ -167,7 +199,42 @@ impl BacktestEngine {
             execution_blocked: false,
             first_bar_open_micros: None,
             last_bar_close_micros: None,
+            economics,
+            economics_ledger,
+            economics_equity_curve: Vec::new(),
         }
+    }
+
+    /// BACKTEST-MULTIPLIER-RUN-WIRE-01: opt into multiplier-aware economics
+    /// for this run. Must be called before `run()`. Does not touch
+    /// `BacktestConfig` -- every existing `BacktestConfig` construction site
+    /// (daemon, CLI, tests) is unaffected by this seam, and callers that
+    /// never call this method get exactly today's equity behavior
+    /// (multiplier=1, unchanged output).
+    pub fn with_economics(mut self, economics: BacktestInstrumentEconomics) -> Self {
+        self.economics_ledger =
+            BacktestEconomicsLedger::new(self.config.initial_cash_micros, economics.clone());
+        self.economics = economics;
+        self
+    }
+
+    /// BACKTEST-MULTIPLIER-RUN-WIRE-01: economics configured for this run.
+    pub fn economics(&self) -> &BacktestInstrumentEconomics {
+        &self.economics
+    }
+
+    /// BACKTEST-MULTIPLIER-RUN-WIRE-01: multiplier-aware equity curve,
+    /// parallel to `BacktestReport::equity_curve`. Identical to it when
+    /// `economics().contract_multiplier == 1`.
+    pub fn economics_equity_curve(&self) -> &[(i64, i64)] {
+        &self.economics_equity_curve
+    }
+
+    /// BACKTEST-MULTIPLIER-RUN-WIRE-01: multiplier-aware realized P&L
+    /// accumulated so far. Identical to `mqk_portfolio`'s realized P&L for
+    /// the same fills when `economics().contract_multiplier == 1`.
+    pub fn economics_realized_pnl_micros(&self) -> i64 {
+        self.economics_ledger.realized_pnl_micros()
     }
 
     /// Register a strategy. Must be called before run().
@@ -214,9 +281,23 @@ impl BacktestEngine {
         Ok(())
     }
 
+    /// BACKTEST-MULTIPLIER-RUN-WIRE-01 -- Validate economics before
+    /// executing any bars. Defense-in-depth alongside
+    /// `BacktestInstrumentEconomics::new`'s own validation, since the
+    /// struct's fields are public and `with_economics` accepts any value.
+    fn validate_economics(&self) -> Result<(), BacktestError> {
+        if self.economics.contract_multiplier <= 0 {
+            return Err(BacktestError::InvalidEconomics {
+                multiplier: self.economics.contract_multiplier,
+            });
+        }
+        Ok(())
+    }
+
     /// Run the backtest on a sequence of bars.
     pub fn run(&mut self, bars: &[BacktestBar]) -> Result<BacktestReport, BacktestError> {
         self.validate_stress_profile()?;
+        self.validate_economics()?;
 
         // BKT-PROV-01: hash the full bar sequence before processing any bars so the
         // run identity encodes the actual input data, not just strategy + config.
@@ -340,6 +421,10 @@ impl BacktestEngine {
                     &self.last_prices,
                 );
                 self.equity_curve.push((bar.end_ts, equity));
+                self.economics_equity_curve.push((
+                    bar.end_ts,
+                    self.economics_ledger.equity_micros(&self.last_prices),
+                ));
                 continue;
             }
 
@@ -351,6 +436,10 @@ impl BacktestEngine {
                     &self.last_prices,
                 );
                 self.equity_curve.push((bar.end_ts, equity));
+                self.economics_equity_curve.push((
+                    bar.end_ts,
+                    self.economics_ledger.equity_micros(&self.last_prices),
+                ));
                 continue;
             }
 
@@ -404,16 +493,12 @@ impl BacktestEngine {
 
                     let fill_price = self.conservative_fill_price(bar, &intent.side);
 
-                    let proposed_notional_micros: i64 = {
-                        let n = (intent.qty as i128) * (fill_price as i128);
-                        if n > i64::MAX as i128 {
-                            i64::MAX
-                        } else if n < 0 {
-                            0
-                        } else {
-                            n as i64
-                        }
-                    };
+                    // BACKTEST-MULTIPLIER-RUN-WIRE-01: multiplier-aware
+                    // notional. With `economics.contract_multiplier == 1`
+                    // this is exactly `qty * fill_price` (the prior inline
+                    // formula), unchanged for every existing equity backtest.
+                    let proposed_notional_micros: i64 =
+                        notional_micros(intent.qty, fill_price, &self.economics);
 
                     if enforce_allocation_cap_micros(
                         equity,
@@ -462,6 +547,11 @@ impl BacktestEngine {
                         let inner =
                             Fill::new(intent.symbol.clone(), pf_side, intent.qty, fill_price, fee);
                         apply_fill(&mut self.portfolio, &inner);
+                        // BACKTEST-MULTIPLIER-RUN-WIRE-01: parallel
+                        // multiplier-aware shadow ledger update. Never reads
+                        // from or mutates `self.portfolio`.
+                        self.economics_ledger
+                            .apply_fill(&intent.symbol, is_buy, intent.qty, fill_price, fee);
                         self.fills.push(BacktestFill {
                             fill_id,
                             order_id,
@@ -526,6 +616,10 @@ impl BacktestEngine {
                 &self.last_prices,
             );
             self.equity_curve.push((bar.end_ts, equity));
+            self.economics_equity_curve.push((
+                bar.end_ts,
+                self.economics_ledger.equity_micros(&self.last_prices),
+            ));
         }
 
         // BKT-PROV-01: strategy identity — derive from spec if registered.
@@ -650,6 +744,15 @@ impl BacktestEngine {
             let fee = self.config.commission.compute_fee(abs_qty, mark);
             let inner = Fill::new(sym.clone(), pf_side, abs_qty, mark, fee);
             apply_fill(&mut self.portfolio, &inner);
+            // BACKTEST-MULTIPLIER-RUN-WIRE-01: parallel multiplier-aware
+            // shadow ledger update, mirroring the intent-fill call site.
+            self.economics_ledger.apply_fill(
+                &sym,
+                matches!(pf_side, PfSide::Buy),
+                abs_qty,
+                mark,
+                fee,
+            );
             self.fills.push(BacktestFill {
                 fill_id,
                 order_id,
