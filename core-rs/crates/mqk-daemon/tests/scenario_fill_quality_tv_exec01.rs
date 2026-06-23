@@ -447,6 +447,21 @@ async fn fq05_read_surface_returns_active_truth_with_exact_rows() {
         .await
         .expect("FQ-05: arm_run must succeed");
 
+    // current_status_snapshot() resolves active_run_id via
+    // fetch_latest_run_for_engine("mqk-daemon", "PAPER") — the single latest
+    // run row for that (engine_id, mode) pair by started_at_utc, not anything
+    // scoped to this test's run_id. seed_run()'s fixed 2020-01-01 fixture
+    // timestamp would otherwise lose that lookup to any other mqk-daemon/PAPER
+    // run created later (a real daemon/CLI session, or this shared DB's
+    // history) — bump it to "now" so this run is unambiguously the latest at
+    // the moment of the route call below.
+    sqlx::query("update runs set started_at_utc = $2 where run_id = $1")
+        .bind(run_id)
+        .bind(Utc::now())
+        .execute(&pool)
+        .await
+        .expect("FQ-05: bump started_at_utc must succeed");
+
     // Build daemon state with DB.
     let st = AppState::new_with_db_and_operator_auth(
         pool.clone(),
