@@ -266,6 +266,12 @@
       "path": "0042_md_bars_provider_metadata.sql",
       "status": "applied",
       "intent": "DATA-PROVIDER-MD-SOURCE-METADATA-01: add provider/source provenance metadata to canonical md_bars without changing the existing (symbol, timeframe, end_ts) primary key. Existing rows backfill provider_id='unknown'."
+    },
+    {
+      "id": "0043",
+      "path": "0043_strategy_signal_evaluations.sql",
+      "status": "applied",
+      "intent": "AUTON-NO-SIGNAL-OBS-01: add strategy_signal_evaluations durable journal table so a market-hours autonomous run that evaluates real bars but produces no order leaves durable evidence after daemon restart. Nullable run_id, no FK; observability only, not part of the outbox/inbox/run lifecycle chain."
     }
   ]
 }

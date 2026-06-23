@@ -1,8 +1,9 @@
 //! Execution route handlers.
 //!
 //! Contains: execution_summary, execution_orders, execution_order_submit,
-//! execution_order_cancel, execution_fill_quality, ValidatedManualOrderSubmit,
-//! validate_manual_order_submit, validate_manual_order_cancel, parse_integer_field,
+//! execution_order_cancel, execution_fill_quality, execution_signal_evaluations,
+//! ValidatedManualOrderSubmit, validate_manual_order_submit,
+//! validate_manual_order_cancel, parse_integer_field,
 //! manual_order_submit_response, manual_order_cancel_response.
 
 use std::sync::Arc;
@@ -17,7 +18,8 @@ use axum::{
 use crate::api_types::{
     ExecutionOrderRow, ExecutionSummaryResponse, FillQualityTelemetryResponse,
     FillQualityTelemetryRow, ManualOrderCancelRequest, ManualOrderCancelResponse,
-    ManualOrderSubmitRequest, ManualOrderSubmitResponse,
+    ManualOrderSubmitRequest, ManualOrderSubmitResponse, SignalEvaluationRow,
+    SignalEvaluationsResponse,
 };
 use crate::state::AppState;
 
@@ -723,6 +725,89 @@ pub(crate) async fn execution_fill_quality(State(st): State<Arc<AppState>>) -> i
             canonical_route: CANONICAL.to_string(),
             truth_state: "active".to_string(),
             backend: "postgres.fill_quality_telemetry".to_string(),
+            rows: api_rows,
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/execution/signal-evaluations
+// ---------------------------------------------------------------------------
+
+/// AUTON-NO-SIGNAL-OBS-01: read-only recent strategy signal-evaluation journal.
+///
+/// Unlike `execution_fill_quality`, this is deliberately NOT scoped to the
+/// active run — the operator must be able to inspect a no-signal evaluation
+/// that was recorded before a daemon restart, even if no run is currently
+/// active.
+pub(crate) async fn execution_signal_evaluations(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    const CANONICAL: &str = "/api/v1/execution/signal-evaluations";
+
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(SignalEvaluationsResponse {
+                canonical_route: CANONICAL.to_string(),
+                truth_state: "db_unavailable".to_string(),
+                backend: "unavailable".to_string(),
+                rows: vec![],
+            }),
+        )
+            .into_response();
+    };
+
+    let rows = match mqk_db::fetch_recent_strategy_signal_evaluations(db, 100).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "auton_no_signal_obs_01: signal_evaluations_fetch_failed"
+            );
+            return (
+                StatusCode::OK,
+                Json(SignalEvaluationsResponse {
+                    canonical_route: CANONICAL.to_string(),
+                    truth_state: "query_failed".to_string(),
+                    backend: "postgres.strategy_signal_evaluations".to_string(),
+                    rows: vec![],
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let truth_state = if rows.is_empty() { "no_rows" } else { "active" };
+    let api_rows: Vec<SignalEvaluationRow> = rows
+        .into_iter()
+        .map(|r| SignalEvaluationRow {
+            evaluation_id: r.evaluation_id,
+            ts_utc: r.ts_utc.to_rfc3339(),
+            run_id: r.run_id,
+            strategy_id: r.strategy_id,
+            symbol: r.symbol,
+            timeframe: r.timeframe,
+            bar_context_source: r.bar_context_source,
+            bars_loaded: r.bars_loaded,
+            latest_bar_ts_utc: r.latest_bar_ts_utc.map(|t| t.to_rfc3339()),
+            signal_generated: r.signal_generated,
+            signal_qty: r.signal_qty,
+            signal_side: r.signal_side,
+            reason_code: r.reason_code,
+            reason: r.reason,
+            decision_stage: r.decision_stage,
+            source: r.source,
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(SignalEvaluationsResponse {
+            canonical_route: CANONICAL.to_string(),
+            truth_state: truth_state.to_string(),
+            backend: "postgres.strategy_signal_evaluations".to_string(),
             rows: api_rows,
         }),
     )

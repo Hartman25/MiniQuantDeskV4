@@ -2764,6 +2764,62 @@ pub struct FillQualityTelemetryResponse {
 }
 
 // ---------------------------------------------------------------------------
+// AUTON-NO-SIGNAL-OBS-01: strategy signal-evaluation journal response types
+// ---------------------------------------------------------------------------
+
+/// One row in the strategy signal-evaluation journal response.
+///
+/// A no-signal row (`signal_generated = false`) is informational, not an
+/// error — it never implies an `oms_outbox`/order/fill row exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalEvaluationRow {
+    pub evaluation_id: Uuid,
+    pub ts_utc: String,
+    /// `None` when no run was active at evaluation time.
+    pub run_id: Option<Uuid>,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe: String,
+    /// `"db_loaded"`, `"no_bars_available"`, or `"stale_bars"`.
+    pub bar_context_source: String,
+    pub bars_loaded: i64,
+    /// `None` only when no completed bars exist at all.
+    pub latest_bar_ts_utc: Option<String>,
+    pub signal_generated: bool,
+    /// Signed sum of strategy target quantities. `None` when `on_bar` never ran.
+    pub signal_qty: Option<i64>,
+    /// `"buy"` / `"sell"`; `None` when `signal_qty` is `None` or zero.
+    pub signal_side: Option<String>,
+    pub reason_code: String,
+    pub reason: String,
+    /// `"pre_dispatch_gate"` or `"strategy_evaluated"`.
+    pub decision_stage: String,
+    pub source: String,
+}
+
+/// Response wrapper for `GET /api/v1/execution/signal-evaluations`.
+///
+/// Deliberately not scoped to the active run (unlike `execution_fill_quality`):
+/// the operator must be able to inspect a no-signal evaluation recorded
+/// before a daemon restart, even when no run is currently active.
+///
+/// `truth_state`:
+/// - `"active"` — DB pool present and at least one row exists; `rows` is authoritative.
+/// - `"no_rows"` — DB pool present but no evaluation has been recorded yet.
+/// - `"db_unavailable"` — no DB pool configured; `rows` is empty and not authoritative.
+/// - `"query_failed"` — DB pool present but the query itself failed; `rows` is empty.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalEvaluationsResponse {
+    pub canonical_route: String,
+    /// See truth_state variants above.
+    pub truth_state: String,
+    /// `"postgres.strategy_signal_evaluations"` when DB-backed; `"unavailable"` otherwise.
+    pub backend: String,
+    /// Most recent evaluations across all runs/symbols, newest first. At most 100 rows.
+    pub rows: Vec<SignalEvaluationRow>,
+}
+
+// ---------------------------------------------------------------------------
 // TV-01B: Runtime artifact intake contract
 // ---------------------------------------------------------------------------
 

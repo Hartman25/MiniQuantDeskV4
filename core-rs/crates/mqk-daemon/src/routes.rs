@@ -159,7 +159,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use execution::{
         execution_fill_quality, execution_order_cancel, execution_order_submit, execution_orders,
-        execution_summary,
+        execution_signal_evaluations, execution_summary,
     };
     use execution_flow::execution_flow;
     use execution_order_analysis::{
@@ -232,6 +232,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/execution/fill-quality",
             get(execution_fill_quality),
+        )
+        .route(
+            "/api/v1/execution/signal-evaluations",
+            get(execution_signal_evaluations),
         )
         .route(
             "/api/v1/execution/orders/:order_id/timeline",

@@ -328,3 +328,157 @@ pub async fn fetch_strategy_suppressions(pool: &PgPool) -> Result<Vec<StrategySu
     }
     Ok(out)
 }
+
+// ---------------------------------------------------------------------------
+// AUTON-NO-SIGNAL-OBS-01: Durable strategy signal-evaluation journal
+// (strategy_signal_evaluations)
+// ---------------------------------------------------------------------------
+
+/// One row from `strategy_signal_evaluations`.
+#[derive(Debug, Clone)]
+pub struct StrategySignalEvaluationRecord {
+    /// Deterministic UUIDv5; caller-derived, never `Uuid::new_v4()`.
+    pub evaluation_id: Uuid,
+    pub ts_utc: DateTime<Utc>,
+    /// `None` when no run was active at evaluation time (observability only —
+    /// not part of the outbox/inbox/run lifecycle chain).
+    pub run_id: Option<Uuid>,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe: String,
+    /// `"db_loaded"`, `"no_bars_available"`, or `"stale_bars"`.
+    pub bar_context_source: String,
+    /// Number of completed `md_bars` rows loaded for this attempt. `0` when
+    /// `bar_context_source = "no_bars_available"`.
+    pub bars_loaded: i64,
+    /// `None` only when no completed bars exist at all.
+    pub latest_bar_ts_utc: Option<DateTime<Utc>>,
+    /// `false` means the strategy's targets summed to zero (or `on_bar` never
+    /// ran because a pre-dispatch gate refused first) — informational, not an
+    /// error.
+    pub signal_generated: bool,
+    /// Signed sum of strategy target quantities. `None` when `on_bar` never ran.
+    pub signal_qty: Option<i64>,
+    /// `"buy"` / `"sell"` derived from the sign of `signal_qty`; `None` when
+    /// `signal_qty` is `None` or zero.
+    pub signal_side: Option<String>,
+    pub reason_code: String,
+    pub reason: String,
+    /// `"pre_dispatch_gate"` or `"strategy_evaluated"`.
+    pub decision_stage: String,
+    pub source: String,
+}
+
+/// Arguments for inserting a new strategy signal-evaluation row.
+#[derive(Debug, Clone)]
+pub struct InsertStrategySignalEvaluationArgs {
+    pub evaluation_id: Uuid,
+    pub ts_utc: DateTime<Utc>,
+    pub run_id: Option<Uuid>,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe: String,
+    pub bar_context_source: String,
+    pub bars_loaded: i64,
+    pub latest_bar_ts_utc: Option<DateTime<Utc>>,
+    pub signal_generated: bool,
+    pub signal_qty: Option<i64>,
+    pub signal_side: Option<String>,
+    pub reason_code: String,
+    pub reason: String,
+    pub decision_stage: String,
+    pub source: String,
+}
+
+/// Persist a single strategy signal-evaluation row.
+///
+/// Idempotent via `ON CONFLICT (evaluation_id) DO NOTHING` — a duplicate
+/// write attempt for the same logical tick (same deterministic
+/// `evaluation_id`) can never produce a second row. Never writes to, reads
+/// from, or otherwise touches `oms_outbox`/`oms_inbox`/`runs`.
+pub async fn insert_strategy_signal_evaluation(
+    pool: &PgPool,
+    args: &InsertStrategySignalEvaluationArgs,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into strategy_signal_evaluations (
+            evaluation_id, ts_utc, run_id, strategy_id, symbol, timeframe,
+            bar_context_source, bars_loaded, latest_bar_ts_utc,
+            signal_generated, signal_qty, signal_side,
+            reason_code, reason, decision_stage, source
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+        on conflict (evaluation_id) do nothing
+        "#,
+    )
+    .bind(args.evaluation_id)
+    .bind(args.ts_utc)
+    .bind(args.run_id)
+    .bind(&args.strategy_id)
+    .bind(&args.symbol)
+    .bind(&args.timeframe)
+    .bind(&args.bar_context_source)
+    .bind(args.bars_loaded)
+    .bind(args.latest_bar_ts_utc)
+    .bind(args.signal_generated)
+    .bind(args.signal_qty)
+    .bind(&args.signal_side)
+    .bind(&args.reason_code)
+    .bind(&args.reason)
+    .bind(&args.decision_stage)
+    .bind(&args.source)
+    .execute(pool)
+    .await
+    .context("insert_strategy_signal_evaluation failed")?;
+    Ok(())
+}
+
+/// Fetch the most recent `limit` strategy signal-evaluation rows across all
+/// runs and symbols, newest first.
+///
+/// An empty `Vec` is authoritative: it means no evaluation has been recorded
+/// yet, not that the journal is unavailable.
+pub async fn fetch_recent_strategy_signal_evaluations(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<StrategySignalEvaluationRecord>> {
+    let rows = sqlx::query(
+        r#"
+        select evaluation_id, ts_utc, run_id, strategy_id, symbol, timeframe,
+               bar_context_source, bars_loaded, latest_bar_ts_utc,
+               signal_generated, signal_qty, signal_side,
+               reason_code, reason, decision_stage, source
+        from strategy_signal_evaluations
+        order by ts_utc desc
+        limit $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_strategy_signal_evaluations failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(StrategySignalEvaluationRecord {
+            evaluation_id: r.try_get("evaluation_id")?,
+            ts_utc: r.try_get("ts_utc")?,
+            run_id: r.try_get("run_id")?,
+            strategy_id: r.try_get("strategy_id")?,
+            symbol: r.try_get("symbol")?,
+            timeframe: r.try_get("timeframe")?,
+            bar_context_source: r.try_get("bar_context_source")?,
+            bars_loaded: r.try_get("bars_loaded")?,
+            latest_bar_ts_utc: r.try_get("latest_bar_ts_utc")?,
+            signal_generated: r.try_get("signal_generated")?,
+            signal_qty: r.try_get("signal_qty")?,
+            signal_side: r.try_get("signal_side")?,
+            reason_code: r.try_get("reason_code")?,
+            reason: r.try_get("reason")?,
+            decision_stage: r.try_get("decision_stage")?,
+            source: r.try_get("source")?,
+        });
+    }
+    Ok(out)
+}

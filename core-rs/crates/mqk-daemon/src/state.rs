@@ -30,7 +30,7 @@ use std::time::Duration;
 use crate::backtest_jobs::{new_job_store, BacktestJobStore};
 use crate::ingest_jobs::{new_ingest_job_store, IngestJobStore};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use mqk_broker_alpaca::types::AlpacaFetchCursor;
 use mqk_broker_alpaca::AlpacaBrokerAdapter;
 use mqk_integrity::{CalendarSpec, IntegrityState};
@@ -627,6 +627,32 @@ pub struct StrategyBarInput {
     pub end_ts: i64,
     pub limit_price: Option<i64>,
     pub qty: i64,
+}
+
+/// AUTON-NO-SIGNAL-OBS-01: one durable signal-evaluation journal write
+/// attempt, scoped to a single symbol/timeframe/tick.
+///
+/// Plain data carrier for [`AppState::record_signal_evaluation`] — bundles
+/// the call site's already-locally-known context so the helper itself takes
+/// one argument instead of a long positional list. Borrowed `&str` fields are
+/// only used for the duration of the call.
+struct SignalEvaluationAttempt<'a> {
+    now_tick: u64,
+    symbol: &'a str,
+    timeframe: &'a str,
+    /// `"db_loaded"`, `"no_bars_available"`, or `"stale_bars"`.
+    bar_context_source: &'static str,
+    bars_loaded: i64,
+    latest_bar_ts_utc: Option<DateTime<Utc>>,
+    /// `false` is informational, not an error: hold/flat signal or a
+    /// pre-dispatch gate refused before `on_bar` ran.
+    signal_generated: bool,
+    /// `None` only when a pre-dispatch gate refused before `on_bar` ran.
+    signal_qty: Option<i64>,
+    reason_code: &'static str,
+    reason: &'static str,
+    /// `"pre_dispatch_gate"` or `"strategy_evaluated"`.
+    decision_stage: &'static str,
 }
 
 /// AUTON-CALENDAR-01: Derive the authoritative CalendarSpec for a (mode, broker_kind) pair.
@@ -1880,6 +1906,23 @@ operator_reconcile_or_repair_required"
                  symbol/timeframe; strategy dispatch refused for this \
                  symbol/tick (fail-closed, no target/intent/order)"
             );
+            // AUTON-NO-SIGNAL-OBS-01: durably record that this tick's
+            // dispatch was refused before the strategy ever ran, so the
+            // operator can see this after a restart, not just in logs.
+            self.record_signal_evaluation(SignalEvaluationAttempt {
+                now_tick: bar.now_tick,
+                symbol,
+                timeframe: md_timeframe,
+                bar_context_source: "no_bars_available",
+                bars_loaded: 0,
+                latest_bar_ts_utc: None,
+                signal_generated: false,
+                signal_qty: None,
+                reason_code: no_order_reason,
+                reason: "no completed bars in md_bars for this symbol/timeframe",
+                decision_stage: "pre_dispatch_gate",
+            })
+            .await;
             return None;
         }
 
@@ -1915,6 +1958,23 @@ operator_reconcile_or_repair_required"
                  strategy dispatch refused for this symbol/tick \
                  (fail-closed, no target/intent/order)"
             );
+            // AUTON-NO-SIGNAL-OBS-01: durably record that this tick's
+            // dispatch was refused before the strategy ever ran (stale bar),
+            // so the operator can see this after a restart, not just in logs.
+            self.record_signal_evaluation(SignalEvaluationAttempt {
+                now_tick: bar.now_tick,
+                symbol,
+                timeframe: md_timeframe,
+                bar_context_source: "stale_bars",
+                bars_loaded: db_bars.len() as i64,
+                latest_bar_ts_utc: latest_end_ts.and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
+                signal_generated: false,
+                signal_qty: None,
+                reason_code: no_order_reason,
+                reason: "latest completed bar exceeds the per-symbol staleness threshold",
+                decision_stage: "pre_dispatch_gate",
+            })
+            .await;
             return None;
         }
 
@@ -1926,6 +1986,11 @@ operator_reconcile_or_repair_required"
         // STRATEGY-DECISION-OBSERVABILITY-01: compute diagnostic snapshot from
         // the bar window before consuming stubs into the strategy context.
         let diagnostics = mqk_strategy::intraday_scalper_compute_diagnostics(&stubs);
+        // Copy out the two `&'static str` fields before `diagnostics` is moved
+        // into `last_strategy_diagnostics` below — AUTON-NO-SIGNAL-OBS-01 reuses
+        // this same already-live diagnostic text for the durable journal row.
+        let diagnostic_decision = diagnostics.decision;
+        let diagnostic_reason = diagnostics.reason;
         *self.last_strategy_diagnostics.lock().await = Some(diagnostics);
         let window = mqk_strategy::RecentBarsWindow::new(bars_loaded.max(1), stubs);
         self.last_bar_context_bars
@@ -1936,8 +2001,110 @@ operator_reconcile_or_repair_required"
             bars_loaded,
             "auton_signal_context_01: db_bar_window_built"
         );
-        self.invoke_native_strategy_on_bar_from_window(bar.now_tick, window)
+        let result = self
+            .invoke_native_strategy_on_bar_from_window(bar.now_tick, window)
+            .await;
+        // AUTON-NO-SIGNAL-OBS-01: the strategy's on_bar ran to completion —
+        // durably record what it actually produced, whether or not that was a
+        // trade signal. Skipped only when the bootstrap itself is missing
+        // (Dormant/Failed/spec-read error), since there is no strategy_id to
+        // attribute the row to in that case.
+        if let Some(ref bar_result) = result {
+            let signal_qty: i64 = bar_result
+                .intents
+                .output
+                .targets
+                .iter()
+                .map(|t| t.qty)
+                .sum();
+            self.record_signal_evaluation(SignalEvaluationAttempt {
+                now_tick: bar.now_tick,
+                symbol,
+                timeframe: md_timeframe,
+                bar_context_source: "db_loaded",
+                bars_loaded: bars_loaded as i64,
+                latest_bar_ts_utc: latest_end_ts.and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
+                signal_generated: signal_qty != 0,
+                signal_qty: Some(signal_qty),
+                reason_code: diagnostic_decision,
+                reason: diagnostic_reason,
+                decision_stage: "strategy_evaluated",
+            })
+            .await;
+        }
+        result
+    }
+
+    /// AUTON-NO-SIGNAL-OBS-01: one durable signal-evaluation journal write
+    /// attempt, scoped to a single symbol/timeframe/tick.
+    ///
+    /// All `&str` fields borrow from the caller's locals for the duration of
+    /// the call only — `record_signal_evaluation` copies what it needs into
+    /// owned `String`s before returning.
+    async fn record_signal_evaluation(&self, attempt: SignalEvaluationAttempt<'_>) {
+        let Some(ref pool) = self.db else {
+            return;
+        };
+        // No strategy_id to attribute this row to when the bootstrap is
+        // Dormant/Failed — see the AUTON-NO-SIGNAL-OBS-01 callers above.
+        let Some(strategy_id) = self
+            .native_strategy_bootstrap
+            .lock()
             .await
+            .as_ref()
+            .and_then(|b| b.active_strategy_id().map(|s| s.to_string()))
+        else {
+            return;
+        };
+        let run_id = self.status.read().await.active_run_id;
+        let signal_side = match attempt.signal_qty {
+            Some(q) if q > 0 => Some("buy".to_string()),
+            Some(q) if q < 0 => Some("sell".to_string()),
+            _ => None,
+        };
+        let run_id_key = run_id
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        // AUDIT-EVENT-DETERMINISM: deterministic UUIDv5, never Uuid::new_v4(),
+        // so a duplicate write attempt for the same logical tick is a no-op
+        // (ON CONFLICT DO NOTHING) rather than a second row.
+        let evaluation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            format!(
+                "mqk.signal-evaluation.v1|{}|{}|{}|{}|{}",
+                run_id_key, strategy_id, attempt.symbol, attempt.timeframe, attempt.now_tick
+            )
+            .as_bytes(),
+        );
+        let args = mqk_db::InsertStrategySignalEvaluationArgs {
+            evaluation_id,
+            ts_utc: Utc::now(),
+            run_id,
+            strategy_id,
+            symbol: attempt.symbol.to_string(),
+            timeframe: attempt.timeframe.to_string(),
+            bar_context_source: attempt.bar_context_source.to_string(),
+            bars_loaded: attempt.bars_loaded,
+            latest_bar_ts_utc: attempt.latest_bar_ts_utc,
+            signal_generated: attempt.signal_generated,
+            signal_qty: attempt.signal_qty,
+            signal_side,
+            reason_code: attempt.reason_code.to_string(),
+            reason: attempt.reason.to_string(),
+            decision_stage: attempt.decision_stage.to_string(),
+            source: "mqk-daemon.execution_loop".to_string(),
+        };
+        // Best-effort: a telemetry write failure must never panic or block
+        // the dispatch/decision path — mirrors the TV-EXEC-01 fill-quality
+        // telemetry write pattern (mqk-runtime orchestrator).
+        if let Err(e) = mqk_db::insert_strategy_signal_evaluation(pool, &args).await {
+            tracing::warn!(
+                symbol = %attempt.symbol,
+                timeframe = %attempt.timeframe,
+                error = %e,
+                "auton_no_signal_obs_01: strategy_signal_evaluations write failed (non-fatal)"
+            );
+        }
     }
 
     /// PER-SYMBOL-BAR-WINDOW-01 / MULTI-SYMBOL-DISPATCH-LOOP-01:
